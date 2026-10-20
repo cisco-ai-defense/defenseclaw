@@ -335,14 +335,13 @@ func TestWindowsStandalonePerUserConnectorMappings(t *testing.T) {
 		t.Fatalf("standalone connectors = %v", got)
 	}
 
-	// Per-user connectors fail closed; an unmanaged connector keeps its mode.
-	for _, name := range WindowsStandalonePerUserConnectorNames() {
-		if got := windowsEnterpriseHookFailMode(name, "open"); got != "closed" {
-			t.Fatalf("%s fail mode = %q, want closed", name, got)
-		}
+	// Per-user connectors take the administrator's mode (owner decision
+	// 2026-10-20): explicit open is open, unset is closed.
+	if got := canonicalHookFailMode("open"); got != "open" {
+		t.Fatalf("standalone explicit open fail mode = %q, want open", got)
 	}
-	if got := windowsEnterpriseHookFailMode("openhands", "open"); got != "open" {
-		t.Fatalf("unmanaged connector fail mode changed to %q", got)
+	if got := canonicalHookFailMode(""); got != "closed" {
+		t.Fatalf("standalone unset fail mode = %q, want closed", got)
 	}
 
 	// The managed runtime accepts exactly the per-user connector names.

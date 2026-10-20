@@ -419,13 +419,10 @@ func runHook(ctx context.Context, opts Options) int {
 		fmt.Fprintf(opts.Stderr, "defenseclaw: unknown hook connector %q\n", opts.Connector)
 		return blockExit
 	}
+	// A managed hook's FailMode comes from administrator-owned runtime state
+	// only (internal/cli: the Windows runtime generation or the Unix runtime
+	// descriptor), never from a connector or the caller's environment.
 	failMode := normalizeFailMode(opts.FailMode)
-	if managedNativeDecision(opts) {
-		// The protected managed profile cannot inherit an open availability
-		// setting from a connector or the caller's environment.
-		failMode = "closed"
-		opts.FailMode = "closed"
-	}
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
 		reason := strings.TrimSpace(opts.ManagedRuntimeFailure)
 		if strings.HasPrefix(reason, ForeignHookBlockedReasonPrefix) {
@@ -868,22 +865,26 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		reason := "gateway unreachable"
 		switch cause := context.Cause(ctx); {
 		case errors.Is(cause, errGatewayNoAnswer):
-			// No decision in time: blocked (closed for a managed hook),
-			// never allowed because the gateway was slow.
+			// No decision in time: the hook's fail mode decides.
 			return failNoAnswer(opts, sp, failMode)
 		case errors.Is(cause, errGatewayStartFailing):
 			reason = errGatewayStartFailing.Error()
 		case errors.Is(cause, errGatewayRestarting):
-			// Fail closed, never open, whatever the hook's fail mode.
-			return failUnreachable(opts, sp, "closed", managedGatewayRestartingReason)
+			// Closed, except for a standalone hook whose administrator chose
+			// open (owner decision 2026-10-20). Secure Client keeps closed.
+			restartMode := "closed"
+			if managedNativeDecision(opts) {
+				restartMode = failMode
+			}
+			return failUnreachable(opts, sp, restartMode, managedGatewayRestartingReason)
 		}
 		if errors.Is(err, errManagedGatewayPeerUnverified) {
 			// Managed peer-verification failure fails closed on the transport
 			// surface too, mirroring the up-front client-build path: a managed
 			// hook launched with FailMode="open" must not let an unverified
 			// gateway peer surface as an allow-by-default. The one exception
-			// is an authenticated Secure Client gateway service that is not
-			// running (see managedPeerFailMode).
+			// is a gateway service that is not running (see
+			// managedPeerFailMode).
 			return failUnreachable(opts, sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 		}
 		return failUnreachable(opts, sp, failMode, reason)
@@ -899,7 +900,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failNoAnswer(opts, sp, failMode)
 	}
 	if int64(len(body)) > defaultMaxBody {
-		return failResponse(opts, sp, managedDecisionFailMode(opts), "gateway response too large")
+		return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "gateway response too large")
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -1242,7 +1243,7 @@ func validCopilotEvent(event string) bool {
 func (sp spec) decide(opts Options, body []byte) int {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
-		return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid JSON response")
+		return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid JSON response")
 	}
 	if sp.connector == "hermes" {
 		return decideHermes(opts, sp, fields)
@@ -1252,7 +1253,7 @@ func (sp spec) decide(opts Options, body []byte) int {
 	if !ok || (action != "allow" && action != "alert" && action != "block" && action != "confirm") {
 		lifecycle := managedNativeDecision(opts) && NeutralLifecycleEvent(sp.connector, opts.Event)
 		if opts.SecureClient && (sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr) {
-			return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid or missing action in gateway response")
+			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid or missing action in gateway response")
 		}
 		if !opts.SecureClient && !lifecycle {
 			return failNativeDecision(opts, sp, "invalid or missing action in gateway response")
@@ -1272,7 +1273,7 @@ func (sp spec) decide(opts Options, body []byte) int {
 		(sp.style == styleHookEcho || sp.style == styleHookEchoDecision || sp.style == styleHookDecisionStderr || sp.style == stylePluginBridge) {
 		return failResponse(opts, sp, "closed", "missing native output in gateway response")
 	}
-	if !opts.SecureClient && managedDecisionFailMode(opts) != "open" &&
+	if !opts.SecureClient && normalizeFailMode(opts.FailMode) != "open" &&
 		(action == "block" || action == "confirm") &&
 		(sp.style == styleHookEcho || sp.style == styleHookEchoDecision || sp.style == styleHookDecisionStderr || sp.style == stylePluginBridge) &&
 		!nativeOutputAgrees(sp, opts.Event, action, output) {
@@ -1398,7 +1399,7 @@ func (sp spec) decide(opts Options, body []byte) int {
 		// (compacted onto one line).
 		var compact bytes.Buffer
 		if err := json.Compact(&compact, body); err != nil {
-			return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid JSON response")
+			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid JSON response")
 		}
 		fmt.Fprintln(opts.Stdout, compact.String())
 		return 0
@@ -1408,19 +1409,14 @@ func (sp spec) decide(opts Options, body []byte) int {
 	}
 }
 
+// managedNativeDecision reports a managed hook outside Secure Client (the
+// standalone profile, Unix or Windows).
 func managedNativeDecision(opts Options) bool {
 	return opts.ManagedEnterprise && !opts.SecureClient
 }
 
-func managedDecisionFailMode(opts Options) string {
-	if managedNativeDecision(opts) {
-		return "closed"
-	}
-	return normalizeFailMode(opts.FailMode)
-}
-
 func failNativeDecision(opts Options, sp spec, reason string) int {
-	if sp.connector == "copilot" && managedDecisionFailMode(opts) != "open" && !opts.SecureClient {
+	if sp.connector == "copilot" && normalizeFailMode(opts.FailMode) != "open" && !opts.SecureClient {
 		// Copilot CLI ignores a failed hook process, but honors its native
 		// structured deny. An unusable 2xx verdict is a failed check.
 		if body := copilotVSCodeLocalOutput(opts.Event, "block", reason); sp.dialect == copilotVSCodeLocalSurface && body != "" {
@@ -1437,7 +1433,7 @@ func failNativeDecision(opts Options, sp spec, reason string) int {
 			return 0
 		}
 	}
-	return failResponse(opts, sp, managedDecisionFailMode(opts), reason)
+	return failResponse(opts, sp, normalizeFailMode(opts.FailMode), reason)
 }
 
 func managedNativeBlockableEvent(connector, event string) bool {
@@ -1563,9 +1559,9 @@ func decideHermes(opts Options, sp spec, fields map[string]json.RawMessage) int 
 			// blocks it (hermesFailClosed), one in fail mode open lets it
 			// run and logs that it did.
 			if action == "block" {
-				return failResponse(opts, sp, managedDecisionFailMode(opts), "Hermes gateway block without a hook_output directive")
+				return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "Hermes gateway block without a hook_output directive")
 			}
-			return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid or missing action in Hermes gateway response")
+			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid or missing action in Hermes gateway response")
 		}
 		return 0
 	}
@@ -1633,6 +1629,13 @@ func exactJSONKeys(fields map[string]json.RawMessage, keys ...string) bool {
 func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 	reason := "missing gateway token: " + tokenFile + " not found"
 	closes := opts.ManagedEnterprise || (!sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed"))
+	if opts.ManagedEnterprise {
+		// A managed hook's token is installer state: a missing one is a
+		// broken or altered install, not an outage, so it is closed in
+		// fail mode open too.
+		failMode = "closed"
+		opts.FailMode = "closed"
+	}
 	if closes && failClosedStopEvent(opts, sp) {
 		return allowFailClosedStop(opts, sp, reason, "transport")
 	}
@@ -1725,12 +1728,18 @@ func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int 
 // transport failures. Strict availability remains an unconditional closed
 // override for compatibility with existing deployments.
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
+	if failMode == "closed" {
+		// A refusal passed in closed (a peer DefenseClaw cannot verify, an
+		// invalid runtime) stays closed for the connectors whose helpers read
+		// the hook's own mode (Hermes) even when that mode is open.
+		opts.FailMode = "closed"
+	}
 	if !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed") && failClosedStopEvent(opts, sp) {
 		return allowFailClosedStop(opts, sp, reason, "transport")
 	}
 	blocked := !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")
 	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
-	if !secureClientCopilotOpen(opts, sp, failMode) {
+	if !managedCopilotOpen(opts, sp, failMode) {
 		if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 			return code
 		}
@@ -2072,6 +2081,10 @@ func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
 func failResponse(opts Options, sp spec, failMode, reason string) int {
+	if failMode == "closed" {
+		// As in failUnreachable: a closed result stays closed for Hermes.
+		opts.FailMode = "closed"
+	}
 	if !managedStandaloneHook(opts) && !opts.ExplainUnenrolledAccount {
 		// The standalone hook socket carries no token, so the token-drift
 		// advice does not apply there. The Windows standalone hook runs as
@@ -2091,7 +2104,7 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 	if code, handled := hermesFailClosed(opts, sp, "response", reason); handled {
 		return code
 	}
-	if !secureClientCopilotOpen(opts, sp, failMode) {
+	if !managedCopilotOpen(opts, sp, failMode) {
 		if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 			return code
 		}
@@ -2315,31 +2328,32 @@ func managedPlainFailClosed(opts Options, sp spec) bool {
 }
 
 // managedPeerFailMode is the fail mode of a managed peer-verification
-// failure. An authenticated Secure Client hook (opts.SecureClient, set only
-// on a host the strict Secure Client classifier verified, and
-// secureClientHook) whose gateway service is simply not running (stopped,
+// failure. A hook whose gateway service is simply not running (stopped,
 // crashed, or held stopped while Setup services the deployment) follows its
-// own fail mode, as a refused connection already does on macOS (#1163): the
-// hook contacted no peer, so nothing unverified can answer it, and only an
-// administrator can stop the service. Every other peer failure (another
-// process on the gateway port, a service the hook cannot query) and every
-// hook outside Secure Client fail closed.
+// own fail mode, as a refused connection already does on macOS: the hook
+// contacted no peer, so nothing unverified can answer it, and only an
+// administrator can stop the service. That is an authenticated Secure Client
+// hook (opts.SecureClient, set only on a host the strict Secure Client
+// classifier verified, and secureClientHook, #1163) or a standalone hook,
+// whose fail mode is the administrator's (owner decision 2026-10-20). Every
+// other peer failure (another process on the gateway port, a service the
+// hook cannot query) fails closed.
 func managedPeerFailMode(opts Options, failMode string, err error) string {
-	if opts.SecureClient && secureClientHook(opts) && errors.Is(err, errManagedGatewayNotRunning) {
+	if errors.Is(err, errManagedGatewayNotRunning) && ((opts.SecureClient && secureClientHook(opts)) || managedNativeDecision(opts)) {
 		return failMode
 	}
 	return "closed"
 }
 
-// secureClientCopilotOpen reports an authenticated Secure Client GitHub
-// Copilot hook whose delivery mode is open (#1163): a gateway it cannot reach
-// and a response it cannot read allow the call, as they do for every other
-// Secure Client connector, instead of the managed deny. A closed mode
-// (configured, strict availability, or another program on the gateway port)
-// and the enrollment and policy refusals still deny, and outside Secure
-// Client a managed Copilot call always gets the managed deny.
-func secureClientCopilotOpen(opts Options, sp spec, failMode string) bool {
-	return sp.connector == "copilot" && opts.SecureClient && secureClientHook(opts) &&
+// managedCopilotOpen reports a managed GitHub Copilot hook whose delivery
+// mode is open: an authenticated Secure Client hook (#1163), or a standalone
+// hook whose administrator chose open (owner decision 2026-10-20). A gateway
+// it cannot reach and a response it cannot read allow the call, as they do
+// for every other connector in fail mode open, instead of the managed deny.
+// A closed mode (configured, strict availability, or another program on the
+// gateway port) and the enrollment and policy refusals still deny.
+func managedCopilotOpen(opts Options, sp spec, failMode string) bool {
+	return sp.connector == "copilot" && ((opts.SecureClient && secureClientHook(opts)) || managedNativeDecision(opts)) &&
 		!opts.StrictAvailability && normalizeFailMode(failMode) == "open"
 }
 

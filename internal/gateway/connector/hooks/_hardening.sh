@@ -1114,25 +1114,34 @@ defenseclaw_response_failure_reason() {
 }
 
 # defenseclaw_should_fail_closed_on_unreachable returns 0 (true) when the
-# connector's effective fail mode is closed, for guardian-installed managed
-# hooks outside an authenticated Secure Client deployment, or when strict
-# availability is enabled. Under Secure Client managed status alone does not
-# select availability policy: the baked FAIL_MODE does (#1163,
-# _DC_SECURE_CLIENT_DELIVERY, rendered only on a verified Secure Client
-# host). Fail mode therefore has one consistent meaning
-# across malformed responses, auth failures, and transport failures instead of
-# silently opening only the latter class.
+# connector's effective fail mode is closed or when strict availability is
+# enabled. A guardian-installed managed hook's FAIL_MODE is the one the
+# administrator's config resolved, baked at render time (owner decision
+# 2026-10-20; under Secure Client #1163), and never DEFENSECLAW_FAIL_MODE.
+# Fail mode therefore has one consistent meaning across malformed responses,
+# auth failures, and transport failures instead of silently opening only the
+# latter class.
 defenseclaw_should_fail_closed_on_unreachable() {
   case "${FAIL_MODE:-open}" in
     closed) return 0 ;;
-  esac
-  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
-    1|true|TRUE|yes|YES) [ "${_DC_SECURE_CLIENT_DELIVERY:-0}" = 1 ] || return 0 ;;
   esac
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# defenseclaw_should_fail_closed_on_missing_token is
+# defenseclaw_should_fail_closed_on_unreachable for a missing gateway token,
+# except that a guardian-installed managed hook outside an authenticated
+# Secure Client deployment (_DC_SECURE_CLIENT_DELIVERY) always fails closed:
+# its token is installer state, so a missing one is a broken or altered
+# install, not an outage.
+defenseclaw_should_fail_closed_on_missing_token() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) [ "${_DC_SECURE_CLIENT_DELIVERY:-0}" = 1 ] || return 0 ;;
+  esac
+  defenseclaw_should_fail_closed_on_unreachable
 }
 
 # defenseclaw_failed_stop_event CONNECTOR EVENT [PAYLOAD] returns 0 (true)
@@ -1395,11 +1404,15 @@ defenseclaw_handle_missing_token() {
   local token_file="${4:-}"
   local reason="missing gateway token file"
   [ -z "$token_file" ] || reason="missing gateway token: ${token_file} not found"
-  if defenseclaw_should_fail_closed_on_unreachable; then
+  if defenseclaw_should_fail_closed_on_missing_token; then
     defenseclaw_allow_failed_stop_event "$connector" "$hook_name" "${5:-}" "${6:-}" "$reason" transport
   fi
-  defenseclaw_log_hook_delivery_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}"
-  if defenseclaw_should_fail_closed_on_unreachable; then
+  if defenseclaw_should_fail_closed_on_missing_token; then
+    defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}" fail_closed
+  else
+    defenseclaw_log_hook_delivery_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}"
+  fi
+  if defenseclaw_should_fail_closed_on_missing_token; then
     echo "defenseclaw: ${reason}, blocking ${subject} (fail mode closed)$(defenseclaw_missing_token_next_step "$connector")" >&2
     exit 2
   fi

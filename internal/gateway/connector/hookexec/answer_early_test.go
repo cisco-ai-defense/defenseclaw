@@ -167,7 +167,6 @@ func TestProgressReportWaitsNoLongerThanTheCeiling(t *testing.T) {
 	})
 	result, elapsed := runAgainstGateway(t, "codex", addr, func(opts *Options) {
 		managedCodex(opts)
-		opts.FailMode = "open"
 	})
 	if elapsed < ceiling-100*time.Millisecond || elapsed > ceiling+500*time.Millisecond {
 		t.Fatalf("the call ended after %s, want at the %s ceiling (not the %s budget, not the judge)", elapsed, ceiling, budget)

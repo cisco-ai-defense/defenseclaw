@@ -122,6 +122,12 @@ type Verdict struct {
 	Severity   string `json:"severity,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 	WouldBlock bool   `json:"would_block,omitempty"`
+	// FailMode is "open" when the ACP profile's fail_mode is explicitly
+	// open in the gateway's config, and empty otherwise. A standalone
+	// managed guard in observe mode lets a frame it could not evaluate
+	// through only after an authenticated verdict said so
+	// (managedObserveRefuses, owner decision 2026-10-20).
+	FailMode string `json:"fail_mode,omitempty"`
 }
 
 type Evaluator interface {

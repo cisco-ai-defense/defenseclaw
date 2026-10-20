@@ -852,7 +852,11 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	}
 	m.migrateAdmission(root, data)
 	m.migrateThresholds(root, data)
-	if !v9SecureClientDocument(root) {
+	// A managed config's Cursor fail mode is the administrator's choice and
+	// its hooks honour it (owner decision 2026-10-20), so the migration keeps
+	// it as written: rewriting a managed observe-mode "closed" to "open" would
+	// open hooks the administrator never opened.
+	if !v9ManagedDocument(root) {
 		m.normalizeCursorFailMode(root)
 	}
 	if err := m.migrateScanners(root); err != nil {
@@ -4336,16 +4340,29 @@ func SecureClientSource(raw []byte) bool {
 	return root != nil && root.Kind == yaml.MappingNode && v9SecureClientDocument(root)
 }
 
-// v9SecureClientDocument reports whether the document is a managed
-// deployment on the Secure Client profile (pinned or configured).
-func v9SecureClientDocument(root *yaml.Node) bool {
+// v9DocumentDeploymentMode is the document's deployment_mode, or its pin
+// (managed.DeploymentModeEnv) when one is set.
+func v9DocumentDeploymentMode(root *yaml.Node) string {
 	mode := normalizeDeploymentMode(yamlScalarValue(v8YAMLMapValue(root, "deployment_mode")))
 	if env := strings.TrimSpace(os.Getenv(managed.DeploymentModeEnv)); env != "" {
 		mode = normalizeDeploymentMode(env)
 	}
-	if !managed.IsManagedEnterprise(mode) {
+	return mode
+}
+
+// v9ManagedDocument reports whether the document is a managed deployment,
+// on either profile.
+func v9ManagedDocument(root *yaml.Node) bool {
+	return managed.IsManagedEnterprise(v9DocumentDeploymentMode(root))
+}
+
+// v9SecureClientDocument reports whether the document is a managed
+// deployment on the Secure Client profile (pinned or configured).
+func v9SecureClientDocument(root *yaml.Node) bool {
+	if !v9ManagedDocument(root) {
 		return false
 	}
+	mode := v9DocumentDeploymentMode(root)
 	declared := yamlScalarValue(v8YAMLMapValue(v8YAMLMapValue(root, "enterprise"), "profile"))
 	profile, err := managed.ResolveEnterpriseProfile(runtime.GOOS, mode, os.Getenv(managed.EnterpriseProfileEnv), declared)
 	if err != nil {

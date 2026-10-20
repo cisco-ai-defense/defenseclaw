@@ -74,6 +74,7 @@ func StandaloneOptions(layout managed.StandaloneLayout, programFiles, programDat
 	opts.WSL = cfg.Enterprise.MachinePolicy.WindowsWSL
 	opts.CopilotHarnessPreference = cfg.Enterprise.MachinePolicy.CopilotHarnessPreference()
 	opts.CopilotLocalHarness = cfg.Enterprise.MachinePolicy.CopilotLocalHarness()
+	opts.CursorFailOpen = cfg.EffectiveHookFailModeForConnector(cursorConnector) == "open"
 	return opts, opts.Validate()
 }
 

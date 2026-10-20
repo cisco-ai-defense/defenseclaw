@@ -254,6 +254,21 @@ run_lifecycle() {
     echo "$action exited $rc"
 }
 
+# launchd can deliver the path event from a config replacement after the next
+# step has started. Its redundant ensure is safe, but a read-only step's fixed 5s
+# lock wait may expire while that job holds the lifecycle lock (exit 75,
+# lifecycle_busy). Retry only this expected busy result, for at most three
+# minutes on macOS.
+retry_busy() { # step-name verb
+    [ "$kind" = pkg ] || return 0
+    local deadline=$((SECONDS + 180))
+    while [ "$(cat "$results/$1.rc")" = 75 ] && [ "$SECONDS" -lt "$deadline" ]; do
+        "$python" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8-sig")); sys.exit(0 if any(e.get("code") == "lifecycle_busy" for e in r.get("errors", [])) else 1)' "$results/$1.json" || break
+        sleep 2
+        lifecycle "$1" "$2"
+    done
+}
+
 services_running() {
     local name
     for name in "${services[@]}"; do
@@ -552,9 +567,11 @@ upgrade_lane() {
         --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"
     cp "$stage/config.yaml" "$results/config-before.yaml"
     lifecycle 03-previous-verify verify
+    retry_busy 03-previous-verify verify
     check "$results/03-previous-verify.json" previous-verify --action verify --installed --version "$previous_version" --ready \
         --allow-warning unprivileged_user_namespaces
     lifecycle 04-previous-status status
+    retry_busy 04-previous-status status
     previous_config_sha=$(sha256_of "$config")
     previous_secrets_sha=$(tree_sha "$secrets_dir")
     previous_ledger=$(ledger_targets)
@@ -680,19 +697,6 @@ check "$results/03-ensure-noop.json" ensure-noop --action ensure --noop --instal
 
 step "verify"
 lifecycle 04-verify verify
-# launchd can deliver the path event from a config replacement after the next
-# step has started. Its redundant ensure is safe, but a read-only step's fixed 5s
-# lock wait may expire while that job holds the lifecycle lock. Retry only this
-# expected busy result, for at most two minutes on macOS.
-retry_busy() { # step-name verb
-    [ "$kind" = pkg ] || return 0
-    local deadline=$((SECONDS + 120))
-    while [ "$(cat "$results/$1.rc")" = 75 ] && [ "$SECONDS" -lt "$deadline" ]; do
-        "$python" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8-sig")); sys.exit(0 if any(e.get("code") == "lifecycle_busy" for e in r.get("errors", [])) else 1)' "$results/$1.json" || break
-        sleep 2
-        lifecycle "$1" "$2"
-    done
-}
 retry_busy 04-verify verify
 # verify reports whether unprivileged user namespaces are open, a setting of
 # the host's kernel (the runner's, or the container host's), not of the package.

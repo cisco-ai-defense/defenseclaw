@@ -19,9 +19,10 @@ import (
 // Secure Client deployment (SecureClientDeploymentVerified is false: a
 // standalone managed host, or a stale or spoofed Secure Client root) gets no
 // Secure Client opening: an unset mode renders closed, the hook does not read
-// DEFENSECLAW_FAIL_MODE, and an unreachable gateway or a missing token block
-// even when the rendered mode is open (owner rule 2026-10-20, main-sync
-// review finding 5).
+// DEFENSECLAW_FAIL_MODE, and a missing token blocks even when the rendered
+// mode is open (main-sync review finding 5). An explicit open is the
+// administrator's choice, so an unreachable gateway follows it (owner
+// decision 2026-10-20).
 func TestUnverifiedSecureClientHostKeepsManagedHooksClosed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("native Windows uses the authenticated hook executor")
@@ -40,8 +41,9 @@ func TestUnverifiedSecureClientHostKeepsManagedHooksClosed(t *testing.T) {
 		}
 	}
 
-	// The rendered Kiro hook bakes its mode and the Codex hook blocks a
-	// gateway outage and a missing token although its explicit mode is open.
+	// The rendered Kiro hook bakes its mode; the Codex hook blocks a missing
+	// token although its explicit mode is open, and lets a gateway outage
+	// through in that mode.
 	for _, scenario := range []string{"outage", "missing-token"} {
 		t.Run(scenario, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -81,8 +83,9 @@ func TestUnverifiedSecureClientHostKeepsManagedHooksClosed(t *testing.T) {
 			cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`)
 			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DEFENSECLAW_FAIL_MODE=open"}
 			out, err := cmd.CombinedOutput()
-			if blocked := err != nil || strings.Contains(string(out), `"decision":"block"`); !blocked {
-				t.Fatalf("an unverified Secure Client host allowed a %s: %s", scenario, out)
+			blocked := err != nil || strings.Contains(string(out), `"decision":"block"`)
+			if want := scenario == "missing-token"; blocked != want {
+				t.Fatalf("an unverified Secure Client host's %s: blocked=%t, want %t: %s", scenario, blocked, want, out)
 			}
 		})
 	}

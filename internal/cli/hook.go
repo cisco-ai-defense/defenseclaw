@@ -597,15 +597,15 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			managedRuntimeFailure = enterpriseManagedHookRuntimeFailureReason()
 		}
 		opts.ManagedRuntimeFailure = managedRuntimeFailure
-		// Only an authenticated Secure Client runtime generation can select
-		// open delivery (#1163). Every other managed runtime, and any runtime
-		// failure, keeps the fail-closed, strict-availability contract: a
-		// generation that says open on a host that is not Secure Client is
-		// ignored (owner rule 2026-10-14: only Secure Client fails open).
-		opts.FailMode = "closed"
-		if opts.SecureClient {
-			opts.FailMode = enterpriseManagedHookRuntimeFailMode()
-		}
+		// A managed hook takes its fail mode from administrator-owned runtime
+		// state only, never from the command line or the environment: the
+		// authenticated Windows runtime generation, or the root-owned Unix
+		// runtime descriptor. Each records the mode the administrator's config
+		// resolved (owner decision 2026-10-20: explicit open or closed wins,
+		// unset is closed, and open under Secure Client, #1163). A runtime
+		// failure, and anything but open, keeps the fail-closed,
+		// strict-availability contract.
+		opts.FailMode = enterpriseManagedHookRuntimeFailMode()
 		if managedRuntimeFailure != "" || opts.FailMode != "open" {
 			opts.FailMode = "closed"
 			opts.StrictAvailability = true

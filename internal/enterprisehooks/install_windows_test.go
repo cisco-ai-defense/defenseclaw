@@ -3079,25 +3079,31 @@ func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {
 	}
 }
 
-// TestWindowsEnterpriseHookFailModeIsClosedOutsideSecureClient keeps
-// origin/main's rule: outside Secure Client the managed Codex, Claude Code
-// and Cursor hooks never inherit a fail-open setting, and the standalone
-// per-user connectors always fail closed. Under Secure Client (#1163) the
-// configured policy wins and an unset policy is open.
-func TestWindowsEnterpriseHookFailModeIsClosedOutsideSecureClient(t *testing.T) {
-	for _, connectorName := range []string{"codex", "claudecode", "cursor"} {
-		setStandaloneProfileForTest(t, true)
-		for _, configured := range []string{"", "open", "Open", "closed"} {
-			if got := windowsEnterpriseHookFailMode(connectorName, configured); got != "closed" {
-				t.Fatalf("standalone %s configured %q = %q, want closed", connectorName, configured, got)
-			}
+// TestWindowsEnterpriseHookFailModeFollowsTheAdministrator pins the owner
+// decision of 2026-10-20 for the Windows managed renders: the administrator's
+// explicit open or closed wins on the standalone profile too, an unset mode
+// is closed there, and under Secure Client (#1163) an unset mode is open.
+func TestWindowsEnterpriseHookFailModeFollowsTheAdministrator(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
+	for configured, want := range map[string]string{"": "closed", "open": "open", "Open": "open", "closed": "closed", "bogus": "closed"} {
+		if got := canonicalHookFailMode(configured); got != want {
+			t.Fatalf("standalone configured %q = %q, want %q", configured, got, want)
 		}
-		setStandaloneProfileForTest(t, false)
-		for configured, want := range map[string]string{"": "open", "open": "open", "Open": "open", "closed": "closed", "bogus": "closed"} {
-			if got := windowsEnterpriseHookFailMode(connectorName, configured); got != want {
-				t.Fatalf("secure client %s configured %q = %q, want %q", connectorName, configured, got, want)
-			}
+		if got := windowsManagedGenerationFailMode([]string{configured}); got != want {
+			t.Fatalf("standalone generation for %q = %q, want %q", configured, got, want)
 		}
+	}
+	if got := windowsManagedGenerationFailMode(nil); got != "closed" {
+		t.Fatalf("standalone generation without a mode = %q, want closed", got)
+	}
+	setStandaloneProfileForTest(t, false)
+	for configured, want := range map[string]string{"": "open", "open": "open", "Open": "open", "closed": "closed", "bogus": "closed"} {
+		if got := canonicalHookFailMode(configured); got != want {
+			t.Fatalf("secure client configured %q = %q, want %q", configured, got, want)
+		}
+	}
+	if got := windowsManagedGenerationFailMode(nil); got != "open" {
+		t.Fatalf("secure client generation without a mode = %q, want open", got)
 	}
 }
 

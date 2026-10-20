@@ -329,18 +329,23 @@ class TestEffectiveResolvers(unittest.TestCase):
 
     def test_non_secure_client_keeps_fail_closed_default(self):
         # OSS and the standalone enterprise profile keep main's fail-closed
-        # default: unset resolves closed in action mode.
-        for doc in (
-            "guardrail: {mode: action}\n",
+        # default: unset resolves closed in action mode. On the standalone
+        # profile the administrator's explicit automatic-protection open wins
+        # (owner decision 2026-10-20).
+        oss = "guardrail: {mode: action}\n"
+        standalone = (
             "config_version: 8\ndeployment_mode: managed_enterprise\n"
-            "enterprise: {profile: standalone}\nguardrail: {mode: action}\n",
+            "enterprise: {profile: standalone}\nguardrail: {mode: action}\n"
+        )
+        overlay = "application_protection: {enabled: true, guardrail: {hook_fail_mode: open}}\n"
+        for doc, extra, expected in (
+            (oss, "", "closed"),
+            (oss, overlay, "closed"),
+            (standalone, "", "closed"),
+            (standalone, overlay, "open"),
         ):
-            for overlay in (
-                "",
-                "application_protection: {enabled: true, guardrail: {hook_fail_mode: open}}\n",
-            ):
-                with self.subTest(doc=doc, overlay=overlay):
-                    self.assertEqual(self._load_hook_fail_mode(doc + overlay, "codex"), "closed")
+            with self.subTest(doc=doc, overlay=extra):
+                self.assertEqual(self._load_hook_fail_mode(doc + extra, "codex"), expected)
 
     def test_empty_map_equals_absent(self):
         with_empty = GuardrailConfig(mode="action", connectors={})

@@ -198,10 +198,15 @@ func gatewayNoAnswer(ctx context.Context) bool {
 }
 
 // failNoAnswer fails a tool call whose gateway gave no decision in time:
-// closed for a managed hook, the fail mode for a per-user hook.
+// closed for a Secure Client hook, the fail mode for a standalone hook (the
+// administrator's, owner decision 2026-10-20) and for a per-user hook.
 func failNoAnswer(opts Options, sp spec, failMode string) int {
 	if opts.ManagedEnterprise {
-		return failUnreachable(opts, sp, "closed", managedGatewayNoAnswerReason)
+		mode := "closed"
+		if managedNativeDecision(opts) {
+			mode = failMode
+		}
+		return failUnreachable(opts, sp, mode, managedGatewayNoAnswerReason)
 	}
 	return failUnreachable(opts, sp, failMode, perUserGatewayNoAnswerReason)
 }

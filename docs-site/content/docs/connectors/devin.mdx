@@ -113,8 +113,10 @@ modify those locations.
 In a standalone enterprise deployment on Linux and macOS, each hook runs the
 administrator-owned hook binary with
 `defenseclaw-hook hook --connector devin --enterprise-managed`, which runs
-the foreign-hook guard and always fails closed: the Devin fail mode is `closed` whatever `hook_fail_mode` says, and
-status and the hook-contract lock report it that way. See
+the foreign-hook guard and follows the administrator's fail mode: `closed`
+unless `hook_fail_mode` (global or for Devin) is `open`, as the runtime
+descriptor records it. Status and the hook-contract lock report the same
+value. See
 [Machine policy](/docs/enterprise/machine-policy).
 
 ### Devin Desktop in a standalone enterprise deployment

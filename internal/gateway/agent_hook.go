@@ -1535,9 +1535,10 @@ func (a *APIServer) hookPanicResponse(
 		return a.failSandboxHookClosed(ctx, profile, connectorName, req, rawBody, payload, resp)
 	}
 	cfg := a.decisionConfig(ctx)
-	standalone := cfg != nil && cfg.StandaloneEnterprise()
 	lifecycle := hookexec.NeutralLifecycleEvent(connectorName, req.HookEventName)
-	failOpen := !standalone && cfg != nil &&
+	// A failed check follows the connector's fail mode, the administrator's
+	// on a managed computer (owner decision 2026-10-20).
+	failOpen := cfg != nil &&
 		(cfg.SecureClientIntegration() || cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open")
 	if !failOpen && action == "block" && !lifecycle {
 		// Observe mode applies to policy verdicts, not failed checks.

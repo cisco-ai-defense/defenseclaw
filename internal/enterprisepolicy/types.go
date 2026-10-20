@@ -130,6 +130,11 @@ type Options struct {
 	// environment). The VS Code managed-hooks lock is written only when
 	// every one of them holds DefenseClaw's current Copilot plugin.
 	CopilotUserHomes []string
+	// CursorFailOpen reports that the administrator's config resolves
+	// Cursor's hook fail mode open (owner decision 2026-10-20): its
+	// machine-policy hooks are registered without failClosed, so Cursor lets
+	// a call through when the hook cannot answer, as the hook itself does.
+	CursorFailOpen bool
 	// SkipTrustChecks disables ancestor ownership checks; only tests set it.
 	SkipTrustChecks bool
 }

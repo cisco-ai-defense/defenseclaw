@@ -269,10 +269,12 @@ checking switched off centrally as "your administrator switched ACP checking
 off". In observe
 mode the session goes on unchecked, and the guard says so once in the editor:
 "DefenseClaw is not checking this session". A managed computer outside Secure
-Client is stricter: there an observe-mode guard refuses a step it could not
-check, as action mode does, and only ACP checking switched off centrally lets
-the session go on unchecked. A `fail_mode: open` on an ACP profile is ignored
-there, and `enterprise <os> status` and `config validate` say so. On Linux and macOS the gateway's
+Client is stricter by default: there an observe-mode guard refuses a step it
+could not check, as action mode does, and ACP checking switched off centrally
+lets the session go on unchecked. An administrator who sets the profile's
+`fail_mode: open` chooses otherwise: once the gateway has answered the session
+once, a step the guard could not check goes through unchecked, as on a
+per-user install. A credential the gateway refused is still refused. On Linux and macOS the gateway's
 authentication-failure audit row names the account (uid) the kernel reports
 for the refused caller.
 

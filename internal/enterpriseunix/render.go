@@ -260,8 +260,30 @@ func (e *Env) renderDescriptor(in renderInputs) ([]byte, error) {
 	sort.Strings(d.MachinePolicyConnectors)
 	if in.Config != nil {
 		d.DisableSelfUpdate = in.Config.SelfUpdateDisabled
+		d.OpenHookConnectors = openHookConnectors(in.Config, d.MachinePolicyConnectors)
 	}
 	return managed.MarshalRuntimeDescriptor(d)
+}
+
+// openHookConnectors is each configured or machine-policy connector whose
+// hook fail mode the administrator's config resolves open
+// (config.Config.EffectiveHookFailModeForConnector), sorted; nil when none
+// is. The `--enterprise-managed` hook runtime reads it from the descriptor.
+func openHookConnectors(cfg *validatedConfig, machinePolicy []string) []string {
+	if cfg == nil || cfg.Loaded == nil {
+		return nil
+	}
+	set := map[string]bool{}
+	for _, name := range append(append([]string{}, cfg.Connectors...), machinePolicy...) {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name != "" && cfg.Loaded.EffectiveHookFailModeForConnector(name) == "open" {
+			set[name] = true
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return sortedKeys(set)
 }
 
 // injectPlistEnvironment adds variables to a plist's EnvironmentVariables

@@ -1755,11 +1755,10 @@ type GuardrailConfig struct {
 	//     the connector/event exposes a blocking response. Migrated legacy
 	//     configs can retain an explicit "open".
 	//
-	// Secure Client is the one exception: when this key is unset, Secure
-	// Client resolves it to "open" (#1163); an explicit "closed" still wins.
-	// A managed deployment outside Secure Client ignores "open" and fails
-	// closed (Config.ManagedHooksFailClosed). See
-	// Config.EffectiveHookFailModeForConnector.
+	// An explicit value always wins, on a managed computer too (there the
+	// administrator's config sets it). Secure Client is the one exception to
+	// the closed default: when this key is unset, Secure Client resolves it
+	// to "open" (#1163). See Config.EffectiveHookFailModeForConnector.
 	//
 	// DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and
 	// missing-token failures closed. See
@@ -2222,58 +2221,6 @@ func validateAllowPrivateUpstreams(ips []string) error {
 		}
 	}
 	return nil
-}
-
-// EffectiveHookFailMode returns the operator-chosen hook fail mode,
-// defaulting to "closed" when unset (CodeGuard rule
-// codeguard-0-authorization-access-control: deny by default). The
-// canonical "open" sentinel is the only way to get the legacy
-// fail-open behavior; any other value (typo, blank, malformed
-// migration row) collapses to "closed" so the agent never silently
-// fails open at the hook failure boundary. Centralized here so the
-// sidecar and any future config-edit surfaces never disagree on the
-// default.
-//
-// Backwards compatibility: existing operators on v3 are protected by
-// the _migrate_0_4_0_seed_hook_fail_mode migration in
-// cli/defenseclaw/migrations.py, which writes “hook_fail_mode: open“
-// into config.yaml on first upgrade. New installs and explicit-empty
-// values get the safer default.
-func (g *GuardrailConfig) EffectiveHookFailMode() string {
-	if g == nil {
-		return "closed"
-	}
-	if strings.EqualFold(strings.TrimSpace(g.HookFailMode), "open") {
-		return "open"
-	}
-	return "closed"
-}
-
-// EffectiveHookFailModeFor returns the hook fail mode for the named
-// connector outside Secure Client: the connector's own value wins, then the
-// global guardrail.hook_fail_mode, in observe and action mode alike. A value
-// that is not set resolves closed (owner rule: hooks fail closed everywhere
-// except under Secure Client; only an explicit `open` opens them). Secure
-// Client resolves through Config.EffectiveHookFailModeForConnector. Pass ""
-// to resolve the global value. Pure lookup — never errors, never mutates.
-func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
-	if g == nil {
-		return "closed"
-	}
-	if pc, ok := g.connectorOverride(connector); ok {
-		if strings.TrimSpace(pc.HookFailMode) != "" {
-			// Mirror the global EffectiveHookFailMode() normalization
-			// (avarice F-0681): the canonical "open" sentinel is the only
-			// way to opt into legacy fail-open; any other per-connector
-			// value (typo, blank, malformed row) collapses to "closed" so
-			// the multi-connector boot path never silently fails open.
-			if strings.EqualFold(strings.TrimSpace(pc.HookFailMode), "open") {
-				return "open"
-			}
-			return "closed"
-		}
-	}
-	return g.EffectiveHookFailMode()
 }
 
 // EffectiveStrategy returns the detection strategy for the given direction,

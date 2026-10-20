@@ -8,18 +8,19 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows
-
 package enterprisehooks
 
 import "github.com/defenseclaw/defenseclaw/internal/config"
 
 // ManagedHookFailMode is the fail mode the managed hook renderer writes into
-// connector's hooks for cfg. It delegates to the hook renderer resolver: on
-// Linux and macOS the renderer passes cfg.EffectiveHookFailModeForConnector
-// to every hook it writes and lowers closed to open for an agent that cannot
-// fail closed, so status reports that value and never derives one from the
-// raw config.
+// connector's hooks for cfg, on every OS: the mode cfg resolves
+// (cfg.EffectiveHookFailModeForConnector: an explicit open or closed wins,
+// unset is closed, and open under Secure Client, #1163), and under Secure
+// Client only, closed lowered to open for an agent that cannot fail closed
+// (renderedHookFailModeFor), so status reports that value and never derives
+// one from the raw config (GAP-0001). The profile is the one cfg resolved
+// (its enterprise.profile, the service pin or the per-OS default), not the
+// caller's process pin (GAP-0014).
 func ManagedHookFailMode(cfg *config.Config, connector string) string {
 	return renderedHookFailModeFor(cfg, connector, cfg.EffectiveHookFailModeForConnector(connector))
 }

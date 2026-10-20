@@ -295,7 +295,10 @@ func TestRecoveredHookFailModeByDeployment(t *testing.T) {
 						reason := "a closed failed check blocks in every mode"
 						if deployment.name == "secure_client" {
 							want, wantMode, reason = "allow", mode, "Secure Client allows recovered errors"
-						} else if deployment.name != "standalone" && failMode == "open" && name != "cursor" {
+						} else if deployment.name == "standalone" && failMode == "open" {
+							// The administrator's explicit open (owner decision 2026-10-20).
+							want, wantMode, reason = "allow", mode, "the administrator's open is effective on a managed standalone host"
+						} else if failMode == "open" && name != "cursor" {
 							want, wantMode, reason = "allow", mode, "explicit open is effective for this connector"
 						} else if failMode == "open" && name == "cursor" {
 							reason = "the cursor accessor keeps this connector closed"

@@ -1,0 +1,58 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package managed
+
+import (
+	"strings"
+	"testing"
+)
+
+func failModeTestDescriptor() *RuntimeDescriptor {
+	return &RuntimeDescriptor{
+		SchemaVersion: RuntimeDescriptorSchemaVersion, Profile: ProfileStandalone,
+		ServiceUser: "defenseclaw", ServiceUID: 995, ServiceGID: 985,
+		APIAddr: StandaloneAPIAddr, MachinePolicyConnectors: []string{"codex"},
+	}
+}
+
+// OpenHookConnectors round-trips sorted, is omitted when empty (a closed
+// deployment's descriptor bytes are unchanged), and HookFailMode reads it:
+// open only for a listed connector.
+func TestRuntimeDescriptorOpenHookConnectors(t *testing.T) {
+	closed, err := MarshalRuntimeDescriptor(failModeTestDescriptor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(closed), "open_hook_connectors") {
+		t.Fatalf("a closed deployment's descriptor names open connectors:\n%s", closed)
+	}
+	d := failModeTestDescriptor()
+	d.OpenHookConnectors = []string{"kiro", "codex"}
+	data, err := MarshalRuntimeDescriptor(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseRuntimeDescriptor(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(parsed.OpenHookConnectors, ","); got != "codex,kiro" {
+		t.Fatalf("open connectors = %q, want codex,kiro", got)
+	}
+	for connector, want := range map[string]string{"codex": "open", " Kiro ": "open", "claudecode": "closed"} {
+		if got := parsed.HookFailMode(connector); got != want {
+			t.Errorf("HookFailMode(%q) = %q, want %q", connector, got, want)
+		}
+	}
+	if got := (*RuntimeDescriptor)(nil).HookFailMode("codex"); got != "closed" {
+		t.Fatalf("nil descriptor fail mode = %q, want closed", got)
+	}
+	for _, bad := range [][]string{{"codex", "codex"}, {"Codex"}, {""}} {
+		d := failModeTestDescriptor()
+		d.OpenHookConnectors = bad
+		if err := d.Validate(); err == nil {
+			t.Errorf("open connectors %q validated", bad)
+		}
+	}
+}

@@ -1298,10 +1298,6 @@ func validateWindowsManagedRuntimeGenerationDesired(
 		return desired, nil, errors.New("enterprise hooks: managed runtime fail mode is invalid")
 	}
 	desired.FailMode = canonicalHookFailMode(desired.FailMode)
-	if !secureClientHookDelivery() {
-		// Outside Secure Client the managed runtime is always fail-closed.
-		desired.FailMode = "closed"
-	}
 	target, err := validateWindowsManagedRuntimeGenerationIdentity(desired)
 	if err != nil {
 		return desired, nil, err
@@ -1879,7 +1875,7 @@ func windowsManagedRuntimeBundleMatchesSelectorIdentity(
 		sameWindowsEnterprisePath(bundle.HookExecutable, entry.HookExecutable) && bundle.HookExecutable == entry.HookExecutable &&
 		bundle.GatewayAddr == entry.GatewayAddr &&
 		bundle.GatewayServiceName == entry.GatewayServiceName &&
-		(bundle.FailMode == "closed" || (bundle.FailMode == "open" && secureClientHookDelivery()))
+		(bundle.FailMode == "closed" || bundle.FailMode == "open")
 }
 
 func windowsManagedRuntimeBundleMatchesDesired(

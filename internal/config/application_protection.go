@@ -378,26 +378,31 @@ func (c *Config) EffectiveActionHookFailModeForConnector(connector string) strin
 }
 
 // effectiveHookFailModeForConnector is the one hook fail-mode resolver
-// (owner rule 2026-10-14, restated 2026-10-20: open under Secure Client,
-// closed everywhere else):
+// (owner decisions 2026-10-14 and 2026-10-20: the customer chooses open or
+// closed and the default is closed; only Secure Client defaults to open):
 //
-//   - a managed deployment outside Secure Client (ManagedHooksFailClosed) is
-//     closed for every connector and mode, whatever is configured;
-//   - a Secure Client deployment (secureClientHookFailModes) follows its
-//     explicit value and resolves an unset value open, for every connector
-//     and guardrail mode (#1163, secureClientHookFailModeForConnector);
-//   - every other install (OSS per-user) is closed unless the operator chose
-//     an explicit open; per-user Cursor follows its guardrail mode.
+//   - an explicit value always wins, the automatic-protection overlay
+//     first, then the connector's own value, then the global one, and
+//     anything but "open" (any case) is closed. That includes a managed
+//     standalone deployment: its config is the administrator's (root- or
+//     SYSTEM-owned and trust-checked by the loader), so its open is the
+//     administrator's choice;
+//   - an unset value is open under Secure Client (secureClientHookFailModes,
+//     #1163) and closed everywhere else;
+//   - per-user Cursor follows its guardrail mode (observe open, action
+//     closed): its hook registration is the mode's.
 func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecision bool) string {
-	if c == nil || c.ManagedHooksFailClosed() {
+	if c == nil {
 		return "closed"
 	}
 	if managed.IsManagedEnterprise(c.DeploymentMode) {
-		// Managed and not closed above: the Secure Client profile.
-		if !c.secureClientHookFailModes() {
-			return "closed"
+		if mode := c.configuredHookFailModeForConnector(connector); mode != "" {
+			return mode
 		}
-		return c.secureClientHookFailModeForConnector(connector)
+		if c.secureClientHookFailModes() {
+			return "open"
+		}
+		return "closed"
 	}
 	if normalizeConnectorKey(connector) == "cursor" {
 		if actionDecision || strings.EqualFold(strings.TrimSpace(c.EffectiveGuardrailModeForConnector(connector)), "action") {
@@ -405,12 +410,10 @@ func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecis
 		}
 		return "open"
 	}
-	if pc, ok := c.appProtectionGuardrailOverride(connector); ok {
-		if mode := strings.TrimSpace(pc.HookFailMode); mode != "" {
-			return explicitHookFailMode(mode)
-		}
+	if mode := c.configuredHookFailModeForConnector(connector); mode != "" {
+		return mode
 	}
-	return c.Guardrail.EffectiveHookFailModeFor(connector)
+	return "closed"
 }
 
 // secureClientHookFailModes reports whether the Secure Client hook fail-mode
@@ -426,13 +429,11 @@ func (c *Config) secureClientHookFailModes() bool {
 		(runtime.GOOS != "linux" || managed.NormalizeEnterpriseProfile(c.Enterprise.Profile) != "")
 }
 
-// secureClientHookFailModeForConnector is the Secure Client delivery contract
-// (#1163): availability does not change policy verdicts, so an unset hook
-// fail mode resolves to open for every connector (Codex and Claude Code
-// included) and in every guardrail mode. An explicit value always wins, the
+// configuredHookFailModeForConnector is the explicit hook fail mode the
+// config sets for connector, canonicalized (explicitHookFailMode): the
 // automatic-protection overlay first, then the connector's own value, then
-// the global one, and anything but "open" (any case) is closed.
-func (c *Config) secureClientHookFailModeForConnector(connector string) string {
+// the global one. It is "" when none is set.
+func (c *Config) configuredHookFailModeForConnector(connector string) string {
 	if pc, ok := c.appProtectionGuardrailOverride(connector); ok {
 		if mode := strings.TrimSpace(pc.HookFailMode); mode != "" {
 			return explicitHookFailMode(mode)
@@ -446,7 +447,7 @@ func (c *Config) secureClientHookFailModeForConnector(connector string) string {
 	if mode := strings.TrimSpace(c.Guardrail.HookFailMode); mode != "" {
 		return explicitHookFailMode(mode)
 	}
-	return "open"
+	return ""
 }
 
 // explicitHookFailMode canonicalizes a non-empty configured fail mode: the
@@ -456,50 +457,6 @@ func explicitHookFailMode(mode string) string {
 		return "open"
 	}
 	return "closed"
-}
-
-// ManagedHooksFailClosed reports a managed deployment outside the Secure
-// Client profile (the standalone profile). There every DefenseClaw hook, in
-// every guardrail mode and for every connector, fails closed: a tool call or
-// prompt DefenseClaw cannot check is blocked, and no hook_fail_mode or ACP
-// fail_mode can turn that off (owner rule 2026-10-14: only Secure Client
-// fails open). Every fail-mode resolver, renderer and status report reads it,
-// so the hooks, the hook-contract lock and status agree. The open values it
-// ignores are reported by ManagedFailOpenWarnings.
-func (c *Config) ManagedHooksFailClosed() bool {
-	return c != nil && managed.IsManagedEnterprise(c.DeploymentMode) && !c.SecureClientIntegration()
-}
-
-// ManagedFailOpenWarnings names each fail-open setting that a managed
-// deployment outside Secure Client ignores (ManagedHooksFailClosed), in a
-// stable order, so ensure, status, verify and config validate say why the
-// hooks report closed although the config says open. It is nil everywhere
-// else.
-func (c *Config) ManagedFailOpenWarnings() []string {
-	if !c.ManagedHooksFailClosed() {
-		return nil
-	}
-	const hookWhy = "open is ignored on this managed computer: outside Secure Client every DefenseClaw hook fails closed, so a call DefenseClaw cannot check is blocked"
-	var warnings []string
-	add := func(path, value, why string) {
-		if strings.EqualFold(strings.TrimSpace(value), "open") {
-			warnings = append(warnings, path+": "+why)
-		}
-	}
-	add("guardrail.hook_fail_mode", c.Guardrail.HookFailMode, hookWhy)
-	for _, name := range sortedACPKeys(c.Guardrail.Connectors) {
-		add("guardrail.connectors."+name+".hook_fail_mode", c.Guardrail.Connectors[name].HookFailMode, hookWhy)
-	}
-	add("application_protection.guardrail.hook_fail_mode", c.ApplicationProtection.Guardrail.HookFailMode, hookWhy)
-	for _, name := range sortedACPKeys(c.ApplicationProtection.Connectors) {
-		add("application_protection.connectors."+name+".guardrail.hook_fail_mode",
-			c.ApplicationProtection.Connectors[name].Guardrail.HookFailMode, hookWhy)
-	}
-	for _, name := range sortedACPKeys(c.ACP.Profiles) {
-		add("acp.profiles."+name+".fail_mode", c.ACP.Profiles[name].FailMode,
-			"open is ignored on this managed computer: outside Secure Client the ACP guard refuses a step DefenseClaw cannot check, in observe mode too")
-	}
-	return warnings
 }
 
 // EffectiveAssetPolicyModeForConnector resolves static asset_policy connector

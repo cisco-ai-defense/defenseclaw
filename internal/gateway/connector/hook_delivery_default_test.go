@@ -246,7 +246,10 @@ func TestManagedHookDeliveryOutsideSecureClientFailsClosed(t *testing.T) {
 				cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DEFENSECLAW_FAIL_MODE=open"}
 				out, err := cmd.CombinedOutput()
 				blocked := err != nil || strings.Contains(string(out), `"decision":"block"`)
-				wantBlocked := scenario != "malformed" || wantBaked == "closed"
+				// The baked mode is the administrator's (owner decision
+				// 2026-10-20): open lets an outage and an unusable answer
+				// through; a missing token is a broken install and blocks.
+				wantBlocked := scenario == "missing-token" || wantBaked == "closed"
 				if blocked != wantBlocked {
 					t.Fatalf("blocked=%t want=%t err=%v output=%s", blocked, wantBlocked, err, out)
 				}

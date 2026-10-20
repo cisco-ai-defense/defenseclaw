@@ -18,7 +18,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
@@ -70,7 +69,6 @@ var configValidateCmd = &cobra.Command{
 			return fmt.Errorf("%s is not valid at %s: %s", configValidateShownPath(path), failure.Path, failure.Reason)
 		}
 		warnings := append(gateway.ConfigHILTWarnings(loaded.runtime), loaded.runtime.SandboxDefaultProfileWarnings()...)
-		warnings = append(warnings, managedFailOpenValidateWarnings(loaded.runtime)...)
 		warnings = append(warnings, configV8InstalledAdvisories(loaded)...)
 		if configValidateJSON {
 			valid := true
@@ -89,18 +87,6 @@ var configValidateCmd = &cobra.Command{
 		}
 		return nil
 	},
-}
-
-// managedFailOpenValidateWarnings is each fail-open setting a managed
-// deployment outside Secure Client ignores, led by the fail_open_ignored code
-// that ensure, status and verify print for it, so the text and the JSON of a
-// validation name the same code (rel-1-0-3 GAP-0091).
-func managedFailOpenValidateWarnings(cfg *config.Config) []string {
-	warnings := cfg.ManagedFailOpenWarnings()
-	for i, warning := range warnings {
-		warnings[i] = enterprisestatus.CodeFailOpenIgnored + ": " + warning
-	}
-	return warnings
 }
 
 func configValidateShownPath(path string) string {
