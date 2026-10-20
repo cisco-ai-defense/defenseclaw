@@ -2385,12 +2385,7 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 			continue
 		}
 		result.Profile, result.Installed, result.InstalledVersion = profile, true, deployment.ProductVersion
-		for _, service := range []struct{ name, kind string }{
-			{"DefenseClawGateway", "gateway"},
-			{"DefenseClawHookGuardian", "guardian"},
-			{"DefenseClawHookEnumerator", "enumerator"},
-			{"DefenseClawSensorHelper", "sensor_helper"},
-		} {
+		for _, service := range windowsEnterpriseStandaloneServiceRoster {
 			state := windowsEnterpriseServiceState(service.name)
 			if state == "absent" {
 				continue
@@ -2418,12 +2413,7 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 // have restarted them after its report was taken.
 func windowsEnterpriseLiveStandaloneServices() []enterprisestatus.Service {
 	var services []enterprisestatus.Service
-	for _, service := range []struct{ name, kind string }{
-		{"DefenseClawGateway", "gateway"},
-		{"DefenseClawHookGuardian", "guardian"},
-		{"DefenseClawHookEnumerator", "enumerator"},
-		{"DefenseClawSensorHelper", "sensor_helper"},
-	} {
+	for _, service := range windowsEnterpriseStandaloneServiceRoster {
 		if state := windowsEnterpriseServiceState(service.name); state != "absent" {
 			services = append(services, enterprisestatus.Service{
 				Name: service.name, Kind: service.kind, State: state, Required: true,
