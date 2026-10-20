@@ -2699,3 +2699,99 @@ func TestHookManagedAIDOnly_ToolCallFollowsResolvedContract(t *testing.T) {
 		}
 	}
 }
+
+// Each reason a tool invocation goes to AID as text alone has its own name, in
+// the order the carry check applies them.
+func TestToolCallNotCarriedReason(t *testing.T) {
+	declared := func(req ToolInspectRequest) *ToolInspectRequest {
+		req.aidToolCallDeclared = true
+		return &req
+	}
+	for _, test := range []struct {
+		name string
+		req  *ToolInspectRequest
+		want string
+	}{
+		{"nil", nil, "not_a_tool_call"},
+		{"prompt", declared(ToolInspectRequest{Tool: "message", Direction: "prompt"}), "not_a_tool_call"},
+		{"undeclared", &ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{"command":"ls"}`), Direction: "tool_call"}, "contract_undeclared"},
+		{"envelope", declared(ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{}`), Direction: "tool_call", toolArgsAreHookEnvelope: true}), "hook_envelope_args"},
+		{"placeholder", declared(ToolInspectRequest{Tool: "tool", Args: json.RawMessage(`{}`), Direction: "tool_call", toolNameIsLabel: true}), "placeholder_tool_name"},
+		{"blank", declared(ToolInspectRequest{Tool: " ", Args: json.RawMessage(`{}`), Direction: "tool_call"}), "blank_tool_name"},
+		{"null args", declared(ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`null`), Direction: "tool_call"}), "args_not_object"},
+		{"string args", declared(ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`"ls"`), Direction: "tool_call"}), "args_not_object"},
+		{"carried", declared(ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{"command":"ls"}`), Direction: "tool_call"}), ""},
+	} {
+		if got := toolCallNotCarriedReason(test.req); got != test.want {
+			t.Errorf("%s: reason=%q want %q", test.name, got, test.want)
+		}
+		if got, want := toolCallArgsCarryable(test.req), test.want == ""; got != want {
+			t.Errorf("%s: carryable=%v want %v", test.name, got, want)
+		}
+	}
+}
+
+// The gateway log says how each PreToolUse went to AID: as a tool call with its
+// name, id, argument keys and message order, or as text alone with the reason.
+// It never carries argument values, which hold the agent's commands.
+func TestHookManagedAIDOnly_LogsToolCallWire(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+	client := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint:  srv.URL,
+		TimeoutMs: 3000,
+	}, newFakeCloudProvider("cmid-token-1"))
+	a := managedHookServer(client)
+	const secret = "s3cr3t-arg-value"
+	args := json.RawMessage(`{"command":"echo ` + secret + `","cwd":"/tmp"}`)
+
+	carried := captureStderr(t, func() {
+		_ = a.inspectToolPolicy(&ToolInspectRequest{
+			Tool: "Bash", Args: args, Direction: "tool_call", Connector: "claudecode",
+			toolUseID: "toolu_01U3wpX", aidToolCallDeclared: true,
+		})
+	})
+	const wantCarried = `[aid] PreToolUse sent as a tool call: connector=claudecode tool="Bash" id=toolu_01U3wpX (agent) arg_keys=[command cwd] wire=chat-tool-calls-v1 messages=[assistant:tool_calls, user:text]`
+	if !strings.Contains(carried, wantCarried) {
+		t.Errorf("log = %q, want %q", carried, wantCarried)
+	}
+	derived := captureStderr(t, func() {
+		_ = a.inspectToolPolicy(&ToolInspectRequest{
+			Tool: "run_terminal_cmd", Args: args, Direction: "tool_call", Connector: "cursor",
+			aidToolCallDeclared: true,
+		})
+	})
+	if !strings.Contains(derived, `connector=cursor tool="run_terminal_cmd" id=dc-`) || !strings.Contains(derived, "(derived)") {
+		t.Errorf("log = %q, want a dc- id marked derived", derived)
+	}
+	textOnly := captureStderr(t, func() {
+		_ = a.inspectToolPolicy(&ToolInspectRequest{
+			Tool: "Bash", Args: args, Direction: "tool_call", Connector: "claudecode",
+		})
+	})
+	const wantText = `[aid] PreToolUse sent as text only: connector=claudecode tool="Bash" reason=contract_undeclared`
+	if !strings.Contains(textOnly, wantText) {
+		t.Errorf("log = %q, want %q", textOnly, wantText)
+	}
+	for _, log := range []string{carried, derived, textOnly} {
+		if strings.Contains(log, secret) {
+			t.Fatalf("log carries an argument value: %q", log)
+		}
+	}
+
+	// No AID lane, no wire line.
+	a.scannerCfg.CiscoAIDefense.ScanHookSurface = boolPtrForAIDLogTest(false)
+	off := captureStderr(t, func() {
+		_ = a.inspectToolPolicy(&ToolInspectRequest{
+			Tool: "Bash", Args: args, Direction: "tool_call", Connector: "claudecode",
+		})
+	})
+	if strings.Contains(off, "[aid] PreToolUse") {
+		t.Errorf("hook surface off still logged: %q", off)
+	}
+}
+
+func boolPtrForAIDLogTest(v bool) *bool { return &v }

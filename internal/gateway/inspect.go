@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -234,9 +236,10 @@ func (a *APIServer) managedAIDOnly() bool {
 
 // aidToolCall is a tool invocation sent to AID as a structured tool call.
 type aidToolCall struct {
-	Name string
-	ID   string
-	Args json.RawMessage
+	Connector string
+	Name      string
+	ID        string
+	Args      json.RawMessage
 }
 
 // inspectManagedAIDOnly is the managed_enterprise hook-lane inspection
@@ -432,12 +435,65 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 // function.name. JSON null decodes into a map without error, but it is not an
 // object, and AID's rule engine fails the tool-call rules on it.
 func toolCallArgsCarryable(req *ToolInspectRequest) bool {
-	if req == nil || !req.aidToolCallDeclared || req.Direction != "tool_call" || req.toolArgsAreHookEnvelope ||
-		req.toolNameIsLabel || strings.TrimSpace(req.Tool) == "" {
-		return false
+	return toolCallNotCarriedReason(req) == ""
+}
+
+// toolCallNotCarriedReason names why an invocation goes to AID as text alone,
+// in the order toolCallArgsCarryable checks; "" when it can be carried.
+func toolCallNotCarriedReason(req *ToolInspectRequest) string {
+	switch {
+	case req == nil || req.Direction != "tool_call":
+		return "not_a_tool_call"
+	case !req.aidToolCallDeclared:
+		return "contract_undeclared"
+	case req.toolArgsAreHookEnvelope:
+		return "hook_envelope_args"
+	case req.toolNameIsLabel:
+		return "placeholder_tool_name"
+	case strings.TrimSpace(req.Tool) == "":
+		return "blank_tool_name"
 	}
 	var object map[string]json.RawMessage
-	return json.Unmarshal(req.Args, &object) == nil && object != nil
+	if json.Unmarshal(req.Args, &object) != nil || object == nil {
+		return "args_not_object"
+	}
+	return ""
+}
+
+// aidHookSurfaceWired reports whether a hook inspection reaches AID at all, so
+// the wire log below is written only for requests that are actually sent.
+func (a *APIServer) aidHookSurfaceWired() bool {
+	return a != nil && a.ciscoInspector != nil && a.scannerCfg != nil &&
+		a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled()
+}
+
+// logAIDToolCallTextOnly records that a tool invocation went to AID as the
+// text form alone, and why. Names only, never argument values.
+func (a *APIServer) logAIDToolCallTextOnly(connectorName, toolName, reason string) {
+	if reason == "" || reason == "not_a_tool_call" || !a.aidHookSurfaceWired() {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[aid] PreToolUse sent as text only: connector=%s tool=%q reason=%s\n",
+		connectorName, toolName, reason)
+}
+
+// logAIDToolCallCarried records the shape of a tool call sent to AID: the
+// tool name, the id and whether the agent reported it, the argument keys and
+// the message order. Never argument values, which carry commands and content.
+func logAIDToolCallCarried(call aidToolCall, wireID string) {
+	idSource := "agent"
+	if call.ID == "" {
+		idSource = "derived"
+	}
+	var object map[string]json.RawMessage
+	_ = json.Unmarshal(call.Args, &object)
+	keys := make([]string, 0, len(object))
+	for key := range object {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	fmt.Fprintf(os.Stderr, "[aid] PreToolUse sent as a tool call: connector=%s tool=%q id=%s (%s) arg_keys=%v wire=%s messages=[assistant:tool_calls, user:text]\n",
+		call.Connector, call.Name, wireID, idSource, keys, connector.AIDWireVersionChatToolCalls)
 }
 
 // hookAIDInspectTool sends the invocation as a tool call ahead of the text form,
@@ -447,14 +503,16 @@ func (a *APIServer) hookAIDInspectTool(
 	req *ToolInspectRequest,
 	toolName, argsStr string,
 ) *ScanVerdict {
-	if toolCallArgsCarryable(req) {
-		return a.hookAIDInspectToolCall(ctx, aidToolCall{
-			Name: toolName,
-			ID:   req.toolUseID,
-			Args: req.Args,
-		}, argsStr)
+	if reason := toolCallNotCarriedReason(req); reason != "" {
+		a.logAIDToolCallTextOnly(req.Connector, toolName, reason)
+		return a.hookAIDInspect(ctx, toolName, argsStr)
 	}
-	return a.hookAIDInspect(ctx, toolName, argsStr)
+	return a.hookAIDInspectToolCall(ctx, aidToolCall{
+		Connector: req.Connector,
+		Name:      toolName,
+		ID:        req.toolUseID,
+		Args:      req.Args,
+	}, argsStr)
 }
 
 // aidToolCallMaxBytes bounds the tool call added beside the text form. Both
@@ -494,10 +552,12 @@ func (a *APIServer) hookAIDInspectToolCall(
 		return nil
 	}
 	if strings.TrimSpace(call.Name) == "" {
+		a.logAIDToolCallTextOnly(call.Connector, call.Name, "blank_tool_name")
 		return a.hookAIDInspect(ctx, call.Name, content)
 	}
+	wireID := toolCallWireID(call)
 	toolCalls, err := json.Marshal([]map[string]interface{}{{
-		"id":   toolCallWireID(call),
+		"id":   wireID,
 		"type": "function",
 		"function": map[string]interface{}{
 			"name":      call.Name,
@@ -508,8 +568,10 @@ func (a *APIServer) hookAIDInspectToolCall(
 		return nil
 	}
 	if len(toolCalls) > aidToolCallMaxBytes {
+		a.logAIDToolCallTextOnly(call.Connector, call.Name, "oversized")
 		return a.hookAIDInspect(ctx, call.Name, content)
 	}
+	logAIDToolCallCarried(call, wireID)
 	return a.ciscoInspector.Inspect(ctx, []ChatMessage{
 		{Role: "assistant", ToolCalls: toolCalls},
 		{Role: "user", Content: hookAIDToolText(call.Name, content)},
@@ -738,14 +800,16 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// CodeGuard, and the judge lane; AID inspects the tool call directly
 	// and a nil AID verdict fails open. See inspectManagedAIDOnly.
 	if a.managedAIDOnly() {
-		if toolCallArgsCarryable(req) {
-			return a.inspectManagedAIDOnlyCall(ctx, req.Tool, string(req.Args), &aidToolCall{
-				Name: req.Tool,
-				ID:   req.toolUseID,
-				Args: req.Args,
-			})
+		if reason := toolCallNotCarriedReason(req); reason != "" {
+			a.logAIDToolCallTextOnly(req.Connector, req.Tool, reason)
+			return a.inspectManagedAIDOnly(ctx, req.Tool, string(req.Args))
 		}
-		return a.inspectManagedAIDOnly(ctx, req.Tool, string(req.Args))
+		return a.inspectManagedAIDOnlyCall(ctx, req.Tool, string(req.Args), &aidToolCall{
+			Connector: req.Connector,
+			Name:      req.Tool,
+			ID:        req.toolUseID,
+			Args:      req.Args,
+		})
 	}
 
 	// Static block/allow list takes priority — checked before any rule
