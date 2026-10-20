@@ -2851,9 +2851,15 @@ func TestSecureClientCopilotHookFollowsItsDeliveryMode(t *testing.T) {
 	if _, stdout, _ := run(open, unenrolled); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
 		t.Fatalf("an unenrolled account's call was allowed: %q", stdout)
 	}
+	// A standalone hook follows the administrator's mode (owner decision
+	// 2026-10-20): open allows a stopped gateway, closed denies it.
 	standalone := func(opts *Options) { opts.SecureClient = false; opts.ExplainUnenrolledAccount = true }
-	if _, stdout, _ := run(standalone, unreachable); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
-		t.Fatalf("a standalone managed Copilot hook allowed a stopped gateway: %q", stdout)
+	if _, stdout, _ := run(standalone, unreachable); strings.Contains(stdout, "deny") {
+		t.Fatalf("a standalone managed Copilot hook in fail mode open denied a stopped gateway: %q", stdout)
+	}
+	standaloneClosed := func(opts Options) int { return failUnreachable(opts, sp, "closed", managedGatewayNotRunningReason) }
+	if _, stdout, _ := run(standalone, standaloneClosed); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
+		t.Fatalf("a standalone managed Copilot hook in fail mode closed allowed a stopped gateway: %q", stdout)
 	}
 }
 
@@ -2948,7 +2954,7 @@ func TestManagedNativeDecisionRejectsMissingActionAndOutput(t *testing.T) {
 			t.Run(tc.connector+"/"+body, func(t *testing.T) {
 				var stdout, stderr bytes.Buffer
 				opts := Options{Connector: tc.connector, Event: tc.event, ManagedEnterprise: true,
-					ManagedStandalone: true, FailMode: "open", Stdout: &stdout, Stderr: &stderr}
+					ManagedStandalone: true, FailMode: "closed", Stdout: &stdout, Stderr: &stderr}
 				code := specs[tc.connector].decide(opts, []byte(body))
 				got := stdout.String()
 				if tc.connector == "kiro" {

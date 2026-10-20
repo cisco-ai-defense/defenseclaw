@@ -36,19 +36,24 @@ func TestWindowsManagedRuntimeBundleAuthenticatesDeliveryMode(t *testing.T) {
 	}
 }
 
-// Outside Secure Client the authenticated runtime generation is always
-// fail-closed (origin/main), whatever mode the caller supplies.
-func TestWindowsManagedRuntimeBundleIsClosedOutsideSecureClient(t *testing.T) {
+// Outside Secure Client the authenticated runtime generation records the
+// administrator's mode (owner decision 2026-10-20): explicit open or closed,
+// closed when unset; a drifted mode does not match it.
+func TestWindowsManagedRuntimeBundleFollowsTheAdministratorOutsideSecureClient(t *testing.T) {
 	setStandaloneProfileForTest(t, true)
-	for _, mode := range []string{"", "open", "closed"} {
+	for mode, want := range map[string]string{"": "closed", "open": "open", "closed": "closed"} {
 		desired := WindowsManagedRuntimeGenerationDesired{FailMode: mode}
 		bundle := windowsManagedRuntimeBundleFromDesired(desired, strings.Repeat("a", 32))
-		if bundle.FailMode != "closed" || !windowsManagedRuntimeBundleMatchesDesired(bundle, desired) {
-			t.Fatalf("mode %q: bundle fail mode = %q, want closed", mode, bundle.FailMode)
+		if bundle.FailMode != want || !windowsManagedRuntimeBundleMatchesDesired(bundle, desired) {
+			t.Fatalf("mode %q: bundle fail mode = %q, want %q", mode, bundle.FailMode, want)
 		}
-		bundle.FailMode = "open"
+		if want == "open" {
+			bundle.FailMode = "closed"
+		} else {
+			bundle.FailMode = "open"
+		}
 		if windowsManagedRuntimeBundleMatchesDesired(bundle, desired) {
-			t.Fatalf("mode %q: an open bundle matched outside Secure Client", mode)
+			t.Fatalf("mode %q: a drifted bundle matched outside Secure Client", mode)
 		}
 	}
 }

@@ -34,9 +34,10 @@ func managedConfigForProfile(t *testing.T, profile string) *config.Config {
 }
 
 // ManagedHookFailMode is the value the renderer writes. Outside Secure Client
-// every connector's managed hooks block through the native deny, so status
-// says closed for every connector, configured open included (rel-1-0-3
-// GAP-0037), and managed Codex and Claude Code hooks always fail closed.
+// every connector's managed hooks block through the native deny, so no
+// connector is lowered: status says closed for a connector without its own
+// value and the administrator's open for one that sets it (owner decision
+// 2026-10-20).
 func TestManagedHookFailModeIsTheRenderedValue(t *testing.T) {
 	cfg := managedConfigForProfile(t, managed.ProfileStandalone)
 	closed := config.PerConnectorGuardrailConfig{HookFailMode: "closed"}
@@ -51,7 +52,7 @@ func TestManagedHookFailModeIsTheRenderedValue(t *testing.T) {
 	want := map[string]string{
 		"hermes": "closed", "copilot": "closed",
 		"codex": "closed", "claudecode": "closed", "opencode": "closed",
-		"amp": "closed", // configured open is ignored outside Secure Client
+		"amp": "open", // the administrator's explicit open
 	}
 	for name, mode := range want {
 		if got := ManagedHookFailMode(cfg, name); got != mode {

@@ -225,9 +225,9 @@ func TestRotationConnectorStateRejectsFallbackPolicyDrift(t *testing.T) {
 	}
 }
 
-// Outside Secure Client the managed native Codex and Claude Code hooks are
-// always fail-closed (origin/main).
-func TestRotationConnectorStateNormalizesManagedNativeHooksClosed(t *testing.T) {
+// Outside Secure Client the managed native Codex and Claude Code hooks keep
+// the administrator's explicit fail mode (owner decision 2026-10-20).
+func TestRotationConnectorStateKeepsManagedStandaloneFailModes(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.DeploymentMode = "managed_enterprise"
 	cfg.Enterprise.Profile = "standalone"
@@ -247,8 +247,8 @@ func TestRotationConnectorStateNormalizesManagedNativeHooksClosed(t *testing.T) 
 		t.Fatalf("connector state rows = %d, want 2: %#v", len(state.Connectors), state.Connectors)
 	}
 	for _, row := range state.Connectors {
-		if row.HookFailMode != "closed" {
-			t.Errorf("managed %s persisted fail mode = %q, want closed", row.Name, row.HookFailMode)
+		if row.HookFailMode != "open" {
+			t.Errorf("managed %s persisted fail mode = %q, want the administrator's open", row.Name, row.HookFailMode)
 		}
 	}
 }

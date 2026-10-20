@@ -42,7 +42,8 @@ type ProxyOptions struct {
 	// Managed marks the guard of a standalone managed enrollment (never
 	// Secure Client), whose user has no DefenseClaw command to run and is
 	// pointed at the administrator. Such a guard refuses a frame it could
-	// not evaluate in observe mode too (managedObserveRefuses).
+	// not evaluate in observe mode too, unless the profile's fail_mode is
+	// explicitly open (managedObserveRefuses).
 	Managed bool
 	// SetupCommand writes this editor entry again ("" when unknown).
 	SetupCommand string
@@ -70,7 +71,8 @@ func (o ProxyOptions) setupCommandFor(profile string, mode Mode) string {
 // Run starts an ACP agent without a shell and mediates every NDJSON frame in
 // both directions. In action mode malformed frames and evaluator failures are
 // fail-closed. Observe mode records evaluations but preserves traffic, except
-// that a standalone managed guard refuses a frame it could not evaluate.
+// that a standalone managed guard refuses a frame it could not evaluate
+// unless its profile's fail_mode is explicitly open.
 func Run(ctx context.Context, opts ProxyOptions) error {
 	if opts.Command == "" || opts.Stdin == nil || opts.Stdout == nil || opts.Stderr == nil {
 		return errors.New("ACP proxy requires command, stdin, stdout, and stderr")
@@ -171,6 +173,9 @@ type proxyState struct {
 	// one guard for every thread (Zed) showed nothing in a new thread after
 	// a revoke (GAP-0354).
 	uncheckedNotified map[string]bool
+	// failOpen is the last authenticated verdict's FailMode == "open": the
+	// administrator set this profile's fail_mode open.
+	failOpen bool
 	// silenceGen and silenceTimer drive the notice for an agent that does
 	// not answer a prompt (armSilenceNotice).
 	silenceGen   uint64
@@ -224,6 +229,22 @@ func (s *proxyState) agentSpoke() {
 		s.silenceTimer.Stop()
 		s.silenceTimer = nil
 	}
+}
+
+// recordFailMode keeps the fail mode an authenticated verdict reported for
+// the profile (Verdict.FailMode).
+func (s *proxyState) recordFailMode(verdict Verdict) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failOpen = verdict.FailMode == "open"
+}
+
+// profileFailsOpen reports whether the last authenticated verdict said the
+// profile's fail_mode is explicitly open.
+func (s *proxyState) profileFailsOpen() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failOpen
 }
 
 // checkingResumed re-arms the unchecked notice after an evaluation worked.
@@ -597,13 +618,21 @@ func unavailableReason(err error) string {
 
 // managedObserveRefuses reports an observe-mode frame of a standalone managed
 // guard (Managed) whose evaluation failed. Outside Secure Client a step
-// DefenseClaw cannot check is never delivered unchecked, in observe mode too
-// (owner rule 2026-10-14; rel-1-0-3 GAP-0037): observe mode lets policy
-// verdicts through, not a missing verdict, as the managed hooks do. An
-// administrator who switched ACP checking off (ErrACPDisabled) gave an
-// answer, not a failure, so that frame goes through with the notice.
-func managedObserveRefuses(opts ProxyOptions, err error) bool {
-	return opts.Managed && opts.Mode == ModeObserve && !errors.Is(err, ErrACPDisabled)
+// DefenseClaw cannot check is not delivered unchecked by default, in observe
+// mode too (rel-1-0-3 GAP-0037): observe mode lets policy verdicts through,
+// not a missing verdict, as the managed hooks do. The administrator chooses
+// otherwise with the profile's fail_mode: open (owner decision 2026-10-20),
+// which an authenticated verdict of this session reported
+// (proxyState.profileFailsOpen); a credential the gateway refused is not an
+// outage and stays refused. An administrator who switched ACP checking off
+// (ErrACPDisabled) gave an answer, not a failure, so that frame goes through
+// with the notice.
+func managedObserveRefuses(opts ProxyOptions, state *proxyState, err error) bool {
+	if !opts.Managed || opts.Mode != ModeObserve || errors.Is(err, ErrACPDisabled) {
+		return false
+	}
+	credential := errors.Is(err, ErrCredentialRejected) || errors.Is(err, ErrCredentialOtherAccount)
+	return credential || !state.profileFailsOpen()
 }
 
 // refusalReason is what the editor sees for a frame refused because it
@@ -903,6 +932,9 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			// is not a gateway problem to report (GAP-0351).
 			return nil
 		}
+		if evalErr == nil {
+			state.recordFailMode(verdict)
+		}
 		if evalErr == nil && state.peerProtocolFixes {
 			state.checkingResumed()
 		}
@@ -916,7 +948,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			if errors.Is(evalErr, ErrModeMismatch) {
 				return fmt.Errorf("ACP evaluation unavailable: %w", evalErr)
 			}
-			if opts.Mode == ModeAction || managedObserveRefuses(opts, evalErr) {
+			if opts.Mode == ModeAction || managedObserveRefuses(opts, state, evalErr) {
 				// Fail closed for this frame only, exactly as for a block.
 				logf(opts.Stderr, "[defenseclaw-acp] evaluation unavailable, refused %s %s: %v\n", direction, msg.Method, evalErr)
 				verdict = Verdict{Action: "block", Reason: state.refusalReason(opts, evalErr)}

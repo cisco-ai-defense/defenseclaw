@@ -22,15 +22,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// windowsRuntimeOnlyRuntimeFailMode is the delivery mode the guardian writes
-// into, and verify requires of, a runtime-only connector's per-user hook
-// runtime (.hookcfg and .hookcfg.<connector>). The vendor machine policy runs
-// the native defenseclaw-hook.exe, which applies that mode itself
-// (internal/cli hookSidecarFailMode), so an agent that cannot fail closed on
-// its own hook error (Copilot) still gets closed delivery: status reports
-// this value (GAP-0014).
-const windowsRuntimeOnlyRuntimeFailMode = "closed"
-
 // windowsOpenCodeMachinePolicy reports OpenCode's managed config path and
 // whether its machine policy is in force: the guardian installed the trusted
 // managed plugin and that config names it. enterprisepolicy owns the check
@@ -165,9 +156,9 @@ func resolveWindowsRuntimeOnlyTarget(opts InstallOptions) (windowsGenericManaged
 	if !windowsStandaloneRuntimeOnlyInstall(name) {
 		return target, "", fmt.Errorf("enterprise hooks: connector %q is not a Windows machine policy runtime connector", name)
 	}
-	// Closed on the standalone profile; under Secure Client (#1163) the
-	// configured delivery mode, open unless set closed.
-	target.setup.HookFailMode = windowsEnterpriseHookFailMode(name, target.setup.HookFailMode)
+	// The administrator's configured delivery mode: explicit open or closed;
+	// unset is closed, and open under Secure Client (#1163).
+	target.setup.HookFailMode = canonicalHookFailMode(target.setup.HookFailMode)
 	policyPath, err := windowsRuntimeOnlyPolicyPath(name)
 	if err != nil {
 		return target, "", err
@@ -253,7 +244,7 @@ func installWindowsRuntimeOnlyManagedResult(
 				return fail(fmt.Errorf("enterprise hooks: create %s managed runtime: %w", name, createErr))
 			}
 			if err := connector.ReconcileManagedNativeHookRuntime(
-				target.dataDir, target.setup.APIAddr, name, target.setup.HookAPIToken, windowsRuntimeOnlyRuntimeFailMode,
+				target.dataDir, target.setup.APIAddr, name, target.setup.HookAPIToken, target.setup.HookFailMode,
 			); err != nil {
 				return fail(fmt.Errorf("enterprise hooks: write %s managed runtime: %w", name, err))
 			}
@@ -371,7 +362,7 @@ func verifyWindowsRuntimeOnlyUserRuntime(target windowsGenericManagedTarget, pol
 	if err := verifyWindowsUserRuntime(windowsRuntimeOnlyPaths(target.dataDir, name), target.sid); err != nil {
 		return err
 	}
-	if err := connector.ValidateManagedNativeHookRuntime(target.dataDir, target.setup.APIAddr, name, windowsRuntimeOnlyRuntimeFailMode); err != nil {
+	if err := connector.ValidateManagedNativeHookRuntime(target.dataDir, target.setup.APIAddr, name, target.setup.HookFailMode); err != nil {
 		return fmt.Errorf("enterprise hooks: %s managed runtime is invalid: %w", name, err)
 	}
 	tokenPath, err := connector.HookTokenFilePath(filepath.Join(target.dataDir, "hooks"), name)

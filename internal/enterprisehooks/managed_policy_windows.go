@@ -1003,7 +1003,6 @@ func validateWindowsClaudeManagedRuntime(target windowsClaudeManagedPolicyTarget
 		target.dataDir,
 		target.gatewayAddr,
 		"claudecode",
-		windowsManagedRuntimeExpectedFailModes()...,
 	); err != nil {
 		return fmt.Errorf("enterprise hooks: current managed Claude runtime sidecars are invalid: %w", err)
 	}
@@ -2488,15 +2487,4 @@ func windowsManagedPolicyDigest(data []byte) string {
 func windowsPathExists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
-}
-
-// windowsManagedRuntimeExpectedFailModes is the delivery mode a managed
-// runtime sidecar must record when the caller has no rendered setup to
-// compare with: closed outside Secure Client (origin/main), either supported
-// mode under Secure Client, whose policy may select open (#1163).
-func windowsManagedRuntimeExpectedFailModes() []string {
-	if secureClientHookDelivery() {
-		return nil
-	}
-	return []string{"closed"}
 }

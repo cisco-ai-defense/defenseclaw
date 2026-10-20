@@ -144,7 +144,7 @@ func TestWindowsStandaloneHeldAPIPortFailsClosedNamingThePort(t *testing.T) {
 		var out, errb bytes.Buffer
 		Run(context.Background(), Options{
 			Connector: "codex", Event: "PreToolUse", HookContractID: "codex-hooks-v4", APIAddr: "127.0.0.1:1",
-			Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "open", ManagedEnterprise: true,
+			Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "closed", ManagedEnterprise: true,
 			ExplainUnenrolledAccount: explain, AuthenticatedManagedToken: &token,
 			Stdin:  strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"shell"}`),
 			Stdout: &out, Stderr: &errb, HTTPClient: &http.Client{Transport: portHeldRT{}},
@@ -194,7 +194,7 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 		failures, _ := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
 		return code, out.String(), errb.String(), string(failures)
 	}
-	code, stdout, stderr, failures := run(true, "open")
+	code, stdout, stderr, failures := run(true, "closed")
 	want := "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
 		"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `" +
 		managedStatusCommand(runtime.GOOS) + "` names what to do. (enterprise_managed_gateway_not_running)"

@@ -74,17 +74,20 @@ func TestWindowsSecureClientPerUserRuntimeDirectory(t *testing.T) {
 }
 
 // Under Secure Client (#1163) Copilot follows the configured delivery mode
-// like Codex; the standalone per-user connectors stay closed.
+// like Codex, unset open; the standalone profile follows the administrator's
+// explicit mode too, unset closed (owner decision 2026-10-20).
 func TestWindowsSecureClientCopilotFailMode(t *testing.T) {
 	pinWindowsPerUserRuntimeStandaloneForTest(t, false)
 	for configured, want := range map[string]string{"": "open", "open": "open", "closed": "closed", "bogus": "closed"} {
-		if got := windowsEnterpriseHookFailMode("copilot", configured); got != want {
+		if got := canonicalHookFailMode(configured); got != want {
 			t.Fatalf("Secure Client copilot fail mode for %q = %q, want %q", configured, got, want)
 		}
 	}
 	pinWindowsPerUserRuntimeStandaloneForTest(t, true)
-	if got := windowsEnterpriseHookFailMode("copilot", "open"); got != "closed" {
-		t.Fatalf("standalone copilot fail mode = %q, want closed", got)
+	for configured, want := range map[string]string{"": "closed", "open": "open", "closed": "closed"} {
+		if got := canonicalHookFailMode(configured); got != want {
+			t.Fatalf("standalone copilot fail mode for %q = %q, want %q", configured, got, want)
+		}
 	}
 }
 

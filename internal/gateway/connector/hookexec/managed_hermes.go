@@ -37,16 +37,16 @@ func hermesToolCallEvent(event string) bool {
 	return event == "" || strings.EqualFold(event, "pre_tool_call")
 }
 
-// hermesFailsClosed reports a Hermes hook that fails closed. Only Secure
-// Client fails open (owner rule 2026-10-14): a managed hook outside Secure
-// Client always fails closed (rel-1-0-2 GAP-0423), and a per-user hook fails
-// closed unless its fail mode is explicitly open, so a per-user fail mode
-// that is closed or not set blocks a tool call during a gateway outage on
-// Windows as on Linux and macOS (rel-1-0-3 GAP-0269, GAP-0150). Strict
-// availability closes it too.
+// hermesFailsClosed reports a Hermes hook that fails closed. A Secure Client
+// hook keeps Hermes' upstream fail-open. Every other hook, managed standalone
+// (rel-1-0-2 GAP-0423) and per-user alike, fails closed unless its fail mode
+// is explicitly open (a standalone hook's is the administrator's, owner
+// decision 2026-10-20), so a fail mode that is closed or not set blocks a
+// tool call during a gateway outage on Windows as on Linux and macOS
+// (rel-1-0-3 GAP-0269, GAP-0150). Strict availability closes it too.
 func hermesFailsClosed(opts Options) bool {
-	if opts.ManagedEnterprise {
-		return managedNativeDecision(opts)
+	if opts.ManagedEnterprise && !managedNativeDecision(opts) {
+		return false
 	}
 	return opts.StrictAvailability || !strings.EqualFold(strings.TrimSpace(opts.FailMode), "open")
 }
@@ -177,12 +177,12 @@ func failOpenOnlyCloses(opts Options, sp spec) bool {
 
 // loggedFailMode is the fail mode a hook-failure line records: the outcome
 // for a failOpenOnly connector (failOpenOnlyCloses, except an open Secure
-// Client Copilot hook, secureClientCopilotOpen), the given one otherwise.
+// Client Copilot hook, managedCopilotOpen), the given one otherwise.
 func loggedFailMode(opts Options, sp spec, failMode string) string {
 	if !sp.failOpenOnly {
 		return failMode
 	}
-	if failOpenOnlyCloses(opts, sp) && !secureClientCopilotOpen(opts, sp, failMode) {
+	if failOpenOnlyCloses(opts, sp) && !managedCopilotOpen(opts, sp, failMode) {
 		return "closed"
 	}
 	return "open"

@@ -179,10 +179,18 @@ func enterpriseManagedHookRuntimeForceClosed() bool {
 	return standaloneHookRuntime.prepared && standaloneHookRuntime.reason != ""
 }
 
-// enterpriseManagedHookRuntimeFailMode: only the Windows authenticated
-// runtime generation carries a delivery policy that may relax managed
-// delivery; the unix `--enterprise-managed` runtime stays closed (#1163).
-func enterpriseManagedHookRuntimeFailMode() string { return "closed" }
+// enterpriseManagedHookRuntimeFailMode is the fail mode the root-owned runtime
+// descriptor records for the prepared connector (RuntimeDescriptor.HookFailMode):
+// open only when the administrator's config chose open for it, and closed
+// otherwise and whenever the runtime failed its checks.
+func enterpriseManagedHookRuntimeFailMode() string {
+	standaloneHookRuntime.Lock()
+	defer standaloneHookRuntime.Unlock()
+	if !standaloneHookRuntime.prepared || standaloneHookRuntime.reason != "" || standaloneHookRuntime.descriptor == nil {
+		return "closed"
+	}
+	return standaloneHookRuntime.descriptor.HookFailMode(standaloneHookRuntime.connector)
+}
 
 func enterpriseManagedHookRuntimeFailureReason() string {
 	standaloneHookRuntime.Lock()
@@ -245,11 +253,9 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	opts.ManagedStandalone = true
 	opts.ManagedServiceUID = descriptor.ServiceUID
 	opts.ManagedUnixSocket = descriptor.HookSocket
-	// The standalone `--enterprise-managed` runtime keeps its fail-closed,
-	// strict-availability contract; only the Windows authenticated runtime
-	// generation may relax managed delivery (#1163).
-	opts.FailMode = "closed"
-	opts.StrictAvailability = true
+	// opts.FailMode and StrictAvailability are the descriptor's
+	// (enterpriseManagedHookRuntimeFailMode): closed and strict unless the
+	// administrator's config chose open for this connector.
 	// An inherited generic gateway token never authenticates a managed hook.
 	opts.Token = ""
 	if opts.MaxBody <= 0 || opts.MaxBody > 1<<20 {

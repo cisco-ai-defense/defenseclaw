@@ -125,12 +125,12 @@ observability: {}
 	}
 }
 
-// Every managed connector follows the owner rule: outside Secure Client
-// (standalone) every hook is closed whatever the source config says; under
-// Secure Client the native Codex and Claude Code hooks take an explicit open
-// like every other connector (#1163); an unmanaged install keeps the
-// operator's open.
-func TestManagedEnterpriseNativeHookFailModesAreAlwaysClosed(t *testing.T) {
+// Every managed connector follows the owner rule (2026-10-20): the
+// administrator's explicit open wins on the standalone profile too, and
+// under Secure Client the native Codex and Claude Code hooks take an
+// explicit open like every other connector (#1163); an unmanaged install
+// keeps the operator's open.
+func TestManagedEnterpriseNativeHookFailModesFollowTheAdministrator(t *testing.T) {
 	cfg := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}
 	cfg.Guardrail.Mode = "observe"
 	cfg.Guardrail.HookFailMode = "open"
@@ -140,8 +140,8 @@ func TestManagedEnterpriseNativeHookFailModesAreAlwaysClosed(t *testing.T) {
 		"cursor":     {HookFailMode: "open"},
 	}
 	for _, connector := range []string{"codex", "claudecode", "cursor"} {
-		if got := cfg.EffectiveHookFailModeForConnector(connector); got != "closed" {
-			t.Errorf("standalone %s fail mode = %q, want closed", connector, got)
+		if got := cfg.EffectiveHookFailModeForConnector(connector); got != "open" {
+			t.Errorf("standalone %s fail mode = %q, want the administrator's open", connector, got)
 		}
 	}
 
@@ -277,15 +277,16 @@ func TestApplicationProtectionEffectiveEnabled(t *testing.T) {
 }
 
 // Standalone Devin runs the administrator-owned hook with
-// --enterprise-managed, which fails closed: an administrator's
-// hook_fail_mode open for Devin must not leave the config, the lock and
-// status saying "open" while the hook fails closed. Other profiles keep the
-// configured value.
-func TestStandaloneDevinHookFailModeIsClosed(t *testing.T) {
+// --enterprise-managed, which takes its fail mode from the runtime
+// descriptor the lifecycle writes from this value (owner decision
+// 2026-10-20), so an administrator's hook_fail_mode open for Devin is open
+// in the config, the lock, status and the hook alike. Every profile keeps
+// the configured value.
+func TestStandaloneDevinHookFailModeFollowsTheConfig(t *testing.T) {
 	for _, test := range []struct {
 		name, mode, profile, want string
 	}{
-		{"standalone", managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone, "closed"},
+		{"standalone", managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone, "open"},
 		{"secure client", managed.DeploymentModeManagedEnterprise, managed.ProfileSecureClient, "open"},
 		{"per-user", "", "", "open"},
 	} {
@@ -379,12 +380,19 @@ func TestUnsetHookFailModeIsOpenOnlyUnderSecureClient(t *testing.T) {
 		}
 	}
 
-	// Outside Secure Client, Cursor in action mode is closed even with an
-	// explicit open (main's rule).
+	// On a per-user install Cursor in action mode is closed even with an
+	// explicit open (main's rule); on the standalone profile the
+	// administrator's explicit open wins (owner decision 2026-10-20).
+	perUser := &Config{}
+	perUser.Guardrail.Mode = "action"
+	perUser.Guardrail.HookFailMode = "open"
+	if got := perUser.EffectiveHookFailModeForConnector("cursor"); got != "closed" {
+		t.Errorf("per-user action cursor fail mode = %q, want closed", got)
+	}
 	standalone := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}
 	standalone.Guardrail.Mode = "action"
 	standalone.Guardrail.HookFailMode = "open"
-	if got := standalone.EffectiveHookFailModeForConnector("cursor"); got != "closed" {
-		t.Errorf("standalone action cursor fail mode = %q, want closed", got)
+	if got := standalone.EffectiveHookFailModeForConnector("cursor"); got != "open" {
+		t.Errorf("standalone action cursor fail mode = %q, want the administrator's open", got)
 	}
 }

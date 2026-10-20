@@ -2542,8 +2542,8 @@ class GuardrailConfig:
     # and leaves ``hook_fail_mode`` unset loads as ``"open"``, and its
     # delivery fail mode is independent of the guardrail mode; an explicit
     # ``"closed"`` is always kept. See ``_apply_secure_client_hook_fail_default``.
-    # A managed deployment outside Secure Client ignores ``"open"`` and fails
-    # closed (``Config.managed_hooks_fail_closed``).
+    # An explicit value always wins, on a managed computer too, where the
+    # administrator's config sets it.
     #
     # ``DEFENSECLAW_STRICT_AVAILABILITY=1`` additionally forces transport and
     # missing-token failures closed. Mirrors ``GuardrailConfig.HookFailMode``
@@ -2639,17 +2639,17 @@ class GuardrailConfig:
         return self.hilt
 
     def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """Open under Secure Client, closed everywhere else (owner rule).
+        """The customer chooses open or closed; the default is closed (owner rule).
 
         Mirrors Go ``Config.EffectiveHookFailModeForConnector``:
 
-        - a managed deployment outside Secure Client is always closed (Go
-          ``Config.ManagedHooksFailClosed``), whatever is configured;
-        - a Secure Client config (:meth:`secure_client_hook_fail_modes`)
-          resolves automatic-protection posture (for connectors outside
-          manual setup) > explicit connector posture > global, independent of
-          the guardrail mode, with its unset global loaded as open (#1163);
-          an explicit closed is kept;
+        - a managed config (Secure Client or the standalone profile,
+          :meth:`Config.managed_outside_secure_client`) resolves
+          automatic-protection posture (for connectors outside manual setup)
+          > explicit connector posture > global, independent of the guardrail
+          mode; an explicit value always wins (the administrator's config
+          sets it), and an unset one is open under Secure Client (#1163) and
+          closed on the standalone profile;
         - everywhere else a fail mode that is not set is ``closed``, in
           observe and action mode alike; only an explicit ``open`` opens a
           hook, and Cursor follows its guardrail mode (action closed,
@@ -2658,9 +2658,8 @@ class GuardrailConfig:
         owner = getattr(self, "_owner", None)
         cfg = owner() if callable(owner) else None
         owned = cfg is not None and getattr(cfg, "guardrail", None) is self
-        if owned and cfg.managed_hooks_fail_closed():
-            return "closed"
-        if self.secure_client_hook_fail_modes():
+        standalone = owned and cfg.managed_outside_secure_client()
+        if standalone or self.secure_client_hook_fail_modes():
             if owned:
                 application = cfg.application_protection
                 if application.enabled and connector_paths.normalize(connector) not in cfg.active_connectors():
@@ -2673,7 +2672,7 @@ class GuardrailConfig:
                 return _normalize_hook_fail_mode(pc.hook_fail_mode)
             if self.hook_fail_mode.strip():
                 return _normalize_hook_fail_mode(self.hook_fail_mode)
-            return "open"
+            return "closed" if standalone else "open"
         # Cursor's native hook registration follows policy mode. A stored
         # fail mode from an older setup cannot override that contract.
         if str(connector).strip().lower() == "cursor":
@@ -4017,15 +4016,16 @@ class Config:
         default_factory=EnterpriseOpenShellConfig, repr=False, compare=False
     )
     # enterprise.profile as loaded ("" when unset). Load only, like
-    # enterprise_openshell; managed_hooks_fail_closed reads it.
+    # enterprise_openshell; managed_outside_secure_client reads it.
     enterprise_profile: str = field(default="", repr=False, compare=False)
 
-    def managed_hooks_fail_closed(self) -> bool:
-        """Whether this is a managed deployment outside Secure Client.
+    def managed_outside_secure_client(self) -> bool:
+        """Whether this is a managed deployment outside Secure Client (the standalone profile).
 
-        Mirrors Go ``Config.ManagedHooksFailClosed``: there every DefenseClaw
-        hook fails closed for every connector and guardrail mode, whatever
-        ``hook_fail_mode`` says (only Secure Client fails open).
+        There the hook fail mode is the administrator's: an explicit value
+        wins and an unset one is closed (owner decision 2026-10-20), and the
+        managed hooks block a call they cannot check through the connector's
+        native deny, so no connector is lowered to an upstream fail-open.
         """
         from defenseclaw import config_writer
 

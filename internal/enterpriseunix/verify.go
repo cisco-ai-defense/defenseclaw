@@ -1175,7 +1175,6 @@ func (l *lifecycle) describeSandboxPolicy(ctx context.Context) {
 		return
 	}
 	r.AddSandboxPolicyWarnings(cfg, env.GOOS)
-	r.AddFailModePolicyWarnings(cfg)
 	if problem := env.sandboxPackDirProblem(ctx, cfg); problem != "" {
 		r.AddWarning(codeSandboxPackDir, problem)
 	}

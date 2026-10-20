@@ -877,8 +877,9 @@ func validWindowsCursorManagedDigest(value string) bool {
 
 func cursorManagedPolicyFailMode(state windowsCursorManagedPolicyState) string {
 	// Pre-upgrade protected state omitted the mode and always rendered closed.
-	// Only Secure Client may run an open Cursor adapter (#1163).
-	if state.HookFailMode == "" || !secureClientHookDelivery() {
+	// Otherwise the adapter runs the administrator's mode (owner decision
+	// 2026-10-20; under Secure Client #1163).
+	if state.HookFailMode == "" {
 		return "closed"
 	}
 	return canonicalHookFailMode(state.HookFailMode)
@@ -896,7 +897,7 @@ func renderWindowsCursorManagedAdapter(state windowsCursorManagedPolicyState) ([
 	aggregate := "open"
 	for _, target := range state.Targets {
 		mode, ok := state.TargetFailModes[target.SID]
-		if !ok || (mode != "open" && mode != "closed") || (mode == "open" && !secureClientHookDelivery()) {
+		if !ok || (mode != "open" && mode != "closed") {
 			return nil, errors.New("enterprise hooks: Cursor target delivery mode is invalid")
 		}
 		if mode == "closed" {
@@ -1802,14 +1803,14 @@ func validateWindowsCursorLifecycleRestoreSource(
 		}
 	}
 	// A partial, administrator-owned publication may precede the state file.
-	// Accept only exact canonical bytes of a supported delivery mode (open is
-	// Secure Client only, #1163); identity, ownership, journal and hook-config
-	// preimage checks still apply.
+	// Accept only exact canonical bytes of a supported delivery mode;
+	// identity, ownership, journal and hook-config preimage checks still
+	// apply.
 	expectedAdapter, err := connector.RenderWindowsCursorEnterpriseAdapter(
 		allowedCurrent.HookExecutable,
 		"closed",
 	)
-	if err == nil && !bytes.Equal(current.adapter.data, expectedAdapter) && secureClientHookDelivery() {
+	if err == nil && !bytes.Equal(current.adapter.data, expectedAdapter) {
 		expectedAdapter, err = connector.RenderWindowsCursorEnterpriseAdapter(allowedCurrent.HookExecutable, "open")
 	}
 	if err != nil || !bytes.Equal(current.adapter.data, expectedAdapter) {
@@ -1829,7 +1830,7 @@ func validateWindowsCursorLifecycleRestoreSource(
 			if !allowed[sid] {
 				return errors.New("enterprise hooks: partial Cursor adapter contains an unauthorized target")
 			}
-			if mode != "closed" && !secureClientHookDelivery() {
+			if mode != "closed" && mode != "open" {
 				return errors.New("enterprise hooks: partial Cursor adapter delivery mode is invalid")
 			}
 		}

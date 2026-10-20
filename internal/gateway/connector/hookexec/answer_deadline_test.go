@@ -70,7 +70,6 @@ func TestManagedToolCallFailsClosedWhenTheGatewayDoesNotAnswerInTime(t *testing.
 	shortAnswerBudget(t, 300*time.Millisecond)
 	result, elapsed := runAgainstGateway(t, "codex", hungGateway(t), func(opts *Options) {
 		managedCodex(opts)
-		opts.FailMode = "open"
 	})
 	if elapsed > time.Second {
 		t.Fatalf("the call waited %s for a gateway that does not answer, want about the 300ms budget", elapsed)

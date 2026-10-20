@@ -54,7 +54,7 @@ func cursorEntry(opts Options, group connector.ManagedHookGroup) *object {
 	entry.set("type", "command")
 	entry.set("command", cursorCommand(opts))
 	entry.set("timeout", json.Number(fmt.Sprint(group.Timeout)))
-	entry.set("failClosed", true)
+	entry.set("failClosed", !opts.CursorFailOpen)
 	return entry
 }
 
@@ -205,8 +205,12 @@ func inspectCursor(opts Options, current []byte, state *State) error {
 			for _, item := range list {
 				if cursorEntryIsOwned(opts, item) {
 					count++
-					if closed, ok := boolField(item, "failClosed"); !ok || !closed {
-						state.conflict("Cursor %s DefenseClaw hook is not failClosed", group.Event)
+					if closed, ok := boolField(item, "failClosed"); !ok || closed == opts.CursorFailOpen {
+						if opts.CursorFailOpen {
+							state.conflict("Cursor %s DefenseClaw hook is failClosed, but its fail mode is open", group.Event)
+						} else {
+							state.conflict("Cursor %s DefenseClaw hook is not failClosed", group.Event)
+						}
 					}
 				}
 			}

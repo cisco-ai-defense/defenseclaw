@@ -155,7 +155,7 @@ func TestEffectiveResolvers_Precedence(t *testing.T) {
 	if got := g.EffectiveMode("codex"); got != "action" {
 		t.Errorf("EffectiveMode(codex) = %q, want action", got)
 	}
-	if got := g.EffectiveHookFailModeFor("codex"); got != "closed" {
+	if got := hookFailModeFor(g, "codex"); got != "closed" {
 		t.Errorf("EffectiveHookFailModeFor(codex) = %q, want closed", got)
 	}
 	if got := g.EffectiveBlockMessage("codex"); got != "codex-msg" {
@@ -172,7 +172,7 @@ func TestEffectiveResolvers_Precedence(t *testing.T) {
 	if got := g.EffectiveMode("empty"); got != "observe" {
 		t.Errorf("EffectiveMode(empty) = %q, want observe", got)
 	}
-	if got := g.EffectiveHookFailModeFor("empty"); got != "open" {
+	if got := hookFailModeFor(g, "empty"); got != "open" {
 		t.Errorf("EffectiveHookFailModeFor(empty) = %q, want open", got)
 	}
 	if got := g.EffectiveBlockMessage("empty"); got != "global-msg" {
@@ -190,11 +190,11 @@ func TestEffectiveResolvers_Precedence(t *testing.T) {
 		t.Errorf("EffectiveMode(nope) = %q, want observe", got)
 	}
 	// Empty connector name resolves the global value (legacy callers).
-	if got := g.EffectiveHookFailModeFor(""); got != "open" {
+	if got := hookFailModeFor(g, ""); got != "open" {
 		t.Errorf("EffectiveHookFailModeFor(\"\") = %q, want open", got)
 	}
 	// The original no-arg global resolver is untouched and still works.
-	if got := g.EffectiveHookFailMode(); got != "open" {
+	if got := hookFailModeFor(g, ""); got != "open" {
 		t.Errorf("EffectiveHookFailMode() = %q, want open", got)
 	}
 }
@@ -208,7 +208,7 @@ func TestEffectiveResolvers_SafeFallbacks(t *testing.T) {
 	}
 	// Outside Secure Client a fail mode that is not set is closed, in
 	// observe mode too.
-	if got := g.EffectiveHookFailModeFor(""); got != "closed" {
+	if got := hookFailModeFor(g, ""); got != "closed" {
 		t.Errorf("EffectiveHookFailModeFor empty = %q, want closed", got)
 	}
 	if got := g.EffectiveBlockMessage(""); got != "" {
@@ -237,21 +237,20 @@ func TestEffectiveHookFailMode_ExplicitOverrideWinsInObserve(t *testing.T) {
 			"claudecode": {},
 		},
 	}
-	if got := g.EffectiveHookFailModeFor("codex"); got != "open" {
+	if got := hookFailModeFor(g, "codex"); got != "open" {
 		t.Fatalf("explicit connector fail mode = %q, want open", got)
 	}
 	// Observe mode no longer keeps a connector without its own value
 	// fail-open: the global value applies.
-	if got := g.EffectiveHookFailModeFor("claudecode"); got != "closed" {
+	if got := hookFailModeFor(g, "claudecode"); got != "closed" {
 		t.Fatalf("unoverridden observe connector fail mode = %q, want the global closed", got)
 	}
 }
 
-// Owner rule (B-01, 1.0.3): hooks fail closed everywhere except under Secure
-// Client. An observe-mode connector whose fail mode is not set is closed on a
-// per-user install and on a standalone managed host; an explicit
-// `hook_fail_mode: open` is honored only on a per-user install; Secure Client
-// keeps its observe-mode fail-open contract.
+// Owner rules (B-01, 1.0.3, and 2026-10-20): an unset fail mode is closed
+// everywhere except under Secure Client, and an explicit `hook_fail_mode`
+// wins everywhere, a standalone managed host included (its config is the
+// administrator's). Secure Client keeps its observe-mode fail-open contract.
 func TestUnsetHookFailModeIsClosedOutsideSecureClient(t *testing.T) {
 	for _, test := range []struct {
 		name, deployment, profile string
@@ -263,8 +262,9 @@ func TestUnsetHookFailModeIsClosedOutsideSecureClient(t *testing.T) {
 		{name: "per-user, connector open", connector: "open", want: "open"},
 		{name: "per-user, global open, connector closed", global: "open", connector: "closed", want: "closed"},
 		{name: "standalone, nothing set", deployment: "managed_enterprise", profile: "standalone", want: "closed"},
-		{name: "standalone, connector open", deployment: "managed_enterprise", profile: "standalone", connector: "open", want: "closed"},
-		{name: "standalone, global open", deployment: "managed_enterprise", profile: "standalone", global: "open", want: "closed"},
+		{name: "standalone, connector open", deployment: "managed_enterprise", profile: "standalone", connector: "open", want: "open"},
+		{name: "standalone, global open", deployment: "managed_enterprise", profile: "standalone", global: "open", want: "open"},
+		{name: "standalone, global open, connector closed", deployment: "managed_enterprise", profile: "standalone", global: "open", connector: "closed", want: "closed"},
 		{name: "secure client, nothing set", deployment: "managed_enterprise", profile: "secure_client", want: "open"},
 		{name: "secure client, connector closed", deployment: "managed_enterprise", profile: "secure_client", connector: "closed", want: "closed"},
 	} {
@@ -492,7 +492,7 @@ func TestResolversArePure(t *testing.T) {
 	before := *g
 
 	methods := []string{
-		"EffectiveMode", "EffectiveHookFailModeFor",
+		"EffectiveMode",
 		"EffectiveBlockMessage", "EffectiveRulePackDir", "EffectiveHILT",
 	}
 	v := reflect.ValueOf(g)
@@ -524,17 +524,23 @@ func TestResolversArePure(t *testing.T) {
 func TestEffectiveHookFailMode_GlobalOpenIgnoresCase(t *testing.T) {
 	for _, raw := range []string{"Open", "OPEN", " open ", "\topEN\n"} {
 		g := &GuardrailConfig{Mode: "action", HookFailMode: raw}
-		if got := g.EffectiveHookFailMode(); got != "open" {
+		if got := hookFailModeFor(g, ""); got != "open" {
 			t.Errorf("EffectiveHookFailMode(%q) = %q, want open", raw, got)
 		}
-		if got := g.EffectiveHookFailModeFor("codex"); got != "open" {
+		if got := hookFailModeFor(g, "codex"); got != "open" {
 			t.Errorf("EffectiveHookFailModeFor(codex) with global %q = %q, want open", raw, got)
 		}
 	}
 	for _, raw := range []string{"", "Closed", "opn", "open-ish"} {
 		g := &GuardrailConfig{HookFailMode: raw}
-		if got := g.EffectiveHookFailMode(); got != "closed" {
+		if got := hookFailModeFor(g, ""); got != "closed" {
 			t.Errorf("EffectiveHookFailMode(%q) = %q, want closed", raw, got)
 		}
 	}
+}
+
+// hookFailModeFor is the per-user hook fail mode of connector for g
+// (Config.EffectiveHookFailModeForConnector; "" resolves the global value).
+func hookFailModeFor(g *GuardrailConfig, connector string) string {
+	return (&Config{Guardrail: *g}).EffectiveHookFailModeForConnector(connector)
 }

@@ -70,39 +70,6 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 	return result, true, err
 }
 
-// windowsEnterpriseHookFailMode is the authoritative managed-native hook
-// policy used by rendering, lock publication, and verification. Enrollment and
-// integrity checks are independent of delivery availability.
-//
-// Outside Secure Client the protected Windows deployment never permits Codex,
-// Claude Code or Cursor hooks to inherit a fail-open normal-mode setting, and
-// the standalone per-user connectors always fail closed. Under Secure Client
-// (#1163) Codex, Claude Code, Cursor and Copilot honor the configured policy:
-// unset and "open" resolve to open, an explicit or invalid non-empty value to
-// closed.
-func windowsEnterpriseHookFailMode(connectorName, configured string) string {
-	return windowsEnterpriseHookFailModeFor(connectorName, configured, secureClientHookDelivery())
-}
-
-// windowsEnterpriseHookFailModeFor is windowsEnterpriseHookFailMode for an
-// explicit profile: secureClient is true only for a resolved Secure Client
-// install. Status passes the profile of the loaded config, so it reports what
-// the pinned guardian renders whatever the caller's environment (GAP-0014).
-func windowsEnterpriseHookFailModeFor(connectorName, configured string, secureClient bool) string {
-	name := strings.ToLower(strings.TrimSpace(connectorName))
-	if _, perUser := windowsStandalonePerUserConnector(name); perUser && !secureClient {
-		return "closed"
-	}
-	if secureClient {
-		return canonicalHookFailModeFor(configured, true)
-	}
-	switch name {
-	case "codex", "claudecode", "cursor":
-		return "closed"
-	}
-	return strings.TrimSpace(configured)
-}
-
 func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
 	if err := requireWindowsEnterpriseManagedAgentVersion(
 		opts.ConnectorName,
@@ -315,7 +282,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		Interactive:              false,
 		ManagedEnterprise:        true,
 		WorkspaceDir:             strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:             windowsEnterpriseHookFailMode(name, opts.HookFailMode),
+		HookFailMode:             canonicalHookFailMode(opts.HookFailMode),
 		SecureClientHookDelivery: secureClientHookDelivery(),
 		GuardrailMode:            strings.TrimSpace(opts.GuardrailMode),
 		HILTEnabled:              opts.HILTEnabled,
@@ -525,7 +492,7 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 		Interactive:              false,
 		ManagedEnterprise:        true,
 		WorkspaceDir:             strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:             windowsEnterpriseHookFailMode(name, opts.HookFailMode),
+		HookFailMode:             canonicalHookFailMode(opts.HookFailMode),
 		SecureClientHookDelivery: secureClientHookDelivery(),
 		HILTEnabled:              opts.HILTEnabled,
 		AgentVersion:             strings.TrimSpace(opts.AgentVersion),

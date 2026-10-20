@@ -122,7 +122,8 @@ func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []by
 	logged.Stderr = io.Discard
 	logFailure = func() {
 		if logged.ManagedEnterprise {
-			logHookFailure(logged, sp, managedGatewayNoAnswerReason, "transport", "closed", true)
+			logHookFailure(logged, sp, managedGatewayNoAnswerReason, "transport", failMode,
+				logged.StrictAvailability || failMode == "closed")
 			return
 		}
 		logHookFailure(logged, sp, perUserGatewayNoAnswerReason, "transport", failMode,

@@ -7483,11 +7483,13 @@ def _check_cursor_configured_runtime(
     fail_mode = str(fail_resolver("cursor") if callable(fail_resolver) else "open").strip().lower()
     mode = "action" if mode == "action" else "observe"
     # Cursor observe hooks fail open, except on a managed deployment outside
-    # Secure Client, where every hook fails closed and the Cursor
-    # registration carries failClosed in observe mode too (rel-1-0-3 GAP-0037).
-    managed_closed = getattr(cfg, "managed_hooks_fail_closed", None)
-    managed_fail_closed = callable(managed_closed) and managed_closed() is True
-    expected_fail_mode = "closed" if mode == "action" or managed_fail_closed else "open"
+    # Secure Client, where the Cursor registration carries the
+    # administrator's fail mode (unset closed) in either guardrail mode.
+    standalone = getattr(cfg, "managed_outside_secure_client", None)
+    if callable(standalone) and standalone() is True:
+        expected_fail_mode = "open" if fail_mode == "open" else "closed"
+    else:
+        expected_fail_mode = "closed" if mode == "action" else "open"
     expected_fail_closed = expected_fail_mode == "closed"
     hilt = None
     hilt_resolver = getattr(guardrail, "effective_hilt", None)

@@ -47,3 +47,52 @@ func TestManagedObserveGuardRefusesAFrameItCouldNotEvaluate(t *testing.T) {
 		})
 	}
 }
+
+// sequenceEvaluator answers each Evaluate with the next verdict and error.
+type sequenceEvaluator struct {
+	verdicts []Verdict
+	errs     []error
+	calls    int
+}
+
+func (e *sequenceEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
+	i := e.calls
+	e.calls++
+	return e.verdicts[i], e.errs[i]
+}
+
+// Owner decision 2026-10-20: the administrator chooses with the profile's
+// fail_mode. After an authenticated verdict said the profile's fail_mode is
+// explicitly open, a standalone managed observe guard delivers a frame it
+// could not evaluate; without that (unset) it keeps refusing it.
+func TestManagedObserveGuardFollowsAnExplicitOpenFailMode(t *testing.T) {
+	frames := `{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}` + "\n" +
+		`{"jsonrpc":"2.0","id":8,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}` + "\n"
+	for _, tc := range []struct {
+		name      string
+		failMode  string
+		delivered bool
+	}{
+		{name: "fail_mode open", failMode: "open", delivered: true},
+		{name: "fail_mode unset", failMode: "", delivered: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var forwarded, client bytes.Buffer
+			state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+			evaluator := &sequenceEvaluator{
+				verdicts: []Verdict{{Action: "allow", FailMode: tc.failMode}, {}},
+				errs:     []error{nil, errors.New("offline")},
+			}
+			opts := ProxyOptions{Mode: ModeObserve, Evaluator: evaluator, Managed: true, Stderr: io.Discard}
+			if err := copyFrames(context.Background(), opts, state, ClientToAgent, strings.NewReader(frames), &forwarded, &client); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(forwarded.String(), `"id":7`) {
+				t.Fatalf("the evaluated frame was not delivered: %q", forwarded.String())
+			}
+			if delivered := strings.Contains(forwarded.String(), `"id":8`); delivered != tc.delivered {
+				t.Fatalf("unevaluated frame delivered = %v, want %v: agent=%q client=%q", delivered, tc.delivered, forwarded.String(), client.String())
+			}
+		})
+	}
+}

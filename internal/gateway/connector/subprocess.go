@@ -1537,9 +1537,9 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 // (see templateData.FailMode and defaultHookFailMode for the
 // contract):
 //
-//  0. A managed standalone render's "closed" stays closed: outside Secure
-//     Client the managed config resolves every connector closed
-//     (config.ManagedHooksFailClosed).
+//  0. A managed standalone render takes the mode the administrator's config
+//     resolved (config.Config.EffectiveHookFailModeForConnector): explicit
+//     open is open, anything else closed, Cursor included.
 //  1. Outside Secure Client, Cursor observe mode always resolves to "open"
 //     and action mode to "closed"; host failClosed and adapter transport
 //     failures must not enforce outside action mode.
@@ -1636,9 +1636,8 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 // resolved mode: open when mode is closed but the connector's hook surface
 // cannot fail closed (SupportsFailClosed). A managed standalone render keeps
 // closed (managedStandaloneRender): its hooks block a call they cannot check
-// through the connector's native deny, as the owner rule for managed
-// deployments outside Secure Client requires (config.ManagedHooksFailClosed).
-// The per-user Hermes hook keeps closed too (hookBlocksItsOwnFailures).
+// through the connector's native deny. The per-user Hermes hook keeps closed
+// too (hookBlocksItsOwnFailures).
 func CapableHookFailMode(opts SetupOpts, conn Connector, mode string) string {
 	if mode != "closed" || managedStandaloneRender(opts) || hookBlocksItsOwnFailures(opts, conn) {
 		return mode
@@ -1669,11 +1668,10 @@ func managedStandaloneRender(opts SetupOpts) bool {
 // upgraded to "closed" when the operator has set the matching enforcement flag
 // for codex / claudecode (avarice F-0681).
 func resolveHookFailMode(opts SetupOpts, c Connector) string {
-	if managedStandaloneRender(opts) && strings.EqualFold(strings.TrimSpace(opts.HookFailMode), "closed") {
-		// A managed standalone config resolves every connector closed
-		// (config.ManagedHooksFailClosed); Cursor's observe boundary does
-		// not reopen it.
-		return "closed"
+	if managedStandaloneRender(opts) {
+		// The administrator's config chose this mode (explicit open, or
+		// closed by default); Cursor's observe boundary does not change it.
+		return normalizeHookFailMode(opts.HookFailMode)
 	}
 	if opts.SecureClientHookDelivery {
 		return setupHookFailMode(opts)

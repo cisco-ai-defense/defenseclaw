@@ -14,9 +14,11 @@ import (
 // A standalone managed host whose process carries the Secure Client profile
 // (not pinned standalone, so secureClientHookDelivery says Secure Client)
 // but that is no authenticated Secure Client deployment
-// (connector.SecureClientDeploymentVerified false) stays closed: an unset
-// mode does not open, and the standalone config resolves every connector
-// closed (owner rule 2026-10-20, main-sync review finding 5).
+// (connector.SecureClientDeploymentVerified false) gets no Secure Client
+// default: an unset mode does not open (main-sync review finding 5), and
+// the standalone config resolves each connector to the administrator's
+// value, closed when unset and open only when set (owner decision
+// 2026-10-20).
 func TestStandaloneHostWithSecureClientProcessProfileStaysClosed(t *testing.T) {
 	useSecureClientHookDelivery(t)
 	saved := connector.SecureClientDeploymentVerified
@@ -37,13 +39,19 @@ func TestStandaloneHostWithSecureClientProcessProfileStaysClosed(t *testing.T) {
 	}
 	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
 	cfg.Enterprise.Profile = managed.ProfileStandalone
-	cfg.Guardrail.HookFailMode = "open"
-	for _, name := range []string{"amp", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode"} {
-		if got := cfg.EffectiveHookFailModeForConnector(name); got != "closed" {
-			t.Errorf("%s: standalone config resolves %q, want closed", name, got)
+	for _, configured := range []string{"", "open"} {
+		cfg.Guardrail.HookFailMode = configured
+		want := "closed"
+		if configured == "open" {
+			want = "open"
 		}
-		if got := ManagedHookFailMode(cfg, name); got != "closed" {
-			t.Errorf("%s: standalone ManagedHookFailMode = %q, want closed", name, got)
+		for _, name := range []string{"amp", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode"} {
+			if got := cfg.EffectiveHookFailModeForConnector(name); got != want {
+				t.Errorf("%s: standalone config with %q resolves %q, want %q", name, configured, got, want)
+			}
+			if got := ManagedHookFailMode(cfg, name); got != want {
+				t.Errorf("%s: standalone ManagedHookFailMode with %q = %q, want %q", name, configured, got, want)
+			}
 		}
 	}
 }

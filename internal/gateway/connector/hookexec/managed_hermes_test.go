@@ -77,7 +77,7 @@ func TestManagedHermesToolCallBlocksWhenDefenseClawCannotCheck(t *testing.T) {
 			var home string
 			result := run(t, "hermes", tc.rt, func(o *Options) {
 				o.Event = "pre_tool_call"
-				o.FailMode = "open"
+				o.FailMode = "closed"
 				o.ManagedEnterprise = true
 				o.ExplainUnenrolledAccount = true
 				o.Stdin = strings.NewReader(`{"hook_event_name":"pre_tool_call","tool_name":"terminal"}`)
@@ -187,7 +187,7 @@ func TestManagedHermesUnusableSuccessfulAnswerBlocks(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			result := run(t, "hermes", ok(tc.body), func(o *Options) {
 				o.Event = "pre_tool_call"
-				o.FailMode = "open"
+				o.FailMode = "closed"
 				o.ManagedEnterprise = true
 				o.ExplainUnenrolledAccount = true
 				o.Stdin = strings.NewReader(`{"hook_event_name":"pre_tool_call","tool_name":"terminal"}`)
@@ -240,6 +240,9 @@ func TestManagedHermesUnboundEventBlocksRefusedInput(t *testing.T) {
 				result := run(t, "hermes", ok(`{"action":"allow"}`), func(o *Options) {
 					o.Event = ""
 					o.FailMode = "open"
+					if managed {
+						o.FailMode = "closed"
+					}
 					o.ManagedEnterprise = managed
 					o.ExplainUnenrolledAccount = managed
 					o.Stdin = tc.stdin()
@@ -298,6 +301,9 @@ func TestManagedHermesDisagreeingEventFieldsBlock(t *testing.T) {
 			result := run(t, "hermes", gateway, func(o *Options) {
 				o.Event = tc.event
 				o.FailMode = "open"
+				if tc.managed {
+					o.FailMode = "closed"
+				}
 				o.ManagedEnterprise = tc.managed
 				o.ExplainUnenrolledAccount = tc.managed
 				o.SecureClient = tc.secureClient

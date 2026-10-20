@@ -30,8 +30,11 @@ func fastRestartRetries(t *testing.T) {
 	t.Cleanup(func() { gatewayRestartRetryDelay = previous })
 }
 
+// managedCodex makes opts a managed hook in the fail mode its
+// administrator-owned runtime records by default, closed.
 func managedCodex(opts *Options) {
 	opts.ManagedEnterprise = true
+	opts.FailMode = "closed"
 	token := "authenticated-generation-token"
 	opts.AuthenticatedManagedToken = &token
 }
@@ -82,7 +85,6 @@ func TestManagedHookFailsClosedWhenTheRestartOutlastsTheBudget(t *testing.T) {
 	started := time.Now()
 	result := run(t, "codex", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
 		managedCodex(opts)
-		opts.FailMode = "open"
 		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 150*time.Millisecond)
 	})
 	elapsed := time.Since(started)
@@ -142,7 +144,7 @@ func TestQueuedStandaloneCallFailsClosedWhenTheGatewayStaysDown(t *testing.T) {
 		opts.ManagedStandalone = true
 		opts.ManagedUnixSocket = "/run/defenseclaw-hook/hook.sock"
 		opts.ManagedServiceUID = 990
-		opts.FailMode = "open"
+		opts.FailMode = "closed"
 		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 200*time.Millisecond)
 	})
 	if elapsed := time.Since(started); elapsed > 2*time.Second {

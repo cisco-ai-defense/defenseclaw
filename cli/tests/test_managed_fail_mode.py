@@ -1,12 +1,15 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""A managed deployment outside Secure Client fails closed (rel-1-0-3 GAP-0037).
+"""The customer chooses open or closed; the default is closed (owner, 2026-10-20).
 
-Mirrors internal/config/managed_fail_mode_test.go: every connector in every
-guardrail mode resolves closed there, and the upstream fail-open connectors
-(Copilot CLI, Antigravity, Hermes) are reported closed too; Secure Client and
-per-user installs keep the configured values.
+Mirrors internal/config/hook_fail_mode_matrix_test.go: for every connector,
+per-user, managed standalone and Secure Client, in observe and action mode,
+an explicit open or closed wins (on a managed computer the administrator's
+config sets it), and an unset fail mode is closed except under Secure Client,
+where it is open (#1163). Per-user Cursor follows its guardrail mode. On the
+standalone profile no connector is lowered to an upstream fail-open: its
+managed hooks block through the native deny.
 """
 
 from __future__ import annotations
@@ -16,23 +19,24 @@ from defenseclaw import config_writer
 from defenseclaw.config import Config, GuardrailConfig, PerConnectorGuardrailConfig
 from defenseclaw.fail_mode import upstream_fail_open
 
-CONNECTORS = ("amp", "antigravity", "copilot", "cursor", "hermes", "kiro", "opencode")
-
-
-def _config(deployment_mode: str, profile: str) -> Config:
-    cfg = Config(
-        deployment_mode=deployment_mode,
-        enterprise_profile=profile,
-        guardrail=GuardrailConfig(
-            mode="observe",
-            hook_fail_mode="open",
-            connectors={
-                "amp": PerConnectorGuardrailConfig(hook_fail_mode="open"),
-                "cursor": PerConnectorGuardrailConfig(hook_fail_mode="open"),
-            },
-        ),
-    )
-    return cfg
+CONNECTORS = (
+    "amp",
+    "antigravity",
+    "claudecode",
+    "codex",
+    "copilot",
+    "cursor",
+    "devin",
+    "hermes",
+    "kiro",
+    "opencode",
+    "openhands",
+)
+DEPLOYMENTS = {
+    "per-user": ("", "", "closed"),
+    "standalone": ("managed_enterprise", "standalone", "closed"),
+    "secure-client": ("managed_enterprise", "secure_client", "open"),
+}
 
 
 @pytest.fixture(autouse=True)
@@ -42,32 +46,63 @@ def _no_host_markers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config_writer, "machine_managed_standalone", lambda: False)
 
 
-def test_standalone_resolves_closed_for_every_connector() -> None:
-    cfg = _config("managed_enterprise", "standalone")
-    assert cfg.managed_hooks_fail_closed()
-    for name in CONNECTORS:
-        assert cfg.guardrail.effective_hook_fail_mode(name) == "closed", name
-        assert not upstream_fail_open(cfg, name), name
+def _config(deployment: str, mode: str, global_mode: str, connector: str, connector_mode: str) -> Config:
+    deployment_mode, profile, _ = DEPLOYMENTS[deployment]
+    guardrail = GuardrailConfig(mode=mode, hook_fail_mode=global_mode)
+    if connector_mode:
+        guardrail.connectors = {connector: PerConnectorGuardrailConfig(hook_fail_mode=connector_mode)}
+    cfg = Config(deployment_mode=deployment_mode, enterprise_profile=profile, guardrail=guardrail)
+    if deployment == "secure-client":
+        # load() marks a Secure Client guardrail (_apply_secure_client_hook_fail_default).
+        object.__setattr__(cfg.guardrail, "_secure_client", True)
+    return cfg
 
 
+@pytest.mark.parametrize("connector", CONNECTORS)
+@pytest.mark.parametrize("deployment", list(DEPLOYMENTS))
+@pytest.mark.parametrize("mode", ["observe", "action"])
 @pytest.mark.parametrize(
-    ("deployment_mode", "profile"),
-    [("managed_enterprise", "secure_client"), ("", "")],
+    ("global_mode", "connector_mode", "want"),
+    [
+        ("", "", None),
+        ("  ", "", None),
+        ("open", "", "open"),
+        ("", " Open ", "open"),
+        ("closed", "", "closed"),
+        ("", "closed", "closed"),
+        ("open", "closed", "closed"),
+        ("closed", "open", "open"),
+        ("opne", "", "closed"),
+    ],
 )
-def test_secure_client_and_per_user_keep_configured_values(deployment_mode: str, profile: str) -> None:
-    cfg = _config(deployment_mode, profile)
-    assert not cfg.managed_hooks_fail_closed()
-    for name in ("amp", "cursor", "kiro"):
-        assert cfg.guardrail.effective_hook_fail_mode(name) == "open", name
-    for name in ("antigravity", "copilot"):
-        assert upstream_fail_open(cfg, name), name
-    # The per-user Hermes hook blocks its own failures on every OS
-    # (GAP-0150, GAP-0269); only Secure Client keeps Hermes open.
-    assert upstream_fail_open(cfg, "hermes") is (deployment_mode == "managed_enterprise")
+def test_hook_fail_mode_matrix(connector, deployment, mode, global_mode, connector_mode, want):
+    cfg = _config(deployment, mode, global_mode, connector, connector_mode)
+    if want is None:
+        want = DEPLOYMENTS[deployment][2]
+    if connector == "cursor" and deployment == "per-user":
+        want = "closed" if mode == "action" else "open"
+    assert cfg.guardrail.effective_hook_fail_mode(connector) == want
+    assert cfg.managed_outside_secure_client() is (deployment == "standalone")
+
+
+@pytest.mark.parametrize("connector", ["antigravity", "copilot", "hermes"])
+def test_standalone_never_lowers_to_upstream_fail_open(connector):
+    assert not upstream_fail_open(_config("standalone", "observe", "", connector, ""), connector)
+    assert not upstream_fail_open(_config("standalone", "observe", "open", connector, ""), connector)
+    # Secure Client keeps the upstream fail-open; per-user Hermes blocks its
+    # own failures on every OS (GAP-0150, GAP-0269).
+    assert upstream_fail_open(_config("secure-client", "observe", "", connector, ""), connector)
+    assert upstream_fail_open(_config("per-user", "observe", "", connector, ""), connector) is (connector != "hermes")
 
 
 def test_machine_marker_makes_any_managed_config_standalone(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config_writer, "machine_managed_standalone", lambda: True)
-    cfg = _config("managed_enterprise", "secure_client")
-    assert cfg.managed_hooks_fail_closed()
+    cfg = Config(
+        deployment_mode="managed_enterprise",
+        enterprise_profile="secure_client",
+        guardrail=GuardrailConfig(mode="observe"),
+    )
+    assert cfg.managed_outside_secure_client()
     assert cfg.guardrail.effective_hook_fail_mode("kiro") == "closed"
+    cfg.guardrail.hook_fail_mode = "open"
+    assert cfg.guardrail.effective_hook_fail_mode("kiro") == "open"

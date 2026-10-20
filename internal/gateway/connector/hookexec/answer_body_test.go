@@ -64,7 +64,6 @@ func TestAPartialGatewayBodyIsNotADecision(t *testing.T) {
 			}
 			managed, elapsed := runAgainstGateway(t, "codex", partialAllowGateway(t, test.drop), func(opts *Options) {
 				managedCodex(opts)
-				opts.FailMode = "open"
 			})
 			if elapsed > time.Second || !blocked(managed) || !strings.Contains(managed.stdout+managed.stderr, managedGatewayNoAnswerReason) {
 				t.Fatalf("managed: after %s code=%d stdout=%q stderr=%q, want a block naming %s",
@@ -133,7 +132,6 @@ func TestAnUnreadableOrIncompleteGatewayBodyFailsClosed(t *testing.T) {
 			}
 			managed := run(t, "codex", test.rt(), func(opts *Options) {
 				managedCodex(opts)
-				opts.FailMode = "open"
 			})
 			if !blocked(managed) {
 				t.Fatalf("managed: code=%d stdout=%q stderr=%q, want a block", managed.code, managed.stdout, managed.stderr)
