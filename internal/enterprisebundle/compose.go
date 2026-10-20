@@ -50,7 +50,13 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 	if err := CheckInlineSecrets(b); err != nil {
 		return nil, nil, err
 	}
-	cfg, _, err := LoadConfig(b, in.Root)
+	// Judge the config by the target platforms, never by the signer's own
+	// operating system (GAP-0005): a Linux workstation signs a macOS-only
+	// key such as enterprise.openshell.e2fsprogs_dir for a darwin target,
+	// and every signer refuses it for a Linux or Windows target. The
+	// per-platform digest loads below check each remaining target.
+	platforms := canonicalPlatforms(in.Platforms)
+	cfg, _, err := LoadConfigForPlatform(b, in.Root, platforms[0])
 	if err != nil {
 		return nil, nil, err
 	}
@@ -62,7 +68,6 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 	for _, name := range names {
 		refs = append(refs, SecretRef{Ref: SecretRefScheme + name, Required: true})
 	}
-	platforms := canonicalPlatforms(in.Platforms)
 	ruleWarnings, _, err := RuleNotBlockingWarnings(cfg)
 	if err != nil {
 		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "custom rule pack: %s", boundedDetail(err.Error()))
