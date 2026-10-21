@@ -240,6 +240,10 @@ type Options struct {
 	// gatewayRefusal is what a per-user hook the gateway refused with an
 	// error status shows in the agent (perUserRefusalText); doRequest sets it.
 	gatewayRefusal string
+	// answerSpentLocally is set when this standalone hook reached its
+	// gateway request with less than hookGatewayAnswerFloor of the answer
+	// budget left: a missing answer then fails closed (failNoAnswer).
+	answerSpentLocally bool
 	// answerBy is the answer deadline of a tool call (answerDeadline);
 	// doRequest sets it, and the request then asks for progress reports.
 	answerBy time.Time
@@ -518,6 +522,12 @@ func runHook(ctx context.Context, opts Options) int {
 		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), "missing or unsupported Copilot hook event binding")
 	}
 	deadline := answerDeadline(opts, startedAt)
+	// The work before the gateway request (the foreign-hook scan and
+	// session exchange, the managed runtime) counts against the answer
+	// budget. When it left the gateway less than hookGatewayAnswerFloor, a
+	// missing answer is not the gateway's outage, and fail mode open does not
+	// apply to it (final review, P2).
+	opts.answerSpentLocally = gatewayAnswerWindowShort(opts, deadline)
 	switch {
 	case opts.answerWatch != nil && deadline.IsZero():
 		// The hook command armed the watchdog for an event that is not a
@@ -2421,7 +2431,7 @@ func ManagedOutageFailsOpen(opts Options, err error) bool {
 		strings.TrimSpace(opts.ManagedRuntimeFailure) != "" || normalizeFailMode(opts.FailMode) != "open" {
 		return false
 	}
-	if errors.Is(err, errManagedGatewayPortHeld) {
+	if errors.Is(err, errManagedGatewayPortHeld) || errors.Is(err, errAnswerBudgetSpentLocally) {
 		return false
 	}
 	return errors.Is(err, errManagedGatewayNotRunning) || errors.Is(err, errGatewayRestarting) ||

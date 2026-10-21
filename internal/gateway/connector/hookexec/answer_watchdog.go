@@ -111,6 +111,10 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 // renderNoAnswer renders the answer of a call whose gateway did not answer
 // in time, and the failure log line it writes when it is given.
 func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []byte, code int, logFailure func()) {
+	if opts.answerSpentLocally {
+		// The answer is closed (failNoAnswer), and so is its log line.
+		failMode = "closed"
+	}
 	var out, errb bytes.Buffer
 	rendered := opts
 	rendered.Stdout, rendered.Stderr = &out, &errb

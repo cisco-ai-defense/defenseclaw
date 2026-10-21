@@ -88,9 +88,7 @@ func managedEnterpriseHTTPClient(
 
 				servicePID, err := managedEnterpriseQueryServicePID(serviceName)
 				if errors.Is(err, errManagedGatewayNotRunning) {
-					// Still a peer-verification failure (fail closed), but the
-					// hook can say the service is stopped.
-					return nil, fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, err)
+					return nil, stoppedManagedGatewayError(canonicalAddr, err)
 				}
 				if err != nil {
 					return nil, managedGatewayPeerError("query protected gateway service: %v", err)
@@ -149,6 +147,28 @@ func managedEnterpriseHTTPClient(
 			return http.ErrUseLastResponse
 		},
 	}, nil
+}
+
+// stoppedManagedGatewayError is the dial error when the gateway service is
+// not running (serviceErr). That is an outage, which a standalone hook's
+// open fail mode lets through, only when nothing listens on the gateway's
+// port either. Another process on the port while the service is stopped is
+// an integrity failure (errManagedGatewayPortHeld, closed in every fail
+// mode), and so is a listen table the hook cannot read: before, the stopped
+// service was reported before the port was looked at, so fail mode open
+// allowed the call while another program held the port.
+func stoppedManagedGatewayError(canonicalAddr string, serviceErr error) error {
+	listening, known := managedEnterpriseListening(canonicalAddr)
+	switch {
+	case !known:
+		return managedGatewayPeerError("gateway service is not running and the listeners on %s cannot be read: %v", canonicalAddr, serviceErr)
+	case listening:
+		return fmt.Errorf("%w: %w: the gateway service is not running but another process listens on %s",
+			errManagedGatewayPeerUnverified, errManagedGatewayPortHeld, canonicalAddr)
+	}
+	// Still a peer-verification failure, but the hook can say the service
+	// is stopped.
+	return fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, serviceErr)
 }
 
 func managedGatewayPeerError(format string, args ...interface{}) error {

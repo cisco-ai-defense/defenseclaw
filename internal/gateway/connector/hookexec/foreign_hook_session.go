@@ -71,7 +71,19 @@ func ExchangeForeignHookSession(ctx context.Context, opts Options, connector str
 	// counted from the invocation like the hook request after it: a gateway
 	// that accepted the exchange but gives no answer (it is stopping, starting
 	// or too busy) ends it in time, and the guard denies the call.
-	ctx, stopAnswer, releaseAnswer := awaitAnswerBy(ctx, answerDeadline(opts, started), progressCeiling(opts, started), nil)
+	answerBy := answerDeadline(opts, started)
+	// A scan that ran close to its own budget may have left the exchange
+	// almost none of the answer budget: a missing answer then is the hook's
+	// own delay, not a gateway outage, and stays closed in fail mode open
+	// (final review, P2).
+	spentLocally := gatewayAnswerWindowShort(opts, answerBy)
+	noAnswer := func(cause, err error) error {
+		if spentLocally {
+			return fmt.Errorf("%w: %w: %v", errAnswerBudgetSpentLocally, cause, err)
+		}
+		return fmt.Errorf("%w: %v", cause, err)
+	}
+	ctx, stopAnswer, releaseAnswer := awaitAnswerBy(ctx, answerBy, progressCeiling(opts, started), nil)
 	defer releaseAnswer()
 	// A call queued in the socket systemd holds across a restart is ended
 	// at the restart budget, like the hook request (Linux).
@@ -102,8 +114,11 @@ func ExchangeForeignHookSession(ctx context.Context, opts Options, connector str
 	if err != nil {
 		// Keep why the watch or the answer budget ended the call: the caller
 		// denies with the cause named.
-		if cause := context.Cause(ctx); errors.Is(cause, errGatewayRestarting) || errors.Is(cause, errGatewayStartFailing) ||
-			errors.Is(cause, errGatewayNoAnswer) {
+		cause := context.Cause(ctx)
+		if errors.Is(cause, errGatewayNoAnswer) {
+			return nil, noAnswer(cause, err)
+		}
+		if errors.Is(cause, errGatewayRestarting) || errors.Is(cause, errGatewayStartFailing) {
 			return nil, fmt.Errorf("%w: %v", cause, err)
 		}
 		return nil, err
@@ -119,7 +134,7 @@ func ExchangeForeignHookSession(ctx context.Context, opts Options, connector str
 	stopAnswer()
 	if err != nil {
 		if cause := context.Cause(ctx); errors.Is(cause, errGatewayNoAnswer) {
-			return nil, fmt.Errorf("%w: %v", cause, err)
+			return nil, noAnswer(cause, err)
 		}
 		return nil, err
 	}

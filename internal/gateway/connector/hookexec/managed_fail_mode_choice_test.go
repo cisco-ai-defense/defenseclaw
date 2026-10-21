@@ -4,6 +4,7 @@
 package hookexec
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -258,5 +259,60 @@ func TestStandaloneManagedOpenCodeAndCopilotFollowTheAdministratorsFailMode(t *t
 					connector, mode, got, wantBlock, result.code, result.stdout, result.stderr)
 			}
 		}
+	}
+}
+
+// Final review P2: a missing answer counts as the gateway's outage, which
+// fail mode open lets through, only when the gateway contact had at least
+// hookGatewayAnswerFloor of the answer budget. A slow local step (a
+// foreign-hook scan close to its own budget) that leaves less fails closed,
+// for the session exchange and for the hook request.
+func TestStandaloneManagedNoAnswerAfterASlowLocalStepStaysClosed(t *testing.T) {
+	shortAnswerBudget(t, 300*time.Millisecond)
+	previousFloor := hookGatewayAnswerFloor
+	hookGatewayAnswerFloor = 200 * time.Millisecond
+	t.Cleanup(func() { hookGatewayAnswerFloor = previousFloor })
+	addr := hungGateway(t)
+
+	for _, tc := range []struct {
+		name  string
+		spent time.Duration
+		open  bool
+	}{
+		{name: "the gateway had the budget", spent: 0, open: true},
+		{name: "a local step spent the budget", spent: 250 * time.Millisecond, open: false},
+	} {
+		t.Run("session exchange: "+tc.name, func(t *testing.T) {
+			token := "authenticated-generation-token"
+			opts := Options{ManagedEnterprise: true, AuthenticatedManagedToken: &token, APIAddr: addr,
+				HTTPClient: &http.Client{}, Connector: "copilot", Event: "preToolUse", FailMode: "open",
+				StartedAt: time.Now().Add(-tc.spent)}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := ExchangeForeignHookSession(ctx, opts, "copilot", []byte(`{}`))
+			if !errors.Is(err, errGatewayNoAnswer) {
+				t.Fatalf("err = %v, want a missing answer", err)
+			}
+			if got := errors.Is(err, errAnswerBudgetSpentLocally); got == tc.open {
+				t.Fatalf("spent locally = %v, want %v (err %v)", got, !tc.open, err)
+			}
+			if got := ManagedOutageFailsOpen(opts, err); got != tc.open {
+				t.Fatalf("ManagedOutageFailsOpen = %v, want %v (err %v)", got, tc.open, err)
+			}
+		})
+		t.Run("hook request: "+tc.name, func(t *testing.T) {
+			started := time.Now().Add(-tc.spent)
+			result := run(t, "codex", nil, func(o *Options) {
+				managedCodex(o)
+				o.ExplainUnenrolledAccount = true
+				o.FailMode = "open"
+				o.APIAddr = addr
+				o.HTTPClient = &http.Client{}
+				o.StartedAt = started
+			})
+			if blocked(result) == tc.open {
+				t.Fatalf("blocked = %v, want %v: code=%d stdout=%q stderr=%q", blocked(result), !tc.open, result.code, result.stdout, result.stderr)
+			}
+		})
 	}
 }
