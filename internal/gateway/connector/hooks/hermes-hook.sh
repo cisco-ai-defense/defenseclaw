@@ -218,7 +218,7 @@ fail_response() {
   exit 0
 }
 {{end}}
-{{.HookSocketTransportSH}}{{.ForeignHookGuardSH}}AUTH_HEADER_ARGS=()
+{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
 {{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
   # would end the curl config line defenseclaw_gateway_post writes it to.

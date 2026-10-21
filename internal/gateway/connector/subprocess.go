@@ -94,8 +94,11 @@ type templateData struct {
 	HookSocketTransportSH string
 	// ForeignHookGuardSH is the standalone foreign-hook guard block the
 	// Hermes shell hook runs before its gateway request (see
-	// shellHookForeignGuard). Empty for every other hook and install, whose
-	// renders are then byte-identical to one without it.
+	// shellHookForeignGuard). HookSocketTransportSH carries the block itself
+	// (it runs before the socket checks, GAP-0354); the Hermes template
+	// reads this field only to keep the agent's HOME for the check. Empty
+	// for every other hook and install, whose renders are then
+	// byte-identical to one without it.
 	ForeignHookGuardSH string
 
 	// Sandbox selects the OpenShell in-image variant (sandbox_hooks.go):
@@ -1621,13 +1624,16 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 	// through the gateway's peer-authorized unix hook socket, as it already
 	// does for in-agent plugins. Every other install (per-user, Secure
 	// Client, Windows) has no socket here and keeps the TCP transport.
-	if socket, serviceUID := managedPluginHookSocket(opts); socket != "" {
-		render.socketTransport = shellHookSocketTransport(socket, serviceUID, managedSessionFactsBinary(opts))
-	}
-	// The standalone Hermes hook also runs the foreign-hook guard first
-	// (shellHookForeignGuardBinary); no other hook or install does.
+	// The standalone Hermes hook also runs the foreign-hook guard
+	// (shellHookForeignGuardBinary, which needs the socket); no other hook or
+	// install does. The guard runs inside the socket transport, before its
+	// socket checks: a stopped gateway removes the socket, and the check must
+	// still deny the guarded call under fail mode open (GAP-0354).
 	if binary := shellHookForeignGuardBinary(opts, c.Name()); binary != "" {
 		render.foreignGuard = shellHookForeignGuard(binary)
+	}
+	if socket, serviceUID := managedPluginHookSocket(opts); socket != "" {
+		render.socketTransport = shellHookSocketTransport(socket, serviceUID, managedSessionFactsBinary(opts), render.foreignGuard)
 	}
 	return render
 }
