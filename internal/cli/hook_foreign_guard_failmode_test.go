@@ -11,8 +11,11 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -81,5 +84,45 @@ func TestForeignHookSessionExchangeErrorMarksOnlyAnOpenOutage(t *testing.T) {
 	}
 	if err := foreignHookSessionExchangeError(open, errors.New("invalid session gateway decision")); errors.Is(err, errForeignHookSessionOutageOpen) {
 		t.Fatalf("a non-outage error must not be marked: %v", err)
+	}
+}
+
+// GAP-0349 and GAP-0350 (managed Windows), GAP-0346 (macOS): the guard
+// runs before the hook request for every guarded connector, OpenCode's
+// tool.execute.before included. Unset and closed still block a stopped
+// gateway; open leaves the call to the hook's open result.
+func TestForeignHookGuardFollowsTheFailModeForOpenCodeAndCopilot(t *testing.T) {
+	notRunning := fmt.Errorf("dial hook socket: %w", hookexec.ErrManagedGatewayNotRunning)
+	for connector, event := range map[string]string{"opencode": "tool.execute.before", "copilot": "preToolUse"} {
+		for _, tc := range []struct {
+			mode    string
+			strict  bool
+			blocked bool
+		}{
+			{mode: "closed", strict: true, blocked: true}, // unset
+			{mode: "open"},
+			{mode: "closed", strict: true, blocked: true},
+		} {
+			fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
+			fixture.guard(connector)
+			fixture.process = "agent-process"
+			exchangeOpts := hookexec.Options{Connector: connector, ManagedEnterprise: true, ExplainUnenrolledAccount: true,
+				FailMode: tc.mode, StrictAvailability: tc.strict}
+			hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+				return enterprisepolicy.GuardDecision{}, foreignHookSessionExchangeError(exchangeOpts, notRunning)
+			}
+			payload, err := json.Marshal(map[string]any{"hook_event_name": event, "cwd": filepath.Join(fixture.project, "src"), "session_id": "s-1", "sessionId": "s-1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts := hookexec.Options{Connector: connector, Event: event, ManagedEnterprise: true, Stdin: bytes.NewReader(payload), Stderr: io.Discard}
+			applyEnterpriseForeignHookGuard(&opts)
+			if tc.blocked && opts.ManagedRuntimeFailure != hookexec.ManagedGatewayNotRunningReason {
+				t.Fatalf("%s mode %s: a stopped gateway must block with the not-running reason: %q", connector, tc.mode, opts.ManagedRuntimeFailure)
+			}
+			if !tc.blocked && opts.ManagedRuntimeFailure != "" {
+				t.Fatalf("%s mode open: the call must go on to the hook's open result, got %q", connector, opts.ManagedRuntimeFailure)
+			}
+		}
 	}
 }

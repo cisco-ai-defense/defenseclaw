@@ -237,3 +237,26 @@ func TestInvalidManagedCopilotEventBindingNeverAllows(t *testing.T) {
 		t.Fatalf("a per-user hook keeps Copilot's fail-open result: stdout=%q", perUser.stdout)
 	}
 }
+
+// GAP-0349 (OpenCode) and GAP-0350 (Copilot) on managed Windows, GAP-0346
+// on macOS: the managed OpenCode and Copilot tool-call hooks follow the
+// administrator's fail mode when the gateway service is not running, on
+// every OS: unset and closed block, open allows.
+func TestStandaloneManagedOpenCodeAndCopilotFollowTheAdministratorsFailMode(t *testing.T) {
+	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
+	for connector, event := range map[string]string{"opencode": "tool.execute.before", "copilot": "preToolUse"} {
+		for mode, wantBlock := range map[string]bool{"": true, "open": false, "closed": true} {
+			result := run(t, connector, &stubRT{err: notRunning}, func(o *Options) {
+				managedCodex(o)
+				o.ExplainUnenrolledAccount = true
+				o.Event = event
+				o.FailMode = mode
+				o.Stdin = strings.NewReader(`{"tool":"bash","args":{"command":"echo ok"},"toolName":"bash","toolArgs":"{}"}`)
+			})
+			if got := blocked(result); got != wantBlock {
+				t.Fatalf("%s, fail mode %q: blocked = %v, want %v: code=%d stdout=%q stderr=%q",
+					connector, mode, got, wantBlock, result.code, result.stdout, result.stderr)
+			}
+		}
+	}
+}
