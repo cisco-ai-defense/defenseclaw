@@ -293,8 +293,10 @@ func TestRecoveredHookFailModeByDeployment(t *testing.T) {
 						response, _ := postPanicTestHook(t, server, name, event)
 						want, wantMode := "block", "action"
 						reason := "a closed failed check blocks in every mode"
-						if deployment.name == "secure_client" {
-							want, wantMode, reason = "allow", mode, "Secure Client allows recovered errors"
+						if deployment.name == "secure_client" && failMode == "closed" {
+							reason = "an explicit closed wins under Secure Client too"
+						} else if deployment.name == "secure_client" {
+							want, wantMode, reason = "allow", mode, "Secure Client's unset or open fail mode allows recovered errors"
 						} else if deployment.name == "standalone" && failMode == "open" {
 							// The administrator's explicit open (owner decision 2026-10-20).
 							want, wantMode, reason = "allow", mode, "the administrator's open is effective on a managed standalone host"

@@ -695,7 +695,8 @@ func TestHandleAgentHook_PostEvaluationRecoveryUsesFailMode(t *testing.T) {
 // and standalone managed alike, deny failed blockable checks even in observe
 // mode and answer a stop or session-end event neutrally; an explicit open
 // (on a standalone managed device the administrator's, owner decision
-// 2026-10-20) and Secure Client keep their open failure behavior.
+// 2026-10-20) and Secure Client's unset default keep their open failure
+// behavior; an explicit closed denies under Secure Client too.
 func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 	type deployment int
 	const (
@@ -759,7 +760,7 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 					// Per-user Cursor fails closed in action mode whatever
 					// hook_fail_mode says; a managed Cursor takes the
 					// administrator's mode.
-					open := d == secureClient || (failSource != "closed" && (connectorName != "cursor" || d == standalone))
+					open := failSource != "closed" && (connectorName != "cursor" || d != perUser)
 					for _, event := range append(append([]string{}, blocking...), lifecycle...) {
 						name := strings.Join([]string{dName, connectorName, event, mode, failSource}, "/")
 						req := agentHookRequest{ConnectorName: connectorName, HookEventName: event}

@@ -983,6 +983,9 @@ func TestManagedAIDOnly_NativeHookOwnerDiscardsPostProposalPanicAndArtifactBlock
 		api := testAPIServerWithConfig(t, "action")
 		api.connectorRegistry = registry
 		api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+		// A declared Secure Client profile: its unset hook fail mode
+		// resolves to open (#1163), which the panic recovery follows.
+		api.scannerCfg.Enterprise.Profile = managed.ProfileSecureClient
 		api.scannerCfg.Guardrail.Connector = connectorName
 		api.SetCiscoInspector(inspector)
 		api.bindObservabilityV8Lifecycle(capture)

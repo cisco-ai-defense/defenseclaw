@@ -1511,8 +1511,9 @@ func safeHookPanicResponse(connectorName, eventName string) agentHookResponse {
 //
 // A recovered error produced no policy verdict. A closed hook denies a
 // blockable tool or prompt event even when policy verdicts are observed.
-// Stop and session-end events keep their neutral allow; explicit per-user
-// open and Secure Client keep their open failure behavior.
+// Stop and session-end events keep their neutral allow; a resolved open
+// (explicit, or Secure Client's unset default) keeps its open failure
+// behavior.
 func (a *APIServer) hookPanicResponse(
 	ctx context.Context,
 	connectorName string,
@@ -1536,10 +1537,11 @@ func (a *APIServer) hookPanicResponse(
 	}
 	cfg := a.decisionConfig(ctx)
 	lifecycle := hookexec.NeutralLifecycleEvent(connectorName, req.HookEventName)
-	// A failed check follows the connector's fail mode, the administrator's
-	// on a managed computer (owner decision 2026-10-20).
-	failOpen := cfg != nil &&
-		(cfg.SecureClientIntegration() || cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open")
+	// A failed check follows the connector's resolved fail mode, the
+	// administrator's on a managed computer (owner decision 2026-10-20): an
+	// explicit closed wins everywhere, Secure Client included, whose unset
+	// value resolves to open (#1163).
+	failOpen := cfg != nil && cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open"
 	if !failOpen && action == "block" && !lifecycle {
 		// Observe mode applies to policy verdicts, not failed checks.
 		mode = "action"

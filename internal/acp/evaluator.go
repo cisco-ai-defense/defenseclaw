@@ -32,6 +32,19 @@ var ErrGatewayNotReady = errors.New("ACP gateway is not ready to evaluate")
 // issued. It keeps the text the guard always logged.
 var ErrCredentialRejected = errors.New("ACP gateway challenge authentication failed")
 
+// ErrResponseAuthentication is an answer of the challenge or of an
+// evaluation whose MAC does not verify: it is not known to come from the
+// gateway, so it is never read as an outage (a managed guard refuses the
+// frame and forgets an open fail mode).
+var ErrResponseAuthentication = errors.New("ACP gateway response authentication failed")
+
+// responseAuthError keeps the text the guard logged for each answer that
+// failed authentication, as an ErrResponseAuthentication.
+type responseAuthError string
+
+func (e responseAuthError) Error() string        { return string(e) }
+func (e responseAuthError) Is(target error) bool { return target == ErrResponseAuthentication }
+
 // ErrBindingRefused is an authenticated HTTP 403: the gateway refused the
 // client, agent or profile of this editor entry, for example after the
 // administrator moved the pair to another profile. It used to read as a
@@ -122,11 +135,13 @@ type Verdict struct {
 	Severity   string `json:"severity,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 	WouldBlock bool   `json:"would_block,omitempty"`
-	// FailMode is "open" when the ACP profile's fail_mode is explicitly
-	// open in the gateway's config, and empty otherwise. A standalone
-	// managed guard in observe mode lets a frame it could not evaluate
-	// through only after an authenticated verdict said so
-	// (managedObserveRefuses, owner decision 2026-10-20).
+	// FailMode is the ACP profile's explicit fail_mode in the gateway's
+	// config for an observe-mode profile: "open", "closed", or empty when
+	// unset (action mode is always closed). A standalone managed guard in
+	// observe mode lets a frame it could not evaluate through only after an
+	// authenticated verdict of that session said "open"; any observe guard
+	// refuses it after one said "closed" (observeRefuses, owner decision
+	// 2026-10-20).
 	FailMode string `json:"fail_mode,omitempty"`
 }
 
@@ -242,7 +257,7 @@ func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, e
 		return Verdict{}, errors.New("ACP evaluator response is too large")
 	}
 	if !VerifyHTTPResponseMAC(e.token, keyID, requestNonce, resp.StatusCode, payload, resp.Header.Get(AuthResponseMACHeader)) {
-		return Verdict{}, errors.New("ACP evaluator response authentication failed")
+		return Verdict{}, responseAuthError("ACP evaluator response authentication failed")
 	}
 	if resp.StatusCode == http.StatusConflict {
 		return Verdict{}, ErrModeMismatch
@@ -326,7 +341,7 @@ func (e *HTTPEvaluator) authenticateGateway(ctx context.Context, keyID string) (
 			// The gateway answers a credential it does not hold unsigned.
 			return "", "", ErrCredentialRejected
 		}
-		return "", "", errors.New("ACP gateway challenge authentication failed")
+		return "", "", responseAuthError("ACP gateway challenge authentication failed")
 	}
 	if otherAccountRefusal(resp.StatusCode, payload) {
 		return "", "", ErrCredentialOtherAccount

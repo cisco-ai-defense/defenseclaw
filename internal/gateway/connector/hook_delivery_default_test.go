@@ -195,13 +195,14 @@ func TestNormalizeHookFailModeOpenIgnoresCase(t *testing.T) {
 // TestManagedHookDeliveryOutsideSecureClientFailsClosed keeps origin/main's
 // managed contract for every profile but Secure Client: an unset mode renders
 // closed, and a managed hook blocks on a gateway outage or a missing token
-// even when its baked mode is open. Response failures follow the baked mode.
+// even when its baked mode is open. Response failures follow the baked mode;
+// a binding error (stdin naming another event) is integrity and blocks.
 func TestManagedHookDeliveryOutsideSecureClientFailsClosed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("native Windows uses the authenticated hook executor")
 	}
 	for _, mode := range []string{"", "open", "closed"} {
-		for _, scenario := range []string{"outage", "missing-token", "malformed"} {
+		for _, scenario := range []string{"outage", "missing-token", "malformed", "binding-error"} {
 			t.Run(mode+"/"+scenario, func(t *testing.T) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 					_, _ = w.Write([]byte("not-json"))
@@ -242,14 +243,18 @@ func TestManagedHookDeliveryOutsideSecureClientFailsClosed(t *testing.T) {
 					}
 				}
 				cmd := exec.Command("bash", filepath.Join(hookDir, "codex-hook.sh"), "--event", "PreToolUse", "--hook-contract", "codex-hooks-v1")
-				cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`)
+				stdinEvent := "PreToolUse"
+				if scenario == "binding-error" {
+					stdinEvent = "PostToolUse"
+				}
+				cmd.Stdin = strings.NewReader(`{"hook_event_name":"` + stdinEvent + `","tool_name":"Bash","tool_input":{"command":"ls"}}`)
 				cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DEFENSECLAW_FAIL_MODE=open"}
 				out, err := cmd.CombinedOutput()
 				blocked := err != nil || strings.Contains(string(out), `"decision":"block"`)
 				// The baked mode is the administrator's (owner decision
 				// 2026-10-20): open lets an outage and an unusable answer
 				// through; a missing token is a broken install and blocks.
-				wantBlocked := scenario == "missing-token" || wantBaked == "closed"
+				wantBlocked := scenario == "missing-token" || scenario == "binding-error" || wantBaked == "closed"
 				if blocked != wantBlocked {
 					t.Fatalf("blocked=%t want=%t err=%v output=%s", blocked, wantBlocked, err, out)
 				}

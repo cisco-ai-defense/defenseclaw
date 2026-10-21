@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -86,6 +87,10 @@ type validatedConfig struct {
 	// Raw is then the migrated config_version 9 document, and the apply
 	// keeps the v8 bytes and the migration record next to config.yaml.
 	Migration *configMigration
+	// FailModeRepair is set when Raw is the installed config with a Cursor
+	// hook_fail_mode the 1.0.0-1.0.2 migration rewrote to open restored to
+	// closed; the apply stores it as migration-v9.json.
+	FailModeRepair *config.MigrationRecord
 }
 
 // configMigration is the v8 to v9 migration of an administrator config.
@@ -137,6 +142,31 @@ func (e *Env) migrateConfigV9(ctx context.Context, raw []byte, v8 *validatedConf
 		return nil, fmt.Errorf("migrate the config to config_version 9: %w", err)
 	}
 	return result, nil
+}
+
+// repairMigratedCursorFailMode is config.RepairMigratedCursorFailMode on
+// the installed config: the repaired config, validated, with the migration
+// record the apply stores next to it, or nil when the record proves no
+// rewrite (no record means no change).
+func (e *Env) repairMigratedCursorFailMode(installed *validatedConfig) (*validatedConfig, error) {
+	raw, err := readBounded(e.P(config.MigrationRecordPath(e.Layout.ConfigPath)), maxInputBytes)
+	if err != nil {
+		return nil, nil
+	}
+	var record config.MigrationRecord
+	if json.Unmarshal(raw, &record) != nil {
+		return nil, nil
+	}
+	repaired, updated, ok := config.RepairMigratedCursorFailMode(installed.Raw, record)
+	if !ok {
+		return nil, nil
+	}
+	validated, err := e.validateConfig(repaired)
+	if err != nil {
+		return nil, fmt.Errorf("the config with its Cursor hook_fail_mode restored to closed does not validate: %w", err)
+	}
+	validated.FailModeRepair = &updated
+	return validated, nil
 }
 
 // envPinMu serializes the temporary process-environment pins validation

@@ -46,6 +46,21 @@ func TestACPConfigValidate(t *testing.T) {
 	}
 }
 
+// Review fix (r103): an administrator may set an observe-mode profile's
+// fail_mode either way; only an action-mode open is refused.
+func TestACPConfigValidateAcceptsAnExplicitObserveFailMode(t *testing.T) {
+	for _, failMode := range []string{"open", "closed", "Closed"} {
+		cfg := validACPConfig()
+		cfg.Mode = "observe"
+		p := cfg.Profiles["kiro-only"]
+		p.Mode, p.FailMode = "observe", failMode
+		cfg.Profiles["kiro-only"] = p
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("observe fail_mode %q: %v", failMode, err)
+		}
+	}
+}
+
 func TestACPConfigValidateRejectsMissingProfileReferences(t *testing.T) {
 	tests := map[string]func(*ACPConfig){
 		"default": func(c *ACPConfig) { c.DefaultProfile = "missing" },
@@ -70,13 +85,6 @@ func TestACPConfigValidateRejectsAmbiguousPolicyValues(t *testing.T) {
 		"action fail open": func(c *ACPConfig) {
 			p := c.Profiles["kiro-only"]
 			p.FailMode = "open"
-			c.Profiles["kiro-only"] = p
-		},
-		"observe fail closed": func(c *ACPConfig) {
-			c.Mode = "observe"
-			p := c.Profiles["kiro-only"]
-			p.Mode = "observe"
-			p.FailMode = "closed"
 			c.Profiles["kiro-only"] = p
 		},
 		"duplicate allow": func(c *ACPConfig) {

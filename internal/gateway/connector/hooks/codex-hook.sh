@@ -97,13 +97,18 @@ BOUND_CONTRACT=
 
 fail_binding() {
   local reason="$1"
-  defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response "$FAIL_MODE"
+{{if and .Managed (not .SecureClient)}}  # A managed binding error is integrity, not an outage: closed in every
+  # fail mode, as in the native runner.
+  defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response closed
+  echo "defenseclaw: codex hook binding error: $reason" >&2
+  exit 2
+{{else}}  defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response "$FAIL_MODE"
   echo "defenseclaw: codex hook binding error: $reason" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
   fi
   exit 2
-}
+{{end}}}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
