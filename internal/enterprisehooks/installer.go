@@ -268,7 +268,7 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err)
 			}
 			if !present {
-				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name())
+				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", conn.Name(), ownedHookAbsentDetail(conn, setupOpts))
 			}
 			// Match validateHookContract's mode selection so Verify does not
 			// load and re-hash the lock in bounded/managed mode on Unix
@@ -640,7 +640,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err))
 			}
 			if !present {
-				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name()))
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", conn.Name(), ownedHookAbsentDetail(conn, setupOpts)))
 			}
 			// See Verify for the rationale: keep Install's persistence
 			// mode consistent with validateHookContract's drift check.
@@ -1571,4 +1571,16 @@ func agentVersionStatus(connectorName, agentVersion string) string {
 		return connector.UntestedNewerVersionReasonPrefix
 	}
 	return ""
+}
+
+// ownedHookAbsentDetail is the reason an owned-hook check found no accepted
+// registration, for verify and install errors. The guardian's watch log and
+// status show it, so an agent rewriting its own config is diagnosable without
+// rerunning the check by hand.
+func ownedHookAbsentDetail(conn connector.Connector, opts connector.SetupOpts) string {
+	reason := strings.TrimSpace(connector.OwnedHooksAbsentReason(conn, opts))
+	if reason == "" {
+		return "owned hook command not present"
+	}
+	return "owned hook command not present: " + reason
 }

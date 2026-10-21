@@ -220,6 +220,23 @@ func ownedHookRegistrationPresent(ctx context.Context, conn Connector, opts Setu
 	return ownedHooksPresentInConfig(conn, opts)
 }
 
+// ownedHookContractReasoner is implemented by connectors whose owned-hook check
+// can say why it found no accepted hook registration.
+type ownedHookContractReasoner interface {
+	ownedHookContractAbsentReason(opts SetupOpts) string
+}
+
+// OwnedHooksAbsentReason explains a (false, nil) result from OwnedHooksPresent,
+// for the messages that report it; "" when the connector cannot say. It does
+// not change OwnedHooksPresent, which hook guards read as "absent, heal by
+// Setup".
+func OwnedHooksAbsentReason(conn Connector, opts SetupOpts) string {
+	if reasoner, ok := conn.(ownedHookContractReasoner); ok {
+		return reasoner.ownedHookContractAbsentReason(opts)
+	}
+	return ""
+}
+
 func ownedHooksPresentInConfig(conn Connector, opts SetupOpts) (bool, error) {
 	paths := HookConfigPathsForConnector(conn, opts)
 	if len(paths) == 0 {

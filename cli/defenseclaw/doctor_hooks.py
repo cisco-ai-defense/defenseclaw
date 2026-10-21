@@ -1768,6 +1768,15 @@ def _codex_hook_state_key_source(config_path: str) -> str:
     return source
 
 
+# Codex caps the SessionEnd and Interrupt timeouts at three seconds (default
+# one) and records trust for the capped value (codex-rs/hooks/src/engine/
+# discovery.rs, normalize_command_hook), as codexCommandHookHashForPlatform does
+# on the Go side.
+_CODEX_CAPPED_TIMEOUT_EVENTS = frozenset({"session_end", "interrupt"})
+_CODEX_CAPPED_TIMEOUT_MAX_SECONDS = 3
+_CODEX_CAPPED_TIMEOUT_DEFAULT_SECONDS = 1
+
+
 def _codex_command_hook_hash(event_key: str, matcher: str | None, hook: dict[str, Any]) -> str:
     """Return Codex's canonical command-handler fingerprint for native Windows."""
 
@@ -1778,10 +1787,13 @@ def _codex_command_hook_hash(event_key: str, matcher: str | None, hook: dict[str
     if not isinstance(windows_command, str) or not windows_command.strip():
         raise _InspectionError("stale", "Codex command handler has an empty native command")
 
-    timeout = hook.get("timeout", 600)
+    capped = event_key in _CODEX_CAPPED_TIMEOUT_EVENTS
+    timeout = hook.get("timeout", _CODEX_CAPPED_TIMEOUT_DEFAULT_SECONDS if capped else 600)
     if type(timeout) is not int or timeout < 0:  # bool is intentionally not accepted as an integer.
         raise _InspectionError("stale", "Codex command handler has an invalid timeout")
     timeout = max(timeout, 1)
+    if capped:
+        timeout = min(timeout, _CODEX_CAPPED_TIMEOUT_MAX_SECONDS)
     async_value = hook.get("async", False)
     if type(async_value) is not bool:
         raise _InspectionError("stale", "Codex command handler has an invalid async value")

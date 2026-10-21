@@ -1302,30 +1302,44 @@ func codexManagedConfigPath() string {
 // guardian repair cannot mistake a partial, moved, disabled, asynchronous, or
 // untrusted matrix for active protection.
 func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
+	present, _, err := c.checkOwnedHookContract(opts)
+	return present, err
+}
+
+// ownedHookContractAbsentReason explains a (false, nil) result from
+// ownedHookContractPresent. The check stays (false, nil) for an absent or
+// rejected matrix so hook guards keep healing it by Setup; the reason is only
+// for the messages that report it.
+func (c *CodexConnector) ownedHookContractAbsentReason(opts SetupOpts) string {
+	_, reason, _ := c.checkOwnedHookContract(opts)
+	return reason
+}
+
+func (c *CodexConnector) checkOwnedHookContract(opts SetupOpts) (bool, string, error) {
 	if runtime.GOOS == "windows" && opts.ManagedEnterprise {
-		return false, nil
+		return false, "managed Windows Codex registrations are not verified from the user config.toml", nil
 	}
 	resolution := resolveHookContractForOptions("codex", opts)
 	if resolution.Contract.ContractID == "" {
-		return false, nil
+		return false, "no Codex hook contract resolves: " + resolution.Reason, nil
 	}
 	userConfigPath := codexConfigPath()
 	var userCfg map[string]interface{}
 	data, err := os.ReadFile(userConfigPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			return false, err
+			return false, "", err
 		}
 	} else {
 		cfg := map[string]interface{}{}
 		if err := parseCodexTOML(data, &cfg); err != nil {
-			return false, fmt.Errorf("parse Codex config for hook guardian: %w", err)
+			return false, "", fmt.Errorf("parse Codex config for hook guardian: %w", err)
 		}
 		userCfg = cfg
 		if rawFeatures, exists := cfg["features"]; exists {
 			features, ok := rawFeatures.(map[string]interface{})
 			if !ok {
-				return false, nil
+				return false, "[features] in " + userConfigPath + " is not a table", nil
 			}
 			for _, key := range []string{"hooks", "codex_hooks"} {
 				if rawEnabled, exists := features[key]; exists {
@@ -1334,13 +1348,13 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 						// The user turned Codex hooks off. Setup must not override
 						// that, so say it at once instead of attempting a repair
 						// that can only fail (GAP-1094).
-						return false, fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+						return false, "", fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 							"Codex hooks are turned off in %s ([features] %s = false), so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks",
 							userConfigPath, key,
 						)
 					}
 					if !ok || !enabled {
-						return false, nil
+						return false, "[features]." + key + " in " + userConfigPath + " is not true", nil
 					}
 				}
 			}
@@ -1351,48 +1365,59 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 	data, err = os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return false, "Codex hook config " + configPath + " does not exist", nil
 		}
-		return false, err
+		return false, "", err
 	}
 	cfg := map[string]interface{}{}
 	if err := parseCodexTOML(data, &cfg); err != nil {
-		return false, fmt.Errorf("parse Codex hook config for guardian: %w", err)
+		return false, "", fmt.Errorf("parse Codex hook config for guardian: %w", err)
 	}
-	if rawFeatures, exists := cfg["features"]; exists {
-		features, ok := rawFeatures.(map[string]interface{})
-		if !ok {
-			return false, nil
-		}
-		for _, key := range []string{"hooks", "codex_hooks"} {
-			if rawEnabled, exists := features[key]; exists {
-				enabled, ok := rawEnabled.(bool)
-				if !ok || !enabled {
-					return false, nil
-				}
-			}
-		}
+	if reason := codexHooksFeatureDisabled(cfg, configPath); reason != "" {
+		return false, reason, nil
 	}
 	hooks, ok := cfg["hooks"].(map[string]interface{})
 	if !ok {
-		return false, nil
+		return false, "Codex hook config " + configPath + " has no [hooks] table", nil
 	}
 	if !opts.ManagedEnterprise && codexHasCommandlessHandlers(hooks) {
 		// Codex refuses to load a config.toml with a hook entry that has no
 		// command, so nothing is guarded until Setup removes it (GAP-1102).
-		return false, nil
+		return false, "Codex hook config " + configPath + " has a hook entry with no command", nil
 	}
 	if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"), opts); err != nil {
-		return false, nil
+		return false, fmt.Sprintf("Codex hook matrix in %s (%s): %v", configPath, resolution.Contract.ContractID, err), nil
 	}
 	// Setup always writes the top-level notify entry into config.toml. A missing
 	// or edited entry leaves Codex launching a program that is not DefenseClaw's
 	// (or does not exist) on every completed turn, so report the contract as
 	// broken and let the guard re-run Setup (GAP-1248).
 	if userCfg != nil && !codexNotifyIsCurrent(userCfg["notify"], opts) {
-		return false, nil
+		return false, "the notify entry in " + userConfigPath + " is missing or not DefenseClaw's", nil
 	}
-	return true, nil
+	return true, "", nil
+}
+
+// codexHooksFeatureDisabled names the [features] flag that turns Codex hooks
+// off, "" when hooks are enabled or the table does not mention them.
+func codexHooksFeatureDisabled(cfg map[string]interface{}, path string) string {
+	rawFeatures, exists := cfg["features"]
+	if !exists {
+		return ""
+	}
+	features, ok := rawFeatures.(map[string]interface{})
+	if !ok {
+		return "[features] in " + path + " is not a table"
+	}
+	for _, key := range []string{"hooks", "codex_hooks"} {
+		if rawEnabled, exists := features[key]; exists {
+			enabled, ok := rawEnabled.(bool)
+			if !ok || !enabled {
+				return "[features]." + key + " in " + path + " is not true"
+			}
+		}
+	}
+	return ""
 }
 
 // codexConfigBackup captures the pre-DefenseClaw shape of the three
@@ -1469,10 +1494,18 @@ var codexHookGroups = []codexHookGroup{
 	{"Stop", "", 90},
 }
 
-// SessionEnd first appears in the official 0.145.0 v4 schema and remains
-// advisory. The client caps this teardown hook at three seconds, so emitting a
-// larger value is misleading even though the client would clamp it at load.
-var codexSessionEndHookGroup = codexHookGroup{"SessionEnd", "", 3}
+// codexSessionEndMaxTimeoutSeconds mirrors Codex's SESSION_END_MAX_TIMEOUT_SEC
+// (codex-rs/hooks/src/engine/discovery.rs, normalize_command_hook). Codex caps
+// the SessionEnd and Interrupt timeouts at three seconds and defaults them to
+// one, and it hashes the capped value when it records trust, so registering
+// more than three only draws a clamp warning and a trust hash no other value
+// reproduces.
+const (
+	codexSessionEndMaxTimeoutSeconds     = 3
+	codexSessionEndDefaultTimeoutSeconds = 1
+)
+
+var codexSessionEndHookGroup = codexHookGroup{"SessionEnd", "", codexSessionEndMaxTimeoutSeconds}
 
 func codexHookContractForSetup(opts SetupOpts) (HookContract, error) {
 	var contract HookContract
@@ -2078,8 +2111,9 @@ func codexCommandHookHash(eventKey, matcher, command string, timeout int) string
 
 // codexCommandHookHashForPlatform mirrors openai/codex hook discovery. Codex
 // first selects commandWindows on Windows (falling back to command), clamps the
-// timeout to at least one second, and then hashes a normalized handler with no
-// commandWindows override. Codex converts the identity through toml::Value
+// timeout to at least one second (SessionEnd and Interrupt: default one, at
+// most three), and then hashes a normalized handler with no commandWindows
+// override. Codex converts the identity through toml::Value
 // before canonical JSON, so absent Option fields (matcher, commandWindows, and
 // statusMessage) are omitted rather than serialized as JSON null.
 func codexCommandHookHashForPlatform(
@@ -2107,7 +2141,11 @@ func codexCommandHookHashForPlatform(
 		return "", fmt.Errorf("selected command is empty")
 	}
 
+	cappedEvent := eventKey == "session_end" || eventKey == "interrupt"
 	timeout := 600
+	if cappedEvent {
+		timeout = codexSessionEndDefaultTimeoutSeconds
+	}
 	if rawTimeout, exists := handler["timeout"]; exists {
 		parsed, ok := codexInteger(rawTimeout)
 		if !ok {
@@ -2120,6 +2158,9 @@ func codexCommandHookHashForPlatform(
 	}
 	if timeout < 1 {
 		timeout = 1
+	}
+	if cappedEvent && timeout > codexSessionEndMaxTimeoutSeconds {
+		timeout = codexSessionEndMaxTimeoutSeconds
 	}
 
 	async := false
