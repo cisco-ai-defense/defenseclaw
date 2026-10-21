@@ -43,7 +43,12 @@ Windows) is missing or fails its checks, when another program answers in
 place of the gateway service, when its token is missing, when the gateway
 refuses its credential (HTTP 401 or 403), when the call does not match the
 event or hook contract the hook was registered for (Codex, GitHub Copilot),
-and when the account is not enrolled.
+and when the account is not enrolled. An unapproved hook that the foreign-hook
+guard finds blocks in every fail mode too. When the guard cannot check the
+agent session's hook record only because the gateway service is stopped,
+restarting or not answering, that is an outage, and the call follows the fail
+mode like the hook request itself (GitHub Copilot, Cursor, Devin, OpenCode,
+Amp and Hermes on a standalone host).
 
 On a managed standalone host both variables are *tighten-only*: a value that
 makes hooks stricter is honored, and one that would loosen the administrator's

@@ -2359,6 +2359,31 @@ func managedPeerFailMode(opts Options, failMode string, err error) string {
 	return "closed"
 }
 
+// ManagedOutageFailsOpen reports whether err, from a gateway contact a
+// managed hook makes before its hook request (the foreign-hook guard's
+// session exchange), is an outage that the hook's open fail mode lets
+// through (GAP-0346). It holds only for a standalone hook outside Secure
+// Client (managedNativeDecision) whose administrator chose open for the
+// connector (opts.FailMode, which the managed runtime sets), without strict
+// availability or a runtime failure, and only when err says the gateway
+// service is not running, was still restarting at the end of the restart
+// budget, or gave no answer in time. The hook request that follows then
+// meets the same outage and gives the open result, with its notice and its
+// failure log line, as for every other connector. Every other error (a peer
+// DefenseClaw cannot verify, another program on the gateway port, an
+// unusable answer) and every closed or unset mode keep the refusal.
+func ManagedOutageFailsOpen(opts Options, err error) bool {
+	if err == nil || !managedNativeDecision(opts) || opts.StrictAvailability ||
+		strings.TrimSpace(opts.ManagedRuntimeFailure) != "" || normalizeFailMode(opts.FailMode) != "open" {
+		return false
+	}
+	if errors.Is(err, errManagedGatewayPortHeld) {
+		return false
+	}
+	return errors.Is(err, errManagedGatewayNotRunning) || errors.Is(err, errGatewayRestarting) ||
+		errors.Is(err, errGatewayNoAnswer)
+}
+
 // managedCopilotOpen reports a managed GitHub Copilot hook whose delivery
 // mode is open: an authenticated Secure Client hook (#1163), or a standalone
 // hook whose administrator chose open (owner decision 2026-10-20). A gateway

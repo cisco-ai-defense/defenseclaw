@@ -77,6 +77,22 @@ var hookForeignGuardExchange = exchangeForeignHookSession
 // cannot answer for the agent session's hook record.
 const foreignHookSessionUnavailableReason = "enterprise_foreign_hook_blocked: DefenseClaw could not check this agent session's hook record with its gateway, so the call is blocked. Retry when the DefenseClaw gateway is running; if the block continues, restart the agent."
 
+// errForeignHookSessionOutageOpen marks a session exchange that failed only
+// because the gateway is stopped, restarting or not answering, on a
+// standalone hook whose administrator chose fail mode open
+// (hookexec.ManagedOutageFailsOpen).
+var errForeignHookSessionOutageOpen = errors.New("foreign-hook session record unavailable during a gateway outage; fail mode open")
+
+// foreignHookSessionExchangeError is the error of a failed session exchange
+// for the hook options opts: marked errForeignHookSessionOutageOpen when the
+// outage follows the open fail mode, unchanged otherwise.
+func foreignHookSessionExchangeError(opts hookexec.Options, err error) error {
+	if hookexec.ManagedOutageFailsOpen(opts, err) {
+		return fmt.Errorf("%w: %w", errForeignHookSessionOutageOpen, err)
+	}
+	return err
+}
+
 // applyEnterpriseForeignHookGuard denies a hook invocation on a standalone
 // managed host while an unapproved hook that could rewrite the tool call
 // after DefenseClaw checks it is present in the agent's user or project
@@ -433,6 +449,17 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		return decision, accountHome
 	}
 	decision, err := hookForeignGuardExchange(name, event, startedAt, deadline, update)
+	if err != nil && !update.Decision.Deny && errors.Is(err, errForeignHookSessionOutageOpen) {
+		// GAP-0346: the scan found no unapproved hook and the gateway that
+		// holds the session record is stopped, restarting or not answering.
+		// That is an outage, and the administrator chose open for it: the
+		// call goes on to the hook request, which meets the same outage and
+		// gives the open result with its notice, as status reports. Before,
+		// every managed Copilot, Cursor, Devin, OpenCode, Amp and Hermes call
+		// was blocked here in fail mode open. An unapproved hook the scan
+		// finds still blocks in every fail mode.
+		return update.Decision, accountHome
+	}
 	if err != nil {
 		// The gateway holds the session record. Without its answer the call
 		// is blocked in every fail mode, and the reason must not suggest an
@@ -503,7 +530,7 @@ func exchangeForeignHookSession(name, event string, startedAt, scanDeadline time
 	}
 	response, err := hookexec.ExchangeForeignHookSession(ctx, opts, name, data)
 	if err != nil {
-		return enterprisepolicy.GuardDecision{}, err
+		return enterprisepolicy.GuardDecision{}, foreignHookSessionExchangeError(opts, err)
 	}
 	var decision enterprisepolicy.GuardDecision
 	if err := json.Unmarshal(response, &decision); err != nil {
