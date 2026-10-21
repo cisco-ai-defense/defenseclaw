@@ -183,13 +183,6 @@ type GuardDecision struct {
 	// source the agent loaded may not have been checked. At a session start
 	// it blocks the session (ApplyForeignHookSession).
 	Incomplete bool `json:"incomplete,omitempty"`
-	// SessionBlock is the record of a block that holds for the rest of the
-	// agent session or process (a session start with an unapproved hook, an
-	// earlier such block, a hook the guardian removed after the agent
-	// started), as ApplyForeignHookSession enforced it. The hook mirrors it
-	// under the account's home (MirrorForeignHookSessionBlock) so a gateway
-	// outage in fail mode open cannot lift it.
-	SessionBlock *SessionRecord `json:"session_block,omitempty"`
 }
 
 func (r GuardRequest) getenv(key string) string {

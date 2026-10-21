@@ -244,6 +244,12 @@ type Options struct {
 	// gateway request with less than hookGatewayAnswerFloor of the answer
 	// budget left: a missing answer then fails closed (failNoAnswer).
 	answerSpentLocally bool
+	// managedOutageOpen is set on a standalone hook outside Secure Client
+	// for a failure that ManagedOutageFailsOpen lets through (the gateway is
+	// not running, was still restarting, or gave no answer). Only such a
+	// failure takes the administrator's open; every other failure is closed
+	// (managedNonOutageMode, bounded review P1).
+	managedOutageOpen bool
 	// answerBy is the answer deadline of a tool call (answerDeadline);
 	// doRequest sets it, and the request then asks for progress reports.
 	answerBy time.Time
@@ -569,7 +575,7 @@ func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, 
 			opts.HTTPClient, err = newManagedHookHTTPClient(ctx, opts, requestTimeout,
 				gatewayRestartDeadline(opts, startedAt))
 			if err != nil {
-				return failUnreachable(opts, sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
+				return failUnreachable(withManagedOutage(opts, err), sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 			}
 		} else {
 			opts.HTTPClient = defaultHTTPClient(requestTimeout)
@@ -890,7 +896,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			if managedNativeDecision(opts) {
 				restartMode = failMode
 			}
-			return failUnreachable(opts, sp, restartMode, managedGatewayRestartingReason)
+			return failUnreachable(withManagedOutage(opts, errGatewayRestarting), sp, restartMode, managedGatewayRestartingReason)
 		}
 		if errors.Is(err, errManagedGatewayPeerUnverified) {
 			// Managed peer-verification failure fails closed on the transport
@@ -899,7 +905,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// gateway peer surface as an allow-by-default. The one exception
 			// is a gateway service that is not running (see
 			// managedPeerFailMode).
-			return failUnreachable(opts, sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
+			return failUnreachable(withManagedOutage(opts, err), sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}
@@ -1452,6 +1458,27 @@ func managedIntegrityFailMode(opts Options, failMode string) string {
 	return failMode
 }
 
+// withManagedOutage marks opts for a failure caused by err, a gateway outage
+// that ManagedOutageFailsOpen lets through.
+func withManagedOutage(opts Options, err error) Options {
+	opts.managedOutageOpen = ManagedOutageFailsOpen(opts, err)
+	return opts
+}
+
+// managedNonOutageMode is the fail mode of a failure on a standalone hook
+// outside Secure Client: failMode only for an outage withManagedOutage
+// marked, closed for everything else (oversized input, an unusable or
+// error answer, a transport error that is not an outage, a local budget),
+// for every connector. opts.FailMode follows, because the Hermes and
+// Copilot helpers read it. Per-user and Secure Client hooks keep failMode.
+func managedNonOutageMode(opts *Options, failMode string) string {
+	if managedNativeDecision(*opts) && !opts.managedOutageOpen {
+		opts.FailMode = "closed"
+		return "closed"
+	}
+	return failMode
+}
+
 func failNativeDecision(opts Options, sp spec, reason string) int {
 	if sp.connector == "copilot" && normalizeFailMode(opts.FailMode) != "open" && !opts.SecureClient {
 		// Copilot CLI ignores a failed hook process, but honors its native
@@ -1730,6 +1757,9 @@ func handleUnavailableHome(opts Options, sp spec, failMode, reason string) int {
 // handleOversized mirrors the per-connector oversized-payload branch. prefix
 // is the start of the payload the hook read before it stopped at its cap.
 func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int {
+	// Oversized input is not an outage: closed on a standalone host in every
+	// fail mode (bounded review P1).
+	failMode = managedNonOutageMode(&opts, failMode)
 	if !sp.failOpenOnly && failMode == "closed" && failClosedStopEvent(opts, sp) {
 		return allowFailClosedStop(opts, sp, "stdin body exceeded cap", "transport")
 	}
@@ -1768,9 +1798,11 @@ func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int 
 // open) with the connector's allow. The managed OpenCode plugin (the only
 // caller of the OpenCode hook, always --enterprise-managed) reads an empty
 // answer as closed, so it gets an explicit allow with the fail-open notice
-// (GAP-0351); every other connector keeps its openAllow.
+// (GAP-0351); every other connector keeps its openAllow. On a standalone
+// host the explicit allow is given only for an outage withManagedOutage
+// marked; any other path gets the empty answer, which the plugin blocks.
 func emitFailOpenAllow(opts Options, sp spec, reason string) int {
-	if sp.connector == "opencode" && opts.ManagedEnterprise {
+	if sp.connector == "opencode" && opts.ManagedEnterprise && (!managedNativeDecision(opts) || opts.managedOutageOpen) {
 		fmt.Fprintln(opts.Stdout, openCodeFailOpenBody(openCodeFailOpenNotice(reason)))
 		return 0
 	}
@@ -1778,6 +1810,7 @@ func emitFailOpenAllow(opts Options, sp spec, reason string) int {
 }
 
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
+	failMode = managedNonOutageMode(&opts, failMode)
 	if failMode == "closed" {
 		// A refusal passed in closed (a peer DefenseClaw cannot verify, an
 		// invalid runtime) stays closed for the connectors whose helpers read
@@ -2131,6 +2164,8 @@ func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
 func failResponse(opts Options, sp spec, failMode, reason string) int {
+	// The gateway answered, or a local check failed: never an outage.
+	failMode = managedNonOutageMode(&opts, failMode)
 	if failMode == "closed" {
 		// As in failUnreachable: a closed result stays closed for Hermes.
 		opts.FailMode = "closed"

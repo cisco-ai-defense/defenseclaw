@@ -2863,9 +2863,23 @@ func TestSecureClientCopilotHookFollowsItsDeliveryMode(t *testing.T) {
 	}
 	// A standalone hook follows the administrator's mode (owner decision
 	// 2026-10-20): open allows a stopped gateway, closed denies it.
-	standalone := func(opts *Options) { opts.SecureClient = false; opts.ExplainUnenrolledAccount = true }
-	if _, stdout, _ := run(standalone, unreachable); strings.Contains(stdout, "deny") {
+	standalone := func(opts *Options) {
+		opts.SecureClient = false
+		opts.ExplainUnenrolledAccount = true
+		opts.FailMode = "open"
+	}
+	standaloneOutage := func(opts Options) int {
+		return failUnreachable(withManagedOutage(opts, errManagedGatewayNotRunning), sp, "open", managedGatewayNotRunningReason)
+	}
+	if _, stdout, _ := run(standalone, standaloneOutage); strings.Contains(stdout, "deny") {
 		t.Fatalf("a standalone managed Copilot hook in fail mode open denied a stopped gateway: %q", stdout)
+	}
+	// A failure that is not an outage is closed there in fail mode open.
+	if _, stdout, _ := run(standalone, unreachable); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
+		t.Fatalf("a standalone managed Copilot hook allowed a failure that is not an outage: %q", stdout)
+	}
+	if _, stdout, _ := run(standalone, response); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
+		t.Fatalf("a standalone managed Copilot hook allowed an unreadable response: %q", stdout)
 	}
 	standaloneClosed := func(opts Options) int { return failUnreachable(opts, sp, "closed", managedGatewayNotRunningReason) }
 	if _, stdout, _ := run(standalone, standaloneClosed); !strings.Contains(stdout, `"permissionDecision":"deny"`) {

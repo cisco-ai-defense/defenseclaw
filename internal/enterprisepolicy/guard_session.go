@@ -327,8 +327,6 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 			}
 		}
 		decision.Reason = strings.TrimSpace(decision.Reason) + " " + note
-		record := blocked(loaded{})
-		decision.SessionBlock = &record
 		return decision
 	}
 
@@ -358,8 +356,6 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 		if key.Process == "" {
 			result.Reason += " " + sessionUnknownProcessNote
 		}
-		record := *sticky
-		result.SessionBlock = &record
 		return result
 	}
 
@@ -463,9 +459,6 @@ func stickySessionDecision(decision GuardDecision, connector string, record Sess
 	var cause string
 	note := sessionBlockNote
 	switch {
-	case strings.HasPrefix(record.Reason, removedSessionReason):
-		cause = "This agent started before DefenseClaw removed an unapproved hook from " + record.Path + "."
-		note = sessionRemovedNote
 	case strings.HasPrefix(record.Reason, incompleteScanReason):
 		cause = "When this agent session started, DefenseClaw's hook scan stopped before it checked every hook file (" + strings.TrimPrefix(record.Reason, incompleteScanReason) + ")."
 		note = sessionIncompleteNote

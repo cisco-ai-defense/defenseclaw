@@ -217,6 +217,5 @@ func removedHookDecision(decision GuardDecision, connector string, removal Forei
 		Path:      removal.Path,
 		Reason:    removedSessionReason,
 	}}, decision.Findings...)
-	decision.SessionBlock = &SessionRecord{Connector: connector, Blocked: true, Path: removal.Path, Reason: removedSessionReason}
 	return decision
 }

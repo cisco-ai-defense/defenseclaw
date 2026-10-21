@@ -231,6 +231,7 @@ func failNoAnswer(opts Options, sp spec, failMode string) int {
 		mode := "closed"
 		if managedNativeDecision(opts) && !opts.answerSpentLocally {
 			mode = failMode
+			opts = withManagedOutage(opts, errGatewayNoAnswer)
 		}
 		return failUnreachable(opts, sp, mode, managedGatewayNoAnswerReason)
 	}

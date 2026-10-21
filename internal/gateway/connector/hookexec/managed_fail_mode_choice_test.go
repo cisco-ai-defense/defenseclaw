@@ -39,9 +39,14 @@ func TestStandaloneManagedHookFollowsTheAdministratorsOpenFailMode(t *testing.T)
 		mutate  func(*Options)
 		blocked bool
 	}{
-		{name: "gateway unreachable", rt: &stubRT{err: errors.New("offline")}},
-		{name: "gateway 5xx", rt: &stubRT{status: 503, body: "unavailable"}},
-		{name: "malformed answer", rt: ok("not-json")},
+		// Bounded review P1: only an outage ManagedOutageFailsOpen names
+		// (not running, restarting, no answer) is open; a transport error
+		// that is not one, an error status and an unusable answer are closed.
+		{name: "gateway unreachable", rt: &stubRT{err: errors.New("offline")}, blocked: true},
+		{name: "gateway 5xx", rt: &stubRT{status: 503, body: "unavailable"}, blocked: true},
+		{name: "malformed answer", rt: ok("not-json"), blocked: true},
+		{name: "oversized input", rt: ok(`{"action":"allow"}`), blocked: true,
+			mutate: func(o *Options) { o.MaxBody = 8 }},
 		{name: "gateway not running", rt: &stubRT{err: fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)}},
 		{name: "unverified gateway peer", rt: &stubRT{err: errManagedGatewayPeerUnverified}, blocked: true},
 		{name: "invalid managed runtime", rt: ok(`{"action":"allow"}`), blocked: true,
@@ -80,8 +85,9 @@ func TestStandaloneManagedHookFollowsTheAdministratorsOpenFailMode(t *testing.T)
 // A standalone Hermes hook in fail mode open lets a tool call through on an
 // outage instead of the managed block directive; closed blocks it.
 func TestStandaloneManagedHermesFollowsTheAdministratorsFailMode(t *testing.T) {
+	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
 	for mode, wantBlock := range map[string]bool{"open": false, "closed": true} {
-		result := run(t, "hermes", &stubRT{err: errors.New("offline")}, func(o *Options) {
+		result := run(t, "hermes", &stubRT{err: notRunning}, func(o *Options) {
 			o.Event = "pre_tool_call"
 			o.FailMode = mode
 			o.ManagedEnterprise = true
@@ -350,6 +356,80 @@ func TestStandaloneManagedOpenCodeFailOpenAnswersAnExplicitAllow(t *testing.T) {
 		if result.code != 0 || answer.HookOutput.Decision != "allow" || !answer.FailOpen ||
 			!strings.Contains(answer.Notice, "fail mode is open") || !strings.Contains(answer.Notice, managedGatewayNotRunningReason) {
 			t.Fatalf("open: want an explicit allow with the notice, got code=%d stdout=%q", result.code, result.stdout)
+		}
+	}
+}
+
+// Bounded review P1: oversized tool input reaches handleOversized before the
+// gateway is contacted. On a standalone host it is not an outage, so it is
+// blocked in fail mode open for every connector, and the managed OpenCode
+// plugin never gets its explicit allow for it. Per-user hooks keep their
+// open result.
+func TestStandaloneManagedOversizedInputBlocksUnderOpenForEveryConnector(t *testing.T) {
+	events := map[string]string{
+		"claudecode": "PreToolUse",
+		"codex":      "PreToolUse",
+		"copilot":    "preToolUse",
+		"hermes":     "pre_tool_call",
+		"opencode":   "tool.execute.before",
+	}
+	for connector, event := range events {
+		result := run(t, connector, ok(`{"action":"allow"}`), func(o *Options) {
+			managedCodex(o)
+			o.ExplainUnenrolledAccount = true
+			o.FailMode = "open"
+			o.Event = event
+			o.MaxBody = 8
+			o.Stdin = strings.NewReader(`{"hook_event_name":"` + event + `","tool_input":{"command":"` + strings.Repeat("x", 64) + `"}}`)
+		})
+		if !blocked(result) {
+			t.Fatalf("%s: oversized input under admin open was allowed: code=%d stdout=%q stderr=%q", connector, result.code, result.stdout, result.stderr)
+		}
+		if strings.Contains(result.stdout, `"fail_open":true`) || strings.Contains(result.stdout, `"decision":"allow"`) {
+			t.Fatalf("%s: oversized input got an explicit allow: %q", connector, result.stdout)
+		}
+	}
+	// A per-user hook in fail mode open keeps its open result.
+	perUser := run(t, "codex", ok(`{"action":"allow"}`), func(o *Options) {
+		o.MaxBody = 8
+		o.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_input":{"command":"` + strings.Repeat("x", 64) + `"}}`)
+	})
+	if blocked(perUser) {
+		t.Fatalf("per-user open: oversized input must keep the open result: code=%d stdout=%q", perUser.code, perUser.stdout)
+	}
+}
+
+// Bounded review P1: the managed OpenCode explicit allow comes only from an
+// outage (the gateway not running, restarting, or no answer). Every other
+// failure on a standalone host under admin open blocks: oversized input, a
+// transport error that is not an outage, an error status, an unusable answer.
+func TestStandaloneManagedOpenCodeExplicitAllowOnlyOnAnOutage(t *testing.T) {
+	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
+	for _, tc := range []struct {
+		name    string
+		rt      *stubRT
+		maxBody int64
+		allowed bool
+	}{
+		{name: "gateway not running", rt: &stubRT{err: notRunning}, allowed: true},
+		{name: "oversized input", rt: ok(`{"action":"allow"}`), maxBody: 8},
+		{name: "transport error", rt: &stubRT{err: errors.New("offline")}},
+		{name: "gateway 5xx", rt: &stubRT{status: 500, body: "boom"}},
+		{name: "unusable answer", rt: ok("not-json")},
+		{name: "port held", rt: &stubRT{err: fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayPortHeld)}},
+	} {
+		result := run(t, "opencode", tc.rt, func(o *Options) {
+			managedCodex(o)
+			o.ExplainUnenrolledAccount = true
+			o.FailMode = "open"
+			o.Event = "tool.execute.before"
+			o.MaxBody = tc.maxBody
+			o.Stdin = strings.NewReader(`{"tool":"bash","args":{"command":"echo ok"}}`)
+		})
+		explicit := strings.Contains(result.stdout, `"fail_open":true`)
+		if explicit != tc.allowed || blocked(result) == tc.allowed {
+			t.Fatalf("%s: explicit allow = %v, blocked = %v, want allowed %v: code=%d stdout=%q stderr=%q",
+				tc.name, explicit, blocked(result), tc.allowed, result.code, result.stdout, result.stderr)
 		}
 	}
 }
