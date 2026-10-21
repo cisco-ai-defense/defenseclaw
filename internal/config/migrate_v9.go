@@ -216,6 +216,11 @@ type MigrationRecord struct {
 	ResultSHA256 string `json:"result_sha256"`
 	// Moved lists every value written to a v9 key.
 	Moved []MigrationMove `json:"moved"`
+	// Repaired lists values a later release set back because this migration
+	// wrote them: a managed Cursor hook_fail_mode the 1.0.0-1.0.2 migration
+	// rewrote to open (RepairMigratedCursorFailMode). ResultSHA256 is then
+	// the repaired config.
+	Repaired []MigrationMove `json:"repaired,omitempty"`
 	// Conflicts lists values that disagreed; data.json wins over the
 	// *_actions keys because enforcement read it.
 	Conflicts []MigrationConflict `json:"conflicts"`

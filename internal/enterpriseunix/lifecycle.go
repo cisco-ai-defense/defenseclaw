@@ -1200,6 +1200,17 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 		validated = v9
 	}
+	if fromInstalled {
+		// An open the 1.0.0-1.0.2 migration wrote is not the administrator's
+		// (managed hooks honour an explicit open since 1.0.3).
+		repaired, err := env.repairMigratedCursorFailMode(validated)
+		if err != nil {
+			return nil, &codedError{code: codeConfig, err: err}
+		}
+		if repaired != nil {
+			validated, fromInstalled = repaired, false
+		}
+	}
 	if validated.Loaded.Fleet.Enabled {
 		var compiler, marker, base string
 		switch {
@@ -1742,6 +1753,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			snapPaths = append(snapPaths, serviceDotEnvPath(env))
 		}
 	}
+	if p.config.FailModeRepair != nil {
+		snapPaths = append(snapPaths, config.MigrationRecordPath(env.Layout.ConfigPath))
+	}
 	dirPaths := []string{}
 	for _, dir := range p.dirs {
 		dirPaths = append(dirPaths, dir.Path)
@@ -2241,6 +2255,18 @@ func (l *lifecycle) applyFilesRecorded(ctx context.Context, p *plan, account Acc
 		if migration.Record.ActionsRowsIgnored > 0 {
 			l.result.AddWarning(config.LocalEnforcementEntriesIgnored, fmt.Sprintf(
 				"%d local block/allow entries in audit.db are ignored; the administrator config is the policy", migration.Record.ActionsRowsIgnored))
+		}
+	}
+	if repair := p.config.FailModeRepair; repair != nil && changed[env.Layout.ConfigPath] {
+		record, err := json.MarshalIndent(repair, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		if err := env.writeFileAtomic(env.P(config.MigrationRecordPath(env.Layout.ConfigPath)), append(record, '\n'), 0o640, serviceGroup); err != nil {
+			return nil, err
+		}
+		for _, move := range repair.Repaired {
+			l.noteChange("%s", config.MigratedCursorFailModeRepairNote(move))
 		}
 	}
 	return changed, nil

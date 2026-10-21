@@ -953,8 +953,14 @@ func noteWindowsEnterpriseMigration(opts *windowsEnterpriseLifecycleOptions, bef
 	if opts == nil || after == nil || bytes.Equal(before, after) {
 		return
 	}
-	var record config.MigrationRecord
+	var record, previous config.MigrationRecord
 	if json.Unmarshal(trimWindowsJSONBOM(after), &record) != nil {
+		return
+	}
+	if json.Unmarshal(trimWindowsJSONBOM(before), &previous) == nil && previous.MigratedAt == record.MigratedAt &&
+		previous.SourceSHA256 == record.SourceSHA256 && len(record.Repaired) > len(previous.Repaired) {
+		// The same migration, with a Cursor fail mode it wrote restored.
+		opts.configFailModeRepairs = record.Repaired[len(previous.Repaired):]
 		return
 	}
 	opts.localEnforcementEntriesIgnored = record.ActionsRowsIgnored
@@ -1031,8 +1037,14 @@ func addWindowsEnterpriseMissingCredentialWarnings(result *enterprisestatus.Resu
 // ensure_upgrade drift:config warning (GAP-0472). Values that disagreed are
 // a warning: migration-v9.json lists what was kept and what was lost.
 func addWindowsEnterpriseMigrationChange(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) {
+	if len(result.Errors) != 0 {
+		return
+	}
+	for _, move := range opts.configFailModeRepairs {
+		result.Changes = append(result.Changes, config.MigratedCursorFailModeRepairNote(move))
+	}
 	migration := opts.configMigration
-	if migration == nil || len(result.Errors) != 0 {
+	if migration == nil {
 		return
 	}
 	path := opts.configMigrationPath

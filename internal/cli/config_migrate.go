@@ -291,6 +291,13 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 		// those files, not to the readable config (GAP-0440).
 		return restoreACL(append(written, path, path+config.ConfigV8BackupSuffix, config.MigrationRecordPath(path))...)
 	}
+	if opt.Bundle.ID == "" {
+		if repaired, err := repairManagedStandaloneCursorFailMode(ctx, path, raw, opt); err != nil {
+			return err
+		} else if repaired {
+			return restoreACL(append(written, path, config.MigrationRecordPath(path))...)
+		}
+	}
 	if state, err := configwrite.ReadGenerationState(path); err == nil &&
 		state.ConfigSHA256 == configwrite.SHA256Hex(raw) &&
 		(opt.Bundle.ID == "" || state.Actor == opt.Actor && state.BundleID == opt.Bundle.ID &&
@@ -304,6 +311,31 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 		return err
 	}
 	return restoreACL(written...)
+}
+
+// repairManagedStandaloneCursorFailMode writes config.RepairMigratedCursorFailMode
+// for the installed config through the config writer (lifecycle actor,
+// compare-and-swap on raw), then its migration record. An open the 1.0.0-1.0.2
+// migration wrote is not the administrator's, and managed hooks honour an
+// explicit open since 1.0.3. No record means no change.
+func repairManagedStandaloneCursorFailMode(ctx context.Context, path string, raw []byte, opt configwrite.Options) (bool, error) {
+	recordRaw, err := os.ReadFile(config.MigrationRecordPath(path))
+	if err != nil {
+		return false, nil
+	}
+	var record config.MigrationRecord
+	if json.Unmarshal(recordRaw, &record) != nil {
+		return false, nil
+	}
+	repaired, updated, ok := config.RepairMigratedCursorFailMode(raw, record)
+	if !ok {
+		return false, nil
+	}
+	opt.ExpectSHA256 = configwrite.SHA256Hex(raw)
+	if _, err := configwrite.ReplaceDocument(ctx, path, repaired, opt); err != nil {
+		return false, fmt.Errorf("restore the migrated Cursor hook_fail_mode in %s: %w", path, err)
+	}
+	return true, config.WriteMigrationRecord(path, updated)
 }
 
 // recordRestoredManagedStandaloneConfig records the config.yaml a lifecycle

@@ -96,3 +96,61 @@ func TestManagedObserveGuardFollowsAnExplicitOpenFailMode(t *testing.T) {
 		})
 	}
 }
+
+// Review fix (r103): an open fail mode belongs to the session whose
+// authenticated verdict reported it, and an answer that fails
+// authentication is always refused and forgets it, so a later outage in
+// that session is refused too.
+func TestManagedObserveOpenFailModeIsScopedToItsSessionAndAuthentication(t *testing.T) {
+	prompt := func(id int, session string) string {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/prompt","params":{"sessionId":%q,"prompt":[]}}`+"\n", id, session)
+	}
+	frames := prompt(1, "a") + prompt(2, "b") + prompt(3, "a") + prompt(4, "a") + prompt(5, "a")
+	offline := errors.New("offline")
+	evaluator := &sequenceEvaluator{
+		verdicts: []Verdict{{Action: "allow", FailMode: "open"}, {}, {}, {}, {}},
+		errs:     []error{nil, offline, offline, responseAuthError("ACP evaluator response authentication failed"), offline},
+	}
+	var forwarded, client bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	opts := ProxyOptions{Mode: ModeObserve, Evaluator: evaluator, Managed: true, Stderr: io.Discard}
+	if err := copyFrames(context.Background(), opts, state, ClientToAgent, strings.NewReader(frames), &forwarded, &client); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[int]bool{1: true, 2: false, 3: true, 4: false, 5: false} {
+		if delivered := strings.Contains(forwarded.String(), fmt.Sprintf(`"id":%d,`, id)); delivered != want {
+			t.Errorf("frame %d delivered = %v, want %v", id, delivered, want)
+		}
+	}
+	if !strings.Contains(client.String(), "could not be verified") {
+		t.Fatalf("the editor was not told the answer failed authentication: %q", client.String())
+	}
+}
+
+// Review fix (r103): after an authenticated verdict said the profile's
+// fail_mode is explicitly closed, an observe guard refuses a frame it could
+// not evaluate, managed or not.
+func TestObserveGuardFollowsAnExplicitClosedFailMode(t *testing.T) {
+	frames := `{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}` + "\n" +
+		`{"jsonrpc":"2.0","id":8,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}` + "\n"
+	for _, managed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("managed=%v", managed), func(t *testing.T) {
+			var forwarded, client bytes.Buffer
+			state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+			evaluator := &sequenceEvaluator{
+				verdicts: []Verdict{{Action: "allow", FailMode: "closed"}, {}},
+				errs:     []error{nil, errors.New("offline")},
+			}
+			opts := ProxyOptions{Mode: ModeObserve, Evaluator: evaluator, Managed: managed, Stderr: io.Discard}
+			if err := copyFrames(context.Background(), opts, state, ClientToAgent, strings.NewReader(frames), &forwarded, &client); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(forwarded.String(), `"id":7`) || strings.Contains(forwarded.String(), `"id":8`) {
+				t.Fatalf("agent=%q client=%q", forwarded.String(), client.String())
+			}
+			if !strings.Contains(client.String(), "not delivered") {
+				t.Fatalf("the editor was not told why: %q", client.String())
+			}
+		})
+	}
+}

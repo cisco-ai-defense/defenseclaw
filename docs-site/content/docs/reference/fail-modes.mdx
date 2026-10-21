@@ -40,8 +40,10 @@ Some refusals do not depend on the fail mode, because they are not an outage:
 on a managed computer a hook still blocks when its administrator-owned runtime
 (the runtime descriptor on Linux and macOS, the runtime generation on
 Windows) is missing or fails its checks, when another program answers in
-place of the gateway service, when its token is missing, and when the account
-is not enrolled.
+place of the gateway service, when its token is missing, when the gateway
+refuses its credential (HTTP 401 or 403), when the call does not match the
+event or hook contract the hook was registered for (Codex, GitHub Copilot),
+and when the account is not enrolled.
 
 On a managed standalone host both variables are *tighten-only*: a value that
 makes hooks stricter is honored, and one that would loosen the administrator's
@@ -80,7 +82,12 @@ On a managed computer outside Secure Client an explicit
 `hook_fail_mode: open` is honored. Earlier 1.0.3 builds ignored it there and
 reported it as `fail_open_ignored`; that warning is gone. An upgrade does not
 write `open` into a managed config: the config_version 9 migration keeps a
-managed Cursor fail mode as the administrator wrote it.
+managed Cursor fail mode as the administrator wrote it. The 1.0.0 to 1.0.2
+migration rewrote it from the guardrail mode (observe became `open`); the
+first 1.0.3 `ensure` sets such a value back to `closed` when
+`migration-v9.json` records that rewrite and `config.yaml` is still the
+migration's output, says so in its changes, and never touches an `open` the
+administrator wrote later.
 </Callout>
 
 <Callout type="info" title="Changed in 1.0.3">

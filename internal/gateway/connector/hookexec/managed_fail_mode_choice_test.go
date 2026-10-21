@@ -6,7 +6,9 @@ package hookexec
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 )
 
 // Owner decision 2026-10-20: a standalone managed hook follows the fail mode
@@ -15,8 +17,13 @@ import (
 // gave an unusable answer goes ahead and is logged fail-open, as on a
 // per-user install. Refusals that are not an outage stay closed: a gateway
 // peer DefenseClaw cannot verify, an invalid managed runtime and a missing
-// token. Strict availability still closes it.
+// token, an authentication refusal (401/403, also after the 401 retries) and
+// a local event binding or contract mismatch. Strict availability still
+// closes it.
 func TestStandaloneManagedHookFollowsTheAdministratorsOpenFailMode(t *testing.T) {
+	original := hookAuthRetryDelay
+	hookAuthRetryDelay = time.Millisecond
+	t.Cleanup(func() { hookAuthRetryDelay = original })
 	standaloneOpen := func(opts *Options) {
 		managedCodex(opts)
 		opts.ExplainUnenrolledAccount = true
@@ -37,6 +44,12 @@ func TestStandaloneManagedHookFollowsTheAdministratorsOpenFailMode(t *testing.T)
 			mutate: func(o *Options) { o.ManagedRuntimeFailure = "enterprise_managed_runtime_state_invalid" }},
 		{name: "strict availability", rt: &stubRT{err: errors.New("offline")}, blocked: true,
 			mutate: func(o *Options) { o.StrictAvailability = true }},
+		{name: "gateway 401 after retries", rt: &stubRT{status: 401, body: `{"error":"unauthorized"}`}, blocked: true},
+		{name: "gateway 403", rt: &stubRT{status: 403, body: `{"error":"forbidden"}`}, blocked: true},
+		{name: "codex contract missing", rt: ok(`{"action":"allow"}`), blocked: true,
+			mutate: func(o *Options) { o.HookContractID = "" }},
+		{name: "codex event mismatch", rt: ok(`{"action":"allow"}`), blocked: true,
+			mutate: func(o *Options) { o.Stdin = strings.NewReader(`{"hook_event_name":"PostToolUse"}`) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result := run(t, "codex", tc.rt, func(o *Options) {

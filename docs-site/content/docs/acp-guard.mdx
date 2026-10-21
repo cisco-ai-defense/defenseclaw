@@ -272,9 +272,13 @@ mode the session goes on unchecked, and the guard says so once in the editor:
 Client is stricter by default: there an observe-mode guard refuses a step it
 could not check, as action mode does, and ACP checking switched off centrally
 lets the session go on unchecked. An administrator who sets the profile's
-`fail_mode: open` chooses otherwise: once the gateway has answered the session
-once, a step the guard could not check goes through unchecked, as on a
-per-user install. A credential the gateway refused is still refused. On Linux and macOS the gateway's
+`fail_mode: open` chooses otherwise: once the gateway has answered that
+session, a step the guard could not check in it goes through unchecked, as on
+a per-user install. An observe-mode profile may also set `fail_mode: closed`:
+once the gateway has answered the session, its guard refuses a step it could
+not check, on every install. A credential the gateway refused is still
+refused, and so is an answer that fails authentication, which also ends the
+open behavior until the gateway answers again. On Linux and macOS the gateway's
 authentication-failure audit row names the account (uid) the kernel reports
 for the refused caller.
 

@@ -119,7 +119,7 @@ func TestHTTPEvaluatorRejectsLoopbackImpersonatorWithoutLeakingToken(t *testing.
 		Mode: ModeAction, Direction: ClientToAgent, Surface: SurfaceProtocol,
 		Payload: []byte(`{"jsonrpc":"2.0","method":"` + sensitive + `"}`),
 	})
-	if err == nil || err.Error() != "ACP gateway challenge authentication failed" {
+	if err == nil || err.Error() != "ACP gateway challenge authentication failed" || !errors.Is(err, ErrResponseAuthentication) {
 		t.Fatalf("impersonator error = %v", err)
 	}
 	if requests != 1 {

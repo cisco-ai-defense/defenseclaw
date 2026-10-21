@@ -166,6 +166,9 @@ type windowsEnterpriseLifecycleOptions struct {
 	// migrated; the standalone result reports it in changes (GAP-0472).
 	configMigration     *config.MigrationRecord
 	configMigrationPath string
+	// configFailModeRepairs are the Cursor fail modes this run restored to
+	// closed in migration-v9.json (config.RepairMigratedCursorFailMode).
+	configFailModeRepairs []config.MigrationMove
 	// deploymentTrustMode is the payload trust the deployment records
 	// (deployment.json trust_mode), taken from the installer report the
 	// standalone result was built from. The marker publishes it rather than

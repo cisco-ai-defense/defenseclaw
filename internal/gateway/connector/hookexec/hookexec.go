@@ -487,7 +487,7 @@ func runHook(ctx context.Context, opts Options) int {
 		)
 		opts.Event = strings.TrimSpace(opts.Event)
 		if bindingErr != nil {
-			return failResponse(opts, sp, failMode, bindingErr.Error())
+			return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), bindingErr.Error())
 		}
 		opts.Event = event
 	} else if strings.EqualFold(strings.TrimSpace(opts.Connector), "antigravity") {
@@ -511,7 +511,7 @@ func runHook(ctx context.Context, opts Options) int {
 		// binding; never infer it from a body field or forward an untrusted
 		// registration. This is a local integration failure, so Copilot must
 		// receive its documented fail-open result.
-		return failResponse(opts, sp, failMode, "missing or unsupported Copilot hook event binding")
+		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), "missing or unsupported Copilot hook event binding")
 	}
 	deadline := answerDeadline(opts, startedAt)
 	switch {
@@ -856,7 +856,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", http.StatusUnauthorized))
+			return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), fmt.Sprintf("gateway returned HTTP %d", http.StatusUnauthorized))
 		case <-timer.C:
 		}
 		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
@@ -925,6 +925,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			opts.Event = resolveHookEvent("", payload)
 		}
 		return failUnenrolled(opts, sp, managedUIDUnregisteredReason)
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		// An authentication refusal is integrity, not an outage.
+		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
 		return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
@@ -1413,6 +1416,17 @@ func (sp spec) decide(opts Options, body []byte) int {
 // standalone profile, Unix or Windows).
 func managedNativeDecision(opts Options) bool {
 	return opts.ManagedEnterprise && !opts.SecureClient
+}
+
+// managedIntegrityFailMode is the fail mode of an integrity failure (an
+// authentication refusal, a local event binding or hook contract mismatch):
+// closed on a managed host outside Secure Client whatever the administrator
+// chose for outages, else failMode.
+func managedIntegrityFailMode(opts Options, failMode string) string {
+	if managedNativeDecision(opts) {
+		return "closed"
+	}
+	return failMode
 }
 
 func failNativeDecision(opts Options, sp spec, reason string) int {

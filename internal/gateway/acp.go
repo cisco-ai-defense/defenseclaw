@@ -203,7 +203,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	ctx = a.withGuardrailProfileDecision(ctx, agent.ConnectorID)
 	if slices.Contains(profile.DeniedMethods, req.Method) {
 		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: "method denied by ACP profile",
-			FailMode: acpProfileFailMode(profile)}
+			FailMode: acpProfileFailMode(profile, mode)}
 		if mode != string(acp.ModeAction) {
 			verdict.Action, verdict.WouldBlock = "allow", true
 		}
@@ -246,7 +246,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	verdict.applyMode(mode)
 	result := acp.Verdict{
 		Action: verdict.Action, RawAction: verdict.RawAction, Severity: verdict.Severity,
-		Reason: verdict.Reason, WouldBlock: verdict.WouldBlock, FailMode: acpProfileFailMode(profile),
+		Reason: verdict.Reason, WouldBlock: verdict.WouldBlock, FailMode: acpProfileFailMode(profile, mode),
 	}
 	record := func(recordCtx context.Context) hookEvaluationContext {
 		var evaluation hookEvaluationContext
@@ -283,11 +283,17 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, result)
 }
 
-// acpProfileFailMode is the Verdict.FailMode of profile: "open" when its
-// fail_mode is explicitly open, "" otherwise.
-func acpProfileFailMode(profile config.ACPProfile) string {
-	if strings.EqualFold(strings.TrimSpace(profile.FailMode), "open") {
-		return "open"
+// acpProfileFailMode is the Verdict.FailMode of profile in mode: its
+// explicit fail_mode ("open" or "closed") in observe mode, "" when unset or
+// in action mode, which is always closed (and keeps the verdict of a guard
+// that predates the field).
+func acpProfileFailMode(profile config.ACPProfile, mode string) string {
+	if mode == string(acp.ModeAction) {
+		return ""
+	}
+	switch failMode := strings.ToLower(strings.TrimSpace(profile.FailMode)); failMode {
+	case "open", "closed":
+		return failMode
 	}
 	return ""
 }

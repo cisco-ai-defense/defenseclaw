@@ -96,6 +96,63 @@ func TestMigrateManagedStandaloneConfig(t *testing.T) {
 	}
 }
 
+// The Windows config step restores a Cursor fail mode the 1.0.0-1.0.2
+// migration rewrote to open, through the config writer, once; an open the
+// administrator sets afterwards stays, and without a record nothing changes.
+func TestMigrateManagedStandaloneConfigRestoresMigratedCursorFailMode(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	const key = "guardrail.connectors.cursor.hook_fail_mode"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	open := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: " + dir +
+		"\nobservability: {}\nguardrail:\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n")
+	if err := os.WriteFile(path, open, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != string(open) {
+		t.Fatalf("no record, but the config changed:\n%s", raw)
+	}
+	record := config.MigrationRecord{
+		SchemaVersion: config.MigrationRecordSchemaVersion, FromVersion: 8, ToVersion: 9, Actor: "lifecycle",
+		SourceSHA256: strings.Repeat("c", 64), ResultSHA256: configwrite.SHA256Hex(open),
+		Moved: []config.MigrationMove{{Source: "config", From: key, To: key, Value: "open"}},
+	}
+	if err := config.WriteMigrationRecord(path, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	repaired, _ := os.ReadFile(path)
+	if want := strings.Replace(string(open), "hook_fail_mode: open", "hook_fail_mode: closed", 1); string(repaired) != want {
+		t.Fatalf("repaired config:\n%s", repaired)
+	}
+	state, err := configwrite.ReadGenerationState(path)
+	if err != nil || state.Actor != configwrite.ActorLifecycle || state.ConfigSHA256 != configwrite.SHA256Hex(repaired) {
+		t.Fatalf("generation = %+v (%v)", state, err)
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := configwrite.ReadGenerationState(path); again.Generation != state.Generation {
+		t.Fatal("the repair ran twice")
+	}
+	adminOpen := strings.Replace(string(repaired), "hook_fail_mode: closed", "hook_fail_mode: open", 1)
+	if err := os.WriteFile(path, []byte(adminOpen), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != adminOpen {
+		t.Fatalf("an administrator open set after the repair was undone:\n%s", raw)
+	}
+}
+
 // A rollback records the config it restored as a new generation and never
 // takes a number back.
 func TestRecordRestoredManagedStandaloneConfig(t *testing.T) {

@@ -78,15 +78,10 @@ func (a *ACPConfig) Validate() error {
 		if effectiveMode == "" {
 			effectiveMode = "observe"
 		}
-		expectedFailureMode := "open"
-		if effectiveMode == "action" {
-			expectedFailureMode = "closed"
-		}
-		if failMode != "" && failMode != expectedFailureMode {
-			return fmt.Errorf(
-				"profiles[%q].fail_mode must be %q when mode is %q",
-				name, expectedFailureMode, effectiveMode,
-			)
+		// Action mode always fails closed. Observe mode takes either: an
+		// explicit closed refuses a frame the guard could not evaluate.
+		if failMode == "open" && effectiveMode == "action" {
+			return fmt.Errorf("profiles[%q].fail_mode must be %q when mode is %q", name, "closed", effectiveMode)
 		}
 		if err := validateACPNameList(name, "allowed_clients", profile.AllowedClients); err != nil {
 			return err
