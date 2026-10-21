@@ -1765,11 +1765,12 @@ func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int 
 // transport failures. Strict availability remains an unconditional closed
 // override for compatibility with existing deployments.
 // emitFailOpenAllow answers a call that a failure lets through (fail mode
-// open) with the connector's allow. The managed OpenCode plugin reads an
-// empty answer as closed, so it gets an explicit allow with the fail-open
-// notice (GAP-0351); every other connector keeps its openAllow.
+// open) with the connector's allow. The managed OpenCode plugin (the only
+// caller of the OpenCode hook, always --enterprise-managed) reads an empty
+// answer as closed, so it gets an explicit allow with the fail-open notice
+// (GAP-0351); every other connector keeps its openAllow.
 func emitFailOpenAllow(opts Options, sp spec, reason string) int {
-	if sp.connector == "opencode" {
+	if sp.connector == "opencode" && opts.ManagedEnterprise {
 		fmt.Fprintln(opts.Stdout, openCodeFailOpenBody(openCodeFailOpenNotice(reason)))
 		return 0
 	}
