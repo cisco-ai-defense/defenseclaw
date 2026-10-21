@@ -208,6 +208,19 @@ var specs = map[string]spec{
 }
 
 // openCodeDenyBody is the managed OpenCode plugin's block answer.
+// openCodeFailOpenBody is the managed OpenCode plugin's answer for a call a
+// failure lets through in fail mode open: an explicit allow that carries the
+// notice the plugin shows (GAP-0351). The plugin treats an empty or
+// unparseable answer as closed, so the hook never answers this with nothing.
+func openCodeFailOpenBody(notice string) string {
+	return `{"action":"allow","hook_output":{"decision":"allow"},"fail_open":true,"notice":` + mustJSONString(notice) + `}`
+}
+
+// openCodeFailOpenNotice is the notice of that answer.
+func openCodeFailOpenNotice(reason string) string {
+	return "DefenseClaw could not check this tool call, and the fail mode is open, so it runs without a check (" + strings.TrimSpace(reason) + ")."
+}
+
 func openCodeDenyBody(reason string) string {
 	return `{"hook_output":{"decision":"deny","reason":` + mustJSONString(reason) + `}}`
 }

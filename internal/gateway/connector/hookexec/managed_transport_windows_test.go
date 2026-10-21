@@ -7,6 +7,7 @@ package hookexec
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"math/bits"
 	"net"
@@ -302,5 +303,62 @@ func TestTCPTableListensOn(t *testing.T) {
 	}
 	if !tcpTableListensOn([]mibTCPRowOwnerPID{{State: mibTCPStateListen, LocalAddr: loopback, LocalPort: wirePort}}, [4]byte{127, 0, 0, 1}, port) {
 		t.Fatal("a loopback listener was not found")
+	}
+}
+
+// A stopped gateway service is an outage only when nothing listens on its
+// port: another process on the port, or a listen table that cannot be read,
+// is an integrity failure that no fail mode lets through.
+func TestStoppedManagedGatewayServiceWithAPortListenerIsNotAnOutage(t *testing.T) {
+	managedTransportTestMu.Lock()
+	defer managedTransportTestMu.Unlock()
+
+	listener := listenManagedTransportTest(t)
+	defer listener.Close()
+	bytesRead := acceptManagedTransportBytes(t, listener)
+	addr := listener.Addr().String()
+	stopped := func(string) (uint32, error) {
+		return 0, fmt.Errorf("%w (state=1 pid=0)", errManagedGatewayNotRunning)
+	}
+	restoreManagedTransportSeams(t, stopped, func(net.Conn) (uint32, error) { return 202, nil })
+	previousListening := managedEnterpriseListening
+	t.Cleanup(func() { managedEnterpriseListening = previousListening })
+	open := Options{ManagedEnterprise: true, ManagedStandalone: true, FailMode: "open"}
+
+	for _, tc := range []struct {
+		name       string
+		listening  bool
+		known      bool
+		notRunning bool
+		portHeld   bool
+	}{
+		{name: "another process holds the port", listening: true, known: true, portHeld: true},
+		{name: "listen table unreadable", known: false},
+		{name: "nothing listens", known: true, notRunning: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			managedEnterpriseListening = func(string) (bool, bool) { return tc.listening, tc.known }
+			client, err := managedEnterpriseHTTPClient(time.Second, addr, "DefenseClawGateway")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.Post("http://"+addr+"/api/v1/hook", "application/json", strings.NewReader(`{"secret":"must-not-leak"}`))
+			if err == nil || !errors.Is(err, errManagedGatewayPeerUnverified) {
+				t.Fatalf("err = %v, want a peer failure", err)
+			}
+			if got := errors.Is(err, errManagedGatewayNotRunning); got != tc.notRunning {
+				t.Fatalf("not running = %v, want %v (err %v)", got, tc.notRunning, err)
+			}
+			if got := errors.Is(err, errManagedGatewayPortHeld); got != tc.portHeld {
+				t.Fatalf("port held = %v, want %v (err %v)", got, tc.portHeld, err)
+			}
+			if got := ManagedOutageFailsOpen(open, err); got != tc.notRunning {
+				t.Fatalf("ManagedOutageFailsOpen = %v, want %v (err %v)", got, tc.notRunning, err)
+			}
+		})
+	}
+	_ = listener.Close()
+	if got := <-bytesRead; len(got) != 0 {
+		t.Fatalf("the listener received %d request bytes: %q", len(got), got)
 	}
 }

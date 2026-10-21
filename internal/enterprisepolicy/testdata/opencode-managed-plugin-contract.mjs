@@ -137,6 +137,23 @@ for (const [stdout, exit, pattern] of [
   console.log("case ok: empty exit-0 answer after the plugin file is removed allows");
 }
 
+// GAP-0351: a call the hook binary lets through in fail mode open gets an
+// explicit allow that carries the fail-open notice: the tool runs and the
+// notice is shown. The empty answer above stays closed.
+{
+  const toasts = [];
+  const client = { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body : arg); return true; } } };
+  const hooks = await load({ client });
+  answer("event.json", JSON.stringify({
+    action: "allow", hook_output: { decision: "allow" }, fail_open: true,
+    notice: "DefenseClaw could not check this tool call, and the fail mode is open, so it runs without a check (enterprise_managed_gateway_not_running).",
+  }));
+  assert.equal(await before(hooks), undefined);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(toasts.some((toast) => toast.variant === "warning" && /could not check this tool call, and the fail mode is open/.test(toast.message)), JSON.stringify(toasts));
+  console.log("case ok: a fail-open allow runs the tool and shows its notice");
+}
+
 // Action mode needs authoritative arguments: a plugin after this one could
 // still rewrite them.
 {

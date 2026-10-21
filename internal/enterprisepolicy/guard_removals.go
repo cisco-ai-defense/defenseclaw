@@ -200,6 +200,10 @@ func removalAfterProcessStart(removals []ForeignHookRemoval, key SessionKey, now
 // the guardian removed a hook.
 const sessionRemovedNote = "The agent can keep running a hook it loaded when it started, even after the file changes, so DefenseClaw blocks this agent's tool calls until it restarts: restart the agent."
 
+// removedSessionReason is the reason of a block for an agent process that
+// started before the guardian removed one of its connector's hooks.
+const removedSessionReason = "removed after this agent process started"
+
 // removedHookDecision denies a call of an agent process that started before
 // the guardian removed an unapproved hook of its connector for this account.
 func removedHookDecision(decision GuardDecision, connector string, removal ForeignHookRemoval) GuardDecision {
@@ -211,7 +215,8 @@ func removedHookDecision(decision GuardDecision, connector string, removal Forei
 	decision.Findings = append([]Finding{{
 		Connector: connector,
 		Path:      removal.Path,
-		Reason:    "removed after this agent process started",
+		Reason:    removedSessionReason,
 	}}, decision.Findings...)
+	decision.SessionBlock = &SessionRecord{Connector: connector, Blocked: true, Path: removal.Path, Reason: removedSessionReason}
 	return decision
 }

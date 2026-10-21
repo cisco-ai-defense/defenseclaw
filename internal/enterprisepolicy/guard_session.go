@@ -310,27 +310,7 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 		return record
 	}
 
-	blockable := hasBlockableFindings(decision)
-	if decision.Deny && update.SessionStart && (blockable || decision.Incomplete) {
-		// The block names the first unapproved hook or plugin; a scan that
-		// stopped on a budget without reaching one names where it stopped
-		// (the last finding).
-		cause, note := Finding{}, sessionBlockNote
-		for _, finding := range decision.Findings {
-			if isBlockableFinding(finding) {
-				cause = finding
-				break
-			}
-		}
-		if !blockable {
-			note = sessionIncompleteNote
-			for _, finding := range decision.Findings {
-				if !finding.Allowed {
-					cause = finding
-				}
-			}
-			cause.Reason = incompleteScanReason + strings.TrimPrefix(cause.Reason, "cannot verify hook file: ")
-		}
+	if cause, note, ok := sessionStartBlockCause(decision, update.SessionStart); ok {
 		blocked := func(existing loaded) SessionRecord {
 			record := fresh(existing)
 			record.Blocked, record.BlockedAt = true, stamp
@@ -347,6 +327,8 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 			}
 		}
 		decision.Reason = strings.TrimSpace(decision.Reason) + " " + note
+		record := blocked(loaded{})
+		decision.SessionBlock = &record
 		return decision
 	}
 
@@ -376,6 +358,8 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 		if key.Process == "" {
 			result.Reason += " " + sessionUnknownProcessNote
 		}
+		record := *sticky
+		result.SessionBlock = &record
 		return result
 	}
 
@@ -394,6 +378,36 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 		pruneSessionRecords(dir, now)
 	}
 	return decision
+}
+
+// sessionStartBlockCause reports a decision that blocks its session: a
+// session start (sessionStart) whose scan found an unapproved hook or
+// plugin, or stopped on a budget before it checked every source. The cause
+// is the first unapproved hook or plugin; a scan that stopped without
+// reaching one names where it stopped (the last finding). note ends the
+// denial.
+func sessionStartBlockCause(decision GuardDecision, sessionStart bool) (cause Finding, note string, ok bool) {
+	blockable := hasBlockableFindings(decision)
+	if !decision.Deny || !sessionStart || (!blockable && !decision.Incomplete) {
+		return Finding{}, "", false
+	}
+	note = sessionBlockNote
+	for _, finding := range decision.Findings {
+		if isBlockableFinding(finding) {
+			cause = finding
+			break
+		}
+	}
+	if !blockable {
+		note = sessionIncompleteNote
+		for _, finding := range decision.Findings {
+			if !finding.Allowed {
+				cause = finding
+			}
+		}
+		cause.Reason = incompleteScanReason + strings.TrimPrefix(cause.Reason, "cannot verify hook file: ")
+	}
+	return cause, note, true
 }
 
 func validGatewaySessionRecord(record SessionRecord, key SessionKey, kind string) bool {
@@ -449,6 +463,9 @@ func stickySessionDecision(decision GuardDecision, connector string, record Sess
 	var cause string
 	note := sessionBlockNote
 	switch {
+	case strings.HasPrefix(record.Reason, removedSessionReason):
+		cause = "This agent started before DefenseClaw removed an unapproved hook from " + record.Path + "."
+		note = sessionRemovedNote
 	case strings.HasPrefix(record.Reason, incompleteScanReason):
 		cause = "When this agent session started, DefenseClaw's hook scan stopped before it checked every hook file (" + strings.TrimPrefix(record.Reason, incompleteScanReason) + ")."
 		note = sessionIncompleteNote

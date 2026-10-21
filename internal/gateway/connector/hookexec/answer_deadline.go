@@ -49,6 +49,30 @@ var hookAnswerBudget = 3500 * time.Millisecond
 // It keeps 1 s of the 5 s for the slip of a late deadline.
 var hookProgressCeiling = 4 * time.Second
 
+// hookGatewayAnswerFloor is the least time a standalone managed hook's
+// gateway contact (the foreign-hook session exchange, or the hook request)
+// must have before the call's answer deadline for a missing answer to count
+// as the gateway's: an outage that the administrator's open fail mode lets
+// through. The deadline counts from the invocation, so a slow local step
+// before the contact (a foreign-hook scan that runs close to its own budget)
+// could otherwise leave a healthy gateway a few milliseconds and turn the
+// expired budget into an allowance (final review, P2). Less than this left
+// fails closed (errAnswerBudgetSpentLocally).
+var hookGatewayAnswerFloor = time.Second
+
+// errAnswerBudgetSpentLocally marks a missing answer of a gateway contact
+// that started with less than hookGatewayAnswerFloor of the answer budget
+// left: the hook's own work spent the budget, the gateway did not fail to
+// answer. It wraps with errGatewayNoAnswer, keeps its reason code, and is
+// closed in every fail mode.
+var errAnswerBudgetSpentLocally = errors.New("the hook's own work used the answer budget before the gateway was asked")
+
+// gatewayAnswerWindowShort reports a standalone managed hook whose answer
+// deadline leaves its gateway less than hookGatewayAnswerFloor from now.
+func gatewayAnswerWindowShort(opts Options, deadline time.Time) bool {
+	return managedNativeDecision(opts) && !deadline.IsZero() && time.Until(deadline) < hookGatewayAnswerFloor
+}
+
 // HookProgressHeader asks the gateway to answer 102 Processing as soon as a
 // tool call it evaluates waits on a remote scanner. Only hooks that bound
 // their wait by hookAnswerBudget send it, so other clients never see an
@@ -199,11 +223,13 @@ func gatewayNoAnswer(ctx context.Context) bool {
 
 // failNoAnswer fails a tool call whose gateway gave no decision in time:
 // closed for a Secure Client hook, the fail mode for a standalone hook (the
-// administrator's, owner decision 2026-10-20) and for a per-user hook.
+// administrator's, owner decision 2026-10-20) and for a per-user hook. A
+// standalone hook whose own work left its gateway less than
+// hookGatewayAnswerFloor (Options.answerSpentLocally) is closed.
 func failNoAnswer(opts Options, sp spec, failMode string) int {
 	if opts.ManagedEnterprise {
 		mode := "closed"
-		if managedNativeDecision(opts) {
+		if managedNativeDecision(opts) && !opts.answerSpentLocally {
 			mode = failMode
 		}
 		return failUnreachable(opts, sp, mode, managedGatewayNoAnswerReason)

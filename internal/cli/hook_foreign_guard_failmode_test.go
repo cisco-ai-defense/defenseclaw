@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -124,5 +125,51 @@ func TestForeignHookGuardFollowsTheFailModeForOpenCodeAndCopilot(t *testing.T) {
 				t.Fatalf("%s mode open: the call must go on to the hook's open result, got %q", connector, opts.ManagedRuntimeFailure)
 			}
 		}
+	}
+}
+
+// Final review P1: a session the gateway blocked at its start (an unapproved
+// hook, since deleted while the agent still runs it) stays blocked when the
+// gateway then stops and the administrator chose open. The hook mirrors the
+// gateway's session block under the account's home and consults it before
+// an open outage allows a clean scan; a copy it cannot read blocks too.
+func TestForeignHookGuardKeepsAGatewaySessionBlockThroughAnOpenOutage(t *testing.T) {
+	fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
+	fixture.guard("copilot")
+	fixture.process = "agent-process"
+	foreign := filepath.Join(fixture.project, ".github", "hooks", "x.json")
+	fixture.write(t, foreign, `{"hooks": {"preToolUse": [{"bash": "./rewrite.sh"}]}}`)
+	isBlock := func(o hookexec.Options) bool {
+		return strings.HasPrefix(o.ManagedRuntimeFailure, hookexec.ForeignHookBlockedReasonPrefix)
+	}
+	if start := fixture.runEvent(t, "copilot", "sessionStart", "sessionId", "s-1"); !isBlock(start) {
+		t.Fatalf("a session start with an unapproved hook must block: %q", start.ManagedRuntimeFailure)
+	}
+	if err := os.Remove(foreign); err != nil {
+		t.Fatal(err)
+	}
+	if held := fixture.runEvent(t, "copilot", "preToolUse", "sessionId", "s-1"); !isBlock(held) {
+		t.Fatalf("the gateway must keep the session blocked: %q", held.ManagedRuntimeFailure)
+	}
+
+	exchangeOpts := hookexec.Options{Connector: "copilot", ManagedEnterprise: true, ExplainUnenrolledAccount: true, FailMode: "open"}
+	notRunning := fmt.Errorf("dial hook socket: %w", hookexec.ErrManagedGatewayNotRunning)
+	hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+		return enterprisepolicy.GuardDecision{}, foreignHookSessionExchangeError(exchangeOpts, notRunning)
+	}
+	if held := fixture.runEvent(t, "copilot", "preToolUse", "sessionId", "s-1"); !isBlock(held) || !strings.Contains(held.ManagedRuntimeFailure, foreign) {
+		t.Fatalf("an open outage lifted the session block: %q", held.ManagedRuntimeFailure)
+	}
+	// Another agent process and session have no block: the open outage
+	// lets their clean scan through.
+	fixture.process = "agent-process-2"
+	if fresh := fixture.runEvent(t, "copilot", "preToolUse", "sessionId", "s-2"); fresh.ManagedRuntimeFailure != "" {
+		t.Fatalf("a clean session must follow the open fail mode: %q", fresh.ManagedRuntimeFailure)
+	}
+	// A copy that cannot be read blocks.
+	fixture.process = "agent-process-3"
+	fixture.write(t, enterprisepolicy.SessionPath(fixture.home, "copilot", "s", "s-3"), "{")
+	if unreadable := fixture.runEvent(t, "copilot", "preToolUse", "sessionId", "s-3"); !isBlock(unreadable) {
+		t.Fatalf("an unreadable session copy must block: %q", unreadable.ManagedRuntimeFailure)
 	}
 }

@@ -53,6 +53,14 @@ var hookForeignGuardLoad = enterprisepolicy.LoadPublicPolicy
 // (replaceable in tests).
 var hookForeignGuardRecord = enterprisepolicy.RecordForeignHookBlock
 
+// hookForeignGuardMirror keeps the account-home copy of the gateway's
+// session answer, and hookForeignGuardLocalSession consults it during an
+// open outage (replaceable in tests).
+var (
+	hookForeignGuardMirror       = enterprisepolicy.MirrorForeignHookSessionBlock
+	hookForeignGuardLocalSession = enterprisepolicy.ApplyMirroredForeignHookSession
+)
+
 // hookForeignGuardRecordEnv records the environment redirects the agent
 // runs with, for the guardian's cleanup (replaceable in tests).
 var hookForeignGuardRecordEnv = enterprisepolicy.RecordEnvRedirect
@@ -449,6 +457,15 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		return decision, accountHome
 	}
 	decision, err := hookForeignGuardExchange(name, event, startedAt, deadline, update)
+	switch {
+	case err == nil:
+		// Keep a copy of the gateway's answer for this session under the
+		// account's home: a block it enforced must outlive a later outage.
+		_ = hookForeignGuardMirror(accountHome, update.Key, decision, now)
+	case update.Decision.Deny:
+		// The gateway could not record a block this session start found.
+		_ = hookForeignGuardMirror(accountHome, update.Key, enterprisepolicy.WithSessionStartBlock(update.Decision, sessionStart, now), now)
+	}
 	if err != nil && !update.Decision.Deny && errors.Is(err, errForeignHookSessionOutageOpen) {
 		// GAP-0346: the scan found no unapproved hook and the gateway that
 		// holds the session record is stopped, restarting or not answering.
@@ -457,8 +474,11 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		// gives the open result with its notice, as status reports. Before,
 		// every managed Copilot, Cursor, Devin, OpenCode, Amp and Hermes call
 		// was blocked here in fail mode open. An unapproved hook the scan
-		// finds still blocks in every fail mode.
-		return update.Decision, accountHome
+		// finds still blocks in every fail mode, and so does a session the
+		// gateway blocked earlier (its block is mirrored under the account's
+		// home; an unreadable copy blocks too): the agent may still run the
+		// hook it loaded, even after its file was deleted (final review, P1).
+		return hookForeignGuardLocalSession(accountHome, update.Key, sessionStart, update.Decision, now), accountHome
 	}
 	if err != nil {
 		// The gateway holds the session record. Without its answer the call
