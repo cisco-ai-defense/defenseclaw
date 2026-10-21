@@ -16,7 +16,13 @@ import (
 )
 
 // shellHookForeignGuardBlock is inserted into the standalone Hermes shell
-// hook after the socket transport block and before the gateway request.
+// hook inside the socket transport block, after its trust functions and
+// before its socket checks (shellHookSocketTransport): a missing socket (the
+// gateway is stopped) or an untrusted one ends the hook in fail_unreachable,
+// which allows under fail mode open, so the guard placed after those checks
+// never ran during an outage and the guarded call was allowed (GAP-0354).
+// The check denies a guarded connector whose session the gateway cannot
+// answer for, in every fail mode, as the hook-time guard does.
 // Hermes runs every shell hook registered for an event in order and lets a
 // later pre_tool_call hook rewrite the tool call, so a hook a user adds after
 // DefenseClaw's could change a command DefenseClaw already checked. Before a
@@ -33,8 +39,9 @@ import (
 // blocks the tool call with the Hermes block object the check rendered, or,
 // when the check gave no decision, with a fixed one that names why; that
 // block is also sent to the gateway's session route, which writes the audit
-// row the check would have. A session-start event cannot be blocked and
-// continues to the gateway.
+// row the check would have, when the hook socket passes its trust check (the
+// guard runs before the hook's own socket checks). A session-start event
+// cannot be blocked and continues to the gateway.
 const shellHookForeignGuardBlock = `# Standalone foreign-hook guard. Hermes runs every shell hook registered for
 # an event, and a hook that runs after this one can rewrite the tool call
 # DefenseClaw checked. Before a tool call, and at session start, the
@@ -75,12 +82,15 @@ case "$DEFENSECLAW_GUARD_EVENT" in
                 DEFENSECLAW_GUARD_REASON="enterprise_foreign_hook_check_failed: DefenseClaw could not check the Hermes hooks of this account: $DEFENSECLAW_GUARD_CAUSE"
                 DEFENSECLAW_GUARD_SESSION="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.session_id // empty' 2>/dev/null)" || DEFENSECLAW_GUARD_SESSION=""
                 # The body names the session: it goes to curl on a descriptor
-                # (defenseclaw_gateway_post), never on its command line.
+                # (defenseclaw_gateway_post), never on its command line, and
+                # only to a socket that passes the trust check.
                 DEFENSECLAW_GUARD_BODY='{"key":{"Connector":"hermes","Session":"'"$(defenseclaw_json_escape "$DEFENSECLAW_GUARD_SESSION")"'"},"session_start":false,"decision":{"deny":true,"reason":"'"$(defenseclaw_json_escape "$DEFENSECLAW_GUARD_REASON")"'"}}'
-                defenseclaw_gateway_post "http://${API_ADDR}/api/v1/foreign-hook-session/hermes" 5 "$DEFENSECLAW_GUARD_BODY" \
-                  -H "Content-Type: application/json" \
-                  -H "X-DefenseClaw-Client: hermes-hook/1.0" \
-                  --unix-socket "${DEFENSECLAW_HOOK_SOCKET}" >/dev/null 2>&1 || :
+                if defenseclaw_hook_socket_trusted; then
+                  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/foreign-hook-session/hermes" 5 "$DEFENSECLAW_GUARD_BODY" \
+                    -H "Content-Type: application/json" \
+                    -H "X-DefenseClaw-Client: hermes-hook/1.0" \
+                    --unix-socket "${DEFENSECLAW_HOOK_SOCKET}" >/dev/null 2>&1 || :
+                fi
               fi
               ;;
           esac

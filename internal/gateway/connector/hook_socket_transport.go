@@ -59,9 +59,14 @@ defenseclaw_hook_socket_trusted() {
 // immediately before it builds its bearer header, when the hook is a
 // standalone enterprise install with a unix hook socket (see
 // managedPluginHookSocket). fail_unreachable is already defined at that
-// point and fails closed for managed hooks. The rendered TCP hook contains
-// none of this.
-const shellHookSocketTransportBlock = shellHookSocketTrustFunctions + `if [ ! -e "$DEFENSECLAW_HOOK_SOCKET" ] && [ ! -L "$DEFENSECLAW_HOOK_SOCKET" ]; then
+// point and follows the hook's fail mode. The rendered TCP hook contains
+// none of this. @GUARD@ is the standalone Hermes foreign-hook guard
+// (shellHookForeignGuard), or nothing: it runs after the trust functions it
+// uses and before the socket checks, because a missing or untrusted socket
+// ends the hook through fail_unreachable, which allows under fail mode open.
+// The guard's check denies a guarded connector whose session the gateway
+// cannot answer for, in every fail mode (GAP-0354).
+const shellHookSocketTransportBlock = shellHookSocketTrustFunctions + `@GUARD@if [ ! -e "$DEFENSECLAW_HOOK_SOCKET" ] && [ ! -L "$DEFENSECLAW_HOOK_SOCKET" ]; then
   fail_unreachable "` + shellManagedGatewayStoppedText + `"
 fi
 if ! defenseclaw_hook_socket_trusted; then
@@ -86,12 +91,16 @@ const shellManagedGatewayStoppedText = "the DefenseClaw gateway service is not r
 // the assignment. factsBinary, when set, is the administrator-owned hook
 // binary the hook runs (hook session-facts) to read the user's Kerberos
 // credential cache, which a shell cannot read; see managedSessionFactsBinary.
-func shellHookSocketTransport(socket string, serviceUID int, factsBinary string) string {
+// guard is the rendered foreign-hook guard block, or "" for every hook but
+// the standalone Hermes one; with "" the block renders as it did before the
+// guard moved into it.
+func shellHookSocketTransport(socket string, serviceUID int, factsBinary, guard string) string {
 	facts := ""
 	if factsBinary != "" {
 		facts = "DEFENSECLAW_SESSION_FACTS_BIN=" + shellSingleQuote(factsBinary) + "\nexport DEFENSECLAW_SESSION_FACTS_BIN\n"
 	}
-	return strings.Replace(renderShellHookSocket(shellHookSocketTransportBlock, socket, serviceUID), "@FACTS@", facts, 1)
+	block := strings.Replace(renderShellHookSocket(shellHookSocketTransportBlock, socket, serviceUID), "@FACTS@", facts, 1)
+	return strings.Replace(block, "@GUARD@", guard, 1)
 }
 
 // managedSessionFactsBinary is the administrator-owned hook binary a managed

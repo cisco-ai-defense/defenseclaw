@@ -122,3 +122,78 @@ func TestForeignHookGuardKeepsAGatewaySessionBlockThroughAnOpenOutage(t *testing
 		}
 	}
 }
+
+// GAP-0354: the check the standalone Hermes hook and the Amp and OpenCode
+// plugins run applies the hook-time guard's outage rule. A guarded
+// connector whose session exchange cannot reach the gateway is denied with
+// the outage's reason (the check takes no fail mode, so unset and open
+// read the same), Hermes with its block object; a gateway that answers for
+// a clean session allows with the exact allow the callers accept; a host
+// without the standalone summary (per-user, Secure Client) allows as before.
+func TestForeignHookCheckDeniesAGuardedConnectorDuringAGatewayOutage(t *testing.T) {
+	notRunning := fmt.Errorf("dial hook socket: %w", hookexec.ErrManagedGatewayNotRunning)
+	connectors := map[string]string{"opencode": "tool.execute.before", "amp": "tool.call"}
+	if runtime.GOOS != "windows" {
+		connectors["hermes"] = "pre_tool_call"
+	}
+	check := func(t *testing.T, connector, event string) (foreignHookCheckResult, string) {
+		t.Helper()
+		var out bytes.Buffer
+		payload := `{"hook_event_name":"` + event + `","session_id":"s-1"}`
+		if code := runForeignHookCheck(connector, strings.NewReader(payload), &out); code != 0 {
+			t.Fatalf("%s: the check always exits 0, got %d", connector, code)
+		}
+		var result foreignHookCheckResult
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatalf("%s: the answer must be JSON: %v: %q", connector, err, out.String())
+		}
+		return result, strings.TrimSpace(out.String())
+	}
+	for connector, event := range connectors {
+		fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
+		fixture.guard(connector)
+		fixture.process = "agent-process"
+		exchanged := 0
+		hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+			exchanged++
+			return enterprisepolicy.GuardDecision{}, notRunning
+		}
+		result, _ := check(t, connector, event)
+		if exchanged != 1 && !foreignHookSessionLocal(connector) {
+			t.Fatalf("%s: the check did not exchange the session with the gateway (%d)", connector, exchanged)
+		}
+		if foreignHookSessionLocal(connector) {
+			continue // Windows Amp keeps its session record locally
+		}
+		if !result.Deny || !strings.Contains(result.Reason, hookexec.ManagedGatewayNotRunningReason) {
+			t.Fatalf("%s: a stopped gateway must deny with the not-running reason: %+v", connector, result)
+		}
+		if connector == "hermes" {
+			if result.HookOutput == nil || result.HookOutput.Action != "block" || !strings.HasSuffix(result.HookOutput.Message, "("+hookexec.ManagedGatewayNotRunningReason+")") {
+				t.Fatalf("hermes: the outage denial must carry the Hermes block object: %+v", result.HookOutput)
+			}
+		} else if result.HookOutput != nil {
+			t.Fatalf("%s: only Hermes gets a hook_output: %+v", connector, result.HookOutput)
+		}
+
+		// The gateway is up and the session is clean.
+		hookForeignGuardExchange = func(_ string, _ string, _, _ time.Time, exchange enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+			return exchange.Decision, nil
+		}
+		if result, raw := check(t, connector, event); result.Deny || raw != `{"deny":false}` {
+			t.Fatalf("%s: a clean session with the gateway up must allow exactly: %q", connector, raw)
+		}
+
+		// No standalone summary (per-user or Secure Client): unchanged allow,
+		// and no exchange.
+		fixture.summary = nil
+		exchanged = 0
+		hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+			exchanged++
+			return enterprisepolicy.GuardDecision{}, notRunning
+		}
+		if result, raw := check(t, connector, event); result.Deny || raw != `{"deny":false}` || exchanged != 0 {
+			t.Fatalf("%s: a host without the standalone summary must allow without an exchange: %q (%d)", connector, raw, exchanged)
+		}
+	}
+}
