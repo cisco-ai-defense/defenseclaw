@@ -647,8 +647,14 @@ func acpBindingAllowed(allow []string, value string) bool {
 	return len(allow) == 0 || slices.Contains(allow, value)
 }
 
+// isACPAPIPath reports whether the path belongs to the ACP guard's own
+// signed-request routes. The operator read-only routes (/v1/acp/catalog,
+// /v1/acp/profiles) deliberately stay on the gateway token: routing them
+// here would let an ACP scoped credential read the ACP policy inventory and
+// would refuse the management token the documented API contract assigns to
+// those routes (docs/reference/gateway-api.mdx, Auth).
 func isACPAPIPath(path string) bool {
-	return path == "/api/v1/acp/challenge" || path == "/api/v1/acp/evaluate" || strings.HasPrefix(path, "/v1/acp/")
+	return path == "/api/v1/acp/challenge" || path == "/api/v1/acp/evaluate"
 }
 
 type acpEnterpriseCredentialContextKey struct{}
