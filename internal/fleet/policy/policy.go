@@ -47,6 +47,22 @@ var ErrInvalidPolicy = errors.New("invalid policy")
 // that only distinguish client input from compiler infrastructure failures.
 var ErrPolicyTooLarge = fmt.Errorf("%w: policy YAML exceeds 64 KiB", ErrInvalidPolicy)
 var ErrMalformedPolicy = fmt.Errorf("%w: malformed policy content", ErrInvalidPolicy)
+
+// ErrCompilerBusy means every policy compiler slot stayed in use; callers
+// should retry later (HTTP 429).
+var ErrCompilerBusy = errors.New("policy compiler busy")
+
+// maxConcurrentCompiles bounds the number of policy compiler processes the
+// gateway runs at once. compileSlotWait is how long a simulate request (which
+// any authenticated tenant can issue) waits for a slot; pushCompileSlotWait is
+// the longer wait for an operator policy push, which should queue behind other
+// compiles rather than fail.
+const maxConcurrentCompiles = 2
+
+var compileSlotWait = 2 * time.Second
+
+var pushCompileSlotWait = 60 * time.Second
+
 var ErrPolicyVersionExhausted = fmt.Errorf("%w: policy version 65534 is the highest supported OTA version; provision a new device policy lineage", ErrInvalidPolicy)
 
 // OTA's uint16 high-water stores 0xffff as erased flash. Never issue it.
@@ -169,9 +185,13 @@ type Service struct {
 
 	emergencySigner Signer
 
-	// compilerPath is the path to the Python policy_compiler.py script.
-	// An empty config value selects a trusted compiler shipped with the gateway.
+	// compilerPath is the absolute path to the Python policy_compiler.py
+	// script, resolved once at construction; the validated path is the one
+	// executed. An empty config value selects a trusted shipped compiler.
 	compilerPath string
+
+	// compileSlots bounds concurrent compiler processes.
+	compileSlots chan struct{}
 
 	// emergencySeq tracks the next emergency broadcast sequence number.
 	// Must be strictly increasing per the C-side anti-replay (REQ-31).
@@ -187,6 +207,31 @@ type Service struct {
 
 	policyReplayMu sync.Mutex
 	policyReplays  map[string]policyReplayAttempt
+
+	emergencyReplayMu sync.Mutex
+	emergencyReplays  map[string]*emergencyReplayState
+}
+
+// Emergency catch-up publishes to the fleet topic, so every device in the
+// fleet receives each replayed command. Passes are coalesced per fleet: at
+// most one runs at a time, a request already covered by a pass in the last
+// emergencyReplayCooldown is skipped, and at most
+// maxEmergencyReplaysPerWindow passes run per fleet per window. Each pass
+// publishes a contiguous, ordered page of the fleet's history, so devices
+// still apply commands in predecessor order.
+const (
+	emergencyReplayCooldown      = 30 * time.Second
+	maxEmergencyReplaysPerWindow = 4
+)
+
+type emergencyReplayPass struct {
+	after, last uint32
+	at          time.Time
+}
+
+type emergencyReplayState struct {
+	inFlight bool
+	passes   []emergencyReplayPass
 }
 
 type policyReplayAttempt struct {
@@ -219,6 +264,9 @@ func NewService(store PolicyStore, signer Signer, client mqtt.Client, cfg *Confi
 		compilerPath:  defaultCompilerPath(),
 		logger:        log.Default(),
 		policyReplays: make(map[string]policyReplayAttempt),
+		compileSlots:  make(chan struct{}, maxConcurrentCompiles),
+
+		emergencyReplays: make(map[string]*emergencyReplayState),
 	}
 	if cfg != nil {
 		if cfg.CompilerPath != "" {
@@ -226,6 +274,17 @@ func NewService(store PolicyStore, signer Signer, client mqtt.Client, cfg *Confi
 		}
 		if cfg.Logger != nil {
 			s.logger = cfg.Logger
+		}
+	}
+
+	// Resolve a relative compiler path once, against the gateway's working
+	// directory at startup, so validation and execution use the same file.
+	if s.compilerPath != "" {
+		if abs, err := filepath.Abs(s.compilerPath); err == nil {
+			s.compilerPath = abs
+		} else {
+			s.logger.Printf("[policy] WARNING: cannot resolve compiler path %q: %v", s.compilerPath, err)
+			s.compilerPath = ""
 		}
 	}
 
@@ -522,6 +581,10 @@ func isUnderAllowedDir(abs string) bool {
 //
 // Returns the raw binary blob (header + payload, no signature).
 func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]byte, error) {
+	return s.compile(yamlBytes, profile, version, compileSlotWait)
+}
+
+func (s *Service) compile(yamlBytes []byte, profile string, version uint32, slotWait time.Duration) ([]byte, error) {
 	// Version zero is a dry-run compiler input used by /policy/simulate; it
 	// is never signed or stored as an OTA policy.
 	if version > maxPolicyVersion {
@@ -543,9 +606,9 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 		return nil, fmt.Errorf("%w: unknown profile %q: must be minimal, standard, or edge", ErrInvalidPolicy, profile)
 	}
 
-	absPath, err := filepath.Abs(s.compilerPath)
-	if err != nil {
-		return nil, fmt.Errorf("invalid compiler path: %w", err)
+	absPath := s.compilerPath
+	if !filepath.IsAbs(absPath) {
+		return nil, fmt.Errorf("compiler path %q is not absolute", absPath)
 	}
 	if strings.Contains(absPath, "..") {
 		return nil, fmt.Errorf("compiler path must not contain '..'")
@@ -559,6 +622,18 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 	}
 	if !isUnderAllowedDir(absPath) {
 		return nil, fmt.Errorf("compiler path %q is not an approved installed, private-home, or source-checkout compiler", absPath)
+	}
+	// Bound concurrent compiler work (interpreter checks and the compile
+	// itself); any authenticated tenant can trigger it via /policy/simulate.
+	if s.compileSlots != nil {
+		timer := time.NewTimer(slotWait)
+		select {
+		case s.compileSlots <- struct{}{}:
+			timer.Stop()
+			defer func() { <-s.compileSlots }()
+		case <-timer.C:
+			return nil, ErrCompilerBusy
+		}
 	}
 	python, err := pythonForCompiler(absPath)
 	if err != nil {
@@ -581,7 +656,7 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, python, "-I", s.compilerPath,
+	cmd := exec.CommandContext(ctx, python, "-I", absPath,
 		"--input", filepath.Base(inputPath),
 		"--profile", profile,
 		"--version", fmt.Sprintf("%d", version),
@@ -847,12 +922,19 @@ func (s *Service) ReplayLatestForDevice(ctx context.Context, tenantID, fleetID u
 		published = true
 		s.logger.Printf("[policy] replayed version=%d for lagging device (reported=%d)", latest.Version, devicePolicyVersion)
 	}
+	if !s.beginEmergencyReplay(tenantID, fleetID, deviceEmergencySeq) {
+		return deviceEmergencySeq, nil
+	}
+	lastPublished := deviceEmergencySeq
+	completed := false
+	defer func() {
+		s.completeEmergencyReplay(tenantID, fleetID, deviceEmergencySeq, lastPublished, completed)
+	}()
 	records, err := s.store.GetEmergenciesAfter(tenantID, fleetID, deviceEmergencySeq, 32)
 	if err != nil {
 		return deviceEmergencySeq, fmt.Errorf("read emergency history for replay: %w", err)
 	}
 	topic := fmt.Sprintf("defenseclaw/%d/%d/ota/emergency", tenantID, fleetID)
-	lastPublished := deviceEmergencySeq
 	for _, record := range records {
 		if err := s.client.Publish(ctx, topic, 1, record.Message); err != nil {
 			return lastPublished, fmt.Errorf("replay emergency sequence %d: %w", record.Sequence, err)
@@ -860,7 +942,64 @@ func (s *Service) ReplayLatestForDevice(ctx context.Context, tenantID, fleetID u
 		lastPublished = record.Sequence
 		s.logger.Printf("[policy] replayed emergency seq=%d to %s", record.Sequence, topic)
 	}
+	completed = true
 	return lastPublished, nil
+}
+
+// beginEmergencyReplay admits an emergency catch-up pass for a device that
+// last applied afterSeq, unless a pass is already running for the fleet, a
+// recent pass already republished the commands after afterSeq, or the
+// fleet's per-window pass budget is spent. A skipped device retries on a
+// later heartbeat.
+func (s *Service) beginEmergencyReplay(tenantID, fleetID uint64, afterSeq uint32) bool {
+	key := fleetKey(tenantID, fleetID)
+	now := time.Now()
+	s.emergencyReplayMu.Lock()
+	defer s.emergencyReplayMu.Unlock()
+	st := s.emergencyReplays[key]
+	if st == nil {
+		st = &emergencyReplayState{}
+		s.emergencyReplays[key] = st
+	}
+	live := st.passes[:0]
+	for _, p := range st.passes {
+		if now.Sub(p.at) < emergencyReplayCooldown {
+			live = append(live, p)
+		}
+	}
+	st.passes = live
+	if st.inFlight {
+		return false
+	}
+	for _, p := range st.passes {
+		if p.after <= afterSeq && afterSeq < p.last {
+			return false
+		}
+	}
+	if len(st.passes) >= maxEmergencyReplaysPerWindow {
+		return false
+	}
+	st.inFlight = true
+	return true
+}
+
+// completeEmergencyReplay records a finished pass. A failed pass is not
+// recorded, so the next heartbeat retries it.
+func (s *Service) completeEmergencyReplay(tenantID, fleetID uint64, afterSeq, lastSeq uint32, completed bool) {
+	key := fleetKey(tenantID, fleetID)
+	s.emergencyReplayMu.Lock()
+	defer s.emergencyReplayMu.Unlock()
+	st := s.emergencyReplays[key]
+	if st == nil {
+		return
+	}
+	st.inFlight = false
+	if completed && lastSeq > afterSeq {
+		st.passes = append(st.passes, emergencyReplayPass{after: afterSeq, last: lastSeq, at: time.Now()})
+	}
+	if len(st.passes) == 0 {
+		delete(s.emergencyReplays, key)
+	}
 }
 
 // One stale or compromised device can otherwise force a fleet-wide policy
@@ -914,7 +1053,7 @@ func (s *Service) CompileSignAndStore(yamlBytes []byte, profile string, tenantID
 	}
 
 	// Compile
-	blob, err := s.Compile(yamlBytes, profile, version)
+	blob, err := s.compile(yamlBytes, profile, version, pushCompileSlotWait)
 	if err != nil {
 		return nil, 0, fmt.Errorf("compile: %w", err)
 	}

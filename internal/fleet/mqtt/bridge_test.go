@@ -541,6 +541,7 @@ func TestBridgeVerdictRequestRouting(t *testing.T) {
 	mc.simulateMessage("defenseclaw/10/20/100/verdict/req", payload, 1)
 
 	time.Sleep(50 * time.Millisecond)
+	bridge.responsePending.Wait()
 
 	_, verds, errs := bridge.Stats()
 	if verds != 1 {
@@ -574,6 +575,9 @@ func TestBridgeVerdictRequestRouting(t *testing.T) {
 	}
 	if respPayload[3] != 3 { // Severity = High
 		t.Errorf("response severity = %d, want 3 (High)", respPayload[3])
+	}
+	if respPayload[6] != ReasonCloudBlock {
+		t.Errorf("response reason = %d, want %d (CLOUD_BLOCK)", respPayload[6], ReasonCloudBlock)
 	}
 
 	cancel()
@@ -1435,4 +1439,56 @@ type errorKeyProvider struct{}
 
 func (e *errorKeyProvider) KeyForDevice(_ uint64) []byte {
 	return nil
+}
+
+// Heartbeat and registration share one auto-registration predicate, so
+// enabling it on either the bridge or the manager works on both topics, and
+// neither enables it outside development mode.
+func TestBridgeAutoRegistrationPredicateConsistent(t *testing.T) {
+	deviceKey := []byte("test-device-key-32-bytes-long!!!")
+	const hbTopic = "defenseclaw/1/2/42/heartbeat"
+	const regTopic = "defenseclaw/1/2/42/register"
+	cases := []struct {
+		name         string
+		bridgeFlag   bool
+		managerFlag  bool
+		topic        string
+		production   bool
+		wantRegister bool
+	}{
+		{"bridge flag, heartbeat", true, false, hbTopic, false, true},
+		{"manager flag, registration", false, true, regTopic, false, true},
+		{"manager flag, heartbeat", false, true, hbTopic, false, true},
+		{"bridge flag, registration", true, false, regTopic, false, true},
+		{"manager flag, heartbeat, production", false, true, hbTopic, true, false},
+		{"disabled, heartbeat", false, false, hbTopic, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fm := manager.New(nil)
+			fm.AutoRegister = tc.managerFlag
+			bridge := newTestBridge(t, newMockClient(), fm, verdict.NewCache(10, nil))
+			if tc.production {
+				t.Setenv("DCLAW_PRODUCTION", "1")
+			}
+			bridge.AllowAutoRegistration = tc.bridgeFlag
+			bridge.SetHeartbeatRateLimit(0)
+			bridge.SetKeyProvider(&fixedKeyProvider{key: deviceKey})
+			msg := Message{Topic: tc.topic, Payload: makeSignedHeartbeatPayload(42, 7, 0, 0, deviceKey, tc.topic)}
+			if tc.topic == hbTopic {
+				bridge.handleHeartbeat(msg)
+			} else {
+				bridge.handleRegistration(msg)
+			}
+			_, registered := fm.GetDevice(manager.ComposeID(1, 2, 42))
+			if registered != tc.wantRegister {
+				t.Fatalf("registered = %v, want %v", registered, tc.wantRegister)
+			}
+			if tc.topic == hbTopic && tc.wantRegister {
+				if hb, _, _ := bridge.Stats(); hb != 1 {
+					t.Fatalf("heartbeats processed = %d, want 1", hb)
+				}
+			}
+		})
+	}
 }

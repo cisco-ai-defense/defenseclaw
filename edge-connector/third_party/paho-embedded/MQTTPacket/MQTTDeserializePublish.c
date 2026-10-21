@@ -62,7 +62,13 @@ int MQTTDeserialize_publish(unsigned char* dup, int* qos, unsigned char* retaine
 		goto exit;
 
 	if (*qos > 0)
+	{
+		/* DefenseClaw: a QoS>0 PUBLISH must carry a 2-byte packet id after
+		 * the topic; reject packets whose topic consumed the remainder. */
+		if (enddata - curdata < 2)
+			goto exit;
 		*packetid = readInt(&curdata);
+	}
 
 	*payloadlen = enddata - curdata;
 	*payload = curdata;

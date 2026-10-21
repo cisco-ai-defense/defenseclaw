@@ -42,17 +42,12 @@ static dclaw_tool_request_t make_request(const char *name, uint8_t caps, const c
 static void test_allowed_local_decision(void) {
     dclaw_tool_request_t req = make_request("read-sensor", DCLAW_CAP_SENSOR_READ, NULL);
     dclaw_verdict_t v = dclaw_evaluate(&req);
-    /* BLK-1: In production builds (DEV_MODE=OFF), strict mode is default,
-     * so even speculative-capable profiles return BLOCK (sync). In dev builds,
-     * speculative exec returns PENDING. Both are correct behavior. */
-#if DCLAW_SPECULATIVE_EXECUTION && DCLAW_DEV_MODE
-    assert(v.mode == DCLAW_VERDICT_PENDING);
-    printf("  PASS: sensor_read with no local rule -> PENDING (speculative, dev)\n");
-#else
+    /* No gateway is reachable in this test, so the request cannot be sent.
+     * Even a speculative-capable class must not be allowed: an unsent
+     * request could never be verified or revoked. */
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_CLOUD_TIMEOUT);
-    printf("  PASS: sensor_read with no cloud -> BLOCK (strict/no-spec)\n");
-#endif
+    printf("  PASS: sensor_read with no reachable gateway -> BLOCK, not speculative ALLOW\n");
     (void)v;
 }
 
@@ -120,14 +115,9 @@ static void test_allowed_destination(void) {
 
     dclaw_tool_request_t req = make_request("api-call", DCLAW_CAP_NET_FETCH, "8.8.8.8");
     dclaw_verdict_t v = dclaw_evaluate(&req);
-#if DCLAW_SPECULATIVE_EXECUTION && DCLAW_DEV_MODE
-    assert(v.mode == DCLAW_VERDICT_PENDING);
-    printf("  PASS: allowed destination + speculative cap -> PENDING (dev)\n");
-#else
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_CLOUD_TIMEOUT);
-    printf("  PASS: allowed destination + no cloud -> BLOCK (strict/no-spec)\n");
-#endif
+    printf("  PASS: allowed destination + no reachable gateway -> BLOCK\n");
     (void)v;
 
     dclaw_get_state()->online = false;
@@ -237,6 +227,77 @@ static void test_content_scan_blocks_secret_in_pipeline(void) {
     printf("  PASS: content scan blocks secret in pipeline\n");
 }
 
+static void reset_limits(void) {
+    extern void dclaw_ipc_rate_limit_reset(void);
+    dclaw_state_t *s = dclaw_get_state();
+    for (int i = 0; i < DCLAW_RATE_LIMITERS; i++)
+        s->rate_limiters[i].tokens = s->rate_limiters[i].bucket_size;
+    dclaw_ipc_rate_limit_reset();
+}
+
+static void set_severity_rule(uint8_t severity, uint8_t action) {
+    dclaw_policy_table_t *rt = &dclaw_get_state()->rt_policy;
+    for (size_t i = 0; i < rt->severity_rules_count; i++) {
+        if (rt->severity_rules[i].severity == severity) {
+            rt->severity_rules[i].action = action;
+            return;
+        }
+    }
+    assert(rt->severity_rules_count < DCLAW_RT_MAX_SEVERITY_RULES);
+    rt->severity_rules[rt->severity_rules_count].severity = severity;
+    rt->severity_rules[rt->severity_rules_count].action = action;
+    rt->severity_rules_count++;
+}
+
+/* Severity rules can tighten the content-scope threshold but never loosen it. */
+static void test_severity_rules_only_tighten(void) {
+    dclaw_policy_table_t *rt = &dclaw_get_state()->rt_policy;
+    size_t saved_count = rt->severity_rules_count;
+    uint8_t saved[DCLAW_RT_MAX_SEVERITY_RULES][2];
+    for (size_t i = 0; i < saved_count; i++) {
+        saved[i][0] = rt->severity_rules[i].severity;
+        saved[i][1] = rt->severity_rules[i].action;
+    }
+
+    /* An email address is a MEDIUM finding: TOOL_OUTPUT only warns. */
+    dclaw_tool_request_t req = make_request("read_data", DCLAW_CAP_READ_FS, NULL);
+    req.session_id = 120;
+    req.content = "contact: alice@example.com";
+    req.content_len = (uint16_t)strlen(req.content);
+    req.content_scope = DCLAW_CONTENT_SCOPE_TOOL_OUTPUT;
+    reset_limits();
+    dclaw_verdict_t v = dclaw_evaluate(&req);
+    assert(v.reason != DCLAW_REASON_CONTENT_BLOCK);
+
+    set_severity_rule(DCLAW_SEV_MEDIUM, DCLAW_ACTION_BLOCK);
+    reset_limits();
+    v = dclaw_evaluate(&req);
+    assert(v.action == DCLAW_ACTION_BLOCK && v.reason == DCLAW_REASON_CONTENT_BLOCK);
+
+    /* Unknown action byte fails closed. */
+    set_severity_rule(DCLAW_SEV_MEDIUM, 0xC8);
+    reset_limits();
+    v = dclaw_evaluate(&req);
+    assert(v.action == DCLAW_ACTION_BLOCK && v.reason == DCLAW_REASON_CONTENT_BLOCK);
+
+    /* Rules that try to allow MEDIUM/HIGH cannot lower the USER_INPUT
+     * threshold, which blocks MEDIUM findings. */
+    set_severity_rule(DCLAW_SEV_MEDIUM, DCLAW_ACTION_ALLOW);
+    set_severity_rule(DCLAW_SEV_HIGH, DCLAW_ACTION_ALLOW);
+    req.content_scope = DCLAW_CONTENT_SCOPE_USER_INPUT;
+    reset_limits();
+    v = dclaw_evaluate(&req);
+    assert(v.action == DCLAW_ACTION_BLOCK && v.reason == DCLAW_REASON_CONTENT_BLOCK);
+    (void)v;
+
+    rt->severity_rules_count = saved_count;
+    for (size_t i = 0; i < saved_count; i++) {
+        rt->severity_rules[i].severity = saved[i][0];
+        rt->severity_rules[i].action = saved[i][1];
+    }
+    printf("  PASS: severity rules tighten but never loosen content thresholds\n");
+}
+
 static void test_no_content_field_backward_compat(void) {
     dclaw_tool_request_t req;
     memset(&req, 0, sizeof(req));
@@ -270,6 +331,108 @@ static void test_hash_mismatch_blocks(void) {
     printf("  PASS: hash-name mismatch -> BLOCK with HASH_MISMATCH\n");
 }
 
+
+#if DCLAW_VERDICT_CACHE_SIZE > 0
+static void refill_limits(void) {
+    extern void dclaw_ipc_rate_limit_reset(void);
+    dclaw_state_t *s = dclaw_get_state();
+    for (int i = 0; i < DCLAW_RATE_LIMITERS; i++)
+        s->rate_limiters[i].tokens = s->rate_limiters[i].bucket_size;
+    dclaw_ipc_rate_limit_reset();
+}
+
+/* Regression: a cached gateway ALLOW for an actuation, shell or file-write
+ * tool was returned for 60 minutes without the synchronous hold. */
+static void test_cached_allow_not_used_for_physical_classes(void) {
+    static const char *const physical[] = { "gpio_write", "exec_shell", "write_file" };
+    for (size_t i = 0; i < sizeof(physical) / sizeof(physical[0]); i++) {
+        refill_limits();
+        dclaw_tool_request_t req = make_request(physical[i], 0, NULL);
+        req.session_id = (uint16_t)(60 + i);
+        dclaw_cache_store_with_ttl(req.tool_hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO, 60);
+        dclaw_verdict_t v = dclaw_evaluate(&req);
+        assert(!v.from_cache);
+        assert(v.action == DCLAW_ACTION_BLOCK);
+        assert(v.reason == DCLAW_REASON_CLOUD_TIMEOUT); /* escalated; no gateway here */
+        /* A cached BLOCK still applies. */
+        dclaw_cache_store_with_ttl(req.tool_hash, DCLAW_ACTION_BLOCK, DCLAW_SEV_INFO, 60);
+        v = dclaw_evaluate(&req);
+        assert(v.action == DCLAW_ACTION_BLOCK && v.from_cache);
+        (void)v;
+    }
+    printf("  PASS: physical classes are escalated despite a cached ALLOW\n");
+}
+
+/* Regression: a WARN from a local sequence rule was dropped when the tool
+ * had a cached ALLOW. */
+static void test_cached_allow_keeps_local_warn(void) {
+    refill_limits();
+    dclaw_tool_request_t first = make_request("sensor_read", 0, NULL);
+    first.session_id = 70;
+    (void)dclaw_evaluate(&first);
+    refill_limits();
+    dclaw_tool_request_t net = make_request("api-call", 0, "8.8.8.8"); /* SENSOR_READ -> NET_FETCH: warn */
+    net.session_id = 70;
+    dclaw_cache_store_with_ttl(net.tool_hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO, 60);
+    dclaw_verdict_t v = dclaw_evaluate(&net);
+    assert(v.from_cache);
+    assert(v.action == DCLAW_ACTION_WARN);
+    /* Without the rule match the cached ALLOW is returned as is. */
+    refill_limits();
+    net.session_id = 71;
+    v = dclaw_evaluate(&net);
+    assert(v.from_cache && v.action == DCLAW_ACTION_ALLOW);
+    (void)v;
+    printf("  PASS: local WARN is kept over a cached ALLOW\n");
+}
+
+/* Regression: an ESCALATE from a local rule was dropped when the tool had a
+ * cached ALLOW; it must reach the gateway. */
+static void test_local_escalate_bypasses_cached_allow(void) {
+    dclaw_policy_table_t *rt = &dclaw_get_state()->rt_policy;
+    size_t saved = rt->sequence_rules_count;
+    assert(saved < DCLAW_RT_MAX_SEQUENCE_RULES);
+    memset(&rt->sequence_rules[saved], 0, sizeof(rt->sequence_rules[saved]));
+    rt->sequence_rules[saved].seq[0] = DCLAW_CAP_READ_FS;
+    rt->sequence_rules[saved].seq[1] = DCLAW_CAP_SENSOR_READ;
+    rt->sequence_rules[saved].seq_len = 2;
+    rt->sequence_rules[saved].action = DCLAW_ACTION_ESCALATE;
+    rt->sequence_rules_count = saved + 1;
+
+    refill_limits();
+    dclaw_tool_request_t rd = make_request("read_file", 0, NULL);
+    rd.session_id = 72;
+    (void)dclaw_evaluate(&rd);
+    refill_limits();
+    dclaw_tool_request_t sr = make_request("get_state", 0, NULL);
+    sr.session_id = 72;
+    dclaw_cache_store_with_ttl(sr.tool_hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO, 60);
+    dclaw_verdict_t v = dclaw_evaluate(&sr);
+    assert(!v.from_cache);
+    assert(v.action == DCLAW_ACTION_BLOCK && v.reason == DCLAW_REASON_CLOUD_TIMEOUT);
+    (void)v;
+    rt->sequence_rules_count = saved;
+    printf("  PASS: local ESCALATE is escalated despite a cached ALLOW\n");
+}
+
+#if DCLAW_CONTENT_SCAN
+/* A content WARN (MEDIUM finding in tool output) is kept over a cached ALLOW. */
+static void test_cached_allow_keeps_content_warn(void) {
+    refill_limits();
+    dclaw_tool_request_t req = make_request("get_temperature", 0, NULL);
+    req.session_id = 73;
+    req.content = "contact ops@example.com";
+    req.content_len = (uint16_t)strlen(req.content);
+    req.content_scope = DCLAW_CONTENT_SCOPE_TOOL_OUTPUT;
+    dclaw_cache_store_with_ttl(req.tool_hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO, 60);
+    dclaw_verdict_t v = dclaw_evaluate(&req);
+    assert(v.from_cache && v.action == DCLAW_ACTION_WARN);
+    (void)v;
+    printf("  PASS: content WARN is kept over a cached ALLOW\n");
+}
+#endif
+#endif /* DCLAW_VERDICT_CACHE_SIZE > 0 */
+
 int main(void) {
     hal_init();
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};
@@ -289,13 +452,18 @@ int main(void) {
 #if DCLAW_CONTENT_SCAN
     test_content_scan_blocks_secret_in_pipeline();
     test_no_content_field_backward_compat();
+    test_severity_rules_only_tighten();
 #endif
     test_hash_mismatch_blocks();
+#if DCLAW_VERDICT_CACHE_SIZE > 0
+    test_cached_allow_not_used_for_physical_classes();
+    test_cached_allow_keeps_local_warn();
+    test_local_escalate_bypasses_cached_allow();
 #if DCLAW_CONTENT_SCAN
-    printf("  ALL PASSED (13 tests)\n");
-#else
-    printf("  ALL PASSED (11 tests)\n");
+    test_cached_allow_keeps_content_warn();
 #endif
+#endif
+    printf("  ALL PASSED\n");
 
     dclaw_shutdown();
     return 0;

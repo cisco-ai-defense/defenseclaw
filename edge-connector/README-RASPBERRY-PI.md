@@ -21,9 +21,11 @@ The test count and latency depend on the checkout and Pi model. Run `edge-connec
 
 ## Check the hook without a broker
 
-The hook loads the C shared library in process. Give the development build a writable, disposable flash file and an audit key. A fresh device starts at `DCLAW_POLICY_VERSION=0`; the engine rejects a claimed nonzero accepted policy without a verified on-flash OTA blob.
+Without a daemon, the hook only uses the C shared library in process when `DCLAW_ALLOW_FFI=1` is set. Give the development build a writable, disposable flash file and an audit key. A fresh device starts at `DCLAW_POLICY_VERSION=0`; the engine rejects a claimed nonzero accepted policy without a verified on-flash OTA blob.
 
 ```bash
+export DCLAW_ALLOW_FFI=1
+export DCLAW_SOCKET_PATH=/nonexistent/defenseclaw.sock
 export DCLAW_LIB_PATH="$PWD/edge-connector/build-rpi-dev/libdclaw_core.so"
 export DCLAW_FLASH_PATH="$(mktemp -d)/flash.bin"
 export DCLAW_AUDIT_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"

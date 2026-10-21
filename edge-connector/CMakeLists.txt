@@ -94,15 +94,45 @@ add_compile_options(
     -Os
 )
 
-# Fortify source in release builds (requires optimization, incompatible with -O0 debug)
-# Guard: _FORTIFY_SOURCE is incompatible with sanitizers (ASan redefines memcpy etc.)
+# Hardening.
+# Every build type is optimized (-Os above comes after the per-config
+# flags), so _FORTIFY_SOURCE applies to all of them, Debug and MinSizeRel
+# included. It is incompatible with the sanitizers (ASan intercepts memcpy
+# etc.). -U first avoids a redefinition warning (-Werror) on toolchains that
+# predefine it.
 if(NOT DCLAW_SANITIZE)
-    add_compile_options($<$<CONFIG:Release>:-D_FORTIFY_SOURCE=2>)
-    add_compile_options($<$<CONFIG:RelWithDebInfo>:-D_FORTIFY_SOURCE=2>)
-    # Also apply unconditionally since the default build uses -Os above
-    if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "")
-        add_compile_options(-D_FORTIFY_SOURCE=2)
+    add_compile_options(-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2)
+endif()
+
+# Stack-clash probes (ELF toolchains; Apple clang accepts but ignores the
+# flag, which -Werror turns into an error).
+include(CheckCCompilerFlag)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(CMAKE_REQUIRED_FLAGS "-Werror")
+    check_c_compiler_flag(-fstack-clash-protection DCLAW_CC_STACK_CLASH_PROTECTION)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(DCLAW_CC_STACK_CLASH_PROTECTION)
+        add_compile_options(-fstack-clash-protection)
     endif()
+endif()
+
+# Position-independent executables (ASLR for the daemon itself), not only
+# the shared library. Apple's linker produces PIE by default.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+include(CheckPIESupported)
+check_pie_supported(OUTPUT_VARIABLE _dclaw_pie_msg LANGUAGES C)
+
+# ELF: read-only relocations after start-up, eager binding (no writable
+# GOT), and a non-executable stack. These flags do not exist on Mach-O.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    include(CheckLinkerFlag)
+    foreach(_flag -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack)
+        string(MAKE_C_IDENTIFIER "DCLAW_LD${_flag}" _var)
+        check_linker_flag(C "${_flag}" ${_var})
+        if(${_var})
+            add_link_options(${_flag})
+        endif()
+    endforeach()
 endif()
 
 # Sources common to all profiles
@@ -114,6 +144,7 @@ set(CORE_SOURCES
     src/decision/ssrf_guard.c
     src/decision/correlator.c
     src/decision/verdict_cache.c
+    src/enforce/deferred_reply.c
     src/enforce/ipc_hook.c
     src/enforce/ipc_json.c
     src/enforce/rate_limiter.c

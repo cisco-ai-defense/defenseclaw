@@ -69,7 +69,7 @@ cmake .. -DDCLAW_PROFILE=EDGE      # for edge gateways
 
 | Variable | Description |
 |---|---|
-| `DCLAW_AUDIT_KEY` | Hex-encoded 32-byte HMAC key for tamper-evident audit chain |
+| `DCLAW_AUDIT_KEY` | Hex-encoded 32-byte HMAC key for the audit chain (verified off-device; the device does not check the chain) |
 | `DCLAW_OTA_HMAC_KEY` | Nonzero, hex-encoded 32-byte secret shared with the Fleet gateway's policy signer; requires `-DDCLAW_ALLOW_HMAC_OTA=ON` at build time |
 | `DCLAW_EMERGENCY_KEY` | Separate nonzero, hex-encoded 32-byte secret shared with the Fleet gateway for emergency commands |
 | `DCLAW_BROKER_URL` | `mqtts://` URL for the MQTT broker (TLS required in production) |
@@ -151,7 +151,7 @@ iot_extensions:
 
 ### Step 2: Check Built-In Inspection and Network Rules
 
-The C engine uses a built-in content scanner and an all-profile SSRF guard. The current policy compiler rejects `content_inspection`, `ssrf_protection`, custom regex patterns, `destination_denylist`, `rate_limits`, and `escalation_mode` in `iot_extensions`; signing them would imply runtime controls that OTA cannot apply. The compiled rate limit defaults are 60 tool calls, 30 network requests, and 10 actuations per minute. Production starts in strict synchronous escalation mode; `DCLAW_STRICT_MODE=0` explicitly permits speculative execution for undecided calls if that build enables it, including when MQTT publication fails. Network capabilities require a nonempty destination and permit only allowlisted canonical public IPv4 or bracketed globally scoped IPv6 literals. Hostnames, private or link-local IPs, and numeric aliases are blocked until an enforced egress resolver/proxy exists. Replace the illustrative public IP in the allowlist with the actual approved destination for your service.
+The C engine uses a built-in content scanner and an all-profile SSRF guard. The current policy compiler rejects `content_inspection`, `ssrf_protection`, custom regex patterns, `destination_denylist`, `rate_limits`, and `escalation_mode` in `iot_extensions`; signing them would imply runtime controls that OTA cannot apply. The compiled rate limit defaults are 60 tool calls, 30 network requests, and 10 actuations per minute. Production starts in strict synchronous escalation mode; `DCLAW_STRICT_MODE=0` explicitly permits speculative execution for undecided calls if that build enables it; a call whose verdict request could not be published is still blocked. Network capabilities require a nonempty destination and permit only allowlisted canonical public IPv4 or bracketed globally scoped IPv6 literals. Hostnames, private or link-local IPs, and numeric aliases are blocked until an enforced egress resolver/proxy exists. Replace the illustrative public IP in the allowlist with the actual approved destination for your service.
 
 ### Step 3: Compile the Policy (Optional â€” for custom policies)
 
@@ -199,7 +199,7 @@ The simplest way to integrate from any Python agent. Works with any framework â€
 ```python
 from generic_hook import EdgeConnector
 
-ec = EdgeConnector()  # auto-detects FFI or Unix socket
+ec = EdgeConnector()  # daemon Unix socket; fails closed when unavailable
 
 # Before executing any tool call:
 verdict = ec.evaluate(
@@ -215,7 +215,7 @@ else:
 ```
 
 **Features:**
-- Auto-detects backend: uses the running daemon's Unix socket first, then FFI (ctypes) when no daemon is available
+- Uses the running daemon's Unix socket; the in-process FFI engine is used only with `DCLAW_ALLOW_FFI=1` (see below)
 - Configurable fail-open / fail-closed behavior
 - Built-in Python capability hints; the C engine still rejects unknown names without a reviewed C mapping
 - Automatic destination extraction from URL arguments
@@ -225,14 +225,17 @@ else:
 
 ```python
 ec = EdgeConnector(
-    lib_path="/path/to/libdclaw_core.so",   # override FFI path
+    lib_path="/path/to/libdclaw_core.so",   # FFI path (used only with allow_ffi)
     socket_path="/run/defenseclaw/defenseclaw.sock", # default daemon socket
     fail_open=False,                         # block when engine is down
     session_id=42,                           # session correlation ID
+    allow_ffi=False,                         # no in-process engine (default)
 )
 ```
 
-Or via environment variables: `DCLAW_LIB_PATH`, `DCLAW_SOCKET_PATH`, `DCLAW_FAIL_OPEN`.
+Or via environment variables: `DCLAW_LIB_PATH`, `DCLAW_SOCKET_PATH`, `DCLAW_FAIL_OPEN`, `DCLAW_ALLOW_FFI`.
+
+The adapter uses the daemon's Unix socket (`DCLAW_SOCKET_PATH`). If the daemon is missing or stops answering, calls fail closed; the adapter does not silently switch to an in-process engine. Set `DCLAW_ALLOW_FFI=1` (or `allow_ffi=True`) to permit the in-process FFI engine when no daemon is running or as a fallback. That engine has its own cache, rate limits and revocation state and does not receive OTA policy, and it needs its own `DCLAW_FLASH_PATH`: the daemon holds an exclusive lock on its flash file.
 
 ---
 
@@ -279,7 +282,7 @@ Add the proxy to your MCP client configuration. Instead of pointing directly at 
       "args": ["/usr/local/lib/defenseclaw/mcp_proxy.py"],
       "env": {
         "DCLAW_MCP_UPSTREAM": "[\"python3\", \"-m\", \"esp_claw.mcp_server\"]",
-        "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so"
+        "DCLAW_SOCKET_PATH": "/run/defenseclaw/defenseclaw.sock"
       }
     }
   }
@@ -389,7 +392,7 @@ Add to `hooks.processes`:
     "transport": "stdio",
     "command": ["python3", "/home/USERNAME/.picoclaw/hooks/defenseclaw_gate.py"],
     "env": {
-      "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so",
+      "DCLAW_SOCKET_PATH": "/run/defenseclaw/defenseclaw.sock",
       "DCLAW_LOG_PATH": "/home/USERNAME/edge-connector.log"
     },
     "intercept": ["before_tool", "before_llm", "after_llm"]
@@ -412,7 +415,7 @@ Replace `USERNAME` with the actual home directory. A process launcher need not e
 ```bash
 # Check that the hook protocol responds (this does not evaluate a tool)
 echo '{"jsonrpc":"2.0","id":1,"method":"hook.hello","params":{}}' | \
-  DCLAW_LIB_PATH=/usr/local/lib/libdclaw_core.so \
+  DCLAW_SOCKET_PATH=/run/defenseclaw/defenseclaw.sock \
   python3 ~/.picoclaw/hooks/defenseclaw_gate.py
 # Expected: {"jsonrpc":"2.0","id":1,"result":{"ok":true,"name":"edge-connector-gate"}}
 
@@ -544,7 +547,9 @@ TOOL_CAP_MAP = {
 
 | Variable | Default | Description |
 |---|---|---|
-| `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to shared library |
+| `DCLAW_SOCKET_PATH` | `/run/defenseclaw/defenseclaw.sock` | Daemon socket the hooks use |
+| `DCLAW_ALLOW_FFI` | unset | `1` permits the in-process engine when the daemon is unavailable (needs its own `DCLAW_FLASH_PATH`) |
+| `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to shared library (in-process engine only) |
 | `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file |
 
 **Compile-time constants** (set in `CMakeLists.txt`; changing these requires rebuilding the binary):
@@ -570,7 +575,7 @@ cd edge-connector/build && ctest --output-on-failure
 
 # 3. Test the hook standalone
 echo '{"jsonrpc":"2.0","id":1,"method":"hook.hello","params":{}}' | \
-  DCLAW_LIB_PATH=/usr/local/lib/libdclaw_core.so \
+  DCLAW_SOCKET_PATH=/run/defenseclaw/defenseclaw.sock \
   python3 /usr/local/lib/defenseclaw/picoclaw_hook.py
 # Expected: {"jsonrpc":"2.0","id":1,"result":{"ok":true,"name":"edge-connector-gate"}}
 

@@ -42,7 +42,7 @@ if _tools_dir not in sys.path:
 from generic_hook import (
     CAP_ACTUATE, CAP_EXEC_SHELL, CAP_NET_FETCH,
     CAP_READ_FS, CAP_SENSOR_READ, CAP_WRITE_FS,
-    EdgeConnector, Verdict, reviewed_adapter_destination,
+    EdgeConnector, Verdict, is_production, reviewed_adapter_destination,
 )
 
 logger = logging.getLogger("defenseclaw.espclaw")
@@ -83,8 +83,7 @@ class ESPClawAdapter:
         # Use DCLAW_ESPCLAW_ALLOW_HTTP=1 to explicitly override when needed.
         if host not in ("localhost", "127.0.0.1", "::1"):
             allow_http = os.environ.get("DCLAW_ESPCLAW_ALLOW_HTTP", "")
-            prod = os.environ.get("DCLAW_PRODUCTION", "")
-            if prod == "1" and allow_http != "1":
+            if is_production() and allow_http != "1":
                 raise ValueError(
                     f"Plaintext HTTP to non-loopback host {host!r} is not allowed in production. "
                     "Set DCLAW_ESPCLAW_ALLOW_HTTP=1 to override."

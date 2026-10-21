@@ -310,16 +310,55 @@ void dclaw_verdict_set_device_key(const uint8_t *key, size_t key_len) {
     s_device_key_provisioned = !all_zero;
 }
 
-/* Register a pending verdict request.
- *
- * A slot is "available" when EITHER:
- *   (a) it has never been used (request_id == 0 && !resolved), OR
- *   (b) it was resolved and reclaimed (resolved == true).
- * The previous logic only checked condition (a), so resolved slots were
- * never reused — once all DCLAW_PENDING_SLOTS were resolved the system
- * could not send any new verdict requests. */
+/* A pending slot that backs a speculatively allowed call is that call's only
+ * revocation path: the gateway's verdict is matched to the session through
+ * it. Such a slot is never reused or timed out by the 500 ms synchronous
+ * bookkeeping; it is held until the verdict arrives or the speculative
+ * deadline passes (dclaw_speculative_expire). */
+bool dclaw_verdict_backs_speculative(uint16_t request_id) {
+    if (request_id == 0) return false;
+    dclaw_state_t *s = dclaw_get_state();
+    for (int k = 0; k < DCLAW_SPECULATIVE_SLOTS; k++) {
+        if (s->speculative[k].request_id == request_id) return true;
+    }
+    return false;
+}
+
+static int find_unresolved_pending(const dclaw_state_t *s, uint16_t request_id) {
+    for (int i = 0; i < DCLAW_PENDING_SLOTS; i++) {
+        if (s->pending[i].request_id == request_id && !s->pending[i].resolved) return i;
+    }
+    return -1;
+}
+
+/* Release speculative slots whose gateway verdict did not arrive before the
+ * deadline, or whose pending slot no longer exists. The call already ran and
+ * can no longer be verified, so its session is revoked (fail closed). */
+void dclaw_speculative_expire(uint64_t now_ms) {
+    dclaw_state_t *s = dclaw_get_state();
+    for (int k = 0; k < DCLAW_SPECULATIVE_SLOTS; k++) {
+        dclaw_speculative_slot_t *sp = &s->speculative[k];
+        if (sp->request_id == 0) continue;
+        int p = find_unresolved_pending(s, sp->request_id);
+        if (p >= 0 && now_ms < sp->revoke_deadline_ms) continue;
+        uint16_t session = sp->session_id;
+        if (p >= 0) {
+            s->pending[p].request_id = 0;
+            s->pending[p].resolved = false;
+        }
+        memset(sp, 0, sizeof(*sp));
+        dclaw_session_revoke(session);
+        dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_TIMEOUT, 0, session);
+        dclaw_retroactive_block_fn cb = dclaw_get_retroactive_callback();
+        if (cb) cb(session, "(verdict-timeout)");
+    }
+}
+
+/* A synchronous request whose transport entry was evicted can no longer be
+ * matched; free its slot. Slots backing speculative calls are kept. */
 void dclaw_verdict_mark_timeout(uint16_t request_id) {
     dclaw_state_t *s = dclaw_get_state();
+    if (dclaw_verdict_backs_speculative(request_id)) return;
     for (int i = 0; i < DCLAW_PENDING_SLOTS; i++) {
         if (s->pending[i].request_id == request_id) {
             s->pending[i].request_id = 0;
@@ -329,8 +368,20 @@ void dclaw_verdict_mark_timeout(uint16_t request_id) {
     }
 }
 
+/* Register a pending verdict request.
+ *
+ * A slot is "available" when EITHER:
+ *   (a) it has never been used (request_id == 0 && !resolved), OR
+ *   (b) it was resolved and reclaimed (resolved == true).
+ * An unresolved slot older than the synchronous deadline is reclaimed,
+ * unless it backs a speculative call. Returns -1 when no slot is free; the
+ * caller then fails closed. */
 int dclaw_verdict_register_pending(uint16_t request_id, const uint8_t *tool_hash) {
     dclaw_state_t *s = dclaw_get_state();
+    uint64_t now = hal_tick_ms();
+    (void)tool_hash; /* stored externally for HMAC verification */
+
+    dclaw_speculative_expire(now);
 
     for (int i = 0; i < DCLAW_PENDING_SLOTS; i++) {
         bool available = (s->pending[i].request_id == 0 && !s->pending[i].resolved)
@@ -338,24 +389,22 @@ int dclaw_verdict_register_pending(uint16_t request_id, const uint8_t *tool_hash
         if (available) {
             s->pending[i].request_id = request_id;
             s->pending[i].resolved = false;
-            s->pending[i].resolved_at = hal_tick_ms();
+            s->pending[i].resolved_at = now;
             hal_random_bytes(s->pending[i].request_nonce, 4);
-            (void)tool_hash; /* stored externally for HMAC verification */
             return i;
         }
     }
 
-    uint64_t now = hal_tick_ms();
     for (int i = 0; i < DCLAW_PENDING_SLOTS; i++) {
-        if (s->pending[i].request_id != 0 && !s->pending[i].resolved) {
+        if (s->pending[i].request_id != 0 && !s->pending[i].resolved &&
+            !dclaw_verdict_backs_speculative(s->pending[i].request_id)) {
             if (s->pending[i].resolved_at != 0 &&
-                (now - s->pending[i].resolved_at) > 500) {
-                /* Reclaim stale slot */
+                (now - s->pending[i].resolved_at) > DCLAW_VERDICT_TIMEOUT_MS) {
+                /* Reclaim stale synchronous slot */
                 s->pending[i].request_id = request_id;
                 s->pending[i].resolved = false;
                 s->pending[i].resolved_at = now;
                 hal_random_bytes(s->pending[i].request_nonce, 4);
-                (void)tool_hash;
                 return i;
             }
         }
@@ -456,15 +505,23 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
     dclaw_cache_store_with_ttl(local_hash, (dclaw_action_t)action,
                                (dclaw_severity_t)severity, ttl);
 
-    /* Invoke retroactive callback when cloud returns BLOCK for a
-     * previously speculatively-allowed request. */
-    if ((dclaw_action_t)action == DCLAW_ACTION_BLOCK) {
-        dclaw_retroactive_block_fn cb = dclaw_get_retroactive_callback();
-        if (cb) {
-            uint32_t target_hash = (uint32_t)local_hash[0] | ((uint32_t)local_hash[1] << 8)
-                                 | ((uint32_t)local_hash[2] << 16) | ((uint32_t)local_hash[3] << 24);
-            cb((uint16_t)target_hash, "(cloud-verdict)");
+    /* Retroactive revocation: if this request was speculatively allowed and
+     * the gateway now blocks it, revoke the session and notify. */
+    for (int i = 0; i < DCLAW_SPECULATIVE_SLOTS; i++) {
+        dclaw_speculative_slot_t *slot = &s->speculative[i];
+        if (slot->request_id == 0 || slot->request_id != request_id) continue;
+        uint16_t spec_session = slot->session_id;
+        memset(slot, 0, sizeof(*slot));
+        if ((dclaw_action_t)action == DCLAW_ACTION_BLOCK) {
+            dclaw_session_revoke(spec_session);
+            dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_RETROACTIVE,
+                              (uint32_t)local_hash[0] | ((uint32_t)local_hash[1] << 8)
+                              | ((uint32_t)local_hash[2] << 16) | ((uint32_t)local_hash[3] << 24),
+                              spec_session);
+            dclaw_retroactive_block_fn cb = dclaw_get_retroactive_callback();
+            if (cb) cb(spec_session, "(cloud-verdict)");
         }
+        break;
     }
 
     /* Audit the decision */
@@ -472,6 +529,20 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
                       (uint32_t)local_hash[0] | ((uint32_t)local_hash[1] << 8)
                       | ((uint32_t)local_hash[2] << 16) | ((uint32_t)local_hash[3] << 24),
                       0);
+
+    /* Release any IPC reply waiting on this verdict. */
+    dclaw_verdict_ready_fn ready = dclaw_get_verdict_ready_callback();
+    if (ready) {
+        dclaw_verdict_t v = {
+            .action = (dclaw_action_t)action,
+            .reason = (dclaw_reason_t)reason,
+            .severity = (dclaw_severity_t)severity,
+            .mode = DCLAW_VERDICT_SYNC,
+            .ttl_minutes = ttl,
+            .from_cache = false,
+        };
+        ready(request_id, &v);
+    }
 
     return 0;
 }
@@ -499,6 +570,19 @@ bool dclaw_verdict_is_key_provisioned(void) {
     size_t dummy;
     (void)get_device_key(&dummy);
     return s_device_key_provisioned;
+}
+
+/* A production daemon must not run with an unprovisioned or all-zero device
+ * key: it would publish unsigned registration and heartbeat frames and
+ * every escalation would time out. Called at startup with
+ * production = !DCLAW_DEV_MODE; returns -1 when the daemon must refuse to
+ * start. */
+int dclaw_verdict_require_device_key(bool production) {
+    if (!production) return 0;
+    if (dclaw_verdict_is_key_provisioned()) return 0;
+    fprintf(stderr, "[DCLAW] ERROR: A nonzero device key is required in production. "
+            "Provision /etc/defenseclaw/device.key (or DCLAW_DEVICE_KEY).\n");
+    return -1;
 }
 
 /* Compute HMAC for outbound use (e.g., for testing/verification).

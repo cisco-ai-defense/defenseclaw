@@ -52,6 +52,8 @@ iot_extensions:
 
 The policy compiler converts these into deterministic finite automata (DFA) tables evaluated in constant time per input symbol. Sequences are tracked per `session_id`.
 
+The compiler rejects a policy (exit status 65) instead of dropping a rule when a sequence names an unknown capability, has more than 4 steps or an unknown `action`, when there are more than 16 sequences or 32 allowlist entries, or when `skill_actions.<severity>.runtime` is not `enable`, `disable` or `warn`.
+
 ## Destination rules
 
 ```yaml
@@ -65,11 +67,11 @@ iot_extensions:
 The compiler rejects `destination_denylist`, `ssrf_protection`, and hostname entries rather than treating them as working controls. The built-in SSRF guard blocks private and metadata addresses across profiles. Replace `1.1.1.1` with an approved public literal for your service.
 </Callout>
 
-The current on-device SSRF check blocks hostname destinations across build profiles until an enforced egress resolver/proxy exists. Network tools also need a nonempty destination. The allowlist therefore needs a canonical public IPv4 or bracketed globally scoped IPv6 literal for a network destination; the parser does not prove external routability. `1.1.1.1` is an illustrative public IP; replace it with an approved address for your service in a real policy. Private, loopback, and link-local addresses, numeric aliases such as octal/hex/decimal forms, and malformed ports are blocked even if listed. A destination absent from the allowlist is also blocked.
+The current on-device SSRF check blocks hostname destinations across build profiles until an enforced egress resolver/proxy exists. Network tools also need a nonempty destination. The allowlist therefore needs a canonical public IPv4 or globally scoped IPv6 literal for a network destination (an IPv6 entry may be written with or without brackets; the compiler stores it unbracketed, and the device strips the brackets from a call destination such as `https://[2606:4700:4700::1111]/` before matching); the parser does not prove external routability. `1.1.1.1` is an illustrative public IP; replace it with an approved address for your service in a real policy. Private, loopback, and link-local addresses, numeric aliases such as octal/hex/decimal forms, and malformed ports are blocked even if listed. A destination absent from the allowlist is also blocked.
 
 ## Built-in rate and escalation behavior
 
-The C runtime has fixed token-bucket limits of 60 tool calls, 30 network requests, and 10 actuations per minute. Production uses synchronous Fleet escalation by default: an undecided call stays blocked when the gateway is unreachable. `DCLAW_STRICT_MODE=0` permits speculative execution on builds that support it, including on MQTT publication failure, so leave the production default enabled. OTA policy cannot change the rates or select per-capability escalation modes. The compiler rejects `iot_extensions.rate_limits` and `iot_extensions.escalation_mode` instead of signing controls that the receiver would ignore.
+The C runtime has fixed token-bucket limits of 60 tool calls, 30 network requests, and 10 actuations per minute. Production uses synchronous Fleet escalation by default: an undecided call stays blocked when the gateway is unreachable. `DCLAW_STRICT_MODE=0` permits speculative execution on builds that support it (a call whose verdict request could not be published is still blocked), so leave the production default enabled. OTA policy cannot change the rates or select per-capability escalation modes. The compiler rejects `iot_extensions.rate_limits` and `iot_extensions.escalation_mode` instead of signing controls that the receiver would ignore.
 
 ## Content inspection
 

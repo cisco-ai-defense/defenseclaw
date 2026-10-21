@@ -72,6 +72,7 @@ Returns all registered devices with an aggregate fleet summary.
       "site_id": "factory-east",
       "registered_at": "2026-09-01T10:00:00Z",
       "flags": 0,
+      "emergency_lockdown": false,
       "denied_total": 42,
       "allowed_total": 18305,
       "flash_writes": 1200
@@ -93,7 +94,7 @@ Returns all registered devices with an aggregate fleet summary.
 POST /api/v1/fleet/devices
 ```
 
-Registers a new device with the fleet manager. Pre-register each production device with the authenticated API and provision its issued per-device key; MQTT auto-registration is limited to unmanaged local development. If a device with the same composite ID already exists, API re-registration returns `200 OK` instead of `201 Created` and replaces its device key. Provision the returned key on the device immediately. A decommissioned device additionally requires `force_reregister: true`. Registration fails closed if the credential store or mandatory pre-commit credential audit is unavailable. Moving a C device to a different tenant/fleet requires trusted flash reset and reprovisioning of its durable emergency state.
+Registers a new device with the fleet manager. Pre-register each production device with the authenticated API and provision its issued per-device key; MQTT auto-registration is limited to unmanaged local development. If a device with the same composite ID is already registered, the request returns `409 Conflict` unless it sets `force_reregister: true`; a forced re-registration returns `200 OK` instead of `201 Created`, replaces the device key, and shares the one-per-minute per-device limit of `rotate-key`. Provision the returned key on the device immediately. A new key (forced re-registration or `rotate-key`) starts a new heartbeat lineage: the stored boot counter and uptime baseline are reset, so a re-provisioned device whose flash was reset is not dropped as a replay; frames signed with the previous key no longer verify. A decommissioned device also requires `force_reregister: true`. Registration fails closed if the credential store or mandatory pre-commit credential audit is unavailable. Moving a C device to a different tenant/fleet requires trusted flash reset and reprovisioning of its durable emergency state.
 
 **Request body**
 
@@ -106,7 +107,7 @@ Registers a new device with the fleet manager. Pre-register each production devi
 | `fw_version` | string | no | Firmware version string |
 | `policy_version` | uint16 | no | Highest accepted policy version (anti-rollback watermark); after a canary rollback this can exceed the active partition's version |
 | `capabilities` | uint8 | no | Capability bitmask the device supports |
-| `force_reregister` | bool | no | Required to re-enable a decommissioned device |
+| `force_reregister` | bool | no | Required to re-key an already registered device or to re-enable a decommissioned device |
 
 ```json
 {
@@ -138,6 +139,7 @@ Registers a new device with the fleet manager. Pre-register each production devi
     "site_id": "",
     "registered_at": "2026-10-05T14:00:00Z",
     "flags": 0,
+    "emergency_lockdown": false,
     "denied_total": 0,
     "allowed_total": 0,
     "flash_writes": 0
@@ -146,7 +148,7 @@ Registers a new device with the fleet manager. Pre-register each production devi
 }
 ```
 
-**Response** `200 OK` (device already exists)
+**Response** `200 OK` (existing device, `force_reregister: true`)
 
 ```json
 {
@@ -161,18 +163,21 @@ Registers a new device with the fleet manager. Pre-register each production devi
 ```
 
 <Callout type="warn">
-The `device_key` is returned on initial registration, re-registration, and explicit key rotation. Each response containing a new key invalidates the previous key; the key cannot be retrieved later. Provision it via `DCLAW_DEVICE_KEY` or `/etc/defenseclaw/device.key`. Registration returns `503` if the credential store is unavailable. Production key delivery requires HTTPS or a configured trusted TLS proxy.
+The `device_key` is returned on initial registration, re-registration, and explicit key rotation. Each response containing a new key invalidates the previous key; the key cannot be retrieved later. Provision it via `DCLAW_DEVICE_KEY` or `/etc/defenseclaw/device.key`. Registration returns `503` if the credential store is unavailable. Production key delivery requires HTTPS or a configured trusted TLS proxy. `fleet.allow_key_over_http` takes effect only in explicit unmanaged development mode (`DCLAW_DEV_MODE=ON`); on managed or production hosts it is ignored with a startup warning, and plaintext requests for a key or token return `403`.
 </Callout>
+
+Outside explicit unmanaged development mode (`DCLAW_DEV_MODE=ON`), the gateway authenticates MQTT traffic only with per-device keys issued by this endpoint. A fleet-wide key set on the gateway (the variable named by `fleet.device_key_env`, `DCLAW_DEVICE_KEY` by default) is ignored, and heartbeats, registrations and verdict requests from a device without a per-device key are rejected; every verdict request must carry a valid HMAC together with the device's boot nonce and request nonce (firmware that omits them is refused). `DCLAW_PRODUCTION` is parsed case-insensitively: `1`, `true` or any other value except empty, `0`, `false`, `no` and `off` forces production behaviour even when `DCLAW_DEV_MODE=ON`.
 
 **Status codes**
 
 | Status | Condition |
 | --- | --- |
-| `200` | Device already exists (idempotent) |
+| `200` | Existing device re-registered with `force_reregister` (new key issued) |
 | `201` | Device created |
 | `400` | Missing `device_id` or malformed JSON |
 | `403` | Token is not authorized for the tenant, or credential delivery channel is not protected |
-| `409` | Device was decommissioned; `force_reregister` is required |
+| `409` | Device is already registered or was decommissioned; `force_reregister` is required |
+| `429` | Forced re-registration of a live device within a minute of its last key change |
 | `413` | Request body exceeds 1 MB |
 | `503` | Atomic credential/tombstone store or mandatory audit unavailable; existing registration and key are preserved so the request can be retried |
 
@@ -182,7 +187,7 @@ The `device_key` is returned on initial registration, re-registration, and expli
 POST /api/v1/fleet/devices/{id}/rotate-key
 ```
 
-Generates and persists a replacement 32-byte device HMAC key. The response returns `device_id`, `device_key`, and `status: "rotated"`; store the key securely and provision it on the device before sending more signed messages. This endpoint is rate limited to one rotation per device per minute and requires a configured key store. A tenant-scoped token can rotate only a device in that tenant. Production key delivery requires HTTPS or a configured trusted TLS proxy. Missing devices return `404`; an unavailable key store returns `501`.
+Generates and persists a replacement 32-byte device HMAC key. The response returns `device_id`, `device_key`, and `status: "rotated"`; store the key securely and provision it on the device before sending more signed messages. This endpoint is rate limited to one rotation per device per minute and requires a configured key store. A tenant-scoped token can rotate only a device in that tenant. Production key delivery requires HTTPS or a configured trusted TLS proxy. Missing devices return `404`. If no key store is configured, the request returns `501`. If the configured key store is not the Fleet device store, which can rotate the key atomically, the request returns `503`; it also returns `503` when the mandatory credential audit is unavailable. Rotation and decommission are mutually exclusive: the key and device record change in one transaction that re-checks the device and its decommission tombstone, so a device decommissioned while a rotation is in progress returns `404` and keeps no key.
 
 ### Rotate the Fleet API token
 
@@ -190,7 +195,7 @@ Generates and persists a replacement 32-byte device HMAC key. The response retur
 POST /api/v1/fleet/token/rotate
 ```
 
-Requires the admin token and returns a new 32-byte token once. Rotation invalidates the old admin token in the running gateway and is rate limited to once per minute. Save the returned token in the gateway's secret source: rotation is currently **in memory only** and does not update `DCLAW_FLEET_API_TOKEN`, so a restart without updating the secret restores the old token. Production token delivery requires HTTPS or a configured trusted TLS proxy.
+Requires the admin token and returns a new 32-byte token once. Rotation invalidates the old admin token and is rate limited to once per minute. The gateway persists a SHA-256 hash of the new token (never the token itself) in the Fleet device database before answering, so a restart does not revive the rotated-out token; if the rotation cannot be persisted the request returns `503` and the current token stays valid. Rotation does not edit `DCLAW_FLEET_API_TOKEN`: after a restart the rotated token remains in effect while the secret source still holds the superseded token. Save the returned token in the secret source; configuring any other new token there replaces the persisted rotation at the next start. Production token delivery requires HTTPS or a configured trusted TLS proxy.
 
 ### Get device details
 
@@ -217,11 +222,26 @@ Returns the full device record for a specific device. The `{id}` is the 64-bit c
   "site_id": "factory-east",
   "registered_at": "2026-09-01T10:00:00Z",
   "flags": 0,
+  "emergency_lockdown": false,
+  "last_emergency_seq": 7,
   "denied_total": 42,
   "allowed_total": 18305,
   "flash_writes": 1200
 }
 ```
+
+`flags` is the bit field from the device's last signed heartbeat:
+
+| Bit | Name | Set by the C engine when |
+| --- | --- | --- |
+| `0x02` | `POLICY_STALE` | No trusted gateway time has been received yet |
+| `0x04` | `TAMPER_DETECT` | Reserved; never set (the audit chain is not verified on the device) |
+| `0x08` | `CANARY_ROLLBACK` | A canary rollback is in effect |
+| `0x20` | `OFFLINE_MODE` | The device is not connected to the broker |
+| `0x40` | `EMERGENCY_LOCKDOWN` | A `BLOCK_ALL` or `ENTER_LOCKDOWN` command is in effect and every tool call is denied |
+| `0x80` | `SE_DEGRADED` | Reserved; never set |
+
+`emergency_lockdown` is `true` while the device reports an active emergency lockdown (block-all, heartbeat flag `0x40`) and `status` is then `lockdown`; it returns to `false` in the first heartbeat after the device releases the lockdown. `status` is also `lockdown` for the reserved tamper flag `0x04`, which the device does not currently set (audit-chain verification is offline); only `0x04` raises a `tamper_detect` alert. Compare `last_emergency_seq` with the fleet's latest emergency sequence to confirm a specific command was applied.
 
 **Status codes**
 
@@ -338,6 +358,7 @@ Standard per-user `install.sh`/`install.ps1` copy the matching compiler only whe
 | `409` | The fleet policy version reached 65534; provision a new device policy lineage |
 | `413` | Request body or compiled policy exceeds its size limit |
 | `422` | Policy YAML cannot be compiled |
+| `429` | Every policy compiler slot stayed busy; retry later |
 | `500` | Signing or distribution failed |
 | `501` | Policy service not configured |
 
@@ -436,6 +457,9 @@ Compiles a policy YAML without signing or distributing. Use this to validate pol
 | `200` | Compilation succeeded (or policy service not configured, returns stub result) |
 | `400` | Malformed JSON |
 | `422` | Compilation failed (invalid policy YAML) |
+| `429` | Every policy compiler slot stayed busy; retry later |
+
+The gateway runs at most two policy compiler processes at a time across simulate and push requests; a request that cannot get a slot within 2 seconds returns `429`. A relative `fleet.policy_compiler_path` is resolved once, against the gateway's working directory at startup, and that absolute path is both validated and executed.
 
 ### Send emergency command
 
@@ -443,7 +467,7 @@ Compiles a policy YAML without signing or distributing. Use this to validate pol
 POST /api/v1/fleet/policy/emergency
 ```
 
-Publishes a signed emergency command to the fleet MQTT topic. A `200` response confirms broker publication, not device receipt or execution. With clean MQTT sessions, devices offline at publication time miss the initial command. The gateway stores signed emergency history for the fleet and replays missed commands in predecessor order after an authenticated signed registration or heartbeat, up to 32 per pass; later heartbeats request subsequent pages. The 112-byte wire frame signs a predecessor sequence so a later command cannot silently bypass a missed lockdown. A history gap or unavailable durable store fails closed. Confirm the device's last-applied emergency sequence in a later signed heartbeat and its state during incident response.
+Publishes a signed emergency command to the fleet MQTT topic. A `200` response confirms broker publication, not device receipt or execution. With clean MQTT sessions, devices offline at publication time miss the initial command. The gateway stores signed emergency history for the fleet and replays missed commands in predecessor order after an authenticated signed registration or heartbeat, up to 32 per pass; later heartbeats request subsequent pages. Replays go to the fleet topic, so passes are coalesced per fleet and run in the background: one pass at a time, a device whose position a pass in the last 30 seconds already covered is skipped, and at most 4 passes run per fleet per 30 seconds. A device that misses a replay is served by a later heartbeat. The 112-byte wire frame signs a predecessor sequence so a later command cannot silently bypass a missed lockdown. A history gap or unavailable durable store fails closed. Confirm the device's last-applied emergency sequence in a later signed heartbeat: `GET /api/v1/fleet/devices/{id}` reports it as `last_emergency_seq`, which equals the command's sequence once the device has applied it. Check its state during incident response.
 
 **Request body**
 

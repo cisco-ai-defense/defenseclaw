@@ -112,7 +112,9 @@ func createTable(db *sql.DB) error {
 			prev_allowed    INTEGER NOT NULL DEFAULT 0,
 			prev_warned     INTEGER NOT NULL DEFAULT 0,
 			prev_escalated  INTEGER NOT NULL DEFAULT 0,
-			boot_epoch      INTEGER NOT NULL DEFAULT 0
+			boot_epoch      INTEGER NOT NULL DEFAULT 0,
+			last_emergency_seq INTEGER NOT NULL DEFAULT 0,
+			emergency_lockdown INTEGER NOT NULL DEFAULT 0
 		)
 	`)
 	if err != nil {
@@ -129,6 +131,8 @@ func createTable(db *sql.DB) error {
 		"ALTER TABLE devices ADD COLUMN prev_warned INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE devices ADD COLUMN prev_escalated INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE devices ADD COLUMN boot_epoch INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE devices ADD COLUMN last_emergency_seq INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE devices ADD COLUMN emergency_lockdown INTEGER NOT NULL DEFAULT 0",
 	} {
 		if _, err := db.Exec(col); err != nil {
 			// Ignore "duplicate column name" — column already exists.
@@ -172,6 +176,71 @@ func createTable(db *sql.DB) error {
 		return fmt.Errorf("create decommissioned_devices table: %w", err)
 	}
 
+	// Durable admin-token rotation: SHA-256 of the token in effect after the
+	// last rotation and of the configured token it superseded. Only hashes
+	// are stored.
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS fleet_admin_token (
+			id              INTEGER PRIMARY KEY CHECK (id = 1),
+			active_hash     TEXT NOT NULL,
+			superseded_hash TEXT NOT NULL DEFAULT '',
+			rotated_at      TEXT NOT NULL
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create fleet_admin_token table: %w", err)
+	}
+
+	return nil
+}
+
+// LoadAdminTokenRotation returns the persisted admin-token rotation, or nil
+// hashes when the token has never been rotated.
+func (s *SQLiteStore) LoadAdminTokenRotation() (active, superseded []byte, err error) {
+	var activeHex, supersededHex string
+	err = s.db.QueryRow(`SELECT active_hash, superseded_hash FROM fleet_admin_token WHERE id = 1`).Scan(&activeHex, &supersededHex)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("load admin token rotation: %w", err)
+	}
+	if active, err = hex.DecodeString(activeHex); err != nil || len(active) != 32 {
+		return nil, nil, fmt.Errorf("load admin token rotation: invalid active hash")
+	}
+	if supersededHex != "" {
+		if superseded, err = hex.DecodeString(supersededHex); err != nil || len(superseded) != 32 {
+			return nil, nil, fmt.Errorf("load admin token rotation: invalid superseded hash")
+		}
+	}
+	return active, superseded, nil
+}
+
+// SaveAdminTokenRotation durably records a rotated admin token hash.
+func (s *SQLiteStore) SaveAdminTokenRotation(active, superseded []byte) error {
+	if len(active) != 32 || (superseded != nil && len(superseded) != 32) {
+		return fmt.Errorf("admin token hashes must be 32 bytes")
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO fleet_admin_token (id, active_hash, superseded_hash, rotated_at)
+		VALUES (1, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			active_hash     = excluded.active_hash,
+			superseded_hash = excluded.superseded_hash,
+			rotated_at      = excluded.rotated_at
+	`, hex.EncodeToString(active), hex.EncodeToString(superseded), time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("save admin token rotation: %w", err)
+	}
+	return nil
+}
+
+// ClearAdminTokenRotation forgets a persisted rotation, used when the
+// operator configures a new admin token.
+func (s *SQLiteStore) ClearAdminTokenRotation() error {
+	if _, err := s.db.Exec(`DELETE FROM fleet_admin_token`); err != nil {
+		return fmt.Errorf("clear admin token rotation: %w", err)
+	}
 	return nil
 }
 
@@ -193,8 +262,9 @@ func saveDeviceWith(exec sqliteExecer, dev *manager.Device) error {
 			last_audit_hmac, site_id, registered_at, flags,
 			denied_total, allowed_total, warned_total, escalated_total,
 			flash_writes, last_uptime, boot_counter, prev_denied, prev_allowed,
-			prev_warned, prev_escalated, boot_epoch
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			prev_warned, prev_escalated, boot_epoch, last_emergency_seq,
+			emergency_lockdown
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(device_id) DO UPDATE SET
 			hw_profile      = excluded.hw_profile,
 			fw_version      = excluded.fw_version,
@@ -216,7 +286,9 @@ func saveDeviceWith(exec sqliteExecer, dev *manager.Device) error {
 			prev_allowed    = excluded.prev_allowed,
 			prev_warned     = excluded.prev_warned,
 			prev_escalated  = excluded.prev_escalated,
-			boot_epoch      = excluded.boot_epoch
+			boot_epoch      = excluded.boot_epoch,
+			last_emergency_seq = excluded.last_emergency_seq,
+			emergency_lockdown = excluded.emergency_lockdown
 	`,
 		dev.DeviceID, dev.TenantID, dev.FleetID,
 		dev.HWProfile, dev.FWVersion,
@@ -226,7 +298,8 @@ func saveDeviceWith(exec sqliteExecer, dev *manager.Device) error {
 		dev.Flags, dev.DeniedTotal, dev.AllowedTotal,
 		dev.WarnedTotal, dev.EscalatedTotal,
 		dev.FlashWrites, dev.LastUptime, dev.BootCounter, dev.PrevDenied, dev.PrevAllowed,
-		dev.PrevWarned, dev.PrevEscalated, dev.BootEpoch,
+		dev.PrevWarned, dev.PrevEscalated, dev.BootEpoch, dev.LastEmergencySeq,
+		dev.EmergencyLockdown,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert device %d: %w", dev.DeviceID, err)
@@ -272,6 +345,40 @@ func (s *SQLiteStore) SaveDeviceRegistration(dev *manager.Device, key []byte, al
 	return nil
 }
 
+// RotateDeviceKey replaces the signing key of a registered device and saves
+// its record in one transaction. It fails, changing nothing, when the device
+// row is missing or the device has a decommission tombstone, so a rotation
+// racing a decommission cannot leave a key for a removed device.
+func (s *SQLiteStore) RotateDeviceKey(dev *manager.Device, key []byte) error {
+	if len(key) != 32 {
+		return fmt.Errorf("device key must be exactly 32 bytes, got %d", len(key))
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin device key rotation %d: %w", dev.DeviceID, err)
+	}
+	defer tx.Rollback()
+	var present int
+	err = tx.QueryRow(`SELECT 1 FROM devices WHERE device_id = ?
+		AND NOT EXISTS (SELECT 1 FROM decommissioned_devices WHERE device_id = ?)`, dev.DeviceID, dev.DeviceID).Scan(&present)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("rotate device key %d: %w", dev.DeviceID, manager.ErrDeviceNotFound)
+	}
+	if err != nil {
+		return fmt.Errorf("check device %d before key rotation: %w", dev.DeviceID, err)
+	}
+	if err := saveDeviceWith(tx, dev); err != nil {
+		return err
+	}
+	if err := saveDeviceKeyWith(tx, dev.DeviceID, key); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit device key rotation %d: %w", dev.DeviceID, err)
+	}
+	return nil
+}
+
 func (s *SQLiteStore) LoadDevice(tenantID, fleetID uint16, deviceID uint32) (*manager.Device, error) {
 	fullID := manager.ComposeID(tenantID, fleetID, deviceID)
 
@@ -281,7 +388,8 @@ func (s *SQLiteStore) LoadDevice(tenantID, fleetID uint16, deviceID uint32) (*ma
 		       last_audit_hmac, site_id, registered_at, flags,
 		       denied_total, allowed_total, warned_total, escalated_total,
 		       flash_writes, last_uptime, boot_counter, prev_denied, prev_allowed,
-		       prev_warned, prev_escalated, boot_epoch
+		       prev_warned, prev_escalated, boot_epoch, last_emergency_seq,
+		       emergency_lockdown
 		FROM devices WHERE device_id = ?
 	`, fullID)
 
@@ -295,7 +403,8 @@ func (s *SQLiteStore) ListDevices() ([]*manager.Device, error) {
 		       last_audit_hmac, site_id, registered_at, flags,
 		       denied_total, allowed_total, warned_total, escalated_total,
 		       flash_writes, last_uptime, boot_counter, prev_denied, prev_allowed,
-		       prev_warned, prev_escalated, boot_epoch
+		       prev_warned, prev_escalated, boot_epoch, last_emergency_seq,
+		       emergency_lockdown
 		FROM devices ORDER BY device_id
 	`)
 	if err != nil {
@@ -493,7 +602,8 @@ func scanDeviceFromScanner(s scanner) (*manager.Device, error) {
 		&dev.FlashWrites, &dev.LastUptime, &dev.BootCounter,
 		&dev.PrevDenied, &dev.PrevAllowed,
 		&dev.PrevWarned, &dev.PrevEscalated,
-		&dev.BootEpoch,
+		&dev.BootEpoch, &dev.LastEmergencySeq,
+		&dev.EmergencyLockdown,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {

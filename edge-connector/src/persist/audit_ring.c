@@ -27,6 +27,56 @@ extern dclaw_state_t *dclaw_get_state(void);
 
 static uint16_t ring_head = 0; /* next write position in flash ring */
 
+/* Group commit for BLOCK entries. Every BLOCK is written to flash
+ * immediately; an fdatasync per entry let any IPC peer (including one past
+ * the IPC flood limit, whose rejections are BLOCKs) drive one sync per
+ * request. Syncs are now coalesced to at most one per
+ * DCLAW_AUDIT_BLOCK_SYNC_MS, and an entry written inside the window is
+ * synced when it closes (dclaw_audit_tick) or by the next write after it. */
+static bool     s_sync_pending = false;
+static bool     s_synced_once = false;
+static uint64_t s_last_sync_ms = 0;
+
+/* A failed sync leaves the entries pending; they are retried when the
+ * next window closes. */
+static int audit_sync_now(uint64_t now) {
+    s_last_sync_ms = now;
+    s_synced_once = true;
+    if (hal_flash_sync() != 0) {
+        fprintf(stderr, "[DCLAW-AUDIT] WARNING: hal_flash_sync() failed\n");
+        s_sync_pending = true;
+        return -1;
+    }
+    s_sync_pending = false;
+    return 0;
+}
+
+static void audit_sync_block(void) {
+    uint64_t now = hal_tick_ms();
+    if (s_synced_once && now - s_last_sync_ms < DCLAW_AUDIT_BLOCK_SYNC_MS) {
+        s_sync_pending = true;
+        return;
+    }
+    (void)audit_sync_now(now);
+}
+
+/* Sync a BLOCK entry whose window has closed. Call from the event loop. */
+void dclaw_audit_tick(uint64_t now_ms) {
+    if (s_sync_pending && now_ms - s_last_sync_ms >= DCLAW_AUDIT_BLOCK_SYNC_MS)
+        (void)audit_sync_now(now_ms);
+}
+
+/* Milliseconds until a pending BLOCK sync is due; -1 when none is pending. */
+int dclaw_audit_sync_due_in_ms(uint64_t now_ms) {
+    if (!s_sync_pending) return -1;
+    uint64_t due = s_last_sync_ms + DCLAW_AUDIT_BLOCK_SYNC_MS;
+    return now_ms >= due ? 0 : (int)(due - now_ms);
+}
+
+bool dclaw_audit_sync_pending(void) {
+    return s_sync_pending;
+}
+
 /*
  * Persistent audit ring header.
  *
@@ -328,9 +378,8 @@ static int flush_buffer_to_flash(dclaw_audit_writer_t *w) {
     /* Persist head position and last HMAC to flash header */
     audit_ring_persist_header(w->prev_hmac);
 
-    if (hal_flash_sync() != 0) {
-        fprintf(stderr, "[DCLAW-AUDIT] WARNING: hal_flash_sync() failed after flush\n");
-    }
+    /* Group-committed with BLOCK entries; dclaw_flush_audit forces it. */
+    audit_sync_block();
     return 0;
 }
 
@@ -487,6 +536,8 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
     dclaw_state_t *s = dclaw_get_state();
     dclaw_audit_writer_t *w = &s->audit_writer;
 
+    dclaw_audit_tick(hal_tick_ms());
+
     dclaw_audit_entry_t entry = {
         .timestamp = hal_tick_ms(),
         .target_hash = target_hash,
@@ -542,8 +593,8 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
         /* Update prev_hmac so the next buffered entry chains from this BLOCK entry */
         memcpy(w->prev_hmac, entry.hmac, 16);
         audit_ring_persist_header(w->prev_hmac);
-        /* Sync to durable storage for BLOCK durability */
-        hal_flash_sync();
+        /* Durable now, or when the current group-commit window closes. */
+        audit_sync_block();
         return 0;
     }
 
@@ -569,7 +620,9 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
 
 int dclaw_flush_audit(void) {
     dclaw_state_t *s = dclaw_get_state();
-    return flush_buffer_to_flash(&s->audit_writer);
+    int rc = flush_buffer_to_flash(&s->audit_writer);
+    if (s_sync_pending && audit_sync_now(hal_tick_ms()) != 0) rc = -1;
+    return rc;
 }
 
 bool dclaw_audit_key_provisioned(void) {
@@ -587,6 +640,7 @@ const uint8_t *dclaw_audit_get_key(size_t *out_len) {
 
 void dclaw_audit_ring_shutdown(void)
 {
+    if (s_sync_pending) (void)audit_sync_now(hal_tick_ms());
     dclaw_secure_zero(s_audit_key, sizeof(s_audit_key));
     s_audit_key_loaded = false;
     s_audit_key_provisioned = false;

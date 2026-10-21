@@ -26,15 +26,27 @@
 #if DCLAW_CONTENT_SCAN
 
 /**
- * Add a finding to the scan context if there's room.
- * Returns true if added, false if findings array is full.
+ * Record a finding. When the array is full, the new finding replaces the
+ * least severe one if it is more severe, so the array always holds the
+ * DCLAW_MAX_SCAN_FINDINGS most severe findings and a late HIGH finding is
+ * never lost behind earlier MEDIUM ones. Scanners therefore run over the
+ * whole content instead of stopping when the array fills.
+ * Returns true if the finding was kept.
  */
 static bool add_finding(dclaw_scan_context_t *ctx,
                        dclaw_content_category_t category,
                        dclaw_severity_t severity,
                        uint16_t offset) {
     if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) {
-        return false;
+        uint8_t lo = 0;
+        for (uint8_t i = 1; i < ctx->finding_count; i++) {
+            if (ctx->findings[i].severity < ctx->findings[lo].severity) lo = i;
+        }
+        if ((uint8_t)severity <= ctx->findings[lo].severity) return false;
+        ctx->findings[lo].category = category;
+        ctx->findings[lo].severity = severity;
+        ctx->findings[lo].offset = offset;
+        return true;
     }
 
     ctx->findings[ctx->finding_count].category = category;
@@ -107,9 +119,6 @@ static void scan_dfa(const char *content, uint16_t content_len,
                            (dclaw_severity_t)pat->severity,
                            match_start);
 
-                if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) {
-                    return;
-                }
             }
         }
     }
@@ -182,7 +191,6 @@ static void scan_secrets(const char *content, uint16_t content_len, dclaw_scan_c
                 break;
             }
         }
-        if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) break;
     }
 }
 
@@ -204,7 +212,6 @@ static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_conte
             isdigit((unsigned char)content[i+7]) && isdigit((unsigned char)content[i+8]) &&
             isdigit((unsigned char)content[i+9]) && isdigit((unsigned char)content[i+10])) {
             add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_CRITICAL, i);
-            if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
         }
     }
 
@@ -212,7 +219,6 @@ static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_conte
     for (uint16_t i = 1; i + 1 < content_len; i++) {
         if (content[i] == '@' && !is_boundary(content[i-1]) && !is_boundary(content[i+1])) {
             add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_MEDIUM, i - 1);
-            if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
         }
     }
 
@@ -233,7 +239,6 @@ static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_conte
             /* Disambiguate from SSN (XXX-XX-XXXX): SSN has 2 digits in middle group */
             /* Phone has 3 digits in middle group, so this is different from SSN */
             add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_MEDIUM, i);
-            if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
         }
 
         /* Format 2: (XXX) XXX-XXXX (14 chars) */
@@ -246,7 +251,6 @@ static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_conte
             isdigit((unsigned char)content[i+10]) && isdigit((unsigned char)content[i+11]) &&
             isdigit((unsigned char)content[i+12]) && isdigit((unsigned char)content[i+13])) {
             add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_MEDIUM, i);
-            if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
         }
 
         /* Format 3: XXX.XXX.XXXX (12 chars) */
@@ -258,7 +262,6 @@ static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_conte
             isdigit((unsigned char)content[i+8]) && isdigit((unsigned char)content[i+9]) &&
             isdigit((unsigned char)content[i+10]) && isdigit((unsigned char)content[i+11])) {
             add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_MEDIUM, i);
-            if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
         }
     }
 
@@ -280,7 +283,6 @@ static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_conte
                 continuous_digits++;
                 if (continuous_digits == 16) {
                     add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_HIGH, cont_start);
-                    if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
                     continuous_digits = 0;
                 }
                 /* Track grouped format */
@@ -291,7 +293,6 @@ static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_conte
                     digit_run = 0;
                     if (groups == 4 && separators >= 2) {
                         add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_HIGH, cc_start);
-                        if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
                         groups = 0;
                         separators = 0;
                     }
@@ -377,7 +378,6 @@ static void scan_credentials(const char *content, uint16_t content_len, dclaw_sc
         }
 
         next_pos: ;
-        if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) break;
     }
 }
 
@@ -399,7 +399,6 @@ static void scan_exfil(const char *content, uint16_t content_len, dclaw_scan_con
         } else {
             if (b64_len > 100) {
                 add_finding(ctx, DCLAW_CONTENT_CATEGORY_EXFIL, DCLAW_SEV_MEDIUM, b64_start);
-                if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
             }
             b64_len = 0;
         }
@@ -479,7 +478,6 @@ static void scan_injection(const char *content, uint16_t content_len, dclaw_scan
         }
 
         next_inj: ;
-        if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) break;
     }
 }
 
@@ -505,7 +503,6 @@ static void scan_commands(const char *content, uint16_t content_len, dclaw_scan_
                 break;
             }
         }
-        if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) break;
     }
 }
 
@@ -529,13 +526,10 @@ static void scan_content_for_scope(const char *content, uint16_t content_len,
     scan_dfa(content, content_len, ctx);
 
     /* Structural patterns the DFA cannot express */
-    if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
-        scan_pii(content, content_len, ctx);
-    }
+    scan_pii(content, content_len, ctx);
 
     /* EXFIL only for USER_INPUT scope */
-    if (scope != DCLAW_CONTENT_SCOPE_TOOL_OUTPUT &&
-        ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
+    if (scope != DCLAW_CONTENT_SCOPE_TOOL_OUTPUT) {
         scan_exfil(content, content_len, ctx);
     }
 }
@@ -547,22 +541,15 @@ static void scan_content_for_scope(const char *content, uint16_t content_len,
                                    dclaw_scan_context_t *ctx) {
     if (scope == DCLAW_CONTENT_SCOPE_TOOL_OUTPUT) {
         scan_secrets(content, content_len, ctx);
-        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS)
-            scan_pii(content, content_len, ctx);
-        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS)
-            scan_credentials(content, content_len, ctx);
+        scan_pii(content, content_len, ctx);
+        scan_credentials(content, content_len, ctx);
     } else {
         scan_secrets(content, content_len, ctx);
-        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS)
-            scan_pii(content, content_len, ctx);
-        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS)
-            scan_credentials(content, content_len, ctx);
-        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS)
-            scan_exfil(content, content_len, ctx);
-        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS)
-            scan_injection(content, content_len, ctx);
-        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS)
-            scan_commands(content, content_len, ctx);
+        scan_pii(content, content_len, ctx);
+        scan_credentials(content, content_len, ctx);
+        scan_exfil(content, content_len, ctx);
+        scan_injection(content, content_len, ctx);
+        scan_commands(content, content_len, ctx);
     }
 }
 

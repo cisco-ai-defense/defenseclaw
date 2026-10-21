@@ -47,7 +47,7 @@ if _tools_dir not in sys.path:
 from generic_hook import (
     CAP_ACTUATE, CAP_EXEC_SHELL, CAP_NET_FETCH,
     CAP_READ_FS, CAP_SENSOR_READ, CAP_WRITE_FS,
-    EdgeConnector, Verdict, reviewed_adapter_destination,
+    EdgeConnector, Verdict, is_production, reviewed_adapter_destination,
 )
 
 logger = logging.getLogger("defenseclaw.bubbaloop")
@@ -123,7 +123,7 @@ class BubbaloopAdapter:
                 "Auth tokens will be transmitted in cleartext. Use HTTPS in production.",
                 stacklevel=2,
             )
-            if os.environ.get("DCLAW_PRODUCTION"):
+            if is_production():
                 raise ValueError(
                     f"Plaintext HTTP to non-loopback host {host} is not allowed in production. "
                     "Use HTTPS or set the URL to https://."

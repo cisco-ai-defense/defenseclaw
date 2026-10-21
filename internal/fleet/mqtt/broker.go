@@ -220,7 +220,14 @@ type VerdictRequest struct {
 	Findings     uint8
 	BootNonce    [16]byte
 	RequestNonce [4]byte
+	// HasNonces reports that a well-formed, non-zero 16-byte boot nonce and
+	// a 4-byte request nonce were both present. Older firmware omitted them.
+	HasNonces bool
 }
+
+// ReasonCloudBlock is DCLAW_REASON_CLOUD_BLOCK in edge-connector/include/defenseclaw.h:
+// the gateway decided BLOCK. Devices report it on held replies and cache hits.
+const ReasonCloudBlock uint8 = 0x06
 
 // VerdictResponse is the 44-byte binary response sent back to the device.
 // Wire layout (HMAC extended to full 32-byte SHA-256):
@@ -392,6 +399,7 @@ func DecodeVerdictRequest(data []byte) (*VerdictRequest, error) {
 			copy(vr.RequestNonce[:], rnonce)
 			pos += n
 			_ = data[pos:] // remaining updated
+			vr.HasNonces = vr.BootNonce != [16]byte{}
 		}
 	}
 

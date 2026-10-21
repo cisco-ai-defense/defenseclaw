@@ -737,8 +737,9 @@ class TestSecurityGate:
         gate.shutdown()
         mock_ec.shutdown.assert_called_once()
 
+    @patch("mcp_proxy.fail_open_attested", return_value=True)
     @patch("mcp_proxy.EdgeConnector")
-    def test_gate_fail_open_config(self, mock_ec_cls):
+    def test_gate_fail_open_config(self, mock_ec_cls, _attested):
         config = ProxyConfig(fail_mode="open")
         SecurityGate(config)
         mock_ec_cls.assert_called_once_with(
@@ -746,6 +747,38 @@ class TestSecurityGate:
             socket_path=None,
             fail_open=True,
         )
+
+    @patch("mcp_proxy.EdgeConnector")
+    def test_gate_fail_open_requires_attestation(self, mock_ec_cls, monkeypatch):
+        monkeypatch.delenv("DCLAW_DEV_MODE", raising=False)
+        monkeypatch.setattr("generic_hook._FAIL_OPEN_TOKEN", "")
+        SecurityGate(ProxyConfig(fail_mode="open"))
+        mock_ec_cls.assert_called_once_with(
+            lib_path=None,
+            socket_path=None,
+            fail_open=False,
+        )
+
+    @patch("mcp_proxy.EdgeConnector")
+    def test_gate_fail_open_rejects_bad_token(self, mock_ec_cls, monkeypatch):
+        monkeypatch.delenv("DCLAW_DEV_MODE", raising=False)
+        monkeypatch.setenv("DCLAW_AUDIT_KEY", "11" * 32)
+        monkeypatch.setattr("generic_hook._FAIL_OPEN_TOKEN", "00" * 32)
+        SecurityGate(ProxyConfig(fail_mode="open"))
+        assert mock_ec_cls.call_args.kwargs["fail_open"] is False
+
+    @patch("mcp_proxy.EdgeConnector")
+    def test_gate_fail_open_accepts_valid_token(self, mock_ec_cls, monkeypatch):
+        import hashlib
+        import hmac
+        key = "11" * 32
+        token = hmac.new(bytes.fromhex(key), b"fail-open-authorized",
+                         hashlib.sha256).hexdigest()
+        monkeypatch.delenv("DCLAW_DEV_MODE", raising=False)
+        monkeypatch.setenv("DCLAW_AUDIT_KEY", key)
+        monkeypatch.setattr("generic_hook._FAIL_OPEN_TOKEN", token)
+        SecurityGate(ProxyConfig(fail_mode="open"))
+        assert mock_ec_cls.call_args.kwargs["fail_open"] is True
 
     @patch("mcp_proxy.EdgeConnector")
     def test_gate_fail_closed_config(self, mock_ec_cls):
@@ -756,3 +789,82 @@ class TestSecurityGate:
             socket_path=None,
             fail_open=False,
         )
+
+
+# -----------------------------------------------------------------------
+# Stdio upstream framing
+# -----------------------------------------------------------------------
+
+_FAKE_UPSTREAM = r'''
+import json, sys
+if "--stderr" in sys.argv:
+    sys.stderr.write("x" * (1024 * 1024))
+    sys.stderr.flush()
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg:
+        continue
+    if "--chatty" in sys.argv:
+        # A notification, a server->client request and a stray reply,
+        # all before the real answer.
+        print(json.dumps({"jsonrpc": "2.0", "method": "notifications/message",
+                          "params": {"level": "info", "data": "hi"}}))
+        print(json.dumps({"jsonrpc": "2.0", "id": "srv-1", "method": "roots/list"}))
+        print(json.dumps({"jsonrpc": "2.0", "id": "other", "result": {}}))
+        sys.stdout.flush()
+        reply = json.loads(sys.stdin.readline())  # proxy's answer to srv-1
+        assert reply["id"] == "srv-1" and reply["error"]["code"] == -32601
+    print(json.dumps({"jsonrpc": "2.0", "id": msg["id"],
+                      "result": {"echo": msg["id"]}}))
+    sys.stdout.flush()
+'''
+
+
+@pytest.fixture
+def fake_upstream_script():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "fake_upstream.py"
+        path.write_text(_FAKE_UPSTREAM)
+        yield str(path)
+
+
+async def _fake_upstream(script, *flags):
+    upstream = _StdioUpstream([sys.executable, script, *flags])
+    await upstream.start()
+    return upstream
+
+
+@pytest.mark.asyncio
+async def test_stdio_upstream_skips_notifications_and_other_ids(fake_upstream_script):
+    upstream = await _fake_upstream(fake_upstream_script, "--chatty")
+    try:
+        for req_id in (3, "abc", 4):
+            resp = await asyncio.wait_for(
+                upstream.send({"jsonrpc": "2.0", "id": req_id, "method": "ping"}), 10)
+            assert resp["id"] == req_id
+            assert resp["result"] == {"echo": req_id}
+    finally:
+        await upstream.stop()
+
+
+@pytest.mark.asyncio
+async def test_stdio_upstream_stderr_flood_does_not_deadlock(fake_upstream_script):
+    upstream = await _fake_upstream(fake_upstream_script, "--stderr")
+    try:
+        resp = await asyncio.wait_for(
+            upstream.send({"jsonrpc": "2.0", "id": 1, "method": "initialize"}), 10)
+        assert resp["result"] == {"echo": 1}
+    finally:
+        await upstream.stop()
+
+
+@pytest.mark.parametrize("raw,rejects", [("on", True), (" TRUE ", True), ("yes", True),
+                                         ("0", False), ("off", False)])
+def test_http_upstream_production_flag_matches_go_parser(raw, rejects, monkeypatch):
+    monkeypatch.setenv("DCLAW_PRODUCTION", raw)
+    if rejects:
+        with pytest.raises(ValueError, match="plaintext HTTP"):
+            _HttpUpstream("http://1.1.1.1/mcp")
+    else:
+        _HttpUpstream("http://1.1.1.1/mcp")

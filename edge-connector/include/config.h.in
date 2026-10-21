@@ -28,7 +28,16 @@
 #define DCLAW_CANARY_SPIKE_MULT        5
 #define DCLAW_CANARY_SPIKE_CONSEC      3
 #define DCLAW_AUDIT_FLUSH_SEC          60
+/* BLOCK audit entries are written to flash at once, but their fdatasync is
+ * group-committed: at most one per window. An entry is durable no later
+ * than this many ms after it was written (the main loop drives the sync). */
+#define DCLAW_AUDIT_BLOCK_SYNC_MS      100
 #define DCLAW_VERDICT_TIMEOUT_MS       500
+/* How long a speculatively allowed call keeps its pending verdict slot. Until
+ * the gateway answers or this deadline passes, the slot is not reused, so a
+ * late BLOCK can still revoke the session. At the deadline the session is
+ * revoked (fail closed) and the slot is released. */
+#define DCLAW_SPECULATIVE_VERDICT_TIMEOUT_MS 30000
 /* Must be at least 2x DCLAW_CONTENT_MAX to accommodate JSON-RPC framing. */
 #define DCLAW_IPC_MAX_PAYLOAD          8192
 #define DCLAW_IPC_RATE_LIMIT_PER_SEC   100

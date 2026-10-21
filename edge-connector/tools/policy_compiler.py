@@ -86,6 +86,15 @@ ACTION_MAP = {
     "escalate": 3,
 }
 
+# Device limits (must match DCLAW_RT_MAX_* in defenseclaw.h).  Entries
+# beyond these are dropped by the device, so the compiler rejects them.
+MAX_SEQUENCE_STEPS = 4
+MAX_SEQUENCE_RULES = 16
+MAX_DEST_ALLOWLIST = 32
+
+# skill_actions.<severity>.runtime values the compiler understands.
+RUNTIME_ACTIONS = ("enable", "disable", "warn")
+
 # Severity name → enum value
 SEVERITY_MAP = {
     "info": 0,
@@ -96,9 +105,17 @@ SEVERITY_MAP = {
 }
 
 def validate_destination(dest: str) -> str:
-    """The local SSRF guard can enforce only explicit public IP literals."""
+    """The local SSRF guard can enforce only explicit public IP literals.
+
+    Returns the entry as the device compares it: an IPv6 literal may be
+    written with or without brackets ("[2606:4700::1111]"); the device strips
+    the brackets from a call's destination before matching, so the stored
+    entry is unbracketed.
+    """
     if not isinstance(dest, str):
         raise ValueError("destination allowlist entries must be strings")
+    if dest.startswith('[') and dest.endswith(']'):
+        dest = dest[1:-1]
     try:
         address = ipaddress.ip_address(dest)
     except ValueError as exc:
@@ -185,6 +202,15 @@ CONTENT_DFA_PATTERNS = [
     ("${",                               5, 3, 1),
     ("eval(",                            5, 3, 1),
     ("exec(",                            5, 3, 1),
+    # Natural-language prompt injection.  Deliberately conservative: only
+    # full instruction-override / prompt-extraction phrases, matched with a
+    # word boundary before them and single spaces between words, so that
+    # ordinary text mentioning "instructions" or "prompt" is not flagged.
+    ("ignore previous instructions",         5, 3, 0),
+    ("ignore all previous instructions",     5, 3, 0),
+    ("disregard all previous instructions",  5, 3, 0),
+    ("disregard your instructions",          5, 3, 0),
+    ("reveal the system prompt",             5, 3, 0),
 
     # COMMAND category (category=6, severity=HIGH=3)
     ("rm ",                              6, 3, 0),
@@ -310,6 +336,11 @@ def extract_severity_rules(policy: dict) -> list:
         if sev_val is None:
             continue
         runtime_action = actions.get("runtime", "enable")
+        if runtime_action not in RUNTIME_ACTIONS:
+            raise ValueError(
+                f"skill_actions.{severity_name}.runtime: unsupported value "
+                f"{runtime_action!r} (expected one of: {', '.join(RUNTIME_ACTIONS)})"
+            )
         if runtime_action == "disable":
             action_val = ACTION_MAP["block"]
         elif runtime_action == "warn":
@@ -328,36 +359,69 @@ def extract_sequence_rules(policy: dict) -> list:
     sequences = iot_ext.get("capability_sequences", [])
     if not isinstance(sequences, list):
         raise ValueError("capability_sequences must be a list")
+    if len(sequences) > MAX_SEQUENCE_RULES:
+        raise ValueError(
+            f"capability_sequences has {len(sequences)} entries; the device "
+            f"supports at most {MAX_SEQUENCE_RULES}"
+        )
     for entry in sequences:
+        if not isinstance(entry, dict):
+            raise ValueError("capability_sequences entries must be mappings")
         seq = entry.get("sequence", [])
+        if not isinstance(seq, list):
+            raise ValueError("capability_sequences sequence must be a list")
         if not seq or len(seq) == 0:
             raise ValueError(
                 "capability_sequences entry has empty sequence. "
                 "Empty sequences would match everything, weakening the C agent."
             )
-        action = ACTION_MAP.get(entry.get("action", "block"), 1)
+        if len(seq) > MAX_SEQUENCE_STEPS:
+            raise ValueError(
+                f"capability_sequences entry has {len(seq)} steps; the device "
+                f"supports at most {MAX_SEQUENCE_STEPS}"
+            )
+        action_name = entry.get("action", "block")
+        if action_name not in ACTION_MAP:
+            raise ValueError(
+                f"capability_sequences action {action_name!r} is not one of: "
+                f"{', '.join(ACTION_MAP)}"
+            )
+        action = ACTION_MAP[action_name]
         cap_bytes = []
         for cap_name in seq:
             _validate_no_null_bytes(str(cap_name), "capability name")
             cap_val = CAP_MAP.get(cap_name)
             if cap_val is None:
-                print(f"WARNING: unknown capability '{cap_name}', skipping rule",
-                      file=sys.stderr)
-                break
+                raise ValueError(
+                    f"unknown capability {cap_name!r} in capability_sequences "
+                    f"(expected one of: {', '.join(CAP_MAP)})"
+                )
             cap_bytes.append(cap_val)
-        else:
-            if len(cap_bytes) <= 4:
-                rules.append((cap_bytes, action))
+        rules.append((cap_bytes, action))
     return rules
 
 
 def extract_dest_allowlist(policy: dict) -> list:
     """Extract destination allowlist from iot_extensions."""
     iot_ext = policy.get("iot_extensions", {})
-    dest_list = iot_ext.get("destination_allowlist", [])
+    # A missing list used to compile as an empty allowlist, which makes every
+    # device deny every destination. Require it; [] is an explicit deny-all.
+    if "destination_allowlist" not in iot_ext:
+        raise ValueError("iot_extensions.destination_allowlist is required "
+                         "(use [] to deny all destinations)")
+    dest_list = iot_ext.get("destination_allowlist")
+    if dest_list is None:
+        dest_list = []
+    if not isinstance(dest_list, list):
+        raise ValueError("iot_extensions.destination_allowlist must be a list")
+    if len(dest_list) > MAX_DEST_ALLOWLIST:
+        raise ValueError(
+            f"destination_allowlist has {len(dest_list)} entries; the device "
+            f"supports at most {MAX_DEST_ALLOWLIST}"
+        )
     for dest in dest_list:
         _validate_no_null_bytes(str(dest), "destination allowlist entry")
-    return dest_list
+    return [validate_destination(dest) for dest in dest_list]
 
 
 def extract_canary_baseline(policy: dict) -> int:
@@ -625,6 +689,17 @@ def generate_binary_blob(policy: dict, version: int) -> bytes:
     return bytes(blob)
 
 
+def _production_mode() -> bool:
+    """Parse DCLAW_PRODUCTION like the Go fleet (productionFlagSet).
+
+    Kept in sync with generic_hook.production_flag_set; this compiler runs
+    as ``python -I policy_compiler.py`` and ships without the adapters, so
+    it cannot import them.
+    """
+    value = os.environ.get("DCLAW_PRODUCTION", "").strip().lower()
+    return value not in ("", "0", "false", "no", "off")
+
+
 def sign_blob(blob: bytes, key_path: str) -> Tuple[bytes, bool]:
     """Sign blob with Ed25519. Returns (signature, is_unsigned) tuple.
 
@@ -646,7 +721,7 @@ def sign_blob(blob: bytes, key_path: str) -> Tuple[bytes, bool]:
             print("WARNING: PyNaCl not installed. Using dev stub signature.",
                   file=sys.stderr)
             # Refuse silent fallback to dev stub in production mode
-            if os.environ.get("DCLAW_PRODUCTION", "").lower() in ("1", "true", "yes"):
+            if _production_mode():
                 raise RuntimeError(
                     "PyNaCl is required for signing in production mode "
                     "(DCLAW_PRODUCTION is set). Install with: pip install pynacl"
@@ -658,7 +733,7 @@ def sign_blob(blob: bytes, key_path: str) -> Tuple[bytes, bool]:
                 )
 
     # Also enforce when no key_path is provided at all
-    if os.environ.get("DCLAW_PRODUCTION", "").lower() in ("1", "true", "yes"):
+    if _production_mode():
         raise RuntimeError(
             "Signing key is required in production mode (DCLAW_PRODUCTION is set). "
             "Provide --signing-key with a valid Ed25519 key."

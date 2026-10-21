@@ -17,7 +17,6 @@
 package mqtt
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -59,15 +58,27 @@ type DeviceKeyChecker interface {
 }
 
 // storeBackedKeyProvider resolves per-device keys from the DeviceKeyStore.
-// Falls back to a fleet-wide key, or to a zero key only in explicit development mode.
+// Outside explicit development mode there is no fallback: a device without a
+// provisioned per-device key cannot authenticate. In development mode a
+// fleet-wide DCLAW_DEVICE_KEY (or, failing that, an all-zero key) is used for
+// devices without a per-device key.
 type storeBackedKeyProvider struct {
 	store       DeviceKeyLookup
 	fallbackKey []byte
 }
 
 func newStoreBackedKeyProvider(store DeviceKeyLookup) *storeBackedKeyProvider {
+	return newStoreBackedKeyProviderWithFallback(store, os.Getenv("DCLAW_DEVICE_KEY"))
+}
+
+func newStoreBackedKeyProviderWithFallback(store DeviceKeyLookup, raw string) *storeBackedKeyProvider {
+	if isProductionMode() {
+		if raw != "" {
+			log.Printf("[mqtt-bridge] ERROR: fleet-wide DCLAW_DEVICE_KEY is ignored outside development mode; provision per-device keys via POST /devices")
+		}
+		return &storeBackedKeyProvider{store: store}
+	}
 	var fallback []byte
-	raw := os.Getenv("DCLAW_DEVICE_KEY")
 	if raw != "" {
 		decoded, err := hex.DecodeString(raw)
 		if err == nil && nonzeroDeviceKey(decoded) {
@@ -77,12 +88,8 @@ func newStoreBackedKeyProvider(store DeviceKeyLookup) *storeBackedKeyProvider {
 		}
 	}
 	if fallback == nil {
-		if isProductionMode() {
-			log.Printf("[mqtt-bridge] ERROR: no valid fleet device key; per-device key lookup is required")
-		} else {
-			fallback = make([]byte, 32)
-			log.Printf("[mqtt-bridge] WARNING: explicit development mode is using an all-zero device key")
-		}
+		fallback = make([]byte, 32)
+		log.Printf("[mqtt-bridge] WARNING: explicit development mode is using an all-zero device key")
 	}
 	return &storeBackedKeyProvider{store: store, fallbackKey: fallback}
 }
@@ -124,8 +131,9 @@ func (p *storeBackedKeyProvider) HasDeviceKey(deviceID uint64) (bool, error) {
 	return key != nil, nil
 }
 
-// envDeviceKeyProvider reads DCLAW_DEVICE_KEY from the environment.
-// Falls back to a 32-byte zero key only in explicit unmanaged dev mode.
+// envDeviceKeyProvider reads DCLAW_DEVICE_KEY from the environment. It is
+// honoured only in explicit unmanaged development mode (falling back to a
+// 32-byte zero key there); outside it no shared key is ever used.
 // Deprecated: Use storeBackedKeyProvider for per-device key support.
 type envDeviceKeyProvider struct {
 	key []byte
@@ -133,16 +141,18 @@ type envDeviceKeyProvider struct {
 
 func newEnvDeviceKeyProvider() *envDeviceKeyProvider {
 	raw := os.Getenv("DCLAW_DEVICE_KEY")
+	if isProductionMode() {
+		if raw != "" {
+			log.Printf("[mqtt-bridge] ERROR: fleet-wide DCLAW_DEVICE_KEY is ignored outside development mode — HMAC verification will reject devices without per-device keys")
+		}
+		return &envDeviceKeyProvider{key: nil}
+	}
 	if raw != "" {
 		decoded, err := hex.DecodeString(raw)
 		if err == nil && nonzeroDeviceKey(decoded) {
 			return &envDeviceKeyProvider{key: decoded}
 		}
 		log.Printf("[mqtt-bridge] ERROR: DCLAW_DEVICE_KEY is invalid (want 64 hex chars / 32 bytes)")
-	}
-	if isProductionMode() {
-		log.Printf("[mqtt-bridge] ERROR: No DCLAW_DEVICE_KEY set in production mode — HMAC verification will reject all messages")
-		return &envDeviceKeyProvider{key: nil}
 	}
 	return &envDeviceKeyProvider{key: make([]byte, 32)}
 }
@@ -159,17 +169,35 @@ func nonzeroDeviceKey(key []byte) bool {
 	return false
 }
 
+// IsProductionMode reports whether Fleet runs with production security
+// defaults. It defaults to fail-closed: only explicit development mode
+// (DCLAW_DEV_MODE=ON) on an unmanaged host without DCLAW_PRODUCTION set
+// relaxes it. Other Fleet packages share this one predicate.
+func IsProductionMode() bool { return isProductionMode() }
+
 // isProductionMode defaults to fail-closed. Explicit development mode is
 // honored only on unmanaged hosts and never overrides DCLAW_PRODUCTION=true.
 func isProductionMode() bool {
 	if managed.IsManagedEnterprise(managed.PinnedDeploymentMode()) || managed.IsStandaloneManagedHost() {
 		return true
 	}
-	v := os.Getenv("DCLAW_PRODUCTION")
-	if v == "true" || v == "1" {
+	if productionFlagSet(os.Getenv("DCLAW_PRODUCTION")) {
 		return true
 	}
 	return !strings.EqualFold(envvars.Getenv("DCLAW_DEV_MODE"), "ON")
+}
+
+// productionFlagSet parses DCLAW_PRODUCTION case-insensitively. "1" and
+// "true" (any case) force production; so does any other non-empty value
+// that is not an explicit "0", "false", "no" or "off", so a typo fails
+// closed instead of leaving development mode in effect.
+func productionFlagSet(raw string) bool {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	switch v {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
 }
 
 func (p *envDeviceKeyProvider) KeyForDevice(_ uint64) []byte {
@@ -210,6 +238,18 @@ type Bridge struct {
 	replayForDevice func(context.Context, uint64, uint64, uint16, uint32) (uint32, error)
 	replayMu        sync.Mutex
 	replayState     map[uint64]deviceReplayState
+	// Catch-up runs on a small worker pool, never on the MQTT router
+	// goroutine: replay publishes QoS 1 messages and must not stall other
+	// devices' heartbeats and verdicts.
+	replayJobs      chan replayJob
+	replayStartOnce sync.Once
+	replayPending   sync.WaitGroup
+
+	// Verdict responses are published by a small worker pool so a slow
+	// broker round-trip cannot stall the MQTT router for every device.
+	responseJobs      chan responseJob
+	responseStartOnce sync.Once
+	responsePending   sync.WaitGroup
 
 	heartbeatMinInterval time.Duration
 	lastHeartbeat        map[uint64]time.Time
@@ -227,6 +267,34 @@ type Bridge struct {
 	decodeErrors        uint64
 	rateLimitDrops      uint64
 }
+
+type replayJob struct {
+	fullID           uint64
+	deviceID         uint32
+	tenantID         uint16
+	fleetID          uint16
+	policyVersion    uint16
+	lastEmergencySeq uint32
+}
+
+const (
+	replayQueueSize = 256
+	replayWorkers   = 4
+
+	responseQueueSize = 1024
+	responseWorkers   = 2
+)
+
+type responseJob struct {
+	topic    string
+	payload  []byte
+	lockdown bool
+}
+
+// maxVerdictFrame bounds a verdict request (the decoder's 4096-byte CBOR
+// limit plus the 32-byte HMAC). Larger frames are dropped before any key
+// lookup or HMAC computation.
+const maxVerdictFrame = 4096 + 32
 
 type deviceReplayState struct {
 	bootCounter uint32
@@ -283,6 +351,8 @@ func NewBridge(client Client, fleet *manager.FleetManager, cache *verdict.Cache)
 		lastHeartbeat:        make(map[uint64]time.Time),
 		verdictRateMap:       make(map[uint64]*verdictRateEntry),
 		replayState:          make(map[uint64]deviceReplayState),
+		replayJobs:           make(chan replayJob, replayQueueSize),
+		responseJobs:         make(chan responseJob, responseQueueSize),
 	}
 }
 
@@ -320,11 +390,28 @@ func (b *Bridge) ClearDecommissioned(fullDeviceID uint64) {
 	b.replayMu.Unlock()
 }
 
+// ResetDeviceLineage forgets the bridge's catch-up freshness baseline for a
+// device whose key changed, so a re-provisioned device that restarts its boot
+// counter still receives OTA catch-up.
+func (b *Bridge) ResetDeviceLineage(fullDeviceID uint64) {
+	b.replayMu.Lock()
+	delete(b.replayState, fullDeviceID)
+	b.replayMu.Unlock()
+}
+
 // SetDeviceKeyStore configures per-device key resolution via a persistent store.
 // When set, the bridge looks up a unique 32-byte key for each device before
 // falling back to the fleet-wide DCLAW_DEVICE_KEY environment variable.
 func (b *Bridge) SetDeviceKeyStore(store DeviceKeyLookup) {
 	b.keyProvider = newStoreBackedKeyProvider(store)
+}
+
+// SetDeviceKeyStoreWithFallback is SetDeviceKeyStore with the fleet-wide
+// fallback key supplied by the caller (hex), as resolved from
+// fleet.device_key_env, instead of read from DCLAW_DEVICE_KEY. The fallback is
+// used only in explicit development mode.
+func (b *Bridge) SetDeviceKeyStoreWithFallback(store DeviceKeyLookup, fallbackKeyHex string) {
+	b.keyProvider = newStoreBackedKeyProviderWithFallback(store, fallbackKeyHex)
 }
 
 // SetKeyProvider overrides the default device key provider.
@@ -530,33 +617,15 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 		return
 	}
 
-	now := time.Now()
-	b.lastHeartbeatMu.Lock()
-	minInterval := b.heartbeatMinInterval
-	if minInterval < 0 {
-		minInterval = time.Second
-	}
-	if minInterval > 0 {
-		if last, ok := b.lastHeartbeat[fullID]; ok && now.Sub(last) < minInterval {
-			b.lastHeartbeatMu.Unlock()
-			b.logger.Printf("[mqtt-bridge] WARNING: rate-limited heartbeat from device %d (interval=%v)",
-				parts.DeviceID, now.Sub(last))
-			b.mu.Lock()
-			b.rateLimitDrops++
-			b.mu.Unlock()
-			return
-		}
-	}
-	const maxHeartbeatEntries = 100000
-	if len(b.lastHeartbeat) >= maxHeartbeatEntries {
-		b.lastHeartbeatMu.Unlock()
-		b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rate-limit map full (%d entries), dropping heartbeat from device %d",
-			maxHeartbeatEntries, parts.DeviceID)
+	// Never allocate rate-limit state or spend a key lookup on an ID the
+	// manager would reject anyway.
+	_, known := b.fleet.GetDevice(fullID)
+	if !known && !b.autoRegistrationAllowed() {
+		b.logger.Printf("[mqtt-bridge] rejected heartbeat from unregistered device %d (tenant=%d fleet=%d)",
+			parts.DeviceID, parts.TenantID, parts.FleetID)
 		b.incErrors()
 		return
 	}
-	b.lastHeartbeat[fullID] = now
-	b.lastHeartbeatMu.Unlock()
 
 	if parts.Suffix != "heartbeat" {
 		b.logger.Printf("[mqtt-bridge] unexpected suffix %q for heartbeat handler", parts.Suffix)
@@ -584,22 +653,47 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 		return
 	}
 
+	// Only authenticated frames consume the device's heartbeat slot, so a
+	// forged frame on its topic cannot suppress the genuine heartbeat.
+	if !b.allowHeartbeat(fullID, parts.DeviceID, time.Now()) {
+		return
+	}
+
 	// Convert to the manager's Heartbeat type
 	hb := &manager.Heartbeat{
-		DeviceID:       hw.DeviceID,
-		UptimeSec:      hw.UptimeSec,
-		BootCounter:    hw.BootCounter,
-		PolicyVersion:  hw.PolicyVersion,
-		FWVersion:      hw.FWVersion,
-		DeniedCount:    uint32(hw.DeniedCount),
-		AllowedCount:   uint32(hw.AllowedCount),
-		WarnedCount:    uint32(hw.WarnedCount),
-		EscalatedCount: uint32(hw.EscalatedCount),
-		CacheHitPct:    hw.CacheHitPct,
-		SessionCount:   hw.SessionCount,
-		AuditHeadHMAC:  hw.AuditHeadHMAC,
-		Flags:          hw.Flags,
-		Capabilities:   hw.Capabilities,
+		DeviceID:         hw.DeviceID,
+		UptimeSec:        hw.UptimeSec,
+		BootCounter:      hw.BootCounter,
+		PolicyVersion:    hw.PolicyVersion,
+		FWVersion:        hw.FWVersion,
+		DeniedCount:      uint32(hw.DeniedCount),
+		AllowedCount:     uint32(hw.AllowedCount),
+		WarnedCount:      uint32(hw.WarnedCount),
+		EscalatedCount:   uint32(hw.EscalatedCount),
+		CacheHitPct:      hw.CacheHitPct,
+		SessionCount:     hw.SessionCount,
+		AuditHeadHMAC:    hw.AuditHeadHMAC,
+		Flags:            hw.Flags,
+		Capabilities:     hw.Capabilities,
+		LastEmergencySeq: hw.LastEmergencySeq,
+		Signed:           hw.Signed,
+	}
+
+	// ProcessHeartbeat auto-registers only when the manager's own AutoRegister
+	// is set; when auto-registration was enabled on the bridge instead,
+	// register the authenticated unknown device here first.
+	if !known && !b.fleet.AutoRegister {
+		_, regErr := b.fleet.RegisterDeviceIfAbsent(parts.TenantID, parts.FleetID, parts.DeviceID,
+			"auto-discovered", fmt.Sprintf("%d", hw.FWVersion), hw.PolicyVersion, hw.Capabilities)
+		if regErr != nil && regErr != manager.ErrDeviceExists {
+			b.logger.Printf("[mqtt-bridge] auto-register device %d from heartbeat: %v", parts.DeviceID, regErr)
+			b.incErrors()
+			return
+		}
+		if regErr == nil {
+			b.logger.Printf("[mqtt-bridge] device %d auto-registered from heartbeat (tenant=%d fleet=%d)",
+				parts.DeviceID, parts.TenantID, parts.FleetID)
+		}
 	}
 
 	if !b.fleet.ProcessHeartbeat(parts.TenantID, parts.FleetID, parts.DeviceID, hb) {
@@ -631,18 +725,94 @@ func (b *Bridge) maybeReplayForDevice(fullID uint64, parts *TopicParts, hw *Hear
 	b.replayState[fullID] = state
 	b.replayMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_, err := b.replayForDevice(ctx, uint64(parts.TenantID), uint64(parts.FleetID), hw.PolicyVersion, hw.LastEmergencySeq)
-	cancel()
+	job := replayJob{
+		fullID: fullID, deviceID: parts.DeviceID, tenantID: parts.TenantID, fleetID: parts.FleetID,
+		policyVersion: hw.PolicyVersion, lastEmergencySeq: hw.LastEmergencySeq,
+	}
+	b.replayStartOnce.Do(func() {
+		for i := 0; i < replayWorkers; i++ {
+			go b.replayWorker()
+		}
+	})
+	b.replayPending.Add(1)
+	select {
+	case b.replayJobs <- job:
+		// Workers drain the queue when they exit on shutdown; a job queued
+		// after their final drain must not stay pending forever.
+		if b.isStopped() {
+			b.drainReplayJobs()
+		}
+	default:
+		// Queue full: drop. A later heartbeat with advanced uptime retries.
+		b.replayPending.Done()
+		b.finishReplay(fullID)
+		b.logger.Printf("[mqtt-bridge] WARNING: OTA catch-up queue full; deferring device %d", parts.DeviceID)
+	}
+}
 
-	b.replayMu.Lock()
-	state = b.replayState[fullID]
-	state.inFlight = false
-	b.replayState[fullID] = state
-	b.replayMu.Unlock()
-	if err != nil {
-		b.logger.Printf("[mqtt-bridge] OTA catch-up failed for device %d: %v", parts.DeviceID, err)
+func (b *Bridge) replayWorker() {
+	for {
+		select {
+		case <-b.stopped:
+			b.drainReplayJobs()
+			return
+		case job := <-b.replayJobs:
+			b.runReplay(job)
+		}
+	}
+}
+
+// isStopped reports whether the bridge has shut down.
+func (b *Bridge) isStopped() bool {
+	select {
+	case <-b.stopped:
+		return true
+	default:
+		return false
+	}
+}
+
+// drainReplayJobs discards queued catch-up jobs on shutdown, releasing their
+// pending count and in-flight marker. It never blocks.
+func (b *Bridge) drainReplayJobs() {
+	for {
+		select {
+		case job := <-b.replayJobs:
+			b.finishReplay(job.fullID)
+			b.replayPending.Done()
+			b.logger.Printf("[mqtt-bridge] bridge stopped; discarded OTA catch-up for device %d", job.deviceID)
+		default:
+			return
+		}
+	}
+}
+
+func (b *Bridge) runReplay(job replayJob) {
+	defer b.replayPending.Done()
+	defer b.finishReplay(job.fullID)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := b.replayForDevice(ctx, uint64(job.tenantID), uint64(job.fleetID), job.policyVersion, job.lastEmergencySeq); err != nil {
+		b.logger.Printf("[mqtt-bridge] OTA catch-up failed for device %d: %v", job.deviceID, err)
 		b.incErrors()
+	}
+}
+
+// autoRegistrationAllowed is the single predicate for registering an unknown
+// device from MQTT traffic (heartbeat or registration). Either the bridge's
+// AllowAutoRegistration (wired from fleet.auto_register by the gateway) or the
+// manager's AutoRegister enables it, and only in explicit unmanaged
+// development mode.
+func (b *Bridge) autoRegistrationAllowed() bool {
+	return (b.AllowAutoRegistration || b.fleet.AutoRegister) && !isProductionMode()
+}
+
+func (b *Bridge) finishReplay(fullID uint64) {
+	b.replayMu.Lock()
+	defer b.replayMu.Unlock()
+	if state, ok := b.replayState[fullID]; ok {
+		state.inFlight = false
+		b.replayState[fullID] = state
 	}
 }
 
@@ -727,7 +897,7 @@ func (b *Bridge) handleRegistration(msg Message) {
 		return
 	}
 
-	if !existsAlready && (!b.AllowAutoRegistration || isProductionMode()) {
+	if !existsAlready && !b.autoRegistrationAllowed() {
 		b.logger.Printf("[mqtt-bridge] WARNING: auto-registration denied for unknown device %d (tenant=%d fleet=%d) — allowed only in explicit unmanaged development mode; register via CLI/API in production",
 			parts.DeviceID, parts.TenantID, parts.FleetID)
 		return
@@ -793,49 +963,11 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		return
 	}
 
-	if dev.Status == manager.StatusLockdown {
-		b.logger.Printf("[mqtt-bridge] verdict request from lockdown device %d — returning BLOCK",
-			parts.DeviceID)
-		// Strip trailing 32-byte HMAC for keyed devices so the CBOR
-		// decoder in sendLockdownBlockResponse sees clean CBOR only.
-		lockdownPayload := msg.Payload
-		if b.keyProvider != nil {
-			dk := b.keyProvider.KeyForDevice(fullID)
-			var zk [32]byte
-			if dk != nil && !bytes.Equal(dk, zk[:]) && len(msg.Payload) >= 64 {
-				lockdownPayload = msg.Payload[:len(msg.Payload)-32]
-			}
-		}
-		b.sendLockdownBlockResponse(parts, lockdownPayload)
+	if len(msg.Payload) > maxVerdictFrame {
+		b.logger.Printf("[mqtt-bridge] verdict request from device %d too large (%d bytes, max %d)",
+			parts.DeviceID, len(msg.Payload), maxVerdictFrame)
 		b.incErrors()
 		return
-	}
-
-	{
-		now := time.Now()
-		b.verdictRateMu.Lock()
-		entry, ok := b.verdictRateMap[fullID]
-		if !ok {
-			entry = &verdictRateEntry{windowAt: now}
-			b.verdictRateMap[fullID] = entry
-		}
-		if now.Sub(entry.windowAt) >= time.Second {
-			entry.count = 0
-			entry.windowAt = now
-		}
-		entry.count++
-		overLimit := entry.count > verdictRateLimit
-		overLimitCount := entry.count
-		b.verdictRateMu.Unlock()
-
-		if overLimit {
-			b.logger.Printf("[mqtt-bridge] WARNING: verdict request rate-limited for device %d (%d req/s exceeds limit %d)",
-				parts.DeviceID, overLimitCount, verdictRateLimit)
-			b.mu.Lock()
-			b.rateLimitDrops++
-			b.mu.Unlock()
-			return
-		}
 	}
 
 	if len(msg.Payload) < 32 {
@@ -848,7 +980,12 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 	payloadBody := msg.Payload
 	isKeyed := false
 
-	if b.keyProvider != nil {
+	if b.keyProvider == nil {
+		b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — device key provider is not configured")
+		b.incErrors()
+		return
+	}
+	{
 		vrFullID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
 		vrDeviceKey := b.keyProvider.KeyForDevice(vrFullID)
 		if vrDeviceKey == nil {
@@ -863,18 +1000,21 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 				b.incErrors()
 				return
 			}
-			if hasKey {
-				isKeyed = true
-			} else {
-				b.logger.Printf("[mqtt-bridge] WARNING: processing verdict request from unkeyed device %d", parts.DeviceID)
-			}
+			// Any usable key (per-device, or a development fleet key) means
+			// the frame must carry a valid HMAC.
+			isKeyed = hasKey || nonzeroDeviceKey(vrDeviceKey)
 		} else {
 			// Legacy envDeviceKeyProvider: no DeviceKeyChecker interface.
 			// Verify HMAC if the key is non-zero (provisioned).
-			var zeroKey [32]byte
-			if len(vrDeviceKey) > 0 && !bytes.Equal(vrDeviceKey, zeroKey[:]) {
-				isKeyed = true
+			isKeyed = nonzeroDeviceKey(vrDeviceKey)
+		}
+		if !isKeyed {
+			if isProductionMode() {
+				b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — device %d has no signing key (unsigned requests are accepted only in development mode)", parts.DeviceID)
+				b.incErrors()
+				return
 			}
+			b.logger.Printf("[mqtt-bridge] WARNING: processing unsigned verdict request from unkeyed device %d (development mode)", parts.DeviceID)
 		}
 
 		if isKeyed {
@@ -896,12 +1036,44 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 			}
 		}
 	}
-	_ = isKeyed
+
+	// Charge the per-device budget only after authentication, so frames
+	// forged on a device's topic cannot exhaust its verdict budget.
+	if !b.allowVerdict(fullID, time.Now()) {
+		b.logger.Printf("[mqtt-bridge] WARNING: verdict request rate-limited for device %d (limit %d req/s)",
+			parts.DeviceID, verdictRateLimit)
+		b.mu.Lock()
+		b.rateLimitDrops++
+		b.mu.Unlock()
+		return
+	}
 
 	vr, err := DecodeVerdictRequest(payloadBody)
 	if err != nil {
 		b.logger.Printf("[mqtt-bridge] decode verdict request from device %d: %v", parts.DeviceID, err)
 		b.incErrors()
+		return
+	}
+
+	// The response MAC binds the boot and request nonces. Without them a
+	// response is tied only to a 16-bit request id and the tool hash, so a
+	// keyed device outside development mode must send both.
+	if isKeyed && isProductionMode() && !vr.HasNonces {
+		b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — device %d sent no boot/request nonce", parts.DeviceID)
+		b.incErrors()
+		return
+	}
+
+	// A device reporting tamper gets a signed BLOCK, but only for a request
+	// that passed the same authentication and rate limit as any other: the
+	// gateway must not sign responses over unauthenticated fields. An
+	// emergency lockdown (flag 0x40) is enforced by the device itself and is
+	// lifted there by RELEASE_LOCKDOWN, so it must not keep the gateway
+	// answering BLOCK until the next heartbeat.
+	if dev.Flags&manager.HeartbeatFlagTamperDetect != 0 {
+		b.logger.Printf("[mqtt-bridge] verdict request from lockdown device %d — returning BLOCK",
+			parts.DeviceID)
+		b.sendLockdownBlockResponse(parts, vr)
 		return
 	}
 
@@ -924,6 +1096,9 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		Severity:  severity,
 		TTL:       60, // 60 minutes default TTL
 		ServerTS:  uint32(time.Now().Unix()),
+	}
+	if action == verdict.ActionBlock {
+		resp.Reason = ReasonCloudBlock
 	}
 
 	// Compute the HMAC tag matching the C-side verdict_protocol.c scheme.
@@ -950,19 +1125,133 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 	respTopic := fmt.Sprintf("defenseclaw/%d/%d/%d/verdict/resp",
 		parts.TenantID, parts.FleetID, parts.DeviceID)
 
-	payload := EncodeVerdictResponse(resp)
+	b.enqueueResponse(responseJob{topic: respTopic, payload: EncodeVerdictResponse(resp)})
+}
 
-	pubCtx, pubCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer pubCancel()
-	if err := b.client.Publish(pubCtx, respTopic, 0, payload); err != nil {
-		b.logger.Printf("[mqtt-bridge] publish verdict response to %s: %v", respTopic, err)
+// enqueueResponse hands a signed response to the publisher pool. When the
+// queue is full the response is dropped; the device times out and fails
+// closed, exactly as for a lost QoS 0 message.
+func (b *Bridge) enqueueResponse(job responseJob) {
+	b.responseStartOnce.Do(func() {
+		for i := 0; i < responseWorkers; i++ {
+			go b.responseWorker()
+		}
+	})
+	b.responsePending.Add(1)
+	select {
+	case b.responseJobs <- job:
+		if b.isStopped() {
+			b.drainResponseJobs()
+		}
+	default:
+		b.responsePending.Done()
+		b.logger.Printf("[mqtt-bridge] WARNING: verdict response queue full; dropping response to %s", job.topic)
+		b.incErrors()
+	}
+}
+
+func (b *Bridge) responseWorker() {
+	for {
+		select {
+		case <-b.stopped:
+			b.drainResponseJobs()
+			return
+		case job := <-b.responseJobs:
+			b.publishResponse(job)
+		}
+	}
+}
+
+// drainResponseJobs discards queued verdict responses on shutdown; the
+// device times out and fails closed. It never blocks.
+func (b *Bridge) drainResponseJobs() {
+	for {
+		select {
+		case job := <-b.responseJobs:
+			b.responsePending.Done()
+			b.logger.Printf("[mqtt-bridge] bridge stopped; discarded verdict response to %s", job.topic)
+		default:
+			return
+		}
+	}
+}
+
+func (b *Bridge) publishResponse(job responseJob) {
+	defer b.responsePending.Done()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := b.client.Publish(ctx, job.topic, 0, job.payload); err != nil {
+		b.logger.Printf("[mqtt-bridge] publish verdict response to %s: %v", job.topic, err)
 		b.incErrors()
 		return
 	}
-
+	if job.lockdown {
+		return
+	}
 	b.mu.Lock()
 	b.verdictsProcessed++
 	b.mu.Unlock()
+}
+
+// maxHeartbeatEntries bounds the heartbeat rate-limit map. Entries are only
+// created for authenticated frames, and entries older than the minimum
+// interval are swept when the map fills because they no longer limit anything.
+const maxHeartbeatEntries = 100000
+
+// allowHeartbeat applies the per-device minimum heartbeat interval. Callers
+// invoke it only after the frame has been authenticated.
+func (b *Bridge) allowHeartbeat(fullID uint64, deviceID uint32, now time.Time) bool {
+	b.lastHeartbeatMu.Lock()
+	defer b.lastHeartbeatMu.Unlock()
+	minInterval := b.heartbeatMinInterval
+	if minInterval < 0 {
+		minInterval = time.Second
+	}
+	if minInterval == 0 {
+		return true
+	}
+	if last, ok := b.lastHeartbeat[fullID]; ok && now.Sub(last) < minInterval {
+		b.logger.Printf("[mqtt-bridge] WARNING: rate-limited heartbeat from device %d (interval=%v)",
+			deviceID, now.Sub(last))
+		b.mu.Lock()
+		b.rateLimitDrops++
+		b.mu.Unlock()
+		return false
+	}
+	if _, ok := b.lastHeartbeat[fullID]; !ok && len(b.lastHeartbeat) >= maxHeartbeatEntries {
+		for id, ts := range b.lastHeartbeat {
+			if now.Sub(ts) >= minInterval {
+				delete(b.lastHeartbeat, id)
+			}
+		}
+		if len(b.lastHeartbeat) >= maxHeartbeatEntries {
+			b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rate-limit map full (%d entries), dropping heartbeat from device %d",
+				maxHeartbeatEntries, deviceID)
+			b.incErrors()
+			return false
+		}
+	}
+	b.lastHeartbeat[fullID] = now
+	return true
+}
+
+// allowVerdict charges one request against the device's per-second verdict
+// budget. Callers invoke it only for authenticated requests from registered
+// devices, so the map is bounded by the registered fleet.
+func (b *Bridge) allowVerdict(fullID uint64, now time.Time) bool {
+	b.verdictRateMu.Lock()
+	defer b.verdictRateMu.Unlock()
+	entry, ok := b.verdictRateMap[fullID]
+	if !ok {
+		entry = &verdictRateEntry{windowAt: now}
+		b.verdictRateMap[fullID] = entry
+	}
+	if now.Sub(entry.windowAt) >= time.Second {
+		entry.count = 0
+		entry.windowAt = now
+	}
+	entry.count++
+	return entry.count <= verdictRateLimit
 }
 
 // validateTopicIDs checks that the topic's tenant/fleet/device IDs are all non-zero,
@@ -987,27 +1276,18 @@ func (b *Bridge) incErrors() {
 }
 
 // sendLockdownBlockResponse sends a BLOCK verdict response to a device that
-func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts, rawPayload []byte) {
-	// Decode the verdict request to get the real RequestID, ToolHash, BootNonce, and RequestNonce.
-	var requestID uint16
-	var toolHash [32]byte
-	var bootNonce [16]byte
-	var requestNonce [4]byte
-	if vr, err := DecodeVerdictRequest(rawPayload); err == nil {
-		requestID = vr.RequestID
-		toolHash = vr.ToolHash
-		bootNonce = vr.BootNonce
-		requestNonce = vr.RequestNonce
-	} else {
-		b.logger.Printf("[mqtt-bridge] lockdown BLOCK: failed to decode verdict request: %v (using request_id=1)", err)
-		requestID = 1 // fallback to non-zero so the C agent does not discard
-	}
+func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts, vr *VerdictRequest) {
+	requestID := vr.RequestID
+	toolHash := vr.ToolHash
+	bootNonce := vr.BootNonce
+	requestNonce := vr.RequestNonce
 
 	resp := &VerdictResponse{
 		RequestID: requestID,
 		Action:    uint8(verdict.ActionBlock),
 		Severity:  0,
 		TTL:       0,
+		Reason:    ReasonCloudBlock,
 		ServerTS:  uint32(time.Now().Unix()),
 	}
 
@@ -1024,13 +1304,7 @@ func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts, rawPayload []byte)
 
 	respTopic := fmt.Sprintf("defenseclaw/%d/%d/%d/verdict/resp",
 		parts.TenantID, parts.FleetID, parts.DeviceID)
-	payload := EncodeVerdictResponse(resp)
-
-	lockdownCtx, lockdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer lockdownCancel()
-	if err := b.client.Publish(lockdownCtx, respTopic, 0, payload); err != nil {
-		b.logger.Printf("[mqtt-bridge] publish lockdown BLOCK to %s: %v", respTopic, err)
-	}
+	b.enqueueResponse(responseJob{topic: respTopic, payload: EncodeVerdictResponse(resp), lockdown: true})
 
 	if b.onBlock != nil {
 		b.onBlock()

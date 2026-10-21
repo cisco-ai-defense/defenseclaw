@@ -8063,7 +8063,8 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 			// bridge verifies/computes verdict HMACs with the correct key
 			// instead of falling back to the fleet-wide shared key.
 			if deviceStore != nil {
-				bridge.SetDeviceKeyStore(deviceStore)
+				// fleet.device_key_env names the development-only fallback key.
+				bridge.SetDeviceKeyStoreWithFallback(deviceStore, s.currentConfig().Fleet.ResolvedDeviceKey())
 				if ids, err := deviceStore.LoadDecommissioned(); err != nil {
 					return fmt.Errorf("fleet load decommission tombstones: %w", err)
 				} else if len(ids) > 0 {

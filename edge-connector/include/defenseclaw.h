@@ -203,7 +203,7 @@ typedef struct {
     uint8_t  cap_count;
     uint64_t started_at;
     uint64_t last_activity;
-    uint8_t  risk_score;
+    bool     revoked;  /* a speculative call was later blocked by the gateway */
 } dclaw_session_t;
 
 /* === Verdict Cache === */
@@ -237,6 +237,7 @@ typedef struct {
     dclaw_exec_stage_t stage;
     bool             verdict_received;
     dclaw_action_t   cloud_verdict;
+    uint64_t         revoke_deadline_ms; /* slot expires (session revoked) here */
 } dclaw_speculative_slot_t;
 
 /* === Rate Limiter === */
@@ -359,12 +360,35 @@ typedef void (*dclaw_retroactive_block_fn)(uint16_t session_id,
                                            const char *tool_name);
 void dclaw_register_retroactive_callback(dclaw_retroactive_block_fn cb);
 
+/* Encoded verdict request: fixed fields (<512 B) plus up to
+ * DCLAW_ESCALATION_PAYLOAD_MAX bytes of content; the HMAC tag is extra. */
+#define DCLAW_VERDICT_REQUEST_MAX (512 + DCLAW_ESCALATION_PAYLOAD_MAX)
+
+/* Sends an escalation to the gateway; returns 0 only if the request was
+ * handed to the transport. The default sender is MQTT (fails when offline).
+ * Register NULL to restore the default. Tests and other transports use this. */
+typedef int (*dclaw_verdict_sender_fn)(const dclaw_tool_request_t *req, uint16_t request_id);
+void dclaw_register_verdict_sender(dclaw_verdict_sender_fn fn);
+
+/* Invoked for every authenticated gateway verdict, after it is cached. */
+typedef void (*dclaw_verdict_ready_fn)(uint16_t request_id, const dclaw_verdict_t *v);
+void dclaw_register_verdict_ready_callback(dclaw_verdict_ready_fn cb);
+dclaw_verdict_ready_fn dclaw_get_verdict_ready_callback(void);
+
+/* Session revocation (correlator.c). A revoked session is denied with
+ * DCLAW_REASON_RETROACTIVE until it expires from inactivity. */
+void dclaw_session_revoke(uint16_t session_id);
+bool dclaw_session_is_revoked(uint16_t session_id);
+void dclaw_sessions_reset_keep_revoked(void);
+
 /* === TLS Engine (mbedTLS transport for MQTT) === */
 
 int  dclaw_tls_init(void);
 int  dclaw_tls_connect(int tcp_fd, const char *hostname);
-int  dclaw_tls_write(const uint8_t *data, size_t len);
+int  dclaw_tls_write(const uint8_t *data, size_t len, int timeout_ms);
 int  dclaw_tls_read(uint8_t *buf, size_t len, int timeout_ms);
+size_t dclaw_tls_pending(void); /* decrypted bytes buffered, not yet read */
+void dclaw_tls_set_handshake_timeout(uint32_t timeout_ms); /* test hook; 0 = default */
 void dclaw_tls_shutdown(void);
 
 #endif /* DEFENSECLAW_H */

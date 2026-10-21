@@ -280,10 +280,12 @@ int cycle(MQTTClient* c, Timer* timer)
             MQTTMessage msg;
             Timer ack_timer;
             int intQoS;
-            msg.payloadlen = 0; /* this is a size_t, but deserialize publish sets this as int */
+            int payloadlen = 0; /* DefenseClaw: msg.payloadlen is a size_t; never write it through an int* */
             if (MQTTDeserialize_publish(&msg.dup, &intQoS, &msg.retained, &msg.id, &topicName,
-               (unsigned char**)&msg.payload, (int*)&msg.payloadlen, c->readbuf, c->readbuf_size) != 1)
+               (unsigned char**)&msg.payload, &payloadlen, c->readbuf, c->readbuf_size) != 1 ||
+               payloadlen < 0)
                 goto exit;
+            msg.payloadlen = (size_t)payloadlen;
             msg.qos = (enum QoS)intQoS;
             deliverMessage(c, &topicName, &msg);
             if (msg.qos != QOS0)
@@ -619,6 +621,43 @@ exit:
     return rc;
 }
 
+
+/* DefenseClaw addition: MQTTPublish without the PUBACK/PUBCOMP wait, so a
+ * single-threaded caller is not blocked for a broker round trip. */
+int MQTTPublishNoWait(MQTTClient* c, const char* topicName, MQTTMessage* message)
+{
+    int rc = FAILURE;
+    Timer timer;
+    MQTTString topic = MQTTString_initializer;
+    topic.cstring = (char *)topicName;
+    int len = 0;
+
+#if defined(MQTT_TASK)
+	  MutexLock(&c->mutex);
+#endif
+	  if (!c->isconnected)
+		    goto exit;
+
+    TimerInit(&timer);
+    TimerCountdownMS(&timer, c->command_timeout_ms);
+
+    if (message->qos == QOS1 || message->qos == QOS2)
+        message->id = getNextPacketId(c);
+
+    len = MQTTSerialize_publish(c->buf, c->buf_size, 0, message->qos, message->retained, message->id,
+              topic, (unsigned char*)message->payload, message->payloadlen);
+    if (len <= 0)
+        goto exit;
+    rc = sendPacket(c, len, &timer);
+
+exit:
+    if (rc == FAILURE)
+        MQTTCloseSession(c);
+#if defined(MQTT_TASK)
+	  MutexUnlock(&c->mutex);
+#endif
+    return rc;
+}
 
 int MQTTPublish(MQTTClient* c, const char* topicName, MQTTMessage* message)
 {

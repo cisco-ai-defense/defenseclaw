@@ -48,6 +48,28 @@ static bool valid_port(const char *start, const char *end) {
     return port != 0;
 }
 
+/* Strict dotted-quad: four 1-3 digit decimal octets, no leading zeros.
+ * glibc/musl inet_pton already enforce this, but BSD/macOS libc and lwIP
+ * accept "0177.0.0.1" (parsed as 177.x) while inet_aton-based clients
+ * resolve it as octal 127.0.0.1. */
+static bool canonical_dotted_quad(const char *s) {
+    int octets = 0;
+    while (*s) {
+        const char *start = s;
+        while (isdigit((unsigned char)*s)) s++;
+        size_t n = (size_t)(s - start);
+        if (n == 0 || n > 3 || (n > 1 && *start == '0')) return false;
+        octets++;
+        if (*s == '.') {
+            s++;
+            if (!*s) return false;
+        } else if (*s) {
+            return false;
+        }
+    }
+    return octets == 4;
+}
+
 dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
     if (!dest || !*dest) return DCLAW_ACTION_ALLOW; /* non-network tool */
 
@@ -93,9 +115,10 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
             return DCLAW_ACTION_BLOCK;
     } else {
         struct in_addr addr;
-        /* inet_pton rejects hostnames, decimal-integer, hex, and octal aliases.
-         * Their later resolver behavior can differ from our local parse. */
-        if (inet_pton(AF_INET, host, &addr) != 1 || !public_ipv4(&addr))
+        /* Reject hostnames, decimal-integer, hex, and octal aliases: their
+         * later resolver behavior can differ from our local parse. */
+        if (!canonical_dotted_quad(host) ||
+            inet_pton(AF_INET, host, &addr) != 1 || !public_ipv4(&addr))
             return DCLAW_ACTION_BLOCK;
     }
     return DCLAW_ACTION_ALLOW;

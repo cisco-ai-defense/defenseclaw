@@ -179,6 +179,7 @@ func (c *PahoClient) Connect(ctx context.Context) error {
 				}
 			}
 		},
+		ConnectPacketBuilder: limitInboundPacketSize,
 		OnConnectError: func(err error) {
 			log.Printf("[mqtt-paho] connect error: %v (will retry)", err)
 		},
@@ -216,6 +217,22 @@ func (c *PahoClient) Connect(ctx context.Context) error {
 	c.cm = cm
 	c.mu.Unlock()
 	return nil
+}
+
+// maxInboundPacketSize is advertised to the broker as the MQTT 5 Maximum
+// Packet Size, so it never forwards a device frame larger than any Fleet
+// message (verdict requests are at most 4 KiB plus a 32-byte HMAC).
+const maxInboundPacketSize uint32 = 64 * 1024
+
+// limitInboundPacketSize sets the CONNECT Maximum Packet Size property while
+// keeping any other properties autopaho configured.
+func limitInboundPacketSize(cp *paho.Connect, _ *url.URL) (*paho.Connect, error) {
+	if cp.Properties == nil {
+		cp.Properties = &paho.ConnectProperties{}
+	}
+	size := maxInboundPacketSize
+	cp.Properties.MaximumPacketSize = &size
+	return cp, nil
 }
 
 // onPublishReceived hands every inbound PUBLISH to the handler of the first

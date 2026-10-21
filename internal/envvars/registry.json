@@ -7650,11 +7650,15 @@
     {
       "name": "DCLAW_PRODUCTION",
       "category": "fleet",
-      "purpose": "Force production Fleet MQTT security checks when set to 1 or true; production checks are already the default.",
+      "purpose": "Force production Fleet MQTT security checks. Any non-empty value other than 0, false, no or off (case-insensitive) forces production; production checks are already the default.",
       "default": "",
       "accepted_values": [
         "1",
         "true",
+        "0",
+        "false",
+        "no",
+        "off",
         "unset"
       ],
       "security_impact": "high",

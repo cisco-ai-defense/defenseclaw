@@ -20,6 +20,7 @@
 #include "platform.h"
 #include "config.h"
 #include "hmac_sha256.h"
+#include "deferred_reply.h"
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -47,7 +48,11 @@ extern int  dclaw_mqtt_connect(void);
 extern int  dclaw_mqtt_send_heartbeat(void);
 extern int  dclaw_mqtt_reconnect(void);
 extern int  dclaw_mqtt_poll(int timeout_ms);
+extern int  dclaw_mqtt_get_fd(void);
+extern bool dclaw_mqtt_has_pending_input(void);
 extern void dclaw_canary_tick(void);
+extern void dclaw_speculative_expire(uint64_t now_ms);
+extern int  dclaw_verdict_require_device_key(bool production);
 #endif
 extern int  dclaw_ipc_parse_request(const char *json, size_t json_len,
                                     dclaw_tool_request_t *out);
@@ -58,7 +63,54 @@ extern int  dclaw_ipc_release_lockdown(void);
 extern void dclaw_lockdown_timeout_check(void);
 #endif
 
+extern void dclaw_audit_tick(uint64_t now_ms);
+extern int  dclaw_audit_sync_due_in_ms(uint64_t now_ms);
+
 static volatile sig_atomic_t g_running = 1;
+
+/* Connected IPC clients. A client that sends "subscribe_revocations"
+ * receives one JSON-RPC notification per revoked session on that
+ * connection; it should use a separate connection for requests. Clients
+ * that never subscribe never receive unsolicited messages. */
+static int  client_fds[DCLAW_MAX_IPC_CLIENTS];
+static bool client_subscribed[DCLAW_MAX_IPC_CLIENTS];
+static int  num_clients = 0;
+
+/* Per-client accumulation buffers for newline-delimited message framing */
+static char   client_buf[DCLAW_MAX_IPC_CLIENTS][DCLAW_IPC_BUF_SIZE];
+static size_t client_buf_len[DCLAW_MAX_IPC_CLIENTS];
+
+/* Close client i and swap-remove it. Callers must not re-check slot i in
+ * the same pass: the swapped-in client's pollfd entry is stale (built
+ * before poll); it will be polled next cycle. */
+static void remove_client(int i) {
+    dclaw_deferred_drop_fd(client_fds[i]);
+    hal_ipc_socket_close(client_fds[i]);
+    num_clients--;
+    if (i < num_clients) {
+        client_fds[i] = client_fds[num_clients];
+        client_subscribed[i] = client_subscribed[num_clients];
+        client_buf_len[i] = client_buf_len[num_clients];
+        memcpy(client_buf[i], client_buf[num_clients], client_buf_len[i]);
+    }
+    client_fds[num_clients] = -1;
+    client_subscribed[num_clients] = false;
+    client_buf_len[num_clients] = 0;
+}
+
+static void notify_session_revoked(uint16_t session_id, const char *tool_name) {
+    (void)tool_name;
+    char msg[128];
+    int n = snprintf(msg, sizeof(msg),
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session_revoked\","
+        "\"params\":{\"session_id\":%u,\"reason\":%u}}\n",
+        (unsigned)session_id, (unsigned)DCLAW_REASON_RETROACTIVE);
+    if (n <= 0 || (size_t)n >= sizeof(msg)) return;
+    for (int i = 0; i < num_clients; i++) {
+        if (!client_subscribed[i] || client_fds[i] < 0) continue;
+        if (write(client_fds[i], msg, (size_t)n) < 0) { /* best-effort */ }
+    }
+}
 
 /* Local lockdown timeout: auto-release block_all after this many seconds.
  * This is a faster local safety net (1 hour) in addition to the 24-hour
@@ -187,6 +239,15 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+#if DCLAW_MQTT_ENABLED
+    /* Like the audit key: production refuses to start unsigned. */
+    if (dclaw_verdict_require_device_key(!DCLAW_DEV_MODE) != 0) {
+        fprintf(stderr, "edge-connector: device key not provisioned\n");
+        dclaw_shutdown();
+        return 1;
+    }
+#endif
+
 #ifdef __linux__
     /* Prevent /proc/PID/environ access by other same-UID processes since
      * dclaw_scrub_env() cannot clear the snapshot taken at exec time. */
@@ -247,24 +308,27 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "edge-connector: running (profile=%s, ipc=%s)\n",
             DCLAW_PROFILE_NAME, ipc_socket_path);
 
-    /* pollfd array: slot 0 = server socket, slots 1..MAX = client connections */
-    struct pollfd fds[1 + DCLAW_MAX_IPC_CLIENTS];
-    int client_fds[DCLAW_MAX_IPC_CLIENTS];
-    int num_clients = 0;
-
-    /* Per-client accumulation buffers for newline-delimited message framing */
-    static char   client_buf[DCLAW_MAX_IPC_CLIENTS][DCLAW_IPC_BUF_SIZE];
-    static size_t client_buf_len[DCLAW_MAX_IPC_CLIENTS];
+    /* pollfd array: slot 0 = server socket, slots 1..num_clients = client
+     * connections, then the MQTT socket when connected. */
+    struct pollfd fds[2 + DCLAW_MAX_IPC_CLIENTS];
 
     memset(fds, 0, sizeof(fds));
     memset(client_buf_len, 0, sizeof(client_buf_len));
-    for (int i = 0; i < DCLAW_MAX_IPC_CLIENTS; i++)
+    for (int i = 0; i < DCLAW_MAX_IPC_CLIENTS; i++) {
         client_fds[i] = -1;
+        client_subscribed[i] = false;
+    }
+    dclaw_register_retroactive_callback(notify_session_revoked);
+    dclaw_deferred_init(write_verdict_response);
+    dclaw_register_verdict_ready_callback(dclaw_deferred_resolve);
 
     fds[0].fd = server_fd;
     fds[0].events = POLLIN;
 
     uint64_t last_idle_flush = hal_tick_ms();
+#if DCLAW_MQTT_ENABLED
+    uint64_t last_mqtt_yield = 0;
+#endif
 
     while (g_running) {
         hal_watchdog_feed();
@@ -273,12 +337,49 @@ int main(int argc, char *argv[]) {
         int nfds = 1;
         for (int i = 0; i < num_clients; i++) {
             fds[nfds].fd = client_fds[i];
+            /* Do not read from a client whose reply is held; hangups are
+             * still reported. */
+            fds[nfds].events = dclaw_deferred_pending_for_fd(client_fds[i]) ? 0 : POLLIN;
+            fds[nfds].revents = 0;
+            nfds++;
+        }
+        const int client_slots_end = nfds;
+
+        /* Sockets (IPC and MQTT) wake the loop; the timeout only paces timers.
+         * Held replies need ~10 ms granularity for their 500 ms deadline;
+         * otherwise every remaining timer (heartbeat, keepalive, reconnect
+         * backoff, audit flush, lockdown timeouts) is coarse. */
+        int poll_timeout_ms = dclaw_deferred_any_pending() ? 10 : 250;
+        /* A client whose held reply was just resolved may still have
+         * complete messages buffered; handle them without waiting. */
+        for (int i = 0; i < num_clients; i++) {
+            if (!dclaw_deferred_pending_for_fd(client_fds[i]) &&
+                memchr(client_buf[i], '\n', client_buf_len[i]) != NULL) {
+                poll_timeout_ms = 0;
+                break;
+            }
+        }
+        {
+            /* Wake up in time to make a group-committed BLOCK durable. */
+            int due = dclaw_audit_sync_due_in_ms(hal_tick_ms());
+            if (due >= 0 && due < poll_timeout_ms) poll_timeout_ms = due;
+        }
+#if DCLAW_MQTT_ENABLED
+        /* Poll the MQTT socket here so a gateway verdict wakes the loop
+         * immediately, instead of waiting inside a fixed-length MQTTYield. */
+        int mqtt_slot = -1;
+        int mqtt_fd = dclaw_mqtt_get_fd();
+        if (mqtt_fd >= 0) {
+            mqtt_slot = nfds;
+            fds[nfds].fd = mqtt_fd;
             fds[nfds].events = POLLIN;
             fds[nfds].revents = 0;
             nfds++;
         }
+        if (dclaw_mqtt_has_pending_input()) poll_timeout_ms = 0;
+#endif
 
-        int ready = poll(fds, (nfds_t)nfds, 10 /* 10ms timeout */);
+        int ready = poll(fds, (nfds_t)nfds, poll_timeout_ms);
 
         /* Accept new connections */
         if (ready > 0 && (fds[0].revents & POLLIN)) {
@@ -289,6 +390,7 @@ int main(int argc, char *argv[]) {
                     hal_ipc_socket_close(client_fd);
                 } else if (num_clients < DCLAW_MAX_IPC_CLIENTS) {
                     client_fds[num_clients] = client_fd;
+                    client_subscribed[num_clients] = false;
                     num_clients++;
                 } else {
                     /* At capacity, reject */
@@ -300,46 +402,54 @@ int main(int argc, char *argv[]) {
         /* Process data from connected clients */
         for (int i = 0; i < num_clients; i++) {
             int slot = 1 + i; /* pollfd index */
-            if (slot >= nfds) break;
-            if (!(fds[slot].revents & POLLIN)) continue;
+            /* Clients accepted in this pass have no pollfd entry yet. */
+            if (slot >= client_slots_end) break;
 
-            /* Read into the per-client accumulation buffer */
-            size_t space = DCLAW_IPC_BUF_SIZE - 1 - client_buf_len[i];
-            if (space == 0) {
-                /* Buffer full with no newline — discard and reset */
-                client_buf_len[i] = 0;
-                space = DCLAW_IPC_BUF_SIZE - 1;
-            }
-            ssize_t n = read(client_fds[i], client_buf[i] + client_buf_len[i], space);
-            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                /* Non-blocking: no data yet, skip this client */
+            if (dclaw_deferred_pending_for_fd(client_fds[i])) {
+                if (fds[slot].revents & (POLLHUP | POLLERR | POLLNVAL))
+                    remove_client(i);
                 continue;
             }
-            if (n <= 0) {
-                /* Client disconnected or error. Swap-remove and do NOT
-                 * re-check slot i: the swapped-in client's fds[] entry is
-                 * stale (built before poll). It will be polled next cycle. */
-                hal_ipc_socket_close(client_fds[i]);
-                num_clients--;
-                if (i < num_clients) {
-                    client_fds[i] = client_fds[num_clients];
-                    client_buf_len[i] = client_buf_len[num_clients];
-                    memcpy(client_buf[i], client_buf[num_clients], client_buf_len[i]);
+
+            if (fds[slot].revents & POLLIN) {
+                /* Read into the per-client accumulation buffer */
+                size_t space = DCLAW_IPC_BUF_SIZE - 1 - client_buf_len[i];
+                if (space == 0) {
+                    /* Buffer full with no newline — discard and reset */
+                    client_buf_len[i] = 0;
+                    space = DCLAW_IPC_BUF_SIZE - 1;
                 }
-                client_fds[num_clients] = -1;
-                client_buf_len[num_clients] = 0;
+                ssize_t n = read(client_fds[i], client_buf[i] + client_buf_len[i], space);
+                if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    /* Non-blocking: no data yet, skip this client */
+                    continue;
+                }
+                if (n <= 0) {
+                    remove_client(i);
+                    continue;
+                }
+                client_buf_len[i] += (size_t)n;
+            } else if (!memchr(client_buf[i], '\n', client_buf_len[i])) {
+                /* Nothing new and no complete message left over from a
+                 * reply that was held. */
                 continue;
             }
-            client_buf_len[i] += (size_t)n;
 
             /* Process complete newline-delimited messages */
             char *base = client_buf[i];
             size_t remaining = client_buf_len[i];
             char *nl;
-            while ((nl = memchr(base, '\n', remaining)) != NULL) {
+            /* Stop at a held reply so later replies stay in order. */
+            while (!dclaw_deferred_pending_for_fd(client_fds[i]) &&
+                   (nl = memchr(base, '\n', remaining)) != NULL) {
                 size_t msg_len = (size_t)(nl - base);
                 *nl = '\0';
 
+                if (msg_len == 21 && memcmp(base, "subscribe_revocations", 21) == 0) {
+                    client_subscribed[i] = true;
+                    const char *ok = "{\"jsonrpc\":\"2.0\",\"result\":{\"subscribed\":true},\"id\":null}\n";
+                    if (write(client_fds[i], ok, strlen(ok)) < 0) { /* best-effort */ }
+                } else
 #if DCLAW_MQTT_ENABLED
                 if (msg_len >= 16 && memcmp(base, "release_lockdown", 16) == 0) {
                     extern uint32_t dclaw_load_lockdown_release_seq(void);
@@ -418,7 +528,22 @@ int main(int argc, char *argv[]) {
                 dclaw_tool_request_t req;
                 if (msg_len > 0 && dclaw_ipc_parse_request(base, msg_len, &req) == 0) {
                     dclaw_verdict_t verdict = dclaw_evaluate(&req);
-                    (void)write_verdict_response(client_fds[i], &verdict, req.request_id);
+                    if (verdict.action == DCLAW_ACTION_BLOCK &&
+                        verdict.mode == DCLAW_VERDICT_PENDING) {
+                        /* Synchronous escalation: hold the reply until the
+                         * gateway answers or the verdict timeout expires.
+                         * dclaw_evaluate just assigned next_request_id. */
+                        uint32_t th = (uint32_t)req.tool_hash[0] | ((uint32_t)req.tool_hash[1] << 8)
+                                    | ((uint32_t)req.tool_hash[2] << 16) | ((uint32_t)req.tool_hash[3] << 24);
+                        if (!dclaw_deferred_add(client_fds[i], req.request_id,
+                                                dclaw_get_state()->next_request_id,
+                                                req.session_id, th, hal_tick_ms())) {
+                            verdict.reason = DCLAW_REASON_CLOUD_TIMEOUT;
+                            (void)write_verdict_response(client_fds[i], &verdict, req.request_id);
+                        }
+                    } else {
+                        (void)write_verdict_response(client_fds[i], &verdict, req.request_id);
+                    }
                 } else if (msg_len > 0) {
                     /* Malformed request — send error response */
                     const char *err =
@@ -442,9 +567,26 @@ int main(int argc, char *argv[]) {
             client_buf_len[i] = remaining;
         }
 
-        /* MQTT: poll for incoming messages (non-blocking, 10ms max) */
+        /* MQTT: yield to Paho when the socket is readable or input is
+         * already buffered, and at least once a second for keepalive and the
+         * reconnect grace check. The 1 ms timeout is only a read budget. */
 #if DCLAW_MQTT_ENABLED
-        dclaw_mqtt_poll(10);
+        {
+            uint64_t now = hal_tick_ms();
+            bool mqtt_ready = (mqtt_slot >= 0 && ready > 0 &&
+                               (fds[mqtt_slot].revents & (POLLIN | POLLHUP | POLLERR))) ||
+                              dclaw_mqtt_has_pending_input() ||
+                              now - last_mqtt_yield >= 1000;
+            if (mqtt_ready) {
+                dclaw_mqtt_poll(1);
+                last_mqtt_yield = now;
+            }
+        }
+#endif
+        dclaw_deferred_expire(hal_tick_ms());
+        dclaw_audit_tick(hal_tick_ms());
+#if DCLAW_MQTT_ENABLED && DCLAW_SPECULATIVE_EXECUTION
+        dclaw_speculative_expire(hal_tick_ms());
 #endif
 
         /* Periodic tasks */

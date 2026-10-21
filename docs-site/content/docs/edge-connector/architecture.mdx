@@ -89,7 +89,7 @@ A finite state machine tracks capability invocations per session. When a configu
 
 ### Stage 6 — Verdict cache
 
-The in-memory LRU cache stores Fleet verdicts keyed by the 32-byte tool hash alone. For requests reaching this stage, input, rate, content, destination, and sequence checks have already run; a cache hit avoids another Fleet request, not those local guards. The authenticated Fleet verdict supplies a TTL in minutes: zero removes any previous same-tool entry and is not cached, while positive values are capped locally at 60 minutes for ALLOW, seven days for BLOCK, and four hours for WARN. Entries expire using monotonic `hal_tick_ms()` elapsed time, independently of wall-clock trust. Policy YAML cannot set these TTLs.
+The in-memory LRU cache stores Fleet verdicts keyed by the 32-byte tool hash alone. For requests reaching this stage, input, rate, content, destination, and sequence checks have already run; a cache hit avoids another Fleet request, not those local guards. The authenticated Fleet verdict supplies a TTL in minutes: zero removes any previous same-tool entry and is not cached, while positive values are capped locally at 60 minutes for ALLOW, seven days for BLOCK, and four hours for WARN. Entries expire using monotonic `hal_tick_ms()` elapsed time, independently of wall-clock trust. Policy YAML cannot set these TTLs. A cached BLOCK always applies. A cached ALLOW or WARN is never used for the physical classes (ACTUATE, EXEC_SHELL, WRITE_FS): every such call is escalated and held for a fresh Fleet verdict. When a local sequence or content-severity rule returned ESCALATE, the cache is skipped and the call is escalated; when a local rule or the content scope threshold returned WARN, a cached ALLOW is returned as WARN.
 
 ### Stage 7 — Fleet escalation
 
@@ -99,7 +99,7 @@ When local policy cannot decide, the Edge Connector sends a verdict request to t
 - Truncated content snippet (up to `DCLAW_ESCALATION_PAYLOAD_MAX`)
 - Session risk/capability metadata and request nonces
 
-The current gateway evaluates the request by tool hash through its verdict cache; it does not pass the content snippet or destination into a separate model pipeline. Unknown hashes default to BLOCK. The `findings` wire field is currently a zero placeholder. In `sync_block` mode the device blocks pending a gateway verdict and stays blocked on timeout. In `speculative` mode it can allow immediately, even if the MQTT publish fails; a later gateway BLOCK cannot undo that action. Select the mode to match the consequence of the tool call.
+The current gateway evaluates the request by tool hash through its verdict cache; it does not pass the content snippet or destination into a separate model pipeline. Unknown hashes default to BLOCK. The `findings` wire field is currently a zero placeholder. In `sync_block` mode the device blocks pending a gateway verdict and stays blocked on timeout. In `speculative` mode (`DCLAW_STRICT_MODE=0`, never for ACTUATE, EXEC_SHELL or WRITE_FS) the device allows the call immediately, but only after the verdict request has been handed to MQTT: a request that was not sent (offline, publish failure, or too large to encode) takes the synchronous path and is blocked. When no speculative or pending verdict slot is free, the call also waits synchronously. A later gateway BLOCK cannot undo a speculatively allowed action; it revokes the calling session. A speculative call keeps its verdict slot until the gateway answers or 30 seconds pass; if no verdict arrives in that time, the session is revoked as well. Select the mode to match the consequence of the tool call.
 
 ## Audit trail
 
@@ -109,7 +109,7 @@ The HMAC-chained flash ring records compact evaluation decisions. Each entry con
 - Action and reason
 - A 16-byte HMAC tag chained to the preceding retained entry
 
-The ring does not store full tool names, capabilities, or content findings. Its HMAC chain detects modification within the retained history. Buffered non-BLOCK entries reduce flash writes; BLOCK entries are written immediately when storage succeeds and are retained in RAM for retry on a transient write failure when space remains.
+The ring does not store full tool names, capabilities, or content findings. Its HMAC chain lets a verifier that holds `DCLAW_AUDIT_KEY` detect modification within the retained history; the device itself does not verify the chain at boot or at runtime, never sets the `TAMPER_DETECT` heartbeat flag, and the ring header is not authenticated. The key is stored on the device, so the chain does not protect against an attacker who can read it. Heartbeats carry the first 8 bytes of the newest entry's HMAC. Buffered non-BLOCK entries reduce flash writes; BLOCK entries are written immediately when storage succeeds and are retained in RAM for retry on a transient write failure when space remains. Their `fdatasync` is group-committed, at most once per 100 ms, so on power loss up to 100 ms of BLOCK entries can be lost.
 
 ## IPC schema
 

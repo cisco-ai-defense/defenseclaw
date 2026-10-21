@@ -31,6 +31,7 @@ extern void dclaw_canary_tick_at(uint64_t now_ms);
 extern void dclaw_canary_record_block(void);
 extern void dclaw_policy_rollback(void);
 extern bool dclaw_emergency_has_gap(uint32_t cloud_current_seq);
+extern int dclaw_emergency_load_from_flash(void);
 extern uint32_t dclaw_load_lockdown_release_seq(void);
 extern int dclaw_store_lockdown_release_seq(uint32_t seq);
 extern uint32_t dclaw_boot_counter_get(void);
@@ -246,6 +247,26 @@ static void make_emergency_msg(uint8_t *buf, uint32_t seq, uint32_t prev,
     }
 }
 
+/* Lockdown must not drop the records that tie an unverified speculative call
+ * to its session; otherwise a late BLOCK can no longer revoke it. */
+static void test_lockdown_keeps_speculative_slots(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    memset(s->speculative, 0, sizeof(s->speculative));
+    s->speculative[0].session_id = 77;
+    s->speculative[0].request_id = 900;
+    uint8_t cmds[2] = {0x01 /* BLOCK_ALL */, 0x04 /* ENTER_LOCKDOWN */};
+    for (int i = 0; i < 2; i++) {
+        uint32_t cur = s->emergency.last_seen_seq;
+        uint8_t msg[112];
+        make_emergency_msg(msg, cur + 1, cur, cmds[i], true);
+        assert(dclaw_apply_emergency(msg, sizeof(msg)) == 0);
+        assert(s->emergency.block_all_active);
+        assert(s->speculative[0].request_id == 900 && s->speculative[0].session_id == 77);
+    }
+    memset(s->speculative, 0, sizeof(s->speculative));
+    printf("  PASS: BLOCK_ALL and ENTER_LOCKDOWN keep speculative slots\n");
+}
+
 static void test_emergency_valid_applies(void) {
     dclaw_state_t *s = dclaw_get_state();
     s->emergency.last_seen_seq = 0;
@@ -417,6 +438,53 @@ static void test_boot_counter_durability(void) {
     printf("  PASS: signed heartbeat includes durable boot generation; one copy repairs and two corrupt copies fail closed\n");
 }
 
+
+/* Regression: a command whose persistence failed forced a lockdown in RAM;
+ * the replay of that same command after storage recovered was applied on
+ * top of the forced lockdown and persisted it, so the device stayed locked
+ * until a RELEASE or the 24 h timer. */
+static void test_emergency_storage_fault_recovers(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    uint32_t seq = s->emergency.last_seen_seq;
+    uint8_t msg[112];
+
+    make_emergency_msg(msg, seq + 1, seq, 0x05, true); /* RELEASE_LOCKDOWN */
+    assert(dclaw_apply_emergency(msg, sizeof(msg)) == 0);
+    assert(!s->emergency.block_all_active);
+
+    /* Storage fails while FORCE_SYNC is applied: fail closed. */
+    make_emergency_msg(msg, seq + 2, seq + 1, 0x03, true);
+    hal_shutdown();
+    assert(dclaw_apply_emergency(msg, sizeof(msg)) == -3);
+    assert(s->emergency.block_all_active);
+    assert(s->emergency.last_seen_seq == seq + 1);
+
+    /* Storage repaired; the replayed command persists and lifts the lock
+     * that only the storage fault caused. */
+    assert(hal_init() == 0);
+    assert(dclaw_apply_emergency(msg, sizeof(msg)) == 0);
+    assert(s->emergency.last_seen_seq == seq + 2);
+    assert(!s->emergency.block_all_active);
+    assert(dclaw_emergency_load_from_flash() == 0);
+    assert(!s->emergency.block_all_active && s->emergency.last_seen_seq == seq + 2);
+
+    /* A durable lockdown is not lifted by the same recovery. */
+    make_emergency_msg(msg, seq + 3, seq + 2, 0x01, true); /* BLOCK_ALL */
+    assert(dclaw_apply_emergency(msg, sizeof(msg)) == 0);
+    make_emergency_msg(msg, seq + 4, seq + 3, 0x03, true);
+    hal_shutdown();
+    assert(dclaw_apply_emergency(msg, sizeof(msg)) == -3);
+    assert(hal_init() == 0);
+    assert(dclaw_apply_emergency(msg, sizeof(msg)) == 0);
+    assert(s->emergency.block_all_active);
+
+    make_emergency_msg(msg, seq + 5, seq + 4, 0x05, true);
+    assert(dclaw_apply_emergency(msg, sizeof(msg)) == 0);
+    assert(!s->emergency.block_all_active);
+    (void)s;
+    printf("  PASS: replay after a storage fault clears only the storage-forced lockdown\n");
+}
+
 int main(void) {
     /* The test intentionally corrupts both boot-counter copies. Start from
      * its dedicated fixture on every run so CTest is repeatable. */
@@ -448,8 +516,10 @@ int main(void) {
     test_emergency_predecessor_gap();
     test_emergency_gap_detection();
     test_emergency_no_gap();
+    test_lockdown_keeps_speculative_slots();
+    test_emergency_storage_fault_recovers();
     test_boot_counter_durability();
-    printf("  ALL PASSED (12 tests)\n");
+    printf("  ALL PASSED (13 tests)\n");
 
     dclaw_shutdown();
     return 0;

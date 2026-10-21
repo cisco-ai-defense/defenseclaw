@@ -47,6 +47,7 @@ extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
 void dclaw_policy_rollback(void);
 void dclaw_canary_tick(void);
 void dclaw_canary_record_block(void);
+void dclaw_canary_record_policy_block(uint32_t target_hash, uint8_t reason);
 int dclaw_policy_reload_from_flash(void);
 int dclaw_emergency_persist(void);
 int dclaw_emergency_load_from_flash(void);
@@ -130,6 +131,11 @@ static bool verify_signature(const uint8_t *message, size_t msg_len,
 
 /* === Policy OTA (REQ-33 through REQ-36) === */
 
+/* Live policy tables captured just before an OTA switch, restored verbatim by
+ * a canary rollback. */
+static dclaw_policy_table_t s_canary_prev_policy;
+static bool s_canary_prev_valid;
+
 int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
                        const uint8_t *signature) {
     dclaw_state_t *s = dclaw_get_state();
@@ -207,7 +213,10 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
         return -3;
     }
 
+    memcpy(&s_canary_prev_policy, &s->rt_policy, sizeof(s_canary_prev_policy));
+    s_canary_prev_valid = true;
     if (dclaw_config_switch_policy_partition(hdr.version) != 0) {
+        s_canary_prev_valid = false;
         fprintf(stderr, "[DCLAW] ERROR: OTA policy partition switch could not be persisted.\n");
         return -3;
     }
@@ -276,13 +285,51 @@ void dclaw_canary_tick(void) {
     dclaw_canary_tick_at(hal_tick_ms());
 }
 
-/* Record a BLOCK event for canary tracking */
+/* Record a BLOCK event for canary tracking (raw counter) */
 void dclaw_canary_record_block(void) {
     dclaw_state_t *s = dclaw_get_state();
     if (!s->canary.canary_active) return;
     if (s->canary.canary_minute < 10) {
         s->canary.canary_blocks[s->canary.canary_minute]++;
     }
+}
+
+/* Distinct (tool, reason) denials already counted in the current canary
+ * minute. A caller looping on one denial counts once per minute; when the
+ * set is full every further denial is counted, erring toward detection. */
+#define CANARY_DEDUPE_SLOTS 64
+static uint64_t s_canary_seen[CANARY_DEDUPE_SLOTS];
+static uint8_t  s_canary_seen_count;
+static uint8_t  s_canary_seen_minute = 0xFF;
+static uint64_t s_canary_seen_started_at;
+
+/*
+ * Record a denial that the active OTA policy can cause (severity rule,
+ * destination allowlist, sequence rule). Denials from compiled-in checks
+ * (input validation, hash binding, trusted classes, rate and flood limits,
+ * SSRF, truncation) and gateway verdicts are not counted: the pushed policy
+ * cannot cause them, and counting them would let any caller trigger a
+ * rollback of a good policy by sending junk.
+ */
+void dclaw_canary_record_policy_block(uint32_t target_hash, uint8_t reason) {
+    dclaw_state_t *s = dclaw_get_state();
+    if (!s->canary.canary_active) return;
+
+    if (s_canary_seen_minute != s->canary.canary_minute ||
+        s_canary_seen_started_at != s->canary.canary_started_at) {
+        s_canary_seen_count = 0;
+        s_canary_seen_minute = s->canary.canary_minute;
+        s_canary_seen_started_at = s->canary.canary_started_at;
+    }
+
+    uint64_t key = ((uint64_t)reason << 32) | target_hash;
+    for (uint8_t i = 0; i < s_canary_seen_count; i++) {
+        if (s_canary_seen[i] == key) return;
+    }
+    if (s_canary_seen_count < CANARY_DEDUPE_SLOTS) {
+        s_canary_seen[s_canary_seen_count++] = key;
+    }
+    dclaw_canary_record_block();
 }
 
 /* Rollback to previous policy partition */
@@ -318,10 +365,19 @@ void dclaw_policy_rollback(void) {
     s->rollback_pending = true;
     dclaw_cache_flush_all();
 
-    if (dclaw_policy_reload_from_flash() != 0) {
-        fprintf(stderr, "[DCLAW] WARNING: Rollback partition is blank or corrupt. "
-                "Falling back to compiled-in policy defaults.\n");
+    if (s_canary_prev_valid) {
+        /* Restore the exact tables that were live before the rejected OTA.
+         * Re-reading the previous partition on top of the live (rejected)
+         * tables would keep every section the previous blob omits. */
+        memcpy(&s->rt_policy, &s_canary_prev_policy, sizeof(s->rt_policy));
+        s_canary_prev_valid = false;
+    } else {
+        /* No snapshot (e.g. reboot during the canary): boot semantics. */
         dclaw_policy_tables_init();
+        if (dclaw_policy_reload_from_flash() != 0) {
+            fprintf(stderr, "[DCLAW] WARNING: Rollback partition is blank or corrupt. "
+                    "Falling back to compiled-in policy defaults.\n");
+        }
     }
 
     dclaw_audit_write(DCLAW_ACTION_WARN, DCLAW_REASON_POLICY_TABLE, 0xFFFF, 0);
@@ -400,6 +456,14 @@ typedef struct {
     uint8_t  signature[64];
 } __attribute__((packed)) dclaw_emergency_msg_t;
 
+/* Lockdown state as last written to flash, and whether RAM holds a
+ * lockdown that only a storage failure caused. A command whose persistence
+ * fails leaves the device locked (fail closed); once storage works again, a
+ * replay of that command must be applied to the durable state, not on top
+ * of the storage-forced lockdown, or the device stays locked for good. */
+static dclaw_emergency_state_t s_durable_emergency;
+static bool s_storage_forced_lock = false;
+
 int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
     dclaw_state_t *s = dclaw_get_state();
 
@@ -429,6 +493,11 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
     if (command < 0x01 || command > 0x05) return -4;
 
     dclaw_emergency_state_t prior = s->emergency;
+    if (s_storage_forced_lock) {
+        s->emergency.block_all_active = s_durable_emergency.block_all_active;
+        s->emergency.last_was_lockdown = s_durable_emergency.last_was_lockdown;
+        s->emergency.lockdown_timestamp = s_durable_emergency.lockdown_timestamp;
+    }
     s->emergency.initialized = true;
 
     /* Apply command */
@@ -437,19 +506,20 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         dclaw_cache_flush_all();
         s->emergency.block_all_active = true;
         s->emergency.last_was_lockdown = true;
-        memset(s->speculative, 0, sizeof(s->speculative));
+        /* Keep speculative slots: they link an unverified call to its
+         * session, so a late gateway BLOCK or the speculative deadline can
+         * still revoke that session after the lockdown is released. */
         s->emergency.lockdown_timestamp = hal_tick_ms();
         break;
 
     case 0x02: /* REVOKE_HASH / REVOKE_SESSIONS */
         /* payload[0:32] contains the hash to revoke */
         dclaw_cache_flush_all(); /* simplified: flush everything */
-        /* Clear session table to revoke all active sessions */
-        memset(s->sessions, 0, sizeof(s->sessions));
-        /* Reset correlator FSM states: zero out pending/speculative slots
-         * so no stale session state lingers after a revocation. */
+        /* Clear the session table and speculative slots. Revoked sessions,
+         * and sessions whose speculative calls are still unverified, stay
+         * revoked. Then zero pending slots so no stale state lingers. */
+        dclaw_sessions_reset_keep_revoked();
         memset(s->pending, 0, sizeof(s->pending));
-        memset(s->speculative, 0, sizeof(s->speculative));
         break;
 
     case 0x03: /* FORCE_SYNC */
@@ -463,7 +533,9 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         dclaw_cache_flush_all();
         s->emergency.block_all_active = true;
         s->emergency.last_was_lockdown = true;
-        memset(s->speculative, 0, sizeof(s->speculative));
+        /* Keep speculative slots: they link an unverified call to its
+         * session, so a late gateway BLOCK or the speculative deadline can
+         * still revoke that session after the lockdown is released. */
         s->emergency.lockdown_timestamp = hal_tick_ms();
         break;
 
@@ -486,6 +558,7 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         s->emergency = prior;
         s->emergency.block_all_active = true;
         s->emergency.last_was_lockdown = true;
+        s_storage_forced_lock = true;
         dclaw_cache_flush_all();
         return -3;
     }
@@ -950,6 +1023,8 @@ int dclaw_emergency_persist(void) {
     if (!stored_a || !stored_b)
         fprintf(stderr, "[DCLAW] WARNING: Emergency state redundancy degraded.\n");
     emergency_generation++;
+    s_durable_emergency = s->emergency;
+    s_storage_forced_lock = false;
     return 0;
 }
 
@@ -1005,5 +1080,7 @@ int dclaw_emergency_load_from_flash(void) {
         s->emergency.lockdown_timestamp = hal_tick_ms();
         fprintf(stderr, "[DCLAW] Emergency lockdown restored (24h timer restarted).\n");
     }
+    s_durable_emergency = s->emergency;
+    s_storage_forced_lock = false;
     return 0;
 }

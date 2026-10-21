@@ -66,19 +66,46 @@ _NAME_KEYS = ("tool_name", "name", "function", "tool", "action")
 _ARGS_KEYS = ("arguments", "args", "parameters", "params", "input")
 
 
-def _extract_tool_info(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Best-effort extraction of tool name and arguments from a request body."""
-    tool_name = ""
+class AmbiguousToolName(ValueError):
+    """The request body names more than one tool."""
+
+
+def _tool_name_candidates(body: dict[str, Any]) -> list[str]:
+    """Return every non-empty tool name found under any recognised key.
+
+    A nested ``{"function": {"name": ...}}`` object counts as a candidate
+    for its parent key.
+    """
+    names: list[str] = []
     for key in _NAME_KEYS:
         val = body.get(key)
         if isinstance(val, str) and val:
-            tool_name = val
-            break
-        if isinstance(val, dict):
+            names.append(val)
+        elif isinstance(val, dict):
             nested = val.get("name", "")
-            if nested:
-                tool_name = nested
-                break
+            if isinstance(nested, str) and nested:
+                names.append(nested)
+    return names
+
+
+def _extract_tool_info(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Best-effort extraction of tool name and arguments from a request body.
+
+    The middleware cannot know which of the recognised name keys the
+    application dispatches on.  If the keys present disagree, evaluating
+    any single one of them could authorise a different tool from the one
+    the application runs, so :class:`AmbiguousToolName` is raised and the
+    caller must reject the request.  This holds even in fail-open mode.
+    """
+    tool_name = ""
+    if isinstance(body, dict):
+        candidates = _tool_name_candidates(body)
+        if len(set(candidates)) > 1:
+            raise AmbiguousToolName("request names more than one tool")
+        if candidates:
+            tool_name = candidates[0]
+    else:
+        body = {}
 
     arguments: dict[str, Any] = {}
     for key in _ARGS_KEYS:
@@ -94,6 +121,23 @@ def _extract_tool_info(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             break
 
     return tool_name, arguments
+
+
+async def _send_asgi_block(send: Callable, error: str, reason: str) -> None:
+    """Send a 403 JSON block response on an ASGI connection."""
+    await send({
+        "type": "http.response.start",
+        "status": 403,
+        "headers": [
+            [b"content-type", b"application/json"],
+            [b"x-defenseclaw-action", b"block"],
+            [b"x-defenseclaw-reason", reason.encode()],
+        ],
+    })
+    await send({
+        "type": "http.response.body",
+        "body": json.dumps({"error": error, "reason": reason}).encode(),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +221,18 @@ class EdgeConnectorMiddleware:
         except (json.JSONDecodeError, TypeError):
             body_json = {}
 
-        tool_name, arguments = _extract_tool_info(body_json)
+        try:
+            tool_name, arguments = _extract_tool_info(body_json)
+        except AmbiguousToolName:
+            logger.warning(
+                "HTTP middleware: conflicting tool names for %s %s — blocking",
+                method, path,
+            )
+            await _send_asgi_block(
+                send, "EdgeConnector: request names more than one tool",
+                "AMBIGUOUS_TOOL_NAME",
+            )
+            return
 
         if tool_name:
             # Full body required: _evaluate_chunked() handles large content via overlapping windows.
@@ -360,7 +415,21 @@ def flask_edge_connector(
         except Exception:
             body = {}
 
-        tool_name, arguments = _extract_tool_info(body)
+        try:
+            tool_name, arguments = _extract_tool_info(body)
+        except AmbiguousToolName:
+            logger.warning(
+                "Flask middleware: conflicting tool names for %s — blocking",
+                request.path,
+            )
+            resp = jsonify({
+                "error": "EdgeConnector: request names more than one tool",
+                "reason": "AMBIGUOUS_TOOL_NAME",
+            })
+            resp.status_code = 403
+            resp.headers["X-DefenseClaw-Action"] = "block"
+            resp.headers["X-DefenseClaw-Reason"] = "AMBIGUOUS_TOOL_NAME"
+            return resp
         if not tool_name:
             # Unextractable tool names must be blocked in fail-closed mode to prevent bypass.
             if not ec.fail_open:

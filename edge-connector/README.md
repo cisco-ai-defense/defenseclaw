@@ -6,10 +6,10 @@ The C engine recognizes a fixed set of tool names and capabilities. An unknown n
 
 ## Features and limits
 
-- Local policy checks, rate limiting, sequence correlation, verdict caching, and a tamper-evident audit ring.
+- Local policy checks, rate limiting, sequence correlation, verdict caching, and an HMAC-chained audit ring. The chain can be checked off-device with the audit key; the device does not verify it.
 - Built-in content patterns for secrets, credentials, PII, exfiltration indicators, injection text, and dangerous commands. The policy YAML cannot change or disable these patterns in this release.
 - An all-profile SSRF guard for network destinations. Network calls need an allowlisted canonical public IPv4 or bracketed globally scoped IPv6 literal; hostnames, private addresses, and numeric aliases are blocked until an enforced egress resolver/proxy exists.
-- MQTT verdict requests to the Fleet gateway. Synchronous escalation blocks on timeout; speculative escalation may allow immediately even if publication fails. A later block cannot undo that action.
+- MQTT verdict requests to the Fleet gateway. Synchronous escalation blocks on timeout. Speculative escalation (never for actuation, shell or file writes) allows immediately only after the request has been published; an unpublished request is blocked. A later gateway block cannot undo a speculative action; it revokes the session, as does a missing verdict after 30 seconds.
 - Policy and emergency OTA with anti-rollback and a local canary window. The current C receiver supports only explicit HMAC policy signing: build with `-DDCLAW_ALLOW_HMAC_OTA=ON` and provision the matching nonzero `DCLAW_OTA_HMAC_KEY`. Ed25519 compiler output is not accepted by this receiver. Emergency commands use a separate `DCLAW_EMERGENCY_KEY`.
 - Signed 72-byte heartbeat and registration frames with a persistent boot counter and last-applied emergency sequence. Upgrade the gateway and devices together; the gateway rejects older 64- and 68-byte keyed frames. Missed emergency commands replay in signed predecessor order from the durable Fleet history.
 

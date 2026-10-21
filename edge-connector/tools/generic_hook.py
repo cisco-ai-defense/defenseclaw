@@ -19,7 +19,7 @@
 Usage:
     from generic_hook import EdgeConnector
 
-    ec = EdgeConnector()  # auto-detects FFI or Unix socket
+    ec = EdgeConnector()  # daemon Unix socket; fails closed if unavailable
 
     # Before executing any tool call:
     verdict = ec.evaluate(
@@ -38,6 +38,12 @@ Environment variables:
     DCLAW_LIB_PATH    Path to libdclaw_core.so (default: /usr/local/lib/libdclaw_core.so)
     DCLAW_SOCKET_PATH Path to Unix socket (default: /run/defenseclaw/defenseclaw.sock)
     DCLAW_FAIL_OPEN   Set to "1" to allow tool calls when the engine is unavailable
+                      (needs DCLAW_DEV_MODE=1 or a valid DCLAW_FAIL_OPEN_TOKEN)
+    DCLAW_ALLOW_FFI   Set to "1" to permit the in-process engine (libdclaw_core)
+                      when the daemon socket is missing or fails.  Off by
+                      default: without it a daemon outage fails closed.  The
+                      in-process engine must use its own DCLAW_FLASH_PATH; the
+                      daemon holds an exclusive lock on its flash file.
     DCLAW_LOG_PATH    Audit log file (default: ~/edge-connector.log)
 """
 from __future__ import annotations
@@ -122,6 +128,17 @@ def _is_fail_open_authorized() -> bool:
     """Check if fail-open mode is authorized with a valid attestation token."""
     if _FAIL_OPEN_ENV != "1":
         return False
+    return fail_open_attested()
+
+
+def fail_open_attested() -> bool:
+    """Return True when fail-open is permitted on this host.
+
+    Fail-open requires either DCLAW_DEV_MODE=1 or a DCLAW_FAIL_OPEN_TOKEN
+    that verifies against DCLAW_AUDIT_KEY.  Every component that offers a
+    fail-open switch (environment, config file) must pass this check
+    before enabling it.
+    """
     if os.environ.get("DCLAW_DEV_MODE") == "1":
         return True
     if not _FAIL_OPEN_TOKEN:
@@ -148,6 +165,49 @@ def _is_fail_open_authorized() -> bool:
     return True
 
 
+def _destination_host(url: str) -> str:
+    """Return the host of *url* in the form the C destination guard expects.
+
+    ``urlparse().hostname`` drops the brackets around an IPv6 literal; the
+    engine only recognises bracketed IPv6 destinations, so put them back.
+    """
+    host = urlparse(url).hostname or ""
+    if ":" in host:
+        return f"[{host}]"
+    return host
+
+
+def _json_escaped_len(ch: str) -> int:
+    """Length of *ch* inside a JSON string as produced by json.dumps()."""
+    if ch in _TWO_CHAR_ESCAPES:
+        return 2
+    o = ord(ch)
+    if o < 0x20 or 0x7F <= o <= 0xFFFF:
+        return 6   # \uXXXX
+    if o < 0x80:
+        return 1
+    return 12  # astral plane: surrogate pair, two \uXXXX escapes
+
+
+_TWO_CHAR_ESCAPES = frozenset('"\\\b\f\n\r\t')
+
+
+def production_flag_set(raw: str | None) -> bool:
+    """Parse a DCLAW_PRODUCTION value the way the Go fleet does.
+
+    Mirrors ``productionFlagSet`` in internal/fleet/mqtt/bridge.go: the
+    value is trimmed and lowercased, and anything other than "", "0",
+    "false", "no" or "off" means production.
+    """
+    value = (raw or "").strip().lower()
+    return value not in ("", "0", "false", "no", "off")
+
+
+def is_production() -> bool:
+    """Return True when DCLAW_PRODUCTION selects production mode."""
+    return production_flag_set(os.environ.get("DCLAW_PRODUCTION"))
+
+
 def check_http_production(url: str, context: str = "adapter") -> None:
     """Warn when a non-loopback URL uses plain HTTP in production.
 
@@ -155,7 +215,7 @@ def check_http_production(url: str, context: str = "adapter") -> None:
     Loopback addresses (127.0.0.1, localhost, ::1) are exempt since
     they never leave the device.
     """
-    if not os.environ.get("DCLAW_PRODUCTION"):
+    if not is_production():
         return
     if not url.startswith("http://"):
         return
@@ -186,6 +246,17 @@ CAP_SENSOR_READ = 0x40
 ACTION_ALLOW = 0
 ACTION_BLOCK = 1
 ACTION_WARN = 2
+ACTION_ESCALATE = 3
+
+# Only these actions let a call proceed.  Every other value, including
+# ESCALATE and codes added by a newer engine, is treated as a denial.
+_PERMIT_ACTIONS = frozenset((ACTION_ALLOW, ACTION_WARN))
+
+
+def action_permits(action: Any) -> bool:
+    """Return True only for ALLOW and WARN; anything else must deny."""
+    return (isinstance(action, int) and not isinstance(action, bool)
+            and action in _PERMIT_ACTIONS)
 
 REASON_NAMES = {
     0x01: "POLICY_TABLE",
@@ -294,7 +365,7 @@ class Verdict:
                  cached: bool = False) -> Verdict:
         return Verdict(
             action=action,
-            blocked=(action == ACTION_BLOCK or action >= 3),
+            blocked=not action_permits(action),
             reason=REASON_NAMES.get(reason_code, f"UNKNOWN(0x{reason_code:02x})"),
             severity=severity,
             cached=cached,
@@ -506,9 +577,15 @@ class _SocketBackend:
 class EdgeConnector:
     """Framework-agnostic Edge Connector client.
 
-    Prefers IPC (Unix socket to daemon) when a daemon is running, since the
-    daemon is the policy authority and applies OTA updates.  Falls back to
-    FFI (ctypes, in-process) only when no daemon socket exists.
+    Uses IPC (Unix socket to the daemon), since the daemon is the policy
+    authority and applies OTA updates, revocations and emergency lockdown.
+
+    The in-process FFI engine is a separate engine instance with its own
+    cache, rate buckets and revocation state, so it is never used silently.
+    It is only used when explicitly enabled with ``allow_ffi=True`` or
+    ``DCLAW_ALLOW_FFI=1``; then it serves when no daemon socket exists and
+    as a fallback when the socket fails.  Otherwise a missing or failing
+    daemon makes every call fail closed (or fail open, if attested).
     Set ``fail_open=True`` to allow tool calls when no backend is available.
     """
 
@@ -519,6 +596,7 @@ class EdgeConnector:
         fail_open: bool | None = None,
         tool_cap_map: dict[str, int] | None = None,
         session_id: int = 1,
+        allow_ffi: bool | None = None,
     ):
         self._lib_path = lib_path or os.environ.get(
             "DCLAW_LIB_PATH", "/usr/local/lib/libdclaw_core.so"
@@ -532,6 +610,11 @@ class EdgeConnector:
             self._fail_open = fail_open
         else:
             self._fail_open = _is_fail_open_authorized()
+
+        if allow_ffi is not None:
+            self._allow_ffi = allow_ffi
+        else:
+            self._allow_ffi = os.environ.get("DCLAW_ALLOW_FFI") == "1"
 
         self.tool_cap_map: dict[str, int] = dict(DEFAULT_TOOL_CAP_MAP)
         if tool_cap_map:
@@ -552,34 +635,45 @@ class EdgeConnector:
 
     # -- connection --------------------------------------------------------
 
-    def _connect(self) -> _FFIBackend | _SocketBackend | None:
-        # Try Unix socket first (daemon is the policy authority)
-        if Path(self._socket_path).exists():
-            try:
-                backend = _SocketBackend(self._socket_path)
-                logger.info(
-                    "EdgeConnector: connected via IPC socket (%s) — "
-                    "daemon is policy authority",
-                    self._socket_path,
-                )
-                return backend
-            except Exception as exc:
-                logger.debug("EdgeConnector: socket unavailable (%s), trying FFI", exc)
-
-        # Fall back to FFI only when no daemon is running
+    def _open_ffi(self) -> _FFIBackend:
+        """Start the in-process engine (only called when explicitly allowed)."""
         try:
             backend = _FFIBackend(self._lib_path)
-            logger.info("EdgeConnector: connected via FFI (%s) — no daemon detected", self._lib_path)
-            return backend
-        except (OSError, RuntimeError) as exc:
-            logger.debug("EdgeConnector: FFI unavailable (%s)", exc)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"{exc} (the in-process engine needs its own DCLAW_FLASH_PATH; "
+                f"it cannot share the daemon's flash file)"
+            ) from exc
+        logger.warning(
+            "SECURITY: EdgeConnector using the in-process engine (%s); it does "
+            "not share the daemon's revocations, cache or OTA policy",
+            self._lib_path,
+        )
+        return backend
+
+    def _connect(self) -> _FFIBackend | _SocketBackend | None:
+        # The daemon socket is the policy authority.
+        if Path(self._socket_path).exists():
+            logger.info(
+                "EdgeConnector: using IPC socket (%s) — daemon is policy authority",
+                self._socket_path,
+            )
+            return _SocketBackend(self._socket_path)
+
+        if self._allow_ffi:
+            try:
+                return self._open_ffi()
+            except (OSError, RuntimeError) as exc:
+                logger.error("EdgeConnector: in-process engine unavailable (%s)", exc)
 
         if self._fail_open:
             logger.warning("EdgeConnector: no backend available — running in fail-open mode")
             return None
+        hint = "" if self._allow_ffi else (
+            " The in-process engine is disabled (set DCLAW_ALLOW_FFI=1 to permit it)."
+        )
         raise ConnectionError(
-            f"EdgeConnector: cannot connect via FFI ({self._lib_path}) "
-            f"or socket ({self._socket_path}). Set DCLAW_FAIL_OPEN=1 to allow fail-open."
+            f"EdgeConnector: daemon socket {self._socket_path} not found.{hint}"
         )
 
     # -- backend liveness check -------------------------------------------
@@ -590,8 +684,10 @@ class EdgeConnector:
         * If currently using FFI, check whether the daemon IPC socket has
           appeared since construction — if so, switch to IPC (the daemon is
           the policy authority and receives OTA updates).
-        * If currently using IPC, verify the socket is still alive with a
-          quick connect test — if the daemon has gone away, fall back to FFI.
+        * If currently using IPC and the in-process engine is explicitly
+          allowed, verify the socket is still alive with a quick connect
+          test — if the daemon has gone away, switch to FFI.  Without the
+          opt-in the socket backend is kept and calls fail closed.
         * For FFI specifically: check whether the flash policy version has
           changed since the last evaluate (indicating an OTA was applied
           externally).  If so, call ``dclaw_policy_reload_from_flash()`` so
@@ -599,6 +695,9 @@ class EdgeConnector:
         """
         with self._backend_lock:
             if self._backend is None:
+                # Fail-open with no engine: pick up the daemon once it appears.
+                if Path(self._socket_path).exists():
+                    self._backend = _SocketBackend(self._socket_path)
                 return
 
             if isinstance(self._backend, _FFIBackend):
@@ -655,8 +754,10 @@ class EdgeConnector:
                 except Exception as exc:
                     logger.debug("EdgeConnector: FFI policy version check failed: %s", exc)
 
-            elif isinstance(self._backend, _SocketBackend):
-                # Verify the daemon socket is still alive.
+            elif isinstance(self._backend, _SocketBackend) and self._allow_ffi:
+                # Verify the daemon socket is still alive.  Only relevant when
+                # the in-process engine is permitted; otherwise a dead socket
+                # simply makes evaluate() fail closed.
                 alive = False
                 try:
                     test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -669,20 +770,13 @@ class EdgeConnector:
                 if not alive:
                     logger.warning(
                         "EdgeConnector: daemon socket at %s is dead — "
-                        "falling back to FFI",
+                        "switching to the in-process engine (DCLAW_ALLOW_FFI=1)",
                         self._socket_path,
                     )
-                    self._backend = None
                     try:
-                        self._backend = _FFIBackend(self._lib_path)
-                        logger.info("EdgeConnector: reconnected via FFI (%s)", self._lib_path)
+                        self._backend = self._open_ffi()
                     except (OSError, RuntimeError) as exc:
-                        logger.debug("EdgeConnector: FFI unavailable (%s)", exc)
-                        if not self._fail_open:
-                            raise ConnectionError(
-                                f"EdgeConnector: daemon gone and FFI unavailable ({exc}). "
-                                f"Set DCLAW_FAIL_OPEN=1 to allow fail-open."
-                            )
+                        logger.error("EdgeConnector: in-process engine unavailable (%s)", exc)
 
     # -- fail-open accounting -----------------------------------------------
 
@@ -724,6 +818,7 @@ class EdgeConnector:
         destination: str = "",
         content: str | None = None,
         direction: str = "request",
+        session_id: int | None = None,
     ) -> Verdict:
         """Evaluate a tool call against the Edge Connector policy.
 
@@ -735,6 +830,7 @@ class EdgeConnector:
             content: Text payload for content scanning. If not provided and
                      *arguments* is given, arguments are JSON-serialized.
             direction: ``"request"`` (tool call) or ``"response"`` (tool output).
+            session_id: Session to evaluate in (defaults to the connector's).
 
         Returns:
             A :class:`Verdict` with ``blocked``, ``reason``, etc.
@@ -767,17 +863,20 @@ class EdgeConnector:
                 destination=dest,
                 content=content,
                 direction=dir_code,
+                session_id=session_id,
             )
         except (ConnectionError, OSError, RuntimeError) as exc:
             # Socket may vanish between _check_backend() and evaluate() (TOCTOU);
             # backend switches happen under _backend_lock to prevent double-free.
-            if isinstance(self._backend, _SocketBackend):
+            # Without an explicit opt-in the call fails closed below.
+            if isinstance(self._backend, _SocketBackend) and self._allow_ffi:
                 logger.warning(
-                    "EdgeConnector: socket evaluate failed (%s) — falling back to FFI",
+                    "EdgeConnector: socket evaluate failed (%s) — falling back "
+                    "to the in-process engine (DCLAW_ALLOW_FFI=1)",
                     exc,
                 )
                 try:
-                    ffi_backend = _FFIBackend(self._lib_path)
+                    ffi_backend = self._open_ffi()
                     with self._backend_lock:
                         self._backend = ffi_backend
                     return self._evaluate_chunked(
@@ -786,6 +885,7 @@ class EdgeConnector:
                         destination=dest,
                         content=content,
                         direction=dir_code,
+                        session_id=session_id,
                     )
                 except (OSError, RuntimeError) as ffi_exc:
                     logger.error("EdgeConnector: FFI fallback also failed: %s", ffi_exc)
@@ -802,13 +902,44 @@ class EdgeConnector:
                 return self._fail_open_verdict(tool_name)
             return Verdict.error(f"ENGINE_ERROR: {exc}")
 
-    # Maximum content bytes the C-side buffer accepts per call (DCLAW_CONTENT_MAX - 1 for NUL).
-    _CONTENT_BUF_MAX = 4095
-    # Overlap between consecutive content windows so patterns that span
-    # a window boundary are still caught.  256 bytes covers the longest
-    # pattern the scanner might detect (e.g. base64-encoded secrets,
-    # multi-field PII, long credential strings).
+    # Maximum content length per call, measured as the JSON-escaped string
+    # the socket backend sends (json.dumps, ensure_ascii).  The daemon
+    # flags content as truncated -- and blocks it -- when the escaped
+    # string exceeds DCLAW_CONTENT_MAX - 1 (4095) or the unescaped text
+    # exceeds DCLAW_CONTENT_MAX - 4 (4092) bytes.  The unescaped UTF-8 length
+    # never exceeds the escaped length, so 4092 escaped characters satisfies
+    # both limits and also fits the FFI backend's 4095-byte buffer.
+    _CONTENT_ESCAPED_MAX = 4092
+    # Overlap (in characters) between consecutive content windows so
+    # patterns that span a window boundary are still caught.  256 covers
+    # the longest pattern the scanner might detect (e.g. base64-encoded
+    # secrets, multi-field PII, long credential strings).
     _CONTENT_OVERLAP = 256
+
+    @classmethod
+    def _content_windows(cls, content: str) -> list[str]:
+        """Split *content* into overlapping windows that each stay within
+        :attr:`_CONTENT_ESCAPED_MAX` once JSON-escaped.
+
+        Windows are cut on character boundaries, so multi-byte characters
+        are never split.
+        """
+        costs = [_json_escaped_len(ch) for ch in content]
+        windows: list[str] = []
+        start = 0
+        n = len(content)
+        while start < n:
+            end = start
+            used = 0
+            while end < n and used + costs[end] <= cls._CONTENT_ESCAPED_MAX:
+                used += costs[end]
+                end += 1
+            windows.append(content[start:end])
+            if end >= n:
+                break
+            overlap = min(cls._CONTENT_OVERLAP, (end - start) // 2)
+            start = end - overlap
+        return windows
 
     def _evaluate_chunked(
         self,
@@ -817,49 +948,46 @@ class EdgeConnector:
         destination: str,
         content: str | None,
         direction: int,
+        session_id: int | None = None,
     ) -> Verdict:
         """Evaluate content in overlapping windows when it exceeds the
-        C-side content buffer, ensuring patterns near window boundaries
-        are still scanned.
+        daemon's content limit after JSON escaping, ensuring patterns near
+        window boundaries are still scanned.
 
-        BLOCK verdicts stop the loop immediately; WARN verdicts are
+        Any verdict that does not permit the call (BLOCK, ESCALATE or an
+        unknown action) stops the loop and is returned; WARN verdicts are
         remembered and returned after all chunks so warnings are never
         silently discarded.
         """
+        sid = self._session_id if session_id is None else session_id
         # Short-circuit: content fits in a single buffer — no chunking.
-        if not content or len(content.encode("utf-8", errors="replace")) <= self._CONTENT_BUF_MAX:
+        if not content or len(json.dumps(content)) - 2 <= self._CONTENT_ESCAPED_MAX:
             return self._backend.evaluate(
                 tool_name=tool_name,
                 cap_flags=cap_flags,
                 destination=destination,
-                session_id=self._session_id,
+                session_id=sid,
                 content=content,
                 direction=direction,
             )
 
-        encoded = content.encode("utf-8", errors="replace")
-        step = self._CONTENT_BUF_MAX - self._CONTENT_OVERLAP
-        offset = 0
         worst_verdict: Verdict | None = None
-        while offset < len(encoded):
-            chunk = encoded[offset:offset + self._CONTENT_BUF_MAX]
-            chunk_str = chunk.decode("utf-8", errors="replace")
+        for chunk_str in self._content_windows(content):
             verdict = self._backend.evaluate(
                 tool_name=tool_name,
                 cap_flags=cap_flags,
                 destination=destination,
-                session_id=self._session_id,
+                session_id=sid,
                 content=chunk_str,
                 direction=direction,
             )
-            # BLOCK — return immediately, no need to scan further.
-            if verdict.action == ACTION_BLOCK:
+            # Anything other than ALLOW/WARN denies — return immediately.
+            if verdict.blocked or not action_permits(verdict.action):
                 return verdict
             # WARN — remember the first (or worst) warning and keep scanning.
             if verdict.action == ACTION_WARN:
                 if worst_verdict is None or worst_verdict.action == ACTION_ALLOW:
                     worst_verdict = verdict
-            offset += step
 
         # Return the worst verdict seen (WARN if any chunk warned, else ALLOW).
         if worst_verdict is not None:
@@ -896,7 +1024,7 @@ class EdgeConnector:
                 if '\\' in str(val):
                     raise ValueError(f"URL contains backslash (potential authority bypass): {val}")
                 try:
-                    return urlparse(str(val)).hostname or ""
+                    return _destination_host(str(val))
                 except Exception:
                     pass
         return ""

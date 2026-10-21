@@ -67,3 +67,14 @@ type DecommissionStore interface {
 	// IsDecommissioned checks whether a device ID has a decommission tombstone.
 	IsDecommissioned(deviceID uint64) (bool, error)
 }
+
+// AdminTokenStore persists Fleet admin-token rotation so a gateway restart
+// does not revive a rotated-out token. Only SHA-256 hashes are stored:
+// active is the token in effect after the last rotation, superseded is the
+// configured token that rotation replaced. Load returns nil hashes when the
+// token has never been rotated.
+type AdminTokenStore interface {
+	LoadAdminTokenRotation() (active, superseded []byte, err error)
+	SaveAdminTokenRotation(active, superseded []byte) error
+	ClearAdminTokenRotation() error
+}

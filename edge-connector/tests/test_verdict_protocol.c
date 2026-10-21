@@ -36,6 +36,9 @@ extern void dclaw_verdict_compute_expected_hmac(uint16_t request_id, uint8_t act
                                                 const uint8_t *request_nonce,
                                                 uint8_t *out_hmac_32bytes);
 extern void dclaw_verdict_set_device_key(const uint8_t *key, size_t key_len);
+extern int dclaw_cbor_encode_verdict_request(const dclaw_tool_request_t *req, uint16_t request_id,
+                                             uint8_t session_risk, uint8_t *buf, size_t *out_len,
+                                             size_t buf_size);
 extern bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out);
 
 static void build_valid_response(uint16_t request_id, uint8_t action,
@@ -221,6 +224,117 @@ static void test_signed_ttl_controls_cache(void) {
     printf("  PASS: signed TTL controls ALLOW/BLOCK expiry, zero/no-cache, ceiling, and tamper rejection\n");
 }
 
+/* Regression: the send path encoded into a 512-byte buffer although the
+ * profile allows DCLAW_ESCALATION_PAYLOAD_MAX bytes of content, so requests
+ * with more than ~450 bytes of content were never sent. */
+static void test_max_content_request_encodes(void) {
+    dclaw_tool_request_t req;
+    memset(&req, 0, sizeof(req));
+    memset(req.tool_name, 'a', DCLAW_TOOL_NAME_MAX - 1);
+    memset(req.tool_hash, 0x11, 32);
+    memset(req.destination, 'b', DCLAW_DESTINATION_MAX - 1);
+    memset(req.content_buf, 'c', DCLAW_CONTENT_MAX);
+    req.content = req.content_buf;
+    req.content_len = DCLAW_CONTENT_MAX; /* more than the payload cap: encoder truncates */
+    static uint8_t buf[DCLAW_VERDICT_REQUEST_MAX];
+    size_t len = 0;
+    assert(dclaw_cbor_encode_verdict_request(&req, 9, 0, buf, &len, sizeof(buf)) == 0);
+    assert(len > DCLAW_ESCALATION_PAYLOAD_MAX && len <= sizeof(buf));
+    printf("  PASS: maximum-size verdict request encodes (%zu bytes)\n", len);
+}
+
+extern uint64_t dclaw_mqtt_next_backoff(uint64_t *cap_ms, uint32_t rnd);
+
+/* Reconnect backoff: jittered, bounded, short cap. */
+static void test_reconnect_backoff_bounds(void) {
+    uint64_t cap = 1000, expect_cap[] = {2000, 4000, 8000, 16000, 30000, 30000, 30000};
+    for (size_t i = 0; i < sizeof(expect_cap) / sizeof(expect_cap[0]); i++) {
+        uint64_t lo = dclaw_mqtt_next_backoff(&(uint64_t){cap}, 0);
+        uint64_t hi = dclaw_mqtt_next_backoff(&(uint64_t){cap}, 0xFFFFFFFFu);
+        uint64_t d = dclaw_mqtt_next_backoff(&cap, (uint32_t)(i * 2654435761u));
+        assert(cap == expect_cap[i]);
+        assert(lo == cap / 2 && hi < cap && d >= cap / 2 && d < cap);
+    }
+    /* Different random draws give different delays (no lock-step retries). */
+    uint64_t c1 = 8000, c2 = 8000;
+    assert(dclaw_mqtt_next_backoff(&c1, 1) != dclaw_mqtt_next_backoff(&c2, 3000));
+    printf("  PASS: reconnect backoff is jittered in [cap/2, cap), cap <= 30 s\n");
+}
+
+
+extern int dclaw_verdict_require_device_key(bool production);
+extern void dclaw_verdict_protocol_shutdown(void);
+
+/* Regression: a production daemon started without a device key (or with an
+ * all-zero one) and sent unsigned frames. */
+static void test_production_requires_device_key(void) {
+    unsetenv("DCLAW_DEVICE_KEY");
+    dclaw_verdict_protocol_shutdown(); /* forget the loaded key */
+    assert(dclaw_verdict_require_device_key(true) == -1);
+    assert(dclaw_verdict_require_device_key(false) == 0);
+
+    dclaw_verdict_protocol_shutdown();
+    setenv("DCLAW_DEVICE_KEY",
+           "0000000000000000000000000000000000000000000000000000000000000000", 1);
+    assert(dclaw_verdict_require_device_key(true) == -1);
+
+    dclaw_verdict_protocol_shutdown();
+    setenv("DCLAW_DEVICE_KEY",
+           "4242424242424242424242424242424242424242424242424242424242424242", 1);
+    assert(dclaw_verdict_require_device_key(true) == 0);
+    unsetenv("DCLAW_DEVICE_KEY");
+    printf("  PASS: production startup requires a nonzero device key\n");
+}
+
+
+extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
+                             uint32_t target_hash, uint16_t session_id);
+
+static bool all_zero(const uint8_t *b, size_t n) {
+    for (size_t i = 0; i < n; i++) if (b[i]) return false;
+    return true;
+}
+
+/* Regression: the heartbeat's audit-head HMAC (bytes 22..29) was all zero
+ * whenever the RAM audit buffer was empty, i.e. after every BLOCK. */
+static void test_heartbeat_audit_head(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    uint8_t hb[64];
+    size_t len = 0;
+
+    dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE, 0x1234, 5);
+    assert(s->audit_writer.count == 0);
+    dclaw_get_health(hb, &len, sizeof(hb));
+    assert(len == 40);
+    assert(!all_zero(hb + 22, 8));
+    assert(memcmp(hb + 22, s->audit_writer.prev_hmac, 8) == 0);
+
+    dclaw_audit_write(DCLAW_ACTION_WARN, DCLAW_REASON_CAP_SEQUENCE, 0x5678, 5);
+    assert(s->audit_writer.count > 0);
+    dclaw_get_health(hb, &len, sizeof(hb));
+    assert(memcmp(hb + 22, s->audit_writer.buffer[s->audit_writer.count - 1].hmac, 8) == 0);
+    (void)all_zero;
+    printf("  PASS: heartbeat carries the audit chain head after a BLOCK\n");
+}
+
+
+/* Regression: an emergency lockdown was not visible in heartbeats. */
+static void test_heartbeat_lockdown_flag(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    uint8_t hb[64];
+    size_t len = 0;
+    bool was = s->emergency.block_all_active;
+
+    s->emergency.block_all_active = true;
+    dclaw_get_health(hb, &len, sizeof(hb));
+    assert(len == 40 && (hb[30] & 0x40));
+    s->emergency.block_all_active = false;
+    dclaw_get_health(hb, &len, sizeof(hb));
+    assert(len == 40 && !(hb[30] & 0x40));
+    s->emergency.block_all_active = was;
+    printf("  PASS: heartbeat flag 0x40 reports an emergency lockdown\n");
+}
+
 int main(void) {
     hal_init();
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};
@@ -243,7 +357,12 @@ int main(void) {
     test_unknown_request_id_rejected();
     test_wrong_size_rejected();
     test_signed_ttl_controls_cache();
-    printf("  ALL PASSED (7 tests)\n");
+    test_max_content_request_encodes();
+    test_reconnect_backoff_bounds();
+    test_production_requires_device_key();
+    test_heartbeat_audit_head();
+    test_heartbeat_lockdown_flag();
+    printf("  ALL PASSED (12 tests)\n");
 
     dclaw_shutdown();
     return 0;

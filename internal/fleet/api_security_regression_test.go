@@ -398,7 +398,7 @@ func TestFleetCredentialAuditFailureBlocksRegistrationAndDecommission(t *testing
 	if err != nil || len(oldKey) != 32 {
 		t.Fatalf("registered key missing: %v", err)
 	}
-	newBody := `{"tenant_id":1,"fleet_id":1,"device_id":42,"fw_version":"new"}`
+	newBody := `{"tenant_id":1,"fleet_id":1,"device_id":42,"fw_version":"new","force_reregister":true}`
 	if got := securityTestRequest(api, http.MethodPost, "/devices", "admin-review", newBody, true); got.Code != http.StatusServiceUnavailable {
 		t.Fatalf("re-registration bypassed audit: status=%d body=%s", got.Code, got.Body.String())
 	}
@@ -616,7 +616,7 @@ func TestFleetCredentialRotationsRequireAuditBeforeMutation(t *testing.T) {
 	if got := securityTestRequest(api, http.MethodPost, "/token/rotate", "admin-review", "{}", true); got.Code != http.StatusServiceUnavailable {
 		t.Fatalf("token rotation during audit failure status=%d body=%s", got.Code, got.Body.String())
 	}
-	if token := api.currentToken.Load(); token == nil || *token != "admin-review" {
+	if !api.isAdminToken("admin-review") {
 		t.Fatal("admin token changed after audit failure")
 	}
 	if !api.lastTokenRotation.IsZero() {

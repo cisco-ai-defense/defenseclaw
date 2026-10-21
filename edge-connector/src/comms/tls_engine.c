@@ -22,6 +22,13 @@
 #include <string.h>
 #include <strings.h>
 #include <limits.h>
+#include <fcntl.h>
+#include <poll.h>
+
+/* The daemon has one event loop: TLS I/O on a stalled broker must never block
+ * it indefinitely. The handshake as a whole and each write get a deadline. */
+#define DCLAW_TLS_HANDSHAKE_TIMEOUT_MS 15000
+#define DCLAW_TLS_WRITE_TIMEOUT_MS     1000
 
 /*
  * TLS engine wrapper — mbedTLS implementation.
@@ -70,6 +77,39 @@ static mbedtls_x509_crt          tls_device_cert;
 static mbedtls_pk_context        tls_device_key;
 static mbedtls_net_context       tls_net;
 static bool                      tls_initialized = false;
+static uint32_t                  tls_handshake_timeout_ms = DCLAW_TLS_HANDSHAKE_TIMEOUT_MS;
+static uint64_t                  tls_handshake_deadline_ms = 0;
+
+/* Test hook: shorten the handshake deadline. 0 restores the default. */
+void dclaw_tls_set_handshake_timeout(uint32_t timeout_ms) {
+    tls_handshake_timeout_ms = timeout_ms ? timeout_ms : DCLAW_TLS_HANDSHAKE_TIMEOUT_MS;
+}
+
+/* Handshake receive callback: each read waits at most until the overall
+ * handshake deadline, so a peer that stalls or drips bytes cannot hold the
+ * handshake open past it. */
+static int tls_recv_until_deadline(void *ctx, unsigned char *buf, size_t len,
+                                   uint32_t timeout) {
+    (void)timeout;
+    uint64_t now = hal_tick_ms();
+    if (now >= tls_handshake_deadline_ms) return MBEDTLS_ERR_SSL_TIMEOUT;
+    uint64_t left = tls_handshake_deadline_ms - now;
+    return mbedtls_net_recv_timeout(ctx, buf, len, left > UINT32_MAX ? UINT32_MAX : (uint32_t)left);
+}
+
+/* Wait for the socket to become ready for the operation mbedTLS asked for,
+ * at most until deadline_ms. Returns false when the deadline has passed. */
+static bool tls_wait_io(int ret, uint64_t deadline_ms) {
+    uint64_t now = hal_tick_ms();
+    if (now >= deadline_ms) return false;
+    uint64_t left = deadline_ms - now;
+    struct pollfd p = {
+        .fd = tls_net.fd,
+        .events = ret == MBEDTLS_ERR_SSL_WANT_WRITE ? POLLOUT : POLLIN,
+    };
+    (void)poll(&p, 1, left > 1000 ? 1000 : (int)left);
+    return true;
+}
 
 /* Helper: read an entire file into a malloc'd buffer (NUL-terminated for PEM).
  * Returns the buffer on success (caller frees), NULL on failure.
@@ -361,14 +401,24 @@ int dclaw_tls_connect(int tcp_fd, const char *hostname) {
     /* Wrap the existing TCP socket FD in an mbedtls_net_context */
     tls_net.fd = tcp_fd;
 
+    /* Run the handshake on a non-blocking socket with one overall deadline:
+     * sends that would block and reads both wait at most until then. */
+    int fd_flags = fcntl(tcp_fd, F_GETFL, 0);
+    if (fd_flags >= 0) (void)fcntl(tcp_fd, F_SETFL, fd_flags | O_NONBLOCK);
+    tls_handshake_deadline_ms = hal_tick_ms() + tls_handshake_timeout_ms;
+    mbedtls_ssl_conf_read_timeout(&tls_conf, tls_handshake_timeout_ms);
     mbedtls_ssl_set_bio(&tls_ssl, &tls_net,
-                        mbedtls_net_send, mbedtls_net_recv, NULL);
+                        mbedtls_net_send, NULL, tls_recv_until_deadline);
 
-    /* Perform the TLS handshake, looping on WANT_READ / WANT_WRITE */
-    do {
+    for (;;) {
         ret = mbedtls_ssl_handshake(&tls_ssl);
-    } while (ret == MBEDTLS_ERR_SSL_WANT_READ ||
-             ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+        if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) break;
+        if (!tls_wait_io(ret, tls_handshake_deadline_ms)) {
+            ret = MBEDTLS_ERR_SSL_TIMEOUT;
+            break;
+        }
+    }
+    if (fd_flags >= 0) (void)fcntl(tcp_fd, F_SETFL, fd_flags);
 
     if (ret != 0) {
         char errbuf[128];
@@ -388,8 +438,15 @@ int dclaw_tls_connect(int tcp_fd, const char *hostname) {
     return 0;
 }
 
-int dclaw_tls_write(const uint8_t *data, size_t len) {
+int dclaw_tls_write(const uint8_t *data, size_t len, int timeout_ms) {
     if (!tls_initialized) return -1;
+
+    /* A peer that stops reading fills the send window. Wait for the socket
+     * (no busy loop) and give up at the deadline; the caller then drops the
+     * connection, since a partially written TLS record cannot be resumed. */
+    if (timeout_ms <= 0 || timeout_ms > DCLAW_TLS_WRITE_TIMEOUT_MS)
+        timeout_ms = DCLAW_TLS_WRITE_TIMEOUT_MS;
+    uint64_t deadline_ms = hal_tick_ms() + (uint64_t)timeout_ms;
 
     size_t sent = 0;
     while (sent < len) {
@@ -398,8 +455,11 @@ int dclaw_tls_write(const uint8_t *data, size_t len) {
             sent += (size_t)ret;
         } else if (ret == MBEDTLS_ERR_SSL_WANT_WRITE ||
                    ret == MBEDTLS_ERR_SSL_WANT_READ) {
-            /* Non-blocking: retry */
-            continue;
+            if (!tls_wait_io(ret, deadline_ms)) {
+                fprintf(stderr, "[DCLAW-TLS] Write timed out after %d ms (%zu/%zu bytes)\n",
+                        timeout_ms, sent, len);
+                return -1;
+            }
         } else {
             char errbuf[128];
             mbedtls_strerror(ret, errbuf, sizeof(errbuf));
@@ -433,6 +493,11 @@ int dclaw_tls_read(uint8_t *buf, size_t len, int timeout_ms) {
         fprintf(stderr, "[DCLAW-TLS] Read error: %s (0x%04x)\n", errbuf, (unsigned)-ret);
         return -1;
     }
+}
+
+size_t dclaw_tls_pending(void) {
+    if (!tls_initialized) return 0;
+    return mbedtls_ssl_get_bytes_avail(&tls_ssl);
 }
 
 void dclaw_tls_shutdown(void) {
@@ -471,8 +536,10 @@ void dclaw_tls_shutdown(void) {
 
 int  dclaw_tls_init(void)                                          { return -1; }
 int  dclaw_tls_connect(int tcp_fd, const char *hostname)            { (void)tcp_fd; (void)hostname; return -1; }
-int  dclaw_tls_write(const uint8_t *data, size_t len)              { (void)data; (void)len; return -1; }
+int  dclaw_tls_write(const uint8_t *data, size_t len, int timeout_ms) { (void)data; (void)len; (void)timeout_ms; return -1; }
+void dclaw_tls_set_handshake_timeout(uint32_t timeout_ms)          { (void)timeout_ms; }
 int  dclaw_tls_read(uint8_t *buf, size_t len, int timeout_ms)      { (void)buf; (void)len; (void)timeout_ms; return -1; }
+size_t dclaw_tls_pending(void)                                     { return 0; }
 void dclaw_tls_shutdown(void)                                       {}
 
 #endif /* DCLAW_HAS_MBEDTLS */

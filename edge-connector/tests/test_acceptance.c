@@ -30,6 +30,12 @@
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
+
+/* AC-09 measures the speculative path, which requires a sent request. */
+static int ac09_send_ok(const dclaw_tool_request_t *req, uint16_t request_id) {
+    (void)req; (void)request_id;
+    return 0;
+}
 #include <time.h>
 #include <unistd.h>
 
@@ -225,9 +231,11 @@ static void test_ac09(void) {
     req.cap_flags = DCLAW_CAP_SENSOR_READ;
     req.session_id = 400;
 
+    dclaw_register_verdict_sender(ac09_send_ok);
     uint64_t start = clock_ns();
     dclaw_verdict_t v = dclaw_evaluate(&req);
     uint64_t elapsed = clock_ns() - start;
+    dclaw_register_verdict_sender(NULL);
 
     /* BLK-1: In production (DEV_MODE=OFF), strict mode blocks by default */
 #if DCLAW_DEV_MODE

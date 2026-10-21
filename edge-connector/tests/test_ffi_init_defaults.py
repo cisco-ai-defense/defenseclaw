@@ -15,7 +15,7 @@ import generic_hook
 import picoclaw_hook
 
 
-@pytest.mark.parametrize("adapter", ["generic", "picoclaw"])
+@pytest.mark.parametrize("adapter", ["generic"])
 @pytest.mark.parametrize("configured,want", [(None, 0), ("7", 7)])
 def test_ffi_initial_policy_version(monkeypatch, adapter, configured, want):
     if configured is None:

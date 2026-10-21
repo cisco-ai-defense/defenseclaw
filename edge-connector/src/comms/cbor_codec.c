@@ -193,20 +193,32 @@ int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size) 
     }
     buf[pos++] = active;
 
-    /* audit_head_hmac (8 bytes) — first 8 bytes of last entry's 16-byte HMAC */
-    memset(buf + pos, 0, 8);
-    if (s->audit_writer.count > 0) {
-        memcpy(buf + pos, s->audit_writer.buffer[s->audit_writer.count - 1].hmac, 8);
-    }
+    /* audit_head_hmac (8 bytes) — first 8 bytes of the 16-byte HMAC of the
+     * newest audit entry: the last buffered one, or, when the RAM buffer is
+     * empty (after every BLOCK and every flush), the chain head on flash. */
+    memcpy(buf + pos, s->audit_writer.count > 0
+                      ? s->audit_writer.buffer[s->audit_writer.count - 1].hmac
+                      : s->audit_writer.prev_hmac, 8);
     pos += 8;
 
-    /* flags (1 byte) */
+    /* flags (1 byte). Bit assignments shared with the Fleet gateway:
+     *   0x01  (unused)
+     *   0x02  POLICY_STALE        no trusted gateway time yet
+     *   0x04  TAMPER_DETECT       reserved; this engine never sets it (the
+     *                             audit chain is not verified on the device)
+     *   0x08  CANARY_ROLLBACK     a canary rollback is in effect
+     *   0x10  (unused)
+     *   0x20  OFFLINE_MODE        not connected to the broker
+     *   0x40  EMERGENCY_LOCKDOWN  BLOCK_ALL / ENTER_LOCKDOWN is in effect
+     *                             (block_all_active): every call is denied
+     *   0x80  SE_DEGRADED         reserved; never set by this engine */
     uint8_t flags = 0;
     if (!s->online) flags |= 0x20; /* OFFLINE_MODE */
     if (!s->clock.time_trusted) flags |= 0x02; /* POLICY_STALE (no time = stale) */
     if (s->rollback_pending) {
         flags |= 0x08; /* CANARY_ROLLBACK */
     }
+    if (s->emergency.block_all_active) flags |= 0x40; /* EMERGENCY_LOCKDOWN */
     buf[pos++] = flags;
 
     /* capabilities (1 byte) — device capability bitmap */

@@ -32,11 +32,12 @@ extern int dclaw_mqtt_send_verdict_request(const dclaw_tool_request_t *req,
                                            uint16_t request_id);
 extern int dclaw_verdict_register_pending(uint16_t request_id, const uint8_t *tool_hash);
 extern void dclaw_mqtt_pending_store(uint16_t request_id, const uint8_t *tool_hash);
-extern bool dclaw_mqtt_is_connected(void);
 #endif
 
 static dclaw_state_t g_state;
 static dclaw_retroactive_block_fn g_retroactive_cb = NULL;
+static dclaw_verdict_ready_fn g_verdict_ready_cb = NULL;
+static dclaw_verdict_sender_fn g_verdict_sender = NULL;
 
 static bool g_strict_mode = false;
 
@@ -48,7 +49,8 @@ static bool g_strict_mode = false;
 /* External module functions */
 extern dclaw_action_t dclaw_policy_check_destination(const char *host);
 extern dclaw_action_t dclaw_policy_check_severity(dclaw_severity_t sev);
-extern dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags);
+extern dclaw_action_t dclaw_correlator_evaluate_ex(uint16_t session_id, uint8_t cap_flags,
+                                                   bool *ota_caused);
 extern uint8_t dclaw_policy_lookup_capability(const char *tool_name);
 extern bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out);
 extern bool dclaw_rate_limit_check(uint8_t cap_flags);
@@ -59,10 +61,13 @@ extern int dclaw_ipc_validate_request(const dclaw_tool_request_t *req);
 extern int dclaw_config_load_brokers(void);
 #if DCLAW_MQTT_ENABLED
 extern int dclaw_boot_counter_advance(void);
-extern void dclaw_canary_record_block(void);
+extern void dclaw_canary_record_policy_block(uint32_t target_hash, uint8_t reason);
 extern int dclaw_emergency_load_from_flash(void);
 #else
-static inline void dclaw_canary_record_block(void) { /* no-op: canary is part of OTA/MQTT */ }
+static inline void dclaw_canary_record_policy_block(uint32_t target_hash, uint8_t reason) {
+    /* no-op: canary is part of OTA/MQTT */
+    (void)target_hash; (void)reason;
+}
 #endif
 extern void dclaw_policy_tables_init(void);
 extern int dclaw_audit_ring_init(void);
@@ -187,6 +192,18 @@ dclaw_retroactive_block_fn dclaw_get_retroactive_callback(void) {
     return g_retroactive_cb;
 }
 
+void dclaw_register_verdict_sender(dclaw_verdict_sender_fn fn) {
+    g_verdict_sender = fn;
+}
+
+void dclaw_register_verdict_ready_callback(dclaw_verdict_ready_fn cb) {
+    g_verdict_ready_cb = cb;
+}
+
+dclaw_verdict_ready_fn dclaw_get_verdict_ready_callback(void) {
+    return g_verdict_ready_cb;
+}
+
 /* Forward declarations for key-material zeroing on shutdown */
 #if DCLAW_MQTT_ENABLED
 extern void dclaw_verdict_protocol_shutdown(void);
@@ -232,12 +249,39 @@ static uint32_t compute_target_hash(const uint8_t *tool_hash) {
 }
 
 
-#if DCLAW_SPECULATIVE_EXECUTION
 static bool is_sync_block_required(uint8_t cap_flags) {
     /* Safety-critical operations must never become speculative, including
-     * after an OTA that cannot carry escalation mode settings. */
+     * after an OTA that cannot carry escalation mode settings, and are
+     * never allowed from the verdict cache: each call is escalated. */
     return (cap_flags & (DCLAW_CAP_ACTUATE | DCLAW_CAP_EXEC_SHELL |
                          DCLAW_CAP_WRITE_FS)) != 0;
+}
+
+#if DCLAW_SPECULATIVE_EXECUTION
+
+extern void dclaw_speculative_expire(uint64_t now_ms);
+
+/* Claim a speculative slot so the gateway verdict can be traced back to the
+ * session. A slot is held until the verdict arrives or the speculative
+ * deadline passes; expired slots are released (and their sessions revoked)
+ * by dclaw_speculative_expire. Returns false when no slot is free: the
+ * caller must wait. */
+static bool speculative_track(uint16_t session_id, uint16_t request_id, uint8_t cap_flags) {
+    uint64_t now = hal_tick_ms();
+    dclaw_speculative_expire(now);
+    for (int i = 0; i < DCLAW_SPECULATIVE_SLOTS; i++) {
+        dclaw_speculative_slot_t *slot = &g_state.speculative[i];
+        if (slot->request_id == 0) {
+            memset(slot, 0, sizeof(*slot));
+            slot->session_id = session_id;
+            slot->request_id = request_id;
+            slot->cap_flags = cap_flags;
+            slot->stage = DCLAW_EXEC_STAGE_STARTED;
+            slot->revoke_deadline_ms = now + DCLAW_SPECULATIVE_VERDICT_TIMEOUT_MS;
+            return true;
+        }
+    }
+    return false;
 }
 #endif
 
@@ -259,6 +303,12 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
 
     g_state.eval_count++;
 
+#if DCLAW_SPECULATIVE_EXECUTION && DCLAW_MQTT_ENABLED
+    /* Revoke sessions whose speculative call outlived its verdict deadline
+     * before this request is checked against the revocation list. */
+    dclaw_speculative_expire(hal_tick_ms());
+#endif
+
     /* SYSTEM scope should only be set internally (e.g., by content
      * scanners or the daemon itself), not from IPC callers.  Override
      * SYSTEM scope on inbound requests to UNKNOWN so external callers
@@ -278,8 +328,17 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
-        dclaw_canary_record_block();
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT, DCLAW_VERDICT_SYNC);
+    }
+
+    /* Step 1-rev: a session whose speculative call was later blocked by the
+     * gateway is denied outright. Not counted by the canary: retries from one
+     * revoked agent must not look like a bad policy push. */
+    if (dclaw_session_is_revoked(req->session_id)) {
+        dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_RETROACTIVE,
+                          target_hash, req->session_id);
+        g_state.eval_denied_count++;
+        return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_RETROACTIVE, DCLAW_VERDICT_SYNC);
     }
 
     /* Step 1a: Hash-to-name binding — verify that the submitted tool_hash
@@ -294,7 +353,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
-        dclaw_canary_record_block();
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT, DCLAW_VERDICT_SYNC);
     }
     {
@@ -305,7 +363,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_HASH_MISMATCH,
                               target_hash, req->session_id);
             g_state.eval_denied_count++;
-            dclaw_canary_record_block();
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_HASH_MISMATCH, DCLAW_VERDICT_SYNC);
         }
     }
@@ -319,7 +376,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
-        dclaw_canary_record_block();
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
                             DCLAW_VERDICT_SYNC);
     }
@@ -348,10 +404,14 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_RATE_LIMIT,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
-        dclaw_canary_record_block();
         in_eval = false;
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_RATE_LIMIT, DCLAW_VERDICT_SYNC);
     }
+
+    /* Local results that a cached gateway ALLOW must not erase: a WARN is
+     * returned as WARN, an ESCALATE forces a fresh gateway escalation. */
+    bool local_warn = false;
+    bool local_escalate = false;
 
     /* Step 3: Content scan (if content provided) */
 #if DCLAW_CONTENT_SCAN
@@ -362,11 +422,35 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             dclaw_infer_content_scope((dclaw_direction_t)req->direction);
         dclaw_content_scan(req->content, req->content_len, scope, &scan_ctx);
         dclaw_action_t scan_action = dclaw_content_scan_worst_action(&scan_ctx, scope);
+        /* Policy severity rules can only tighten the scope threshold: a
+         * finding whose rule says BLOCK blocks in any scope, but a rule can
+         * never let through what the threshold blocks. Unknown rule actions
+         * fail closed. */
+        bool blocked_by_rule = false;
+        for (uint8_t i = 0; i < scan_ctx.finding_count &&
+                            scan_action != DCLAW_ACTION_BLOCK; i++) {
+            dclaw_action_t rule = dclaw_policy_check_severity(
+                (dclaw_severity_t)scan_ctx.findings[i].severity);
+            if (rule != DCLAW_ACTION_ALLOW && rule != DCLAW_ACTION_WARN &&
+                rule != DCLAW_ACTION_ESCALATE) {
+                scan_action = DCLAW_ACTION_BLOCK;
+                blocked_by_rule = true;
+            } else if (rule == DCLAW_ACTION_WARN) {
+                local_warn = true;
+            } else if (rule == DCLAW_ACTION_ESCALATE) {
+                local_escalate = true;
+            }
+        }
+        if (scan_action == DCLAW_ACTION_WARN) local_warn = true;
+        else if (scan_action == DCLAW_ACTION_ESCALATE) local_escalate = true;
         if (scan_action == DCLAW_ACTION_BLOCK) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
                               target_hash, req->session_id);
             g_state.eval_denied_count++;
-            dclaw_canary_record_block();
+            /* Only the OTA severity rules are policy; the scope thresholds
+             * and patterns are compiled in. */
+            if (blocked_by_rule)
+                dclaw_canary_record_policy_block(target_hash, DCLAW_REASON_CONTENT_BLOCK);
             in_eval = false;
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
                                 DCLAW_VERDICT_SYNC);
@@ -380,7 +464,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY,
                               target_hash, req->session_id);
             g_state.eval_denied_count++;
-            dclaw_canary_record_block();
             in_eval = false;
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY,
                                 DCLAW_VERDICT_SYNC);
@@ -389,7 +472,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_SSRF_BLOCK,
                               target_hash, req->session_id);
             g_state.eval_denied_count++;
-            dclaw_canary_record_block();
             in_eval = false;
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_SSRF_BLOCK,
                                 DCLAW_VERDICT_SYNC);
@@ -398,22 +480,27 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY,
                               target_hash, req->session_id);
             g_state.eval_denied_count++;
-            dclaw_canary_record_block();
+            dclaw_canary_record_policy_block(target_hash, DCLAW_REASON_DEST_DENY);
             in_eval = false;
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY, DCLAW_VERDICT_SYNC);
         }
     }
 
     /* Step 5: Capability sequence correlation */
-    dclaw_action_t seq_result = dclaw_correlator_evaluate(req->session_id, req->cap_flags);
+    bool seq_by_ota = false;
+    dclaw_action_t seq_result = dclaw_correlator_evaluate_ex(req->session_id, req->cap_flags,
+                                                             &seq_by_ota);
     if (seq_result == DCLAW_ACTION_BLOCK) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
-        dclaw_canary_record_block();
+        if (seq_by_ota)
+            dclaw_canary_record_policy_block(target_hash, DCLAW_REASON_CAP_SEQUENCE);
         in_eval = false;
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE, DCLAW_VERDICT_SYNC);
     }
+    if (seq_result == DCLAW_ACTION_WARN) local_warn = true;
+    else if (seq_result == DCLAW_ACTION_ESCALATE) local_escalate = true;
 
     /* Step 5b: A truncated body may hide a dangerous suffix. Run every
      * local destination and sequence guard first, then fail closed before a
@@ -424,20 +511,26 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
-        dclaw_canary_record_block();
         in_eval = false;
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
                             DCLAW_VERDICT_SYNC);
     }
 
-    /* Step 6: Verdict cache lookup */
+    /* Step 6: Verdict cache lookup. A cached BLOCK always applies. A cached
+     * ALLOW/WARN is not used for physical classes (actuation, shell, file
+     * writes: every call is escalated) or when a local rule asked for
+     * escalation; a local WARN is kept over a cached ALLOW. */
     dclaw_verdict_t cached;
-    if (dclaw_cache_lookup(req->tool_hash, &cached)) {
+    if (dclaw_cache_lookup(req->tool_hash, &cached) &&
+        (cached.action == DCLAW_ACTION_BLOCK ||
+         (!is_sync_block_required(req->cap_flags) && !local_escalate))) {
+        if (cached.action == DCLAW_ACTION_ALLOW && local_warn)
+            cached.action = DCLAW_ACTION_WARN;
         g_state.eval_cache_hit_count++;
         dclaw_audit_write(cached.action, cached.reason, target_hash, req->session_id);
         switch (cached.action) {
             case DCLAW_ACTION_ALLOW:    g_state.eval_allowed_count++;   break;
-            case DCLAW_ACTION_BLOCK:    g_state.eval_denied_count++;  dclaw_canary_record_block(); break;
+            case DCLAW_ACTION_BLOCK:    g_state.eval_denied_count++;    break;
             case DCLAW_ACTION_WARN:     g_state.eval_warned_count++;    break;
             case DCLAW_ACTION_ESCALATE: g_state.eval_escalated_count++; break;
         }
@@ -465,21 +558,24 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_mqtt_pending_store(request_id, req->tool_hash);
 
         /* Attempt to send the verdict request to the cloud */
-        int send_rc = -1;
-        if (dclaw_mqtt_is_connected()) {
-            send_rc = dclaw_mqtt_send_verdict_request(req, request_id);
-        }
+        int send_rc = g_verdict_sender ? g_verdict_sender(req, request_id)
+                                       : dclaw_mqtt_send_verdict_request(req, request_id);
 
 #if DCLAW_SPECULATIVE_EXECUTION
-        if (!g_strict_mode && !is_sync_block_required(req->cap_flags)) {
-            /* Speculative mode: allow the agent to proceed, cloud will respond async.
-             * If send failed, still return ALLOW — the request is logged for audit. */
+        /* Speculate only on a request the gateway will actually see: an
+         * unsent request (offline, or too large to encode) can never be
+         * verified or revoked, so it takes the synchronous path and fails
+         * closed below. */
+        if (send_rc == 0 && !g_strict_mode && !is_sync_block_required(req->cap_flags) &&
+            speculative_track(req->session_id, request_id, req->cap_flags)) {
+            /* Speculative mode: allow the agent to proceed, cloud will respond
+             * async. A local WARN (content or sequence rule) is kept. */
             dclaw_audit_write(DCLAW_ACTION_ESCALATE, DCLAW_REASON_CLOUD_BLOCK,
                               target_hash, req->session_id);
             g_state.eval_escalated_count++;
             in_eval = false;
-            return make_verdict(DCLAW_ACTION_ALLOW, DCLAW_REASON_CLOUD_BLOCK,
-                                DCLAW_VERDICT_PENDING);
+            return make_verdict(local_warn ? DCLAW_ACTION_WARN : DCLAW_ACTION_ALLOW,
+                                DCLAW_REASON_CLOUD_BLOCK, DCLAW_VERDICT_PENDING);
         }
 #endif
 

@@ -29,8 +29,24 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 
 #define FLASH_TOTAL_SIZE   (16 * 1024)
+
+/* Production flash files must live in a provisioned state directory. Each
+ * prefix includes its trailing '/', so "/var/lib/defenseclawX/..." does
+ * not match "/var/lib/defenseclaw/". */
+bool hal_flash_path_is_provisioned(const char *path) {
+    static const char *const prefixes[] = {
+        "/var/lib/defenseclaw/",
+        "/etc/defenseclaw/",
+    };
+    if (!path) return false;
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+        if (strncmp(path, prefixes[i], strlen(prefixes[i])) == 0) return true;
+    }
+    return false;
+}
 
 static const char *get_flash_path(void) {
     const char *env = getenv("DCLAW_FLASH_PATH");
@@ -41,7 +57,7 @@ static const char *get_flash_path(void) {
             return NULL;
         }
 #if !DCLAW_DEV_MODE
-        if (strncmp(env, "/var/lib/defenseclaw/", 20) != 0 && strncmp(env, "/etc/defenseclaw/", 17) != 0) {
+        if (!hal_flash_path_is_provisioned(env)) {
             fprintf(stderr, "[DCLAW] ERROR: DCLAW_FLASH_PATH must be under /var/lib/defenseclaw/ or /etc/defenseclaw/ in production\n");
             return NULL;
         }
@@ -52,6 +68,11 @@ static const char *get_flash_path(void) {
 }
 
 static int flash_fd = -1;
+static hal_flash_stats_t flash_stats;
+
+void hal_flash_get_stats(hal_flash_stats_t *out) {
+    if (out) *out = flash_stats;
+}
 
 uint64_t hal_tick_ms(void) {
     struct timespec ts;
@@ -70,12 +91,26 @@ int hal_flash_write(uint32_t offset, const void *buf, size_t len) {
     if (flash_fd < 0) return -1;
     if (offset > FLASH_TOTAL_SIZE || len > FLASH_TOTAL_SIZE - (size_t)offset) return -1;
     if (pwrite(flash_fd, buf, len, (off_t)offset) != (ssize_t)len) return -1;
+    flash_stats.writes++;
+    flash_stats.bytes_written += len;
     return 0;
+}
+
+static unsigned flash_sync_failures;
+
+void hal_flash_fail_next_syncs(unsigned n) {
+    flash_sync_failures = n;
 }
 
 int hal_flash_sync(void) {
     if (flash_fd < 0) return -1;
-    return fdatasync(flash_fd);
+    if (flash_sync_failures > 0) {
+        flash_sync_failures--;
+        return -1;
+    }
+    if (fdatasync(flash_fd) != 0) return -1;
+    flash_stats.syncs++;
+    return 0;
 }
 
 int hal_flash_erase_sector(uint32_t sector) {
@@ -83,7 +118,10 @@ int hal_flash_erase_sector(uint32_t sector) {
     if (offset + 4096 > FLASH_TOTAL_SIZE) return -1;
     uint8_t zeros[4096];
     memset(zeros, 0xFF, sizeof(zeros));
-    return hal_flash_write(offset, zeros, sizeof(zeros));
+    /* The file-backed erase is a 4 KiB write; it is also counted as one. */
+    if (hal_flash_write(offset, zeros, sizeof(zeros)) != 0) return -1;
+    flash_stats.erases++;
+    return 0;
 }
 
 int hal_ipc_socket_create(const char *path) {
@@ -350,8 +388,32 @@ int hal_init(void) {
      * especially important when falling back to /tmp.
      * O_NOFOLLOW: Prevent symlink attacks — if the path is a symlink, open()
      * will fail with ELOOP instead of following it. */
-    flash_fd = open(flash_path, O_RDWR | O_CREAT | O_NOFOLLOW, 0600);
+    /* Re-initialisation in the same process reopens the file. */
+    if (flash_fd >= 0) {
+        close(flash_fd);
+        flash_fd = -1;
+    }
+    flash_fd = open(flash_path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (flash_fd < 0) return -1;
+
+    /* Exactly one engine may own a flash file. Each engine keeps the audit
+     * ring head, HMAC chain, boot counter and emergency records in RAM, so
+     * two engines on one file (the daemon and an in-process library, or two
+     * daemons) overwrite each other's entries and break the audit chain. */
+    if (flock(flash_fd, LOCK_EX | LOCK_NB) != 0) {
+        if (errno == EWOULDBLOCK || errno == EAGAIN) {
+            fprintf(stderr, "[DCLAW] ERROR: flash file %s is in use by another DefenseClaw "
+                    "engine (daemon or in-process library); refusing to start. "
+                    "Use the daemon's IPC socket, or give this engine its own DCLAW_FLASH_PATH.\n",
+                    flash_path);
+        } else {
+            fprintf(stderr, "[DCLAW] ERROR: cannot lock flash file %s: %s\n",
+                    flash_path, strerror(errno));
+        }
+        close(flash_fd);
+        flash_fd = -1;
+        return -1;
+    }
 
     /* Ensure file is at least FLASH_TOTAL_SIZE */
     if (ftruncate(flash_fd, FLASH_TOTAL_SIZE) < 0) {

@@ -325,6 +325,7 @@ def edge_connector_node(state: dict[str, Any]) -> dict[str, Any]:
 
     new_messages: list = []
     allowed_tool_calls: list = []
+    any_blocked = False
     for tc in tool_calls:
         name = tc.get("name", tc.get("function", {}).get("name", ""))
         args = tc.get("args", tc.get("function", {}).get("arguments", {}))
@@ -337,6 +338,7 @@ def edge_connector_node(state: dict[str, Any]) -> dict[str, Any]:
         verdict = ec.evaluate(tool_name=name, arguments=args)
 
         if verdict.blocked:
+            any_blocked = True
             logger.warning("LangGraph gate: blocked %s (%s)", name, verdict.reason)
             if _ToolMessage is not None:
                 tool_call_id = tc.get("id", "")
@@ -349,9 +351,10 @@ def edge_connector_node(state: dict[str, Any]) -> dict[str, Any]:
         else:
             allowed_tool_calls.append(tc)
 
-    if new_messages:
+    if any_blocked:
         # Remove blocked tool_calls from the AIMessage so ToolNode does not
-        # execute them.  We mutate a shallow copy of the last message to avoid
+        # execute them.  This must happen even when ToolMessage could not be
+        # imported and no explanatory message was produced.  We mutate a shallow copy of the last message to avoid
         # side-effects on the caller's original list.
         import copy
         patched_last = copy.copy(last)

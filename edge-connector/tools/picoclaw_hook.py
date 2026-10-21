@@ -19,12 +19,20 @@
 """Edge Connector hook for PicoClaw.
 
 Bridges PicoClaw's JSON-RPC hook protocol (stdin/stdout) to the Edge
-Connector evaluation engine via ctypes. Every tool call PicoClaw's AI agent
-makes passes through dclaw_evaluate() before execution.
+Connector. Every tool call PicoClaw's AI agent makes is evaluated before
+execution through generic_hook.EdgeConnector, which talks to the daemon
+over its Unix socket (DCLAW_SOCKET_PATH). The daemon is the policy
+authority, so OTA policy, revocations and emergency lockdown apply.
+
+If the daemon is not reachable the hook fails closed. The in-process
+engine (libdclaw_core via ctypes) is used only when DCLAW_ALLOW_FFI=1 is
+set, and then needs its own DCLAW_FLASH_PATH.
 
 Install:
-  1. Build libdclaw_core.so on the Pi
-  2. Copy this file to ~/.picoclaw/hooks/defenseclaw_gate.py
+  1. Run the Edge Connector daemon (or build libdclaw_core.so and opt in
+     with DCLAW_ALLOW_FFI=1)
+  2. Copy this file and generic_hook.py to ~/.picoclaw/hooks/
+     (this file as defenseclaw_gate.py)
   3. Register in picoclaw config.json hooks.processes
 
 Tool → Capability mapping (configurable below):
@@ -38,8 +46,6 @@ Tool → Capability mapping (configurable below):
 """
 from __future__ import annotations
 
-import ctypes
-import hashlib
 import json
 import logging as _logging_mod
 import os
@@ -52,21 +58,20 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-# This hook communicates with the Edge Connector engine via FFI (ctypes
-# in-process call) or local loopback IPC (127.0.0.1).  All connections are
-# localhost-only, so TLS is unnecessary.  Network-facing transports (MQTT
-# to fleet, cloud escalation) use TLS separately.
+# This hook talks to the Edge Connector daemon over its local Unix socket
+# (or, when explicitly allowed, an in-process engine).  Network-facing
+# transports (MQTT to fleet, cloud escalation) use TLS separately.
 
 try:
-    from generic_hook import check_http_production
-    from generic_hook import normalize_tool_name as _generic_normalize
+    import generic_hook as _generic_hook
 except ImportError:
-    def check_http_production(url: str, context: str = "adapter") -> None:  # type: ignore[misc]
-        """Fallback if generic_hook is not importable."""
-        if os.environ.get("DCLAW_PRODUCTION") == "1" and url.startswith("http://"):
-            import warnings
-            warnings.warn(f"Plaintext HTTP in production: {url}")
-    _generic_normalize = None  # type: ignore[assignment]
+    # Installed layout: `make install` puts the adapters here.
+    sys.path.append(os.environ.get("DCLAW_TOOLS_DIR", "/usr/local/lib/defenseclaw"))
+    import generic_hook as _generic_hook
+
+EdgeConnector = _generic_hook.EdgeConnector
+check_http_production = _generic_hook.check_http_production
+_generic_normalize = _generic_hook.normalize_tool_name
 
 
 LIBDCLAW_PATH = os.environ.get(
@@ -127,6 +132,15 @@ TOOL_CAP_MAP = {
 ACTION_ALLOW = 0
 ACTION_BLOCK = 1
 ACTION_WARN  = 2
+ACTION_ESCALATE = 3
+
+# Only ALLOW and WARN let a tool run; ESCALATE and any unknown action deny.
+_PERMIT_ACTIONS = frozenset((ACTION_ALLOW, ACTION_WARN))
+
+
+def _permits(action: Any) -> bool:
+    return (isinstance(action, int) and not isinstance(action, bool)
+            and action in _PERMIT_ACTIONS)
 
 # Reason codes
 REASON_NAMES = {
@@ -147,171 +161,9 @@ REASON_NAMES = {
 }
 
 
-class DclawToolRequest(ctypes.Structure):
-    _fields_ = [
-        ("tool_name", ctypes.c_char * 64),       # DCLAW_TOOL_NAME_MAX
-        ("tool_hash", ctypes.c_uint8 * 32),
-        ("cap_flags", ctypes.c_uint8),
-        ("destination", ctypes.c_char * 128),     # DCLAW_DESTINATION_MAX
-        ("session_id", ctypes.c_uint16),
-        ("direction", ctypes.c_uint8),
-        ("content_scope", ctypes.c_uint8),
-        ("content_buf", ctypes.c_char * 4096),    # Must match DCLAW_CONTENT_MAX
-        ("content", ctypes.c_char_p),
-        ("content_len", ctypes.c_uint16),
-        ("request_id", ctypes.c_int32),
-        ("flags", ctypes.c_uint8),                # DCLAW_FLAG_* bitmask
-    ]
-
-
-class DclawVerdict(ctypes.Structure):
-    _fields_ = [
-        ("action", ctypes.c_int),
-        ("reason", ctypes.c_int),
-        ("severity", ctypes.c_int),
-        ("mode", ctypes.c_int),
-        ("ttl_minutes", ctypes.c_uint16),
-        ("from_cache", ctypes.c_bool),
-    ]
-
-
-class DclawDeviceInfo(ctypes.Structure):
-    _fields_ = [
-        ("tenant_id", ctypes.c_uint16),
-        ("fleet_id", ctypes.c_uint16),
-        ("device_id", ctypes.c_uint32),
-        ("policy_version", ctypes.c_uint16),
-        ("fw_version", ctypes.c_uint16),
-        ("hw_profile", ctypes.c_uint8),
-        ("capabilities", ctypes.c_uint8),
-    ]
-
-
-class DclawEngine:
-    """Wrapper around libdclaw_core shared library."""
-
-    def __init__(self, lib_path: str):
-        self.lib = ctypes.CDLL(lib_path)
-        self._setup_prototypes()
-        self._initialized = False
-        self._session_counter = 0
-
-    def _setup_prototypes(self):
-        self.lib.dclaw_init.argtypes = [ctypes.POINTER(DclawDeviceInfo)]
-        self.lib.dclaw_init.restype = ctypes.c_int
-
-        self.lib.dclaw_evaluate.argtypes = [ctypes.POINTER(DclawToolRequest)]
-        self.lib.dclaw_evaluate.restype = DclawVerdict
-
-        self.lib.dclaw_shutdown.argtypes = []
-        self.lib.dclaw_shutdown.restype = None
-
-    def init(self):
-        info = DclawDeviceInfo(
-            tenant_id=int(os.environ.get("DCLAW_TENANT_ID", "1")),
-            fleet_id=int(os.environ.get("DCLAW_FLEET_ID", "1")),
-            device_id=int(os.environ.get("DCLAW_DEVICE_ID", "42")),
-            policy_version=int(os.environ.get("DCLAW_POLICY_VERSION", "0")),
-            fw_version=int(os.environ.get("DCLAW_FW_VERSION", "1")),
-            hw_profile=int(os.environ.get("DCLAW_HW_PROFILE", "2")),
-            capabilities=int(os.environ.get("DCLAW_CAPABILITIES", "0xFF"), 0),
-        )
-        rc = self.lib.dclaw_init(ctypes.byref(info))
-        if rc != 0:
-            raise RuntimeError(f"dclaw_init failed: {rc}")
-        self._initialized = True
-
-    def evaluate(self, tool_name: str, cap_flags: int,
-                 destination: str = "", session_id: int = 0,
-                 content: str = "") -> dict:
-        if not self._initialized:
-            self.init()
-
-        req = DclawToolRequest()
-        req.tool_name = tool_name.encode("ascii", errors="replace")[:63]
-        tool_hash_bytes = hashlib.sha256(tool_name.encode()).digest()
-        for i in range(32):
-            req.tool_hash[i] = tool_hash_bytes[i]
-        req.cap_flags = cap_flags
-        req.destination = destination.encode("ascii", errors="replace")[:127]
-        req.session_id = session_id
-        req.direction = 0       # DCLAW_DIRECTION_REQUEST
-        req.content_scope = 0   # DCLAW_CONTENT_SCOPE_UNKNOWN
-
-        # Serialize tool arguments as JSON content so the C engine's content
-        # scanner can inspect them. Large payloads are scanned in overlapping
-        # windows matching generic_hook's chunked approach.
-        if content:
-            content_bytes = content.encode("utf-8", errors="replace")
-            if len(content_bytes) <= 4095:
-                req.content = content_bytes
-                req.content_len = len(content_bytes)
-                verdict = self.lib.dclaw_evaluate(ctypes.byref(req))
-                return {
-                    "action": verdict.action,
-                    "reason": verdict.reason,
-                    "reason_name": REASON_NAMES.get(verdict.reason, "UNKNOWN"),
-                    "severity": verdict.severity,
-                    "mode": verdict.mode,
-                    "from_cache": verdict.from_cache,
-                }
-            else:
-                # Overlapping chunk scan: track worst verdict across all chunks (BLOCK > WARN > ALLOW).
-                _CHUNK_MAX = 4095
-                _OVERLAP = 256
-                step = _CHUNK_MAX - _OVERLAP
-                offset = 0
-                worst_verdict = None
-                while offset < len(content_bytes):
-                    chunk = content_bytes[offset:offset + _CHUNK_MAX]
-                    req.content = chunk
-                    req.content_len = len(chunk)
-                    verdict = self.lib.dclaw_evaluate(ctypes.byref(req))
-                    chunk_result = {
-                        "action": verdict.action,
-                        "reason": verdict.reason,
-                        "reason_name": REASON_NAMES.get(verdict.reason, "UNKNOWN"),
-                        "severity": verdict.severity,
-                        "mode": verdict.mode,
-                        "from_cache": verdict.from_cache,
-                    }
-                    # BLOCK — return immediately, no need to scan further.
-                    if verdict.action == ACTION_BLOCK:
-                        return chunk_result
-                    # WARN — remember if current worst is None or ALLOW.
-                    if verdict.action == ACTION_WARN:
-                        if worst_verdict is None or worst_verdict["action"] == ACTION_ALLOW:
-                            worst_verdict = chunk_result
-                    elif worst_verdict is None:
-                        worst_verdict = chunk_result
-                    offset += step
-                if worst_verdict is None:
-                    return {"action": ACTION_ALLOW, "severity": 0, "reason": "empty_content"}
-                return worst_verdict
-        else:
-            req.content = None
-            req.content_len = 0
-
-        verdict = self.lib.dclaw_evaluate(ctypes.byref(req))
-
-        return {
-            "action": verdict.action,
-            "reason": verdict.reason,
-            "reason_name": REASON_NAMES.get(verdict.reason, "UNKNOWN"),
-            "severity": verdict.severity,
-            "mode": verdict.mode,
-            "from_cache": verdict.from_cache,
-        }
-
-    def shutdown(self):
-        if self._initialized:
-            self.lib.dclaw_shutdown()
-            self._initialized = False
-
-
 # Global engine instance
 _engine_lock = threading.Lock()
-_engine: DclawEngine | None = None
+_engine: EdgeConnector | None = None
 _session_map: dict[str, int] = {}
 _next_session_id = 1
 _SESSION_MAP_MAX = 10000
@@ -343,16 +195,19 @@ def log(msg: str):
     _picoclaw_logger.info(msg)
 
 
-def get_engine() -> DclawEngine:
+def get_engine() -> EdgeConnector:
+    """Return the shared connector (daemon socket first, fail closed)."""
     global _engine
     if _engine is not None:
         return _engine
     with _engine_lock:
         if _engine is None:
-            log(f"Loading libdclaw from {LIBDCLAW_PATH}")
-            _engine = DclawEngine(LIBDCLAW_PATH)
-            _engine.init()
-            log("Edge Connector engine initialized")
+            ec = EdgeConnector(lib_path=LIBDCLAW_PATH)
+            # Use exactly the PicoClaw map; unknown tools fall back to the
+            # shared fail-closed rules (EXEC_SHELL unless a safe prefix).
+            ec.tool_cap_map = dict(TOOL_CAP_MAP)
+            _engine = ec
+            log("Edge Connector client initialized")
         return _engine
 
 
@@ -390,8 +245,7 @@ def extract_destination(tool: str, arguments: dict) -> str:
                 break
         if "://" in url:
             try:
-                from urllib.parse import urlparse
-                return urlparse(url).hostname or ""
+                return _generic_hook._destination_host(url)
             except Exception:
                 pass
         return url
@@ -403,19 +257,9 @@ def normalize_tool_name(raw_tool: str) -> str:
     PicoClaw sends: mcp_roboclaw_drive, mcp_vision-ai_battery_status
     We need:        drive,              battery_status
 
-    Delegates to the shared implementation in generic_hook.normalize_tool_name
-    when available, with a local fallback for standalone deployments.
+    Delegates to the shared implementation in generic_hook.normalize_tool_name.
     """
-    if _generic_normalize is not None:
-        return _generic_normalize(raw_tool)
-    # Fallback: same logic as generic_hook.normalize_tool_name
-    if raw_tool.startswith("mcp_"):
-        parts = raw_tool.split("_", 2)
-        if len(parts) >= 3:
-            return parts[2]
-        elif len(parts) == 2:
-            return parts[1]
-    return raw_tool
+    return _generic_normalize(raw_tool)
 
 
 def handle_before_tool(params: dict[str, Any]) -> dict[str, Any]:
@@ -450,19 +294,19 @@ def handle_before_tool(params: dict[str, Any]) -> dict[str, Any]:
     engine = get_engine()
     verdict = engine.evaluate(
         tool_name=tool,
-        cap_flags=cap_flags,
+        arguments=arguments if isinstance(arguments, dict) else {},
         destination=destination,
+        content=content or None,
         session_id=session_id,
-        content=content,
     )
 
-    action = verdict["action"]
-    reason_name = verdict["reason_name"]
+    action = verdict.action
+    reason_name = verdict.reason
 
     log(f"EVAL raw={raw_tool} tool={tool} caps=0x{cap_flags:02x} dest={destination!r} "
         f"session={session_id} → action={action} reason={reason_name}")
 
-    if action == ACTION_BLOCK:
+    if verdict.blocked or not _permits(action):
         reason_explanations = {
             "CLOUD_TIMEOUT": "This action requires cloud security approval, but no cloud connection is available. Fail-closed policy enforced.",
             "CAP_SEQUENCE": "A dangerous capability sequence was detected in this session. This multi-step pattern matches a known attack chain.",
@@ -727,7 +571,7 @@ def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
     raise KeyError(f"method not found: {method}")
 
 
-def send_response(message_id: int, result: Any | None = None,
+def send_response(message_id: str | int | float | None, result: Any | None = None,
                   error: str | None = None) -> None:
     payload: dict[str, Any] = {"jsonrpc": "2.0", "id": message_id}
     if error is not None:
@@ -770,24 +614,33 @@ def main() -> int:
             except json.JSONDecodeError:
                 continue
 
+            if not isinstance(message, dict):
+                send_response(None, error="invalid request")
+                continue
             method = message.get("method")
-            message_id = message.get("id", 0)
+            # JSON-RPC ids may be strings or numbers (including 0); a
+            # request without an id (or with a null id) is a notification
+            # and gets no reply.  The id is echoed back unchanged.
+            message_id = message.get("id")
+            if message_id is None:
+                continue
+            if isinstance(message_id, bool) or not isinstance(message_id, (str, int, float)):
+                send_response(None, error="invalid request id")
+                continue
             params = message.get("params") or {}
             if not isinstance(params, dict):
                 params = {}
-            if not message_id:
-                continue
 
             try:
                 result = handle_request(str(method or ""), params)
             except KeyError as exc:
-                send_response(int(message_id), error=str(exc))
+                send_response(message_id, error=str(exc))
                 continue
             except Exception as exc:
                 log(f"ERROR handling {method}: {exc}")
-                send_response(int(message_id), error=f"error: {exc}")
+                send_response(message_id, error=f"error: {exc}")
                 continue
-            send_response(int(message_id), result=result)
+            send_response(message_id, result=result)
     except KeyboardInterrupt:
         pass
     finally:

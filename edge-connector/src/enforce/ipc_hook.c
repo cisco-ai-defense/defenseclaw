@@ -28,6 +28,14 @@ extern dclaw_state_t *dclaw_get_state(void);
 static uint32_t ipc_request_count_this_sec = 0;
 static uint64_t ipc_last_rate_check_tick = 0;
 
+/* Reset the per-second IPC flood window. Benchmarks and tests only: lets a
+ * timing loop exceed DCLAW_IPC_RATE_LIMIT_PER_SEC without measuring the
+ * flood-rejection path instead of the path under test. */
+void dclaw_ipc_rate_limit_reset(void) {
+    ipc_request_count_this_sec = 0;
+    ipc_last_rate_check_tick = hal_tick_ms();
+}
+
 static bool validate_ascii(const char *s, size_t max_len) {
     for (size_t i = 0; i < max_len && s[i] != '\0'; i++) {
         if (s[i] < 0x20 || s[i] > 0x7E) return false;

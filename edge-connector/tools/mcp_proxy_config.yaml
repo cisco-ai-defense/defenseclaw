@@ -32,7 +32,9 @@ edge_connector:
 
   # What to do when the engine is unavailable:
   #   closed = block all tool calls (safe default)
-  #   open   = allow all tool calls (use only for testing)
+  #   open   = allow all tool calls (use only for testing). Ignored unless
+  #            DCLAW_DEV_MODE=1 or DCLAW_FAIL_OPEN_TOKEN verifies against
+  #            DCLAW_AUDIT_KEY; otherwise the proxy stays fail-closed.
   fail_mode: closed
 
 # ---------------------------------------------------------------------------

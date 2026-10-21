@@ -167,6 +167,13 @@ DLLExport int MQTTConnect(MQTTClient* client, MQTTPacket_connectData* options);
  */
 DLLExport int MQTTPublish(MQTTClient* client, const char*, MQTTMessage*);
 
+/** DefenseClaw addition: send a PUBLISH without waiting for PUBACK/PUBCOMP.
+ *  The acknowledgement is consumed later by MQTTYield. Delivery relies on TCP;
+ *  like MQTTPublish, this client does not resend unacknowledged messages.
+ *  @return success code (send result only)
+ */
+DLLExport int MQTTPublishNoWait(MQTTClient* client, const char*, MQTTMessage*);
+
 /** MQTT SetMessageHandler - set or remove a per topic message handler
  *  @param client - the client object to use
  *  @param topicFilter - the topic filter set the message handler for

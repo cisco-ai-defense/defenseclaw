@@ -29,6 +29,36 @@ type MemoryStore struct {
 	mu         sync.RWMutex
 	devices    map[uint64]*manager.Device
 	deviceKeys map[uint64][]byte
+
+	adminActive     []byte
+	adminSuperseded []byte
+}
+
+// LoadAdminTokenRotation returns the admin-token rotation recorded in memory.
+func (s *MemoryStore) LoadAdminTokenRotation() (active, superseded []byte, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]byte(nil), s.adminActive...), append([]byte(nil), s.adminSuperseded...), nil
+}
+
+// SaveAdminTokenRotation records an admin-token rotation in memory.
+func (s *MemoryStore) SaveAdminTokenRotation(active, superseded []byte) error {
+	if len(active) != 32 || (superseded != nil && len(superseded) != 32) {
+		return fmt.Errorf("admin token hashes must be 32 bytes")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.adminActive = append([]byte(nil), active...)
+	s.adminSuperseded = append([]byte(nil), superseded...)
+	return nil
+}
+
+// ClearAdminTokenRotation forgets the in-memory rotation.
+func (s *MemoryStore) ClearAdminTokenRotation() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.adminActive, s.adminSuperseded = nil, nil
+	return nil
 }
 
 // NewMemoryStore creates a new in-memory device store.
@@ -46,6 +76,22 @@ func (s *MemoryStore) SaveDevice(dev *manager.Device) error {
 	// Store a copy to prevent external mutation
 	copy := *dev
 	s.devices[dev.DeviceID] = &copy
+	return nil
+}
+
+// RotateDeviceKey replaces a registered device's key and record under one lock.
+func (s *MemoryStore) RotateDeviceKey(dev *manager.Device, key []byte) error {
+	if len(key) != 32 {
+		return fmt.Errorf("device key must be exactly 32 bytes, got %d", len(key))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.devices[dev.DeviceID]; !ok {
+		return fmt.Errorf("rotate device key %d: %w", dev.DeviceID, manager.ErrDeviceNotFound)
+	}
+	copy := *dev
+	s.devices[dev.DeviceID] = &copy
+	s.deviceKeys[dev.DeviceID] = append([]byte(nil), key...)
 	return nil
 }
 
