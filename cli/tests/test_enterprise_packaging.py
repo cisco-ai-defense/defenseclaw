@@ -28,10 +28,24 @@ STANDALONE_ENV = {
 }
 
 
+# The per-user archives install.sh and install.ps1 extract. Their Fleet-on
+# install copies bin/edge-connector/tools/policy_compiler.py and fails
+# without it, so these two must carry it (the 1.0.3 Release install gate
+# failed when they did not).
+PER_USER_ARCHIVES = {"default", "windows-amd64"}
+FLEET_COMPILER = "edge-connector/tools/policy_compiler.py"
+
+
 def test_managed_package_recipes_exclude_fleet_compiler():
     release = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    archive_ids = {archive["id"] for archive in release["archives"]}
+    assert PER_USER_ARCHIVES <= archive_ids
     for archive in release["archives"]:
-        assert not any("policy_compiler.py" in entry for entry in archive.get("files", [])), archive["id"]
+        files = archive.get("files", [])
+        if archive["id"] in PER_USER_ARCHIVES:
+            assert FLEET_COMPILER in files, archive["id"]
+            continue
+        assert not any("policy_compiler.py" in entry for entry in files), archive["id"]
     for package in release["nfpms"]:
         assert not any("policy_compiler.py" in entry.get("src", "") or
                        "policy_compiler.py" in entry.get("dst", "")
