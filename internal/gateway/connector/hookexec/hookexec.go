@@ -1690,7 +1690,7 @@ func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 		}
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
-	return emitHookResult(opts, sp, sp.openAllow)
+	return emitFailOpenAllow(opts, sp, reason)
 }
 
 // handleUnavailableHome refuses an unavailable registered per-user hook in
@@ -1724,7 +1724,7 @@ func handleUnavailableHome(opts Options, sp spec, failMode, reason string) int {
 		}
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
-	return emitHookResult(opts, sp, sp.openAllow)
+	return emitFailOpenAllow(opts, sp, reason)
 }
 
 // handleOversized mirrors the per-connector oversized-payload branch. prefix
@@ -1758,12 +1758,24 @@ func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int 
 	if closes {
 		return emitHookResult(opts, sp, sp.oversizedClosed)
 	}
-	return emitHookResult(opts, sp, sp.openAllow)
+	return emitFailOpenAllow(opts, sp, "stdin body exceeded cap")
 }
 
 // failUnreachable applies the connector's effective fail mode to native hook
 // transport failures. Strict availability remains an unconditional closed
 // override for compatibility with existing deployments.
+// emitFailOpenAllow answers a call that a failure lets through (fail mode
+// open) with the connector's allow. The managed OpenCode plugin reads an
+// empty answer as closed, so it gets an explicit allow with the fail-open
+// notice (GAP-0351); every other connector keeps its openAllow.
+func emitFailOpenAllow(opts Options, sp spec, reason string) int {
+	if sp.connector == "opencode" {
+		fmt.Fprintln(opts.Stdout, openCodeFailOpenBody(openCodeFailOpenNotice(reason)))
+		return 0
+	}
+	return emitHookResult(opts, sp, sp.openAllow)
+}
+
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	if failMode == "closed" {
 		// A refusal passed in closed (a peer DefenseClaw cannot verify, an
@@ -1801,7 +1813,7 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		fmt.Fprintln(opts.Stdout, notice)
 		return 0
 	}
-	return emitHookResult(opts, sp, sp.openAllow)
+	return emitFailOpenAllow(opts, sp, reason)
 }
 
 const coldStartFailedReason = "gateway cold start failed"
@@ -2147,7 +2159,7 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 		}
 	}
 	if sp.failOpenOnly || failMode == "open" {
-		return emitHookResult(opts, sp, sp.openAllow)
+		return emitFailOpenAllow(opts, sp, reason)
 	}
 	if opts.gatewayRefusal != "" {
 		return emitPerUserGatewayDown(opts, sp, opts.gatewayRefusal)

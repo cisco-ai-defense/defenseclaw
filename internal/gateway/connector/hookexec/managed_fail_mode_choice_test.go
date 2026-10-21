@@ -5,6 +5,7 @@ package hookexec
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -314,5 +315,41 @@ func TestStandaloneManagedNoAnswerAfterASlowLocalStepStaysClosed(t *testing.T) {
 				t.Fatalf("blocked = %v, want %v: code=%d stdout=%q stderr=%q", blocked(result), !tc.open, result.code, result.stdout, result.stderr)
 			}
 		})
+	}
+}
+
+// GAP-0351: the managed OpenCode plugin reads an empty answer as closed, so a
+// standalone OpenCode hook in fail mode open answers an outage with an
+// explicit allow that carries the fail-open notice; closed keeps the deny.
+func TestStandaloneManagedOpenCodeFailOpenAnswersAnExplicitAllow(t *testing.T) {
+	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
+	for _, mode := range []string{"open", "closed"} {
+		result := run(t, "opencode", &stubRT{err: notRunning}, func(o *Options) {
+			managedCodex(o)
+			o.ExplainUnenrolledAccount = true
+			o.Event = "tool.execute.before"
+			o.FailMode = mode
+			o.Stdin = strings.NewReader(`{"tool":"bash","args":{"command":"echo ok"}}`)
+		})
+		var answer struct {
+			HookOutput struct {
+				Decision string `json:"decision"`
+			} `json:"hook_output"`
+			FailOpen bool   `json:"fail_open"`
+			Notice   string `json:"notice"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(result.stdout)), &answer); err != nil {
+			t.Fatalf("fail mode %s: the answer is not one JSON object: %q (%v)", mode, result.stdout, err)
+		}
+		if mode == "closed" {
+			if answer.HookOutput.Decision != "deny" || result.code == 0 {
+				t.Fatalf("closed: want the deny, got code=%d stdout=%q", result.code, result.stdout)
+			}
+			continue
+		}
+		if result.code != 0 || answer.HookOutput.Decision != "allow" || !answer.FailOpen ||
+			!strings.Contains(answer.Notice, "fail mode is open") || !strings.Contains(answer.Notice, managedGatewayNotRunningReason) {
+			t.Fatalf("open: want an explicit allow with the notice, got code=%d stdout=%q", result.code, result.stdout)
+		}
 	}
 }
