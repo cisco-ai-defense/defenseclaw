@@ -6,6 +6,8 @@ package hookexec
 import (
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -160,5 +162,78 @@ func TestManagedOutageFailsOpenOnlyForAnOpenStandaloneOutage(t *testing.T) {
 				t.Fatalf("ManagedOutageFailsOpen = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// Re-review P1: a standalone hook in fail mode open that gets a 401 or 403
+// status line followed by a body it cannot read (cut off, or over the cap)
+// blocks: the status already says the credential was refused, an integrity
+// failure, closed in every fail mode.
+func TestStandaloneManagedAuthRefusalWithAnUnreadableBodyStaysClosed(t *testing.T) {
+	original := hookAuthRetryDelay
+	hookAuthRetryDelay = time.Millisecond
+	t.Cleanup(func() { hookAuthRetryDelay = original })
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		for name, body := range map[string]func() io.ReadCloser{
+			"truncated": func() io.ReadCloser { return io.NopCloser(&failingReader{data: []byte(`{"error":"unauth`)}) },
+			"oversized": func() io.ReadCloser {
+				return io.NopCloser(strings.NewReader(`{"error":"` + strings.Repeat("x", int(defaultMaxBody)+16) + `"}`))
+			},
+		} {
+			rt := &stubRT{onRequest: func(_ *stubRT, _ *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: status, Body: body(), Header: make(http.Header)}, nil
+			}}
+			result := run(t, "codex", rt, func(o *Options) {
+				managedCodex(o)
+				o.ExplainUnenrolledAccount = true
+				o.FailMode = "open"
+			})
+			if !blocked(result) {
+				t.Fatalf("HTTP %d with a %s body allowed an open standalone call: code=%d stdout=%q stderr=%q", status, name, result.code, result.stdout, result.stderr)
+			}
+		}
+	}
+}
+
+// failingReader returns data, then a read error: a body the gateway cut off.
+type failingReader struct {
+	data []byte
+	done bool
+}
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.ErrUnexpectedEOF
+	}
+	r.done = true
+	return copy(p, r.data), nil
+}
+
+// Re-review P2: a managed standalone Copilot hook whose command binds no
+// reviewed Copilot event never answers allow: in every fail mode it writes
+// Copilot's two native denies (preToolUse and permissionRequest, the only
+// Copilot events that can block). A per-user hook keeps Copilot's documented
+// fail-open result.
+func TestInvalidManagedCopilotEventBindingNeverAllows(t *testing.T) {
+	for _, event := range []string{"", "bogusEvent", "PreToolUse"} {
+		for _, mode := range []string{"", "open", "closed"} {
+			rt := ok(`{"action":"allow"}`)
+			result := run(t, "copilot", rt, func(o *Options) {
+				managedCodex(o)
+				o.ExplainUnenrolledAccount = true
+				o.Event = event
+				o.FailMode = mode
+			})
+			if result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"deny"`) || !strings.Contains(result.stdout, `"behavior":"deny"`) {
+				t.Fatalf("event %q, fail mode %q: stdout=%q stderr=%q code=%d", event, mode, result.stdout, result.stderr, result.code)
+			}
+			if !strings.Contains(result.stderr, invalidManagedCopilotBindingReason) || rt.requests != 0 {
+				t.Fatalf("event %q: the refusal must name its reason and never reach the gateway: stderr=%q requests=%d", event, result.stderr, rt.requests)
+			}
+		}
+	}
+	perUser := run(t, "copilot", ok(`{"action":"allow"}`), func(o *Options) { o.Event = "bogusEvent"; o.FailMode = "closed" })
+	if strings.Contains(perUser.stdout, "deny") {
+		t.Fatalf("a per-user hook keeps Copilot's fail-open result: stdout=%q", perUser.stdout)
 	}
 }

@@ -41,7 +41,8 @@ on a managed computer a hook still blocks when its administrator-owned runtime
 (the runtime descriptor on Linux and macOS, the runtime generation on
 Windows) is missing or fails its checks, when another program answers in
 place of the gateway service, when its token is missing, when the gateway
-refuses its credential (HTTP 401 or 403), when the call does not match the
+refuses its credential (HTTP 401 or 403, also when the rest of that answer is
+cut off or too large), when the call does not match the
 event or hook contract the hook was registered for (Codex, GitHub Copilot),
 and when the account is not enrolled. An unapproved hook that the foreign-hook
 guard finds blocks in every fail mode too. When the guard cannot check the
@@ -133,6 +134,14 @@ service is not running, its answer cannot be used, or the call is too large to
 inspect), on Linux, macOS and Windows alike, and the agent shows why, for
 example that the DefenseClaw gateway service is not running on this computer.
 Only the administrator's `hook_fail_mode: open` lets such a call through.
+
+A managed GitHub Copilot hook whose registered command names no Copilot event
+DefenseClaw reviewed (a registration DefenseClaw did not write) is refused in
+every fail mode. Copilot can block only `preToolUse` and `permissionRequest`,
+and its payload does not say which event it is, so the hook answers with both
+of Copilot's deny fields; Copilot's other events cannot block. `verify`
+reports a DefenseClaw hook in the policy drop-in that is registered for an
+event DefenseClaw does not publish, and `ensure` rewrites the drop-in.
 
 ## Effective behavior
 

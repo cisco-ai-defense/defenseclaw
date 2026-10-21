@@ -372,3 +372,66 @@ func TestConfigMigrateRebasesTheDefaultPackEditedInPlace(t *testing.T) {
 		})
 	}
 }
+
+// Re-review P1: a signed policy bundle whose config bytes match an old v9
+// migration result is the administrator's signed choice. Once it is
+// confirmed (its config generation names the bundle, or the bundle store has
+// a current bundle) the Windows config step never repairs its explicit open.
+func TestMigrateManagedStandaloneConfigNeverRepairsABundleConfig(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	const key = "guardrail.connectors.cursor.hook_fail_mode"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	open := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: " + dir +
+		"\nobservability: {}\nguardrail:\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n")
+	if err := os.WriteFile(path, open, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := config.MigrationRecord{
+		SchemaVersion: config.MigrationRecordSchemaVersion, FromVersion: 8, ToVersion: 9, Actor: "lifecycle",
+		SourceSHA256: strings.Repeat("c", 64), ResultSHA256: configwrite.SHA256Hex(open),
+		Moved: []config.MigrationMove{{Source: "config", From: key, To: key, Value: "open"}},
+	}
+	if err := config.WriteMigrationRecord(path, record); err != nil {
+		t.Fatal(err)
+	}
+	// The confirmed bundle's generation attribution.
+	generation := `{"generation":3,"config_sha256":"` + configwrite.SHA256Hex(open) +
+		`","actor":"bundle","written_at":"2026-10-20T00:00:00Z","bundle_id":"acme-endpoints","bundle_version":4,"signer_key_id":"k1"}`
+	if err := os.WriteFile(configwrite.GenerationPath(path), []byte(generation), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != string(open) {
+		t.Fatalf("a confirmed bundle's config was repaired:\n%s", raw)
+	}
+
+	// A current bundle in the store, whatever the generation record says.
+	if err := os.Remove(configwrite.GenerationPath(path)); err != nil {
+		t.Fatal(err)
+	}
+	previous := managedStandaloneBundleCurrent
+	t.Cleanup(func() { managedStandaloneBundleCurrent = previous })
+	managedStandaloneBundleCurrent = func() (bool, error) { return true, nil }
+	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != string(open) {
+		t.Fatalf("the config of a host with a current bundle was repaired:\n%s", raw)
+	}
+
+	// No bundle: the record's rewrite is repaired, as before.
+	managedStandaloneBundleCurrent = func() (bool, error) { return false, nil }
+	if err := os.Remove(configwrite.GenerationPath(path)); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); !strings.Contains(string(raw), "hook_fail_mode: closed") {
+		t.Fatalf("without a bundle the migrated open must be repaired:\n%s", raw)
+	}
+}

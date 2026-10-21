@@ -509,8 +509,12 @@ func runHook(ctx context.Context, opts Options) int {
 		// Copilot's official camelCase stdin bodies do not identify the
 		// event. Setup supplies the reviewed event through an exact --event
 		// binding; never infer it from a body field or forward an untrusted
-		// registration. This is a local integration failure, so Copilot must
-		// receive its documented fail-open result.
+		// registration. Per-user and Secure Client hooks give Copilot its
+		// documented fail-open result for this local integration failure; a
+		// standalone hook refuses (failInvalidManagedCopilotBinding).
+		if managedNativeDecision(opts) {
+			return failInvalidManagedCopilotBinding(opts, sp)
+		}
 		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), "missing or unsupported Copilot hook event binding")
 	}
 	deadline := answerDeadline(opts, startedAt)
@@ -896,6 +900,15 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// the bytes it sent are never taken as its decision.
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, defaultMaxBody+1))
 	stopAnswer()
+	if (readErr != nil || int64(len(body)) > defaultMaxBody) && managedNativeDecision(opts) &&
+		(resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		// The status line already says the gateway refused the call's
+		// credential: an integrity failure, closed on a standalone host in
+		// every fail mode, whatever happens to the body after it. Before,
+		// a truncated or oversized 401/403 body took the no-answer or
+		// unusable-answer path, which an open fail mode allows.
+		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
+	}
 	if readErr != nil {
 		return failNoAnswer(opts, sp, failMode)
 	}
@@ -2137,6 +2150,37 @@ func responseFailureReason(reason string) string {
 		return reason + " (gateway auth failed; possible token drift. Run `defenseclaw doctor --fix` or `defenseclaw-gateway restart`.)"
 	}
 	return reason
+}
+
+// invalidManagedCopilotBindingReason is the hook-failure reason of a managed
+// Copilot hook whose command binds no reviewed Copilot event.
+const invalidManagedCopilotBindingReason = "enterprise_managed_copilot_event_binding_invalid"
+
+// failInvalidManagedCopilotBinding answers a managed standalone Copilot hook
+// whose command binds no reviewed Copilot event: a registration DefenseClaw
+// did not render (verify reports DefenseClaw's drop-in not intact, or an
+// event it does not publish, and ensure rewrites it). It is an integrity
+// failure, closed in every fail mode. Copilot's hook contract has a deny
+// only for preToolUse (permissionDecision) and permissionRequest (behavior),
+// and its stdin bodies do not name the event, so the hook writes both deny
+// fields: whichever of the two events Copilot ran it for, its deny is there.
+// Every other Copilot event (sessionStart, sessionEnd, userPromptSubmitted,
+// postToolUse, errorOccurred and the rest) cannot block in Copilot's
+// contract and ignores them. The answer is never an allow decision.
+func failInvalidManagedCopilotBinding(opts Options, sp spec) int {
+	opts.FailMode = "closed"
+	reason := invalidManagedCopilotBindingReason
+	// The call is refused, so it is logged closed: loggedFailMode counts a
+	// Copilot event it does not know as one that cannot block.
+	logged := sp
+	logged.failOpenOnly = false
+	logHookFailure(opts, logged, reason, "response", "closed", true)
+	text := "DefenseClaw blocked this Copilot call: its DefenseClaw hook is registered without a Copilot event DefenseClaw reviewed. " +
+		"Ask your administrator to run ensure, which rewrites the DefenseClaw policy hook. (" + reason + ")"
+	message := mustJSONString(text)
+	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking managed %s (fail mode closed): %s (event %q)\n", sp.subject, reason, strings.TrimSpace(opts.Event))
+	fmt.Fprintln(opts.Stdout, `{"permissionDecision":"deny","permissionDecisionReason":`+message+`,"behavior":"deny","message":`+message+`}`)
+	return 0
 }
 
 // managedCopilotFailClosed denies an administrator-managed Copilot tool call

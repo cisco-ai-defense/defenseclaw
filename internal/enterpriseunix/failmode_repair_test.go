@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 )
 
 // A host a 1.0.0-1.0.2 upgrade migrated keeps the Cursor fail mode that
@@ -85,5 +86,44 @@ func TestEnsureRestoresMigratedCursorFailModeOnce(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionEnsure, Reason: "path"}))
 	if got := h.read(h.env.Layout.ConfigPath); !strings.Contains(got, "hook_fail_mode: open") {
 		t.Fatalf("an administrator open set after the repair was undone:\n%s", got)
+	}
+}
+
+// Re-review P1: a config a confirmed signed policy bundle installed is the
+// administrator's signed choice, also when its bytes match an old v9
+// migration result: ensure never repairs its explicit open.
+func TestEnsureNeverRepairsABundleConfig(t *testing.T) {
+	const key = "guardrail.connectors.cursor.hook_fail_mode"
+	h := newTestHost(t, "linux")
+	admin := strings.Replace(string(DefaultConfig(h.env.Layout)), "  mode: observe\n",
+		"  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", 1)
+	cfg := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfg, []byte(admin), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg}))
+	installed := h.read(h.env.Layout.ConfigPath)
+	raw, _ := json.Marshal(config.MigrationRecord{
+		SchemaVersion: config.MigrationRecordSchemaVersion, FromVersion: 8, ToVersion: 9, Actor: "lifecycle",
+		SourceSHA256: strings.Repeat("b", 64), ResultSHA256: sha256Bytes([]byte(installed)),
+		Moved: []config.MigrationMove{{Source: "config", From: key, To: key, Value: "open"}},
+	})
+	if err := os.WriteFile(h.env.P(config.MigrationRecordPath(h.env.Layout.ConfigPath)), raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	generationPath := h.env.P(configwrite.GenerationPath(h.env.Layout.ConfigPath))
+	state, err := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.BundleID, state.BundleVersion, state.SignerKeyID = "acme-endpoints", 4, "k1"
+	attributed, _ := json.Marshal(state)
+	if err := os.WriteFile(generationPath, attributed, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	requireOK(t, r)
+	if got := h.read(h.env.Layout.ConfigPath); got != installed || strings.Contains(strings.Join(r.Changes, "\n"), "restored "+key) {
+		t.Fatalf("a confirmed bundle's config was repaired: changes=%+v\n%s", r.Changes, got)
 	}
 }

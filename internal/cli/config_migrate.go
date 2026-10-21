@@ -19,8 +19,10 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +39,26 @@ import (
 // bundle whose rendered config is the file installed by Setup.
 var managedStandaloneBundleGeneration = func(string, []byte) (configwrite.Options, bool, error) {
 	return configwrite.Options{}, false, nil
+}
+
+// managedStandaloneBundleCurrent reports a current (confirmed) signed policy
+// bundle on this host; the Windows bundle lifecycle supplies it.
+var managedStandaloneBundleCurrent = func() (bool, error) { return false, nil }
+
+// managedStandaloneConfigFromBundle reports whether the installed config at
+// path belongs to a signed policy bundle: its config generation record names
+// a bundle, or a bundle is current on this host. An unreadable record counts
+// as a bundle's, so the v9 Cursor repair never rewrites an explicit, signed
+// value (a bundle whose bytes match an old migration result).
+func managedStandaloneConfigFromBundle(path string) (bool, error) {
+	state, err := configwrite.ReadGenerationState(path)
+	switch {
+	case err == nil && state.BundleID != "":
+		return true, nil
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return true, nil
+	}
+	return managedStandaloneBundleCurrent()
 }
 
 // config is the operator-facing config group of the gateway binary. Like
@@ -291,7 +313,13 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 		// those files, not to the readable config (GAP-0440).
 		return restoreACL(append(written, path, path+config.ConfigV8BackupSuffix, config.MigrationRecordPath(path))...)
 	}
-	if opt.Bundle.ID == "" {
+	fromBundle := opt.Bundle.ID != ""
+	if !fromBundle {
+		if fromBundle, err = managedStandaloneConfigFromBundle(path); err != nil {
+			return err
+		}
+	}
+	if !fromBundle {
 		if repaired, err := repairManagedStandaloneCursorFailMode(ctx, path, raw, opt); err != nil {
 			return err
 		} else if repaired {
