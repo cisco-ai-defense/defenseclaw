@@ -744,7 +744,8 @@ off the device. The agent does not read `/health` itself (section 7); the
   Windows settles first, as in 4.4.
 - stdout: `bundle-status.schema.json`: `current`, `last_good`, `floor`,
   `last_receipt` (the root-only receipt, with `transitions` and
-  `error_message`), `last_refusal`, `bundle`, `gateway_digest`, `applied`.
+  `error_message`, and `rollback_of` for a rollback bundle, 4.9),
+  `last_refusal`, `bundle`, `gateway_digest`, `applied`.
   `current` and `last_good` carry the `delivery_id` of the apply that
   confirmed them, when it had one (2.6).
   `applied` is true when the running gateway enforces the current bundle's
@@ -1048,6 +1049,11 @@ enforcing.
 - `delivery_id` is present when the apply had `--delivery-id` (2.6). The
   `config.bundle.receipt` audit event and OTel do not carry it; only these
   files, the command results and `bundle status` do.
+- `rollback_of` is optional and present only on the receipt of a rollback
+  bundle: the id of the earlier bundle whose content that bundle publishes
+  again, copied from its signed manifest (`enterprise bundle sign
+  --rollback-of`). As with every member, the agent ignores it when it does
+  not know it and treats its absence as normal (section 0).
 - Remember the last forwarded id; nothing is acknowledged back.
 
 ```sh
