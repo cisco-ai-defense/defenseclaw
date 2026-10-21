@@ -117,6 +117,7 @@ var windowsReadOnlyExtraBroadPrincipals = map[string]bool{
 	"S-1-5-11":     true, // Authenticated Users
 	"S-1-5-14":     true, // Remote Interactive Logon
 	"S-1-5-113":    true, // Local account
+	"S-1-5-114":    true, // Local account and member of Administrators group
 	"S-1-5-32-545": true, // Users
 	"S-1-5-32-546": true, // Guests
 	"S-1-5-32-547": true, // Power Users

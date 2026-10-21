@@ -105,16 +105,18 @@ func TestWindowsReadOnlyExtraACE(t *testing.T) {
 		"OWNER RIGHTS":   "S-1-3-4",
 		"CREATOR OWNER":  "S-1-3-0",
 		// Broad groups: a sandbox grants its own group, never these.
-		"Everyone":                 "S-1-1-0",
-		"Dialup":                   "S-1-5-1",
-		"Batch":                    "S-1-5-3",
-		"Service":                  "S-1-5-6",
-		"Authenticated Users":      "S-1-5-11",
-		"Users":                    "S-1-5-32-545",
-		"Remote Desktop Users":     "S-1-5-32-555",
-		"ALL APPLICATION PACKAGES": "S-1-15-2-1",
-		"Domain Users":             "S-1-5-21-1004336348-1177238915-682003330-513",
-		"Domain Guests":            "s-1-5-21-1004336348-1177238915-682003330-514",
+		"Everyone":      "S-1-1-0",
+		"Dialup":        "S-1-5-1",
+		"Batch":         "S-1-5-3",
+		"Service":       "S-1-5-6",
+		"Local account": "S-1-5-113",
+		"Local account and member of Administrators": "S-1-5-114",
+		"Authenticated Users":                        "S-1-5-11",
+		"Users":                                      "S-1-5-32-545",
+		"Remote Desktop Users":                       "S-1-5-32-555",
+		"ALL APPLICATION PACKAGES":                   "S-1-15-2-1",
+		"Domain Users":                               "S-1-5-21-1004336348-1177238915-682003330-513",
+		"Domain Guests":                              "s-1-5-21-1004336348-1177238915-682003330-514",
 	} {
 		entry := codex
 		entry.sid = sid
