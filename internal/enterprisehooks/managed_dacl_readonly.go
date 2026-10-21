@@ -100,14 +100,19 @@ func windowsReadOnlyExtraReservedSID(sid, target string) bool {
 }
 
 // windowsReadOnlyExtraBroadPrincipals are well-known groups that cover every
-// user, every logon of a kind, or every app container. An agent sandbox grants
+// user, every logon of a kind (Windows adds the Dialup, Network, Batch,
+// Interactive and Service groups to the token of every such logon), or every
+// app container. An agent sandbox grants
 // its own group, never one of these, so a read grant to one is not tolerated.
 var windowsReadOnlyExtraBroadPrincipals = map[string]bool{
 	"S-1-1-0":      true, // Everyone
 	"S-1-2-0":      true, // Local
 	"S-1-2-1":      true, // Console Logon
+	"S-1-5-1":      true, // Dialup
 	"S-1-5-2":      true, // Network
+	"S-1-5-3":      true, // Batch
 	"S-1-5-4":      true, // Interactive
+	"S-1-5-6":      true, // Service
 	"S-1-5-7":      true, // Anonymous Logon
 	"S-1-5-11":     true, // Authenticated Users
 	"S-1-5-14":     true, // Remote Interactive Logon

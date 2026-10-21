@@ -106,6 +106,9 @@ func TestWindowsReadOnlyExtraACE(t *testing.T) {
 		"CREATOR OWNER":  "S-1-3-0",
 		// Broad groups: a sandbox grants its own group, never these.
 		"Everyone":                 "S-1-1-0",
+		"Dialup":                   "S-1-5-1",
+		"Batch":                    "S-1-5-3",
+		"Service":                  "S-1-5-6",
 		"Authenticated Users":      "S-1-5-11",
 		"Users":                    "S-1-5-32-545",
 		"Remote Desktop Users":     "S-1-5-32-555",
