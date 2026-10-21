@@ -1469,26 +1469,36 @@ func TestNativeConnectorEndpointMatrix(t *testing.T) {
 	}
 }
 
+// An unreviewed bound event never reaches the gateway. A Secure Client hook
+// keeps Copilot's fail-open result; a managed hook outside Secure Client
+// refuses with Copilot's native denies (failInvalidManagedCopilotBinding;
+// re-review P2: it allowed under closed before).
 func TestCopilotEventBindingRequiresReviewedExactEvent(t *testing.T) {
 	for _, event := range []string{"PreToolUse", "futureEvent", ""} {
-		t.Run(fmt.Sprintf("event_%s", event), func(t *testing.T) {
-			rt := ok(`{"action":"allow"}`)
-			result := run(t, "copilot", rt, func(opts *Options) {
-				opts.Event = event
-				opts.FailMode = "closed"
-				opts.StrictAvailability = true
-				opts.ManagedEnterprise = true
+		for _, secureClient := range []bool{false, true} {
+			t.Run(fmt.Sprintf("event_%s_secure_client_%v", event, secureClient), func(t *testing.T) {
+				rt := ok(`{"action":"allow"}`)
+				result := run(t, "copilot", rt, func(opts *Options) {
+					opts.Event = event
+					opts.FailMode = "closed"
+					opts.StrictAvailability = true
+					opts.ManagedEnterprise = true
+					opts.SecureClient = secureClient
+				})
+				if rt.requests != 0 || rt.gotReq != nil {
+					t.Fatalf("unreviewed event %q reached the gateway", event)
+				}
+				if secureClient && (result.code != 0 || result.stdout != "") {
+					t.Fatalf("Secure Client: unreviewed event %q synthesized enforcement: code=%d stdout=%q stderr=%q",
+						event, result.code, result.stdout, result.stderr)
+				}
+				if !secureClient && (result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
+					!strings.Contains(result.stdout, `"behavior":"deny"`) || strings.Contains(result.stderr, "fail-open")) {
+					t.Fatalf("managed: unreviewed event %q must be refused: code=%d stdout=%q stderr=%q",
+						event, result.code, result.stdout, result.stderr)
+				}
 			})
-			if rt.requests != 0 || rt.gotReq != nil {
-				t.Fatalf("unreviewed event %q reached the gateway", event)
-			}
-			if result.code != 0 || result.stdout != "" {
-				t.Fatalf(
-					"unreviewed event %q synthesized enforcement: code=%d stdout=%q stderr=%q",
-					event, result.code, result.stdout, result.stderr,
-				)
-			}
-		})
+		}
 	}
 }
 

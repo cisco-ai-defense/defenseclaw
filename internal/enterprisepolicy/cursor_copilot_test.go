@@ -275,3 +275,49 @@ func TestCopilotCLIPolicyOnlyWritesNoEditorPolicy(t *testing.T) {
 		t.Fatalf("verify: %+v %v", verified, err)
 	}
 }
+
+// Re-review P2: a DefenseClaw command registered for a Copilot event
+// DefenseClaw does not publish (here one that is no Copilot event at all)
+// matched the command rendered for its own key and passed as intact. Verify
+// reports it, and ensure's reconcile rewrites the drop-in without it.
+func TestCopilotHookForAnUnpublishedEventIsAConflict(t *testing.T) {
+	opts := testOptions(t)
+	if _, err := (copilotTarget{}).Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := copilotDropInPath(opts)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(readFile(t, path)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := encodeOrdered(copilotHandler(opts, "bogusEvent", 30))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var handler map[string]any
+	if err := json.Unmarshal(rendered, &handler); err != nil {
+		t.Fatal(err)
+	}
+	doc["hooks"].(map[string]any)["bogusEvent"] = []any{handler}
+	edited, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, string(edited))
+	state, err := copilotTarget{}.Verify(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Covered || !hasConflict(state, `Copilot event "bogusEvent", which DefenseClaw does not publish`) {
+		t.Fatalf("a DefenseClaw hook for an unpublished event must fail verification: %+v", state)
+	}
+	if _, err := (copilotTarget{}).Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(readFile(t, path), "bogusEvent") {
+		t.Fatalf("reconcile must rewrite the drop-in without the unpublished event:\n%s", readFile(t, path))
+	}
+	if state, err := (copilotTarget{}).Verify(opts); err != nil || !state.Covered {
+		t.Fatalf("after reconcile: %+v %v", state, err)
+	}
+}

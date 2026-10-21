@@ -206,6 +206,13 @@ func inspectCopilot(opts Options, state *State) error {
 					if !copilotHandlerIsIntact(opts, event, handler) {
 						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s is not the command DefenseClaw publishes, so it may not enforce; the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites it", file, event)
 					}
+					if _, published := timeouts[event]; !published {
+						// Intact compares the command with the one rendered
+						// for this key, so a DefenseClaw command bound to an
+						// event DefenseClaw does not publish (or to no
+						// Copilot event at all) passed as intact.
+						state.entryConflict("%s: a DefenseClaw policy hook is registered for Copilot event %q, which DefenseClaw does not publish; the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites the drop-in without it", file, event)
+					}
 					if want, ok := timeouts[event]; ok && copilotHandlerTimeout(handler) != fmt.Sprint(want) {
 						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s has timeoutSec %q, DefenseClaw publishes %d; Copilot lets the tool call proceed when the hook times out, so deploy the exported value; the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites it", file, event, copilotHandlerTimeout(handler), want)
 					}

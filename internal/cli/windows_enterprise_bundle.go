@@ -117,6 +117,7 @@ func init() {
 		return nil
 	}
 	managedStandaloneBundleGeneration = windowsStagedBundleGeneration
+	managedStandaloneBundleCurrent = windowsBundleCurrent
 	bundleSettleStatus = settleWindowsBundleStatus
 }
 
@@ -257,6 +258,20 @@ func windowsStagedBundleGeneration(path string, raw []byte) (configwrite.Options
 		return configwrite.Options{}, false, fmt.Errorf("staged policy bundle %s has no principal", matched.ReceiptID)
 	}
 	return opt, true, nil
+}
+
+// windowsBundleCurrent reports a current (confirmed) policy bundle in the
+// Windows bundle store.
+func windowsBundleCurrent() (bool, error) {
+	layout, err := windowsBundleLayout()
+	if err != nil {
+		return false, nil
+	}
+	state, err := newWindowsBundleDriver(layout).Store.LoadState()
+	if err != nil {
+		return false, fmt.Errorf("read the policy bundle state: %w", err)
+	}
+	return state.Current != nil, nil
 }
 
 // windowsBundleRun is the bundle state of one ensure run.

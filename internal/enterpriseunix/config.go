@@ -25,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/local"
@@ -149,6 +150,9 @@ func (e *Env) migrateConfigV9(ctx context.Context, raw []byte, v8 *validatedConf
 // record the apply stores next to it, or nil when the record proves no
 // rewrite (no record means no change).
 func (e *Env) repairMigratedCursorFailMode(installed *validatedConfig) (*validatedConfig, error) {
+	if fromBundle, err := e.installedConfigFromBundle(); err != nil || fromBundle {
+		return nil, err
+	}
 	raw, err := readBounded(e.P(config.MigrationRecordPath(e.Layout.ConfigPath)), maxInputBytes)
 	if err != nil {
 		return nil, nil
@@ -167,6 +171,26 @@ func (e *Env) repairMigratedCursorFailMode(installed *validatedConfig) (*validat
 	}
 	validated.FailModeRepair = &updated
 	return validated, nil
+}
+
+// installedConfigFromBundle reports whether the installed config belongs to
+// a signed policy bundle: its config generation record names a bundle, or a
+// bundle is current in the bundle store. An unreadable record counts as a
+// bundle's, so the v9 Cursor repair never rewrites an explicit, signed value
+// (a bundle whose bytes match an old migration result).
+func (e *Env) installedConfigFromBundle() (bool, error) {
+	state, err := configwrite.ReadGenerationState(e.P(e.Layout.ConfigPath))
+	switch {
+	case err == nil && state.BundleID != "":
+		return true, nil
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return true, nil
+	}
+	current, err := e.bundleStore().LoadState()
+	if err != nil {
+		return false, fmt.Errorf("read the policy bundle state: %w", err)
+	}
+	return current.Current != nil, nil
 }
 
 // envPinMu serializes the temporary process-environment pins validation
