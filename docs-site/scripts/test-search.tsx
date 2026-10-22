@@ -63,8 +63,9 @@ describe('compact search index', () => {
       return Response.json(payload);
     };
     try {
+      assert.equal(fetches, 0, 'Search must not fetch before the dialog creates its client');
       const client = flexsearchStaticClient({ from: '/compact-search-regression' });
-      assert.equal(fetches, 0, 'Constructing the closed search client must not fetch the index');
+      assert.equal(fetches, 1, 'Opening search should load the index once');
       const results = await client.search('guard');
       assert.ok(results.some((result) => result.type === 'page' && result.url === page.url));
       assert.ok(results.some((result) => result.type === 'text' && result.url === `${page.url}#blocking`));
@@ -73,7 +74,7 @@ describe('compact search index', () => {
       assert.ok(heading.some((result) => result.type === 'heading' && result.url === `${page.url}#blocking`));
       const description = await client.search('determin');
       assert.ok(description.some((result) => result.type === 'text' && result.url === page.url));
-      assert.equal(fetches, 1, 'Opening search should load and cache the index once');
+      assert.equal(fetches, 1, 'Search queries should reuse the loaded index');
     } finally {
       globalThis.fetch = originalFetch;
     }
