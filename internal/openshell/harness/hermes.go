@@ -32,6 +32,7 @@ import (
 var hermesTool = uvTool{
 	harness:      "hermes",
 	dist:         "hermes-agent",
+	extras:       []string{"anthropic"}, // Hermes 0.19.0 pins anthropic==0.87.0 in this extra.
 	commands:     []string{"hermes"},
 	versionCheck: `/usr/local/bin/hermes --version | awk 'NR==1{sub(/^v/,"",$3); print $3}'`,
 	// The Ctrl-Z shim (hermesSuspendModule, base64 so the Dockerfile RUN

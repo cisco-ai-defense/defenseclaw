@@ -808,6 +808,9 @@ A few rules the flags follow:
   endpoint from `HERMES_DEFENSECLAW_BASE_URL` and its key from
   `HERMES_DEFENSECLAW_API_KEY`: for your own endpoint, run
   `defenseclaw sandbox run hermes --llm none --credential HERMES_DEFENSECLAW_API_KEY=HOST[:PORT] --env HERMES_DEFENSECLAW_BASE_URL=https://HOST/v1 -- --provider defenseclaw -m MODEL`.
+  The pinned Hermes image also includes Hermes's `anthropic` extra and its
+  pinned Anthropic SDK for the native Anthropic provider. No SDK installation
+  on the host or inside a running sandbox is required.
 - `--pack`, `--profile`, `--copy`, `--safe`, `--unmask`, `--host-port`,
   `--no-mcp`, `--cpu`, and `--memory` go through the
   [sandbox policy](/docs/reference/sandboxes/policy). An organization limit can
