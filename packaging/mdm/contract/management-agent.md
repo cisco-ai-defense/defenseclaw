@@ -543,7 +543,9 @@ Exit 0.
   bundle enabled or changed its connector keeps the hooks it loaded, or none:
   its tool calls are **not enforced** until it restarts, although the apply
   is `confirmed`. The live scan in `bundle.sessions_restart_required` (also in
-  `bundle status`, 4.5) counts them. The apply result then warns
+  `bundle status`, 4.5) counts sessions (collapsing a script-host launcher and
+  its native child into one session under the parent PID), not individual
+  processes. The apply result then warns
   `sessions_need_restart` (`sessions_scan_unknown` when the scan could not
   run) and reports `coverage_complete` and `security_complete` false;
   `bundle status` warns with the same codes. After

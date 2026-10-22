@@ -16,6 +16,7 @@ const CodeSessionsNeedRestart = "sessions_need_restart"
 // hook activation check. Callers obtain it from the platform process scan.
 type SessionProcess struct {
 	PID       int
+	PPID      int
 	User      string
 	Agent     string
 	StartedAt time.Time
@@ -76,6 +77,7 @@ func WriteSessionEntries(w io.Writer, status SessionRestartStatus) {
 // that it could inspect the process list.
 func UnprotectedSessions(processes []SessionProcess, changed map[string]time.Time) SessionRestartStatus {
 	status := SessionRestartStatus{State: "known", Entries: []SessionEntry{}}
+	processes = collapseSessionProcesses(processes)
 	sort.Slice(processes, func(i, j int) bool { return processes[i].PID < processes[j].PID })
 	for _, process := range processes {
 		at := changed[process.Agent]
@@ -89,6 +91,42 @@ func UnprotectedSessions(processes []SessionProcess, changed map[string]time.Tim
 		}
 	}
 	return status
+}
+
+// collapseSessionProcesses collapses launcher/child pairs of the same user and
+// agent down to their topmost listed ancestor so one agent session is counted
+// once under the parent PID the user sees in ps and tmux.
+func collapseSessionProcesses(processes []SessionProcess) []SessionProcess {
+	byPID := make(map[int]SessionProcess, len(processes))
+	for _, p := range processes {
+		if p.PID > 0 {
+			byPID[p.PID] = p
+		}
+	}
+	kept := make([]SessionProcess, 0, len(processes))
+	seenRoot := make(map[int]bool, len(processes))
+	for _, p := range processes {
+		if p.PID <= 0 {
+			continue
+		}
+		cur := p
+		for steps := 0; steps < len(byPID); steps++ {
+			if cur.PPID <= 0 || cur.PPID == cur.PID {
+				break
+			}
+			parent, ok := byPID[cur.PPID]
+			if !ok || parent.Agent != cur.Agent || parent.User != cur.User {
+				break
+			}
+			cur = parent
+		}
+		if seenRoot[cur.PID] {
+			continue
+		}
+		seenRoot[cur.PID] = true
+		kept = append(kept, cur)
+	}
+	return kept
 }
 
 // SetBundleSessions adds the live scan to the bundle block and warns while

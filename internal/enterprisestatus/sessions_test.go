@@ -109,3 +109,55 @@ func TestBundleDigestUnverifiableMarkerReachesStatus(t *testing.T) {
 		t.Fatalf("digest marker omitted or duplicated: %+v", r)
 	}
 }
+
+func TestUnprotectedSessionsCollapsesLauncherAndChild(t *testing.T) {
+	changed := time.Date(2026, 10, 21, 22, 25, 0, 0, time.UTC)
+	rows := []SessionProcess{
+		{PID: 3706701, PPID: 1200, User: "alice", Agent: "codex", StartedAt: changed.Add(-2 * time.Minute)},
+		{PID: 3706708, PPID: 3706701, User: "alice", Agent: "codex", StartedAt: changed.Add(-2*time.Minute + 30*time.Millisecond)},
+	}
+	got := UnprotectedSessions(rows, map[string]time.Time{"codex": changed})
+	if got.State != "known" || got.Count != 1 || len(got.Entries) != 1 || got.Entries[0].PID != 3706701 {
+		t.Fatalf("collapsed launcher/child = %+v, want count 1 with parent pid 3706701", got)
+	}
+}
+
+func TestUnprotectedSessionsKeepsIndependentSessions(t *testing.T) {
+	changed := time.Date(2026, 10, 21, 22, 25, 0, 0, time.UTC)
+	rows := []SessionProcess{
+		{PID: 1001, PPID: 500, User: "alice", Agent: "codex", StartedAt: changed.Add(-3 * time.Minute)},
+		{PID: 1002, PPID: 1001, User: "alice", Agent: "codex", StartedAt: changed.Add(-3 * time.Minute)},
+		{PID: 2001, PPID: 600, User: "alice", Agent: "codex", StartedAt: changed.Add(-2 * time.Minute)},
+		{PID: 2002, PPID: 2001, User: "alice", Agent: "codex", StartedAt: changed.Add(-2 * time.Minute)},
+	}
+	got := UnprotectedSessions(rows, map[string]time.Time{"codex": changed})
+	if got.State != "known" || got.Count != 2 || len(got.Entries) != 2 || got.Entries[0].PID != 1001 || got.Entries[1].PID != 2001 {
+		t.Fatalf("independent sessions = %+v, want count 2 with pids 1001 and 2001", got)
+	}
+}
+
+func TestUnprotectedSessionsDoesNotCollapseAcrossUserOrAgent(t *testing.T) {
+	changed := time.Date(2026, 10, 21, 22, 25, 0, 0, time.UTC)
+	rows := []SessionProcess{
+		{PID: 3001, PPID: 1, User: "alice", Agent: "claudecode", StartedAt: changed.Add(-time.Minute)},
+		{PID: 3002, PPID: 3001, User: "alice", Agent: "codex", StartedAt: changed.Add(-time.Minute)},
+		{PID: 4001, PPID: 1, User: "alice", Agent: "codex", StartedAt: changed.Add(-time.Minute)},
+		{PID: 4002, PPID: 4001, User: "bob", Agent: "codex", StartedAt: changed.Add(-time.Minute)},
+	}
+	got := UnprotectedSessions(rows, map[string]time.Time{"claudecode": changed, "codex": changed})
+	if got.State != "known" || got.Count != 4 || len(got.Entries) != 4 {
+		t.Fatalf("cross-user/agent sessions = %+v, want all 4 kept", got)
+	}
+}
+
+func TestUnprotectedSessionsPPIDCycleTerminates(t *testing.T) {
+	changed := time.Date(2026, 10, 21, 22, 25, 0, 0, time.UTC)
+	rows := []SessionProcess{
+		{PID: 5001, PPID: 5002, User: "alice", Agent: "codex", StartedAt: changed.Add(-time.Minute)},
+		{PID: 5002, PPID: 5001, User: "alice", Agent: "codex", StartedAt: changed.Add(-time.Minute)},
+	}
+	got := UnprotectedSessions(rows, map[string]time.Time{"codex": changed})
+	if got.State != "known" || got.Count < 1 || got.Count > 2 {
+		t.Fatalf("ppid cycle = %+v, want known state with count in [1,2]", got)
+	}
+}

@@ -126,6 +126,7 @@ func agentCLIOf(argv []string) string {
 // agentSession is a running agent CLI process.
 type agentSession struct {
 	PID     int
+	PPID    int
 	UID     int
 	Agent   string
 	Started time.Time
@@ -207,6 +208,7 @@ func (e *Env) linuxAgentSessions() []agentSession {
 		if len(fields) < 20 {
 			continue
 		}
+		ppid, _ := strconv.Atoi(fields[1])
 		ticks, err := strconv.ParseInt(fields[19], 10, 64)
 		if err != nil {
 			continue
@@ -220,9 +222,43 @@ func (e *Env) linuxAgentSessions() []agentSession {
 			continue
 		}
 		started := time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100)
-		out = append(out, agentSession{PID: pid, UID: int(owner.Uid), Agent: agent, Started: started, CodexServer: codexBackgroundServer(argv)})
+		out = append(out, agentSession{PID: pid, PPID: ppid, UID: int(owner.Uid), Agent: agent, Started: started, CodexServer: codexBackgroundServer(argv)})
 	}
-	return out
+	return collapseAgentSessions(out)
+}
+
+func collapseAgentSessions(sessions []agentSession) []agentSession {
+	byPID := make(map[int]agentSession, len(sessions))
+	for _, s := range sessions {
+		if s.PID > 0 {
+			byPID[s.PID] = s
+		}
+	}
+	kept := make([]agentSession, 0, len(sessions))
+	seenRoot := make(map[int]bool, len(sessions))
+	for _, s := range sessions {
+		if s.PID <= 0 {
+			continue
+		}
+		cur := s
+		for steps := 0; steps < len(byPID); steps++ {
+			if cur.PPID <= 0 || cur.PPID == cur.PID {
+				break
+			}
+			parent, ok := byPID[cur.PPID]
+			if !ok || parent.Agent != cur.Agent || parent.UID != cur.UID || parent.CodexServer != cur.CodexServer || parent.Unknown != cur.Unknown {
+				break
+			}
+			cur = parent
+		}
+		if seenRoot[cur.PID] {
+			continue
+		}
+		seenRoot[cur.PID] = true
+		kept = append(kept, cur)
+	}
+	sort.Slice(kept, func(i, j int) bool { return kept[i].PID < kept[j].PID })
+	return kept
 }
 
 // darwinAgentSessions asks ps for every process with its elapsed time.
