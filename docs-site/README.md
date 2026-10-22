@@ -32,6 +32,7 @@ npm run validate-links          # internal MDX links and anchors
 npm run validate-snippets       # bash syntax in docs/ and site shell fences
 npm run test:policy-creator      # policy-creator unit tests
 npm run test:feature-demos       # feature-demo data/component tests
+npm run test:search              # lazy startup, prefix results, index budget
 npm run build                    # static export plus postbuild checks
 ```
 
@@ -43,6 +44,22 @@ npm run build                    # static export plus postbuild checks
 - **Fails** above **1168px** unless the diagram opted in via `<Flow oversize />` / `<Sequence oversize />`.
 
 Authoring contract for new diagrams lives in [`components/diagram/AUTHORING.md`](components/diagram/AUTHORING.md).
+
+## Search memory budget
+
+Search initializes only after opening the dialog (`search.preload: false` in
+`components/root-provider.tsx`). The static index uses forward tokenization for
+word-prefix matching and compact, build-local record IDs. Page text and heading
+anchors are retained; arbitrary matches inside a word are no longer indexed.
+Do not restore full substring tokenization or URL-based index IDs without
+measuring the decoded payload and browser memory.
+
+`npm run build` runs `check-search-index-size` on `out/api/search` and fails if
+it is missing or exceeds **32 MiB decoded**. Gzip size is not the budget:
+JSON parsing and FlexSearch import allocate from the expanded content. If the
+gate fails, reduce or split the index before deploying. Raising the limit
+requires new mobile memory measurements. Search regression tests run in the
+Pages workflow before the static export.
 
 ## Authoring
 

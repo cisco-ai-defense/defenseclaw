@@ -10141,11 +10141,25 @@ func TestHookScript_FailOpen_Override(t *testing.T) {
 	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:1", "tok-test"); err != nil {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
+	home := t.TempDir()
+	defenseclawHome := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(defenseclawHome, 0o700); err != nil {
+		t.Fatalf("create isolated DefenseClaw home: %v", err)
+	}
 
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
-	cmd.Env = append(os.Environ(),
-		"PATH="+os.Getenv("PATH"),
+	cmd.Env = make([]string, 0, len(os.Environ())+3)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if key == "HOME" || key == "DEFENSECLAW_HOME" || key == "DEFENSECLAW_FAIL_MODE" {
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
+	cmd.Env = append(cmd.Env,
+		"HOME="+home,
+		"DEFENSECLAW_HOME="+defenseclawHome,
 		"DEFENSECLAW_FAIL_MODE=open",
 	)
 	err := cmd.Run()

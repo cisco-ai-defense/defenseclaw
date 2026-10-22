@@ -10,6 +10,10 @@ for current behavior.
 
 ## [Unreleased] — 1.0.3
 
+### Documentation website
+
+- **Avoid loading a large search index on every page visit.** Search now initializes when opened, uses a smaller word-prefix index with compact record IDs, and has a 32 MiB decoded build limit to guard against mobile tab reloads. Page text and heading links remain searchable.
+
 ### Upgrade note for 1.0.3
 
 - Existing managed standalone 1.0.2 configurations with webhook URLs or literal provider and destination credential headers continue to load after upgrade. `status` and `verify` warn with the affected paths and credential-reference guidance. New administrator input refuses credential-bearing headers; non-secret provider headers and webhook URLs remain supported. `defenseclaw-gateway config validate` refuses the same candidates as `ensure --config` and prints the advisory for the installed config.
