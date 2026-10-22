@@ -328,6 +328,15 @@ jobs:
         run: uv run --frozen python -m pytest cli/tests/test_install_ps1.py -q
       - name: Committed uninstall finalized retry regression
         run: ./packaging/windows/tests/enterprise-uninstall-finalized-retry-smoke.ps1
+      - name: Installer JSON output keeps advisories out of the console
+        run: |
+          ./packaging/windows/tests/enterprise-installer-json-warnings-smoke.ps1
+          # Production setup uses the in-box engine. Run the same test there
+          # as well as in the default PowerShell 7 runner shell.
+          $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+          $legacy = Join-Path $windows 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          & $legacy -NoLogo -NoProfile -NonInteractive -File ./packaging/windows/tests/enterprise-installer-json-warnings-smoke.ps1
+          if ($LASTEXITCODE -ne 0) { throw "in-box installer JSON warnings regression failed: $LASTEXITCODE" }
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
