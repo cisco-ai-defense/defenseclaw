@@ -64,14 +64,16 @@ describe('compact search index', () => {
     };
     try {
       const client = flexsearchStaticClient({ from: '/compact-search-regression' });
+      assert.equal(fetches, 0, 'Constructing the closed search client must not fetch the index');
       const results = await client.search('guard');
       assert.ok(results.some((result) => result.type === 'page' && result.url === page.url));
       assert.ok(results.some((result) => result.type === 'text' && result.url === `${page.url}#blocking`));
+      assert.deepEqual(await client.search('uardrails'), [], 'Search matches word prefixes, not interior substrings');
       const heading = await client.search('block');
       assert.ok(heading.some((result) => result.type === 'heading' && result.url === `${page.url}#blocking`));
       const description = await client.search('determin');
       assert.ok(description.some((result) => result.type === 'text' && result.url === page.url));
-      assert.equal(fetches, 1);
+      assert.equal(fetches, 1, 'Opening search should load and cache the index once');
     } finally {
       globalThis.fetch = originalFetch;
     }
