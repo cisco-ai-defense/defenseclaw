@@ -1,0 +1,47 @@
+{
+  "recipients": ["ihabler", "habler-code", "vineethsai", "vineethsai7", "sanjayab23"],
+  "requirements": {
+    "discovery": "Our registered user/managed hook files must remain discoverable at their OS-specific paths.",
+    "registration": "Owned event groups, command handlers and matchers must remain valid.",
+    "delivery": "Required enforcement events must reach our hook at the expected stage.",
+    "payload": "Consumed fields must retain compatible names and JSON types.",
+    "decision": "The host must keep accepting and enforcing our emitted blocking response.",
+    "failure": "Blocking exit codes and failure handling must not become fail-open.",
+    "execution": "Ordering, synchronous execution, launchers and timeouts must preserve enforcement.",
+    "correlation": "Tool identity must correlate proposal/result events and lifecycle cleanup."
+  },
+  "connectors": {
+    "codex": {
+      "repository": "openai/codex",
+      "paths": "codex-rs/(hooks/|config/src/(?:hook_config|config_toml|config_requirements)\\.rs|utils/(?:home-dir|pty)/src/|core/src/(hook|tools/registry|session/session\\.rs))|hook|requirements|managed_config",
+      "notify_paths": "^codex-rs/(?:core/src/|hooks/(?:src/|schema/generated/)|features/src/|config/src/|utils/(?:home-dir|pty)/src/|app-server/src/)|^codex-rs/core/config\\.schema\\.json$",
+      "quiet_paths": "^(?:examples/|codex-rs/tui/.*hooks_browser)",
+      "priority_paths": "^codex-rs/(?:config/src/(?:hook_config|config_toml|config_requirements)\\.rs$|hooks/src/engine/(?:config|discovery|dispatcher)\\.rs$|core/src/(?:config|config_loader)/mod\\.rs$|core/src/hook_runtime\\.rs$|features/src/(?:lib|legacy)\\.rs$)",
+      "input_schemas": [
+        "codex-rs/hooks/schema/generated/pre-tool-use.command.input.schema.json",
+        "codex-rs/hooks/schema/generated/post-tool-use.command.input.schema.json"
+      ],
+      "output_schemas": ["codex-rs/hooks/schema/generated/pre-tool-use.command.output.schema.json"],
+      "local_files": [
+        "internal/gateway/codex_hook.go",
+        "internal/gateway/connector/codex.go",
+        "internal/gateway/connector/codex_policy_windows.go",
+        "internal/enterprisepolicy/paths.go",
+        "internal/gateway/connector/hookexec/spec.go"
+      ]
+    },
+    "claudecode": {
+      "repository": "anthropics/claude-code",
+      "paths": "hook|settings|managed|policy",
+      "notify_paths": "^(?:CHANGELOG\\.md$|mods/sec-default/hooks/|(?:src|lib)/|examples/settings/.*settings\\.json$)|(?:^|/)(?:managed-)?settings\\.json$",
+      "quiet_paths": "^(?:examples/|plugins/|mods/(?:types/|tsconfig\\.json$|(?:diff|telemetry|agents-md)/))",
+      "priority_paths": "^mods/sec-default/hooks/register\\.ts$",
+      "local_files": [
+        "internal/gateway/claude_code_hook.go",
+        "internal/gateway/connector/claudecode.go",
+        "internal/enterprisepolicy/paths.go",
+        "internal/gateway/connector/hookexec/spec.go"
+      ]
+    }
+  }
+}
