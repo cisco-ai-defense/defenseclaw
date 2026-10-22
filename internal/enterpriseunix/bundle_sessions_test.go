@@ -35,6 +35,9 @@ func TestDarwinBundleSessionScanFromFakeProcessLister(t *testing.T) {
 	}
 }
 
+// TestDarwinBundleSessionScanLauncherNotCounted verifies that on macOS a node
+// launcher line in ps output is ignored while the native codex binary is
+// counted once.
 func TestDarwinBundleSessionScanLauncherNotCounted(t *testing.T) {
 	const command = "ps -axww -o pid=,user=,lstart=,comm="
 	out := strings.Join([]string{
@@ -56,6 +59,9 @@ func TestDarwinBundleSessionScanLauncherNotCounted(t *testing.T) {
 	}
 }
 
+// TestBundleLinuxProcessesReadsParentPID verifies that bundleLinuxProcesses
+// parses the parent PID and script-host launcher flag from /proc/<pid>/stat
+// and /proc/<pid>/cmdline.
 func TestBundleLinuxProcessesReadsParentPID(t *testing.T) {
 	h := newTestHost(t, "linux")
 	boot := time.Date(2026, 10, 21, 20, 0, 0, 0, time.UTC).Unix()
@@ -75,11 +81,14 @@ func TestBundleLinuxProcessesReadsParentPID(t *testing.T) {
 	for _, p := range processes {
 		byPID[p.PID] = p
 	}
-	if byPID[3706701].PPID != 1900 || byPID[3706708].PPID != 3706701 {
-		t.Fatalf("processes = %+v, want PPIDs 1900 and 3706701", processes)
+	if byPID[3706701].PPID != 1900 || !byPID[3706701].Launcher || byPID[3706708].PPID != 3706701 || byPID[3706708].Launcher {
+		t.Fatalf("processes = %+v, want PPIDs 1900 (launcher) and 3706701 (native child)", processes)
 	}
 }
 
+// TestBundleSessionsCountNpmCodexOnce verifies end to end that an npm-launched
+// Codex session on Linux is counted once under the parent PID and clears to 0
+// when restarted.
 func TestBundleSessionsCountNpmCodexOnce(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{
@@ -118,6 +127,9 @@ func TestBundleSessionsCountNpmCodexOnce(t *testing.T) {
 	}
 }
 
+// TestLinuxAgentSessionsCollapsesLauncherPair verifies that linuxAgentSessions
+// collapses a script-host launcher and its native child into the parent PID
+// while keeping independent native-agent sessions separate.
 func TestLinuxAgentSessionsCollapsesLauncherPair(t *testing.T) {
 	h := newTestHost(t, "linux")
 	boot := time.Date(2026, 10, 21, 20, 0, 0, 0, time.UTC).Unix()
@@ -132,5 +144,12 @@ func TestLinuxAgentSessionsCollapsesLauncherPair(t *testing.T) {
 	sessions := h.env.linuxAgentSessions()
 	if len(sessions) != 1 || sessions[0].PID != 7001 || sessions[0].Agent != "cursor-agent" {
 		t.Fatalf("linuxAgentSessions = %+v, want single parent session pid 7001", sessions)
+	}
+
+	writeProc("8001", "1000", "/opt/agents/vendor/cursor-agent\x00", 60*100+10)
+	writeProc("8002", "8001", "/opt/agents/vendor/cursor-agent\x00", 60*100+15)
+	sessionsWithNativePair := h.env.linuxAgentSessions()
+	if len(sessionsWithNativePair) != 3 || sessionsWithNativePair[0].PID != 7001 || sessionsWithNativePair[1].PID != 8001 || sessionsWithNativePair[2].PID != 8002 {
+		t.Fatalf("linuxAgentSessions with native parent/child = %+v, want pids 7001, 8001, and 8002", sessionsWithNativePair)
 	}
 }

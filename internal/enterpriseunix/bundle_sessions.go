@@ -149,6 +149,9 @@ func (e *Env) bundleManagedSettingsTimes() (map[string]time.Time, error) {
 	return changed, nil
 }
 
+// bundleLinuxProcesses enumerates running agent CLI processes from /proc on
+// Linux, recording each process's PID, PPID, user, connector name, script-host
+// launcher status, and start time.
 func (e *Env) bundleLinuxProcesses(ctx context.Context, aliases map[string]string) ([]enterprisestatus.SessionProcess, error) {
 	stat, err := readBounded(e.P("/proc/stat"), 1<<20)
 	if err != nil {
@@ -187,7 +190,7 @@ func (e *Env) bundleLinuxProcesses(ctx context.Context, aliases map[string]strin
 			continue
 		}
 		argv := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
-		agent := agentCLIOf(argv)
+		agent, launcher := agentCLIAndLauncherOf(argv)
 		connector := bundleAgentName(agent, aliases)
 		if connector == "" {
 			continue
@@ -222,7 +225,7 @@ func (e *Env) bundleLinuxProcesses(ctx context.Context, aliases map[string]strin
 			who = account.Username
 		}
 		out = append(out, enterprisestatus.SessionProcess{PID: pid, PPID: ppid, User: who, Agent: connector,
-			StartedAt: time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100)})
+			Launcher: launcher, StartedAt: time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100)})
 	}
 	return out, nil
 }

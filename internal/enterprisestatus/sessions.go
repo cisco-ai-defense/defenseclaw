@@ -19,6 +19,7 @@ type SessionProcess struct {
 	PPID      int
 	User      string
 	Agent     string
+	Launcher  bool
 	StartedAt time.Time
 }
 
@@ -93,9 +94,10 @@ func UnprotectedSessions(processes []SessionProcess, changed map[string]time.Tim
 	return status
 }
 
-// collapseSessionProcesses collapses launcher/child pairs of the same user and
-// agent down to their topmost listed ancestor so one agent session is counted
-// once under the parent PID the user sees in ps and tmux.
+// collapseSessionProcesses collapses a script-host launcher and its native
+// child process of the same user and agent down to the launcher ancestor so
+// one agent session is counted once under the parent PID the user sees in ps
+// and tmux, while keeping independent native-agent sessions separate.
 func collapseSessionProcesses(processes []SessionProcess) []SessionProcess {
 	byPID := make(map[int]SessionProcess, len(processes))
 	for _, p := range processes {
@@ -111,11 +113,11 @@ func collapseSessionProcesses(processes []SessionProcess) []SessionProcess {
 		}
 		cur := p
 		for steps := 0; steps < len(byPID); steps++ {
-			if cur.PPID <= 0 || cur.PPID == cur.PID {
+			if cur.PPID <= 0 || cur.PPID == cur.PID || cur.Launcher {
 				break
 			}
 			parent, ok := byPID[cur.PPID]
-			if !ok || parent.Agent != cur.Agent || parent.User != cur.User {
+			if !ok || !parent.Launcher || parent.Agent != cur.Agent || parent.User != cur.User {
 				break
 			}
 			cur = parent

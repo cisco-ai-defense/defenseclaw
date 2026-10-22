@@ -110,10 +110,13 @@ func TestBundleDigestUnverifiableMarkerReachesStatus(t *testing.T) {
 	}
 }
 
+// TestUnprotectedSessionsCollapsesLauncherAndChild verifies that a script-host
+// launcher and its native child process for the same user and agent collapse
+// into one session entry carrying the parent launcher PID.
 func TestUnprotectedSessionsCollapsesLauncherAndChild(t *testing.T) {
 	changed := time.Date(2026, 10, 21, 22, 25, 0, 0, time.UTC)
 	rows := []SessionProcess{
-		{PID: 3706701, PPID: 1200, User: "alice", Agent: "codex", StartedAt: changed.Add(-2 * time.Minute)},
+		{PID: 3706701, PPID: 1200, User: "alice", Agent: "codex", Launcher: true, StartedAt: changed.Add(-2 * time.Minute)},
 		{PID: 3706708, PPID: 3706701, User: "alice", Agent: "codex", StartedAt: changed.Add(-2*time.Minute + 30*time.Millisecond)},
 	}
 	got := UnprotectedSessions(rows, map[string]time.Time{"codex": changed})
@@ -122,26 +125,41 @@ func TestUnprotectedSessionsCollapsesLauncherAndChild(t *testing.T) {
 	}
 }
 
+// TestUnprotectedSessionsKeepsIndependentSessions verifies that separate
+// launcher/child pairs and separate native-agent parent/child sessions of the
+// same user are counted independently.
 func TestUnprotectedSessionsKeepsIndependentSessions(t *testing.T) {
 	changed := time.Date(2026, 10, 21, 22, 25, 0, 0, time.UTC)
 	rows := []SessionProcess{
-		{PID: 1001, PPID: 500, User: "alice", Agent: "codex", StartedAt: changed.Add(-3 * time.Minute)},
+		{PID: 1001, PPID: 500, User: "alice", Agent: "codex", Launcher: true, StartedAt: changed.Add(-3 * time.Minute)},
 		{PID: 1002, PPID: 1001, User: "alice", Agent: "codex", StartedAt: changed.Add(-3 * time.Minute)},
-		{PID: 2001, PPID: 600, User: "alice", Agent: "codex", StartedAt: changed.Add(-2 * time.Minute)},
+		{PID: 2001, PPID: 600, User: "alice", Agent: "codex", Launcher: true, StartedAt: changed.Add(-2 * time.Minute)},
 		{PID: 2002, PPID: 2001, User: "alice", Agent: "codex", StartedAt: changed.Add(-2 * time.Minute)},
 	}
 	got := UnprotectedSessions(rows, map[string]time.Time{"codex": changed})
 	if got.State != "known" || got.Count != 2 || len(got.Entries) != 2 || got.Entries[0].PID != 1001 || got.Entries[1].PID != 2001 {
 		t.Fatalf("independent sessions = %+v, want count 2 with pids 1001 and 2001", got)
 	}
+
+	nativePair := []SessionProcess{
+		{PID: 2501, PPID: 700, User: "alice", Agent: "codex", StartedAt: changed.Add(-2 * time.Minute)},
+		{PID: 2502, PPID: 2501, User: "alice", Agent: "codex", StartedAt: changed.Add(-time.Minute)},
+	}
+	gotNative := UnprotectedSessions(nativePair, map[string]time.Time{"codex": changed})
+	if gotNative.State != "known" || gotNative.Count != 2 || len(gotNative.Entries) != 2 {
+		t.Fatalf("independent native parent/child sessions = %+v, want count 2", gotNative)
+	}
 }
 
+// TestUnprotectedSessionsDoesNotCollapseAcrossUserOrAgent verifies that
+// parent/child processes belonging to different agents or different users are
+// never merged into a single session.
 func TestUnprotectedSessionsDoesNotCollapseAcrossUserOrAgent(t *testing.T) {
 	changed := time.Date(2026, 10, 21, 22, 25, 0, 0, time.UTC)
 	rows := []SessionProcess{
-		{PID: 3001, PPID: 1, User: "alice", Agent: "claudecode", StartedAt: changed.Add(-time.Minute)},
+		{PID: 3001, PPID: 1, User: "alice", Agent: "claudecode", Launcher: true, StartedAt: changed.Add(-time.Minute)},
 		{PID: 3002, PPID: 3001, User: "alice", Agent: "codex", StartedAt: changed.Add(-time.Minute)},
-		{PID: 4001, PPID: 1, User: "alice", Agent: "codex", StartedAt: changed.Add(-time.Minute)},
+		{PID: 4001, PPID: 1, User: "alice", Agent: "codex", Launcher: true, StartedAt: changed.Add(-time.Minute)},
 		{PID: 4002, PPID: 4001, User: "bob", Agent: "codex", StartedAt: changed.Add(-time.Minute)},
 	}
 	got := UnprotectedSessions(rows, map[string]time.Time{"claudecode": changed, "codex": changed})
@@ -150,10 +168,12 @@ func TestUnprotectedSessionsDoesNotCollapseAcrossUserOrAgent(t *testing.T) {
 	}
 }
 
+// TestUnprotectedSessionsPPIDCycleTerminates verifies that cyclic PPID
+// references terminate cleanly without hanging and yield a bounded count.
 func TestUnprotectedSessionsPPIDCycleTerminates(t *testing.T) {
 	changed := time.Date(2026, 10, 21, 22, 25, 0, 0, time.UTC)
 	rows := []SessionProcess{
-		{PID: 5001, PPID: 5002, User: "alice", Agent: "codex", StartedAt: changed.Add(-time.Minute)},
+		{PID: 5001, PPID: 5002, User: "alice", Agent: "codex", Launcher: true, StartedAt: changed.Add(-time.Minute)},
 		{PID: 5002, PPID: 5001, User: "alice", Agent: "codex", StartedAt: changed.Add(-time.Minute)},
 	}
 	got := UnprotectedSessions(rows, map[string]time.Time{"codex": changed})

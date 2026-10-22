@@ -87,18 +87,26 @@ func isScriptHost(name string) bool {
 
 // agentCLIOf names the agent CLI a command line runs, or "".
 func agentCLIOf(argv []string) string {
+	agent, _ := agentCLIAndLauncherOf(argv)
+	return agent
+}
+
+// agentCLIAndLauncherOf names the agent CLI a command line runs and reports
+// whether argv invokes it through a script-host launcher (such as node or
+// python) rather than executing a native agent binary directly.
+func agentCLIAndLauncherOf(argv []string) (string, bool) {
 	if len(argv) == 0 {
-		return ""
+		return "", false
 	}
 	if strings.Contains(argv[0], "/.local/share/claude/versions/") {
-		return "claude"
+		return "claude", false
 	}
 	name := filepath.Base(argv[0])
 	if agentCLINames[name] {
-		return name
+		return name, false
 	}
 	if !isScriptHost(name) {
-		return ""
+		return "", false
 	}
 	for index, argument := range argv[1:] {
 		switch {
@@ -106,30 +114,31 @@ func agentCLIOf(argv []string) string {
 			if index+2 < len(argv) {
 				for module, agent := range agentModuleNames {
 					if strings.Contains(argv[index+2], module) {
-						return agent
+						return agent, true
 					}
 				}
 			}
-			return ""
+			return "", false
 		case strings.HasPrefix(argument, "-"):
 			continue
 		}
 		script := strings.TrimSuffix(filepath.Base(argument), filepath.Ext(argument))
 		if agentCLINames[script] {
-			return script
+			return script, true
 		}
-		return ""
+		return "", false
 	}
-	return ""
+	return "", false
 }
 
 // agentSession is a running agent CLI process.
 type agentSession struct {
-	PID     int
-	PPID    int
-	UID     int
-	Agent   string
-	Started time.Time
+	PID      int
+	PPID     int
+	UID      int
+	Agent    string
+	Launcher bool
+	Started  time.Time
 	// Unknown marks an unreadable agent-shaped command on macOS.
 	Unknown bool
 	// CodexServer marks the Codex background server.
@@ -192,7 +201,7 @@ func (e *Env) linuxAgentSessions() []agentSession {
 			continue
 		}
 		argv := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
-		agent := agentCLIOf(argv)
+		agent, launcher := agentCLIAndLauncherOf(argv)
 		if agent == "" {
 			continue
 		}
@@ -222,11 +231,14 @@ func (e *Env) linuxAgentSessions() []agentSession {
 			continue
 		}
 		started := time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100)
-		out = append(out, agentSession{PID: pid, PPID: ppid, UID: int(owner.Uid), Agent: agent, Started: started, CodexServer: codexBackgroundServer(argv)})
+		out = append(out, agentSession{PID: pid, PPID: ppid, UID: int(owner.Uid), Agent: agent, Launcher: launcher, Started: started, CodexServer: codexBackgroundServer(argv)})
 	}
 	return collapseAgentSessions(out)
 }
 
+// collapseAgentSessions collapses a script-host launcher and its native child
+// agent process for the same UID and agent into the parent launcher session
+// while keeping independent native-agent sessions separate.
 func collapseAgentSessions(sessions []agentSession) []agentSession {
 	byPID := make(map[int]agentSession, len(sessions))
 	for _, s := range sessions {
@@ -242,11 +254,11 @@ func collapseAgentSessions(sessions []agentSession) []agentSession {
 		}
 		cur := s
 		for steps := 0; steps < len(byPID); steps++ {
-			if cur.PPID <= 0 || cur.PPID == cur.PID {
+			if cur.PPID <= 0 || cur.PPID == cur.PID || cur.Launcher {
 				break
 			}
 			parent, ok := byPID[cur.PPID]
-			if !ok || parent.Agent != cur.Agent || parent.UID != cur.UID || parent.CodexServer != cur.CodexServer || parent.Unknown != cur.Unknown {
+			if !ok || !parent.Launcher || parent.Agent != cur.Agent || parent.UID != cur.UID || parent.CodexServer != cur.CodexServer || parent.Unknown != cur.Unknown {
 				break
 			}
 			cur = parent
