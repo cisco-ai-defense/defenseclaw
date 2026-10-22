@@ -101,3 +101,16 @@ async def test_stopped_gateway_recovery_is_whole_on_the_80x24_overview(tmp_path)
         notices = app.overview_model.build_notices()
     recovery = next(notice.message for notice in notices if "Gateway is not running" in notice.message)
     assert any(recovery in line for line in screen.splitlines()), screen
+
+
+async def test_initial_audit_loading_notice_is_whole_on_the_80x24_overview(tmp_path) -> None:
+    app = fixtures.snapshot_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.overview_model.history_loading = True
+        app.action_switch_panel("overview")
+        await pilot.pause()
+        notices = app.overview_model.build_notices()
+        loading = next(notice.message for notice in notices if "Loading the audit history" in notice.message)
+        screen = fixtures.screen_text(app)
+    assert any(loading in line for line in screen.splitlines()), screen
