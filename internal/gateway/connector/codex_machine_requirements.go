@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -316,19 +317,6 @@ func windowsCodexMachineProfileGroups(opts WindowsCodexMachineRequirementsOption
 		return codexHookGroups
 	}
 	return windowsCodexMachineGroups(opts.HookContractID)
-}
-
-// windowsCodexMachineRemovableGroups is every group shape opts may find from
-// this or the previous release: the current matrix and the legacy one, so
-// removal also takes the groups an install before the compact matcher wrote.
-func windowsCodexMachineRemovableGroups(opts WindowsCodexMachineRequirementsOptions) []codexHookGroup {
-	groups := append([]codexHookGroup(nil), windowsCodexMachineProfileGroups(opts)...)
-	for _, legacy := range codexHookGroups {
-		if !slices.Contains(groups, legacy) {
-			groups = append(groups, legacy)
-		}
-	}
-	return groups
 }
 
 func windowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptions) codexMachineRequirementsLayout {
@@ -776,7 +764,7 @@ func windowsCodexRequirementsContainExactManagedHook(
 	if !ok {
 		return false, nil
 	}
-	for _, expected := range windowsCodexMachineRemovableGroups(opts) {
+	for _, expected := range windowsCodexMachineProfileGroups(opts) {
 		groups, _ := hooks[expected.eventType].([]interface{})
 		for _, candidate := range groups {
 			if windowsCodexMachineGroupMatches(candidate, expected, opts) {
@@ -804,7 +792,7 @@ func removeWindowsCodexRequirementsOwnedChanges(
 	hooks, cfgHooks := cfg["hooks"].(map[string]interface{})
 	baseHooks, baseHadHooks := base["hooks"].(map[string]interface{})
 	if cfgHooks {
-		for _, expected := range windowsCodexMachineRemovableGroups(opts) {
+		for _, expected := range windowsCodexMachineProfileGroups(opts) {
 			groups, _ := hooks[expected.eventType].([]interface{})
 			baselineGroups, _ := baseHooks[expected.eventType].([]interface{})
 			baselineCount := 0
@@ -847,9 +835,12 @@ func removeWindowsCodexRequirementsOwnedChanges(
 		// is DefenseClaw's, and one left behind would run a removed binary.
 		// A baseline that an earlier release recorded with its own groups
 		// (a requirements file recovered to that release's bytes) no longer
-		// strands the uninstall on them (GAP-0907).
+		// strands the uninstall on them (GAP-0907). This install's own
+		// group in a shape this install does not render is an
+		// administrator's edit and stays, unless the recorded baseline holds
+		// that same group (windowsCodexEditedCurrentGroup).
 		if windowsCodexOwnedGroupsRecognized(opts) {
-			removeWindowsCodexOwnedGroups(hooks, opts)
+			removeWindowsCodexOwnedGroups(hooks, baseHooks, opts)
 		}
 
 		// The isolation booleans and managed directory are shared prerequisites
@@ -918,6 +909,33 @@ func removeWindowsCodexRequirementsOwnedChanges(
 	return rendered, !bytes.Equal(current, rendered), nil
 }
 
+// windowsCodexEditedCurrentGroup reports whether raw, listed under
+// hooks.<event>, runs exactly the command this install renders for event
+// but is not the group this install renders there. Another release renders
+// that shape (the SessionStart matcher before the compact source), so the
+// shape alone does not make it DefenseClaw's: it is what an administrator
+// who edits this install's group gets (the compact source cut from the
+// matcher). An upgrade replaces it, as the earlier release's group
+// (reconcile's owned); a removal leaves it unless the recorded preimage
+// holds that same group, and its reference to the managed directory keeps
+// the binary removal unsafe.
+func windowsCodexEditedCurrentGroup(raw interface{}, event string, opts WindowsCodexMachineRequirementsOptions) bool {
+	command := windowsCodexManagedHookCommandFor(opts, event)
+	for _, shape := range windowsCodexMachineProfileGroups(opts) {
+		if shape.eventType == event && windowsCodexMachineGroupHasCommand(raw, shape, command) {
+			return false
+		}
+	}
+	group, _ := raw.(map[string]interface{})
+	handlers, _ := group["hooks"].([]interface{})
+	if len(handlers) != 1 {
+		return false
+	}
+	handler, _ := handlers[0].(map[string]interface{})
+	got, _ := handler["command"].(string)
+	return got == command
+}
+
 // windowsCodexOwnedGroupsRecognized reports whether opts recognizes
 // DefenseClaw's managed groups of any release by their hook binary: a
 // standalone layout (bound to a hook contract), as reconcile does.
@@ -926,16 +944,21 @@ func windowsCodexOwnedGroupsRecognized(opts WindowsCodexMachineRequirementsOptio
 }
 
 // removeWindowsCodexOwnedGroups drops every DefenseClaw managed group of any
-// release from each event list of hooks.
-func removeWindowsCodexOwnedGroups(hooks map[string]interface{}, opts WindowsCodexMachineRequirementsOptions) {
+// release from each event list of hooks, except this install's own group as
+// an administrator edited it that baseHooks (the recorded preimage) does not
+// hold (windowsCodexEditedCurrentGroup).
+func removeWindowsCodexOwnedGroups(hooks, baseHooks map[string]interface{}, opts WindowsCodexMachineRequirementsOptions) {
 	for key, raw := range hooks {
 		groups, ok := raw.([]interface{})
 		if !ok || key == "windows_managed_dir" || key == "state" {
 			continue
 		}
+		recorded, _ := baseHooks[key].([]interface{})
 		kept := make([]interface{}, 0, len(groups))
 		for _, group := range groups {
-			if !windowsCodexOwnedHookGroup(group, key, opts.HookBinary) {
+			edited := windowsCodexEditedCurrentGroup(group, key, opts) &&
+				!slices.ContainsFunc(recorded, func(entry interface{}) bool { return reflect.DeepEqual(entry, group) })
+			if edited || !windowsCodexOwnedHookGroup(group, key, opts.HookBinary) {
 				kept = append(kept, group)
 			}
 		}
@@ -952,8 +975,9 @@ func removeWindowsCodexOwnedGroups(hooks map[string]interface{}, opts WindowsCod
 
 // windowsCodexRequirementsHoldOwnedLeftovers reports whether raw still holds
 // what a standalone removal takes: a DefenseClaw managed group of any
-// release, or, with no hook left, a managed directory that names this
-// install's own directory.
+// release (not this install's group as an administrator edited it,
+// windowsCodexEditedCurrentGroup), or, with no hook left, a managed directory
+// that names this install's own directory.
 func windowsCodexRequirementsHoldOwnedLeftovers(raw []byte, opts WindowsCodexMachineRequirementsOptions) (bool, error) {
 	if !windowsCodexOwnedGroupsRecognized(opts) {
 		return false, nil
@@ -972,7 +996,7 @@ func windowsCodexRequirementsHoldOwnedLeftovers(raw []byte, opts WindowsCodexMac
 			continue
 		}
 		for _, group := range groups {
-			if windowsCodexOwnedHookGroup(group, key, opts.HookBinary) {
+			if windowsCodexOwnedHookGroup(group, key, opts.HookBinary) && !windowsCodexEditedCurrentGroup(group, key, opts) {
 				return true, nil
 			}
 		}
