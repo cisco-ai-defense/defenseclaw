@@ -208,6 +208,7 @@ type SandboxDaemon struct {
 	listenMu     sync.Mutex
 	listenCancel context.CancelFunc
 	listenDone   chan struct{}
+	listenFailed atomic.Pointer[listenerFailure]
 	runCtx       context.Context
 
 	// lifecycle (capacity 1) serializes managed creates and starts with
@@ -1590,13 +1591,16 @@ func (d *SandboxDaemon) ensureListeners() error {
 	ingressAddr := d.api.SandboxIngressAddr()
 	ingress, err := net.Listen("tcp", ingressAddr)
 	if err != nil {
+		d.listenFailed.Store(&listenerFailure{part: "ingress", err: err})
 		return sandboxListenError(err)
 	}
 	egressLn, err := egress.Listen(d.rt.egressAddr)
 	if err != nil {
 		_ = ingress.Close()
+		d.listenFailed.Store(&listenerFailure{part: "egress", err: err})
 		return sandboxListenError(err)
 	}
+	d.listenFailed.Store(nil)
 	ctx, cancel := context.WithCancel(d.runCtx)
 	done := make(chan struct{})
 	d.listenCancel, d.listenDone = cancel, done
@@ -1605,30 +1609,34 @@ func (d *SandboxDaemon) ensureListeners() error {
 	d.rt.setListening("egress", true)
 	var wg sync.WaitGroup
 	wg.Add(2)
-	lost := make(chan string, 2)
+	lost := make(chan listenerFailure, 2)
 	go func() {
 		defer wg.Done()
 		defer d.rt.setListening("ingress", false)
 		if err := d.api.RunSandboxIngressOn(ctx, ingress); err != nil && ctx.Err() == nil {
 			d.logf("sandbox ingress: %v", err)
-			lost <- "ingress"
+			failure := &listenerFailure{part: "ingress", err: err}
+			d.listenFailed.Store(failure)
+			lost <- *failure
 		}
 	}()
 	go func() {
 		defer wg.Done()
 		if err := d.rt.serveEgressOn(ctx, egressLn, true); err != nil && ctx.Err() == nil {
 			d.logf("sandbox egress: %v", err)
-			lost <- "egress"
+			failure := &listenerFailure{part: "egress", err: err}
+			d.listenFailed.Store(failure)
+			lost <- *failure
 		}
 	}()
 	go func() {
 		select {
-		case part := <-lost:
+		case failure := <-lost:
 			// A listener died under running sandboxes: stop them (their
 			// hooks and egress would reach whatever binds the port next)
 			// and let the next create bind both again.
 			cancel()
-			stopSandboxesWithoutListener(context.WithoutCancel(ctx), d.rt.manager, d.rt.publish, part, map[string]bool{})
+			stopSandboxesWithoutListener(context.WithoutCancel(ctx), d.rt.manager, d.rt.publish, failure.part, map[string]bool{})
 		case <-ctx.Done():
 		}
 		wg.Wait()
@@ -1640,6 +1648,15 @@ func (d *SandboxDaemon) ensureListeners() error {
 		d.listenMu.Unlock()
 	}()
 	return nil
+}
+
+type listenerFailure struct {
+	part string
+	err  error
+}
+
+func (d *SandboxDaemon) lastListenerFailure() *listenerFailure {
+	return d.listenFailed.Load()
 }
 
 // releaseListeners frees the ingress and egress ports.
@@ -1933,7 +1950,7 @@ func (c *managedSandboxController) Status(ctx context.Context) (*sandboxapi.Stat
 			c.d.driverInForce(st.Managed, st.Gateway.Driver)
 		}
 		c.d.neutralGatewayStatus(st)
-		c.d.rt.statusListenerAddresses(st)
+		c.d.statusListenerAddresses(st)
 		// The daemon's own resolution knows neither the caller's required
 		// pack nor its profile minimum: the pack and profile are the
 		// managed gateway's for the caller's newest sandbox, else for a
@@ -1950,6 +1967,18 @@ func (c *managedSandboxController) Status(ctx context.Context) (*sandboxapi.Stat
 		cancel()
 	}
 	return st, err
+}
+
+// statusListenerAddresses keeps a failed bind or lost managed listener as
+// the status cause until ensureListeners successfully binds again. The
+// runtime still clears every address the daemon no longer holds.
+func (d *SandboxDaemon) statusListenerAddresses(st *sandboxapi.Status) {
+	if failure := d.lastListenerFailure(); st.Enabled && st.Available && failure != nil {
+		st.Available = false
+		st.Reason = fmt.Sprintf("the sandbox %s listener is not running in this process: %v; check openshell.%s_port, fix the listener error, then restart the DefenseClaw daemon",
+			failure.part, failure.err, failure.part)
+	}
+	d.rt.statusListenerAddresses(st)
 }
 
 // driverInForce makes m name the compute driver the connected gateway runs

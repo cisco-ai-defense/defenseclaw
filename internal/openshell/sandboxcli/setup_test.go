@@ -32,6 +32,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -108,6 +109,28 @@ func TestSetupWaitDaemonRefusesSquattedIngress(t *testing.T) {
 	ta.fresh()
 	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
 	has(t, ta.output(), "not ready for sandboxes yet", "openshell.ingress_port", "restart")
+}
+
+func TestSetupWaitDaemonWaitsForListenersToBind(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	ta.daemon.status.IngressAddr = ""
+	polls, sleeps := 0, 0
+	ta.daemon.onStatus = func(st *sandboxapi.Status) {
+		polls++
+		if polls == 2 {
+			st.IngressAddr = "127.0.0.1:18971"
+		}
+	}
+	ta.Sleep = func(context.Context, time.Duration) error {
+		sleeps++
+		return nil
+	}
+	ready, _, down := ta.waitDaemon(context.Background(), openshell.DriverDocker)
+	if !ready || down || polls != 2 || sleeps != 1 {
+		t.Fatalf("waitDaemon = ready %t, down %t, polls %d, sleeps %d; output:\n%s", ready, down, polls, sleeps, ta.output())
+	}
+	has(t, ta.output(), "the daemon runs the sandbox subsystem")
+	lacks(t, ta.output(), "another process may hold the port")
 }
 
 // noCloseClient keeps the shared fake gateway open when a command closes

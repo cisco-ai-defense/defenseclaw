@@ -704,8 +704,8 @@ func TestEnterpriseOpenShellUnpinnedSetupOffUpgradeConfig(t *testing.T) {
 				t.Fatalf("off config refused after upgrade: %v", err)
 			}
 			cfg.OpenShell.Enabled = true
-			if err := resolveEnterpriseConfig(cfg, goos, "standalone"); err == nil || !strings.Contains(err.Error(), "install: setup needs an exact version") {
-				t.Fatalf("enabled setup without a pin = %v", err)
+			if err := resolveEnterpriseConfig(cfg, goos, "standalone"); err != nil {
+				t.Fatalf("enabled legacy setup config refused on load: %v", err)
 			}
 		})
 	}

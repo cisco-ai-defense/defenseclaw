@@ -179,7 +179,7 @@ func TestManagedDeleteWhenSandboxesOffNamesRecovery(t *testing.T) {
 	ta.daemon.status.Available = false
 	ta.daemon.status.Reason = "the administrator turned sandboxes off"
 	err := ta.Delete(context.Background(), DeleteOptions{Names: []string{"kept"}, Yes: true})
-	if err == nil || !strings.Contains(err.Error(), "enterprise.openshell.enabled") || !strings.Contains(err.Error(), "sandbox delete kept") {
+	if err == nil || !strings.Contains(err.Error(), "openshell.enabled") || strings.Contains(err.Error(), "enterprise.openshell.enabled") || !strings.Contains(err.Error(), "sandbox delete kept") {
 		t.Fatalf("disabled managed delete = %v", err)
 	}
 	if got := len(ta.daemon.callsTo("DELETE", "kept")); got != 0 {

@@ -21,6 +21,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -271,6 +272,67 @@ func TestManagedStatusPreservesGatewayCauseWhenListenersIdle(t *testing.T) {
 	if err != nil || st == nil || st.Available || st.IngressAddr != "" ||
 		!strings.Contains(st.Reason, "gateway registration") || strings.Contains(st.Reason, "openshell.ingress_port") {
 		t.Fatalf("managed status hid the primary unavailable cause: %+v, %v", st, err)
+	}
+}
+
+// An idle managed daemon deliberately releases both sandbox listeners. A
+// reachable gateway still makes it ready for the next run, which binds them.
+func TestManagedStatusIdleReleaseKeepsGatewayAvailable(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.run(t)
+	if err := f.d.ensureListeners(); err != nil {
+		t.Fatal(err)
+	}
+	if stop, err := f.d.check(context.Background()); stop || err != nil || f.d.listening() {
+		t.Fatalf("idle check did not release listeners: stop %t, err %v", stop, err)
+	}
+	zero := 0
+	st := &sandboxapi.Status{Enabled: true, Available: true, Live: &zero,
+		Gateway: &sandboxapi.Gateway{Healthy: true, Driver: "docker"}, Managed: &sandboxapi.ManagedStatus{},
+		IngressAddr: f.d.api.SandboxIngressAddr(), EgressAddr: f.d.rt.egressAddr}
+	f.d.statusListenerAddresses(st)
+	if !st.Available || st.Reason != "" || st.IngressAddr != "" || st.EgressAddr != "" {
+		t.Fatalf("healthy idle managed status = %+v", st)
+	}
+	active := 1
+	st.Live = &active
+	f.d.statusListenerAddresses(st)
+	if st.Available || !strings.Contains(st.Reason, "listener is not running") {
+		t.Fatalf("lost listener under a running sandbox = %+v", st)
+	}
+}
+
+func TestManagedStatusKeepsBindFailureUntilListenersRecover(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.run(t)
+	addr := f.d.api.SandboxIngressAddr()
+	squatter, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.ensureListeners(); err == nil {
+		t.Fatal("busy ingress port was accepted")
+	}
+	zero := 0
+	status := func() *sandboxapi.Status {
+		st := &sandboxapi.Status{Enabled: true, Available: true, Live: &zero,
+			Gateway: &sandboxapi.Gateway{Healthy: true}, Managed: &sandboxapi.ManagedStatus{},
+			IngressAddr: addr, EgressAddr: f.d.rt.egressAddr}
+		f.d.statusListenerAddresses(st)
+		return st
+	}
+	if st := status(); st.Available || !strings.Contains(st.Reason, "address already in use") ||
+		!strings.Contains(st.Reason, "openshell.ingress_port") || st.IngressAddr != "" {
+		t.Fatalf("bind failure hidden by idle status: %+v", st)
+	}
+	if err := squatter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.ensureListeners(); err != nil {
+		t.Fatal(err)
+	}
+	if st := status(); !st.Available || st.Reason != "" || st.IngressAddr == "" || st.EgressAddr == "" {
+		t.Fatalf("recovered listener still unavailable: %+v", st)
 	}
 }
 

@@ -1684,25 +1684,29 @@ func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) (r
 		if err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
 			drives = openshell.ComputeDriver(st.Gateway.Driver)
 		}
+		missingListeners := err == nil && st.Enabled &&
+			(st.Available || strings.Contains(st.Reason, "listener is not running in this process")) &&
+			(st.IngressAddr == "" || st.EgressAddr == "")
 		switch {
 		case err != nil:
 			return false, false, true
-		case st.Enabled && (st.Available || strings.Contains(st.Reason, "listener is not running in this process")) && (st.IngressAddr == "" || st.EgressAddr == ""):
-			var missing []string
-			if st.IngressAddr == "" {
-				missing = append(missing, "ingress (openshell.ingress_port)")
-			}
-			if st.EgressAddr == "" {
-				missing = append(missing, "egress (openshell.egress_port)")
-			}
-			a.warn("the daemon does not hold its sandbox " + strings.Join(missing, " and ") + " listener; another process may hold the port. Free or move the port, then restart it with `defenseclaw-gateway restart` and rerun setup")
-			return false, false, false
-		case st.Enabled && st.Available && (driver == "" || drives == driver):
+		case st.Enabled && st.Available && !missingListeners && (driver == "" || drives == driver):
 			a.ok("the daemon runs the sandbox subsystem (ingress " + st.IngressAddr + ", egress proxy " + st.EgressAddr + ")")
 			return true, st.DockerGroupMissing, false
 		}
 		// The polls bound the wait when the clock does not move.
 		if a.Now().After(deadline) || time.Duration(polls)*poll >= wait {
+			if missingListeners {
+				var missing []string
+				if st.IngressAddr == "" {
+					missing = append(missing, "ingress (openshell.ingress_port)")
+				}
+				if st.EgressAddr == "" {
+					missing = append(missing, "egress (openshell.egress_port)")
+				}
+				a.warn("the daemon does not hold its sandbox " + strings.Join(missing, " and ") + " listener; another process may hold the port. Free or move the port, then restart it with `defenseclaw-gateway restart` and rerun setup")
+				return false, false, false
+			}
 			if st.Enabled && st.Available {
 				a.warn(fmt.Sprintf("the daemon still drives the OpenShell gateway as the %s driver, not %s; restart it (`defenseclaw-gateway restart`) "+
 					"if `%s doctor` says the same", drives, driver, CommandName))

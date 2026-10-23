@@ -77,6 +77,19 @@ func TestRunDisabledNamesTheMissingRuntimeBeforeCreating(t *testing.T) {
 	}
 }
 
+func TestStartConflictInLandlockErrorStateNamesMicroVMStep(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.GOOS = "darwin"
+	ta.daemon.status.Gateway.Driver = "docker"
+	sb := sampleSandbox("stuck")
+	cause := sandboxapi.Errorf(sandboxapi.CodeConflict, "stuck is in OpenShell's error state: Landlock is unavailable")
+	err := ta.startError(context.Background(), ta.API, &sb, cause)
+	if !sandboxapi.IsCode(err, sandboxapi.CodeConflict) || !strings.Contains(err.Error(), "Landlock is unavailable") ||
+		!strings.Contains(err.Error(), "switch the gateway to MicroVMs with `defenseclaw sandbox setup`") {
+		t.Fatalf("typed conflict lost cause or next step: %v", err)
+	}
+}
+
 func TestRunMountSessionKeepsChanges(t *testing.T) {
 	ta := newTestApp(t, "y\n")
 	ta.env["ANTHROPIC_API_KEY"] = "sk-test-not-a-secret"
