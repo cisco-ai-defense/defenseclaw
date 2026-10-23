@@ -6,13 +6,20 @@
 package gateway
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -59,5 +66,44 @@ func TestUtmpFallbackConfirmsALongDirectoryName(t *testing.T) {
 	owner = 1001
 	if facts, ok := verifyPeerSession(1001, 4201, long[:20], claim); ok {
 		t.Fatalf("a shorter name matched a full utmp field: %+v", facts)
+	}
+}
+
+// GAP-0653: a per-user gateway that is not root cannot show that SSSD holds
+// no other account of its uid. Its own account's groups are its kernel
+// credentials, so a group assignment decides as for proven groups; only an
+// assignment that names an account is refused, naming the account holder.
+func TestPerUserGatewayDecidesGroupsFromItsOwnCredentials(t *testing.T) {
+	previous := processGroupIDs
+	t.Cleanup(func() { processGroupIDs = previous })
+	processGroupIDs = func() ([]int, error) { return []int{os.Getgid()}, nil }
+	resolver, err := unixidentity.NewNSSResolver(context.Background())
+	if err != nil {
+		t.Skipf("no NSS resolver: %v", err)
+	}
+	uid := os.Getuid()
+	facts, ok := processCredentialFacts(resolver, uid, time.Now())
+	if !ok || !facts.HolderUnproven || len(facts.Groups) != 1 || len(facts.UnconfirmedGroups) != 0 {
+		t.Fatalf("facts = %+v, %v; want the gateway's own named group, holder unproven", facts, ok)
+	}
+	if _, ok := processCredentialFacts(resolver, uid+1, time.Now()); ok {
+		t.Fatal("another uid must not get the gateway's own credentials")
+	}
+	subject := profileSubjectFromVerified(VerifiedSubject{UserID: strconv.Itoa(uid), IDKind: useridentity.KindPOSIXUID,
+		UserName: "t7ar-u1", Directory: facts, Source: subjectSourceProcessOwner}, true)
+	p := identityTestPlatforms[0]
+	byGroup := func(group string) config.ProfileAssignment {
+		return config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{group}}}
+	}
+	if got := identityTestSet(t, p, "watch", byGroup(facts.Groups[0])).match(&subject, profileSubjectProcessOwner, "claudecode", ""); got.Refused != "" || got.Name != "strict" {
+		t.Fatalf("member: %+v; want strict, not refused", got)
+	}
+	if got := identityTestSet(t, p, "watch", byGroup("dc-r104-id-strict")).match(&subject, profileSubjectProcessOwner, "claudecode", ""); got.Refused != "" || got.Name != "watch" {
+		t.Fatalf("not a member: %+v; want watch, not refused", got)
+	}
+	byName := config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{"t7ar-u1"}}}
+	got := identityTestSet(t, p, "watch", byName).match(&subject, profileSubjectProcessOwner, "claudecode", "")
+	if !strings.Contains(got.Refused, "account holder is unconfirmed") || !slices.Equal(got.Unproven, []string{"account:unknown"}) {
+		t.Fatalf("users entry: %+v; want a refusal naming the account holder only", got)
 	}
 }

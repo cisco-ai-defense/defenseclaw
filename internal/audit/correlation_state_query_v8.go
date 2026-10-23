@@ -25,6 +25,7 @@ type CorrelationPendingQuery struct {
 	Status              CorrelationOperationStatus
 	Name                string
 	SessionID           string
+	SessionIDOrAbsent   bool
 	TurnID              string
 	AgentID             string
 	ExecutionID         string
@@ -177,13 +178,20 @@ func (repo *CorrelationRepository) ListPendingOperations(
 		{"operation_namespace", query.Namespace}, {"operation_kind", string(query.Kind)},
 		{"operation_id", query.OperationID}, {"operation_type", string(query.Type)},
 		{"scope_kind", string(query.ScopeKind)}, {"scope_id", query.ScopeID}, {"status", string(query.Status)},
-		{"operation_name", query.Name}, {"session_id", query.SessionID}, {"turn_id", query.TurnID},
+		{"operation_name", query.Name}, {"turn_id", query.TurnID},
 		{"agent_id", query.AgentID}, {"execution_id", query.ExecutionID},
 	} {
 		if filter.value != "" {
 			clauses = append(clauses, filter.column+"=?")
 			args = append(args, filter.value)
 		}
+	}
+	if query.SessionIDOrAbsent {
+		clauses = append(clauses, "(session_id=? OR session_id IS NULL)")
+		args = append(args, query.SessionID)
+	} else if query.SessionID != "" {
+		clauses = append(clauses, "session_id=?")
+		args = append(args, query.SessionID)
 	}
 	args = append(args, limit)
 	release, err := repo.store.acquireReady()
@@ -302,6 +310,9 @@ func (repo *CorrelationRepository) validatePendingQuery(ctx context.Context, que
 	}
 	if query.Limit < 0 || query.Limit > maxCorrelationStateQueryLimit {
 		return fmt.Errorf("audit: pending operation query limit must be between 0 and %d", maxCorrelationStateQueryLimit)
+	}
+	if query.SessionIDOrAbsent && query.SessionID == "" {
+		return errors.New("audit: session-or-absent pending lookup requires a session id")
 	}
 	for field, value := range map[string]string{
 		"pending operation namespace": query.Namespace, "pending operation id": query.OperationID,

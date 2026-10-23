@@ -101,6 +101,10 @@ type profileSubject struct {
 	// viaProcessOwner marks a subject verified as the per-user gateway's own
 	// account, so explain and telemetry report it as process_owner.
 	viaProcessOwner bool
+	// holderUnproven marks facts that do not show which account holds the
+	// uid (useridentity.DirectoryFacts.HolderUnproven): the account and its
+	// UPN are unproven, its groups are not (resolveIdentity).
+	holderUnproven bool
 	// nameUnconfirmed marks a UserName that kept a domain the directory facts
 	// do not confirm (profileUserName): no users entry matches it by name.
 	nameUnconfirmed bool
@@ -804,6 +808,7 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 			s.Directory.Source == useridentity.SourceSSSDInfoPipe) &&
 			s.Directory.Directory == useridentity.DirectoryActiveDirectory &&
 			strings.ContainsAny(s.UserName, `@\`),
+		holderUnproven: lookupAttempted && s.Directory.HolderUnproven,
 	}
 }
 
