@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -843,7 +844,10 @@ func TestManagedRunRefusalComesFromTheCreate(t *testing.T) {
 	refused(ta, "openshell.admin.allowed_harnesses", "claude is not an allowed harness")
 	err = ta.Run(bg, RunOptions{Harness: "claude"})
 	wantErr(t, err, "claude is not an allowed harness")
-	if ta.creates() != 1 || len(ta.copy.steps) != 0 || len(ta.daemon.calls) == 0 || !ta.deletedOne() {
+	// The delete forgets the CLI's state of the sandbox (its staged copy,
+	// which there is none of, included): nothing was staged.
+	if ta.creates() != 1 || slices.ContainsFunc(ta.copy.steps, func(s string) bool { return !strings.HasPrefix(s, "discard ") }) ||
+		len(ta.daemon.calls) == 0 || !ta.deletedOne() {
 		t.Fatalf("a create the gateway let through was kept: creates %d, copy steps %v", ta.creates(), ta.copy.steps)
 	}
 }

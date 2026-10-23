@@ -271,3 +271,16 @@ func publishedSessionFolderOwnerUID(path string) (uint32, error) {
 // account can list and only root and the gateway service can add a file
 // to). The record folder itself is not listable (0711).
 func publishedSessionMarkDir(_, keyDir string) string { return keyDir }
+
+// publishedSessionClosedPath is the closed mark of the account digest under
+// the record folder root: <root>/<digest>.closed. The record folder (0711,
+// the gateway service's) is apart from the key folder the revocation marks
+// go in; every account can read the mark by its name, and only root and the
+// gateway service can add or remove it.
+func publishedSessionClosedPath(root, digest string) (string, bool) {
+	clean, ok := publishedSessionClosedPlace(root, digest)
+	if !ok {
+		return "", false
+	}
+	return filepath.Join(clean, digest+publishedSessionClosedSuffix), true
+}

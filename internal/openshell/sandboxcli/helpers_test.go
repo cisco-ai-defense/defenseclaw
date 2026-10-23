@@ -811,8 +811,9 @@ type fakeCopy struct {
 	pulled    []workspace.PullOptions
 	// refreshErr is what Refresh fails with.
 	refreshErr error
-	// onPull runs as a Pull (not a reuse) reads the copy.
-	onPull func()
+	// onPull runs as a Pull (not a reuse) reads the copy; onPending as
+	// PendingWork looks at it.
+	onPull, onPending func()
 	// diff is what Diff answers.
 	diff string
 }
@@ -834,6 +835,9 @@ func (f *fakeCopy) Discard(_, name string) error {
 }
 
 func (f *fakeCopy) PendingWork(_ context.Context, _, name string, ex workspace.Execer) (workspace.CopyStatus, error) {
+	if f.onPending != nil {
+		f.onPending()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if ex == nil {

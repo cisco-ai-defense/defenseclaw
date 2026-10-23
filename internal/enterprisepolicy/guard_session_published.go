@@ -104,6 +104,19 @@ import (
 // the key (ErrPublishedSessionKeyAlive) stops the removal before it changes
 // anything: the unapproved hook stays, and the scan keeps blocking.
 //
+// An allow is a proof that lives only as long as the gateway keeps it
+// fresh (1.0.4 guard: the allow must not outlive its proof). The hook cannot
+// learn of a revocation the gateway failed to write, so the gateway renews
+// the allow records of every session it still allows every
+// PublishedSessionRenewEvery (internal/gateway foreign_hook_session_proof.go),
+// and the hook accepts one for at most PublishedSessionProofLifetime after
+// its last renewal. A gateway that stops, crashes, hangs or denies the
+// session stops renewing it, so an earlier allow ends by itself at most that
+// long after, whatever write failed. When a revocation write of a denial
+// fails, the gateway also closes the account in a second machine-owned
+// folder (MarkPublishedSessionAccountClosed), and reports the denial as
+// FAILED, with the exact time the last allow ends, when that fails too.
+//
 // During such an outage the hook allows a call only when all of these hold,
 // and blocks otherwise:
 //
@@ -112,9 +125,13 @@ import (
 //     check accepts it and every folder above it;
 //   - the records of the agent process and of the session (every key part
 //     the call names) say not blocked, carry a MAC that verifies with that
-//     key, and are at most publishedSessionMaxAge old. A record the call
-//     needs that is missing, untrusted, corrupt or dead blocks. A blocking
-//     record denies with the gateway's reason, whatever its MAC;
+//     key, name its generation, and were renewed at most
+//     PublishedSessionProofLifetime ago and not after now (a clock that went
+//     back is doubt). A record the call needs that is missing, untrusted,
+//     corrupt or dead blocks. A blocking record denies with the gateway's
+//     reason, whatever its MAC;
+//   - the account is not closed (publishedSessionAccountClosed), and its
+//     closed mark can be read;
 //   - the volume of the record folder is not read-only (where no key could
 //     be removed);
 //   - the folder of the account's revocation marks lets the gateway that
@@ -124,7 +141,8 @@ import (
 //     deny entry, and is on a writable volume (publishedSessionRevocable).
 //     Otherwise a block the gateway decided may have changed nothing the
 //     hook reads, so no allow of the account proves anything;
-//   - the key is the same at the end of the check.
+//   - the key is the same, and the clock has not gone back, at the end of
+//     the check.
 //
 // Any error reading the key, a record or a folder above them blocks. No
 // removal state lives in this tree: the guardian's ledger is in its
@@ -132,8 +150,10 @@ import (
 // data directory, which no standard user can reach.
 
 const (
-	// publishedSessionVersion is the record schema: 3 carries the MAC.
-	publishedSessionVersion = 3
+	// publishedSessionVersion is the record schema: 3 carried the MAC, 4 the
+	// key generation (Gen) and the renewal time the proof lifetime counts
+	// from.
+	publishedSessionVersion = 4
 	// publishedSessionRecordLimit bounds one record.
 	publishedSessionRecordLimit = 8 << 10
 	// publishedSessionReasonLimit bounds the gateway reason a record keeps.
@@ -146,14 +166,17 @@ const (
 	PublishedSessionKeyInfix = ".key-"
 	// publishedSessionKeyBytes is the size of a key.
 	publishedSessionKeyBytes = 32
-	// publishedSessionMaxAge is the oldest answer the hook accepts during an
-	// outage. The gateway writes the record again at every exchange, so an
-	// agent in use keeps a fresh one; an outage that lasts longer blocks.
-	publishedSessionMaxAge = 15 * time.Minute
-	// publishedSessionClockSkew is how far after now the hook still accepts
-	// a record's time. The gateway and the hook read the same clock, so this
-	// only covers a small step back of it.
-	publishedSessionClockSkew = time.Minute
+	// PublishedSessionProofLifetime is how long after its last renewal an
+	// allow record still proves its session during an outage, and
+	// PublishedSessionRenewEvery how often the gateway renews the records of
+	// the sessions it still allows. An outage that lasts longer than the
+	// lifetime since the last renewal blocks.
+	PublishedSessionProofLifetime = 90 * time.Second
+	PublishedSessionRenewEvery    = 30 * time.Second
+	// publishedSessionPruneSkew is how far after now a record's file time
+	// may be before a prune removes it (the gateway reads its clock before
+	// it writes).
+	publishedSessionPruneSkew = time.Minute
 	// publishedSessionKeyRemoveAttempts bounds how often a key file a
 	// reader holds for a moment is removed again.
 	publishedSessionKeyRemoveAttempts = 3
@@ -223,6 +246,18 @@ func publishedSessionKeyOwned(path string) (bool, error) {
 	return check(path)
 }
 
+// publishedSessionNow is the hook's clock (replaceable in tests, which
+// stand in for an outage that lasted a while).
+var publishedSessionNow = time.Now
+
+// OverridePublishedSessionNowForTest replaces the clock the hook checks a
+// record's renewal with, for tests in other packages.
+func OverridePublishedSessionNowForTest(now func() time.Time) (restore func()) {
+	previous := publishedSessionNow
+	publishedSessionNow = now
+	return func() { publishedSessionNow = previous }
+}
+
 // publishedSessionVolumeReadOnly reports whether the volume of a path is
 // mounted read-only (replaceable in tests, which cannot mount one).
 var publishedSessionVolumeReadOnly = publishedSessionVolumeIsReadOnly
@@ -260,6 +295,7 @@ type PublishedSessionRecord struct {
 	Blocked   bool   `json:"blocked"`
 	Reason    string `json:"reason,omitempty"`
 	At        string `json:"at"`
+	Gen       string `json:"gen,omitempty"`
 	MAC       string `json:"mac,omitempty"`
 }
 
@@ -286,6 +322,16 @@ func (k SessionRecordKey) ID() string { return k.path }
 
 // IsZero reports no key.
 func (k SessionRecordKey) IsZero() bool { return len(k.secret) == 0 }
+
+// Generation names the key in the records made with it: the first 16 hex
+// of a SHA-256 of its secret; "" for no key. A record names the generation
+// it was made with, and the hook refuses one that names another.
+func (k SessionRecordKey) Generation() string {
+	if k.IsZero() {
+		return ""
+	}
+	return sha256Hex(append([]byte("defenseclaw protected session record key generation\x00"), k.secret...))[:16]
+}
 
 // PublishedSessionIdentityDir is the folder of one account below root: the
 // first 20 bytes of the SHA-256 of the canonical account identity (a
@@ -510,6 +556,12 @@ func RevokePublishedSessionKey(root, identity string) error {
 	if !ok {
 		return fmt.Errorf("%w: invalid caller identity", ErrPublishedSessionKeyAlive)
 	}
+	return revokePublishedSessionAccountKey(root, digest)
+}
+
+// revokePublishedSessionAccountKey is RevokePublishedSessionKey for the
+// account whose folder name is digest.
+func revokePublishedSessionAccountKey(root, digest string) error {
 	dir, prefix, ok := publishedSessionKeyPlace(root, digest)
 	if !ok {
 		return fmt.Errorf("%w: no protected session record folder %q", ErrPublishedSessionKeyAlive, root)
@@ -808,11 +860,20 @@ func EnsurePublishedSessionKey(root, identity string, trust PublishedSessionTrus
 
 // ensurePublishedSessionAccountKey keeps the one key of the account digest
 // that no mark ends, and removes the marks of keys it no longer has;
-// otherwise it rotates the account's key.
+// otherwise it rotates the account's key. A closed account (its closed mark
+// is there, or cannot be read) gets a new key first, and its mark is
+// removed once the old key is ended.
 func ensurePublishedSessionAccountKey(root, digest string, trust PublishedSessionTrust) error {
 	dir, prefix, ok := publishedSessionKeyPlace(root, digest)
 	if !ok {
 		return fmt.Errorf("no protected session record folder %q", root)
+	}
+	if publishedSessionAccountClosed(root, digest) != nil {
+		err := rotatePublishedSessionAccountKey(root, digest, trust)
+		if errors.Is(err, ErrPublishedSessionKeyAlive) {
+			return err
+		}
+		return errors.Join(err, clearPublishedSessionAccountClosed(root, digest))
 	}
 	if keys, err := publishedSessionKeys(dir, prefix); err == nil && len(keys) == 1 {
 		if marks, err := publishedSessionMarksOf(root, digest); err == nil && !marks.ends(keys[0]) {
@@ -969,13 +1030,15 @@ func publishedSessionKeysLeft(keys []SessionRecordKey) []SessionRecordKey {
 }
 
 // RemovePublishedSessionKeys removes every key file of the record folder
-// root, every file with its key prefix this account may remove, and its
-// revocation marks: for uninstall, which removes the folder.
+// root, every file with its key prefix this account may remove, its
+// revocation marks and its closed marks: for uninstall, which removes the
+// folder.
 func RemovePublishedSessionKeys(root string) error {
 	if err := KillAllPublishedSessionKeys(root); err != nil {
 		return err
 	}
 	dir, rootPrefix, _ := publishedSessionKeyRoot(root)
+	_ = forEachPublishedSessionAccount(root, func(digest string) error { return clearPublishedSessionAccountClosed(root, digest) })
 	for _, folder := range []string{dir, publishedSessionMarkDir(filepath.Clean(strings.TrimSpace(root)), dir)} {
 		names, err := publishedSessionList(folder)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -1027,7 +1090,7 @@ func publishedSessionMAC(secret []byte, identity string, record PublishedSession
 	mac := hmac.New(sha256.New, secret)
 	for _, field := range []string{
 		"defenseclaw protected foreign-hook session record", strconv.Itoa(record.Version), identity,
-		record.Connector, record.Kind, record.ID, strconv.FormatBool(record.Blocked), record.Reason, record.At,
+		record.Connector, record.Kind, record.ID, strconv.FormatBool(record.Blocked), record.Reason, record.At, record.Gen,
 	} {
 		var size [4]byte
 		binary.BigEndian.PutUint32(size[:], uint32(len(field)))
@@ -1120,8 +1183,9 @@ func publishedSessionAnswer(dir, canonical, name string, key SessionKey, decisio
 		if entry.id == "" {
 			continue
 		}
-		record.Kind, record.ID, record.MAC = entry.kind, entry.id, ""
+		record.Kind, record.ID, record.Gen, record.MAC = entry.kind, entry.id, "", ""
 		if !decision.Deny && !recordKey.IsZero() {
+			record.Gen = recordKey.Generation()
 			record.MAC = publishedSessionMAC(recordKey.secret, canonical, record)
 		}
 		entries = append(entries, publishedSessionEntry{publishedSessionPath(dir, name, entry.kind, entry.id), record})
@@ -1155,11 +1219,13 @@ func WritePublishedSessionRecordsForTest(root, identity string, key SessionKey, 
 // CheckPublishedForeignHookSession decides a guarded call during a gateway
 // outage from the protected records of identity under root. It returns the
 // scan's decision when the records of the agent process and of the session
-// (each the call names) are trusted, not blocked, fresh, and carry a MAC
-// that verifies with the record folder's one key, the volume is not
-// read-only, and the gateway that wrote them could still revoke them
-// (publishedSessionRevocable); a denial with the gateway's reason when a record blocks it;
-// and ErrPublishedSessionUnavailable otherwise. An agent process the hook
+// (each the call names) are trusted, not blocked, renewed at most
+// PublishedSessionProofLifetime ago, and carry a MAC that verifies with the
+// record folder's one key and name its generation, the account is not
+// closed, the volume is not read-only, and the gateway that wrote them could
+// still revoke them (publishedSessionRevocable); a denial with the
+// gateway's reason when a record blocks it; and
+// ErrPublishedSessionUnavailable otherwise. An agent process the hook
 // cannot name is never proven: it may be one that started during the
 // outage and resumed the session ID. trust checks a record or key file path
 // and every folder above it (ValidatePublishedSessionPath in production).
@@ -1176,7 +1242,7 @@ func CheckPublishedForeignHookSession(root, identity string, key SessionKey, dec
 	if err != nil {
 		return decision, fmt.Errorf("%w: the record folder's key: %v", ErrPublishedSessionUnavailable, err)
 	}
-	now := time.Now()
+	now := publishedSessionNow()
 	var allows []PublishedSessionRecord
 	missing := key.Process == ""
 	for _, entry := range []struct{ kind, id string }{{sessionKindProcess, key.Process}, {sessionKindSession, key.Session}} {
@@ -1205,12 +1271,17 @@ func CheckPublishedForeignHookSession(root, identity string, key SessionKey, dec
 	}
 	for _, record := range allows {
 		at, err := time.Parse(time.RFC3339, record.At)
-		if err != nil || !publishedSessionAgeFresh(now.Sub(at)) {
-			return decision, fmt.Errorf("%w: the %s record is stale or has no valid time", ErrPublishedSessionUnavailable, record.Kind)
+		if err != nil || !publishedSessionProofFresh(now.Sub(at)) {
+			return decision, fmt.Errorf("%w: the %s record was not renewed within %s, or its time is after now or not valid", ErrPublishedSessionUnavailable, record.Kind, PublishedSessionProofLifetime)
 		}
-		if !publishedSessionMACValid(recordKey, canonical, record) {
+		if record.Gen == "" || record.Gen != recordKey.Generation() || !publishedSessionMACValid(recordKey, canonical, record) {
 			return decision, fmt.Errorf("%w: the %s record was not written under the record folder's current key", ErrPublishedSessionUnavailable, record.Kind)
 		}
+	}
+	// A denial whose revocation did not take closed the account in a
+	// second folder: no allow of it proves anything.
+	if err := publishedSessionAccountClosed(root, filepath.Base(dir)); err != nil {
+		return decision, fmt.Errorf("%w: %v", ErrPublishedSessionUnavailable, err)
 	}
 	// A record folder on a volume that is read-only proves nothing: no key
 	// could be removed there.
@@ -1229,16 +1300,19 @@ func CheckPublishedForeignHookSession(root, identity string, key SessionKey, dec
 	if again, err := readPublishedSessionKeyForHook(root, identity, trust); err != nil || again.ID() != recordKey.ID() {
 		return decision, fmt.Errorf("%w: the record folder's key changed while the record was checked", ErrPublishedSessionUnavailable)
 	}
+	// And the clock: one that went back while the check ran is doubt.
+	if publishedSessionNow().Before(now) {
+		return decision, fmt.Errorf("%w: the clock went back while the record was checked", ErrPublishedSessionUnavailable)
+	}
 	return decision, nil
 }
 
-// publishedSessionAgeFresh reports an age within publishedSessionMaxAge
-// that is not in the future by more than publishedSessionClockSkew: an
-// answer dated ahead (the clock was ahead when the gateway wrote it, and
-// was set back since) would otherwise stay fresh for as much longer than
-// the limit.
-func publishedSessionAgeFresh(age time.Duration) bool {
-	return age >= -publishedSessionClockSkew && age <= publishedSessionMaxAge
+// publishedSessionProofFresh reports the age of a record's last renewal
+// that still proves its session: not after now (the record's time is cut
+// to the second, so it is never after the hook's clock unless the clock
+// went back, which is doubt) and at most PublishedSessionProofLifetime.
+func publishedSessionProofFresh(age time.Duration) bool {
+	return age >= 0 && age <= PublishedSessionProofLifetime
 }
 
 // publishedBlockDecision denies a call the gateway's record blocks, with the
@@ -1363,8 +1437,9 @@ func writePublishedSessionRecord(path string, record PublishedSessionRecord) err
 	}
 }
 
-// prunePublishedSessionRecords removes records older than
-// publishedSessionMaxAge or dated after now (publishedSessionAgeFresh) and,
+// prunePublishedSessionRecords removes records whose file was last written
+// more than PublishedSessionProofLifetime before now or more than
+// publishedSessionPruneSkew after it (none of them proves anything) and,
 // past publishedSessionDirLimit, the oldest ones, plus temporary files a
 // crashed writer left. A pruned record reads as missing, which blocks.
 func prunePublishedSessionRecords(dir string, now time.Time) {
@@ -1389,7 +1464,11 @@ func prunePublishedSessionRecords(dir string, now time.Time) {
 			}
 			continue
 		}
-		if !publishedSessionAgeFresh(now.Sub(info.ModTime())) {
+		if isPublishedSessionClosedName(entry.Name()) {
+			// The account's closed mark (Windows) is no record.
+			continue
+		}
+		if age := now.Sub(info.ModTime()); age > PublishedSessionProofLifetime || age < -publishedSessionPruneSkew {
 			_ = os.Remove(path)
 			continue
 		}

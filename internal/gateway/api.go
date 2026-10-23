@@ -96,6 +96,12 @@ type APIServer struct {
 	// foreignHookOwed are the revocations of protected session records the
 	// operating system refused, tried again until they take.
 	foreignHookOwed foreignHookRevocationsOwed
+	// foreignHookProofs are the sessions whose outage proof this gateway
+	// renews (foreign_hook_session_proof.go).
+	foreignHookProofs foreignHookSessionProofs
+	// foreignHookServing tells whether this gateway answers the hooks; the
+	// proofs are renewed only while it does.
+	foreignHookServing foreignHookServing
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
@@ -1310,6 +1316,8 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// agent parent without creating an unregistered SDK server span.
 	handler = requestIDMiddleware(handler)
 	handler = inboundTraceContextMiddleware(handler)
+	// Outermost, so a session exchange is timed from its arrival.
+	handler = a.answerForeignHooks(handler)
 
 	baseCtx := ctx
 	if managedHookSocketEnabled(a.scannerCfg) {
@@ -1355,7 +1363,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		h = a.metricsMiddleware(h)
 		h = CorrelationMiddleware(reg)(h)
 		h = requestIDMiddleware(h)
-		return inboundTraceContextMiddleware(h)
+		return a.answerForeignHooks(inboundTraceContextMiddleware(h))
 	})
 	apiDetails := map[string]interface{}{"addr": a.addr}
 	if hookErr != nil {
@@ -1383,8 +1391,12 @@ func (a *APIServer) Run(ctx context.Context) error {
 
 	// A revocation of an account's protected session records that the
 	// operating system refused is tried again until it takes, and once more
-	// as this run stops (foreign_hook_revocation_owed.go); a no-op where the
-	// gateway publishes no records.
+	// as this run stops (foreign_hook_revocation_owed.go), and the outage
+	// proof of every session this gateway still allows is renewed while it
+	// answers the hooks (foreign_hook_session_proof.go); both are no-ops
+	// where the gateway publishes no records. Once this run stops or no
+	// longer answers, nothing renews a proof, so every allow ends by itself
+	// within its lifetime.
 	revocationsCtx, stopRevocations := context.WithCancel(ctx)
 	revocationsDone := make(chan struct{})
 	defer func() {
@@ -1396,12 +1408,20 @@ func (a *APIServer) Run(ctx context.Context) error {
 	}()
 	go func() {
 		defer close(revocationsDone)
+		var renewals sync.WaitGroup
+		renewals.Add(1)
+		go func() {
+			defer renewals.Done()
+			a.renewForeignHookSessionProofs(revocationsCtx, foreignHookSessionRenewEvery)
+		}()
 		a.retryOwedForeignHookRevocations(revocationsCtx, foreignHookRevocationRetryEvery)
+		renewals.Wait()
 	}()
 
 	errCh := make(chan error, 2)
 	if hookSrv != nil {
 		apiDetails["hook_socket"] = hookLn.Addr().String()
+		a.serveForeignHooks(hookLn)
 		go func() {
 			fmt.Fprintf(os.Stderr, "[sidecar-api] standalone hook socket listening on %s\n", hookLn.Addr())
 			if err := hookSrv.Serve(hookLn); err != nil && err != http.ErrServerClosed {
@@ -1411,6 +1431,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	}
 
 	serveTCP := func(ln net.Listener) {
+		a.serveForeignHooks(ln)
 		go func() {
 			fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {

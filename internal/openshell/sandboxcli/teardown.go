@@ -91,6 +91,10 @@ type teardownPlan struct {
 	// unhanded says, per copy-mode sandbox, the work it holds that never
 	// came back to the folder (see unhandedWork).
 	unhanded []string
+	// attached is how many sessions were attached to each sandbox as the
+	// plan was made, which the question names; each delete counts again
+	// under the sandbox's gate (endAsked).
+	attached map[string]int
 }
 
 // gatewayBackups are the backups DefenseClaw made of the gateway file path
@@ -241,6 +245,14 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 		p.profiles = a.unusedProfiles(ctx, c, p.providers, p.ownIngress)
 	}
 	sort.Strings(p.sandboxes)
+	p.attached = map[string]int{}
+	for _, name := range p.sandboxes {
+		// A count that cannot be made is made again under the gate, which
+		// keeps the sandbox when it fails too.
+		if n, err := a.attachedSessions(name); err == nil {
+			p.attached[name] = n
+		}
+	}
 	if p.offline {
 		p.recorded = map[string]manager.RecordedSandbox{}
 		for _, r := range manager.RecordedSandboxes(a.dataDir()) {
@@ -408,6 +420,11 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 	for _, u := range p.unhanded {
 		a.warn(u + "; teardown deletes it")
 	}
+	for _, name := range p.sandboxes {
+		if n := p.attached[name]; n > 0 {
+			a.warn(attachedText(name, n) + "; teardown deletes it, which ends " + them(n))
+		}
+	}
 	for _, w := range p.wrappers {
 		row("shell wrappers", strings.Join(w.Block.Commands(), ", ")+" in "+a.tildePath(w.Path))
 	}
@@ -512,6 +529,11 @@ func (a *App) sandboxImageRefs(ctx context.Context, p *teardownPlan, undeleted i
 // pins and masks, snapshot, copy, run files, binding and record, and the
 // CLI's own state of it.
 func (a *App) removeSandboxState(ctx context.Context, name string) error {
+	// The CLI's state (its gate included, which the delete took) first:
+	// manager.RemoveSandboxState leaves a folder that holds anything else.
+	if dir, err := a.cliStateDir(name); err == nil {
+		_ = os.RemoveAll(dir)
+	}
 	if err := manager.RemoveSandboxState(ctx, a.dataDir(), name); err != nil {
 		return err
 	}
@@ -527,20 +549,46 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 	}
 	api, _ := a.api()
 	undeleted := 0
+	var kept []string
 	for _, name := range p.sandboxes {
+		// Each delete is decided under the sandbox's exclusive gate: a
+		// session that attached since the question is named and asked about
+		// again (with no lock held while that question is open), and none
+		// attaches between the last count and the delete (endAsked).
 		deleted := false
-		if p.daemon && api != nil {
-			if _, err := api.Delete(ctx, name, sandboxapi.DeleteRequest{}); err == nil {
-				deleted = true
-			} else if !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) && p.client == nil {
-				fail("delete sandbox "+name, apiError(err))
-				undeleted++
-				continue
+		var daemonErr, clientErr error
+		err := a.endAsked(ctx, name, p.attached[name], func(others int) (bool, error) {
+			return a.confirmEnding(attachedText(name, others)+" now; deleting it ends "+them(others), "Delete anyway?", o.Yes)
+		}, func() {
+			if p.daemon && api != nil {
+				if _, daemonErr = api.Delete(ctx, name, sandboxapi.DeleteRequest{}); daemonErr == nil {
+					deleted = true
+					return
+				}
+				if !sandboxapi.IsCode(daemonErr, sandboxapi.CodeNotFound) && p.client == nil {
+					return
+				}
 			}
+			if p.client != nil {
+				_, clientErr = p.client.DeleteSandbox(ctx, name)
+			}
+		})
+		switch {
+		case errors.Is(err, errKept):
+			kept = append(kept, name)
+			continue
+		case err != nil:
+			a.warn(name + " is kept: " + err.Error())
+			kept = append(kept, name)
+			continue
+		case daemonErr != nil && p.client == nil && !sandboxapi.IsCode(daemonErr, sandboxapi.CodeNotFound):
+			fail("delete sandbox "+name, apiError(daemonErr))
+			undeleted++
+			continue
 		}
 		if !deleted && p.client != nil {
-			if _, err := p.client.DeleteSandbox(ctx, name); err != nil {
-				fail("delete sandbox "+name, err)
+			if clientErr != nil {
+				fail("delete sandbox "+name, clientErr)
 				undeleted++
 				continue
 			}
@@ -564,6 +612,15 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 		// `sandbox delete` removes it: the daemon's delete leaves it.
 		a.forgetCLIState(name)
 		a.ok("deleted sandbox " + name)
+	}
+	if len(kept) > 0 {
+		// What follows would end their sessions all the same (their
+		// providers deleted, the gateway restarted under them): it waits
+		// for a teardown run again once they end.
+		a.note("teardown stopped after the sandboxes: " + strings.Join(kept, ", ") + map[bool]string{true: " is", false: " are"}[len(kept) == 1] +
+			" kept, and nothing else was removed → once the sessions end, rerun: " + CommandName + " teardown")
+		errs = append(errs, fmt.Errorf("kept %s: a session is attached to it, or the sessions could not be counted", strings.Join(kept, ", ")))
+		return &Silent{Err: errors.Join(errs...)}
 	}
 	for _, name := range p.stale {
 		if err := a.removeSandboxState(ctx, name); err != nil {

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -118,8 +119,8 @@ func LockForeignHookAccountExchange(ctx context.Context, dataDir, identity strin
 
 // LockForeignHookAccountRemoval holds identity's removal lock exclusively for
 // one removal commit: the gate within ctx (an error when it expires), then
-// the lock for at most ForeignHookRemovalDrainWait. drained reports that no
-// exchange was inside when it went on.
+// the lock for at most ForeignHookRemovalDrainWait, a wait ctx does not
+// shorten. drained reports that no exchange was inside when it went on.
 func LockForeignHookAccountRemoval(ctx context.Context, dataDir, identity string) (release func(), drained bool, err error) {
 	gatePath, mainPath, ok := ForeignHookAccountLockPaths(dataDir, identity)
 	if !ok {
@@ -144,7 +145,13 @@ func LockForeignHookAccountRemoval(ctx context.Context, dataDir, identity string
 		gate.release()
 		return nil, false, err
 	}
-	drainCtx, cancel := context.WithTimeout(ctx, ForeignHookRemovalDrainWait)
+	// The drain always gets its whole wait, whatever is left of ctx: the
+	// removal goes on past an exchange still inside only once that
+	// exchange's answer deadline has passed (it set it before it asked for
+	// the gate, which this removal now holds). A caller whose own deadline
+	// ended the wait early would go on while that exchange may still
+	// publish an allow under the key the removal is about to rotate.
+	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), foreignHookRemovalDrainWait())
 	err = main.lock(drainCtx, true, foreignHookLockRemovalPoll)
 	cancel()
 	held := err == nil
@@ -160,6 +167,27 @@ func LockForeignHookAccountRemoval(ctx context.Context, dataDir, identity string
 		main.close()
 		gate.release()
 	}), held, nil
+}
+
+// foreignHookRemovalDrainOverride replaces ForeignHookRemovalDrainWait
+// when set (nanoseconds): tests in other packages shorten the drain to
+// probe whether an exchange is inside the lock
+// (OverrideForeignHookRemovalDrainWaitForTest).
+var foreignHookRemovalDrainOverride atomic.Int64
+
+func foreignHookRemovalDrainWait() time.Duration {
+	if d := foreignHookRemovalDrainOverride.Load(); d > 0 {
+		return time.Duration(d)
+	}
+	return ForeignHookRemovalDrainWait
+}
+
+// OverrideForeignHookRemovalDrainWaitForTest sets how long a removal waits
+// for the exchanges inside the lock, for tests that probe whether one is
+// inside without waiting the whole drain.
+func OverrideForeignHookRemovalDrainWaitForTest(wait time.Duration) (restore func()) {
+	previous := foreignHookRemovalDrainOverride.Swap(int64(wait))
+	return func() { foreignHookRemovalDrainOverride.Store(previous) }
 }
 
 func foreignHookLockWaitError(err error) error {

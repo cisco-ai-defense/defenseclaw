@@ -194,7 +194,7 @@ func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
 		}
 		return string(data)
 	}
-	good := PublishedSessionRecord{Version: publishedSessionVersion, Connector: "copilot", Kind: sessionKindProcess, ID: key.Process, At: at}
+	good := PublishedSessionRecord{Version: publishedSessionVersion, Connector: "copilot", Kind: sessionKindProcess, ID: key.Process, At: at, Gen: recordKey.Generation()}
 	// The writer's own encoding of the same record proves the process: the
 	// cases below differ from it in one point each.
 	if err := os.WriteFile(path, []byte(encode(good, canonical)), 0o644); err != nil {
@@ -203,21 +203,23 @@ func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
 	if got, err := check(key, trustAll); err != nil || got.Deny {
 		t.Fatalf("a well-formed record must prove the process: %+v %v", got, err)
 	}
-	withID, withVersion, withAt := good, good, good
-	withID.ID, withVersion.Version, withAt.At = "linux:b:9:9", 2, ""
+	withID, withVersion, withAt, withoutGen, otherGen := good, good, good, good, good
+	withID.ID, withVersion.Version, withAt.At, withoutGen.Gen, otherGen.Gen = "linux:b:9:9", 3, "", "", "0123456789abcdef"
 	tampered := encode(good, canonical)
-	tampered = strings.Replace(tampered, `"at":"`+at+`"`, `"at":"`+time.Now().Add(time.Second).UTC().Format(time.RFC3339)+`"`, 1)
+	tampered = strings.Replace(tampered, `"at":"`+at+`"`, `"at":"`+time.Now().Add(-5*time.Second).UTC().Format(time.RFC3339)+`"`, 1)
 	for name, content := range map[string]string{
-		"corrupt":           `{"v":3,"connector":"copilot"`,
-		"unknown field":     strings.TrimSuffix(encode(good, canonical), "}") + `,"x":1}`,
-		"other key":         encode(withID, canonical),
-		"other version":     encode(withVersion, canonical),
-		"no time":           encode(withAt, canonical),
-		"no MAC":            strings.Replace(encode(good, canonical), `,"mac":"`, `,"x":"`, 1),
-		"another account":   encode(good, publishedSessionOtherIdentity(canonical)),
-		"a changed field":   tampered,
-		"trailing value":    encode(good, canonical) + ` {}`,
-		"an earlier schema": `{"v":2,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"` + at + `","gen":"1"}`,
+		"corrupt":                `{"v":3,"connector":"copilot"`,
+		"unknown field":          strings.TrimSuffix(encode(good, canonical), "}") + `,"x":1}`,
+		"other key":              encode(withID, canonical),
+		"other version":          encode(withVersion, canonical),
+		"no time":                encode(withAt, canonical),
+		"no key generation":      encode(withoutGen, canonical),
+		"another key generation": encode(otherGen, canonical),
+		"no MAC":                 strings.Replace(encode(good, canonical), `,"mac":"`, `,"x":"`, 1),
+		"another account":        encode(good, publishedSessionOtherIdentity(canonical)),
+		"a changed field":        tampered,
+		"trailing value":         encode(good, canonical) + ` {}`,
+		"an earlier schema":      `{"v":2,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"` + at + `","gen":"1"}`,
 	} {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
@@ -753,7 +755,7 @@ func TestPublishedForeignHookSessionPruneKeepsTheNewest(t *testing.T) {
 	if err := os.WriteFile(old, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stale := now.Add(-publishedSessionMaxAge - time.Minute)
+	stale := now.Add(-PublishedSessionProofLifetime - time.Second)
 	if err := os.Chtimes(old, stale, stale); err != nil {
 		t.Fatal(err)
 	}

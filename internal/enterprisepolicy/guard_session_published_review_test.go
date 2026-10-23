@@ -26,14 +26,14 @@ func publishedSessionTestExists(path string) bool {
 	return err == nil
 }
 
-// Review P2 (GAP-0352, loop round 2): an answer dated after now proves
-// nothing. The clock was ahead when the gateway wrote the allow and was set
-// back since: without the bound its age is negative, and the allow would
-// outlive the age limit by as long as the clock was ahead. A small step
-// back of the clock (publishedSessionClockSkew) still passes, an answer
-// older than the limit proves nothing, and the prune drops a future-dated
-// record like an expired one. The time is under the MAC, so it cannot be
-// changed.
+// Review P2 (GAP-0352, loop round 2), and the proof lifetime (1.0.4 guard
+// loop round 4): an allow proves its session only for
+// PublishedSessionProofLifetime after its last renewal, and an answer dated
+// after now (the clock went back since the gateway wrote it) is doubt, so it
+// proves nothing at all: without the bound its age is negative, and the
+// allow would outlive the lifetime by as long as the clock was ahead. The
+// prune drops a future-dated record like an expired one. The time is under
+// the MAC, so it cannot be changed.
 func TestPublishedForeignHookSessionRefusesAFutureDatedAnswer(t *testing.T) {
 	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
@@ -63,17 +63,18 @@ func TestPublishedForeignHookSessionRefusesAFutureDatedAnswer(t *testing.T) {
 	}{
 		{"a month ahead", now.Add(30 * 24 * time.Hour)},
 		{"an hour ahead", now.Add(time.Hour)},
-		{"just past the skew", now.Add(publishedSessionClockSkew + 10*time.Second)},
-		{"older than the limit", now.Add(-publishedSessionMaxAge - time.Minute)},
+		{"two seconds ahead", now.Add(2 * time.Second)},
+		{"renewed just over the lifetime ago", now.Add(-PublishedSessionProofLifetime - 2*time.Second)},
+		{"renewed fifteen minutes ago", now.Add(-15 * time.Minute)},
 	} {
 		publish(tc.at)
 		if err := check(); !errors.Is(err, ErrPublishedSessionUnavailable) {
 			t.Fatalf("%s: the answer must prove nothing: %v", tc.name, err)
 		}
 	}
-	publish(now.Add(publishedSessionClockSkew / 2))
+	publish(now.Add(-PublishedSessionProofLifetime + 5*time.Second))
 	if err := check(); err != nil {
-		t.Fatalf("an answer within the clock skew must prove the process: %v", err)
+		t.Fatalf("an answer renewed within the lifetime must prove the process: %v", err)
 	}
 	ahead := now.Add(48 * time.Hour)
 	if err := os.Chtimes(path, ahead, ahead); err != nil {

@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -17,7 +16,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // An owed revocation (any doubt blocks).
@@ -40,18 +38,20 @@ import (
 //     folder that takes a change again ends the earlier allow at once, not
 //     at the account's next call.
 //
-// While the folders take no change, the hook refuses every allow of the
-// account during an outage by itself: it allows only while the folder of
-// the account's revocation marks lets the gateway add a file
-// (enterprisepolicy.CheckPublishedForeignHookSession).
+// While it is owed the account stays closed when its closed mark could be
+// added (enterprisepolicy.MarkPublishedSessionAccountClosed; each retry adds
+// it again when it could not), no proof of the account is renewed, and,
+// whatever the folders look like, its earlier allows end by themselves
+// within enterprisepolicy.PublishedSessionProofLifetime of their last
+// renewal (foreign_hook_session_proof.go). A revocation that took clears the
+// account's closed mark: no earlier allow verifies any more.
 
-// foreignHookRevocationsOwedDirName is the folder of the owed revocations
-// in the gateway's data directory, and foreignHookRevocationOwedLimit
-// bounds one saved revocation (an account identity).
-const (
-	foreignHookRevocationsOwedDirName = "foreign-hook-revocations-owed"
-	foreignHookRevocationOwedLimit    = 512
-)
+// The saved owed revocations are in the gateway's data directory
+// (enterprisepolicy.ForeignHookRevocationsOwedDir), where the hook guardian
+// reads them too: it ends the key of every account named there at every
+// pass, as root or SYSTEM, whom the operating system does not refuse what
+// it refused the gateway.
+const foreignHookRevocationsOwedDirName = enterprisepolicy.ForeignHookRevocationsOwedDirName
 
 // foreignHookRevocationRetryEvery is how often the API server tries the
 // owed revocations again, and foreignHookRevocationStopTimeout bounds its
@@ -72,7 +72,7 @@ type foreignHookRevocationsOwed struct {
 // account: one file per account in the data directory dataDir, named like
 // its private session store, holding the identity.
 func foreignHookRevocationOwedPath(dataDir, identity string) string {
-	return filepath.Join(dataDir, foreignHookRevocationsOwedDirName, filepath.Base(enterprisepolicy.ForeignHookSessionStoreDir(dataDir, identity)))
+	return enterprisepolicy.ForeignHookRevocationOwedPath(dataDir, identity)
 }
 
 // oweForeignHookRevocation records that a revocation of identity's account
@@ -86,7 +86,9 @@ func (a *APIServer) oweForeignHookRevocation(places foreignHookSessionPlaces, id
 	a.foreignHookOwed.owed[path] = identity
 	a.foreignHookOwed.mu.Unlock()
 	if err := saveForeignHookRevocationOwed(path, identity); err != nil {
-		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: an owed revocation of an account's protected session records was not saved, so a restarted gateway would not try it again: %v\n", err)
+		// A restarted gateway does not know of it, but it renews no proof
+		// it did not answer itself, so the earlier allows still end.
+		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: an owed revocation of an account's protected session records was not saved; it is owed in memory: %v\n", err)
 	}
 }
 
@@ -107,8 +109,12 @@ func saveForeignHookRevocationOwed(path, identity string) error {
 }
 
 // settleForeignHookRevocation records that a revocation of identity's
-// account took: none is owed any more.
+// account took: none is owed any more, and the account's closed mark, which
+// stood for allows that no longer verify, is cleared.
 func (a *APIServer) settleForeignHookRevocation(places foreignHookSessionPlaces, identity string) {
+	if err := foreignHookSessionOpen(places.recordRoot, identity); err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the account's closed mark could not be cleared, so its guarded calls block during an outage until the hook guardian clears it: %v\n", err)
+	}
 	path := foreignHookRevocationOwedPath(places.dataDir, identity)
 	a.foreignHookOwed.mu.Lock()
 	delete(a.foreignHookOwed.owed, path)
@@ -136,13 +142,21 @@ func (a *APIServer) foreignHookRevocationOwed(places foreignHookSessionPlaces, i
 }
 
 // payForeignHookRevocation tries an owed revocation of identity's account
-// again (the caller holds the account's exchange lock of this process). It
+// again (the caller holds the account's exchange lock of this process), and
+// closes the account again when the revocation still does not take. It
 // reports whether none is owed any more.
 func (a *APIServer) payForeignHookRevocation(places foreignHookSessionPlaces, identity, connectorName string) bool {
 	if places.recordRoot == "" || !a.foreignHookRevocationOwed(places, identity) {
 		return true
 	}
-	return a.killForeignHookSessionKey(places, identity, connectorName)
+	if a.killForeignHookSessionKey(places, identity, connectorName) == nil {
+		return true
+	}
+	if err := foreignHookSessionClose(places.recordRoot, identity); err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: revocation FAILED again: the account could not be closed either; its earlier allows end within %s of their last renewal, and this is tried again: %v\n",
+			enterprisepolicy.PublishedSessionProofLifetime, err)
+	}
+	return false
 }
 
 // owedForeignHookRevocations names the accounts with an owed revocation
@@ -153,17 +167,14 @@ func (a *APIServer) owedForeignHookRevocations(dataDir string) []string {
 	seen := map[string]bool{}
 	a.foreignHookOwed.mu.Lock()
 	for path, identity := range a.foreignHookOwed.owed {
-		if filepath.Dir(path) == dir {
+		if identity != "" && filepath.Dir(path) == dir {
 			seen[identity] = true
 		}
 	}
 	a.foreignHookOwed.mu.Unlock()
-	entries, _ := os.ReadDir(dir)
-	for _, entry := range entries {
-		path := filepath.Join(dir, entry.Name())
-		if identity, ok := readForeignHookRevocationOwed(path); ok && foreignHookRevocationOwedPath(dataDir, identity) == path {
-			seen[identity] = true
-		}
+	saved, _, _ := enterprisepolicy.ForeignHookRevocationsOwed(dataDir)
+	for _, identity := range saved {
+		seen[identity] = true
 	}
 	identities := make([]string, 0, len(seen))
 	for identity := range seen {
@@ -171,21 +182,6 @@ func (a *APIServer) owedForeignHookRevocations(dataDir string) []string {
 	}
 	sort.Strings(identities)
 	return identities
-}
-
-// readForeignHookRevocationOwed is the account identity a saved owed
-// revocation names.
-func readForeignHookRevocationOwed(path string) (string, bool) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", false
-	}
-	defer func() { _ = file.Close() }()
-	data, err := io.ReadAll(io.LimitReader(file, foreignHookRevocationOwedLimit))
-	if err != nil {
-		return "", false
-	}
-	return connector.CanonicalUserScopedIdentity(strings.TrimSpace(string(data)))
 }
 
 // payOwedForeignHookRevocations tries every owed revocation of this

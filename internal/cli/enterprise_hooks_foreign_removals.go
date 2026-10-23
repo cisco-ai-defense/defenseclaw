@@ -262,8 +262,10 @@ func recordEnterpriseForeignHookRemovalsAt(stderr io.Writer, mark, account, home
 // (enterprisepolicy.EnsurePublishedSessionKeys), unless a lifecycle run
 // holds the key lock: the gateway removes an account's key before every
 // block, and a lifecycle run removes all of them. A new key never makes an
-// earlier record count. Only root or SYSTEM can make a key the hook
-// accepts, so any other account does nothing.
+// earlier record count. First it rotates the key of every account whose
+// revocation the gateway owes (settleEnterpriseForeignHookRevocationsOwed).
+// Only root or SYSTEM can make a key the hook accepts, so any other account
+// does nothing.
 func ensureEnterpriseForeignHookSessionKey(stderr io.Writer) {
 	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() || !enterpriseForeignHookCanCreateSessionKey() {
 		return
@@ -274,7 +276,8 @@ func ensureEnterpriseForeignHookSessionKey(stderr io.Writer) {
 		// Never while a lifecycle run holds the key lock: the run removed
 		// every key and makes new ones at its end.
 		ran, err = enterpriseForeignHookWithKeyCreation(func() error {
-			return enterpriseForeignHookEnsureSessionKeys(root, enterpriseForeignHookSessionKeyTrust())
+			trust := enterpriseForeignHookSessionKeyTrust()
+			return errors.Join(settleEnterpriseForeignHookRevocationsOwed(root, trust), enterpriseForeignHookEnsureSessionKeys(root, trust))
 		})
 	}
 	if err != nil {
@@ -282,6 +285,37 @@ func ensureEnterpriseForeignHookSessionKey(stderr io.Writer) {
 	} else if !ran {
 		fmt.Fprintln(stderr, "defenseclaw: enterprise foreign-hook guard: a lifecycle run holds the protected session record key lock; its end makes the keys")
 	}
+}
+
+// settleEnterpriseForeignHookRevocationsOwed rotates the key of every
+// account whose revocation the gateway saved as owed in its data directory
+// (enterprisepolicy.ForeignHookRevocationsOwed): the operating system
+// refused the gateway every way of ending it, and root or SYSTEM is not
+// refused what the gateway was. When every account's key is owed, or a
+// saved one cannot be read or names no account, every account's key is
+// rotated (any doubt blocks). The gateway clears what it saved once its
+// own revocation took; until then each pass rotates those keys again, which
+// only ends allows the gateway publishes without a key anyway. A lifecycle
+// run in progress removed every key already (the caller holds the key lock
+// shared, so none runs now).
+func settleEnterpriseForeignHookRevocationsOwed(root string, trust enterprisepolicy.PublishedSessionTrust) error {
+	if cfg == nil || !filepath.IsAbs(cfg.DataDir) {
+		return nil
+	}
+	identities, all, err := enterpriseForeignHookRevocationsOwed(cfg.DataDir)
+	if all {
+		if rotateErr := enterpriseForeignHookRotateAllSessionKeys(root, trust); rotateErr != nil {
+			err = errors.Join(err, fmt.Errorf("rotate every account's key, whose revocation the gateway owes: %w", rotateErr))
+		}
+		return err
+	}
+	var errs []error
+	for _, identity := range identities {
+		if err := enterpriseForeignHookRotateSessionKey(root, identity, trust); err != nil {
+			errs = append(errs, fmt.Errorf("rotate the key of %s, whose revocation the gateway owes: %w", foreignGuardLogField(identity, 256), err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // writeEnterpriseForeignHookRemovalLedger adds added to the removal ledger
@@ -404,8 +438,11 @@ var enterpriseForeignHookSessionRootForDataDir = func(dataDir string) (string, b
 // enterpriseForeignHookEnsureSessionKeys makes the keys of the
 // accounts that have none at every pass,
 // enterpriseForeignHookSessionKeyTrust names the gateway service a Windows
-// key file lets remove it, and enterpriseForeignHookCanCreateSessionKey
-// reports a guardian that runs as root or SYSTEM (replaceable in tests).
+// key file lets remove it, enterpriseForeignHookCanCreateSessionKey
+// reports a guardian that runs as root or SYSTEM,
+// enterpriseForeignHookRevocationsOwed lists the revocations the gateway
+// owes and enterpriseForeignHookRotateAllSessionKeys rotates every
+// account's key (replaceable in tests).
 var (
 	enterpriseForeignHookLockAccount       = enterprisepolicy.LockForeignHookAccountRemoval
 	enterpriseForeignHookLockLedger        = enterprisepolicy.LockForeignHookRemovalLedger
@@ -415,7 +452,9 @@ var (
 	enterpriseForeignHookSessionKeyTrust   = func() enterprisepolicy.PublishedSessionTrust {
 		return enterprisepolicy.PublishedSessionTrust{ServiceAccount: `NT SERVICE\` + managed.StandaloneWindowsGatewaySvc}
 	}
-	enterpriseForeignHookCanCreateSessionKey = enterpriseForeignHookRunsAsAdministrator
+	enterpriseForeignHookCanCreateSessionKey  = enterpriseForeignHookRunsAsAdministrator
+	enterpriseForeignHookRevocationsOwed      = enterprisepolicy.ForeignHookRevocationsOwed
+	enterpriseForeignHookRotateAllSessionKeys = enterprisepolicy.RotateAllPublishedSessionKeys
 )
 
 func loadEnterpriseForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {

@@ -396,6 +396,43 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 	return decision
 }
 
+// ForeignHookSessionRenewable reports why the gateway may not renew the
+// outage proof of the session key (the protected allow records the hook
+// reads during an outage), nil when its private store StateDir still allows
+// it: the records of both key parts are there, valid and not blocked, and
+// no removal of the guardian (removals, which removalsErr says could not be
+// read) came after the agent process started. Anything that cannot be read
+// is a reason. The gateway then stops renewing, and the proof ends by
+// itself.
+func ForeignHookSessionRenewable(stateDir string, key SessionKey, removals []ForeignHookRemoval, removalsErr error, now time.Time) error {
+	if !filepath.IsAbs(stateDir) || !key.valid() {
+		return errors.New("invalid session store or key")
+	}
+	if removalsErr != nil {
+		return fmt.Errorf("the guardian's removals cannot be read: %w", removalsErr)
+	}
+	if removal, ok := removalAfterProcessStart(removals, key, now); ok {
+		return fmt.Errorf("the guardian removed %s after the agent process started", removal.Path)
+	}
+	for _, entry := range []struct{ kind, id string }{{sessionKindProcess, key.Process}, {sessionKindSession, key.Session}} {
+		if entry.id == "" {
+			continue
+		}
+		record, exists, err := readSessionRecord(sessionPathInDir(stateDir, key.Connector, entry.kind, entry.id))
+		switch {
+		case err != nil:
+			return err
+		case !exists:
+			return fmt.Errorf("the %s record is gone", entry.kind)
+		case !validGatewaySessionRecord(record, key, entry.kind):
+			return fmt.Errorf("the %s record is not valid", entry.kind)
+		case record.Blocked:
+			return fmt.Errorf("the %s is blocked", entry.kind)
+		}
+	}
+	return nil
+}
+
 // sessionStartBlockCause reports a decision that blocks its session: a
 // session start (sessionStart) whose scan found an unapproved hook or
 // plugin, or stopped on a budget before it checked every source. The cause

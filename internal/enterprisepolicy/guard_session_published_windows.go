@@ -350,3 +350,16 @@ func publishedSessionDACLLetsAddAFile(path string, dacl *windows.ACL, writer *wi
 // file to (its protected DACL). A standard user may add a file to the key
 // folder, %ProgramData%\Cisco.
 func publishedSessionMarkDir(root, _ string) string { return root }
+
+// publishedSessionClosedPath is the closed mark of the account digest under
+// the record folder root: account.closed in the account's own folder, whose
+// protected DACL lets only SYSTEM, Administrators and the gateway service
+// add or remove a file, apart from the record folder the revocation marks go
+// in. A standard user may add a file to the key folder, so it is not used.
+func publishedSessionClosedPath(root, digest string) (string, bool) {
+	clean, ok := publishedSessionClosedPlace(root, digest)
+	if !ok {
+		return "", false
+	}
+	return filepath.Join(clean, digest, "account"+publishedSessionClosedSuffix), true
+}

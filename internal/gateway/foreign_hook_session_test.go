@@ -269,6 +269,10 @@ func foreignHookGuardianDirForTest(t *testing.T) string {
 // the account was inside when it went on.
 func lockForeignHookAccountRemovalForTest(t *testing.T, dataDir, identity string, timeout time.Duration) (release func(), drained bool, err error) {
 	t.Helper()
+	// The drain ignores the caller's context (it always waits its whole
+	// time for an exchange inside), so the probe shortens the drain itself.
+	restore := enterprisepolicy.OverrideForeignHookRemovalDrainWaitForTest(timeout)
+	defer restore()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return enterprisepolicy.LockForeignHookAccountRemoval(ctx, dataDir, identity)
