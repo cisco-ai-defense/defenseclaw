@@ -1899,6 +1899,8 @@ func (a *APIServer) hookFailedCheckResponse(
 	case failOpen:
 		action, wouldBlock = "allow", true
 		plain += "The call was allowed because the hook fails open. Ask your administrator to review the hook and audit log."
+	case failure.recoveredPanic && claudePanicStopsTurn(connectorName, req.HookEventName):
+		plain += "The agent turn was stopped because the hook fails closed. Contact your administrator before continuing."
 	case failure.recoveredPanic:
 		plain += "The call was blocked because the hook fails closed. Retry the call; if this continues, contact your administrator."
 	case lifecycle:
@@ -1920,9 +1922,41 @@ func (a *APIServer) hookFailedCheckResponse(
 		if recover() != nil {
 			out = resp
 			out.HookOutput = hookOutputFor(req, resp.Action, resp.RawAction, plain, resp.AdditionalContext, profile.Capabilities)
+			out = panicNativeClosedOutcome(req, failure.recoveredPanic, out)
 		}
 	}()
-	return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain)
+	return panicNativeClosedOutcome(req, failure.recoveredPanic,
+		a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain))
+}
+
+// A Claude Code stop denial starts another agent turn. Its universal
+// continue:false response instead ends processing with a visible failure,
+// so a persistent evaluator panic cannot make Stop retry indefinitely.
+func claudePanicStopsTurn(connectorName, event string) bool {
+	if connectorName != "claudecode" {
+		return false
+	}
+	switch event {
+	case "Stop", "SubagentStop", "TeammateIdle":
+		return true
+	}
+	return false
+}
+
+// Keep a closed panic's native outcome in sync with the block and audit row.
+// Antigravity has a Stop veto distinct from its PreToolUse deny; an ordinary
+// block rendered through the generic profile would answer decision=allow.
+func panicNativeClosedOutcome(req agentHookRequest, recoveredPanic bool, resp agentHookResponse) agentHookResponse {
+	if !recoveredPanic || resp.Action != "block" {
+		return resp
+	}
+	switch {
+	case claudePanicStopsTurn(req.ConnectorName, req.HookEventName):
+		resp.HookOutput = map[string]interface{}{"continue": false, "stopReason": resp.Reason}
+	case req.ConnectorName == "antigravity" && req.HookEventName == "Stop":
+		resp.HookOutput = map[string]interface{}{"decision": "continue", "reason": resp.Reason}
+	}
+	return resp
 }
 
 // handleHookPanic centralises the side-effects of a recovered hook panic. The
@@ -3543,6 +3577,9 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 	case "antigravity":
 		if action == "block" && canonicalEvent(req.HookEventName) == "pretooluse" {
 			return map[string]interface{}{"decision": "deny", "reason": reason}
+		}
+		if action == "block" && req.HookEventName == "Stop" {
+			return map[string]interface{}{"decision": "continue", "reason": reason}
 		}
 	case "kiro":
 		if action == "block" {

@@ -790,10 +790,11 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 							t.Errorf("%s: action=%q mode=%q would_block=%v, want %s/%s", name, resp.Action, resp.Mode, resp.WouldBlock, wantAction, wantMode)
 						}
 						// The Amp plugin reads the action field itself.
-						// A Claude Code event whose native denial is exit 2 with
-						// the reason on stderr (TaskCreated, TaskCompleted,
-						// TeammateIdle) has no output to render.
+						// An ordinary Claude Code denial that uses exit 2 has
+						// no output to render. A recovered TeammateIdle panic
+						// instead ends the teammate with continue:false.
 						exitTwoDenial := connectorName == "claudecode" &&
+							!claudePanicStopsTurn(connectorName, event) &&
 							claudeCodeOutput(claudeCodeHookRequest{HookEventName: event}, "block", "block", "", "") == nil
 						if wantAction == "block" && exitTwoDenial && len(resp.HookOutput) != 0 {
 							t.Errorf("%s: an exit-2 denial rendered output %v", name, resp.HookOutput)
@@ -837,6 +838,56 @@ func TestHookEvaluatorPanicClosedForEveryRegisteredEvent(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestClaudeStopPersistentEvaluatorPanicTerminatesTurn(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Guardrail.HookFailMode = "closed"
+	api := &APIServer{scannerCfg: cfg}
+	panicking := hookProfileRuntime{Evaluate: func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+		panic("persistent Stop evaluator error")
+	}}
+	for _, event := range []string{"Stop", "SubagentStop", "TeammateIdle"} {
+		for attempt := 0; attempt < 3; attempt++ {
+			req := agentHookRequest{
+				ConnectorName: "claudecode", HookEventName: event, SessionID: "persistent-panic",
+				Payload: map[string]interface{}{"stop_hook_active": attempt > 0},
+			}
+			resp, panicked := api.safeEvaluateHook(t.Context(), "claudecode", req, nil, nil, panicking)
+			if !panicked || resp.Action != "block" || resp.Mode != "action" {
+				t.Fatalf("%s attempt %d: panic response=%+v, panicked=%v", event, attempt, resp, panicked)
+			}
+			if resp.HookOutput["continue"] != false || resp.HookOutput["stopReason"] == "" {
+				t.Fatalf("%s attempt %d: native output=%v, want terminal closed failure", event, attempt, resp.HookOutput)
+			}
+		}
+	}
+}
+
+func TestAntigravityStopEvaluatorPanicUsesNativeVeto(t *testing.T) {
+	injectPanicForProfile(t, "antigravity")
+	for _, deployment := range []struct{ name, mode, profile string }{
+		{"per-user", "", ""},
+		{"standalone", managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone},
+	} {
+		t.Run(deployment.name, func(t *testing.T) {
+			store, logger := testStoreAndLogger(t)
+			cfg := config.DefaultConfig()
+			cfg.DataDir = t.TempDir()
+			cfg.DeploymentMode, cfg.Enterprise.Profile = deployment.mode, deployment.profile
+			cfg.Guardrail.HookFailMode = "closed"
+			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+			response, _ := postPanicTestHook(t, api, "antigravity", "Stop")
+			output, _ := response["hook_output"].(map[string]interface{})
+			if response["action"] != "block" || response["mode"] != "action" || output["decision"] != "continue" {
+				t.Fatalf("Stop panic response=%v, want native veto of termination", response)
+			}
+			row := soleHookDecisionForTest(t, store)
+			if row.Structured["result"] != "panic" || row.Structured["action"] != "block" || !row.Enforced {
+				t.Fatalf("Stop panic audit=%+v, want enforced native veto", row)
+			}
+		})
 	}
 }
 

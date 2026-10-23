@@ -297,8 +297,20 @@ func TestRecoveredHookVerdictUsesRegisteredProfiles(t *testing.T) {
 					t.Fatalf("panic response=%v, want closed block/action", response)
 				}
 				expected := agentHookResponseForProfile(profile, req, "block", "block", "WARN", "comparison reason for recovered hook evaluation error", nil, "action", false, profile.Capabilities)
-				if got, want := normalizedPanicOutput(panicTestOutput(name, response)), normalizedPanicOutput(expected.HookOutput); !reflect.DeepEqual(got, want) {
-					t.Fatalf("hook output=%v, normal verdict output=%v", got, want)
+				output := panicTestOutput(name, response)
+				switch {
+				case name == "claudecode" && (tc.event == "Stop" || tc.event == "SubagentStop" || tc.event == "TeammateIdle"):
+					if wire, ok := output.(map[string]interface{}); !ok || wire["continue"] != false || wire["stopReason"] == "" {
+						t.Fatalf("Claude lifecycle panic output=%v, want terminal closed failure", output)
+					}
+				case name == "antigravity" && tc.event == "Stop":
+					if wire, ok := output.(map[string]interface{}); !ok || wire["decision"] != "continue" {
+						t.Fatalf("Antigravity Stop panic output=%v, want native veto", output)
+					}
+				default:
+					if got, want := normalizedPanicOutput(output), normalizedPanicOutput(expected.HookOutput); !reflect.DeepEqual(got, want) {
+						t.Fatalf("hook output=%v, normal verdict output=%v", got, want)
+					}
 				}
 				mappedAction, _ := mapHookActionForProfile("block", "action", tc.event, profile.Capabilities, profile, req.Payload)
 				if mappedAction == "block" {
@@ -335,8 +347,13 @@ func (c panickingResponderConnector) HookProfile(opts connector.SetupOpts) conne
 }
 
 func TestHookPanicResponseNativeFallbackAfterResponderPanic(t *testing.T) {
-	for _, name := range []string{"antigravity", "kiro"} {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct{ name, event string }{
+		{"antigravity", "PreToolUse"},
+		{"antigravity", "Stop"},
+		{"kiro", "PreToolUse"},
+	} {
+		t.Run(tc.name+"/"+tc.event, func(t *testing.T) {
+			name := tc.name
 			original, ok := sharedDefaultRegistry().Get(name)
 			if !ok {
 				t.Fatalf("missing registered %s connector", name)
@@ -356,10 +373,14 @@ func TestHookPanicResponseNativeFallbackAfterResponderPanic(t *testing.T) {
 			cfg.Guardrail.Mode = "observe"
 			cfg.Guardrail.HookFailMode = "closed"
 			api := &APIServer{scannerCfg: cfg, connectorRegistry: registry}
-			req := agentHookRequest{ConnectorName: name, HookEventName: "PreToolUse"}
+			req := agentHookRequest{ConnectorName: name, HookEventName: tc.event}
 			resp := api.hookPanicResponse(t.Context(), name, req, nil, nil)
+			denies := panicWireDenies(resp.HookOutput)
+			if name == "antigravity" && tc.event == "Stop" {
+				denies = resp.HookOutput["decision"] == "continue"
+			}
 			if !panicked || resp.Action != "block" || resp.Mode != "action" || resp.WouldBlock ||
-				!panicWireDenies(resp.HookOutput) {
+				!denies {
 				t.Fatalf("%s responder panic response=%+v, panicked=%t", name, resp, panicked)
 			}
 		})

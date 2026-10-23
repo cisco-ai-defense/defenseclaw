@@ -151,6 +151,76 @@ func claudeBlocked(r runResult) bool {
 		(strings.Contains(r.stdout, `"permissionDecision":"deny"`) || strings.Contains(r.stdout, `"decision":"block"`)))
 }
 
+func TestClosedPanicStopNativeAnswersSurviveHookRunner(t *testing.T) {
+	for _, tc := range []struct {
+		connector, event, response, wantOutput string
+	}{
+		{
+			connector:  "claudecode",
+			event:      "Stop",
+			response:   `{"action":"block","claude_code_output":{"continue":false,"stopReason":"DefenseClaw stopped this turn after an internal evaluator error."}}`,
+			wantOutput: `{"continue":false,"stopReason":"DefenseClaw stopped this turn after an internal evaluator error."}`,
+		},
+		{
+			connector:  "antigravity",
+			event:      "Stop",
+			response:   `{"action":"block","hook_output":{"decision":"continue","reason":"DefenseClaw internal evaluator error"}}`,
+			wantOutput: `{"decision":"continue","reason":"DefenseClaw internal evaluator error"}`,
+		},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			result := run(t, tc.connector, ok(tc.response), func(opts *Options) {
+				opts.Event = tc.event
+				opts.FailMode = "closed"
+				if tc.connector == "claudecode" {
+					opts.Stdin = strings.NewReader(`{"hook_event_name":"Stop","session_id":"panic-stop"}`)
+				} else {
+					opts.Stdin = strings.NewReader(`{"conversationId":"panic-stop","terminationReason":"error","fullyIdle":true}`)
+				}
+			})
+			if result.code != 0 || strings.TrimSpace(result.stdout) != tc.wantOutput {
+				t.Fatalf("native answer: code=%d stdout=%q stderr=%q, want %q", result.code, result.stdout, result.stderr, tc.wantOutput)
+			}
+		})
+	}
+}
+
+func TestAntigravityClosedStopBlockCannotEmitNativeAllow(t *testing.T) {
+	for _, response := range []string{
+		`{"action":"block","reason":"internal evaluator error","hook_output":{"decision":"allow"}}`,
+		`{"action":"block","reason":"internal evaluator error"}`,
+	} {
+		result := run(t, "antigravity", ok(response), func(opts *Options) {
+			opts.Event = "Stop"
+			opts.FailMode = "closed"
+			opts.Stdin = strings.NewReader(`{"conversationId":"panic-stop","terminationReason":"error","fullyIdle":true}`)
+		})
+		var output map[string]interface{}
+		if result.code != 0 || json.Unmarshal([]byte(result.stdout), &output) != nil || output["decision"] != "continue" {
+			t.Fatalf("gateway block %s yielded code=%d stdout=%q stderr=%q, want native Stop veto", response, result.code, result.stdout, result.stderr)
+		}
+	}
+}
+
+func TestClaudeClosedStopBlockCannotEmitNativeAllow(t *testing.T) {
+	for _, response := range []string{
+		`{"action":"block","reason":"internal evaluator error","claude_code_output":{"decision":"allow"}}`,
+		`{"action":"block","reason":"internal evaluator error","claude_code_output":{"continue":null,"stopReason":"claimed terminal"}}`,
+		`{"action":"block","reason":"internal evaluator error","claude_code_output":{"continue":true,"stopReason":"claimed terminal"}}`,
+		`{"action":"block","reason":"internal evaluator error"}`,
+	} {
+		result := run(t, "claudecode", ok(response), func(opts *Options) {
+			opts.Event = "Stop"
+			opts.FailMode = "closed"
+			opts.Stdin = strings.NewReader(`{"hook_event_name":"Stop","session_id":"panic-stop"}`)
+		})
+		var output map[string]interface{}
+		if result.code != 0 || json.Unmarshal([]byte(result.stdout), &output) != nil || output["continue"] != false || output["stopReason"] == "" {
+			t.Fatalf("gateway block %s yielded code=%d stdout=%q stderr=%q, want terminal closed Stop", response, result.code, result.stdout, result.stderr)
+		}
+	}
+}
+
 func TestClaudeAndCodexNativeOutputAgreesWithGatewayAction(t *testing.T) {
 	for _, connector := range []string{"claudecode", "codex"} {
 		field := "claude_code_output"

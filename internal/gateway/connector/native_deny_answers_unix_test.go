@@ -175,6 +175,40 @@ func TestPerUserHookDeniesAConfirmationWithoutTheNativeAsk(t *testing.T) {
 	}
 }
 
+func TestAntigravityStopBlockCannotBecomeShellAllow(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	for _, reply := range []string{
+		`200|{"action":"block","reason":"internal evaluator error","hook_output":{"decision":"allow"}}`,
+		`200|{"action":"block","reason":"internal evaluator error"}`,
+	} {
+		run := runPerUserHookForStop(t, NewAntigravityConnector(), "antigravity-hook.sh",
+			[]string{"Stop"}, `{"conversationId":"panic-stop","terminationReason":"error","fullyIdle":true}`,
+			reply, "DEFENSECLAW_FAIL_MODE=closed")
+		if run.code != 0 || !strings.Contains(run.stdout, `"decision":"continue"`) || strings.Count(run.stdout, "\n") != 1 {
+			t.Fatalf("gateway response %s yielded exit %d stdout %q stderr %q, want one native Stop veto", reply, run.code, run.stdout, run.stderr)
+		}
+	}
+}
+
+func TestClaudeStopBlockCannotBecomeShellAllow(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	for _, reply := range []string{
+		`200|{"action":"block","reason":"internal evaluator error","claude_code_output":{"decision":"allow"}}`,
+		`200|{"action":"block","reason":"internal evaluator error","claude_code_output":{"continue":null,"stopReason":"claimed terminal"}}`,
+		`200|{"action":"block","reason":"internal evaluator error"}`,
+	} {
+		run := runPerUserHookForStop(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil,
+			`{"hook_event_name":"Stop","session_id":"panic-stop"}`, reply, "DEFENSECLAW_FAIL_MODE=closed")
+		if run.code != 0 || !strings.Contains(run.stdout, `"continue":false`) || strings.Count(run.stdout, "\n") != 1 {
+			t.Fatalf("gateway response %s yielded exit %d stdout %q stderr %q, want one terminal closed Stop", reply, run.code, run.stdout, run.stderr)
+		}
+	}
+}
+
 // Review round 2: an Antigravity hook whose registration lost its event (or
 // names one DefenseClaw did not review) denies a tool call in fail mode
 // closed before any other check answers it, its helpers missing included.

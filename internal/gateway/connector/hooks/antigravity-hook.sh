@@ -2,8 +2,9 @@
 # defenseclaw-managed-hook v8
 # DefenseClaw Antigravity (`agy`) hook. Setup passes the documented lifecycle
 # event as argv[1] because Antigravity's official stdin schemas omit it.
-# PreToolUse blocks only through synchronous stdout {"decision":"deny"}; this
-# bridge does not rely on undocumented non-zero-exit enforcement.
+# PreToolUse blocks through synchronous stdout {"decision":"deny"}; Stop
+# vetoes termination through {"decision":"continue"}. This bridge does not
+# rely on undocumented non-zero-exit enforcement.
 set -euo pipefail
 
 HOOK_EVENT="${1:-}"
@@ -379,6 +380,12 @@ case "$ACTION" in
         REASON="Blocked by DefenseClaw Antigravity policy."
       fi
       OUTPUT="$(printf '{"decision":"deny","reason":"%s"}' "$(defenseclaw_json_escape "$REASON")")"
+    elif [ "$OUTPUT_DECISION" != "continue" ] && [ "$HOOK_EVENT" = "Stop" ]; then
+      REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+      if [ -z "$REASON" ]; then
+        REASON="DefenseClaw hook failed closed."
+      fi
+      OUTPUT="$(printf '{"decision":"continue","reason":"%s"}' "$(defenseclaw_json_escape "$REASON")")"
     fi
     ;;
   *) fail_response "invalid or missing action in gateway response" ;;

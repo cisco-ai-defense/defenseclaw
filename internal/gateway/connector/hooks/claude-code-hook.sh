@@ -392,17 +392,10 @@ if command -v jq >/dev/null 2>&1; then
     OUTPUT="${RESPONSE_FIELDS#*$'\n'}"
   fi
   unset RESPONSE_FIELDS
-  if [ -n "$OUTPUT" ]; then
-    printf '%s\n' "$OUTPUT"
-  fi
 else
 {{end}}OUTPUT=$(echo "$RESULT" | _dc_jq -c '.claude_code_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
-  echo "$OUTPUT"
-fi
-
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
@@ -413,6 +406,33 @@ case "$ACTION" in
   allow|alert|block|confirm) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
+
+if [ "$ACTION" = "block" ]; then
+  CLAUDE_EVENT=$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null) || CLAUDE_EVENT=""
+  case "$CLAUDE_EVENT" in
+    Stop|SubagentStop|TeammateIdle)
+      NATIVE_CONTINUE=""
+      NATIVE_STOP_REASON=""
+      NATIVE_DECISION=""
+      NATIVE_REASON=""
+      if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+        NATIVE_CONTINUE=$(printf '%s' "$OUTPUT" | _dc_jq -c '.continue' 2>/dev/null) || NATIVE_CONTINUE=""
+        NATIVE_STOP_REASON=$(printf '%s' "$OUTPUT" | _dc_jq -r '.stopReason // empty' 2>/dev/null) || NATIVE_STOP_REASON=""
+        NATIVE_DECISION=$(printf '%s' "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null) || NATIVE_DECISION=""
+        NATIVE_REASON=$(printf '%s' "$OUTPUT" | _dc_jq -r '.reason // empty' 2>/dev/null) || NATIVE_REASON=""
+      fi
+      if ! { [ "$NATIVE_CONTINUE" = "false" ] && [ -n "$NATIVE_STOP_REASON" ]; } &&
+         ! { [ "$NATIVE_DECISION" = "block" ] && [ -n "$NATIVE_REASON" ]; }; then
+        REASON=$(printf '%s' "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+        [ -n "$REASON" ] || REASON="DefenseClaw hook failed closed."
+        OUTPUT=$(printf '{"continue":false,"stopReason":"%s"}' "$(defenseclaw_json_escape "$REASON")")
+      fi
+      ;;
+  esac
+fi
+if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+  printf '%s\n' "$OUTPUT"
+fi
 
 # Anthropic's Claude Code hook protocol — like Codex's — is strictly
 # EITHER structured JSON on stdout with exit 0 (Claude parses the

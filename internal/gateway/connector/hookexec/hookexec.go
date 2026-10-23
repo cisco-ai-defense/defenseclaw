@@ -1514,6 +1514,29 @@ func (sp spec) decide(opts Options, body []byte) int {
 	if sp.style == stylePluginBridge {
 		output = compactField(fields, "hook_output")
 	}
+	if sp.connector == "claudecode" && action == "block" && claudeTerminalStopEvent(opts.Event) &&
+		(output == "" || !nativeOutputAgrees(sp, opts.Event, action, output)) {
+		// A malformed or missing Stop directive cannot turn a gateway block
+		// into a neutral allow or an exit-2 retry loop.
+		logHookFailure(opts, sp, "gateway block without a terminal Claude Stop answer", "response", "closed", true)
+		if reason == "" {
+			reason = "DefenseClaw hook failed closed."
+		}
+		fmt.Fprintln(opts.Stdout, `{"continue":false,"stopReason":`+mustJSONString(reason)+`}`)
+		return 0
+	}
+	if sp.connector == "antigravity" && opts.Event == "Stop" && action == "block" &&
+		(output == "" || !nativeOutputAgrees(sp, opts.Event, action, output)) {
+		// Stop has a different veto from PreToolUse. A missing or
+		// allow-shaped native field must not undo the gateway's closed
+		// response and its enforced audit row.
+		logHookFailure(opts, sp, "gateway block without an Antigravity Stop veto", "response", "closed", true)
+		if reason == "" {
+			reason = "DefenseClaw hook failed closed."
+		}
+		fmt.Fprintln(opts.Stdout, `{"decision":"continue","reason":`+mustJSONString(reason)+`}`)
+		return 0
+	}
 	if managedNativeDecision(opts) && managedNativeBlockableEvent(sp.connector, opts.Event) && output == "" &&
 		(action == "block" || action == "confirm" || (sp.connector == "cursor" && action == "allow")) &&
 		(sp.style == styleHookEcho || sp.style == styleHookEchoDecision || sp.style == styleHookDecisionStderr || sp.style == stylePluginBridge) {
@@ -1748,12 +1771,23 @@ func managedNativeBlockableEvent(connector, event string) bool {
 	return false
 }
 
+func claudeTerminalStopEvent(event string) bool {
+	switch event {
+	case "Stop", "SubagentStop", "TeammateIdle":
+		return true
+	}
+	return false
+}
+
 // nativeOutputAgrees checks the vendor decision that actually reaches the
 // agent. A complete gateway response can still contain an allow-shaped native
 // directive beside a block action; the native directive wins at the agent.
 func nativeOutputAgrees(sp spec, event, action, output string) bool {
 	blockable := managedNativeBlockableEvent(sp.connector, event)
 	if sp.style == styleClaudeCode {
+		blockable = true
+	}
+	if sp.connector == "antigravity" && event == "Stop" && action == "block" {
 		blockable = true
 	}
 	if sp.style == styleCodex {
@@ -1775,6 +1809,15 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 	}
 	switch sp.connector {
 	case "claudecode", "codex":
+		if sp.style == styleClaudeCode && action == "block" && claudeTerminalStopEvent(event) {
+			// A recovered gateway panic ends the turn without another
+			// Stop callback. This universal field takes precedence over
+			// the event's retrying decision:block response.
+			if raw, present := fields["continue"]; present {
+				return bytes.Equal(bytes.TrimSpace(raw), []byte("false")) &&
+					rawStringOr(fields, "stopReason", "") != ""
+			}
+		}
 		var nested map[string]json.RawMessage
 		if json.Unmarshal(fields["hookSpecificOutput"], &nested) == nil && nested != nil {
 			if outputEvent := rawStringOr(nested, "hookEventName", ""); outputEvent != "" && outputEvent != event {
@@ -1835,6 +1878,9 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 		}
 		return rawStringOr(fields, "permissionDecision", "") == want
 	case "antigravity":
+		if event == "Stop" && action == "block" {
+			return rawStringOr(fields, "decision", "") == "continue"
+		}
 		// Antigravity reads only its documented decision values. A
 		// confirmation must be force_ask: its plain ask honors a cached
 		// Always Allow grant and can run the call unasked (GAP-0405).
