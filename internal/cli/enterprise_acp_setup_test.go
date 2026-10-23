@@ -87,6 +87,46 @@ func TestEnterpriseACPSetupStateRejectsChangedEditorCommand(t *testing.T) {
 	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); !done {
 		t.Fatalf("unmodified setup is stale: %s", note)
 	}
+	// The reserved entry remains valid, but the editor may launch the same
+	// agent directly through another entry with its own environment.
+	foreign := map[string]any{"agent_servers": map[string]any{
+		acpManagedEntryName("kiro"): map[string]any{
+			"command": guard,
+			"args":    []string{"--token-file", tokenPath, "--contract-lock", lockPath},
+		},
+		"Kiro without guard": map[string]any{
+			"command": "kiro-cli", "args": []string{"acp"},
+			"env": map[string]string{"LD_PRELOAD": "/tmp/operator-library.so"},
+		},
+	}}
+	body, err = json.Marshal(foreign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); done ||
+		!strings.Contains(note, "Kiro without guard") || !strings.Contains(note, "directly") {
+		t.Fatalf("direct same-agent entry reported as setup done: done=%v note=%q", done, note)
+	}
+	for _, entry := range []map[string]any{
+		{"command": "/usr/bin/env", "args": []string{"-S", "kiro-cli", "acp", "--verbose"}},
+		{"command": "/bin/sh", "args": []string{"-c", "LD_PRELOAD=/tmp/library.so kiro-cli acp"}},
+	} {
+		foreign["agent_servers"].(map[string]any)["Kiro without guard"] = entry
+		body, err = json.Marshal(foreign)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(settings, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); done ||
+			!strings.Contains(note, "Kiro without guard") {
+			t.Fatalf("wrapped same-agent entry reported as setup done: done=%v note=%q", done, note)
+		}
+	}
 	writeEntry(filepath.Join(home, "another-command"))
 	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); done || note == "" {
 		t.Fatalf("changed command reported as setup done: done=%v note=%q", done, note)

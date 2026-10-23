@@ -872,7 +872,7 @@ class TestStatusJson(unittest.TestCase):
             result = self._invoke_json()
         self.assertEqual(result.exit_code, 0, msg=result.output)
         sidecar = json.loads(result.output)["sidecar"]
-        self.assertFalse(sidecar["running"])
+        self.assertIsNone(sidecar["running"])
         self.assertIn("port 19081 is held by a process of another account", sidecar["reason"])
 
     def test_json_roster_has_per_connector_mode(self):
@@ -935,6 +935,34 @@ class TestStatusJson(unittest.TestCase):
         self.assertIsNone(doc["sidecar"]["running"])
         self.assertNotIn("policy", doc)
 
+    def test_json_sidecar_reports_live_process_when_authenticated_health_is_unreadable(self):
+        with (
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch.object(cmd_status, "_live_gateway_pid", return_value=4242),
+            patch.object(cmd_status, "_status_refused_detail", return_value="the gateway token was rejected"),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=""),
+        ):
+            result = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        sidecar = json.loads(result.output)["sidecar"]
+        self.assertIsNone(sidecar["running"])
+        self.assertIn("token was rejected", sidecar["reason"])
+
+    def test_json_sidecar_names_foreign_port_holder_without_claiming_gateway_stopped(self):
+        with (
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch.object(cmd_status, "_live_gateway_pid", return_value=0),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value="PID 4343 (python3)"),
+        ):
+            result = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        sidecar = json.loads(result.output)["sidecar"]
+        self.assertIsNone(sidecar["running"])
+        self.assertIn("port", sidecar["reason"])
+        self.assertIn("PID 4343 (python3)", sidecar["reason"])
+
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))
         result = self._invoke_json()
@@ -982,8 +1010,13 @@ class TestStatusProfileIdentity(unittest.TestCase):
             # The test varies the configured port in memory for each fake
             # endpoint; the client now reloads that configuration to prove it.
             config_patch = patch("defenseclaw.config.load", return_value=app.cfg)
+            # This fixture serves both endpoints in the test account. Socket
+            # ownership is covered separately; this case exercises profile
+            # binding after that connected-peer check succeeds.
+            socket_patch = patch("defenseclaw.gateway._verify_connected_gateway_socket", return_value=None)
             listener_patch.start()
             config_patch.start()
+            socket_patch.start()
             try:
                 with _owned_status_endpoint(str(ambient_home), foreign_health, owned_token) as (port, seen):
                     app.cfg.gateway.api_port = port
@@ -1033,6 +1066,7 @@ class TestStatusProfileIdentity(unittest.TestCase):
                 self.assertTrue(doc["sidecar"]["running"])
                 self.assertIn(matching_marker, json.dumps(doc))
             finally:
+                socket_patch.stop()
                 config_patch.stop()
                 listener_patch.stop()
                 cleanup_app(app, db_path, app_tmp)

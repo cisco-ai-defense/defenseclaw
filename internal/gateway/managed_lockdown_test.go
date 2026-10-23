@@ -5,12 +5,10 @@ package gateway
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,13 +20,6 @@ func managedStandaloneTestConfig(dataDir string) *config.Config {
 	cfg := &config.Config{DataDir: dataDir, DeploymentMode: "managed_enterprise"}
 	cfg.Enterprise.Profile = "standalone"
 	return cfg
-}
-
-func useBundleAnchorsPath(t *testing.T, path string, err error) {
-	t.Helper()
-	previous := bundleAnchorsPath
-	bundleAnchorsPath = func() (string, error) { return path, err }
-	t.Cleanup(func() { bundleAnchorsPath = previous })
 }
 
 func TestManagedStandaloneGatewayRefusesShutdownOverTheAPI(t *testing.T) {
@@ -69,25 +60,15 @@ func TestSignedBundleComputerRefusesPolicyReloadOverTheAPI(t *testing.T) {
 		return w
 	}
 
-	anchors := filepath.Join(t.TempDir(), "trust", "bundle-anchors.json")
-	useBundleAnchorsPath(t, anchors, nil)
-	if w := reload(); w.Code != http.StatusOK || called != 1 {
-		t.Fatalf("reload without anchors = %d %s, calls %d; want the reload", w.Code, w.Body.String(), called)
+	if w := reload(); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "signed policy bundles") || called != 0 {
+		t.Fatalf("reload without anchors = %d %s, calls %d; want 403 and no reload", w.Code, w.Body.String(), called)
 	}
-
-	if err := os.MkdirAll(filepath.Dir(anchors), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(anchors, []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if w := reload(); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "signed policy bundles") || called != 1 {
-		t.Fatalf("reload with anchors = %d %s, calls %d; want 403 and no reload", w.Code, w.Body.String(), called)
-	}
-
-	// An anchors location the gateway cannot resolve counts as bundle mode.
-	useBundleAnchorsPath(t, "", errors.New("no layout"))
-	if w := reload(); w.Code != http.StatusForbidden || called != 1 {
-		t.Fatalf("reload with unknown anchors = %d %s, calls %d; want 403", w.Code, w.Body.String(), called)
+	// The published generation is authoritative even if a stale startup
+	// snapshot says per-user while an authenticated request arrives.
+	live := api.scannerCfg
+	api.scannerCfg = &config.Config{}
+	api.SetGenerationSource(func() *Generation { return &Generation{Config: live} })
+	if w := reload(); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "signed policy bundles") || called != 0 {
+		t.Fatalf("reload with managed generation and stale startup config = %d %s, calls %d; want 403 and no reload", w.Code, w.Body.String(), called)
 	}
 }

@@ -112,6 +112,18 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 			if _, keep := features[feature]; !keep {
 				continue
 			}
+			if feature == "hooks" && features["hooks"] == true {
+				// Managed reconciliation may have to undo a user preference
+				// that contradicts the administrator's pinned hooks=true.
+				// Replace just the boolean token; retain the user's spelling,
+				// whitespace, comments and the rest of config.toml.
+				if equals := strings.IndexByte(visible, '='); equals >= 0 &&
+					strings.TrimSpace(visible[equals+1:]) == "false" {
+					value := equals + 1 + strings.Index(visible[equals+1:], "false")
+					out.WriteString(line[:value] + "true" + line[value+len("false"):])
+					continue
+				}
+			}
 		}
 		out.WriteString(line)
 	}

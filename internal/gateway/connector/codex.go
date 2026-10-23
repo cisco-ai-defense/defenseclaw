@@ -1752,16 +1752,30 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if features == nil {
 			features = map[string]interface{}{}
 		}
+		repairManagedPreference := opts.ManagedEnterprise && !opts.SecureClientHookDelivery
 		if enabled, explicitlySet := features["hooks"].(bool); explicitlySet && !enabled {
-			return fmt.Errorf("Codex hooks are disabled in config.toml; enable [features].hooks before installing the Codex connector") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+			if !repairManagedPreference {
+				return fmt.Errorf("Codex hooks are disabled in config.toml; enable [features].hooks before installing the Codex connector") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+			}
 		}
 		if enabled, explicitlySet := features["codex_hooks"].(bool); explicitlySet && !enabled {
-			return fmt.Errorf("Codex hooks are disabled by deprecated [features].codex_hooks; enable hooks before installing the Codex connector") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+			if !repairManagedPreference {
+				return fmt.Errorf("Codex hooks are disabled by deprecated [features].codex_hooks; enable hooks before installing the Codex connector") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+			}
 		}
 		// Remove the retired alias when it is enabled. Current Codex accepts the
 		// [features].hooks key (and enables hooks by default) and warns on the old
 		// name.
 		delete(features, "codex_hooks")
+		if enabled, present := features["hooks"].(bool); repairManagedPreference && present && !enabled {
+			// Codex accepts `codex features disable hooks` even when an admin
+			// requirement pins hooks on. It writes hooks=false into the user
+			// config, then project-trust saves fail validation. A managed
+			// reconciliation owns this one conflicting preference and restores
+			// it while preserving the user's unrelated settings.
+			features["hooks"] = true
+			cfg["features"] = features
+		}
 
 		if opts.ManagedEnterprise {
 			otelBlock, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)

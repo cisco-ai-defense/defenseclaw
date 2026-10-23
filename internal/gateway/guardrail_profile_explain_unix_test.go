@@ -97,14 +97,19 @@ func TestProfileExplainUIDTheDirectoryCannotNameMatchesItsUsersEntry(t *testing.
 		profileExplainDirectoryFacts, profileExplainCachedSubject = prevFacts, prevCached
 		setIdentityLookupBlocking(prevBlocking)
 	})
+	lookupCalls := 0
 	profileExplainDirectoryFacts = func(string) (useridentity.DirectoryFacts, error) {
+		lookupCalls++
 		return useridentity.DirectoryFacts{}, errors.New("SSSD NSS responder: i/o timeout")
 	}
 	profileExplainCachedSubject = func(string, time.Time) (profileSubject, error) { return profileSubject{}, errNoCachedHolder }
 	setIdentityLookupBlocking(true)
 	subject, err := profileExplainUnresolved("94404076", unixidentity.ErrNotFound)
-	if err != nil || subject.UserID != "94404076" || !subject.LookupFailed || !strings.Contains(subject.LookupError, "i/o timeout") {
+	if err != nil || subject.UserID != "94404076" || !subject.LookupFailed || !strings.Contains(subject.LookupError, "account database names no account") {
 		t.Fatalf("subject %+v, err %v; want the uid with the lookup failure", subject, err)
+	}
+	if lookupCalls != 0 {
+		t.Fatalf("unknown-account explain started %d directory lookup(s); it must not add a false health warning", lookupCalls)
 	}
 	set := &guardrailProfileSet{
 		profiles: map[string]config.DerivedGuardrailProfile{"contractors": {Digest: "d1"}, "engineering": {Digest: "d2"}, "offline-floor": {Digest: "d3"}},

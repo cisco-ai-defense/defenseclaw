@@ -4594,6 +4594,68 @@ hooks = false
 	}
 }
 
+func TestCodexManagedSetupRepairsUserHooksFalseWithoutLosingProjectTrust(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed Windows Codex uses the machine requirements installer")
+	}
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const source = "model = \"gpt-5\"\n[features]\nhooks = true\n[projects.\"/work/trusted\"]\ntrust_level = \"trusted\"\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousConfig, previousInspector := CodexConfigPathOverride, codexPolicyInspector
+	CodexConfigPathOverride = configPath
+	codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
+		return codexEffectivePolicy{}, nil
+	}
+	t.Cleanup(func() {
+		CodexConfigPathOverride, codexPolicyInspector = previousConfig, previousInspector
+	})
+	conn := NewCodexConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970", ManagedEnterprise: true}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("initial managed Codex setup: %v", err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := bytes.Replace(raw, []byte("hooks = true"), []byte("hooks = false # user preference"), 1)
+	if bytes.Equal(changed, raw) {
+		t.Fatalf("initial managed config has no hooks=true preference to change:\n%s", raw)
+	}
+	if err := os.WriteFile(configPath, changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || present {
+		t.Fatalf("managed hooks after user changed the preference = %v, %v; want repair needed", present, err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("managed Codex setup should repair the forbidden user preference: %v", err)
+	}
+	cfg := readCASTOML(t, configPath)
+	rendered, err := os.ReadFile(configPath)
+	if err != nil || !bytes.Contains(rendered, []byte("hooks = true # user preference")) {
+		t.Fatalf("managed repair did not preserve the feature comment: %v\n%s", err, rendered)
+	}
+	features, _ := cfg["features"].(map[string]interface{})
+	if features["hooks"] != true {
+		t.Fatalf("managed Codex hooks preference = %#v; want true", features)
+	}
+	projects, _ := cfg["projects"].(map[string]interface{})
+	project, _ := projects["/work/trusted"].(map[string]interface{})
+	if project["trust_level"] != "trusted" || cfg["model"] != "gpt-5" {
+		t.Fatalf("managed repair lost unrelated Codex settings: %#v", cfg)
+	}
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("managed hooks after repair = %v, %v", present, err)
+	}
+}
+
 func TestCodexCommandHookHashMatchesCodexCanonicalIdentity(t *testing.T) {
 	got := codexCommandHookHash("pre_tool_use", "*", "/tmp/hook.sh", 30)
 	want := "sha256:73ec4bb1ffa348f02fcca6c5c0725cc825ba47aa298a7e72eab4e47856cbadbc"

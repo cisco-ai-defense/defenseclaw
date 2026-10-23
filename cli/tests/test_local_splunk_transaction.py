@@ -548,6 +548,95 @@ def test_native_disable_remote_only_skips_local_runtime_preflight(tmp_path: Path
     stop_bridge.assert_not_called()
 
 
+def test_native_disable_without_docker_clears_stale_sink_when_no_stack_exists(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    app = _app(tmp_path)
+    owned = SimpleNamespace(
+        name="local-splunk", kind="splunk_hec", enabled=True,
+        endpoint="https://127.0.0.1:8088/services/collector/event",
+    )
+    disabled: list[str] = []
+    with (
+        patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=SimpleNamespace(destinations=(owned,)),
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._set_v8_destination_enabled",
+            side_effect=lambda _data_dir, name, *_: disabled.append(name),
+        ),
+        patch(
+            "defenseclaw.observability.local_splunk.prepare_native_local_splunk_stop",
+            side_effect=LocalStackError("Docker CLI was not found on PATH"),
+        ),
+        patch("defenseclaw.observability.local_stack.resolve_native_docker_executable", return_value=""),
+        patch.object(cmd_setup, "_port_in_use", return_value=False),
+        patch.object(cmd_setup, "_reload_cfg_from_data_dir"),
+    ):
+        cmd_setup._disable_splunk(app, False, True, False, True)
+    assert disabled == ["local-splunk"]
+    assert "Local Splunk stack was not running" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("obstruction", ["managed-assets", "listener"])
+def test_native_disable_without_docker_refuses_unproven_stack(
+    tmp_path: Path, obstruction: str
+) -> None:
+    app = _app(tmp_path)
+    owned = SimpleNamespace(
+        name="local-splunk", kind="splunk_hec", enabled=True,
+        endpoint="https://127.0.0.1:8088/services/collector/event",
+    )
+    if obstruction == "managed-assets":
+        (tmp_path / "splunk-bridge").mkdir()
+    with (
+        patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=SimpleNamespace(destinations=(owned,)),
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._set_v8_destination_enabled"
+        ) as writer,
+        patch(
+            "defenseclaw.observability.local_splunk.prepare_native_local_splunk_stop",
+            side_effect=LocalStackError("Docker CLI was not found on PATH"),
+        ),
+        patch("defenseclaw.observability.local_stack.resolve_native_docker_executable", return_value=""),
+        patch.object(cmd_setup, "_port_in_use", return_value=obstruction == "listener"),
+        pytest.raises(ClickException, match="could not validate owned Local Splunk stack"),
+    ):
+        cmd_setup._disable_splunk(app, False, True, False, True)
+    writer.assert_not_called()
+
+
+def test_native_disable_without_docker_names_a_newly_discovered_shell_shim(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    owned = SimpleNamespace(
+        name="local-splunk", kind="splunk_hec", enabled=True,
+        endpoint="https://127.0.0.1:8088/services/collector/event",
+    )
+    with (
+        patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
+        patch(
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            return_value=SimpleNamespace(destinations=(owned,)),
+        ),
+        patch(
+            "defenseclaw.observability.local_splunk.prepare_native_local_splunk_stop",
+            side_effect=LocalStackError("Docker CLI was not found on PATH"),
+        ),
+        patch(
+            "defenseclaw.observability.local_stack.resolve_native_docker_executable",
+            side_effect=LocalStackError("docker.exe required; shell shim found"),
+        ),
+        pytest.raises(ClickException, match="docker.exe required; shell shim found"),
+    ):
+        cmd_setup._disable_splunk(app, False, True, False, True)
+
+
 def test_native_disable_failure_restores_config_and_running_stack(tmp_path: Path) -> None:
     app = _app(tmp_path)
     custom_name = "OPERATOR_MANAGED_GATEWAY_TOKEN"

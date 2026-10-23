@@ -1265,15 +1265,37 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 			if heldDiff := diffConfigs(oldCfg, held); len(heldDiff.RestartRequired) == 0 {
 				pendingRestart = diff.RestartRequired
 				next, diff = held, heldDiff
-				fmt.Fprintf(os.Stderr, "[config] restart the gateway to apply %s; the rest of the change applies now\n",
-					strings.Join(pendingRestart, ", "))
 			}
 		}
 	}
-	setPendingRestart(pendingRestart)
 	hot = len(diff.RestartRequired) == 0
 	if source.compiledV8 != nil && source.compiledV8.Plan != nil && m.observabilityV8PlanChanged(source.compiledV8.Plan) {
 		diff.Changed = sortedUniqueStrings(append(diff.Changed, "observability"))
+	}
+	// On a standalone managed host the lifecycle's signed bundle is the only
+	// source of a new config or policy generation. A watcher event or an
+	// authenticated API call cannot turn hand-edited bytes or assets active.
+	// The boot bytes are already the running snapshot and may be reconciled
+	// once before the manager has an applied generation.
+	startupBoot := !assets && !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
+		sha256.Sum256(source.raw) == m.startupSource
+	if (oldCfg.StandaloneEnterprise() || next.StandaloneEnterprise()) && !startupBoot &&
+		!m.pendingBundleGeneration(source.raw) &&
+		(assets || m.rejected || !bytes.Equal(m.appliedRaw, source.raw) || len(diff.Changed) > 0) {
+		err := fmt.Errorf("config reload refused: this managed computer takes config and policy from a signed policy bundle; apply a new signed bundle")
+		m.rejected = true
+		m.recordLoadError(ctx, "managed_unbundled_reload")
+		if m.health != nil {
+			m.setConfigHealth(StateError, err.Error(), map[string]interface{}{
+				"path": m.path, "generation": m.gen.Load(), "reason": reason,
+			})
+		}
+		return err
+	}
+	setPendingRestart(pendingRestart)
+	if len(pendingRestart) > 0 {
+		fmt.Fprintf(os.Stderr, "[config] restart the gateway to apply %s; the rest of the change applies now\n",
+			strings.Join(pendingRestart, ", "))
 	}
 	// A standing rejection also forces a rebuild: the repair (an asset
 	// restored, a bad config edit reverted) changes nothing the diff sees,

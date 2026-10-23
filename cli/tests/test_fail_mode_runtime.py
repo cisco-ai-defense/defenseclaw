@@ -1885,3 +1885,34 @@ def test_doctor_mode_fails_a_windows_hook_rendered_open_or_without_a_mode(
     mode_rows = [row for row in emitted if row[1] == "Mode"]
     assert len(mode_rows) == 1 and mode_rows[0][0] == "fail", mode_rows
     assert phrase in mode_rows[0][2]
+
+
+def test_windows_codex_reconcile_waits_for_a_transient_registration_read(tmp_path: Path) -> None:
+    # Windows can briefly deny a read of Codex's freshly reconciled hook
+    # target while an existing app-server releases its handle. The final
+    # verdict still has to come from a successful full registration check.
+    unread = SimpleNamespace(current=False, connector="codex", drift=("registration-access-denied",))
+    current = SimpleNamespace(current=True, connector="codex", drift=())
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+    with (
+        patch.object(fail_mode_runtime, "_is_windows", return_value=True),
+        patch.object(fail_mode_runtime.shutil, "which", return_value="C:/bin/defenseclaw-gateway.exe"),
+        patch.object(fail_mode_runtime.subprocess, "run", return_value=SimpleNamespace(returncode=0)),
+        patch.object(fail_mode_runtime, "resolve_connector_fail_mode", side_effect=(unread, current)) as check,
+    ):
+        assert fail_mode_runtime.reconcile_connector_registration(cfg, "codex") is current
+    assert check.call_count == 2
+
+
+def test_windows_codex_reconcile_refuses_persistent_registration_read_denial(tmp_path: Path) -> None:
+    unread = SimpleNamespace(current=False, connector="codex", drift=("registration-access-denied",))
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+    with (
+        patch.object(fail_mode_runtime, "_is_windows", return_value=True),
+        patch.object(fail_mode_runtime.shutil, "which", return_value="C:/bin/defenseclaw-gateway.exe"),
+        patch.object(fail_mode_runtime.subprocess, "run", return_value=SimpleNamespace(returncode=0)),
+        patch.object(fail_mode_runtime, "resolve_connector_fail_mode", return_value=unread) as check,
+    ):
+        with pytest.raises(OSError, match="registration-access-denied"):
+            fail_mode_runtime.reconcile_connector_registration(cfg, "codex")
+    assert check.call_count == 3
