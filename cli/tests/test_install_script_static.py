@@ -795,9 +795,7 @@ def test_a_rollback_whose_gateway_does_not_start_is_undone_and_exits_1(tmp_path:
     for folder, version, start in ((bin_dir, "1.0.2", "exit 0"), (dc_home / "previous" / "bin", "1.0.1", "exit 1")):
         gateway = folder / "defenseclaw-gateway"
         gateway.write_text(
-            # Like a real 1.0.1 or 0.8.10 gateway, start refuses a flag it
-            # does not know (the installer asks for --require-every-connector).
-            f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; start) [ "$#" -eq 1 ] || exit 1; {start} ;; esac\n',
+            f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; start) {start} ;; esac\n',
             encoding="utf-8",
         )
         gateway.chmod(0o755)
@@ -948,7 +946,9 @@ def _rollback_to_0_8_with_a_damaged_store(tmp_path: Path, starts: bool) -> tuple
     calls = tmp_path / "calls.txt"
     log = f"echo \"$V $*\" >> '{calls}'"
     pid = '"$DEFENSECLAW_HOME/gateway.pid"'
-    new = f"connector|start) {log} ;; esac\n"
+    # Like a real 1.0.1 gateway, start refuses a flag it does not know (the
+    # installer asks whether it has --require-every-connector).
+    new = f'connector|start) [ "$1" = connector ] || [ "$#" -eq 1 ] || exit 1; {log} ;; esac\n'
     guard = '[ ! -e "$DEFENSECLAW_HOME/audit.db" ] || ' if starts else ""
     old = (
         f"start) {log}; {guard}exit 1\n"
@@ -1036,9 +1036,7 @@ def test_a_rollback_refused_on_hook_drift_prints_only_the_fix_that_works(tmp_pat
     for folder, version, start in ((bin_dir, "1.0.1", "exit 0"), (dc_home / "previous" / "bin", "0.8.10", drift)):
         gateway = folder / "defenseclaw-gateway"
         gateway.write_text(
-            # Like a real 1.0.1 or 0.8.10 gateway, start refuses a flag it
-            # does not know (the installer asks for --require-every-connector).
-            f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; start) [ "$#" -eq 1 ] || exit 1; {start} ;; esac\n',
+            f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; start) {start} ;; esac\n',
             encoding="utf-8",
         )
         gateway.chmod(0o755)
