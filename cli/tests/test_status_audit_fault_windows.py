@@ -56,7 +56,7 @@ def test_status_reports_live_audit_failure_and_block_after_recovery(tmp_path):
         assert reported["enforcement"] is None
         assert "database or disk is full" in reported["audit_db_error"]
         assert "events cannot be written" in reported["audit_write_failure"]
-        assert reported["runtime_tool_blocks"] == 1
+        assert reported["tool_blocks"] == 1
 
         human = CliRunner().invoke(main.cli, ["status"], obj=AppContext())
         assert human.exit_code == 0, human.output
@@ -71,4 +71,4 @@ def test_status_reports_live_audit_failure_and_block_after_recovery(tmp_path):
         recovered = json.loads(after.output)
         assert "audit_db_error" not in recovered
         assert "audit_write_failure" not in recovered
-        assert recovered["runtime_tool_blocks"] == 1
+        assert recovered["tool_blocks"] == 1

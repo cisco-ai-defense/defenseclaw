@@ -1973,7 +1973,7 @@ def _status_payload(app) -> dict:
     else:
         payload["sidecar"] = {"running": health is not None}
     if health is not None:
-        payload["runtime_tool_blocks"] = sum(
+        payload["tool_blocks"] = sum(
             max(0, _safe_int(connector.get("tool_blocks")))
             for connector in _fetch_health_connectors(health=health).values()
         )
