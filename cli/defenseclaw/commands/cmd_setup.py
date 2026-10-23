@@ -18591,7 +18591,7 @@ def _ensure_private_splunk_bridge_env(data_dir: str) -> str:
 
 
 def _migrate_retired_splunk_image(env_file: str) -> None:
-    """Replace only the unavailable shipped image; keep operator overrides."""
+    """Upgrade 0.8.10 and 1.0.0-1.0.3 private envs; remove after the 1.0.x bridge."""
     from defenseclaw.observability.local_splunk import RETIRED_SPLUNK_IMAGE
 
     entries = _load_dotenv(env_file)

@@ -86,7 +86,7 @@ The `DCLAW_*` variables below are in the registry at `internal/envvars/registry.
 
 | Variable | What it does |
 | --- | --- |
-| `DCLAW_FLEET_API_URL` | Fleet API URL used by `defenseclaw setup edge-connector install`. |
+| `DCLAW_FLEET_API_URL` | Fleet API URL used by the remote installer and `defenseclaw edge-connector` commands. Use HTTPS for production key delivery. |
 | `DCLAW_LIB_PATH` | Path to `libdclaw_core.so`. Default `/usr/local/lib/libdclaw_core.so`. |
 | `DCLAW_SOCKET_PATH` | Socket the Python adapters connect to. Default `/run/defenseclaw/defenseclaw.sock`. |
 | `DCLAW_LOG_PATH` | Adapter audit log. Default `~/edge-connector.log`. |
@@ -233,7 +233,7 @@ The gateway publishes policy updates; devices publish heartbeats and escalation 
 
 Legacy flash partitions with unsigned policy payloads are preserved but refused at boot, including in a development build. Back up the device state and use a trusted re-sign/reprovisioning procedure before starting the new connector. An in-place metadata migration alone does not make the old policy executable; verify the signed flash policy and authenticated heartbeat after upgrade.
 
-The gateway rejects missing or invalid device HMAC keys by default. Pre-register every production device through the authenticated Fleet API; MQTT auto-registration is for unmanaged local development only. An unmanaged development host can opt into the legacy zero-key behavior only with `DCLAW_DEV_MODE=ON`; managed deployments never permit that fallback. For multiple devices, use registration-issued per-device keys rather than the one shared test key above. The C device binds its durable emergency sequence to tenant/fleet identity; moving it requires trusted flash reset and reprovisioning, because a new identity with the prior emergency state refuses startup.
+The gateway rejects missing or invalid device HMAC keys by default. Pre-register every production device through the [authenticated Fleet API over HTTPS](/docs/reference/edge-connector/api#register-a-device), or through a configured trusted TLS proxy, and provision the returned key on the device. The `defenseclaw edge-connector register` command uses the Fleet endpoint saved by `setup edge-connector`; set that endpoint to your HTTPS gateway URL for production. The default loopback HTTP endpoint is for local test mode only and succeeds only when Fleet explicitly permits HTTP key delivery; the default production setting refuses it with `key_delivery_requires_tls`. MQTT auto-registration is for unmanaged local development only. An unmanaged development host can opt into the legacy zero-key behavior only with `DCLAW_DEV_MODE=ON`; managed deployments never permit that fallback. For multiple devices, use registration-issued per-device keys rather than the one shared test key above. The C device binds its durable emergency sequence to tenant/fleet identity; moving it requires trusted flash reset and reprovisioning, because a new identity with the prior emergency state refuses startup.
 
 ## Integrations
 

@@ -11,9 +11,10 @@ from types import SimpleNamespace
 import click
 import pytest
 from click.testing import CliRunner
-from defenseclaw.commands import cmd_edge_install, cmd_setup_edge_connector, cmd_setup_mqtt
+from defenseclaw.commands import cmd_edge_connector_cli, cmd_edge_install, cmd_setup_edge_connector, cmd_setup_mqtt
 from defenseclaw.context import AppContext
 from defenseclaw.dotenv_utils import persist_env_var
+from defenseclaw.file_permissions import make_private_directory
 
 
 def _app(tmp_path):
@@ -60,9 +61,20 @@ def test_edge_install_help_and_missing_source_name_fleet_archive(tmp_path, monke
 
 
 def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    install_guide = (
+        Path(__file__).resolve().parents[2]
+        / "docs-site/content/docs/how-to/install-the-edge-connector.mdx"
+    ).read_text(encoding="utf-8")
+    assert "defenseclaw edge-connector register 1001" not in install_guide
+    assert "--endpoint https://fleet.example.com/api/v1/fleet" in install_guide
+    assert "--target DEVICE --user USER" in install_guide
+    assert "automatically registers" in install_guide
+    private_home = tmp_path / "fleet-home"
+    make_private_directory(private_home)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(private_home))
     monkeypatch.delenv("DCLAW_FLEET_API_URL", raising=False)
     monkeypatch.setattr(cmd_setup_edge_connector, "_persist_svc_env_var", lambda *_args: True)
+    monkeypatch.setattr(cmd_setup_edge_connector, "_install_fleet_compiler", lambda *_args: private_home)
     endpoint = "http://127.0.0.1:19999/api/v1/fleet"
     enabled = []
 
@@ -73,10 +85,13 @@ def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch
     result = CliRunner().invoke(
         cmd_setup_edge_connector.edge_connector,
         ["--non-interactive", "--token", "test-token", "--endpoint", endpoint],
-        obj=_app(tmp_path),
+        obj=_app(private_home),
     )
     assert result.exit_code == 0, result.output
     assert enabled == [endpoint]
+    assert "loopback-only test mode" in result.output
+    assert "HTTPS" in result.output
+    assert "Fleet CLI commands use this endpoint" in result.output
 
     calls = []
 
@@ -88,6 +103,61 @@ def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch
     assert cmd_edge_install._register_device_via_api("1", "1", "42") == "12" * 32
     assert endpoint + "/devices" in calls[0]
     assert calls[0][1:5] == ["-q", "--noproxy", "*", "-s"]
+
+
+def test_edge_register_uses_saved_https_endpoint_without_redirects(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("DCLAW_FLEET_API_TOKEN", raising=False)
+    (tmp_path / ".env").write_text(
+        "DCLAW_FLEET_API_URL=https://fleet.example.com/api/v1/fleet\n"
+        "DCLAW_FLEET_API_TOKEN=fixture-token\n"
+    )
+    calls = []
+
+    class FakeSession:
+        def __init__(self):
+            self.headers = {}
+            self.trust_env = True
+            self.verify = False
+
+        def post(self, url, *, json, timeout, allow_redirects):
+            calls.append((url, json, timeout, allow_redirects, dict(self.headers), self.trust_env, self.verify))
+            return SimpleNamespace(status_code=201, content=b"{}", json=lambda: {"device_key": "12" * 32})
+
+    class FakeLocalGateway:
+        def __init__(self, *, host, port, token, timeout):
+            self._session = FakeSession()
+            self.base_url = f"http://{host}:{port}"
+            self.timeout = timeout
+
+    monkeypatch.setattr(cmd_edge_connector_cli.req_lib, "Session", FakeSession)
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", FakeLocalGateway)
+    app = _app(tmp_path)
+    app.cfg.gateway = SimpleNamespace(api_port=18970, token="", resolved_token=lambda: "")
+    result = CliRunner().invoke(
+        cmd_edge_connector_cli.edge_connector_group,
+        ["register", "1001", "--json"], obj=app,
+    )
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    url, body, timeout, redirects, headers, trust_env, verify = calls[0]
+    assert url == "https://fleet.example.com/api/v1/fleet/devices"
+    assert body["device_id"] == 1001
+    assert timeout <= 10 and redirects is False
+    assert headers["Authorization"] == "Bearer fixture-token"
+    assert headers["X-DefenseClaw-Client"] == "python-cli"
+    assert trust_env is False
+    assert verify is True
+
+
+def test_edge_register_https_refuses_gateway_token_fallback(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("DCLAW_FLEET_API_TOKEN", raising=False)
+    (tmp_path / ".env").write_text("DCLAW_FLEET_API_URL=https://fleet.example.com/api/v1/fleet\n")
+    app = _app(tmp_path)
+    app.cfg.gateway = SimpleNamespace(api_port=18970, token="gateway-token")
+    with pytest.raises(click.ClickException, match="DCLAW_FLEET_API_TOKEN is required"):
+        cmd_edge_connector_cli._client(app)
 
 
 @pytest.mark.parametrize("platform", ["darwin", "win32"])

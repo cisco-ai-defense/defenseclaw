@@ -7845,7 +7845,7 @@
     {
       "name": "DCLAW_FLEET_API_URL",
       "category": "fleet",
-      "purpose": "Fleet API URL used by the remote device installer.",
+      "purpose": "Fleet API URL used by the remote device installer and Fleet CLI.",
       "default": "",
       "accepted_values": [
         "URL"
@@ -7857,6 +7857,10 @@
         {
           "location": "cli/defenseclaw/commands/cmd_edge_install.py",
           "description": "Runtime environment reader"
+        },
+        {
+          "location": "cli/defenseclaw/commands/cmd_edge_connector_cli.py",
+          "description": "Fleet CLI endpoint reader"
         }
       ],
       "since": "1.1.0"

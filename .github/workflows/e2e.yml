@@ -161,7 +161,7 @@ jobs:
           # Bring down the Splunk compose stack from any prior run BEFORE
           # the host-wide reclaim, so docker can release its volumes.
           cd bundles/splunk_local_bridge/compose 2>/dev/null && {
-            export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+            export SPLUNK_IMAGE=splunk/splunk:10.2.0
             docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
             cd -
           } || true
@@ -322,7 +322,7 @@ jobs:
           cd bundles/splunk_local_bridge
           bash splunk/package_local_mode_app.sh
           cd compose
-          export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+          export SPLUNK_IMAGE=splunk/splunk:10.2.0
           docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
           for i in $(seq 1 60); do
@@ -691,7 +691,7 @@ jobs:
           fi
 
           cd bundles/splunk_local_bridge/compose 2>/dev/null && {
-            export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+            export SPLUNK_IMAGE=splunk/splunk:10.2.0
             docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
             cd -
           } || true
@@ -888,7 +888,7 @@ jobs:
           # Bring down any leftover Splunk compose stack BEFORE host-wide
           # reclaim so docker can release its volumes.
           cd bundles/splunk_local_bridge/compose 2>/dev/null && {
-            export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+            export SPLUNK_IMAGE=splunk/splunk:10.2.0
             docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
             cd -
           } || true
@@ -1048,7 +1048,7 @@ jobs:
           cd bundles/splunk_local_bridge
           bash splunk/package_local_mode_app.sh
           cd compose
-          export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+          export SPLUNK_IMAGE=splunk/splunk:10.2.0
           docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
           for i in $(seq 1 60); do
@@ -1732,7 +1732,7 @@ jobs:
           fi
 
           cd bundles/splunk_local_bridge/compose 2>/dev/null && {
-            export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+            export SPLUNK_IMAGE=splunk/splunk:10.2.0
             docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
             cd -
           } || true
