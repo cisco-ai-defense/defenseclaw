@@ -16,11 +16,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -44,6 +47,16 @@ import (
 // naming the unproven agent ownership (the gateway's selectProfile).
 // Windows needs no map: 1.0.x keyed its identities on the SID, which is
 // what they are keyed on now. Remove with agentidentity.LegacyAgentID.
+//
+// An account the first pass listed but could not prove (its lookup failed,
+// or its automounted home was not there) is recorded as pending, by uid and
+// name, and a later pass that proves it adds its owner: the map is never
+// changed otherwise, and an account the first pass did not list is never
+// added. Such an account was dropped for good before (review of r104
+// Q-identity, continuation 2, loop round 2). The map holds every account:
+// past maxLegacyAgentOwners a file, the rest go to shards
+// (legacyAgentOwnersShardFile) that the main file counts, so no account is
+// dropped for the map's size either.
 
 // LegacyAgentOwnersFile is the file of the identity spool that holds the
 // migration map.
@@ -58,23 +71,53 @@ var legacyAgentOwnersOpen = os.Open
 
 const (
 	legacyAgentOwnersVersion = 1
-	maxLegacyAgentOwners     = 65536
+	// maxLegacyAgentOwners bounds the accounts (owners and pending) of one
+	// file of the map.
+	maxLegacyAgentOwners = 65536
+	// maxLegacyAgentOwnerShards bounds the shards. With the main file they
+	// hold 2^32 accounts, one for every uid a host can give.
+	maxLegacyAgentOwnerShards = 1<<16 - 1
 	// maxLegacyAgentOwnerField bounds the bytes of an owner's user and of
 	// its token (validLegacyAgentOwner).
 	maxLegacyAgentOwnerField = 256
-	// maxLegacyAgentOwnersBytes is the largest map WriteLegacyAgentOwners
-	// can write, and the largest the reader takes. The map is written once,
-	// so a map the reader refused would leave every legacy agents entry
-	// unbound for good. It is the header with the longest time plus
-	// maxLegacyAgentOwners entries with the longest uid, user and token, a
-	// byte of which json.Marshal spells in at most six (\u003c for <, > and
-	// &; earlier 1.0.4 builds also wrote \ufffd for a byte that is not
-	// UTF-8). A map of real account names is far smaller (about 8 MiB for
-	// 65,536 qualified AD accounts).
+	// maxLegacyAgentOwnersBytes is the largest file of the map
+	// WriteLegacyAgentOwners can write, and the largest the reader takes. A
+	// map the reader refused would leave every legacy agents entry unbound
+	// for good. It is the header with the longest time, the open mark and
+	// the most shards, plus maxLegacyAgentOwners entries with the longest
+	// uid, user and token, a byte of which json.Marshal spells in at most six
+	// (\u003c for <, > and &; earlier 1.0.4 builds also wrote \ufffd for a
+	// byte that is not UTF-8). A pending entry is shorter than an owner's. A
+	// map of real account names is far smaller (about 8 MiB for 65,536
+	// qualified AD accounts).
 	maxLegacyAgentOwnersBytes    = int64(legacyAgentOwnersHeaderBytes + maxLegacyAgentOwners*legacyAgentOwnerEntryBytes)
-	legacyAgentOwnersHeaderBytes = len(`{"v":1,"written_at":"","owners":{}}`) + len("9999-12-31T23:59:59.999999999Z")
+	legacyAgentOwnersHeaderBytes = len(`{"v":1,"written_at":"","owners":{},"pending":{},"open":true,"shards":}`) +
+		len("9999-12-31T23:59:59.999999999Z") + len("65535")
 	legacyAgentOwnerEntryBytes   = len(`"":{"user":"","token":""},`) + len("9223372036854775807") + 2*6*maxLegacyAgentOwnerField
+	legacyAgentPendingEntryBytes = len(`"":"",`) + len("9223372036854775807") + 6*maxLegacyAgentOwnerField
 )
+
+// legacyAgentOwnersShardFile is the name of shard i (1 to the main file's
+// shards) of the migration map: outside the uid.json record namespace, as
+// the main file is.
+func legacyAgentOwnersShardFile(i int) string {
+	return "legacy-agent-owners-" + strconv.Itoa(i) + ".map"
+}
+
+// isLegacyAgentOwnersFile reports whether name is a file of the migration
+// map (the main file or a shard) or a quarantined invalid map: files the
+// spool's cleanup keeps.
+func isLegacyAgentOwnersFile(name string) bool {
+	if name == LegacyAgentOwnersFile {
+		return true
+	}
+	if strings.HasPrefix(name, "legacy-agent-owners-corrupt-") && strings.HasSuffix(name, ".bad") {
+		return true
+	}
+	index := strings.TrimSuffix(strings.TrimPrefix(name, "legacy-agent-owners-"), ".map")
+	i, err := strconv.Atoi(index)
+	return err == nil && i >= 1 && i <= maxLegacyAgentOwnerShards && legacyAgentOwnersShardFile(i) == name
+}
 
 // LegacyAgentOwner is the account that held a uid at the upgrade.
 type LegacyAgentOwner struct {
@@ -89,6 +132,24 @@ type legacyAgentOwnersDoc struct {
 	Version   int                         `json:"v"`
 	WrittenAt time.Time                   `json:"written_at"`
 	Owners    map[string]LegacyAgentOwner `json:"owners"`
+	// Pending are the accounts (uid to name) the first pass listed without
+	// an owner proof; a later pass that proves one moves it to Owners.
+	Pending map[string]string `json:"pending,omitempty"`
+	// Open, in the main file, marks a map with an account still pending in
+	// any of its files.
+	Open bool `json:"open,omitempty"`
+	// Shards, in the main file, is how many shards hold the rest of the map.
+	Shards int `json:"shards,omitempty"`
+}
+
+// legacyAgentOwnersFileDoc is one file of the map as read: its owners and
+// pending accounts by uid.
+type legacyAgentOwnersFileDoc struct {
+	writtenAt time.Time
+	owners    map[int]LegacyAgentOwner
+	pending   map[int]string
+	open      bool
+	shards    int
 }
 
 // LegacyAgentOwnerToken names one account incarnation: the SID SSSD or
@@ -131,11 +192,17 @@ func LegacyAgentOwnersRecorded(dir string) bool {
 	return err == nil
 }
 
-// WriteLegacyAgentOwners writes the migration map owners (by uid) to dir
-// once: an existing map is kept as it is, and an empty one is not written,
-// so the next pass tries again. setOwnership gives the file the guardian
-// authorization ownership before it is renamed into place. Every map it
-// writes is within maxLegacyAgentOwnersBytes, the reader's bound.
+// WriteLegacyAgentOwners records the migration map of owners (by uid) in
+// dir. An owner without a Token is an account listed without its owner
+// proof (its lookup failed, or its home was not there): it is recorded as
+// pending. The first call writes the map, in shards past
+// maxLegacyAgentOwners accounts (an empty one is not written, so the next
+// pass tries again). Later calls only add the owner of a pending account
+// whose name owners now gives with a proof, and change nothing else.
+// setOwnership gives each file the guardian authorization ownership before
+// it is renamed into place; shards are written before the main file that
+// counts them. Every file it writes is within maxLegacyAgentOwnersBytes, the
+// reader's bound. It reports whether it wrote anything.
 func WriteLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, now time.Time, setOwnership func(string) error) (bool, error) {
 	if dir == "" {
 		return false, nil
@@ -144,86 +211,272 @@ func WriteLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, now tim
 		return false, err
 	}
 	if LegacyAgentOwnersRecorded(dir) {
-		return false, nil
+		return fillLegacyAgentOwners(dir, owners, setOwnership)
 	}
-	doc := legacyAgentOwnersDoc{Version: legacyAgentOwnersVersion, WrittenAt: now.UTC(), Owners: map[string]LegacyAgentOwner{}}
+	proven, pending := map[int]LegacyAgentOwner{}, map[int]string{}
 	for uid, owner := range owners {
-		if uid < 0 || !validLegacyAgentOwner(owner) || len(doc.Owners) >= maxLegacyAgentOwners {
-			continue
+		switch {
+		case uid < 0:
+		case owner.Token == "" && validLegacyAgentOwnerField(owner.User):
+			pending[uid] = owner.User
+		case validLegacyAgentOwner(owner):
+			proven[uid] = owner
 		}
-		doc.Owners[strconv.Itoa(uid)] = owner
 	}
-	if len(doc.Owners) == 0 {
+	uids := make([]int, 0, len(proven)+len(pending))
+	for uid := range proven {
+		uids = append(uids, uid)
+	}
+	for uid := range pending {
+		uids = append(uids, uid)
+	}
+	if len(uids) == 0 {
 		return false, nil
 	}
-	data, err := json.Marshal(doc)
-	if err != nil {
-		return false, err
+	slices.Sort(uids)
+	files := (len(uids) + maxLegacyAgentOwners - 1) / maxLegacyAgentOwners
+	if files-1 > maxLegacyAgentOwnerShards {
+		// Never published short: a map without an account refuses its
+		// agents entries for good.
+		return false, fmt.Errorf("%d accounts are more than the agent identity migration map holds", len(uids))
 	}
-	if err := writeSpoolBytes(dir, LegacyAgentOwnersFile, ".legacy-agents-*", data, setOwnership); err != nil {
-		return false, err
+	docs := make([]legacyAgentOwnersDoc, files)
+	for i := range docs {
+		docs[i] = legacyAgentOwnersDoc{Version: legacyAgentOwnersVersion, WrittenAt: now.UTC(), Owners: map[string]LegacyAgentOwner{}}
+		for _, uid := range uids[i*maxLegacyAgentOwners : min((i+1)*maxLegacyAgentOwners, len(uids))] {
+			if user, ok := pending[uid]; ok {
+				if docs[i].Pending == nil {
+					docs[i].Pending = map[string]string{}
+				}
+				docs[i].Pending[strconv.Itoa(uid)] = user
+			} else {
+				docs[i].Owners[strconv.Itoa(uid)] = proven[uid]
+			}
+		}
+	}
+	docs[0].Open, docs[0].Shards = len(pending) > 0, files-1
+	for i := files - 1; i >= 0; i-- {
+		if err := writeLegacyAgentOwnersDoc(dir, i, docs[i], setOwnership); err != nil {
+			return false, err
+		}
+	}
+	legacyAgentOwnersClosed.forget(dir)
+	if !docs[0].Open {
+		legacyAgentOwnersClosed.set(dir)
 	}
 	return true, nil
 }
 
-// ReadLegacyAgentOwners returns the migration map of dir by uid, when the
-// file exists and trust accepts it; false otherwise.
-func ReadLegacyAgentOwners(dir string, trust func(path, label string) error) (map[int]LegacyAgentOwner, bool) {
-	if dir == "" {
-		return nil, false
+// legacyAgentOwnersClosed remembers, per spool directory, a map with no
+// account pending, so later passes do not read it again.
+var legacyAgentOwnersClosed = closedLegacyAgentOwnerMaps{byDir: map[string]bool{}}
+
+type closedLegacyAgentOwnerMaps struct {
+	sync.Mutex
+	byDir map[string]bool
+}
+
+func (c *closedLegacyAgentOwnerMaps) closed(dir string) bool {
+	c.Lock()
+	defer c.Unlock()
+	return c.byDir[dir]
+}
+
+func (c *closedLegacyAgentOwnerMaps) set(dir string) {
+	c.Lock()
+	defer c.Unlock()
+	c.byDir[dir] = true
+}
+
+func (c *closedLegacyAgentOwnerMaps) forget(dir string) {
+	c.Lock()
+	defer c.Unlock()
+	delete(c.byDir, dir)
+}
+
+// fillLegacyAgentOwners adds to the published map of dir the owner of each
+// pending account that owners proves under the name the map recorded for
+// it (a uid now held by another name stays pending). Shards it changes are
+// written before the main file, which is rewritten last, with its open mark
+// cleared once nothing is pending.
+func fillLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, setOwnership func(string) error) (bool, error) {
+	if legacyAgentOwnersClosed.closed(dir) {
+		return false, nil
 	}
-	if owners, ok, _ := readLegacyAgentOwnersFile(filepath.Join(dir, LegacyAgentOwnersFile), trust); ok {
-		return owners, true
+	main, ok, err := readLegacyAgentOwnersFile(filepath.Join(dir, LegacyAgentOwnersFile), nil)
+	if err != nil {
+		return false, err
+	}
+	if !ok || !main.open {
+		// A map this build cannot read is not rewritten: what it binds is
+		// unknown.
+		if ok {
+			legacyAgentOwnersClosed.set(dir)
+		}
+		return false, nil
+	}
+	files := []legacyAgentOwnersFileDoc{main}
+	for i := 1; i <= main.shards; i++ {
+		shard, ok, err := readLegacyAgentOwnersFile(filepath.Join(dir, legacyAgentOwnersShardFile(i)), nil)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, nil
+		}
+		files = append(files, shard)
+	}
+	changed, open := make([]bool, len(files)), false
+	for i, file := range files {
+		for uid, user := range file.pending {
+			if owner, ok := owners[uid]; ok && owner.Token != "" && validLegacyAgentOwner(owner) && strings.EqualFold(owner.User, user) {
+				file.owners[uid] = owner
+				delete(file.pending, uid)
+				changed[i] = true
+			}
+		}
+		open = open || len(file.pending) > 0
+	}
+	if !slices.Contains(changed, true) {
+		return false, nil
+	}
+	files[0].open = open
+	for i := len(files) - 1; i >= 0; i-- {
+		if !changed[i] && i > 0 {
+			continue
+		}
+		if err := writeLegacyAgentOwnersDoc(dir, i, files[i].doc(), setOwnership); err != nil {
+			return false, err
+		}
+	}
+	if !open {
+		legacyAgentOwnersClosed.set(dir)
+	}
+	return true, nil
+}
+
+// doc is the file as WriteLegacyAgentOwners writes it.
+func (f legacyAgentOwnersFileDoc) doc() legacyAgentOwnersDoc {
+	doc := legacyAgentOwnersDoc{Version: legacyAgentOwnersVersion, WrittenAt: f.writtenAt.UTC(),
+		Owners: make(map[string]LegacyAgentOwner, len(f.owners)), Open: f.open, Shards: f.shards}
+	for uid, owner := range f.owners {
+		doc.Owners[strconv.Itoa(uid)] = owner
+	}
+	for uid, user := range f.pending {
+		if doc.Pending == nil {
+			doc.Pending = map[string]string{}
+		}
+		doc.Pending[strconv.Itoa(uid)] = user
+	}
+	return doc
+}
+
+// writeLegacyAgentOwnersDoc writes file i of the map: 0 is the main file,
+// and the others are shards.
+func writeLegacyAgentOwnersDoc(dir string, i int, doc legacyAgentOwnersDoc, setOwnership func(string) error) error {
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	name := LegacyAgentOwnersFile
+	if i > 0 {
+		name = legacyAgentOwnersShardFile(i)
+	}
+	return writeSpoolBytes(dir, name, ".legacy-agents-*", data, setOwnership)
+}
+
+// ReadLegacyAgentOwners returns the proven owners of the migration map of
+// dir by uid, and whether an account is still pending (open: a later pass
+// may add its owner), when every file of the map exists and trust accepts
+// it; false otherwise.
+func ReadLegacyAgentOwners(dir string, trust func(path, label string) error) (map[int]LegacyAgentOwner, bool, bool) {
+	if dir == "" {
+		return nil, false, false
+	}
+	if main, ok, _ := readLegacyAgentOwnersFile(filepath.Join(dir, LegacyAgentOwnersFile), trust); ok {
+		owners := main.owners
+		for i := 1; i <= main.shards; i++ {
+			shard, ok, _ := readLegacyAgentOwnersFile(filepath.Join(dir, legacyAgentOwnersShardFile(i)), trust)
+			if !ok {
+				// A map without one of its shards binds no account it lists:
+				// it is read again once the shard is there.
+				return nil, false, false
+			}
+			for uid, owner := range shard.owners {
+				if _, seen := owners[uid]; !seen {
+					owners[uid] = owner
+				}
+			}
+		}
+		return owners, main.open, true
 	}
 	// A guardian already running before this upgrade may not have moved its
 	// old map yet. Keep its agent assignments working during that handoff.
-	owners, ok, _ := readLegacyAgentOwnersFile(filepath.Join(dir, oldLegacyAgentOwnersFile), trust)
-	return owners, ok
+	// Builds that wrote the old name wrote no pending accounts or shards.
+	old, ok, _ := readLegacyAgentOwnersFile(filepath.Join(dir, oldLegacyAgentOwnersFile), trust)
+	if !ok || old.open || old.shards != 0 || len(old.pending) != 0 {
+		return nil, false, false
+	}
+	return old.owners, false, true
 }
 
-// A false result with no error means the bytes cannot be a migration map.
-// I/O and trust errors are distinct so the guardian never moves a valid map
-// aside merely because it could not read it on this pass.
-func readLegacyAgentOwnersFile(path string, trust func(path, label string) error) (map[int]LegacyAgentOwner, bool, error) {
+// A false result with no error means the bytes cannot be a file of a
+// migration map. I/O and trust errors are distinct so the guardian never
+// moves a valid map aside merely because it could not read it on this pass.
+func readLegacyAgentOwnersFile(path string, trust func(path, label string) error) (legacyAgentOwnersFileDoc, bool, error) {
+	var none legacyAgentOwnersFileDoc
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, false, err
+		return none, false, err
 	}
 	if !info.Mode().IsRegular() || info.Size() > maxLegacyAgentOwnersBytes {
-		return nil, false, nil
+		return none, false, nil
 	}
 	if trust != nil {
 		if err := trust(path, "agent identity migration map"); err != nil {
-			return nil, false, err
+			return none, false, err
 		}
 	}
 	file, err := legacyAgentOwnersOpen(path)
 	if err != nil {
-		return nil, false, err
+		return none, false, err
 	}
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, maxLegacyAgentOwnersBytes+1))
 	if err != nil {
-		return nil, false, err
+		return none, false, err
 	}
 	if int64(len(data)) > maxLegacyAgentOwnersBytes {
-		return nil, false, nil
+		return none, false, nil
 	}
 	var doc legacyAgentOwnersDoc
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&doc) != nil || doc.Version != legacyAgentOwnersVersion {
-		return nil, false, nil
+	if decoder.Decode(&doc) != nil || doc.Version != legacyAgentOwnersVersion ||
+		doc.Shards < 0 || doc.Shards > maxLegacyAgentOwnerShards || len(doc.Owners)+len(doc.Pending) > maxLegacyAgentOwners {
+		return none, false, nil
 	}
-	out := make(map[int]LegacyAgentOwner, len(doc.Owners))
+	out := legacyAgentOwnersFileDoc{writtenAt: doc.WrittenAt, owners: make(map[int]LegacyAgentOwner, len(doc.Owners)),
+		pending: make(map[int]string, len(doc.Pending)), open: doc.Open, shards: doc.Shards}
 	for key, owner := range doc.Owners {
-		uid, err := strconv.Atoi(key)
-		if err != nil || uid < 0 || strconv.Itoa(uid) != key || !validLegacyAgentOwner(owner) {
-			continue
+		if uid, ok := legacyAgentOwnerUID(key); ok && validLegacyAgentOwner(owner) {
+			out.owners[uid] = owner
 		}
-		out[uid] = owner
+	}
+	for key, user := range doc.Pending {
+		if uid, ok := legacyAgentOwnerUID(key); ok && validLegacyAgentOwnerField(user) {
+			if _, proven := out.owners[uid]; !proven {
+				out.pending[uid] = user
+			}
+		}
 	}
 	return out, true, nil
+}
+
+// legacyAgentOwnerUID is the uid a map key names, in its one spelling.
+func legacyAgentOwnerUID(key string) (int, bool) {
+	uid, err := strconv.Atoi(key)
+	return uid, err == nil && uid >= 0 && strconv.Itoa(uid) == key
 }
 
 // moveLegacyAgentOwners moves a valid previous map to its rollback-safe
@@ -266,11 +519,12 @@ func moveLegacyAgentOwners(dir string) (invalid bool, err error) {
 // give back unchanged. A user or token that is not UTF-8 is refused: JSON
 // would carry another name (U+FFFD), which binds no account.
 func validLegacyAgentOwner(owner LegacyAgentOwner) bool {
-	if !utf8.ValidString(owner.User) || !utf8.ValidString(owner.Token) {
-		return false
-	}
-	if owner.User == "" || len(owner.User) > maxLegacyAgentOwnerField || owner.Token == "" || len(owner.Token) > maxLegacyAgentOwnerField {
-		return false
-	}
-	return !strings.ContainsFunc(owner.User+owner.Token, func(r rune) bool { return r < 0x20 || r == 0x7f })
+	return validLegacyAgentOwnerField(owner.User) && validLegacyAgentOwnerField(owner.Token)
+}
+
+// validLegacyAgentOwnerField reports whether a user or token (or a pending
+// account's name) is one the map can carry and give back unchanged.
+func validLegacyAgentOwnerField(field string) bool {
+	return field != "" && len(field) <= maxLegacyAgentOwnerField && utf8.ValidString(field) &&
+		!strings.ContainsFunc(field, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }

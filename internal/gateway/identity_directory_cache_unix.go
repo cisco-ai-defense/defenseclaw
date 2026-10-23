@@ -14,6 +14,29 @@ func (c *identityCache[T]) getNonblocking(key string) (T, bool) {
 	return c.getWithColdWait(key, false, false)
 }
 
+// getCached serves cached facts as getNonblocking does (an expired entry
+// starts one background refresh) and reports whether they are current:
+// within their lifetime and settled. Facts past their lifetime are still
+// served to hooks that read only memory, but they can name an account as it
+// was before the directory changed it (a UPN it no longer gives).
+func (c *identityCache[T]) getCached(key string) (facts T, current, ok bool) {
+	if _, ok = c.getNonblocking(key); !ok {
+		return facts, false, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[key]
+	if entry == nil {
+		return facts, false, false
+	}
+	now := c.now()
+	c.dropAgedLocked(key, entry, now)
+	if !entry.ok {
+		return facts, false, false
+	}
+	return entry.facts, now.Sub(entry.fetchedAt) < c.lifetime(entry.facts) && !c.unsettled(entry.facts), true
+}
+
 // getFresh waits for a lookup started for this call or one already in flight.
 // A lookup completed after an earlier timeout may be consumed once within
 // identityDirectoryRetry of completion; older answers require a new lookup.

@@ -13,6 +13,7 @@
 package enterprisehooks
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -219,9 +220,19 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 				logf("[hook-guardian] identity facts for uid %d: %v", account.UID, err)
 			}
 		}
+		if _, proven := owners[account.UID]; !proven {
+			if user := cmp.Or(record.User, account.User); user != "" {
+				// No owner proof on this pass (the lookup failed, or the
+				// home is not there now, as an automounted one can be): the
+				// map lists the account as pending, under the name the host
+				// gives it, and a later pass that proves the account under
+				// that name adds its owner (WriteLegacyAgentOwners).
+				owners[account.UID] = LegacyAgentOwner{User: user}
+			}
+		}
 	}
-	if err := writeLegacyAgentOwnersOnce(dir, owners, passErr == nil, setOwnership); err != nil {
-		passErr = errors.Join(passErr, err)
+	if _, err := WriteLegacyAgentOwners(dir, owners, time.Now(), setOwnership); err != nil {
+		passErr = errors.Join(passErr, fmt.Errorf("record the agent identity migration map: %w", err))
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -235,9 +246,9 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	unresolved := map[string]bool{}
 	var withdrawErr error
 	for _, entry := range entries {
-		// The migration map is written once and kept for good.
-		if keep[entry.Name()] || entry.Name() == LegacyAgentOwnersFile ||
-			strings.HasPrefix(entry.Name(), "legacy-agent-owners-corrupt-") && strings.HasSuffix(entry.Name(), ".bad") {
+		// The migration map, its shards and a quarantined map are kept for
+		// good.
+		if keep[entry.Name()] || isLegacyAgentOwnersFile(entry.Name()) {
 			continue
 		}
 		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge && !left[entry.Name()] &&
@@ -340,38 +351,6 @@ var identitySpoolAccountHome = func(uid int) string {
 		return ""
 	}
 	return account.Home
-}
-
-// legacyAgentOwnersPasses counts, per spool directory, the passes that did
-// not collect every account before the migration map was written.
-var legacyAgentOwnersPasses = struct {
-	sync.Mutex
-	byDir map[string]int
-}{byDir: map[string]int{}}
-
-// legacyAgentOwnersPassLimit is how many passes with a failed account the
-// guardian waits before it records the migration map without that account.
-const legacyAgentOwnersPassLimit = 3
-
-// writeLegacyAgentOwnersOnce records the migration map of the upgrade at
-// the guardian's first pass that collected every account (complete), or at
-// the legacyAgentOwnersPassLimit-th pass with what it collected, and never
-// again (LegacyAgentOwnersFile).
-func writeLegacyAgentOwnersOnce(dir string, owners map[int]LegacyAgentOwner, complete bool, setOwnership func(string) error) error {
-	if LegacyAgentOwnersRecorded(dir) || len(owners) == 0 {
-		return nil
-	}
-	legacyAgentOwnersPasses.Lock()
-	legacyAgentOwnersPasses.byDir[dir]++
-	passes := legacyAgentOwnersPasses.byDir[dir]
-	legacyAgentOwnersPasses.Unlock()
-	if !complete && passes < legacyAgentOwnersPassLimit {
-		return nil
-	}
-	if _, err := WriteLegacyAgentOwners(dir, owners, time.Now(), setOwnership); err != nil {
-		return fmt.Errorf("record the agent identity migration map: %w", err)
-	}
-	return nil
 }
 
 // identitySpoolCollect is collectIdentitySpoolRecord; tests replace it.

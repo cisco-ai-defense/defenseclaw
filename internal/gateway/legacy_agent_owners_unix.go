@@ -13,9 +13,12 @@
 package gateway
 
 import (
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
@@ -27,9 +30,10 @@ import (
 // (enterprisehooks.LegacyAgentOwnersFile) binds the 1.0.3 agent identities
 // of uid identity to account, the account that holds the uid now: the map
 // records the uid under that name, domain included, and the incarnation
-// that holds it now has the recorded token. Any other account, a namesake
-// of another domain, an account created again under the uid and name, or a
-// uid the map does not record, is not bound. Tests replace it.
+// that holds it now has the recorded token (legacyAgentOwnerTokenMatches).
+// Any other account, a namesake of another domain, an account created again
+// under the uid and name, or a uid the map does not record, is not bound.
+// Tests replace it.
 var legacyAgentOwnerBound = func(identity, account string) bool {
 	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
 		return false
@@ -42,7 +46,30 @@ var legacyAgentOwnerBound = func(identity, account string) bool {
 	if !ok || !legacyAgentOwnerSameAccount(owner.User, account) {
 		return false
 	}
-	return legacyAgentOwnerTokenNow(uid, account) == owner.Token
+	return legacyAgentOwnerTokenMatches(owner.Token, legacyAgentOwnerTokenNow(uid, account))
+}
+
+// legacyAgentOwnerTokenMatches reports whether now, the token of the
+// incarnation that holds a uid now, is the one the migration map recorded.
+// A SID token must be the same SID. A home token
+// (home:<device>:<inode>[:<creation time>]) is compared without its device
+// (normalizeHomeProof): an automounted home gets another device number at
+// each mount, and an exact compare refused the account's 1.0.x agents entry
+// after a remount (review of r104 Q-identity, continuation 2, loop round 2).
+// The inode must be the same, and so must the creation time where the map
+// recorded one: a home created again can get the inode the removed one
+// freed, never its creation time, so a missing time now does not stand in
+// for a recorded one.
+func legacyAgentOwnerTokenMatches(recorded, now string) bool {
+	if recorded == "" || now == "" {
+		return false
+	}
+	if strings.HasPrefix(recorded, "sid:") {
+		return recorded == now
+	}
+	inodeRecorded, birthRecorded, okRecorded := homeProofParts(normalizeHomeProof(recorded))
+	inodeNow, birthNow, okNow := homeProofParts(normalizeHomeProof(now))
+	return okRecorded && okNow && inodeRecorded == inodeNow && (birthRecorded == "" || birthRecorded == birthNow)
 }
 
 // legacyAgentOwnerSameAccount reports whether recorded and account are one
@@ -77,9 +104,12 @@ var legacyAgentOwnerTokenNow = func(uid int, account string) string {
 	return enterprisehooks.LegacyAgentOwnerToken(incarnation, managedHookPeerHome(uid))
 }
 
-// legacyAgentOwners is the migration map the gateway read. The map never
-// changes once written, so it is read until it is found, at most every
-// legacyAgentOwnersRetry, and then kept.
+// legacyAgentOwners is the migration map the gateway read. It is read until
+// it is found, at most every legacyAgentOwnersRetry. A map with an account
+// still pending (open) is read again when its main file changes, checked
+// at most every legacyAgentOwnersRetry, since the guardian adds a pending
+// account's owner once it proves it; a map with none pending never changes
+// and is kept.
 var legacyAgentOwners = &legacyAgentOwnerCache{}
 
 const legacyAgentOwnersRetry = 30 * time.Second
@@ -89,7 +119,24 @@ type legacyAgentOwnerCache struct {
 	dir     string
 	owners  map[int]enterprisehooks.LegacyAgentOwner
 	loaded  bool
+	open    bool
+	stamp   string
 	nextTry time.Time
+}
+
+// legacyAgentOwnersStamp names the version of the map's main file in dir,
+// which the guardian rewrites (renames into place) whenever it changes the
+// map; "" when there is none.
+func legacyAgentOwnersStamp(dir string) string {
+	info, err := os.Stat(filepath.Join(dir, enterprisehooks.LegacyAgentOwnersFile))
+	if err != nil {
+		return ""
+	}
+	stamp := strconv.FormatInt(info.Size(), 10) + ":" + strconv.FormatInt(info.ModTime().UnixNano(), 10)
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		stamp += ":" + strconv.FormatUint(uint64(st.Ino), 10)
+	}
+	return stamp
 }
 
 func (c *legacyAgentOwnerCache) get(uid int) (enterprisehooks.LegacyAgentOwner, bool) {
@@ -100,13 +147,16 @@ func (c *legacyAgentOwnerCache) get(uid int) (enterprisehooks.LegacyAgentOwner, 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if dir != c.dir {
-		c.dir, c.owners, c.loaded, c.nextTry = dir, nil, false, time.Time{}
+		c.dir, c.owners, c.loaded, c.open, c.stamp, c.nextTry = dir, nil, false, false, "", time.Time{}
 	}
-	if !c.loaded && !time.Now().Before(c.nextTry) {
-		if owners, ok := enterprisehooks.ReadLegacyAgentOwners(dir, validateManagedGuardianAuthorization); ok {
-			c.owners, c.loaded = owners, true
-		} else {
-			c.nextTry = time.Now().Add(legacyAgentOwnersRetry)
+	if (!c.loaded || c.open) && !time.Now().Before(c.nextTry) {
+		c.nextTry = time.Now().Add(legacyAgentOwnersRetry)
+		if stamp := legacyAgentOwnersStamp(dir); !c.loaded || stamp != c.stamp {
+			// A map that cannot be read now (a shard being written, a
+			// transient error) keeps the owners read before.
+			if owners, open, ok := enterprisehooks.ReadLegacyAgentOwners(dir, validateManagedGuardianAuthorization); ok {
+				c.owners, c.open, c.loaded, c.stamp = owners, open, true, stamp
+			}
 		}
 	}
 	owner, ok := c.owners[uid]
