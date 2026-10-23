@@ -286,7 +286,7 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 		}
 	}
 	if changed {
-		created, err := writePolicyFile(opts, path, rendered)
+		created, err := writePolicyFileOver(opts, path, state.policyFileBase(opts, path, exists, current), rendered)
 		record.CreatedDirs = appendUnique(record.CreatedDirs, created...)
 		if err != nil {
 			return false, err
@@ -427,6 +427,9 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 	if err != nil {
 		return err
 	}
+	// Every write and removal below is of this read: a save another writer
+	// makes meanwhile is kept, and the caller renders again (GAP-0896).
+	base := policyFileBase{exists: exists, data: current}
 	switch {
 	case !exists:
 	case record == nil && wholeFile:
@@ -442,7 +445,7 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 			}
 		}
 		if blank(admin) {
-			if err := removePolicyFile(opts, path); err != nil {
+			if err := removePolicyFileOver(opts, path, base); err != nil {
 				return err
 			}
 			if sha256Hex(current) != record.PostimageSHA256 {
@@ -451,7 +454,7 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 				state.detail("removed %s (it held no administrator content besides DefenseClaw's)", path)
 			}
 		} else {
-			if _, err := writePolicyFile(opts, path, admin); err != nil {
+			if _, err := writePolicyFileOver(opts, path, base, admin); err != nil {
 				return err
 			}
 			state.detail("restored the administrator content of %s", path)
@@ -474,13 +477,13 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 				state.detail("%s no longer holds DefenseClaw entries; left it unchanged", path)
 			}
 		case blank(admin):
-			if err := removePolicyFile(opts, path); err != nil {
+			if err := removePolicyFileOver(opts, path, base); err != nil {
 				return err
 			}
 			state.Changed = true
 			state.detail("removed %s (only DefenseClaw content remained)", path)
 		default:
-			if _, err := writePolicyFile(opts, path, admin); err != nil {
+			if _, err := writePolicyFileOver(opts, path, base, admin); err != nil {
 				return err
 			}
 			state.Changed = true

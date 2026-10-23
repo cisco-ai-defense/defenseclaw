@@ -241,6 +241,9 @@ type State struct {
 	// VersionFloor is Claude Code's requiredMinimumVersion state (claudecode
 	// only).
 	VersionFloor *VersionFloorState `json:"version_floor,omitempty"`
+	// replacing holds the untrusted files a reconcile replaces at
+	// DefenseClaw's own drop-in names (replaceUntrustedPolicyFile).
+	replacing map[string]policyFileBase
 }
 
 // ToStatus maps the report onto the shared lifecycle result schema.

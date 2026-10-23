@@ -129,6 +129,7 @@ func readPolicyFileWith(opts Options, path string, validate func(Options, string
 	path = platformPath(opts, path)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
+		forgetPolicyFileRead(path)
 		if !opts.SkipTrustChecks {
 			if err := validateTrustedAncestors(opts, path); err != nil {
 				return nil, false, err
@@ -163,6 +164,7 @@ func readPolicyFileWith(opts Options, path string, validate func(Options, string
 	if err != nil {
 		return nil, false, err
 	}
+	notePolicyFileRead(path, file, data)
 	return data, true, nil
 }
 
