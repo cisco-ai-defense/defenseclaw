@@ -97,7 +97,7 @@ enterprise:
 | `verify_only` | Only checks the file. When its entries are missing, it reports `missing_defenseclaw_hooks` and the export command to use. |
 | `off` | On Linux and macOS, leaves the machine policy alone. Codex, Claude Code, Cursor and Copilot then have no DefenseClaw hooks, and `policy show` lists them as `ownership off: machine policy not managed`; OpenCode keeps its per-user plugin. On Windows, configured Claude Code, Codex and Cursor machine hooks remain installed and are verified even with zero enrolled users. The setting applies to Copilot, OpenCode and the Claude Code version floor there. |
 
-Quote `"off"`: YAML 1.1 tools read a bare `off` as the boolean `false`, which the config refuses. Use `verify_only` when an MDM already writes a policy file on Linux or macOS: export DefenseClaw's entries (below) and add them to the MDM's template. On Windows, the lifecycle writes the configured Claude Code, Codex and Cursor machine hooks regardless of `ownership`, and `enterprise policy verify` checks them even before the first user enrolls and after the last is removed.
+Quote `"off"` so YAML 1.1 tools do not read a bare `off` as the boolean `false`. Use `verify_only` when an MDM already writes a policy file on Linux or macOS: export DefenseClaw's entries (below) and add them to the MDM's template. On Windows, the lifecycle writes the configured Claude Code, Codex and Cursor machine hooks regardless of `ownership`, and `enterprise policy verify` checks them even before the first user enrolls and after the last is removed.
 
 ## Who writes machine policy
 
