@@ -242,6 +242,51 @@ def test_saved_openclaw_default_respects_installed_hint_and_fleet_link(
         selected.assert_called_once_with(expected)
 
 
+@pytest.mark.parametrize("picked", [False, True], ids=["without-hint", "with-unverified-codex-hint"])
+def test_saved_local_openclaw_present_outside_discovery_is_kept(tmp_path, picked: bool) -> None:
+    from unittest.mock import patch
+
+    from defenseclaw import config as config_module
+    from defenseclaw import platform_support
+    from defenseclaw.commands import cmd_setup
+    from defenseclaw.context import AppContext
+
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 9\n"
+        "claw:\n  mode: openclaw\n"
+        "guardrail:\n  connector: openclaw\n"
+        "gateway:\n  host: 127.0.0.1\n  fleet_mode: auto\n",
+        encoding="utf-8",
+    )
+    if picked:
+        (tmp_path / "picked_connector").write_text("codex\n", encoding="utf-8")
+    app = AppContext()
+    with patch("defenseclaw.openclaw_presence.openclaw_installed", return_value=True):
+        app.cfg = config_module.load(data_dir=str(tmp_path))
+        assert app.cfg.active_connector() == "openclaw"
+        with (
+            patch.object(cmd_setup, "_detect_installed_connectors", return_value=[]),
+            patch.object(cmd_setup, "_capture_setup_config_snapshot", return_value=object()),
+            patch.object(
+                cmd_setup,
+                "_ensure_connector_available",
+                side_effect=click.ClickException("connector selected"),
+            ) as selected,
+        ):
+            result = CliRunner().invoke(
+                cmd_setup.setup,
+                ["guardrail", "--yes", "--no-restart", "--cisco-api-key-env", "ASIA_PACIFIC_KEY"],
+                obj=app,
+            )
+    if platform_support.connector_supported_on_os("openclaw"):
+        assert "connector selected" in result.output, result.output
+        selected.assert_called_once_with("openclaw")
+        assert app.cfg.guardrail.connector == "openclaw"
+    else:
+        assert "no agent connector is configured" in result.output, result.output
+        selected.assert_not_called()
+
+
 def test_restart_without_a_connector_does_not_start_openclaw(tmp_path) -> None:
     from unittest.mock import patch
 
