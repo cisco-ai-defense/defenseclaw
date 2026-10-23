@@ -1919,11 +1919,6 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 
 	l.rememberGeneration()
-	// A failed opt-in returns a leave-mode deployment to the live kernel
-	// settings it found. Restricted deployments keep their live controls on
-	// rollback, because their committed policy still relies on them.
-	var rollbackPolicyViews *policyViewKernelSettings
-
 	failAndRollback := func(code string, cause error) int {
 		r.AddError(code, cause.Error())
 		// Before the rollback, which can free space: what was full when the
@@ -1962,19 +1957,12 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			// back before the services restart.
 			revertConfig = func() { newerConfig = l.revertRejectedConfig(record, committedConfig, p.config.Raw, cause.Error()) }
 		}
-		var liveRestoreErr error
-		restoreLiveBeforeStart := func(filesRestored bool) {
+		restoreLiveBeforeStart := func(_ bool) {
 			if revertConfig != nil {
 				revertConfig()
 			}
-			if filesRestored && rollbackPolicyViews != nil {
-				liveRestoreErr = env.restorePolicyViewKernelSettings(*rollbackPolicyViews)
-			}
 		}
 		restored, err := l.rollback(ctx, snap, pending, false, keepNewerConfig, restoreLiveBeforeStart)
-		if liveRestoreErr != nil {
-			err = errors.Join(err, fmt.Errorf("live policy-view settings could not be restored after rollback: %w; inspect the kernel settings and reboot if they cannot be restored", liveRestoreErr))
-		}
 		if newerConfig != nil {
 			l.restoreNewerConfig(record.ServiceGID, newerConfig)
 		}
@@ -2051,39 +2039,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		return failAndRollback(codeApply, err)
 	}
 	l.clearStaleHookSocket(account)
-	// The host-wide kernel restriction is the administrator's choice
-	// (enterprise.machine_policy.linux.namespaces_and_ptrace: restrict); by
-	// default the host's settings are left alone. Capture whether the host
-	// had a trusted, live restriction before this transaction wrote the
-	// sysctl file. A zero value alone cannot prove that a namespace created
-	// earlier in this boot has gone away.
-	restrictViews := env.GOOS == "linux" && p.config.restrictsPolicyViews()
-	priorUserNamespaceRestricted := false
-	if restrictViews {
-		uninstalledThisBoot, hasUninstallMarker := env.userNamespaceUninstallState()
-		// The deployment record describes what was published, not what is on
-		// disk now. In particular, its old checksum and a same-boot uninstall
-		// marker cannot attest a file that went missing after reinstall.
-		fileAndKernelRestricted := env.userNamespaceProblem() == ""
-		priorUserNamespaceRestricted = env.userNamespaceBootProblem() == "" && env.ptraceBootProblem() == "" && env.ptraceProblem() == "" &&
-			(fileAndKernelRestricted && (!hasUninstallMarker || uninstalledThisBoot) ||
-				record == nil && uninstalledThisBoot)
-	}
 	changed, err := l.applyFilesRecorded(ctx, p, account)
 	if err != nil {
 		return failAndRollback(errorCode(err, codeApply), err)
-	}
-	if restrictViews {
-		if !env.policyViewsRestricted(record) {
-			previous, err := env.readPolicyViewKernelSettings()
-			if err != nil {
-				return failAndRollback(codeUserNamespaces, err)
-			}
-			rollbackPolicyViews = &previous
-		}
-		if err := env.restrictManagedPolicyViews(priorUserNamespaceRestricted); err != nil {
-			return failAndRollback(codeUserNamespaces, err)
-		}
 	}
 	if record != nil {
 		// An edit made in place (the config-apply trigger) is never rewritten,
@@ -2242,11 +2200,6 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	if err := env.saveDeployment(newRecord); err != nil {
 		return failAndRollback(codeApply, err)
-	}
-	if restrictViews {
-		if err := env.clearUserNamespaceUninstall(); err != nil {
-			r.AddError(codeUserNamespaces, err.Error())
-		}
 	}
 	if l.bundle != nil {
 		// The commit point of the bundle: the gateway reported its policy
@@ -3228,10 +3181,6 @@ func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *
 func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, string) {
 	env := l.env
 	l.noopPolicy, l.policyAssetsEdited, l.policyAssetRefusal = nil, false, ""
-	if env.policyViewsRestricted(record) &&
-		(env.userNamespaceProblem() != "" || env.ptraceProblem() != "" || env.userNamespaceBootProblem() != "" || env.ptraceBootProblem() != "") {
-		return false, ""
-	}
 	account, ok, err := env.Accounts.Lookup(ctx, env.Layout.ServiceUser)
 	if err != nil || !ok || account.UID != record.ServiceUID || account.GID != record.ServiceGID {
 		return false, ""
@@ -3272,6 +3221,9 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 		}
 	}
 	if l.machinePolicyDrift(p) {
+		return false, ""
+	}
+	if !l.policyViewPinsCurrent(p.machinePolicy) {
 		return false, ""
 	}
 	if l.helperModeDrift(ctx, p) {
@@ -3478,15 +3430,6 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	if removePerUser && l.refuseUnresolvedPerUserRows(ctx) {
 		return 0
 	}
-	var uninstallMarker []byte
-	if env.policyViewsRestricted(record) {
-		var err error
-		uninstallMarker, err = env.userNamespaceUninstallMarker()
-		if err != nil {
-			r.AddError(codeUninstall, err.Error())
-			return 0
-		}
-	}
 	// The guardian repairs any DefenseClaw registration that goes missing
 	// from a manifest target, the enumerator republishes the manifest, and
 	// the apply and verify triggers start lifecycle runs. All of them stop
@@ -3645,10 +3588,6 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 		if err := removeFile(env.P(path)); err != nil {
 			errs = append(errs, err)
-		} else if path == userNamespacesConfigPath && len(uninstallMarker) > 0 {
-			if err := env.markUserNamespaceUninstall(uninstallMarker); err != nil {
-				errs = append(errs, err)
-			}
 		}
 		if ownedParent(filepath.Dir(path)) {
 			_ = removeDirIfEmpty(env.P(filepath.Dir(path)))

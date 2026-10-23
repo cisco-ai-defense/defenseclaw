@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
-"""The package lane must distinguish a pending reboot from a failed apply."""
+"""The package lane checks policy-view facts without a reboot exception."""
 
 import json
 import subprocess
@@ -37,41 +37,22 @@ def result(errors, security_complete):
     }
 
 
-class RebootResultTest(unittest.TestCase):
+class LifecycleResultTest(unittest.TestCase):
     def check_result(self, document, *flags):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "result.json"
             path.write_text(json.dumps(document), encoding="utf-8")
-            return subprocess.run(
+            return subprocess.run(  # noqa: UP022 - capture_output is unavailable on Python 3.6
                 [sys.executable, str(CHECKER), str(path), "--platform", "linux", *flags],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 check=False,
             )
 
-    def test_pending_reboot_requires_only_namespace_errors(self):
-        flags = ("--reboot-pending", "--ready")
-        pending_without_coverage = result(["unprivileged_user_namespaces"], False)
-        pending_without_coverage["coverage_complete"] = False
-        self.assertEqual(self.check_result(result(["unprivileged_user_namespaces"], False), *flags).returncode, 0)
-        rolled_back = result(["unprivileged_user_namespaces"], False)
-        rolled_back["warnings"] = [{"code": "rolled_back", "message": "restored the previous deployment"}]
-        rollback_failed = result(["unprivileged_user_namespaces"], False)
-        rollback_failed["warnings"] = [{"code": "rollback_failed", "message": ""}]
-        for document in (rolled_back, rollback_failed):
-            # Rejected even when the step allows the warning.
-            allowed = ("--allow-warning", "rolled_back", "--allow-warning", "rollback_failed")
-            self.assertEqual(self.check_result(document, *flags, *allowed).returncode, 1)
-        for document in (
-            result(["unprivileged_user_namespaces", "lifecycle_test_fault"], False),
-            result(["unprivileged_user_namespaces"], True),
-            result([], True),
-            pending_without_coverage,
-        ):
-            self.assertEqual(self.check_result(document, *flags).returncode, 1)
-
-    def test_reboot_transition_is_complete(self):
-        self.assertEqual(self.check_result(result([], True), "--complete").returncode, 0)
-        self.assertEqual(self.check_result(result(["unprivileged_user_namespaces"], False), "--complete").returncode, 1)
+    def test_retired_reboot_mode_is_rejected(self):
+        completed = self.check_result(result([], True), "--reboot-pending")
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn(b"unrecognized arguments: --reboot-pending", completed.stderr)
 
     def test_default_policy_view_status_matches_open_route_warnings(self):
         open_view = result([], False)

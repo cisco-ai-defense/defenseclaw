@@ -55,6 +55,135 @@ func descriptorConnectors(t *testing.T, h *testHost) []string {
 	return descriptor.MachinePolicyConnectors
 }
 
+func TestLifecyclePinsPublishedPolicyViewAndRepairsDrift(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	opts := enterprisepolicy.LayoutOptions(h.env.Layout, "", "")
+	opts.Root, opts.SkipTrustChecks = h.env.Root, true
+	assertPin := func() string {
+		t.Helper()
+		descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		observed, err := enterprisepolicy.PolicyViewDigest(opts, "codex")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if descriptor.PolicyViewDigests["codex"] != observed {
+			t.Fatalf("descriptor policy pin %q does not match published %q", descriptor.PolicyViewDigests["codex"], observed)
+		}
+		return observed
+	}
+	pinned := assertPin()
+	path := h.env.P(codexRequirements)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := enterprisepolicy.PolicyViewDigest(opts, "codex")
+	if err != nil || changed == pinned {
+		t.Fatalf("policy drift kept the trusted pin: %q, %v", changed, err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	if after := assertPin(); after != pinned {
+		t.Fatalf("repair changed the intended policy digest: %q, want %q", after, pinned)
+	}
+	// An administrator can add unrelated valid policy text without removing
+	// the hook. The hook closes until ensure publishes a pin for those bytes.
+	withNote := []byte(h.read(codexRequirements) + "\n# administrator note\n")
+	if err := os.WriteFile(path, withNote, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err = enterprisepolicy.PolicyViewDigest(opts, "codex")
+	if err != nil || changed == pinned {
+		t.Fatalf("admin policy edit kept the previous pin: %q, %v", changed, err)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	if status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("status hid a policy-view mismatch while the hook refuses calls: %+v", status)
+	}
+	result := h.run(Options{Action: ActionEnsure})
+	requireOK(t, result)
+	if result.Noop {
+		t.Fatal("ensure ignored a policy-view digest mismatch")
+	}
+	if after := assertPin(); after == pinned {
+		t.Fatalf("ensure did not pin the updated policy view: %q", after)
+	}
+}
+
+func TestEnsureMigratesDescriptorWithoutPolicyPin(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.3"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	descriptorPath := h.env.Layout.DescriptorPath
+	descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(descriptorPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor.PolicyViewDigests = nil // previous release's on-disk descriptor
+	data, err := managed.MarshalRuntimeDescriptor(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(descriptorPath), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record, err := h.env.loadDeployment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Files[descriptorPath] = sha256Bytes(data)
+	if err := h.env.saveDeployment(record); err != nil {
+		t.Fatal(err)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	if status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("status hid a legacy descriptor without a policy pin: %+v", status)
+	}
+	result := h.run(Options{Action: ActionEnsure})
+	requireOK(t, result)
+	if result.Noop {
+		t.Fatal("ensure kept a legacy descriptor without a policy-view pin")
+	}
+	updated, err := managed.ParseRuntimeDescriptor([]byte(h.read(descriptorPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.PolicyViewDigests["codex"] == "" {
+		t.Fatal("ensure did not publish the policy-view pin")
+	}
+}
+
+func TestDarwinPublishedPinDetectsPrivateManagedPreference(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	opts := enterprisepolicy.LayoutOptions(h.env.Layout, "", "")
+	opts.Root, opts.SkipTrustChecks = h.env.Root, true
+	descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := enterprisepolicy.PolicyViewDigest(opts, "codex")
+	if err != nil || pinned == "" || descriptor.PolicyViewDigests["codex"] != pinned {
+		t.Fatalf("macOS descriptor did not pin its published policy: %q, %v", pinned, err)
+	}
+	pref := h.env.P("/Library/Managed Preferences/com.openai.codex.plist")
+	if err := os.MkdirAll(filepath.Dir(pref), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pref, []byte("private policy override"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := enterprisepolicy.PolicyViewDigest(opts, "codex")
+	if err != nil || changed == pinned {
+		t.Fatalf("macOS private preference kept the trusted policy digest: %q, %v", changed, err)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	if status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("macOS status hid a private policy source: %+v", status)
+	}
+}
+
 func TestHookBinaryIsTheMachinePolicyCommand(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		layout, err := managed.StandaloneLayoutFor(goos)

@@ -178,18 +178,17 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	l.warnDirectoryUnreachable()
 	l.warnSELinuxConfinedUsers()
 	problems = append(problems, l.describeMachinePolicy(record)...)
+	for _, problem := range l.policyViewPinProblems(record.MachinePolicyConnectors) {
+		r.AddWarning(codeMachinePolicyIncomplete, problem+"; run `"+env.lifecycleCommand(ActionEnsure)+"` to publish the verified policy view")
+	}
 	problems = append(problems, l.describeTetragon(ctx)...)
 	l.describeStatusV2(record)
 	if machinePolicyIncomplete(r) {
 		r.SecurityComplete = false
 	}
-	if !env.policyViewsRestricted(record) {
-		// A hook can refuse a private process context only when an agent
-		// actually calls it. When the agent never loaded its machine policy,
-		// there is no hook call to refuse. Both status and verify must report
-		// the host's remaining route instead of claiming complete security.
-		l.warnOpenPolicyViews()
-	}
+	// This is the observed host setting. The hook proves its managed policy
+	// view separately on each invocation.
+	l.warnOpenPolicyViews()
 	if strict {
 		// An agent the guardian or the enumerator could not protect for one
 		// account (an unverified hook contract, an agent it could not enroll)
@@ -870,11 +869,9 @@ func (e *Env) lastPackageInstallFailure() string {
 		return ""
 	}
 	var last struct {
-		OK        bool                       `json:"ok"`
-		Installed bool                       `json:"installed"`
-		Action    string                     `json:"action"`
-		Errors    []enterprisestatus.Message `json:"errors"`
-		Warnings  []enterprisestatus.Message `json:"warnings"`
+		OK     bool                       `json:"ok"`
+		Action string                     `json:"action"`
+		Errors []enterprisestatus.Message `json:"errors"`
 	}
 	if json.Unmarshal(raw, &last) != nil || last.OK || len(last.Errors) == 0 {
 		return ""
@@ -884,41 +881,8 @@ func (e *Env) lastPackageInstallFailure() string {
 	default:
 		return ""
 	}
-	if e.GOOS == "linux" && packageResultCommitted(last.Installed, last.Warnings) {
-		// The package applied, but a user namespace from before the host
-		// restriction can survive until reboot. Report that through status
-		// and verify without claiming the package itself was not applied.
-		// A run that rolled back (or failed to) did not commit: the previous
-		// deployment, which may not restrict anything, is what runs, so its
-		// namespace error is the package's failure (as the postinstall
-		// script reads it).
-		onlyReboot := true
-		for _, problem := range last.Errors {
-			if problem.Code != codeUserNamespaces {
-				onlyReboot = false
-			}
-		}
-		if onlyReboot {
-			return ""
-		}
-	}
 	first := last.Errors[0]
-	if first.Code == codeUserNamespaces {
-		for _, problem := range last.Errors[1:] {
-			if problem.Code != codeUserNamespaces {
-				first = problem
-				break
-			}
-		}
-	}
 	return strings.TrimSpace(first.Code + ": " + first.Message)
-}
-
-// packageResultCommitted reports whether a failed package run still left
-// its own deployment in place: installed, with no rolled_back or
-// rollback_failed warning.
-func packageResultCommitted(installed bool, warnings []enterprisestatus.Message) bool {
-	return installed && !hasMessageCode(warnings, codeRolledBack) && !hasMessageCode(warnings, codeRollbackFailed)
 }
 
 // warnPackageInstallFailed adds the package_install_failed warning that
@@ -1158,24 +1122,6 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
 	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
-	if env.policyViewsRestricted(record) {
-		if problem := env.userNamespaceProblem(); problem != "" {
-			r.AddError(codeUserNamespaces, problem)
-			r.SecurityComplete = false
-		}
-		if problem := env.ptraceProblem(); problem != "" {
-			r.AddError(codeUnprivilegedPtrace, problem)
-			r.SecurityComplete = false
-		}
-		if problem := env.userNamespaceBootProblem(); problem != "" {
-			r.AddError(codeUserNamespaces, problem)
-			r.SecurityComplete = false
-		}
-		if problem := env.ptraceBootProblem(); problem != "" {
-			r.AddError(codeUserNamespaces, problem)
-			r.SecurityComplete = false
-		}
-	}
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeChangedGuardianFiles()

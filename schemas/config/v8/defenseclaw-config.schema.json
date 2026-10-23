@@ -5046,21 +5046,6 @@
                   ]
                 }
               }
-            },
-            "linux": {
-              "type": "object",
-              "additionalProperties": false,
-              "description": "Linux standalone only: host-wide kernel settings that decide whether a standard user can hide machine policy from an agent. Other operating systems ignore it.",
-              "properties": {
-                "namespaces_and_ptrace": {
-                  "type": "string",
-                  "enum": [
-                    "leave",
-                    "restrict"
-                  ],
-                  "description": "leave (default) keeps the host's settings and verify warns while they are open. restrict sets user.max_user_namespaces=0 and kernel.yama.ptrace_scope=2 for the whole host, requires a reboot, and stops user-namespace command sandboxes, rootless containers, OpenShell Docker sandboxes and standard-user gdb or strace."
-                }
-              }
             }
           }
         },

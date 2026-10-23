@@ -194,10 +194,9 @@ per-user install. See [Per-user installs](/docs/enterprise/install/reference/lin
 ### User namespaces
 
 On most distributions `status` and `verify` warn `unprivileged_user_namespaces`
-or `unprivileged_ptrace` and report incomplete security: a standard user can start an agent with its own view of
-the machine-policy files, and that agent never calls the hook. DefenseClaw
-leaves these host-wide kernel settings alone unless you set
-`enterprise.machine_policy.linux.namespaces_and_ptrace: restrict`. That closes
-both routes after a reboot, but also stops Codex's workspace sandbox, rootless
-containers and OpenShell Docker sandboxes. The trade-off is in
+or `unprivileged_ptrace` when the observed kernel settings allow private policy
+views. DefenseClaw does not change those host settings. An administrator can
+apply optional hardening with their own tools after testing workloads. Every
+invoked managed machine-policy hook checks its policy content against the
+administrator-owned digest and refuses an unproven view. See
 [User namespaces](/docs/enterprise/install/reference/linux#user-namespaces).

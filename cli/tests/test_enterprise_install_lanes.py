@@ -28,9 +28,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 CHECKER = SCRIPTS / "check_enterprise_lifecycle_result.py"
-REBOOT_CHECKER_TEST = SCRIPTS / "test_check_enterprise_lifecycle_reboot.py"
+RESULT_CHECKER_TEST = SCRIPTS / "test_check_enterprise_lifecycle_result.py"
 UNIX_LANE = SCRIPTS / "test-enterprise-unix-install.sh"
-POSTINSTALL_REBOOT_TEST = ROOT / "packaging/linux/tests/test_postinstall_userns_reboot.sh"
+POSTINSTALL_RESULT_TEST = ROOT / "packaging/linux/tests/test_postinstall_result.sh"
 # CI selects Python modules that name the changed file's basename.
 POSTINSTALL = ROOT / "packaging/linux/postinstall.sh"
 
@@ -99,19 +99,19 @@ def _check(tmp_path: Path, document: Any, *arguments: str, raw: bytes | None = N
 FULL = ("--action", "ensure", "--platform", "linux", "--changed", "--installed", "--version", "1.4.0", "--ready")
 
 
-def test_pending_reboot_contract_runs_in_ci() -> None:
+def test_policy_view_result_contract_runs_in_ci() -> None:
     result = subprocess.run(
-        [sys.executable, str(REBOOT_CHECKER_TEST)],
+        [sys.executable, str(RESULT_CHECKER_TEST)],
         capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Linux postinstall requires a POSIX shell")
-def test_postinstall_reboot_contract_runs_in_ci() -> None:
+def test_postinstall_failure_contract_runs_in_ci() -> None:
     assert POSTINSTALL.is_file()
     result = subprocess.run(
-        ["sh", str(POSTINSTALL_REBOOT_TEST)],
+        ["sh", str(POSTINSTALL_RESULT_TEST)],
         cwd=ROOT, capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr

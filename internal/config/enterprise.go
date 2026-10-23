@@ -305,38 +305,6 @@ type EnterpriseMachinePolicyConfig struct {
 	Default    EnterpriseConnectorPolicy            `mapstructure:"default"     yaml:"default,omitempty"`
 	Connectors map[string]EnterpriseConnectorPolicy `mapstructure:"connectors"  yaml:"connectors,omitempty"`
 	WindowsWSL EnterpriseWindowsWSLPolicy           `mapstructure:"windows_wsl" yaml:"windows_wsl,omitempty"`
-	Linux      EnterpriseLinuxHostPolicy            `mapstructure:"linux"       yaml:"linux,omitempty"`
-}
-
-// enterprise.machine_policy.linux.namespaces_and_ptrace values.
-const (
-	// LinuxNamespacesAndPtraceLeave (the default) leaves the host's
-	// user-namespace and ptrace settings as they are; verify warns while a
-	// standard user can use either to hide machine policy from an agent.
-	LinuxNamespacesAndPtraceLeave = "leave"
-	// LinuxNamespacesAndPtraceRestrict sets user.max_user_namespaces=0 and
-	// kernel.yama.ptrace_scope=2 (keeping 3) for the whole host. It also
-	// stops user-namespace command sandboxes (Codex's workspace sandbox),
-	// rootless containers, OpenShell Docker sandboxes and standard-user
-	// gdb or strace, so it is the administrator's explicit choice.
-	LinuxNamespacesAndPtraceRestrict = "restrict"
-)
-
-// EnterpriseLinuxHostPolicy holds host-wide Linux kernel settings that
-// decide whether a standard user can give an agent a private view of
-// machine policy. Other operating systems ignore it.
-type EnterpriseLinuxHostPolicy struct {
-	// NamespacesAndPtrace is leave (default) or restrict.
-	NamespacesAndPtrace string `mapstructure:"namespaces_and_ptrace" yaml:"namespaces_and_ptrace,omitempty"`
-}
-
-// LinuxNamespacesAndPtrace returns the effective
-// enterprise.machine_policy.linux.namespaces_and_ptrace.
-func (m EnterpriseMachinePolicyConfig) LinuxNamespacesAndPtrace() string {
-	if value := strings.ToLower(strings.TrimSpace(m.Linux.NamespacesAndPtrace)); value != "" {
-		return value
-	}
-	return LinuxNamespacesAndPtraceLeave
 }
 
 // EnterpriseWindowsWSLPolicy governs agent sessions that run inside a WSL 2
@@ -1503,8 +1471,7 @@ func enrollmentEmpty(e EnterpriseEnrollmentConfig) bool {
 }
 
 func machinePolicyEmpty(m EnterpriseMachinePolicyConfig) bool {
-	return connectorPolicyEmpty(m.Default) && len(m.Connectors) == 0 && m.WindowsWSL == (EnterpriseWindowsWSLPolicy{}) &&
-		m.Linux == (EnterpriseLinuxHostPolicy{})
+	return connectorPolicyEmpty(m.Default) && len(m.Connectors) == 0 && m.WindowsWSL == (EnterpriseWindowsWSLPolicy{})
 }
 
 func connectorPolicyEmpty(p EnterpriseConnectorPolicy) bool {
@@ -1640,10 +1607,6 @@ func validateEnterpriseConfig(cfg *Config) error {
 		if err := oneOf("enterprise.machine_policy.windows_wsl."+knob.name, knob.value, knob.allowed...); err != nil {
 			return err
 		}
-	}
-	if err := oneOf("enterprise.machine_policy.linux.namespaces_and_ptrace", e.MachinePolicy.Linux.NamespacesAndPtrace,
-		LinuxNamespacesAndPtraceLeave, LinuxNamespacesAndPtraceRestrict); err != nil {
-		return err
 	}
 	if err := oneOf("enterprise.trust.mode", e.Trust.Mode, EnterpriseTrustAuthenticode, EnterpriseTrustHashPinned); err != nil {
 		return err

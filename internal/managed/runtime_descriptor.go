@@ -12,6 +12,8 @@ package managed
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,6 +55,9 @@ type RuntimeDescriptor struct {
 	// published through vendor machine policy, so every local user of that
 	// agent is inspected without a per-user registration.
 	MachinePolicyConnectors []string `json:"machine_policy_connectors"`
+	// PolicyViewDigests pin the vendor policy bytes the lifecycle published.
+	// Unix hooks compare their own policy view with this trusted descriptor.
+	PolicyViewDigests map[string]string `json:"policy_view_digests,omitempty"`
 	// OpenHookConnectors lists connectors whose hook fail mode the
 	// administrator's config resolves open: the `--enterprise-managed` hook
 	// runtime lets a call it cannot get a verdict for through, instead of
@@ -97,6 +102,14 @@ func (d *RuntimeDescriptor) Validate() error {
 				return fmt.Errorf("managed runtime descriptor lists connector %q twice", name)
 			}
 			seen[name] = true
+		}
+	}
+	for name, digest := range d.PolicyViewDigests {
+		if !d.HasMachinePolicyConnector(name) {
+			return fmt.Errorf("managed runtime descriptor has a policy-view digest for unlisted connector %q", name)
+		}
+		if decoded, err := hex.DecodeString(digest); err != nil || len(decoded) != sha256.Size || strings.ToLower(digest) != digest {
+			return fmt.Errorf("managed runtime descriptor has an invalid policy-view digest for %s", name)
 		}
 	}
 	return nil

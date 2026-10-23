@@ -151,16 +151,11 @@ and a failed platform script does not make a Linux device noncompliant. Read eac
 script's per-device status instead (open the configuration profile and select
 **Device status**). The package database answers inventory:
 
-With the default `namespaces_and_ptrace: leave`, a host that still permits
-unprivileged namespaces or ptrace reports incomplete security. The health
-script reports `unhealthy` until the administrator addresses that risk. When
-your config sets `enterprise.machine_policy.linux.namespaces_and_ptrace:
-restrict`, DefenseClaw applies the Linux host restrictions with the first
-install that has it, but reports `unprivileged_user_namespaces` until the next
-reboot.
-During that interval, `detect.sh --require-healthy` reports `unhealthy`; this
-is the expected pending-reboot state, not a completed rollout. Schedule the
-reboot and rerun the health script before marking the device healthy.
+DefenseClaw leaves Linux kernel settings as found. If the observed values
+allow unprivileged namespaces or ptrace, `status` and `verify` report
+incomplete security and `detect.sh --require-healthy` reports `unhealthy`.
+An administrator may apply optional host hardening with their own tools.
+There is no DefenseClaw pending-reboot state.
 
 ```bash
 dpkg-query -W -f='${Status} ${Version}\n' defenseclaw-enterprise

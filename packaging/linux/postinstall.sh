@@ -148,31 +148,17 @@ case "$status" in
         echo "  Apply this package with: sudo $gateway enterprise linux ensure --from-package$downgrade" >&2
         ;;
     *)
-        codes=$(message_codes errors)
-        other_errors=$(printf '%s\n' "$codes" | grep -vFx unprivileged_user_namespaces)
         rollback_warning=$(message_codes warnings | grep -E '^(rolled_back|rollback_failed)$')
-        if [ -n "$codes" ] && [ -z "$other_errors" ] &&
-           [ -z "$rollback_warning" ] &&
-           printf '%s\n' "$result" | grep -Eq '"installed":[[:space:]]*true'; then
-            echo "defenseclaw-enterprise: a managed deployment is installed, but policy protection is incomplete until this host reboots." >&2
-            echo "  Reboot, then run: sudo $gateway enterprise linux verify --json" >&2
-            echo "  Review $state/last-package-result.json for any other errors." >&2
-            exit 0
-        fi
         # Name the cause (the first error of the JSON result, one line) so
         # the administrator does not have to open the file (GAP-1744).
         cause=$(printf '%s\n' "$result" |
             sed -n 's/.*"errors":[[:space:]]*\[[[:space:]]*{[[:space:]]*"code":[[:space:]]*"\([^"]*\)",[[:space:]]*"message":[[:space:]]*"\(\([^"\\]\|\\.\)*\)".*/\1: \2/p' |
             head -n 1 | unescape)
-        if [ -n "$other_errors" ]; then
-            first_other=$(printf '%s\n' "$other_errors" | head -n 1)
-            cause="$first_other: $(message_of "$first_other")"
-        fi
         # A run that refused the config, or rolled its change back, leaves the
         # previous deployment running; only a first install, or a failed
         # rollback, leaves none (GAP-0176).
         running=$(printf '%s\n' "$result" | sed -n 's/.*"installed_version":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-        if [ -n "$running" ] && [ -z "$(printf '%s\n' "$rollback_warning" | grep -Fx rollback_failed)" ]; then
+        if [ -n "$running" ] && ! printf '%s\n' "$rollback_warning" | grep -Fxq rollback_failed; then
             echo "defenseclaw-enterprise: the package is installed but not applied; the previous deployment ($running) keeps running unchanged." >&2
             finish="apply this package with"
         else

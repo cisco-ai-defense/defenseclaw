@@ -154,14 +154,15 @@ const (
 	ManagedMountNamespaceReason        = "enterprise_managed_mount_namespace"
 	ManagedTracedProcessReason         = "enterprise_managed_traced_process"
 	ManagedProcessContextUnknownReason = "enterprise_managed_process_context_unverified"
+	ManagedPolicyViewReason            = "enterprise_managed_policy_view_unverified"
 )
 
-// IsManagedProcessContextReason accepts only the hook's fixed diagnostics,
+// IsManagedProcessContextReason accepts only the hook's fixed context and policy-view diagnostics,
 // never caller-supplied text, for the managed socket refusal audit.
 func IsManagedProcessContextReason(reason string) bool {
 	switch reason {
 	case ManagedUserNamespaceReason, ManagedMountNamespaceReason,
-		ManagedTracedProcessReason, ManagedProcessContextUnknownReason:
+		ManagedTracedProcessReason, ManagedProcessContextUnknownReason, ManagedPolicyViewReason:
 		return true
 	default:
 		return false
@@ -3057,6 +3058,9 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 	case reason == ManagedProcessContextUnknownReason:
 		cause, advice = "DefenseClaw cannot verify this agent's Linux process context and managed policy view",
 			"Start the agent from your normal login session; if this continues, contact your administrator."
+	case reason == ManagedPolicyViewReason:
+		cause, advice = "DefenseClaw cannot prove that this agent sees the administrator's effective managed policy",
+			"Ask your administrator to check the managed policy files and run enterprise verify."
 	case reason == managedHookSocketSELinuxDeniedReason:
 		cause, advice = "SELinux does not let your account reach the DefenseClaw gateway on this computer",
 			"Ask your administrator to run `enterprise linux repair`, which loads the DefenseClaw SELinux module that SELinux-confined accounts need."

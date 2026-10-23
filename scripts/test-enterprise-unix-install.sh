@@ -240,7 +240,7 @@ exit_status_matches() {
     shift 2
     local expected_failure=0 arg
     for arg in "$@"; do
-        case "$arg" in --expect-error | --reboot-pending) expected_failure=1 ;; esac
+        case "$arg" in --expect-error) expected_failure=1 ;; esac
     done
     [ -f "$status_file" ] || return 0
     rc=$(cat "$status_file")
@@ -250,59 +250,15 @@ exit_status_matches() {
     fi
 }
 
-# A deployment without the administrator's opt-in
-# (enterprise.machine_policy.linux.namespaces_and_ptrace: restrict) must leave
-# the host's user namespace and ptrace settings as the preflight found them,
-# and write no restriction file: the restriction stops Codex's workspace
-# sandbox, rootless containers and OpenShell Docker sandboxes.
+# Every 1.0.4 path leaves the host's kernel controls exactly as found.
 assert_kernel_untouched() {
     [ "$platform" = linux ] || return 0
     [ "$(cat /proc/sys/user/max_user_namespaces)" = "$found_userns" ] ||
-        die "user.max_user_namespaces changed from $found_userns without the administrator's opt-in"
+        die "user.max_user_namespaces changed from $found_userns"
     [ "$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)" = "$found_ptrace" ] ||
-        die "kernel.yama.ptrace_scope changed from $found_ptrace without the administrator's opt-in"
+        die "kernel.yama.ptrace_scope changed from $found_ptrace"
     [ ! -e /etc/sysctl.d/99-zz-defenseclaw-userns.conf ] ||
-        die "the managed sysctl file exists without the administrator's opt-in"
-}
-
-# assert_policy_views: the restriction when this lane opted in, else the
-# untouched kernel.
-assert_policy_views() {
-    if [ "$restrict_views" = 1 ]; then
-        assert_userns_restriction
-    else
-        assert_kernel_untouched
-    fi
-}
-
-# A pre-reboot Linux result is allowed only while the host really has the
-# applied restriction and a persistent boot-time sysctl file.
-assert_userns_restriction() {
-    [ "$platform" = linux ] || return 0
-    [ "$(cat /proc/sys/user/max_user_namespaces)" = 0 ] || die "live user.max_user_namespaces is not zero"
-    ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope)
-    case "$ptrace_scope" in
-        2 | 3) ;;
-        *) die "live kernel.yama.ptrace_scope is below two" ;;
-    esac
-    [ -f /etc/sysctl.d/99-zz-defenseclaw-userns.conf ] || die "the managed user namespace sysctl file is missing"
-    grep -Fxq 'user.max_user_namespaces = 0' /etc/sysctl.d/99-zz-defenseclaw-userns.conf ||
-        die "the managed user namespace sysctl file does not persist zero"
-    grep -Fxq "kernel.yama.ptrace_scope = $ptrace_scope" /etc/sysctl.d/99-zz-defenseclaw-userns.conf ||
-        die "the managed sysctl file does not persist ptrace scope $ptrace_scope"
-    # PRoot uses PTRACE_TRACEME as an ordinary user. Fork first so the
-    # potential tracer (the parent) is also unprivileged; runuser itself is a
-    # privileged parent and could make a direct TRACEME check pass at scope 2.
-    as_standard_user "$python" -c '
-import ctypes, errno, os, sys
-libc = ctypes.CDLL(None, use_errno=True)
-pid = os.fork()
-if pid == 0:
-    result = libc.ptrace(0, 0, 0, 0)  # PTRACE_TRACEME
-    os._exit(0 if result == -1 and ctypes.get_errno() == errno.EPERM else 1)
-_, status = os.waitpid(pid, 0)
-sys.exit(0 if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 else 1)
-' || die "a standard user can still trace a child process"
+        die "DefenseClaw wrote a retired host sysctl file"
 }
 
 # lifecycle <result-name> <action> [arguments...]: run the installed gateway's
@@ -603,12 +559,6 @@ upgrade_secret_kept() {
 }
 
 write_admin_config() {
-    local machine_policy=""
-    if [ "$restrict_views" = 1 ]; then
-        machine_policy='  machine_policy:
-    linux:
-      namespaces_and_ptrace: restrict'
-    fi
     cat >"$stage/config.yaml" <<EOF
 config_version: 9
 deployment_mode: managed_enterprise
@@ -616,7 +566,6 @@ data_dir: $data_dir
 policy_dir: $vendor_policy_dir
 enterprise:
   profile: standalone
-${machine_policy}
 gateway:
   api_bind: 127.0.0.1
   api_port: 18970
@@ -716,9 +665,9 @@ upgrade_lane() {
     step "upgrade to $version (ensure --from-package)"
     lifecycle 06-upgrade ensure --from-package --reason ci-upgrade-lane
     # The version 9 config keeps its bytes, so its generation does not drop.
-    check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready "${complete_or_pending[@]}" \
-        "${policy_checks[@]}" --policy-applied --config-generation-above "$((previous_generation - 1))"
-    assert_policy_views
+    check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready "${complete_or_status[@]}" \
+        "${policy_checks[@]}" ${open_views[@]+"${open_views[@]}"} --policy-applied --config-generation-above "$((previous_generation - 1))"
+    assert_kernel_untouched
     sandbox_files_present
     launcher_offers_only_sandbox
     cp "$config" "$results/config-upgraded.yaml"
@@ -732,22 +681,13 @@ upgrade_lane() {
 # Both connectors' machine policy is written, owned by DefenseClaw and locked.
 policy_checks=(--machine-policy claudecode --machine-policy codex
     --machine-policy-enforced claudecode --machine-policy-enforced codex)
-# The Linux fresh-install lane's administrator config opts in to the
-# host-wide kernel restriction and then awaits a reboot. The package's own
-# install, the upgrade lanes and macOS keep the default, which leaves the
-# host's kernel settings alone; there verify warns while the runner's kernel
-# leaves a user namespace or same-user ptrace open.
-restrict_views=0
-[ "$platform" != linux ] || [ -n "$upgrade_from" ] || restrict_views=1
-complete_or_pending=(--complete)
+# Open Linux kernel settings are reported as facts. The hook checks its
+# policy view on each call; no lifecycle step asks this lane to reboot.
+complete_or_status=(--complete)
 read_security=(--complete)
-converged=(--noop)
 open_views=()
-if [ "$restrict_views" = 1 ]; then
-    complete_or_pending=(--reboot-pending)
-    read_security=(--reboot-pending)
-    converged=(--changed)
-elif [ "$platform" = linux ]; then
+if [ "$platform" = linux ]; then
+    complete_or_status=(--policy-view-status)
     read_security=(--policy-view-status)
     open_views=(--allow-warning unprivileged_user_namespaces --allow-warning unprivileged_ptrace)
 fi
@@ -796,8 +736,8 @@ else
     write_admin_config
     lifecycle 02-ensure-config ensure --from-package --config "$stage/config.yaml" --reason ci-install-lane
     check "$results/02-ensure-config.json" ensure-config --action ensure --changed --installed --version "$version" --ready \
-        "${complete_or_pending[@]}" "${policy_checks[@]}"
-    assert_policy_views
+        "${complete_or_status[@]}" "${policy_checks[@]}" ${open_views[@]+"${open_views[@]}"}
+    assert_kernel_untouched
     [ "$(cksum <"$stage/config.yaml")" = "$(cksum <"$config")" ] || die "$config is not the applied administrator config"
     [ -n "$(policy_entries)" ] || die "no DefenseClaw machine-policy entry was written under ${policy_dirs[*]}"
     echo "machine policy entries: $(policy_entries | tr '\n' ' ')"
@@ -810,18 +750,18 @@ fi
 # ---- converge ----------------------------------------------------------------
 # The apply trigger runs ensure after the admin config lands; on a slow runner it can
 # still hold the lifecycle lock, so wait for it instead of failing with lifecycle_busy.
-step "ensure again (converged; an opted-in Linux host still awaits reboot)"
+step "ensure again (converged)"
 lifecycle 03-ensure-noop ensure --from-package --reason ci-install-lane --lock-wait 2m
-check "$results/03-ensure-noop.json" ensure-noop --action ensure "${converged[@]}" --installed --version "$version" --ready \
-    "${complete_or_pending[@]}"
-assert_policy_views
+check "$results/03-ensure-noop.json" ensure-noop --action ensure --noop --installed --version "$version" --ready \
+    "${complete_or_status[@]}" ${open_views[@]+"${open_views[@]}"}
+assert_kernel_untouched
 
 step "verify"
 lifecycle 04-verify verify
 retry_busy 04-verify verify
 check "$results/04-verify.json" verify --action verify --installed --version "$version" --ready \
     "${read_security[@]}" "${policy_checks[@]}" ${open_views[@]+"${open_views[@]}"}
-assert_policy_views
+assert_kernel_untouched
 
 step "status"
 lifecycle 05-status status
@@ -833,7 +773,6 @@ services_running
 step "MDM detection (detect.sh --require-healthy)"
 detected=$(detect_value --require-healthy --min-version "$version" || true)
 expected_detection=$version
-[ "$restrict_views" != 1 ] || expected_detection=unhealthy
 if [ "$platform" = linux ] && [ "$(json_field "$results/05-status.json" security_complete)" = False ]; then
     expected_detection=unhealthy
 fi

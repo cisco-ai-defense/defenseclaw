@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Machine policy codes in the lifecycle result.
@@ -322,11 +324,20 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		}
 	}
 	covered := coveredMachinePolicy(p.intended, result)
-	if sameStrings(covered, p.machinePolicy) {
-		return nil
-	}
 	p.machinePolicy = covered
 	p.render.MachinePolicy = covered
+	policyOpts := enterprisepolicy.LayoutOptions(env.Layout, "", "")
+	policyOpts.GOOS = env.GOOS
+	policyOpts.Root = env.Root
+	policyOpts.SkipTrustChecks = env.Root != "" // rooted test host
+	p.render.PolicyViewDigests = make(map[string]string, len(covered))
+	for _, name := range covered {
+		digest, digestErr := enterprisepolicy.PolicyViewDigest(policyOpts, name)
+		if digestErr != nil {
+			return &codedError{code: codeMachinePolicy, err: fmt.Errorf("pin %s policy view: %w", name, digestErr)}
+		}
+		p.render.PolicyViewDigests[name] = digest
+	}
 	data, err := env.renderDescriptor(p.render)
 	if err != nil {
 		return &codedError{code: codeApply, err: err}
@@ -335,6 +346,9 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		file := &p.files[index]
 		if file.Path != env.Layout.DescriptorPath {
 			continue
+		}
+		if bytes.Equal(file.Data, data) {
+			return nil
 		}
 		if err := env.writeFileAtomic(env.P(file.Path), data, file.Mode, file.Owner); err != nil {
 			return &codedError{code: codeApply, err: err}
@@ -348,6 +362,48 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		return nil
 	}
 	return &codedError{code: codeApply, err: errors.New("the plan has no runtime descriptor")}
+}
+
+// policyViewPinProblems reports why a managed hook would refuse its current
+// policy view. Ensure uses it to migrate older descriptors and repair drift;
+// status and verify report the same observed fact to the administrator.
+func (l *lifecycle) policyViewPinProblems(connectors []string) []string {
+	if len(connectors) == 0 {
+		return nil
+	}
+	env := l.env
+	path := env.P(env.Layout.DescriptorPath)
+	if err := env.Trust(path, TrustAdminFile); err != nil {
+		return []string{fmt.Sprintf("the managed runtime descriptor is not trusted: %v", err)}
+	}
+	data, err := readBounded(path, 64<<10)
+	if err != nil {
+		return []string{fmt.Sprintf("cannot read the managed runtime descriptor: %v", err)}
+	}
+	descriptor, err := managed.ParseRuntimeDescriptor(data)
+	if err != nil {
+		return []string{fmt.Sprintf("cannot parse the managed runtime descriptor: %v", err)}
+	}
+	opts := enterprisepolicy.LayoutOptions(env.Layout, "", "")
+	opts.GOOS, opts.Root, opts.SkipTrustChecks = env.GOOS, env.Root, env.Root != ""
+	var problems []string
+	for _, name := range connectors {
+		pin := descriptor.PolicyViewDigests[name]
+		observed, err := enterprisepolicy.PolicyViewDigest(opts, name)
+		switch {
+		case pin == "":
+			problems = append(problems, fmt.Sprintf("%s has no trusted policy-view digest; its managed hook refuses calls", name))
+		case err != nil:
+			problems = append(problems, fmt.Sprintf("%s policy view cannot be read: %v; its managed hook refuses calls", name, err))
+		case observed != pin:
+			problems = append(problems, fmt.Sprintf("%s policy view differs from its trusted digest; its managed hook refuses calls", name))
+		}
+	}
+	return problems
+}
+
+func (l *lifecycle) policyViewPinsCurrent(connectors []string) bool {
+	return len(l.policyViewPinProblems(connectors)) == 0
 }
 
 // restoreMachinePolicy puts vendor machine policy back to the previous

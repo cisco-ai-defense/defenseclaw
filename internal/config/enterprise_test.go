@@ -717,47 +717,14 @@ func TestWindowsWSLPolicyValidation(t *testing.T) {
 	}
 }
 
-// enterprise.machine_policy.linux.namespaces_and_ptrace: leave by default,
-// closed in the schema and the loader, and a standalone-only knob.
-func TestLinuxNamespacesAndPtraceValidation(t *testing.T) {
-	if got := (EnterpriseMachinePolicyConfig{}).LinuxNamespacesAndPtrace(); got != LinuxNamespacesAndPtraceLeave {
-		t.Fatalf("default: %q, want leave: a host-wide kernel restriction must be the administrator's choice", got)
+func TestLinuxHostKernelOptInIsRetired(t *testing.T) {
+	const doc = "config_version: 8\nenterprise:\n  machine_policy:\n    linux:\n      namespaces_and_ptrace: restrict\n"
+	parsed, err := ParseV8YAML("retired.yaml", []byte(doc))
+	if err == nil {
+		err = validateV8Schema("retired.yaml", parsed)
 	}
-	const head = "config_version: 8\nenterprise:\n  machine_policy:\n    linux:\n"
-	for doc, ok := range map[string]bool{
-		head + "      namespaces_and_ptrace: restrict\n": true,
-		head + "      namespaces_and_ptrace: leave\n":    true,
-		head + "      namespaces_and_ptrace: off\n":      false,
-		head + "      ptrace_scope: 2\n":                 false,
-	} {
-		document, err := ParseV8YAML("linux.yaml", []byte(doc))
-		if err == nil {
-			err = validateV8Schema("linux.yaml", document)
-		}
-		if (err == nil) != ok {
-			t.Errorf("schema on %q: %v", doc, err)
-		}
-	}
-	managedConfig := func(value, profile string) Config {
-		return Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: profile,
-			MachinePolicy: EnterpriseMachinePolicyConfig{Linux: EnterpriseLinuxHostPolicy{NamespacesAndPtrace: value}}}}
-	}
-	for _, value := range []string{"leave", "restrict", "RESTRICT"} {
-		good := managedConfig(value, "standalone")
-		if err := resolveEnterpriseConfig(&good, "linux", ""); err != nil {
-			t.Fatalf("namespaces_and_ptrace %q rejected: %v", value, err)
-		}
-	}
-	if got := managedConfig("RESTRICT", "standalone").Enterprise.MachinePolicy.LinuxNamespacesAndPtrace(); got != LinuxNamespacesAndPtraceRestrict {
-		t.Fatalf("effective value %q, want restrict", got)
-	}
-	bad := managedConfig("disable", "standalone")
-	if err := resolveEnterpriseConfig(&bad, "linux", ""); err == nil || !strings.Contains(err.Error(), "enterprise.machine_policy.linux.namespaces_and_ptrace") {
-		t.Fatalf("a bad value must be rejected by name, got %v", err)
-	}
-	secureClient := managedConfig("restrict", "secure_client")
-	if err := resolveEnterpriseConfig(&secureClient, "windows", ""); err == nil || !strings.Contains(err.Error(), "apply only to the standalone profile") {
-		t.Fatalf("secure_client accepted machine_policy.linux: %v", err)
+	if err == nil {
+		t.Fatal("retired host-wide kernel opt-in was accepted")
 	}
 }
 

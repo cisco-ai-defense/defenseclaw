@@ -32,15 +32,18 @@ func withStandaloneHookRuntime(
 ) {
 	t.Helper()
 	oldGOOS, oldLoad, oldPolicy, oldSC := standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir
+	oldDigest := standalonePolicyViewDigest
 	oldContext, oldReport := standaloneLinuxHookContext, reportStandaloneHookRefusal
 	standaloneLinuxHookContext = func() string { return "" }
 	reportStandaloneHookRefusal = func(string, string, string) {}
 	standaloneHookGOOS = goos
 	standaloneRuntimeDescriptorLoad = load
 	standaloneMachinePolicyOptions = policy
+	standalonePolicyViewDigest = func(_, _ string) (string, error) { return strings.Repeat("a", 64), nil }
 	standaloneSecureClientInstallDir = secureClientDir
 	t.Cleanup(func() {
 		standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir = oldGOOS, oldLoad, oldPolicy, oldSC
+		standalonePolicyViewDigest = oldDigest
 		standaloneLinuxHookContext, reportStandaloneHookRefusal = oldContext, oldReport
 		standaloneHookRuntime.Lock()
 		standaloneHookRuntime.prepared = false
@@ -61,6 +64,7 @@ func testDescriptor() *managed.RuntimeDescriptor {
 		APIAddr:                 managed.StandaloneAPIAddr,
 		HookSocket:              "/run/defenseclaw-hook/hook.sock",
 		MachinePolicyConnectors: []string{"codex"},
+		PolicyViewDigests:       map[string]string{"codex": strings.Repeat("a", 64)},
 	}
 }
 
@@ -194,14 +198,50 @@ func TestStandaloneHookRefusesPrivateAgentContextWithValidDescriptor(t *testing.
 	}
 }
 
+func TestStandaloneHookRequiresPublishedPolicyContent(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, tc := range []struct {
+			name, observed string
+			readErr        error
+			pinMissing     bool
+			want           string
+		}{
+			{name: "matching content", observed: strings.Repeat("a", 64)},
+			{name: "hidden or changed policy", observed: strings.Repeat("b", 64), want: hookexec.ManagedPolicyViewReason},
+			{name: "unreadable policy", readErr: os.ErrPermission, want: hookexec.ManagedPolicyViewReason},
+			{name: "missing trusted pin", observed: strings.Repeat("a", 64), pinMissing: true, want: hookexec.ManagedPolicyViewReason},
+		} {
+			t.Run(goos+"/"+tc.name, func(t *testing.T) {
+				descriptor := testDescriptor()
+				descriptor.OpenHookConnectors = []string{"codex"}
+				if tc.pinMissing {
+					descriptor.PolicyViewDigests = nil
+				}
+				withStandaloneHookRuntime(t, goos,
+					func(string) (*managed.RuntimeDescriptor, error) { return descriptor, nil },
+					noMarkers, "/nonexistent-secure-client")
+				standalonePolicyViewDigest = func(_, _ string) (string, error) { return tc.observed, tc.readErr }
+				prepareEnterpriseManagedHookRuntime("codex")
+				opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
+				if opts.ManagedRuntimeFailure != tc.want {
+					t.Fatalf("policy view failure = %q, want %q", opts.ManagedRuntimeFailure, tc.want)
+				}
+				if tc.want != "" && (opts.FailMode != "closed" || !opts.StrictAvailability) {
+					t.Fatalf("unproven policy used outage-open mode: %+v", opts)
+				}
+			})
+		}
+	}
+}
+
 func TestLinuxManagedHookContextReason(t *testing.T) {
 	baseLinks := map[string]string{
 		"/proc/self/ns/user": "user:[1]", "/proc/1/ns/user": "user:[1]",
 		"/proc/self/ns/mnt": "mnt:[2]", "/proc/1/ns/mnt": "mnt:[2]",
 	}
 	for _, tc := range []struct {
-		name, uidMap, selfMount, status, want                             string
-		hostLinksDenied, hostViewsDenied, differentMounts, changingMounts bool
+		name, uidMap, selfMount, status, want                                                   string
+		hostLinksDenied, hostViewsDenied, differentMounts, changingMounts, secondHostReadDenied bool
 	}{
 		{name: "host login", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "Name:\thook\nTracerPid:\t0\n"},
 		{name: "private user namespace", uidMap: "0 1000 1\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", want: hookexec.ManagedUserNamespaceReason},
@@ -209,9 +249,10 @@ func TestLinuxManagedHookContextReason(t *testing.T) {
 		{name: "traced hook", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t42\n", want: hookexec.ManagedTracedProcessReason},
 		{name: "unverifiable context", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "Name:\thook\n", want: hookexec.ManagedProcessContextUnknownReason},
 		{name: "protected host namespace links", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true},
-		{name: "hidden host proc view", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true, hostViewsDenied: true, want: hookexec.ManagedProcessContextUnknownReason},
+		{name: "hidden host proc view uses policy digest", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true, hostViewsDenied: true},
 		{name: "protected links with a different mount view", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true, differentMounts: true, want: hookexec.ManagedMountNamespaceReason},
 		{name: "protected links during mount change", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true, changingMounts: true},
+		{name: "host proc becomes hidden during mount retry", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true, changingMounts: true, secondHostReadDenied: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			links := make(map[string]string, len(baseLinks))
@@ -219,7 +260,7 @@ func TestLinuxManagedHookContextReason(t *testing.T) {
 				links[path] = target
 			}
 			links["/proc/self/ns/mnt"] = tc.selfMount
-			mountReads := 0
+			mountReads, hostMountReads := 0, 0
 			got := linuxManagedHookContextReason(func(path string) (string, error) {
 				if tc.hostLinksDenied && strings.HasPrefix(path, "/proc/1/ns/") {
 					return "", os.ErrPermission
@@ -247,7 +288,8 @@ func TestLinuxManagedHookContextReason(t *testing.T) {
 					}
 					return []byte("host mount\n"), nil
 				case "/proc/1/mountinfo":
-					if tc.hostViewsDenied {
+					hostMountReads++
+					if tc.hostViewsDenied || tc.secondHostReadDenied && hostMountReads > 1 {
 						return nil, os.ErrPermission
 					}
 					return []byte("host mount\n"), nil

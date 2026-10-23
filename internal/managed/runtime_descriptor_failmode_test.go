@@ -56,3 +56,27 @@ func TestRuntimeDescriptorOpenHookConnectors(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeDescriptorPolicyViewPinsAreBoundToListedConnectors(t *testing.T) {
+	d := failModeTestDescriptor()
+	d.PolicyViewDigests = map[string]string{"codex": strings.Repeat("a", 64)}
+	data, err := MarshalRuntimeDescriptor(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseRuntimeDescriptor(data)
+	if err != nil || parsed.PolicyViewDigests["codex"] != d.PolicyViewDigests["codex"] {
+		t.Fatalf("policy-view pin did not round-trip: %v, %+v", err, parsed)
+	}
+	for _, bad := range []map[string]string{
+		{"codex": "not-a-digest"},
+		{"codex": strings.Repeat("A", 64)},
+		{"claudecode": strings.Repeat("a", 64)},
+	} {
+		d := failModeTestDescriptor()
+		d.PolicyViewDigests = bad
+		if err := d.Validate(); err == nil {
+			t.Errorf("invalid policy-view pins %v validated", bad)
+		}
+	}
+}

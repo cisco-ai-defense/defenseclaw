@@ -104,7 +104,10 @@ func linuxManagedHookContextReason(readlink func(string) (string, error), readFi
 			selfView, selfErr := readFile("/proc/self/" + kind.fallback)
 			hostView, hostErr := readFile("/proc/1/" + kind.fallback)
 			if selfErr != nil || hostErr != nil {
-				return hookexec.ManagedProcessContextUnknownReason
+				// RHEL can deny /proc/1 even for a host-context user.
+				// The trusted descriptor's policy-content pin is the
+				// invocation proof when that comparison is unavailable.
+				continue
 			}
 			if !bytes.Equal(selfView, hostView) {
 				if kind.fallback != "mountinfo" {
@@ -115,7 +118,10 @@ func linuxManagedHookContextReason(readlink func(string) (string, error), readFi
 				// that brief difference; a stable mismatch stays closed.
 				selfView, selfErr = readFile("/proc/self/mountinfo")
 				hostView, hostErr = readFile("/proc/1/mountinfo")
-				if selfErr != nil || hostErr != nil {
+				if hostErr != nil {
+					continue
+				}
+				if selfErr != nil {
 					return hookexec.ManagedProcessContextUnknownReason
 				}
 				if !bytes.Equal(selfView, hostView) {
@@ -125,7 +131,7 @@ func linuxManagedHookContextReason(readlink func(string) (string, error), readFi
 			continue
 		}
 		if host == "" {
-			return hookexec.ManagedProcessContextUnknownReason
+			continue
 		}
 		if self != host {
 			return kind.reason
@@ -184,9 +190,16 @@ var reportStandaloneHookRefusal = func(socket, connectorName, reason string) {
 
 // Test seams.
 var (
-	standaloneHookGOOS               = runtime.GOOS
-	standaloneRuntimeDescriptorLoad  = managed.LoadRuntimeDescriptor
-	standaloneMachinePolicyOptions   = defaultStandaloneMachinePolicyOptions
+	standaloneHookGOOS              = runtime.GOOS
+	standaloneRuntimeDescriptorLoad = managed.LoadRuntimeDescriptor
+	standaloneMachinePolicyOptions  = defaultStandaloneMachinePolicyOptions
+	standalonePolicyViewDigest      = func(goos, connector string) (string, error) {
+		opts, ok := standaloneMachinePolicyOptions(goos)
+		if !ok {
+			return "", errors.New("standalone machine policy paths are unavailable")
+		}
+		return enterprisepolicy.PolicyViewDigest(opts, connector)
+	}
 	standaloneSecureClientInstallDir = "/opt/cisco/secureclient/defenseclaw"
 )
 
@@ -228,11 +241,21 @@ func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	if err == nil {
 		loaded, err = standaloneRuntimeDescriptorLoad(layout.DescriptorPath)
 	}
+	viewReason := ""
+	if err == nil && loaded != nil && loaded.HasMachinePolicyConnector(connectorName) {
+		expected := loaded.PolicyViewDigests[connectorName]
+		observed, digestErr := standalonePolicyViewDigest(standaloneHookGOOS, connectorName)
+		if expected == "" || digestErr != nil || observed != expected {
+			viewReason = hookexec.ManagedPolicyViewReason
+		}
+	}
 	reason := ""
 	secureClientHost := false
 	switch {
 	case contextReason != "":
 		reason = contextReason
+	case viewReason != "":
+		reason = viewReason
 	case err == nil && loaded != nil && strings.TrimSpace(loaded.HookSocket) == "":
 		reason = standaloneRuntimeReasonHookSocketMissing
 	case err == nil:

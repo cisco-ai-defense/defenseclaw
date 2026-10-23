@@ -328,9 +328,6 @@ func TestUninstallRefusesFailedHookPrecheckBeforeStoppingAnything(t *testing.T) 
 	if !exists(h.env.deploymentPath()) {
 		t.Fatal("the refused uninstall removed the deployment record")
 	}
-	if exists(h.env.P(userNamespaceUninstalled)) {
-		t.Fatal("the refused uninstall recorded removal of a restriction it kept")
-	}
 }
 
 // A macOS uninstall --purge returned ok while one account's Devin hooks,

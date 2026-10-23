@@ -66,13 +66,12 @@ Under `enterprise.machine_policy.windows_wsl`. See [Agent sessions in WSL](/docs
 | `editor_settings` | `repair`, `report`, `allow`. Default: `repair` | **Windows.** What the guardian does with `chatgpt.runCodexInWindowsSubsystemForLinux: true` in enrolled users' VS Code, VS Code Insiders and Cursor settings: reset it to `false`, only report it, or ignore it. |
 | `claude_desktop_key` | `merge`, `create`. Default: `merge` | **Windows.** `merge` adds `disableWslSessions` only where `HKLM\SOFTWARE\Policies\Claude` already holds machine policy. `create` also writes it to an empty key, which makes Claude Desktop ignore every account's HKCU policy and local third-party configuration. |
 
-### Linux kernel restriction
+### Linux kernel settings
 
-Under `enterprise.machine_policy.linux`. See [User namespaces](/docs/enterprise/install/reference/linux#user-namespaces).
-
-| Key | Values and default | What it does |
-| --- | --- | --- |
-| `namespaces_and_ptrace` | `leave`, `restrict`. Default: `leave` | **Linux.** `leave` keeps the host's kernel settings; `status` and `verify` warn `unprivileged_user_namespaces` or `unprivileged_ptrace` and report incomplete security while a standard user can hide machine policy from an agent. When invoked, managed hooks check their proc view and refuse private or traced contexts that they observe; a process controlling that view can supply false files. `restrict` sets `user.max_user_namespaces=0` and `kernel.yama.ptrace_scope=2` for the whole host and needs a reboot. It also stops Codex's workspace sandbox, rootless containers, OpenShell Docker sandboxes and a standard user's `gdb` and `strace`. Other operating systems ignore it. |
+DefenseClaw has no setting that writes host-wide kernel values. `status` and
+`verify` report the observed user namespace and ptrace settings. An
+administrator may harden the host with their own tools; see
+[User namespaces](/docs/enterprise/install/reference/linux#user-namespaces).
 
 ### `managed_hooks_only` on Windows
 
