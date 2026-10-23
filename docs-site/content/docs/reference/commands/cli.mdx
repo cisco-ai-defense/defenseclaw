@@ -99,17 +99,17 @@ To rotate the gateway token on purpose, run `defenseclaw setup rotate-token --ye
 
 Not available on Secure Client.
 
-Each time the gateway applies `config.yaml` and the policy assets it names by digest, it builds a *policy generation* and swaps it in. Each generation has an *effective policy digest*: a SHA-256 over the canonical configuration, with secrets dropped, plus the asset digests. `defenseclaw status` prints both:
+Each time the gateway applies `config.yaml` and the policy assets it names by digest, it builds a policy snapshot and swaps it in. Each snapshot has an *effective policy digest*: a SHA-256 over the canonical configuration, with secrets dropped, plus the asset digests. Plain `defenseclaw status` prints the applied config generation and the digest:
 
 ```text
   Sidecar:      running (PID 709868, up <1m, API http://127.0.0.1:19347)
-  Policy:       generation 2, sha256:22fa11f6a549
+  Policy:       config generation 2, sha256:22fa11f6a549
 ```
 
-The generation number is the gateway's own counter and restarts at 1 with the gateway. The config generation that `config set` prints is separate, kept in `config.generation.json` with the file's SHA-256, the actor (`cli:alice`, `tui:alice`, `hand-edit:alice`) and the reason. `defenseclaw status --json` carries `effective_digest`, `generation`, `config_generation` and `last_reload_error` in its `policy` object. If the gateway rejects a change it keeps the previous generation and says so:
+The Policy line in plain `defenseclaw status` shows `policy.config_generation`, the same applied counter as the TUI footer. The counter is kept in `config.generation.json` with the file's SHA-256, the actor (`cli:alice`, `tui:alice`, `hand-edit:alice`) and the reason. `config set` prints the generation it saved; on a per-user install the gateway also records an applied hand edit as the next config generation. The separate `policy.generation` field is the gateway-local policy-build counter and restarts at 1 with the gateway. `defenseclaw status --json` carries `effective_digest`, `generation`, `config_generation` and `last_reload_error` in its `policy` object. If the gateway rejects a change it keeps the previous applied config generation and says so:
 
 ```text
-  Policy:       generation 20, sha256:f61a485cfcbf; the last change was rejected (see defenseclaw doctor)
+  Policy:       config generation 20, sha256:f61a485cfcbf; the last change was rejected (see defenseclaw doctor)
 ```
 
 Compare the running digest with what is on disk:

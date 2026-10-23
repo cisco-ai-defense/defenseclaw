@@ -159,6 +159,11 @@ function docsText(): string {
     .join(' ').split(/\s+/).join(' ');
 }
 
+const blanketOutageClaims = [
+  /(?:gateway )?outages? always block (?:all|every) (?:managed )?(?:hook|connector|call)/i,
+  /Every call checked while the gateway is down is blocked/i,
+];
+
 describe('1.0.4 managed outage and upgrade claims', () => {
   it('pins guarded outage guidance to the protected process and session records', () => {
     const guard = source('internal/cli/hook_foreign_guard.go');
@@ -189,7 +194,22 @@ describe('1.0.4 managed outage and upgrade claims', () => {
     assert.match(threatRow, /foreign_hooks: remove.*(?:process|session).*records.*(?:allow|block)/i);
     assert.doesNotMatch(threatRow, /except for connectors whose foreign-hook guard/i);
     const all = docsText();
-    assert.doesNotMatch(all, /(?:gateway )?outages? always block (?:all|every) (?:managed )?(?:hook|connector|call)/i);
+    for (const pattern of blanketOutageClaims) assert.doesNotMatch(all, pattern);
+    assert.ok(blanketOutageClaims.some((pattern) => pattern.test('Every call checked while the gateway is down is blocked')));
+  });
+
+  it('documents the Hermes protected-record route under outage-only open', () => {
+    const hermes = page('reference/connectors/hermes.mdx');
+    const enterprise = hermes.split('### Enterprise standalone profile')[1]?.split('### OpenShell sandbox')[0] ?? '';
+    const failMode = hermes.split('## Fail mode')[1]?.split('## Limits')[0] ?? '';
+    const row = hermes.match(/\| Hook fail mode \|[^|]*\|/)?.[0] ?? '';
+    const managedRow = hermes.match(/\| Managed standalone \|[^|]*\|/)?.[0] ?? '';
+    for (const [name, section] of [['enterprise', enterprise], ['verdict row', row], ['managed row', managedRow], ['fail mode', failMode]] as const) {
+      assert.match(section, /foreign_hooks: remove/i, name);
+      assert.match(section, /protected process and session records/i, name);
+      assert.match(section, /(?:outage-only|fail mode) `?open`?/i, name);
+    }
+    assert.doesNotMatch(hermes, /guarded outage calls block under `open` too|during an outage it blocks guarded calls even under `open`/i);
   });
 
   it('distinguishes the Windows Amp local guard record from gateway-backed sessions', () => {
@@ -312,10 +332,19 @@ describe('1.0.4 operator routes and limits', () => {
     assert.match(agents, /setup openclaw --replace.*Linux and macOS.*native Windows.*(?:unsupported|no guardrail proxy)/i);
   });
 
-  it('identifies the TUI footer generation as the persisted config counter', () => {
+  it('aligns the TUI footer and status Policy line with the applied config counter', () => {
     const tui = page('reference/commands/tui.mdx');
+    const cli = page('reference/commands/cli.mdx').split('### Policy generation and digest')[1]?.split('### ')[0] ?? '';
     assert.match(tui, /`gen`.*config\.generation\.json.*(?:survives|persists).*gateway restart/i);
     assert.doesNotMatch(tui, /`gen` is the gateway's policy generation|restarts at 1 when the gateway starts/i);
+    assert.match(tui, /Policy line.*same.*policy\.config_generation.*config generation N/i);
+    assert.match(tui, /per-user.*applied hand edit.*(?:moves|increments).*counter/i);
+    assert.doesNotMatch(tui, /prints a different, gateway-local policy generation|hand edit can change the policy digest without moving/i);
+    assert.match(cli, /Policy:.*config generation 2/i);
+    assert.match(cli, /plain `defenseclaw status`.*policy\.config_generation.*TUI footer/i);
+    assert.match(cli, /separate `policy\.generation`.*restarts at 1/i);
+    assert.match(cli, /per-user.*hand edit.*(?:next|moves|increments).*config generation/i);
+    assert.doesNotMatch(cli, /The generation number is the gateway's own counter and restarts at 1/i);
   });
 
   it('does not promise enrollment for an extension without an engine version', () => {
