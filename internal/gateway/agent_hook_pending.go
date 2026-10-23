@@ -133,6 +133,9 @@ type pendingHookOccurrence struct {
 	// Final is set before a failed acknowledgement is answered closed, when
 	// the journal remains writable. Recovery uses it to audit that block.
 	Final *pendingHookResponse
+	// Settled keeps an acknowledged row available for a bounded retry without
+	// counting the same hook a second time when that window ends.
+	Settled bool
 }
 
 type sandboxPendingHookReceipt struct {
@@ -194,7 +197,7 @@ func (a *APIServer) journalHookDelivery(
 	p := &pendingHookOccurrence{
 		ID: uuid.NewString(), Request: pendingRequest(*req),
 		Proposed:    pendingResponse(proposed),
-		NoReceipt:   pendingResponse(a.deliveredHookDecision(false, req.ConnectorName, proposed, "")),
+		NoReceipt:   pendingResponse(a.deliveredHookDecision(req.ConnectorName, proposed, "")),
 		Envelope:    audit.EnvelopeFromContext(ctx),
 		Identity:    AgentIdentityFromContext(ctx),
 		RawEventIDs: rawEventIDs, Extra: extra, BodyBytes: bodyBytes,
@@ -312,6 +315,9 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 		}
 		if err := json.Unmarshal(latest.Occurrence, &p); err != nil {
 			return err
+		}
+		if p.Settled {
+			return a.store.ForgetHookDelivery(ctx, p.ID)
 		}
 	}
 	resp, err := a.pendingHookRecoveryResponse(ctx, &p)
