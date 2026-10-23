@@ -179,7 +179,7 @@ func installWindowsCodexManagedResult(
 			// Take back the native exporter an earlier per-user install left in
 			// the account's own config (GAP-0836) before hardening re-applies the
 			// managed data directory DACL the atomic edit replaced.
-			if err := removeWindowsManagedUserNativeOTLPAsTarget("codex", target.dataDir); err != nil {
+			if err := removeWindowsManagedUserNativeOTLPAsTarget("codex", target.sid, target.home, target.dataDir); err != nil {
 				return fail(err)
 			}
 			if err := hardenWindowsUserRuntime(

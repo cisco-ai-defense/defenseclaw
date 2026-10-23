@@ -81,7 +81,7 @@ func TestWindowsManagedRowRefusesAndRemovesStalePerUserNativeOTLP(t *testing.T) 
 			t.Fatalf("%s: verify error carries a value: %v", name, err)
 		}
 		if err := connector.WithUserHomeDir(home, func() error {
-			return removeWindowsManagedUserNativeOTLPAsTarget(name, dataDir)
+			return removeWindowsManagedUserNativeOTLPAsTarget(name, sid, home, dataDir)
 		}); err != nil {
 			t.Fatalf("%s: remove: %v", name, err)
 		}

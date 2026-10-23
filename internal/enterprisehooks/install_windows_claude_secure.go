@@ -259,7 +259,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		// account's own settings (GAP-0836) before hardening re-applies the
 		// managed data directory DACL the atomic edit replaced.
 		if err := connector.WithUserHomeDir(home, func() error {
-			return removeWindowsManagedUserNativeOTLPAsTarget(conn.Name(), setup.DataDir)
+			return removeWindowsManagedUserNativeOTLPAsTarget(conn.Name(), targetSID, home, setup.DataDir)
 		}); err != nil {
 			return fail(err)
 		}

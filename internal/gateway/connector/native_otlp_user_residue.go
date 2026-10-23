@@ -43,39 +43,188 @@ func RemoveUserNativeOTLP(connectorName string, opts SetupOpts) ([]string, error
 }
 
 func userNativeOTLP(connectorName string, opts SetupOpts, apply bool) ([]string, error) {
+	removed, err := userNativeOTLPConfig(connectorName, "", opts, apply)
+	if err != nil {
+		return removed, err
+	}
+	// Revoke only after no configuration references the credential.
+	credential, err := userNativeOTLPCredential(connectorName, opts, apply)
+	return append(removed, credential...), err
+}
+
+// RemoveUserNativeOTLPAt removes the DefenseClaw exporter entries from one
+// agent configuration file, configPath, which may sit outside the default
+// root (CODEX_HOME, CLAUDE_CONFIG_DIR, or the file a setup recorded). It
+// leaves the scoped credential: the caller revokes it
+// (RevokeUserNativeOTLPCredential) once no configuration names it.
+func RemoveUserNativeOTLPAt(connectorName, configPath string, opts SetupOpts) ([]string, error) {
+	if strings.TrimSpace(configPath) == "" {
+		return nil, errors.New("native OTLP cleanup: empty config path")
+	}
+	return userNativeOTLPConfig(connectorName, configPath, opts, true)
+}
+
+// UserNativeOTLPCredentialResidue names the scoped native OTLP credential
+// file a per-user setup left, if it is still there.
+func UserNativeOTLPCredentialResidue(connectorName string, opts SetupOpts) ([]string, error) {
+	return userNativeOTLPCredential(connectorName, opts, false)
+}
+
+// RevokeUserNativeOTLPCredential removes that credential and names it.
+func RevokeUserNativeOTLPCredential(connectorName string, opts SetupOpts) ([]string, error) {
+	return userNativeOTLPCredential(connectorName, opts, true)
+}
+
+// UserNativeOTLPResidueIn names the DefenseClaw exporter entries in config,
+// the bytes of a Codex config.toml or Claude Code settings.json the caller
+// read itself, judged against backup, the bytes of the connector's setup
+// backup (UserNativeOTLPBackupName; nil when there is none). A config over
+// UserNativeOTLPReadLimit is refused unread.
+func UserNativeOTLPResidueIn(connectorName string, config, backup []byte, opts SetupOpts) ([]string, error) {
+	switch connectorName {
+	case "codex":
+		var original codexConfigBackup
+		if len(backup) > 0 {
+			if err := json.Unmarshal(backup, &original); err != nil {
+				return nil, fmt.Errorf("load original Codex OTel config: %w", err)
+			}
+		}
+		_, removed, err := codexWithoutUserNativeOTLP(config, original, opts)
+		return removed, err
+	case "claudecode":
+		var original claudeCodeBackup
+		if len(backup) > 0 {
+			if err := json.Unmarshal(backup, &original); err != nil {
+				return nil, fmt.Errorf("load Claude Code settings backup: %w", err)
+			}
+		}
+		_, removed, err := claudeCodeWithoutUserNativeOTLP(config, original, opts)
+		return removed, err
+	}
+	return nil, nil
+}
+
+// UserNativeOTLPBackupName is the setup backup a per-user install kept in its
+// data dir for connectorName ("" for a connector without a native exporter).
+func UserNativeOTLPBackupName(connectorName string) string {
+	switch connectorName {
+	case "codex":
+		return "codex_config_backup.json"
+	case "claudecode":
+		return "claudecode_backup.json"
+	}
+	return ""
+}
+
+// UserNativeOTLPConfigPathFor is the agent configuration file under the
+// account home that a per-user setup wrote its exporter into when no
+// variable moved the root: ~/.codex/config.toml or ~/.claude/settings.json.
+// The caller adds the roots the account's own environment names; this
+// process's environment is not the account's.
+func UserNativeOTLPConfigPathFor(connectorName, home string) string {
+	switch connectorName {
+	case "codex":
+		if CodexConfigPathOverride != "" {
+			return CodexConfigPathOverride
+		}
+		return filepath.Join(home, ".codex", "config.toml")
+	case "claudecode":
+		if ClaudeCodeSettingsPathOverride != "" {
+			return ClaudeCodeSettingsPathOverride
+		}
+		return filepath.Join(home, ".claude", "settings.json")
+	}
+	return ""
+}
+
+// UserNativeOTLPReadLimit bounds every file the native OTLP check reads.
+const UserNativeOTLPReadLimit = userNativeOTLPReadLimit
+
+// UserNativeOTLPFileTooLarge is the error for a file over
+// UserNativeOTLPReadLimit; it names the base name only.
+func UserNativeOTLPFileTooLarge(name string) error {
+	return userNativeOTLPTooLarge(name)
+}
+
+// UserAgentConfigRecordPath is where a per-user setup recorded the agent
+// configuration file it bound its managed record to, for connectorName.
+func UserAgentConfigRecordPath(dataDir, connectorName string) string {
+	for _, pin := range connectorConfigRootPins {
+		if pin.connector == connectorName {
+			return managedFileBackupPath(dataDir, pin.connector, pin.logical)
+		}
+	}
+	return ""
+}
+
+// UserAgentConfigRecordTarget is the configuration file record (the bytes of
+// UserAgentConfigRecordPath) names, or "" when it names none of that
+// connector's.
+func UserAgentConfigRecordTarget(connectorName string, record []byte) string {
+	for _, pin := range connectorConfigRootPins {
+		if pin.connector != connectorName {
+			continue
+		}
+		var b managedFileBackup
+		if json.Unmarshal(record, &b) != nil || b.Version != managedBackupVersion ||
+			b.Connector != pin.connector || b.LogicalName != pin.logical {
+			return ""
+		}
+		target := filepath.Clean(strings.TrimSpace(b.Path))
+		if !filepath.IsAbs(target) || !strings.EqualFold(filepath.Base(target), pin.file[len(pin.file)-1]) {
+			return ""
+		}
+		return target
+	}
+	return ""
+}
+
+func userNativeOTLPConfig(connectorName, configPath string, opts SetupOpts, apply bool) ([]string, error) {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil, errors.New("native OTLP cleanup: empty data dir")
+	}
+	switch connectorName {
+	case "codex":
+		if configPath == "" {
+			configPath = codexConfigPath()
+		}
+		return codexUserNativeOTLP(configPath, opts, apply)
+	case "claudecode":
+		if configPath == "" {
+			configPath = claudeCodeSettingsPath()
+		}
+		return claudeCodeUserNativeOTLP(configPath, opts, apply)
+	}
+	return nil, nil
+}
+
+func userNativeOTLPCredential(connectorName string, opts SetupOpts, apply bool) ([]string, error) {
 	if strings.TrimSpace(opts.DataDir) == "" {
 		return nil, errors.New("native OTLP cleanup: empty data dir")
 	}
 	var scope OTLPPathTokenScope
-	var removed []string
-	var err error
 	switch connectorName {
 	case "codex":
 		scope = OTLPScopeCodex
-		removed, err = codexUserNativeOTLP(opts, apply)
 	case "claudecode":
 		scope = OTLPScopeClaude
-		removed, err = claudeCodeUserNativeOTLP(opts, apply)
 	default:
 		return nil, nil
 	}
-	if err != nil {
-		return removed, err
-	}
 	tokenPath, err := OTLPPathTokenFilePath(opts.DataDir, scope)
 	if err != nil {
-		return removed, err
+		return nil, err
 	}
+	var removed []string
 	if _, statErr := os.Lstat(tokenPath); statErr == nil {
 		removed = append(removed, "hooks/"+otlpPathTokenFileName(scope))
 		if apply {
-			// Revoke only after no configuration references the credential.
 			if err := RemoveOTLPPathToken(opts.DataDir, scope); err != nil {
 				return removed, fmt.Errorf("revoke obsolete %s native OTLP credential: %w", connectorName, err)
 			}
 		}
 	} else if !os.IsNotExist(statErr) {
-		return removed, fmt.Errorf("inspect %s native OTLP credential: %w", connectorName, statErr)
+		return nil, fmt.Errorf("inspect %s native OTLP credential: %w", connectorName, statErr)
 	}
 	return removed, nil
 }
@@ -164,8 +313,7 @@ func readUserNativeOTLPBackup(dataDir, name string, backup interface{}) error {
 	return json.Unmarshal(data, backup)
 }
 
-func codexUserNativeOTLP(opts SetupOpts, apply bool) ([]string, error) {
-	configPath := codexConfigPath()
+func codexUserNativeOTLP(configPath string, opts SetupOpts, apply bool) ([]string, error) {
 	var backup codexConfigBackup
 	if err := readUserNativeOTLPBackup(opts.DataDir, "codex_config_backup.json", &backup); err != nil {
 		return nil, fmt.Errorf("load original Codex OTel config: %w", err)
@@ -269,8 +417,7 @@ func codexWithoutUserNativeOTLP(raw []byte, backup codexConfigBackup, opts Setup
 	return out, removed, nil
 }
 
-func claudeCodeUserNativeOTLP(opts SetupOpts, apply bool) ([]string, error) {
-	settingsPath := claudeCodeSettingsPath()
+func claudeCodeUserNativeOTLP(settingsPath string, opts SetupOpts, apply bool) ([]string, error) {
 	var backup claudeCodeBackup
 	if err := readUserNativeOTLPBackup(opts.DataDir, "claudecode_backup.json", &backup); err != nil {
 		return nil, fmt.Errorf("load Claude Code settings backup: %w", err)
