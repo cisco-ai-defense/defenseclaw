@@ -539,6 +539,10 @@ func TestStandaloneConfigManagerRejectsUnbundledConfigAndAssetReload(t *testing.
 	t.Cleanup(func() { setPendingRestart(nil) })
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
+	asset := filepath.Join(dir, "asset.rego")
+	if err := os.WriteFile(asset, []byte("package original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	raw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
@@ -559,12 +563,20 @@ func TestStandaloneConfigManagerRejectsUnbundledConfigAndAssetReload(t *testing.
 			boot = false
 			return errGenerationUnchanged
 		}
-		if source.recoveryOnly {
+		if source.proveUnchanged {
+			contents, err := os.ReadFile(asset)
+			if err != nil {
+				return err
+			}
+			if string(contents) != "package original" {
+				return fmt.Errorf("config reload refused: referenced asset %s differs; apply a new signed policy bundle", asset)
+			}
 			return errGenerationUnchanged
 		}
 		applied++
 		return nil
 	})
+	mgr.assetFiles = func() []string { return []string{asset} }
 	loadSnapshot := mgr.loadSnapshot
 	mgr.loadSnapshot = func(source string, snapshot []byte) (*config.Config, error) {
 		candidate, loadErr := loadSnapshot(source, snapshot)
@@ -601,17 +613,27 @@ func TestStandaloneConfigManagerRejectsUnbundledConfigAndAssetReload(t *testing.
 	if err := mgr.ReloadAssets(context.Background(), "asset_watch"); err != nil || mgr.rejected {
 		t.Fatalf("restored config recovery = %v, rejected=%t", err, mgr.rejected)
 	}
-	if err := mgr.ReloadAssets(context.Background(), "unsigned_asset_watch"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
-		t.Fatalf("unbundled later asset reload = %v, want named refusal", err)
+	if err := mgr.ReloadAssets(context.Background(), "unchanged_asset_watch"); err != nil || mgr.rejected {
+		t.Fatalf("unchanged later asset reload = %v, rejected=%t", err, mgr.rejected)
+	}
+	if err := os.WriteFile(asset, []byte("package changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadAssets(context.Background(), "unsigned_asset_watch"); err == nil || !strings.Contains(err.Error(), asset) {
+		t.Fatalf("unbundled changed asset reload = %v, want named refusal", err)
 	}
 	if applied != 0 {
 		t.Fatalf("unbundled reload applied %d times", applied)
 	}
 }
 
-func TestStandaloneConfigManagerRejectsUnbundledStartupAssetReload(t *testing.T) {
+func TestStandaloneConfigManagerProvesStartupAssetReload(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
+	asset := filepath.Join(dir, "asset.rego")
+	if err := os.WriteFile(asset, []byte("package original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	raw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
@@ -622,11 +644,19 @@ func TestStandaloneConfigManagerRejectsUnbundledStartupAssetReload(t *testing.T)
 	}
 	initial.DeploymentMode = "managed_enterprise"
 	initial.Enterprise.Profile = "standalone"
-	called := false
+	called := 0
 	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
-		called = true
-		return nil
+		called++
+		contents, err := os.ReadFile(asset)
+		if err != nil {
+			return err
+		}
+		if string(contents) != "package original" {
+			return fmt.Errorf("config reload refused: referenced asset %s differs; apply a new signed policy bundle", asset)
+		}
+		return errGenerationUnchanged
 	})
+	mgr.assetFiles = func() []string { return []string{asset} }
 	loadSnapshot := mgr.loadSnapshot
 	mgr.loadSnapshot = func(source string, snapshot []byte) (*config.Config, error) {
 		candidate, loadErr := loadSnapshot(source, snapshot)
@@ -637,14 +667,20 @@ func TestStandaloneConfigManagerRejectsUnbundledStartupAssetReload(t *testing.T)
 		return candidate, loadErr
 	}
 	mgr.setStartupSource(path, raw)
-	if err := mgr.ReloadAssets(context.Background(), "startup_reconcile"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
-		t.Fatalf("unbundled startup asset reload = %v, want named refusal", err)
+	if err := mgr.ReloadAssets(context.Background(), "startup_reconcile"); err != nil {
+		t.Fatalf("unchanged startup asset reload = %v", err)
 	}
-	if err := mgr.Reload(context.Background(), "startup_reconcile"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
-		t.Fatalf("startup retry after the rejected assets = %v, want named refusal", err)
+	if called != 1 || mgr.gen.Load() != 0 || mgr.rejected {
+		t.Fatalf("startup asset proof: builds=%d gen=%d rejected=%t", called, mgr.gen.Load(), mgr.rejected)
 	}
-	if called {
-		t.Fatal("unbundled startup asset reload applied")
+	if err := os.WriteFile(asset, []byte("package changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadAssets(context.Background(), "asset_watch"); err == nil || !strings.Contains(err.Error(), asset) {
+		t.Fatalf("changed asset after startup = %v, want named refusal", err)
+	}
+	if called != 2 || mgr.gen.Load() != 0 || !mgr.rejected {
+		t.Fatalf("changed asset proof: builds=%d gen=%d rejected=%t", called, mgr.gen.Load(), mgr.rejected)
 	}
 }
 
