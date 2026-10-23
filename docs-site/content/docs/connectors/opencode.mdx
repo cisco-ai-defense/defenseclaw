@@ -18,11 +18,13 @@ DefenseClaw installs one plugin file in OpenCode's plugin directory. The plugin 
 ## Set up
 
 ```bash
-defenseclaw setup opencode                # observe (default): record only
+defenseclaw setup opencode                # first setup defaults to observe: record only
 defenseclaw setup opencode --mode action  # block on policy hits by throwing
 ```
 
-On Windows, run the same commands in PowerShell. Restart OpenCode afterwards. Until it starts, `defenseclaw status` shows OpenCode as `IDLE`, which is normal.
+A re-run without `--mode` keeps the current mode. On Windows, run the same
+commands in PowerShell. Restart OpenCode afterwards. Until it starts,
+`defenseclaw status` shows OpenCode as `IDLE`, which is normal.
 
 ## Check it
 
@@ -70,7 +72,15 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-This keeps OpenCode's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove opencode --yes` (add `--force` if it is the last one). If you modified the plugin, removal refuses before saving configuration. Preserve your edits, run `defenseclaw setup opencode --yes --restart` to restore the managed plugin, then retry removal. Restart OpenCode afterwards.
+With the default gateway restart, disabling removes DefenseClaw's plugin file
+when it is unchanged since setup. An edited plugin is left in place to preserve
+your edits; `defenseclaw doctor` reports it. This preserves your other OpenCode
+settings. `defenseclaw guardrail enable` reinstalls DefenseClaw's plugin. To
+remove the connector, run `defenseclaw setup remove opencode --yes` (add
+`--force` if it is the last one). If you modified the plugin, removal refuses
+before saving configuration. Preserve your edits, run
+`defenseclaw setup opencode --yes --restart` to restore the managed plugin,
+then retry removal. Restart OpenCode afterwards.
 
 On a multi-connector install, add `--connector opencode` to `guardrail disable` and `guardrail enable` to change only this agent.
 

@@ -18,11 +18,13 @@ DefenseClaw installs hooks for Kiro IDE and Kiro CLI under one Kiro connector. T
 ## Set up
 
 ```bash
-defenseclaw setup kiro                # observe (default)
+defenseclaw setup kiro                # first setup defaults to observe
 defenseclaw setup kiro --mode action  # block where Kiro honors a veto
 ```
 
-On Windows, run the same commands in PowerShell. Restart Kiro CLI, or run `/agent swap defenseclaw`, so `/hooks` lists the hooks.
+A re-run without `--mode` keeps the current mode. On Windows, run the same
+commands in PowerShell. Restart Kiro CLI, or run `/agent swap defenseclaw`, so
+`/hooks` lists the hooks.
 
 ## Check it
 
@@ -72,7 +74,12 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-This keeps Kiro's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove kiro --yes` (add `--force` if it is the last one). On Linux and macOS, `kiro-hook.sh` stays as an inert stub until Kiro restarts.
+With the default gateway restart, disabling removes DefenseClaw's hook
+registrations from Kiro's hook and agent files and preserves your other Kiro
+settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To
+remove the connector, run `defenseclaw setup remove kiro --yes` (add `--force`
+if it is the last one). On Linux and macOS, `kiro-hook.sh` stays as an inert
+stub until Kiro restarts.
 
 On a multi-connector install, add `--connector kiro` to `guardrail disable` and `guardrail enable` to change only this agent.
 

@@ -139,8 +139,9 @@ defenseclaw registry require --type mcp   --enabled --enforce
 `allowed` lists it follows `enabled` and `mode`. The requirement is enforced
 only while asset policy is on: `asset_policy.enabled: true` and
 `asset_policy.mode: action`. A per-user
-install starts with `enabled: false` and `mode: observe`, so `require` alone
-blocks nothing and the CLI says so. Add `--enforce` to turn both on in the same
+install starts with `enabled: false` and `mode: observe`, so a `require` rule
+does not take effect until asset policy is enabled for action; the CLI says so.
+Add `--enforce` to turn both on in the same
 save, or set them in the TUI config editor (Setup → `c` → Asset Policy). In
 `observe` mode an unregistered asset is logged, not blocked. To turn
 enforcement back off, run
