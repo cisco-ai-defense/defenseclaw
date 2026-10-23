@@ -709,7 +709,8 @@ func TestEventHistoryWriterPersistsExactCanonicalProjectionAndLegacyView(t *test
 	digest := sha256.Sum256(wantEnvelope)
 	wantHash := ProjectionHashAlgorithm + ":" + hex.EncodeToString(digest[:])
 	if row.ID != record.RecordID() || row.Action != "diagnostic.emit" || row.Actor != "gateway.audit" ||
-		row.Details != "projected local message" || row.StructuredJSON != wantPayload || row.Severity != "HIGH" {
+		row.Details != "projected local message" || row.StructuredJSON != "" || row.Severity != "HIGH" {
+		// A native row keeps its body once, in payload_json (GAP-0614).
 		t.Fatalf("legacy columns = %#v", row)
 	}
 	if row.Bucket != "diagnostic" || row.EventName != "diagnostic.message" || row.Source != "gateway" ||

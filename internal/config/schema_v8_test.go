@@ -16,6 +16,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -289,5 +290,41 @@ func TestV8SchemaNamesMissingKeysAndLimits(t *testing.T) {
 		if tc.keyword == "required" && !slices.Equal(schemaErr.Missing, []string{"match"}) {
 			t.Fatalf("%s: missing = %q", tc.name, schemaErr.Missing)
 		}
+	}
+}
+
+// GAP-0617: `defenseclaw config reference` printed a "v8" reference with
+// config_version: 8 on a v9 install. Every embedded reference format and the
+// JSON Schema title must name MaxSupportedConfigVersion, the version written.
+func TestConfigReferenceNamesCurrentConfigVersion(t *testing.T) {
+	version := strconv.Itoa(MaxSupportedConfigVersion)
+	yamlRef := string(publicschemas.DefenseClawConfigV8ObservabilityReferenceYAML())
+	if !strings.HasPrefix(yamlRef, "# DEFENSECLAW CONFIGURATION v"+version+" — OBSERVABILITY REFERENCE\n") {
+		t.Errorf("YAML reference header does not name v%s: %q", version, strings.SplitN(yamlRef, "\n", 2)[0])
+	}
+	if !strings.Contains(yamlRef, "\nconfig_version: "+version+"\n") {
+		t.Errorf("YAML reference does not declare config_version: %s", version)
+	}
+	mdRef := string(publicschemas.DefenseClawConfigV8ObservabilityReferenceMarkdown())
+	if !strings.HasPrefix(mdRef, "# DefenseClaw v"+version+" observability configuration reference\n") ||
+		!strings.Contains(mdRef, "`config_version: "+version+"`") {
+		t.Errorf("Markdown reference does not name config_version %s: %q", version, strings.SplitN(mdRef, "\n", 2)[0])
+	}
+	var schema struct {
+		Title      string `json:"title"`
+		Properties struct {
+			ConfigVersion struct {
+				Enum []int `json:"enum"`
+			} `json:"config_version"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(publicschemas.DefenseClawConfigV8Schema(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	if schema.Title != "DefenseClaw configuration v"+version {
+		t.Errorf("schema title = %q", schema.Title)
+	}
+	if enum := schema.Properties.ConfigVersion.Enum; len(enum) == 0 || slices.Max(enum) != MaxSupportedConfigVersion {
+		t.Errorf("schema config_version enum = %v, want max %d", enum, MaxSupportedConfigVersion)
 	}
 }

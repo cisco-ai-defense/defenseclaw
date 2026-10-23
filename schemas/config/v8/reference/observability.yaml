@@ -1,4 +1,4 @@
-# DEFENSECLAW CONFIGURATION v8 — OBSERVABILITY REFERENCE
+# DEFENSECLAW CONFIGURATION v9 — OBSERVABILITY REFERENCE
 #
 # GENERATED FILE. DO NOT EDIT.
 # Canonical schema: schemas/config/v8/defenseclaw-config.schema.json
@@ -36,10 +36,10 @@
 #   defenseclaw config reference observability
 #   defenseclaw observability plan
 
-# Selects the strict v8 configuration contract; unknown keys are errors.
-config_version: 8
+# Selects the strict v9 configuration contract; unknown keys are errors.
+config_version: 9
 observability:
-  # Optional in source. Version 8 currently resolves catalog 1; pin it only
+  # Optional in source. Version 9 currently resolves catalog 1; pin it only
   # when deliberately binding the file to this reviewed bucket taxonomy.
   bucket_catalog_version: 1
   # OpenTelemetry resource attributes shared by emitted signals. Keep values

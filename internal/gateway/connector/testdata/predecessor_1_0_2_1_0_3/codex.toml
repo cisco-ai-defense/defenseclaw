@@ -1,0 +1,147 @@
+notify = ['bash', '{data_dir}/notify-bridge.sh']
+[hooks]
+[[hooks.PermissionRequest]]
+matcher = '*'
+
+[[hooks.PermissionRequest.hooks]]
+command = '{data_dir}/hooks/codex-hook.sh --event PermissionRequest --hook-contract codex-hooks-v4'
+timeout = 30
+type = 'command'
+
+[[hooks.PostCompact]]
+[[hooks.PostCompact.hooks]]
+command = '{data_dir}/hooks/codex-hook.sh --event PostCompact --hook-contract codex-hooks-v4'
+timeout = 30
+type = 'command'
+
+[[hooks.PostToolUse]]
+matcher = '*'
+
+[[hooks.PostToolUse.hooks]]
+command = '{data_dir}/hooks/codex-hook.sh --event PostToolUse --hook-contract codex-hooks-v4'
+timeout = 30
+type = 'command'
+
+[[hooks.PreCompact]]
+[[hooks.PreCompact.hooks]]
+command = '{data_dir}/hooks/codex-hook.sh --event PreCompact --hook-contract codex-hooks-v4'
+timeout = 30
+type = 'command'
+
+[[hooks.PreToolUse]]
+matcher = '*'
+
+[[hooks.PreToolUse.hooks]]
+command = '{data_dir}/hooks/codex-hook.sh --event PreToolUse --hook-contract codex-hooks-v4'
+timeout = 30
+type = 'command'
+
+[[hooks.SessionEnd]]
+[[hooks.SessionEnd.hooks]]
+command = '{data_dir}/hooks/codex-hook.sh --event SessionEnd --hook-contract codex-hooks-v4'
+timeout = 3
+type = 'command'
+
+[[hooks.SessionStart]]
+matcher = 'startup|resume|clear|compact'
+
+[[hooks.SessionStart.hooks]]
+command = '{data_dir}/hooks/codex-hook.sh --event SessionStart --hook-contract codex-hooks-v4'
+timeout = 30
+type = 'command'
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+command = '{data_dir}/hooks/codex-hook.sh --event Stop --hook-contract codex-hooks-v4'
+timeout = 90
+type = 'command'
+
+[[hooks.SubagentStart]]
+matcher = '*'
+
+[[hooks.SubagentStart.hooks]]
+command = '{data_dir}/hooks/codex-hook.sh --event SubagentStart --hook-contract codex-hooks-v4'
+timeout = 30
+type = 'command'
+
+[[hooks.SubagentStop]]
+matcher = '*'
+
+[[hooks.SubagentStop.hooks]]
+command = '{data_dir}/hooks/codex-hook.sh --event SubagentStop --hook-contract codex-hooks-v4'
+timeout = 90
+type = 'command'
+
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+command = '{data_dir}/hooks/codex-hook.sh --event UserPromptSubmit --hook-contract codex-hooks-v4'
+timeout = 30
+type = 'command'
+
+[hooks.state]
+[hooks.state.'{home}/.codex/config.toml:permission_request:0:0']
+trusted_hash = 'sha256:{digest}'
+
+[hooks.state.'{home}/.codex/config.toml:post_compact:0:0']
+trusted_hash = 'sha256:{digest}'
+
+[hooks.state.'{home}/.codex/config.toml:post_tool_use:0:0']
+trusted_hash = 'sha256:{digest}'
+
+[hooks.state.'{home}/.codex/config.toml:pre_compact:0:0']
+trusted_hash = 'sha256:{digest}'
+
+[hooks.state.'{home}/.codex/config.toml:pre_tool_use:0:0']
+trusted_hash = 'sha256:{digest}'
+
+[hooks.state.'{home}/.codex/config.toml:session_end:0:0']
+trusted_hash = 'sha256:{digest}'
+
+[hooks.state.'{home}/.codex/config.toml:session_start:0:0']
+trusted_hash = 'sha256:{digest}'
+
+[hooks.state.'{home}/.codex/config.toml:stop:0:0']
+trusted_hash = 'sha256:{digest}'
+
+[hooks.state.'{home}/.codex/config.toml:subagent_start:0:0']
+trusted_hash = 'sha256:{digest}'
+
+[hooks.state.'{home}/.codex/config.toml:subagent_stop:0:0']
+trusted_hash = 'sha256:{digest}'
+
+[hooks.state.'{home}/.codex/config.toml:user_prompt_submit:0:0']
+trusted_hash = 'sha256:{digest}'
+
+[otel]
+environment = 'dev'
+log_user_prompt = true
+
+[otel.exporter]
+[otel.exporter.otlp-http]
+endpoint = 'http://127.0.0.1:18970/v1/logs'
+protocol = 'json'
+
+[otel.exporter.otlp-http.headers]
+authorization = 'Bearer {otlp_token}'
+x-defenseclaw-client = 'codex-otel/1.0'
+x-defenseclaw-source = 'codex'
+
+[otel.metrics_exporter]
+[otel.metrics_exporter.otlp-http]
+endpoint = 'http://127.0.0.1:18970/v1/metrics'
+protocol = 'json'
+
+[otel.metrics_exporter.otlp-http.headers]
+authorization = 'Bearer {otlp_token}'
+x-defenseclaw-client = 'codex-otel/1.0'
+x-defenseclaw-source = 'codex'
+
+[otel.trace_exporter]
+[otel.trace_exporter.otlp-http]
+endpoint = 'http://127.0.0.1:18970/v1/traces'
+protocol = 'json'
+
+[otel.trace_exporter.otlp-http.headers]
+authorization = 'Bearer {otlp_token}'
+x-defenseclaw-client = 'codex-otel/1.0'
+x-defenseclaw-source = 'codex'

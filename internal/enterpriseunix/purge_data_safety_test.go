@@ -54,6 +54,47 @@ func TestUninstallPurgeNamesTheBackupOfAPerUserInstall(t *testing.T) {
 	}
 }
 
+// GAP-0727: a machine-policy-only enrollment can leave a pre-existing OSS
+// installation untouched. The result must name the retained account data;
+// lifecycle reporting never deletes or moves the account's files.
+func TestUnixPurgeReportsAnEnrolledOSSInstallItLeavesBehind(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.3")}))
+			home := "/home/alice"
+			if goos == "darwin" {
+				home = "/Users/alice"
+			}
+			writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath), fmt.Sprintf(
+				`{"accounts":[{"user":"alice","uid":%d,"home":"%s"}]}`, os.Getuid(), home))
+			record := h.env.P(enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath))
+			config := filepath.Join(home, ".defenseclaw", "config.yaml")
+			writeHostFile(t, h, config, "guardrail: {}\n")
+			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+				// The real remove-all worker removes this record before lifecycle
+				// reports what survived. Its pre-removal snapshot must suffice.
+				if err := os.Remove(record); err != nil {
+					t.Fatal(err)
+				}
+				return CommandResult{Stdout: []byte(`{"ok":true,"removed":0}`)}, nil
+			}}
+			done := h.run(Options{Action: ActionUninstall, Purge: true})
+			requireOK(t, done)
+			if _, err := os.Lstat(record); !os.IsNotExist(err) {
+				t.Fatalf("worker did not remove enrollment record: %v", err)
+			}
+			if got := h.read(config); got != "guardrail: {}\n" {
+				t.Fatalf("purge changed the account's OSS data: %q", got)
+			}
+			if got := messagesOf(done.Warnings, codePerUserState); !strings.Contains(got, "alice") ||
+				!strings.Contains(got, "~/.defenseclaw") || !strings.Contains(got, "kept") {
+				t.Fatalf("purge omitted retained OSS data from its result: %q", got)
+			}
+		})
+	}
+}
+
 // GAP-0582: a purge that keeps an account's per-user state (its pending
 // cleanup still needs it) also keeps that account's session-facts cache;
 // the other accounts' caches go.

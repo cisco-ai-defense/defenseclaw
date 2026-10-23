@@ -1679,3 +1679,47 @@ def test_repair_rollback_refusal_names_the_supported_next_step(tmp_path: Path) -
     assert "administrator-selected path permissions" in cases["external policy ACL drift"]["error"]
     assert "Next step:" in cases["transitional service"]["error"]
     assert "retry Setup /repair" in cases["transitional service"]["error"]
+
+
+def _csharp_method_body(text: str, name: str) -> str:
+    start = text.index(f" {name}(string path)\n")
+    end = text.index("\n        }\n", start)
+    return text[start : end + 11]
+
+
+def test_squatted_root_messages_name_the_link_owner() -> None:
+    # GAP-0618: a junction a standard user planted at C:\ProgramData\Cisco was
+    # reported as created by "an account DefenseClaw could not read" although
+    # its owner resolved: the planter lookup used the managed-directory
+    # snapshot, which refuses a reparse point. The owner of the path itself
+    # (folder, file, junction or symbolic link) is read with the link opened
+    # as a link, before the path is removed or moved.
+    module = _text(MODULE)
+    native = _csharp_method_body(module, "GetPathSecurityDescriptorNoFollow")
+    assert "FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS" in native
+    assert "GetFileSecurityDescriptorFromHandle(handle, path)" in native
+    assert "REPARSE_POINT) != 0" not in native and "refusing" not in native
+
+    planter = _function_body(module, "Get-DefenseClawSquattedRootPlanter")
+    assert "$nativeSecurity::GetPathSecurityDescriptorNoFollow($Path)" in planter
+    assert "GetDirectorySecuritySnapshotNoFollow" not in planter
+    translate = planter.index("Translate([Security.Principal.NTAccount])")
+    sid_fallback = planter.index("return $owner.Value", translate)
+    generic = planter.index("'an account DefenseClaw could not read'")
+    assert translate < sid_fallback < generic
+
+    move = _function_body(module, "Move-DefenseClawStandaloneSquattedRoots")
+    captured = move.index("$planter = Get-DefenseClawSquattedRootPlanter -Path $path")
+    for change in ("[IO.Directory]::Delete(", "[IO.File]::Delete(", "[IO.Directory]::Move(", "[IO.File]::Move("):
+        assert captured < move.index(change), change
+    assert "removed the link $path that $planter created" in move
+    assert "that $planter created aside to $quarantine" in move
+
+    # Every root_squatted refusal names the account through the same lookup,
+    # never a bare SID or a category in place of an owner.
+    cause = _function_body(module, "Format-DefenseClawSquattedRootCause")
+    assert "Get-DefenseClawSquattedRootPlanter -Path" in cause
+    assert "is owned by $($entry.owner)" not in module
+    assert "$($squattedRoots[0].owner)" not in module
+    assert move.count("root_squatted: $path $cause,") == 3
+    assert "$(Format-DefenseClawSquattedRootCause -Entry $squattedRoots[0])" in module

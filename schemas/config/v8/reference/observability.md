@@ -1,7 +1,8 @@
-# DefenseClaw v8 observability configuration reference
+# DefenseClaw v9 observability configuration reference
 
 <!-- GENERATED FILE. DO NOT EDIT. -->
 
+Current source files declare `config_version: 9`.
 This reference is generated from `schemas/config/v8/defenseclaw-config.schema.json`.
 The JSON Schema is the source of truth; this document and the adjacent exhaustive
 YAML are presentation artifacts checked for drift in CI.

@@ -1,0 +1,356 @@
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "DEFENSECLAW_FAIL_MODE": "open",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:18970",
+    "OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer {otlp_token},x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
+    "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://127.0.0.1:18970/v1/logs",
+    "OTEL_EXPORTER_OTLP_LOGS_HEADERS": "authorization=Bearer {otlp_token},x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
+    "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://127.0.0.1:18970/v1/metrics",
+    "OTEL_EXPORTER_OTLP_METRICS_HEADERS": "authorization=Bearer {otlp_token},x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
+    "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://127.0.0.1:18970/v1/traces",
+    "OTEL_EXPORTER_OTLP_TRACES_HEADERS": "authorization=Bearer {otlp_token},x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
+    "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/json",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_LOG_ASSISTANT_RESPONSES": "0",
+    "OTEL_LOG_RAW_API_BODIES": "0",
+    "OTEL_LOG_TOOL_CONTENT": "0",
+    "OTEL_LOG_TOOL_DETAILS": "0",
+    "OTEL_LOG_USER_PROMPTS": "0",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_RESOURCE_ATTRIBUTES": "defenseclaw.connector=claudecode,service.name=claudecode",
+    "OTEL_SERVICE_NAME": "claudecode",
+    "OTEL_TRACES_EXPORTER": "none"
+  },
+  "hooks": {
+    "ConfigChange": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Elicitation": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "ElicitationResult": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "FileChanged": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": ".+"
+      }
+    ],
+    "InstructionsLoaded": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "MessageDisplay": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 90,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 60,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "startup|resume|clear|compact|fork"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 90,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 90,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "command": "{data_dir}/hooks/claude-code-hook.sh || { rc=$?; [ \"$rc\" -eq 126 ] || [ \"$rc\" -eq 127 ] || exit \"$rc\"; echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json.' \u003e\u00262; exit 2; }",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

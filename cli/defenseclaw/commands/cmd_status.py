@@ -1248,6 +1248,21 @@ def _connectors_refused_by_agent_settings(health: dict | None) -> dict[str, str]
     }
 
 
+def _connectors_not_started_reasons(health: dict | None) -> dict[str, str]:
+    """Each configured connector the gateway did not start, with the reason its
+    setup gave (GAP-0620)."""
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    details = guardrail.get("details") if isinstance(guardrail, dict) else None
+    reasons = details.get("connectors_not_started_reasons") if isinstance(details, dict) else None
+    if not isinstance(reasons, dict):
+        return {}
+    return {
+        name.strip().lower(): reason.strip()
+        for name, reason in reasons.items()
+        if isinstance(name, str) and name.strip() and isinstance(reason, str) and reason.strip()
+    }
+
+
 def _agent_missing(cfg, connector: str, live: dict | None = None) -> bool:
     """Whether the connector's agent is not installed (GAP-0513).
 

@@ -3098,7 +3098,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	}
 
 	rows, err := s.queryDB(context.Background(), "audit",
-		`SELECT id, timestamp, action, target, actor, details, structured_json, severity,
+		`SELECT id, timestamp, action, target, actor, details, `+s.structuredJSONReadSQL("")+`, severity,
 		        run_id, trace_id, request_id,
 		        session_id, turn_id, agent_name, agent_instance_id, policy_id,
 		        destination_app, tool_name, tool_id,
@@ -4002,7 +4002,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	legacyActions := legacyAlertEligibleActions()
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	query := `SELECT event.id, event.timestamp, event.action, event.target, event.actor,
-			event.details, event.structured_json, ` + alertEffectiveSeveritySQL() + `,
+			event.details, ` + s.structuredJSONReadSQL("event") + `, ` + alertEffectiveSeveritySQL() + `,
 			event.run_id,
 			event.trace_id, event.request_id, event.connector, event.enforced
 		 FROM audit_events AS event

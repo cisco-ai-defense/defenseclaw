@@ -332,7 +332,7 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return errors.New("managed Windows Codex hooks require the administrator-owned machine requirements installer")
 	}
 	return withCodexLifecycleTransaction(opts, func() error {
-		if err := refuseCodexUserConfig(opts); err != nil {
+		if err := c.checkAgentSettings(opts); err != nil {
 			return err
 		}
 		if previous, err := codexPreviousSetupRoot(opts.DataDir); err != nil {
@@ -364,20 +364,41 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	})
 }
 
-// refuseCodexUserConfig refuses, before Setup changes anything, a per-user
+// checkAgentSettings refuses, before Setup changes anything, a per-user
 // config.toml that Setup must not rewrite: one that turns Codex hooks off
 // (the user's choice, GAP-1094) or that does not parse. The earlier hooks and
 // the user's setting stay as they are, and a gateway start keeps the other
 // connectors (GAP-0578). Managed installs keep their hooks in protected
 // requirements, so their patch decides.
-func refuseCodexUserConfig(opts SetupOpts) error {
+func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
 	if opts.ManagedEnterprise {
 		return nil
 	}
 	path := codexConfigPath()
+	// Match the writer's boundary: an OSS account may keep its dotfiles on a
+	// user-owned volume, while an enterprise per-user home binding is confined.
+	if home := activeUserHomeOverride(); home != "" && runtime.GOOS != "windows" {
+		target, outside, err := AgentConfigOutsideHome(home, path)
+		if err != nil {
+			return refuseForAgentConfig(fmt.Errorf("inspect Codex config %s: %w; fix the link, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+		}
+		if outside {
+			return refuseForAgentConfig(&AgentConfigOutsideHomeError{Path: path, Target: target})
+		}
+	}
+	if _, err := userOwnedSettingsReadPath(path); err != nil {
+		return refuseForAgentConfig(fmt.Errorf("inspect Codex config %s: %w; fix the link, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+	}
+	_, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // only an absent config can be created by Setup
+	}
+	if err != nil {
+		return refuseForAgentConfig(fmt.Errorf("inspect Codex config %s: %w; fix the file, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil // a missing file is created by the patch; an unreadable one is reported there
+		return refuseForAgentConfig(fmt.Errorf("Codex config %s cannot be read: %w; fix the file, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
 	}
 	cfg := map[string]interface{}{}
 	if err := parseCodexTOML(data, &cfg); err != nil {

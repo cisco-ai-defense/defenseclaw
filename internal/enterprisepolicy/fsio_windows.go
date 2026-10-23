@@ -916,6 +916,8 @@ func publishedDirProblem(Options, string) string { return "" }
 
 func restorePublishedDirs(Options, string) ([]string, error) { return nil, nil }
 
+func restoreRecordedPolicyFileMode(Options, string, string) (bool, error) { return false, nil }
+
 // adminOwnedLink is never true on Windows, where no file is bound by kind
 // only (adminOwnedFile).
 func adminOwnedLink(os.FileInfo) bool { return false }

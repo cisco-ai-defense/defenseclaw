@@ -9955,6 +9955,10 @@ def _apply_hook_connector_setup(
     if connector == "opencode":
         _preflight_opencode_plugin_folder()
 
+    if refusal := _agent_settings_refusal(app.cfg, connector, workspace_dir=workspace_dir):
+        ux.echo(f"  ✗ {refusal}", err=True)
+        return False
+
     # Normalize mode at the boundary. Anything other than the literal
     # ``action`` sentinel is downgraded to ``observe`` because failing-
     # safe on a typo is strictly less surprising than enforcing on one.
@@ -11462,6 +11466,10 @@ def _apply_setup_batch(
 
     if "opencode" in connectors:
         _preflight_opencode_plugin_folder()
+    for connector_name in connectors:
+        if refusal := _agent_settings_refusal(app.cfg, connector_name, workspace_dir=""):
+            _restore_setup_config_snapshot(app, setup_snapshot)
+            raise click.ClickException(refusal)
 
     resolved_connector_modes = {
         connector_name: (connector_modes or {}).get(connector_name, default_mode)
@@ -12218,6 +12226,67 @@ def _connector_not_shipped(cfg, name: str) -> bool:
     except OSError:
         return False
     return normalized not in declared and name.strip().lower() not in declared
+
+
+# The connectors whose gateway Setup refuses the agent's own settings before it
+# changes anything (connector.CheckAgentSettings).
+_AGENT_SETTINGS_CHECKED_CONNECTORS = frozenset({"claudecode", "codex", "copilot"})
+_GATEWAY_RESTART_STEP_RE = re.compile(r",? then run: defenseclaw-gateway restart\.?$")
+
+
+def _agent_settings_refusal(cfg, connector: str, *, workspace_dir: str | None = None) -> str:
+    """Why the gateway would refuse *connector*'s agent settings, or "".
+
+    The agent's own settings can refuse DefenseClaw hooks: a Codex
+    config.toml that does not parse, ``codex features disable hooks``,
+    Claude Code or Copilot ``disableAllHooks``. Setup restarted the gateway
+    anyway; the gateway then could not start the connector and the rollback
+    left the gateway stopped (GAP-0615). ``defenseclaw-gateway connector
+    check-agent-settings`` runs the gateway's own check and changes nothing,
+    so setup stops here, before it changes anything, with the file and the
+    fix. When the check cannot run, the gateway start still refuses those
+    settings and setup's readiness wait reports that reason.
+    """
+    if connector not in _AGENT_SETTINGS_CHECKED_CONNECTORS:
+        return ""
+    executable = _gateway_lifecycle_executable()
+    if not executable:
+        return ""
+    data_dir = str(cfg.data_dir)
+    env = {**os.environ, "DEFENSECLAW_HOME": data_dir}
+    if connector == "codex":
+        selected_root = os.path.abspath(connector_paths.codex_home())
+        env["CODEX_HOME"] = selected_root
+        env["DEFENSECLAW_EXPLICIT_CODEX_SETUP"] = selected_root
+    workspace = _resolve_connector_workspace(workspace_dir)
+    try:
+        result = run_pinned_executable(
+            [executable, "connector", "check-agent-settings", "--connector", connector, "--data-dir", data_dir,
+             "--workspace-dir", workspace, "--json"],
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+            env=env,
+        )
+    except (UnsafePathError, subprocess.TimeoutExpired, OSError):
+        return ""
+    lines = (result.stdout or "").strip().splitlines()
+    try:
+        payload = _json.loads(lines[-1]) if lines else None
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict) or payload.get("refused") is not True:
+        return ""
+    reason = str(payload.get("reason") or "").strip()
+    if not reason:
+        return ""
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    return (
+        f"{label}: {_GATEWAY_RESTART_STEP_RE.sub('', reason)}. Setup changed nothing and the gateway keeps "
+        "running as it was; after the fix, run the same setup command again."
+    )
 
 
 def _prune_orphaned_connector_hooks(cfg, connector: str) -> tuple[list[str], str]:
@@ -15131,6 +15200,46 @@ def _gateway_refused_peers(
     return expected - active - must_converge
 
 
+_GATEWAY_REASON_MAX_CHARS = 1200
+
+
+def _bounded_gateway_reason(reason: str) -> str:
+    reason = " ".join(reason.split())
+    if len(reason) > _GATEWAY_REASON_MAX_CHARS:
+        reason = reason[:_GATEWAY_REASON_MAX_CHARS] + " ... (gateway.log has the rest)"
+    return reason
+
+
+def _agent_not_on_path_hint(connector: str) -> str:
+    """Say that *connector*'s agent is not on PATH, or "" (GAP-0620).
+
+    The gateway runs the agent to check its hooks; an agent that discovery
+    finds neither on PATH nor in its documented install folders was reported
+    only as a roster mismatch.
+    """
+    if not connector or connector in {"openclaw", "openhands"}:
+        return ""
+    try:
+        spec = agent_discovery._SPECS.get(connector)
+        binary = getattr(spec, "binary_name", "") if spec is not None else ""
+        if not binary or agent_discovery._binary_path_for_agent(connector, spec):
+            return ""
+    except Exception:  # noqa: BLE001 - a hint only; the readiness failure stands.
+        return ""
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    return (
+        f"{label} ({binary}) is not on PATH, so the gateway could not start the {connector} connector; "
+        f"install {label} or add its folder to PATH, then run the setup command again"
+    )
+
+
+def _connector_not_started_detail(connector: str, reason: str) -> str:
+    detail = f"the gateway did not start it: {_bounded_gateway_reason(reason)}"
+    if missing := _agent_not_on_path_hint(connector):
+        detail = f"{missing}; {detail}"
+    return detail
+
+
 def _connector_runtime_snapshot_failure(
     state: Any,
     state_marker: int,
@@ -15148,12 +15257,10 @@ def _connector_runtime_snapshot_failure(
     active, inactive = runtime_sets
     if not expected.issubset(active):
         peer = next(iter(sorted(expected - active)), "")
-        return _ConnectorRuntimeReadiness(
-            False,
-            peer,
-            "roster",
-            f"active={','.join(sorted(active))}; expected={','.join(sorted(expected))}",
-        )
+        detail = f"active={','.join(sorted(active))}; expected={','.join(sorted(expected))}"
+        if missing := _agent_not_on_path_hint(peer):
+            detail = f"{missing} ({detail})"
+        return _ConnectorRuntimeReadiness(False, peer, "roster", detail)
     if previous_state_marker is not None and state_marker == previous_state_marker:
         return _ConnectorRuntimeReadiness(False, invariant="freshness", detail="active connector state is stale")
     if previous_lock_marker is not None and lock_marker == previous_lock_marker:
@@ -15383,10 +15490,11 @@ def _wait_for_connector_runtime(
     skipped_peers: set[str] = set()
     last_failure = _ConnectorRuntimeReadiness(False, invariant="snapshot", detail="runtime files are not ready")
     agent_settings_refused: dict[str, str] = {}
-    from defenseclaw.commands.cmd_status import _connectors_refused_by_agent_settings
+    not_started_reasons: dict[str, str] = {}
+    from defenseclaw.commands.cmd_status import _connectors_not_started_reasons, _connectors_refused_by_agent_settings
 
     def gateway_ready(deadline: float) -> tuple[bool, str | None, _ConnectorRuntimeReadiness]:
-        nonlocal gateway_generation, agent_settings_refused
+        nonlocal gateway_generation, agent_settings_refused, not_started_reasons
         if not require_gateway_health and gateway_generation is None:
             return True, gateway_generation, _ConnectorRuntimeReadiness(True)
         remaining = deadline - time.monotonic()
@@ -15427,16 +15535,18 @@ def _wait_for_connector_runtime(
             )
         guardrail = health.get("guardrail")
         agent_settings_refused = _connectors_refused_by_agent_settings(health)
+        not_started_reasons = _connectors_not_started_reasons(health)
         state = guardrail.get("state") if isinstance(guardrail, dict) else None
         if isinstance(state, str) and state.strip().lower() in {"error", "stopped"}:
+            detail = f"restarted gateway guardrail is {state.strip().lower()}"
+            last_error = guardrail.get("last_error")
+            if isinstance(last_error, str) and last_error.strip():
+                # Name the cause the gateway gave, not only its state (GAP-0620).
+                detail += f": {_bounded_gateway_reason(last_error)}"
             return (
                 False,
                 gateway_generation,
-                _ConnectorRuntimeReadiness(
-                    False,
-                    invariant="gateway-state",
-                    detail=f"restarted gateway guardrail is {state.strip().lower()}",
-                ),
+                _ConnectorRuntimeReadiness(False, invariant="gateway-state", detail=detail),
             )
         return True, gateway_generation, _ConnectorRuntimeReadiness(True)
 
@@ -15568,6 +15678,18 @@ def _wait_for_connector_runtime(
         )
         if blocking:
             return _ConnectorRuntimeReadiness(False, blocking[0], "agent-settings", settings_refused[blocking[0]])
+        # The gateway skipped a connector this setup brings up and said why
+        # (GAP-0620): waiting cannot change that, and the roster mismatch the
+        # wait ends with does not name the cause.
+        not_started = sorted(
+            name for name in not_started_reasons
+            if name in must_converge and name in expected and name not in settings_refused
+        )
+        if not_started:
+            name = not_started[0]
+            return _ConnectorRuntimeReadiness(
+                False, name, "not-started", _connector_not_started_detail(name, not_started_reasons[name])
+            )
         if settings_refused:
             for name in sorted(settings_refused):
                 ux.warn(f"skipping {name}: {settings_refused[name]}")
@@ -15609,9 +15731,12 @@ def _wait_for_connector_runtime(
             )
             if refused:
                 for name in sorted(refused):
+                    reason = not_started_reasons.get(name)
                     ux.warn(
                         f"skipping {name}: the restarted gateway did not activate it "
-                        "(gateway.log names the reason), so it is not guarded now"
+                        + (f"({_connector_not_started_detail(name, reason)})" if reason
+                           else "(gateway.log names the reason)")
+                        + ", so it is not guarded now"
                     )
                 rerun = ", ".join(
                     f"defenseclaw setup {'claude-code' if name == 'claudecode' else name}" for name in sorted(refused)

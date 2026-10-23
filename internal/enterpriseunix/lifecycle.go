@@ -3280,10 +3280,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			return 0
 		}
 	}
-	if !l.opts.Purge {
-		// Read before the machine state, and the accounts record with it, go.
-		l.keptPerUser, l.keptKnown = env.perUserLeftovers()
-	}
+	// Read before the machine state, and the accounts record with it, go.
+	// A Unix purge also needs this snapshot to report enrolled OSS data that
+	// the per-user worker leaves untouched (GAP-0727).
+	l.keptPerUser, l.keptKnown = env.perUserLeftovers()
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	// stopUnits stops a group of units and returns the ones still running.
@@ -3389,6 +3389,9 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		l.purgeSessionFactsCaches(cacheAccounts)
 	} else if record == nil && l.opts.Purge {
 		l.warnUnpurgedPerUser(ctx)
+	}
+	if l.opts.Purge {
+		l.reportRetainedEnrolledUserData()
 	}
 	// The sandbox subsystem goes before the binaries it runs: a non-purge
 	// uninstall stops and keeps each account's sandboxes, then its daemon

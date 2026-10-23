@@ -5348,6 +5348,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		if len(setupTransaction.agentSettingsRefused) > 0 {
 			guardrailDetails[GuardrailAgentSettingsRefused] = setupTransaction.agentSettingsRefused
 		}
+		if reasons := setupTransaction.notStartedReasonsFor(notStarted); len(reasons) > 0 {
+			guardrailDetails[GuardrailNotStartedReasons] = reasons
+		}
 		s.health.SetGuardrail(StateRunning, "", guardrailDetails)
 	}
 	publishHealth()
@@ -5899,6 +5902,10 @@ type multiConnectorSetupTransaction struct {
 	// agentSettingsRefused maps each connector whose agent's own settings
 	// refused DefenseClaw hooks to the reason, which names the fix.
 	agentSettingsRefused map[string]string
+	// notStartedReasons maps each connector this start skipped to the reason,
+	// so setup and status name it instead of only a roster mismatch
+	// (GAP-0620).
+	notStartedReasons map[string]string
 	// keptRegistrations lists the agentSettingsRefused connectors that still
 	// hold their earlier registration. They stay in the saved active set, so a
 	// later per-connector disable removes them through the non-fatal
@@ -6124,6 +6131,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 		transaction.admissionRefused = nil
 		transaction.releaseRefused = false
 		transaction.agentSettingsRefused = nil
+		transaction.notStartedReasons = nil
 		transaction.keptRegistrations = nil
 	}
 	registrations := make([]connectorRegistration, 0, len(conns))
@@ -6183,12 +6191,14 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				pluginLockSnapshot, err = connector.CaptureHookContractLockSnapshot(registration.opts.DataDir)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s lock rollback snapshot failed, skipping before setup (other connectors unaffected): %v\n", registration.conn.Name(), err)
+					transaction.noteNotStarted(registration.conn.Name(), err)
 					continue
 				}
 			}
 			pluginSnapshot, err = connector.CapturePluginArtifactRegistrationSnapshot(registration.opts, name)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s rollback snapshot failed, skipping before setup (other connectors unaffected): %v\n", registration.conn.Name(), err)
+				transaction.noteNotStarted(registration.conn.Name(), err)
 				continue
 			}
 		}
@@ -6223,6 +6233,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				transaction.agentSettingsRefused = map[string]string{}
 			}
 			transaction.agentSettingsRefused[registration.conn.Name()] = err.Error()
+			transaction.noteNotStarted(registration.conn.Name(), err)
 			if strings.TrimSpace(previousLock.Connector) != "" {
 				transaction.keptRegistrations = append(transaction.keptRegistrations, registration.conn.Name())
 			}
@@ -6262,6 +6273,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 			// refused before writing anything (GAP-1851).
 			unchanged := errors.Is(err, connector.ErrExecutableAdmission) || errors.Is(err, connector.ErrSetupRefusedUnchanged)
 			if errors.Is(err, ErrHookContractAdmission) || errors.Is(err, connector.ErrAgentVersionProbeTimeout) || unchanged {
+				transaction.noteNotStarted(registration.conn.Name(), err)
 				var restoreErr error
 				if !unchanged {
 					restoreErr = restoreFailedConnectorLock(registration.opts.DataDir, registration.conn.Name(), previousLock)
@@ -6318,6 +6330,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				)
 			}
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v\n", registration.conn.Name(), err)
+			transaction.noteNotStarted(registration.conn.Name(), err)
 			continue
 		}
 		transaction.succeeded = append(transaction.succeeded, registration.conn.Name())
@@ -7744,6 +7757,43 @@ var ErrHookContractAdmission = errors.New("hook contract admission failed")
 // connector the agent's own settings refused (connector.ErrAgentConfigRefusal)
 // to the reason, so status can name that agent's fix (GAP-0578).
 const GuardrailAgentSettingsRefused = "connectors_refused_by_agent_settings"
+
+// GuardrailNotStartedReasons is the guardrail health detail that maps each
+// configured connector this start did not start (connectors_not_started) to
+// the reason its setup gave. Setup's readiness wait reports it for the
+// connector it adds, so a missing agent is named instead of a roster mismatch
+// (GAP-0620).
+const GuardrailNotStartedReasons = "connectors_not_started_reasons"
+
+// notStartedReasonMaxBytes bounds one reason in guardrail health.
+const notStartedReasonMaxBytes = 1024
+
+func (t *multiConnectorSetupTransaction) noteNotStarted(name string, err error) {
+	if err == nil {
+		return
+	}
+	if t.notStartedReasons == nil {
+		t.notStartedReasons = map[string]string{}
+	}
+	reason := err.Error()
+	if len(reason) > notStartedReasonMaxBytes {
+		reason = strings.ToValidUTF8(reason[:notStartedReasonMaxBytes], "") + " [truncated; the gateway log has the rest]"
+	}
+	t.notStartedReasons[strings.ToLower(strings.TrimSpace(name))] = reason
+}
+
+// notStartedReasonsFor returns the recorded reasons of the connectors in
+// notStarted, the ones a later setup in the same start did not bring up.
+func (t *multiConnectorSetupTransaction) notStartedReasonsFor(notStarted []string) map[string]string {
+	reasons := map[string]string{}
+	for _, name := range notStarted {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if reason, ok := t.notStartedReasons[key]; ok {
+			reasons[key] = reason
+		}
+	}
+	return reasons
+}
 
 // GuardrailHookContractAdmissionRefused is the guardrail health detail that
 // lists the connectors refused by the hook-contract admission gate when that

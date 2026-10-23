@@ -42,3 +42,21 @@ func refuseForAgentConfig(err error) error {
 	}
 	return agentConfigRefusal{err: err}
 }
+
+// agentSettingsChecker is implemented by the connectors whose Setup refuses
+// the agent's own settings (ErrAgentConfigRefusal) before it changes anything.
+type agentSettingsChecker interface {
+	checkAgentSettings(opts SetupOpts) error
+}
+
+// CheckAgentSettings runs the agent-settings refusal conn's Setup starts with,
+// and changes nothing. `defenseclaw setup` asks it before it restarts the
+// gateway, so settings the gateway would refuse stop setup before the running
+// gateway is touched (GAP-0615). It returns nil for a connector without such a
+// refusal.
+func CheckAgentSettings(conn Connector, opts SetupOpts) error {
+	if checker, ok := conn.(agentSettingsChecker); ok {
+		return checker.checkAgentSettings(opts)
+	}
+	return nil
+}

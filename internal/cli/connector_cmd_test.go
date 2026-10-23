@@ -401,6 +401,8 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 		err = runConnectorPruneOrphans(cmd, nil)
 	case "reconcile":
 		err = runConnectorReconcile(cmd, nil)
+	case "check-agent-settings":
+		err = runConnectorCheckAgentSettings(cmd, nil)
 	default:
 		t.Fatalf("unknown subcommand for harness: %s", sub)
 	}

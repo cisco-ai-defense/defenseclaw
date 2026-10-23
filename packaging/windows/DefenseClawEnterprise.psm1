@@ -2031,6 +2031,43 @@ namespace $nativeNamespace
             }
         }
 
+        // The security descriptor of a path itself, of any kind: a folder, a
+        // file, or a junction or symbolic link, which is opened as the link
+        // (FILE_FLAG_OPEN_REPARSE_POINT) and never followed. Used only to
+        // name the account that planted a squatted root; it grants nothing.
+        // The managed-directory helpers above refuse a reparse point, so they
+        // cannot name a link's owner (GAP-0618).
+        public static byte[] GetPathSecurityDescriptorNoFollow(string path)
+        {
+            const uint READ_CONTROL = 0x00020000;
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint FILE_SHARE_WRITE = 0x00000002;
+            const uint FILE_SHARE_DELETE = 0x00000004;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+            IntPtr handle = CreateFileW(
+                path,
+                READ_CONTROL,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                IntPtr.Zero);
+            if (handle == new IntPtr(-1))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "open path security failed: " + path);
+            try
+            {
+                return GetFileSecurityDescriptorFromHandle(handle, path);
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
+        }
+
         public static PathSecuritySnapshot SetDirectoryDaclNoFollow(
             string path,
             byte[] securityDescriptor,
@@ -35179,6 +35216,10 @@ function Move-DefenseClawStandaloneSquattedRoots {
     foreach ($entry in $Squatted) {
         $path = [string]$entry.path
         $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force
+        # The planting account is read from the path itself before anything
+        # removes or moves it (GAP-0618).
+        $planter = Get-DefenseClawSquattedRootPlanter -Path $path
+        $cause = Format-DefenseClawSquattedRootCause -Entry $entry -Planter $planter
         $children = @()
         if ($item.PSIsContainer -and
             ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
@@ -35229,7 +35270,7 @@ function Move-DefenseClawStandaloneSquattedRoots {
             if ($null -ne $childOwner -and
                 $childOwner -in @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)) {
                 throw (
-                    "root_squatted: $path is owned by $($entry.owner), not an administrator, " +
+                    "root_squatted: $path $cause, " +
                     "and holds administrator-owned content ($($child.FullName)); an administrator must " +
                     'move or remove it before DefenseClaw can install'
                 )
@@ -35240,13 +35281,12 @@ function Move-DefenseClawStandaloneSquattedRoots {
                     ($null -eq $childOwner -or
                         [string]::Equals([string]$childOwner, [string]$vendorOwner, [StringComparison]::OrdinalIgnoreCase)))) {
                 throw (
-                    "root_squatted: $path is owned by $($entry.owner), not an administrator, " +
+                    "root_squatted: $path $cause, " +
                     "and holds content other than DefenseClaw that its owner did not create ($($child.FullName)); " +
                     'an administrator must correct its ownership or remove it before DefenseClaw can install'
                 )
             }
         }
-        $planter = Get-DefenseClawSquattedRootPlanter -Path $path
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             # A junction or symbolic link a standard user planted is removed
             # as a link (rmdir semantics: the reparse point goes, its target
@@ -35296,7 +35336,7 @@ function Move-DefenseClawStandaloneSquattedRoots {
         }
         catch {
             throw (
-                "root_squatted: $path is owned by $($entry.owner), not an administrator, and could not " +
+                "root_squatted: $path $cause, and could not " +
                 "be moved aside ($($_.Exception.Message)); retry after the owning user signs out, or " +
                 'have an administrator remove it'
             )
@@ -35316,14 +35356,43 @@ function Move-DefenseClawStandaloneSquattedRoots {
 # What Install did with each squatted root, for the result.
 $script:DefenseClawSquattedRootNotes = @()
 
+function Format-DefenseClawSquattedRootCause {
+    # Why a squatted root is refused, naming the account that created it
+    # (Get-DefenseClawSquattedRootPlanter) rather than a bare SID or a
+    # category.
+    param(
+        [Parameter(Mandatory)][object]$Entry,
+        [string]$Planter = ''
+    )
+    if ([string]::IsNullOrEmpty($Planter)) {
+        $Planter = Get-DefenseClawSquattedRootPlanter -Path ([string]$Entry.path)
+    }
+    switch ([string]$Entry.owner) {
+        'not a plain directory' {
+            return "is a link or file that $Planter created, not a plain directory an administrator owns"
+        }
+        'unreadable security descriptor' {
+            return "has a security descriptor DefenseClaw could not check (created by $Planter)"
+        }
+        default {
+            return "is owned by $Planter, not an administrator"
+        }
+    }
+}
+
 function Get-DefenseClawSquattedRootPlanter {
-    # The owner of a squatted path, read without following a link, as an
-    # account name next to its SID.
+    # The owner of a squatted path itself (a folder, a file, or a junction or
+    # symbolic link, opened as the link and never followed), as an account
+    # name next to its SID; the SID alone when the name does not resolve.
+    # Read before the path is removed or moved. The generic phrase is only
+    # for a path whose security descriptor cannot be opened at all: the
+    # managed-directory snapshot used here before refuses a reparse point,
+    # so every planted link was reported with no account (GAP-0618).
     param([Parameter(Mandatory)][string]$Path)
     try {
         $nativeSecurity = Initialize-DefenseClawNativeSecurity
-        $snapshot = $nativeSecurity::GetDirectorySecuritySnapshotNoFollow($Path)
-        $owner = [Security.AccessControl.RawSecurityDescriptor]::new([byte[]]$snapshot.SecurityDescriptor, 0).Owner
+        $descriptor = [byte[]]$nativeSecurity::GetPathSecurityDescriptorNoFollow($Path)
+        $owner = [Security.AccessControl.RawSecurityDescriptor]::new($descriptor, 0).Owner
         if ($null -eq $owner) {
             return 'an unknown account'
         }
@@ -35960,8 +36029,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             }
             else {
                 throw (
-                    "root_squatted: $($squattedRoots[0].path) is owned by $($squattedRoots[0].owner), not an " +
-                    'administrator; no DefenseClaw deployment can use it. Install (or ensure) moves it aside; ' +
+                    "root_squatted: $($squattedRoots[0].path) $(Format-DefenseClawSquattedRootCause -Entry $squattedRoots[0]); " +
+                    'no DefenseClaw deployment can use it. Install (or ensure) moves it aside; ' +
                     'otherwise an administrator must remove it'
                 )
             }
