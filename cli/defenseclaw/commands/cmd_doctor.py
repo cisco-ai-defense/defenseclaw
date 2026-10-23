@@ -16164,12 +16164,19 @@ def _check_removed_connector_cleanup(cfg, r: _DoctorResult) -> None:
 
     for left in leftovers(str(getattr(cfg, "data_dir", "") or "")):
         steps = "; ".join(f"{item.path}: {item.what} (to remove: {item.step})" for item in left.items)
+        pending_publication = any("interrupted publication" in item.what for item in left.items)
+        remediation = f"do each step above; until then {left.label} is blocked by DefenseClaw's stub"
+        if pending_publication:
+            remediation = (
+                "rerun connector teardown to recover the interrupted publication; "
+                "preserve its receipt and saved copies if recovery fails"
+            )
         _emit(
             "warn",
             f"Removed connector [{left.label}]",
             f"removed in DefenseClaw 1.0.4; left for you to remove by hand: {steps}",
             r=r,
-            remediation=f"do each step above; until then {left.label} is blocked by DefenseClaw's stub",
+            remediation=remediation,
         )
 
 

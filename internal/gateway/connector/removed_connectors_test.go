@@ -495,6 +495,93 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 	}
 }
 
+func TestRemovedTeardownRecoversInterruptedStubPublication(t *testing.T) {
+	for _, c := range removedConnectorsUnderTest() {
+		for _, replacePath := range []bool{false, true} {
+			name := "retry"
+			if replacePath {
+				name = "foreign_path"
+			}
+			t.Run(c.name+"/"+name, func(t *testing.T) {
+				h := newRemovedHost(t)
+				h.stage(t, c)
+				path := h.script(c)
+				conn, _ := RetiredConnector(c.name)
+				var crashState atomicTransformPhaseState
+				restore := setAtomicTransformPhaseHookForTest(path, func(phase atomicTransformPhase, state atomicTransformPhaseState) error {
+					if phase == atomicTransformPhaseDetached {
+						crashState = state
+						return errAtomicTransformSimulatedCrash
+					}
+					return nil
+				})
+				err := conn.Teardown(context.Background(), h.opts)
+				restore()
+				if !errors.Is(err, errAtomicTransformSimulatedCrash) {
+					t.Fatalf("interrupted Teardown = %v, want simulated crash", err)
+				}
+				if crashState.IntentPath == "" {
+					t.Fatal("the detached publication has no recovery intent")
+				}
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("detached module path = %v, want absent", err)
+				}
+				if _, err := os.Lstat(crashState.IntentPath); err != nil {
+					t.Fatalf("recovery intent: %v", err)
+				}
+				leftovers, _ := RemovedConnectorLeftovers(c.name, h.opts)
+				if !removedListsPath(leftovers, crashState.IntentPath) {
+					t.Fatalf("leftovers do not name the interrupted publication receipt: %+v", leftovers)
+				}
+				backups := filepath.Join(h.dataDir, "connector_backups", c.name)
+				listedBackups := false
+				for _, item := range leftovers {
+					if item.Path == backups {
+						listedBackups = true
+						if !strings.Contains(item.Step, "do not delete") || !strings.Contains(item.Step, "teardown") {
+							t.Fatalf("pending publication backup guidance permits deletion: %+v", item)
+						}
+					}
+				}
+				if !listedBackups {
+					t.Fatalf("leftovers do not preserve the backup folder %s: %+v", backups, leftovers)
+				}
+				if err := conn.VerifyClean(h.opts); err == nil || !strings.Contains(err.Error(), "interrupted") {
+					t.Fatalf("VerifyClean with pending publication = %v, want interrupted-publication refusal", err)
+				}
+				if replacePath {
+					writeRemovedFile(t, path, "operator module\n", 0o600)
+					if err := conn.Teardown(context.Background(), h.opts); err == nil || !strings.Contains(err.Error(), "recover") {
+						t.Fatalf("Teardown with a foreign replacement = %v, want recovery refusal", err)
+					}
+					if got, err := os.ReadFile(path); err != nil || string(got) != "operator module\n" {
+						t.Fatalf("foreign replacement = %q, %v", got, err)
+					}
+					for _, token := range h.tokens(c) {
+						if _, err := os.Lstat(token); err != nil {
+							t.Fatalf("token revoked during refused recovery: %s: %v", token, err)
+						}
+					}
+					if err := os.Remove(path); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := conn.Teardown(context.Background(), h.opts); err != nil {
+					t.Fatalf("retry after detached publication: %v", err)
+				}
+				h.requireStub(t, c)
+				h.requireRevoked(t, c)
+				if err := conn.VerifyClean(h.opts); err != nil {
+					t.Fatalf("VerifyClean after retry: %v", err)
+				}
+				if _, err := os.Lstat(crashState.IntentPath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("recovery intent survived retry: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func removedTokenPath(t *testing.T, dataDir, connectorName string) string {
 	t.Helper()
 	path, err := HookAPITokenFilePath(dataDir, connectorName)

@@ -14,3 +14,7 @@ func removedStubTransform(
 ) error {
 	return atomicTransformFileWithStateDir(path, stateDir, perm, transform)
 }
+
+func removedStubRecoveryDir(path, stateDir string) string {
+	return atomicTransformRenameableStateDir(path, stateDir)
+}
