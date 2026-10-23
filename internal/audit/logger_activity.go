@@ -183,12 +183,14 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 // and the stored row. A pin that does not read is an error (no sink gets
 // the offer); a store that cannot say whether it holds the row is not: the
 // offer skips it (lookupErr) and still goes to the remote destinations. A
-// row whose pin is gone pins the record the row holds.
+// row whose pin is gone pins the record the row holds: its provenance and
+// the digest stored with it. A row without a digest cannot say which record
+// it holds, so its change is not offered again.
 func (l *Logger) spooledChange(ctx context.Context, in ActivityInput) (*spooledChange, error) {
 	if in.Pins == nil {
 		return nil, fmt.Errorf("audit: spooled occurrence %s has no record pins", in.OccurrenceID)
 	}
-	change := &spooledChange{pins: in.Pins, key: in.PinKey}
+	change := &spooledChange{pins: in.Pins, key: in.PinKey, id: in.OccurrenceID}
 	var err error
 	if change.pin, change.pinned, err = in.Pins.load(in.PinKey); err != nil {
 		return nil, err

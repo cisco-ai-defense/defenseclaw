@@ -178,13 +178,45 @@ func (pins *ConfigChangePins) Prune(reported func(eventID string) bool) {
 	}
 }
 
+// configChangeRecordDigestMigrationDescription names the audit migration
+// that adds audit_events.record_sha256.
+const configChangeRecordDigestMigrationDescription = "audit events: keep the canonical record digest of a spooled change"
+
+// migrateAuditEventRecordDigest adds audit_events.record_sha256, the
+// SHA-256 of the canonical record the row of a spooled change was written
+// from (spooledChange.recordDigest). Every other row leaves it NULL. The
+// column is additive: an earlier binary names its insert columns and never
+// reads it.
+func migrateAuditEventRecordDigest(ex dbExecer) error {
+	present, err := tableExists(ex, "audit_events")
+	if err != nil || !present {
+		return err
+	}
+	exists, err := hasColumnDB(ex, "audit_events", "record_sha256")
+	if err != nil || exists {
+		return err
+	}
+	if _, err := ex.Exec(`ALTER TABLE audit_events ADD COLUMN record_sha256 TEXT`); err != nil {
+		return fmt.Errorf("alter audit_events.record_sha256: %w", err)
+	}
+	return nil
+}
+
+// recordSHA256 is the digest a pin and a change's row keep of a record.
+func recordSHA256(encoded []byte) string {
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
+}
+
 // storedChangeRow is what the audit row of a change keeps of its record:
 // the local projection (projected_record_json), which copies every member
 // of the canonical record but its body and field classes byte for byte,
-// and whether it is the mandatory-floor form.
+// whether it is the mandatory-floor form, and the digest of the canonical
+// record (record_sha256; empty on a row an earlier build wrote).
 type storedChangeRow struct {
 	envelope  []byte
 	floorOnly bool
+	digest    string
 }
 
 // storedChangeRow reads the audit row with id, and whether there is one. A
@@ -193,10 +225,10 @@ func (s *Store) storedChangeRow(ctx context.Context, id string) (storedChangeRow
 	if s == nil || s.db == nil {
 		return storedChangeRow{}, false, nil
 	}
-	var envelope, payload string
+	var envelope, payload, digest string
 	err := s.scanRow(ctx, "audit_event_exists",
-		s.db.QueryRowContext(ctx, `SELECT COALESCE(projected_record_json,''), COALESCE(payload_json,'')
-			FROM audit_events WHERE id = ? LIMIT 1`, id), &envelope, &payload)
+		s.db.QueryRowContext(ctx, `SELECT COALESCE(projected_record_json,''), COALESCE(payload_json,''),
+			COALESCE(record_sha256,'') FROM audit_events WHERE id = ? LIMIT 1`, id), &envelope, &payload, &digest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storedChangeRow{}, false, nil
 	}
@@ -207,13 +239,17 @@ func (s *Store) storedChangeRow(ctx context.Context, id string) (storedChangeRow
 		FloorOnly bool `json:"floor_only"`
 	}
 	_ = json.Unmarshal([]byte(payload), &body)
-	return storedChangeRow{envelope: []byte(envelope), floorOnly: body.FloorOnly}, true, nil
+	return storedChangeRow{envelope: []byte(envelope), floorOnly: body.FloorOnly, digest: digest}, true, nil
 }
 
 // pin is the pin of the record the row holds: its run, sidecar, binary and
-// config, read from its projection. The digest is filled once the record
-// is rebuilt and matches the row.
+// config, read from its projection, and the digest stored with it. A row
+// without a digest has no pin: the body of its record is not in its
+// projection, so a rebuild cannot be told from another record.
 func (row storedChangeRow) pin() (ConfigChangePin, error) {
+	if !configChangePinDigest.MatchString(row.digest) {
+		return ConfigChangePin{}, errors.New("audit: the stored change row keeps no record digest, so its record cannot be rebuilt")
+	}
 	envelope, err := decodeEnvelope(row.envelope)
 	if err != nil {
 		return ConfigChangePin{}, errors.New("audit: the stored change row has no valid record")
@@ -235,19 +271,17 @@ func (row storedChangeRow) pin() (ConfigChangePin, error) {
 	return ConfigChangePin{
 		RunID: correlation.RunID, SidecarInstanceID: correlation.SidecarInstanceID,
 		BinaryVersion: provenance.BinaryVersion, ConfigGeneration: uint64(provenance.ConfigGeneration),
-		ConfigDigest: provenance.ConfigDigest, FloorOnly: row.floorOnly,
+		ConfigDigest: provenance.ConfigDigest, FloorOnly: row.floorOnly, RecordSHA256: row.digest,
 	}, nil
 }
 
-// holds reports whether the row's projection is of record: every member
-// but the body and field classes is the record's, byte for byte, and the
-// form is the same. The body is checked through the pin's digest.
-func (row storedChangeRow) holds(record observability.Record) bool {
-	if record.IsFloorOnly() != row.floorOnly {
-		return false
-	}
-	encoded, err := record.Bytes()
-	if err != nil {
+// holds reports whether the row's projection is of record, whose canonical
+// bytes are encoded: every member but the body and field classes is the
+// record's, byte for byte, the form is the same, and the digest stored
+// with the row, if it has one, is the record's. The body of a row without
+// a digest is checked through the pin's digest.
+func (row storedChangeRow) holds(record observability.Record, encoded []byte) bool {
+	if record.IsFloorOnly() != row.floorOnly || (row.digest != "" && row.digest != recordSHA256(encoded)) {
 		return false
 	}
 	canonical, err := decodeEnvelope(encoded)
@@ -276,12 +310,14 @@ func (row storedChangeRow) holds(record observability.Record) bool {
 // the pin (none on its first offer) and the stored row, if the store holds
 // one.
 type spooledChange struct {
-	pins   *ConfigChangePins
-	key    string
+	pins *ConfigChangePins
+	key  string
+	// id is the record id, and the audit row id, of the change.
+	id     string
 	pin    ConfigChangePin
 	pinned bool
 	// fromRow: the pin was read from the stored row (its pin file is
-	// gone) and is written once the record is rebuilt as the row's.
+	// gone) and is written again once the record rebuilds as the row's.
 	fromRow bool
 	row     *storedChangeRow
 	// lookupErr: the store could not say whether it holds the row.
@@ -332,18 +368,19 @@ func (change *spooledChange) builder(build RuntimeV8Builder) RuntimeV8Builder {
 		if err != nil {
 			return observability.Record{}, err
 		}
-		sum := sha256.Sum256(encoded)
-		digest := hex.EncodeToString(sum[:])
-		if change.row != nil && !change.row.holds(record) {
+		digest := recordSHA256(encoded)
+		if change.row != nil && !change.row.holds(record, encoded) {
 			return observability.Record{}, fmt.Errorf(
 				"audit: the stored row of change %s is not its record, so the record is not sent", change.key)
 		}
-		if change.pinned && !change.fromRow {
+		if change.pinned {
 			if digest != change.pin.RecordSHA256 {
 				return observability.Record{}, fmt.Errorf(
 					"audit: change %s does not rebuild as its pinned record, so it is not sent", change.key)
 			}
-			return record, nil
+			if !change.fromRow {
+				return record, nil
+			}
 		}
 		pin := change.pin
 		if !change.pinned {
@@ -365,6 +402,19 @@ func (change *spooledChange) builder(build RuntimeV8Builder) RuntimeV8Builder {
 		change.pin, change.pinned, change.fromRow = pin, true, false
 		return record, nil
 	}
+}
+
+// recordDigest is the digest the audit row of record keeps: that of its
+// canonical bytes when record is the change's own record, none otherwise.
+func (change *spooledChange) recordDigest(record observability.Record) (string, error) {
+	if change == nil || change.id == "" || record.RecordID() != change.id {
+		return "", nil
+	}
+	encoded, err := record.Bytes()
+	if err != nil {
+		return "", err
+	}
+	return recordSHA256(encoded), nil
 }
 
 type spooledChangeKey struct{}

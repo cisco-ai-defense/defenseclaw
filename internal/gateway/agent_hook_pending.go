@@ -43,13 +43,23 @@ import (
 // The handler deletes the row once its records are settled. A row whose
 // handler could not write them is audited later, by the next gateway process
 // or, when the journal fills up, by this one. A row recovery cannot audit in
-// pendingHookRecoveryAttempts tries is evicted: it is deleted, and leaves one
-// unconfirmed-evicted audit row, so the journal always drains.
-const pendingHookRecoveredReason = "managed hook receipt recovered after gateway restart"
+// pendingHookRecoveryAttempts tries is evicted (evictPendingHook): it is
+// deleted, so the journal always drains, and leaves one record that adds no
+// second verdict.
 
-// pendingHookEvictedAction is the action of the one audit row an evicted
-// journal row leaves, under the call's ID plus "-evicted".
+// pendingHookEvictedAction is the action of the audit row an evicted
+// journal row leaves, under the call's ID plus "-evicted", when no record
+// of the call can exist anywhere.
 const pendingHookEvictedAction = "unconfirmed-evicted"
+
+// pendingHookEvictedAlert is the summary, and the error code, of the
+// audit-health alert an evicted journal row leaves when a record of the
+// call may exist.
+const pendingHookEvictedAlert = "hook_delivery_evicted"
+
+// hookDecisionReasonMaxBytes bounds the reason a hook_decision record keeps;
+// a longer reason is absent from it.
+const hookDecisionReasonMaxBytes = 65536
 
 // pendingHookJournalLimits bounds the journal in rows and bytes, and one
 // occurrence in bytes. Rows pile up only while the records of the calls
@@ -147,8 +157,8 @@ type pendingHookResponse struct {
 	EvaluationID     string
 	RuleIDs          []string
 	RedactionEnabled *bool
-	// Reason and SourceReason are kept for a pinned verdict only
-	// (pendingHookOccurrence.Decided), so every write of it is the same.
+	// Reason and SourceReason are the answer's own reasons, an empty one
+	// included, so every write of a verdict is the same as the live one.
 	Reason       string `json:",omitempty"`
 	SourceReason string `json:",omitempty"`
 }
@@ -159,28 +169,14 @@ func pendingResponse(resp agentHookResponse) pendingHookResponse {
 		Mode: resp.Mode, WouldBlock: resp.WouldBlock,
 		EvaluationID: resp.EvaluationID, RuleIDs: resp.RuleIDs,
 		RedactionEnabled: resp.RedactionEnabled,
+		Reason:           resp.Reason, SourceReason: resp.SourceReason,
 	}
-}
-
-// pendingVerdict is resp as a pinned verdict, its reasons included.
-func pendingVerdict(resp agentHookResponse) *pendingHookResponse {
-	verdict := pendingResponse(resp)
-	verdict.Reason, verdict.SourceReason = resp.Reason, resp.SourceReason
-	return &verdict
 }
 
 func (p pendingHookResponse) response() agentHookResponse {
-	reason, sourceReason := p.Reason, p.SourceReason
-	if reason == "" && sourceReason == "" {
-		reason = pendingHookRecoveredReason
-		if p.Action == hookActionUnconfirmed {
-			reason = hookexec.ManagedGatewayNoAnswerReason
-		}
-		sourceReason = reason
-	}
 	return agentHookResponse{
 		Action: p.Action, RawAction: p.RawAction, Severity: p.Severity,
-		Mode: p.Mode, Reason: reason, SourceReason: sourceReason,
+		Mode: p.Mode, Reason: p.Reason, SourceReason: p.SourceReason,
 		WouldBlock: p.WouldBlock, EvaluationID: p.EvaluationID,
 		RuleIDs: p.RuleIDs, RedactionEnabled: p.RedactionEnabled,
 	}
@@ -385,8 +381,11 @@ func presentPointer[T any](value *T) observability.Optional[T] {
 // encodePendingHookOccurrence is the journal form of p. An occurrence over
 // the journal's limit is stored with its large fields truncated: each long
 // string ends with a marker, long lists and Extra keep their first entries,
-// and Extra says the occurrence was truncated. IDs, numbers and the verdicts
-// are kept. Recovery decodes a truncated occurrence like any other.
+// and Extra says the occurrence was truncated. IDs, numbers and the pinned
+// verdict (Decided) are kept whole: a pin that does not fit is an error, so
+// the caller holds its records as for any pin that failed. Recovery decodes
+// a truncated occurrence like any other; a truncated reason of Proposed or
+// NoReceipt matches no stored record (pendingHookRecoveryVerdict).
 func encodePendingHookOccurrence(p *pendingHookOccurrence) ([]byte, error) {
 	data, err := json.Marshal(p)
 	limit := pendingHookJournalLimits.OccurrenceBytes
@@ -402,7 +401,11 @@ func encodePendingHookOccurrence(p *pendingHookOccurrence) ([]byte, error) {
 	for _, bound := range pendingHookFieldBounds {
 		bounded := make(map[string]any, len(tree))
 		for key, value := range tree {
-			if key == "Extra" {
+			switch key {
+			case "Extra":
+				continue
+			case "Decided":
+				bounded[key] = value
 				continue
 			}
 			bounded[key] = truncatePendingHookValue(value, bound.text, bound.entries)
@@ -510,7 +513,8 @@ func (a *APIServer) pendingHookDecidedContext(ctx context.Context, p *pendingHoo
 	if p == nil || a.store == nil {
 		return ctx
 	}
-	p.Decided = pendingVerdict(resp)
+	verdict := pendingResponse(resp)
+	p.Decided = &verdict
 	data, err := encodePendingHookOccurrence(p)
 	if err == nil {
 		// No row: the journal refused it, so no recovery follows.
@@ -641,20 +645,23 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 	var p pendingHookOccurrence
 	if entry.Occurrence == nil || json.Unmarshal(entry.Occurrence, &p) != nil ||
 		p.ID != entry.ID || p.Request.ConnectorName == "" || p.Request.HookEventName == "" {
-		a.evictPendingHook(ctx, entry.ID, nil, "the journal row cannot be read")
+		a.evictPendingHook(ctx, entry.ID, nil, false, "the journal row cannot be read")
 		return nil
 	}
 	tries := p.Attempts + pendingHookUnrecordedTries[p.ID]
 	if tries >= pendingHookRecoveryAttempts {
-		a.evictPendingHook(ctx, p.ID, &p, fmt.Sprintf("not audited in %d recovery attempts", tries))
+		a.evictPendingHook(ctx, p.ID, &p, p.Decided != nil, fmt.Sprintf("not audited in %d recovery attempts", tries))
 		return nil
 	}
 	tries++
 	p.Attempts++
 	newVerdict := p.Decided == nil
+	var verdictErr error
 	if newVerdict {
-		if resp, err := a.pendingHookRecoveryVerdict(ctx, &p); err == nil {
-			p.Decided = pendingVerdict(resp)
+		var resp agentHookResponse
+		if resp, verdictErr = a.pendingHookRecoveryVerdict(ctx, &p); verdictErr == nil {
+			verdict := pendingResponse(resp)
+			p.Decided = &verdict
 		}
 	}
 	data, err := encodePendingHookOccurrence(&p)
@@ -674,13 +681,13 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 		return nil // another pass took it
 	}
 	if p.Decided == nil {
-		err = errors.New("no stored record could be read")
+		err = verdictErr
 	} else {
 		err = a.writePendingHookRecords(ctx, &p, held)
 	}
 	if err != nil {
 		if tries >= pendingHookRecoveryAttempts {
-			a.evictPendingHook(ctx, p.ID, &p, fmt.Sprintf("not audited in %d recovery attempts", tries))
+			a.evictPendingHook(ctx, p.ID, &p, p.Decided != nil && !held, fmt.Sprintf("not audited in %d recovery attempts: %v", tries, err))
 			return nil
 		}
 		return err
@@ -713,42 +720,86 @@ func (a *APIServer) writePendingHookRecords(ctx context.Context, p *pendingHookO
 	return nil
 }
 
-// evictPendingHook deletes a journal row recovery gives up on, and audits
-// it once as one unconfirmed-evicted connector row under id+"-evicted",
-// with the verdict the row pinned when it has one. That ID is never another
-// record's, so no ID gets a second verdict. The row is deleted even when the
-// store refuses the audit row, which still leaves for the remote
-// destinations (GAP-1536): the journal always drains.
-func (a *APIServer) evictPendingHook(ctx context.Context, id string, p *pendingHookOccurrence, cause string) {
+// evictPendingHook deletes a journal row recovery gives up on, so the
+// journal always drains, and leaves one record of it that adds no verdict
+// to a call that may have one:
+//   - A call no record of which can exist anywhere is audited as one
+//     unconfirmed-evicted connector row under id+"-evicted", an ID no other
+//     record has. That is a readable row that never pinned a verdict (its
+//     records left only once stored, RemoteExportAfterLocalWrite) and whose
+//     records the store does not hold.
+//   - Any other call may hold its verdict already: a record of it is stored
+//     (a partial write), or its pinned verdict left for the remote
+//     destinations although the store refused it (GAP-1536), or the row
+//     cannot be read, or the store cannot say. Its eviction is an
+//     audit-health alert naming the call, the records the store holds and
+//     the pinned verdict, never a connector row.
+//
+// The row is deleted even when the store refuses that record, which still
+// leaves for the remote destinations. pinned says the row's verdict is
+// pinned in the journal row.
+func (a *APIServer) evictPendingHook(ctx context.Context, id string, p *pendingHookOccurrence, pinned bool, cause string) {
 	evictedID := id + "-evicted"
-	if stored, err := a.store.HasAuditEventID(ctx, evictedID); err != nil || !stored {
+	stored, known := a.storedPendingHookRecords(ctx, id, id+"-decision", evictedID)
+	persistCtx := ctx
+	if p != nil {
+		persistCtx = audit.ContextWithEnvelope(ctx, p.Envelope)
+		persistCtx = ContextWithAgentIdentity(persistCtx, p.Identity)
+		persistCtx = enrichAgentHookContext(persistCtx, p.request())
+	}
+	switch {
+	case known && len(stored) == 1 && stored[0] == evictedID:
+		// An earlier eviction left its row and could not delete the journal row.
+	case p != nil && !pinned && known && len(stored) == 0:
+		req := p.request()
 		env := HookAuditEnvelope{
 			Action: pendingHookEvictedAction, Reason: "managed hook delivery evicted from the journal: " + cause,
-			Extra: map[string]string{"hook_delivery_id": id},
+			Connector: req.ConnectorName, Event: req.HookEventName, ElapsedMs: time.Duration(p.ElapsedNanos).Milliseconds(),
+			BodyBytes: p.BodyBytes, RawEventIDs: p.RawEventIDs, EvaluationID: p.Proposed.EvaluationID,
+			Extra: mergeHookEnvelopeExtra(map[string]string{"hook_delivery_id": id}, p.Extra),
 		}
-		persistCtx := ctx
-		if p != nil {
-			req := p.request()
-			env.Connector, env.Event, env.ElapsedMs = req.ConnectorName, req.HookEventName, time.Duration(p.ElapsedNanos).Milliseconds()
-			env.BodyBytes, env.RawEventIDs, env.EvaluationID = p.BodyBytes, p.RawEventIDs, p.Proposed.EvaluationID
-			env.Extra = mergeHookEnvelopeExtra(env.Extra, p.Extra)
-			env.Extra["hook_delivery_attempts"] = fmt.Sprint(p.Attempts)
-			if p.Decided != nil {
-				env.Extra["hook_delivery_verdict"] = p.Decided.Action
-			}
-			p.Provenance.stamp(&env)
-			persistCtx = audit.ContextWithEnvelope(ctx, p.Envelope)
-			persistCtx = ContextWithAgentIdentity(persistCtx, p.Identity)
-			persistCtx = enrichAgentHookContext(persistCtx, req)
-		}
+		env.Extra["hook_delivery_attempts"] = fmt.Sprint(p.Attempts)
+		p.Provenance.stamp(&env)
 		env.occurrenceID = evictedID
 		if err := a.logConnectorHookAuditEnvelope(persistCtx, env); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] hook delivery id=%s evicted; its audit row was refused locally: %v\n", id, err)
+		}
+	default:
+		details := map[string]any{"hook_delivery_id": id, "cause": cause, "stored_records": strings.Join(stored, ",")}
+		if !known {
+			details["stored_records"] = "unknown"
+		}
+		if p != nil {
+			details["connector"], details["hook_event"] = p.Request.ConnectorName, p.Request.HookEventName
+			details["hook_delivery_attempts"] = p.Attempts
+			if p.Decided != nil && pinned {
+				details["hook_delivery_verdict"] = p.Decided.Action
+			}
+		}
+		if a.logger != nil {
+			if err := a.logger.LogAlertCtx(persistCtx, "hook_audit", "HIGH", pendingHookEvictedAlert, details); err != nil {
+				fmt.Fprintf(os.Stderr, "[gateway] hook delivery id=%s evicted; its audit-health alert was refused locally: %v\n", id, err)
+			}
 		}
 	}
 	if err := a.forgetPendingHook(ctx, id); err != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] hook delivery id=%s evicted; its journal row was not deleted: %v\n", id, err)
 	}
+}
+
+// storedPendingHookRecords is which of ids the store holds, and whether it
+// could say for every one.
+func (a *APIServer) storedPendingHookRecords(ctx context.Context, ids ...string) (stored []string, known bool) {
+	for _, id := range ids {
+		found, err := a.store.HasAuditEventID(ctx, id)
+		if err != nil {
+			return stored, false
+		}
+		if found {
+			stored = append(stored, id)
+		}
+	}
+	return stored, true
 }
 
 func (a *APIServer) forgetPendingHook(ctx context.Context, id string) error {
@@ -761,38 +812,53 @@ func (a *APIServer) forgetPendingHook(ctx context.Context, id string) error {
 
 // pendingHookRecoveryVerdict is the verdict recovery pins for a row the live
 // handler did not pin: a record of the occurrence that is already stored
-// decides its missing companion, so the two records of one call never
-// disagree, and with neither stored the call has its no-receipt decision.
+// decides its missing companion, its reason included, so the two records of
+// one call never disagree, and with neither stored the call has its
+// no-receipt decision. A stored record whose verdict the row cannot rebuild
+// is an error: the row stays until it is evicted, and no companion that
+// disagrees with the stored record is written.
 func (a *APIServer) pendingHookRecoveryVerdict(ctx context.Context, p *pendingHookOccurrence) (agentHookResponse, error) {
-	for _, id := range []string{p.ID, p.ID + "-decision"} {
-		action, found, err := a.store.StoredHookDecisionAction(ctx, id)
+	for _, record := range []struct {
+		id       string
+		decision bool
+	}{{p.ID, false}, {p.ID + "-decision", true}} {
+		stored, found, err := a.store.StoredHookVerdict(ctx, record.id)
 		if err != nil {
 			return agentHookResponse{}, err
 		}
-		if found {
-			return p.responseFor(action), nil
+		if !found {
+			continue
 		}
+		if resp, ok := p.responseFor(stored, record.decision); ok {
+			return resp, nil
+		}
+		return agentHookResponse{}, fmt.Errorf("the stored record %s holds a %q verdict its journal row cannot rebuild", record.id, stored.Action)
 	}
 	return p.NoReceipt.response(), nil
 }
 
-// responseFor is the occurrence's answer whose decision is action, the
-// decision a stored record holds. A live handler records the acknowledged
-// proposal, the no-receipt decision, or a block: the hook refused the
-// answer, or the gateway answered 503 and the hook took its closed
-// fallback.
-func (p *pendingHookOccurrence) responseFor(action string) agentHookResponse {
-	switch {
-	case strings.EqualFold(action, p.NoReceipt.Action):
-		return p.NoReceipt.response()
-	case strings.EqualFold(action, p.Proposed.Action):
-		return p.Proposed.response()
-	case strings.EqualFold(action, "block"):
-		return failedClosedHookDelivery(p.Proposed.response(), hookexec.ManagedGatewayNoAnswerReason)
+// responseFor is the occurrence's answer a stored record of it holds: one a
+// live handler records (the acknowledged proposal, the no-receipt
+// decision, unconfirmed, or a closed block: the hook refused the answer, or
+// the gateway answered 503 and the hook took its closed fallback) whose
+// action and reason, as that record stores them, are the stored ones. A
+// hook_decision record (decision) keeps the reason up to
+// hookDecisionReasonMaxBytes, a connector row keeps it cleaned of log
+// injection.
+func (p *pendingHookOccurrence) responseFor(stored audit.StoredHookVerdict, decision bool) (agentHookResponse, bool) {
+	proposed := p.Proposed.response()
+	for _, resp := range []agentHookResponse{
+		p.NoReceipt.response(), proposed, unconfirmedHookDelivery(proposed),
+		failedClosedHookDelivery(proposed, hookexec.ManagedGatewayNoAnswerReason),
+		failedClosedHookDelivery(proposed, hookDeliveryRejectedReason),
+	} {
+		reason := sanitizeEnvelopeFreeForm(hookSourceReason(resp))
+		if decision {
+			reason, _ = hookV8OptionalText(hookSourceReason(resp), hookDecisionReasonMaxBytes).Get()
+		}
+		if strings.EqualFold(resp.Action, stored.Action) && reason == stored.Reason {
+			return resp, true
+		}
 	}
-	resp := p.NoReceipt.response()
-	if action != "" {
-		resp.Action = action
-	}
-	return resp
+	return agentHookResponse{}, false
 }
