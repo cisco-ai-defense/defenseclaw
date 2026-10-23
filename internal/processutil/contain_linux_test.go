@@ -188,6 +188,65 @@ func TestRunContainedAsTheGuardianActingAsAUser(t *testing.T) {
 	}
 }
 
+const containWorkerHelperEnv = "DC_PROCESSUTIL_CONTAIN_WORKER_HELPER"
+
+// TestRunContainedWorkerHelper is the helper process of
+// TestRunContainedFromANonDumpableWorker: as the hook guardian's per-user
+// worker does, it holds one account's IDs alone (as root it becomes nobody)
+// and makes itself not dumpable, then runs the probe.
+func TestRunContainedWorkerHelper(t *testing.T) {
+	if os.Getenv(containWorkerHelperEnv) == "" {
+		t.Skip("helper process of TestRunContainedFromANonDumpableWorker")
+	}
+	if os.Geteuid() == 0 {
+		if syscall.Setgroups(nil) != nil || syscall.Setresgid(65534, 65534, 65534) != nil || syscall.Setresuid(65534, 65534, 65534) != nil {
+			os.Exit(3)
+		}
+	}
+	if unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0) != nil {
+		os.Exit(3)
+	}
+	cmd := exec.Command("/bin/sh", "-c", `echo "$(id -u) $(id -ru)"`)
+	cmd.Stdout = os.Stdout
+	if err := RunContained(cmd); err != nil {
+		os.Exit(4)
+	}
+	os.Exit(0)
+}
+
+// GAP-0846: the hook guardian's per-user worker is not dumpable, so the ID
+// maps of the child RunContained starts were root's, the worker could not
+// write them, and every managed Linux Hermes probe failed closed: Verify
+// reported "owned hook command not present" for a working hook.
+func TestRunContainedFromANonDumpableWorker(t *testing.T) {
+	if os.Getenv(containWorkerHelperEnv) != "" {
+		t.Skip("running as the helper")
+	}
+	// A host that cannot create the namespaces at all fails every probe the
+	// same way; that is TestRunContainedFailsClosedWithoutANamespace.
+	if err := RunContained(exec.Command("/bin/true")); err != nil {
+		t.Skipf("no PID namespace for this test process: %v", err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := exec.Command(self, "-test.run=^TestRunContainedWorkerHelper$", "-test.count=1")
+	helper.Env = append(os.Environ(), containWorkerHelperEnv+"=1")
+	helper.Dir = "/"
+	out, err := helper.Output()
+	if err != nil {
+		t.Fatalf("helper = %v:\n%s", err, out)
+	}
+	uid := os.Geteuid()
+	if uid == 0 {
+		uid = 65534
+	}
+	if want := strconv.Itoa(uid) + " " + strconv.Itoa(uid); strings.TrimSpace(string(out)) != want {
+		t.Fatalf("probe ran as %q, want %q", out, want)
+	}
+}
+
 // When the supervisor cannot sweep what is left, the run fails closed.
 func TestRunTrackedFailsClosedWhenItCannotEndTheTree(t *testing.T) {
 	requireContainTools(t)

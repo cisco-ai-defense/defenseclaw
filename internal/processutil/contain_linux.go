@@ -116,7 +116,7 @@ func runContained(cmd *exec.Cmd) error {
 		return errors.New("processutil: RunContained: already started")
 	}
 	mode := containInitMode
-	if mixedCredentials() {
+	if mixedCredentials() || !dumpable() {
 		mode = containLauncherMode
 	}
 	target := cmd.Path
@@ -189,10 +189,25 @@ func mixedCredentials() bool {
 	return ruid != euid || suid != euid || rgid != egid || sgid != egid
 }
 
+// dumpable reports whether this process is dumpable. One that is not (the
+// hook guardian's per-user worker makes itself so: its request carries
+// scoped hook tokens) shares that state with the child it starts until the
+// child executes, so the child's ID maps are owned by root and a caller
+// without privilege cannot write them: every managed Linux Hermes probe
+// failed to start and Verify reported "owned hook command not present"
+// (GAP-0846). It runs the command through the launcher instead, which is a
+// new image and sets itself dumpable.
+func dumpable() bool {
+	state, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
+	return err == nil && state == 1
+}
+
 // launchContained becomes the effective user and group alone, which needs no
-// privilege, and runs argv in a PID namespace of its own from there. The hook
-// guardian's probe ran the user's hook with the guardian's real root UID,
-// which bash restores as its effective UID.
+// privilege, makes itself dumpable, and runs argv in a PID namespace of its
+// own from there. The hook guardian's probe ran the user's hook with the
+// guardian's real root UID, which bash restores as its effective UID. The
+// launcher holds only its arguments and the environment the command gets
+// too, so being dumpable exposes nothing the command could not read.
 func launchContained(argv []string) int {
 	runtime.LockOSThread()
 	terms := make(chan os.Signal, 1)
@@ -201,7 +216,7 @@ func launchContained(argv []string) int {
 	if syscall.Setresgid(gid, gid, gid) != nil || syscall.Setresuid(uid, uid, uid) != nil || mixedCredentials() {
 		return containExitNotContained
 	}
-	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 1, 0, 0, 0); err != nil {
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 1, 0, 0, 0); err != nil || !dumpable() {
 		return containExitNotContained
 	}
 	ctx, cancel := context.WithCancel(context.Background())
