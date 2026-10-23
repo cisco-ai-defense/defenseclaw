@@ -30,3 +30,16 @@ func homeIdentity(home string) (homeProof, bool) {
 	}
 	return proof, true
 }
+
+// symlinkBirth is the creation time of home itself in nanoseconds when
+// home is a symlink: the creation time the 1.0.4 builds before the GAP-0939
+// fix put in the owner token of a symlinked home (LegacyAgentOwnerTokenFor).
+// false when home is not a symlink, or its creation time is not known.
+func symlinkBirth(home string) (int64, bool) {
+	var st syscall.Stat_t
+	if err := syscall.Lstat(home, &st); err != nil || st.Mode&syscall.S_IFMT != syscall.S_IFLNK ||
+		(st.Birthtimespec.Sec == 0 && st.Birthtimespec.Nsec == 0) {
+		return 0, false
+	}
+	return st.Birthtimespec.Sec*1_000_000_000 + st.Birthtimespec.Nsec, true
+}

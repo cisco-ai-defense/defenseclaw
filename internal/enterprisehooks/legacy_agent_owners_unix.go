@@ -61,12 +61,20 @@ import (
 // dropped for the map's size either.
 //
 // A listed account the first pass cannot name at all (the listing and its
-// lookup give no name, and the guardian holds no recent record of its uid)
-// is looked up once more; while it stays unnamed the map is not recorded
+// lookup give no name, and the guardian holds no record of its uid) is
+// looked up once more; while it stays unnamed the map is not recorded
 // (unnamedLegacyAgentOwners). Recorded without it, the map was closed and
 // could never add it, so its 1.0.x agents entry was refused for good once
 // its lookup answered again (review of r104 Q-identity, continuation 2,
-// loop round 3).
+// loop round 3). An account still unnamed at the next pass is recorded as
+// pending without a name, and the map stays open for it: a later pass binds
+// the account that holds the uid then only when its home directory was
+// created before the map was written (legacyAgentOwnerHomeCreatedBy), so an
+// account given the uid after the upgrade is never bound. That pass took
+// two not-found answers as proof that the uid held no account and closed
+// the map without it, so an account a directory missed twice (SSSD offline)
+// lost its 1.0.x agents entry for good (review of r104 Q-identity,
+// continuation 3, loop round 2).
 
 // LegacyAgentOwnersFile is the file of the identity spool that holds the
 // migration map.
@@ -182,9 +190,62 @@ func LegacyAgentOwnerToken(incarnation, home string) string {
 	if !ok {
 		return ""
 	}
-	token := "home:" + strconv.FormatUint(proof.dev, 10) + ":" + strconv.FormatUint(proof.ino, 10)
-	if proof.hasBirth {
-		token += ":" + strconv.FormatInt(proof.birth, 10)
+	return proof.token()
+}
+
+// LegacyAgentOwnerTokenFor is LegacyAgentOwnerToken(incarnation, home),
+// or the token the migration map recorded for the account (recorded gives
+// it, with the time the map was written) when that is the token the 1.0.4
+// builds before the GAP-0939 fix wrote for this same home. Those builds
+// (r104 trains t7 to t10; no release) took the device and inode of the
+// directory a symlinked home names but the creation time of the symlink
+// itself, so the token of a symlinked home changed with the fix, and a map
+// they wrote no longer bound its account (review of r104 Q-identity,
+// continuation 3, loop round 2). The recorded token is kept only while home
+// is a symlink whose own creation time and target inode are the ones it
+// records, and the directory it names was created no later than the map
+// (or its file system keeps no creation time, where the token of this
+// build proves the inode alone too): a home created again behind the
+// symlink after the map, on the inode the removed one freed, is another
+// account's. Remove with LegacyAgentOwnerToken.
+func LegacyAgentOwnerTokenFor(incarnation, home string, recorded func() (string, time.Time)) string {
+	token := LegacyAgentOwnerToken(incarnation, home)
+	if recorded == nil || !strings.HasPrefix(token, "home:") {
+		return token
+	}
+	home = strings.TrimSpace(home)
+	linkBirth, isLink := symlinkBirth(home)
+	if !isLink {
+		return token
+	}
+	proof, ok := homeIdentity(home)
+	if !ok {
+		return token
+	}
+	was, writtenAt := recorded()
+	if was == "" || was == token || writtenAt.IsZero() || (proof.hasBirth && proof.birth > writtenAt.UnixNano()) {
+		return token
+	}
+	before := homeProof{dev: proof.dev, ino: proof.ino, birth: linkBirth, hasBirth: true}
+	if sameHomeTokenInode(was, before.token()) {
+		return was
+	}
+	return token
+}
+
+// sameHomeTokenInode reports whether two home tokens with a creation time
+// name the same inode with the same creation time, whatever their device
+// (an automounted home gets another device number at each mount).
+func sameHomeTokenInode(a, b string) bool {
+	pa, pb := strings.Split(a, ":"), strings.Split(b, ":")
+	return len(pa) == 4 && len(pb) == 4 && pa[0] == "home" && pb[0] == "home" && pa[2] == pb[2] && pa[3] == pb[3]
+}
+
+// token is the owner token of the home proof.
+func (p homeProof) token() string {
+	token := "home:" + strconv.FormatUint(p.dev, 10) + ":" + strconv.FormatUint(p.ino, 10)
+	if p.hasBirth {
+		token += ":" + strconv.FormatInt(p.birth, 10)
 	}
 	return token
 }
@@ -210,7 +271,8 @@ func LegacyAgentOwnersRecorded(dir string) bool {
 // WriteLegacyAgentOwners records the migration map of owners (by uid) in
 // dir. An owner without a Token is an account listed without its owner
 // proof (its lookup failed, or its home was not there): it is recorded as
-// pending. The first call writes the map, in shards past
+// pending, by its name, or without one when User is empty too (an account
+// no lookup named). The first call writes the map, in shards past
 // maxLegacyAgentOwners accounts (an empty one is not written, so the next
 // pass tries again). Later calls only add the owner of a pending account
 // whose name owners now gives with a proof, and change nothing else.
@@ -232,7 +294,7 @@ func WriteLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, now tim
 	for uid, owner := range owners {
 		switch {
 		case uid < 0:
-		case owner.Token == "" && validLegacyAgentOwnerField(owner.User):
+		case owner.Token == "" && (owner.User == "" || validLegacyAgentOwnerField(owner.User)):
 			pending[uid] = owner.User
 		case validLegacyAgentOwner(owner):
 			proven[uid] = owner
@@ -303,49 +365,68 @@ func legacyAgentHolderOfRecord(dir string, uid int) string {
 
 // unnamedLegacyAgentOwners names, in owners as pending, each uid in unnamed:
 // a listed account of a pass before the map is recorded that neither the
-// listing, its lookup nor a guardian record named. Its account is
-// looked up once more. It reports whether the map may be recorded now:
-// false while one stays unnamed (a lookup that fails or does not finish),
-// so the map is recorded at a later pass that names every account. A uid
-// that two successive passes find unresolved holds no account, and is left
-// out: an account given it later is another one. A single not-found answer
-// can miss an account its directory still holds (GAP-1236).
+// listing, its lookup nor a guardian record named. Its account is looked up
+// once more. It reports whether the map may be recorded now: false while one
+// is unnamed for the first time, so the next pass can name it. A uid the
+// pass before left unnamed too is recorded as pending without a name, and
+// the map is recorded: whatever its lookups answer (not found, an error, no
+// answer), it does not keep the map from the other accounts, and the
+// account that holds it is bound once its home proves it held the uid at
+// the upgrade (fillLegacyAgentOwners). A not-found answer is not taken as
+// proof that no account holds the uid: a directory that is offline or
+// misses an account answers it too (GAP-1236).
 func unnamedLegacyAgentOwners(ctx context.Context, dir string, owners map[int]LegacyAgentOwner, unnamed []int,
 	logf func(string, ...any)) bool {
 	before := legacyAgentOwnersUnresolved.take(dir)
-	gone := map[int]bool{}
+	still := map[int]bool{}
 	var unknown []int
 	for _, uid := range unnamed {
 		lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
 		account, err := identityLookupGated(lookupCtx, &identitySpoolDepartureGate, strconv.Itoa(uid),
 			func(ctx context.Context) (unixidentity.Account, error) { return identitySpoolLookupUID(ctx, uid) })
-		notFound := err != nil && lookupCtx.Err() == nil && unixidentity.IsNotFound(err)
 		cancel()
 		switch {
 		case err == nil && account.UID == uid && account.Name != "":
 			owners[uid] = LegacyAgentOwner{User: account.Name}
-		case notFound && before[uid]:
-			// No account holds the uid: nothing to bind.
-		case notFound:
-			gone[uid] = true
-			unknown = append(unknown, uid)
+		case before[uid]:
+			// Unnamed at two passes: pending without a name.
+			owners[uid] = LegacyAgentOwner{}
+			still[uid] = true
 		default:
+			still[uid] = true
 			unknown = append(unknown, uid)
 		}
 	}
 	if len(unknown) == 0 {
 		return true
 	}
-	legacyAgentOwnersUnresolved.set(dir, gone)
+	// Every uid still unnamed is marked, also one this pass recorded as
+	// pending: the map is not recorded at this pass, and the next pass must
+	// not take it for unnamed the first time again.
+	legacyAgentOwnersUnresolved.set(dir, still)
 	if logf != nil {
 		logf("[hook-guardian] agent identity migration map: no account name for uid %v (the lookup did not answer); "+
-			"the map is recorded at a later pass that names every listed account", unknown)
+			"the map is recorded at the next pass, with any account still unnamed then pending until its home proves it", unknown)
 	}
 	return false
 }
 
-// legacyAgentOwnersUnresolved holds, per spool directory, the unnamed uids
-// the last pass that did not record the map found unresolved.
+// legacyAgentOwnerHomeCreatedBy reports whether home, the home directory
+// of the account that holds a uid now, was created no later than at, when
+// the migration map was written: the account held the uid at the upgrade,
+// since an account given the uid later gets a home created later. false
+// when the home is not there or its file system keeps no creation time.
+func legacyAgentOwnerHomeCreatedBy(home string, at time.Time) bool {
+	home = strings.TrimSpace(home)
+	if home == "" || !filepath.IsAbs(home) || at.IsZero() {
+		return false
+	}
+	proof, ok := homeIdentity(home)
+	return ok && proof.hasBirth && proof.birth <= at.UnixNano()
+}
+
+// legacyAgentOwnersUnresolved holds, per spool directory, the uids the last
+// pass that did not record the map left unnamed.
 var legacyAgentOwnersUnresolved = unresolvedLegacyAgentOwners{byDir: map[string]map[int]bool{}}
 
 type unresolvedLegacyAgentOwners struct {
@@ -402,7 +483,10 @@ func (c *closedLegacyAgentOwnerMaps) forget(dir string) {
 
 // fillLegacyAgentOwners adds to the published map of dir the owner of each
 // pending account that owners proves under the name the map recorded for
-// it (a uid now held by another name stays pending). Shards it changes are
+// it (a uid now held by another name stays pending). A pending account
+// without a name is bound to the account owners proves for its uid only
+// when that account's home was created before the map was written
+// (legacyAgentOwnerHomeCreatedBy). Shards it changes are
 // written before the main file, which is rewritten last, with its open mark
 // cleared once nothing is pending.
 func fillLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, setOwnership func(string) error) (bool, error) {
@@ -435,7 +519,12 @@ func fillLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, setOwner
 	changed, open := make([]bool, len(files)), false
 	for i, file := range files {
 		for uid, user := range file.pending {
-			if owner, ok := owners[uid]; ok && owner.Token != "" && validLegacyAgentOwner(owner) && strings.EqualFold(owner.User, user) {
+			owner, ok := owners[uid]
+			if !ok || owner.Token == "" || !validLegacyAgentOwner(owner) {
+				continue
+			}
+			if (user == "" && legacyAgentOwnerHomeCreatedBy(identitySpoolAccountHome(uid), file.writtenAt)) ||
+				(user != "" && strings.EqualFold(owner.User, user)) {
 				file.owners[uid] = owner
 				delete(file.pending, uid)
 				changed[i] = true
@@ -492,12 +581,12 @@ func writeLegacyAgentOwnersDoc(dir string, i int, doc legacyAgentOwnersDoc, setO
 }
 
 // ReadLegacyAgentOwners returns the proven owners of the migration map of
-// dir by uid, and whether an account is still pending (open: a later pass
-// may add its owner), when every file of the map exists and trust accepts
-// it; false otherwise.
-func ReadLegacyAgentOwners(dir string, trust func(path, label string) error) (map[int]LegacyAgentOwner, bool, bool) {
+// dir by uid, whether an account is still pending (open: a later pass may
+// add its owner), and when the map was written, when every file of the map
+// exists and trust accepts it; false otherwise.
+func ReadLegacyAgentOwners(dir string, trust func(path, label string) error) (map[int]LegacyAgentOwner, bool, time.Time, bool) {
 	if dir == "" {
-		return nil, false, false
+		return nil, false, time.Time{}, false
 	}
 	if main, ok, _ := readLegacyAgentOwnersFile(filepath.Join(dir, LegacyAgentOwnersFile), trust); ok {
 		owners := main.owners
@@ -506,7 +595,7 @@ func ReadLegacyAgentOwners(dir string, trust func(path, label string) error) (ma
 			if !ok {
 				// A map without one of its shards binds no account it lists:
 				// it is read again once the shard is there.
-				return nil, false, false
+				return nil, false, time.Time{}, false
 			}
 			for uid, owner := range shard.owners {
 				if _, seen := owners[uid]; !seen {
@@ -514,16 +603,40 @@ func ReadLegacyAgentOwners(dir string, trust func(path, label string) error) (ma
 				}
 			}
 		}
-		return owners, main.open, true
+		return owners, main.open, main.writtenAt, true
 	}
 	// A guardian already running before this upgrade may not have moved its
 	// old map yet. Keep its agent assignments working during that handoff.
 	// Builds that wrote the old name wrote no pending accounts or shards.
 	old, ok, _ := readLegacyAgentOwnersFile(filepath.Join(dir, oldLegacyAgentOwnersFile), trust)
 	if !ok || old.open || old.shards != 0 || len(old.pending) != 0 {
-		return nil, false, false
+		return nil, false, time.Time{}, false
 	}
-	return old.owners, false, true
+	return old.owners, false, old.writtenAt, true
+}
+
+// legacyAgentOwnerOfRecord returns what LegacyAgentOwnerTokenFor needs of
+// the migration map of dir for the account user that holds uid: the token
+// the map records for it, and when the map was written; "" when the map
+// records another name for the uid, or none. The map is read at the first
+// call, once.
+func legacyAgentOwnerOfRecord(dir string) func(uid int, user string) (string, time.Time) {
+	var (
+		read      bool
+		owners    map[int]LegacyAgentOwner
+		writtenAt time.Time
+	)
+	return func(uid int, user string) (string, time.Time) {
+		if !read {
+			read = true
+			owners, _, writtenAt, _ = ReadLegacyAgentOwners(dir, nil)
+		}
+		owner, ok := owners[uid]
+		if !ok || !strings.EqualFold(owner.User, user) {
+			return "", time.Time{}
+		}
+		return owner.Token, writtenAt
+	}
 }
 
 // A false result with no error means the bytes cannot be a file of a
@@ -570,7 +683,7 @@ func readLegacyAgentOwnersFile(path string, trust func(path, label string) error
 		}
 	}
 	for key, user := range doc.Pending {
-		if uid, ok := legacyAgentOwnerUID(key); ok && validLegacyAgentOwnerField(user) {
+		if uid, ok := legacyAgentOwnerUID(key); ok && (user == "" || validLegacyAgentOwnerField(user)) {
 			if _, proven := out.owners[uid]; !proven {
 				out.pending[uid] = user
 			}
