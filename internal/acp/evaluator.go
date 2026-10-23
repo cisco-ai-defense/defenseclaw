@@ -172,7 +172,10 @@ func NewHTTPEvaluator(endpoint, token string) (*HTTPEvaluator, error) {
 }
 
 // NewManagedHTTPEvaluator is for an administrator-owned gateway service. A
-// user guard cannot require that service's accepted socket to have its UID.
+// user guard cannot require that service's accepted socket to have its UID;
+// it requires the gateway service's instead (managedGatewayPeer), so the
+// scoped token and the evaluation never reach another account that holds the
+// port while the gateway restarts (GAP-0962).
 func NewManagedHTTPEvaluator(endpoint, token string) (*HTTPEvaluator, error) {
 	return newHTTPEvaluator(endpoint, token, true)
 }
@@ -191,7 +194,14 @@ func newHTTPEvaluator(endpoint, token string, managed bool) (*HTTPEvaluator, err
 	challengeURL := *u
 	challengeURL.Path = "/api/v1/acp/challenge"
 	var client *http.Client
-	if managed {
+	if managed && !secureClientHost() {
+		client, err = hookexec.NewManagedGatewayHTTPClient(10*time.Second, u.Host, managedGatewayPeer())
+		if err != nil {
+			return nil, err
+		}
+	} else if managed {
+		// Secure Client is outside the 1.0.x certification (skipped-sc) and
+		// keeps its service transport.
 		transport := http.DefaultTransport.(*http.Transport).Clone()
 		// The scoped token must never go to an environment proxy.
 		transport.Proxy = nil

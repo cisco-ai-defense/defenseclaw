@@ -11,10 +11,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"runtime"
 	"sync/atomic"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -73,7 +75,62 @@ func TestPerUserEvaluatorPinsRequestsToConfiguredGateway(t *testing.T) {
 	}
 }
 
-func TestManagedEvaluatorUsesServiceTransport(t *testing.T) {
+// GAP-0962: the managed guard sends its challenge and evaluation only to a
+// socket the gateway service owns, never to another account's listener on the
+// port; a listener the service owns is served.
+func TestManagedEvaluatorRequiresTheGatewayService(t *testing.T) {
+	restoreSecureClient, restorePeer := secureClientHost, managedGatewayPeer
+	t.Cleanup(func() { secureClientHost, managedGatewayPeer = restoreSecureClient, restorePeer })
+	secureClientHost = func() bool { return false }
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
+		t.Skip("root is a trusted managed socket owner")
+	}
+	var received atomic.Int32
+	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer service.Close()
+	post := func(evaluator *HTTPEvaluator) error {
+		request, err := http.NewRequest(http.MethodPost, service.URL+"/api/v1/acp/challenge", http.NoBody)
+		if err != nil {
+			return err
+		}
+		request.Header.Set(AuthRequestMACHeader, "private-auth-proof")
+		response, err := evaluator.client.Do(request)
+		if err == nil {
+			_ = response.Body.Close()
+		}
+		return err
+	}
+	managedGatewayPeer = func() hookexec.ManagedGatewayPeer {
+		return hookexec.ManagedGatewayPeer{ServiceName: "DefenseClawGatewayTestAbsent", ServiceUID: os.Geteuid() + 1}
+	}
+	evaluator, err := NewManagedHTTPEvaluator(service.URL, "managed-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := post(evaluator); err == nil || received.Load() != 0 {
+		t.Fatalf("another account's listener received %d requests; error = %v", received.Load(), err)
+	}
+	if runtime.GOOS == "windows" {
+		return // the SCM ownership proof has its own native tests in hookexec
+	}
+	managedGatewayPeer = func() hookexec.ManagedGatewayPeer { return hookexec.ManagedGatewayPeer{ServiceUID: os.Geteuid()} }
+	evaluator, err = NewManagedHTTPEvaluator(service.URL, "managed-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := post(evaluator); err != nil || received.Load() != 1 {
+		t.Fatalf("the service's listener: %d requests, error %v", received.Load(), err)
+	}
+}
+
+// Under Secure Client the managed guard keeps its service transport.
+func TestSecureClientManagedEvaluatorKeepsServiceTransport(t *testing.T) {
+	restoreSecureClient := secureClientHost
+	t.Cleanup(func() { secureClientHost = restoreSecureClient })
+	secureClientHost = func() bool { return true }
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
