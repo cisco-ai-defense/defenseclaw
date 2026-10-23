@@ -196,37 +196,53 @@ sudo systemctl show defenseclaw-gateway.service \
 
 ## User namespaces
 
-On most distributions as shipped (Ubuntu 24.04 and RHEL 9 included), `verify`
-reports `ok: true` with one warning, `unprivileged_user_namespaces`. Where standard
-users can create a private user and mount namespace, an agent started inside one
-can be given its own view of the machine-policy files, the runtime descriptor and
-`/run/defenseclaw-hook`, outside your enforcement
-([Residual risks](/docs/enterprise/plan/threat-model#residual-risks)). The warning
-names the host setting that closes it:
+The managed install writes `/etc/sysctl.d/99-zz-defenseclaw-userns.conf` with
+`user.max_user_namespaces = 0` and `kernel.yama.ptrace_scope = 2`, and applies
+both to the running kernel. These settings prevent a standard user from
+mounting over machine policy or translating its paths with ptrace before
+starting an agent. A preexisting, stricter ptrace scope of `3` is preserved.
+`status` and `verify` report
+`unprivileged_user_namespaces` or `unprivileged_ptrace` and
+`security_complete: false` if either live setting or the persistent file is
+missing, changed or unreadable. `ensure` restores the settings.
 
-| Host | Setting |
-| --- | --- |
-| Ubuntu 24.04 and other AppArmor hosts where `kernel.apparmor_restrict_unprivileged_userns` is `1` | `kernel.apparmor_restrict_unprivileged_unconfined=1` |
-| Any host | `user.max_user_namespaces=0`, which turns user namespaces off for everyone but root |
+**Reboot after the first managed install or an upgrade from an older
+deployment, even if the live value was already zero.** A user namespace
+created earlier in that boot, or a tracer already attached to an agent, can
+survive the sysctl change. DefenseClaw
+records the boot ID in the root-owned
+`/etc/sysctl.d/.defenseclaw-userns-restricted-boot-id` and
+`/etc/sysctl.d/.defenseclaw-ptrace-restricted-boot-id` markers and keeps
+`security_complete: false` until the host starts a new boot with the
+restrictions in effect. Status and verify also fail if either marker is
+missing or changed. Another root-owned marker,
+`/etc/sysctl.d/.defenseclaw-userns-uninstalled-boot-id`, records when an
+uninstall removed the persistent file. All markers survive uninstall: a
+same-boot reinstall can keep a prior safe boot only when the restriction was
+intact at uninstall, while a reinstall after a boot without that file requires
+another reboot. If the kernel setting cannot
+be applied, the transaction fails. After uninstall, the lifecycle removes
+its persistent sysctl file but leaves the running restriction in place until
+reboot.
 
-```bash
-# Ubuntu 24.04: keep the setting across reboots, then load it.
-echo 'kernel.apparmor_restrict_unprivileged_unconfined = 1' |
-  sudo tee /etc/sysctl.d/60-defenseclaw-userns.conf
-sudo sysctl --system
-```
-
-Weigh the trade-off first: the command sandboxes of Codex and Claude Code use
-bubblewrap, which needs user namespaces. With `user.max_user_namespaces=0` those
-sandboxes cannot start, nor can rootless containers. On stock Ubuntu 24.04,
-Codex's bundled bubblewrap already fails
-(`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`), so its shell
-calls fail until the user chooses `--sandbox danger-full-access` or approves
-running outside the sandbox. DefenseClaw's hooks inspect each tool call whether or
-not the agent's own sandbox runs. An agent started inside a private user namespace
-that was not given such a view (`unshare -Ur`) fails closed ("this agent runs in a
-private user namespace ... Start the agent from your normal login session"), and
-the gateway records `enterprise_managed_user_namespace`.
+These are host-wide kernel settings, including for processes outside
+DefenseClaw. On a managed RHEL 9.8 compatibility lane, setting
+`user.max_user_namespaces=0` made a standard user's `unshare -Ur` and
+RootlessKit fail and stopped Codex's workspace sandbox from running a command.
+An OpenShell Docker sandbox ran with that setting alone, but failed when
+`kernel.yama.ptrace_scope=2` was applied; the combined settings also failed.
+Ordinary Claude Code and Hermes turns ran on that lane, without proving their
+optional sandboxes work. The OpenShell MicroVM probe was inconclusive because
+gateway JWT signing was not configured. Expect rootless container workflows,
+user namespace based command sandboxes, and process debugging with `gdb` or
+`strace` to be affected; test each required workload before managed rollout.
+Do not roll out this managed configuration on a host that requires any of the
+failed workloads until the namespace and ptrace enforcement strategy is
+resolved.
+The hook rejects a private user namespace when invoked, but a private view
+that hides machine policy before agent startup can prevent the agent from
+invoking the hook at all. Application control must also prevent modified or
+loader-injected clients from bypassing policy registration.
 
 ## Tetragon and AI Discovery Plane C
 
@@ -329,7 +345,7 @@ rpm still lists `defenseclaw-enterprise`. Removing the package runs `uninstall`:
 
 | Package command | Effect |
 | --- | --- |
-| `apt remove defenseclaw-enterprise` | Runs plain `uninstall`, then removes the package files and `/opt/defenseclaw/share/policies`. The config, most state and the `defenseclaw` account go, also after a failed package install that rolled back; `/etc/defenseclaw/policies` stays. If an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `redaction-correlation.key` stay; each user keeps `~/.defenseclaw`. Use lifecycle `--purge` for a clean image |
+| `apt remove defenseclaw-enterprise` | Runs plain `uninstall`, then removes the package files and `/opt/defenseclaw/share/policies`. The config, most state and the `defenseclaw` account go, also after a failed package install that rolled back; `/etc/defenseclaw/policies` stays. If an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `redaction-correlation.key` stay; each user keeps `~/.defenseclaw`. Use lifecycle `--purge` to remove enrolled user data |
 | `apt purge defenseclaw-enterprise` | Runs the same plain lifecycle uninstall, then deletes what it left of `/etc/defenseclaw`, `/var/lib/defenseclaw` (including `sandbox` and `redaction-correlation.key`), `/var/lib/defenseclaw-hook-guardian` and `/var/log/defenseclaw`, plus lifecycle state except the root-owned `lifecycle.lock`. It does not purge each enrolled account's home; run lifecycle `--purge` first. The sandboxes accounts kept in their homes are no longer known to a later install, because their registrations are gone: pull their work first |
 | `dnf remove defenseclaw-enterprise` | Runs plain `uninstall`, then removes the package files and `/opt/defenseclaw/share/policies`. Same results as `apt remove`, including the sandbox store and key that an account's kept sandboxes leave behind; delete `/etc/defenseclaw/policies` by hand when you no longer need it |
 
@@ -338,7 +354,7 @@ before removing the binaries (`uninstall_incomplete`), apt or dnf fails and keep
 the package files. Its result stays in `last-package-result.json`. Fix the cause it
 names, then run the removal again.
 
-To remove everything from a package host, including each user's data, purge with
+To remove the deployment and enrolled user data from a package host, purge with
 the lifecycle first, while the binary still exists:
 
 ```bash
@@ -348,7 +364,10 @@ sudo apt purge defenseclaw-enterprise
 # sudo dnf remove defenseclaw-enterprise
 ```
 
-On a tarball host, `uninstall --purge` removes everything, including `/opt/defenseclaw`.
+On a tarball host, `uninstall --purge` removes the deployment, including
+`/opt/defenseclaw`. The two host-security boot markers under `/etc/sysctl.d`
+remain after every removal mode, and the live namespace limit stays zero until
+reboot. They prevent a same-boot reinstall from forgetting earlier exposure.
 
 ## Upgrades and changes
 

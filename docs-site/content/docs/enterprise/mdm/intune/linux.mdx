@@ -150,6 +150,12 @@ and a failed platform script does not make a Linux device noncompliant. Read eac
 script's per-device status instead (open the configuration profile and select
 **Device status**). The package database answers inventory:
 
+After a first managed install or upgrade, DefenseClaw applies the Linux host
+restrictions but reports `unprivileged_user_namespaces` until the next reboot.
+During that interval, `detect.sh --require-healthy` reports `unhealthy`; this
+is the expected pending-reboot state, not a completed rollout. Schedule the
+reboot and rerun the health script before marking the device healthy.
+
 ```bash
 dpkg-query -W -f='${Status} ${Version}\n' defenseclaw-enterprise
 rpm -q defenseclaw-enterprise

@@ -161,8 +161,9 @@ and readiness check, and exits `1` when anything fails. A healthy `status`, trim
 - With no agent enabled, `status` warns `no_connectors_enabled` and `verify` fails.
 - A new user appears after the next enumerator cycle (up to five minutes). To
   reconcile at once: `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux reconcile --json`.
-- On most distributions `verify` also warns `unprivileged_user_namespaces`. See
-  [User namespaces](#user-namespaces).
+- On Linux, managed install disables unprivileged user namespaces. A first
+  install or upgrade from an older deployment requires a reboot before
+  `security_complete` becomes true. See [User namespaces](#user-namespaces).
 
 ## Remove
 
@@ -194,8 +195,8 @@ per-user install. See [Per-user installs](/docs/enterprise/install/reference/lin
 
 ### User namespaces
 
-On most distributions `verify` reports `unprivileged_user_namespaces`: an agent
-started inside a private user namespace can hide the machine-policy files from
-the hook. The warning names the host setting that closes it, and the trade-off
-with agent command sandboxes is in
+The managed install disables unprivileged user namespaces to prevent an agent
+from hiding machine-policy files. `status` and `verify` report an error if the
+restriction drifts, and require a reboot after first install or a reopened
+restriction. The impact on agent command sandboxes is in
 [User namespaces](/docs/enterprise/install/reference/linux#user-namespaces).
