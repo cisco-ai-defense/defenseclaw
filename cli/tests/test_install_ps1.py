@@ -1676,7 +1676,7 @@ $Rollback = $false
 $Ver = '1.0.4'
 $ReleaseBase = 'https://github.com/cisco-ai-defense/defenseclaw'
 $Run = @{{ Lock = $true; RestorePending = $false; UndoPending = $false; UnprovenReplacement = $null;
-    UnprovenReplacementUnchanged = $false; HooksClosedFor = $null }}
+    UnprovenReplacementUnchanged = $false }}
 $script:running = ${str(gateway_running).lower()}
 $script:stops = 0; $script:closes = 0; $script:starts = 0; $script:warnings = @()
 function Write-Warn([string]$Message) {{ $script:warnings += $Message; Write-Host "WARN: $Message" }}
@@ -1755,26 +1755,26 @@ Write-Output "LAST_WARNING=$(if ($script:warnings.Count) {{ $script:warnings[-1]
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-@pytest.mark.parametrize("closed_for", ["none", "this-gateway", "an-earlier-gateway"])
-def test_a_failed_run_keeps_the_lock_over_a_running_gateway_only_after_closing_its_hooks(
-    tmp_path: Path, closed_for: str
-) -> None:
+@pytest.mark.parametrize("gateway", ["running", "running-without-id", "down"])
+def test_a_failed_run_never_keeps_the_lock_over_a_running_gateway(tmp_path: Path, gateway: str) -> None:
     # Finish-InstallLock is the one place a failed run decides the lock. A
-    # gateway that runs at the end keeps the lock only when this run closed
-    # the hooks while that same gateway ran (the hash-checked closer, with
-    # the closed hold failing afterwards). A closure before that gateway was
-    # started again does not count.
-    closed = {"none": "$null", "this-gateway": "4242", "an-earlier-gateway": "0"}[closed_for]
+    # gateway that still runs at the end renders its own hooks again, whatever
+    # this run closed before (no closed hold outlives the run), so the lock
+    # goes and the record stays. Only a gateway that is down keeps the lock,
+    # with every hook closed.
+    image = "(Join-Path $BinDir 'defenseclaw-gateway.exe')"
+    process = {"running": f"[pscustomobject]@{{ Id = 4242; Path = {image} }}",
+               "running-without-id": f"[pscustomobject]@{{ Path = {image} }}", "down": "$null"}[gateway]
     result = _txn_harness(tmp_path, _ps1_function("Close-InstallLock") + _ps1_function("Finish-InstallLock") + f"""
 $Run.Lock = $true
 $Run.RestorePending = $true
+$Run.UnprovenReplacement = $true
 $Run.UnprovenReplacementUnchanged = $false
-$Run.HooksClosedFor = {closed}
 $LockDir = Join-Path $DataDir '.install.lock'
 [void][IO.Directory]::CreateDirectory($LockDir)
 [IO.File]::WriteAllText($LifecycleManifest, '{{"Schema":1,"Bins":{{}}}}')
 $Ver = '1.0.4'
-$script:gateway = [pscustomobject]@{{ Id = 4242; Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }}
+$script:gateway = {process}
 $script:warnings = @()
 $script:cleanupCloses = 0
 function Write-Warn {{ param($Message) $script:warnings += [string]$Message }}
@@ -1790,11 +1790,12 @@ Finish-InstallLock 1
     out = result.stdout + result.stderr
     assert result.returncode == 0, out
     assert "RECORD=True" in out and "CLEANUP=1" in out, out
-    if closed_for == "this-gateway":
+    if gateway == "down":
         assert "LOCK=True" in out, out
     else:
         assert "LOCK=False" in out, out
-        assert "the install lock is released" in out and "-Version '1.0.4' -Yes" in out, out
+        warning = out.split("LAST_WARNING=")[1]
+        assert "the install lock is released" in warning and "-AcceptCurrentInstall" in warning, out
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -1890,8 +1891,18 @@ if (Test-Path -LiteralPath $LifecycleManifest) {{ throw 'proven replacement kept
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-@pytest.mark.parametrize("failure", ["staged-changed", "closer-cannot-close", "hold-failed"])
-def test_unproven_replacement_keeps_the_lock_only_after_checked_hook_closure(tmp_path: Path, failure: str) -> None:
+@pytest.mark.parametrize(
+    "failure", ["staged-changed", "closer-cannot-close", "hold-failed", "stop-failed", "hold-incomplete"]
+)
+def test_unproven_replacement_keeps_the_lock_only_with_its_gateway_down_and_hooks_closed(
+    tmp_path: Path, failure: str
+) -> None:
+    # An accepted retry over a running older install closes every hook with
+    # the checked gateway, holds them closed, and stops that gateway. While
+    # the gateway still runs (the hold or the stop failed) it can render its
+    # hooks open again once the hold is let go, so the lock goes and only the
+    # record stays. A gateway that did stop leaves the hooks closed: the lock
+    # stays for the retry.
     result = _txn_harness(tmp_path, _ps1_function("Prepare-UnprovenReplacement") + _ps1_function("Close-InstallLock")
                           + _ps1_function("Finish-InstallLock") + f"""
 $Staging = Join-Path $DataDir '.staging'
@@ -1908,16 +1919,26 @@ $Run.Lock = $true
 $LockDir = Join-Path $DataDir '.install.lock'
 [void][IO.Directory]::CreateDirectory($LockDir)
 [IO.File]::WriteAllText($LifecycleManifest, '{{"Schema":1,"Bins":{{}}}}')
+$Ver = '1.0.4'
 $script:warnings = @()
-$script:cleanupCloses = 0
+$script:cleanupCloses = 0; $script:holds = 0; $script:released = 0; $script:stops = 0
 function Write-Warn {{ param($Message) $script:warnings += [string]$Message }}
 function Invoke-Quietly {{ param([scriptblock]$Action) & $Action }}
 function Close-UnfinishedInstallHooks {{ $script:cleanupCloses++ }}
 function Clear-StagedRelease {{ }}
 function Test-RecoveryPending {{ return $Run.RestorePending }}
 function Remove-Tree {{ param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }}
-function Start-HookFailModeHold {{ return $false }}
-function Stop-UnprovenGateway {{ throw 'working gateway was stopped' }}
+function Start-HookFailModeHold {{ param($Gateway, $GatewayId, [switch]$Closed)
+    if (-not $Closed -or $GatewayId -ne 123) {{ throw 'the hold was not closed for the running gateway' }}
+    if ('{failure}' -eq 'hold-failed') {{ return $false }}
+    $script:holds++; return $true
+}}
+function Stop-HookFailModeHold {{ $script:released++ }}
+function Complete-HookFailModeHold {{ return ('{failure}' -ne 'hold-incomplete') }}
+function Stop-UnprovenGateway {{
+    if ('{failure}' -eq 'stop-failed') {{ throw 'The unproven gateway or watchdog is still running' }}
+    $script:stops++; $script:gateway = $null
+}}
 if ('{failure}' -eq 'staged-changed') {{ [IO.File]::WriteAllText($stagedGateway, 'changed after checking') }}
 if ('{failure}' -eq 'closer-cannot-close') {{
     function Invoke-Native {{ param($FilePath, $Arguments, [switch]$Quiet) return 1 }}
@@ -1925,23 +1946,105 @@ if ('{failure}' -eq 'closer-cannot-close') {{
 try {{ Prepare-UnprovenReplacement $stagedGateway $expected; throw 'failure was accepted' }} catch {{
     if ($_.Exception.Message -notlike '*staged release changed*' -and
         $_.Exception.Message -notlike '*Could not close the older install*' -and
-        $_.Exception.Message -notlike '*Could not hold the older install*') {{ throw }}
+        $_.Exception.Message -notlike '*Could not hold the older install*' -and
+        $_.Exception.Message -notlike '*still running*' -and
+        $_.Exception.Message -notlike '*Could not keep the older install*') {{ throw }}
 }}
 Finish-InstallLock 1
-$closed = '{failure}' -eq 'hold-failed'
-if (-not (Test-Path -LiteralPath $LifecycleManifest) -or -not $script:gateway) {{ throw 'the record or working gateway was lost' }}
-if ([bool](Test-Path -LiteralPath $LockDir) -ne $closed -or [bool]$Run.RestorePending -ne $closed) {{
-    throw 'the lock did not follow the checked hook closure'
-}}
-if ($closed) {{
-    if ($script:closes -ne 1 -or $script:cleanupCloses -ne 1 -or $script:warnings[-1] -like '*programs stopped*') {{
-        throw 'the lock warning misstates a running gateway'
-    }}
-}} elseif ($script:closes -ne 0 -or $script:cleanupCloses -ne 0) {{ throw 'hooks were closed before the checked closure point' }}
-'OK'
+"LOCK=$(Test-Path -LiteralPath $LockDir) PENDING=$([bool]$Run.RestorePending) RECORD=$(Test-Path -LiteralPath $LifecycleManifest) RUNNING=$([bool]$script:gateway)"
+"CLOSES=$script:closes CLEANUP=$script:cleanupCloses HOLDS=$script:holds RELEASED=$script:released STOPS=$script:stops"
+"LAST_WARNING=$(if ($script:warnings.Count) {{ $script:warnings[-1] }})"
 """)
     out = result.stdout + result.stderr
-    assert result.returncode == 0 and "OK" in out, out
+    assert result.returncode == 0, out
+    assert "RECORD=True" in out, out
+    closed = failure in ("hold-failed", "stop-failed", "hold-incomplete")
+    if not closed:
+        # Nothing changed before the checked closure point: the gateway
+        # keeps running, no hook was closed and the lock goes.
+        assert "LOCK=False PENDING=False" in out and "RUNNING=True" in out, out
+        assert "CLOSES=0 CLEANUP=0 HOLDS=0 RELEASED=0 STOPS=0" in out, out
+    elif failure == "hold-incomplete":
+        # The gateway stopped with every hook closed: the lock stays.
+        assert "LOCK=True PENDING=True" in out and "RUNNING=False" in out, out
+        assert "CLOSES=1 CLEANUP=1 HOLDS=1 RELEASED=0 STOPS=1" in out, out
+        assert "programs stopped" not in out.split("LAST_WARNING=")[1], out
+    else:
+        # The older gateway still runs and can reopen its hooks: no lock.
+        assert "LOCK=False PENDING=False" in out and "RUNNING=True" in out, out
+        assert "CLOSES=1 CLEANUP=1" in out and "STOPS=0" in out, out
+        if failure == "stop-failed":
+            assert "HOLDS=1 RELEASED=1" in out, out
+        warning = out.split("LAST_WARNING=")[1]
+        assert "the install lock is released" in warning and "-AcceptCurrentInstall" in warning, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("failure", ["hold-failed", "stop-failed", "hold-incomplete"])
+def test_interrupted_replacement_recovery_keeps_the_lock_only_with_its_gateway_down(
+    tmp_path: Path, failure: str
+) -> None:
+    # The interrupted-replacement recovery closes the hooks with the recorded
+    # closer, then holds them closed and stops the restored gateway. If that
+    # gateway keeps running, the lock goes (it can reopen its hooks); if it
+    # stopped, the lock stays with every hook closed.
+    result = _txn_harness(tmp_path, _ps1_function("Stop-UnprovenRecoveryGateway") + _ps1_function("Close-InstallLock")
+                          + _ps1_function("Finish-InstallLock") + f"""
+$Staging = Join-Path $DataDir '.staging'
+$checked = Join-Path $LifecycleCloser 'defenseclaw-gateway.exe'
+[void][IO.Directory]::CreateDirectory($LifecycleCloser)
+[IO.File]::WriteAllText($checked, 'checked 1.0.4 gateway')
+$manifest = [pscustomobject]@{{ ReplacementCloserSha256 = (Get-Sha256 $checked) }}
+$script:gateway = [pscustomobject]@{{ Id = 123; Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }}
+$Run.UnprovenReplacement = $true
+$Run.UnprovenReplacementUnchanged = $false
+$Run.Lock = $true
+$LockDir = Join-Path $DataDir '.install.lock'
+[void][IO.Directory]::CreateDirectory($LockDir)
+[IO.File]::WriteAllText($LifecycleManifest, '{{"Schema":1,"Bins":{{}}}}')
+$Ver = '1.0.4'
+$script:warnings = @()
+$script:cleanupCloses = 0; $script:holds = 0; $script:released = 0; $script:stops = 0
+function Write-Warn {{ param($Message) $script:warnings += [string]$Message }}
+function Invoke-Quietly {{ param([scriptblock]$Action) & $Action }}
+function Close-UnfinishedInstallHooks {{ $script:cleanupCloses++ }}
+function Clear-StagedRelease {{ }}
+function Test-RecoveryPending {{ return $Run.RestorePending }}
+function Remove-Tree {{ param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }}
+function Start-HookFailModeHold {{ param($Gateway, $GatewayId, [switch]$Closed)
+    if (-not $Closed -or $GatewayId -ne 123 -or $Gateway -ne $checked) {{ throw 'the hold was not closed with the checked closer' }}
+    if ('{failure}' -eq 'hold-failed') {{ return $false }}
+    $script:holds++; return $true
+}}
+function Stop-HookFailModeHold {{ $script:released++ }}
+function Complete-HookFailModeHold {{ return ('{failure}' -ne 'hold-incomplete') }}
+function Stop-UnprovenGateway {{
+    if ('{failure}' -eq 'stop-failed') {{ throw 'The unproven gateway or watchdog is still running' }}
+    $script:stops++; $script:gateway = $null
+}}
+try {{ Stop-UnprovenRecoveryGateway $manifest (Join-Path $DataDir 'previous.new'); throw 'failure was accepted' }} catch {{
+    if ($_.Exception.Message -notlike '*Could not hold the interrupted install*' -and
+        $_.Exception.Message -notlike '*still running*' -and
+        $_.Exception.Message -notlike '*Could not keep the interrupted install*') {{ throw }}
+}}
+# Invoke-Install's catch around Resume-InterruptedRun.
+Set-RecoveryPending
+Finish-InstallLock 1
+"LOCK=$(Test-Path -LiteralPath $LockDir) PENDING=$([bool]$Run.RestorePending) RECORD=$(Test-Path -LiteralPath $LifecycleManifest) RUNNING=$([bool]$script:gateway)"
+"CLOSES=$script:closes HOLDS=$script:holds RELEASED=$script:released STOPS=$script:stops"
+"LAST_WARNING=$(if ($script:warnings.Count) {{ $script:warnings[-1] }})"
+""")
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "RECORD=True" in out and "CLOSES=1" in out, out
+    if failure == "hold-incomplete":
+        assert "LOCK=True PENDING=True RECORD=True RUNNING=False" in out and "STOPS=1" in out, out
+    else:
+        assert "LOCK=False PENDING=False RECORD=True RUNNING=True" in out and "STOPS=0" in out, out
+        if failure == "stop-failed":
+            assert "HOLDS=1 RELEASED=1" in out, out
+        warning = out.split("LAST_WARNING=")[1]
+        assert "the install lock is released" in warning and "-AcceptCurrentInstall" in warning, out
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
