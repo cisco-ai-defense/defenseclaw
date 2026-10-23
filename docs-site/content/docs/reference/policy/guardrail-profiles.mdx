@@ -194,11 +194,12 @@ How the keys combine:
   only by its uid. Use the principal, the uid or the SID to tell two people of
   the same short name apart. When a bare name selects a directory account,
   `explain`, `status` and `doctor` warn and name the principal to write
-  instead. On an SSSD Active Directory host that reports qualified account
-  names, a bare entry may name accounts in multiple trusted domains. It is
-  treated as ambiguous: affected requests are refused when that assignment
-  could change the profile. Write `alice@corp.example.com`, `DOMAIN\\alice`
-  or the uid to select one account.
+  instead. On a qualified-name SSSD Active Directory host with one joined
+  domain, a bare entry keeps matching that account after a 1.0.3 upgrade.
+  With multiple joined Active Directory domains or a configured trusted
+  child, the entry is ambiguous: affected requests are refused when that
+  assignment could change the profile. Write the qualified principal shown
+  by explain, status, verify or doctor, or the uid, to select one account.
 - **`DOMAIN\user` names the verified account domain.** The domain part is the
   NetBIOS name (or DNS name) the directory confirms for the account: winbind,
   also with `use default domain = yes` where accounts have bare names; SSSD

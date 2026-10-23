@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"sort"
 	"strconv"
@@ -263,6 +264,18 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 			list(uid, canonicalUser(uid))
 		}
 	}
+	// A machine-policy connector under inspect accepts every account, and an
+	// unreadable authorization may still accept any account. Neither state
+	// names its callers in listedUIDs. Refresh the records they already hold
+	// so a UPN assignment does not disappear at the record's one-hour limit
+	// while the gateway continues to inspect that caller (T7-07).
+	if accepted.everyone || accepted.unknown {
+		for _, uid := range enterpriseHookRecordedCallerUIDs(dir) {
+			if !seen[uid] {
+				list(uid, canonicalUser(uid))
+			}
+		}
+	}
 	// A caller the gateway accepts by name only (an exempt_users entry, or
 	// a protected target without a uid) keeps a refreshed record too, by the
 	// uid its name holds now, or, while its lookup does not answer, by the
@@ -323,8 +336,8 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 // inspects that connector's hook calls from every account, enrolled or not
 // (managedHookAuthorizer.decide). unknown marks an authorization or a
 // descriptor that could not be read. Either way every account is taken as
-// accepted, so no record is withdrawn at once (an omitted record still
-// ages out under enterprisehooks.WriteIdentitySpool's rules).
+// accepted, so no record is withdrawn. Existing records are listed for
+// refresh even when the authorization names no individual caller.
 type enterpriseHookAcceptedAccounts struct {
 	unknown  bool
 	everyone bool
@@ -459,6 +472,31 @@ func (a enterpriseHookAcceptedAccounts) listedUIDs() []int {
 		}
 	}
 	slices.Sort(uids)
+	return uids
+}
+
+// enterpriseHookRecordedCallerUIDs lists every existing uid record when the
+// authorization accepts callers without listing their uids. It reads names
+// only; WriteIdentitySpool resolves the uid again before publishing facts.
+func enterpriseHookRecordedCallerUIDs(dir string) []int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	uids := make([]int, 0, len(entries))
+	for _, entry := range entries {
+		key, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !entry.Type().IsRegular() {
+			continue
+		}
+		uid, err := strconv.Atoi(key)
+		if err != nil || uid <= 0 || strconv.Itoa(uid) != key {
+			continue
+		}
+		if _, err := enterprisehooks.ReadIdentitySpoolRecord(dir, key, nil); err == nil {
+			uids = append(uids, uid)
+		}
+	}
 	return uids
 }
 

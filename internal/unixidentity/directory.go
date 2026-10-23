@@ -535,6 +535,7 @@ func (r *NSSResolver) applySSSDDomain(facts *useridentity.DirectoryFacts, sssd *
 	if err != nil {
 		return "", fmt.Errorf("unixidentity: realmd lookup: %w", err)
 	}
+	facts.QualifiedNamesMayCollide = sssdADDomainsMayCollide(realms)
 	var candidates []string
 	if strings.Contains(domain, ".") {
 		candidates = []string{strings.ToLower(domain)}
@@ -578,6 +579,24 @@ func (r *NSSResolver) applySSSDDomain(facts *useridentity.DirectoryFacts, sssd *
 		return candidate, nil
 	}
 	return "", nil
+}
+
+// sssdADDomainsMayCollide counts only joined Active Directory realms and
+// explicitly trusted children. An IPA or plain LDAP domain beside one AD
+// realm does not make that AD account's short name ambiguous.
+func sssdADDomainsMayCollide(realms []Realm) bool {
+	known := map[string]bool{}
+	for _, realm := range realms {
+		if strings.EqualFold(realm.ClientSoftware, "sssd") && realmDirectory(realm) == useridentity.DirectoryActiveDirectory && realm.Domain != "" {
+			known[strings.ToLower(realm.Domain)] = true
+		}
+	}
+	for _, child := range useridentity.TrustedADChildDomains() {
+		if realm, ok := sssdRealmFor(child, realms); ok && realmDirectory(realm) == useridentity.DirectoryActiveDirectory {
+			known[strings.ToLower(child)] = true
+		}
+	}
+	return len(known) > 1
 }
 
 // sssdAccountSID returns the SID SSSD holds for the user with uid, "" for

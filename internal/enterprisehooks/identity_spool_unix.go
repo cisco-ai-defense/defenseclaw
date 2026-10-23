@@ -112,8 +112,12 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			return fmt.Errorf("set identity spool ownership: %w", err)
 		}
 	}
-	if err := moveLegacyAgentOwners(dir); err != nil {
+	invalidMap, err := moveLegacyAgentOwners(dir)
+	if err != nil {
 		return fmt.Errorf("move agent identity migration map out of rollback records: %w", err)
+	}
+	if invalidMap && logf != nil {
+		logf("[hook-guardian] invalid previous agent identity migration map; quarantined it outside the rollback JSON records and continuing the identity pass")
 	}
 	keep, left := map[string]bool{}, map[string]bool{}
 	owners := map[int]LegacyAgentOwner{}
@@ -232,7 +236,8 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	var withdrawErr error
 	for _, entry := range entries {
 		// The migration map is written once and kept for good.
-		if keep[entry.Name()] || entry.Name() == LegacyAgentOwnersFile {
+		if keep[entry.Name()] || entry.Name() == LegacyAgentOwnersFile ||
+			strings.HasPrefix(entry.Name(), "legacy-agent-owners-corrupt-") && strings.HasSuffix(entry.Name(), ".bad") {
 			continue
 		}
 		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge && !left[entry.Name()] &&

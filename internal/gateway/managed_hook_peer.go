@@ -280,7 +280,10 @@ func (z *managedHookAuthorizer) hostRunExempt(peer managedHookPeer) bool {
 // caller's names with, from the cache the caller's hook requests use; tests
 // replace it.
 var managedHookExemptFacts = func(uid int) (useridentity.DirectoryFacts, bool) {
-	return verifiedIdentityDirectory(strconv.Itoa(uid), identityLookupBlocking.Load())
+	// A named exemption needs verified name forms even when no profile
+	// assignment selects by identity. Wait for a cold lookup so the first
+	// hook after a restart can use a UPN or DOMAIN\\name exemption.
+	return verifiedIdentityDirectory(strconv.Itoa(uid), true)
 }
 
 // decide authorizes one hook call. surface is the caller's

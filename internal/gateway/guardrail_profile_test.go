@@ -1763,6 +1763,8 @@ func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 // trusted domains. Neither account may receive a relaxed profile by that
 // short name; the administrator must use a qualified name or uid.
 func TestSSSDQualifiedNamesDoNotGrantBareNamesakeProfile(t *testing.T) {
+	useridentity.SetTrustedADChildDomains([]string{"dclab2.test"})
+	t.Cleanup(func() { useridentity.SetTrustedADChildDomains(nil) })
 	previous := identityFactsEnabled.Load()
 	setIdentityFactsEnabled(true)
 	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
@@ -1791,6 +1793,51 @@ func TestSSSDQualifiedNamesDoNotGrantBareNamesakeProfile(t *testing.T) {
 		if got := set.match(&subject, profileSubjectVerified, "claudecode", ""); got.Name != "strict" || got.Refused == "" ||
 			got.Match != profileMatchDefaultLookupFailed {
 			t.Errorf("%s: bare namesake decision %+v; want strict refusal", tc.domain, got)
+		} else if warning := ambiguousShortNameUserNote(set, got, &subject); !strings.Contains(warning, "uid "+tc.uid) {
+			t.Errorf("%s: ambiguous decision did not name an exact replacement: %q", tc.domain, warning)
+		}
+	}
+}
+
+// A 1.0.3 single-domain realm-join config selected alice by her bare users
+// entry. Upgrading must keep that assignment while still naming the exact
+// form the administrator can write to bind it to this account.
+func TestSingleDomainSSSDBareUserAssignmentSurvivesUpgrade(t *testing.T) {
+	useridentity.SetTrustedADChildDomains(nil)
+	previous := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Mode: "action", BlockAt: "low"}, "relaxed": {Mode: "observe"},
+	}
+	cfg.Guardrail.DefaultProfile = "strict"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{Profile: "relaxed", Match: config.ProfileMatch{Users: []string{"alice"}}}}
+	set, err := newGuardrailProfileSet(cfg, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := profileSubjectFromVerified(VerifiedSubject{UserID: "94404135", UserName: "alice@corp.example.com",
+		Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+			Source: useridentity.SourceSSSD, Domain: "corp.example.com", Principal: "alice@corp.example.com", ResolvedAt: time.Now()}}, true)
+	got := set.match(&subject, profileSubjectVerified, "claudecode", "")
+	if got.Name != "relaxed" || got.Match != profileMatchUser || got.Refused != "" {
+		t.Fatalf("1.0.3 single-domain assignment after upgrade: %+v", got)
+	}
+	if warning := shortNameUserNote(set, got, &subject); !strings.Contains(warning, "alice@corp.example.com") {
+		t.Fatalf("short-name warning does not name the qualified replacement: %q", warning)
+	}
+	if runtime.GOOS == "linux" {
+		previousRecords := profileShortNameRecords
+		profileShortNameRecords = func() []enterprisehooks.IdentitySpoolRecord {
+			return []enterprisehooks.IdentitySpoolRecord{{Key: subject.UserID, User: "alice@corp.example.com",
+				Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+					Source: useridentity.SourceSSSDInfoPipe, UPN: "alice@login.example.com"}}}
+		}
+		t.Cleanup(func() { profileShortNameRecords = previousRecords })
+		if warnings := set.healthProfileWarnings(); !strings.Contains(strings.Join(warnings, "\n"), "write alice@login.example.com") {
+			t.Fatalf("status, verify and doctor do not name the qualified form: %v", warnings)
 		}
 	}
 }
@@ -1825,7 +1872,7 @@ func TestBareUsersEntrySkipsLocalNamesake(t *testing.T) {
 			name: "linux",
 			domain: VerifiedSubject{UserID: "1916801104", UserName: "ent-alice@dclab.test", Directory: useridentity.DirectoryFacts{
 				Directory: useridentity.DirectoryActiveDirectory, Source: useridentity.SourceSSSD, Domain: "dclab.test",
-				AccountDomain: "DCLAB", Assurance: useridentity.AssuranceVerified, ResolvedAt: now}},
+				AccountDomain: "DCLAB", QualifiedNamesMayCollide: true, Assurance: useridentity.AssuranceVerified, ResolvedAt: now}},
 			local: VerifiedSubject{UserID: "2500", UserName: "ent-alice", Directory: useridentity.DirectoryFacts{
 				Directory: useridentity.DirectoryLocal, Source: useridentity.SourceNSSFiles, Assurance: useridentity.AssuranceVerified,
 				ResolvedAt: now}},

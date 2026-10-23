@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"golang.org/x/text/unicode/norm"
@@ -26,6 +27,9 @@ import (
 func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, subject *profileSubject) []string {
 	warnings := set.assignmentWarnings(subject == nil || !subject.LookupFailed)
 	if note := shortNameUserNote(set, decision, subject); note != "" {
+		warnings = append(warnings, note)
+	}
+	if note := ambiguousShortNameUserNote(set, decision, subject); note != "" {
 		warnings = append(warnings, note)
 	}
 	if note := shortNameGroupNote(decision); note != "" {
@@ -81,7 +85,45 @@ func (set *guardrailProfileSet) assignmentWarningsWithWait(checkGroups bool, wai
 // restart listed no unknown group while profile-explain named it (GAP-0830).
 func (set *guardrailProfileSet) healthProfileWarnings() []string {
 	warnings := set.assignmentWarningsWithWait(true, profileGroupCheckWait)
+	if runtime.GOOS == "linux" {
+		warnings = append(warnings, shortNameAssignmentWarnings(set.assignments, profileShortNameRecords())...)
+	}
 	return append(warnings, set.inertHILTWarnings()...)
+}
+
+// profileShortNameRecords supplies verified guardian facts for the exact
+// qualified-name remedy in status, verify and doctor. Tests replace it.
+var profileShortNameRecords = func() []enterprisehooks.IdentitySpoolRecord {
+	if dir := currentIdentitySpoolDir(); dir != "" {
+		return enterprisehooks.ReadIdentitySpoolRecords(dir, validateManagedGuardianAuthorization, identityDirectoryMax)
+	}
+	return nil
+}
+
+func shortNameAssignmentWarnings(assignments []config.ProfileAssignment, records []enterprisehooks.IdentitySpoolRecord) []string {
+	var warnings []string
+	for i, assignment := range assignments {
+		for _, entry := range assignment.Match.Users {
+			entry = strings.TrimSpace(entry)
+			if entry == "" || strings.ContainsAny(entry, `@\`) || useridentity.KindForID(entry) != "" {
+				continue
+			}
+			for _, record := range records {
+				facts := record.Facts
+				if facts.Directory != useridentity.DirectoryActiveDirectory ||
+					(facts.Source != useridentity.SourceSSSD && facts.Source != useridentity.SourceSSSDInfoPipe) ||
+					!useridentity.EqualFold(useridentity.BareAccountName(record.User), entry) {
+					continue
+				}
+				qualified := firstNonEmpty(facts.UPN, facts.Principal)
+				if qualified != "" {
+					warnings = append(warnings, fmt.Sprintf("assignment %d uses the bare user %q for %s; write %s (or uid %s) to select exactly this SSSD AD account",
+						i+1, entry, record.User, qualified, record.Key))
+				}
+			}
+		}
+	}
+	return warnings
 }
 
 // standaloneProfileWarnings is what status and verify list on a standalone
@@ -865,6 +907,25 @@ func shortNameUserNote(set *guardrailProfileSet, decision profileDecision, subje
 		qualified := firstNonEmpty(subject.UPN, subject.Principal, subject.UserID)
 		return fmt.Sprintf("assignment %d selects this account by the short name %q, so it selects a directory account of that name "+
 			"in another domain too (never a local account); write %s (or the uid) to select only this account", decision.Assignment, entry, qualified)
+	}
+	return ""
+}
+
+func ambiguousShortNameUserNote(set *guardrailProfileSet, decision profileDecision, subject *profileSubject) string {
+	if set == nil || subject == nil || !slices.Contains(decision.Unproven, "account:ambiguous_short_name") {
+		return ""
+	}
+	qualified := firstNonEmpty(subject.UPN, subject.Principal)
+	if qualified == "" {
+		qualified = subject.UserID
+	}
+	for i, assignment := range set.assignments {
+		for _, entry := range assignment.Match.Users {
+			if ambiguousBareUserEntry(subject, entry) {
+				return fmt.Sprintf("assignment %d uses the ambiguous short name %q for %s; write %s (or uid %s) to select only this account",
+					i+1, strings.TrimSpace(entry), subject.UserName, qualified, subject.UserID)
+			}
+		}
 	}
 	return ""
 }

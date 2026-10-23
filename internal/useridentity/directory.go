@@ -110,6 +110,11 @@ type DirectoryFacts struct {
 	// AccountDomain is the verified account namespace (NetBIOS or local
 	// computer name). It is only used for profile matching, never emitted.
 	AccountDomain string `json:"-"`
+	// QualifiedNamesMayCollide is true when this SSSD AD account belongs to
+	// a host with more than one joined AD domain or configured trusted child.
+	// It is proved during the directory lookup, never inferred from an @ in
+	// the account name, and is used only for bare users assignments.
+	QualifiedNamesMayCollide bool `json:"-"`
 	// Realm is the Kerberos realm, usually the upper-case DNS domain.
 	Realm string `json:"realm,omitempty"`
 	// Directory is the directory that owns the account.

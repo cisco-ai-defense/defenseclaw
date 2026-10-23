@@ -125,3 +125,45 @@ func TestNameOnlyAcceptedCallerKeepsAFreshIdentityRecord(t *testing.T) {
 		t.Fatalf("no longer accepted caller: accounts %+v; want no refreshed record", accounts)
 	}
 }
+
+// T7-07: enumerate=false omits B from the rows. B is excluded and absent
+// from the protected targets. A runtime kiro machine-policy connector under
+// inspect still accepts B's hooks; that branch must list and refresh the old
+// UPN record. With no such connector, the exclusion withdraws it instead.
+func TestExcludedUnlistedKiroCallerFollowsCurrentAuthorization(t *testing.T) {
+	identityCallerTestConfig(t)
+	const aUID, bUID = 94404135, 94404136
+	const bName = "dcad-r103-eng2@dclab.test"
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"dcad-r103-eng1@dclab.test": {Name: "dcad-r103-eng1@dclab.test", UID: aUID, GID: aUID},
+		bName:                       {Name: bName, UID: bUID, GID: bUID},
+	}})
+	cfg.Enterprise.Enrollment.ExcludeUsers = []string{bName}
+	cfg.Enterprise.Enrollment.UnenrolledUsers = config.EnterpriseUnenrolledInspect
+	previousMachine := enterpriseHookLoadMachinePolicyConnectors
+	t.Cleanup(func() { enterpriseHookLoadMachinePolicyConnectors = previousMachine })
+	enterpriseHookLoadAcceptedTargets = func() ([]enterpriseHookReconcileRow, error) {
+		return []enterpriseHookReconcileRow{{UID: aUID, User: "dcad-r103-eng1@dclab.test", Connector: "kiro", OK: true}}, nil
+	}
+	dir := t.TempDir()
+	record := enterprisehooks.IdentitySpoolRecord{Version: enterprisehooks.IdentitySpoolRecordVersion,
+		Key: "94404136", User: bName, UpdatedAt: time.Now().UTC(), Facts: useridentity.DirectoryFacts{UPN: "eng2@dclab.test"}}
+	data, err := enterprisehooks.MarshalIdentitySpoolRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, record.Key+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := enterpriseHookReconcileRun{Rows: []enterpriseHookReconcileRow{{UID: aUID, User: "dcad-r103-eng1@dclab.test", Connector: "kiro", OK: true}}}
+	enterpriseHookLoadMachinePolicyConnectors = func() ([]string, error) { return []string{"kiro"}, nil }
+	accounts, _, withdraw := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, run)
+	if listed, _ := listedUIDs(accounts); !slices.Contains(listed, bUID) || withdraw(bUID, record) {
+		t.Fatalf("accepted but unlisted B loses its UPN record: accounts %+v", accounts)
+	}
+	enterpriseHookLoadMachinePolicyConnectors = func() ([]string, error) { return nil, nil }
+	accounts, _, withdraw = enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, run)
+	if listed, _ := listedUIDs(accounts); slices.Contains(listed, bUID) || !withdraw(bUID, record) {
+		t.Fatalf("excluded B is not accepted but retains its record: accounts %+v", accounts)
+	}
+}

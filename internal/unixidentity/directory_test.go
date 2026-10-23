@@ -21,6 +21,27 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+func TestSSSDQualifiedADNamesCollideOnlyAcrossADDomains(t *testing.T) {
+	useridentity.SetTrustedADChildDomains(nil)
+	t.Cleanup(func() { useridentity.SetTrustedADChildDomains(nil) })
+	joined := []Realm{{Domain: "corp.example.com", ClientSoftware: "sssd", ServerSoftware: "active-directory"}}
+	if sssdADDomainsMayCollide(joined) {
+		t.Fatal("one joined AD domain is not a collision")
+	}
+	withIPA := append(append([]Realm{}, joined...), Realm{Domain: "ipa.example.com", ClientSoftware: "sssd", ServerSoftware: "ipa"})
+	if sssdADDomainsMayCollide(withIPA) {
+		t.Fatal("an IPA realm is not another AD domain")
+	}
+	withAD := append(append([]Realm{}, joined...), Realm{Domain: "other.example.com", ClientSoftware: "sssd", ServerSoftware: "active-directory"})
+	if !sssdADDomainsMayCollide(withAD) {
+		t.Fatal("two joined AD domains may hold the same short name")
+	}
+	useridentity.SetTrustedADChildDomains([]string{"child.corp.example.com"})
+	if !sssdADDomainsMayCollide(joined) {
+		t.Fatal("a trusted child may hold the same short name")
+	}
+}
+
 // GAP-1087: a bare name shared by a local account and a directory account
 // of a joined realm names both, so the admin views refuse it with both.
 func TestSameNameAccountsFindsTheDirectoryTwin(t *testing.T) {
