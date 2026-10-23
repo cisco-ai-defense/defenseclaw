@@ -204,6 +204,28 @@ describe('recovery and repair advice', () => {
   });
 });
 
+function repoText(name: string): string {
+  return readFileSync(join(repo, name), 'utf8').split(/\s+/).join(' ');
+}
+
+describe('1.0.4 audit flood and upgrade claims', () => {
+  it('describes bounded Windows WAL catch-up and the remaining hook delay', () => {
+    const enterprise = page('troubleshooting/enterprise/index.mdx');
+    assert.match(enterprise, /Windows.*audit\.db-wal.*bounded catch-up/i);
+    assert.match(enterprise, /bounded catch-up.*256 MiB/i);
+    assert.match(enterprise, /0\.9.to.1\.2 GB.*10 calls a second/i);
+    assert.match(enterprise, /hook answers.*(?:slow|wait|delay).*default.*closed/i);
+    assert.doesNotMatch(enterprise, /audit\.db-wal.*20 GB|fix needs a change to how the audit store indexes hook records and is deferred/i);
+  });
+
+  it('keeps one supervisor upgrade entry with automatic stop and failed-stop recovery', () => {
+    const changelog = repoText('CHANGELOG.md');
+    assert.equal((changelog.match(/\*\*Sandboxes run only on OpenShell 0\.1\.5 or later\.\*\*/g) ?? []).length, 1);
+    assert.match(changelog, /DefenseClaw stops it as soon as it sees it.*A stop that fails is a second finding/);
+    assert.doesNotMatch(changelog, /A sandbox that keeps running through the upgrade keeps the old supervisor: the feed/);
+  });
+});
+
 describe('Intune base config versus the signed bundle', () => {
   it('names exactly the blocks the packager compares', () => {
     const packager = readFileSync(
@@ -541,13 +563,22 @@ describe('1.0.4 operator routes and limits', () => {
     assert.doesNotMatch(envVars, /On Windows, set.*\$env:DEFENSECLAW_CONFIG/i);
   });
 
-  it('keeps native-hook warnings and names the managed OpenCode code gap', () => {
+  it('keeps native-hook warnings and gives plugin readers a working report route', () => {
     const guard = page('enterprise/configure/foreign-hook-guard.mdx');
     assert.match(guard, /foreign_hooks: report.*enterprise policy show/i);
     assert.match(guard, /Cursor, Copilot and Devin.*defenseclaw-hook.*warning.*file and digest.*stderr/i);
     assert.match(guard, /Hermes.*stderr warning.*without the file and digest/i);
-    assert.match(guard, /Amp.*drops.*warnings/i);
-    assert.match(guard, /GAP-0697.*OpenCode.*drops.*warnings/i);
+    assert.match(guard, /OpenCode and Amp.*enterprise policy show.*file and digest/i);
+    assert.doesNotMatch(guard, /GAP-0697|(?:OpenCode|Amp).*drops.*warnings/i);
+  });
+
+  it('gives managed profile-explain routes in every identity troubleshooting row', () => {
+    const rows = readFileSync(join(site, 'content/docs/enterprise/identity/sources.mdx'), 'utf8')
+      .split('\n').filter((line) => line.startsWith('| ') && /profile explain/.test(line));
+    assert.ok(rows.length >= 4, 'identity troubleshooting rows are missing');
+    for (const row of rows) {
+      assert.match(row, /managed.*enterprise .*profile-explain/i, row);
+    }
   });
 
   it('gives a working managed restart route without promising it in the refusal', () => {

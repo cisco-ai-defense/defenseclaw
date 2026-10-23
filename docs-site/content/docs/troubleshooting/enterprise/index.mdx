@@ -319,12 +319,15 @@ report `enterprise_managed_runtime_state_invalid` instead.
   hook can report: more than 512 targets or more than 64 KiB of target paths. The refusal says
   DefenseClaw blocked the action under your organization's policy and may name "SSH authorized keys
   mutation." Split the command into smaller calls. Per-user mode is not affected.
-- On Windows, a sustained flood of about 10 hook calls a second for many minutes can grow the audit
-  log (`audit.db-wal`) up to about 20 GB. During such a flood, hook answers slow down and many calls
-  can be blocked (fail closed), sometimes every call for minutes at a time. No call is ever allowed
-  because of it. Keep several tens of GB free on the system drive if you expect such floods. The
-  file shrinks back once the flood stops. This limit remains in 1.0.4: the fix needs a change to how
-  the audit store indexes hook records and is deferred to a later release.
+- On Windows, sustained hook traffic on a disk with slow scattered writes can delay audit writes and
+  hook answers. The gateway checks `audit.db-wal` every two seconds and uses bounded catch-up once
+  the log in use passes 256 MiB; it kept the log from growing without bound in the measured flood. In Windows
+  runner tests, the file peaked at 0.9 to 1.2 GB at 10 calls a second; that is an observation, not
+  a disk-space guarantee. Catch-up may hold the audit writer, so some hook answers can still wait
+  seconds or exceed their answer budget. Under the default `closed` mode those calls block; an
+  administrator's outage-only `open` applies only to a classified no-answer timeout, and calls of
+  guarded connectors (`foreign_hooks: remove`) still block, as in 1.0.3 (GAP-0352). If the gateway logs a persistent
+  `audit WAL` over-bound warning, check for a long-running reader and available disk space.
 - A tool call that DefenseClaw allowed while the gateway was running still runs if you approve it in
   the agent after the gateway stops. Every call checked while the gateway is down is blocked.
 
