@@ -341,10 +341,13 @@ outranks those files; export DefenseClaw's entries in plist form and add them to
 your profile ([Higher-precedence sources](/docs/enterprise/configure/machine-policy#higher-precedence-sources),
 [Inspect, export and verify](/docs/enterprise/configure/machine-policy#inspect-export-and-verify)).
 After changing a vendor policy file or MDM preference, run
-`sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure --json`.
-Until the new policy view is verified and pinned, managed hooks refuse calls with
-`enterprise_managed_policy_view_unverified`. This includes a per-user managed
-preference that appears when an account signs in.
+`sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos reconcile --json`
+(or `ensure`). Until the new policy view is verified and pinned, managed hooks
+keep sending every call for inspection under the managed policy and raise a
+`HIGH` runtime alert, `enterprise_managed_policy_view_unverified`. This includes
+a per-user managed preference that appears when an account signs in. An MDM
+agent that delivers the same preference bytes again changes nothing: pins
+compare content only.
 
 On a managed 1.0.2 macOS 15.8 test host, a standard user started Claude Code inside
 a `sandbox-exec` profile that hid its machine policy directory. Claude ran a

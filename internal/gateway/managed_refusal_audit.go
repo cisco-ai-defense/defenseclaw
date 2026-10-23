@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,8 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -154,4 +157,31 @@ func (a *APIServer) handleManagedRefusalAudit(w http.ResponseWriter, r *http.Req
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// recordManagedPolicyViewAlert writes the gateway log line and the HIGH
+// runtime alert for a managed hook that could not prove its agent's view of
+// vendor machine policy. The connector comes from the route scope and the
+// account from the kernel-verified peer; each account is rate limited like
+// refusal rows.
+func (a *APIServer) recordManagedPolicyViewAlert(r *http.Request, peer managedHookPeer, route string) {
+	if !a.managedAlertLimits.allow(peer.UID) {
+		return
+	}
+	connectorName, _ := a.managedHookRouteScope(r)
+	fmt.Fprintf(os.Stderr,
+		"[sidecar-api] hook policy-view alert uid=%d connector=%q route=%s reason=%s: the agent's view of managed vendor policy differs from the trusted pin; its calls are still inspected under the managed policy\n",
+		peer.UID, connectorName, route, hookexec.ManagedPolicyViewReason)
+	if a.logger == nil {
+		return
+	}
+	envelope := audit.EnvelopeFromContext(r.Context())
+	envelope.Connector = connectorName
+	ctx := audit.ContextWithEnvelope(r.Context(), envelope)
+	if err := a.logger.LogAlertCtx(ctx, "managed_hook", "HIGH", hookexec.ManagedPolicyViewReason, map[string]any{
+		"actor": "uid:" + strconv.Itoa(peer.UID),
+		"route": route,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar-api] hook policy-view alert by uid=%d was not recorded: %v\n", peer.UID, err)
+	}
 }

@@ -145,24 +145,29 @@ const AgentSurfaceHeader = "X-DefenseClaw-Agent-Surface"
 // IsManagedProcessContextReason limits the accepted values.
 const ClientRefusalHeader = "X-DefenseClaw-Client-Refusal"
 
+// ClientAlertHeader carries, on the standalone hook socket, an alert from a
+// managed hook that still sends its call for inspection: today only
+// ManagedPolicyViewReason, a view of vendor machine policy that differs from
+// the trusted descriptor's pin.
+const ClientAlertHeader = "X-DefenseClaw-Client-Alert"
+
 // ManagedUserNamespaceReason is the refusal of a hook that runs in a private
 // user namespace (unshare -U, a sandbox tool): from there it cannot check the
 // root-owned runtime state, whose owners read as the overflow uid.
 const ManagedUserNamespaceReason = "enterprise_managed_user_namespace"
 
 const (
-	ManagedMountNamespaceReason        = "enterprise_managed_mount_namespace"
 	ManagedTracedProcessReason         = "enterprise_managed_traced_process"
 	ManagedProcessContextUnknownReason = "enterprise_managed_process_context_unverified"
 	ManagedPolicyViewReason            = "enterprise_managed_policy_view_unverified"
 )
 
-// IsManagedProcessContextReason accepts only the hook's fixed context and policy-view diagnostics,
-// never caller-supplied text, for the managed socket refusal audit.
+// IsManagedProcessContextReason accepts only the hook's fixed context
+// diagnostics, never caller-supplied text, for the managed socket refusal
+// audit.
 func IsManagedProcessContextReason(reason string) bool {
 	switch reason {
-	case ManagedUserNamespaceReason, ManagedMountNamespaceReason,
-		ManagedTracedProcessReason, ManagedProcessContextUnknownReason, ManagedPolicyViewReason:
+	case ManagedUserNamespaceReason, ManagedTracedProcessReason, ManagedProcessContextUnknownReason:
 		return true
 	default:
 		return false
@@ -3049,18 +3054,12 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 		// The setup is fine; the agent's process is the problem (GAP-0923).
 		cause, advice = "this agent runs in a private user namespace (for example one started with unshare or a sandbox tool), where DefenseClaw cannot check it or reach its hook socket",
 			"Start the agent from your normal login session; if this continues, contact your administrator."
-	case reason == ManagedMountNamespaceReason:
-		cause, advice = "this agent runs in a private mount namespace, where its view of managed machine policy may differ from the host's",
-			"Start the agent from your normal login session; if this continues, contact your administrator."
 	case reason == ManagedTracedProcessReason:
 		cause, advice = "this agent's hook is being traced, so another process may change the policy paths it reads",
 			"Start the agent without a tracer; if this continues, contact your administrator."
 	case reason == ManagedProcessContextUnknownReason:
 		cause, advice = "DefenseClaw cannot verify this agent's Linux process context and managed policy view",
 			"Start the agent from your normal login session; if this continues, contact your administrator."
-	case reason == ManagedPolicyViewReason:
-		cause, advice = "DefenseClaw cannot prove that this agent sees the administrator's effective managed policy",
-			"Ask your administrator to check the managed policy files and run enterprise verify."
 	case reason == managedHookSocketSELinuxDeniedReason:
 		cause, advice = "SELinux does not let your account reach the DefenseClaw gateway on this computer",
 			"Ask your administrator to run `enterprise linux repair`, which loads the DefenseClaw SELinux module that SELinux-confined accounts need."

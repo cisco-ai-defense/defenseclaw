@@ -5,8 +5,6 @@
 
 package enterprisepolicy
 
-import "github.com/defenseclaw/defenseclaw/internal/managed"
-
-func PolicyViewUserPins(Options, string) (map[string]managed.PolicyViewFilePin, error) {
-	return nil, nil
+func PolicyViewUserPins(Options, string) (map[string]string, []string, error) {
+	return nil, nil, nil
 }

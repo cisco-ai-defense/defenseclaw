@@ -206,18 +206,22 @@ agent never calls the hook, so its tool calls are outside your enforcement
 ([Residual risks](/docs/enterprise/plan/threat-model#residual-risks)). For
 an invoked machine-policy hook, DefenseClaw compares the content digest of
 the policy files it can read with the digest pinned in the administrator-owned
-runtime descriptor. A missing, changed or unreadable policy causes
-`enterprise_managed_policy_view_unverified` and a closed refusal on Linux and
-macOS. Linux also refuses a private user or mount namespace and a traced
-hook when it can observe them. If RHEL denies access to `/proc/1`, the hook
-uses the policy digest as its proof. This check cannot run if an agent omitted
-its managed hook before launch.
+runtime descriptor. When the view is missing, changed or unreadable, the hook
+does not refuse the call: it still sends it to the gateway, which inspects it
+under the managed policy, and it raises a `HIGH` runtime alert
+(`enterprise_managed_policy_view_unverified`, source `managed_hook`) in the
+audit log. Only a hook with no trusted runtime descriptor refuses. Linux also
+refuses a hook in a private user namespace, where it cannot verify the
+gateway's listener, and a traced hook. A private mount view alone (for
+example a `pam_namespace` login) is not refused; the digest decides. This
+check cannot run if an agent omitted its managed hook before launch.
 
 After an administrator or MDM changes a vendor machine-policy file or adds a
-drop-in, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --json`.
-The hook refuses calls until DefenseClaw verifies the current
-policy and publishes its new digest. Vendor policy paths are not watched by
-the apply unit; the daily verify timer reports drift but does not repair it.
+drop-in, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux reconcile --json`
+(or `ensure`). It pins the new view once DefenseClaw verifies it and names the
+connector in `changes`; until then, hooks keep enforcing and raise the alert.
+Vendor policy paths are not watched by the apply unit; the daily verify timer
+reports drift but does not repair it.
 
 DefenseClaw never writes host-wide kernel or sysctl settings. An
 administrator may apply optional hardening with their own host management

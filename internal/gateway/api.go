@@ -101,6 +101,9 @@ type APIServer struct {
 	hookCallerLimits hookCallerLimiter
 	// managedRefusalLimits bounds the managed refusal rows per account.
 	managedRefusalLimits managedRefusalLimiter
+	// managedAlertLimits bounds the managed hook policy-view alerts per
+	// account: a hook raises one on every call until the view is pinned.
+	managedAlertLimits managedRefusalLimiter
 	// copilotDedupe answers the second delivery of one Copilot tool call
 	// with the first delivery's verdict.
 	copilotDedupe copilotHookDedupe

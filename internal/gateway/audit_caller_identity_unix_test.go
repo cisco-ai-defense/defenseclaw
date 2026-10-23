@@ -14,6 +14,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -117,7 +118,7 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 	// A hook that refused an unsafe process context reports its fixed reason,
 	// so the refusal is audited like the unenrolled-account refusal above.
 	for _, reason := range []string{
-		hookexec.ManagedUserNamespaceReason, hookexec.ManagedMountNamespaceReason,
+		hookexec.ManagedUserNamespaceReason,
 		hookexec.ManagedTracedProcessReason, hookexec.ManagedProcessContextUnknownReason,
 	} {
 		report, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/inspect/tool", strings.NewReader("{}"))
@@ -133,6 +134,40 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 			return event.Action == string(audit.ActionAPIAuthFailure) && event.Structured["defenseclaw.admin.principal_ref"] == "uid:7101" &&
 				event.Structured["defenseclaw.admin.reason"] == reason && event.Connector == "claudecode"
 		})
+	}
+
+	// A hook that could not prove its policy view still sends its calls for
+	// inspection; its alert report is answered and recorded, never refused.
+	alert, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/inspect/tool", strings.NewReader("{}"))
+	alert.Header.Set("Content-Type", "application/json")
+	alert.Header.Set("X-DefenseClaw-Connector", "claudecode")
+	alert.Header.Set(hookexec.ClientAlertHeader, hookexec.ManagedPolicyViewReason)
+	if response, err := client.Do(alert); err != nil || response.StatusCode != http.StatusNoContent {
+		t.Fatalf("policy-view alert = %v %v", response, err)
+	} else {
+		_ = response.Body.Close()
+	}
+	alertRow := waitForAuditRow(t, store, "policy-view alert", func(event audit.Event) bool {
+		return event.Action == string(audit.ActionAlert)
+	})
+	if alertRow.Structured["defenseclaw.health.subsystem"] != "managed_hook" ||
+		alertRow.Structured["defenseclaw.schema.error_code"] != hookexec.ManagedPolicyViewReason || alertRow.Connector != "claudecode" || alertRow.Severity != "HIGH" ||
+		!strings.Contains(alertRow.Details, hookexec.ManagedPolicyViewReason) || !strings.Contains(alertRow.Details, "uid:7101") {
+		t.Fatalf("policy-view alert row = %+v", alertRow)
+	}
+	// The policy-view reason is no refusal reason any more.
+	stale, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/inspect/tool", strings.NewReader("{}"))
+	stale.Header.Set("Content-Type", "application/json")
+	stale.Header.Set("X-DefenseClaw-Connector", "claudecode")
+	stale.Header.Set(hookexec.ClientRefusalHeader, hookexec.ManagedPolicyViewReason)
+	if response, err := client.Do(stale); err != nil {
+		t.Fatal(err)
+	} else {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		_ = response.Body.Close()
+		if strings.Contains(string(body), hookexec.ManagedPolicyViewReason) {
+			t.Fatalf("a policy-view reason was still accepted as a hook refusal: %d %s", response.StatusCode, body)
+		}
 	}
 
 	// A foreign-hook guard denial recorded by the session exchange.

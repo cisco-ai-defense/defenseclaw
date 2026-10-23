@@ -6,7 +6,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -51,10 +50,13 @@ const (
 	standaloneRuntimeReasonHookSocketMissing = "enterprise_managed_hook_socket_missing"
 )
 
-// The hook inherits the agent's process context. A managed Linux hook checks
-// its user and mount namespaces against the host's and refuses a traced
-// process. This is an invocation check: an agent that never loads its managed
-// hook still has no invocation to check, which status reports separately.
+// The hook inherits the agent's process context. A managed Linux hook refuses
+// a private user namespace, where it can not verify the gateway's listener,
+// and a traced process. A private mount view is not refused on its own (a
+// pam_namespace login has one): the policy-view digest below is the proof of
+// what the agent sees. This is an invocation check: an agent that never loads
+// its managed hook still has no invocation to check, which status reports
+// separately.
 var standaloneLinuxHookContext = func() string {
 	return linuxManagedHookContextReason(os.Readlink, readLinuxHookContextFile)
 }
@@ -87,59 +89,16 @@ func linuxManagedHookContextReason(readlink func(string) (string, error), readFi
 	if len(fields) != 3 || fields[0] != "0" || fields[1] != "0" || fields[2] != "4294967295" {
 		return hookexec.ManagedUserNamespaceReason
 	}
-	for _, kind := range []struct{ name, reason, fallback string }{
-		{"user", hookexec.ManagedUserNamespaceReason, "uid_map"},
-		{"mnt", hookexec.ManagedMountNamespaceReason, "mountinfo"},
-	} {
-		self, selfErr := readlink("/proc/self/ns/" + kind.name)
-		host, hostErr := readlink("/proc/1/ns/" + kind.name)
-		if selfErr != nil || self == "" {
-			return hookexec.ManagedProcessContextUnknownReason
-		}
-		if hostErr != nil {
-			// SELinux on managed RHEL denies standard users readlink on
-			// /proc/1/ns, even in the host namespaces. Compare the proc
-			// views the same users can read. A private mount view differs;
-			// unprivileged private user namespaces cannot retain the full
-			// host uid map checked above.
-			selfView, selfErr := readFile("/proc/self/" + kind.fallback)
-			hostView, hostErr := readFile("/proc/1/" + kind.fallback)
-			if selfErr != nil {
-				return hookexec.ManagedProcessContextUnknownReason
-			}
-			if hostErr != nil {
-				// RHEL can deny /proc/1 even for a host-context user.
-				// The trusted descriptor's policy-content pin is the
-				// invocation proof when that comparison is unavailable.
-				continue
-			}
-			if !bytes.Equal(selfView, hostView) {
-				if kind.fallback != "mountinfo" {
-					return kind.reason
-				}
-				// Mounts can change between the two snapshots. A second
-				// bounded comparison avoids refusing a host-context call for
-				// that brief difference; a stable mismatch stays closed.
-				selfView, selfErr = readFile("/proc/self/mountinfo")
-				hostView, hostErr = readFile("/proc/1/mountinfo")
-				if hostErr != nil {
-					continue
-				}
-				if selfErr != nil {
-					return hookexec.ManagedProcessContextUnknownReason
-				}
-				if !bytes.Equal(selfView, hostView) {
-					return kind.reason
-				}
-			}
-			continue
-		}
-		if host == "" {
-			continue
-		}
-		if self != host {
-			return kind.reason
-		}
+	self, err := readlink("/proc/self/ns/user")
+	if err != nil || self == "" {
+		return hookexec.ManagedProcessContextUnknownReason
+	}
+	// SELinux on managed RHEL denies standard users readlink on /proc/1/ns,
+	// even in the host namespaces. An unprivileged private user namespace
+	// can not keep the full host uid map checked above, so that check
+	// stands alone then.
+	if host, err := readlink("/proc/1/ns/user"); err == nil && host != "" && host != self {
+		return hookexec.ManagedUserNamespaceReason
 	}
 	status, err := readFile("/proc/self/status")
 	if err != nil {
@@ -168,6 +127,17 @@ func linuxManagedHookContextReason(readlink func(string) (string, error), readFi
 // overflow uid), so the report carries only the connector and the reason;
 // it is best effort and bounded.
 var reportStandaloneHookRefusal = func(socket, connectorName, reason string) {
+	postStandaloneHookDiagnostic(socket, connectorName, hookexec.ClientRefusalHeader, reason)
+}
+
+// reportStandaloneHookAlert raises the gateway's policy-view alert for a call
+// this hook still sends for inspection (GAP-0922, GAP-0923). It is best
+// effort and bounded, like the refusal report.
+var reportStandaloneHookAlert = func(socket, connectorName, reason string) {
+	postStandaloneHookDiagnostic(socket, connectorName, hookexec.ClientAlertHeader, reason)
+}
+
+func postStandaloneHookDiagnostic(socket, connectorName, header, reason string) {
 	if strings.TrimSpace(socket) == "" {
 		return
 	}
@@ -183,7 +153,7 @@ var reportStandaloneHookRefusal = func(socket, connectorName, reason string) {
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-DefenseClaw-Connector", connectorName)
-	request.Header.Set(hookexec.ClientRefusalHeader, reason)
+	request.Header.Set(header, reason)
 	response, err := client.Do(request)
 	if err != nil {
 		return
@@ -213,7 +183,7 @@ var (
 		}
 		return account.Name, nil
 	}
-	standalonePolicyViewUser = func(goos, connector, account string, pin managed.PolicyViewFilePin) error {
+	standalonePolicyViewUser = func(goos, connector, account, pin string) error {
 		opts, ok := standaloneMachinePolicyOptions(goos)
 		if !ok {
 			return errors.New("standalone machine policy paths are unavailable")
@@ -230,6 +200,9 @@ var standaloneHookRuntime struct {
 	layout     managed.StandaloneLayout
 	descriptor *managed.RuntimeDescriptor
 	reason     string
+	// alert is the policy-view alert of a runtime that still enforces: the
+	// hook could not prove the agent sees the pinned managed policy.
+	alert string
 	// secureClientHost marks a macOS Secure Client host, whose
 	// --enterprise-managed failures keep their historical results.
 	secureClientHost bool
@@ -261,29 +234,21 @@ func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	if err == nil {
 		loaded, err = standaloneRuntimeDescriptorLoad(layout.DescriptorPath)
 	}
-	viewReason := ""
-	if err == nil && loaded != nil && loaded.HasMachinePolicyConnector(connectorName) {
-		expected := loaded.PolicyViewDigests[connectorName]
-		observed, digestErr := standalonePolicyViewDigest(standaloneHookGOOS, connectorName)
-		if expected == "" || digestErr != nil || observed != expected {
-			viewReason = hookexec.ManagedPolicyViewReason
-		}
-		if viewReason == "" && standaloneHookGOOS == "darwin" &&
-			(connectorName == enterprisepolicy.ConnectorCodex || connectorName == enterprisepolicy.ConnectorClaudeCode) {
-			account, accountErr := standaloneHookAccount()
-			if accountErr != nil || standalonePolicyViewUser(standaloneHookGOOS, connectorName, account,
-				loaded.PolicyViewUserSources[connectorName][account]) != nil {
-				viewReason = hookexec.ManagedPolicyViewReason
-			}
-		}
+	// The trusted descriptor is the managed policy this hook enforces. A view
+	// it can not prove (an administrator's edit not yet pinned, an MDM
+	// rewrite, a hidden or unreadable file, an older descriptor) raises an
+	// alert and the call is still inspected under that policy; only a hook
+	// with no trusted descriptor at all refuses.
+	alert := ""
+	if err == nil && loaded != nil && loaded.HasMachinePolicyConnector(connectorName) &&
+		!standalonePolicyViewProven(loaded, connectorName) {
+		alert = hookexec.ManagedPolicyViewReason
 	}
 	reason := ""
 	secureClientHost := false
 	switch {
 	case contextReason != "":
 		reason = contextReason
-	case viewReason != "":
-		reason = viewReason
 	case err == nil && loaded != nil && strings.TrimSpace(loaded.HookSocket) == "":
 		reason = standaloneRuntimeReasonHookSocketMissing
 	case err == nil:
@@ -306,12 +271,32 @@ func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	standaloneHookRuntime.layout = layout
 	standaloneHookRuntime.descriptor = loaded
 	standaloneHookRuntime.reason = reason
+	standaloneHookRuntime.alert = alert
 	standaloneHookRuntime.secureClientHost = secureClientHost
 	if reason != "" {
 		standaloneHookRuntime.descriptor = nil
+		standaloneHookRuntime.alert = ""
 	}
 	standaloneHookRuntime.Unlock()
 	return false
+}
+
+// standalonePolicyViewProven reports whether this hook reads the managed
+// policy the descriptor pinned, by content: the shared vendor sources and, on
+// macOS, only the invoking account's own managed preference.
+func standalonePolicyViewProven(descriptor *managed.RuntimeDescriptor, connectorName string) bool {
+	expected := descriptor.PolicyViewDigests[connectorName]
+	observed, err := standalonePolicyViewDigest(standaloneHookGOOS, connectorName)
+	if expected == "" || err != nil || observed != expected {
+		return false
+	}
+	if standaloneHookGOOS != "darwin" ||
+		connectorName != enterprisepolicy.ConnectorCodex && connectorName != enterprisepolicy.ConnectorClaudeCode {
+		return true
+	}
+	account, err := standaloneHookAccount()
+	return err == nil && standalonePolicyViewUser(standaloneHookGOOS, connectorName, account,
+		descriptor.PolicyViewUserSources[connectorName][account]) == nil
 }
 
 func enterpriseManagedHookRuntimeForceClosed() bool {
@@ -376,6 +361,7 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	layout := standaloneHookRuntime.layout
 	prepared := standaloneHookRuntime.prepared && standaloneHookRuntime.connector == connectorName
 	failed := standaloneHookRuntime.reason != ""
+	alert := standaloneHookRuntime.alert
 	secureClientHost := standaloneHookRuntime.secureClientHost
 	standaloneHookRuntime.Unlock()
 	if opts.ManagedRuntimeFailure != "" {
@@ -390,6 +376,9 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	matches := prepared && !failed
 	if !matches || descriptor == nil {
 		return
+	}
+	if alert != "" {
+		reportStandaloneHookAlert(descriptor.HookSocket, connectorName, alert)
 	}
 	opts.ManagedStandalone = true
 	opts.ManagedServiceUID = descriptor.ServiceUID
