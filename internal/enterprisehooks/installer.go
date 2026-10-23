@@ -241,6 +241,9 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 		ManagedHookBinary:      strings.TrimSpace(opts.ManagedHookBinary),
 	}
+	if runtime.GOOS == "darwin" && secureClientHookDelivery() {
+		setupOpts.HookExecutable = "/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway"
+	}
 	if standalonePerUserRepair(uid) {
 		// Install renders some hooks for the guardrail mode (Cursor's action
 		// command differs from its observe command). Without the mode here
@@ -296,6 +299,11 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				if err := verifyOwnedHooks(); err != nil {
 					return err
 				}
+			}
+			if path, driftErr := connector.ManagedPluginArtifactDrift(conn, setupOpts); driftErr != nil {
+				return fmt.Errorf("enterprise hooks: inspect connector %s plugin %s: %w", conn.Name(), path, driftErr)
+			} else if path != "" {
+				return fmt.Errorf("enterprise hooks: connector %s plugin differs from the current template: %s", conn.Name(), path)
 			}
 			// Match validateHookContract's mode selection so Verify does not
 			// load and re-hash the lock in bounded/managed mode on Unix
@@ -490,6 +498,9 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 		ManagedHookBinary:      strings.TrimSpace(opts.ManagedHookBinary),
 	}
+	if runtime.GOOS == "darwin" && secureClientHookDelivery() {
+		setupOpts.HookExecutable = "/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway"
+	}
 	requiresScopedHookToken := connector.RequiresScopedHookToken(conn)
 	if requiresScopedHookToken {
 		if !validEnterpriseScopedHookToken(setupOpts.APIToken) {
@@ -680,6 +691,11 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			}
 			if !present {
 				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", conn.Name(), ownedHookAbsentDetail(conn, setupOpts)))
+			}
+			if path, driftErr := connector.ManagedPluginArtifactDrift(conn, setupOpts); driftErr != nil {
+				return rollback(fmt.Errorf("enterprise hooks: inspect connector %s plugin %s: %w", conn.Name(), path, driftErr))
+			} else if path != "" {
+				return rollback(fmt.Errorf("enterprise hooks: connector %s plugin differs from the current template: %s", conn.Name(), path))
 			}
 			// See Verify for the rationale: keep Install's persistence
 			// mode consistent with validateHookContract's drift check.

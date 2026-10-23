@@ -27,11 +27,12 @@ const userScopedListenerProofRefusedReason = "user_scoped_listener_proof_refused
 // sends its per-user credential (connector.UserScopedListenerProof). The
 // request names a credential only by its key ID, so it is served before
 // bearer authentication: proving the listener is what lets the plugin send
-// its bearer. The answer is an HMAC under a credential the caller already
-// identified by its SHA-256, for a nonce the caller chose; it is never
-// accepted as a credential anywhere. A key ID that does not name a
-// protected user's hook credential for the named connector gets the same
-// 401 as any other authentication failure.
+// its bearer. The gateway verifies that the accepted TCP caller's SID on
+// Windows, or UID on Unix, belongs to the credential's account. This prevents
+// a second account from relaying a challenge to the real gateway on another
+// port. The answer is an HMAC under
+// the credential for a nonce the caller chose; it is never accepted as a
+// credential anywhere. An unbound key ID or caller gets a 401.
 func (a *APIServer) serveUserScopedListenerProof(w http.ResponseWriter, r *http.Request) {
 	refuse := func() {
 		a.emitHTTPAuthFailure(r.Context(), r, connector.UserScopedListenerProofPath,
@@ -45,14 +46,46 @@ func (a *APIServer) serveUserScopedListenerProof(w http.ResponseWriter, r *http.
 	scope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
 	keyID := r.Header.Get(connector.UserScopedListenerKeyIDHeader)
 	nonce := strings.TrimSpace(r.Header.Get(connector.UserScopedListenerNonceHeader))
-	credential, ok := a.userScopedCredentialStore().hookCredentialForKeyID(scope, keyID)
-	if !ok {
+	credential, identity, ok := a.userScopedCredentialStore().hookCredentialForKeyID(scope, keyID)
+	if !ok || !userScopedProofCallerMatches(r, identity) {
 		refuse()
 		return
 	}
 	proof, err := connector.UserScopedListenerProof(credential, scope, nonce)
 	if err != nil {
 		refuse()
+		return
+	}
+	w.Header().Set(connector.UserScopedListenerProofHeader, proof)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// serveRotationListenerProof is reachable only on the managed hook socket.
+// The socket's kernel credentials, checked here and in managedHookPeerAuth,
+// restrict it to the root lifecycle process that already holds the machine
+// key. It does not relax the TCP proof route's same-account caller binding.
+func (a *APIServer) serveRotationListenerProof(w http.ResponseWriter, r *http.Request) {
+	peer, ok := managedHookPeerFromContext(r.Context())
+	if !ok || peer.UID != 0 {
+		writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonGuardianOnly)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	scope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
+	keyID := r.Header.Get(connector.UserScopedListenerKeyIDHeader)
+	nonce := strings.TrimSpace(r.Header.Get(connector.UserScopedListenerNonceHeader))
+	credential, _, ok := a.userScopedCredentialStore().hookCredentialForKeyID(scope, keyID)
+	if !ok {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	proof, err := connector.UserScopedListenerProof(credential, scope, nonce)
+	if err != nil {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
 	w.Header().Set(connector.UserScopedListenerProofHeader, proof)

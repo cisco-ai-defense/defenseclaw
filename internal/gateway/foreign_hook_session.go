@@ -135,7 +135,7 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		_ = json.NewEncoder(w).Encode(decision)
 		return
 	}
-	if refusal, _ := writeFencedForeignHookAllow(w, decision, answerBy); refusal != "" {
+	if refusal := writeFencedForeignHookAllow(w, decision, answerBy); refusal != "" {
 		release()
 		unlock()
 		writeManagedHookRefusal(w, http.StatusServiceUnavailable, refusal)
@@ -168,38 +168,37 @@ var (
 // It returns a refusal reason, having written nothing, when the connection
 // cannot bound the write or answerBy has passed: the caller then refuses the
 // call instead of answering an allow that a removal no longer waits for.
-// delivered is false if a started write or flush failed. A write cut at the
-// deadline leaves the expired deadline in place, so the server's own
-// finishing writes fail at once too.
-func writeFencedForeignHookAllow(w http.ResponseWriter, decision enterprisepolicy.GuardDecision, answerBy time.Time) (refusal string, delivered bool) {
+// A write cut at the deadline leaves the expired deadline in place, so the
+// server's own finishing writes fail at once too.
+func writeFencedForeignHookAllow(w http.ResponseWriter, decision enterprisepolicy.GuardDecision, answerBy time.Time) string {
 	var body bytes.Buffer
 	if err := json.NewEncoder(&body).Encode(decision); err != nil {
-		return "foreign_hook_response_unbounded", false
+		return "foreign_hook_response_unbounded"
 	}
 	deadline := time.Now().Add(foreignHookFencedWriteTimeout)
 	if answerBy.Before(deadline) {
 		deadline = answerBy
 	}
 	if !time.Now().Before(deadline) {
-		return "foreign_hook_removal_fence_expired", false
+		return "foreign_hook_removal_fence_expired"
 	}
 	controller := http.NewResponseController(w)
 	if err := controller.SetWriteDeadline(deadline); err != nil {
-		return "foreign_hook_response_unbounded", false
+		return "foreign_hook_response_unbounded"
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", strconv.Itoa(body.Len()))
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(body.Bytes()); err != nil {
-		return "", false
+		return ""
 	}
 	if err := controller.Flush(); err != nil {
-		return "", false
+		return ""
 	}
 	// A keep-alive connection serves the caller's next request: clear the
 	// deadline only after the whole allow has reached it.
 	_ = controller.SetWriteDeadline(time.Time{})
-	return "", true
+	return ""
 }
 
 // foreignHookAuditReasonLimit bounds the reason an audit row repeats, and

@@ -19,6 +19,24 @@ import (
 // for a client connection that is already open. The Python CLI invokes this
 // before urllib3 writes headers or a body on that connection.
 func VerifyPerUserConnectedTuple(local, remote string) error {
+	client, server, err := parseConnectedLoopbackTuple(local, remote)
+	if err != nil {
+		return err
+	}
+	return verifyPerUserConnectedTuple(client, server)
+}
+
+// VerifyManagedConnectedTuple checks a Python CLI's already-connected socket
+// against the active protected gateway service before urllib3 writes a byte.
+func VerifyManagedConnectedTuple(local, remote, serviceName string) error {
+	client, server, err := parseConnectedLoopbackTuple(local, remote)
+	if err != nil {
+		return err
+	}
+	return verifyManagedConnectedTuple(client, server, serviceName)
+}
+
+func parseConnectedLoopbackTuple(local, remote string) (*net.TCPAddr, *net.TCPAddr, error) {
 	parse := func(raw string) (*net.TCPAddr, error) {
 		host, portText, err := net.SplitHostPort(raw)
 		if err != nil {
@@ -33,16 +51,16 @@ func VerifyPerUserConnectedTuple(local, remote string) error {
 	}
 	client, err := parse(local)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	server, err := parse(remote)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	if !client.IP.IsLoopback() || !server.IP.IsLoopback() {
-		return fmt.Errorf("connected gateway endpoint is not loopback")
+		return nil, nil, fmt.Errorf("connected gateway endpoint is not loopback")
 	}
-	return verifyPerUserConnectedTuple(client, server)
+	return client, server, nil
 }
 
 // connectedSocketNameMatches accepts lsof's optional protocol and state text
@@ -81,6 +99,25 @@ func NewPerUserGatewayHTTPClient(timeout time.Duration, apiAddr string) (*http.C
 // would leave a race when the gateway stops and another account binds its
 // port before the plugin opens a second connection.
 func PostPerUserHook(ctx context.Context, apiAddr, path string, headers map[string]string, body []byte) (PerUserHookReply, error) {
+	client, err := NewPerUserGatewayHTTPClient(30*time.Second, apiAddr)
+	if err != nil {
+		return PerUserHookReply{}, err
+	}
+	return postPluginHook(ctx, client, apiAddr, path, headers, body)
+}
+
+// PostManagedEnterprisePluginHook sends one plugin event through the service
+// peer transport. The connected listener is checked before net/http can write
+// its shared Secure Client bearer or any event bytes.
+func PostManagedEnterprisePluginHook(ctx context.Context, apiAddr, serviceName, path string, headers map[string]string, body []byte) (PerUserHookReply, error) {
+	client, err := NewManagedEnterpriseGatewayHTTPClient(30*time.Second, apiAddr, serviceName)
+	if err != nil {
+		return PerUserHookReply{}, err
+	}
+	return postPluginHook(ctx, client, apiAddr, path, headers, body)
+}
+
+func postPluginHook(ctx context.Context, client *http.Client, apiAddr, path string, headers map[string]string, body []byte) (PerUserHookReply, error) {
 	switch path {
 	case "/api/v1/amp/hook", "/api/v1/opencode/hook",
 		"/api/v1/codex/hook", "/api/v1/claude-code/hook",
@@ -94,10 +131,6 @@ func PostPerUserHook(ctx context.Context, apiAddr, path string, headers map[stri
 	}
 	if len(body) > 900*1024 {
 		return PerUserHookReply{}, fmt.Errorf("per-user plugin hook body is too large")
-	}
-	client, err := NewPerUserGatewayHTTPClient(30*time.Second, apiAddr)
-	if err != nil {
-		return PerUserHookReply{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+apiAddr+path, bytes.NewReader(body))
 	if err != nil {

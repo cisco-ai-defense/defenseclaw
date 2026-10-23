@@ -7,7 +7,7 @@ keywords:
   - Claude Code version floor
 ---
 
-Reference for the [Claude Code connector](/docs/connectors/claudecode). Claude Code talks to `api.anthropic.com` directly. DefenseClaw observes through [Anthropic's hooks](https://code.claude.com/docs/en/hooks). Managed hosts and OpenShell also use native OpenTelemetry. No proxy listener is involved.
+Reference for the [Claude Code connector](/docs/connectors/claudecode). Claude Code talks to `api.anthropic.com` directly. DefenseClaw observes host activity through [Anthropic's hooks](https://code.claude.com/docs/en/hooks). Only isolated OpenShell also uses native OpenTelemetry. No proxy listener is involved.
 
 ## Install surface
 
@@ -15,18 +15,18 @@ Reference for the [Claude Code connector](/docs/connectors/claudecode). Claude C
 
 | Platform | Status | Connector path |
 | --- | --- | --- |
-| macOS and Linux | **Supported** | Portable command hooks; native OpenTelemetry on managed hosts and in OpenShell. |
+| macOS and Linux | **Supported** | Portable command hooks; native OpenTelemetry only in isolated OpenShell. |
 | Native Windows x64 | **Supported** | Shell-free native executable hooks, using Claude Code's `command` plus `args` exec form. |
 
 On Windows, install and run Claude Code from PowerShell or CMD ([native setup](https://code.claude.com/docs/en/setup)). Git for Windows is recommended upstream when Claude should use its Bash tool, but it is optional: without it Claude uses its PowerShell tool. Git for Windows is not part of the DefenseClaw hook contract. WSL, Git Bash, Cygwin, MSYS, containers and virtual machines are outside the native connector path. Each hook entry runs through the system `cmd.exe`. If the launcher is missing, for example after antivirus quarantine, Claude Code blocks the prompt or tool call with one sentence that says to run the DefenseClaw installer again.
 
 ### Telemetry and proxies
 
-On per-user hosts, setup sets Claude Code telemetry and all OTLP exporters off, removes the DefenseClaw native endpoints and old `otelHeadersHelper`, and revokes the scoped token. Quit and reopen Claude Code after an upgrade so an existing process stops using its old exporter settings. Managed hosts use a scoped bearer for native logs and metrics; native traces and content-bearing telemetry gates stay off. Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/reference/observability/redaction).
+On every host install, setup sets Claude Code telemetry and all OTLP exporters off, removes earlier DefenseClaw native endpoints and `otelHeadersHelper`, and revokes the scoped token. Quit and reopen Claude Code after an upgrade so an existing process stops using its old exporter settings. Isolated OpenShell images retain native logs and metrics; native traces and content-bearing telemetry gates stay off. Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/reference/observability/redaction).
 
 <Flow
   direction="TB"
-  caption="Claude Code reaches the gateway through hooks. Managed hosts and OpenShell also use native OpenTelemetry for logs and metrics. Per-user hosts disable the native exporter."
+  caption="Claude Code reaches the gateway through hooks. Only isolated OpenShell uses native OpenTelemetry for logs and metrics."
 >
   <Node id="cc" kind="agent">Claude Code</Node>
   <Node id="hooks" kind="connector">{`DefenseClaw hook\nruns on each hook event`}</Node>
@@ -38,9 +38,9 @@ On per-user hosts, setup sets Claude Code telemetry and all OTLP exporters off, 
   <Edge from="otel" to="gateway" label="logs + metrics" />
 </Flow>
 
-**Behind an HTTP proxy.** Hooks reach the gateway on 127.0.0.1 and ignore `HTTP_PROXY` and `HTTPS_PROXY`. On managed hosts, set `NO_PROXY=127.0.0.1,localhost` (and `no_proxy`) in the shell that starts Claude Code if native OTLP appears in a proxy log. Per-user setup does not enable native OTLP.
+**Behind an HTTP proxy.** Host hooks reach the gateway on 127.0.0.1 and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Host setup does not enable native OTLP.
 
-**Another account on the gateway port.** Per-user hooks verify the listener before sending an event. Native exporters cannot make that check, so per-user setup disables them and removes their old credentials on Linux, macOS and Windows. `defenseclaw status` and `defenseclaw doctor` name a peer-held API port and suggest a free one. A Claude Code process started before the upgrade must be restarted to discard its old settings.
+**Another account on the gateway port.** Host hooks verify the listener before sending an event. Native exporters cannot make that check, so host setup disables them and removes their old credentials on Linux, macOS and Windows. `defenseclaw status` and `defenseclaw doctor` name a peer-held API port and suggest a free one. A Claude Code process started before the upgrade must be restarted to discard its old settings.
 
 ### Files
 
@@ -107,7 +107,7 @@ The machine-wide drop-in carries one hook contract for every account, not the ve
 | Hook script | `claude-code-hook.sh` |
 | Hook config paths | `~/.claude/settings.json` |
 | Response field | `claude_code_output` |
-| Native OTLP | managed hosts and OpenShell only |
+| Native OTLP | isolated OpenShell only; host upgrades remove old exporters |
 | W3C traceparent | yes |
 | Fail closed | yes |
 

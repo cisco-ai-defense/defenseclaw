@@ -24,23 +24,53 @@ type perUserHookInput struct {
 const maxPerUserHookInput = 6 << 20
 
 func postPerUserPluginHook(ctx context.Context, apiAddr string, source io.Reader, output io.Writer, curlOutput bool) error {
-	input, err := io.ReadAll(io.LimitReader(source, maxPerUserHookInput+1))
+	request, err := readPluginHookInput(source)
 	if err != nil {
 		return err
-	}
-	if len(input) > maxPerUserHookInput {
-		return fmt.Errorf("per-user plugin hook input is too large")
-	}
-	var request perUserHookInput
-	if err := json.Unmarshal(input, &request); err != nil {
-		return fmt.Errorf("decode per-user plugin hook input: %w", err)
 	}
 	response, err := hookexec.PostPerUserHook(ctx, apiAddr, request.Path, request.Headers, []byte(request.Body))
 	if err != nil {
 		return err
 	}
+	return writePluginHookReply(output, response, curlOutput)
+}
+
+// postSecureClientPluginHook uses the protected gateway service identity,
+// never the account-wide bearer, to decide whether it may send that bearer.
+func postSecureClientPluginHook(ctx context.Context, apiAddr string, source io.Reader, output io.Writer) error {
+	if !secureClientHost() {
+		return fmt.Errorf("secure client gateway service peer cannot be verified on this host")
+	}
+	request, err := readPluginHookInput(source)
+	if err != nil {
+		return err
+	}
+	response, err := hookexec.PostManagedEnterprisePluginHook(ctx, apiAddr, managedServiceName(true),
+		request.Path, request.Headers, []byte(request.Body))
+	if err != nil {
+		return err
+	}
+	return writePluginHookReply(output, response, false)
+}
+
+func readPluginHookInput(source io.Reader) (perUserHookInput, error) {
+	input, err := io.ReadAll(io.LimitReader(source, maxPerUserHookInput+1))
+	if err != nil {
+		return perUserHookInput{}, err
+	}
+	if len(input) > maxPerUserHookInput {
+		return perUserHookInput{}, fmt.Errorf("plugin hook input is too large")
+	}
+	var request perUserHookInput
+	if err := json.Unmarshal(input, &request); err != nil {
+		return perUserHookInput{}, fmt.Errorf("decode plugin hook input: %w", err)
+	}
+	return request, nil
+}
+
+func writePluginHookReply(output io.Writer, response hookexec.PerUserHookReply, curlOutput bool) error {
 	if curlOutput {
-		_, err = fmt.Fprintf(output, "%s\n%d", response.Body, response.Status)
+		_, err := fmt.Fprintf(output, "%s\n%d", response.Body, response.Status)
 		return err
 	}
 	return json.NewEncoder(output).Encode(response)
@@ -50,6 +80,7 @@ func init() {
 	var apiAddr string
 	var maxTime int
 	var curlOutput bool
+	var secureClientService bool
 	cmd := &cobra.Command{
 		Use:         "hook-post",
 		Hidden:      true,
@@ -61,27 +92,38 @@ func init() {
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), time.Duration(maxTime)*time.Second)
 			defer cancel()
+			if secureClientService {
+				if curlOutput {
+					return fmt.Errorf("secure client plugin post does not support curl output")
+				}
+				return postSecureClientPluginHook(ctx, apiAddr, os.Stdin, cmd.OutOrStdout())
+			}
 			return postPerUserPluginHook(ctx, apiAddr, os.Stdin, cmd.OutOrStdout(), curlOutput)
 		},
 	}
 	cmd.Flags().StringVar(&apiAddr, "api-addr", "", "gateway loopback host:port")
 	cmd.Flags().IntVar(&maxTime, "max-time", 10, "maximum request time in seconds")
 	cmd.Flags().BoolVar(&curlOutput, "curl-output", false, "print response body and trailing HTTP code")
+	cmd.Flags().BoolVar(&secureClientService, "secure-client-service", false, "verify the Secure Client gateway service peer")
 	_ = cmd.MarkFlagRequired("api-addr")
 	rootCmd.AddCommand(cmd)
 
-	var local, remote string
+	var local, remote, managedService string
 	verify := &cobra.Command{
 		Use:         "hook-verify-connected",
 		Hidden:      true,
 		Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		Args:        cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
+			if managedService != "" {
+				return hookexec.VerifyManagedConnectedTuple(local, remote, managedService)
+			}
 			return hookexec.VerifyPerUserConnectedTuple(local, remote)
 		},
 	}
 	verify.Flags().StringVar(&local, "local", "", "connected client endpoint")
 	verify.Flags().StringVar(&remote, "remote", "", "connected gateway endpoint")
+	verify.Flags().StringVar(&managedService, "managed-service", "", "protected gateway service identity")
 	_ = verify.MarkFlagRequired("local")
 	_ = verify.MarkFlagRequired("remote")
 	rootCmd.AddCommand(verify)

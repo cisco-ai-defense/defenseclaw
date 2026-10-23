@@ -34,6 +34,7 @@ async function runScenario({
   response = { action: "allow", mode, would_block: false },
   failure,
   expectBlocked = false,
+  expectRequest = true,
   verify,
 }) {
   const requests = [];
@@ -82,6 +83,10 @@ async function runScenario({
   if (blockedError) assert.match(blockedError.message, /DefenseClaw/);
 
   const request = requests.find(({ payload }) => payload.hook_event_name === "tool.execute.before");
+  if (expectRequest === false) {
+    assert.equal(request, undefined, `${name}: unproved listener received a tool call`);
+    return;
+  }
   assert.ok(request, `${name}: authenticated gateway call was not made`);
   assert.equal(request.url, "http://127.0.0.1:18970/api/v1/opencode/hook");
   assert.equal(request.init.headers.Authorization, "Bearer " + "a".repeat(64));
@@ -192,6 +197,8 @@ try {
       name: "removed-managed-plugin-empty-foreign-check",
       pluginPath: removedManagedPluginPath,
       removePluginAfterImport: true,
+      expectBlocked: true,
+      expectRequest: false,
     });
   }
 } finally {

@@ -807,7 +807,7 @@ func TestClaudeCode_ComponentAndWatchTargetsIncludeEffectiveAutoMemory(t *testin
 }
 
 func TestClaudeCode_ContentTelemetryGatesAreExplicitlyOffAndManaged(t *testing.T) {
-	spec := NewClaudeCodeConnector().HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970", ManagedEnterprise: true}).NativeOTLP
+	spec := NewClaudeCodeConnector().HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970", ManagedEnterprise: true, sandboxNativeOTLP: true}).NativeOTLP
 	if spec == nil {
 		t.Fatal("Claude Code native OTLP specification is missing")
 	}
@@ -4315,6 +4315,7 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 		APIAddr:           "127.0.0.1:18970",
 		APIToken:          "test-token-codex-otel",
 		ManagedEnterprise: true,
+		sandboxNativeOTLP: true,
 	}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
@@ -4442,6 +4443,7 @@ log_user_prompt = false
 		APIAddr:           "127.0.0.1:18970",
 		APIToken:          "test-token-codex-raw",
 		ManagedEnterprise: true,
+		sandboxNativeOTLP: true,
 	}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
@@ -6006,7 +6008,7 @@ func TestCodex_TeardownKeepsScopedOTLPTokenWhenConfigCleanupFails(t *testing.T) 
 	defer func() { CodexConfigPathOverride = "" }()
 
 	conn := NewCodexConnector()
-	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-token", ManagedEnterprise: true}
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-token", ManagedEnterprise: true, sandboxNativeOTLP: true}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -8248,6 +8250,7 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 		APIAddr:           "127.0.0.1:18970",
 		APIToken:          "test-token-claude-otel",
 		ManagedEnterprise: true,
+		sandboxNativeOTLP: true,
 	}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
@@ -8326,24 +8329,6 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if _, helper := settings[claudeCodeOTLPHeadersHelperKey]; helper == staticBearer {
 		t.Errorf("otelHeadersHelper present = %v, want %v", helper, !staticBearer)
 	}
-	probes, err := LoadClaudeCodeNativeOTLPProbes()
-	if err != nil {
-		t.Fatalf("LoadClaudeCodeNativeOTLPProbes: %v", err)
-	}
-	if len(probes) != 2 {
-		t.Fatalf("Claude native OTLP probes = %d, want logs and metrics", len(probes))
-	}
-	for _, probe := range probes {
-		if probe.Headers.Get("Authorization") != "Bearer "+scoped {
-			t.Fatalf("Claude %s probe did not preserve the literal scoped bearer", probe.Signal)
-		}
-		if probe.Headers.Get("X-DefenseClaw-Source") != "claudecode" {
-			t.Fatalf("Claude %s probe source = %q", probe.Signal, probe.Headers.Get("X-DefenseClaw-Source"))
-		}
-		if !strings.HasSuffix(probe.Endpoint, "/v1/"+string(probe.Signal)) {
-			t.Fatalf("Claude %s probe endpoint does not select its signal", probe.Signal)
-		}
-	}
 	if env["OTEL_SERVICE_NAME"] != "claudecode" {
 		t.Errorf("OTEL_SERVICE_NAME = %v, want \"claudecode\"", env["OTEL_SERVICE_NAME"])
 	}
@@ -8384,6 +8369,7 @@ func TestApplyClaudeCodeManagedOtelEnvMigratesPercentEncodedNativeOTLPBearer(t *
 		APIAddr:           "127.0.0.1:18970",
 		OTLPPathToken:     scopedToken,
 		ManagedEnterprise: true,
+		sandboxNativeOTLP: true,
 		// The static bearer contract (Windows and managed installs).
 		GOOS: "windows",
 	}
@@ -8410,9 +8396,6 @@ func TestApplyClaudeCodeManagedOtelEnvMigratesPercentEncodedNativeOTLPBearer(t *
 		if strings.Contains(value, "Bearer%20") || !strings.Contains(value, "authorization=Bearer "+scopedToken) {
 			t.Errorf("%s was not migrated to Claude's literal Authorization contract", key)
 		}
-	}
-	if _, err := LoadClaudeCodeNativeOTLPProbes(); err != nil {
-		t.Fatalf("migrated Claude native OTLP contract is not probeable: %v", err)
 	}
 }
 
@@ -8586,6 +8569,7 @@ func TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv(t *
 		APIToken:          "old-api-token",
 		OTLPPathToken:     strings.Repeat("a", 64),
 		ManagedEnterprise: true,
+		sandboxNativeOTLP: true,
 	}
 	oldManaged := buildClaudeCodeOtelEnv(oldOpts)
 	oldDefenseClawHeaders := "x-defenseclaw-client=claudecode-otel%2F0.9," +
@@ -8616,6 +8600,7 @@ func TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv(t *
 	// pristine, then writes a new connector-scoped endpoint over it.
 	newOpts := oldOpts
 	newOpts.ManagedEnterprise = false
+	newOpts.sandboxNativeOTLP = false
 	newOpts.APIToken = "new-api-token"
 	newOpts.OTLPPathToken = strings.Repeat("b", 64)
 	c := NewClaudeCodeConnector()
@@ -8793,6 +8778,7 @@ func TestClaudeCode_TeardownWithoutBackup_RemovesManagedHooksAndOtel(t *testing.
 	staleOpts := opts
 	staleOpts.OTLPPathToken = strings.Repeat("b", 64)
 	staleOpts.ManagedEnterprise = true
+	staleOpts.sandboxNativeOTLP = true
 	staleEnv := buildClaudeCodeOtelEnv(staleOpts)
 	for _, key := range []string{
 		"OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -8858,6 +8844,7 @@ func TestClaudeCode_VerifyCleanChecksManagedEnvWithoutHooks(t *testing.T) {
 	}
 	managedOpts := opts
 	managedOpts.ManagedEnterprise = true
+	managedOpts.sandboxNativeOTLP = true
 	managed := buildClaudeCodeOtelEnv(managedOpts)
 	settings := map[string]interface{}{
 		"env": map[string]interface{}{
@@ -9163,6 +9150,7 @@ func TestClaudeCode_Teardown_PreservesManagedEnvChangedAfterSetup(t *testing.T) 
 		APIAddr:           "127.0.0.1:18970",
 		APIToken:          "test-token",
 		ManagedEnterprise: true,
+		sandboxNativeOTLP: true,
 	}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
@@ -9380,6 +9368,7 @@ func TestClaudeCode_VerifyCleanChecksEveryManagedEnvKeyWithoutValidHooks(t *test
 		OTLPPathToken:     strings.Repeat("a", 64),
 		HookFailMode:      "closed",
 		ManagedEnterprise: true,
+		sandboxNativeOTLP: true,
 	}
 	managed := buildClaudeCodeOtelEnv(opts)
 	if len(managed) != len(claudeCodeOtelEnvKeys)-1 {

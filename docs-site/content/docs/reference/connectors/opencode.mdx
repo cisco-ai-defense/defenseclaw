@@ -7,7 +7,7 @@ keywords:
   - OpenCode inventory
 ---
 
-Reference for the [OpenCode connector](/docs/connectors/opencode). OpenCode has no command-hook config surface. It [auto-loads JavaScript and TypeScript plugins](https://opencode.ai/docs/plugins/) from its user plugin directory at startup. DefenseClaw installs one dependency-free bridge plugin, `defenseclaw.js`, there. Its `tool.execute.before` hook forwards every tool call to the local gateway and throws when the verdict is a block. That awaited, thrown-error path is the authoritative enforcement boundary. OpenCode talks to its configured model provider directly, and there is no `opencode.json` edit or shell shim. The bridge uses the runtime's global `fetch`, so it needs no npm dependencies and never triggers a `bun install`.
+Reference for the [OpenCode connector](/docs/connectors/opencode). OpenCode has no command-hook config surface. It [auto-loads JavaScript and TypeScript plugins](https://opencode.ai/docs/plugins/) from its user plugin directory at startup. DefenseClaw installs one dependency-free bridge plugin, `defenseclaw.js`, there. Its `tool.execute.before` hook forwards every tool call to the local gateway and throws when the verdict is a block. That awaited, thrown-error path is the authoritative enforcement boundary. OpenCode talks to its configured model provider directly, and there is no `opencode.json` edit or shell shim. The per-user bridge invokes the account-owned DefenseClaw native helper, which checks the connected listener before sending any bearer or event. The bridge needs no npm dependencies and never triggers a `bun install`.
 
 ## Install surface
 
@@ -20,7 +20,7 @@ Reference for the [OpenCode connector](/docs/connectors/opencode). OpenCode has 
 
 ### The bridge plugin
 
-The bridge resolves the gateway verdict before throwing, so a fail-open transport error never becomes an accidental block.
+The bridge resolves the gateway verdict before throwing. On per-user hosts, a failed peer check blocks before any credential or tool event leaves the account.
 
 ```js
 "tool.execute.before": async (input, output) => {
@@ -30,7 +30,7 @@ The bridge resolves the gateway verdict before throwing, so a fail-open transpor
 }
 ```
 
-The plugin file carries the connector-scoped token, address and fail mode. DefenseClaw sets mode `0600` on Unix and restricts the Windows DACL to the current user, Administrators and SYSTEM. That stops other standard users, not the owning user or administrators. Doctor detects digest drift, and setup repair restores the packaged registration. Reconciliation publishes the custody receipt before the atomic plugin replacement, then the contract lock and active runtime state, and reports success only after re-reading the plugin, receipt, scoped token, lock and active marker as one current registration. A failure rolls back what it published. This proves registration consistency, not that a client loaded it.
+The plugin file carries the connector-scoped token sidecar path, address and installed fail mode. DefenseClaw sets mode `0600` on Unix and restricts the Windows DACL to the current user, Administrators and SYSTEM. That stops other standard users, not the owning user or administrators. Doctor detects digest drift, and setup repair restores the packaged registration. Reconciliation publishes the custody receipt before the atomic plugin replacement, then the contract lock and active runtime state, and reports success only after re-reading the plugin, receipt, scoped token, lock and active marker as one current registration. A failure rolls back what it published. This proves registration consistency, not that a client loaded it.
 
 The plugin emits a secret-free `defenseclaw.plugin.loaded` heartbeat from its awaited config hook. When the digest is current but the gateway has no heartbeat, doctor shows a skip row, which is normal while OpenCode is closed. Open OpenCode and run `defenseclaw doctor` again. If the row still shows none, OpenCode may be running with `--pure`. A stale heartbeat is a warning. File presence alone is not runtime health.
 
@@ -121,7 +121,7 @@ OpenCode 1.18.10 to 1.18.33 also expose `permission.ask`, `chat.params`, `chat.h
 
 Fail closed: yes, for the awaited `tool.execute.before` only. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
 
-When the gateway is unreachable the bridge honors the fail mode: `FAIL_MODE=closed` throws and blocks, `FAIL_MODE=open` allows. This applies only to the awaited `tool.execute.before`. The bridge also awaits `tool.execute.after` so the result is attributed before the next call, but ignores that delivery's verdict and transport result. Generic lifecycle delivery is not awaited.
+A per-user host bridge blocks `tool.execute.before` when the gateway is unreachable or its listener cannot be verified, even if an older sidecar still says `open`. On managed hosts, an administrator may select open for a classified outage only; an unverified listener never receives the bearer or payload. Secure Client uses an administrator-owned native helper to verify the connected gateway service and blocks an unverified peer even when its outage mode is open. The bridge also awaits `tool.execute.after` for attribution but cannot undo a completed call. Generic lifecycle delivery is not awaited.
 
 ## Limits
 

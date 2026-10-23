@@ -97,7 +97,8 @@ def current_user_guardrail_profile(cfg: Any, *, connector: str = "", timeout: fl
             unchecked: list[bool] = []
             overrides = (
                 _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""), unchecked)
-                if not connector else []
+                if not connector
+                else []
             )
         finally:
             client.close()
@@ -257,7 +258,11 @@ def current_profile_account(*, secure_client: bool = False) -> tuple[str, str]:
 
 
 def _scoped_profile_overrides(
-    cfg: Any, client: Any, user: str, profile: str, unchecked: list[bool] | None = None,
+    cfg: Any,
+    client: Any,
+    user: str,
+    profile: str,
+    unchecked: list[bool] | None = None,
 ) -> list[dict[str, str]]:
     """Connector/agent subjects whose resolved profile differs from *profile*.
 
@@ -288,7 +293,8 @@ def _scoped_profile_overrides(
     for assignment in scoped:
         configured = getattr(cfg.guardrail, "connectors", {}) or {}
         connectors = [
-            normalized for name in assignment.match.connectors
+            normalized
+            for name in assignment.match.connectors
             if (normalized := normalize(name)) in KNOWN_CONNECTORS or normalized in configured
         ]
         if assignment.match.connectors and not connectors:
@@ -580,9 +586,7 @@ def foreign_loopback_listener(host: str, port: int) -> str:
 
 def _unproven_per_user_gateway_target(host: str, port: int) -> str:
     """Return why a token-bearing CLI target is not proven to be this gateway."""
-    from defenseclaw.upgrade_shim import _windows_managed_profile, managed_descriptor
-
-    if managed_descriptor() or (os.name == "nt" and _windows_managed_profile()):
+    if _managed_connected_verifier_spec() is not None:
         return ""
     try:
         from defenseclaw import config
@@ -623,9 +627,7 @@ def _windows_foreign_listener(host: str, port: int) -> str:
     return f"PID {listener.pid}, a process of another account"
 
 
-def _foreign_loopback_listener_uncached(
-    port: int, proc_net: str = "/proc/net", *, host: str = "127.0.0.1"
-) -> str:
+def _foreign_loopback_listener_uncached(port: int, proc_net: str = "/proc/net", *, host: str = "127.0.0.1") -> str:
     import ipaddress
 
     target_host = host.strip("[]")
@@ -699,35 +701,23 @@ def _foreign_loopback_listener_uncached(
 
 def _verify_connected_gateway_socket(sock: socket.socket, host: str, port: int) -> None:
     """Prove the accepted server socket before urllib3 writes request bytes."""
-    from defenseclaw.upgrade_shim import _windows_managed_profile, managed_descriptor
-
-    if managed_descriptor() or (os.name == "nt" and _windows_managed_profile()):
-        return
     remote = sock.getpeername()
     local = sock.getsockname()
     if remote[1] != port or (host.strip("[]") != "localhost" and remote[0] != host.strip("[]")):
         raise GatewayListenerNotOwnedError("connected gateway endpoint changed")
-    binary = canonical_install_path()
+    managed = _managed_connected_verifier_spec()
+    binary = managed[0] if managed else canonical_install_path()
     try:
-        for path in (
-            os.path.dirname(os.path.dirname(os.path.dirname(binary))),
-            os.path.dirname(os.path.dirname(binary)),
-            os.path.dirname(binary),
-            binary,
-        ):
-            info = os.lstat(path)
-            if stat.S_ISLNK(info.st_mode) or (os.name != "nt" and (
-                info.st_uid != os.geteuid() or info.st_mode & 0o022
-            )):
-                raise OSError("untrusted gateway helper path")
-        if os.name != "nt" and not os.access(binary, os.X_OK):
-            raise OSError("gateway helper is not executable")
+        _trusted_connected_verifier_binary(binary, managed=managed is not None)
 
         def format_addr(endpoint) -> str:
             return f"{_url_host(endpoint[0])}:{endpoint[1]}"
 
+        argv = [binary, "hook-verify-connected", "--local", format_addr(local), "--remote", format_addr(remote)]
+        if managed:
+            argv.extend(["--managed-service", managed[1]])
         result = subprocess.run(
-            [binary, "hook-verify-connected", "--local", format_addr(local), "--remote", format_addr(remote)],
+            argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -738,6 +728,44 @@ def _verify_connected_gateway_socket(sock: socket.socket, host: str, port: int) 
         raise GatewayListenerNotOwnedError("connected gateway owner could not be verified") from exc
     if result.returncode != 0:
         raise GatewayListenerNotOwnedError("connected gateway socket belongs to another account or is unverified")
+
+
+def _managed_connected_verifier_spec() -> tuple[str, str] | None:
+    """Select only the fixed package helper and protected service identity."""
+    from defenseclaw.upgrade_shim import _windows_managed_profile, managed_descriptor
+
+    if os.name == "nt" and _windows_managed_profile():
+        return (packaged_windows_gateway_path() or "", "DefenseClawGateway")
+    descriptor = managed_descriptor()
+    if descriptor:
+        binary = _MANAGED_GATEWAY_BINARIES.get(descriptor, "")
+        service = "defenseclaw-gateway.service" if sys.platform.startswith("linux") else "com.cisco.defenseclaw.gateway"
+        return binary, service
+    if sys.platform == "darwin" and os.path.lexists("/opt/cisco/secureclient/defenseclaw"):
+        return "/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway", "com.cisco.secureclient.defenseclaw"
+    return None
+
+
+def _trusted_connected_verifier_binary(binary: str, *, managed: bool) -> None:
+    if not binary or not os.path.isabs(binary):
+        raise OSError("gateway verifier binary is unavailable")
+    path = binary
+    parent_count = 0
+    while True:
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or (
+            os.name != "nt" and (info.st_uid != (0 if managed else os.geteuid()) or info.st_mode & 0o022)
+        ):
+            raise OSError("untrusted gateway helper path")
+        if path == binary and not stat.S_ISREG(info.st_mode):
+            raise OSError("gateway helper is not a regular file")
+        if path == binary and os.name != "nt" and not os.access(binary, os.X_OK):
+            raise OSError("gateway helper is not executable")
+        parent = os.path.dirname(path)
+        parent_count += 1
+        if parent == path or (not managed and parent_count >= 4):
+            break
+        path = parent
 
 
 class _GatewayVerifiedConnection(HTTPConnection):
@@ -1054,13 +1082,16 @@ class OrchestratorClient:
         return resp.json()
 
     def agent_identities(
-        self, *, user: str | None = None, connector: str | None = None, cursor: str = "", limit: int = 0,
+        self,
+        *,
+        user: str | None = None,
+        connector: str | None = None,
+        cursor: str = "",
+        limit: int = 0,
     ) -> dict[str, Any]:
         """Fetch one page of agent identities (``GET /api/v1/agents/identities``),
         optionally narrowed to one user or one connector."""
-        params = {
-            key: value for key, value in (("user", user), ("connector", connector), ("cursor", cursor)) if value
-        }
+        params = {key: value for key, value in (("user", user), ("connector", connector), ("cursor", cursor)) if value}
         if limit > 0:
             params["limit"] = str(limit)
         resp = self._session.get(
@@ -1073,7 +1104,12 @@ class OrchestratorClient:
         return resp.json()
 
     def agent_identities_all(
-        self, *, user: str | None = None, connector: str | None = None, limit: int = 0, max_pages: int = 64,
+        self,
+        *,
+        user: str | None = None,
+        connector: str | None = None,
+        limit: int = 0,
+        max_pages: int = 64,
     ) -> dict[str, Any]:
         """Fetch every page of agent identities, or the ``limit`` most recently
         seen, into one payload.
@@ -1464,9 +1500,7 @@ class OrchestratorClient:
         )
         return self._sandbox_object(result, "review")
 
-    def accept_sandbox_changes(
-        self, name: str, *, snapshot_created_at: str = "", session: int = 0
-    ) -> dict[str, Any]:
+    def accept_sandbox_changes(self, name: str, *, snapshot_created_at: str = "", session: int = 0) -> dict[str, Any]:
         """Record that the user kept the changes on top of a stopped mounted sandbox's undo point.
 
         Its next start takes a new undo point, whoever starts it.

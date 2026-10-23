@@ -102,8 +102,7 @@ def _write_bridge_publication(
                     connector: {
                         "connector": connector,
                         "hook_script_digests": {
-                            digest_path.name: "sha256:"
-                            + hashlib.sha256(digest_path.read_bytes()).hexdigest(),
+                            digest_path.name: "sha256:" + hashlib.sha256(digest_path.read_bytes()).hexdigest(),
                         },
                         "locations": {
                             "hook_config_paths": hook_config_paths,
@@ -607,6 +606,42 @@ def test_bridge_template_fingerprints_match_gateway_sources(
     digests.add(hashlib.sha256((hooks / pinned).read_bytes()).hexdigest())
 
     assert digests == self_identity._BRIDGE_TEMPLATE_DIGESTS[connector]
+
+
+@pytest.mark.parametrize("connector", ("amp", "opencode"))
+def test_secure_client_bridge_fingerprint_includes_native_verifier(
+    connector: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hooks = Path(__file__).resolve().parents[2] / "internal/gateway/connector/hooks"
+    suffix = "ts" if connector == "amp" else "js"
+    template = (hooks / f"{connector}-plugin-secure-client.{suffix}").read_text(encoding="utf-8")
+    data_dir = tmp_path / "home/.defenseclaw"
+    binary = tmp_path / "administrator-owned-gateway"
+    binary.write_text("native verifier", encoding="ascii")
+    binary.chmod(0o700)
+    token = data_dir / "hooks" / f".hook-{connector}.token"
+    rendered = template
+    for field, value in {
+        "APIAddr": "127.0.0.1:18970",
+        "TokenFileJS": str(token),
+        "NativePostBinaryJS": str(binary),
+        "FailMode": "closed",
+        "HookSocketJS": "",
+        "ServiceUID": "0",
+        "ForeignHookGuardJS": "",
+        "InstallMarkerJS": "",
+    }.items():
+        rendered = rendered.replace("{{." + field + "}}", value)
+    assert "{{." not in rendered
+    original = self_identity._valid_bridge_managed_path
+    monkeypatch.setattr(
+        self_identity,
+        "_valid_bridge_managed_path",
+        lambda kind, value: bool(value) if kind == "native" else original(kind, value),
+    )
+    assert self_identity._matches_immutable_bridge_template(connector, rendered.encode(), data_dir=str(data_dir))
+    tampered = rendered.replace("--secure-client-service", "--unverified-service", 1)
+    assert not self_identity._matches_immutable_bridge_template(connector, tampered.encode(), data_dir=str(data_dir))
 
 
 @pytest.mark.parametrize(

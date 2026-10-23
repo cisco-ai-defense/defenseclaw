@@ -44,12 +44,22 @@ func renderListenerProofPlugin(t *testing.T, asset, addr, tokenPath string) []by
 		"{{.ForeignHookGuardJS}}", "",
 		"{{.InstallMarkerJS}}", "",
 		"{{.ListenerProofJS}}", "1",
-		"const DC_PER_USER_NATIVE_POST = \"1\"", "const DC_PER_USER_NATIVE_POST = \"\"",
-		"const DC_PER_USER_NATIVE_POST: string = \"1\"", "const DC_PER_USER_NATIVE_POST: string = \"\"",
 	).Replace(string(body))
 	if strings.Contains(rendered, "{{.") {
 		t.Fatalf("%s rendered with a placeholder left", asset)
 	}
+	// These bridge-host goldens are rendered for a per-user install. The
+	// listener proof is the managed TCP profile, which leaves native post off.
+	perUserMarker := `const DC_PER_USER_NATIVE_POST = "1";`
+	managedMarker := `const DC_PER_USER_NATIVE_POST = "";`
+	if strings.HasSuffix(asset, ".ts") {
+		perUserMarker = `const DC_PER_USER_NATIVE_POST: string = "1"`
+		managedMarker = `const DC_PER_USER_NATIVE_POST: string = ""`
+	}
+	if !strings.Contains(rendered, perUserMarker) {
+		t.Fatalf("%s has no per-user transport marker", asset)
+	}
+	rendered = strings.Replace(rendered, perUserMarker, managedMarker, 1)
 	return []byte(rendered)
 }
 

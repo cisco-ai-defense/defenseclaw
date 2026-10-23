@@ -34,7 +34,7 @@ func withStandaloneHookRuntime(
 	oldGOOS, oldLoad, oldPolicy, oldSC := standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir
 	oldUserNamespace, oldReport := standaloneHookInUserNamespace, reportStandaloneHookRefusal
 	standaloneHookInUserNamespace = func() bool { return false }
-	reportStandaloneHookRefusal = func(string, string, string) {}
+	reportStandaloneHookRefusal = func(string, int, string, string) {}
 	standaloneHookGOOS = goos
 	standaloneRuntimeDescriptorLoad = load
 	standaloneMachinePolicyOptions = policy
@@ -201,7 +201,7 @@ func TestStandaloneHookRuntimeFailsClosed(t *testing.T) {
 			withStandaloneHookRuntime(t, tc.goos, tc.load, noMarkers, "/nonexistent-secure-client")
 			reported := ""
 			standaloneHookInUserNamespace = func() bool { return tc.userns }
-			reportStandaloneHookRefusal = func(_, connectorName, reason string) { reported = connectorName + " " + reason }
+			reportStandaloneHookRefusal = func(_ string, _ int, connectorName, reason string) { reported = connectorName + " " + reason }
 			if prepareEnterpriseManagedHookRuntime("claudecode") {
 				t.Fatal("a failed standalone runtime is never a no-op")
 			}

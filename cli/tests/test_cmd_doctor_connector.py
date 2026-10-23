@@ -459,6 +459,15 @@ class TestCheckConnectorHooks(unittest.TestCase):
     attribute each connector's row on multi-connector installs.
     """
 
+    @staticmethod
+    def _probe_trusted_cursor_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
+        # These transport tests supply a health response from a verified gateway.
+        with patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=SimpleNamespace(trusted=True, detail="verified"),
+        ):
+            return _probe_cursor_windows_runtime(cfg, adapter_path)
+
     def test_codex_emits_codex_hooks_row(self) -> None:
         cfg = MagicMock()
         cfg.data_dir = "/nonexistent/data/dir"
@@ -829,7 +838,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertTrue(ok)
         self.assertIn("requests 4->5", detail)
@@ -902,7 +911,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertTrue(ok)
         self.assertIn("requests 4->5", detail)
@@ -937,7 +946,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertFalse(ok)
         self.assertEqual(detail, "Cursor runtime probe timed out")
@@ -965,7 +974,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertFalse(ok)
         self.assertIn("tree did not terminate", detail)
@@ -1094,7 +1103,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertFalse(ok)
         self.assertIn("invalid sessionStart fields: continue", detail)
@@ -1127,7 +1136,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertFalse(ok)
         self.assertIn("did not advance", detail)

@@ -33,6 +33,7 @@ func TestCodexCapabilitiesExposeResolvedInventoryAndTelemetry(t *testing.T) {
 		APIAddr:           "127.0.0.1:18970",
 		WorkspaceDir:      workspace,
 		ManagedEnterprise: true,
+		sandboxNativeOTLP: true,
 	}
 	conn := NewCodexConnector()
 	caps := conn.Capabilities(opts)
@@ -84,6 +85,7 @@ func TestClaudeCodeCapabilitiesExposeResolvedInventoryAndTelemetry(t *testing.T)
 		APIAddr:           "127.0.0.1:18970",
 		WorkspaceDir:      workspace,
 		ManagedEnterprise: true,
+		sandboxNativeOTLP: true,
 	}
 	conn := NewClaudeCodeConnector()
 	caps := conn.Capabilities(opts)

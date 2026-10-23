@@ -71,16 +71,16 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "8e186821a5d812a03362836056446bcaa5b9f13ba0c3adf1994b8d461bdc6922",  # amp-plugin.ts
-            "cfe91f892ba228430fabeaf8f74cede13e6c09e8ecce2f601b7bdbeead8ab948",  # amp-plugin-managed.ts
-            "392bc21bb99d9978b69683dca8fd022d074037a1e9df6f885916c6525537cdd6",  # amp-plugin-secure-client.ts
+            "bdc7eee4c8a0b710b11ecee9a1779786354747abde65e453644f43dca1ee03a2",  # amp-plugin.ts
+            "13b87331e4d23a12329741186ceec144479a4fb1244f9c2a58fcb7c76245cbf6",  # amp-plugin-managed.ts
+            "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "5b545adb4ee029f0656f317d3dd4350202252e9bda46fa4e9c9939090b65fd33",  # opencode-plugin.js
-            "5824bbe5227f8dcd4703550e2e937c36e7888f441bbce814e10fc265b71c5236",  # opencode-plugin-managed.js
-            "f81b5b2f208d2535ac028c49bc95941d5666bee72315053386c05cd9411e34de",  # opencode-plugin-secure-client.js
+            "fa87cf43fbbe1d850953679041c8cbf4db620601e44e598f68faf2bc535f6493",  # opencode-plugin.js
+            "f877340ea9bb5eb9b7575483a9fde55d08e1f2ade5a2dbe970c3c68267a51c37",  # opencode-plugin-managed.js
+            "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
         }
     ),
 }
@@ -109,6 +109,18 @@ _BRIDGE_DYNAMIC_LINES = {
             b'"\n',
             b'const DC_TOKEN_FILE = "{{.TokenFileJS}}"\n',
             "token",
+        ),
+        (
+            b'const DC_NATIVE_POST_BINARY = "',
+            b'"\n',
+            b'const DC_NATIVE_POST_BINARY = "{{.NativePostBinaryJS}}"\n',
+            "native",
+        ),
+        (
+            b'const DC_FAIL_MODE: string = "',
+            b'" // "open" or "closed"\n',
+            b'const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"\n',
+            "mode",
         ),
         (
             b'const DC_HOOK_SOCKET: string = "',
@@ -153,6 +165,18 @@ _BRIDGE_DYNAMIC_LINES = {
             b'";\n',
             b'const DC_TOKEN_FILE = "{{.TokenFileJS}}";\n',
             "token",
+        ),
+        (
+            b'const DC_NATIVE_POST_BINARY = "',
+            b'";\n',
+            b'const DC_NATIVE_POST_BINARY = "{{.NativePostBinaryJS}}";\n',
+            "native",
+        ),
+        (
+            b'const DC_FAIL_MODE = "',
+            b'"; // "open" or "closed"\n',
+            b'const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"\n',
+            "mode",
         ),
         (
             b'const DC_HOOK_SOCKET = "',
@@ -399,6 +423,8 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
     absolute paths.
     """
 
+    if kind == "native" and value == b"":
+        return False
     if value == b"":
         return True
     try:
@@ -407,7 +433,7 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
         return False
     if not isinstance(path, str) or not os.path.isabs(path) or any(ord(char) < 0x20 for char in path):
         return False
-    if kind != "guard":
+    if kind not in {"guard", "native"}:
         return True
     try:
         info = os.lstat(path)
@@ -437,7 +463,9 @@ def _valid_bridge_dynamic_value(
     if kind == "proof":
         # The Windows standalone listener proof is on ("1") or off ("").
         return value in {b"", b"1"}
-    if kind in {"socket", "guard", "marker"}:
+    if kind == "mode":
+        return value in {b"open", b"closed"}
+    if kind in {"socket", "guard", "marker", "native"}:
         return _valid_bridge_managed_path(kind, value)
     if kind != "token":
         return False
@@ -472,6 +500,10 @@ def _matches_immutable_bridge_template(
             for index, line in enumerate(lines)
             if line.startswith(prefix) and line.endswith(suffix)
         ]
+        if not matches and kind in {"native", "proof", "mode"}:
+            # Current and Secure Client templates have distinct fields, each
+            # still covered by its exact pinned digest.
+            continue
         if len(matches) != 1:
             return False
         index = matches[0]

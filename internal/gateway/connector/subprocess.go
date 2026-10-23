@@ -51,6 +51,9 @@ type templateData struct {
 	APIAddr     string
 	APIToken    string // gateway bearer token; empty when unconfigured (loopback-allow)
 	TokenFileJS string // absolute token path, escaped for a JavaScript double-quoted string
+	// NativePostBinaryJS is the administrator-owned native gateway helper a
+	// Secure Client plugin uses to verify the connected service before POST.
+	NativePostBinaryJS string
 	// HookSocketJS is the standalone gateway's unix hook socket, escaped for a
 	// JavaScript double-quoted string; empty keeps the TCP transport.
 	HookSocketJS string
