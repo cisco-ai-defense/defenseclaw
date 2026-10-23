@@ -106,6 +106,7 @@ func TestEveryCandidateProfileIsEnforcedInItsOwnModePerConnector(t *testing.T) {
 					}
 					for _, order := range orders {
 						t.Run(spelling+"/"+m.name+"/"+tc.name+"/"+style+"/"+order[0].Profile+" first", func(t *testing.T) {
+							t.Parallel()
 							profileSetOf := func(assignments []config.ProfileAssignment) (*APIServer, context.Context, *guardrailProfileSet) {
 								cfg := &config.Config{}
 								cfg.Guardrail.Mode = "observe"
