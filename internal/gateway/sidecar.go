@@ -6414,6 +6414,7 @@ func rollbackMultiConnectorPublication(ctx context.Context, transaction multiCon
 	// connector setup loop. If final roster publication fails, restore those
 	// registrations as part of the same transaction so the exact old active
 	// roster can never be paired with missing hooks or lock evidence.
+	credentialLost := make(map[int]bool)
 	for i := len(transaction.removed) - 1; i >= 0; i-- {
 		removed := transaction.removed[i]
 		name := "unknown"
@@ -6422,10 +6423,19 @@ func rollbackMultiConnectorPublication(ctx context.Context, transaction multiCon
 		}
 		// Teardown revokes per-user scoped credentials after removing the
 		// registration. Restore the same credential before reviving either a
-		// hook registration or a byte-exact plugin snapshot.
+		// hook registration or a byte-exact plugin snapshot. Without it a
+		// revived hook cannot authenticate, and one set to fail open would
+		// allow every call uninspected. Such a connector stays removed: no
+		// hook runs for it. Its lock entry and roster entry still come back
+		// below, so the next start retries its removal with rollback
+		// authority, as for a connector whose teardown failed.
 		if removed.conn != nil && removed.opts.HookAPITokenScoped {
 			if err := connector.PublishHookAPIToken(removed.opts.DataDir, name, removed.opts.HookAPIToken); err != nil {
-				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore removed connector %s hook credential: %w", name, err))
+				rollbackErrors = append(rollbackErrors, fmt.Errorf(
+					"restore removed connector %s hook credential (left it removed; the next start retries its removal): %w", name, err,
+				))
+				credentialLost[i] = true
+				continue
 			}
 		}
 		if removed.pluginSnapshot != nil {
@@ -6451,8 +6461,8 @@ func rollbackMultiConnectorPublication(ctx context.Context, transaction multiCon
 			rollbackErrors = append(rollbackErrors, fmt.Errorf("verify prior connector %s registration: %w", applied.conn.Name(), err))
 		}
 	}
-	for _, removed := range transaction.removed {
-		if removed.conn == nil {
+	for i, removed := range transaction.removed {
+		if removed.conn == nil || credentialLost[i] {
 			continue
 		}
 		if err := verifyPreviouslyActiveConnectorRollback(removed); err != nil {
