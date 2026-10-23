@@ -2083,6 +2083,7 @@ func (c *managedSandboxController) Ready(ctx context.Context) (*sandboxapi.Statu
 	if err := d.lockLifecycle(ctx); err != nil {
 		return nil, managedBusyError(err)
 	}
+	boundForReady := false
 	s := d.freshSettings(ctx)
 	err := managedSettingsRefusal(s)
 	if err == nil {
@@ -2105,16 +2106,33 @@ func (c *managedSandboxController) Ready(ctx context.Context) (*sandboxapi.Statu
 				err = &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
 					Message: "Your organization doesn't allow sandboxes for your account.", Detail: sandboxrelay.ReasonNotAllowed}
 			default:
-				err = d.readyOpenShell(ctx, s, "")
+				// Status reports unavailable until this process holds both
+				// listeners. Bind them before setup installs anything, so a
+				// busy port refuses Ready without changing the account.
+				wasListening := d.listening()
+				if err = d.ensureListeners(); err == nil {
+					boundForReady = !wasListening
+					err = d.readyOpenShell(ctx, s, "")
+				}
 			}
 		}
 	}
-	d.unlockLifecycle()
+	if err != nil && boundForReady {
+		// A failed Ready leaves a listener it found in place, but releases
+		// listeners it bound itself even when the gateway cannot list boxes.
+		d.releaseListeners()
+	}
 	if err != nil {
+		d.unlockLifecycle()
 		d.reportAccountBusy(ctx, "", err)
 		return nil, err
 	}
-	return c.Status(ctx)
+	// A supervisor pass may release idle listeners as soon as the lifecycle
+	// unlocks. Report the readiness this call established while it still
+	// holds that lock; Create will bind again if an idle pass follows.
+	st, statusErr := c.Status(ctx)
+	d.unlockLifecycle()
+	return st, statusErr
 }
 
 // Create resolves the run at the managed gateway, creates the sandbox

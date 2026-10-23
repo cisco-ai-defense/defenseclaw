@@ -142,11 +142,24 @@ func (rt *sandboxRuntime) statusListenerAddresses(st *sandboxapi.Status) {
 	}
 	rt.listenMu.Lock()
 	defer rt.listenMu.Unlock()
+	var missing, keys []string
 	if !rt.listening["ingress"] {
 		st.IngressAddr = ""
+		missing = append(missing, "ingress")
+		keys = append(keys, "openshell.ingress_port")
 	}
 	if !rt.listening["egress"] {
 		st.EgressAddr = ""
+		missing = append(missing, "egress")
+		keys = append(keys, "openshell.egress_port")
+	}
+	if st.Enabled && st.Available && len(missing) > 0 {
+		st.Available = false
+		if st.Reason != "" {
+			st.Reason += "; "
+		}
+		st.Reason += "the sandbox " + strings.Join(missing, " and ") + " listener is not running in this process; check " +
+			strings.Join(keys, " and ") + " for a busy port, free or move it, then restart the DefenseClaw daemon"
 	}
 }
 

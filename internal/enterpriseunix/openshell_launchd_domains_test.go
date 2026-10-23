@@ -6,12 +6,40 @@
 package enterpriseunix
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
+
+// A committed non-package ensure still publishes its new prerequisites when
+// an account's broken LaunchAgent adds a result error during describe.
+func TestCommittedOpenShellEnsurePublishesDespiteFailedLaunchAgent(t *testing.T) {
+	h, f, _ := newLaunchdTestHost(t)
+	before := h.read(h.env.prerequisitesPath())
+	sshOnlyLaunchdJob(h, f, &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", runs: 5})
+	h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Running: 1}
+	h.writeExecutables(t, openshell.PackageE2fsprogsDir+"/sbin/mke2fs", openshell.PackageE2fsprogsDir+"/sbin/debugfs", "/usr/local/bin/docker")
+	h.env.Trust = func(string, TrustKind) error { return nil }
+	cfg := sandboxConfig(t, "darwin", true, map[string]any{"install": "setup", "driver": "vm", "version": "0.1.5"})
+	r := h.ensure(cfg)
+	if !strings.Contains(messagesOf(r.Errors, codeSandboxUserState), "OS_REASON_CODESIGNING") {
+		t.Fatalf("missing LaunchAgent error: %+v", r.Errors)
+	}
+	record, err := h.env.loadDeployment()
+	if err != nil || record.ConfigSHA256 != sha256Bytes(cfg) {
+		t.Fatalf("new configuration did not commit: record %+v, error %v", record, err)
+	}
+	after := h.read(h.env.prerequisitesPath())
+	var prereq openshell.PrerequisitesRecord
+	if err := json.Unmarshal([]byte(after), &prereq); err != nil || after == before || prereq.Install != "setup" {
+		t.Fatalf("committed setup did not publish prerequisites: before %s, after %s, record %+v, error %v", before, after, prereq, err)
+	}
+}
 
 func sshOnlyLaunchdJob(h *osHost, f *fixtureLaunchdRunner, job *launchdJobFixture) string {
 	uid := h.alice.UID

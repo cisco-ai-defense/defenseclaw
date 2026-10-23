@@ -571,10 +571,14 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 		if startErr != nil {
 			// A pull may have started this stopped copy after our first get.
 			// Attach to the now-ready sandbox; this connect did not start it.
-			if !strings.Contains(startErr.Error(), "is ready, not stopped") {
+			if !sandboxapi.IsCode(startErr, sandboxapi.CodeConflict) {
 				return startErr
 			}
-			if sb, err = api.Get(ctx, before.Name); err != nil || sb.Phase != "ready" {
+			if sb, err = api.Get(ctx, before.Name); err != nil {
+				return startErr
+			}
+			sb = a.settledSandbox(ctx, api, sb)
+			if sb.Phase != "ready" {
 				return startErr
 			}
 			a.note(before.Name + " is running now; attaching…")
@@ -1183,6 +1187,15 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 	api, err := a.api()
 	if err != nil {
 		return err
+	}
+	if len(o.Names) > 0 && (a.ManagedHost() || onManagedHost()) {
+		st, statusErr := api.Status(ctx)
+		if statusErr != nil {
+			return apiError(statusErr)
+		}
+		if st != nil && !st.Enabled {
+			return fmt.Errorf("the administrator has turned sandboxes off (enterprise.openshell.enabled); kept sandboxes cannot be deleted until the account gateway runs. Ask the administrator to turn sandboxes on temporarily, then run `%s delete %s` again", CommandName, strings.Join(o.Names, " "))
+		}
 	}
 	var errs []error
 	for _, name := range o.Names {

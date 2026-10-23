@@ -322,6 +322,23 @@ func TestGAP0756PullConnectRace(t *testing.T) {
 		ta.wantCalls(t, 1, "POST", "copybox/start")
 		has(t, ta.output(), "copybox keeps running")
 	})
+	t.Run("connect waits while pull is still starting", func(t *testing.T) {
+		ta := newTestApp(t, "s\n", copySandbox("copybox"))
+		gets := 0
+		ta.daemon.onStart = func(sb *sandboxapi.Sandbox) *sandboxapi.Error {
+			sb.Phase = "starting"
+			return sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox copybox is starting, not stopped")
+		}
+		ta.daemon.onGet = func(sb *sandboxapi.Sandbox) {
+			gets++
+			if gets > 2 && sb.Phase == "starting" {
+				sb.Phase = "ready"
+			}
+		}
+		ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "copybox", Prompt: "fix it"}))
+		ta.wantCalls(t, 1, "POST", "copybox/start")
+		has(t, ta.output(), "waiting for it", "copybox keeps running")
+	})
 	t.Run("reused pull names newly attached session", func(t *testing.T) {
 		ta := newTestApp(t, "", copySandbox("copybox"))
 		ta.copy.pull = &workspace.PullResult{Name: "copybox", Result: "r1", Effective: "r1", PulledAt: ta.Now(),

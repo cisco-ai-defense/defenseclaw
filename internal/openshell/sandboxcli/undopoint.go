@@ -89,6 +89,11 @@ func (a *App) startSandbox(ctx context.Context, api API, sb *sandboxapi.Sandbox,
 // a copy, a harness it no longer allows) can only be deleted and run
 // again.
 func (a *App) startError(ctx context.Context, api API, sb *sandboxapi.Sandbox, err error) error {
+	// Connect needs the code to distinguish another command's start race
+	// from a refusal. Preserve the typed conflict through this wrapper.
+	if sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
+		return apiError(err)
+	}
 	msg := apiError(err).Error()
 	var e *sandboxapi.Error
 	if errors.As(err, &e) && e.Violation != nil {

@@ -1785,6 +1785,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	if err != nil {
 		code := errorCode(err, codeApply)
+		// A plan that failed before commit must never supply prerequisite
+		// settings to describe; the prior applied record remains in force.
+		l.osPlan = nil
 		if committedConfig == nil && code == codeConfig {
 			// An edit written after the check above, while this run planned
 			// (a standard user writing a config.yaml whose mode was just

@@ -72,15 +72,15 @@ func (e *Env) checkLauncher() (prereqRow, bool) {
 // currentOpenShellSettings are the settings the result describes: the plan of
 // the running transaction, else what the last commit applied.
 func (l *lifecycle) currentOpenShellSettings() (openshellSettings, bool) {
-	if l.osPlan != nil && len(l.result.Errors) == 0 {
+	if l.osPlan != nil {
 		return l.osPlan.settings, l.osPlan.settings.Enabled
 	}
 	applied := l.env.loadOpenShellState().Applied
-	if applied == nil || !applied.Enabled {
+	if applied == nil {
 		return openshellSettings{}, false
 	}
-	return openshellSettings{Enabled: true, Install: applied.Install, Driver: applied.Driver, Fallback: applied.Fallback, Version: applied.Version,
-		GatewayPort: applied.GatewayPort, E2fsprogsDir: applied.E2fsprogsDir}, true
+	return openshellSettings{Enabled: applied.Enabled, Install: applied.Install, Driver: applied.Driver, Fallback: applied.Fallback, Version: applied.Version,
+		GatewayPort: applied.GatewayPort, E2fsprogsDir: applied.E2fsprogsDir}, applied.Enabled
 }
 
 // describeOpenShell adds the sandbox rows to the result and warns for every
@@ -91,6 +91,9 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	settings, on := l.currentOpenShellSettings()
 	state := env.loadOpenShellState()
 	if !on {
+		if settings.Install == config.EnterpriseOpenShellInstallSetup && strings.TrimSpace(settings.Version) == "" {
+			r.AddWarning(codeOpenShellPrerequisite, "sandboxes remain off: enterprise.openshell.install: setup has no pin; set enterprise.openshell.version to an exact supported OpenShell release before enabling openshell.enabled")
+		}
 		for _, entry := range state.sortedPending() {
 			if entry.Kind == "stop" {
 				l.describePending(ctx, entry)
@@ -166,7 +169,7 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	l.describeMacOSAgents(ctx)
 	// The gateway reads this to say, in its own words, why a host run of a
 	// required agent cannot move into a sandbox. status and verify only read.
-	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify && len(r.Errors) == 0 {
+	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify && (l.osPlan != nil || len(r.Errors) == 0) {
 		if err := env.publishPrerequisites(ctx, settings); err != nil {
 			r.AddWarning(codeState, "could not record "+openshell.PrerequisitesFile+": "+err.Error())
 		}

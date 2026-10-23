@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,7 +48,9 @@ func managedStatusFixture() *sandboxapi.ManagedStatus {
 func TestPolicyExplainDoesNotWaitForManagedSandboxList(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.daemon.explain.Managed = managedExplainFixture()
-	ta.daemon.onList = func(ctx context.Context) { <-ctx.Done() }
+	ta.daemon.status.Enabled = false
+	var listed atomic.Bool
+	ta.daemon.onList = func(ctx context.Context) { listed.Store(true); <-ctx.Done() }
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	start := time.Now()
@@ -56,6 +59,34 @@ func TestPolicyExplainDoesNotWaitForManagedSandboxList(t *testing.T) {
 		t.Fatalf("read-only policy explain waited %s for the sandbox list", elapsed)
 	}
 	has(t, ta.output(), "Your sandbox policy on this computer")
+	if listed.Load() {
+		t.Fatal("policy explain queried the disabled sandbox gateway")
+	}
+}
+
+func TestPolicyExplainIncludesSlowHealthyManagedList(t *testing.T) {
+	sb := sampleSandbox("kept")
+	sb.Phase = "ready"
+	ta := newTestApp(t, "", sb)
+	ta.daemon.explain.Managed = managedExplainFixture()
+	ta.daemon.onList = func(context.Context) { time.Sleep(400 * time.Millisecond) }
+	ta.ok(t, ta.PolicyExplain(context.Background(), PolicyOptions{}))
+	has(t, ta.output(), "running: kept")
+}
+
+func TestManagedDeleteWhenSandboxesOffNamesRecovery(t *testing.T) {
+	withManagedHost(t)
+	ta := newTestApp(t, "", sampleSandbox("kept"))
+	ta.daemon.status.Enabled = false
+	ta.daemon.status.Available = false
+	ta.daemon.status.Reason = "the administrator turned sandboxes off"
+	err := ta.Delete(context.Background(), DeleteOptions{Names: []string{"kept"}, Yes: true})
+	if err == nil || !strings.Contains(err.Error(), "enterprise.openshell.enabled") || !strings.Contains(err.Error(), "sandbox delete kept") {
+		t.Fatalf("disabled managed delete = %v", err)
+	}
+	if got := len(ta.daemon.callsTo("DELETE", "kept")); got != 0 {
+		t.Fatalf("disabled delete reached the unavailable gateway %d times", got)
+	}
 }
 
 // withManagedHost makes the CLI treat this computer as a managed one.

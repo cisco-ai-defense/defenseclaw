@@ -154,6 +154,89 @@ func TestSandboxDaemonFloorChangesWaitForAdoption(t *testing.T) {
 	})
 }
 
+// A phase can move from stopped to ready after the poll's first list. The
+// adoption must use a fresh list taken under adoptMu, not that stale view.
+func TestSandboxDaemonPollRelistsPhasesAtAdoption(t *testing.T) {
+	f := newFreshFixture(t)
+	f.d.floorMu.Lock()
+	f.d.floor = &config.OpenShellAdminConfig{MinProfile: "open"}
+	f.d.floorMu.Unlock()
+	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 8, Digest: "sha256:v2",
+		Floor: &config.OpenShellAdminConfig{MinProfile: "strict"}}, nil)
+	listed, release := make(chan struct{}), make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	var lists atomic.Int32
+	f.d.opts.listPhases = func(context.Context) (map[string]string, bool) {
+		if lists.Add(1) == 1 {
+			close(listed)
+			<-release
+			return map[string]string{"dc-a": "stopped"}, true
+		}
+		return map[string]string{"dc-a": "ready"}, true
+	}
+	done := make(chan struct{})
+	go func() { f.d.pollRegistrations(context.Background(), true); close(done) }()
+	select {
+	case <-listed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("poll did not take its first phase snapshot")
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("poll did not finish adoption")
+	}
+	if lists.Load() < 2 || f.d.config().OpenShell.Admin.MinProfile != "strict" {
+		t.Fatalf("poll adopted the stale phase: lists %d, floor %+v", lists.Load(), f.d.config().OpenShell.Admin)
+	}
+}
+
+func TestSandboxDaemonRevalidateWaitsForAdoption(t *testing.T) {
+	f := newFreshFixture(t)
+	listed := make(chan struct{})
+	f.d.opts.listPhases = func(context.Context) (map[string]string, bool) {
+		select {
+		case <-listed:
+		default:
+			close(listed)
+		}
+		return map[string]string{"dc-a": "ready"}, true
+	}
+	f.d.adoptMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			f.d.adoptMu.Unlock()
+		}
+	}()
+	done := make(chan struct{})
+	go func() { f.d.revalidate(context.Background()); close(done) }()
+	select {
+	case <-listed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("revalidate did not list phases")
+	}
+	select {
+	case <-done:
+		t.Fatal("revalidate passed the adoption lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+	f.d.adoptMu.Unlock()
+	locked = false
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("revalidate did not finish after adoption")
+	}
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

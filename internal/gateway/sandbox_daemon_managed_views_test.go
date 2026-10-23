@@ -263,6 +263,17 @@ func TestManagedStatusUsesCurrentEnablementAfterDriverSwitch(t *testing.T) {
 	}
 }
 
+func TestManagedStatusPreservesGatewayCauseWhenListenersIdle(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.run(t)
+	f.d.rt.setListening("ingress", false)
+	st, err := sandboxapi.NewUnixClient(f.socket).Status(context.Background())
+	if err != nil || st == nil || st.Available || st.IngressAddr != "" ||
+		!strings.Contains(st.Reason, "gateway registration") || strings.Contains(st.Reason, "openshell.ingress_port") {
+		t.Fatalf("managed status hid the primary unavailable cause: %+v, %v", st, err)
+	}
+}
+
 // A policy view of an off computer must not wait for the kept sandbox's
 // OpenShell gateway during daemon startup. That gateway cannot start without
 // the organization's gateway.toml after sandboxes were turned off.

@@ -273,8 +273,26 @@ func TestSandboxStatusDoesNotClaimAnotherAccountsIngress(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
 		t.Fatal(err)
 	}
-	if w.Code != http.StatusOK || st.IngressAddr != "" || st.EgressAddr == "" {
+	// This fixture has no OpenShell gateway, so that earlier failure remains
+	// the status cause even though another account also holds ingress.
+	if w.Code != http.StatusOK || st.IngressAddr != "" || st.EgressAddr == "" || st.Available || !strings.Contains(st.Reason, "gateway") {
 		t.Fatalf("status claims a listener held by another account: %d %+v", w.Code, st)
+	}
+}
+
+func TestSandboxStatusListenerAvailabilityRequiresOwnership(t *testing.T) {
+	rt := &sandboxRuntime{}
+	rt.setListening("egress", true)
+	st := &sandboxapi.Status{Enabled: true, Available: true, IngressAddr: "127.0.0.1:19081", EgressAddr: "127.0.0.1:19082"}
+	rt.statusListenerAddresses(st)
+	if st.Available || st.IngressAddr != "" || st.EgressAddr == "" ||
+		!strings.Contains(st.Reason, "openshell.ingress_port") || !strings.Contains(st.Reason, "restart") {
+		t.Fatalf("unheld ingress still reported ready: %+v", st)
+	}
+	alreadyUnavailable := &sandboxapi.Status{Enabled: true, Reason: sandboxapi.AccountBusyMessage, IngressAddr: "127.0.0.1:19081"}
+	rt.statusListenerAddresses(alreadyUnavailable)
+	if alreadyUnavailable.Reason != sandboxapi.AccountBusyMessage || alreadyUnavailable.IngressAddr != "" {
+		t.Fatalf("listener status hid the primary unavailable cause: %+v", alreadyUnavailable)
 	}
 }
 
