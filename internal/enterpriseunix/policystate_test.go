@@ -138,6 +138,44 @@ func TestPolicyOmittedWhenTheDigestIsUnknown(t *testing.T) {
 	}
 }
 
+// Status and verify name the policy digest they could not compute instead of
+// omitting the policy block silently (rel-1-0-4 GAP-0594, the Unix side): the
+// warning carries the installed gateway's reason.
+func TestPolicyOmittedNamesTheDigestItCouldNotCompute(t *testing.T) {
+	const computed = "sha256:" + "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
+	for name, c := range map[string]struct {
+		refusal, want string
+	}{
+		"exit status": {want: "pack digest mismatch"},
+		"refused":     {refusal: "rule pack \"p\" does not match its pin", want: "does not match its pin"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			runner := &policyDigestRunner{fakeRunner: h.runner, digest: computed}
+			h.env.Runner = runner
+			reported, reloadError := computed, ""
+			servePolicyHealth(h, &reported, &reloadError)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			if err := os.Remove(h.env.policyStatePath()); err != nil {
+				t.Fatal(err)
+			}
+			runner.digest, runner.refusal = "", c.refusal
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				r := h.run(Options{Action: action})
+				var message string
+				for _, w := range r.Warnings {
+					if w.Code == codePolicyUnverified {
+						message = w.Message
+					}
+				}
+				if r.Policy != nil || !strings.Contains(message, c.want) {
+					t.Fatalf("%s: policy = %+v, warnings = %+v, want %s naming %q", action, r.Policy, r.Warnings, codePolicyUnverified, c.want)
+				}
+			}
+		})
+	}
+}
+
 // GAP-0133: a sandbox pack under the policies directory edited in place
 // leaves config.yaml and every installed file as applied, but the config now
 // computes to another effective policy than the running gateway reports.

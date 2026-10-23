@@ -11,7 +11,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -27,13 +30,101 @@ func TestNewHTTPEvaluatorRequiresLiteralLoopback(t *testing.T) {
 			t.Fatalf("NewHTTPEvaluator(%q) accepted a non-literal-loopback endpoint", endpoint)
 		}
 	}
-	for _, endpoint := range []string{
-		"http://127.0.0.1:18970/api/v1/acp/evaluate",
-		"http://[::1]:18970/api/v1/acp/evaluate",
-	} {
+	valid := []string{"http://127.0.0.1:18970/api/v1/acp/evaluate"}
+	// The Windows connected-process proof uses the IPv4 TCP table. An IPv6
+	// endpoint must be refused there rather than bypassing that proof.
+	if runtime.GOOS != "windows" {
+		valid = append(valid, "http://[::1]:18970/api/v1/acp/evaluate")
+	} else if _, err := NewHTTPEvaluator("http://[::1]:18970/api/v1/acp/evaluate", "secret"); err == nil {
+		t.Fatal("Windows accepted an IPv6 per-user evaluator without a connected-process proof")
+	}
+	for _, endpoint := range valid {
 		if _, err := NewHTTPEvaluator(endpoint, "secret"); err != nil {
 			t.Fatalf("NewHTTPEvaluator(%q): %v", endpoint, err)
 		}
+	}
+}
+
+func TestPerUserEvaluatorPinsRequestsToConfiguredGateway(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer origin.Close()
+	var received atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer other.Close()
+	evaluator, err := NewHTTPEvaluator(origin.URL, "private-acp-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, other.URL+"/api/v1/acp/challenge", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set(AuthRequestMACHeader, "private-auth-proof")
+	response, err := evaluator.client.Do(request)
+	if err == nil {
+		_ = response.Body.Close()
+	}
+	if err == nil || received.Load() != 0 {
+		t.Fatalf("per-user evaluator sent %d authenticated requests to another endpoint; error = %v", received.Load(), err)
+	}
+}
+
+func TestManagedEvaluatorUsesServiceTransport(t *testing.T) {
+	previousFactory := managedGatewayClientFactory
+	var requestedAddr, requestedService string
+	managedGatewayClientFactory = func(timeout time.Duration, apiAddr, serviceName string) (*http.Client, error) {
+		requestedAddr, requestedService = apiAddr, serviceName
+		return &http.Client{Timeout: timeout}, nil
+	}
+	t.Cleanup(func() { managedGatewayClientFactory = previousFactory })
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer origin.Close()
+	var received atomic.Int32
+	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer service.Close()
+	evaluator, err := NewManagedHTTPEvaluator(origin.URL, "managed-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestedAddr != origin.Listener.Addr().String() || requestedService != managedGatewayServiceName() {
+		t.Fatalf("managed transport selected %q, %q; want the configured endpoint and service", requestedAddr, requestedService)
+	}
+	response, err := evaluator.client.Get(service.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if received.Load() != 1 {
+		t.Fatalf("managed service received %d requests, want one", received.Load())
+	}
+}
+
+func TestManagedEvaluatorRefusesUnverifiedServiceBeforeChallenge(t *testing.T) {
+	var received atomic.Int32
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer listener.Close()
+	evaluator, err := NewManagedHTTPEvaluator(listener.URL, "managed-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evaluator.Evaluate(context.Background(), Evaluation{}); err == nil {
+		t.Fatal("an unverified managed gateway answered the ACP challenge")
+	}
+	if got := received.Load(); got != 0 {
+		t.Fatalf("unverified managed listener received %d ACP challenge requests, want zero", got)
 	}
 }
 

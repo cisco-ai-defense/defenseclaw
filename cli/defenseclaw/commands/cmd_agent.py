@@ -3587,9 +3587,12 @@ def _resolve_connector_for_restart(cfg: Any) -> str:
     """Return the active connector name in lower-kebab form.
 
     Mirrors :func:`cmd_guardrail._resolve_active_connector` so the
-    restart helper teardowns/setups the right adapter. Falls back to
-    "openclaw" when nothing else is configured (matches Go default).
+    restart helper teardowns/setups the configured adapter. A Config that
+    explicitly reports no connector cannot fall through to a raw mode default.
     """
+    configured = getattr(cfg, "has_connector_configured", None)
+    if callable(configured) and not configured():
+        return ""
     try:
         active = cfg.active_connector()
         if active:
@@ -3606,7 +3609,7 @@ def _resolve_connector_for_restart(cfg: Any) -> str:
         mode = getattr(claw, "mode", "")
         if mode:
             return normalize_connector(str(mode))
-    return "openclaw"
+    return ""
 
 
 def _resolve_connectors_for_restart(cfg: Any) -> list[str]:
@@ -3768,17 +3771,11 @@ def signatures() -> None:
     """Manage AI discovery signature packs."""
 
 
-@signatures.command("list")
-@click.option("--json", "as_json", is_flag=True, help="Output merged signatures as JSON.")
-@click.option("--include-disabled", is_flag=True, help="Include configured disabled signatures.")
-@pass_ctx
-def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> None:
-    """List the merged AI discovery signature catalog."""
-    cfg = _load_config_best_effort(app)
+def _signature_catalog(cfg, disabled: list[str]):
+    """Load the merged signature catalog the way ``signatures list`` shows it."""
     from defenseclaw.commands.cmd_status import _enterprise_profile
 
     secure_client = _enterprise_profile(cfg) == "secure_client"
-    disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     pins, require_pins = ai_signatures.pack_pins(cfg)
     configured = list(cfg.ai_discovery.signature_packs)
     if secure_client:
@@ -3799,6 +3796,31 @@ def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> N
         )
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc
+    return sigs, refused
+
+
+def _require_known_signature(cfg, normalized: str) -> None:
+    """Refuse a signature ID that no loaded pack defines (GAP-0557)."""
+    sigs, _ = _signature_catalog(cfg, [])
+    if normalized not in {ai_signatures.normalize_signature_id(sig.id) for sig in sigs}:
+        raise click.ClickException(
+            f"unknown AI signature ID: {normalized}. Run 'defenseclaw agent signatures list "
+            "--include-disabled' to find the ID."
+        )
+
+
+@signatures.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Output merged signatures as JSON.")
+@click.option("--include-disabled", is_flag=True, help="Include configured disabled signatures.")
+@pass_ctx
+def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> None:
+    """List the merged AI discovery signature catalog."""
+    cfg = _load_config_best_effort(app)
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    secure_client = _enterprise_profile(cfg) == "secure_client"
+    disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
+    sigs, refused = _signature_catalog(cfg, disabled)
 
     if as_json:
         payload = [asdict(sig) for sig in sigs]
@@ -3910,6 +3932,7 @@ def signatures_disable(app: AppContext, signature_id: str) -> None:
         raise click.ClickException("signature id must not be empty")
     disabled = list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     if normalized not in disabled:
+        _require_known_signature(cfg, normalized)
         disabled.append(normalized)
         cfg.ai_discovery.disabled_signature_ids = sorted(disabled)
         cfg.save()
@@ -3927,6 +3950,8 @@ def signatures_enable(app: AppContext, signature_id: str) -> None:
     if normalized in disabled:
         cfg.ai_discovery.disabled_signature_ids = [s for s in disabled if s != normalized]
         cfg.save()
+    else:
+        _require_known_signature(cfg, normalized)
     click.echo(f"Enabled AI signature: {normalized}")
 
 

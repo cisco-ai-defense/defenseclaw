@@ -1241,12 +1241,12 @@ func TestResolveEnterpriseHookTargetFallsBackToTheDirectory(t *testing.T) {
 }
 
 // With unenrolled_users: deny the enumerator writes rows for connectors the
-// lifecycle published through machine policy. Those rows only mark the uid
-// as enrolled: running the per-user installer for them failed live on RHEL
-// (Codex refuses user hooks under allow_managed_hooks_only, Claude Code
-// verification trips over the managed settings). They succeed when the
-// machine policy is in place and never reach a worker.
-func TestStandaloneReconcileMachinePolicyRowsOnlyRecordEnrollment(t *testing.T) {
+// lifecycle published through machine policy. They mark the uid as enrolled
+// without running the per-user installer (Codex refuses user hooks under
+// allow_managed_hooks_only, Claude Code verification trips over managed
+// settings). The Codex row may use a target-user worker only to remove a
+// conflicting user feature preference.
+func TestStandaloneReconcileMachinePolicyRowsAvoidPerUserInstall(t *testing.T) {
 	uid, gid := os.Getuid(), os.Getgid()
 	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 	f := newStandaloneFixture(t, resolver)
@@ -1287,10 +1287,54 @@ func TestStandaloneReconcileMachinePolicyRowsOnlyRecordEnrollment(t *testing.T) 
 	}
 	for _, request := range f.requests {
 		for _, target := range request.Targets {
-			if target.Options.ConnectorName == "codex" || target.Options.ConnectorName == "claudecode" {
+			if target.Options.ConnectorName == "codex" && target.Mode != "repair_managed_codex_feature" || target.Options.ConnectorName == "claudecode" {
 				t.Fatalf("a machine-policy row reached the per-user worker: %+v", target)
 			}
 		}
+	}
+}
+
+func TestStandaloneReconcileManagedCodexFeatureChangeQueuesRepair(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	f.writeManifest(t, enterprisehooks.ManifestTarget{User: "alice", Connector: "codex"})
+	configDir := filepath.Join(alice, ".codex")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("model = 'gpt-5'\n[features]\nhooks = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousSet, previousCovered := enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered
+	t.Cleanup(func() {
+		enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered = previousSet, previousCovered
+	})
+	enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} { return map[string]struct{}{"codex": {}} }
+	enterpriseHookStandaloneMachinePolicyCovered = func(name string) (bool, error) { return name == "codex", nil }
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	if len(run.Rows) != 1 || !run.Rows[0].OK {
+		t.Fatalf("managed Codex row not covered: %+v", run.Rows)
+	}
+	if !slices.Contains(run.WatchDirs, alice) || !slices.Contains(run.WatchDirs, configDir) ||
+		!slices.Contains(run.WatchSharedFiles, configDir) || !slices.Contains(run.WatchSharedFiles, configPath) {
+		t.Fatalf("managed Codex config change will not trigger repair: dirs=%v shared=%v", run.WatchDirs, run.WatchSharedFiles)
+	}
+	found := false
+	for _, request := range f.requests {
+		for _, target := range request.Targets {
+			found = found || target.Options.ConnectorName == "codex" && target.Mode == "repair_managed_codex_feature"
+		}
+	}
+	if !found {
+		t.Fatal("managed Codex row did not queue user-owned feature repair")
 	}
 }
 

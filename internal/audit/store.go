@@ -608,9 +608,42 @@ func txExecContextObserved(
 	}
 	res, err := tx.ExecContext(ctx, query, args...)
 	if isSQLiteBusy(err) && observer != nil {
-		_ = observer.RecordSQLiteBusyMetric(ctx, op)
+		reportSQLiteBusyDetached(ctx, observer, op)
 	}
 	return res, err
+}
+
+// sqliteBusyDetachedReports bounds the BUSY reports of open transactions
+// that are still running: a burst of contention drops the reports beyond it
+// instead of piling up goroutines.
+var sqliteBusyDetachedReports = make(chan struct{}, 4)
+
+const sqliteBusyDetachedReportTimeout = 5 * time.Second
+
+// reportSQLiteBusyDetached reports a BUSY that a statement of an open
+// transaction met, in the background and bounded. The observer records the
+// busy metric and its correlation observations in the audit store, whose
+// pool has one connection, and the caller's open transaction holds that
+// connection until the statement's error has gone back up. Reported in line,
+// the observer waited for the connection its own caller held, with no
+// deadline, and every later audit write and managed hook queued behind it:
+// fresh native sessions were refused with HTTP 429 while /health answered
+// 200 (rel-1-0-4 GAP-0944).
+func reportSQLiteBusyDetached(ctx context.Context, observer SQLiteBusyObservabilityV8, op string) {
+	select {
+	case sqliteBusyDetachedReports <- struct{}{}:
+	default:
+		return
+	}
+	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sqliteBusyDetachedReportTimeout)
+	go func() {
+		defer func() {
+			_ = recover()
+			cancel()
+			<-sqliteBusyDetachedReports
+		}()
+		_ = observer.RecordSQLiteBusyMetric(reportCtx, op)
+	}()
 }
 
 // ---------------------------------------------------------------------------
@@ -2116,6 +2149,48 @@ func (s *Store) DatabasePath() string {
 	return s.dbPath
 }
 
+// HasAuditEventID reports whether a durable event-history row already owns id.
+// Spool replay uses this before re-offering an occurrence after a crash.
+func (s *Store) HasAuditEventID(ctx context.Context, id string) (bool, error) {
+	if s == nil || !s.Ready() || id == "" {
+		return false, errors.New("audit: event lookup requires a ready store and id")
+	}
+	var one int
+	err := s.scanRow(ctx, "audit", s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM audit_events WHERE id = ?`, id), &one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return one == 1, err
+}
+
+// StoredHookDecisionAction returns the decision a stored hook record holds:
+// the action in a connector hook row's envelope, or the effective action of
+// a hook_decision record. found is false when no row owns id; action is
+// empty when the row holds neither.
+func (s *Store) StoredHookDecisionAction(ctx context.Context, id string) (action string, found bool, err error) {
+	if s == nil || !s.Ready() || id == "" {
+		return "", false, errors.New("audit: hook decision lookup requires a ready store and id")
+	}
+	var envelopeAction, decisionAction string
+	err = s.scanRow(ctx, "audit", s.db.QueryRowContext(ctx, `SELECT
+		CASE WHEN json_valid(COALESCE(structured_json,''))
+			THEN COALESCE(json_extract(structured_json,'$.action'),'') ELSE '' END,
+		CASE WHEN json_valid(COALESCE(projected_record_json,''))
+			THEN COALESCE(json_extract(projected_record_json,'$.body."defenseclaw.guardrail.effective_action"'),'') ELSE '' END
+		FROM audit_events WHERE id = ?`, id), &envelopeAction, &decisionAction)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if envelopeAction != "" {
+		return envelopeAction, true, nil
+	}
+	return decisionAction, true, nil
+}
+
 // DatabaseFileReplaced reports whether the database path no longer names
 // the file this store opened: it was deleted or replaced while the gateway
 // ran. SQLite keeps writing to the open, unlinked file, so every new audit
@@ -3083,7 +3158,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	}
 
 	rows, err := s.queryDB(context.Background(), "audit",
-		`SELECT id, timestamp, action, target, actor, details, structured_json, severity,
+		`SELECT id, timestamp, action, target, actor, details, `+s.structuredJSONReadSQL("")+`, severity,
 		        run_id, trace_id, request_id,
 		        session_id, turn_id, agent_name, agent_instance_id, policy_id,
 		        destination_app, tool_name, tool_id,
@@ -3987,7 +4062,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	legacyActions := legacyAlertEligibleActions()
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	query := `SELECT event.id, event.timestamp, event.action, event.target, event.actor,
-			event.details, event.structured_json, ` + alertEffectiveSeveritySQL() + `,
+			event.details, ` + s.structuredJSONReadSQL("event") + `, ` + alertEffectiveSeveritySQL() + `,
 			event.run_id,
 			event.trace_id, event.request_id, event.connector, event.enforced
 		 FROM audit_events AS event

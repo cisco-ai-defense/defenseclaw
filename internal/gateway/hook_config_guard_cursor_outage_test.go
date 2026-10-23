@@ -11,20 +11,18 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// A per-user Cursor's outage mode follows the config's explicit fail mode
-// while its resolved mode follows the guardrail mode (open in observe either
-// way): setting or removing an explicit open must re-render its hooks without
-// a restart, or an open the operator removed stays in place while the
-// gateway is down (r104 W3 G3-upg).
-func TestHookConfigGuardRerendersACursorOutageModeChange(t *testing.T) {
+// A managed administrator's explicit Cursor outage mode is re-rendered
+// without a restart when the administrator changes it (r104 W3 G3-upg).
+func TestHookConfigGuardRerendersManagedCursorOutageModeChange(t *testing.T) {
 	root := t.TempDir()
 	conn := &runtimePolicyCaptureConnector{
 		stubConnector: stubConnector{name: "cursor"},
 		configPath:    filepath.Join(root, "hooks.json"),
 	}
-	cached := connector.SetupOpts{DataDir: root, HookFailMode: "open", GuardrailMode: "observe"}
+	cached := connector.SetupOpts{DataDir: root, HookFailMode: "closed", GuardrailMode: "observe", ManagedEnterprise: true}
 	if err := conn.Setup(context.Background(), cached); err != nil {
 		t.Fatalf("initial Setup: %v", err)
 	}
@@ -45,6 +43,8 @@ func TestHookConfigGuardRerendersACursorOutageModeChange(t *testing.T) {
 
 	live := config.DefaultConfig()
 	live.DataDir = root
+	live.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	live.Enterprise.Profile = managed.ProfileStandalone
 	live.Guardrail.Mode = "observe"
 	sidecar.publishConfig(live)
 	before, _ := state()
@@ -57,7 +57,7 @@ func TestHookConfigGuardRerendersACursorOutageModeChange(t *testing.T) {
 
 	open := cloneConfig(live)
 	open.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"cursor": {HookFailMode: "open"}}
-	if open.EffectiveHookFailModeForConnector("cursor") != live.EffectiveHookFailModeForConnector("cursor") {
+	if open.EffectiveHookFailModeForConnector("cursor") == live.EffectiveHookFailModeForConnector("cursor") {
 		t.Fatal("precondition: the resolved Cursor mode changed")
 	}
 	sidecar.publishConfig(open)

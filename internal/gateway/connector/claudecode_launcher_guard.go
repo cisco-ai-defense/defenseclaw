@@ -112,6 +112,13 @@ func claudeCodeLauncherGuardParts(hook map[string]interface{}) (string, []string
 	return launcher, hookArgs, true
 }
 
+// ClaudeCodeLauncherGuardTarget returns the launcher and hook argv of a
+// handler in the exact launcher-guard form per-user Setup has written since
+// 1.0.0; ok is false for any other handler, an edited guard included.
+func ClaudeCodeLauncherGuardTarget(hook map[string]interface{}) (launcher string, hookArgs []string, ok bool) {
+	return claudeCodeLauncherGuardParts(hook)
+}
+
 // claudeCodeExecView returns a guarded handler as the exec-form handler it
 // runs (command = launcher, args = hook argv), so the ownership and contract
 // checks written for the exec form apply to both. Any other value is returned

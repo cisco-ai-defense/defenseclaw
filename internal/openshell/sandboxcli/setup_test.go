@@ -25,12 +25,14 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -84,6 +86,51 @@ func setupApp(t *testing.T, input, extra string, settled bool) *testApp {
 		ta.gateway.state.DockerNamespace = openshell.AccountDockerNamespace(1000)
 	}
 	return ta
+}
+
+// Setup must not report ready while another account holds the ingress port.
+func TestSetupWaitDaemonRefusesSquattedIngress(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	squatter, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = squatter.Close() })
+	ta.Cfg.OpenShell.IngressPort = squatter.Addr().(*net.TCPAddr).Port
+	// The fake daemon reports the same listener state as one that lost its
+	// configured ingress port to the other account.
+	ta.daemon.status.IngressAddr = ""
+	ready, _, down := ta.waitDaemon(context.Background(), openshell.DriverDocker)
+	if ready || down {
+		t.Fatalf("waitDaemon = ready %t, down %t; output:\n%s", ready, down, ta.output())
+	}
+	has(t, ta.output(), "ingress", "openshell.ingress_port", "restart")
+	lacks(t, ta.output(), "the daemon runs the sandbox subsystem")
+	ta.fresh()
+	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
+	has(t, ta.output(), "not ready for sandboxes yet", "openshell.ingress_port", "restart")
+}
+
+func TestSetupWaitDaemonWaitsForListenersToBind(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	ta.daemon.status.IngressAddr = ""
+	polls, sleeps := 0, 0
+	ta.daemon.onStatus = func(st *sandboxapi.Status) {
+		polls++
+		if polls == 2 {
+			st.IngressAddr = "127.0.0.1:18971"
+		}
+	}
+	ta.Sleep = func(context.Context, time.Duration) error {
+		sleeps++
+		return nil
+	}
+	ready, _, down := ta.waitDaemon(context.Background(), openshell.DriverDocker)
+	if !ready || down || polls != 2 || sleeps != 1 {
+		t.Fatalf("waitDaemon = ready %t, down %t, polls %d, sleeps %d; output:\n%s", ready, down, polls, sleeps, ta.output())
+	}
+	has(t, ta.output(), "the daemon runs the sandbox subsystem")
+	lacks(t, ta.output(), "another process may hold the port")
 }
 
 // noCloseClient keeps the shared fake gateway open when a command closes

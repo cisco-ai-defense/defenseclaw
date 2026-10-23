@@ -389,3 +389,21 @@ func TestManagedConfigNamesMissingKeyAndSizeLimit(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-4 GAP-0590: an administrator's openshell path that is not
+// absolute is refused with the requirement, not "does not match the
+// setting's required format".
+func TestManagedConfigOpenShellPathsNameTheAbsolutePathRequirement(t *testing.T) {
+	for _, tc := range []struct{ setting, value, want string }{
+		{"trusted_ca_bundle", "proxy-root-ca.pem", "openshell.trusted_ca_bundle must be an absolute path: a managed configuration needs an absolute path to an administrator-owned file"},
+		{"trusted_ca_bundle", "./proxy-root-ca.pem", "openshell.trusted_ca_bundle must be an absolute path: a managed configuration needs an absolute path to an administrator-owned file"},
+		{"trusted_ca_bundle", "~/proxy-root-ca.pem", "a managed configuration needs an absolute path to an administrator-owned file"},
+		{"pack_dir", "sandbox-packs", "openshell.pack_dir must be an absolute path or one starting with ~/"},
+	} {
+		h := newTestHost(t, "linux")
+		got := installMessage(t, h, string(DefaultConfig(h.env.Layout))+"openshell:\n  "+tc.setting+": "+tc.value+"\n")
+		if !strings.Contains(got, tc.want) || strings.Contains(got, "required format") {
+			t.Fatalf("%s: %s: %s", tc.setting, tc.value, got)
+		}
+	}
+}

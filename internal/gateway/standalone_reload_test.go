@@ -250,11 +250,16 @@ func TestStandaloneConfigManagerRestoredConfigClearsRejection(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				initial, err := config.LoadRuntimeV8File(path)
+				// Boot and reload must use the same in-memory migration path,
+				// including its platform-specific default directories.
+				initial, err := loadRuntimeConfigCandidate(path, good)
 				if err != nil {
 					t.Fatal(err)
 				}
 				initial = withEnterpriseProfile(initial, managed.ProfileStandalone)
+				if err := config.ApplyRuntimeV8DataDirDefaultsFromBytes(initial, path, good, dir); err != nil {
+					t.Fatal(err)
+				}
 				health := NewSidecarHealth()
 				applyCalls := 0
 				mgr := newConfigManagerWithSnapshot(path, initial, nil, health, "", func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {

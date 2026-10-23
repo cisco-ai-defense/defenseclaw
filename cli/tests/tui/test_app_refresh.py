@@ -341,7 +341,13 @@ async def test_tool_mutation_refresh_uses_repository_worker(tmp_path) -> None:
     assert scheduled == [True]
 
 
-def test_fetch_ai_usage_uses_gateway_auth_and_accept_headers() -> None:
+def test_fetch_ai_usage_uses_gateway_auth_and_accept_headers(monkeypatch) -> None:
+    from defenseclaw import gateway
+
+    # The local test server is a same-account gateway stand-in on a random
+    # port; this test checks the TUI request headers, not owner discovery.
+    monkeypatch.setattr(gateway, "_unproven_per_user_gateway_target", lambda _host, _port: "")
+    monkeypatch.setattr(gateway, "_verify_connected_gateway_socket", lambda _sock, _host, _port: None)
     seen: dict[str, str] = {}
 
     class Handler(BaseHTTPRequestHandler):

@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -235,6 +236,192 @@ func TestGAP0522UncertainIdentityNamesTheMissingFact(t *testing.T) {
 	}
 }
 
+// Process credentials prove groups even when the holder's account name is
+// unproven. An uncertain weaker named-user assignment cannot change an
+// already proven stricter group decision, regardless of assignment order.
+func TestProvenStrictGroupCoversUncertainWeakerNamedUser(t *testing.T) {
+	p := identityTestPlatforms[0]
+	subject := identityTestSubject(p, p.providers[0], stateProven, true)
+	subject.holderUnproven = true
+	group := config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{p.group}}}
+	name := config.ProfileAssignment{Profile: "watch", Match: config.ProfileMatch{Users: []string{p.name}}}
+	for _, assignments := range [][]config.ProfileAssignment{{group, name}, {name, group}} {
+		set := identityTestSet(t, p, "watch", assignments...)
+		got := set.match(&subject, profileSubjectVerified, "codex", "")
+		if got.Name != "strict" || got.Match != profileMatchGroup || got.Refused != "" || len(got.Unproven) != 0 {
+			t.Fatalf("assignments %+v: %+v; want proven strict group", assignments, got)
+		}
+	}
+	// If the uncertain assignment enforces something the proven one does
+	// not, only the account fact must be named in the refusal.
+	set := identityTestSet(t, p, "watch",
+		config.ProfileAssignment{Profile: "tooling", Match: group.Match},
+		config.ProfileAssignment{Profile: "strict", Match: name.Match})
+	got := set.match(&subject, profileSubjectVerified, "codex", "")
+	if !slices.Equal(got.Unproven, []string{"account:unknown"}) || !strings.Contains(got.Refused, "account holder is unconfirmed") {
+		t.Fatalf("uncertain stronger user assignment = %+v; want account-only refusal", got)
+	}
+}
+
+// A proven meet has the sandbox floor of every member. An unproven account
+// name cannot change that decision when its sandbox floor is already covered,
+// even when both the meet and the uncertain profile carry sandbox settings.
+func TestProvenMeetCoversUncertainSandboxProfile(t *testing.T) {
+	p := identityTestPlatforms[0]
+	subject := identityTestSubject(p, p.providers[0], stateProven, true)
+	subject.holderUnproven = true
+	group := config.ProfileAssignment{Profile: "sandboxed", Match: config.ProfileMatch{Groups: []string{p.group}}}
+	uid := config.ProfileAssignment{Profile: "low", Match: config.ProfileMatch{Users: []string{p.id}}}
+	unknown := config.ProfileAssignment{Profile: "weaker", Match: config.ProfileMatch{Users: []string{p.name}}}
+	for _, assignments := range [][]config.ProfileAssignment{{group, uid, unknown}, {unknown, uid, group}} {
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = "observe"
+		cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+			"sandboxed": {Mode: "action", BlockAt: "HIGH", Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"codex", "claudecode"}}},
+			"low":       {Mode: "action", BlockAt: "LOW"},
+			"weaker":    {Mode: "observe", Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"codex"}}},
+			"stronger":  {Mode: "observe", Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"codex", "claudecode", "hermes"}}},
+		}
+		cfg.Guardrail.DefaultProfile = "weaker"
+		cfg.Guardrail.ProfileAssignments = assignments
+		set := newGuardrailProfileSetFor(t, cfg)
+		got := set.match(&subject, profileSubjectVerified, "codex", "")
+		want := config.ProfileMeetName([]string{"low", "sandboxed"})
+		if got.Name != want || got.Refused != "" || len(got.Unproven) != 0 {
+			t.Fatalf("assignments %+v: %+v; want proven meet %s without refusal", assignments, got, want)
+		}
+		derived, ok := set.derivedProfile(got.Name)
+		if !ok || resolveThresholds(derived.Config, "codex").Block != "LOW" ||
+			!slices.Contains(derived.Sandbox.RequiredFor, "claudecode") {
+			t.Fatalf("meet %+v; want the proven block and sandbox floors", derived)
+		}
+		cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{group, uid,
+			{Profile: "stronger", Match: unknown.Match}}
+		set = newGuardrailProfileSetFor(t, cfg)
+		got = set.match(&subject, profileSubjectVerified, "codex", "")
+		if !slices.Equal(got.Unproven, []string{"account:unknown"}) ||
+			!strings.Contains(got.Refused, "account holder is unconfirmed") {
+			t.Fatalf("uncertain stronger sandbox assignment = %+v; want account-only refusal", got)
+		}
+	}
+	// The same floor rule applies when one proven assignment selected the
+	// stricter sandbox profile without needing a combined profile.
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"sandboxed": {Mode: "action", BlockAt: "LOW", Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"codex", "claudecode"}}},
+		"weaker":    {Mode: "observe", Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"codex"}}},
+	}
+	cfg.Guardrail.DefaultProfile = "weaker"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{group, unknown}
+	set := newGuardrailProfileSetFor(t, cfg)
+	got := set.match(&subject, profileSubjectVerified, "codex", "")
+	if got.Name != "sandboxed" || got.Refused != "" || len(got.Unproven) != 0 {
+		t.Fatalf("proven sandbox profile = %+v; want sandboxed without refusal", got)
+	}
+}
+
+// A proven meet already enforces each member's pack. An unconfirmed account
+// name that repeats a proven member cannot change the decision, even when
+// the other proven member selected a different pack.
+func TestProvenMeetCoversUncertainDuplicateMemberWithDifferentPacks(t *testing.T) {
+	p := identityTestPlatforms[0]
+	subject := identityTestSubject(p, p.providers[0], stateProven, true)
+	subject.holderUnproven = true
+	root := t.TempDir()
+	aDir, bDir, cDir := filepath.Join(root, "a"), filepath.Join(root, "b"), filepath.Join(root, "c")
+	writeRulePackFixtureFile(t, aDir, "rules/a.yaml", `version: 1
+category: secret
+rules:
+  - id: MEET-DUPLICATE-A
+    pattern: "meet_duplicate_a"
+    title: first member
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+	writeRulePackFixtureFile(t, bDir, "rules/b.yaml", `version: 1
+category: secret
+rules:
+  - id: MEET-DUPLICATE-B
+    pattern: "meet_duplicate_b"
+    title: second member
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+	writeRulePackFixtureFile(t, cDir, "rules/c.yaml", `version: 1
+category: secret
+rules:
+  - id: MEET-DUPLICATE-C
+    pattern: "meet_duplicate_c"
+    title: third profile
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+	group := config.ProfileAssignment{Profile: "a", Match: config.ProfileMatch{Groups: []string{p.group}}}
+	uid := config.ProfileAssignment{Profile: "b", Match: config.ProfileMatch{Users: []string{p.id}}}
+	for _, member := range []string{"a", "b"} {
+		unknown := config.ProfileAssignment{Profile: member, Match: config.ProfileMatch{Users: []string{p.name}}}
+		for _, assignments := range [][]config.ProfileAssignment{{group, uid, unknown}, {unknown, uid, group}} {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "observe"
+			cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+				"a": {Mode: "action", BlockAt: "HIGH", RulePackDir: aDir},
+				"b": {Mode: "action", BlockAt: "HIGH", RulePackDir: bDir},
+				"c": {Mode: "action", BlockAt: "HIGH", RulePackDir: cDir},
+			}
+			cfg.Guardrail.ProfileAssignments = assignments
+			set := newGuardrailProfileSetFor(t, cfg)
+			got := set.match(&subject, profileSubjectVerified, "codex", "")
+			want := config.ProfileMeetName([]string{"a", "b"})
+			if got.Name != want || got.Refused != "" || len(got.Unproven) != 0 {
+				t.Fatalf("uncertain duplicate %s, assignments %+v: %+v; want proven meet %s", member, assignments, got, want)
+			}
+		}
+	}
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"a": {Mode: "action", BlockAt: "HIGH", RulePackDir: aDir},
+		"b": {Mode: "action", BlockAt: "HIGH", RulePackDir: bDir},
+		"c": {Mode: "action", BlockAt: "HIGH", RulePackDir: cDir},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{group, uid,
+		{Profile: "c", Match: config.ProfileMatch{Users: []string{p.name}}}}
+	got := newGuardrailProfileSetFor(t, cfg).match(&subject, profileSubjectVerified, "codex", "")
+	if got.Refused == "" || !slices.Contains(got.Unproven, "account:unknown") {
+		t.Fatalf("uncertain different pack = %+v; want account-holder refusal", got)
+	}
+}
+
+// The default is a fallback, not a proven assignment. Two profiles that
+// currently enforce the same settings can still have different identities;
+// a named-user assignment needs its account fact before replacing default.
+func TestUncertainDifferentProfileNeedsProofWithoutProvenAssignment(t *testing.T) {
+	p := identityTestPlatforms[0]
+	subject := identityTestSubject(p, p.providers[0], stateProven, false)
+	subject.holderUnproven = true
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"watch": {Mode: "observe"}, "other-watch": {Mode: "observe"},
+	}
+	cfg.Guardrail.DefaultProfile = "watch"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "other-watch", Match: config.ProfileMatch{Users: []string{p.name}}},
+	}
+	set, err := newGuardrailProfileSet(cfg, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := set.match(&subject, profileSubjectVerified, "codex", "")
+	if !slices.Equal(got.Unproven, []string{"account:unknown"}) || !strings.Contains(got.Refused, "account holder is unconfirmed") {
+		t.Fatalf("uncertain assignment over default = %+v; want account-only refusal", got)
+	}
+}
+
 // TestResolveIdentityProofStatesAcrossProvidersAndPlatforms is the table
 // of resolveIdentity: every proof state of a pass, for every directory
 // provider, on Linux, macOS and Windows, and the profile the one selection
@@ -321,7 +508,7 @@ func TestUnprovenFactsWithIncomparableProfilesApplyTheirMeet(t *testing.T) {
 		t.Fatalf("decision %+v; want the meet of default and strict", got)
 	}
 	derived, ok := set.derivedProfile(got.Name)
-	if !ok || hookModeForConfig(derived.Config, "codex") != "action" || resolveThresholds(derived.Config, "codex").Block != "LOW" ||
+	if !ok || derived.Config.HookModeForConnector("codex") != "action" || resolveThresholds(derived.Config, "codex").Block != "LOW" ||
 		!slices.Contains(derived.Sandbox.RequiredFor, "codex") {
 		t.Fatalf("meet %+v; want action, block_at LOW and codex required in a sandbox", derived)
 	}
@@ -329,22 +516,25 @@ func TestUnprovenFactsWithIncomparableProfilesApplyTheirMeet(t *testing.T) {
 
 // GAP-0323: a cold lookup timeout or a directory outage with a strict group
 // assignment before a weaker default selected default_lookup_failed and
-// the weaker default. It now selects the strictest profile that may apply.
+// the weaker default. It now refuses and names the missing group fact;
+// the strict profile is only a diagnostic candidate.
 func TestGAP0323LookupFailureNeverSelectsAWeakerDefault(t *testing.T) {
 	p := identityTestPlatforms[0]
 	set := identityTestSet(t, p, "watch",
 		config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{p.group}}})
 	failed := profileSubject{UserID: p.id, IDKind: p.kind, LookupFailed: true}
-	if got := set.match(&failed, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed {
-		t.Fatalf("failed lookup selected %+v; want strict", got)
+	if got := set.match(&failed, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed ||
+		!strings.Contains(got.Refused, "group membership is unconfirmed") {
+		t.Fatalf("failed lookup selected %+v; want refusal naming group membership, with strict only as candidate", got)
 	}
 	// A uid assignment needs no directory and still applies; the failed
 	// lookup cannot make the account weaker than it either.
 	set = identityTestSet(t, p, "watch",
 		config.ProfileAssignment{Profile: "tooling", Match: config.ProfileMatch{Users: []string{p.id}}},
 		config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{p.group}}})
-	if got := set.match(&failed, profileSubjectVerified, "codex", ""); got.Name != "strict" {
-		t.Fatalf("a uid assignment before an unknown group selected %+v; want strict (strictest regardless of order)", got)
+	if got := set.match(&failed, profileSubjectVerified, "codex", ""); got.Name != "strict" ||
+		!strings.Contains(got.Refused, "group membership is unconfirmed") {
+		t.Fatalf("a uid assignment before an unknown group selected %+v; want refusal naming the group, with strict only as candidate", got)
 	}
 }
 

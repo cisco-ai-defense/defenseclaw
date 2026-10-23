@@ -187,3 +187,68 @@ func TestOpenCodePluginSessionFactsSkipAStalledCredentialCache(t *testing.T) {
 		t.Fatal("a stalled credential cache ran the session facts binary")
 	}
 }
+
+// An idle OpenCode session can wake while the Kerberos cache or its reader is
+// slow. Its first actionable hook must reach the gateway inside the hook
+// budget with the available SSH facts; a principal is optional (GAP-0744).
+func TestOpenCodeIdleWakeAnswersWhilePrincipalReaderStalls(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in session-facts binary is a shell script")
+	}
+	home := t.TempDir()
+	ccache := filepath.Join(home, "krb5cc")
+	if err := os.WriteFile(ccache, []byte("ticket"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(home, ".local", "bin", "defenseclaw-gateway")
+	if err := os.MkdirAll(filepath.Dir(binary), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nsleep 3\nprintf 'v1;k=ssh;krb=late@EXAMPLE.TEST'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("KRB5CCNAME", "FILE:"+ccache)
+	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.20 22")
+	t.Setenv("SSH_TTY", "")
+	t.Setenv("XDG_SESSION_ID", "")
+	var mu sync.Mutex
+	var facts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload struct {
+			Event string `json:"hook_event_name"`
+		}
+		_ = json.Unmarshal(body, &payload)
+		if payload.Event == "tool.execute.before" {
+			mu.Lock()
+			facts = append(facts, r.Header.Get("X-DefenseClaw-Session-Facts"))
+			mu.Unlock()
+		}
+		_, _ = io.WriteString(w, `{"action":"allow","mode":"observe"}`)
+	}))
+	defer server.Close()
+	harness := `
+import { pathToFileURL } from "node:url";
+const plugin = await (await import(pathToFileURL(process.argv[1]).href)).DefenseClaw({ directory: "", client: { tui: { showToast: async () => true } } });
+const started = Date.now();
+try { await plugin["tool.execute.before"]({ tool: "bash", sessionID: "S", messageID: "M", callID: "C" }, { args: { command: "echo marker" } }); }
+catch (error) { console.log("block:" + String(error && error.message || error)); }
+console.log("elapsed:" + (Date.now() - started));
+`
+	lines := runNodeHarness(t, harness, writeRenderedPlugin(t, "opencode-plugin.js", "defenseclaw.mjs", openCodePluginTestData(t, server)))
+	elapsed := -1
+	for _, line := range lines {
+		if v, ok := strings.CutPrefix(line, "elapsed:"); ok {
+			elapsed, _ = strconv.Atoi(v)
+		}
+	}
+	if elapsed < 0 || elapsed > 1500 {
+		t.Fatalf("idle wake took %d ms, want a gateway answer within 1.5s; output %q", elapsed, lines)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(facts) != 1 || facts[0] != "v1;k=ssh;ca=192.0.2.10" {
+		t.Fatalf("idle wake session facts = %q, want the available SSH facts", facts)
+	}
+}

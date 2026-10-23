@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,8 +48,8 @@ func enterpriseForeignHookAccountID(sid string, uid int) string {
 const enterpriseForeignHookRemovalMarkAhead = 5 * time.Minute
 
 // enterpriseForeignHookRemovalTx is one removal commit of one account: the
-// account's removal lock held exclusively, the account's record key
-// rotated, and the removal recorded once before the change.
+// account's removal lock held exclusively and the removal recorded once
+// before the change.
 type enterpriseForeignHookRemovalTx struct {
 	stderr    io.Writer
 	identity  string
@@ -72,11 +71,7 @@ type enterpriseForeignHookRemovalTx struct {
 //     (enterprisepolicy.LockForeignHookAccountRemoval): no new online
 //     answer of the account starts, and those inside finish within their
 //     bound or are cut. Other accounts never wait.
-//  2. It rotates the account's protected session record key
-//     (enterprisepolicy.RotatePublishedSessionKey, one atomic rename): from
-//     then on no outage allow of the account written before proves
-//     anything. A rotation that could not end the key refuses the removal.
-//  3. It records the removal in the ledger with a mark
+//  2. It records the removal in the ledger with a mark
 //     enterpriseForeignHookRemovalMarkAhead ahead.
 //
 // On an error nothing may change: the hook stays in place, so the scan
@@ -107,14 +102,10 @@ func beginEnterpriseForeignHookRemovalMarked(ctx context.Context, stderr io.Writ
 		return nil, fmt.Errorf("take the account's foreign-hook removal lock: %w", err)
 	}
 	if !drained {
-		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: an online answer for %s did not finish within %s; going on, it is cut and its record proves nothing\n",
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: an online answer for %s did not finish within %s; going on, it is cut\n",
 			foreignGuardLogField(account, 256), enterprisepolicy.ForeignHookRemovalDrainWait)
 	}
 	tx := &enterpriseForeignHookRemovalTx{stderr: stderr, identity: identity, home: home, connector: connectorName, paths: limitEnterpriseForeignHookPaths(paths), release: release}
-	if err := tx.rotate(); err != nil {
-		release()
-		return nil, err
-	}
 	mark := firstMark
 	if mark == "" {
 		mark = agentprocess.NowAfter(enterpriseForeignHookRemovalMarkAhead)
@@ -139,39 +130,6 @@ func limitEnterpriseForeignHookPaths(paths []string) []string {
 		out = append(out, foreignGuardLogField(path, 512))
 	}
 	return out
-}
-
-// rotate ends the account's outage allows (the kill switch). A record
-// folder that cannot be located, or a key that could not be ended, refuses
-// the removal; a rotation that ended the key but could not make a new one
-// only warns (the account's guarded calls block during an outage until a
-// later pass makes one). While a lifecycle run holds the key lock, or when
-// it cannot be taken, the key is only revoked: no key the guardian makes
-// while a run changes the deployment outlives the run (the run makes new
-// ones at its end).
-func (tx *enterpriseForeignHookRemovalTx) rotate() error {
-	root, err := enterpriseForeignHookSessionRoot()
-	if err != nil {
-		return fmt.Errorf("rotate the protected session record key before the removal: %w", err)
-	}
-	ran, err := enterpriseForeignHookWithKeyCreation(func() error {
-		return enterpriseForeignHookRotateSessionKey(root, tx.identity, enterpriseForeignHookSessionKeyTrust())
-	})
-	if !ran {
-		if err != nil {
-			fmt.Fprintf(tx.stderr, "defenseclaw: enterprise foreign-hook guard: the protected session record key lock (%v); the key of %s is revoked without a new one\n",
-				err, foreignGuardLogField(tx.identity, 256))
-		}
-		err = enterpriseForeignHookRevokeSessionKey(root, tx.identity)
-	}
-	if errors.Is(err, enterprisepolicy.ErrPublishedSessionKeyAlive) {
-		return fmt.Errorf("rotate the protected session record key before the removal: %w", err)
-	}
-	if err != nil {
-		fmt.Fprintf(tx.stderr, "defenseclaw: enterprise foreign-hook guard: make a new protected session record key for %s (guarded calls block during a gateway outage until a later pass makes one): %v\n",
-			foreignGuardLogField(tx.identity, 256), err)
-	}
-	return nil
 }
 
 // record writes the transaction's files to the ledger with mark. The time
@@ -226,7 +184,7 @@ func (tx *enterpriseForeignHookRemovalTx) commitAt(mark string, removed []string
 // recordEnterpriseForeignHookRemovals records removals a cleanup made that
 // no commit recorded (a worker that changed a file and ended before its
 // commit): a full commit (beginEnterpriseForeignHookRemoval) with nothing
-// left to change, so the key is rotated first as for every removal.
+// left to change.
 // Failures are logged; the per-call check still applies.
 func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connectorName string, paths []string) {
 	recordEnterpriseForeignHookRemovalsAt(stderr, agentprocess.Now(), account, home, connectorName, paths)
@@ -254,33 +212,6 @@ func recordEnterpriseForeignHookRemovalsAt(stderr io.Writer, mark, account, home
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s: %v\n",
 			connectorName, foreignGuardLogField(account, 256), err)
-	}
-}
-
-// ensureEnterpriseForeignHookSessionKey gives every account under the
-// protected session records exactly one key at every guardian pass
-// (enterprisepolicy.EnsurePublishedSessionKeys), unless a lifecycle run
-// holds the key lock: the gateway removes an account's key before every
-// block, and a lifecycle run removes all of them. A new key never makes an
-// earlier record count. Only root or SYSTEM can make a key the hook
-// accepts, so any other account does nothing.
-func ensureEnterpriseForeignHookSessionKey(stderr io.Writer) {
-	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() || !enterpriseForeignHookCanCreateSessionKey() {
-		return
-	}
-	root, err := enterpriseForeignHookSessionRoot()
-	ran := false
-	if err == nil {
-		// Never while a lifecycle run holds the key lock: the run removed
-		// every key and makes new ones at its end.
-		ran, err = enterpriseForeignHookWithKeyCreation(func() error {
-			return enterpriseForeignHookEnsureSessionKeys(root, enterpriseForeignHookSessionKeyTrust())
-		})
-	}
-	if err != nil {
-		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: make the protected session record keys (guarded calls of an account without one block during a gateway outage): %v\n", err)
-	} else if !ran {
-		fmt.Fprintln(stderr, "defenseclaw: enterprise foreign-hook guard: a lifecycle run holds the protected session record key lock; its end makes the keys")
 	}
 }
 
@@ -326,96 +257,9 @@ func writeEnterpriseForeignHookRemovalLedger(added, dropped []enterprisepolicy.F
 // the removal is refused (the hook stays and the scan keeps blocking).
 const enterpriseForeignHookLedgerLockWait = 30 * time.Second
 
-// enterpriseForeignHookSessionRoot is the folder of the protected session
-// records (managed.StandaloneLayout.HookSessionDir): from the standalone
-// layout, or else the folder the layout named last in this process (the
-// Windows guardian is a service, so a lookup that fails for a moment does
-// not refuse a removal), or else from the guardian's data directory
-// (managed.StandaloneHookSessionDirForDataDir), which names the same folder
-// on a standalone host. Only when none names it is it an error: the
-// guardian then cannot rotate the account's key, so it removes nothing
-// (replaceable in tests).
-var enterpriseForeignHookSessionRoot = func() (string, error) {
-	root, err := enterpriseForeignHookSessionLayoutRoot()
-	enterpriseForeignHookSessionRootSeen.Lock()
-	defer enterpriseForeignHookSessionRootSeen.Unlock()
-	if err == nil {
-		enterpriseForeignHookSessionRootSeen.root = root
-		return root, nil
-	}
-	if seen := enterpriseForeignHookSessionRootSeen.root; seen != "" {
-		return seen, nil
-	}
-	if cfg != nil {
-		if fallback, ok := enterpriseForeignHookSessionRootForDataDir(cfg.DataDir); ok {
-			return fallback, nil
-		}
-	}
-	return "", err
-}
-
-// enterpriseForeignHookSessionRootSeen is the record folder the standalone
-// layout named last in this process (enterpriseForeignHookSessionRoot).
-var enterpriseForeignHookSessionRootSeen struct {
-	sync.Mutex
-	root string
-}
-
-// enterpriseForeignHookSessionLayoutRoot is the record folder of the
-// standalone layout. A layout that cannot be resolved (on Windows, a failed
-// ProgramData lookup) is an error (replaceable in tests).
-var enterpriseForeignHookSessionLayoutRoot = func() (string, error) {
-	layout, _, _, err := standaloneEnterprisePolicyLayout()
-	if err != nil {
-		return "", fmt.Errorf("locate the protected session record folder: %w", err)
-	}
-	if strings.TrimSpace(layout.HookSessionDir) == "" {
-		return "", errors.New("the standalone layout names no protected session record folder")
-	}
-	return layout.HookSessionDir, nil
-}
-
-// enterpriseForeignHookWithKeyCreation runs create, which makes or rotates
-// keys, holding the key lock of the standalone lifecycle folder shared,
-// only when no lifecycle run holds it
-// (enterprisepolicy.WithPublishedSessionKeyCreation). A layout that cannot
-// be resolved is an error, and create does not run (replaceable in tests).
-var enterpriseForeignHookWithKeyCreation = func(create func() error) (bool, error) {
-	layout, _, _, err := standaloneEnterprisePolicyLayout()
-	if err != nil {
-		return false, fmt.Errorf("locate the lifecycle folder: %w", err)
-	}
-	if !filepath.IsAbs(layout.LifecycleDir) {
-		return false, fmt.Errorf("the lifecycle folder %q is not an absolute path", layout.LifecycleDir)
-	}
-	return enterprisepolicy.WithPublishedSessionKeyCreation(enterprisepolicy.PublishedSessionKeysLockPath(layout.LifecycleDir), create)
-}
-
-// enterpriseForeignHookSessionRootForDataDir is the record folder of the
-// standalone layout whose data directory is dataDir (replaceable in tests).
-var enterpriseForeignHookSessionRootForDataDir = func(dataDir string) (string, bool) {
-	return managed.StandaloneHookSessionDirForDataDir(runtime.GOOS, dataDir)
-}
-
-// enterpriseForeignHookLockAccount takes an account's removal lock,
-// enterpriseForeignHookRotateSessionKey rotates its record key before a
-// removal (enterpriseForeignHookRevokeSessionKey only revokes it while a
-// lifecycle run holds the key lock, enterpriseForeignHookWithKeyCreation),
-// enterpriseForeignHookEnsureSessionKeys makes the keys of the
-// accounts that have none at every pass,
-// enterpriseForeignHookSessionKeyTrust names the gateway service a Windows
-// key file lets remove it, and enterpriseForeignHookCanCreateSessionKey
-// reports a guardian that runs as root or SYSTEM (replaceable in tests).
 var (
-	enterpriseForeignHookLockAccount       = enterprisepolicy.LockForeignHookAccountRemoval
-	enterpriseForeignHookLockLedger        = enterprisepolicy.LockForeignHookRemovalLedger
-	enterpriseForeignHookRotateSessionKey  = enterprisepolicy.RotatePublishedSessionKey
-	enterpriseForeignHookRevokeSessionKey  = enterprisepolicy.RevokePublishedSessionKey
-	enterpriseForeignHookEnsureSessionKeys = enterprisepolicy.EnsurePublishedSessionKeys
-	enterpriseForeignHookSessionKeyTrust   = func() enterprisepolicy.PublishedSessionTrust {
-		return enterprisepolicy.PublishedSessionTrust{ServiceAccount: `NT SERVICE\` + managed.StandaloneWindowsGatewaySvc}
-	}
-	enterpriseForeignHookCanCreateSessionKey = enterpriseForeignHookRunsAsAdministrator
+	enterpriseForeignHookLockAccount = enterprisepolicy.LockForeignHookAccountRemoval
+	enterpriseForeignHookLockLedger  = enterprisepolicy.LockForeignHookRemovalLedger
 )
 
 func loadEnterpriseForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {

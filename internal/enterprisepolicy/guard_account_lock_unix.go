@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -102,25 +101,4 @@ func createForeignHookSessionStoreParent(dataDir, dir string) error {
 		return err
 	}
 	return os.Lchown(dir, int(st.Uid), int(st.Gid))
-}
-
-// PublishedSessionKeysLockPath is the key lock of the standalone lifecycle
-// folder lifecycleDir: the lifecycle's own lock (enterpriseunix holds it
-// exclusively for its whole run), which only root can reach.
-func PublishedSessionKeysLockPath(lifecycleDir string) string {
-	return filepath.Join(lifecycleDir, "lifecycle.lock")
-}
-
-// publishedSessionKeysLockGuardianCreates is false: the key lock is the
-// lifecycle's own, which only a lifecycle run makes (an uninstall that
-// leaves the lifecycle folder empty removes it with the folder).
-const publishedSessionKeysLockGuardianCreates = false
-
-// openPublishedSessionKeysLockFile opens the key lock, never through a
-// link; read access is enough for a flock.
-func openPublishedSessionKeysLockFile(path string, create bool) (*os.File, error) {
-	if create {
-		return os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
-	}
-	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 }

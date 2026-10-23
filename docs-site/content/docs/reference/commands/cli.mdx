@@ -99,17 +99,17 @@ To rotate the gateway token on purpose, run `defenseclaw setup rotate-token --ye
 
 Not available on Secure Client.
 
-Each time the gateway applies `config.yaml` and the policy assets it names by digest, it builds a *policy generation* and swaps it in. Each generation has an *effective policy digest*: a SHA-256 over the canonical configuration, with secrets dropped, plus the asset digests. `defenseclaw status` prints both:
+Each time the gateway applies `config.yaml` and the policy assets it names by digest, it builds a policy snapshot and swaps it in. Each snapshot has an *effective policy digest*: a SHA-256 over the canonical configuration, with secrets dropped, plus the asset digests. Plain `defenseclaw status` prints the applied config generation and the digest:
 
 ```text
   Sidecar:      running (PID 709868, up <1m, API http://127.0.0.1:19347)
-  Policy:       generation 2, sha256:22fa11f6a549
+  Policy:       config generation 2, sha256:22fa11f6a549
 ```
 
-The generation number is the gateway's own counter and restarts at 1 with the gateway. The config generation that `config set` prints is separate, kept in `config.generation.json` with the file's SHA-256, the actor (`cli:alice`, `tui:alice`, `hand-edit:alice`) and the reason. `defenseclaw status --json` carries `effective_digest`, `generation`, `config_generation` and `last_reload_error` in its `policy` object. If the gateway rejects a change it keeps the previous generation and says so:
+The Policy line in plain `defenseclaw status` shows `policy.config_generation`, the same applied counter as the TUI footer. The counter is kept in `config.generation.json` with the file's SHA-256, the actor (`cli:alice`, `tui:alice`, `hand-edit:alice`) and the reason. `config set` prints the generation it saved; on a per-user install the gateway also records an applied hand edit as the next config generation. The separate `policy.generation` field is the gateway-local policy-build counter and restarts at 1 with the gateway. `defenseclaw status --json` carries `effective_digest`, `generation`, `config_generation` and `last_reload_error` in its `policy` object. If the gateway rejects a change it keeps the previous applied config generation and says so:
 
 ```text
-  Policy:       generation 20, sha256:f61a485cfcbf; the last change was rejected (see defenseclaw doctor)
+  Policy:       config generation 20, sha256:f61a485cfcbf; the last change was rejected (see defenseclaw doctor)
 ```
 
 Compare the running digest with what is on disk:
@@ -147,17 +147,17 @@ Hook setup aliases (`setup codex`, `setup claude-code` and the rest) add or reco
 | `defenseclaw setup routing --enable\|--disable\|--status` | Configure or inspect semantic model routing for proxy-mode OpenAI Chat Completions traffic. Managed mode requires Docker; all config changes activate on gateway restart. See [Semantic routing](/docs/how-to/agents/route-models). |
 | `defenseclaw setup llm [--show] [--non-interactive] [--provider P] [--model M] [--api-key-env NAME]` | Write the unified or role-scoped LLM block (`--role unified\|agent\|judge`) in `config.yaml`; the key itself goes to `~/.defenseclaw/.env`. `--show` prints the resolved values and changes nothing. Supports SaaS providers and regional Bedrock / Vertex AI / Azure OpenAI via dedicated `--bedrock-*`, `--vertex-*`, `--azure-*` flags, plus `--instance-name` to bind a custom provider from `llm_providers` (use `--provider custom`) and `--inherit-from` to seed from a sibling component. `--ping` / `--no-ping` sends (or skips) a one-shot reachability probe after saving. See [LLM providers](/docs/reference/configuration/llm-providers). |
 | `defenseclaw setup provider add\|list\|show\|remove` | Manage `llm_providers.custom` entries that route LLM traffic through internal or self-hosted endpoints. `custom-providers.json` is derived from them; never edit it. `add` writes the entry and asks a running gateway to reload its provider registry (`--no-reload` skips); omit `--name` for the wizard. `list` prints the live registry. [`add` flags](#setup-provider-add-flags) are below. |
-| `defenseclaw setup claude-code` | Hook setup alias for Claude Code; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup codex` | Hook setup alias for Codex; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup cursor` | User-hook alias for Cursor; defaults to observe, while `--mode action` uses event-native deny with `failClosed: true`. Native human approval is not enabled. |
-| `defenseclaw setup devin` | Native Devin CLI hook alias; defaults to observe, while `--mode action` can block only on the four documented block-capable events. |
-| `defenseclaw setup copilot` | Hook setup alias for GitHub Copilot CLI; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup hermes` | Hook setup alias for Hermes; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup antigravity` | Hook setup alias for Antigravity (`agy`); defaults to observe, pass `--mode action` to block hook-side. Native ask and deny are documented only for `PreToolUse`; no permission-bypass override is claimed. |
-| `defenseclaw setup opencode` | Hook setup alias for OpenCode; writes the auto-loaded bridge plugin. Defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup claude-code` | Hook setup alias for Claude Code. Defaults to observe on first setup; a re-run without `--mode` keeps the current mode. Pass `--mode action` to block hook-side. |
+| `defenseclaw setup codex` | Hook setup alias for Codex. Defaults to observe on first setup; a re-run without `--mode` keeps the current mode. Pass `--mode action` to block hook-side. |
+| `defenseclaw setup cursor` | User-hook alias for Cursor. Defaults to observe on first setup; a re-run without `--mode` keeps the current mode. `--mode action` uses event-native deny. Both modes set `failClosed: true` for hook-process failure outside Secure Client. Native human approval is not enabled. |
+| `defenseclaw setup devin` | Native Devin CLI hook alias. Defaults to observe on first setup; a re-run without `--mode` keeps the current mode. `--mode action` can block only on the four documented block-capable events. |
+| `defenseclaw setup copilot` | Hook setup alias for GitHub Copilot CLI. Defaults to observe on first setup; a re-run without `--mode` keeps the current mode. Pass `--mode action` to block hook-side. |
+| `defenseclaw setup hermes` | Hook setup alias for Hermes. Defaults to observe on first setup; a re-run without `--mode` keeps the current mode. Pass `--mode action` to block hook-side. |
+| `defenseclaw setup antigravity` | Hook setup alias for Antigravity (`agy`). Defaults to observe on first setup; a re-run without `--mode` keeps the current mode. Pass `--mode action` to block hook-side. Native ask and deny are documented only for `PreToolUse`; no permission-bypass override is claimed. |
+| `defenseclaw setup opencode` | Hook setup alias for OpenCode; writes the auto-loaded bridge plugin. Defaults to observe on first setup; a re-run without `--mode` keeps the current mode. Pass `--mode action` to block hook-side. |
 | `defenseclaw setup acp` | Find ACP agents an editor is launching unguarded and route them through `defenseclaw-acp`. Reuses the per-pair `acp setup` transaction and points the operator's existing entry at the guard, so no unmediated duplicate is left behind. Defaults to observe; `--activate` selects action. Alias of `defenseclaw acp adopt`. |
-| `defenseclaw setup kiro` | Native hook alias for Kiro IDE and Kiro CLI; defaults to observe, pass `--mode action` to block hook-side. The `.kiro/hooks` surface (Kiro IDE and `kiro-cli --v3`) vetoes `PreToolUse`, and `UserPromptSubmit` in Kiro IDE (kiro-cli 2.24.1 `--v3` still sends a blocked prompt to the model); the CLI 2.x agent config vetoes `PreToolUse` only. ACP is optional and configured separately with `defenseclaw acp setup --agent kiro`. |
-| `defenseclaw setup amp` | Direct-to-upstream system-policy setup for Amp; writes the TypeScript plugin. Defaults to observe; pass `--mode action` for synchronous `tool.call` execution gating and model-bound `tool.result` output gating. Native confirmation is available only in the active foreground thread; background confirmation falls back to safe rejection or withholding. |
+| `defenseclaw setup kiro` | Native hook alias for Kiro IDE and Kiro CLI. Defaults to observe on first setup; a re-run without `--mode` keeps the current mode. Pass `--mode action` to block hook-side. The `.kiro/hooks` surface (Kiro IDE and `kiro-cli --v3`) vetoes `PreToolUse`, and `UserPromptSubmit` in Kiro IDE (kiro-cli 2.24.1 `--v3` still sends a blocked prompt to the model); the CLI 2.x agent config vetoes `PreToolUse` only. ACP is optional and configured separately with `defenseclaw acp setup --agent kiro`. |
+| `defenseclaw setup amp` | Direct-to-upstream system-policy setup for Amp; writes the TypeScript plugin. Defaults to observe on first setup; a re-run without `--mode` keeps the current mode. Pass `--mode action` for synchronous `tool.call` execution gating and model-bound `tool.result` output gating. Native confirmation is available only in the active foreground thread; background confirmation falls back to safe rejection or withholding. |
 | `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector); unsupported in the native Windows release. |
 | `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector); unsupported in the native Windows release. |
 | `defenseclaw setup local-observability up\|down\|status\|logs\|url\|env\|reset` | Bring up the bundled Prom/Loki/Tempo/Grafana stack, tear it down, show its readiness, tail its logs (`--service`, `--follow`), print the Grafana and backend URLs or the environment that points a gateway at it, or `reset` it (stop it and delete its stored metrics, logs, and traces). `up --password` requires the managed Grafana credential; `up --no-password` explicitly selects anonymous read-only (Viewer) access on managed loopback; anonymous access is never Admin. New stacks default to password and previously used anonymous stacks keep anonymous access, read-only. `down` keeps the data volumes; `down --disable-config` also turns off the `local-observability` destination. |
@@ -344,11 +344,11 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | --- | --- |
 | `defenseclaw guardrail status [--connector X]` | Read-only. Shows the resolved guardrail posture (enabled, mode, fail mode, HILT, block message) as one per-connector block for **every** active connector by default. Pass `--connector X` to narrow the view to one active connector. |
 | `defenseclaw guardrail enable [--connector X]` | Turn the guardrail on. Global, or re-enable a single previously-disabled connector (restores its hooks with no re-prompt). |
-| `defenseclaw guardrail mode observe\|action [--connector X] [--clear] [--no-restart] [--json]` | Switch between observe (log, block nothing) and action (enforce). Sets `guardrail.mode`, or with `--connector X` only `guardrail.connectors.X.mode`; `--clear --connector X` removes X's override. The running gateway applies it on its next reload. A changed hook fail mode is re-rendered into the hook scripts of Claude Code, Codex, Amp and OpenCode in place; other hook connectors restart the gateway (`--no-restart` skips; a stopped gateway is never started). `--json` prints `{"version": 1, "ok", "scope", "mode", "previous", "mode_source", "changed", "not_covered", "gateway", "message"}`. |
+| `defenseclaw guardrail mode observe\|action [--connector X] [--clear] [--no-restart] [--json]` | Switch between observe (logs policy findings without enforcing them) and action (enforce). Hook fail mode and proxy availability still apply. Sets `guardrail.mode`, or with `--connector X` only `guardrail.connectors.X.mode`; `--clear --connector X` removes X's override. The running gateway applies it on its next reload. A changed hook fail mode is re-rendered into the hook scripts of Claude Code, Codex, Amp and OpenCode in place; other hook connectors restart the gateway (`--no-restart` skips; a stopped gateway is never started). `--json` prints `{"version": 1, "ok", "scope", "mode", "previous", "mode_source", "changed", "not_covered", "gateway", "message"}`. |
 | `defenseclaw guardrail block-at LEVEL [--connector X] [--json]` | Set the lowest severity the guardrail blocks at: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` (any case) or `inherit` to clear. Writes `guardrail.block_at`, or with `--connector X` only `guardrail.connectors.X.block_at`. A connector's own level wins over the global one, which wins over the rule pack's (strict blocks MEDIUM+, default and permissive CRITICAL). It applies in action mode to prompts, completions, tool calls and tool responses, on hooks and through the proxy; `policy edit guardrail --block-threshold` sets the same key. See [Tool-call levels](#tool-call-levels). Refused on a managed standalone device ([exit 3](#managed-devices-and-exit-code-3)). |
 | `defenseclaw guardrail alert-at LEVEL [--connector X] [--json]` | The same for the lowest severity that raises an alert (`guardrail.alert_at`, pack levels: strict LOW+, default MEDIUM+, permissive HIGH+). Anything that blocks also alerts, so an alert level above the block level alerts from the block level. |
 | `defenseclaw guardrail disable [--connector X]` | Kill switch. Global disables everything; `--connector X` drops only that connector from the active set and removes its hooks. |
-| `defenseclaw guardrail fail-mode [open\|closed] [--connector X]` | Show/set behavior for hook delivery, authentication, and invalid-response failures. Run bare it prints the global value **plus a per-connector breakdown** of every active connector's effective value. See [Fail modes](/docs/reference/configuration/fail-modes). |
+| `defenseclaw guardrail fail-mode [closed] [--connector X]` | Show the effective mode or refresh a closed per-user hook registration. Earlier saved `open` values do not open per-user hooks. An administrator sets an outage-only `open` in managed config. Run bare it prints the global value **plus a per-connector breakdown** of every active connector's effective value. See [Fail modes](/docs/reference/configuration/fail-modes). |
 | `defenseclaw guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X]` | Show/set human-in-the-loop approval policy. Run bare it prints the global value **plus a per-connector breakdown**. The running gateway applies a change without a restart; on a Secure Client computer the command restarts it (`--no-restart` to skip). |
 | `defenseclaw guardrail block-message ["<text>"] [--clear] [--connector X]` | Show/set the message the agent sees when an action is blocked. Run bare it prints the global value **plus a per-connector breakdown**. `--clear --connector X` removes that connector's override so it inherits the global message, or the built-in default when the global value is empty. Unscoped `--clear` also clears active connector overrides, returning the active roster to the built-in default. Do not pass text and `--clear` together. |
 | `defenseclaw guardrail list-packs [--json]` | Read-only. Lists the built-in rule-pack presets, custom packs found under `~/.defenseclaw/policies/guardrail/` or configured anywhere, and the pack each active connector enforces (per-connector override > global pack > built-in default). `--json` prints `{"version": 1, "global": {...}, "connectors": [...], "packs": [...]}`. |
@@ -757,7 +757,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | `defenseclaw-gateway policy digest [--json]` | Compute the effective policy digest from `config.yaml` and the policy assets it names (rule packs, Rego modules, signature packs, scanner policies), the way the gateway does when it applies a configuration. Compare it with `policy.effective_digest` on the gateway's `/health` to see whether the running gateway applies this configuration. See [Policy generation and digest](#policy-generation-and-digest). Secure Client does not provide `policy digest`; it returns an unknown-command error. |
 | `defenseclaw-gateway policy evaluate [--target-type T] [--target-name N] [--severity S] [--findings N]` | Dry-run the admission policy for one input. |
 | `defenseclaw-gateway rulepack validate [--dir DIR] [--json]` | Validate a rule-pack directory the way the gateway does when it loads one, without starting it; without `--dir` it validates the embedded default pack. `defenseclaw guardrail validate-pack` runs this. |
-| `defenseclaw-gateway config validate [FILE] [--json] [--data-dir DIR]` | Read-only check of a candidate `config.yaml` with the compiler and loader the gateway runs at start: schema, guardrail profiles and assignments, every profile's sandbox floor combined with `openshell.admin`, rule packs and destinations. A refusal names the setting and the profile, for example `guardrail.profiles["contractors"]: sandbox: allowed: false contradicts required_for [claudecode]`. Exits 1 when the gateway would refuse the file. |
+| `defenseclaw-gateway config validate [FILE] [--json] [--data-dir DIR]` | Read-only check of a candidate `config.yaml` with the compiler and loader the gateway runs at start: schema, guardrail profiles and assignments, every profile's sandbox floor combined with `openshell.admin`, rule packs and destinations. A managed standalone file also gets the layout rules `ensure` applies (every OS refuses a `gateway.api_bind` other than `127.0.0.1`, and Linux and macOS also refuse a `gateway.api_port` other than `18970`; on a managed computer `data_dir` too). A refusal names the setting and the profile, for example `guardrail.profiles["contractors"]: sandbox: allowed: false contradicts required_for [claudecode]`. Exits 1 when the gateway or `ensure` would refuse the file. Without `FILE` it checks the installed config: on a managed computer, the managed one. |
 | `defenseclaw-gateway config migrate [--dry-run] [--json] [--ack] [--config FILE] [--data-dir DIR] [--to 9]` | The migration that `defenseclaw config migrate` and `defenseclaw migrate` run: moves `policies/rego/data.json`, the `*_actions` keys, `rule_pack_dir`, the v8 scanner keys, `update_check` and, on a per-user install, the operator block and allow entries of `audit.db` into `config.yaml`. See [Upgrade](#upgrade). |
 | `defenseclaw-gateway provenance show` | Print the config schema version, content hash, generation, and binary version. |
 | `defenseclaw-gateway connector reconcile\|verify\|teardown\|list-backups [--connector X] [--json]` | Low-level lifecycle for one connector, outside the `setup` flow: refresh its installed registration, check it left no residual state, remove its config patches, or list its pristine backups. Without `--connector` it uses the active connector. `defenseclaw uninstall` uses these. |
@@ -1222,6 +1222,7 @@ its transaction on PowerShell 7, which must be installed.
 | `reconcile` | Secure Client, standalone | Restart the guardian and wait for a fresh reconcile |
 | `status`, `verify` | Secure Client, standalone | Read-only state, and the full check |
 | `profile-explain`, `agent-identities`, `ide-plugins` | Standalone | Read-only views of the managed gateway's guardrail profile resolution, agent identities and IDE plugin inventory, as JSON. Flags as on Linux and macOS: `--user`, `--connector`, `--agent`, `--ide`, `--ai-only`, `--cursor` |
+| `events` | Standalone | Check the `DefenseClaw` event log entries (or, with `--application`, the Application log copies) against the lifecycle log; exits `1` on a forged entry or a missing record. `--max N`, `--json`. See [Logs and events](/docs/enterprise/operate/operations#logs-and-events) |
 | `uninstall` | Secure Client, standalone | Remove the services and every account's hooks. Standalone also removes the machine state; Secure Client keeps it unless `--purge`. Each account keeps `%USERPROFILE%\.defenseclaw` unless `--purge` |
 
 | Flag | Meaning |
@@ -1328,8 +1329,8 @@ guardian's health.
 
 | Command | Who runs it | Use it for |
 | --- | --- | --- |
-| `defenseclaw-gateway enterprise hooks status` | Administrator | Read-only: the last guardian reconcile and the authorization ledger |
-| `defenseclaw-gateway enterprise hooks verify` | Administrator | Read-only: verify every enabled target in the manifest without repairing it |
+| `defenseclaw-gateway enterprise hooks status` | Administrator on Linux and macOS. On Windows, `enterprise windows status` runs it | Read-only: the last guardian reconcile and the authorization ledger |
+| `defenseclaw-gateway enterprise hooks verify` | Administrator on Linux and macOS. On Windows, `enterprise windows verify` runs it | Read-only: verify every enabled target in the manifest without repairing it |
 | `defenseclaw-gateway enterprise hooks watch` | Guardian service | Watch the manifest's targets and repair them, with a periodic reconcile (`--interval`, default `1m`) |
 | `defenseclaw-gateway enterprise hooks reconcile` | Guardian and lifecycle | Install or repair every enabled target once |
 | `defenseclaw-gateway enterprise hooks install`, `uninstall` | Root or a guardian on Linux and macOS; only the guardian on Windows | Install, repair, or remove one user's hook registration |
@@ -1340,8 +1341,26 @@ guardian's health.
 lifecycle and the guardian use. The hooks commands read the managed config
 and the ledger directory from the service environment
 (`DEFENSECLAW_CONFIG`, `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR`). To run `status`
-or `verify` yourself, use the same values as the guardian's unit or plist,
+or `verify` yourself on Linux or macOS, use the same values as the guardian's unit or plist,
 and pass `--manifest` on macOS (`/opt/cisco/defenseclaw/etc/hook-guardian/targets.yaml`).
+On a managed Windows computer an elevated prompt has none of the service's
+settings, so `enterprise hooks status` and `verify` refuse and name
+`enterprise windows status --profile standalone`. Run `enterprise windows status`
+or `verify` instead: each runs the hooks command with the service's settings
+and includes its result.
+
+On managed Windows, use an elevated PowerShell prompt and the lifecycle views,
+which include the guardian's health:
+
+```powershell
+$DefenseClaw = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
+& $DefenseClaw enterprise windows status --json
+& $DefenseClaw enterprise windows verify --json
+```
+
+`DEFENSECLAW_CONFIG` alone does not provide the guardian's managed service
+pins and runtime identity to a direct `enterprise hooks` command. Windows hook
+mutations run only in the LocalSystem guardian.
 
 ### ACP
 

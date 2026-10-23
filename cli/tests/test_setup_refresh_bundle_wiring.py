@@ -299,6 +299,13 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
         )
         self._native_local_splunk.start()
         self.addCleanup(self._native_local_splunk.stop)
+        # Local setup records the container it started; no Docker here.
+        self._container = patch(
+            "defenseclaw.commands.cmd_setup._local_splunk_container_id",
+            return_value="0123456789abcdef" * 4,
+        )
+        self._container.start()
+        self.addCleanup(self._container.stop)
 
     def tearDown(self) -> None:
         import shutil

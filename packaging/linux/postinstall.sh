@@ -80,11 +80,31 @@ fi
 # for a whole transaction; wait for it like the apply trigger does. When it
 # already applied this package, ensure is a no-op and reports success. Every
 # package script waits 8 minutes, as the macOS pkg must (GAP-1413).
-# shellcheck disable=SC2086 # $downgrade is empty or one flag
-"$gateway" enterprise linux ensure --from-package$downgrade --reason package --json --lock-wait 8m \
-    >"$state/last-package-result.json" 2>"$state/last-package-result.log"
-status=$?
-rm -f "$marker"
+# Allocate fresh files before running ensure. Opening stdout over the last
+# result used to erase it before a full disk refused the stderr open.
+result=""
+status=1
+lifecycle_started=0
+output_saved=0
+result_tmp=""
+log_tmp=""
+if result_tmp=$(mktemp "$state/.last-package-result.json.XXXXXX") && \
+    log_tmp=$(mktemp "$state/.last-package-result.log.XXXXXX"); then
+    lifecycle_started=1
+    # Capture JSON in memory so a partial disk write cannot replace the last
+    # complete result. The subshell also contains a file-size-limit signal.
+    # shellcheck disable=SC2086 # $downgrade is empty or one flag
+    result=$("$gateway" enterprise linux ensure --from-package$downgrade --reason package --json --lock-wait 8m 2>"$log_tmp")
+    status=$?
+    if [ -n "$result" ] && (printf '%s\n' "$result" >"$result_tmp") && \
+        mv -fT "$result_tmp" "$state/last-package-result.json"; then
+        output_saved=1
+    fi
+    mv -fT "$log_tmp" "$state/last-package-result.log" 2>/dev/null || true
+    rm -f "$marker"
+fi
+[ -z "$result_tmp" ] || rm -f "$result_tmp"
+[ -z "$log_tmp" ] || rm -f "$log_tmp"
 if [ "$apply_path_was_active" = 1 ]; then
     if systemctl start "$apply_path" >/dev/null 2>&1; then
         rm -f "$held"
@@ -94,7 +114,14 @@ fi
 
 # ensure --json writes indented JSON, so join the lines first and allow
 # whitespace between the tokens.
-result=$(tr '\n' ' ' 2>/dev/null <"$state/last-package-result.json")
+result=$(printf '%s' "$result" | tr '\n' ' ')
+if [ "$status" = 0 ] && [ -z "$result" ]; then
+    status=1
+fi
+if [ "$output_saved" != 1 ]; then
+    echo "defenseclaw-enterprise: the current package result could not be saved (disk full or storage write failure); last-package-result.json was not replaced." >&2
+    echo "  Free disk space or correct the storage problem, then run: sudo $gateway enterprise linux ensure --from-package$downgrade" >&2
+fi
 unescape() {
     sed 's/\\"/"/g; s/\\u003c/</g; s/\\u003e/>/g; s/\\u0026/\&/g'
 }
@@ -126,15 +153,20 @@ case "$status" in
         cause=$(printf '%s\n' "$result" |
             sed -n 's/.*"errors":[[:space:]]*\[[[:space:]]*{[[:space:]]*"code":[[:space:]]*"\([^"]*\)",[[:space:]]*"message":[[:space:]]*"\(\([^"\\]\|\\.\)*\)".*/\1: \2/p' |
             head -n 1 | unescape)
-        # A run that refused the config, or rolled its change back, leaves the
-        # previous deployment running; only a first install, or a failed
-        # rollback, leaves none (GAP-0176).
+        # A refused config or successful rollback names the previous version
+        # (GAP-0176). A missing version is not proof that no service is active.
         running=$(printf '%s\n' "$result" | sed -n 's/.*"installed_version":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-        if [ -n "$running" ] && [ -z "$(message_of rollback_failed)" ]; then
+        if [ "$lifecycle_started" = 0 ]; then
+            echo "defenseclaw-enterprise: the package is installed but not applied; the lifecycle did not run, so the previous deployment was not changed." >&2
+            finish="apply this package with"
+        elif [ -z "$result" ]; then
+            echo "defenseclaw-enterprise: the package is installed but its deployment state could not be confirmed." >&2
+            finish="check and apply this package with"
+        elif [ -n "$running" ] && [ -z "$(message_of rollback_failed)" ]; then
             echo "defenseclaw-enterprise: the package is installed but not applied; the previous deployment ($running) keeps running unchanged." >&2
             finish="apply this package with"
         else
-            echo "defenseclaw-enterprise: installed, but the lifecycle reported a problem, so no deployment is active." >&2
+            echo "defenseclaw-enterprise: installed, but the lifecycle reported a problem; deployment state could not be confirmed." >&2
             finish="finish the install with"
         fi
         if [ -n "$cause" ]; then
@@ -146,7 +178,9 @@ case "$status" in
             echo "  disk_full: $disk" >&2
         fi
         echo "  Fix that, then $finish: sudo $gateway enterprise linux ensure --from-package$downgrade" >&2
-        echo "  The full result is in $state/last-package-result.json." >&2
+        if [ "$output_saved" = 1 ]; then
+            echo "  The full result is in $state/last-package-result.json." >&2
+        fi
         ;;
 esac
 exit 0

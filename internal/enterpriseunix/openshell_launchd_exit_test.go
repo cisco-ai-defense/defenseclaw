@@ -24,7 +24,7 @@ func TestMacOSIdleLaunchAgentExitIsWarningWithoutReload(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, f, cfg := newLaunchdTestHost(t)
 			job := &launchdJobFixture{loaded: true, state: "not running", code: "0", runs: 1}
-			f.jobs[h.alice.UID][labelOpenShellGateway] = job
+			f.jobs[h.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = job
 			runAction := func(action string) *enterprisestatus.Result {
 				if action == ActionEnsure {
 					return h.ensure(cfg)
@@ -39,7 +39,7 @@ func TestMacOSIdleLaunchAgentExitIsWarningWithoutReload(t *testing.T) {
 				warning := messagesOf(r.Warnings, codeSandboxUserState)
 				var services []string
 				for _, s := range r.Services {
-					if strings.Contains(s.Name, labelOpenShellGateway) {
+					if strings.Contains(s.Name, h.env.launchAgentLabel(labelOpenShellGateway)) {
 						services = append(services, s.State)
 					}
 				}
@@ -61,7 +61,7 @@ func TestMacOSIdleLaunchAgentExitIsWarningWithoutReload(t *testing.T) {
 
 func TestMacOSPackageReloadsIdleExit78OnlyForNewIdentity(t *testing.T) {
 	h, f := newMacOSPackageLaunchdHost(t)
-	f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "not running", code: "78: EX_CONFIG", runs: 1}
+	f.jobs[h.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: true, state: "not running", code: "78: EX_CONFIG", runs: 1}
 	replaceMacOSPackageBinaries(t, h, "1.0.2")
 	r := h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"})
 	if len(r.Errors) != 0 || len(f.mutated) != 2 || !strings.Contains(f.mutated[0], "bootout") || !strings.Contains(f.mutated[1], "bootstrap") {
@@ -76,7 +76,7 @@ func TestMacOSPackageReloadsIdleExit78OnlyForNewIdentity(t *testing.T) {
 
 func TestMacOSIdleLaunchAgentNeverExitedIsNotFailure(t *testing.T) {
 	h, f, _ := newLaunchdTestHost(t)
-	f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "not running", code: "(never exited)", runs: 3}
+	f.jobs[h.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: true, state: "not running", code: "(never exited)", runs: 3}
 	r := h.run(Options{Action: ActionRepair})
 	if messagesOf(r.Errors, codeSandboxUserState) != "" || len(f.mutated) != 0 || len(h.env.loadOpenShellState().Pending) != 0 {
 		t.Fatalf("idle job treated as failure: errors=%+v calls=%v pending=%+v", r.Errors, f.mutated, h.env.loadOpenShellState().Pending)
@@ -94,7 +94,7 @@ func TestMacOSLaunchAgentFailureStatesStillFail(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, f, _ := newLaunchdTestHost(t)
-			f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "not running", reason: tc.reason, spawn: tc.spawn, code: "0", runs: 1}
+			f.jobs[h.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: true, state: "not running", reason: tc.reason, spawn: tc.spawn, code: "0", runs: 1}
 			if tc.running > 0 {
 				h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Running: tc.running}
 			}

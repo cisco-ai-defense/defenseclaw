@@ -14,9 +14,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -167,6 +170,16 @@ type httpGatewayChallenge struct {
 }
 
 func NewHTTPEvaluator(endpoint, token string) (*HTTPEvaluator, error) {
+	return newHTTPEvaluator(endpoint, token, false)
+}
+
+// NewManagedHTTPEvaluator is for an administrator-owned gateway service. It
+// verifies the process behind the accepted socket before sending a challenge.
+func NewManagedHTTPEvaluator(endpoint, token string) (*HTTPEvaluator, error) {
+	return newHTTPEvaluator(endpoint, token, true)
+}
+
+func newHTTPEvaluator(endpoint, token string, managed bool) (*HTTPEvaluator, error) {
 	u, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil || u.Scheme != "http" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("ACP evaluator endpoint must be an http loopback URL")
@@ -179,22 +192,42 @@ func NewHTTPEvaluator(endpoint, token string) (*HTTPEvaluator, error) {
 	}
 	challengeURL := *u
 	challengeURL.Path = "/api/v1/acp/challenge"
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// The scoped token must never be delegated to an environment-configured
-	// proxy, even when NO_PROXY is missing or malformed.
-	transport.Proxy = nil
+	var client *http.Client
+	if managed {
+		client, err = managedGatewayClientFactory(10*time.Second, u.Host, managedGatewayServiceName())
+		if err != nil {
+			return nil, fmt.Errorf("verify managed ACP gateway transport: %w", err)
+		}
+	} else {
+		// Authenticate the accepted socket before even the challenge's MAC
+		// or the encrypted evaluation crosses a per-user account boundary.
+		client, err = hookexec.NewPerUserGatewayHTTPClient(10*time.Second, u.Host)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &HTTPEvaluator{
 		endpoint:          u.String(),
 		challengeEndpoint: challengeURL.String(),
 		token:             token,
-		client: &http.Client{
-			Timeout:   10 * time.Second,
-			Transport: transport,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		client:            client,
 	}, nil
+}
+
+var managedGatewayClientFactory = hookexec.NewManagedEnterpriseGatewayHTTPClient
+
+func managedGatewayServiceName() string {
+	switch runtime.GOOS {
+	case "linux":
+		return "defenseclaw-gateway.service"
+	case "darwin":
+		if secureClientHost() {
+			return "com.cisco.secureclient.defenseclaw"
+		}
+		return "com.cisco.defenseclaw.gateway"
+	default:
+		return managed.StandaloneWindowsGatewaySvc
+	}
 }
 
 func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, error) {

@@ -131,7 +131,7 @@ func managedStatusOfExplain(m *sandboxapi.ManagedExplain) *sandboxapi.ManagedSta
 	if m == nil {
 		return nil
 	}
-	return &sandboxapi.ManagedStatus{Profile: m.Profile, Description: m.Description, HostRunGate: m.HostRunGate, Provisional: m.Provisional,
+	return &sandboxapi.ManagedStatus{Profile: m.Profile, Description: m.Description, Allowed: m.Allowed, HostRunGate: m.HostRunGate, Provisional: m.Provisional,
 		EffectiveDigest: m.PolicyDigest, UpdatedAt: m.UpdatedAt, RequestAccess: m.RequestAccess,
 		Driver: m.Driver, DriverReason: m.DriverReason, DriverFallback: m.DriverFallback}
 }
@@ -196,7 +196,7 @@ func matchText(m *sandboxapi.ManagedExplain) string {
 	case "default_unverified":
 		return "the default (your identity could not be verified)"
 	case "default_lookup_failed":
-		return "the default (your directory couldn't be reached)"
+		return "the default (your directory couldn't be reached; no assignment needs the missing facts)"
 	case "none":
 		return "no organization profile applies; your organization's floor does"
 	}
@@ -907,7 +907,7 @@ func firstCovering(globs []string, host string) string {
 // managedPolicyCheck is the doctor's "Organization policy" row on a managed
 // computer: the caller's own profile and policy id, never the local
 // configuration, and a warning while the directory could not be reached.
-func (a *App) managedPolicyCheck(m *sandboxapi.ManagedStatus) openshell.Check {
+func (a *App) managedPolicyCheck(ctx context.Context, m *sandboxapi.ManagedStatus) openshell.Check {
 	c := openshell.Check{ID: CheckIDAdmin, Title: "Organization policy", Status: openshell.StatusPass}
 	// Before the first sandbox the daemon knows no profile: the row then
 	// names the policy, not a "profile" without a name (GAP-0175).
@@ -921,13 +921,101 @@ func (a *App) managedPolicyCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 	if ago := agoText(m.UpdatedAt, a.Now()); ago != "" {
 		c.Detail += ", updated " + ago
 	}
-	if m.Provisional {
+	allowed, denied := m.Allowed, m.DeniedHarnesses
+	if m.LegacyAllowedMissing {
+		var err error
+		allowed, denied, err = a.legacyManagedPermission(ctx)
+		if err != nil {
+			c.Status = openshell.StatusFail
+			c.Detail += ": this older sandbox service did not report authorization, and its policy explanation could not confirm it: " + sandboxapi.DisplayText(err.Error())
+			c.Fix = &openshell.Fix{Summary: sandboxapi.AccessContact(m.RequestAccess)}
+			return c
+		}
+	}
+	if !allowed {
+		c.Status = openshell.StatusFail
+		if len(denied) > 0 {
+			c.Detail += ": your organization doesn't allow sandboxes for " + strings.Join(sandboxapi.DisplayTexts(denied), ", ")
+		} else {
+			c.Detail += ": sandbox authorization could not be confirmed for your account"
+		}
+		c.Fix = &openshell.Fix{Summary: sandboxapi.AccessContact(m.RequestAccess)}
+	} else if m.Provisional {
 		c.Status = openshell.StatusWarn
 		c.Detail += ": your directory couldn't be reached, so your organization's default applies for now"
 		c.Fix = &openshell.Fix{Summary: "nothing to do on this computer; the policy updates when the directory answers. " +
 			sandboxapi.AccessContact(m.RequestAccess)}
 	}
 	return c
+}
+
+// legacyDaemonHarness names, in a denial, the agent an older sandbox
+// service judged for a doctor that named none.
+const legacyDaemonHarness = "the agent your sandbox service is configured to run"
+
+// legacyManagedPermission asks an older daemon's existing explain endpoint
+// whether sandboxes may run. Its status did not carry that verdict, so
+// absence must not mean a denial or an approval. For each harness this
+// CLI's openshell.harnesses names it asks about that harness; with none,
+// it asks once without a harness, which the daemon answers for the harness
+// its own managed configuration runs (managedConnector in
+// internal/gateway: the first of its harnesses, else Claude Code). The
+// CLI's local setup defaults never stand in for the daemon's
+// configuration. That answer cannot say which harness it judged, so a
+// profile's allowed_harnesses list is the daemon's to apply at run time.
+func (a *App) legacyManagedPermission(ctx context.Context) (bool, []string, error) {
+	api, err := a.api()
+	if err != nil {
+		return false, nil, err
+	}
+	var names []string
+	if a.Cfg != nil {
+		names = a.Cfg.OpenShell.Harnesses
+	}
+	if len(names) == 0 {
+		ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{})
+		if err != nil {
+			return false, nil, err
+		}
+		if ex == nil || ex.Managed == nil {
+			return false, nil, fmt.Errorf("no managed policy for %s", legacyDaemonHarness)
+		}
+		if !ex.Managed.Allowed {
+			return false, []string{legacyDaemonHarness}, nil
+		}
+		return true, nil, nil
+	}
+	specs, err := a.harnesses(names)
+	if err != nil {
+		return false, nil, err
+	}
+	var denied []string
+	for _, spec := range specs {
+		ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Harness: spec.Name})
+		if err != nil {
+			return false, nil, err
+		}
+		if ex == nil || ex.Managed == nil {
+			return false, nil, fmt.Errorf("no managed policy for %s", spec.Name)
+		}
+		if !ex.Managed.Allowed || !managedHarnessListed(ex.Managed.AllowedHarnesses, spec.Name) {
+			denied = append(denied, spec.Name)
+		}
+	}
+	return len(denied) == 0, denied, nil
+}
+
+func managedHarnessListed(allowed []string, name string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	name = config.NormalizeConnectorName(name)
+	for _, h := range allowed {
+		if config.NormalizeConnectorName(h) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // managedRuntimeCheck is the doctor's row for the daemon's OpenShell on a
@@ -952,8 +1040,9 @@ func managedRuntimeCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 	switch {
 	case m.Unavailable == sandboxrelay.UnavailableSetupChanging:
 		// The organization's switch of the setup is under way: it clears
-		// by itself, and is nothing to ask IT about (#1203).
-		c.Status = openshell.StatusWarn
+		// by itself, and is nothing to ask IT about. A run refuses until
+		// it clears, so doctor must not report ready (GAP-0528).
+		c.Status = openshell.StatusFail
 		c.Detail = m.Unavailable
 		c.Fix = &openshell.Fix{Summary: "nothing to do on this computer; run the command again in a few minutes"}
 	case m.Unavailable != "":

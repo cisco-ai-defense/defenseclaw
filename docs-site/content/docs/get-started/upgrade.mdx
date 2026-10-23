@@ -22,7 +22,18 @@ The command downloads the latest release's installer (`install.sh` on macOS and 
 3. Stops the gateway, keeps the current install in `~/.defenseclaw/previous`, swaps in the new version and runs `defenseclaw migrate`.
 4. Starts the gateway and waits for it to report healthy.
 
-An upgrade sets each hook's fail mode from your config before the new hook runs. A fail mode you set to open stays open; outside Secure Client one you never set is closed.
+An upgrade refreshes the installed hooks. Per-user hooks fail closed even if an earlier config or registration saved `open`; restart running agents so they discard old hook and native telemetry settings already loaded in memory. Managed standalone hooks default closed and honor an administrator's explicit outage-only `open`; Secure Client keeps its managed fail mode.
+
+End every running agent session before upgrading. Quit OpenCode and Amp
+processes completely, then start a new agent process after the installer
+reports the gateway healthy. OpenCode and Amp load their DefenseClaw plugin
+once per process. The installer checks for running OpenCode and Amp processes
+before stopping the gateway and refuses the swap if it finds one; close it and
+run the installer again. A previous release's plugin already loaded in memory
+cannot gain the new install-lock check: with `hook_fail_mode: open`, it may
+allow tool calls if the gateway is stopped, even after the installer replaces
+the plugin on disk. Keep those agents closed until the gateway is healthy.
+Managed installs keep the fail mode the administrator set.
 
 If a step fails, the installer puts the previous version back, restarts it and keeps the failed attempt in `~/.defenseclaw/.failed-<time>`. Every run writes a log to `~/.defenseclaw/logs/`. On Windows the installer continues in a new PowerShell window so the running command can release its files.
 
@@ -52,7 +63,9 @@ Rollback swaps the live install with the one the last upgrade replaced: programs
 
 - Between releases from 1.0.1 on, rollback also carries your sandbox setup: sandbox records, hook bindings and harness images. A release before 1.0.1 cannot take over that setup.
 - Each install shows only its own audit events. Read the other install's with `~/.defenseclaw/previous/bin/defenseclaw-gateway audit export --db ~/.defenseclaw/previous/data/audit.db`.
-- Rollback starts the restored gateway and waits up to 3 minutes. If it does not come up, rollback exits `1` and agent hooks are not guarded until `defenseclaw-gateway start` succeeds.
+- Rollback restarts the restored gateway if the current gateway is running or the saved install records that it was running, and waits up to 3 minutes. If both were stopped, the restored gateway stays stopped; start it with `defenseclaw-gateway start` when you are ready to resume agent work. This also applies when rolling back to 0.8.x and rolling forward again. If a required restart does not start or, on Windows, cannot be proven, rollback exits `1` and the installer undoes the rollback. On Windows, it tries to restart and prove the install it started from. If recovery remains pending, the installer keeps the lifecycle record and install lock. On Windows, when recovery is unfinished, the gateway is down and a hooks directory exists, the installer tries to close installed hooks. If hook closure succeeds, they block tool calls until the gateway runs again. If the gateway is running or no hooks directory exists, the installer does not force hooks closed. If the installer warns that hooks could not be closed, they follow the configured outage fail mode, so a hook configured open may allow tool calls. Stop agent activity, fix the reported cause and run the recovery command the installer prints. Then retry `defenseclaw rollback`.
+- On Linux and macOS, an incomplete restore leaves an unfinished snapshot or rollback hold; run the same install command again to put the previous install back. The installer does not force hooks closed during that pending recovery. Existing hooks that run while the gateway stays down follow their configured outage mode: in `closed` they block calls they receive, and in `open` they may allow them. Stop agent activity until recovery finishes.
+- If undoing the rollback also fails, either installer can report the rollback target installed with its gateway down and agent hooks not guarded. Windows then attempts the hook closure above if its conditions are met. Stop agent activity and follow the recovery command the installer prints.
 - If an upgrade or rollback is interrupted, run the same command again. The installer first restores the install it was replacing.
 - Rolling back to 0.8.x, and the Windows 0.8.7-0.8.10 Setup case, are covered in [Upgrade from 0.8.x](/docs/appendix/upgrade-from-0-8#roll-back-to-08x).
 

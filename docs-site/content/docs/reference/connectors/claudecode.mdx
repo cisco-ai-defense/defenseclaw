@@ -7,7 +7,7 @@ keywords:
   - Claude Code version floor
 ---
 
-Reference for the [Claude Code connector](/docs/connectors/claudecode). Claude Code talks to `api.anthropic.com` directly. DefenseClaw observes through [Anthropic's hooks](https://code.claude.com/docs/en/hooks) and native OpenTelemetry. No proxy listener is involved.
+Reference for the [Claude Code connector](/docs/connectors/claudecode). Claude Code talks to `api.anthropic.com` directly. DefenseClaw observes host activity through [Anthropic's hooks](https://code.claude.com/docs/en/hooks). Only isolated OpenShell also uses native OpenTelemetry. No proxy listener is involved.
 
 ## Install surface
 
@@ -15,18 +15,18 @@ Reference for the [Claude Code connector](/docs/connectors/claudecode). Claude C
 
 | Platform | Status | Connector path |
 | --- | --- | --- |
-| macOS and Linux | **Supported** | Portable command hooks plus Claude Code's native OpenTelemetry exporter. |
+| macOS and Linux | **Supported** | Portable command hooks; native OpenTelemetry only in isolated OpenShell. |
 | Native Windows x64 | **Supported** | Shell-free native executable hooks, using Claude Code's `command` plus `args` exec form. |
 
 On Windows, install and run Claude Code from PowerShell or CMD ([native setup](https://code.claude.com/docs/en/setup)). Git for Windows is recommended upstream when Claude should use its Bash tool, but it is optional: without it Claude uses its PowerShell tool. Git for Windows is not part of the DefenseClaw hook contract. WSL, Git Bash, Cygwin, MSYS, containers and virtual machines are outside the native connector path. Each hook entry runs through the system `cmd.exe`. If the launcher is missing, for example after antivirus quarantine, Claude Code blocks the prompt or tool call with one sentence that says to run the DefenseClaw installer again.
 
 ### Telemetry and proxies
 
-Native OTLP uses managed loopback exporter settings with a Claude-scoped bearer. Logs and metrics are on. Traces are off. Prompt and assistant-response content logging are separate vendor opt-ins, and DefenseClaw leaves both off. The scoped credential cannot authenticate management or another connector. Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/reference/observability/redaction).
+On every host install, setup sets Claude Code telemetry and all OTLP exporters off, removes earlier DefenseClaw native endpoints and `otelHeadersHelper`, and revokes the scoped token. Quit and reopen Claude Code after an upgrade so an existing process stops using its old exporter settings. Isolated OpenShell images retain native logs and metrics; native traces and content-bearing telemetry gates stay off. Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/reference/observability/redaction).
 
 <Flow
   direction="TB"
-  caption="Claude Code reaches the gateway's API port two ways. The hook sends each event and gets a verdict back, which can block or ask on the events that allow a decision. Claude Code's own OpenTelemetry exporter only records logs and metrics. Setup writes both into Claude Code's settings."
+  caption="Claude Code reaches the gateway through hooks. Only isolated OpenShell uses native OpenTelemetry for logs and metrics."
 >
   <Node id="cc" kind="agent">Claude Code</Node>
   <Node id="hooks" kind="connector">{`DefenseClaw hook\nruns on each hook event`}</Node>
@@ -38,9 +38,9 @@ Native OTLP uses managed loopback exporter settings with a Claude-scoped bearer.
   <Edge from="otel" to="gateway" label="logs + metrics" />
 </Flow>
 
-**Behind an HTTP proxy.** The hooks reach the gateway on 127.0.0.1 and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Claude Code 2.1's exporter also connects directly when they are set. DefenseClaw does not add `NO_PROXY` to the `env` block in `settings.json`, because that would replace your shell's value for all Claude Code traffic. If your proxy log shows `POST http://127.0.0.1:<port>/v1/...` from Claude Code, set `NO_PROXY=127.0.0.1,localhost` (and `no_proxy`) in the shell that starts it. On Windows run `setx NO_PROXY 127.0.0.1,localhost` once and open a new terminal.
+**Behind an HTTP proxy.** Host hooks reach the gateway on 127.0.0.1 and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Host setup does not enable native OTLP.
 
-**Another account on the gateway port.** Per-user installs point the exporter at this account's gateway API port (for example `http://127.0.0.1:18970`) with the Claude-scoped bearer in `settings.json`. The hooks and CLI check who owns the port and send nothing to another account's listener. The exporter cannot. If another account holds the port while this account's gateway is stopped, that listener receives Claude Code's OTLP logs and metrics and the bearer. The bearer lets it post only Claude Code OTLP into this account's gateway; it never authenticates hooks, inspection or management. To reduce the risk, give each account its own port (`defenseclaw setup gateway --api-port <port>`), keep the gateway running, and treat telemetry attribution as advisory after an outage. See [Residual risks](/docs/enterprise/plan/threat-model#residual-risks).
+**Another account on the gateway port.** Host hooks verify the listener before sending an event. Native exporters cannot make that check, so host setup disables them and removes their old credentials on Linux, macOS and Windows. `defenseclaw status` and `defenseclaw doctor` name a peer-held API port and suggest a free one. A Claude Code process started before the upgrade must be restarted to discard its old settings.
 
 ### Files
 
@@ -107,7 +107,7 @@ The machine-wide drop-in carries one hook contract for every account, not the ve
 | Hook script | `claude-code-hook.sh` |
 | Hook config paths | `~/.claude/settings.json` |
 | Response field | `claude_code_output` |
-| Native OTLP | yes |
+| Native OTLP | isolated OpenShell only; host upgrades remove old exporters |
 | W3C traceparent | yes |
 | Fail closed | yes |
 

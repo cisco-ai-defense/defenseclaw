@@ -14,8 +14,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -61,14 +59,14 @@ func foreignHookTestCleanups(connectorName string) []enterpriseHookWorkerForeign
 // Item 1 for the per-user worker: the worker's removal over the fence pipes
 // (its lock ask names the files) and a real worker process, as the user,
 // talking to this process's session. The change happens in the worker; the
-// lock, the rotation, both records and the release in the guardian.
-func TestForeignHookWorkerRemovalRotatesTheKeyBeforeItPublishes(t *testing.T) {
+// lock, both records and the release in the guardian.
+func TestForeignHookWorkerRemovalRecordsBeforeTheFileChanges(t *testing.T) {
 	cleanups := foreignHookTestCleanups("cursor")
 	var account enterpriseHookWorkerAccount
 	runForeignHookRemovalOrderCases(t, []foreignHookRemovalOrderCase{
 		{
 			name: "the worker's pipe protocol",
-			want: "lock,rotate,ledger,change,ledger,release",
+			want: "lock,ledger,change,ledger,release",
 			run: func(t *testing.T, trace *foreignHookRemovalTrace, home, path string) {
 				var stderr bytes.Buffer
 				session := newEnterpriseForeignHookFenceSession(cleanups, &stderr, "1001", home)
@@ -84,7 +82,7 @@ func TestForeignHookWorkerRemovalRotatesTheKeyBeforeItPublishes(t *testing.T) {
 		},
 		{
 			name: "a real worker process",
-			want: "lock,rotate,ledger,change,ledger,release",
+			want: "lock,ledger,change,ledger,release",
 			home: func(t *testing.T) string {
 				useEnterpriseHookWorkerHelper(t, "real")
 				account = selfWorkerAccount(t)
@@ -167,75 +165,6 @@ func TestStandaloneWorkerWithoutACommitChannelRemovesNothing(t *testing.T) {
 	}
 }
 
-// Item 2 through the worker: a rotation that could not end the key refuses
-// the removal (the worker's report names it, every plugin stays, and the
-// second plugin's removal is refused without asking the guardian again); a
-// rotation that ended the key but made no new one warns in the guardian's
-// log and the removals go on.
-func TestForeignHookWorkerRemovalAndTheKeyRotation(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		rotate  func(root, identity string) error
-		refused bool
-	}{
-		{name: "the key could not be ended", refused: true, rotate: func(string, string) error {
-			return fmt.Errorf("%w: the key file is in use", enterprisepolicy.ErrPublishedSessionKeyAlive)
-		}},
-		{name: "the key ended, no new one", rotate: func(root, identity string) error {
-			if err := enterprisepolicy.RevokePublishedSessionKey(root, identity); err != nil {
-				return fmt.Errorf("%w: %v", enterprisepolicy.ErrPublishedSessionKeyAlive, err)
-			}
-			return errors.New("create the protected session record key: no space left on device")
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			g := useForeignHookGuardian(t, nil)
-			process := runtime.GOOS + ":b:1:100"
-			g.allow(t, "1001", process)
-			rotations := 0
-			enterpriseForeignHookRotateSessionKey = func(root, identity string, _ enterprisepolicy.PublishedSessionTrust) error {
-				rotations++
-				return tc.rotate(root, identity)
-			}
-			trace := traceForeignHookRemovals(t)
-			home := t.TempDir()
-			plugins := foreignHookTestOpenCodePlugins(t, home)
-			var stderr bytes.Buffer
-			cleanups := foreignHookTestCleanups("opencode")
-			session := newEnterpriseForeignHookFenceSession(cleanups, &stderr, "1001", home)
-			report := runEnterpriseHookWorkerForeignCleanup(enterpriseHookWorkerRequest{Home: home, Standalone: true, ForeignCleanup: cleanups}, time.Now(), foreignHookPipeFence(t, session))["opencode"]
-			if tc.refused {
-				if !strings.Contains(report.Error, enterprisepolicy.ErrPublishedSessionKeyAlive.Error()) || len(report.Removed) != 0 || len(report.Reported) < len(plugins) {
-					t.Fatalf("the refused rotation must be reported and every plugin kept: %+v", report)
-				}
-				for _, path := range plugins {
-					if _, err := os.Lstat(path); err != nil {
-						t.Fatalf("%s changed although the key could not be rotated: %v", path, err)
-					}
-				}
-				if rotations != 1 || trace.String() != "lock,rotate,release" || g.ledgerExists() {
-					t.Fatalf("nothing may be recorded, the later removal is refused without asking (rotations %d): %s", rotations, trace)
-				}
-				return
-			}
-			if report.Error != "" || len(report.Removed) != len(plugins) {
-				t.Fatalf("a rotation that ended the key must not refuse the removals: %+v", report)
-			}
-			if rotations != len(plugins) || !strings.Contains(stderr.String(), "guarded calls block during a gateway outage until a later pass makes one") {
-				t.Fatalf("each removal rotates, and the missing key is reported (rotations %d): %q", rotations, stderr.String())
-			}
-			for _, path := range plugins {
-				if _, ok := g.entry(t, "1001", "opencode", path); !ok {
-					t.Fatalf("%s is not recorded", path)
-				}
-			}
-			if g.proves("1001", process) {
-				t.Fatal("the old allow must prove nothing")
-			}
-		})
-	}
-}
-
 // foreignHookWorkerPass is a standalone guardian with the Cursor machine
 // policy, eligible accounts with temporary homes, and runner as the
 // per-user worker.
@@ -287,8 +216,8 @@ func TestForeignHookWorkerThatDiedAfterItsLock(t *testing.T) {
 		report bool // the worker still answered, with an uncommitted removal
 		want   string
 	}{
-		{name: "the worker died", want: "lock,rotate,ledger,ledger,release"},
-		{name: "the worker reported a removal no commit covered", report: true, want: "lock,rotate,ledger,ledger,release,lock,rotate,ledger,ledger,release"},
+		{name: "the worker died", want: "lock,ledger,ledger,release"},
+		{name: "the worker reported a removal no commit covered", report: true, want: "lock,ledger,ledger,release,lock,ledger,ledger,release"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var locked, other string
@@ -356,6 +285,10 @@ func TestStandaloneForeignCleanupWorkersDoNotHoldTheLock(t *testing.T) {
 	var mu sync.Mutex
 	active, peak := 0, 0
 	both := make(chan struct{})
+	releaseWorkers := make(chan struct{})
+	var release sync.Once
+	letWorkersFinish := func() { release.Do(func() { close(releaseWorkers) }) }
+	defer letWorkersFinish()
 	g, _ := foreignHookWorkerPass(t, []string{"alice", "bob"}, func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
 		mu.Lock()
 		active++
@@ -374,25 +307,38 @@ func TestStandaloneForeignCleanupWorkersDoNotHoldTheLock(t *testing.T) {
 		if len(request.ForeignCleanup) == 0 || request.cleanupFence == nil {
 			t.Errorf("worker for %s has no foreign cleanup commit session", account.User)
 		}
-		for _, uid := range []int{4242, 4243} {
-			// Both workers probe the same account gate. Give those probes
-			// time to serialize under the race detector; a worker that holds
-			// the gate through its callback still cannot pass this check.
-			if !accountRemovalLockFree(t, strconv.Itoa(uid), time.Second) {
-				t.Errorf("the worker for %s holds uid %d's removal lock before any removal", account.User, uid)
-			}
-		}
-		select {
-		case <-both:
-		case <-time.After(2 * time.Second):
-			t.Errorf("the worker for %s ran alone: the accounts' workers must run concurrently", account.User)
-		}
+		<-releaseWorkers
 		return enterpriseHookWorkerResponse{Targets: foreignHookWorkerTargets(request), Cleanup: map[string]enterpriseHookWorkerCleanupReport{
 			"cursor": {Removed: []string{account.Home + "/.cursor/hooks.json"}, BackupDir: account.Home + "/.defenseclaw/foreign-hooks-backup/cursor/x"},
 		}}, nil
 	})
 	var log strings.Builder
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC), enterprisehooks.Manifest{}, map[string]map[string]bool{}, "")
+	done := make(chan struct{})
+	go func() {
+		runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC), enterprisehooks.Manifest{}, map[string]map[string]bool{}, "")
+		close(done)
+	}()
+	select {
+	case <-both:
+	case <-time.After(10 * time.Second):
+		letWorkersFinish()
+		<-done
+		t.Fatal("the accounts' workers did not run concurrently")
+	}
+	// Both workers remain inside their callbacks while the main goroutine
+	// probes each account lock. A worker that holds one cannot release it
+	// until after these probes, regardless of scheduler delays.
+	var held []string
+	for _, uid := range []string{"4242", "4243"} {
+		if !accountRemovalLockFree(t, uid, 5*time.Second) {
+			held = append(held, uid)
+		}
+	}
+	letWorkersFinish()
+	<-done
+	if len(held) != 0 {
+		t.Fatalf("workers held removal locks before any removal: %v", held)
+	}
 	if peak != 2 {
 		t.Fatalf("peak concurrent workers = %d, want 2; log:\n%s", peak, log.String())
 	}
@@ -404,7 +350,7 @@ func TestStandaloneForeignCleanupWorkersDoNotHoldTheLock(t *testing.T) {
 		t.Fatalf("both accounts' removals must reach the ledger, got %q; log:\n%s", got, log.String())
 	}
 	for _, uid := range []string{"4242", "4243"} {
-		if !accountRemovalLockFree(t, uid, 100*time.Millisecond) {
+		if !accountRemovalLockFree(t, uid, 5*time.Second) {
 			t.Fatalf("uid %s's removal lock is still held after the pass", uid)
 		}
 	}
@@ -432,12 +378,10 @@ func TestForeignHookFenceSessionCommitsOneRemovalAtATime(t *testing.T) {
 	if accountRemovalLockFree(t, "4242", 50*time.Millisecond) {
 		t.Fatal("a removal in progress must hold the account's lock against the gateway")
 	}
-	start := time.Now()
-	if err := bob.lock(context.Background(), "cursor", []string{"/home/bob/.cursor/hooks.json"}); err != nil {
-		t.Fatal(err)
-	}
-	if elapsed := time.Since(start); elapsed > enterprisepolicy.ForeignHookRemovalDrainWait/2 {
-		t.Fatalf("another account's removal waited %v for alice's", elapsed)
+	bobCtx, cancelBob := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelBob()
+	if err := bob.lock(bobCtx, "cursor", []string{"/home/bob/.cursor/hooks.json"}); err != nil {
+		t.Fatalf("another account's removal waited for alice's lock: %v", err)
 	}
 	if err := bob.commit("cursor", []string{"/home/bob/.cursor/hooks.json"}); err != nil {
 		t.Fatal(err)
@@ -465,7 +409,7 @@ func TestForeignHookFenceSessionCommitsOneRemovalAtATime(t *testing.T) {
 	if err := alice2.commit("cursor", []string{"/home/alice/.cursor/other.json"}); err != nil {
 		t.Fatal(err)
 	}
-	if !accountRemovalLockFree(t, "4242", 100*time.Millisecond) {
+	if !accountRemovalLockFree(t, "4242", 5*time.Second) {
 		t.Fatal("the lock stays held after the last commit")
 	}
 
@@ -501,7 +445,7 @@ func TestForeignHookFenceSessionCommitsOneRemovalAtATime(t *testing.T) {
 		alice.release()
 		t.Fatal("locked past the per-connector bound")
 	}
-	if !accountRemovalLockFree(t, "4242", 100*time.Millisecond) {
+	if !accountRemovalLockFree(t, "4242", 5*time.Second) {
 		t.Fatal("the lock stays held after the session's commits")
 	}
 }

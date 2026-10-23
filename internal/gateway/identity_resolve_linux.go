@@ -7,6 +7,8 @@ package gateway
 
 import (
 	"context"
+	"os"
+	"slices"
 	"strconv"
 	"time"
 
@@ -29,17 +31,29 @@ var peerDirectoryLookupTimeout = unixidentity.DirectoryLookupBudget()
 // account holds a uid (managedHookPeerAccountIncarnation).
 const peerIncarnationTimeout = 10 * time.Second
 
-// managedHookPeerAccountIncarnation names which directory account holds the
-// uid of account (unixidentity.AccountIncarnation): the SID SSSD holds for
-// it. false when it cannot tell. Tests replace it.
-var managedHookPeerAccountIncarnation = func(account unixidentity.Account) (string, bool) {
+// managedPeerIncarnation asks the current NSS owner for its incarnation. A
+// current local guardian record may supply root's proof of an SSSD miss;
+// NSS still checks whether SSSD now holds the uid.
+func managedPeerIncarnation(account unixidentity.Account, recordedUnshared bool) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), peerIncarnationTimeout)
 	defer cancel()
 	resolver, err := unixidentity.NewNSSResolver(ctx)
 	if err != nil {
 		return "", false
 	}
+	if recordedUnshared {
+		return resolver.AccountIncarnationForRecordedUnsharedUID(account.UID, account.Name)
+	}
 	return resolver.AccountIncarnation(account.UID, account.Name)
+}
+
+// Tests replace these boundaries for the account holding a verified uid.
+var managedHookPeerAccountIncarnation = func(account unixidentity.Account) (string, bool) {
+	return managedPeerIncarnation(account, false)
+}
+
+var managedHookPeerRecordedAccountIncarnation = func(account unixidentity.Account) (string, bool) {
+	return managedPeerIncarnation(account, true)
 }
 
 // holderSpoolRecord is the guardian's current record of the uid key when it
@@ -50,7 +64,8 @@ var managedHookPeerAccountIncarnation = func(account unixidentity.Account) (stri
 // facts the first one's record gave it the first one's UPN, principal and
 // domain, and the profile assigned to them, until the guardian's next pass
 // (review of GAP-0551). A record that names no incarnation (an older
-// guardian's), or an incarnation that cannot be told now, proves nothing:
+// guardian's), or an incarnation that cannot be told now even with the
+// guardian's recorded SSSD miss, proves nothing:
 // the facts are then the gateway's own, as without a guardian, and the
 // cache looks them up again soon (awaitingSpoolUPN).
 // A record of another SID is an error (readIdentitySpoolFactsForAccount): the
@@ -63,15 +78,79 @@ func holderSpoolRecord(key string, account unixidentity.Account, accountSID stri
 	if !ok || record.AccountIncarnation == "" {
 		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
-	if incarnation, known := managedHookPeerAccountIncarnation(account); !known || incarnation != record.AccountIncarnation {
+	incarnation, known := managedHookPeerAccountIncarnation(account)
+	if !known && record.AccountIncarnation == "files" && record.AccountSID == "" &&
+		record.Facts.Source == useridentity.SourceNSSFiles {
+		incarnation, known = managedHookPeerRecordedAccountIncarnation(account)
+	}
+	if !known || incarnation != record.AccountIncarnation {
 		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
 	return record, true, nil
 }
 
+// processCredentialFacts are the facts of the per-user gateway's own
+// account, uid, from its kernel credentials: the groups its process holds
+// (its primary group first), named through NSS as an account's groups are,
+// and no fact of which account holds the uid (HolderUnproven): the uid may
+// be another account's as well. false for any other uid and on a gateway
+// that runs as a service account. Tests replace processGroupIDs.
+func processCredentialFacts(resolver peerNSSResolver, uid int, now time.Time) (useridentity.DirectoryFacts, bool) {
+	if gatewayRunsAsServiceAccount() || uid != os.Getuid() {
+		return useridentity.DirectoryFacts{}, false
+	}
+	ids, err := processGroupIDs()
+	if err != nil {
+		return useridentity.DirectoryFacts{}, false
+	}
+	names, unconfirmed, err := resolver.GroupNames(ids)
+	if err != nil {
+		return useridentity.DirectoryFacts{}, false
+	}
+	return useridentity.DirectoryFacts{
+		Source:            useridentity.SourceProcessCredentials,
+		Groups:            names,
+		UnconfirmedGroups: unconfirmed,
+		HolderUnproven:    true,
+		Assurance:         useridentity.AssuranceVerified,
+		ResolvedAt:        now,
+	}, true
+}
+
+// processGroupIDs are the gateway process's primary and supplementary gids.
+var processGroupIDs = func() ([]int, error) {
+	groups, err := os.Getgroups()
+	if err != nil {
+		return nil, err
+	}
+	ids := []int{os.Getgid()}
+	for _, id := range groups {
+		if !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
 // peerNSSFacts resolves a verified uid's facts (resolveNSSPeerFacts);
 // tests replace it.
 var peerNSSFacts = resolveNSSPeerFacts
+
+// peerNSSResolver is the NSS work this gateway does for one verified peer.
+// Keep the resolver boundary replaceable so the managed path can be tested
+// with a local uid absent from SSSD without changing the host's account DB.
+type peerNSSResolver interface {
+	LookupUID(int) (unixidentity.Account, error)
+	DirectoryFactsForUID(int, time.Time) (useridentity.DirectoryFacts, error)
+	DirectoryFactsForRecordedUnsharedUID(int, time.Time) (useridentity.DirectoryFacts, error)
+	GroupNames([]int) ([]string, []string, error)
+}
+
+var newPeerNSSResolver = func(ctx context.Context) (peerNSSResolver, error) {
+	return unixidentity.NewNSSResolver(ctx)
+}
+
+var peerUnsharedUIDNeedsRoot = unixidentity.UnsharedUIDNeedsRoot
 
 // resolvePeerDirectoryFacts is the peer directory cache's lookup
 // (peerNSSFacts). A lookup that fails leaves the account and its groups
@@ -91,7 +170,7 @@ func resolveNSSPeerFacts(key string) (useridentity.DirectoryFacts, error) {
 	now := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(context.Background(), peerDirectoryLookupTimeout)
 	defer cancel()
-	resolver, err := unixidentity.NewNSSResolver(ctx)
+	resolver, err := newPeerNSSResolver(ctx)
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
@@ -100,6 +179,19 @@ func resolveNSSPeerFacts(key string) (useridentity.DirectoryFacts, error) {
 		return useridentity.DirectoryFacts{}, err
 	}
 	facts, err := resolver.DirectoryFactsForUID(uid, now)
+	if peerUnsharedUIDNeedsRoot(err) {
+		// The gateway is not root, so it cannot show that SSSD holds no
+		// other account of the uid (GAP-0653). The hook guardian, which
+		// runs as root, records that proof for the account in its current
+		// identity record; a per-user gateway's own account has the groups
+		// its own kernel credentials list, which no other account's are.
+		if _, recorded, _ := holderSpoolRecord(key, account, "", now); recorded {
+			facts, err = resolver.DirectoryFactsForRecordedUnsharedUID(uid, now)
+		} else if own, ok := processCredentialFacts(resolver, uid, now); ok {
+			noteGroupDomains(own.Groups)
+			return own, nil
+		}
+	}
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}

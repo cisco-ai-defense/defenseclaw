@@ -55,6 +55,8 @@ var agentIdentityVerifiedAccountToken = func(string) string { return "" }
 
 var agentIdentityHolderHistory = func(string) (string, bool) { return "", false }
 
+var agentIdentityAdminHolderToken = func(string, string) (string, bool) { return "", false }
+
 // legacyAgentOwnerBound binds no 1.0.3 agent identity here: Windows keyed
 // them on the SID, which did not change, so its agents entries match as
 // they did.

@@ -118,6 +118,7 @@ func newProxyGeneratedRuntimeWithPolicies(
 	defaults config.ObservabilityV8BucketPolicySource,
 	buckets map[observability.Bucket]config.ObservabilityV8BucketPolicySource,
 	includeSpans bool,
+	reporterFactory ...func(*audit.Store, *redaction.Engine) runtimegraph.Reporter,
 ) (*observabilityruntime.Runtime, *proxyCanonicalCapture) {
 	t.Helper()
 	directory := t.TempDir()
@@ -199,9 +200,13 @@ func newProxyGeneratedRuntimeWithPolicies(
 			return pipelines, nil
 		},
 	})
+	var reporter runtimegraph.Reporter = &discardSidecarGraphReporter{}
+	if len(reporterFactory) > 0 {
+		reporter = reporterFactory[0](store, engine)
+	}
 	runtime, err := observabilityruntime.New(t.Context(), runtimegraph.ConfigFromPlan(plan, false), observabilityruntime.Options{
 		Store: store, Engine: engine, RecordBuilder: builder,
-		Reporter: &discardSidecarGraphReporter{}, RetentionController: retention,
+		Reporter: reporter, RetentionController: retention,
 		TelemetryProviderFactory: providerFactory,
 	})
 	if err != nil {

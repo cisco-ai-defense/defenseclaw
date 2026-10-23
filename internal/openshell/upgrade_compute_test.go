@@ -106,9 +106,9 @@ func TestHoldsGateway(t *testing.T) {
 // DefenseClaw starts none on it: a delete.
 func TestStopWayOn(t *testing.T) {
 	const (
-		stop      = "`defenseclaw sandbox stop dc-x`"
+		stop      = "`defenseclaw sandbox stop dc-x` (DefenseClaw sandbox), or `openshell sandbox stop dc-x` (raw OpenShell sandbox)"
 		startStop = "`defenseclaw sandbox start dc-x`, then `defenseclaw sandbox stop dc-x` once it is ready"
-		del       = "`defenseclaw sandbox delete dc-x`, which deletes it and its work"
+		del       = "`defenseclaw sandbox delete dc-x` (DefenseClaw sandbox) or `openshell sandbox delete dc-x` (raw OpenShell sandbox), which deletes it and its work"
 		ended     = "nothing in OpenShell writes this MicroVM's disk back or stops it: its VM still runs what its workload left running, " +
 			"and its start ends that VM with no flush first, so what the VM has not written to its disk is lost: " +
 			"`defenseclaw sandbox start dc-x --end-vm` ends the VM that way, then `defenseclaw sandbox stop dc-x` once it is ready; or " + del
@@ -119,10 +119,10 @@ func TestStopWayOn(t *testing.T) {
 		runs  bool
 		want  string
 	}{
-		{openshell.PhaseReady, "", true, stop + " (DefenseClaw sandbox), or `openshell sandbox stop dc-x` (raw OpenShell sandbox)"},
-		{openshell.PhaseReady, "", false, stop + " (DefenseClaw sandbox), or `openshell sandbox stop dc-x` (raw OpenShell sandbox)"},
-		{openshell.PhaseStarting, "", true, "wait until `defenseclaw sandbox list` shows it ready or stopped, then " + stop + " if it is ready"},
-		{openshell.PhaseUnknown, "", false, "wait until `defenseclaw sandbox list` shows it ready or stopped, then " + stop + " if it is ready"},
+		{openshell.PhaseReady, "", true, stop},
+		{openshell.PhaseReady, "", false, stop},
+		{openshell.PhaseStarting, "", true, "wait until `openshell sandbox list` shows it ready or stopped, then " + stop + " if it is ready"},
+		{openshell.PhaseUnknown, "", false, "wait until `openshell sandbox list` shows it ready or stopped, then " + stop + " if it is ready"},
 		{openshell.PhaseCompleted, "", true, ended},
 		{openshell.PhaseError, "MainProcessFailed: exited 1", true, ended},
 		{openshell.PhaseError, "ProvisioningTimedOut: window expired", true, "wait a minute for OpenShell's cleanup of the provisioning that timed out, then " + startStop +
@@ -145,10 +145,19 @@ func TestStopWayOn(t *testing.T) {
 	}
 }
 
+// A raw OpenShell sandbox holds its gateway too, and DefenseClaw's
+// commands refuse it ("no DefenseClaw sandbox named"): every way on names
+// an OpenShell command that acts on it (GAP-0370, GAP-0623).
 func TestRawMicroVMRestartAdviceNamesItsControlSurface(t *testing.T) {
-	got := openshell.StopWayOn("raw-box", openshell.PhaseReady, "", true)
-	if !strings.Contains(got, "`openshell sandbox stop raw-box`") {
-		t.Fatalf("raw MicroVM cannot follow the printed stop advice: %s", got)
+	for _, p := range []openshell.SandboxPhase{openshell.PhaseReady, openshell.PhaseStarting, openshell.PhaseCompleted, openshell.PhaseError} {
+		for _, said := range []string{"", "MainProcessFailed: exited 3", "ProvisioningTimedOut: window expired", "ProcessPollFailed: x"} {
+			for _, runs := range []bool{true, false} {
+				got := openshell.StopWayOn("raw-box", p, said, runs)
+				if !strings.Contains(got, "`openshell sandbox stop raw-box`") && !strings.Contains(got, "`openshell sandbox delete raw-box`") {
+					t.Errorf("raw MicroVM (%s, %q, runs %v) cannot follow the printed advice: %s", p, said, runs, got)
+				}
+			}
+		}
 	}
 }
 
@@ -328,7 +337,7 @@ func TestTheGatewayStopsOnlyOnceOpenShellReportsEveryMicroVMStopped(t *testing.T
 	c, f := heldGateway(t, openshell.PhaseCompleted, nil)
 	f.SetRelease("0.1.3")
 	if err := openshell.PrepareUpgrade(context.Background(), c, pull, noMicroVMs); !errors.Is(err, openshell.ErrSandboxesRunning) ||
-		!strings.Contains(err.Error(), "dc-x (completed): `defenseclaw sandbox delete dc-x`, which deletes it and its work (this OpenShell neither stops nor starts a completed MicroVM)") {
+		!strings.Contains(err.Error(), "dc-x (completed): `defenseclaw sandbox delete dc-x` (DefenseClaw sandbox) or `openshell sandbox delete dc-x` (raw OpenShell sandbox), which deletes it and its work (this OpenShell neither stops nor starts a completed MicroVM)") {
 		t.Errorf("upgrade from 0.1.3 under a completed MicroVM: %v", err)
 	}
 

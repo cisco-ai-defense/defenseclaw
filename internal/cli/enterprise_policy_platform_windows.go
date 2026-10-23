@@ -177,14 +177,11 @@ func enterprisePolicyLiveCredential(target enterprisehooks.TargetCredentials) fu
 }
 
 // enterprisePolicyUnprotectedAgents reads the enumerator's
-// unprotected-agents record next to manifestPath. A token that cannot read
-// the protected record lists none. Replaceable in tests.
-var enterprisePolicyUnprotectedAgents = func(manifestPath string) []enterprisehooks.UnprotectedAgent {
-	agents, err := enterprisehooks.ReadWindowsUnprotectedAgents(manifestPath)
-	if err != nil {
-		return nil
-	}
-	return agents
+// unprotected-agents record next to manifestPath. The caller reports a
+// missing, stale or unreadable scan rather than silently listing no agents.
+// Replaceable in tests.
+var enterprisePolicyUnprotectedAgents = func(manifestPath string) ([]enterprisehooks.UnprotectedAgent, error) {
+	return enterprisehooks.ReadWindowsUnprotectedAgents(manifestPath)
 }
 
 // hookForeignGuardAccountHome returns the profile directory of the

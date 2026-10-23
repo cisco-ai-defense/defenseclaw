@@ -167,6 +167,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			// must still prevent the structured source from restoring
 			// authority on its own.
 			base.markPartial(IssueUnsupportedConstruct)
+			base.addIssue(IssueIncomparableSources)
 		}
 	}
 

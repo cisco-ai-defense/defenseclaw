@@ -20,15 +20,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func pinWindowsStandaloneProfileForTest(t *testing.T, pinned bool) {
-	t.Helper()
-	original := windowsEnterpriseStandaloneProcess
-	windowsEnterpriseStandaloneProcess = func() bool { return pinned }
-	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = original })
-}
-
 func TestRegisterWindowsStandalonePerUserConnectorsRequiresStandalonePin(t *testing.T) {
-	pinWindowsStandaloneProfileForTest(t, false)
+	setStandaloneProfileForTest(t, false)
 	registry := connector.NewRegistry()
 	RegisterWindowsStandalonePerUserConnectors(registry)
 	for _, name := range WindowsStandalonePerUserConnectorNames() {
@@ -45,7 +38,7 @@ func TestRegisterWindowsStandalonePerUserConnectorsRequiresStandalonePin(t *test
 		}
 	}
 
-	pinWindowsStandaloneProfileForTest(t, true)
+	setStandaloneProfileForTest(t, true)
 	registry = connector.NewRegistry()
 	RegisterWindowsStandalonePerUserConnectors(registry)
 	for _, name := range WindowsStandalonePerUserConnectorNames() {
@@ -76,11 +69,7 @@ func newPerUserManagedHarness(t *testing.T) perUserManagedHarness {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		t.Fatalf("resolve test SID: %v", err)
-	}
-	target := user.User.Sid
+	target := currentWindowsTestSID(t)
 	for _, path := range []string{dataDir, hookDir} {
 		setWindowsTestPathExactOwner(t, path, target)
 		if err := setWindowsUserPathProtection(path, target, true); err != nil {
@@ -270,7 +259,7 @@ func TestWindowsPerUserManagedEnrollmentDecodeIsStrict(t *testing.T) {
 }
 
 func TestCertifyWindowsEnterpriseConnectorPerUserRequiresStandalone(t *testing.T) {
-	pinWindowsStandaloneProfileForTest(t, false)
+	setStandaloneProfileForTest(t, false)
 	if err := certifyWindowsEnterpriseConnector("devin", connector.NewDevinConnector()); err == nil ||
 		!strings.Contains(err.Error(), "standalone") {
 		t.Fatalf("Secure Client process certified devin: %v", err)
@@ -281,7 +270,7 @@ func TestCertifyWindowsEnterpriseConnectorPerUserRequiresStandalone(t *testing.T
 	if err := certifyWindowsEnterpriseConnector("copilot", connector.NewDevinConnector()); err == nil {
 		t.Fatal("Secure Client certified an impostor implementation under the copilot name")
 	}
-	pinWindowsStandaloneProfileForTest(t, true)
+	setStandaloneProfileForTest(t, true)
 	for _, conn := range []connector.Connector{
 		connector.NewCopilotConnector(), connector.NewAntigravityConnector(), connector.NewDevinConnector(),
 		connector.NewHermesConnector(), connector.NewOpenCodeConnector(), connector.NewAMPConnector(),
@@ -306,11 +295,11 @@ func TestCertifyWindowsEnterpriseConnectorPerUserRequiresStandalone(t *testing.T
 // The per-user connectors join the registry, the effective hook connectors
 // and the managed runtime only in the standalone profile, and fail closed.
 func TestWindowsStandalonePerUserConnectorMappings(t *testing.T) {
-	pinWindowsStandaloneProfileForTest(t, false)
+	setStandaloneProfileForTest(t, false)
 	if _, ok := newWindowsEnterpriseConnectorRegistry().Get("devin"); ok {
 		t.Fatal("Secure Client registry gained devin")
 	}
-	pinWindowsStandaloneProfileForTest(t, true)
+	setStandaloneProfileForTest(t, true)
 	if _, ok := newWindowsEnterpriseConnectorRegistry().Get("devin"); !ok {
 		t.Fatal("standalone registry is missing devin")
 	}
@@ -321,7 +310,7 @@ func TestWindowsStandalonePerUserConnectorMappings(t *testing.T) {
 			"codex": {}, "copilot": {}, "amp": {},
 		},
 	}}
-	pinWindowsStandaloneProfileForTest(t, false)
+	setStandaloneProfileForTest(t, false)
 	if got := EffectiveWindowsHookConnectors(cfg); !reflect.DeepEqual(got, []string{"codex", "copilot"}) {
 		t.Fatalf("Secure Client connectors = %v", got)
 	}
@@ -330,7 +319,7 @@ func TestWindowsStandalonePerUserConnectorMappings(t *testing.T) {
 	if got := EffectiveWindowsStandaloneHookConnectors(cfg); !reflect.DeepEqual(got, []string{"amp", "codex", "copilot"}) {
 		t.Fatalf("standalone config connectors without the pin = %v", got)
 	}
-	pinWindowsStandaloneProfileForTest(t, true)
+	setStandaloneProfileForTest(t, true)
 	if got := EffectiveWindowsHookConnectors(cfg); !reflect.DeepEqual(got, []string{"amp", "codex", "copilot"}) {
 		t.Fatalf("standalone connectors = %v", got)
 	}

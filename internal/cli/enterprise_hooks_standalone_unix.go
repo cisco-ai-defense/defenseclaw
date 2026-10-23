@@ -653,7 +653,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	jobs := map[int]*enterpriseHookWorkerJob{}
 	slots := map[int]enterpriseHookStandaloneSlot{}
-	var machineClaudeRows []int
+	var machineWorkerRows []int
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
@@ -755,21 +755,33 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 				failRow(fmt.Errorf("enterprise hooks: %s machine policy is not in place", row.Connector))
 			default:
 				index := len(rows)
-				if strings.EqualFold(row.Connector, "claudecode") {
+				if strings.EqualFold(row.Connector, "claudecode") || strings.EqualFold(row.Connector, "codex") {
 					// An older personal install can leave a second hook in
 					// settings.json. The managed hook is already published;
-					// neutralize that personal script as the target user.
+					// neutralize that personal script as the target user. Codex
+					// can also leave a disallowed user features.hooks key that
+					// breaks an unrelated project trust write; remove that key
+					// as the user while machine policy keeps hooks pinned true.
 					job, exists := jobs[account.UID]
 					if !exists {
 						job = &enterpriseHookWorkerJob{Account: account, Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true}}
 						jobs[account.UID] = job
 					}
+					mode := enterpriseHookWorkerModeBlockPersonalClaude
+					if strings.EqualFold(row.Connector, "codex") {
+						mode = enterpriseHookWorkerModeRepairManagedCodexFeature
+						configDir := filepath.Join(account.Home, ".codex")
+						watchDirs[account.Home] = struct{}{}
+						watchDirs[configDir] = struct{}{}
+						sharedFiles[configDir] = struct{}{} // Creation after enrollment is a repair signal.
+						sharedFiles[filepath.Join(configDir, "config.toml")] = struct{}{}
+					}
 					job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{Index: index,
-						Mode: enterpriseHookWorkerModeBlockPersonalClaude,
+						Mode: mode,
 						Options: enterpriseHookWorkerOptionsFrom(enterprisehooks.InstallOptions{
-							ConnectorName: "claudecode", UserHome: account.Home, OwnerUID: account.UID, OwnerGID: account.GID,
+							ConnectorName: row.Connector, UserHome: account.Home, OwnerUID: account.UID, OwnerGID: account.GID,
 						})})
-					machineClaudeRows = append(machineClaudeRows, index)
+					machineWorkerRows = append(machineWorkerRows, index)
 				} else {
 					row.OK = true
 				}
@@ -878,7 +890,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	}
 
 	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, jobs)
-	for _, index := range machineClaudeRows {
+	for _, index := range machineWorkerRows {
 		row := rows[index]
 		outcome, ok := outcomes[index]
 		switch {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // The unprotected-agents record and the group cache carry the manifest's
@@ -18,8 +19,8 @@ import (
 func TestWindowsProtectedRecordsRoundTripUnderTheManifestContract(t *testing.T) {
 	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	manifest := filepath.Join(dir, "targets.yaml")
-	if agents, err := ReadWindowsUnprotectedAgents(manifest); err != nil || len(agents) != 0 {
-		t.Fatalf("a missing record is empty: %v %v", agents, err)
+	if agents, err := ReadWindowsUnprotectedAgents(manifest); !os.IsNotExist(err) || len(agents) != 0 {
+		t.Fatalf("a missing record must be reported: %v %v", agents, err)
 	}
 	agents := []UnprotectedAgent{{User: "alice", SID: testLocalUserSID, Connector: "cursor", Version: "4.1.0", Reason: "version 4.1.0 is not verified against a known hook contract"}}
 	if changed, err := WriteWindowsUnprotectedAgents(manifest, agents); err != nil || !changed {
@@ -54,5 +55,27 @@ func TestWindowsProtectedRecordsRoundTripUnderTheManifestContract(t *testing.T) 
 	}
 	if _, err := ReadWindowsUnprotectedAgents(planted); err == nil {
 		t.Fatal("an unprotected record must be refused")
+	}
+}
+
+func TestWindowsStaleUnprotectedAgentsRecordRejectedAndRefreshed(t *testing.T) {
+	dir := prepareWindowsTargetsManifestTestDirectory(t)
+	manifest := filepath.Join(dir, "targets.yaml")
+	if _, err := WriteWindowsUnprotectedAgents(manifest, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := UnprotectedAgentsPath(manifest)
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadWindowsUnprotectedAgents(manifest); err == nil {
+		t.Fatal("stale record was accepted as a completed install scan")
+	}
+	if changed, err := WriteWindowsUnprotectedAgents(manifest, nil); err != nil || changed {
+		t.Fatalf("unchanged rescan changed record: changed=%t err=%v", changed, err)
+	}
+	if _, err := ReadWindowsUnprotectedAgents(manifest); err != nil {
+		t.Fatalf("fresh rescan was rejected: %v", err)
 	}
 }

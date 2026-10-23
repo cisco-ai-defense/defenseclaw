@@ -35,6 +35,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -43,6 +44,7 @@ import click
 import pytest
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_status
+from defenseclaw.commands.cmd_doctor import _managed_gateway_listener_evidence as _native_listener_evidence
 from defenseclaw.commands.cmd_status import _print_agents
 from defenseclaw.commands.cmd_status import status as status_cmd
 from defenseclaw.config import AIDiscoveryConfig, ApplicationProtectionConfig, GuardrailConfig
@@ -193,6 +195,54 @@ def _render_live(cfg, health: dict) -> str:
     with contextlib.redirect_stdout(buf):
         cmd_status._print_agents(cfg, health=health)
     return buf.getvalue()
+
+
+def test_refused_scoped_hook_credential_degrades_only_its_connector(tmp_path):
+    # GAP-0821: the gateway rejects a well-formed Claude token at POSIX 0640
+    # (or untrusted Windows custody), even while /status says running.
+    from defenseclaw.commands import cmd_doctor
+
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    token = hooks / ".hook-claudecode.token"
+    token.write_text("a" * 64 + "\n", encoding="ascii")
+    cfg = _cfg(["claudecode", "codex"], modes={"claudecode": "action", "codex": "action"})
+    cfg.data_dir = str(tmp_path)
+    health = {"connectors": [
+        {"name": "claudecode", "state": "running", "source": "manual"},
+        {"name": "codex", "state": "running", "source": "manual"},
+    ]}
+    trust = type("Trust", (), {"trusted": True})()
+    fault = True
+
+    def gateway_verdict(*_args, **_kwargs):
+        if os.name != "nt":
+            assert token.stat().st_mode & 0o777 == (0o640 if fault else 0o600)
+        return (401 if fault else 405, "")
+
+    with (
+        patch.object(cmd_doctor, "_trusted_gateway_listener", return_value=trust),
+        patch.object(cmd_doctor, "_http_probe", side_effect=gateway_verdict) as probe,
+    ):
+        if os.name != "nt":
+            token.chmod(0o640)
+        out = _render_live(cfg, health)
+        rows = {row["name"]: row for row in cmd_status._connector_roster(cfg, health)}
+        claude = out.split("Claude Code (claudecode)", 1)[1].split("Codex (codex)", 1)[0]
+        assert "DEGRADED" in claude and "hook credential" in claude
+        assert "DEGRADED" not in out.split("Codex (codex)", 1)[1]
+        assert rows["claudecode"]["state"] == "degraded"
+        assert "hook credential" in rows["claudecode"]["runtime_detail"]
+        assert rows["codex"]["state"] == "running"
+        assert probe.call_count == 2
+
+        fault = False
+        if os.name != "nt":
+            token.chmod(0o600)
+        out = _render_live(cfg, health)
+        rows = {row["name"]: row for row in cmd_status._connector_roster(cfg, health)}
+        assert "DEGRADED" not in out
+        assert rows["claudecode"]["state"] == "running"
 
 
 @contextlib.contextmanager
@@ -796,6 +846,7 @@ class TestStatusHeaderAndConfigProblems(unittest.TestCase):
         self.assertIn("Sidecar", result.output)
         self.assertIn("not checked while config.yaml is invalid", result.output)
         self.assertNotIn("not running; start it", result.output)
+        self.assertNotIn("not enforced while the sidecar is stopped", result.output)
         self.assertIn("Enforcement", result.output)
         as_json = self._invoke(["--json"])
         self.assertEqual(as_json.exit_code, 1, msg=as_json.output)
@@ -858,6 +909,8 @@ class TestStatusJson(unittest.TestCase):
         ):
             self.assertIn(key, doc)
         self.assertFalse(doc["sidecar"]["running"])
+        self.assertIs(doc["sidecar"]["running"], False)
+        self.assertIn("no gateway process or API listener", doc["sidecar"]["reason"])
         self.assertEqual(doc["application_protection"]["guardrail_mode"], "observe")
         self.assertFalse(doc["application_protection"]["require_trusted_binary_paths"])
         self.assertEqual(doc["deployment_mode"], "managed_enterprise")
@@ -865,6 +918,15 @@ class TestStatusJson(unittest.TestCase):
         delivery = json.dumps(doc["native_otlp_delivery"], sort_keys=True)
         self.assertNotIn(self.tmp_dir, delivery)
         self.assertNotIn("token", delivery.lower())
+
+    def test_json_names_a_peer_holding_the_gateway_port(self):
+        self.app.cfg.gateway.api_port = 19081
+        with patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value="a process of another account"):
+            result = self._invoke_json()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        sidecar = json.loads(result.output)["sidecar"]
+        self.assertIsNone(sidecar["running"])
+        self.assertIn("port 19081 is held by a process of another account", sidecar["reason"])
 
     def test_json_roster_has_per_connector_mode(self):
         result = self._invoke_json()
@@ -926,7 +988,7 @@ class TestStatusJson(unittest.TestCase):
         self.assertIsNone(doc["sidecar"]["running"])
         self.assertNotIn("policy", doc)
 
-    def test_json_sidecar_reports_live_process_when_authenticated_health_is_unreadable(self):
+    def test_json_does_not_report_a_live_gateway_stopped_when_status_is_unreadable(self):
         with (
             patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
             patch.object(cmd_status, "_live_gateway_pid", return_value=4242),
@@ -953,6 +1015,82 @@ class TestStatusJson(unittest.TestCase):
         self.assertIsNone(sidecar["running"])
         self.assertIn("port", sidecar["reason"])
         self.assertIn("PID 4343 (python3)", sidecar["reason"])
+
+    def test_json_does_not_report_stopped_when_listener_probe_fails(self):
+        with (
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch.object(cmd_status, "_live_gateway_pid", return_value=0),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=""),
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_listener_evidence",
+                return_value=MagicMock(status="unavailable", pid=0, reason="listener probe failed"),
+            ),
+        ):
+            result = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            human = CliRunner().invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(human.exit_code, 0, msg=human.output)
+        sidecar = json.loads(result.output)["sidecar"]
+        self.assertIsNone(sidecar["running"])
+        self.assertIn("listener probe failed", sidecar["reason"])
+        self.assertIn("listener probe failed", human.output)
+        self.assertNotIn("not running; start it", human.output)
+
+        from defenseclaw.commands import cmd_doctor
+
+        native = MagicMock(status="unavailable", reason="Linux listener table unreadable")
+        with (
+            patch.object(cmd_doctor, "_linux_gateway_listener_evidence", return_value=native),
+            patch.object(cmd_doctor, "_lsof_gateway_listener_evidence", return_value=MagicMock(status="missing")),
+        ):
+            self.assertIs(
+                _native_listener_evidence(self.app.cfg.gateway.api_port, platform_name="linux"),
+                native,
+            )
+
+    def test_status_does_not_call_a_hidden_macos_listener_stopped(self):
+        with (
+            patch.object(cmd_status, "sys", SimpleNamespace(platform="darwin"), create=True),
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch.object(cmd_status, "_live_gateway_pid", return_value=0),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=""),
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_listener_evidence",
+                return_value=MagicMock(status="missing", pid=0, reason="no visible listener"),
+            ),
+            patch.object(cmd_status, "socket", create=True) as status_socket,
+        ):
+            connect = status_socket.create_connection
+            runner = CliRunner()
+            as_json = runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            as_text = runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+            self.assertEqual(as_json.exit_code, 0, msg=as_json.output)
+            self.assertIsNone(json.loads(as_json.output)["sidecar"]["running"])
+            self.assertIn("API port answers", json.loads(as_json.output)["sidecar"]["reason"])
+            self.assertIn("held by another account", json.loads(as_json.output)["sidecar"]["reason"])
+            self.assertIn("API port answers", as_text.output)
+            self.assertNotIn("not running; start it", as_text.output)
+            self.assertNotIn("not enforced while the sidecar is stopped", as_text.output)
+            self.assertEqual(connect.call_count, 2)
+
+            connect.reset_mock(side_effect=True)
+            connect.side_effect = ConnectionRefusedError("connection refused")
+            stopped_json = runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            stopped_text = runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+            self.assertEqual(stopped_json.exit_code, 0, msg=stopped_json.output)
+            self.assertIs(json.loads(stopped_json.output)["sidecar"]["running"], False)
+            self.assertIn("not running; start it", stopped_text.output)
+
+            connect.side_effect = TimeoutError("loopback probe timed out")
+            uncertain_json = runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            uncertain_text = runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+            self.assertIsNone(json.loads(uncertain_json.output)["sidecar"]["running"])
+            self.assertIn("state is unconfirmed", uncertain_text.output)
+            self.assertNotIn("not running; start it", uncertain_text.output)
 
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))
@@ -998,7 +1136,16 @@ class TestStatusProfileIdentity(unittest.TestCase):
                 "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
                 return_value=MagicMock(trusted=True, pid=4242, detail=""),
             )
+            # The test varies the configured port in memory for each fake
+            # endpoint; the client now reloads that configuration to prove it.
+            config_patch = patch("defenseclaw.config.load", return_value=app.cfg)
+            # This fixture serves both endpoints in the test account. Socket
+            # ownership is covered separately; this case exercises profile
+            # binding after that connected-peer check succeeds.
+            socket_patch = patch("defenseclaw.gateway._verify_connected_gateway_socket", return_value=None)
             listener_patch.start()
+            config_patch.start()
+            socket_patch.start()
             try:
                 with _owned_status_endpoint(str(ambient_home), foreign_health, owned_token) as (port, seen):
                     app.cfg.gateway.api_port = port
@@ -1017,6 +1164,7 @@ class TestStatusProfileIdentity(unittest.TestCase):
                 doc = json.loads(result.output)
                 rendered = json.dumps(doc)
                 self.assertFalse(doc["sidecar"]["running"])
+                self.assertIs(doc["sidecar"]["running"], False)
                 self.assertNotIn(foreign_marker, rendered)
                 self.assertNotIn(str(ambient_home), rendered)
                 self.assertEqual(
@@ -1048,6 +1196,8 @@ class TestStatusProfileIdentity(unittest.TestCase):
                 self.assertTrue(doc["sidecar"]["running"])
                 self.assertIn(matching_marker, json.dumps(doc))
             finally:
+                socket_patch.stop()
+                config_patch.stop()
                 listener_patch.stop()
                 cleanup_app(app, db_path, app_tmp)
 
@@ -1166,3 +1316,41 @@ def test_status_hook_activity_after_a_negative_scan_outranks_it(monkeypatch, tmp
     else:
         assert "RUNNING" in claude_row and "is not installed" not in claude_row, out
         assert "1 active" in agents_row and "not running" not in agents_row, out
+
+
+def test_status_names_the_agent_settings_fix_for_a_connector_the_gateway_refused():
+    # GAP-0578: `codex features disable hooks`, then a restart. Rerunning
+    # setup cannot help, so status names the fix the gateway gave.
+    cfg = _cfg(["codex", "hermes"], modes={"codex": "action"})
+    reason = (
+        "Codex hooks are turned off in /home/u/.codex/config.toml ([features] hooks = false), "
+        "so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks"
+    )
+    health = {
+        "connectors": [{"name": "hermes", "state": "running"}],
+        "guardrail": {"state": "running", "details": {
+            "connectors_not_started": ["codex"],
+            "connectors_refused_by_agent_settings": {"codex": reason},
+        }},
+    }
+    out = " ".join(_render_live(cfg, health).split())
+    codex_block = out[out.index("Codex (codex)"):out.index("Hermes (hermes)")]
+    assert "NOT RUNNING" in codex_block
+    assert "codex features enable hooks" in codex_block
+    assert "defenseclaw setup codex" not in codex_block
+    assert "1 active, 1 not running" in out
+
+
+def test_policy_row_names_the_config_generation_that_survives_a_restart(capsys) -> None:
+    # GAP-0642: the row named policy.generation, which counts the rebuilds of
+    # the running gateway and starts again at 1 after a restart, while
+    # config.generation.json kept counting.
+    from defenseclaw.commands import cmd_status
+
+    digest = "sha256:" + "c" * 64
+    cmd_status._print_policy({"policy": {"effective_digest": digest, "generation": 1, "config_generation": 18}})
+    cmd_status._print_policy({"policy": {"effective_digest": digest, "generation": 3}})
+    rows = [line for line in capsys.readouterr().out.splitlines() if "Policy" in line]
+    assert len(rows) == 2, rows
+    assert rows[0].rstrip().endswith("config generation 18, sha256:cccccccccccc"), rows
+    assert rows[1].rstrip().endswith("sha256:cccccccccccc") and "generation" not in rows[1], rows

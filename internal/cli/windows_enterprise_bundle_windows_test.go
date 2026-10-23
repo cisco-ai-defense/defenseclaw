@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 func TestWindowsBundleHotWriteRecordsPrincipalAndSignedMetadata(t *testing.T) {
@@ -129,8 +130,13 @@ func TestWindowsStatusSettlesOnlyEnforcedAppliedReceipt(t *testing.T) {
 		{"wrong digest", 1, "sha256:" + strings.Repeat("2", 64), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			e := newBundleCLIEnv(t)
+			e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
 			layout := stubWindowsBundleHost(t)
 			driver := newWindowsBundleDriver(layout)
+			if _, _, err := installWindowsBundleAnchors(e.anchors, driver.AnchorsPath); err != nil {
+				t.Fatal(err)
+			}
 			rc, err := driver.Store.Receive("b-01JA0000000000000000000033", 13, "")
 			if err != nil {
 				t.Fatal(err)
@@ -182,6 +188,106 @@ func TestWindowsStatusSettlesOnlyEnforcedAppliedReceipt(t *testing.T) {
 				t.Fatalf("receipts=%+v", receipts)
 			}
 		})
+	}
+}
+
+// Status may confirm an applied receipt after a killed run. A full volume
+// during that write is a disk_full refusal, including for an MDM JSON poll.
+func TestWindowsStatusReceiptWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	layout := stubWindowsBundleHost(t)
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{
+		managed.ProfileStandalone: winpath.EnterpriseDeploymentInstalled,
+	})
+	elevated := windowsEnterpriseIsElevated
+	activation := windowsEnterpriseActivationMetadata
+	windowsEnterpriseIsElevated = func() bool { return true }
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return "", true }
+	t.Cleanup(func() {
+		windowsEnterpriseIsElevated = elevated
+		windowsEnterpriseActivationMetadata = activation
+	})
+	driver := newWindowsBundleDriver(layout)
+	rc, err := driver.Store.Receive("b-01JA0000000000000000000035", 5, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed := []byte("config_version: 9\n")
+	if _, err := driver.Store.Stage(rc, &enterprisebundle.Bundle{Files: map[string][]byte{"config.yaml": installed}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := driver.Store.Advance(rc, enterprisebundle.StateVerified, func(r *enterprisebundle.Receipt) {
+		r.ManifestSHA256 = strings.Repeat("a", 64)
+		r.Principal, r.SignerKeyID = "operator:alice", "k1"
+		r.ExpectedDigest = windowsBundleTestDigest
+		r.SetDigestComparison(true, false, false)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.Store.Promote(rc); err != nil {
+		t.Fatal(err)
+	}
+	generation := recordWindowsBundleTestCommit(t, layout, rc, installed)
+	if err := driver.Store.Advance(rc, enterprisebundle.StateApplied, func(r *enterprisebundle.Receipt) {
+		r.ConfigSHA256 = configwrite.SHA256Hex(installed)
+		r.EffectivePolicyDigest = windowsBundleTestDigest
+		r.ConfigGeneration = generation
+	}); err != nil {
+		t.Fatal(err)
+	}
+	receiptsDir := filepath.Join(layout.LifecycleDir, enterprisebundle.ReceiptsDirName)
+	windowsBundleEnsurePrivateDirectory = func(path string) error {
+		if filepath.Clean(path) == filepath.Clean(receiptsDir) {
+			return &os.PathError{Op: "write", Path: path, Err: windows.ERROR_DISK_FULL}
+		}
+		return os.MkdirAll(path, 0o700)
+	}
+	cmd, out := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{profile: managed.ProfileStandalone, jsonOutput: true}
+	if err := runWindowsEnterpriseStandaloneAction(context.Background(), cmd, "status", opts, "", nil); err == nil {
+		t.Fatal("status accepted a receipt it could not confirm")
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("status result: %v\n%s", err, out)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Code != string(enterprisebundle.CodeDiskFull) ||
+		!strings.Contains(result.Errors[0].Message, "free space on that volume") {
+		t.Fatalf("status errors = %+v, want disk_full and the recovery step", result.Errors)
+	}
+}
+
+func TestWindowsStatusMarkerWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	stubWindowsBundleHost(t)
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{
+		managed.ProfileStandalone: winpath.EnterpriseDeploymentInstalled,
+	})
+	elevated, activation, syncMarker := windowsEnterpriseIsElevated, windowsEnterpriseActivationMetadata, windowsBundleSyncMarker
+	runner := windowsEnterpriseStandaloneRunner
+	windowsEnterpriseIsElevated = func() bool { return true }
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return "", true }
+	windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
+		t.Error("status reached the installer after the bundle marker write failed")
+		return windowsEnterpriseStandaloneRun{}, errors.New("unexpected installer invocation")
+	}
+	windowsBundleSyncMarker = func(*enterprisebundle.Store) error {
+		return &os.PathError{Op: "write", Path: "enterprise bundle marker", Err: windows.ERROR_DISK_FULL}
+	}
+	t.Cleanup(func() {
+		windowsEnterpriseIsElevated, windowsEnterpriseActivationMetadata, windowsBundleSyncMarker = elevated, activation, syncMarker
+		windowsEnterpriseStandaloneRunner = runner
+	})
+	cmd, out := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{profile: managed.ProfileStandalone, jsonOutput: true}
+	if err := runWindowsEnterpriseStandaloneAction(context.Background(), cmd, "status", opts, "", nil); err == nil {
+		t.Fatal("status accepted an enterprise marker it could not write")
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("status result: %v\n%s", err, out)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Code != string(enterprisebundle.CodeDiskFull) ||
+		!strings.Contains(result.Errors[0].Message, "free space on that volume") {
+		t.Fatalf("status errors = %+v, want disk_full and recovery step", result.Errors)
 	}
 }
 
@@ -597,7 +703,10 @@ func assertWindowsBundleInstalledAnchors(t *testing.T, layout managed.Standalone
 func assertWindowsBundleAnchorsStaged(t *testing.T, layout managed.StandaloneLayout, run *windowsBundleRun, delivered string, installed []byte) {
 	t.Helper()
 	installedPath := newWindowsBundleDriver(layout).AnchorsPath
-	stage := filepath.Join(layout.LifecycleDir, windowsBundleStagedAnchorsName)
+	stage := ""
+	if run != nil && run.prepared != nil && run.prepared.Receipt != nil {
+		stage, _, _ = windowsReceiptAnchorPaths(layout, run.prepared.Receipt.ReceiptID)
+	}
 	if run == nil || run.anchorStage != stage || run.anchorPath != installedPath || run.driver.AnchorsPath != stage {
 		var got [3]string
 		if run != nil {
@@ -1074,6 +1183,449 @@ func TestWindowsBundleGatewayRestartReachesEveryReceiptSurface(t *testing.T) {
 	}
 }
 
+func TestWindowsCommittedBundleGatewayOutageReportsPendingReceipt(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "outage.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	layout := stubWindowsBundleHost(t)
+	cmd, _ := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts); done || err != nil {
+		t.Fatalf("prepare: done=%t err=%v", done, err)
+	}
+	cleanupPreparedWindowsBundle(t, opts)
+	run := opts.bundle
+	id := run.prepared.Receipt.ReceiptID
+	_ = recordWindowsBundleTestCommit(t, layout, run.prepared.Receipt, run.prepared.Config)
+	confirmedPolicy := windowsBundlePolicy(t.Context())
+	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return nil }
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	cmd.SetOut(io.Discard)
+	finishErr := finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
+	if rc := windowsBundleReceiptState(t, layout, id); rc.State != enterprisebundle.StateApplied || rc.ErrorCode != "" ||
+		result.Bundle == nil || result.Bundle.State != enterprisebundle.StateApplied ||
+		!windowsBundleHasCode(result.Errors, string(enterprisebundle.CodeNotConfirmed)) ||
+		!windowsBundleHasCode(result.Warnings, enterprisebundle.WarnBundlePending) ||
+		commandExitCode(finishErr) != enterprisestatus.WindowsExitBusy {
+		t.Fatalf("gateway outage: receipt=%+v bundle=%+v errors=%+v warnings=%+v exit=%d",
+			rc, result.Bundle, result.Errors, result.Warnings, commandExitCode(finishErr))
+	}
+	if _, err := os.Stat(run.driver.Store.PublicReceiptPath()); !os.IsNotExist(err) {
+		t.Fatalf("pending receipt published as terminal: %v", err)
+	}
+	state, err := run.driver.Store.LoadState()
+	if err != nil || state.Current != nil {
+		t.Fatalf("outage confirmed an unproven bundle: state=%+v error=%v", state, err)
+	}
+	report, rollback, err := run.driver.SettleRun(run.prepared.Config, nil)
+	if err != nil || len(report.Pending) != 1 || len(rollback) != 0 {
+		t.Fatalf("outage settle: report=%+v rollback=%+v error=%v", report, rollback, err)
+	}
+	report, rollback, err = run.driver.SettleRun(run.prepared.Config, confirmedPolicy)
+	if err != nil || len(report.Completed) != 1 || len(rollback) != 0 ||
+		windowsBundleReceiptState(t, layout, id).State != enterprisebundle.StateConfirmed {
+		t.Fatalf("recovered settle: report=%+v rollback=%+v error=%v", report, rollback, err)
+	}
+	public, err := enterprisestatus.ReadPublicReceipt(run.driver.Store.PublicReceiptPath())
+	if err != nil || public.State != enterprisebundle.StateConfirmed || public.ErrorCode != "" {
+		t.Fatalf("public confirmed receipt=%+v error=%v", public, err)
+	}
+}
+
+// A first delivery can commit config while the gateway is down. Its trust
+// anchors must survive the pending receipt and be installed before recovery
+// confirms it. Neither the missing installed file nor a later plain ensure
+// may admit an unsigned CONFIG= in that interval.
+func TestWindowsPendingFirstBundleKeepsTrustAnchors(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "pending-first.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	layout := stubWindowsBundleHost(t)
+	stubWindowsBundleMarker(t)
+	cmd, _ := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts); done || err != nil {
+		t.Fatalf("prepare: done=%t err=%v", done, err)
+	}
+	cleanupPreparedWindowsBundle(t, opts)
+	run := opts.bundle
+	id := run.prepared.Receipt.ReceiptID
+	want, err := os.ReadFile(e.anchors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := run.anchorStage
+	_ = recordWindowsBundleTestCommit(t, layout, run.prepared.Receipt, run.prepared.Config)
+	recoveredPolicy := windowsBundlePolicy(t.Context())
+	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return nil }
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	finishWindowsEnterpriseBundle(cmd, opts, result)
+	if rc := windowsBundleReceiptState(t, layout, id); rc.State != enterprisebundle.StateApplied ||
+		result.Bundle == nil || result.Bundle.State != enterprisebundle.StateApplied {
+		t.Fatalf("gateway outage: receipt=%+v result=%+v", rc, result.Bundle)
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, nil, "while the receipt is applied")
+	if got := readWindowsBundleAnchors(t, stage); !bytes.Equal(got, want) {
+		t.Fatalf("pending receipt lost its staged anchors: %d bytes, want %d", len(got), len(want))
+	}
+	// Another delivery can stage different anchors without replacing those
+	// retained for the receipt whose config is already installed.
+	otherAnchors := filepath.Join(e.dir, "other-anchors.json")
+	other := bytes.Replace(want, []byte(`"min_version":0`), []byte(`"min_version":1`), 1)
+	writeBundleTestFile(t, otherAnchors, other)
+	cmd, _ = windowsBundleCommand()
+	second := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: otherAnchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", second); done || err != nil {
+		t.Fatalf("stage second delivery: done=%t err=%v", done, err)
+	}
+	cleanupPreparedWindowsBundle(t, second)
+	if got := readWindowsBundleAnchors(t, stage); !bytes.Equal(got, want) || second.bundle.anchorStage == stage {
+		t.Fatalf("second delivery replaced the pending receipt's trust anchors: %d bytes", len(got))
+	}
+	second.bundle.release()
+	unsigned := filepath.Join(e.dir, "unsigned.yaml")
+	writeBundleTestFile(t, unsigned, []byte("config_version: 9\n"))
+	cmd, out := windowsBundleCommand()
+	plain := &windowsEnterpriseLifecycleOptions{configPath: unsigned, profile: managed.ProfileStandalone,
+		jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", plain); !done ||
+		!strings.Contains(out.String(), string(enterprisebundle.CodeBundleRequired)) {
+		t.Fatalf("unsigned CONFIG= was accepted during pending bundle: done=%t err=%v output=%s", done, err, out.String())
+	}
+	if rc := windowsBundleReceiptState(t, layout, id); rc.State != enterprisebundle.StateApplied {
+		t.Fatalf("CONFIG= changed the pending receipt: %+v", rc)
+	}
+	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return recoveredPolicy }
+	installedPath := newWindowsBundleDriver(layout).AnchorsPath
+	windowsBundlePublishPrivateFile = func(path string) error {
+		if path == installedPath {
+			return errors.New("test anchor publication failed")
+		}
+		return nil
+	}
+	failedCommit := &windowsBundleSettle{ctx: t.Context()}
+	settleWindowsInterruptedBundles(failedCommit, layout, newWindowsBundleDriver(layout), 0, false)
+	if rc := windowsBundleReceiptState(t, layout, id); rc.State != enterprisebundle.StateApplied ||
+		!slices.ContainsFunc(failedCommit.warnings, func(w enterprisebundle.Warning) bool { return w.Code == windowsBundleStateUnreadableWarning }) {
+		t.Fatalf("failed anchor publication confirmed a receipt: receipt=%+v warnings=%+v", rc, failedCommit.warnings)
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, nil, "after failed anchor publication")
+	windowsBundlePublishPrivateFile = func(string) error { return nil }
+	settled := &windowsBundleSettle{ctx: t.Context()}
+	settleWindowsInterruptedBundles(settled, layout, newWindowsBundleDriver(layout), 0, false)
+	if !slices.ContainsFunc(settled.warnings, func(w enterprisebundle.Warning) bool {
+		return w.Code == enterprisebundle.WarnConfirmedAfterInterrupt
+	}) {
+		t.Fatalf("recovery did not report confirmation: %+v", settled.warnings)
+	}
+	if rc := windowsBundleReceiptState(t, layout, id); rc.State != enterprisebundle.StateConfirmed {
+		t.Fatalf("recovery receipt = %+v", rc)
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, want, "after confirmation")
+	if _, err := os.Lstat(stage); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("confirmed anchor stage remains: %v", err)
+	}
+	if err := os.Remove(newWindowsBundleDriver(layout).AnchorsPath); err != nil {
+		t.Fatal(err)
+	}
+	cmd, out = windowsBundleCommand()
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", plain); !done ||
+		!strings.Contains(out.String(), string(enterprisebundle.CodeBundleRequired)) {
+		t.Fatalf("unsigned CONFIG= was accepted with confirmed bundle and missing anchors: done=%t err=%v output=%s", done, err, out.String())
+	}
+	before, err := newWindowsBundleDriver(layout).Store.Receipts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, _ = windowsBundleCommand()
+	repeat := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", repeat); done || err != nil {
+		t.Fatalf("repeat signed bundle: done=%t err=%v", done, err)
+	}
+	cleanupPreparedWindowsBundle(t, repeat)
+	if !repeat.bundle.prepared.AlreadyApplied {
+		t.Fatal("same signed bundle was not recognized as already applied")
+	}
+	noOp := newWindowsEnterpriseStandaloneResult("ensure", repeat)
+	noOp.Noop = true
+	finishWindowsEnterpriseBundle(cmd, repeat, noOp)
+	after, err := newWindowsBundleDriver(layout).Store.Receipts()
+	if err != nil || len(after) != len(before) || noOp.Bundle == nil || noOp.Bundle.State != enterprisebundle.StateConfirmed {
+		t.Fatalf("repeat created another receipt or lost confirmation: before=%d after=%d bundle=%+v error=%v", len(before), len(after), noOp.Bundle, err)
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, want, "after repeating the confirmed bundle")
+}
+
+func TestWindowsRetryConfirmationKeepsAnchorsWhenEarlierReceiptFails(t *testing.T) {
+	for _, rotated := range []bool{false, true} {
+		name := "first anchors"
+		if rotated {
+			name = "rotation"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := newBundleCLIEnv(t)
+			e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+			signed := filepath.Join(e.dir, "retry.dcbundle")
+			if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+				t.Fatalf("sign exit %d: %s", code, out)
+			}
+			layout := stubWindowsBundleHost(t)
+			stubWindowsBundleMarker(t)
+			anchors := e.anchors
+			var previous []byte
+			if rotated {
+				previous = readWindowsBundleAnchors(t, e.anchors)
+				if _, _, err := installWindowsBundleAnchors(e.anchors, newWindowsBundleDriver(layout).AnchorsPath); err != nil {
+					t.Fatal(err)
+				}
+				anchors = windowsBundleCandidateAnchors(t, e)
+			}
+			want := readWindowsBundleAnchors(t, anchors)
+			recoveredPolicy := windowsBundlePolicy
+			windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return nil }
+			prepare := func() (*windowsEnterpriseLifecycleOptions, *cobra.Command) {
+				cmd, _ := windowsBundleCommand()
+				opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: anchors,
+					profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+				if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts); done || err != nil {
+					t.Fatalf("prepare retry: done=%t err=%v", done, err)
+				}
+				cleanupPreparedWindowsBundle(t, opts)
+				return opts, cmd
+			}
+			first, cmd := prepare()
+			firstID := first.bundle.prepared.Receipt.ReceiptID
+			g1 := recordWindowsBundleTestCommit(t, layout, first.bundle.prepared.Receipt, first.bundle.prepared.Config)
+			finishWindowsEnterpriseBundle(cmd, first, newWindowsEnterpriseStandaloneResult("ensure", first))
+			if rc := windowsBundleReceiptState(t, layout, firstID); rc.State != enterprisebundle.StateApplied {
+				t.Fatalf("first receipt = %+v", rc)
+			}
+			second, cmd := prepare()
+			secondID := second.bundle.prepared.Receipt.ReceiptID
+			if firstID == secondID {
+				t.Fatal("retry reused the pending receipt")
+			}
+			g2 := recordWindowsBundleTestCommit(t, layout, second.bundle.prepared.Receipt, second.bundle.prepared.Config)
+			if g2 <= g1 {
+				t.Fatalf("retry did not advance generation: first=%d second=%d", g1, g2)
+			}
+			windowsBundlePolicy = recoveredPolicy
+			finishWindowsEnterpriseBundle(cmd, second, newWindowsEnterpriseStandaloneResult("ensure", second))
+			if rc := windowsBundleReceiptState(t, layout, secondID); rc.State != enterprisebundle.StateConfirmed {
+				t.Fatalf("retry receipt = %+v", rc)
+			}
+			assertWindowsBundleInstalledAnchors(t, layout, want, "after retry confirmation")
+			plain := &windowsEnterpriseLifecycleOptions{profile: managed.ProfileStandalone, installedBeforeRun: true}
+			cmd, _ = windowsBundleCommand()
+			if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", plain); done || err != nil {
+				t.Fatalf("plain ensure: done=%t err=%v", done, err)
+			}
+			if rc := windowsBundleReceiptState(t, layout, firstID); rc.State != enterprisebundle.StateFailed {
+				t.Fatalf("earlier receipt = %+v", rc)
+			}
+			assertWindowsBundleInstalledAnchors(t, layout, want, "after earlier receipt failed")
+			if rotated && bytes.Equal(previous, want) {
+				t.Fatal("rotation did not change anchors")
+			}
+		})
+	}
+}
+
+func TestWindowsRetryWithAnchorsRecoversLegacyAppliedReceiptWithoutAnchors(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "legacy-retry.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	layout := stubWindowsBundleHost(t)
+	stubWindowsBundleMarker(t)
+	cmd, _ := windowsBundleCommand()
+	first := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", first); done || err != nil {
+		t.Fatalf("prepare first delivery: done=%t err=%v", done, err)
+	}
+	cleanupPreparedWindowsBundle(t, first)
+	firstID := first.bundle.prepared.Receipt.ReceiptID
+	recordWindowsBundleTestCommit(t, layout, first.bundle.prepared.Receipt, first.bundle.prepared.Config)
+	recoveredPolicy := windowsBundlePolicy
+	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return nil }
+	finishWindowsEnterpriseBundle(cmd, first, newWindowsEnterpriseStandaloneResult("ensure", first))
+	stage, previous, err := windowsReceiptAnchorPaths(layout, firstID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{stage, previous} {
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, nil, "after legacy stage loss")
+	windowsBundlePolicy = recoveredPolicy
+	cmd, _ = windowsBundleCommand()
+	retry := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", retry); done || err != nil {
+		t.Fatalf("retry did not reach the new bundle: done=%t err=%v", done, err)
+	}
+	cleanupPreparedWindowsBundle(t, retry)
+	if retry.bundle.prepared == nil || retry.bundle.prepared.Receipt == nil ||
+		retry.bundle.prepared.Receipt.ReceiptID == firstID {
+		t.Fatalf("retry did not stage a new receipt: %+v", retry.bundle.prepared)
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, nil, "while retry is staged")
+	retryID := retry.bundle.prepared.Receipt.ReceiptID
+	recordWindowsBundleTestCommit(t, layout, retry.bundle.prepared.Receipt, retry.bundle.prepared.Config)
+	finishWindowsEnterpriseBundle(cmd, retry, newWindowsEnterpriseStandaloneResult("ensure", retry))
+	if rc := windowsBundleReceiptState(t, layout, retryID); rc.State != enterprisebundle.StateConfirmed {
+		t.Fatalf("replacement receipt = %+v", rc)
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, readWindowsBundleAnchors(t, e.anchors), "after retry confirmation")
+	plain := &windowsEnterpriseLifecycleOptions{profile: managed.ProfileStandalone, installedBeforeRun: true}
+	cmd, _ = windowsBundleCommand()
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", plain); done || err != nil {
+		t.Fatalf("plain ensure: done=%t err=%v", done, err)
+	}
+	if rc := windowsBundleReceiptState(t, layout, firstID); rc.State != enterprisebundle.StateFailed {
+		t.Fatalf("legacy receipt after replacement = %+v", rc)
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, readWindowsBundleAnchors(t, e.anchors), "after legacy receipt failed")
+}
+
+func TestWindowsStatusKeepsLegacyAppliedReceiptPendingWithoutAnchors(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "legacy-status.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	layout := stubWindowsBundleHost(t)
+	cmd, _ := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts); done || err != nil {
+		t.Fatalf("prepare legacy delivery: done=%t err=%v", done, err)
+	}
+	cleanupPreparedWindowsBundle(t, opts)
+	rc := opts.bundle.prepared.Receipt
+	recordWindowsBundleTestCommit(t, layout, rc, opts.bundle.prepared.Config)
+	policy := windowsBundlePolicy
+	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return nil }
+	finishWindowsEnterpriseBundle(cmd, opts, newWindowsEnterpriseStandaloneResult("ensure", opts))
+	if got := windowsBundleReceiptState(t, layout, rc.ReceiptID); got.State != enterprisebundle.StateApplied {
+		t.Fatalf("legacy receipt = %+v", got)
+	}
+	stage, previous, err := windowsReceiptAnchorPaths(layout, rc.ReceiptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{stage, previous} {
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, nil, "after legacy anchor loss")
+	windowsBundlePolicy = policy // The gateway proves the signed config is enforced.
+	for range 2 {
+		pending, err := settleWindowsBundleStatusReport(t.Context())
+		if err != nil {
+			t.Fatalf("status could not report the pending receipt: %v", err)
+		}
+		if len(pending) != 1 || pending[0].ReceiptID != rc.ReceiptID || pending[0].State != enterprisebundle.StateApplied {
+			t.Fatalf("status pending receipts = %+v", pending)
+		}
+		if got := windowsBundleReceiptState(t, layout, rc.ReceiptID); got.State != enterprisebundle.StateApplied {
+			t.Fatalf("status changed legacy receipt = %+v", got)
+		}
+	}
+}
+
+func TestWindowsPendingReceiptCannotBorrowEarlierTrustAnchors(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	layout := stubWindowsBundleHost(t)
+	driver := newWindowsBundleDriver(layout)
+	if _, _, err := installWindowsBundleAnchors(e.anchors, driver.AnchorsPath); err != nil {
+		t.Fatal(err)
+	}
+	rc, err := driver.Store.Receive("b-01JA00000000000000000000D1", 2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, previous, err := windowsReceiptAnchorPaths(layout, rc.ReceiptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.ReadFile(e.anchors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeWindowsBundleAdminFile(previous, old); err != nil {
+		t.Fatal(err)
+	}
+	// A pending receipt's stage was lost, but the old installed anchors are
+	// still valid. They did not verify the new delivery.
+	if _, err := commitWindowsReceiptAnchors(layout, rc, nil); err == nil {
+		t.Fatal("pending receipt borrowed the earlier valid trust anchors")
+	}
+}
+
+func TestWindowsCommittedStagedBundleKeepsAnchorsAfterRelease(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "staged-commit.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	layout := stubWindowsBundleHost(t)
+	cmd, _ := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts); done || err != nil {
+		t.Fatalf("prepare: done=%t err=%v", done, err)
+	}
+	cleanupPreparedWindowsBundle(t, opts)
+	run := opts.bundle
+	id := run.prepared.Receipt.ReceiptID
+	stage := run.anchorStage
+	want, err := os.ReadFile(e.anchors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = recordWindowsBundleTestCommit(t, layout, run.prepared.Receipt, run.prepared.Config)
+	policy := windowsBundlePolicy(t.Context())
+	run.release() // The transaction committed, but Finish did not run.
+	if rc := windowsBundleReceiptState(t, layout, id); rc.State != enterprisebundle.StateStaged {
+		t.Fatalf("committed receipt state = %s, want staged", rc.State)
+	}
+	if got := readWindowsBundleAnchors(t, stage); !bytes.Equal(got, want) {
+		t.Fatalf("committed staged receipt lost its anchors: %d bytes, want %d", len(got), len(want))
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, nil, "while the committed receipt is staged")
+	driver := newWindowsBundleDriver(layout)
+	report, rollback, err := driver.SettleRun(run.prepared.Config, nil)
+	if err != nil || len(rollback) != 0 || !slices.Contains(report.Pending, id) {
+		t.Fatalf("outage settle: report=%+v rollback=%+v error=%v", report, rollback, err)
+	}
+	report, rollback, err = driver.SettleRun(run.prepared.Config, policy)
+	if err != nil || len(rollback) != 0 || !slices.Contains(report.Completed, id) ||
+		windowsBundleReceiptState(t, layout, id).State != enterprisebundle.StateConfirmed {
+		t.Fatalf("recovered settle: report=%+v rollback=%+v error=%v", report, rollback, err)
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, want, "after confirming a committed staged receipt")
+}
+
 func TestWindowsBundleWarningOnlyVerifyIsNoopEligible(t *testing.T) {
 	report := &windowsEnterpriseInstallerReport{Installed: true, GatewayReady: true}
 	if !windowsEnterpriseVerifyAcceptable(report) {
@@ -1124,6 +1676,89 @@ func TestWindowsBundleApplyRejectsDifferentEnforcingDigest(t *testing.T) {
 		t.Fatalf("Windows confirmed a different digest: errors=%+v bundle=%+v", result.Errors, result.Bundle)
 	}
 	assertWindowsBundleLockRemoved(t, layout)
+}
+
+// GAP-0609: a full volume can also stop the private rollback copy after a
+// failed apply or confirmation. The result must name that write failure and
+// the free-space step while preserving the original bundle failure.
+func TestWindowsBundleRollbackStageOnAFullVolumeIsDiskFull(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		failureCode  string
+		policyDigest string
+		applied      bool
+	}{
+		{name: "apply failure", failureCode: "installer_failed"},
+		{name: "digest mismatch", policyDigest: "sha256:" + strings.Repeat("2", 64), applied: true},
+		{name: "not confirmed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newBundleCLIEnv(t)
+			e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+			signed := filepath.Join(e.dir, "v5.dcbundle")
+			if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+				t.Fatalf("sign exit %d:\n%s", code, out)
+			}
+			layout := stubWindowsBundleHost(t)
+			cmd, out := windowsBundleCommand()
+			opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+				profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+			if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts); done || err != nil {
+				t.Fatalf("prepare: done=%v err=%v\n%s", done, err, out)
+			}
+			cleanupPreparedWindowsBundle(t, opts)
+			run := opts.bundle
+			run.previous = []byte("config_version: 9\n")
+			opts.resolvedInstaller = `C:\stage\install-enterprise.ps1`
+			if err := os.MkdirAll(filepath.Dir(layout.ConfigPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(layout.ConfigPath, run.prepared.Config, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			policyDigest := tc.policyDigest
+			if policyDigest == "" {
+				policyDigest = run.prepared.Receipt.ExpectedDigest
+			}
+			windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy {
+				return &enterprisebundle.GatewayPolicy{EffectiveDigest: policyDigest, Digest: policyDigest, Applied: tc.applied}
+			}
+			rollbackPath := filepath.Join(layout.LifecycleDir, windowsBundleRollbackName)
+			var rollbackWrites int
+			windowsBundlePublishPrivateFile = func(path string) error {
+				if path == rollbackPath {
+					rollbackWrites++
+					return &os.PathError{Op: "publish", Path: path, Err: windows.ERROR_DISK_FULL}
+				}
+				return nil
+			}
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			if tc.failureCode != "" {
+				result.AddError(tc.failureCode, "the ensure transaction failed")
+			}
+			finishWindowsEnterpriseBundle(cmd, opts, result)
+			if rollbackWrites != 1 {
+				t.Fatalf("rollback writes = %d, want one", rollbackWrites)
+			}
+			if !windowsBundleHasCode(result.Errors, string(enterprisebundle.CodeDiskFull)) {
+				t.Fatalf("errors = %+v; want disk_full beside the original failure", result.Errors)
+			}
+			for _, message := range result.Errors {
+				if message.Code == string(enterprisebundle.CodeDiskFull) &&
+					(!strings.Contains(message.Message, "stage the last good config for rollback") ||
+						!strings.Contains(message.Message, "free space on that volume")) {
+					t.Errorf("disk_full message = %q; want the write and recovery step", message.Message)
+				}
+			}
+			if result.Bundle == nil || result.Bundle.State != enterprisebundle.StateFailed {
+				t.Fatalf("bundle = %+v; want the original failure recorded", result.Bundle)
+			}
+			if _, err := os.Stat(rollbackPath); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("unsealed rollback copy remains: %v", err)
+			}
+			assertWindowsBundleLockRemoved(t, layout)
+		})
+	}
 }
 
 // GAP-0113: Setup /ensure BUNDLE= refuses a validly signed bundle whose
@@ -1372,6 +2007,9 @@ func windowsKilledApplyReceipt(t *testing.T, driver *enterprisebundle.Driver, bu
 	if until == enterprisebundle.StateVerified {
 		return rc
 	}
+	// Prepare records the rendered config hash before promoting a receipt,
+	// so a killed run can leave a staged receipt with a committed config.
+	rc.ConfigSHA256 = configwrite.SHA256Hex(config)
 	if _, err := driver.Store.Promote(rc); err != nil {
 		t.Fatal(err)
 	}
@@ -1492,13 +2130,15 @@ func TestWindowsPlainEnsureSettlesKilledApplyReceipt(t *testing.T) {
 // Every receipt state a killed bundle run can leave is settled by a plain
 // ensure (GAP-1302), as `ensure --bundle` settles them before its own bundle:
 // received, verified and staged fail as interrupted; an applied one whose
-// config is installed and enforced is confirmed; one the gateway does not
-// confirm fails, and the run's bundle restore re-installs the last good
-// bundle over it. A pending install transaction defers the settle until the
+// config is installed and enforced is confirmed; an applied one whose
+// gateway is unavailable stays pending until a later run can confirm it.
+// A pending install transaction defers the settle until the
 // ensure recovered it, and a live bundle run's lock leaves its receipt alone.
 func TestWindowsPlainEnsureSettlesEveryKilledApplyState(t *testing.T) {
 	const lastGood, killedID = "b-01JA00000000000000000000C1", "b-01JA00000000000000000000C2"
 	goodConfig, killedConfig := []byte("config_version: 9\n# last good\n"), []byte("config_version: 9\n# killed\n")
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
 	for _, tc := range []struct {
 		name      string
 		until     string
@@ -1520,7 +2160,7 @@ func TestWindowsPlainEnsureSettlesEveryKilledApplyState(t *testing.T) {
 		{name: "applied and enforced", until: enterprisebundle.StateApplied, installed: killedConfig, gateway: true,
 			wantState: enterprisebundle.StateConfirmed, wantWarn: enterprisebundle.WarnConfirmedAfterInterrupt},
 		{name: "applied, gateway silent", until: enterprisebundle.StateApplied, installed: killedConfig,
-			wantState: enterprisebundle.StateFailed, wantCode: enterprisebundle.CodeNotConfirmed, wantWarn: windowsBundleUnconfirmedWarning, replacing: true},
+			wantState: enterprisebundle.StateApplied, wantWarn: enterprisebundle.WarnBundlePending},
 		{name: "pending transaction recovered", until: enterprisebundle.StateStaged, installed: goodConfig, gateway: true, pending: "recovered",
 			wantState: enterprisebundle.StateFailed, wantCode: enterprisebundle.CodeInterrupted, wantWarn: windowsBundleInterruptedWarning},
 		{name: "pending transaction stuck", until: enterprisebundle.StateStaged, installed: goodConfig, gateway: true, pending: "stuck",
@@ -1532,6 +2172,9 @@ func TestWindowsPlainEnsureSettlesEveryKilledApplyState(t *testing.T) {
 			layout := stubWindowsBundleHost(t)
 			stubWindowsBundleMarker(t)
 			driver := newWindowsBundleDriver(layout)
+			if _, _, err := installWindowsBundleAnchors(e.anchors, driver.AnchorsPath); err != nil {
+				t.Fatal(err)
+			}
 			windowsKilledApplyReceipt(t, driver, lastGood, 1, goodConfig, enterprisebundle.StateConfirmed)
 			rc := windowsKilledApplyReceipt(t, driver, killedID, 2, killedConfig, tc.until)
 			if err := os.MkdirAll(filepath.Dir(layout.ConfigPath), 0o700); err != nil {

@@ -427,6 +427,26 @@ def test_status_strip_names_the_applied_policy_generation_and_digest() -> None:
     assert [segment.label for segment in status_segments(status)][:2] == ["Gateway", status.applied_policy]
 
 
+def test_the_applied_policy_is_named_by_the_config_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0642: the strip named policy.generation, which starts again at 1 when
+    # the gateway restarts; config_generation is the persisted writer counter.
+    class RestartedClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def status(self) -> dict[str, object]:
+            policy = {"effective_digest": "sha256:" + "ab" * 32, "generation": 1, "config_generation": 18}
+            return {**_status_payload(), "policy": policy}
+
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", RestartedClient)
+
+    result = _fetch_gateway_health(_config())
+
+    assert result.snapshot is not None
+    assert result.snapshot.applied_policy_label().startswith("gen 18 · abababab")
+    assert HealthSnapshot(policy_digest="sha256:" + "ab" * 32).applied_policy_label() == "ab" * 6
+
+
 def test_disabled_gateway_availability_is_terminal_readiness() -> None:
     readiness = build_readiness_checks(
         {},

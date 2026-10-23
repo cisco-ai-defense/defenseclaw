@@ -104,8 +104,8 @@ const (
 	userUnitSandboxService = "defenseclaw-sandbox.service"
 	userUnitGatewayService = "defenseclaw-openshell-gateway.service"
 
-	labelSandbox          = "com.cisco.defenseclaw.sandbox"
-	labelOpenShellGateway = "com.cisco.defenseclaw.openshell-gateway"
+	labelSandbox          = openshell.SandboxAgentBase
+	labelOpenShellGateway = openshell.GatewayAgentBase
 )
 
 // openshellSettings are the sandbox settings the lifecycle derives from the
@@ -261,11 +261,15 @@ type userUnit struct {
 	Source string
 }
 
+// userUnits are the sandbox user units. On macOS each label carries the tag
+// of the gateway the deployment runs (openshell.LaunchAgentLabel), so an
+// upgrade installs jobs of a label macOS has not decided on (GAP-0206).
 func (e *Env) userUnits() []userUnit {
 	if e.GOOS == "darwin" {
+		digest := e.launchAgentDigest()
 		return []userUnit{
-			{Name: labelSandbox, Source: labelSandbox + ".plist"},
-			{Name: labelOpenShellGateway, Source: labelOpenShellGateway + ".plist"},
+			{Name: openshell.LaunchAgentLabel(labelSandbox, digest), Source: labelSandbox + ".plist"},
+			{Name: openshell.LaunchAgentLabel(labelOpenShellGateway, digest), Source: labelOpenShellGateway + ".plist"},
 		}
 	}
 	return []userUnit{
@@ -290,10 +294,15 @@ func (e *Env) userUnitPath(u userUnit, channel string) string {
 // packaging/systemd/user and the LaunchAgents under
 // packaging/launchd-standalone/agents, which the system units' embed globs do
 // not carry (UserUnitSource overrides it in tests). On a managed Mac, a
-// verified packaged gateway copy gets a content-addressed program path.
+// verified packaged gateway copy gets a content-addressed program path, and
+// the plist names the unit's tagged label.
 func (e *Env) userUnitBytes(u userUnit) ([]byte, error) {
 	if e.UserUnitSource != nil {
-		return e.UserUnitSource(u.Source)
+		data, err := e.UserUnitSource(u.Source)
+		if err != nil || e.GOOS != "darwin" {
+			return data, err
+		}
+		return withLaunchAgentLabel(data, u), nil
 	}
 	if e.GOOS == "darwin" {
 		data, err := launchdstandalone.ReadAgentPlist(strings.TrimSuffix(u.Source, ".plist"))
@@ -305,9 +314,53 @@ func (e *Env) userUnitBytes(u userUnit) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		return []byte(strings.Replace(string(data), gateway, program, 1)), nil
+		return withLaunchAgentLabel([]byte(strings.Replace(string(data), gateway, program, 1)), u), nil
 	}
 	return systemdunits.ReadUserUnit(u.Source)
+}
+
+// withLaunchAgentLabel names u's label in the Label of its plist, which
+// the embedded asset gives as the base label.
+func withLaunchAgentLabel(data []byte, u userUnit) []byte {
+	base := strings.TrimSuffix(u.Source, ".plist")
+	return []byte(strings.Replace(string(data), "<string>"+base+"</string>", "<string>"+u.Name+"</string>", 1))
+}
+
+// launchAgentDigest is the SHA-256 of the gateway the LaunchAgents run: the
+// one the plan being applied installs, else the installed one. "" when there
+// is none yet, which keeps the bare base labels.
+func (e *Env) launchAgentDigest() string {
+	if e.agentDigest != "" {
+		return e.agentDigest
+	}
+	digest, _ := sha256File(e.P(filepath.Join(e.Layout.BinDir, binGateway)))
+	return digest
+}
+
+// launchAgentLabel is the installed job label of base: the one whose plist
+// is in /Library/LaunchAgents (openshell.FindLaunchAgent).
+func (e *Env) launchAgentLabel(base string) string {
+	label, _ := openshell.FindLaunchAgent(e.P(openshell.LaunchAgentsDir), base)
+	return label
+}
+
+// strayLaunchAgents are the plists of DefenseClaw's sandbox LaunchAgents in
+// /Library/LaunchAgents that want does not name: those of an earlier label,
+// which 1.0.0 to 1.0.3 and every earlier package installed (GAP-0206).
+func (e *Env) strayLaunchAgents(want map[string]bool) []string {
+	entries, _ := os.ReadDir(e.P(openshell.LaunchAgentsDir))
+	var stray []string
+	for _, entry := range entries {
+		name, ok := strings.CutSuffix(entry.Name(), ".plist")
+		if !ok || !openshell.IsLaunchAgentLabel(labelSandbox, name) && !openshell.IsLaunchAgentLabel(labelOpenShellGateway, name) {
+			continue
+		}
+		path := filepath.Join(openshell.LaunchAgentsDir, entry.Name())
+		if !want[path] {
+			stray = append(stray, path)
+		}
+	}
+	return stray
 }
 
 // launchAgentProgram is the gateway file both macOS LaunchAgents execute: the
@@ -392,6 +445,9 @@ type openshellPlan struct {
 // removed by the plan's stale list.
 func (l *lifecycle) planOpenShell(p *plan) error {
 	env := l.env
+	if p.payload != nil {
+		env.agentDigest = p.payload.Digests[binGateway]
+	}
 	settings := openshellSettingsOf(env.GOOS, p.config.Loaded)
 	op := &openshellPlan{settings: settings}
 	op.defaultNamespaceBridge = dockerBridgeHolds(env.GOOS, settings, l.openShellAppliedForPlan())
@@ -411,8 +467,8 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 		return nil
 	}
 
-	// A setup pin this build cannot install would surface only at a user's
-	// first sandbox run: refuse it here, before anything changes (GAP-0236).
+	// An enabled setup needs a release this build can install. Older releases
+	// refused an enabled setup without that pin too.
 	if settings.Install == config.EnterpriseOpenShellInstallSetup && openshell.TarballPins[settings.Version] == nil {
 		return fmt.Errorf("enterprise.openshell.version %q is not a release this DefenseClaw build can install in setup mode; set it to one of: %s",
 			settings.Version, strings.Join(openshell.PinnedTarballReleases(), ", "))
@@ -635,11 +691,14 @@ type openshellState struct {
 // openshellApplied is the sandbox configuration the last committed
 // transaction applied.
 type openshellApplied struct {
-	Enabled      bool   `json:"enabled"`
-	Install      string `json:"install"`
-	Driver       string `json:"driver"`
-	Fallback     string `json:"driver_fallback,omitempty"`
-	Version      string `json:"version,omitempty"`
+	Enabled  bool   `json:"enabled"`
+	Install  string `json:"install"`
+	Driver   string `json:"driver"`
+	Fallback string `json:"driver_fallback,omitempty"`
+	Version  string `json:"version,omitempty"`
+	// RaisedFrom is the setup-mode pin Version was raised from
+	// (openshellSettings.RaisedFrom), so status and verify name it too.
+	RaisedFrom   string `json:"raised_from,omitempty"`
 	GatewayPort  int    `json:"gateway_port"`
 	Rendered     string `json:"rendered,omitempty"`
 	DaemonInputs string `json:"daemon_inputs,omitempty"`
@@ -666,7 +725,7 @@ func appliedOf(op *openshellPlan) *openshellApplied {
 	}
 	s := op.settings
 	a := &openshellApplied{Enabled: s.Enabled, Install: s.Install, Driver: s.Driver, Fallback: s.Fallback, Version: s.Version,
-		GatewayPort: s.GatewayPort, Rendered: op.digest, DaemonInputs: op.daemonInputs, E2fsprogsDir: s.E2fsprogsDir,
+		RaisedFrom: s.RaisedFrom, GatewayPort: s.GatewayPort, Rendered: op.digest, DaemonInputs: op.daemonInputs, E2fsprogsDir: s.E2fsprogsDir,
 		DefaultNamespaceBridge: op.defaultNamespaceBridge}
 	if a.usesDocker() {
 		a.DockerNamespace = openshell.ManagedDockerNamespace
@@ -742,6 +801,9 @@ type pending struct {
 	From *openshellApplied `json:"from,omitempty"`
 	// Sandboxes is how many ran when the change was last tried.
 	Sandboxes int `json:"sandboxes"`
+	// Hold is the named blocker and next step from the last failed status or
+	// drain check. It is shown on status and verify while the change waits.
+	Hold string `json:"hold,omitempty"`
 }
 
 func (e *Env) loadOpenShellState() *openshellState {

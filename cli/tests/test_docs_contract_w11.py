@@ -75,6 +75,77 @@ def test_turn_off_page_says_what_a_scoped_enable_does_after_a_global_disable():
     assert "Add `--connector codex` to bring back one agent" not in text
     assert "After `setup guardrail --disable`, `defenseclaw guardrail enable --connector codex` changes nothing" in text
     assert "exits `1`" in text
+    assert (
+        "it names both steps: `defenseclaw guardrail enable`, then `defenseclaw guardrail enable --connector codex`"
+        in text
+    )
+
+
+def test_no_contract_pages_describe_the_gateway_start_gates_as_the_code_does():
+    # The page said the gateway installs no hooks for a version with no
+    # contract, and first-run named only Claude Code and Codex. Single-connector
+    # boot refuses any hook connector in every mode; multi-connector boot
+    # refuses in action mode (OpenCode in both) and only warns in observe.
+    sidecar = (REPO / "internal/gateway/sidecar.go").read_text(encoding="utf-8")
+    single = re.search(
+        r"if !guardianManagedLifecycle && contractResolution\.Status == connector\.HookCompatibilityUnknown && "
+        r'envvars\.Getenv\("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT"\) != "1" \{',
+        sidecar,
+    )
+    assert single, "runGuardrail no longer refuses an unknown version in every mode; update the page"
+    assert "(actionMode || strictUnknownVersion) &&" in sidecar
+    assert "is not covered by a known hook contract; continuing in observe mode" in sidecar
+    text = _page("reference/apis/hook-contracts.mdx")
+    assert "The gateway installs no hooks for such a version" not in text
+    assert (
+        "With one connector, a version with no contract is refused in observe and action mode for every hook "
+        "connector, and the gateway does not start." in text
+    )
+    assert "In observe mode a version with no contract gets a warning in the gateway log" in text
+    setup = (REPO / "cli/defenseclaw/commands/cmd_setup.py").read_text(encoding="utf-8")
+    assert "the gateway installs no" not in setup
+    first_run = _page("reference/commands/first-run.mdx")
+    assert "has no hook contract is downgraded to observe" not in first_run
+    assert "For Claude Code and Codex the gateway then does not start" not in first_run
+    assert (
+        "A connector whose installed version has no hook contract is left out in observe and action mode" in first_run
+    )
+
+
+def test_hook_contract_pages_say_which_start_gate_the_guardian_skips_and_when_a_refusal_stops_the_start():
+    # The page said the guardian skips both start gates, and that a refused
+    # connector is always skipped. setupOneConnector has no guardian check,
+    # and a refused connector this gateway guarded before stops the start.
+    sidecar = (REPO / "internal/gateway/sidecar.go").read_text(encoding="utf-8")
+    multi = sidecar[sidecar.index("func (s *Sidecar) setupOneConnector(") :]
+    multi = multi[: multi.index("\n}\n")]
+    assert "guardianManagedLifecycle" not in multi
+    assert "if wasActive && !registration.opts.ManagedEnterprise {" in sidecar
+    text = _page("reference/apis/hook-contracts.mdx")
+    assert "Unless the enterprise hook guardian owns the hooks" not in text
+    assert "The guardian does not skip this check." in text
+    assert "One it already guarded, as after an upgrade of DefenseClaw or of the agent, stops the start" in text
+    assert "If every connector is refused, the gateway does not start." in text
+
+
+def test_pages_do_not_say_a_version_with_no_contract_is_saved_in_observe():
+    # GAP-0554 class: setup, init and quickstart refuse it in both modes.
+    hermes = _page("reference/connectors/hermes.mdx")
+    assert "saves Hermes in observe mode with upgrade guidance" not in hermes
+    assert "refuses Hermes in observe and action mode" in hermes
+    trouble = _page("troubleshooting/hooks-and-blocking.mdx")
+    assert (
+        "Its installed version has no hook contract (below the tested floor or known broken). Action mode needs one."
+        not in trouble
+    )
+    assert "is not switched to observe" in trouble
+    first_run = _page("reference/commands/first-run.mdx")
+    assert "`defenseclaw quickstart --connector <name>` for quickstart" in first_run
+    registry = json.loads((REPO / "internal/envvars/registry.json").read_text(encoding="utf-8"))
+    drift = next(v for v in registry["entries"] if v["name"] == "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT")
+    assert drift["default"] == "unset (fail-closed)"
+    assert "observe and action mode" in drift["purpose"]
+    assert "cli/defenseclaw/bootstrap.py" in {c["location"] for c in drift["consumers"]}
 
 
 def test_rule_recipes_page_names_the_suppressions_the_catalog_holds():

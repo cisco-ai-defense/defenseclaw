@@ -54,9 +54,9 @@ class TestNormalize:
     @pytest.mark.parametrize(
         "inp,expected",
         [
-            (None, "openclaw"),
-            ("", "openclaw"),
-            ("   ", "openclaw"),
+        (None, ""),
+        ("", ""),
+        ("   ", ""),
             ("openclaw", "openclaw"),
             ("OpenClaw", "openclaw"),
             ("  CODEX  ", "codex"),
@@ -84,9 +84,12 @@ class TestIsKnown:
         assert not connector_paths.is_known("future-frame")
         assert not connector_paths.is_known("openclaaaaw")
 
-    def test_none_falls_back_to_openclaw_and_is_known(self):
-        # Per normalize() contract — None resolves to "openclaw"
-        assert connector_paths.is_known(None)
+    def test_none_selects_no_connector(self):
+        assert connector_paths.normalize(None) == ""
+        assert not connector_paths.is_known(None)
+        assert connector_paths.skill_dirs(None) == []
+        assert connector_paths.plugin_dirs(None) == []
+        assert connector_paths.mcp_servers(None) == []
 
 
 class TestSkillDirs:
@@ -725,16 +728,13 @@ class TestClaudeAutoMemory:
         assert str(tmp_path / "extra1") in dirs
         assert os.path.join(str(tmp_path), "skills") in dirs
 
-    def test_unknown_connector_falls_back_to_openclaw(self, tmp_path):
+    def test_unknown_connector_selects_no_agent_paths(self, tmp_path):
         dirs = connector_paths.skill_dirs(
             "totally-unknown",
             openclaw_home=str(tmp_path),
             openclaw_config=str(tmp_path / "openclaw.json"),
         )
-        # Must not be empty and must include the OpenClaw home_dir/skills
-        # so "guardrail.connector got typo'd" doesn't silently swallow
-        # all skill discovery.
-        assert os.path.join(str(tmp_path), "skills") in dirs
+        assert dirs == []
 
 
 # ---------------------------------------------------------------------------
@@ -2488,7 +2488,7 @@ class TestConfigDispatch:
 
         cfg.guardrail.connector = ""
         cfg.claw.mode = ""
-        assert cfg.active_connector() == "openclaw"
+        assert cfg.active_connector() == ""
 
 
 # ---------------------------------------------------------------------------

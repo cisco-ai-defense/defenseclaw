@@ -1132,6 +1132,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	if record != nil {
 		l.describePerUserGateways(ctx)
 		l.describeAgentSessionsBeforeActivation(ctx, record)
+		l.describePluginLaunchCoverage(ctx, record)
 	}
 	if exists(env.rotationIntentPath()) {
 		r.AddWarning(codeRotationIncomplete, "a credential rotation did not finish; run rotate-credentials, or any other lifecycle action, to complete it or roll it back")
@@ -1228,8 +1229,8 @@ const codeJudgeFailing = enterprisestatus.CodeJudgeFailing
 
 // readGatewayPosture copies the gateway's inspection posture from /health
 // when the gateway publishes it, and warns when it reports directory lookups
-// that fail: the accounts without cached facts then run under the default
-// guardrail profile, and nothing else in status or verify showed it (GAP-0216).
+// that fail: requests whose assignments need the missing facts are refused
+// and name them, and nothing else in status or verify showed it (GAP-0216).
 func (l *lifecycle) readGatewayPosture(body []byte) {
 	l.noteIdentityHealth(body)
 	var health struct {
@@ -1294,8 +1295,8 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		if ids := directoryLookupAccounts(d.Accounts); ids != "" {
 			which = " (" + ids + ")"
 		}
-		message := fmt.Sprintf("directory lookups are failing for %d account(s)%s since %s; accounts without cached facts get the "+
-			"default guardrail profile (default_lookup_failed)", d.Failing, which, d.Since)
+		message := fmt.Sprintf("directory lookups are failing for %d account(s)%s since %s; requests whose assignments need missing identity facts are refused "+
+			"(default_lookup_failed), and the refusal names the missing fact", d.Failing, which, d.Since)
 		if d.Stale > 0 {
 			message += fmt.Sprintf(", and %d account(s) are served older facts that are dropped after an hour", d.Stale)
 		}

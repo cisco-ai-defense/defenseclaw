@@ -1112,6 +1112,31 @@ def _activate_policy(app: AppContext, name: str) -> tuple[str, list[str]]:
 
     watch_raw = data.get("watch", {})
     secure_client = asset_lists.is_secure_client(app.cfg)
+    if not secure_client:
+        guardrail_data = data.get("guardrail")
+        target_mode = app.cfg.guardrail.mode
+        if isinstance(guardrail_data, dict) and "mode" in guardrail_data:
+            target_mode = str(guardrail_data["mode"]).strip()
+        if target_mode in {"observe", "action"}:
+            from defenseclaw.commands.cmd_guardrail import (
+                _action_hook_switch_problems,
+                _ActionHookInspectionError,
+                _connector_label,
+            )
+            from defenseclaw.hook_integrity import repair_command
+
+            try:
+                switched_off = _action_hook_switch_problems(app.cfg, global_mode=target_mode)
+            except _ActionHookInspectionError as exc:
+                raise click.ClickException(
+                    f"Nothing was changed: {_connector_label(exc.connector)} hook settings could not be inspected."
+                ) from exc
+            if switched_off:
+                details = "; ".join(f"{_connector_label(name)}: {problem}" for name, problem in switched_off)
+                repairs = "; ".join(f"Next: {repair_command(name, problem)}" for name, problem in switched_off)
+                raise click.ClickException(
+                    f"Nothing was changed: action mode cannot guard these connectors: {details}. {repairs}"
+                )
     opa_update = _prepare_opa_data(app, data) if secure_client else None
     first_party_notes: list[str] = []
     if not secure_client:

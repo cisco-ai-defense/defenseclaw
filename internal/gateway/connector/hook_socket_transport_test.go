@@ -435,6 +435,18 @@ func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
 	if code, stdout, stderr := run(); code != 2 || !strings.Contains(stderr, "peer_unverified") {
 		t.Fatalf("open mode with untrusted socket directory: exit %d stdout=%q stderr=%q, want a peer refusal", code, stdout, stderr)
 	}
+	// An administrator's outage-only open does not trust a socket whose
+	// directory another account could replace (GAP-0715).
+	opts.HookFailMode = "open"
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewDevinConnector()); err != nil {
+		t.Fatal(err)
+	}
+	bakeHookPathForTest(t, hookPath, filepath.Dir(curlPath)+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+	if code, stdout, stderr := run(); code != 2 || !strings.Contains(stderr, "hook socket") {
+		t.Fatalf("untrusted socket in outage-open mode: exit %d stdout=%q stderr=%q, want a closed failure", code, stdout, stderr)
+	}
+	// The open-mode socket checks below run on this open render; the
+	// stopped-gateway sentence is checked closed at the end.
 	// GAP-0581: a stopped gateway (no socket) is named as such, not as a
 	// socket ownership problem.
 	if err := os.Chmod(f.runDir, 0o755); err != nil {
@@ -466,6 +478,11 @@ func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
 	if err := os.Remove(f.socket); err != nil {
 		t.Fatal(err)
 	}
+	opts.HookFailMode = "open"
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewDevinConnector()); err != nil {
+		t.Fatal(err)
+	}
+	bakeHookPathForTest(t, hookPath, filepath.Dir(curlPath)+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 	if code, stdout, stderr := run(); code != 0 || !strings.Contains(stderr, "gateway service is not running") {
 		t.Fatalf("open mode with a verified missing socket: exit %d stdout=%q stderr=%q, want an outage allow", code, stdout, stderr)
 	}

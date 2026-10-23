@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -84,6 +85,30 @@ func GuardApplies(connector, goos string, policy config.ResolvedConnectorPolicy)
 		return goos != "windows"
 	}
 	return lockConnectors[connector] && policy.ManagedHooksOnly != config.ManagedHooksOnlyEnforce
+}
+
+// ForeignHookSessionLocal reports a connector whose foreign-hook guard keeps
+// the agent session's record under the account's home on goos instead of
+// exchanging it with the gateway. On Windows the Amp plugin calls the gateway
+// with its own per-user token and has no hook-binary runtime generation, so
+// `hook --connector amp --foreign-hook-check` has no credential for the
+// exchange (every check failed closed and blocked each Amp tool call). The
+// plugin keeps its session.load decision for the life of the Amp process.
+func ForeignHookSessionLocal(connector, goos string) bool {
+	return goos == "windows" && strings.EqualFold(strings.TrimSpace(connector), "amp")
+}
+
+// GuardBlocksOutage reports whether the foreign-hook guard blocks
+// connector's guarded calls on goos while the gateway cannot answer, in every
+// fail mode, the administrator's open included: the guard covers the
+// connector, foreign_hooks is remove (each scan is combined with the
+// agent session's record, which only the gateway holds), and the record is
+// not kept locally. The gateway outage table of the docs capability matrix
+// is checked against it (TestDocsCapabilityMatrixOutageMatchesTheHooks), and
+// internal/cli checks it against a full managed call.
+func GuardBlocksOutage(connector, goos string, policy config.ResolvedConnectorPolicy) bool {
+	return GuardApplies(connector, goos, policy) && policy.ForeignHooks == config.ForeignHooksRemove &&
+		!ForeignHookSessionLocal(connector, goos)
 }
 
 // BuildPublicPolicy renders the summary for connectors.

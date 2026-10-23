@@ -98,7 +98,9 @@ $stream.Dispose()
                 $failures.Add('a junction in StateRoot passed the uninstall preflight')
             }
             catch {
-                if ($_.Exception.Message -notlike '*stopped before it changed anything*' -or $_.Exception.Message -notlike '*rmdir*') {
+                if ($_.Exception.Message -notlike 'state_invalid: managed state contains a reparse point:*' -or
+                    $_.Exception.Message -notlike '*stopped before it changed anything*' -or
+                    $_.Exception.Message -notlike '*rmdir*') {
                     $failures.Add("junction refusal: $($_.Exception.Message)")
                 }
             }
@@ -768,6 +770,26 @@ $stream.Dispose()
                 (Get-DefenseClawVendorUsersReadGrant -Path $vendor) -ne 0x20) {
                 $failures.Add("Setup did not complete an administrator's partial Users entry, or did not record only what it added")
             }
+            # Get-Acl projects same-SID allow rules. Inspect the on-disk
+            # descriptor so this catches a widened foreign ACE, not a
+            # FileSystemSecurity projection of two separate raw ACEs.
+            $native = Initialize-DefenseClawNativeSecurity
+            $partialSnapshot = $native::GetDirectorySecuritySnapshotNoFollow($vendor)
+            $partialRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$partialSnapshot.SecurityDescriptor, 0)
+            $originalUsers = @($partialRaw.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
+                    $_ -is [Security.AccessControl.KnownAce] -and
+                    $_.SecurityIdentifier.Value -ceq $script:UsersSID -and
+                    $_.AccessMask -eq 0x120080
+                })
+            $addedUsers = @($partialRaw.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
+                    $_ -is [Security.AccessControl.KnownAce] -and
+                    $_.SecurityIdentifier.Value -ceq $script:UsersSID -and
+                    $_.AccessMask -eq 0x20
+                })
+            if ($originalUsers.Count -ne 1 -or $addedUsers.Count -ne 1) {
+                $failures.Add("Setup widened the administrator's partial Users ACE instead of adding its own")
+            }
             Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
             if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before -or [IO.File]::Exists($grantRecord)) {
                 $failures.Add("uninstall took the administrator's own rights with Setup's: $((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl)")
@@ -795,6 +817,42 @@ $stream.Dispose()
             Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
             if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before -or [IO.File]::Exists($grantRecord)) {
                 $failures.Add('uninstall did not give back the Users entry Setup created')
+            }
+            # A second installer or GPO can replace the vendor DACL after
+            # Setup. Repair must restore its grant, and uninstall must leave
+            # that replacement DACL exactly as it found it.
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            Set-TestDirectorySddl $vendor 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+            $reset = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) -or
+                (Get-DefenseClawVendorUsersReadGrant -Path $vendor) -ne 0x1200a0) {
+                $failures.Add('repair did not restore the recorded vendor Users grant')
+            }
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $reset -or [IO.File]::Exists($grantRecord)) {
+                $failures.Add('uninstall did not preserve the externally reset vendor DACL')
+            }
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            Set-TestDirectorySddl $vendor 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x120080;;;BU)'
+            $partialReset = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            $partialSnapshot = $native::GetDirectorySecuritySnapshotNoFollow($vendor)
+            $partialRepaired = [Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$partialSnapshot.SecurityDescriptor, 0)
+            $foreignPartial = @($partialRepaired.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
+                    $_ -is [Security.AccessControl.KnownAce] -and
+                    $_.SecurityIdentifier.Value -ceq $script:UsersSID -and $_.AccessMask -eq 0x120080
+                })
+            if ($foreignPartial.Count -ne 1 -or
+                (Get-DefenseClawVendorUsersReadGrant -Path $vendor) -ne 0x20 -or
+                -not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor)) {
+                $failures.Add('repair widened a foreign partial Users ACE or recorded the wrong rights')
+            }
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $productionScope
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $partialReset -or [IO.File]::Exists($grantRecord)) {
+                $failures.Add('uninstall changed the foreign partial Users ACE after repair')
             }
             # Review loop round 3: production and certification scopes share
             # the vendor directory and its grant record. A certification

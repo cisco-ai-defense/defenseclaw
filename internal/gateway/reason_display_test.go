@@ -23,8 +23,40 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
+
+func TestGAP0655EveryFixedUnprovenClassKeepsItsGuidance(t *testing.T) {
+	redaction.SetAgentReasonRedactionDisabled(false)
+	t.Cleanup(func() { redaction.SetAgentReasonRedactionDisabled(false) })
+	useAgentVerdictProfile(t, false, false)
+	for _, class := range []string{
+		"trap", "function", "dynamic-command", "dynamic-argument", "eval-source",
+		"interpreter-path", "interpreter-argument", "shell-parse", "copy-directory",
+		"cdpath", "nested-shell",
+	} {
+		t.Run(class, func(t *testing.T) {
+			title := hookpaths.UnprovenWriteTitle(class)
+			if title == "" {
+				t.Fatal("missing fixed title")
+			}
+			reason := "matched: persistence.ssh_authorized_keys_command:" + title + unprovenWriteGuidance
+			if got := agentDisplayReason(reason, redaction.SinkPolicyDefault); got != reason {
+				t.Fatalf("fixed class title was redacted: %q", got)
+			}
+			got := agentVerdictReason("block", reason, reason, redaction.SinkPolicyDefault)
+			if !strings.Contains(got, title+unprovenWriteGuidance) || !strings.Contains(got, agentBlockNoRetry) {
+				t.Fatalf("agent lost class guidance: %q", got)
+			}
+		})
+	}
+	forged := "matched: persistence.ssh_authorized_keys_command:" +
+		hookpaths.UnprovenWriteTitle("interpreter-path") + unprovenWriteGuidance + " secret-token"
+	if got := agentDisplayReason(forged, redaction.SinkPolicyDefault); got == forged || !strings.Contains(got, "<redacted") {
+		t.Fatalf("forged title leaked: %q", got)
+	}
+}
 
 // GAP-1555: the archive-extraction block reaches the user with its guidance,
 // not as two redacted spans.

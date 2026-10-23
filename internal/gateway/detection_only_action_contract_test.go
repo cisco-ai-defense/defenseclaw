@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -170,6 +171,17 @@ func TestGenericPythonInlineInvocationIsQuietAcrossModes(t *testing.T) {
 					HookEventName: "PreToolUse", ToolName: "Bash",
 					ToolInput: map[string]interface{}{"command": command}, CWD: "/repo",
 				})
+				if strings.HasPrefix(command, "python3 /tmp/") {
+					wantAction := guardrailActionBlock
+					if mode == "observe" {
+						wantAction = guardrailActionAllow
+					}
+					if response.Action != wantAction || response.RawAction != guardrailActionBlock ||
+						!findingStringHasRuleID(response.Findings, "persistence.ssh_authorized_keys_command") {
+						t.Fatalf("%s response for outside script %q = %+v, want closed action proof", mode, command, response)
+					}
+					continue
+				}
 				if response.Action != guardrailActionAllow || response.RawAction != guardrailActionAllow ||
 					response.Severity != "NONE" || findingStringHasRuleID(response.Findings, "CMD-PYTHON-C") {
 					t.Fatalf("%s response for %q = %+v, want quiet generic invocation", mode, command, response)
@@ -226,7 +238,7 @@ func TestPythonInlineSpecificOwnersRemainDetectionOnlyWithoutTypedProof(t *testi
 	}
 }
 
-func TestEvaluateCodexHook_DynamicExecutablesRemainDetectionOnly(t *testing.T) {
+func TestEvaluateCodexHook_DynamicExecutablesFailClosed(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "codex"
@@ -260,10 +272,10 @@ func TestEvaluateCodexHook_DynamicExecutablesRemainDetectionOnly(t *testing.T) {
 				ToolInput: map[string]interface{}{"command": test.command},
 				CWD:       "/repo",
 			})
-			if response.Action != guardrailActionAllow ||
-				response.RawAction != guardrailActionAllow || response.WouldBlock ||
-				findingStringHasRuleID(response.Findings, trustedParserUncertaintyRuleID) {
-				t.Fatalf("hook response = %+v, want parser uncertainty excluded from findings", response)
+			if response.Action != guardrailActionBlock ||
+				response.RawAction != guardrailActionBlock || response.WouldBlock ||
+				!findingStringHasRuleID(response.Findings, "persistence.ssh_authorized_keys_command") {
+				t.Fatalf("hook response = %+v, want closed dynamic executable", response)
 			}
 		})
 	}
@@ -294,11 +306,11 @@ func TestArtifactPromotion_AllDetectionOnlyAllows(t *testing.T) {
 	installDefaultProfileConnector(t, connectorName)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "unreachable.sh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nrm -rf /\n"), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\nrm -rf /\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	facts := actionfacts.Analyze(actionfacts.Input{
-		Tool: "shell", Command: fmt.Sprintf("false && bash %q", path), CWD: dir,
+		Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: dir,
 	})
 	capture := &toolChainHookCapture{}
 	capture.recordTrustedAction(facts, nil)

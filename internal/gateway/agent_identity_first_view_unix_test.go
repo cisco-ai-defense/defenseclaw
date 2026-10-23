@@ -23,7 +23,7 @@ func TestQualifiedAgentInventoryRefreshesHolderBeforeFiltering(t *testing.T) {
 	agentIdentityVerifiedAccountToken = func(string) string { return "new-holder" }
 	agentIdentityHolderHistory = func(string) (string, bool) { return "new-holder", refreshed }
 	id := "41700"
-	incarnation, changed := adminViewAccountProvenance([]string{id})
+	incarnation, changed := adminViewAccountProvenance([]string{id}, "")
 	if !changed {
 		t.Fatal("first qualified view did not refresh holder history")
 	}
@@ -46,7 +46,7 @@ func TestQualifiedAgentInventoryWithUnprovenHolderSelectsNoUIDRows(t *testing.T)
 	agentIdentityVerifiedAccountToken = func(string) string { return "" }
 	agentIdentityHolderHistory = func(string) (string, bool) { return "old-holder", false }
 	id := "41701"
-	incarnation, changed := adminViewAccountProvenance([]string{id})
+	incarnation, changed := adminViewAccountProvenance([]string{id}, "")
 	filter := inventory.AgentIdentityFilter{User: `OTHER\alice`, UserIDs: []string{id}, UserIncarnation: incarnation, HolderChanged: changed}
 	for _, row := range []inventory.AgentIdentityRecord{
 		{UserID: id, UserName: "alice"},
@@ -67,7 +67,7 @@ func TestQualifiedAgentInventoryRejectsUnrecordedHolderHandoff(t *testing.T) {
 	agentIdentityIncarnation = func(string) string { return "" } // bounded holder history could not save
 	agentIdentityVerifiedAccountToken = func(string) string { return "new-holder" }
 	agentIdentityHolderHistory = func(string) (string, bool) { return "old-holder", false }
-	incarnation, changed := adminViewAccountProvenance([]string{"41702"})
+	incarnation, changed := adminViewAccountProvenance([]string{"41702"}, "")
 	if incarnation != "" || !changed {
 		t.Fatalf("unrecorded handoff returned incarnation=%q changed=%v; want fail closed", incarnation, changed)
 	}

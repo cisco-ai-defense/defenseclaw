@@ -244,8 +244,8 @@ A user can break files DefenseClaw needs in their own account, for example by re
 ## Rotate per-user credentials
 
 The guardian gives each enrolled user credentials that it derives from one
-per-machine key and binds to that user's uid or SID. The agents' telemetry uses them
-on every OS, and so do hooks and in-agent plugins on Windows. On Linux and macOS,
+per-machine key and binds to that user's uid or SID. Native agent telemetry,
+where enabled, uses them on every OS, as do hooks and in-agent plugins on Windows. On Linux and macOS,
 hooks and in-agent plugins reach the gateway over the hook socket and hold no
 credential. Rotate the key when a user's credentials may have been copied, or on your
 own schedule.
@@ -283,7 +283,27 @@ A host cloned from a template that already runs the deployment shares its device
 | Guardian and enumerator log | `C:\ProgramData\Cisco\DefenseClaw\logs\guardian\hook-guardian.log`. The hook enumerator writes here too, each line prefixed `[hook-enumerator]`; its warnings about one account name the account's SID |
 | Sensor helper log | `C:\ProgramData\Cisco\DefenseClaw\logs\sensor-helper\sensor-helper.log` |
 
-Log files are readable by Administrators and Event Log Readers only. The event IDs (`100` installed through `150` refused) are in [Operate reference](/docs/enterprise/operate/reference#windows-event-ids).
+Administrators and Event Log Readers can read the files in `%WINDIR%\Logs\DefenseClaw`. The gateway, guardian and sensor helper logs under `C:\ProgramData\Cisco\DefenseClaw\logs` are for SYSTEM and Administrators only; the gateway service can also read and write `logs\gateway`. The event IDs (`100` installed through `150` refused) are in [Operate reference](/docs/enterprise/operate/reference#windows-event-ids).
+
+To check that the event log entries are DefenseClaw's, compare them with the
+lifecycle log from an elevated PowerShell (as an Administrator or a member of
+Event Log Readers, the accounts that can read the lifecycle log):
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --application --json
+```
+
+An entry is DefenseClaw's only when its message ends with `record <id>`, the
+lifecycle log holds that record with the same event ID and the SHA-256 of the
+exact message, it was written within two minutes of that lifecycle line, and no
+earlier entry carried the same record. Entries older than the lifecycle log's
+first record are listed as unverifiable. The command exits `1` when an entry
+was not written by DefenseClaw (a forged entry) or when the newest lifecycle
+record written to the checked log has no entry there (a missing record).
+`--application` checks the copies in the Application log instead, `--max N`
+shows the newest `N` entries (default `20`, `0` for all) while every entry is
+checked, and `--json` prints every entry.
 
 ### Linux
 

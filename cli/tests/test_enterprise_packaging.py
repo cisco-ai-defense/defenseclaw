@@ -1001,6 +1001,42 @@ def _linux_scriptlet(host: _Host, name: str) -> str:
     )
 
 
+def test_linux_postinstall_preserves_last_result_when_output_storage_is_full(tmp_path: Path) -> None:
+    host = _Host(tmp_path, apply_path_active=True)
+    host.state.mkdir()
+    previous = b'{"schema_version":2,"ok":true,"installed_version":"1.0.3"}\n'
+    result_path = host.state / "last-package-result.json"
+    result_path.write_bytes(previous)
+    # The log's open fails as on ENOSPC, after the old stdout redirect had
+    # already truncated the last good result. No lifecycle process ran.
+    (host.state / "last-package-result.log").mkdir()
+    _write_stub(host.bin, "mktemp", "echo 'mktemp: No space left on device' >&2; exit 1")
+    result = host.run(_linux_scriptlet(host, "postinstall.sh"), "2")
+    assert result.returncode == 0  # the package transaction still completes
+    assert result_path.read_bytes() == previous
+    assert not any(call.startswith("gateway ") for call in host.calls())
+    assert "no deployment is active" not in result.stderr
+    assert "not applied" in result.stderr
+    assert "disk" in result.stderr.lower() or "space" in result.stderr.lower()
+    assert "enterprise linux ensure --from-package" in result.stderr
+    assert "systemctl start defenseclaw-enterprise-apply.path" in host.calls()
+
+
+def test_linux_postinstall_preserves_last_result_when_atomic_publish_fails(tmp_path: Path) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    result_path = host.state / "last-package-result.json"
+    previous = b'{"schema_version":2,"ok":true,"installed_version":"1.0.3"}\n'
+    result_path.write_bytes(previous)
+    _write_stub(host.bin, "mv", "echo 'mv: No space left on device' >&2; exit 1")
+    result = host.run(_linux_scriptlet(host, "postinstall.sh"), "2")
+    assert result.returncode == 0
+    assert result_path.read_bytes() == previous
+    assert "current package result could not be saved" in result.stderr
+    assert "enterprise linux ensure --from-package" in result.stderr
+    assert not list(host.state.glob(".last-package-result.*"))
+
+
 # The postinstall's own systemd-tmpfiles and daemon-reload started
 # the config-apply path unit, whose ensure won the lifecycle lock and did the
 # upgrade, while the scriptlet's ensure (default 5 s wait) exited 75 and every
@@ -1071,6 +1107,8 @@ def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_pat
         assert "no deployment is active" not in result.stderr
         assert f"apply this package with: sudo {host.gateway} enterprise linux ensure --from-package" in result.stderr
     else:
+        assert "deployment state could not be confirmed" in result.stderr
+        assert "no deployment is active" not in result.stderr
         assert f"finish the install with: sudo {host.gateway} enterprise linux ensure --from-package" in result.stderr
 
 

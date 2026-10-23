@@ -264,22 +264,28 @@ func validateHermesExecutableEvidence(
 	return nil
 }
 
+// hermesBoundedCommandBuffer keeps at most limit bytes of a command stream and
+// fails the write past it. The buffer is a named field, not embedded: an
+// embedded bytes.Buffer exports ReadFrom, and io.Copy (used by os/exec) then
+// reads the whole stream into it without calling Write.
 type hermesBoundedCommandBuffer struct {
-	bytes.Buffer
-	limit int64
+	buffer bytes.Buffer
+	limit  int64
 }
 
 func (b *hermesBoundedCommandBuffer) Write(p []byte) (int, error) {
-	remaining := b.limit - int64(b.Len())
+	remaining := b.limit - int64(b.buffer.Len())
 	if remaining <= 0 {
 		return 0, fmt.Errorf("command output exceeds %d bytes", b.limit)
 	}
 	if int64(len(p)) > remaining {
-		written, _ := b.Buffer.Write(p[:remaining])
+		written, _ := b.buffer.Write(p[:remaining])
 		return written, fmt.Errorf("command output exceeds %d bytes", b.limit)
 	}
-	return b.Buffer.Write(p)
+	return b.buffer.Write(p)
 }
+
+func (b *hermesBoundedCommandBuffer) String() string { return b.buffer.String() }
 
 func firstHermesVersionLine(stdout, stderr string) (string, error) {
 	output := stdout

@@ -118,8 +118,10 @@ func TestRefreshOfThisReleasesOpenAdapterIsItsClosedRender(t *testing.T) {
 		t.Run(adapter, func(t *testing.T) {
 			open, closed := render(t, adapter, "open"), render(t, adapter, "closed")
 			if adapter == "copilot-hook.ps1" {
+				// Outside an install it fails open; an install is denied in
+				// every fail mode before this fallback (w25-setup GAP-0649).
 				if !bytes.Contains(open, []byte(copilotAdapterOpenFailure)) || bytes.Contains(open, []byte(copilotAdapterClosedFailure)) {
-					t.Fatalf("the open Copilot adapter does not fail open:\n%s", open)
+					t.Fatalf("the open Copilot adapter does not fail open outside an install:\n%s", open)
 				}
 				if !bytes.Contains(closed, []byte(copilotAdapterClosedFailure)) || bytes.Contains(closed, []byte(copilotAdapterOpenFailure)) {
 					t.Fatalf("the closed Copilot adapter does not deny on a failure:\n%s", closed)

@@ -149,6 +149,7 @@ type watchdogHealthRequirements struct {
 	requireGuardrail bool
 	requireWatcher   bool
 	connectors       []string
+	transportConfig  *config.Config
 }
 
 func watchdogHealthRequirementsFromConfig(cfg *config.Config) watchdogHealthRequirements {
@@ -168,6 +169,7 @@ func watchdogHealthRequirementsFromConfig(cfg *config.Config) watchdogHealthRequ
 		requireGuardrail: cfg.Guardrail.Enabled,
 		requireWatcher:   cfg.Gateway.Watcher.Enabled,
 		connectors:       connectors,
+		transportConfig:  cfg,
 	}
 }
 
@@ -358,10 +360,12 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 
 	var recoveryRecorder watchdogRecoveryRecorder
 	if token := strings.TrimSpace(cfg.Gateway.ResolvedToken()); token != "" {
-		recoveryRecorder = &watchdogAPIRecoveryRecorder{
-			client: &http.Client{Timeout: 5 * time.Second},
-			url:    strings.TrimSuffix(healthURL, "/health") + "/api/v1/watchdog/recovery",
-			token:  token,
+		recoveryURL := strings.TrimSuffix(healthURL, "/health") + "/api/v1/watchdog/recovery"
+		recorder, err := newWatchdogAPIRecoveryRecorder(cfg, recoveryURL, token)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[watchdog] warn: gateway peer could not be verified; recovery telemetry will not be recorded: %v\n", err)
+		} else {
+			recoveryRecorder = recorder
 		}
 	} else {
 		fmt.Fprintln(os.Stderr, "[watchdog] warn: gateway token unavailable; recovery telemetry will not be recorded")
@@ -412,7 +416,7 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 	// unreachable" for a gateway that answered (GAP-1642).
 	degradedCount, downCount := 0, 0
 	pendingRecovery := false
-	client := &http.Client{Timeout: watchdogProbeTimeout}
+	client, peerErr := watchdogPeerClient(requirements.transportConfig, healthURL, watchdogProbeTimeout)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -422,7 +426,10 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			assessment := probeHealth(client, healthURL, requirements)
+			assessment := downWatchdogAssessment("Sidecar gateway peer is unverified")
+			if peerErr == nil && client != nil {
+				assessment = probeHealth(client, healthURL, requirements)
+			}
 
 			switch assessment.state {
 			case stateHealthy:

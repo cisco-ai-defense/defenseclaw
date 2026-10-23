@@ -26,6 +26,7 @@ func claudeResponseTestCommand(t *testing.T, response string) (*exec.Cmd, string
 	}))
 	t.Cleanup(server.Close)
 	home := t.TempDir()
+	installNativeGatewayForHookTest(t, home)
 	hookDir := filepath.Join(home, "hooks")
 	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, SetupOpts{
 		DataDir: home, APIAddr: strings.TrimPrefix(server.URL, "http://"), APIToken: "test-hook-token", HookFailMode: "closed",

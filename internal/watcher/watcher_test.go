@@ -21,10 +21,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1705,6 +1707,54 @@ func TestFailedQuarantineIsRecordedAndRetried(t *testing.T) {
 	}
 	if issues, err := ReadAdmissionIssues(cfg.DataDir); err != nil || len(issues) != 0 {
 		t.Fatalf("issues after the quarantine completed: %+v (err %v)", issues, err)
+	}
+}
+
+// GAP-0574: a 1.0.2 watcher that watched ~/.openhands/cache/.../skills
+// recorded the skills there it could not quarantine. After an upgrade (or a
+// setup change) that no longer watches that folder, the retry refused each
+// one as outside the watched folders and raised a HIGH alert on every
+// cycle. An issue under a folder this watcher does not watch is kept but
+// not admitted again; one under a watched folder still is.
+func TestDueIssueOutsideTheWatchedFoldersIsNotRetried(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	gone := filepath.Join(cfg.DataDir, "home", ".openhands", "cache", "skills", "public-skills", "skills", "ssh")
+	watched := filepath.Join(skillDir, "crit-k")
+	for _, dir := range []string{gone, watched, filepath.Join(skillDir, "crit-p")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	doc := admissionStateFile{Updated: time.Now().UTC(), Issues: []AdmissionIssue{
+		{Type: "skill", Name: "ssh", Path: gone, Connector: "openhands", Kind: AdmissionNotQuarantined, Since: time.Now().UTC()},
+		{Type: "skill", Name: "crit-k", Path: watched, Kind: AdmissionNotQuarantined, Since: time.Now().UTC()},
+		// A skill folder is not a plugin folder: the plugin issue is not retried.
+		{Type: "plugin", Name: "crit-p", Path: filepath.Join(skillDir, "crit-p"), Kind: AdmissionUnscanned, Since: time.Now().UTC()},
+	}}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, AdmissionStateFile), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.queueDueIssues(time.Now().Add(admissionRetryFirst))
+	w.mu.Lock()
+	pending := maps.Clone(w.pending)
+	w.mu.Unlock()
+	if _, ok := pending[gone]; ok {
+		t.Fatalf("the skill outside the watched folders was admitted again: %v", pending)
+	}
+	if _, ok := pending[watched]; !ok || len(pending) != 1 {
+		t.Fatalf("pending %v, want only the skill in the watched folder", pending)
+	}
+	issues, err := ReadAdmissionIssues(cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(issues, func(issue AdmissionIssue) bool { return issue.Path == gone }) {
+		t.Fatalf("issues %+v: the unwatched skill's issue was dropped, want it kept", issues)
 	}
 }
 

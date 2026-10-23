@@ -402,6 +402,21 @@ class FreshMigrationCursorTests(unittest.TestCase):
         self.assertFalse(cfg.has_connector_configured())
         self.assertEqual(cfg.active_connectors(), [])
 
+    def test_default_first_run_options_persist_no_absent_agent(self):
+        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
+        from defenseclaw.config import load
+
+        data_dir = os.path.join(self._tmp_root, "default-no-agent")
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            report = run_first_run(
+                FirstRunOptions(skip_install=True, start_gateway=False, verify=False)
+            )
+            cfg = load()
+
+        self.assertNotEqual(report.status, "needs_attention")
+        self.assertFalse(cfg.has_connector_configured())
+        self.assertEqual(cfg.active_connectors(), [])
+
     def test_no_connector_first_run_preserves_unloadable_existing_config(self):
         from defenseclaw.bootstrap import FirstRunOptions, run_first_run
 

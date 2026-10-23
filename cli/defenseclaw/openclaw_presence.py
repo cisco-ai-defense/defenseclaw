@@ -121,6 +121,39 @@ def openclaw_binary_installed() -> bool:
         return True
 
 
+def openclaw_installed(cfg: Any) -> bool:
+    """True when an openclaw.json candidate exists or an openclaw binary is found."""
+    return _openclaw_config_present(cfg) or openclaw_binary_installed()
+
+
+def openclaw_only_implied(cfg: Any) -> bool:
+    """True when only ``claw.mode`` names OpenClaw.
+
+    ``guardrail.connector`` and the connector roster are empty, so nothing
+    but the ``claw.mode`` default (or a leftover
+    of it) selects OpenClaw. ``setup openclaw`` pins ``guardrail.connector``.
+    """
+    guardrail = getattr(cfg, "guardrail", None)
+    claw = getattr(cfg, "claw", None)
+    if claw is None:
+        return False
+    if str(getattr(guardrail, "connector", "") or "").strip():
+        return False
+    connectors = getattr(guardrail, "connectors", None) or {}
+    if isinstance(connectors, dict) and any(str(name).strip() for name in connectors):
+        return False
+    return str(getattr(claw, "mode", "") or "").strip().lower() == "openclaw"
+
+
+def openclaw_fleet_link_configured(cfg: Any) -> bool:
+    """Whether a remote gateway host or explicit fleet mode keeps OpenClaw."""
+    gateway = getattr(cfg, "gateway", None)
+    if gateway is None:
+        return False
+    fleet_mode = str(getattr(gateway, "fleet_mode", "") or "").strip().lower()
+    return fleet_mode not in {"", "auto"} or not _is_loopback_gateway_host(getattr(gateway, "host", ""))
+
+
 def openclaw_implied_but_not_installed(cfg: Any) -> bool:
     """True when the gateway reports the OpenClaw fleet off as "not installed".
 
@@ -128,8 +161,8 @@ def openclaw_implied_but_not_installed(cfg: Any) -> bool:
 
     * ``gateway.fleet_mode`` is unset (``""`` or ``"auto"``),
     * ``gateway.host`` is loopback,
-    * ``guardrail.connector`` is empty and ``guardrail.connectors`` has no
-      openclaw entry, so only ``claw.mode`` names OpenClaw, and
+    * ``guardrail.connector`` and the connector roster are empty, so only
+      ``claw.mode`` names OpenClaw, and
     * no openclaw.json candidate exists and no openclaw binary is found.
 
     Anything else, including an installed or configured OpenClaw, keeps the
@@ -138,19 +171,8 @@ def openclaw_implied_but_not_installed(cfg: Any) -> bool:
     if cfg is None:
         return False
     gateway = getattr(cfg, "gateway", None)
-    guardrail = getattr(cfg, "guardrail", None)
-    claw = getattr(cfg, "claw", None)
-    if gateway is None or claw is None:
+    if gateway is None:
         return False
-    if str(getattr(gateway, "fleet_mode", "") or "").strip().lower() not in {"", "auto"}:
+    if openclaw_fleet_link_configured(cfg):
         return False
-    if not _is_loopback_gateway_host(getattr(gateway, "host", "")):
-        return False
-    if str(getattr(guardrail, "connector", "") or "").strip():
-        return False
-    connectors = getattr(guardrail, "connectors", None) or {}
-    if isinstance(connectors, dict) and any(str(name).strip().lower() == "openclaw" for name in connectors):
-        return False
-    if str(getattr(claw, "mode", "") or "").strip().lower() != "openclaw":
-        return False
-    return not _openclaw_config_present(cfg) and not openclaw_binary_installed()
+    return openclaw_only_implied(cfg) and not openclaw_installed(cfg)

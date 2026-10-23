@@ -666,7 +666,16 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		legacyActor = subsystem
 	}
 	legacyDetails := any(details)
-	legacyStructured := any(string(payloadJSON))
+	// A native v8 row keeps its fields once, in payload_json (and the signed
+	// envelope). structured_json repeated the same bytes, a third copy of
+	// every body: about 7 KB more audit.db per hook decision under a flood
+	// (GAP-0614). Readers take payload_json when structured_json is NULL on
+	// such a row (StructuredJSONReadSQL). A legacy.audit.* compatibility row
+	// still writes its own structured_json below, or the payload as before.
+	legacyStructured := any(nil)
+	if IsLegacyCompatibilityEventName(string(record.EventName())) {
+		legacyStructured = string(payloadJSON)
+	}
 	legacySeverity := severityValue
 	legacySchemaVersion := any(version.SchemaVersion)
 	legacyContentHash := any(nullStr(provenance.ConfigDigest))

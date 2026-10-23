@@ -784,12 +784,21 @@ func TestSessionDeletionFailureOffersRecovery(t *testing.T) {
 
 func TestSessionEndNamesRuntimeAndOtherGateway(t *testing.T) {
 	for _, tc := range []struct {
-		name, sandboxDriver, gatewayDriver, managedDriver string
-		others                                            []string
-		want, absent                                      []string
+		name, sandboxDriver, gatewayDriver, managedDriver, phaseReason string
+		others                                                         []string
+		want, absent                                                   []string
 	}{
 		{name: "MicroVM", sandboxDriver: "vm",
 			want: []string{"MicroVM stopped under the session", "its gateway restarted"}, absent: []string{"Docker", "container stopped", "likely took over"}},
+		{name: "failed MicroVM main process", sandboxDriver: "vm", phaseReason: "MainProcessFailed: Canonical main process exited with status 1",
+			want:   []string{"MicroVM stopped under the session", "sandbox start " + sbName + " --end-vm", "what the VM has not written to its disk is lost", "sandbox delete " + sbName + "`", "deletes it and its work"},
+			absent: []string{"which keep the sandbox and its work"}},
+		{name: "failed MicroVM process exited", sandboxDriver: "vm", phaseReason: "ProcessExited: VM process exited with status 1",
+			want:   []string{"MicroVM stopped under the session", "last successful disk sync"},
+			absent: []string{"which keep the sandbox and its work", "container stopped"}},
+		{name: "failed MicroVM still held", sandboxDriver: "vm", phaseReason: "ProcessPollFailed: Bad file descriptor",
+			want:   []string{"MicroVM stopped under the session", "sandbox stop " + sbName, "last successful disk sync"},
+			absent: []string{"sandbox start " + sbName, "which keep the sandbox and its work", "container stopped"}},
 		{name: "managed gateway took over", managedDriver: "vm", others: []string{"pid 520: gateway marker"},
 			want:   []string{"MicroVM stopped under the session", "likely took over its state", "pid 520: gateway marker", "Stop that process (`kill PID`"},
 			absent: []string{"Docker", "container stopped"}},
@@ -813,7 +822,7 @@ func TestSessionEndNamesRuntimeAndOtherGateway(t *testing.T) {
 				}
 				ta.term.during = func() {
 					ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) {
-						sb.Phase, sb.Driver = "error", tc.sandboxDriver
+						sb.Phase, sb.Driver, sb.PhaseReason = "error", tc.sandboxDriver, tc.phaseReason
 					})
 				}
 			}, want: tc.want, not: tc.absent}})
@@ -1426,46 +1435,6 @@ func TestStartTakesAFreshSnapshotWhenNothingIsOnTop(t *testing.T) {
 		has(t, ta.output(), c.want...)
 		lacks(t, ta.output(), c.not)
 	}
-}
-
-// TestAnOldSupervisorRunsNothing (GAP-0415): a ready sandbox the daemon
-// names as running the supervisor of an OpenShell older than SupportedMin
-// gets no exec, and a connect stops it and starts it again (on the
-// gateway's own supervisor) before it attaches; one it cannot stop is
-// refused with the way on.
-func TestAnOldSupervisorRunsNothing(t *testing.T) {
-	ta := newTestApp(t, "y\n")
-	sb := sampleSandbox("m1-b")
-	sb.Phase, sb.OldSupervisor = "ready", true
-	ta.daemon.add(sb)
-	err := ta.Exec(bg, ExecOptions{Name: "m1-b", Command: []string{"ls"}})
-	if err == nil || !strings.Contains(err.Error(), "m1-b runs the supervisor of an OpenShell release older than "+openshell.SupportedMin) ||
-		!strings.Contains(err.Error(), "`defenseclaw sandbox connect m1-b` stops and starts it") {
-		t.Fatalf("exec = %v", err)
-	}
-	if len(ta.stream.runs) != 0 {
-		t.Fatalf("exec ran in the sandbox: %v", ta.stream.runs)
-	}
-
-	ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/m1-b/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "OpenShell: stop failed"}
-	err = ta.Connect(bg, ConnectOptions{Name: "m1-b"})
-	if err == nil || !strings.Contains(err.Error(), "DefenseClaw runs nothing in it, and it could not stop it") || ta.calls("POST", "m1-b/start") != 0 || len(ta.stream.runs) != 0 {
-		t.Fatalf("connect with a failing stop = %v (starts %d, runs %d)", err, ta.calls("POST", "m1-b/start"), len(ta.stream.runs))
-	}
-
-	delete(ta.daemon.errors, "POST "+sandboxapi.PathSandboxes+"/m1-b/stop")
-	runAnswers(ta, "", "")
-	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "m1-b"}))
-	var order []string
-	for _, c := range ta.daemon.calls {
-		if c.Method == "POST" && (strings.HasSuffix(c.Path, "/m1-b/stop") || strings.HasSuffix(c.Path, "/m1-b/start")) {
-			order = append(order, c.Path[strings.LastIndex(c.Path, "/")+1:])
-		}
-	}
-	if len(order) < 3 || order[1] != "stop" || order[2] != "start" {
-		t.Fatalf("connect: stop and start calls %v, want the stop before the start", order)
-	}
-	has(t, ta.output(), "m1-b still runs the supervisor of an OpenShell release older than "+openshell.SupportedMin)
 }
 
 // A headless session in an existing sandbox runs without a terminal:
@@ -2304,6 +2273,12 @@ func TestSessionSummary(t *testing.T) {
 		{name: "stopped from elsewhere", opts: claude, exit: 255, setup: elsewhere(false), check: noStop,
 			want: []string{sbName + " was stopped from outside this session (`defenseclaw sandbox stop` or the TUI), which ended Claude Code", "Sandbox kept (stopped)"},
 			not:  []string{"the harness itself failed"}},
+		{name: "last managed sandbox stopped and idle listeners released", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
+			elsewhere(false)(ta)
+			ta.daemon.status.Managed = managedStatusFixture()
+			ta.daemon.status.IngressAddr, ta.daemon.status.EgressAddr = "", ""
+		}, want: []string{sbName + " was stopped from outside this session (`defenseclaw sandbox stop` or the TUI), which ended Claude Code"},
+			not: []string{"the OpenShell gateway is not available"}},
 		// GAP-0486: on a managed computer the organization stopped it, its
 		// profile no longer allowing sandboxes: not a stop from elsewhere.
 		{name: "the organization revoked sandboxes", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
@@ -2377,7 +2352,7 @@ func TestSessionSummary(t *testing.T) {
 		{name: "a container that does not answer", input: "y\n", exit: 1, do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "box"}) },
 			setup: lateContainerStop(0), want: []string{"box does not answer, though OpenShell still reads it as running",
 				"the undo point stays, since box does not answer", "Sandbox box does not answer → `defenseclaw sandbox status box` shows its state"},
-			not: []string{"keeps running", "is still running"}},
+			not: []string{"keeps running", "is still running", "bring it back with its work"}},
 		// GAP-0077: the OpenShell gateway restarted under the session (an
 		// upgrade), which closed the harness's exec relay: the sandbox read
 		// as unknown for a moment, then ready, and the session said it was
@@ -2437,6 +2412,22 @@ func TestSessionSummary(t *testing.T) {
 		}, check: noStop,
 			want: []string{sbName + " was deleted from outside this session, which ended Claude Code; there is nothing left to review, and its undo point went with it"},
 			not:  []string{"stopped from outside", "could not review", "Keep changes?"}},
+		{name: "deleted from elsewhere after the exec relay lost TLS", opts: claude, exit: 255, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 255
+			ta.term.stderr = "Error:   × code: Unknown error, message: h2 protocol error: error reading a body from connection | hyper::Error(Body, Error { kind: Io(Custom { kind: UnexpectedEof, error: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/ }) })\n"
+			ta.term.during = func() { ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "deleting" }) }
+			ta.Sleep = func(_ context.Context, d time.Duration) error {
+				if d == settlePhaseInterval {
+					ta.daemon.mu.Lock()
+					delete(ta.daemon.sandboxes, sbName)
+					ta.daemon.mu.Unlock()
+				}
+				return nil
+			}
+		}, check: noStop,
+			want:    []string{sbName + " was deleted from outside this session, which ended Claude Code; there is nothing left to review, and its undo point went with it"},
+			notLive: []string{"h2 protocol error", "hyper::Error", "close_notify"}},
 		{name: "undone from elsewhere", opts: claude, exit: 255, setup: elsewhere(true), check: noStop,
 			want: []string{sbName + " was undone from outside this session (`defenseclaw sandbox undo` or the TUI): the folder is back at its undo point, " +
 				"and that stopped Claude Code", "Sandbox kept (stopped)"}, not: []string{"the harness itself failed"}},

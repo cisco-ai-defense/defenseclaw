@@ -63,7 +63,10 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 			if conn.Name() != row.ID {
 				continue
 			}
-			wantDelivery := !row.Hooks.SupportsFailClosed && CapableHookFailMode(SetupOpts{}, conn, "closed") == "closed"
+			// These vendor contracts cannot fail closed when the hook itself
+			// cannot start, but their running DefenseClaw hook emits a native
+			// denial for a delivery failure it observes.
+			wantDelivery := !row.Hooks.SupportsFailClosed && slices.Contains([]string{"copilot", "antigravity", "hermes"}, conn.Name())
 			if row.Hooks.BlocksDeliveryFailures != wantDelivery {
 				t.Errorf("%s delivery failure support=%v, want %v from its rendered closed mode", row.ID, row.Hooks.BlocksDeliveryFailures, wantDelivery)
 			}

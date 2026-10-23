@@ -18,12 +18,14 @@ DefenseClaw ships a plugin for OpenClaw. It redirects recognized model calls thr
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector openclaw` first. Until DefenseClaw is initialized, `defenseclaw setup openclaw` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
 defenseclaw setup openclaw --mode observe --restart
 defenseclaw setup openclaw --mode action --human-approval --rule-pack default --restart
 ```
 
-The proxy is in the data path in both modes. Observe records and never blocks. Action enforces. Run `defenseclaw doctor` to check the result.
+The proxy is in the data path in both modes. Observe records policy findings without blocking on those findings; a gateway outage still stops proxied requests. Action enforces policy. Run `defenseclaw doctor` to check the result.
 
 ## Check it
 
@@ -76,9 +78,9 @@ This restores `openclaw.json`, removes the plugin entries and stops the proxy. T
 defenseclaw setup remove openclaw --yes --force
 ```
 
-Turn it back on with `defenseclaw guardrail enable`.
+Turn it back on by running the Set up command again, for example `defenseclaw setup openclaw --restart`. Leaving out `--mode` keeps the mode you saved before disabling the guardrail. `defenseclaw guardrail enable` turns OpenClaw back on only when `guardrail.model` is set (`defenseclaw setup guardrail`); otherwise it stops with `Cannot enable: guardrail.model is not set.`
 
-On a multi-connector install, add `--connector openclaw` to `guardrail disable` and `guardrail enable` to change only this agent.
+OpenClaw is proxy-backed and cannot run next to hook connectors. While any hook connector is configured, `defenseclaw setup openclaw` refuses and changes nothing; `defenseclaw setup openclaw --replace` removes the hook connectors and sets up OpenClaw in their place.
 
 ## Details
 

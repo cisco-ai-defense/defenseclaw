@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.defenseclaw.dev/config/v8/defenseclaw-config.schema.json",
-  "title": "DefenseClaw configuration v8",
-  "description": "Canonical source schema for DefenseClaw config_version 8. Every defined configuration object is closed; extensible maps declare the schema of their values explicitly.",
+  "title": "DefenseClaw configuration v9",
+  "description": "Canonical source schema for DefenseClaw config_version 9, the current version written by this build; config_version 8 sources remain accepted as migration input. Every defined configuration object is closed; extensible maps declare the schema of their values explicitly.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -3628,6 +3628,25 @@
         },
         "routes": {
           "$ref": "#/$defs/logRoutes"
+        },
+        "local_stack": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Written only by local Splunk setup: the record that DefenseClaw started the local Splunk container this destination sends to. Every Splunk destination without it is remote.",
+          "required": [
+            "marker",
+            "container_id"
+          ],
+          "properties": {
+            "marker": {
+              "const": "defenseclaw-local-splunk"
+            },
+            "container_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "description": "Full ID of the Splunk container local setup started."
+            }
+          }
         }
       },
       "allOf": [

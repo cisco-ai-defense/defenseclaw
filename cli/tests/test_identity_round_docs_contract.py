@@ -61,7 +61,9 @@ def test_macos_membership_cache_recovery() -> None:
     text = page("reference/policy/guardrail-profiles.mdx")
     assert "dscacheutil -flushcache" in text
     assert "dsmemberutil flushcache" in text
-    assert "then explain the account, restart the gateway, or wait" in text
+    assert "Managed macOS hooks check secondary groups on each call" in text
+    assert "waits up to two seconds for a current Open Directory answer" in text
+    assert "A group removal takes effect on the first hook after Open Directory reports it" in text
 
 
 def test_profile_enforcement_matches_install_mode() -> None:

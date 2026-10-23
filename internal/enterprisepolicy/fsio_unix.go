@@ -106,6 +106,63 @@ func validateTrustedPolicyFile(opts Options, path string) error {
 	return validateTrustedAncestors(opts, path)
 }
 
+// restoreRecordedPolicyFileMode repairs a mode-only drift on a file whose
+// published bytes are still exactly the bytes in the root-owned record. It
+// atomically replaces the writable inode with those verified bytes, so an
+// account that opened the old inode for writing cannot change the repaired
+// policy afterward. Verify does not call this: it must report the drift.
+func restoreRecordedPolicyFileMode(opts Options, path, postimageSHA256 string) (bool, error) {
+	if opts.SkipTrustChecks || postimageSHA256 == "" {
+		return false, nil
+	}
+	path = platformPath(opts, path)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o022 == 0 {
+		return false, nil
+	}
+	if err := validateTrustedAncestors(opts, path); err != nil {
+		return false, err
+	}
+	owner, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !trustedOwner(owner.Uid) {
+		return false, fmt.Errorf("%s: writable policy file is not administrator-owned", path)
+	}
+	file, err := openNoFollow(path)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return false, fmt.Errorf("%s changed while opening it: %v", path, err)
+	}
+	openedOwner, ok := opened.Sys().(*syscall.Stat_t)
+	if !ok || !trustedOwner(openedOwner.Uid) {
+		return false, fmt.Errorf("%s: writable policy file is not administrator-owned", path)
+	}
+	data, err := readBounded(file, policyFileLimit)
+	if err != nil {
+		return false, err
+	}
+	if sha256Hex(data) != postimageSHA256 {
+		return false, fmt.Errorf("%s: %w; restore a trusted copy before repair", path, errRecordedPolicyBytesChanged)
+	}
+	current, err := file.Stat()
+	if err != nil || !os.SameFile(info, current) || info.Size() != current.Size() || !info.ModTime().Equal(current.ModTime()) {
+		return false, fmt.Errorf("%s changed while inspecting it: %v", path, err)
+	}
+	if _, err := writePolicyFile(opts, path, data); err != nil {
+		return false, fmt.Errorf("republish %s with mode 0644: %w", path, err)
+	}
+	return true, nil
+}
+
 // The managed OpenCode plugin is an ordinary public policy file here:
 // OpenCode reads it with a read-only open.
 func validateOpenCodePluginFile(opts Options, path string) error {
@@ -634,7 +691,7 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 		listed := listedPolicyDir(path, index)
 		need := publishedDirModeAccess(listed)
 		perm := info.Mode().Perm()
-		needMode := perm&need != need
+		needMode := perm&need != need || perm&0o022 != 0
 		aclProblem, err := publishedDirACLProblem(opts, dir, listed)
 		if err != nil {
 			return restored, err
@@ -671,7 +728,7 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 				return restored, err
 			}
 			perm = info.Mode().Perm()
-			needMode = perm&need != need
+			needMode = perm&need != need || perm&0o022 != 0
 		}
 		if needMode {
 			if err := os.Chmod(dir, (perm|need)&^0o022); err != nil {

@@ -76,6 +76,24 @@ func RemoveWindowsStandaloneHookRuntimeDirectories() ([]string, error) {
 			kept = append(kept, directory)
 		}
 	}
+	// A failed hot-config undo leaves a durable, closed hook marker. Only a
+	// completed teardown whose runtime root holds that marker alone may drop
+	// it; an enrollment, selector or unexpected entry keeps it in force.
+	if len(kept) == 0 {
+		entries, readErr := os.ReadDir(root)
+		if readErr != nil {
+			errs = append(errs, fmt.Errorf("enterprise hooks: inspect hook closure during teardown: %w", readErr))
+		} else if len(entries) == 1 && entries[0].Name() == windowsStandaloneHookClosureFile {
+			closure := filepath.Join(root, windowsStandaloneHookClosureFile)
+			if held, closureErr := readWindowsStandaloneHookClosure(closure); closureErr != nil {
+				errs = append(errs, fmt.Errorf("enterprise hooks: verify hook closure during teardown: %w", closureErr))
+			} else if held {
+				if removeErr := os.Remove(closure); removeErr != nil {
+					errs = append(errs, fmt.Errorf("enterprise hooks: remove hook closure after teardown: %w", removeErr))
+				}
+			}
+		}
+	}
 	if err := os.Remove(root); err != nil && !errors.Is(err, os.ErrNotExist) {
 		if !errors.Is(err, windows.ERROR_DIR_NOT_EMPTY) {
 			errs = append(errs, fmt.Errorf("enterprise hooks: remove hook runtime directory %s: %w", root, err))

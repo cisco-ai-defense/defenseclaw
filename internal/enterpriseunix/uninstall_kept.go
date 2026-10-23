@@ -27,6 +27,7 @@ import (
 // uninstall, which keeps the accounts' own DefenseClaw files.
 type perUserKept struct {
 	user     string
+	home     string
 	data     bool
 	binaries bool
 }
@@ -62,10 +63,24 @@ func (env *Env) perUserLeftovers() ([]perUserKept, bool) {
 	return kept, true
 }
 
+// reportRetainedEnrolledUserData makes a successful Unix purge account for
+// enrolled users whose OSS data survived remove-all. The lifecycle only
+// observes these user-owned files; it never deletes them to make the result
+// look complete.
+func (l *lifecycle) reportRetainedEnrolledUserData() {
+	for _, before := range l.keptPerUser {
+		// The remove-all worker may already have removed eligible-accounts.json.
+		// Use the home captured before removal to inspect what still exists.
+		if before.data && !l.perUserStateKept[before.user] && perUserFilesOf(before.user, before.home).data {
+			l.result.AddWarning(codePerUserState, "kept per-user data (~/.defenseclaw) for enrolled user "+before.user+" after --purge; this account-owned folder still exists and must be reviewed with its owner")
+		}
+	}
+}
+
 // perUserFilesOf is what the account user has in home: ~/.defenseclaw,
 // and the per-user install's binaries or launcher in ~/.local/bin.
 func perUserFilesOf(user, home string) perUserKept {
-	entry := perUserKept{user: user}
+	entry := perUserKept{user: user, home: home}
 	_, statErr := os.Lstat(filepath.Join(home, ".defenseclaw"))
 	entry.data = statErr == nil
 	for _, name := range []string{"defenseclaw-gateway", "defenseclaw-acp", "defenseclaw"} {

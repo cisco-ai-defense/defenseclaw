@@ -155,3 +155,34 @@ func TestMCPSpoolRecordFailuresNamesTheRecordsAndTheFolder(t *testing.T) {
 		t.Fatal("a record error must name and wrap its cause")
 	}
 }
+
+// GAP-0643: an account whose state the enumerator could not read because it
+// signed out keeps that cause through the record, and its refusal says the
+// account is not signed in instead of asking for SYSTEM read access.
+func TestClaudeStateUnreadableOfASignedOutAccountSaysSo(t *testing.T) {
+	dir := t.TempDir()
+	const sid = "S-1-5-21-1-1001"
+	state := ClaudeStateUnreadable{User: `DCLAB\dcw-std2`, Home: `C:\Users\dcw-std2`, Path: `C:\Users\dcw-std2\.claude.json`,
+		Reason: "read Claude Code projects as enrolled user: no session", SignedOut: true}
+	record, err := MarshalClaudeMCPSpoolUnreadable(sid, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sid+".json"), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, read, err := ReadClaudeMCPSpool(dir, sid, nil)
+	if err != nil || read == nil || !read.SignedOut {
+		t.Fatalf("read back %+v (%v), want the signed-out cause kept", read, err)
+	}
+	blocked := read.Blocked("Claude Code")
+	if !strings.Contains(blocked, `DCLAB\dcw-std2 is not signed in`) || !strings.Contains(blocked, "once they sign in") ||
+		strings.Contains(blocked, "SYSTEM") {
+		t.Fatalf("signed-out refusal %q", blocked)
+	}
+	state.SignedOut = false
+	if blocked := state.Blocked("Kiro"); !strings.Contains(blocked, "the Kiro MCP servers of DCLAB\\dcw-std2 are blocked: "+
+		"the hook enumerator could not read") || !strings.Contains(blocked, "give SYSTEM read access") {
+		t.Fatalf("unreadable refusal %q", blocked)
+	}
+}

@@ -176,10 +176,12 @@ var profileExplainDirectoryFacts = func(id string) (useridentity.DirectoryFacts,
 
 // profileExplainUID explains a uid the account database cannot name now as
 // a hook call from it is decided: the kernel verifies the uid, so users
-// entries naming it still select their profile, with default_lookup_failed
-// for directory-dependent assignments. profileExplainCachedSubject already
-// handled any verified cached holder before this function. Starting a new
-// lookup for an unknown uid would create a false directory-health warning.
+// entries naming it still select their profile, from the cached facts if any;
+// requests needing other missing facts are refused and name them.
+// profileExplainCachedSubject already handled any verified cached holder
+// before this function; starting a new lookup for an unknown uid would create
+// a false directory-health warning. Explain printed default_lookup_failed for
+// it while its hook calls got the uid's profile (GAP-0361).
 func profileExplainUID(name string, lookupErr error) (profileSubject, bool) {
 	uid, err := strconv.Atoi(name)
 	if err != nil || uid < 0 || strconv.Itoa(uid) != name {
@@ -192,7 +194,7 @@ func profileExplainUID(name string, lookupErr error) (profileSubject, bool) {
 	}
 	return profileSubject{
 		UserID: name, IDKind: useridentity.KindForID(name), UserName: userName,
-		LookupFailed: identityLookupBlocking.Load(), LookupError: reason,
+		LookupFailed: identityLookupBlocking.Load(), LookupError: reason, accountUnresolved: true,
 	}, true
 }
 

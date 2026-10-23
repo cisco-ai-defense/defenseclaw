@@ -5,9 +5,10 @@
 package connector
 
 // until 1.1: the safety net for the teardown-only OpenHands and OmniGent
-// connectors (removed.go, G-deadcode review loop round 1): the stub is
-// written into the script file itself, so every name of it (a hard link)
-// blocks, and a copy is renamed over the path. Delete with removed.go.
+// connectors (removed.go, G-deadcode review loop round 1): the OpenHands
+// stub is written into the verified script file itself, so every name of it
+// (a hard link) blocks. OmniGent refuses hard-linked modules. Delete with
+// removed.go.
 
 import (
 	"context"
@@ -84,13 +85,9 @@ func (h *removedHost) requireStubUnderEveryName(t *testing.T, c removedOnlyConne
 	}
 }
 
-// Safety net, finding 2's class: a marked script with more names (a hard
-// link) gets the stub written into the file itself, so every name blocks,
-// and the path gets a copy renamed over it. The tokens go, VerifyClean
-// passes, nothing else changes, and a second run changes nothing. On
-// Windows the stub is only renamed: a hard-linked file keeps its bytes and
-// its tokens (so an old module still reaches the route that blocks), with
-// the step.
+// A marked OpenHands script with hard links gets the stub under every name
+// on Unix. A hard-linked OmniGent module is left intact with its tokens and
+// a manual step on every OS; Windows also refuses the OpenHands hard link.
 func TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript(t *testing.T) {
 	for _, c := range removedConnectorsUnderTest() {
 		olds := []struct{ name, body string }{
@@ -111,17 +108,28 @@ func TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				skip := append(append([]string{h.script(c)}, links...), h.tokens(c)...)
+				// The lock changes only to seal the stub (requireSealed).
+				skip := append(append([]string{h.script(c), filepath.Join(h.dataDir, hookContractLockFile)}, links...), h.tokens(c)...)
+				if c.name == removedOpenHandsID {
+					skip = append(skip, c.editedCopyPath(h.dataDir, []byte(old.body)))
+				}
 				before := h.snapshot(t, skip...)
 				err = c.Teardown(context.Background(), h.opts)
-				if runtime.GOOS == "windows" {
+				if runtime.GOOS == "windows" || c.name == removedOmnigentID {
 					h.requireLeftStep(t, c, err, c.hardLinkStep(h.script(c)))
+					for _, name := range append([]string{h.script(c)}, links...) {
+						if got, readErr := os.ReadFile(name); readErr != nil || string(got) != old.body {
+							t.Fatalf("linked script %s = %q, %v; want original bytes", name, got, readErr)
+						}
+					}
+					h.requireTokensKept(t, c)
 					return
 				}
 				if err != nil {
 					t.Fatalf("Teardown: %v", err)
 				}
 				h.requireStub(t, c)
+				h.requireSealed(t, c, removedStubDigest(c))
 				h.requireRevoked(t, c)
 				if err := c.VerifyClean(h.opts); err != nil {
 					t.Fatalf("VerifyClean: %v", err)
@@ -132,6 +140,7 @@ func TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript(t *testing.T) {
 				h.requireStubUnderEveryName(t, c, first, links)
 				if c.name == removedOpenHandsID {
 					requireRemovedHookBlocks(t, h.script(c))
+					h.requireEditedSaved(t, c, old.body)
 				}
 				requireRemovedSame(t, "teardown of a hard-linked script", h.snapshot(t, skip...), before)
 				again := h.snapshot(t)
@@ -257,7 +266,7 @@ func TestRemovedInPlaceWriteThatFailsLeavesNoPartScript(t *testing.T) {
 		{name: "the old tail cannot be cut", long: true, truncate: func(*os.File, int64) error { return syscall.EIO },
 			want: "old tail could not be cut", stubFirst: true},
 	}
-	for _, c := range removedConnectorsUnderTest() {
+	for _, c := range []removedOnlyConnector{removedOpenHands} {
 		for _, f := range failures {
 			if f.only != "" && f.only != c.name {
 				continue
@@ -277,7 +286,11 @@ func TestRemovedInPlaceWriteThatFailsLeavesNoPartScript(t *testing.T) {
 					t.Fatal(err)
 				}
 				names := append([]string{h.script(c)}, links...)
-				before := h.snapshot(t, names...)
+				skip := append([]string(nil), names...)
+				if c.name == removedOpenHandsID {
+					skip = append(skip, c.editedCopyPath(h.dataDir, []byte(old)))
+				}
+				before := h.snapshot(t, skip...)
 				restore := removedInPlaceSeams(t, f.writeAt, f.truncate)
 				err = c.Teardown(context.Background(), h.opts)
 				if err == nil || !strings.Contains(err.Error(), f.want) || !strings.Contains(err.Error(), "To finish: "+c.hardLinkStep(h.script(c))) ||
@@ -288,7 +301,10 @@ func TestRemovedInPlaceWriteThatFailsLeavesNoPartScript(t *testing.T) {
 				if err := c.VerifyClean(h.opts); err == nil {
 					t.Fatal("VerifyClean passed while the old file may still run")
 				}
-				requireRemovedSame(t, "a failed write into the file", h.snapshot(t, names...), before)
+				requireRemovedSame(t, "a failed write into the file", h.snapshot(t, skip...), before)
+				if c.name == removedOpenHandsID {
+					h.requireEditedSaved(t, c, old)
+				}
 				for _, name := range names {
 					info, err := os.Stat(name)
 					if err != nil || !os.SameFile(first, info) {
@@ -340,4 +356,76 @@ func TestRemovedInPlaceWriteThatFailsLeavesNoPartScript(t *testing.T) {
 			h.requireRevoked(t, c)
 		})
 	}
+}
+
+// A Python import can run a definition left beyond the deny stub when a
+// longer module is overwritten before its old suffix is truncated. Publishing
+// a complete staged file avoids that intermediate state; a stopped publish
+// keeps a recovery intent and the tokens for the next teardown.
+func TestRemovedOmnigentPublishesACompleteStub(t *testing.T) {
+	c := removedOmnigent
+	t.Run("interrupted publication", func(t *testing.T) {
+		h := newRemovedHost(t)
+		h.stage(t, c)
+		old := removedLongOld(c) + "\ndef defenseclaw_policy(event):\n    return {\"result\": \"ALLOW\"}\n"
+		writeRemovedFile(t, h.script(c), old, c.mode)
+		if len(old) <= len(c.tombstone) {
+			t.Fatal("the old module must be longer than the deny stub")
+		}
+		// Before the fix this was the interruption after the first WriteAt
+		// and before Truncate. A CAS publication never reaches this seam.
+		removedInPlaceSeams(t, nil, func(*os.File, int64) error {
+			panic("interrupted before cutting the old Python suffix")
+		})
+		var phase atomicTransformPhaseState
+		restore := setAtomicTransformPhaseHookForTest(h.script(c), func(at atomicTransformPhase, state atomicTransformPhaseState) error {
+			if at == atomicTransformPhaseDetached {
+				phase = state
+				return errAtomicTransformSimulatedCrash
+			}
+			return nil
+		})
+		t.Cleanup(restore)
+		var err error
+		func() {
+			defer func() { _ = recover() }()
+			err = c.Teardown(context.Background(), h.opts)
+		}()
+		if !errors.Is(err, errAtomicTransformSimulatedCrash) || phase.IntentPath == "" {
+			body, _ := os.ReadFile(h.script(c))
+			t.Fatalf("Teardown = %v, receipt = %q, module has old allow suffix = %v; want recoverable CAS interruption",
+				err, phase.IntentPath, strings.Contains(string(body), "return {\"result\": \"ALLOW\"}"))
+		}
+		h.requireTokensKept(t, c)
+		if err := c.VerifyClean(h.opts); err == nil {
+			t.Fatal("VerifyClean accepted an interrupted publication")
+		}
+		restore()
+		if err := c.Teardown(context.Background(), h.opts); err != nil {
+			t.Fatalf("recover interrupted publication: %v", err)
+		}
+		if body, err := os.ReadFile(h.script(c)); err != nil || string(body) != c.tombstone {
+			t.Fatalf("published module = %q, %v; want only the complete deny stub", body, err)
+		}
+		h.requireRevoked(t, c)
+	})
+	t.Run("hard-linked module", func(t *testing.T) {
+		h := newRemovedHost(t)
+		h.stage(t, c)
+		old := removedLongOld(c)
+		writeRemovedFile(t, h.script(c), old, c.mode)
+		other := filepath.Join(h.home, "elsewhere", c.script)
+		removedLinkOrSkip(t, h.script(c), other)
+		err := c.Teardown(context.Background(), h.opts)
+		h.requireLeftStep(t, c, err, c.hardLinkStep(h.script(c)))
+		for _, name := range []string{h.script(c), other} {
+			if body, readErr := os.ReadFile(name); readErr != nil || string(body) != old {
+				t.Fatalf("linked module %s = %q, %v; want original bytes", name, body, readErr)
+			}
+		}
+		h.requireTokensKept(t, c)
+		if err := c.VerifyClean(h.opts); err == nil {
+			t.Fatal("VerifyClean accepted a hard-linked old module")
+		}
+	})
 }

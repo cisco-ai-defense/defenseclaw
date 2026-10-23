@@ -661,6 +661,7 @@ func TestEnterpriseOpenShellValidation(t *testing.T) {
 	}{
 		{"defaults", "linux", EnterpriseOpenShellConfig{}, ""},
 		{"setup exact", "darwin", EnterpriseOpenShellConfig{Install: "setup", Driver: "vm", Version: "0.1.3", GatewayPort: 17671, E2fsprogsDir: "/opt/cisco/defenseclaw-deps/e2fsprogs"}, ""},
+		{"setup missing pin with sandboxes off", "darwin", EnterpriseOpenShellConfig{Install: "setup", Driver: "vm"}, ""},
 		{"prerequisite range", "linux", EnterpriseOpenShellConfig{Install: "prerequisite", Version: ">=0.1.1 <0.2.0"}, ""},
 		{"linux vm prerequisite is judged by ensure", "linux", EnterpriseOpenShellConfig{Driver: "vm"}, ""},
 		{"setup range", "linux", EnterpriseOpenShellConfig{Install: "setup", Version: ">=0.1.1"}, "install: setup needs an exact version"},
@@ -686,6 +687,26 @@ func TestEnterpriseOpenShellValidation(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A 1.0.2/1.0.3 standalone config could retain install: setup without a pin
+// while sandboxes were off. Loading it must survive 1.0.4; an enabled setup
+// still needs an installable pin when the lifecycle plans the change.
+func TestEnterpriseOpenShellUnpinnedSetupOffUpgradeConfig(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			cfg := &Config{DeploymentMode: "managed_enterprise"}
+			cfg.Enterprise.Profile = "standalone"
+			cfg.Enterprise.OpenShell = EnterpriseOpenShellConfig{Install: "setup", Driver: "docker"}
+			if err := resolveEnterpriseConfig(cfg, goos, "standalone"); err != nil {
+				t.Fatalf("off config refused after upgrade: %v", err)
+			}
+			cfg.OpenShell.Enabled = true
+			if err := resolveEnterpriseConfig(cfg, goos, "standalone"); err != nil {
+				t.Fatalf("enabled unpinned setup config refused on load: %v", err)
 			}
 		})
 	}

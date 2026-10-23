@@ -648,3 +648,30 @@ func TestPrintConnectorModesMarksADisabledConnectorAsNotEnforced(t *testing.T) {
 		t.Errorf("enabled Codex lost its enforcement lines:\n%s", out)
 	}
 }
+
+// GAP-0578: a connector whose agent's own settings refused the hooks is
+// shown with the gateway's reason, which names the fix, instead of a setup
+// rerun that cannot help. Both status and the start result say so.
+func TestNotStartedConnectorRefusedByAgentSettingsNamesTheFix(t *testing.T) {
+	reason := "Codex hooks are turned off in /home/u/.codex/config.toml ([features] hooks = false), so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks"
+	for _, refused := range []interface{}{map[string]string{"codex": reason}, map[string]interface{}{"codex": reason}} {
+		snap := &gateway.HealthSnapshot{
+			Connectors: []gateway.ConnectorHealth{{Name: "claudecode", State: "running"}},
+			Guardrail: gateway.SubsystemHealth{Details: map[string]interface{}{
+				"connectors_not_started":               []interface{}{"codex"},
+				"connectors_refused_by_agent_settings": refused,
+			}},
+		}
+		for label, out := range map[string]string{
+			"status": captureStdout(t, func() { printConnectors(snap) }),
+			"start":  captureStdout(t, func() { printConnectorsNotStarted(*snap) }),
+		} {
+			if !strings.Contains(out, "codex features enable hooks") || !strings.Contains(out, "not enforced") {
+				t.Errorf("%s %T: output %q does not name the fix", label, refused, out)
+			}
+			if strings.Contains(out, "defenseclaw setup codex") {
+				t.Errorf("%s %T: output %q points at a setup rerun that cannot help", label, refused, out)
+			}
+		}
+	}
+}

@@ -14,14 +14,14 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows && !linux
+//go:build !windows && !linux && !darwin
 
 package processutil
 
 import "os/exec"
 
-// exitWithParent has no kernel support here (macOS); cmd runs as is.
+// exitWithParent has no kernel support here; cmd runs as is.
 func exitWithParent(_ *exec.Cmd) {}
 
-// killDescendantsAtExit is Linux only (parent_linux.go).
+// killDescendantsAtExit is Linux and macOS only (parent_unix.go).
 func killDescendantsAtExit(_ *exec.Cmd) {}

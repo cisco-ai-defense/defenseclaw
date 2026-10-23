@@ -1473,7 +1473,22 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertRegex(out, r"connectors:\s+claudecode, codex, opencode\n")
         self.assertRegex(out, r"not guarded now:\s+hermes ")
         self.assertIn("This install now has 4 connectors configured; 3 guarded now: claudecode, codex, opencode.", out)
-        self.assertIn("Not guarded now: hermes. To guard it again, run: defenseclaw setup hermes", out)
+        self.assertIn("Not guarded now: hermes.", out)
+        self.assertIn("To guard hermes again, run: defenseclaw setup hermes", out)
+
+    def test_summary_does_not_offer_setup_for_a_refused_retired_peer(self):
+        self._seed_map("codex", "hermes", "omnigent")
+        buf = io.StringIO()
+        with click.Context(click.Command("setup")), contextlib.redirect_stdout(buf):
+            cmd_setup._remember_runtime_skipped_peers({"hermes", "omnigent"})
+            _print_observability_summary("codex", self.app.cfg, mode="action", os_name="posix")
+        out = buf.getvalue()
+
+        self.assertIn("not guarded now:", out)
+        self.assertIn("omnigent", out)
+        self.assertIn("defenseclaw setup hermes", out)
+        self.assertIn("defenseclaw doctor", out)
+        self.assertNotIn("defenseclaw setup omnigent", out)
 
 
 class TestConfiguredConnectorSet(unittest.TestCase):

@@ -116,12 +116,13 @@ the older app; otherwise Intune can reapply the newer release.
 
 | OS and channel | How to go back |
 | --- | --- |
-| Windows | `/ensure` refuses to install an older version (`downgrade_refused`, exit `1603`). Run the older release's Setup with `/upgrade CONFIG=<version 8 config> JSON=1`: an explicit `upgrade` does not compare versions. Uninstalling and installing the older release also works |
+| Windows | `/ensure` refuses to install an older version (`downgrade_refused`, exit `1603`). Run the older release's Setup with `/upgrade CONFIG=<version 8 config> JSON=1`: an explicit `upgrade` does not compare versions. A Setup before 1.0.4 tries once to replace the hook program, so while agents run hooks it can stop with `1603` and roll back to the installed release; run it again, or run it while agents are idle. Uninstalling and installing the older release also works |
 | Debian and Ubuntu | Create the root-owned rollback marker, then install the older package: `sudo touch /var/lib/defenseclaw-enterprise/allow-downgrade`, then `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<older>-linux-amd64.deb`. Its postinstall applies the installed config if compatible. If it refuses a version 9 config, finish with `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --allow-downgrade --config <version 8 config> --json` |
 | RHEL | Create the same marker, then `sudo dnf downgrade ./defenseclaw-enterprise-<older>-linux-amd64.rpm` (`rpm -U` refuses an older package). If its postinstall refuses a version 9 config, use the same `ensure --from-package --allow-downgrade --config <version 8 config>` recovery |
 | Linux payload | Extract the older release as in [Upgrade](#linux), then run `sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD" --allow-downgrade --config <compatible config> --json` |
 | macOS | Create the root-owned rollback marker, then install the older package: `sudo touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`, then `sudo installer -pkg ./defenseclaw-enterprise-<older>-darwin-arm64.pkg -target /`. An older release that reads `config_version: 9` applies the installed config and is done (`last-package-result.json` reads `ok`). Only a release that reads version 8 fails on the version 9 config; then run `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure --from-package --allow-downgrade --config <version 8 config> --json` |
 
+- **Windows rollback to 1.0.0–1.0.2 from an open-mode deployment:** These published Setups cannot collect a runtime generation with `hook_fail_mode: open`; they may install the older version, then exit `1603` while retiring the previous journal. Before running the older Setup, save the current admin config. Set `guardrail.hook_fail_mode` and each `guardrail.connectors.<name>.hook_fail_mode` to `closed` in a compatible config, then apply it with the installed 1.0.4 Setup `/ensure CONFIG=<closed config> JSON=1`. Run that Setup's `/verify JSON=1` and resolve any pending users before the rollback. Pass the same closed config to the older Setup `/upgrade`; that release cannot provide open-mode managed hooks. If the older Setup already committed with `1603` and reports a journal retirement error, run the 1.0.4 Setup `/ensure CONFIG=<desired admin config> JSON=1`; it recovers the committed journal and validates and collects the old generation. Do not delete the journal or runtime files by hand. Version 1.0.3 understands open-mode generations.
 - **Packages refuse an older release** unless the root-owned marker exists, and the postinstall deletes the marker, so each rollback needs a new one. On Debian and Ubuntu use `apt`, not `dpkg -i`. Per-channel notes, Tetragon cleanup and the MDM wrapper behaviour are in [Lifecycle detail](/docs/enterprise/operate/reference#roll-back-notes-per-channel).
 
 ## Change the config
@@ -221,8 +222,8 @@ On Windows, `reconcile` restarts the guardian and waits for a fresh reconcile:
 ## Restart the managed gateway
 
 `defenseclaw-gateway start`, `stop` and `restart` control the per-user gateway, and on a
-managed host they refuse, also as root; the refusal names the commands below. Restart the
-managed gateway through the service manager instead.
+managed host they refuse, also as root. The refusal points to deployment status. Use the
+commands below to restart the managed gateway.
 
 | OS | Restart the gateway | Re-apply the deployment and restart every service |
 | --- | --- | --- |
@@ -298,13 +299,19 @@ After an uninstall or a reinstall, ask users to restart running agents; an agent
 ## Contain an incident
 
 - **Disable the account** in your directory or on the host, then remove it from enrollment.
-  DefenseClaw inspects and blocks agent actions; it does not disable accounts. Each user's hook and
-  telemetry credentials are bound to that user's uid or SID and authenticate only while the
-  guardian's authorization ledger protects that user, so they stop working on the guardian's next
-  pass after the removal. They never reach management routes, other connectors or another user's
-  identity. An account that is cut off and still runs an agent is refused, and on Windows each
-  refused call is audited with reason `enterprise_managed_sid_unregistered` (see
+  DefenseClaw inspects and blocks agent actions; it does not disable accounts. Per-user hook and
+  telemetry credentials are bound to their uid or SID and stop authenticating on the guardian's
+  next pass after removal. They never reach management routes, other connectors or another user's
+  identity. On Linux and macOS, machine-policy hooks keep inspecting a removed account by default;
+  set `unenrolled_users: deny` to refuse its calls. On Windows, a cut-off SID must be refused, with
+  an audited `enterprise_managed_sid_unregistered` decision while the hook is in force (see
   [Review the audit log](/docs/enterprise/install/windows#review-the-audit-log)).
+- **Check the machine policy after removal.** On managed Windows, Claude Code, Codex and Cursor must
+  refuse the cut-off account even with zero enrolled users for that agent. Run
+  `defenseclaw-gateway enterprise policy verify --json` and review each enabled agent. If its policy
+  is missing, keep the account disabled, stop that agent with application control, and repair the
+  deployment before allowing agent use. On Linux and macOS the policy stays machine-wide; use
+  `unenrolled_users: deny` when enrollment alone must refuse a call.
 - **Rotate the per-user credentials** on Linux and macOS when a user's credentials may have been
   copied to another account or host. See
   [Rotate per-user credentials](/docs/enterprise/operate/operations#rotate-per-user-credentials).

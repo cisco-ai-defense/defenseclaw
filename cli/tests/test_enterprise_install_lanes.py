@@ -30,6 +30,42 @@ CHECKER = SCRIPTS / "check_enterprise_lifecycle_result.py"
 UNIX_LANE = SCRIPTS / "test-enterprise-unix-install.sh"
 
 
+def test_hook_process_warning_keeps_install_lanes_honest(tmp_path: Path) -> None:
+    """Enabled Claude/Codex coverage is complete while prevention is not."""
+    result = _result(
+        action="verify", security_complete=False,
+        warnings=[{"code": "hook_process_fail_open", "message": "codex hook can fail open"}],
+    )
+    accepted = _check(tmp_path, result, "--coverage-complete", "--security-incomplete",
+                      "--allow-warning", "hook_process_fail_open")
+    assert accepted.returncode == 0, accepted.stderr
+
+    unix = UNIX_LANE.read_text(encoding="utf-8")
+    lines = unix.splitlines()
+    for step in ("04-verify", "05-status"):
+        matches = [i for i, line in enumerate(lines) if f'check "$results/{step}.json"' in line]
+        assert len(matches) == 1, step
+        i = matches[0]
+        args = lines[i]
+        while lines[i].rstrip().endswith("\\"):
+            i += 1
+            args += " " + lines[i]
+        assert "--coverage-complete" in args and "--security-incomplete" in args
+        assert "--allow-warning hook_process_fail_open" in args
+        assert "--complete" not in args
+
+    windows = (SCRIPTS / "test-enterprise-windows-install.ps1").read_text(encoding="utf-8")
+    checks = windows[windows.index("$installedChecks = @("):windows.index("\n)", windows.index("$installedChecks = @("))]
+    assert "'--coverage-complete'" in checks and "'--security-incomplete'" in checks
+    assert "'hook_process_fail_open'" in checks
+
+    docs = ROOT / "docs-site/content/docs/enterprise"
+    for page in ("get-started.mdx", "install/linux.mdx", "install/macos.mdx",
+                 "install/reference/windows.mdx"):
+        text = (docs / page).read_text(encoding="utf-8")
+        assert "hook_process_fail_open" in text and "security_complete" in text, page
+
+
 def _result(**overrides: Any) -> dict[str, Any]:
     document: dict[str, Any] = {
         "schema_version": 2,
@@ -262,6 +298,44 @@ def test_unix_upgrade_lane_checks_a_stored_credential_survives(tmp_path: Path) -
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     assert (secrets / "ci-upgrade-lane").read_text().startswith("ci-upgrade-lane-")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
+def test_unix_upgrade_lane_secret_check_needs_no_cmp(tmp_path: Path) -> None:
+    # GAP-0886: the pinned UBI 9 init image of the rpm-el9 lane has no
+    # diffutils, so a cmp-based check failed after a good secret set.
+    lane = UNIX_LANE.read_text(encoding="utf-8")
+    helpers = re.search(r"^upgrade_secret_name=.*?^upgrade_secret_kept\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
+    assert helpers, "the upgrade lane has no protected-credential fixture"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("od", "tr", "python3", "cat"):
+        found = subprocess.run(["bash", "-c", f"command -v {tool}"], capture_output=True, text=True, check=False).stdout.strip()
+        if found:
+            (bin_dir / tool).symlink_to(found)
+    assert not (bin_dir / "cmp").exists()
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    gateway = tmp_path / "gateway"
+    gateway.write_text(
+        '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = --name ] && n=$2; shift; done\n'
+        'IFS= read -r v; printf %s "$v" >"$FAKE_SECRETS/$n"\n',
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    (tmp_path / "results").mkdir()
+    script = helpers.group(0) + (
+        '\ndie() { echo "FAIL: $*" >&2; exit 1; }\n'
+        "seed_upgrade_secret 02-previous-secret\n"
+        "upgrade_secret_kept || exit 3\n"
+        'printf x >>"$secrets_dir/$upgrade_secret_name"\n'
+        "! upgrade_secret_kept || exit 4\n"
+    )
+    env = {"PATH": str(bin_dir), "gateway": str(gateway), "secrets_dir": str(secrets), "results": str(tmp_path / "results"),
+           "FAKE_SECRETS": str(secrets)}
+    bash = subprocess.run(["bash", "-c", "command -v bash"], capture_output=True, text=True, check=True).stdout.strip()
+    result = subprocess.run([bash, "-c", script], env=env, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 def test_windows_upgrade_lane_checks_a_stored_credential_survives() -> None:

@@ -51,6 +51,18 @@ def test_untrusted_listener_gets_no_hook_credential(tmp_path) -> None:
     assert problems == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="creating a file symlink needs Windows privilege")
+def test_symlinked_hook_credential_is_reported_without_reading_its_target(tmp_path) -> None:
+    target = tmp_path / "other-secret"
+    target.write_bytes(b"a" * 64 + b"\n")
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / ".hook-claudecode.token").symlink_to(target)
+    with mock.patch.object(cmd_doctor, "_http_probe", side_effect=AssertionError("sent symlink target")):
+        problems = cmd_doctor._connector_hook_credential_problems(_cfg(str(tmp_path)), SimpleNamespace(trusted=True))
+    assert problems == ["claudecode"]
+
+
 def test_rotate_token_names_the_connector_and_the_way_out() -> None:
     with pytest.raises(click.ClickException) as raised:
         cmd_setup._rotate_token_hook_value(b"not-a-token", "claudecode")

@@ -263,6 +263,14 @@ try {
                 [string]$script:DefenseClawSquattedRootNotes[0] -notlike "removed the link $lock that *pointed at*junction-target*") {
                 $failures.Add("planted junction left behind or not reported: $(@($script:DefenseClawSquattedRootNotes) -join ' | ')")
             }
+            # GAP-0618: the note names the account that created the junction
+            # (the link's own owner, read without following it), not "an
+            # account DefenseClaw could not read".
+            if (@($script:DefenseClawSquattedRootNotes).Count -eq 1 -and
+                ([string]$script:DefenseClawSquattedRootNotes[0] -like '*could not read*' -or
+                [string]$script:DefenseClawSquattedRootNotes[0] -notmatch ('^removed the link ' + [regex]::Escape($lock) + ' that .+ \(S-1-[0-9-]+\) created; '))) {
+                $failures.Add("planted junction note does not name its owner: $($script:DefenseClawSquattedRootNotes[0])")
+            }
             Reset-TestRoots
 
             # Upgrade, Repair and Uninstall prepare an existing state root

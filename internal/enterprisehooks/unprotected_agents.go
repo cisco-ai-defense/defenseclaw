@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // An agent the standalone enumerator knows is installed for an eligible user
@@ -34,11 +35,25 @@ const UnprotectedAgentsFileName = "unprotected-agents.json"
 // UnprotectedAgentsMaxBytes bounds the record a reader accepts.
 const UnprotectedAgentsMaxBytes = 4 << 20
 
+// The enumerator runs every five minutes. Three missed cycles mean its last
+// result can no longer establish which agent copies are runnable now.
+const UnprotectedAgentsMaxAge = 16 * time.Minute
+
+// UnprotectedAgentsRecordStale uses the protected file's mtime as evidence
+// of the latest completed scan. The writer refreshes it even for an empty,
+// unchanged result.
+func UnprotectedAgentsRecordStale(modTime, now time.Time) bool {
+	return now.Sub(modTime) > UnprotectedAgentsMaxAge || modTime.After(now.Add(5*time.Minute))
+}
+
 // Status codes for an unprotected agent.
 const (
 	// UnprotectedCodeHookContractUnverified: the agent's version has no
 	// verified DefenseClaw hook contract.
 	UnprotectedCodeHookContractUnverified = "hook_contract_unverified"
+	// UnprotectedCodeInstallScanIncomplete means an enrolled user's install
+	// locations could not be fully inspected within the scan bound.
+	UnprotectedCodeInstallScanIncomplete = "agent_install_scan_incomplete"
 	// UnprotectedCodeAgentUnprotected: any other reason the agent could not
 	// be enrolled.
 	UnprotectedCodeAgentUnprotected = "agent_unprotected"
@@ -63,6 +78,8 @@ type UnprotectedAgent struct {
 	UID       *int   `json:"uid,omitempty"`
 	Connector string `json:"connector"`
 	Version   string `json:"version,omitempty"`
+	// InstallPath distinguishes multiple runnable copies of the same CLI.
+	InstallPath string `json:"install_path,omitempty"`
 	// Surface, Host and HostVersion describe an app or extension install
 	// (connector.AgentSurface); Version is then its engine version. Empty
 	// for a CLI install.
@@ -101,6 +118,9 @@ func (a UnprotectedAgent) Message() string {
 	name := strings.TrimSpace(a.Connector)
 	if version := strings.TrimSpace(a.Version); version != "" {
 		name += " " + version
+	}
+	if path := strings.TrimSpace(a.InstallPath); path != "" {
+		name += " at " + path
 	}
 	who := strings.TrimSpace(a.User)
 	if sid := strings.TrimSpace(a.SID); sid != "" {
@@ -153,12 +173,12 @@ func ParseUnprotectedAgents(data []byte) ([]UnprotectedAgent, error) {
 	for _, agent := range record.Agents {
 		accountOnly := agent.Code == UnprotectedCodeHomeUntrusted
 		if accountOnly {
-			agent.Connector, agent.Version, agent.Surface, agent.Host, agent.HostVersion = "", "", "", "", ""
+			agent.Connector, agent.Version, agent.InstallPath, agent.Surface, agent.Host, agent.HostVersion = "", "", "", "", "", ""
 		}
 		if (strings.TrimSpace(agent.Connector) == "" && !accountOnly) || (strings.TrimSpace(agent.User) == "" && strings.TrimSpace(agent.SID) == "") {
 			continue
 		}
-		if agent.Code != UnprotectedCodeHookContractUnverified && agent.Code != UnprotectedCodeSurfaceUnverified &&
+		if agent.Code != UnprotectedCodeHookContractUnverified && agent.Code != UnprotectedCodeInstallScanIncomplete && agent.Code != UnprotectedCodeSurfaceUnverified &&
 			agent.Code != UnprotectedCodeKiroIDEBelowGlobalHooksFloor && !accountOnly {
 			agent.Code = UnprotectedCodeAgentUnprotected
 		}
@@ -177,6 +197,7 @@ func normalizeUnprotectedAgents(agents []UnprotectedAgent) []UnprotectedAgent {
 		agent.SID = boundedStatusText(agent.SID, 128)
 		agent.Connector = strings.ToLower(boundedStatusText(agent.Connector, 64))
 		agent.Version = boundedStatusText(agent.Version, 128)
+		agent.InstallPath = boundedStatusText(agent.InstallPath, 512)
 		agent.Surface = strings.ToLower(boundedStatusText(agent.Surface, 32))
 		agent.Host = boundedStatusText(agent.Host, 64)
 		agent.HostVersion = boundedStatusText(agent.HostVersion, 128)
@@ -184,7 +205,7 @@ func normalizeUnprotectedAgents(agents []UnprotectedAgent) []UnprotectedAgent {
 		if agent.Code == "" {
 			agent.Code = UnprotectedCodeForReason(agent.Reason)
 		}
-		key := strings.ToLower(agent.SID) + "\x00" + agent.User + "\x00" + agent.Connector + "\x00" + agent.Surface + "\x00" + agent.Host
+		key := strings.ToLower(agent.SID) + "\x00" + agent.User + "\x00" + agent.Connector + "\x00" + agent.Surface + "\x00" + agent.Host + "\x00" + agent.InstallPath + "\x00" + agent.Version + "\x00" + agent.Code
 		byKey[key] = agent
 	}
 	out := make([]UnprotectedAgent, 0, len(byKey))
@@ -203,6 +224,9 @@ func normalizeUnprotectedAgents(agents []UnprotectedAgent) []UnprotectedAgent {
 		}
 		if out[i].Surface != out[j].Surface {
 			return out[i].Surface < out[j].Surface
+		}
+		if out[i].InstallPath != out[j].InstallPath {
+			return out[i].InstallPath < out[j].InstallPath
 		}
 		return out[i].Host < out[j].Host
 	})

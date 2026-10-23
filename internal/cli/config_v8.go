@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -103,8 +104,9 @@ var configV8ValidateCmd = &cobra.Command{
 			PlanDigest:        loaded.compiled.Plan.Digest(),
 			NetworkValidation: "offline_syntax_and_literal_policy_only",
 			Valid:             &valid,
-			Warnings:          append(gateway.ConfigHILTWarnings(loaded.runtime), configV8InstalledAdvisories(loaded)...),
 		}
+		result.Warnings = append(gateway.ConfigHILTWarnings(loaded.runtime), configV8InstalledAdvisories(loaded)...)
+		result.Warnings = append(result.Warnings, configValidateManagedStandaloneWarnings(loaded)...)
 		encoder := json.NewEncoder(cmd.OutOrStdout())
 		encoder.SetEscapeHTML(false)
 		return encoder.Encode(result)
@@ -131,6 +133,9 @@ func checkConfigV8Candidate(path, dataDir string) (*loadedConfigV8File, error) {
 		// (GAP-0138). The installed config keeps loading for the upgrade
 		// path; configV8InstalledAdvisories reports it instead.
 		err = config.ValidateManagedStandaloneLiteralCandidate(loaded.runtime, loaded.raw)
+	}
+	if err == nil {
+		err = configValidateManagedStandaloneLayout(loaded)
 	}
 	if err != nil {
 		return nil, &configV8SourceError{version: loaded.runtime.ConfigVersion, err: err}
@@ -195,10 +200,13 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 	var profileError *config.UnknownGuardrailProfileError
 	var settingError *config.SettingError
 	var sourceError *configV8SourceError
+	var readError *configV8ReadError
 	if errors.As(err, &sourceError) && sourceError.version >= config.ObservabilityV8ConfigVersion {
 		result.ConfigVersion = sourceError.version
 	}
 	switch {
+	case errors.As(err, &readError):
+		result.Reason = readError.reason()
 	case errors.As(err, &settingError):
 		// A runtime-loader refusal of a profile, its sandbox section or the
 		// openshell section: name the setting and the rule, so the fix is to
@@ -263,6 +271,41 @@ type configV8SourceError struct {
 
 func (e *configV8SourceError) Error() string { return e.err.Error() }
 func (e *configV8SourceError) Unwrap() error { return e.err }
+
+// configV8ReadError is a config file that could not be read at all: not a
+// file that failed to compile, so validate names the read problem and the
+// path instead of "could not be compiled safely" (GAP-0605).
+type configV8ReadError struct {
+	path string
+	err  error
+}
+
+func (e *configV8ReadError) Error() string { return fmt.Sprintf("read config %s: %v", e.path, e.err) }
+func (e *configV8ReadError) Unwrap() error { return e.err }
+
+// diagnostic is the read failure's code, what happened and the next step.
+func (e *configV8ReadError) diagnostic() (code, summary, action string) {
+	switch {
+	case errors.Is(e.err, fs.ErrNotExist):
+		return "config_not_found", "no file exists at this path", "check the path, or pass the config.yaml to check"
+	case errors.Is(e.err, fs.ErrPermission):
+		return "config_unreadable", "this account may not read the file",
+			"run the command as an account that can read it, such as an administrator"
+	}
+	return "config_unreadable", "the file could not be read", "check that the path names a readable file"
+}
+
+// reason is the bounded diagnostic of the read failure.
+func (e *configV8ReadError) reason() string {
+	code, summary, action := e.diagnostic()
+	return configV8DiagnosticReason(code, summary, "", action)
+}
+
+// sentence is the read failure in plain words, naming the file as shown.
+func (e *configV8ReadError) sentence(shown string) string {
+	_, summary, action := e.diagnostic()
+	return "cannot read " + shown + ": " + summary + "; " + action
+}
 
 // configV8SourceVersion is the config_version a parsed document declares, or
 // the compiler's own when it declares none that reads as an integer.
@@ -692,13 +735,13 @@ func validateRuntimeV8ConnectorRoster(document *config.V8YAMLDocument, candidate
 func readConfigV8Source(path string) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config %s: %w", path, err)
+		return nil, &configV8ReadError{path: path, err: err}
 	}
 	defer file.Close()
 	limit := int64(config.ObservabilityV8MaxSourceBytes) + 1
 	raw, err := io.ReadAll(io.LimitReader(file, limit))
 	if err != nil {
-		return nil, fmt.Errorf("read config %s: %w", path, err)
+		return nil, &configV8ReadError{path: path, err: err}
 	}
 	if len(raw) > config.ObservabilityV8MaxSourceBytes {
 		// Feed a bounded over-limit value to the canonical parser so callers get

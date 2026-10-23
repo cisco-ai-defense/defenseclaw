@@ -47,11 +47,19 @@ var errAtomicTransformConflict = errors.New("atomic transform target changed")
 
 // atomicTransformResult is the next state returned by a read/merge
 // transformation. Remove is used by teardown when the connector originally
-// created a config file that did not exist before setup.
+// created a config file that did not exist before setup. Keep leaves the file
+// exactly as it is, bytes and permissions, whatever Data and Perm say: a
+// teardown that found nothing of DefenseClaw's in a user's file must not
+// rewrite it (GAP-0650).
 type atomicTransformResult struct {
 	Data   []byte
 	Remove bool
+	Keep   bool
 	Perm   os.FileMode
+	// Force publishes a distinct file even when Data and Perm already match.
+	// Retired connector teardown needs this after writing a deny stub into an
+	// old file: the path gets a distinct file while other names keep the stub.
+	Force bool
 }
 
 type atomicFileSnapshot struct {

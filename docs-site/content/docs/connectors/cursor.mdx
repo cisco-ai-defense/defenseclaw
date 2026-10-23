@@ -17,12 +17,18 @@ DefenseClaw adds entries to Cursor's user `hooks.json`. This is a hook connector
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector cursor` first. Until DefenseClaw is initialized, `defenseclaw setup cursor` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
-defenseclaw setup cursor
+defenseclaw setup cursor  # first setup defaults to observe
 defenseclaw setup cursor --mode action --no-human-approval
 ```
 
-On Windows, run the same commands in PowerShell. The default installs observe-mode hooks. Action mode turns on event-native deny and leaves native approval off. Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
+A re-run without `--mode` keeps the current mode. On Windows, run the same
+commands in PowerShell. Action mode turns on event-native deny and leaves
+native approval off. Interactive setup asks for the mode, whether to add to or
+replace an existing connector roster, and whether to add an LLM judge. For
+scripts, pass `--yes --mode observe` (or `--mode action`).
 
 Action setup requires an installed Cursor version covered by a hook contract. If that check fails, setup exits with an error before changing the connector roster or hooks. Install a supported version and rerun `defenseclaw setup cursor --yes --mode action --no-human-approval`. To stage observation explicitly, run `defenseclaw setup cursor --yes --mode observe`.
 
@@ -41,7 +47,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 
 - In action mode these events deny with Cursor's own response: `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead` and `beforeSubmitPrompt`.
 - DefenseClaw does not turn on Cursor's native ask. A confirm verdict stays an alert.
-- Observe mode allows everything and records what action mode would have blocked.
+- Observe mode records policy findings without blocking on those findings. On a per-user install, a gateway outage blocks supported events by default while its hook runs ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)).
 - `sessionStart`, `sessionEnd`, `stop` and `subagentStop` never gate.
 
 ## Files it changes
@@ -69,7 +75,11 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-This keeps Cursor's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove cursor --yes` (add `--force` if it is the last one).
+With the default gateway restart, disabling removes DefenseClaw's hooks from
+Cursor's config and its hook adapter files. It preserves your other Cursor
+settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To
+remove the connector, run `defenseclaw setup remove cursor --yes` (add
+`--force` if it is the last one).
 
 On a multi-connector install, add `--connector cursor` to `guardrail disable` and `guardrail enable` to change only this agent.
 

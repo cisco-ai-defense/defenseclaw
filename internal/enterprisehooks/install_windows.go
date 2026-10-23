@@ -50,6 +50,13 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 		return InstallResult{}, true, err
 	}
 	defer unlockRuntime()
+	if opts.WindowsTargetLogon != WindowsTargetLogonActive {
+		sid, err := validateWindowsEnterpriseTargetSID(opts.OwnerSID)
+		if err != nil {
+			return InstallResult{}, true, err
+		}
+		defer useWindowsEnterpriseInstallLogon(sid.String(), opts.WindowsTargetLogon)()
+	}
 	var result InstallResult
 	switch strings.ToLower(strings.TrimSpace(opts.ConnectorName)) {
 	case "claudecode":
@@ -370,6 +377,9 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 
 	lock, err := verifyWindowsClaudeUserRuntimeReadOnly(home, dataDir, policyPath, targetSID, setupOpts, conn)
 	if err != nil {
+		return InstallResult{}, err
+	}
+	if err := windowsManagedUserNativeOTLPAbsent(conn.Name(), home, dataDir, targetSID); err != nil {
 		return InstallResult{}, err
 	}
 	lockUpdatedAt, entryUpdatedAt, err := connector.ManagedHookContractTimestamps(

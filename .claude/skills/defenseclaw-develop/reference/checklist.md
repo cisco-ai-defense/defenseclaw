@@ -76,7 +76,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
   Check: `go test ./internal/config -run GuardrailProfile` and `pytest cli/tests/test_guardrail_profiles.py`. Evidence: `internal/config/guardrail_profiles.go`.
 - [ ] **M-ID-5** The policy digest is canonical, deterministic and secret-free; test stability and change detection. Why: it is stamped on decisions and telemetry.
   Check: `go test ./internal/config -run Digest`. Evidence: `internal/config/guardrail_profiles_test.go`.
-- [ ] **M-ID-6** Sandbox and OpenShell profile settings may only tighten the admin floor. Why: a profile that loosens it, or a looser default profile, is a gap during a directory outage.
+- [ ] **M-ID-6** Sandbox and OpenShell profile settings may only tighten the admin floor. Why: a profile that loosens it is a gap. An outage refuses requests whose assignments need an unconfirmed fact, naming it; the default profile applies only when no assignment needs that fact, so keep it strict for those accounts too.
   Check: `go test ./internal/config -run 'Tighten|Sandbox'`. Evidence: `internal/config/openshell_tighten.go`.
 - [ ] **M-ID-7** A new identity source reads OS facts only (never an IdP API or identity credentials), marks each fact verified or claimed, and states per-OS limits. Why: the product promise is no IdP calls.
   Check: `go test ./internal/useridentity ./internal/unixidentity`. Evidence: `docs-site/content/docs/enterprise/identity/authentication.mdx`.

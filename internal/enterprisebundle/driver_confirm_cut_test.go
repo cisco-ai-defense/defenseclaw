@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
@@ -169,6 +170,118 @@ func TestStoreSettleCompletesOnlyTheReceiptTheStateNames(t *testing.T) {
 			}
 			if got := receiptOf(t, d, rc.ReceiptID); tc.complete && (got.State != enterprisebundle.StateConfirmed || got.ConfirmedAt != ref.ConfirmedAt) {
 				t.Fatalf("receipt = %s at %q", got.State, got.ConfirmedAt)
+			}
+		})
+	}
+}
+
+func TestDriverSettleRunKeepsNamedReceiptPendingWithoutConfirmationPrerequisite(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	p, err := d.Prepare(t.Context(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proven := installPreparedBundle(t, d, p)
+	if err := d.Store.Advance(p.Receipt, enterprisebundle.StateApplied, func(rc *enterprisebundle.Receipt) {
+		rc.EffectivePolicyDigest, rc.ConfigGeneration = proven.EffectiveDigest, proven.Generation
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rc := p.Receipt
+	ref := enterprisebundle.Ref{BundleID: rc.BundleID, Version: rc.Version, ManifestSHA256: rc.ManifestSHA256, Dir: rc.Dir,
+		SignerKeyID: rc.SignerKeyID, EffectivePolicyDigest: rc.EffectivePolicyDigest, ConfigGeneration: rc.ConfigGeneration,
+		ConfirmedAt: "2026-06-01T00:00:00.000Z"}
+	raw, err := json.Marshal(enterprisebundle.State{SchemaVersion: enterprisebundle.StateSchemaVersion, Current: &ref, Floor: rc.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(d.Store.StatePath(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.Store.BeforeConfirm = func(*enterprisebundle.Receipt) error {
+		return fmt.Errorf("legacy trust anchors absent: %w", enterprisebundle.ErrConfirmationPrerequisiteMissing)
+	}
+	for range 2 {
+		report, rollback, err := d.SettleRun(p.Config, &proven)
+		if err != nil {
+			t.Fatalf("settle refused a pending receipt: %v", err)
+		}
+		if len(rollback) != 0 || !slices.Contains(report.Pending, rc.ReceiptID) || slices.Contains(report.Completed, rc.ReceiptID) {
+			t.Fatalf("settle report = %+v, rollback = %+v", report, rollback)
+		}
+		if got := receiptOf(t, d, rc.ReceiptID); got.State != enterprisebundle.StateApplied || got.ConfirmedAt != "" {
+			t.Fatalf("named receipt was confirmed without anchors: %+v", got)
+		}
+	}
+}
+
+// A state ref was written only after the apply was proved. Losing the
+// receipt's trust-anchor stage does not undo that proof, even when a later
+// gateway readback or the installed config is unavailable or has changed.
+// Settlement must not fail or roll back that state-named receipt.
+func TestDriverSettleRunNeverRollsBackNamedReceiptMissingAnchors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy func(enterprisebundle.GatewayPolicy) *enterprisebundle.GatewayPolicy
+		absent bool
+	}{
+		{name: "gateway unavailable", policy: func(enterprisebundle.GatewayPolicy) *enterprisebundle.GatewayPolicy { return nil }},
+		{name: "gateway changed", policy: func(p enterprisebundle.GatewayPolicy) *enterprisebundle.GatewayPolicy {
+			p.Digest, p.EffectiveDigest = "sha256:"+fmt.Sprintf("%064d", 7), "sha256:"+fmt.Sprintf("%064d", 7)
+			return &p
+		}},
+		{name: "installed config changed", policy: func(p enterprisebundle.GatewayPolicy) *enterprisebundle.GatewayPolicy { return &p }, absent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, bundleConfig(t), nil)
+			d := driverFor(t, f)
+			// The production Unix store seals for its service group. This
+			// receipt test does not exercise file modes; keep its stage
+			// movable on macOS, where 0555 directories cannot be renamed.
+			d.Store.SealVersion = func(string) error { return nil }
+			p, err := d.Prepare(t.Context(), f.bundle, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proven := installPreparedBundle(t, d, p)
+			if err := d.Store.Advance(p.Receipt, enterprisebundle.StateApplied, func(rc *enterprisebundle.Receipt) {
+				rc.EffectivePolicyDigest, rc.ConfigGeneration = proven.EffectiveDigest, proven.Generation
+			}); err != nil {
+				t.Fatal(err)
+			}
+			rc := p.Receipt
+			ref := enterprisebundle.Ref{BundleID: rc.BundleID, Version: rc.Version, ManifestSHA256: rc.ManifestSHA256, Dir: rc.Dir,
+				SignerKeyID: rc.SignerKeyID, EffectivePolicyDigest: rc.EffectivePolicyDigest, ConfigGeneration: rc.ConfigGeneration,
+				ConfirmedAt: "2026-06-01T00:00:00.000Z"}
+			raw, err := json.Marshal(enterprisebundle.State{SchemaVersion: enterprisebundle.StateSchemaVersion, Current: &ref, Floor: rc.Version})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(d.Store.StatePath(), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			d.Store.BeforeConfirm = func(*enterprisebundle.Receipt) error {
+				return fmt.Errorf("staged trust anchors missing: %w", enterprisebundle.ErrConfirmationPrerequisiteMissing)
+			}
+			installed := p.Config
+			if tc.absent {
+				installed = nil
+			}
+			for range 2 {
+				report, rollback, err := d.SettleRun(installed, tc.policy(proven))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(rollback) != 0 || !slices.Contains(report.Pending, rc.ReceiptID) || len(report.Completed) != 0 {
+					t.Fatalf("report = %+v, rollback = %+v", report, rollback)
+				}
+				if reason := report.PendingReasons[rc.ReceiptID]; !strings.Contains(reason, "staged trust anchors missing") {
+					t.Fatalf("pending reason = %q, report = %+v", reason, report)
+				}
+				if got := receiptOf(t, d, rc.ReceiptID); got.State != enterprisebundle.StateApplied || got.ErrorCode != "" {
+					t.Fatalf("anchorless receipt changed: %+v", got)
+				}
 			}
 		})
 	}

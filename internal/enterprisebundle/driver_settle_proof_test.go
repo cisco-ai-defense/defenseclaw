@@ -128,6 +128,43 @@ func TestSettleNeverConfirmsAnIdenticalStagedBundleFromMatchingBytes(t *testing.
 	}
 }
 
+// A repeat of the same signed bundle while the first receipt is applied
+// can have identical bytes and bundle identity. Its staged receipt did not
+// commit the already installed generation and must not become current.
+func TestSettleDoesNotBorrowPendingSameBundleCommit(t *testing.T) {
+	f := newFixture(t, strings.Replace(bundleConfig(t), r104StrippedRefs, "", 1), nil)
+	d := driverFor(t, f)
+	first, err := d.Prepare(t.Context(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := installPreparedBundle(t, d, first)
+	if _, err := d.Finish(first, first.ConfigSHA256, nil, enterprisebundle.GatewayPolicy{}, false, nil); enterprisebundle.CodeOf(err) != enterprisebundle.CodeNotConfirmed {
+		t.Fatalf("first receipt did not remain pending: %v", err)
+	}
+	d.EnforcedConfig = first.Config
+	second, err := d.Prepare(t.Context(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first.Config, second.Config) || second.Receipt.BaseConfigSHA256 != first.ConfigSHA256 {
+		t.Fatal("repeat did not start from identical signed config")
+	}
+	report, rollback, err := d.SettleRun(first.Config, nil)
+	if err != nil || len(rollback) != 0 || !slices.Contains(report.Interrupted, second.Receipt.ReceiptID) ||
+		!slices.Contains(report.Pending, first.Receipt.ReceiptID) || slices.Contains(report.Pending, second.Receipt.ReceiptID) {
+		t.Fatalf("outage settle: report=%+v rollback=%+v error=%v", report, rollback, err)
+	}
+	if rc := receiptOf(t, d, second.Receipt.ReceiptID); rc.State != enterprisebundle.StateFailed || rc.ErrorCode != enterprisebundle.CodeInterrupted {
+		t.Fatalf("uncommitted repeat receipt = %+v", rc)
+	}
+	report, rollback, err = d.SettleRun(first.Config, &proof)
+	if err != nil || len(rollback) != 0 || !slices.Contains(report.Completed, first.Receipt.ReceiptID) ||
+		receiptOf(t, d, first.Receipt.ReceiptID).State != enterprisebundle.StateConfirmed {
+		t.Fatalf("original receipt was not confirmed: report=%+v rollback=%+v error=%v", report, rollback, err)
+	}
+}
+
 // GAP-0484: A comment in the installed config that names B's version
 // directory is not evidence that B's transaction installed anything. With
 // the base record (and, for a legacy receipt, the value-only scan) B is

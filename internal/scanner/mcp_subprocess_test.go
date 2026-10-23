@@ -7,10 +7,12 @@ package scanner
 import (
 	"context"
 	"errors"
+	"io"
 	"os/exec"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 // A non-zero scanner exit must fail closed even when stdout parsed
@@ -43,12 +45,12 @@ func TestMCPScanner_NonZeroExitFailsClosed(t *testing.T) {
 	}
 }
 
-// GAP-0712: the MCP path must use the process-tree runner that owns the
+// GAP-0712: the MCP path must use the containment runner that owns the
 // embedded runtime's Python child on Windows.
-func TestMCPScannerUsesTreeRunner(t *testing.T) {
+func TestMCPScannerUsesContainedRunner(t *testing.T) {
 	prior := runMCPScannerCommand
 	t.Cleanup(func() { runMCPScannerCommand = prior })
-	marker := errors.New("tree runner called")
+	marker := errors.New("contained runner called")
 	called := false
 	runMCPScannerCommand = func(_ context.Context, _ *exec.Cmd) error {
 		called = true
@@ -57,6 +59,38 @@ func TestMCPScannerUsesTreeRunner(t *testing.T) {
 	scanner := &MCPScanner{Config: config.MCPScannerConfig{Binary: "scanner-fixture"}}
 	_, _ = scanner.Scan(context.Background(), "local")
 	if !called {
-		t.Fatal("MCP scan bypassed the process-tree runner")
+		t.Fatal("MCP scan bypassed the containment runner")
+	}
+}
+
+// A runner that cannot prove cleanup must make even a parseable clean scan
+// fail. A scanner may write its JSON before a detached child is discovered.
+func TestScannersRejectUncontainedCleanOutput(t *testing.T) {
+	prior, priorMCP := runScannerCommand, runMCPScannerCommand
+	t.Cleanup(func() { runScannerCommand, runMCPScannerCommand = prior, priorMCP })
+	runScannerCommand = func(cmd *exec.Cmd) error {
+		_, _ = io.WriteString(cmd.Stdout, `{"findings":[]}`+"\n")
+		return processutil.ErrNotContained
+	}
+	// MCP scans keep their own runner (RunTreeIsolated, GAP-0354/GAP-0712);
+	// the same rule holds for it.
+	runMCPScannerCommand = func(_ context.Context, cmd *exec.Cmd) error { return runScannerCommand(cmd) }
+	for _, tc := range []struct {
+		name string
+		scan Scanner
+	}{
+		{"plugin", &PluginScanner{BinaryPath: "scanner-fixture"}},
+		{"skill", NewSkillScannerFromLLM(config.SkillScannerConfig{Binary: "scanner-fixture"}, config.LLMConfig{}, config.CiscoAIDefenseConfig{})},
+		{"mcp", &MCPScanner{Config: config.MCPScannerConfig{Binary: "scanner-fixture"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tc.scan.Scan(context.Background(), t.TempDir())
+			if !errors.Is(err, processutil.ErrNotContained) {
+				t.Fatalf("Scan() = %+v, %v; uncontained clean output must fail", result, err)
+			}
+			if result == nil || result.ExitCode != -1 {
+				t.Fatalf("Scan() = %+v, %v; want failed result diagnostics", result, err)
+			}
+		})
 	}
 }

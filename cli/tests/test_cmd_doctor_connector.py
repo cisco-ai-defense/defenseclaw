@@ -247,11 +247,11 @@ class TestActiveConnectorResolver(unittest.TestCase):
         cfg.guardrail.connector = "claudecode"
         self.assertEqual(_active_connector(cfg), "claudecode")
 
-    def test_active_connector_defaults_to_openclaw_when_unset(self) -> None:
+    def test_active_connector_names_no_agent_when_unset(self) -> None:
         cfg = MagicMock(spec=["guardrail"])
         cfg.guardrail = MagicMock()
         cfg.guardrail.connector = ""
-        self.assertEqual(_active_connector(cfg), "openclaw")
+        self.assertEqual(_active_connector(cfg), "")
 
     def test_active_connector_lowercases_method_result(self) -> None:
         """ZeptoClaw, OpenClaw, etc. — display casing varies, but the
@@ -458,6 +458,15 @@ class TestCheckConnectorHooks(unittest.TestCase):
     matching the connector, and combines with ``_doctor_label_suffix`` to
     attribute each connector's row on multi-connector installs.
     """
+
+    @staticmethod
+    def _probe_trusted_cursor_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
+        # These transport tests supply a health response from a verified gateway.
+        with patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=SimpleNamespace(trusted=True, detail="verified"),
+        ):
+            return _probe_cursor_windows_runtime(cfg, adapter_path)
 
     def test_codex_emits_codex_hooks_row(self) -> None:
         cfg = MagicMock()
@@ -829,7 +838,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertTrue(ok)
         self.assertIn("requests 4->5", detail)
@@ -902,7 +911,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertTrue(ok)
         self.assertIn("requests 4->5", detail)
@@ -937,7 +946,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertFalse(ok)
         self.assertEqual(detail, "Cursor runtime probe timed out")
@@ -965,7 +974,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertFalse(ok)
         self.assertIn("tree did not terminate", detail)
@@ -1094,7 +1103,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertFalse(ok)
         self.assertIn("invalid sessionStart fields: continue", detail)
@@ -1127,7 +1136,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertFalse(ok)
         self.assertIn("did not advance", detail)
@@ -1971,7 +1980,7 @@ class TestCheckHookHealth(unittest.TestCase):
         )
 
 
-    def test_lock_path_with_marker_requires_hermes_reload(self) -> None:
+    def test_marker_only_never_proves_hermes_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             hook = os.path.join(tmp, "config.yaml")
             with open(hook, "w", encoding="utf-8") as fh:
@@ -1979,17 +1988,38 @@ class TestCheckHookHealth(unittest.TestCase):
             results = {}
             for running in (True, False):
                 r = _DoctorResult()
-                with patch("defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running):
+                with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=hook), patch(
+                    "defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running
+                ):
                     _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
                 results[running] = r.checks[-1]
         self.assertEqual(results[True]["status"], "fail")
         self.assertEqual(results[True]["label"], _HERMES_HOOKS_LABEL)
-        self.assertIn(hook, results[True]["detail"])
-        self.assertIn("live=false", results[True]["detail"])
+        self.assertIn("sealed hook script", results[True]["detail"])
+        # An idle host cannot make an unproven on-disk registration healthy.
+        self.assertEqual(results[False]["status"], "fail", results[False])
+
+    def test_proven_hermes_registration_with_a_running_host_names_the_close_step(self) -> None:
+        # The registration is proven (execution probe passes): a running host
+        # may still hold the old hooks, so doctor cannot verify them and says
+        # to close every host; with no host running the check passes.
+        with tempfile.TemporaryDirectory() as tmp:
+            hook = os.path.join(tmp, "config.yaml")
+            with open(hook, "w", encoding="utf-8") as fh:
+                fh.write("hooks:\n  - command: /x/hooks/hermes-hook.sh\n")
+            results = {}
+            for running in (True, False):
+                r = _DoctorResult()
+                with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=hook), patch(
+                    "defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running
+                ), patch("defenseclaw.commands.cmd_doctor._hermes_registered_execution_problem", return_value=""):
+                    _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
+                results[running] = r.checks[-1]
+        self.assertEqual(results[True]["status"], "fail", results[True])
         self.assertIn("cannot verify", results[True]["detail"])
+        self.assertIn("live=false", results[True]["detail"])
         self.assertIn("close", results[True]["remediation"].lower())
         self.assertIn("defenseclaw doctor", results[True]["remediation"])
-        # With no Hermes host running there is nothing to reload.
         self.assertEqual(results[False]["status"], "pass", results[False])
 
     def test_hermes_host_running_treats_wrapped_hosts_as_unknown(self) -> None:
@@ -2042,20 +2072,20 @@ class TestCheckHookHealth(unittest.TestCase):
             with open(hook, "w", encoding="utf-8") as fh:
                 fh.write("hooks: []\n")
             r = _DoctorResult()
-            _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
+            with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=hook):
+                _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
         self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("does not reference", r.checks[-1]["detail"])
+        self.assertIn("sealed hook script", r.checks[-1]["detail"])
 
     def test_missing_hook_file_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             r = _DoctorResult()
-            _check_hook_health(
-                self._cfg(tmp, "hermes", [os.path.join(tmp, "nope.yaml")]),
-                "hermes",
-                r,
-            )
+            missing = os.path.join(tmp, "nope.yaml")
+            with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=missing):
+                _check_hook_health(self._cfg(tmp, "hermes", [missing]), "hermes", r)
         self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("not found", r.checks[-1]["detail"])
+        self.assertIn("active hook registration is missing", r.checks[-1]["detail"])
+        self.assertIn("setup hermes --yes --restart", r.checks[-1]["remediation"])
 
     @patch("defenseclaw.commands.cmd_doctor._check_cursor_configured_runtime")
     def test_passive_cursor_health_disables_runtime_probe(self, configured_runtime) -> None:

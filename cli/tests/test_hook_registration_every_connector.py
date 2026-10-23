@@ -123,6 +123,14 @@ def _install(tmp_path: Path, monkeypatch, case: dict[str, Any], *, removed: bool
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content.replace("{data_dir}", str(data_dir)).replace("{home}", str(home)), encoding="utf-8")
         paths.append(str(path))
+    # Files Setup writes beside the hook files (the Hermes approvals); the
+    # lock records only the hook files.
+    for file in case.get("agent_files", []):
+        path = Path(file["path"].replace("{data_dir}", str(data_dir)).replace("{home}", str(home)))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            file["content"].replace("{data_dir}", str(data_dir)).replace("{home}", str(home)), encoding="utf-8"
+        )
     lock = {"version": 2, "connectors": {case["connector"]: {"locations": {"hook_config_paths": paths}}}}
     (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
     cfg = default_config()

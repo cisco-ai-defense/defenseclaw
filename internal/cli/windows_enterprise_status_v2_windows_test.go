@@ -174,6 +174,21 @@ func TestWindowsStatusV2GatewayAndConfigFailures(t *testing.T) {
 	}
 }
 
+func TestWindowsManagedCodexStatusAndVerifyShowHookProcessFailure(t *testing.T) {
+	for _, action := range []string{"status", "verify"} {
+		t.Run(action, func(t *testing.T) {
+			cfg := windowsStatusV2Config()
+			fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{cfg: cfg})
+			result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
+			result.Installed, result.SecurityComplete = true, true
+			applyWindowsEnterpriseStatusV2(result)
+			if messagesWithCode(result.Warnings, "hook_process_fail_open") == 0 || result.SecurityComplete {
+				t.Fatalf("%s warning=%v security_complete=%v", action, result.Warnings, result.SecurityComplete)
+			}
+		})
+	}
+}
+
 func messagesWithCode(messages []enterprisestatus.Message, code string) int {
 	n := 0
 	for _, message := range messages {

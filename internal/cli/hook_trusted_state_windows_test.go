@@ -59,7 +59,9 @@ func stubEnterpriseManagedRuntimeResolver(
 ) {
 	t.Helper()
 	previous := enterpriseManagedRuntimeResolver
+	previousClosure := windowsStandaloneHooksHeldClosed
 	enterpriseManagedRuntimeResolver = resolve
+	windowsStandaloneHooksHeldClosed = func() (bool, error) { return false, nil }
 	nativeEnterpriseHookRuntimeSnapshot.Lock()
 	nativeEnterpriseHookRuntimeSnapshot.prepared = false
 	nativeEnterpriseHookRuntimeSnapshot.executable = ""
@@ -76,6 +78,7 @@ func stubEnterpriseManagedRuntimeResolver(
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	t.Cleanup(func() {
 		enterpriseManagedRuntimeResolver = previous
+		windowsStandaloneHooksHeldClosed = previousClosure
 		nativeEnterpriseHookRuntimeSnapshot.Lock()
 		nativeEnterpriseHookRuntimeSnapshot.prepared = false
 		nativeEnterpriseHookRuntimeSnapshot.executable = ""
@@ -91,6 +94,50 @@ func stubEnterpriseManagedRuntimeResolver(
 		nativeEnterpriseHookRuntimeSnapshot.err = nil
 		nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	})
+}
+
+func TestWindowsStandaloneHookClosureOverridesAuthenticatedOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode                   string
+		standalone, held, wantClosed bool
+		readErr                      error
+	}{
+		{name: "standalone closure", mode: "open", standalone: true, held: true, wantClosed: true},
+		{name: "standalone closure unreadable", mode: "open", standalone: true, readErr: errors.New("access denied"), wantClosed: true},
+		{name: "standalone with no closure", mode: "open", standalone: true},
+		{name: "secure client does not read standalone closure", mode: "open", held: true},
+		{name: "already closed", mode: "closed", standalone: true, wantClosed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+				return enterprisehooks.WindowsManagedHookRuntime{
+					Connector: "codex", PolicyActive: true, Registered: true, DataDir: t.TempDir(),
+					GatewayAddr: "127.0.0.1:18970", FailMode: tc.mode, ScopedToken: "test token",
+					GenerationID: strings.Repeat("a", 32),
+				}, nil
+			})
+			previousCheck, previousClosure := standaloneEnterpriseHookCheck, windowsStandaloneHooksHeldClosed
+			standaloneEnterpriseHookCheck = func(string) bool { return tc.standalone }
+			calls := 0
+			windowsStandaloneHooksHeldClosed = func() (bool, error) { calls++; return tc.held, tc.readErr }
+			t.Cleanup(func() {
+				standaloneEnterpriseHookCheck, windowsStandaloneHooksHeldClosed = previousCheck, previousClosure
+			})
+			_ = prepareEnterpriseManagedHookRuntime("codex")
+			if got := enterpriseManagedHookRuntimeForceClosed(); got != (tc.standalone && (tc.held || tc.readErr != nil)) {
+				t.Fatalf("force closed = %t, marker held=%t read error=%v", got, tc.held, tc.readErr)
+			}
+			if got := enterpriseManagedHookRuntimeFailMode(); (got == "closed") != tc.wantClosed {
+				t.Fatalf("fail mode = %q, want closed=%t", got, tc.wantClosed)
+			}
+			if tc.standalone && calls != 1 || !tc.standalone && calls != 0 {
+				t.Fatalf("closure read %d times", calls)
+			}
+			if tc.held && tc.standalone && tc.readErr == nil && enterpriseManagedHookRuntimeFailureReason() != "enterprise_hot_config_undo_unproven" {
+				t.Fatalf("closure reason = %q", enterpriseManagedHookRuntimeFailureReason())
+			}
+		})
+	}
 }
 
 func stageTrustedNativeHookForTest(t *testing.T, failMode string) (string, string) {
