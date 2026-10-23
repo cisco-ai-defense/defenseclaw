@@ -96,6 +96,24 @@ func removedHoldOld(t *testing.T, path string) *os.File {
 	return file
 }
 
+// removedFileIdentity is the identity of the file at path now. On Windows
+// os.Stat reads the file index lazily, by path, at the first os.SameFile, so
+// a FileInfo taken before a rename would name the file at the path by then;
+// one taken through an open handle carries its own index.
+func removedFileIdentity(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
+}
+
 // requireRemovedOldWhole checks that the old file still holds exactly old:
 // nothing ever wrote into it.
 func requireRemovedOldWhole(t *testing.T, file *os.File, old string) {
@@ -148,10 +166,7 @@ func TestRemovedTeardownNeverWritesIntoTheOldScript(t *testing.T) {
 				h.stage(t, c)
 				writeRemovedFile(t, h.script(c), old.body, c.mode)
 				h.recordWritten(t, c)
-				first, err := os.Stat(h.script(c))
-				if err != nil {
-					t.Fatal(err)
-				}
+				first := removedFileIdentity(t, h.script(c))
 				held := removedHoldOld(t, h.script(c))
 				if err := c.Teardown(context.Background(), h.opts); err != nil {
 					t.Fatalf("Teardown: %v", err)
@@ -175,10 +190,8 @@ func TestRemovedTeardownNeverWritesIntoTheOldScript(t *testing.T) {
 				writeRemovedFile(t, h.script(c), old.body, c.mode)
 				h.recordWritten(t, c)
 				links := h.removedHardLinks(t, c)
-				first, err := os.Stat(h.script(c))
-				if err != nil {
-					t.Fatal(err)
-				}
+				first := removedFileIdentity(t, h.script(c))
+				var err error
 				held := removedHoldOld(t, h.script(c))
 				names := append([]string{h.script(c)}, links...)
 				// OpenHands has no post-setup hash, so its marked hook is
@@ -256,10 +269,8 @@ func TestRemovedStubRenameThatFailsLeavesTheOldScriptWhole(t *testing.T) {
 					h.stage(t, c)
 					writeRemovedFile(t, h.script(c), old.body, c.mode)
 					h.recordWritten(t, c)
-					first, err := os.Stat(h.script(c))
-					if err != nil {
-						t.Fatal(err)
-					}
+					first := removedFileIdentity(t, h.script(c))
+					var err error
 					held := removedHoldOld(t, h.script(c))
 					save := removedStubPublish
 					t.Cleanup(func() { removedStubPublish = save })

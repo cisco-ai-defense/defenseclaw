@@ -468,10 +468,8 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 			if c.name == removedOpenHandsID {
 				skip = append(skip, c.editedCopyPath(h.dataDir, []byte(removedOpenHands103Script)))
 			}
-			first, err := os.Stat(h.script(c))
-			if err != nil {
-				t.Fatal(err)
-			}
+			first := removedFileIdentity(t, h.script(c))
+			var err error
 			before := h.snapshot(t, skip...)
 			if err := os.Chmod(hooks, 0o500); err != nil {
 				t.Fatal(err)

@@ -177,10 +177,8 @@ func TestRemovedTeardownSavesTheEditBeforeEveryWrite(t *testing.T) {
 		h.stage(t, c)
 		writeRemovedFile(t, h.script(c), removedOmnigentEditedModule, 0o600)
 		links := h.removedHardLinks(t, c)
-		first, err := os.Stat(h.script(c))
-		if err != nil {
-			t.Fatal(err)
-		}
+		first := removedFileIdentity(t, h.script(c))
+		var err error
 		err = c.Teardown(context.Background(), h.opts)
 		h.requireLeftStep(t, c, err, c.hardLinkStep(h.script(c)))
 		requireRemovedNamesWhole(t, first, removedOmnigentEditedModule, append([]string{h.script(c)}, links...))
