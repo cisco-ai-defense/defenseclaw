@@ -204,7 +204,11 @@ func TestManagedClaudeHealthyInstallsPassVerifyAndOldCopiesAreReported(t *testin
 					t.Fatalf("%s %s flagged a supported Claude Code build: %s", goos, action, warning)
 				}
 				requireOK(t, result)
-				if !result.CoverageComplete || !result.SecurityComplete {
+				// fix/r104-sa-hook-pause reports the Claude Code hook-process
+				// limit (hook_process_fail_open) on every managed Claude Code
+				// host, and that alone lowers security completeness.
+				processLimitOnly := messagesOf(result.Warnings, "hook_process_fail_open") != ""
+				if !result.CoverageComplete || (!result.SecurityComplete && !processLimitOnly) {
 					t.Fatalf("%s %s lowered health for supported builds: %+v", goos, action, result)
 				}
 			}
