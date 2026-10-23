@@ -1265,6 +1265,143 @@ func TestWindowsPendingFirstBundleKeepsTrustAnchors(t *testing.T) {
 	assertWindowsBundleInstalledAnchors(t, layout, want, "after repeating the confirmed bundle")
 }
 
+func TestWindowsRetryConfirmationKeepsAnchorsWhenEarlierReceiptFails(t *testing.T) {
+	for _, rotated := range []bool{false, true} {
+		name := "first anchors"
+		if rotated {
+			name = "rotation"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := newBundleCLIEnv(t)
+			e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+			signed := filepath.Join(e.dir, "retry.dcbundle")
+			if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+				t.Fatalf("sign exit %d: %s", code, out)
+			}
+			layout := stubWindowsBundleHost(t)
+			stubWindowsBundleMarker(t)
+			anchors := e.anchors
+			var previous []byte
+			if rotated {
+				previous = readWindowsBundleAnchors(t, e.anchors)
+				if _, _, err := installWindowsBundleAnchors(e.anchors, newWindowsBundleDriver(layout).AnchorsPath); err != nil {
+					t.Fatal(err)
+				}
+				anchors = windowsBundleCandidateAnchors(t, e)
+			}
+			want := readWindowsBundleAnchors(t, anchors)
+			recoveredPolicy := windowsBundlePolicy
+			windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return nil }
+			prepare := func() (*windowsEnterpriseLifecycleOptions, *cobra.Command) {
+				cmd, _ := windowsBundleCommand()
+				opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: anchors,
+					profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+				if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts); done || err != nil {
+					t.Fatalf("prepare retry: done=%t err=%v", done, err)
+				}
+				cleanupPreparedWindowsBundle(t, opts)
+				return opts, cmd
+			}
+			first, cmd := prepare()
+			firstID := first.bundle.prepared.Receipt.ReceiptID
+			g1 := recordWindowsBundleTestCommit(t, layout, first.bundle.prepared.Receipt, first.bundle.prepared.Config)
+			finishWindowsEnterpriseBundle(cmd, first, newWindowsEnterpriseStandaloneResult("ensure", first))
+			if rc := windowsBundleReceiptState(t, layout, firstID); rc.State != enterprisebundle.StateApplied {
+				t.Fatalf("first receipt = %+v", rc)
+			}
+			second, cmd := prepare()
+			secondID := second.bundle.prepared.Receipt.ReceiptID
+			if firstID == secondID {
+				t.Fatal("retry reused the pending receipt")
+			}
+			g2 := recordWindowsBundleTestCommit(t, layout, second.bundle.prepared.Receipt, second.bundle.prepared.Config)
+			if g2 <= g1 {
+				t.Fatalf("retry did not advance generation: first=%d second=%d", g1, g2)
+			}
+			windowsBundlePolicy = recoveredPolicy
+			finishWindowsEnterpriseBundle(cmd, second, newWindowsEnterpriseStandaloneResult("ensure", second))
+			if rc := windowsBundleReceiptState(t, layout, secondID); rc.State != enterprisebundle.StateConfirmed {
+				t.Fatalf("retry receipt = %+v", rc)
+			}
+			assertWindowsBundleInstalledAnchors(t, layout, want, "after retry confirmation")
+			plain := &windowsEnterpriseLifecycleOptions{profile: managed.ProfileStandalone, installedBeforeRun: true}
+			cmd, _ = windowsBundleCommand()
+			if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", plain); done || err != nil {
+				t.Fatalf("plain ensure: done=%t err=%v", done, err)
+			}
+			if rc := windowsBundleReceiptState(t, layout, firstID); rc.State != enterprisebundle.StateFailed {
+				t.Fatalf("earlier receipt = %+v", rc)
+			}
+			assertWindowsBundleInstalledAnchors(t, layout, want, "after earlier receipt failed")
+			if rotated && bytes.Equal(previous, want) {
+				t.Fatal("rotation did not change anchors")
+			}
+		})
+	}
+}
+
+func TestWindowsRetryWithAnchorsRecoversLegacyAppliedReceiptWithoutAnchors(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "legacy-retry.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	layout := stubWindowsBundleHost(t)
+	stubWindowsBundleMarker(t)
+	cmd, _ := windowsBundleCommand()
+	first := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", first); done || err != nil {
+		t.Fatalf("prepare first delivery: done=%t err=%v", done, err)
+	}
+	cleanupPreparedWindowsBundle(t, first)
+	firstID := first.bundle.prepared.Receipt.ReceiptID
+	recordWindowsBundleTestCommit(t, layout, first.bundle.prepared.Receipt, first.bundle.prepared.Config)
+	recoveredPolicy := windowsBundlePolicy
+	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return nil }
+	finishWindowsEnterpriseBundle(cmd, first, newWindowsEnterpriseStandaloneResult("ensure", first))
+	stage, previous, err := windowsReceiptAnchorPaths(layout, firstID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{stage, previous} {
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, nil, "after legacy stage loss")
+	windowsBundlePolicy = recoveredPolicy
+	cmd, _ = windowsBundleCommand()
+	retry := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", retry); done || err != nil {
+		t.Fatalf("retry did not reach the new bundle: done=%t err=%v", done, err)
+	}
+	cleanupPreparedWindowsBundle(t, retry)
+	if retry.bundle.prepared == nil || retry.bundle.prepared.Receipt == nil ||
+		retry.bundle.prepared.Receipt.ReceiptID == firstID {
+		t.Fatalf("retry did not stage a new receipt: %+v", retry.bundle.prepared)
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, nil, "while retry is staged")
+	retryID := retry.bundle.prepared.Receipt.ReceiptID
+	recordWindowsBundleTestCommit(t, layout, retry.bundle.prepared.Receipt, retry.bundle.prepared.Config)
+	finishWindowsEnterpriseBundle(cmd, retry, newWindowsEnterpriseStandaloneResult("ensure", retry))
+	if rc := windowsBundleReceiptState(t, layout, retryID); rc.State != enterprisebundle.StateConfirmed {
+		t.Fatalf("replacement receipt = %+v", rc)
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, readWindowsBundleAnchors(t, e.anchors), "after retry confirmation")
+	plain := &windowsEnterpriseLifecycleOptions{profile: managed.ProfileStandalone, installedBeforeRun: true}
+	cmd, _ = windowsBundleCommand()
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", plain); done || err != nil {
+		t.Fatalf("plain ensure: done=%t err=%v", done, err)
+	}
+	if rc := windowsBundleReceiptState(t, layout, firstID); rc.State != enterprisebundle.StateFailed {
+		t.Fatalf("legacy receipt after replacement = %+v", rc)
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, readWindowsBundleAnchors(t, e.anchors), "after legacy receipt failed")
+}
+
 func TestWindowsPendingReceiptCannotBorrowEarlierTrustAnchors(t *testing.T) {
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
