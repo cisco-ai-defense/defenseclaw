@@ -791,10 +791,7 @@ func simpleMayImportExportedFunctions(call *syntax.CallExpr, source string, expo
 			strings.HasPrefix(strings.Trim(raw, `'"`), "../") {
 			return true
 		}
-		for _, token := range strings.FieldsFunc(raw, func(r rune) bool {
-			return !(r == '_' || r == '.' || r == '/' || r == '-' || r == '+' ||
-				r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
-		}) {
+		for _, token := range strings.FieldsFunc(raw, simpleNotWordTokenRune) {
 			switch path.Base(token) {
 			case "sh", "bash", "rbash", "dash", "ksh", "mksh", "zsh", "ash", "busybox", "SHELL", "BASH":
 				return true
@@ -806,4 +803,11 @@ func simpleMayImportExportedFunctions(call *syntax.CallExpr, source string, expo
 		}
 	}
 	return false
+}
+
+// simpleNotWordTokenRune separates the program-name and path tokens of an
+// argv word, including those inside script text.
+func simpleNotWordTokenRune(r rune) bool {
+	return r != '_' && r != '.' && r != '/' && r != '-' && r != '+' &&
+		(r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z')
 }
