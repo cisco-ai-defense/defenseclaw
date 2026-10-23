@@ -5407,7 +5407,7 @@
     {
       "name": "DEFENSECLAW_STRICT_AVAILABILITY",
       "category": "security_opt_out",
-      "purpose": "Force transport and missing-token hook failures closed even when the effective fail mode is open (the OpenCode plugin: a gateway outage). Invalid gateway responses still follow guardrail.hook_fail_mode.",
+      "purpose": "Force transport and missing-token hook failures closed even when the effective fail mode is open (the OpenCode and Amp plugins: a gateway outage). Invalid gateway responses still follow guardrail.hook_fail_mode.",
       "default": "unset (no additional force-closed override)",
       "accepted_values": [
         "1",

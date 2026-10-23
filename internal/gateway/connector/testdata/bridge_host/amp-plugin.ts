@@ -27,6 +27,9 @@ const DC_TOKEN_FILE = "{{.TokenFileJS}}"
 const DC_FAIL_MODE: string = "closed" // managed outage choice or Secure Client
 const DC_RESPONSE_FAIL_MODE: string = "closed"
 const DC_MANAGED_HOOK = false
+// DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035), as it
+// does for the native hook and the OpenCode plugin. It can only close.
+const DC_TRANSPORT_FAIL_MODE: string = ["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || "")) ? "closed" : DC_FAIL_MODE
 // Standalone managed installs talk to the gateway's peer-authorized unix hook
 // socket instead of the TCP API: the gateway identifies the caller by
 // kernel-verified uid, so no bearer token leaves this process, and a user who
@@ -249,7 +252,12 @@ async function verifyHookSocket(): Promise<void> {
 			throw new Error("the DefenseClaw hook socket directory is not trusted")
 		}
 	}
-	const socket = await lstat(DC_HOOK_SOCKET)
+	const socket = await lstat(DC_HOOK_SOCKET).catch((error: unknown) => {
+		// Only a socket missing from its verified directories proves the
+		// gateway service is stopped (verifiedSocketAbsences).
+		if ((error as { code?: unknown } | null)?.code === "ENOENT") verifiedSocketAbsences.add(error as object)
+		throw error
+	})
 	if (!socket.isSocket() || !trustedSocketOwner(socket.uid)) {
 		throw new Error("the DefenseClaw hook socket is not trusted")
 	}
@@ -448,6 +456,14 @@ const DC_GATEWAY_STOPPED_TEXT = "DefenseClaw blocked this tool call: the Defense
 	"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
 	"(enterprise_managed_gateway_not_running)"
 
+// verifiedSocketAbsences holds the errors of a managed hook socket proven
+// absent in its verified directories: the one transport failure that proves
+// the gateway service is stopped, and so the only one the administrator's
+// outage-open lets through (the native hook's rule). A missing or untrusted
+// socket directory, and a socket that refuses or vanishes after
+// verification, prove nothing about who would answer, so they block.
+const verifiedSocketAbsences = new WeakSet<object>()
+
 // gatewayStopped reports a transport failure that means the gateway is not
 // running: its hook socket is missing, or nothing accepts the connection
 // (Node ECONNREFUSED, Bun ConnectionRefused).
@@ -645,11 +661,13 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			return data
 		} catch (error) {
 			if (await deploymentRemoved()) return { action: "allow" }
-			if (DC_MANAGED_HOOK && DC_HOOK_SOCKET && gatewayStopped(error)) {
-				if (DC_FAIL_MODE === "open") return { action: "allow" }
-				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
+			// No usable answer. A closed transport mode (the default, or strict
+			// availability) blocks every such failure.
+			if (DC_TRANSPORT_FAIL_MODE === "closed") {
+				if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
+				return { action: "block", reason: `DefenseClaw hook failed closed (${safeError(error)})` }
 			}
-			return failureResponse(safeError(error))
+			return { action: "allow" }
 		} finally {
 			clearTimeout(timer)
 		}

@@ -387,7 +387,12 @@ async function defenseclawVerifyHookSocket() {
       throw new Error("the DefenseClaw hook socket directory is not trusted");
     }
   }
-  const socket = await lstat(DC_HOOK_SOCKET);
+  const socket = await lstat(DC_HOOK_SOCKET).catch((err) => {
+    // Only a socket missing from its verified directories proves the
+    // gateway service is stopped (defenseclawVerifiedSocketAbsences).
+    if (err && err.code === "ENOENT") defenseclawVerifiedSocketAbsences.add(err);
+    throw err;
+  });
   if (!socket.isSocket() || !defenseclawTrustedSocketOwner(socket.uid)) {
     throw new Error("the DefenseClaw hook socket is not trusted");
   }
@@ -704,15 +709,17 @@ async function defenseclawLogFailOpen(reason, category) {
     }
 {{end}}{{end}}    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
   } catch (err) {
-    // A managed outage-open choice applies only to the trusted hook socket
-    // refusing a connection or being absent. Timeouts and other failures block.
+    // A managed outage-open choice applies only to a hook socket proven absent
+    // in its verified directories. A missing or untrusted directory, a socket
+    // that refuses or vanishes after verification, timeouts and other
+    // failures block.
     if (await defenseclawDeploymentRemoved()) return null;
     if (DC_TRANSPORT_FAIL_MODE === "closed") {
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }
-{{if and .Managed (not .SecureClient)}}    if (!DC_MANAGED_HOOK || !DC_HOOK_SOCKET || !defenseclawGatewayStopped(err)) {
-      return { reason: "DefenseClaw hook failed closed (unverified gateway outage)" };
+{{if and .Managed (not .SecureClient)}}    if (!DC_HOOK_SOCKET || !defenseclawVerifiedSocketAbsences.has(err)) {
+      return { reason: defenseclawGatewayStopped(err) ? DC_GATEWAY_STOPPED_TEXT : "DefenseClaw hook failed closed (unverified gateway outage)" };
     }
 {{end}}
 {{if not .Sandbox}}    if (actionable) await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");
@@ -727,6 +734,12 @@ async function defenseclawLogFailOpen(reason, category) {
 const DC_GATEWAY_STOPPED_TEXT = "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
   "Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
   "(enterprise_managed_gateway_not_running)";
+
+// defenseclawVerifiedSocketAbsences holds the errors of a managed hook
+// socket proven absent in its verified directories: the one transport
+// failure that proves the gateway service is stopped, and so the only one
+// the administrator's outage-open lets through (the native hook's rule).
+const defenseclawVerifiedSocketAbsences = new WeakSet();
 
 // defenseclawGatewayStopped reports a transport failure that means the
 // gateway is not running: its hook socket is missing, or nothing accepts
