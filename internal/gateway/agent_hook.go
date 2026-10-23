@@ -82,6 +82,7 @@ type agentHookRequest struct {
 	pendingOccurrenceID         string
 	pendingBodyBytes            int64
 	pendingRecovery             bool
+	pendingProvenance           *pendingHookProvenance // the journaled call was evaluated under it
 	ConnectorName               string
 	AgentID                     string
 	AgentName                   string
@@ -881,7 +882,13 @@ func (a *APIServer) finalizeAgentHook(
 	}
 	env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
 	safeSection("identity", func() {
-		a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
+		if req.pendingProvenance != nil {
+			// A journaled call was stamped before its answer was offered.
+			req.pendingProvenance.stamp(&env)
+			env.Enforced = resp.Action == "block"
+		} else {
+			a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
+		}
 		result.Enforced = env.Enforced
 		// These fields describe the already-active HTTP/hook span. They are
 		// independent of metric export and must remain available even when the

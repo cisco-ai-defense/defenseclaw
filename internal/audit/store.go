@@ -239,7 +239,7 @@ type Store struct {
 	checkpointMu sync.Mutex
 	checkpointDB *sql.DB
 	// durableDB is a synchronous=FULL connection that makes committed
-	// writes power-loss durable (syncCommittedWrites). It is opened on
+	// writes power-loss durable (SyncCommittedWrites). It is opened on
 	// first use under checkpointMu and closed with the store.
 	durableDB *sql.DB
 	// walGuardMu guards the checkpoint connection's data_version as of the

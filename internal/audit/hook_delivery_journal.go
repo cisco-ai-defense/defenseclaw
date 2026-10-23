@@ -33,9 +33,38 @@ const hookDeliveryJournalSchema = `CREATE TABLE IF NOT EXISTS hook_delivery_jour
 // hookDeliveryJournalTime sorts as text in time order (fixed width).
 const hookDeliveryJournalTime = "2006-01-02T15:04:05.000000000Z"
 
-// ErrHookDeliveryJournalFull is the refusal of a journal row when the
-// journal already holds its limit of rows.
+// hookDeliveryJournalBytes is the size of every occurrence in the journal,
+// save the row ?. octet_length reads the size from the row header, not the
+// text.
+const hookDeliveryJournalBytes = `(SELECT COALESCE(SUM(octet_length(occurrence_json)), 0)
+	FROM hook_delivery_journal WHERE id <> ?)`
+
+// ErrHookDeliveryJournalFull is the refusal of a journal row, or of a
+// larger occurrence for one, when the journal already holds its limit of
+// rows or bytes.
 var ErrHookDeliveryJournalFull = errors.New("audit: the hook delivery journal is full")
+
+// ErrHookDeliveryOccurrenceTooLarge is the refusal of an occurrence larger
+// than HookDeliveryJournalLimits.OccurrenceBytes.
+var ErrHookDeliveryOccurrenceTooLarge = errors.New("audit: the hook delivery occurrence is too large to journal")
+
+// HookDeliveryJournalLimits bounds the journal: at most Rows rows, Bytes
+// bytes of occurrences in all, and OccurrenceBytes bytes for one occurrence.
+type HookDeliveryJournalLimits struct {
+	Rows            int
+	OccurrenceBytes int
+	Bytes           int64
+}
+
+func (limits HookDeliveryJournalLimits) check(occurrence []byte) error {
+	if limits.Rows <= 0 || limits.OccurrenceBytes <= 0 || limits.Bytes <= 0 {
+		return errors.New("audit: the hook delivery journal needs row and byte limits")
+	}
+	if len(occurrence) > limits.OccurrenceBytes {
+		return ErrHookDeliveryOccurrenceTooLarge
+	}
+	return nil
+}
 
 // HookDeliveryJournalEntry is one journaled hook occurrence. The zero entry
 // lists the journal from its oldest row (HookDeliveries).
@@ -47,18 +76,25 @@ type HookDeliveryJournalEntry struct {
 }
 
 // JournalHookDelivery stores the occurrence of an answer about to be offered.
-// processID names the gateway process that offers it. A journal that holds
-// limit rows takes no more (ErrHookDeliveryJournalFull): rows pile up only
-// while their records cannot be written. It returns nil only once the row
-// survives a power loss: the insert commits on the store's synchronous=FULL
-// connection, which also makes every earlier commit durable.
-func (s *Store) JournalHookDelivery(ctx context.Context, id, processID string, occurrence []byte, limit int) error {
-	if id == "" || processID == "" || len(occurrence) == 0 || limit <= 0 {
-		return errors.New("audit: a hook delivery journal row needs an id, a process, an occurrence and a limit")
+// processID names the gateway process that offers it. The journal takes no
+// occurrence over limits.OccurrenceBytes (ErrHookDeliveryOccurrenceTooLarge)
+// and no row past limits.Rows rows or limits.Bytes bytes
+// (ErrHookDeliveryJournalFull): rows pile up only while their records cannot
+// be written. It returns nil only once the row survives a power loss: the
+// insert commits on the store's synchronous=FULL connection, which also
+// makes every earlier commit durable.
+func (s *Store) JournalHookDelivery(ctx context.Context, id, processID string, occurrence []byte, limits HookDeliveryJournalLimits) error {
+	if id == "" || processID == "" || len(occurrence) == 0 {
+		return errors.New("audit: a hook delivery journal row needs an id, a process and an occurrence")
+	}
+	if err := limits.check(occurrence); err != nil {
+		return err
 	}
 	result, err := s.execHookDeliveryJournal(ctx, true, `INSERT INTO hook_delivery_journal (id, process_id, created_at, occurrence_json)
-		SELECT ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM hook_delivery_journal) < ?`,
-		id, processID, time.Now().UTC().Format(hookDeliveryJournalTime), string(occurrence), limit)
+		SELECT ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM hook_delivery_journal) < ?
+			AND `+hookDeliveryJournalBytes+` + ? <= ?`,
+		id, processID, time.Now().UTC().Format(hookDeliveryJournalTime), string(occurrence),
+		limits.Rows, id, len(occurrence), limits.Bytes)
 	if err != nil {
 		return fmt.Errorf("audit: journal hook delivery: %w", err)
 	}
@@ -69,25 +105,54 @@ func (s *Store) JournalHookDelivery(ctx context.Context, id, processID string, o
 }
 
 // RecordHookDeliveryVerdict replaces the occurrence of a journal row, as the
-// gateway does once it knows the decision the call has. It reports whether
-// the row exists, and returns nil only once the new occurrence survives a
-// power loss. On an error the row keeps its earlier occurrence.
-func (s *Store) RecordHookDeliveryVerdict(ctx context.Context, id string, occurrence []byte) (bool, error) {
+// gateway does once it knows the decision the call has, within the same
+// limits as JournalHookDelivery. It reports whether the row exists, and
+// returns nil only once the new occurrence survives a power loss. On an
+// error the row keeps its earlier occurrence.
+func (s *Store) RecordHookDeliveryVerdict(ctx context.Context, id string, occurrence []byte, limits HookDeliveryJournalLimits) (bool, error) {
 	if id == "" || len(occurrence) == 0 {
 		return false, errors.New("audit: a hook delivery verdict needs an id and an occurrence")
 	}
+	if err := limits.check(occurrence); err != nil {
+		return false, err
+	}
 	// The insert of the row flushed the folder entry of the WAL file, which
 	// stays while the store is open: an error here leaves the row as it was.
-	result, err := s.execHookDeliveryJournal(ctx, false, `UPDATE hook_delivery_journal SET occurrence_json = ? WHERE id = ?`,
-		string(occurrence), id)
+	result, err := s.execHookDeliveryJournal(ctx, false, `UPDATE hook_delivery_journal SET occurrence_json = ?
+		WHERE id = ? AND `+hookDeliveryJournalBytes+` + ? <= ?`,
+		string(occurrence), id, id, len(occurrence), limits.Bytes)
 	if err != nil && strings.Contains(err.Error(), "no such table") {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("audit: record hook delivery verdict: %w", err)
 	}
-	updated, _ := result.RowsAffected()
-	return updated > 0, nil
+	if updated, _ := result.RowsAffected(); updated > 0 {
+		return true, nil
+	}
+	exists, err := s.hookDeliveryJournaled(ctx, id)
+	if err != nil {
+		return false, fmt.Errorf("audit: record hook delivery verdict: %w", err)
+	}
+	if exists {
+		return true, ErrHookDeliveryJournalFull
+	}
+	return false, nil
+}
+
+func (s *Store) hookDeliveryJournaled(ctx context.Context, id string) (bool, error) {
+	release, err := s.acquireReady()
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	rows, err := s.queryDB(ctx, "hook_delivery_journal", `SELECT 1 FROM hook_delivery_journal WHERE id = ?`, id)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	exists := rows.Next()
+	return exists, rows.Err()
 }
 
 // execHookDeliveryJournal runs one journal write on the durable connection.

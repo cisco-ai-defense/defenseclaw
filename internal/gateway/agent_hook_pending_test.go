@@ -177,7 +177,7 @@ func refuseConnectorHookAuditRows(t *testing.T, f managedHookAuditFixture) func(
 func refuseHookDeliveryJournal(t *testing.T, f managedHookAuditFixture) func() {
 	t.Helper()
 	// The table is created on first use.
-	if err := f.store.JournalHookDelivery(t.Context(), "create", "test", []byte("{}"), 1); err != nil {
+	if err := f.store.JournalHookDelivery(t.Context(), "create", "test", []byte("{}"), pendingHookJournalLimits); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.store.ForgetHookDelivery(t.Context(), "create"); err != nil {
@@ -190,7 +190,7 @@ func refuseHookDeliveryJournal(t *testing.T, f managedHookAuditFixture) func() {
 // of a journal row, until the returned function lifts it.
 func refuseHookDeliveryDecision(t *testing.T, f managedHookAuditFixture) func() {
 	t.Helper()
-	if err := f.store.JournalHookDelivery(t.Context(), "create", "test", []byte("{}"), 1); err != nil {
+	if err := f.store.JournalHookDelivery(t.Context(), "create", "test", []byte("{}"), pendingHookJournalLimits); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.store.ForgetHookDelivery(t.Context(), "create"); err != nil {
@@ -319,7 +319,7 @@ func TestPendingHookUnwritableStoreNeverOffersAnAnswer(t *testing.T) {
 				if err != nil || id == "" {
 					t.Fatalf("connector row id %q: %v", id, err)
 				}
-				if err := f.store.JournalHookDelivery(t.Context(), id, "the failed process", data, 1); err != nil {
+				if err := f.store.JournalHookDelivery(t.Context(), id, "the failed process", data, pendingHookJournalLimits); err != nil {
 					t.Fatal(err)
 				}
 				f.restartedAPI(t, true).recoverPendingHooks(t.Context())
@@ -740,7 +740,7 @@ func TestPendingHookRecoveryTakesAStoredRecordAsTheAuthority(t *testing.T) {
 			if tc.decisionOnly {
 				lift = refuseConnectorHookAuditRows(t, f)
 			}
-			req := p.Request.request(p.ID, p.BodyBytes)
+			req := p.request()
 			req.pendingRecovery = false
 			writer.finalizeAgentHook(enrichAgentHookContext(t.Context(), req), req.ConnectorName, req, tc.stored,
 				nil, nil, time.Millisecond, false, nil)
@@ -907,9 +907,9 @@ func TestPendingHookRemoteDestinationsGetOneDecisionPerRecord(t *testing.T) {
 // acknowledged, the journal empties, and calls are answered again.
 func TestPendingHookFullJournalAnswersClosedAndDrains(t *testing.T) {
 	f := newManagedHookAuditFixture(t, nil)
-	rows, interval := pendingHookJournalRows, pendingHookDrainInterval
-	t.Cleanup(func() { pendingHookJournalRows, pendingHookDrainInterval = rows, interval })
-	pendingHookJournalRows, pendingHookDrainInterval = 2, 0
+	limits, interval := pendingHookJournalLimits, pendingHookDrainInterval
+	t.Cleanup(func() { pendingHookJournalLimits, pendingHookDrainInterval = limits, interval })
+	pendingHookJournalLimits.Rows, pendingHookDrainInterval = 2, 0
 	pendingHookDrainAt.Store(0)
 
 	lift := refuseConnectorHookAuditRows(t, f)
