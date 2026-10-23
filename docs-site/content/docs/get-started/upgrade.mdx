@@ -52,10 +52,13 @@ restarts the gateway the same way.
 End every running agent session before upgrading. Quit OpenCode and Amp
 processes completely, then start a new agent process after the installer
 reports the gateway healthy. OpenCode and Amp load their DefenseClaw plugin
-once per process. An already running process may keep a previous release's
-plugin; with `hook_fail_mode: open`, it may allow tool calls while the gateway
-is stopped, even after the installer replaces the plugin on disk. Managed
-installs keep the fail mode the administrator set.
+once per process. The installer checks for running OpenCode and Amp processes
+before stopping the gateway and refuses the swap if it finds one; close it and
+run the installer again. A previous release's plugin already loaded in memory
+cannot gain the new install-lock check: with `hook_fail_mode: open`, it may
+allow tool calls if the gateway is stopped, even after the installer replaces
+the plugin on disk. Keep those agents closed until the gateway is healthy.
+Managed installs keep the fail mode the administrator set.
 
 If any step fails, the installer puts the previous version back, restarts it,
 and keeps the failed attempt in `~/.defenseclaw/.failed-<time>` for

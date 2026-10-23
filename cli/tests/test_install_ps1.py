@@ -347,6 +347,69 @@ def _ps1_function(name: str) -> str:
     return text[start : text.index("\n}\n", start) + 3]
 
 
+def test_loaded_plugins_block_windows_install_before_gateway_stop() -> None:
+    # A running 1.0.3 Amp or OpenCode process retains its old plugin even
+    # after the installer replaces the file. Keep the old gateway enforcing.
+    classifier = _ps1_function("Get-LoadedPluginAgent")
+    guard = _ps1_function("Assert-NoLoadedPluginAgents")
+    assert "Get-CimInstance Win32_Process" in guard
+    assert "GetOwner" in guard
+    install = _ps1_function("Invoke-Install")
+    rollback = _ps1_function("Invoke-Rollback")
+    handoff = _ps1_function("Invoke-ReleaseInstaller")
+    assert install.index("Assert-NoLoadedPluginAgents") < install.index("Stop-Gateway")
+    # Wait-VenvFree and setup work can outlive the first scan. Recheck at
+    # the gateway-stop boundary so a newly started old plugin is refused.
+    setup = install.index("Disable-SetupHooks")
+    stop = install.index("Stop-Gateway", setup)
+    assert install.index("Assert-NoLoadedPluginAgents", setup) < stop
+    assert re.search(
+        r"try\s*\{\s*Assert-NoLoadedPluginAgents\s*\}\s*catch\s*\{\s*"
+        r"if \(\$Setup\) \{ Restore-SetupInstall \$false \}\s*throw\s*\}",
+        install[setup:stop],
+    )
+    assert rollback.index("Assert-NoLoadedPluginAgents") < rollback.index("Stop-Gateway")
+    assert handoff.index("Assert-NoLoadedPluginAgents") < handoff.index("Stop-Gateway")
+    if not POWERSHELL:
+        return
+    script = classifier + "\n" + "\n".join(
+        f'$p = [pscustomobject]@{{ Name = "{name}"; CommandLine = "{command}" }}; '
+        "Get-LoadedPluginAgent $p"
+        for name, command in [
+            ("opencode.exe", "opencode.exe"),
+            ("amp.exe", "amp.exe"),
+            ("node.exe", "node.exe C:/node_modules/@sourcegraph/amp/cli.js"),
+            ("node.exe", "node.exe unrelated.js"),
+        ]
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert [line for line in result.stdout.splitlines() if line] == ["opencode", "amp", "amp"]
+
+
+def test_refused_late_swap_restores_setup_hooks_without_restarting_gateway(tmp_path: Path) -> None:
+    if not POWERSHELL:
+        pytest.skip("PowerShell is unavailable")
+    staged = tmp_path / "hook-runtime-state.json"
+    restored = tmp_path / "active-state.json"
+    staged.write_text("enforcing", encoding="ascii")
+    root = str(tmp_path).replace("'", "''")
+    destination = str(restored).replace("'", "''")
+    script = _ps1_function("Restore-SetupInstall") + f"""
+$Staging = '{root}'
+$SetupHookState = '{destination}'
+$WasRunning = $true
+$Setup = [pscustomobject]@{{ Root = '{root}' }}
+function Move-Path([string]$Source, [string]$Destination) {{ Move-Item -LiteralPath $Source -Destination $Destination -Force }}
+function Start-SetupGateway {{ throw 'the gateway was never stopped' }}
+Restore-SetupInstall $false
+"""
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert restored.read_text(encoding="ascii") == "enforcing"
+    assert not staged.exists()
+
+
 _GUARDRAIL_CONFIGS = {
     # What 'uninstall --binaries' and 'setup guardrail --disable' save.
     "off": ("guardrail:\n  enabled: false\n  mode: action\n  judge:\n    enabled: true\ngateway:\n  port: 18970\n", True),

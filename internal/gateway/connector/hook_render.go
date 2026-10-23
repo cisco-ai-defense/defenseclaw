@@ -78,6 +78,16 @@ func renderHookTemplate(name string, data templateData) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("render hook %s: %w", name, err)
 	}
+	if !data.Managed && !data.Sandbox && !data.SecureClient && strings.HasSuffix(name, ".sh") && !strings.HasPrefix(name, "_") {
+		// Only a managed render may select the hook socket or managed fail mode.
+		// Clear agent-inherited markers before any per-user bootstrap branch;
+		// the managed and Secure Client render bytes stay unchanged.
+		lines := strings.SplitN(rendered, "\n", 3)
+		if len(lines) != 3 || !strings.HasPrefix(lines[1], hookSchemaVersionMarker) {
+			return nil, fmt.Errorf("render hook %s: missing schema marker", name)
+		}
+		rendered = lines[0] + "\n" + lines[1] + "\nunset DEFENSECLAW_MANAGED_HOOK DEFENSECLAW_HOOK_SOCKET DEFENSECLAW_HOOK_SOCKET_UID\n" + lines[2]
+	}
 	return []byte(rendered), nil
 }
 

@@ -596,7 +596,8 @@ async function defenseclawInstallWindow() {
 }
 
 {{end}}{{end}}async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
-  let token;
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}  if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+{{end}}  let token;
   try {
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
   } catch (_) {
@@ -639,23 +640,24 @@ async function defenseclawInstallWindow() {
       body: JSON.stringify(payload),
       signal: controller.signal,
     }, token), controller.signal);{{end}}
-    if (!res.ok) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+{{end}}    if (!res.ok) {
       // Gateway answered with a bad status (auth/5xx). Honor fail mode.
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}      if (await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
-{{end}}      if (DC_FAIL_MODE === "closed") {
+      if (DC_FAIL_MODE === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
 {{if not .Sandbox}}      await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
 {{end}}      return null;
     }
     const data = await res.json();
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+{{end}}
 {{if .Sandbox}}    // A reply without a known verdict is as untrustworthy as no reply.
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
 {{else}}{{if not .SecureClient}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
-{{if not .Managed}}      if (await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
-{{end}}{{if not .Managed}}      if (DC_FAIL_MODE === "open") {
+{{if not .Managed}}      if (DC_FAIL_MODE === "open") {
         await defenseclawLogFailOpen("invalid gateway verdict", "response");
         return null;
       }
@@ -677,7 +679,7 @@ async function defenseclawInstallWindow() {
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    if (await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
 {{end}}    if (DC_FAIL_MODE === "closed") {
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };

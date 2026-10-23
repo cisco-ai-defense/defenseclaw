@@ -532,7 +532,9 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 
 		const originalBytes = utf8Bytes(body)
 		if (originalBytes > DC_MAX_BODY_BYTES) {
-			if (actionable) return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
+			if (actionable) {
+				return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
+			}
 			const reduced = {
 				hook_event_name: payload.hook_event_name || "",
 				session_id: payload.session_id || "",
@@ -593,8 +595,8 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				signal: controller.signal,
 			}, token), controller.signal)
 			if (!response.ok) return failureResponse(`HTTP ${response.status}`)
-
 			const data = await response.json() as GatewayResponse
+
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
 				return failureResponse("invalid gateway verdict")
 			}

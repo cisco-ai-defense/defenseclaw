@@ -596,16 +596,21 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	}
 
 	async function post(payload: Record<string, unknown>, actionable: boolean): Promise<GatewayResponse> {
-		let body: string
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}		if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}		let body: string
 		try {
 			body = JSON.stringify(payload)
 		} catch (error) {
-			return failureResponse(`payload serialization: ${safeError(error)}`)
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}			return failureResponse(`payload serialization: ${safeError(error)}`)
 		}
 
 		const originalBytes = utf8Bytes(body)
 		if (originalBytes > DC_MAX_BODY_BYTES) {
-			if (actionable) return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
+			if (actionable) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}				return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
+			}
 			const reduced = {
 				hook_event_name: payload.hook_event_name || "",
 				session_id: payload.session_id || "",
@@ -665,21 +670,18 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				body,
 				signal: controller.signal,
 			}, token), controller.signal){{end}}
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (!response.ok) {
-				if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
-				return failureResponse(`HTTP ${response.status}`)
-			}
-{{else}}			if (!response.ok) return failureResponse(`HTTP ${response.status}`)
-{{end}}
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}			if (!response.ok) return failureResponse(`HTTP ${response.status}`)
 			const data = await response.json() as GatewayResponse
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
-{{end}}				return failureResponse("invalid gateway verdict")
+				return failureResponse("invalid gateway verdict")
 			}
 			return data
 		} catch (error) {
 			if (await deploymentRemoved()) return { action: "allow" }
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 {{end}}			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
 				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
 			}

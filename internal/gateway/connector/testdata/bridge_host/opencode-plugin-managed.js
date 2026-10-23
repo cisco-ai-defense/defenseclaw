@@ -571,6 +571,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       return null;
     }
     const data = await res.json();
+
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
 
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };

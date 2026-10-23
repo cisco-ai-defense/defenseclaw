@@ -3,7 +3,6 @@
 import re
 from pathlib import Path
 
-
 UPGRADE_GUIDE = Path(__file__).resolve().parents[1] / "content/docs/get-started/upgrade.mdx"
 
 
@@ -16,5 +15,10 @@ def test_upgrade_requires_fresh_agent_processes_after_gateway_restart() -> None:
     assert re.search(r"start (?:a )?(?:new|fresh) agent process(?:es)? after .*gateway.*healthy", upgrade, re.I)
     assert "OpenCode" in upgrade and "Amp" in upgrade
     assert re.search(r"(?:OpenCode|Amp).*load.*plugin.*once", upgrade, re.I)
-    assert re.search(r"previous release.s plugin.*hook_fail_mode: open.*may allow tool calls.*gateway is stopped", upgrade, re.I)
+    assert re.search(
+        r"previous release.s plugin.*hook_fail_mode: open.*may allow tool calls.*gateway is stopped", upgrade, re.I
+    )
+    assert re.search(
+        r"installer checks for running OpenCode and Amp processes.*before stopping the gateway.*refuses", upgrade, re.I
+    )
     assert not re.search(r"agent hooks on a per-user install block.*hook_fail_mode: open", upgrade, re.I)

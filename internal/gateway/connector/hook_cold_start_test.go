@@ -229,11 +229,16 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 			_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
 			_ = os.WriteFile(filepath.Join(dataDir, "gateway.stopped"), []byte("stopped\n"), 0o600)
 		}, hint: installing, retried: true, blocked: true},
+		"install with inherited socket marker": {prepare: func(dataDir string) {
+			_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
+		}, env: []string{"DEFENSECLAW_HOOK_SOCKET=/tmp/inherited.sock"}, hint: installing, retried: true, blocked: true},
+		"install with inherited managed marker": {prepare: func(dataDir string) {
+			_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
+		}, env: []string{"DEFENSECLAW_MANAGED_HOOK=1"}, hint: installing, retried: true, blocked: true},
 		"no configuration": {prepare: func(dataDir string) {
 			_ = os.Remove(filepath.Join(dataDir, "config.yaml"))
 		}, hint: waited, retried: true},
 		"autostart off": {env: []string{"DEFENSECLAW_GATEWAY_AUTOSTART=0"}, hint: waited, retried: true},
-		"managed hook":  {env: []string{"DEFENSECLAW_MANAGED_HOOK=1"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -341,10 +346,10 @@ func TestClaudeShellHookFailClosedDenyIsOnePlainSentence(t *testing.T) {
 		t.Fatalf("deny reason = %q\nwant %q", reason, want)
 	}
 
-	managed := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, stopped,
+	inherited := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, stopped,
 		"DEFENSECLAW_FAIL_MODE=closed", "DEFENSECLAW_MANAGED_HOOK=1")
-	if code := exitCodeOf(managed.err); code != 2 || strings.TrimSpace(managed.stdout) != "" {
-		t.Fatalf("managed hook: exit %d stdout %q, want its exit-2 contract unchanged", code, managed.stdout)
+	if got := failClosedDenyReason(t, inherited); got != want {
+		t.Fatalf("inherited managed marker changed per-user denial: %q, want %q", got, want)
 	}
 }
 

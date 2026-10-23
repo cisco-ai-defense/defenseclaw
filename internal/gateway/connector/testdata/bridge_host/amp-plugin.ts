@@ -539,16 +539,21 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	}
 
 	async function post(payload: Record<string, unknown>, actionable: boolean): Promise<GatewayResponse> {
+		if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 		let body: string
 		try {
 			body = JSON.stringify(payload)
 		} catch (error) {
+			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 			return failureResponse(`payload serialization: ${safeError(error)}`)
 		}
 
 		const originalBytes = utf8Bytes(body)
 		if (originalBytes > DC_MAX_BODY_BYTES) {
-			if (actionable) return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
+			if (actionable) {
+				if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+				return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
+			}
 			const reduced = {
 				hook_event_name: payload.hook_event_name || "",
 				session_id: payload.session_id || "",
@@ -608,20 +613,18 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				body,
 				signal: controller.signal,
 			}, token), controller.signal)
-			if (!response.ok) {
-				if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
-				return failureResponse(`HTTP ${response.status}`)
-			}
-
+			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+			if (!response.ok) return failureResponse(`HTTP ${response.status}`)
 			const data = await response.json() as GatewayResponse
+			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
-				if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 				return failureResponse("invalid gateway verdict")
 			}
 			return data
 		} catch (error) {
 			if (await deploymentRemoved()) return { action: "allow" }
-			if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
 				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
 			}

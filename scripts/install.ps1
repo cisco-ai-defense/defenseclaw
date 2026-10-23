@@ -575,6 +575,7 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
             # rollback. Older/unrecognized installers need this outer check.
             Wait-VenvFree
             $restartCurrent = [bool](Get-GatewayProcess)
+            Assert-NoLoadedPluginAgents
             if (-not (Stop-Gateway)) { Die "The gateway did not stop; the release installer was not started" }
             Stop-Watchdog
             Assert-GatewayQuiescent "Version change to $target"
@@ -771,6 +772,43 @@ function Get-GatewayProcess {
     $recorded = [string](Get-Field $record "executable")
     if ($recorded -and $process.Path -ne $recorded) { return $null }
     return $process
+}
+
+# A loaded 1.0.3 OpenCode or Amp plugin cannot acquire this release's lock
+# check until its agent process exits. Recognize native binaries and the
+# Node/Bun launchers used by package installs without reading plugin files.
+function Get-LoadedPluginAgent($Process) {
+    $name = ([string]$Process.Name).ToLowerInvariant()
+    if ($name -match '^opencode(\.exe)?$') { return "opencode" }
+    if ($name -match '^amp(\.exe)?$') { return "amp" }
+    if ($name -notmatch '^(node|bun)(\.exe)?$') { return "" }
+    $command = [string]$Process.CommandLine
+    if ($command -match '(?i)(?:^|[\\/\s])opencode(?:[\\/\s]|$)') { return "opencode" }
+    if ($command -match '(?i)@sourcegraph[\\/]amp(?:[\\/\s]|$)' -or
+        $command -match '(?i)(?:^|[\\/\s])amp(?:[\\/\s]|$)') { return "amp" }
+    return ""
+}
+
+function Assert-NoLoadedPluginAgents {
+    $loaded = @()
+    $current = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    try { $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {
+        Die "Could not check running OpenCode and Amp processes; the gateway was not stopped"
+    }
+    foreach ($process in $processes) {
+        $agent = Get-LoadedPluginAgent $process
+        if (-not $agent) { continue }
+        try { $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop } catch {
+            Die "Could not check the owner of a running $agent process; the gateway was not stopped"
+        }
+        if ([int]$owner.ReturnValue -ne 0) {
+            Die "Could not check the owner of a running $agent process; the gateway was not stopped"
+        }
+        if (("$($owner.Domain)\$($owner.User)") -ieq $current) { $loaded += "$agent (PID $($process.ProcessId))" }
+    }
+    if ($loaded.Count) {
+        Die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: $($loaded -join ', ')"
+    }
 }
 
 function Stop-Gateway {
@@ -1036,10 +1074,10 @@ function Disable-SetupHooks {
     if (Test-Path -LiteralPath $SetupHookState) { Move-Path $SetupHookState (Join-Path $Staging "hook-runtime-state.json") }
 }
 
-function Restore-SetupInstall {
+function Restore-SetupInstall([bool]$RestartGateway = $true) {
     $state = Join-Path $Staging "hook-runtime-state.json"
     if (Test-Path -LiteralPath $state) { Move-Path $state $SetupHookState }
-    if ($WasRunning) { Start-SetupGateway $Setup.Root }
+    if ($RestartGateway -and $WasRunning) { Start-SetupGateway $Setup.Root }
 }
 
 function Start-SetupGateway([string]$Root) {
@@ -2192,6 +2230,7 @@ function Invoke-Rollback {
     $wasRunning = [bool](Get-GatewayProcess)
     $savedWasRunning = Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")
     $startAfter = $wasRunning -or $savedWasRunning -eq "true"
+    Assert-NoLoadedPluginAgents
     if (-not (Stop-Gateway)) { Die "The gateway did not stop; nothing was changed" }
     $conversionAttempted = $false
     try {
@@ -2570,6 +2609,7 @@ function Invoke-Install {
     if (-not $PrevVersion -and -not $Yes -and -not $Connector) { $Connector = Select-Connector }
 
     Assert-InstallRoom $FinalEnvRoom "the final Python environment"
+    Assert-NoLoadedPluginAgents
     Wait-VenvFree
     if ($Setup) {
         Disable-SetupHooks
@@ -2579,6 +2619,10 @@ function Invoke-Install {
     $WasRunning = [bool](Get-GatewayProcess)
     if ($WasRunning) {
         Write-Info "Stopping the gateway [$(Get-UtcClock)]"
+        try { Assert-NoLoadedPluginAgents } catch {
+            if ($Setup) { Restore-SetupInstall $false }
+            throw
+        }
         if (-not (Stop-Gateway)) {
             if ($Setup) { Restore-SetupInstall }
             Die "The running gateway did not stop; nothing was changed"
