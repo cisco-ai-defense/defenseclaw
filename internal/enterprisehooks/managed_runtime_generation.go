@@ -152,15 +152,13 @@ type WindowsManagedRuntimeSelectorFullRestoreOptions struct {
 }
 
 // WindowsManagedRuntimeGenerationGCOptions authorizes bounded cleanup of
-// strict, unselected immutable bundles for one authenticated target. Preserve
-// IDs come from the protected lifecycle journal and are always unioned with
-// the currently selected generation.
+// strict, unselected immutable bundles for one authenticated target. The
+// currently selected generation is classified but never collected.
 type WindowsManagedRuntimeGenerationGCOptions struct {
-	Connector                      string
-	TargetSID                      string
-	DataDir                        string
-	HookExecutable                 string
-	ProtectedPreserveGenerationIDs []string
+	Connector      string
+	TargetSID      string
+	DataDir        string
+	HookExecutable string
 }
 
 // WindowsManagedRuntimeGenerationPublication is an opaque prepared immutable
@@ -378,7 +376,8 @@ func RestoreWindowsManagedRuntimeSelectorCAS(
 }
 
 // GarbageCollectWindowsManagedRuntimeGenerations deletes only strict,
-// target-owned, unselected bundles while preserving protected journal pins.
+// target-owned, unselected bundles, and only after every bundle of the target,
+// the selected one included, passed the same classification.
 func GarbageCollectWindowsManagedRuntimeGenerations(
 	opts WindowsManagedRuntimeGenerationGCOptions,
 ) (int, error) {

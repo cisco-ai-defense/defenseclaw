@@ -304,11 +304,13 @@ func resolveWindowsCodexRequirementsLayout(
 }
 
 // A committed journal left by an older gateway must be retired with this
-// release's GC before Setup commits. The staged executable is authenticated by
-// Setup's source descriptor; here the protected installed deployment record
-// supplies the layout that an installed gateway would have derived from its
-// own path. This exception is limited to standalone, LocalSystem and retire.
+// release's GC before Setup commits. The installed deployment record supplies
+// the layout that an installed gateway derives from its path. This exception
+// is limited to standalone, LocalSystem and retire.
 func resolveWindowsStagedRetireInstallRoot(executable string) (string, error) {
+	if err := validateWindowsStagedRetireGatewayImage(executable); err != nil {
+		return "", err
+	}
 	if !enterprisehooks.WindowsStandaloneProcess() {
 		return "", errors.New("staged managed-hook retirement requires the standalone profile")
 	}
@@ -334,28 +336,30 @@ func resolveWindowsStagedRetireInstallRoot(executable string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	programData, err := winpath.TrustedProgramData()
-	if err != nil {
-		return "", err
+	return validateWindowsStagedRetireGatewayLayout(executable, stateRoot, metadata, roots)
+}
+
+// validateWindowsStagedRetireGatewayImage admits the replacement gateway from
+// every folder a documented install path runs it from: the Setup stage
+// %ProgramData%\DefenseClaw-Enterprise-Setup-<hex> that Setup, the MDM
+// wrapper and Intune use, or the payload folder (flat, or with a libexec
+// folder) an administrator runs the lifecycle CLI from. The file and every
+// folder above it must be owned and writable only by SYSTEM, Administrators
+// or TrustedInstaller, which outside the shared Cisco folders is the rule
+// Setup's source descriptor applies to it just before it starts this process.
+func validateWindowsStagedRetireGatewayImage(executable string) error {
+	if !strings.EqualFold(filepath.Base(executable), "defenseclaw-gateway.exe") ||
+		!filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
+		return fmt.Errorf("staged managed-hook retirement requires an exact replacement gateway path, got %s", executable)
 	}
-	return validateWindowsStagedRetireGatewayLayout(executable, stateRoot, programData, metadata, roots)
+	return managed.ValidateTrustedFilePathStrictAncestors(executable, "staged managed-hook retirement gateway")
 }
 
 func validateWindowsStagedRetireGatewayLayout(
-	executable, stateRoot, programData string,
+	executable, stateRoot string,
 	metadata windowsCodexDeploymentMetadata,
 	roots winpath.EnterpriseRoots,
 ) (string, error) {
-	const prefix = "DefenseClaw-Enterprise-Setup-"
-	stageDir := filepath.Dir(executable)
-	stageLeaf := filepath.Base(stageDir)
-	if !strings.EqualFold(filepath.Base(executable), "defenseclaw-gateway.exe") ||
-		!sameWindowsEnterprisePathCLI(filepath.Dir(stageDir), programData) ||
-		!strings.HasPrefix(stageLeaf, prefix) ||
-		len(stageLeaf) != len(prefix)+32 ||
-		strings.Trim(stageLeaf[len(prefix):], "0123456789abcdef") != "" {
-		return "", fmt.Errorf("staged managed-hook retirement requires the exact protected Setup gateway path, got %s", executable)
-	}
 	if metadata.SchemaVersion != 1 ||
 		!managed.IsManagedEnterprise(metadata.DeploymentMode) ||
 		!sameWindowsEnterprisePathCLI(metadata.StateRoot, stateRoot) ||
@@ -364,6 +368,9 @@ func validateWindowsStagedRetireGatewayLayout(
 	}
 	if err := winpath.ValidateEnterpriseInstallRoot(roots, metadata.InstallRoot); err != nil {
 		return "", err
+	}
+	if sameWindowsEnterprisePathCLI(executable, filepath.Join(metadata.InstallRoot, "bin", "defenseclaw-gateway.exe")) {
+		return "", errors.New("staged managed-hook retirement requires a replacement gateway, not the installed gateway")
 	}
 	return filepath.Clean(metadata.InstallRoot), nil
 }

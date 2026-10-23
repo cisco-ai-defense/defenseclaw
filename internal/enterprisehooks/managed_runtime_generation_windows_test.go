@@ -939,6 +939,7 @@ func TestWindowsManagedRuntimeGenerationGCClassifiesPriorInstallState(t *testing
 		absentRoot bool
 		absentHook bool
 		selected   bool
+		extraID    string // another, collectable open generation beside it
 		strict     bool
 		invalid    bool
 		reason     string
@@ -946,6 +947,34 @@ func TestWindowsManagedRuntimeGenerationGCClassifiesPriorInstallState(t *testing
 		{name: "absent data root", absentRoot: true},
 		{name: "absent hooks folder", absentHook: true},
 		{name: "selected missing hooks folder", absentHook: true, selected: true, invalid: true},
+		{name: "selected closed generation stays in use", selected: true, mutate: func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" }},
+		// GC lists names in sorted order: a prior generation that sorts
+		// after or before the refused one must survive the refusal.
+		{name: "selected unsupported schema beside prior open generation", selected: true, extraID: strings.Repeat("f", 32), mutate: func(b *windowsManagedRuntimeBundle) {
+			b.FailMode = "closed"
+			b.SchemaVersion = 2
+		}, invalid: true, reason: "unsupported schema version"},
+		{name: "selected unsupported schema after prior open generation", selected: true, extraID: strings.Repeat("0", 32), mutate: func(b *windowsManagedRuntimeBundle) {
+			b.FailMode = "closed"
+			b.SchemaVersion = 2
+		}, invalid: true, reason: "unsupported schema version"},
+		{name: "selected malformed JSON beside prior open generation", selected: true, extraID: strings.Repeat("f", 32),
+			mutate:    func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" },
+			mutateRaw: func([]byte) []byte { return []byte("{\n") },
+			invalid:   true, reason: "decode managed runtime bundle"},
+		{name: "selected malformed JSON after prior open generation", selected: true, extraID: strings.Repeat("0", 32),
+			mutate:    func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" },
+			mutateRaw: func([]byte) []byte { return []byte("{\n") },
+			invalid:   true, reason: "decode managed runtime bundle"},
+		{name: "unsupported schema after collectable generation", extraID: strings.Repeat("0", 32),
+			mutate:  func(b *windowsManagedRuntimeBundle) { b.SchemaVersion = 2 },
+			invalid: true, reason: "unsupported schema version"},
+		{name: "invalid fail mode after collectable generation", extraID: strings.Repeat("0", 32),
+			mutate:  func(b *windowsManagedRuntimeBundle) { b.FailMode = "permissive" },
+			invalid: true, reason: "invalid fail mode"},
+		{name: "open generations on both sides", extraID: strings.Repeat("0", 32)},
+		{name: "selected closed generation beside prior open generation", selected: true, extraID: strings.Repeat("0", 32),
+			mutate: func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" }},
 		{name: "open generation"},
 		{name: "closed generation", mutate: func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" }},
 		{name: "prior data directory", mutate: func(b *windowsManagedRuntimeBundle) {
@@ -1052,11 +1081,36 @@ func TestWindowsManagedRuntimeGenerationGCClassifiesPriorInstallState(t *testing
 				if err := connector.PublishManagedTargetRuntimeFileNoReplace(path, data); err != nil {
 					t.Fatal(err)
 				}
+				if tc.extraID != "" {
+					bundle.GenerationID = tc.extraID
+					bundle.SchemaVersion = windowsManagedRuntimeGenerationSchema
+					bundle.FailMode = "open"
+					data, err = marshalWindowsManagedRuntimeBundle(bundle)
+					if err != nil {
+						t.Fatal(err)
+					}
+					path, err = windowsManagedRuntimeBundlePath(fixture.options.DataDir, fixture.options.Connector, bundle.GenerationID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := connector.PublishManagedTargetRuntimeFileNoReplace(path, data); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
 			if tc.invalid {
 				if err == nil || removed != 0 {
 					t.Fatalf("incompatible state: removed=%d err=%v", removed, err)
+				}
+				if tc.extraID != "" {
+					path, pathErr := windowsManagedRuntimeBundlePath(fixture.options.DataDir, fixture.options.Connector, tc.extraID)
+					if pathErr != nil {
+						t.Fatal(pathErr)
+					}
+					if _, statErr := os.Lstat(path); statErr != nil {
+						t.Fatalf("a refused GC deleted the prior open generation %s: %v", tc.extraID, statErr)
+					}
 				}
 				if tc.reason != "" && !strings.Contains(err.Error(), tc.reason) {
 					t.Fatalf("incompatible state lost reason %q: %v", tc.reason, err)
@@ -1064,11 +1118,23 @@ func TestWindowsManagedRuntimeGenerationGCClassifiesPriorInstallState(t *testing
 				return
 			}
 			want := 1
-			if tc.absentRoot || tc.absentHook {
+			if tc.absentRoot || tc.absentHook || tc.selected {
 				want = 0
+			}
+			if tc.extraID != "" {
+				want++
 			}
 			if err != nil || removed != want {
 				t.Fatalf("recoverable state: removed=%d, want=%d err=%v", removed, want, err)
+			}
+			if tc.selected && !tc.absentHook {
+				path, pathErr := windowsManagedRuntimeBundlePath(fixture.options.DataDir, fixture.options.Connector, strings.Repeat("a", 32))
+				if pathErr != nil {
+					t.Fatal(pathErr)
+				}
+				if _, statErr := os.Lstat(path); statErr != nil {
+					t.Fatalf("selected bundle was changed by preflight GC: %v", statErr)
+				}
 			}
 		})
 	}
