@@ -32,6 +32,10 @@ import (
 func TestManagedGatewayStartsFromV8ObservabilityConfig(t *testing.T) {
 	clearGenerationBuildError()
 	t.Cleanup(clearGenerationBuildError)
+	// The published generation is process-wide; later tests (the provider
+	// registry reads it) must not see this managed one.
+	previousGeneration := liveGeneration.Load()
+	t.Cleanup(func() { liveGeneration.Store(previousGeneration) })
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	previousTrust := managedPolicyTreeTrust
 	managedPolicyTreeTrust = func(*config.Config, string) error { return nil }
