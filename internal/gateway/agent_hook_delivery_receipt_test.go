@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -42,9 +43,18 @@ type managedHookAuditFixture struct {
 // set, wraps the hook's response writer.
 func newManagedHookAuditFixture(t *testing.T, wrap func(http.ResponseWriter) http.ResponseWriter) managedHookAuditFixture {
 	t.Helper()
+	return newManagedHookAuditFixtureCollectingNo(t, wrap)
+}
+
+// newManagedHookAuditFixtureCollectingNo is newManagedHookAuditFixture with
+// log collection off for each bucket in off.
+func newManagedHookAuditFixtureCollectingNo(
+	t *testing.T, wrap func(http.ResponseWriter) http.ResponseWriter, off ...observability.Bucket,
+) managedHookAuditFixture {
+	t.Helper()
 	installCorrelationHMACForTest()
 	installDefaultProfileConnector(t, "claudecode")
-	fixture := newSidecarRuntimeFixture(t, true)
+	fixture := newSidecarRuntimeFixtureCollectingNo(t, nil, off...)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {
 		t.Fatal(err)
@@ -377,27 +387,33 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 		t.Errorf("hook_decision records = %v, want %v", got, wantDecisions)
 	}
 	// If the pending audit cannot be made durable, the gateway never offers
-	// the evaluated allow. The closed hook gets an outage response.
+	// the evaluated allow. A managed hook resolves the 503 closed in both
+	// fail modes (only a transport outage can open), so both audit a block.
 	blockedDir := filepath.Join(f.api.scannerCfg.DataDir, "not-a-directory")
 	if err := os.WriteFile(blockedDir, []byte("occupied"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.api.scannerCfg.Guardrail.HookFailMode = "closed"
 	f.api.scannerCfg.DataDir = blockedDir
-	const pendingFailureSession = "pending-write-failed"
-	body := managedHookBody(pendingFailureSession, "PreToolUse")
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook",
-		strings.NewReader(body+hookexec.HookDeliveryReceiptAck))
-	request.Header.Set(hookexec.HookDeliveryReceiptHeader, "1")
-	request.Header.Set(hookexec.HookDeliveryPayloadBytesHeader, strconv.Itoa(len(body)))
-	request.Header.Set("Content-Type", "application/json")
-	reply := &recordFullDuplexStatusWriter{ResponseRecorder: httptest.NewRecorder()}
-	f.api.handleAgentHook("claudecode").ServeHTTP(reply, request)
-	if reply.finalStatus != http.StatusServiceUnavailable || strings.Contains(reply.Body.String(), `"action":"allow"`) {
-		t.Fatalf("offered response = status %d body %q, want no answer", reply.finalStatus, reply.Body.String())
-	}
-	if got := f.audited(t, pendingFailureSession)[pendingFailureSession]; got != "block/no_answer" {
-		t.Fatalf("audited outage = %q, want block/no_answer", got)
+	for _, mode := range []string{"closed", "open"} {
+		f.api.scannerCfg.Guardrail.HookFailMode = mode
+		if got := f.api.scannerCfg.EffectiveHookFailModeForConnector("claudecode"); got != mode {
+			t.Fatalf("effective hook fail mode = %q, want %q", got, mode)
+		}
+		pendingFailureSession := "pending-write-failed-" + mode
+		body := managedHookBody(pendingFailureSession, "PreToolUse")
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook",
+			strings.NewReader(body+hookexec.HookDeliveryReceiptAck))
+		request.Header.Set(hookexec.HookDeliveryReceiptHeader, "1")
+		request.Header.Set(hookexec.HookDeliveryPayloadBytesHeader, strconv.Itoa(len(body)))
+		request.Header.Set("Content-Type", "application/json")
+		reply := &recordFullDuplexStatusWriter{ResponseRecorder: httptest.NewRecorder()}
+		f.api.handleAgentHook("claudecode").ServeHTTP(reply, request)
+		if reply.finalStatus != http.StatusServiceUnavailable || strings.Contains(reply.Body.String(), `"action":"allow"`) {
+			t.Fatalf("%s: offered response = status %d body %q, want no answer", mode, reply.finalStatus, reply.Body.String())
+		}
+		if got := f.audited(t, pendingFailureSession)[pendingFailureSession]; got != "block/no_answer" {
+			t.Fatalf("%s: audited outage = %q, want block/no_answer", mode, got)
+		}
 	}
 }
 

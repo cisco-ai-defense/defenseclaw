@@ -579,16 +579,16 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// and the connector telemetry log for a single request.
 		finalized := false
 		var pending *pendingHookOccurrence
+		// Runs last: recovery in this process skips the occurrence until
+		// this handler has finished with it.
+		defer func() { pending.release() }()
 		var rawEventIDs []string
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				elapsed := time.Since(t0)
 				resp := a.hookPanicResponse(ctx, connectorName, req, b, payload)
 				if pending != nil {
-					resp = pending.Unconfirmed.response()
-					if pending.Final != nil {
-						resp = pending.Final.response()
-					}
+					resp = pending.publishedResponse()
 				}
 				a.handleHookPanic(ctx, connectorName, req.HookEventName, recovered)
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
@@ -603,7 +603,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 								connectorName, req.HookEventName, err)
 						}
 					}
-					if pending != nil && finalization.AuditPersisted && finalization.DecisionPersisted {
+					if pending != nil && finalization.AuditPersisted && finalization.DecisionSettled {
 						_ = pending.remove()
 					}
 					finalized = true
@@ -775,8 +775,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				fmt.Fprintf(os.Stderr, "[gateway] hook pending audit unavailable connector=%s: %v\n",
 					connectorName, pendingErr)
 				// The proposal never leaves this process without a durable
-				// occurrence. The hook's non-200 response takes its outage mode.
-				resp = a.deliveredHookDecision(true, connectorName, resp, "")
+				// occurrence. A receipt-capable managed hook resolves this
+				// 503 closed in every fail mode (only a transport outage can
+				// open), so the audit records the block it enforces.
+				resp = pendingFailureHookDecision(resp)
 				persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 				_ = a.finalizeAgentHook(persistCtx, connectorName, req, resp,
 					rawEventIDs, b, time.Since(t0), panicked, auditExtra)
@@ -808,9 +810,16 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		elapsed := time.Since(t0)
 		if pending != nil {
-			if err := pending.setFinal(resp, elapsed); err != nil {
+			published, err := pending.setFinal(resp, elapsed)
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "[gateway] hook receipt state was not persisted connector=%s: %v\n",
 					connectorName, err)
+			}
+			if !published {
+				// Recovery can stand only behind the published occurrence,
+				// so the terminal records carry its answer too: a record
+				// recovery completes later never contradicts one written here.
+				resp = pending.Unconfirmed.response()
 			}
 		}
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
@@ -849,7 +858,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					connectorName, req.HookEventName, err)
 			}
 		}
-		if pending != nil && finalization.AuditPersisted && finalization.DecisionPersisted {
+		if pending != nil && finalization.AuditPersisted && finalization.DecisionSettled {
 			if err := pending.remove(); err != nil {
 				fmt.Fprintf(os.Stderr, "[gateway] hook pending occurrence cleanup failed connector=%s: %v\n",
 					connectorName, err)
@@ -902,8 +911,10 @@ func hookLLMEventExportable(req agentHookRequest) bool {
 }
 
 type hookFinalizationResult struct {
-	AuditPersisted       bool
-	DecisionPersisted    bool
+	AuditPersisted bool
+	// DecisionSettled: the hook_decision record is persisted, or no retry
+	// can keep it (its collection is off, or it cannot be built).
+	DecisionSettled      bool
 	EnforcementPersisted bool
 	Enforced             bool
 	// Response is the verdict to answer with: the evaluated one, or the
@@ -1096,13 +1107,18 @@ func (a *APIServer) finalizeAgentHook(
 	safeSection("observability_v8", func() {
 		if req.pendingRecovery && a.store != nil {
 			var err error
-			result.DecisionPersisted, err = a.store.HasAuditEventID(ctx, req.pendingOccurrenceID+"-decision")
+			result.DecisionSettled, err = a.store.HasAuditEventID(ctx, req.pendingOccurrenceID+"-decision")
 			if err != nil {
 				return
 			}
 		}
-		if !result.DecisionPersisted {
-			result.DecisionPersisted = a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
+		if !result.DecisionSettled {
+			decision := a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
+			result.DecisionSettled = decision.settled()
+			if decision == hookDecisionLogUnbuildable && req.pendingOccurrenceID != "" {
+				fmt.Fprintf(os.Stderr, "[gateway] hook_decision record cannot be built connector=%s event=%s; the connector audit row keeps the decision\n",
+					connectorName, req.HookEventName)
+			}
 		}
 		// With no companion to persist, an enforced hook is
 		// notification-ready as soon as its audit row has landed.
