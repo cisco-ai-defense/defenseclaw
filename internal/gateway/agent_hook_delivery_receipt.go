@@ -138,6 +138,18 @@ func (a *APIServer) unreceiptedHookDecision(hungUpBeforeAnswer bool, connectorNa
 	return resp
 }
 
+// pendingFailureHookDecision is the decision of a receipt-capable call whose
+// pending occurrence could not be made durable. The gateway answers 503
+// without offering the evaluated answer, and a managed standalone hook takes
+// an error answer closed even under the administrator's open outage mode. A
+// policy block keeps its own reason; it is the same result.
+func pendingFailureHookDecision(resp agentHookResponse) agentHookResponse {
+	if resp.Action == "block" {
+		return resp
+	}
+	return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
+}
+
 func failedClosedHookDelivery(resp agentHookResponse, reason string) agentHookResponse {
 	if resp.RawAction == "" {
 		resp.RawAction = resp.Action

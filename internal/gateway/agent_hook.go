@@ -543,6 +543,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// and the connector telemetry log for a single request.
 		finalized := false
 		var pending *pendingHookOccurrence
+		// Runs last: recovery in this process skips the occurrence until
+		// this handler has finished with it.
+		defer func() { pending.release() }()
 		var rawEventIDs []string
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -733,14 +736,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				fmt.Fprintf(os.Stderr, "[gateway] hook pending audit unavailable connector=%s: %v\n",
 					connectorName, pendingErr)
 				// The proposal never leaves this process without a durable
-				// occurrence. The hook's non-200 response takes its outage mode.
-				// No answer was offered and no pending occurrence was saved.
-				// This is a proven outage rather than a missing receipt.
-				if a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) == "open" {
-					resp = unconfirmedHookDelivery(resp)
-				} else if resp.Action != "block" {
-					resp = failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
-				}
+				// occurrence. A receipt-capable managed hook resolves this
+				// 503 closed in every fail mode (only a transport outage can
+				// open), so the audit records the block it enforces.
+				resp = pendingFailureHookDecision(resp)
 				persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 				_ = a.finalizeAgentHook(persistCtx, connectorName, req, resp,
 					rawEventIDs, b, time.Since(t0), panicked, auditExtra)
