@@ -509,9 +509,18 @@ func runWindowsManagedHooksTeardown(
 	if !exists {
 		return fail(errors.New("managed-hook teardown requires protected deployment metadata"))
 	}
-	activation, err := validateWindowsManagedHooksTeardownDeployment(
+	validationAction, committedStandalone, err := windowsManagedHooksTeardownValidationAction(
 		metadata,
 		action,
+		enterprisehooks.WindowsStandaloneProcess(),
+		filepath.Join(installDir, "pending.json"),
+	)
+	if err != nil {
+		return fail(err)
+	}
+	activation, err := validateWindowsManagedHooksTeardownDeployment(
+		metadata,
+		validationAction,
 		manifestSHA256,
 		len(targets),
 	)
@@ -628,6 +637,7 @@ func runWindowsManagedHooksTeardown(
 			windowsManagedHooksCursorOptions(opts, identity.CursorTargets),
 			identity,
 			report.JournalPath,
+			committedStandalone,
 		)
 		report.SurvivingOwnedPathReferences = surviving
 		if rollbackCompleted {
@@ -806,12 +816,39 @@ func captureWindowsManagedHooksTeardownCodexPolicy(identity *windowsManagedHooks
 	return nil
 }
 
+// A standalone uninstall keeps its hooks installed until pending.json is
+// retired. Only its inactive tombstone, in the same protected state tree,
+// can authorize the subsequent hook removal. Secure Client keeps its
+// existing precommit teardown contract.
+func windowsManagedHooksTeardownValidationAction(
+	metadata windowsCodexDeploymentMetadata,
+	action string,
+	standalone bool,
+	pendingPath string,
+) (string, bool, error) {
+	if metadata.Installed == nil || *metadata.Installed ||
+		(action != "prepare" && action != "verify") {
+		return action, false, nil
+	}
+	if !standalone {
+		return "", false, errors.New("committed managed-hook teardown preparation requires standalone profile")
+	}
+	if _, err := os.Lstat(pendingPath); !errors.Is(err, os.ErrNotExist) {
+		if err == nil {
+			return "", false, errors.New("committed managed-hook teardown preparation requires transaction retirement")
+		}
+		return "", false, fmt.Errorf("inspect pending managed-hook transaction: %w", err)
+	}
+	return "finalize", true, nil
+}
+
 func prepareWindowsManagedHooksTeardown(
 	opts connector.WindowsCodexMachineRequirementsOptions,
 	claudeOpts enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions,
 	cursorOpts enterprisehooks.WindowsCursorManagedPolicyTeardownOptions,
 	identity windowsManagedHooksTeardownJournal,
 	journalPath string,
+	committedStandalone bool,
 ) (bool, int, error) {
 	if existing, err := readWindowsManagedHooksTeardownJournal(journalPath); err == nil {
 		if validateErr := validateWindowsManagedHooksTeardownJournal(existing, identity); validateErr != nil {
@@ -834,9 +871,23 @@ func prepareWindowsManagedHooksTeardown(
 			// Partial or mismatched enrollment still fails the installed-state
 			// verification before any mutation.
 		case "captured":
-			return false, 0, errors.New(
-				"managed-hook teardown has an incomplete captured transaction; rollback is required",
-			)
+			if !committedStandalone {
+				return false, 0, errors.New(
+					"managed-hook teardown has an incomplete captured transaction; rollback is required",
+				)
+			}
+			// A process-tree kill or reboot after the uninstall commit can
+			// interrupt post-commit removal. Restore the captured preimage
+			// first, then start a fresh, authenticated removal attempt.
+			if err := rollbackWindowsManagedHooksTeardown(
+				opts,
+				claudeOpts,
+				cursorOpts,
+				existing,
+				journalPath,
+			); err != nil {
+				return false, 0, fmt.Errorf("restore interrupted committed hook teardown: %w", err)
+			}
 		case "rolled_back", "finalized":
 			// A subsequent lifecycle attempt may safely replace a completed
 			// journal after the active set is verified below.

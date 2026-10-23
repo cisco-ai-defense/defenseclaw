@@ -615,6 +615,35 @@ func TestWindowsEnterpriseStandaloneUninstallOnCleanHostIsNoop(t *testing.T) {
 	}
 }
 
+func TestWindowsEnterpriseStandaloneCLIUninstallUsesTransactionModule(t *testing.T) {
+	originalFootprint := windowsEnterpriseStandaloneFootprint
+	originalRunner := windowsEnterpriseStandaloneRunner
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneFootprint = originalFootprint
+		windowsEnterpriseStandaloneRunner = originalRunner
+	})
+	windowsEnterpriseStandaloneFootprint = func() (bool, error) { return true, nil }
+	var script string
+	var args []string
+	windowsEnterpriseStandaloneRunner = func(_ context.Context, _ *cobra.Command, path string, supplied []string) (windowsEnterpriseStandaloneRun, error) {
+		script, args = path, append([]string(nil), supplied...)
+		return windowsEnterpriseStandaloneRun{}, errors.New("stopped at the shared module boundary")
+	}
+	command := &cobra.Command{}
+	command.SetOut(&bytes.Buffer{})
+	command.SetErr(&bytes.Buffer{})
+	opts := &windowsEnterpriseLifecycleOptions{resolvedProfile: "standalone", jsonOutput: true}
+	installer := `C:\stage\install-enterprise.ps1`
+	_ = runWindowsEnterpriseStandaloneAction(
+		context.Background(), command, "uninstall", opts, installer,
+		windowsEnterprisePowerShellArgs("uninstall", opts),
+	)
+	if script != installer || windowsEnterpriseInstallerAction(args) != "Uninstall" ||
+		!containsString(args, "Standalone") {
+		t.Fatalf("CLI uninstall bypassed the shared transaction module: script=%q args=%q", script, args)
+	}
+}
+
 func TestWindowsEnterpriseEventMapping(t *testing.T) {
 	for _, tc := range []struct {
 		action string
@@ -732,6 +761,42 @@ func TestWindowsEnterpriseConfigRefusalReportsTheInstalledHost(t *testing.T) {
 	if result.OK || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
 		!result.Installed || result.InstalledVersion != "1.4.0" || !result.Readiness.Gateway || !result.Readiness.Guardian {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+// GAP-0723: Setup /install forwards a supplied config to this preflight.
+// A connector Windows cannot enroll is a bad argument (1639), before the
+// lifecycle can create a root or change hook wiring.
+func TestWindowsEnterpriseInstallUnsupportedConnectorIsInvalidArguments(t *testing.T) {
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status")}}
+	stub.install(t)
+	previousSource, previousLayout := windowsEnterpriseStandaloneConfigSource, windowsEnterpriseStandaloneLayoutForPreflight
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneConfigSource, windowsEnterpriseStandaloneLayoutForPreflight = previousSource, previousLayout
+	})
+	windowsEnterpriseStandaloneConfigSource = func(string) error { return nil }
+	windowsEnterpriseStandaloneLayoutForPreflight = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{}, errors.New("no installed layout needed")
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("guardrail:\n  connectors:\n    openhands: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := ensureTestOptions()
+	opts.configPath = path
+	opts.jsonOutput = true
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	refused, err := refuseWindowsEnterpriseStandaloneSuppliedConfig(context.Background(), command, "install", opts, `C:\stage\install-enterprise.ps1`)
+	var result enterprisestatus.Result
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if !refused || commandExitCode(err) != 1639 || result.ExitCode != 1639 || result.OK ||
+		len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
+		!strings.Contains(result.Errors[0].Message, "openhands") || len(stub.calls) != 1 || stub.calls[0][1] != "Status" {
+		t.Fatalf("refused=%t err=%v result=%+v calls=%v", refused, err, result, stub.calls)
 	}
 }
 

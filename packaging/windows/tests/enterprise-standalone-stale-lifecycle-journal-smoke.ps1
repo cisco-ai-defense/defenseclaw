@@ -282,6 +282,84 @@ try {
                 }
                 [IO.File]::Delete($layout.ManagedHooksLifecycleJournalPath)
             }
+
+            # GAP-0748: recovery itself retires the rolled-back journal once
+            # Complete-DefenseClawTransaction removes pending.json. A later
+            # timeout must not mistake this old record for unfinished work.
+            function script:Restore-DefenseClawTransactionWithManagedHooksRollback {
+                param([string]$SnapshotPath, [hashtable]$Layout)
+                return [pscustomobject]@{
+                    install_root_created = $false
+                    state_root_created = $false
+                }
+            }
+            function script:Complete-DefenseClawTransaction {
+                param([string]$SnapshotPath, [hashtable]$Layout, [switch]$Rollback)
+                [IO.File]::Delete($Layout.PendingPath)
+            }
+            [IO.File]::WriteAllText($layout.PendingPath, '{"snapshot":"test-snapshot"}')
+            [IO.File]::WriteAllText($layout.ManagedHooksTeardownJournalPath, '{"phase":"rolled_back"}')
+            $recovery = Recover-DefenseClawPendingTransaction `
+                -Layout $layout `
+                -GatewayServiceName DefenseClawGateway `
+                -GuardianServiceName DefenseClawHookGuardian
+            if (-not $recovery.recovered -or
+                [IO.File]::Exists($layout.PendingPath) -or
+                [IO.File]::Exists($layout.ManagedHooksTeardownJournalPath)) {
+                $failures.Add('a completed pending recovery retained its rolled-back teardown journal')
+            }
+
+            # GAP-0758: an older deferred Install could leave an unclaimed
+            # preparation intent over an active install. Repair must retire
+            # that receipt, keep the active deployment, and continue.
+            if (-not ('DcsfNoPendingNative' -as [type])) {
+                Microsoft.PowerShell.Utility\Add-Type -TypeDefinition 'public static class DcsfNoPendingNative { public static object GetDirectorySecuritySnapshotNoFollowIfExists(string path) { return null; } }'
+            }
+            $layout['StateRoot'] = [IO.Path]::Combine($Root, 'state')
+            $layout['PurgeIntentPath'] = [IO.Path]::Combine($Root, 'purge.json')
+            $layout['MetadataPath'] = [IO.Path]::Combine($Root, 'deployment.json')
+            function script:Invoke-DefenseClawSelfUninstallRecovery {
+                param([string]$Action, [hashtable]$Layout, [string]$GatewayServiceName,
+                    [string]$GuardianServiceName, [switch]$Purge, [int]$SelfUninstallCallerPID)
+                return [pscustomobject]@{ handled = $false }
+            }
+            function script:Get-DefenseClawInstallRollbackIntent {
+                param([hashtable]$Layout, [string]$GatewayServiceName, [string]$GuardianServiceName)
+                return [pscustomobject]@{ phase = 'preparing_layout'; snapshot_path = '' }
+            }
+            function script:Get-DefenseClawDeploymentMetadata {
+                param([hashtable]$Layout, [switch]$Required)
+                return [pscustomobject]@{ installed = $true }
+            }
+            function script:Test-DefenseClawMetadataInstalled {
+                param($Metadata)
+                return $true
+            }
+            function script:Initialize-DefenseClawNativeSecurity {
+                return [DcsfNoPendingNative]
+            }
+            $script:UnclaimedIntentRemoved = $false
+            function script:Remove-DefenseClawUnclaimedInstallPreparationIntent {
+                param([hashtable]$Layout, [string]$GatewayServiceName, [string]$GuardianServiceName)
+                $script:UnclaimedIntentRemoved = $true
+            }
+            try {
+                Assert-DefenseClawDeferredInstallIsFresh -Layout $layout
+                $failures.Add('deferred Install accepted an active deployment')
+            }
+            catch {
+                if ($_.Exception.Message -notmatch 'invalid_arguments:.*nothing was changed') {
+                    $failures.Add("deferred Install returned an unexpected refusal: $($_.Exception.Message)")
+                }
+            }
+            $oldIntentRecovery = Invoke-DefenseClawPreLayoutRecovery `
+                -Action Repair `
+                -Layout $layout `
+                -GatewayServiceName DefenseClawGateway `
+                -GuardianServiceName DefenseClawHookGuardian
+            if (-not $script:UnclaimedIntentRemoved -or $oldIntentRecovery.handled) {
+                $failures.Add('Repair failed to clear only the unclaimed deferred-Install receipt')
+            }
         }
         finally {
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $originalProfile

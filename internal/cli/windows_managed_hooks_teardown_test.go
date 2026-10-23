@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -497,6 +498,35 @@ func TestValidateWindowsManagedHooksTeardownDeploymentBindsActionToCommitState(t
 				t.Fatal("invalid finalize deployment metadata was accepted")
 			}
 		})
+	}
+}
+
+func TestWindowsManagedHooksCommitBoundaryForStandaloneUninstall(t *testing.T) {
+	pending := filepath.Join(t.TempDir(), "pending.json")
+	active, inactive := true, false
+	for _, action := range []string{"prepare", "verify"} {
+		validation, committed, err := windowsManagedHooksTeardownValidationAction(
+			windowsCodexDeploymentMetadata{Installed: &active}, action, true, pending)
+		if err != nil || validation != action || committed {
+			t.Fatalf("active %s: validation=%q committed=%t error=%v", action, validation, committed, err)
+		}
+		validation, committed, err = windowsManagedHooksTeardownValidationAction(
+			windowsCodexDeploymentMetadata{Installed: &inactive}, action, true, pending)
+		if err != nil || validation != "finalize" || !committed {
+			t.Fatalf("committed %s: validation=%q committed=%t error=%v", action, validation, committed, err)
+		}
+		if _, _, err = windowsManagedHooksTeardownValidationAction(
+			windowsCodexDeploymentMetadata{Installed: &inactive}, action, false, pending); err == nil {
+			t.Fatalf("Secure Client %s accepted standalone committed teardown", action)
+		}
+	}
+	if err := os.WriteFile(pending, []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := windowsManagedHooksTeardownValidationAction(
+		windowsCodexDeploymentMetadata{Installed: &inactive}, "prepare", true, pending); err == nil ||
+		!strings.Contains(err.Error(), "transaction retirement") {
+		t.Fatalf("pending transaction authorized hook removal: %v", err)
 	}
 }
 

@@ -264,6 +264,9 @@ func embeddedEnterpriseSetupStandalone() bool {
 }
 
 func runEnterpriseSetup(arguments []string, stdout, stderr io.Writer) int {
+	if len(arguments) == 2 && arguments[0] == "--internal-recover-after-parent" {
+		return runStandaloneSetupRecoveryWatchdog(arguments[1], stdout, stderr)
+	}
 	standalone := enterpriseSetupStandaloneFlavor()
 	opts, help, err := parseEnterpriseSetupOptionsForFlavor(arguments, standalone)
 	if help {

@@ -202,6 +202,30 @@ func TestEffectiveWindowsHookConnectorsFiltersUnsupported(t *testing.T) {
 	}
 }
 
+// Standalone preflight accepts Claude Code's established aliases, so the
+// enumerator must produce the canonical row for each spelling. An explicit
+// map disable still wins over a differently spelled scalar.
+func TestEffectiveWindowsStandaloneHookConnectorsCanonicalizeClaudeAliases(t *testing.T) {
+	disabled := false
+	for _, alias := range []string{"claude-code", "claude_code", "Claude-Code"} {
+		t.Run(alias, func(t *testing.T) {
+			cfg := &config.Config{Guardrail: config.GuardrailConfig{Connector: alias}}
+			if got := EffectiveWindowsStandaloneHookConnectors(cfg); len(got) != 1 || got[0] != "claudecode" {
+				t.Fatalf("%s enrollment = %v", alias, got)
+			}
+		})
+	}
+	cfg := &config.Config{Guardrail: config.GuardrailConfig{
+		Connector: "claude-code",
+		Connectors: map[string]config.PerConnectorGuardrailConfig{
+			"claudecode": {Enabled: &disabled},
+		},
+	}}
+	if got := EffectiveWindowsStandaloneHookConnectors(cfg); len(got) != 0 {
+		t.Fatalf("disabled canonical entry was re-enabled by alias: %v", got)
+	}
+}
+
 func prepareWindowsTargetsManifestTestDirectory(t *testing.T) string {
 	t.Helper()
 	originalAncestorTrust := windowsTargetsManifestAncestorTrust

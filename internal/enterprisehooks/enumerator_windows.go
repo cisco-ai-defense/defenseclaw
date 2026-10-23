@@ -1501,6 +1501,9 @@ func effectiveWindowsHookConnectors(cfg *config.Config, standalone bool) []strin
 	ordered := make([]string, 0, len(cfg.Guardrail.Connectors)+1)
 	consider := func(name string, explicitlyDisabled bool) {
 		trimmed := strings.ToLower(strings.TrimSpace(name))
+		if standalone {
+			trimmed = windowsStandaloneHookConnectorName(trimmed)
+		}
 		if trimmed == "" {
 			return
 		}

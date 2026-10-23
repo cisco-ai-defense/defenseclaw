@@ -18,7 +18,56 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
+
+// An implicit deferred install over an active deployment must be rejected by
+// Setup itself, before the lifecycle can publish an unclaimed rollback intent.
+func TestStandaloneSetupRefusesDeferredInstallOverDeployment(t *testing.T) {
+	previousFlavor, previousPayload, previousDeployment := enterpriseSetupStandaloneFlavor, enterpriseSetupPayloadLoader, standaloneSetupDeployment
+	t.Cleanup(func() {
+		enterpriseSetupStandaloneFlavor, enterpriseSetupPayloadLoader, standaloneSetupDeployment = previousFlavor, previousPayload, previousDeployment
+	})
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, true)
+	enterpriseSetupPayloadLoader = func() (enterprisePayload, error) { return loadEnterprisePayload(payloadFS) }
+	for _, state := range []winpath.EnterpriseDeploymentState{
+		winpath.EnterpriseDeploymentInstalled,
+		winpath.EnterpriseDeploymentUnknown,
+	} {
+		t.Run(string(state), func(t *testing.T) {
+			standaloneSetupDeployment = func() (winpath.EnterpriseDeployment, error) {
+				return winpath.EnterpriseDeployment{State: state}, nil
+			}
+			var stdout, stderr bytes.Buffer
+			code := runEnterpriseSetup([]string{"/install", "JSON=1"}, &stdout, &stderr)
+			var result struct {
+				OK       bool `json:"ok"`
+				ExitCode int  `json:"exit_code"`
+				Errors   []struct {
+					Code string `json:"code"`
+				} `json:"errors"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || code != enterpriseInvalidArgsExitCode ||
+				result.OK || result.ExitCode != code || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
+				!strings.Contains(stdout.String(), "nothing was changed") || stderr.Len() != 0 {
+				t.Fatalf("state=%s code=%d stdout=%q stderr=%q parse=%v", state, code, stdout.String(), stderr.String(), err)
+			}
+		})
+	}
+	for _, state := range []winpath.EnterpriseDeploymentState{
+		winpath.EnterpriseDeploymentAbsent,
+		winpath.EnterpriseDeploymentTombstone,
+	} {
+		standaloneSetupDeployment = func() (winpath.EnterpriseDeployment, error) {
+			return winpath.EnterpriseDeployment{State: state}, nil
+		}
+		if err := requireStandaloneDeferredInstallAbsent(); err != nil {
+			t.Fatalf("a %s standalone deployment cannot start a fresh deferred Install: %v", state, err)
+		}
+	}
+}
 
 func TestTimedOutStandaloneSetupRecoveryUsesBoundedJournalReplay(t *testing.T) {
 	stage := `C:\ProgramData\DefenseClaw-Enterprise-Setup-0123456789abcdef0123456789abcdef`

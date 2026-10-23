@@ -17,6 +17,28 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
+// GAP-0723: every configured Windows hook must have an enrollment path.
+// Empty connector blocks still count, and removed IDs must be checked before
+// migration can erase them from the decoded runtime candidate.
+func TestWindowsStandaloneConfigPreflightRefusesUnsupportedConnectors(t *testing.T) {
+	for _, name := range []string{"openhands", "omnigent", "openclaw", "zeptoclaw", "gemini", "unknown-agent"} {
+		t.Run(name, func(t *testing.T) {
+			raw := []byte("guardrail:\n  connectors:\n    codex: {}\n    " + name + ": {}\n")
+			if err := refuseUnsupportedWindowsGuardrailConnectors(raw); err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("unsupported %s accepted: %v", name, err)
+			}
+		})
+	}
+	for _, name := range []string{"claudecode", "claude-code", "codex", "cursor", "amp", "copilot", "hermes", "opencode"} {
+		t.Run("supported-"+name, func(t *testing.T) {
+			raw := []byte("guardrail:\n  connectors:\n    " + name + ": {}\n")
+			if err := refuseUnsupportedWindowsGuardrailConnectors(raw); err != nil {
+				t.Fatalf("supported %s refused: %v", name, err)
+			}
+		})
+	}
+}
+
 // GAP-0705: these values pass the gateway's generic compiler, but the
 // installed Windows service rejects them after config.yaml is replaced.
 // Ensure must refuse them while the previous config is still in place.

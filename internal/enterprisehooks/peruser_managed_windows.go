@@ -681,6 +681,20 @@ func windowsEnumeratorHookConnector(name string, standalone bool) bool {
 	return perUser && (standalone || windowsSecureClientPerUserConnectors[name])
 }
 
+// WindowsStandaloneHookConnectorSupported is the lifecycle preflight's view
+// of the same closed connector set the enumerator can actually enroll.
+func WindowsStandaloneHookConnectorSupported(name string) bool {
+	return windowsEnumeratorHookConnector(windowsStandaloneHookConnectorName(name), true)
+}
+
+func windowsStandaloneHookConnectorName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "claude-code" || name == "claude_code" {
+		return "claudecode"
+	}
+	return name
+}
+
 // WindowsPerUserManagedEnrollmentTarget is one secretless enrollment row.
 type WindowsPerUserManagedEnrollmentTarget struct {
 	SID     string `json:"sid"`

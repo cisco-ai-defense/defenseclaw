@@ -98,6 +98,7 @@ $stream.Dispose()
                     )) {
                     [IO.File]::WriteAllText($file, 'state')
                 }
+                [IO.File]::WriteAllText([IO.Path]::Combine($install, 'bin', 'defenseclaw-hook.exe'), 'installed')
                 return @{
                     InstallRoot = $install
                     BinDirectory = [IO.Path]::Combine($install, 'bin')
@@ -208,6 +209,53 @@ $stream.Dispose()
             Stop-TestReader $reader
             Test-Accepted 'purge after the reader closed' { Invoke-Preflight $layout }
 
+            # GAP-0752: an outside program may hold an installed executable
+            # without running its image from InstallRoot. Refuse before the
+            # hook wiring or services are touched.
+            $layout = New-TestState 'install-holder'
+            $reader = Start-TestReader ([IO.Path]::Combine($layout.BinDirectory, 'defenseclaw-hook.exe')) 120000
+            Test-Refused 'installed binary is held open' {
+                Assert-DefenseClawStandaloneInstallTreeNotInUse `
+                    -Layout $layout `
+                    -GatewayServiceName DefenseClawGateway `
+                    -GuardianServiceName DefenseClawHookGuardian
+            } ('^uninstall_in_use: .*' + [regex]::Escape($engineName) + ' \(pid ' + $reader.Id +
+                '.* holds a file in ' + [regex]::Escape([string]$layout.InstallRoot) +
+                '; nothing was changed\. Close the program and run the uninstall again$')
+            Test-StateIntact 'install-root holder refusal' $layout
+            Stop-TestReader $reader
+
+            # Two short hook invocations on a busy host can be seen on
+            # different passes. Neither PID survived the recheck.
+            $savedInstallRootHolders = ${function:Get-DefenseClawInstallRootHolders}
+            try {
+                $script:HolderPass = 0
+                function Get-DefenseClawInstallRootHolders {
+                    param($InstallRoot, $SelfUninstallCallerPID, $ExcludedProcessIds,
+                        [switch]$FailOnQueryError, [switch]$IncludeProcessId)
+                    $script:HolderPass++
+                    $holderId = 200000 + $script:HolderPass
+                    return [pscustomobject]@{
+                        Id = $holderId
+                        Description = "defenseclaw-hook.exe (pid $holderId)"
+                    }
+                }
+                Test-Accepted 'different short hook holders across recheck' {
+                    Assert-DefenseClawStandaloneInstallTreeNotInUse `
+                        -Layout $layout `
+                        -GatewayServiceName DefenseClawGateway `
+                        -GuardianServiceName DefenseClawHookGuardian
+                }
+                if ($script:HolderPass -ne 2) {
+                    $failures.Add("install holder check ran $script:HolderPass passes, expected two")
+                }
+            }
+            finally {
+                Microsoft.PowerShell.Management\Set-Item `
+                    -Path function:Get-DefenseClawInstallRootHolders `
+                    -Value $savedInstallRootHolders
+            }
+
             # A Restart Manager query that fails refuses the purge before it
             # changes anything: the check did not run, and the purge must not
             # start blind.
@@ -221,6 +269,16 @@ $stream.Dispose()
                     '^uninstall_in_use: Restart Manager could not list the programs that hold DefenseClaw data files \(.*Restart Manager session start failed.*\); ' +
                     'nothing was changed; run the uninstall again$')
                 Test-StateIntact 'purge refused after a failed Restart Manager query' $layout
+                # GAP-0735: the install-root query has the same precommit
+                # guard. An error here used to be taken for no holder and
+                # the uninstall only failed after removing the services.
+                Test-Refused 'install-root Restart Manager query fails' {
+                    Assert-DefenseClawStandaloneInstallTreeNotInUse `
+                        -Layout $layout `
+                        -GatewayServiceName DefenseClawGateway `
+                        -GuardianServiceName DefenseClawHookGuardian
+                } '^uninstall_in_use: Restart Manager could not list the programs that hold DefenseClaw install files \(.*Restart Manager session start failed.*\); nothing was changed; run the uninstall again$'
+                Test-StateIntact 'install-root query refusal' $layout
             }
             finally {
                 Microsoft.PowerShell.Management\Set-Item -Path function:script:Initialize-DefenseClawNativeSecurity -Value $savedNative
