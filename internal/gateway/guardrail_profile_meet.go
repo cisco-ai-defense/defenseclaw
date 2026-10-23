@@ -265,9 +265,14 @@ func meetSourcesKey[T any](connectorName string, sources []*T) string {
 
 // meetRuleGeneration is the rule generation of the meet for connectorName:
 // every rule of every member's generation, a rule all of them define the
-// same way once. A merge that does not compile (over the semantic rule
-// limits) keeps the largest member generation and is logged.
-func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileSet, connectorName string) *compiledRulePackCategories {
+// same way once. A merge that does not compile must refuse the decision;
+// substituting any one member would silently drop the others' rules.
+type meetRuleGenerationResult struct {
+	generation *compiledRulePackCategories
+	err        error
+}
+
+func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileSet, connectorName string) (*compiledRulePackCategories, error) {
 	var sources []*compiledRulePackCategories
 	for _, member := range m.members {
 		if generation := set.memberRuleGeneration(ctx, member, connectorName); generation != nil && !slices.Contains(sources, generation) {
@@ -276,34 +281,39 @@ func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileS
 	}
 	switch len(sources) {
 	case 0:
-		return nil
+		return nil, nil
 	case 1:
-		return sources[0]
+		return sources[0], nil
 	}
 	key := meetSourcesKey(connectorName, sources)
 	if cached, ok := m.rules.Load(key); ok {
-		return cached.(*compiledRulePackCategories)
+		result := cached.(meetRuleGenerationResult)
+		return result.generation, result.err
 	}
 	merged, err := mergeRuleGenerations(sources)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] strictest combination %s: merging the rule packs of its profiles: %v; it scans with the largest one\n", m.derived.Name, err)
-		merged = sources[0]
-		for _, source := range sources[1:] {
-			if ruleCount(source) > ruleCount(merged) {
-				merged = source
-			}
-		}
+		fmt.Fprintf(os.Stderr, "[guardrail] strictest combination %s: merging the rule packs of its profiles: %v; requests are refused\n", m.derived.Name, err)
 	}
-	value, _ := m.rules.LoadOrStore(key, merged)
-	return value.(*compiledRulePackCategories)
+	value, _ := m.rules.LoadOrStore(key, meetRuleGenerationResult{generation: merged, err: err})
+	result := value.(meetRuleGenerationResult)
+	return result.generation, result.err
 }
 
-func ruleCount(generation *compiledRulePackCategories) int {
-	count := 0
-	for _, category := range generation.categories {
-		count += len(category.Rules)
+// refuseUncompiledMeet makes a proven meet's pack merge part of the
+// decision, before any blocking surface can scan with an incomplete pack.
+// The member names and compiler error remain in the administrator's log.
+func (set *guardrailProfileSet) refuseUncompiledMeet(ctx context.Context, decision profileDecision, connectorName string) profileDecision {
+	if decision.Refused != "" {
+		return decision
 	}
-	return count
+	meet := set.meet(decision.Name)
+	if meet == nil {
+		return decision
+	}
+	if _, err := meet.ruleGeneration(ctx, set, connectorName); err != nil {
+		decision.Refused = "DefenseClaw refused this request: the strictest combination of rule packs could not be compiled; ask an administrator to check the profile rule packs"
+	}
+	return decision
 }
 
 // mergeRuleGenerations compiles the union of sources' categories: each

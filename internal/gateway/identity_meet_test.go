@@ -4,6 +4,11 @@
 package gateway
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -11,9 +16,107 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
+
+// Every member pack is valid alone, but their union exceeds the semantic
+// generation limit. The first member's blocking rule must never disappear
+// just because the second member has more rules.
+func TestOverLimitProfileMeetRefusesInsteadOfDroppingAMember(t *testing.T) {
+	stubProfileSources(t)
+	rules := func(prefix string, count int) *compiledRulePackCategories {
+		t.Helper()
+		category := ruleCategory{Name: "command"}
+		for i := range count {
+			marker := fmt.Sprintf("%s-marker-%03d", prefix, i)
+			category.Rules = append(category.Rules, PatternRule{
+				ID: prefix + fmt.Sprintf("-%03d", i), Title: marker,
+				Pattern:    regexp.MustCompile(regexp.QuoteMeta(marker)),
+				Expression: "f.commands.exists(c, c.program == 'echo')",
+				Severity:   "HIGH", Confidence: 0.99, ToolCallOnly: true,
+			})
+		}
+		compiled, err := compileRulePackGeneration([]ruleCategory{category})
+		if err != nil {
+			t.Fatalf("compile %s: %v", prefix, err)
+		}
+		return compiled
+	}
+	aRules := rules("MEET-A", 2)
+	bRules := rules("MEET-B", maxGenerationSemanticRules-1)
+	root := t.TempDir()
+	writeRulePackFixtureFile(t, filepath.Join(root, "a"), "rules/a.yaml", `version: 1
+category: secret
+rules:
+  - id: MEET-A-FIXTURE
+    pattern: "meet_a_fixture"
+    title: first member fixture
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+	writeRulePackFixtureFile(t, filepath.Join(root, "b"), "rules/b.yaml", `version: 1
+category: secret
+rules:
+  - id: MEET-B-FIXTURE
+    pattern: "meet_b_fixture"
+    title: second member fixture
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"a": {Mode: "action", BlockAt: "HIGH", RulePackDir: filepath.Join(root, "a")},
+		"b": {Mode: "action", BlockAt: "HIGH", RulePackDir: filepath.Join(root, "b")},
+	}
+	p := identityTestPlatforms[0]
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "a", Match: config.ProfileMatch{Users: []string{p.id}}},
+		{Profile: "b", Match: config.ProfileMatch{Groups: []string{p.group}}},
+	}
+	set, err := newGuardrailProfileSet(cfg, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set.rules[effectiveRulePackKey(set.profiles["a"].Config, "codex")] = aRules
+	set.rules[effectiveRulePackKey(set.profiles["b"].Config, "codex")] = bRules
+	set.missing = nil
+	if _, err := mergeRuleGenerations([]*compiledRulePackCategories{aRules, bRules}); err == nil {
+		t.Fatal("fixture unexpectedly fits in one compiled generation")
+	}
+	subject := identityTestSubject(p, p.providers[0], stateProven, true)
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, subject)
+	ctx = withGuardrailProfile(ctx, set, "codex")
+	decision := resolvedGuardrailProfileFrom(ctx).decision
+	if decision.Name != config.ProfileMeetName([]string{"a", "b"}) || decision.Refused == "" ||
+		!strings.Contains(decision.Refused, "rule packs") {
+		t.Fatalf("over-limit meet decision = %+v; want a refusal naming the pack merge", decision)
+	}
+	meet := set.meet(decision.Name)
+	if generation, err := meet.ruleGeneration(ctx, set, "codex"); err == nil || generation != nil {
+		t.Fatalf("failed meet returned generation %p, error %v; want no member substitution", generation, err)
+	}
+	api := &APIServer{}
+	api.guardrailProfiles.set.Store(set)
+	if response, refused := api.refuseProfileHook(ctx, connector.HookProfile{}, "codex",
+		agentHookRequest{ConnectorName: "codex", HookEventName: "pre_tool_use"}, nil, nil); !refused || response.Action != "block" {
+		t.Fatalf("hook did not refuse the uncompiled meet: %+v, refused=%v", response, refused)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	if !api.refuseProfileInspect(rec, req, "/api/v1/inspect/tool", "inspect-tool-block", "tool") ||
+		!strings.Contains(rec.Body.String(), `"action":"block"`) {
+		t.Fatalf("inspect did not refuse the uncompiled meet: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	if !refuseProfileProxy(rec, req) || rec.Code != http.StatusForbidden {
+		t.Fatalf("proxy did not refuse the uncompiled meet: %d %s", rec.Code, rec.Body.String())
+	}
+}
 
 // meetTestSet is a profile set of profiles, with no assignments.
 func meetTestSet(t *testing.T, profiles map[string]config.GuardrailProfile) *guardrailProfileSet {
