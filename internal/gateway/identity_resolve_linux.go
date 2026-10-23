@@ -64,7 +64,8 @@ var managedHookPeerRecordedAccountIncarnation = func(account unixidentity.Accoun
 // facts the first one's record gave it the first one's UPN, principal and
 // domain, and the profile assigned to them, until the guardian's next pass
 // (review of GAP-0551). A record that names no incarnation (an older
-// guardian's), or an incarnation that cannot be told now, proves nothing:
+// guardian's), or an incarnation that cannot be told now even with the
+// guardian's recorded SSSD miss, proves nothing:
 // the facts are then the gateway's own, as without a guardian, and the
 // cache looks them up again soon (awaitingSpoolUPN).
 // A record of another SID is an error (readIdentitySpoolFactsForAccount): the
@@ -187,6 +188,7 @@ func resolveNSSPeerFacts(key string) (useridentity.DirectoryFacts, error) {
 		if _, recorded, _ := holderSpoolRecord(key, account, "", now); recorded {
 			facts, err = resolver.DirectoryFactsForRecordedUnsharedUID(uid, now)
 		} else if own, ok := processCredentialFacts(resolver, uid, now); ok {
+			noteGroupDomains(own.Groups)
 			return own, nil
 		}
 	}

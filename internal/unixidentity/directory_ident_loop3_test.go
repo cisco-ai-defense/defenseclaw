@@ -432,3 +432,45 @@ func TestTheUnsharedUIDProofOfALocalAccountNeedsRootOnly(t *testing.T) {
 		t.Fatalf("err = %v; an SSSD account of the uid must still be refused", err)
 	}
 }
+
+// With SSSD before files, the root-only absence check precedes the local
+// owner lookup. The guardian's recorded miss must reach that check too.
+func TestRecordedSSSDMissBeforeFilesStillResolvesLocalOwner(t *testing.T) {
+	const uid = 1021
+	localLine := "t7ar-u2:x:1021:1021::/home/t7ar-u2:/bin/bash\n"
+	accountHost(t, localLine, "t7ar-u2:x:1021:\n", "passwd: sss files\n")
+	sssdConfiguredHost(t)
+	startFakeSSSD(t, nil)
+	previousEUID, previousOnline := sssdEUID, sssdDomainsOnline
+	t.Cleanup(func() { sssdEUID, sssdDomainsOnline = previousEUID, previousOnline })
+	sssdEUID, sssdDomainsOnline = func() int { return uid }, sssctlDomainsOnline
+	results := map[string]commandResult{
+		"passwd 1021":          {stdout: []byte(localLine)},
+		"-s files passwd 1021": {stdout: []byte(localLine)},
+	}
+	r := newFakeNSS(&fakeRun{results: results})
+	if _, err := r.DirectoryFactsForUID(uid, time.Now()); !UnsharedUIDNeedsRoot(err) {
+		t.Fatalf("ordinary lookup error = %v; want the root-only absence proof", err)
+	}
+	facts, err := r.DirectoryFactsForRecordedUnsharedUID(uid, time.Now())
+	if err != nil || facts.Directory != useridentity.DirectoryLocal || facts.Source != useridentity.SourceNSSFiles || len(facts.Groups) == 0 {
+		t.Fatalf("recorded local facts = %+v, %v", facts, err)
+	}
+	if incarnation, known := r.AccountIncarnation(uid, "t7ar-u2"); known || incarnation != "" {
+		t.Fatalf("unrecorded incarnation = %q, %v; want unknown", incarnation, known)
+	}
+	if incarnation, known := r.AccountIncarnationForRecordedUnsharedUID(uid, "t7ar-u2"); !known || incarnation != "files" {
+		t.Fatalf("recorded incarnation = %q, %v; want files", incarnation, known)
+	}
+	// A newly found SSSD account under the uid must defeat the record.
+	const sid = "S-1-5-21-1-2-3-1021"
+	startFakeSSSD(t, map[string]string{"uid:1021": sid, "sid:" + sid: "1021"})
+	results["-s sss passwd 1021"] = commandResult{stdout: []byte(localLine)}
+	if incarnation, known := newFakeNSS(&fakeRun{results: results}).AccountIncarnationForRecordedUnsharedUID(uid, "t7ar-u2"); !known || incarnation != "sid:"+sid {
+		t.Fatalf("new SSSD holder incarnation = %q, %v; want its SID", incarnation, known)
+	}
+	var shared *SharedUIDError
+	if _, err := newFakeNSS(&fakeRun{results: results}).DirectoryFactsForRecordedUnsharedUID(uid, time.Now()); !errors.As(err, &shared) {
+		t.Fatalf("new SSSD holder error = %v; want shared uid", err)
+	}
+}

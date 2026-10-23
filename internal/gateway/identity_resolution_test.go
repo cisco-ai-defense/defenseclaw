@@ -235,6 +235,117 @@ func TestGAP0522UncertainIdentityNamesTheMissingFact(t *testing.T) {
 	}
 }
 
+// Process credentials prove groups even when the holder's account name is
+// unproven. An uncertain weaker named-user assignment cannot change an
+// already proven stricter group decision, regardless of assignment order.
+func TestProvenStrictGroupCoversUncertainWeakerNamedUser(t *testing.T) {
+	p := identityTestPlatforms[0]
+	subject := identityTestSubject(p, p.providers[0], stateProven, true)
+	subject.holderUnproven = true
+	group := config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{p.group}}}
+	name := config.ProfileAssignment{Profile: "watch", Match: config.ProfileMatch{Users: []string{p.name}}}
+	for _, assignments := range [][]config.ProfileAssignment{{group, name}, {name, group}} {
+		set := identityTestSet(t, p, "watch", assignments...)
+		got := set.match(&subject, profileSubjectVerified, "codex", "")
+		if got.Name != "strict" || got.Match != profileMatchGroup || got.Refused != "" || len(got.Unproven) != 0 {
+			t.Fatalf("assignments %+v: %+v; want proven strict group", assignments, got)
+		}
+	}
+	// If the uncertain assignment enforces something the proven one does
+	// not, only the account fact must be named in the refusal.
+	set := identityTestSet(t, p, "watch",
+		config.ProfileAssignment{Profile: "tooling", Match: group.Match},
+		config.ProfileAssignment{Profile: "strict", Match: name.Match})
+	got := set.match(&subject, profileSubjectVerified, "codex", "")
+	if !slices.Equal(got.Unproven, []string{"account:unknown"}) || !strings.Contains(got.Refused, "account holder is unconfirmed") {
+		t.Fatalf("uncertain stronger user assignment = %+v; want account-only refusal", got)
+	}
+}
+
+// A proven meet has the sandbox floor of every member. An unproven account
+// name cannot change that decision when its sandbox floor is already covered,
+// even when both the meet and the uncertain profile carry sandbox settings.
+func TestProvenMeetCoversUncertainSandboxProfile(t *testing.T) {
+	p := identityTestPlatforms[0]
+	subject := identityTestSubject(p, p.providers[0], stateProven, true)
+	subject.holderUnproven = true
+	group := config.ProfileAssignment{Profile: "sandboxed", Match: config.ProfileMatch{Groups: []string{p.group}}}
+	uid := config.ProfileAssignment{Profile: "low", Match: config.ProfileMatch{Users: []string{p.id}}}
+	unknown := config.ProfileAssignment{Profile: "weaker", Match: config.ProfileMatch{Users: []string{p.name}}}
+	for _, assignments := range [][]config.ProfileAssignment{{group, uid, unknown}, {unknown, uid, group}} {
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = "observe"
+		cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+			"sandboxed": {Mode: "action", BlockAt: "HIGH", Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"codex", "claudecode"}}},
+			"low":       {Mode: "action", BlockAt: "LOW"},
+			"weaker":    {Mode: "observe", Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"codex"}}},
+			"stronger":  {Mode: "observe", Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"codex", "claudecode", "hermes"}}},
+		}
+		cfg.Guardrail.DefaultProfile = "weaker"
+		cfg.Guardrail.ProfileAssignments = assignments
+		set := newGuardrailProfileSetFor(t, cfg)
+		got := set.match(&subject, profileSubjectVerified, "codex", "")
+		want := config.ProfileMeetName([]string{"low", "sandboxed"})
+		if got.Name != want || got.Refused != "" || len(got.Unproven) != 0 {
+			t.Fatalf("assignments %+v: %+v; want proven meet %s without refusal", assignments, got, want)
+		}
+		derived, ok := set.derivedProfile(got.Name)
+		if !ok || resolveThresholds(derived.Config, "codex").Block != "LOW" ||
+			!slices.Contains(derived.Sandbox.RequiredFor, "claudecode") {
+			t.Fatalf("meet %+v; want the proven block and sandbox floors", derived)
+		}
+		cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{group, uid,
+			{Profile: "stronger", Match: unknown.Match}}
+		set = newGuardrailProfileSetFor(t, cfg)
+		got = set.match(&subject, profileSubjectVerified, "codex", "")
+		if !slices.Equal(got.Unproven, []string{"account:unknown"}) ||
+			!strings.Contains(got.Refused, "account holder is unconfirmed") {
+			t.Fatalf("uncertain stronger sandbox assignment = %+v; want account-only refusal", got)
+		}
+	}
+	// The same floor rule applies when one proven assignment selected the
+	// stricter sandbox profile without needing a combined profile.
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"sandboxed": {Mode: "action", BlockAt: "LOW", Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"codex", "claudecode"}}},
+		"weaker":    {Mode: "observe", Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"codex"}}},
+	}
+	cfg.Guardrail.DefaultProfile = "weaker"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{group, unknown}
+	set := newGuardrailProfileSetFor(t, cfg)
+	got := set.match(&subject, profileSubjectVerified, "codex", "")
+	if got.Name != "sandboxed" || got.Refused != "" || len(got.Unproven) != 0 {
+		t.Fatalf("proven sandbox profile = %+v; want sandboxed without refusal", got)
+	}
+}
+
+// The default is a fallback, not a proven assignment. Two profiles that
+// currently enforce the same settings can still have different identities;
+// a named-user assignment needs its account fact before replacing default.
+func TestUncertainDifferentProfileNeedsProofWithoutProvenAssignment(t *testing.T) {
+	p := identityTestPlatforms[0]
+	subject := identityTestSubject(p, p.providers[0], stateProven, false)
+	subject.holderUnproven = true
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"watch": {Mode: "observe"}, "other-watch": {Mode: "observe"},
+	}
+	cfg.Guardrail.DefaultProfile = "watch"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "other-watch", Match: config.ProfileMatch{Users: []string{p.name}}},
+	}
+	set, err := newGuardrailProfileSet(cfg, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := set.match(&subject, profileSubjectVerified, "codex", "")
+	if !slices.Equal(got.Unproven, []string{"account:unknown"}) || !strings.Contains(got.Refused, "account holder is unconfirmed") {
+		t.Fatalf("uncertain assignment over default = %+v; want account-only refusal", got)
+	}
+}
+
 // TestResolveIdentityProofStatesAcrossProvidersAndPlatforms is the table
 // of resolveIdentity: every proof state of a pass, for every directory
 // provider, on Linux, macOS and Windows, and the profile the one selection
