@@ -445,11 +445,8 @@ func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
 	if code, stdout, stderr := run(); code != 2 || !strings.Contains(stderr, "hook socket") {
 		t.Fatalf("untrusted socket in outage-open mode: exit %d stdout=%q stderr=%q, want a closed failure", code, stdout, stderr)
 	}
-	opts.HookFailMode = "closed"
-	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewDevinConnector()); err != nil {
-		t.Fatal(err)
-	}
-	bakeHookPathForTest(t, hookPath, filepath.Dir(curlPath)+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+	// The open-mode socket checks below run on this open render; the
+	// stopped-gateway sentence is checked closed at the end.
 	// GAP-0581: a stopped gateway (no socket) is named as such, not as a
 	// socket ownership problem.
 	if err := os.Chmod(f.runDir, 0o755); err != nil {

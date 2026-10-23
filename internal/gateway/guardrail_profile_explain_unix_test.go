@@ -106,7 +106,7 @@ func TestProfileExplainUIDTheDirectoryCannotNameMatchesItsUsersEntry(t *testing.
 	setIdentityLookupBlocking(true)
 	subject, err := profileExplainUnresolved("94404076", unixidentity.ErrNotFound)
 	if err != nil || subject.UserID != "94404076" || !subject.LookupFailed || !subject.accountUnresolved ||
-		!strings.Contains(subject.LookupError, "i/o timeout") {
+		!strings.Contains(subject.LookupError, "account database names no account") {
 		t.Fatalf("subject %+v, err %v; want the uid with the lookup failure", subject, err)
 	}
 	if lookupCalls != 0 {

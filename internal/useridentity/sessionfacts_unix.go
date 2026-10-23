@@ -24,8 +24,10 @@ const (
 	kcmDialTimeout = 200 * time.Millisecond
 	// kcmCallTimeout covers a socket-activated sssd-kcm starting after its
 	// idle exit, which took about 0.4 s on RHEL 9; a running KCM answers in
-	// milliseconds.
-	kcmCallTimeout = time.Second
+	// milliseconds. 750 ms keeps two session-facts reads (the guard's
+	// session check and the gateway request) under 2 s of a managed hook's
+	// 3.5 s answer budget (guard, GAP-0744).
+	kcmCallTimeout = 750 * time.Millisecond
 	krb5ConfPath   = "/etc/krb5.conf"
 	maxKrb5Conf    = 256 << 10
 	// macOS's own Heimdal klist reads the API: cache; it answers in about

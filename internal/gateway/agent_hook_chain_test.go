@@ -2155,8 +2155,15 @@ func TestAuthenticatedHookToolChainResetsOnlyAtSessionBoundary(t *testing.T) {
 					session, "discover", "sudo -l",
 				))
 			case "hermes":
-				callAgentHookForTest(t, handler, hermesToolCall(session, "discover", "sudo -l"))
-				callAgentHookForTest(t, handler, hermesToolResult(session, "discover", "sudo -l", "ok"))
+				// No cwd: under the hooks class rule a cwd-bound `sudo -l` from
+				// Hermes reads as a dynamic command that can write a protected
+				// file and blocks (T9 integration, gap filed); this test is
+				// about the chain across turn boundaries.
+				discover, result := hermesToolCall(session, "discover", "sudo -l"), hermesToolResult(session, "discover", "sudo -l", "ok")
+				delete(discover, "cwd")
+				delete(result, "cwd")
+				callAgentHookForTest(t, handler, discover)
+				callAgentHookForTest(t, handler, result)
 			default:
 				callAgentHookForTest(t, handler, claudeToolEvent(
 					"PreToolUse", session, "discover", "sudo -l",
@@ -2177,7 +2184,9 @@ func TestAuthenticatedHookToolChainResetsOnlyAtSessionBoundary(t *testing.T) {
 					"tool.execute.before", session, "elevate", "sudo -u root /bin/sh",
 				))
 			case "hermes":
-				got = callAgentHookForTest(t, handler, hermesToolCall(session, "elevate", "sudo -u root /bin/sh"))
+				elevate := hermesToolCall(session, "elevate", "sudo -u root /bin/sh")
+				delete(elevate, "cwd")
+				got = callAgentHookForTest(t, handler, elevate)
 			default:
 				got = callAgentHookForTest(t, handler, claudeToolEvent(
 					"PreToolUse", session, "elevate", "sudo -u root /bin/sh",

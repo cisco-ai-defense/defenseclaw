@@ -189,7 +189,6 @@ func TestCopilotReconcileReplacesRegisteredOldOpenCopy(t *testing.T) {
 	assertCurrentOnly(repaired)
 }
 
-
 func TestHardeningJQFallbackRejectsStructuredOutputWithoutParser(t *testing.T) {
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("bash is required")
