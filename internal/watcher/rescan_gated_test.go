@@ -387,6 +387,9 @@ func TestRescanCycleRefusesInstalledSkillAddedToDeniedList(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Claw.ConfigFile = ocPath
+	// An installed OpenClaw is the active connector (w13: no connector resolves
+	// to OpenClaw by default).
+	cfg.Claw.Mode = config.ClawOpenClaw
 	skillPath := filepath.Join(skillDir, "epa-notes")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
 		t.Fatal(err)

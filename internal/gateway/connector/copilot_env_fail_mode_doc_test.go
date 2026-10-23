@@ -91,8 +91,11 @@ func TestCopilotConfirmIsCopilotsAskAndThePageSaysWhereItDenies(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := strings.Join(strings.Fields(string(data)), " ")
-	for _, want := range []string{"In Autopilot and in a non-interactive run (`copilot -p`) Copilot cannot ask, so it denies the call",
-		"the audit row still reads `action=confirm`"} {
+	// Outside Secure Client the gateway maps a Copilot CLI confirm to a block
+	// (s2-copilot, copilotCLIProfileMapVerdict): its hook does not say whether
+	// it can show the prompt. The rendered ask above stays Secure Client's.
+	for _, want := range []string{"`preToolUse` blocks an action-mode call that needs confirmation",
+		"DefenseClaw records the delivered denial as a block"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("connectors/copilot.mdx does not say %q", want)
 		}
