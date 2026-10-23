@@ -823,7 +823,7 @@ func TestToolChainObserveRetriesWholeTransactionOnBusy(t *testing.T) {
 	if err := <-released; err != nil {
 		t.Fatal(err)
 	}
-	if len(capture.operations) == 0 {
+	if len(capture.observed()) == 0 {
 		t.Fatal("whole-operation retry did not report SQLite contention")
 	}
 }
