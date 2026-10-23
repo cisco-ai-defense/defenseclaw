@@ -1575,8 +1575,16 @@ func shellBodyProtectedWrite(code, cwd, home string) bool {
 }
 
 func protectedReachFromText(command, cwd, home string) bool {
-	protected := newProtectedFiles(home)
-	ssh := filepath.Join(home, ".ssh")
+	return protectedReachFromTextWithFiles(command, cwd, home, newProtectedFiles(home), filepath.Join(home, ".ssh"), true)
+}
+
+func protectedReachFromTextWithFiles(command, cwd, home string, protected protectedFiles, ssh string, includeHome bool) bool {
+	reaches := func(path string) bool {
+		if includeHome {
+			return protectedReachTextPath(path, protected, ssh)
+		}
+		return protectedReachPath(path, protected, ssh)
+	}
 	seen := map[string]bool{}
 	text := strings.ReplaceAll(strings.ReplaceAll(command, "${HOME}/", home+"/"), "$HOME/", home+"/")
 	for _, quoted := range unprovenQuotedPath {
@@ -1592,7 +1600,7 @@ func protectedReachFromText(command, cwd, home string) bool {
 			if candidate == "~" || strings.HasPrefix(candidate, "~/") {
 				candidate = filepath.Join(home, strings.TrimPrefix(candidate, "~/"))
 			}
-			if protectedReachTextPath(OperandPath(candidate, cwd), protected, ssh) {
+			if reaches(OperandPath(candidate, cwd)) {
 				return true
 			}
 		}
@@ -1615,7 +1623,7 @@ func protectedReachFromText(command, cwd, home string) bool {
 		if token == "~" || strings.HasPrefix(token, "~/") {
 			token = filepath.Join(home, strings.TrimPrefix(token, "~/"))
 		}
-		if protectedReachTextPath(OperandPath(token, cwd), protected, ssh) {
+		if reaches(OperandPath(token, cwd)) {
 			return true
 		}
 	}

@@ -30,13 +30,13 @@ func actionWindowsPath(value, cwd, home string) (string, bool) {
 			break
 		}
 	}
-	if strings.ContainsAny(value, "$%*?[]") {
-		return "", false
-	}
 	if strings.HasPrefix(lower, "//?/unc/") {
 		value = "//" + value[len("//?/unc/"):]
 	} else if strings.HasPrefix(lower, "//?/") {
 		value = value[len("//?/"):]
+	}
+	if strings.ContainsAny(value, "$%*?[]") {
+		return "", false
 	}
 	if strings.HasPrefix(strings.ToLower(value), "/cygdrive/") && len(value) >= 12 && value[11] == '/' {
 		value = value[10:11] + ":" + value[11:]
@@ -193,6 +193,13 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 	if depth >= 8 {
 		return "dynamic-command"
 	}
+	first := 0
+	for first < len(words) && strings.Contains(words[first], "=") && !strings.HasPrefix(words[first], "-") {
+		first++
+	}
+	if first < len(words) && actionMakeProgram(words[first]) {
+		return actionMakeDecision(words[first:], words[:first], cwd, home)
+	}
 	program := strings.ToLower(strings.TrimSuffix(path.Base(strings.ReplaceAll(words[0], `\`, "/")), ".exe"))
 	for i := 1; i < len(words); i++ {
 		if words[i] != ">" && words[i] != ">>" && words[i] != "<" && words[i] != "<<" {
@@ -304,8 +311,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 			continue
 		}
 		if strings.ContainsAny(word, "/\\$%") || len(word) >= 2 && word[1] == ':' {
-			readOnly := program == "cat" || program == "type" || program == "get-content" ||
-				program == "get-childitem" || program == "grep"
+			readOnly := actionPrivateKeyReader(program, true)
 			protected, resolved := actionWindowsProtected(word, cwd, home, readOnly)
 			if protected || !resolved && writeCapable && actionWindowsPathPosition(program, i+1, words) &&
 				!actionWindowsBoundedSourceGlob(program, i+1, words, word, cwd, home) {
@@ -459,10 +465,13 @@ func actionWindowsWrapperDecision(program string, words []string, cwd, home stri
 			index++
 		}
 	}
+	var env []string
 	if program == "env" {
+		start := index
 		for index < len(words) && strings.Contains(words[index], "=") && !strings.HasPrefix(words[index], "-") {
 			index++
 		}
+		env = words[start:index]
 	}
 	if program == "flock" && index < len(words) {
 		if protected, resolved := actionWindowsProtected(words[index], cwd, home, false); protected || !resolved {
@@ -477,6 +486,9 @@ func actionWindowsWrapperDecision(program string, words []string, cwd, home stri
 	}
 	if index >= len(words) || words[index] == "" {
 		return "dynamic-command"
+	}
+	if len(env) > 0 && actionMakeProgram(words[index]) {
+		return actionMakeDecision(words[index:], env, cwd, home)
 	}
 	return actionWindowsStatement(words[index:], cwd, home, depth+1)
 }
