@@ -488,10 +488,31 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			for _, path := range boundedStrings(report.Kept, 8) {
 				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: left %s for %s in place: it holds hooks DefenseClaw did not write\n", boundedString(path, 512), user)
 			}
+			requestedCoverageKept := false
+			if request := outcome.Job.Request.CopilotVSCode; request != nil {
+				localPath := filepath.Clean(enterprisepolicy.CopilotVSCodeLocalHookFilePath(outcome.Job.Account.Home))
+				pluginDir := filepath.Clean(enterprisepolicy.CopilotPluginDir(outcome.Job.Account.Home))
+				for _, path := range report.Kept {
+					path = filepath.Clean(path)
+					if request.HookFile && path == localPath ||
+						request.Plugin && (path == pluginDir || strings.HasPrefix(path, pluginDir+string(filepath.Separator))) {
+						requestedCoverageKept = true
+						break
+					}
+				}
+			}
+			if requestedCoverageKept {
+				clean = false
+				dropped[outcome.Job.Account.UID] = true
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: cannot claim VS Code Local coverage for %s while independent handlers occupy DefenseClaw's hook files\n", user)
+			}
 			if report.Error != "" {
 				clean = false
+				if request := outcome.Job.Request.CopilotVSCode; request != nil && (request.HookFile || request.Plugin) {
+					dropped[outcome.Job.Account.UID] = true
+				}
 				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: VS Code Local hooks for %s: %s\n", user, boundedString(report.Error, 512))
-			} else if !governed || staleUIDs[outcome.Job.Account.UID] || !vscodeScoped[outcome.Job.Account.UID] {
+			} else if !requestedCoverageKept && (!governed || staleUIDs[outcome.Job.Account.UID] || !vscodeScoped[outcome.Job.Account.UID]) {
 				dropped[outcome.Job.Account.UID] = true
 			}
 		}

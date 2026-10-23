@@ -217,9 +217,9 @@ func TestCopilotVSCodeUpgradeFromTheReleasedRender(t *testing.T) {
 	}
 }
 
-// The Local hook file is the guardian's (WIN-R1-25): verify reports a
-// deleted or edited copy as drift, setup rewrites it and uninstall removes
-// it, whatever the user left at its name.
+// The Local hook file is the guardian's path (WIN-R1-25): a deleted copy is
+// repaired. An independent handler added at that path is kept and reported;
+// non-file entries at the dedicated path are still replaced or removed.
 func TestCopilotVSCodeRepairsATamperedHookFile(t *testing.T) {
 	home := t.TempDir()
 	run := func(keep, dryRun bool) CopilotVSCodeUserResult {
@@ -246,13 +246,19 @@ func TestCopilotVSCodeRepairsATamperedHookFile(t *testing.T) {
 	if err := os.WriteFile(hookFile, edited, 0o400); err != nil {
 		t.Fatal(err)
 	}
-	if result := run(true, true); len(result.Changed) != 1 || len(result.Kept) != 0 {
-		t.Fatalf("verify must report the edited hook file as drift: %+v", result)
+	if result := run(true, true); len(result.Kept) != 1 || result.HookFileOK {
+		t.Fatalf("verify must report the independent hook: %+v", result)
 	}
-	if result := run(true, false); !result.HookFileOK {
-		t.Fatalf("setup must repair the edited hook file: %+v", result)
+	if result := run(true, false); len(result.Kept) != 1 || result.HookFileOK {
+		t.Fatalf("setup must leave the independent hook alone: %+v", result)
+	}
+	if got := readFile(t, hookFile); got != string(edited) {
+		t.Fatalf("setup changed the independent hook: %s", got)
 	}
 	// A directory (or link) a user puts at the name is replaced too.
+	if err := os.Chmod(hookFile, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(hookFile); err != nil {
 		t.Fatal(err)
 	}

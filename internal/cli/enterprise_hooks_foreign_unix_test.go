@@ -501,6 +501,58 @@ func TestStandaloneForeignCleanupRewritesADeletedCopilotLocalHookFileAtOnce(t *t
 	}
 }
 
+func TestStandaloneCopilotKeptIndependentHookDoesNotClaimCoverage(t *testing.T) {
+	previousCfg, previousManifest := cfg, enterpriseHookManifest
+	previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
+	previousRecordLoad, previousRecordWrite := enterpriseHookLoadCopilotVSCodeAccounts, enterpriseHookWriteCopilotVSCodeAccounts
+	t.Cleanup(func() {
+		cfg, enterpriseHookManifest = previousCfg, previousManifest
+		enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner = previousLoad, previousCheck, previousRunner
+		enterpriseHookLoadCopilotVSCodeAccounts, enterpriseHookWriteCopilotVSCodeAccounts = previousRecordLoad, previousRecordWrite
+		enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+		enterpriseHookForeignCleanupState.leftoversClean = false
+	})
+	enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+	enterpriseHookForeignCleanupState.leftoversClean = false
+	cfg = &config.Config{DataDir: useUserCleanupStateDir(t), DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"copilot": {}}
+	useStandaloneForeignHookFenceFixture(t)
+	enterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
+	home := t.TempDir()
+	account := enterprisehooks.UnixEligibleAccount{User: "alice", UID: 4242, GID: 4242, Home: home}
+	enterpriseHookLoadEligibleAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		return []enterprisehooks.UnixEligibleAccount{account}, nil
+	}
+	enterpriseHookLoadCopilotVSCodeAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) { return nil, nil }
+	var recorded []enterprisehooks.UnixEligibleAccount
+	enterpriseHookWriteCopilotVSCodeAccounts = func(_ string, accounts []enterprisehooks.UnixEligibleAccount) error {
+		recorded = accounts
+		return nil
+	}
+	enterpriseHookCheckHome = func(string, int) enterprisehooks.HomeCheck {
+		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable}
+	}
+	enterpriseHookWorkerRunner = func(_ context.Context, worker enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		if request.CopilotVSCode == nil || !request.CopilotVSCode.HookFile {
+			t.Fatalf("guardian omitted the required Local hook for %s", worker.User)
+		}
+		response := enterpriseHookWorkerResponse{CopilotVSCode: &enterpriseHookWorkerCopilotVSCodeReport{
+			Kept: []string{enterprisepolicy.CopilotVSCodeLocalHookFilePath(worker.Home)},
+		}}
+		for _, target := range request.Targets {
+			response.Targets = append(response.Targets, enterpriseHookWorkerTargetResult{Index: target.Index, OK: true})
+		}
+		return response, nil
+	}
+	var log bytes.Buffer
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, time.Now(), enterprisehooks.Manifest{}, nil, "")
+	if enterpriseHookForeignCleanupState.leftoversClean || len(recorded) != 0 {
+		t.Fatalf("guardian claimed Local hook coverage after preserving an independent handler: clean=%t recorded=%v log=%s",
+			enterpriseHookForeignCleanupState.leftoversClean, recorded, log.String())
+	}
+}
+
 func TestStandaloneForeignCleanupRemovesVSCodeHooksOfAccountsNoLongerEligible(t *testing.T) {
 	previousCfg, previousManifest := cfg, enterpriseHookManifest
 	previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
