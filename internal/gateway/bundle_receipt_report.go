@@ -93,7 +93,13 @@ type bundleReceiptReporter struct {
 	reportedRefusal string
 	attempts        int
 	gaugeVersion    uint64
-	seen            map[string]bool
+	// seen holds the ids whose reported marker is on disk.
+	seen map[string]bool
+	// unmarked holds the ids reported by this process whose marker write
+	// failed. They are not reported again, and every poll writes their
+	// marker again: the change commands remove a change event from the
+	// spool only once its marker is on disk.
+	unmarked map[string]bool
 	// changes holds the change events offered and not reported yet.
 	changes map[string]*changeDelivery
 	// pins keeps the record of each change the same on every offer.
@@ -149,6 +155,7 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 			r.gaugeVersion = v
 		}
 	}
+	r.retryMarkers()
 	r.reportSpool()
 	r.reportChanges()
 	info, err := os.Lstat(r.receiptPath)
@@ -233,23 +240,46 @@ func (r *bundleReceiptReporter) hasSeen(id string) bool {
 	if !reportableID(id) {
 		return false
 	}
-	if r.seen[id] {
+	if r.seen[id] || r.unmarked[id] {
 		return true
 	}
 	info, err := os.Lstat(filepath.Join(r.seenDir(), id))
 	return err == nil && info.Mode().IsRegular()
 }
 
-func (r *bundleReceiptReporter) markSeen(id string) {
+// markSeen records that id is reported and reports whether its marker is on
+// disk. An id whose marker write failed is kept in unmarked, so it is not
+// reported again, and retryMarkers writes its marker at the next poll.
+func (r *bundleReceiptReporter) markSeen(id string) bool {
 	if !reportableID(id) {
-		return
+		return false
+	}
+	err := os.MkdirAll(r.seenDir(), 0o700)
+	if err == nil {
+		err = configwrite.WriteFileDurable(filepath.Join(r.seenDir(), id), []byte("reported\n"), 0o600)
+	}
+	if err != nil {
+		if r.unmarked == nil {
+			r.unmarked = make(map[string]bool)
+		}
+		r.unmarked[id] = true
+		return false
 	}
 	if r.seen == nil {
 		r.seen = make(map[string]bool)
 	}
 	r.seen[id] = true
-	if err := os.MkdirAll(r.seenDir(), 0o700); err == nil {
-		_ = configwrite.WriteFileDurable(filepath.Join(r.seenDir(), id), []byte("reported\n"), 0o600)
+	delete(r.unmarked, id)
+	return true
+}
+
+// retryMarkers writes the marker of each id reported without one. A change
+// keeps its delivery state and its record pin until its marker is on disk.
+func (r *bundleReceiptReporter) retryMarkers() {
+	for id := range r.unmarked {
+		if r.markSeen(id) {
+			r.markedChange(id)
+		}
 	}
 }
 
@@ -363,15 +393,23 @@ func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
 	}
 }
 
-// changeReported marks a change every sink confirmed, and then drops its
-// record pin, once the marker is on disk: until then a restart offers it
-// again, and its pin keeps that offer the same record.
+// changeReported marks a change every sink confirmed. Its delivery state
+// and record pin go once the marker is on disk: until then a restart offers
+// it again, and its pin keeps that offer the same record.
 func (r *bundleReceiptReporter) changeReported(id string) {
-	delete(r.changes, id)
-	r.markSeen(id)
-	if r.reportedOnDisk(id) {
-		_ = r.pins.Remove(id)
+	if r.markSeen(id) {
+		r.markedChange(id)
 	}
+}
+
+// markedChange drops the delivery state and the record pin of a change
+// whose marker is on disk.
+func (r *bundleReceiptReporter) markedChange(id string) {
+	if _, ok := r.changes[id]; !ok && !enterprisestatus.ValidChangeEventID(id) {
+		return
+	}
+	delete(r.changes, id)
+	_ = r.pins.Remove(id)
 }
 
 // reportedOnDisk reports whether the reported marker of id is on disk.

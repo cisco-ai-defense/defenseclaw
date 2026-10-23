@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"math"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -22,23 +24,44 @@ import (
 
 const hookDecisionMetricsV8Producer = "gateway.hook.decision.metrics"
 
+// hookDecisionLogResult is what became of one hook_decision record. Only a
+// failed attempt can turn out differently on a retry, so a pending managed
+// hook occurrence (agent_hook_pending.go) waits for its record only then.
+type hookDecisionLogResult uint8
+
+const (
+	// hookDecisionLogFailed: the record could be kept and was not (the
+	// runtime is not bound yet, the local write failed).
+	hookDecisionLogFailed hookDecisionLogResult = iota
+	// hookDecisionLogPersisted: the record is in the local store.
+	hookDecisionLogPersisted
+	// hookDecisionLogNotCollected: the collection policy for
+	// guardrail.evaluation logs drops the record.
+	hookDecisionLogNotCollected
+	// hookDecisionLogUnbuildable: these facts never make a valid record.
+	hookDecisionLogUnbuildable
+)
+
+// settled reports whether a retry cannot change the result.
+func (result hookDecisionLogResult) settled() bool { return result != hookDecisionLogFailed }
+
 func (a *APIServer) emitHookDecisionObservabilityV8(
 	ctx context.Context,
 	req agentHookRequest,
 	resp agentHookResponse,
 	env HookAuditEnvelope,
 	panicked bool,
-) bool {
+) hookDecisionLogResult {
 	if a == nil || ctx == nil {
-		return false
+		return hookDecisionLogFailed
 	}
 	meta, connectorName, ok := a.hookDecisionMeta(ctx, req)
 	if !ok {
-		return false
+		return hookDecisionLogUnbuildable
 	}
-	persisted := a.emitHookDecisionLogV8(ctx, req, resp, env, panicked, meta, connectorName)
+	result := a.emitHookDecisionLogV8(ctx, req, resp, env, panicked, meta, connectorName)
 	a.recordHookDecisionMetricsV8(ctx, req, resp, env, panicked, meta, connectorName)
-	return persisted
+	return result
 }
 
 func (a *APIServer) emitHookDecisionLogV8(
@@ -49,15 +72,15 @@ func (a *APIServer) emitHookDecisionLogV8(
 	panicked bool,
 	meta llmEventMeta,
 	connectorName string,
-) bool {
+) hookDecisionLogResult {
 	emitter := a.observabilityV8RuntimeEmitter()
 	if emitter == nil {
-		return false
+		return hookDecisionLogFailed
 	}
 	connectorName = hookDecisionMetricConnector(connectorName)
 	severity := observability.NormalizeSeverity(firstNonEmpty(resp.Severity, "NONE"))
 	if !severity.Valid || !severity.Present {
-		return false
+		return hookDecisionLogUnbuildable
 	}
 	// A clean or INFO decision logs at INFO. A finding severity (LOW..CRITICAL)
 	// has no log level, so the record's severity_text follows the security
@@ -91,7 +114,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 		observability.ProducerKey(gatewaylog.EventHookDecision),
 	)
 	if err != nil {
-		return false
+		return hookDecisionLogUnbuildable
 	}
 	outcome, emitErr := emitter.Emit(ctx, metadata, func(
 		snapshot observabilityruntime.EmitContext,
@@ -197,7 +220,18 @@ func (a *APIServer) emitHookDecisionLogV8(
 		meta.Identity.applyTo(&identityInput)
 		return builder.BuildLogCompatHookDecision(identityInput)
 	})
-	return emitErr == nil && outcome.LocalPersisted()
+	var pipelineErr *pipeline.Error
+	switch {
+	case emitErr == nil && outcome.LocalPersisted():
+		return hookDecisionLogPersisted
+	case emitErr == nil && outcome.Admission() == router.AdmissionDrop:
+		// Collection is off for this record (a managed-only projection
+		// included): no retry keeps it locally.
+		return hookDecisionLogNotCollected
+	case errors.As(emitErr, &pipelineErr) && pipelineErr.Code() == pipeline.ErrorRecordBuild:
+		return hookDecisionLogUnbuildable
+	}
+	return hookDecisionLogFailed
 }
 
 func (a *APIServer) recordHookDecisionMetricsV8(

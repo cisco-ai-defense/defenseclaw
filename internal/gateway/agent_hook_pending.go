@@ -148,14 +148,19 @@ func (a *APIServer) beginPendingHookOccurrence(
 	// The handler owns its occurrence from before it is published until it
 	// returns; recovery in this process leaves it alone.
 	livePendingHooks.claim(p.path)
-	if err := p.save(); err != nil {
+	if err := p.publish(); err != nil {
+		// A write that failed late can still have published the file.
+		// This call is answered 503 and audited here, so recovery must not
+		// audit it a second time.
+		_ = os.Remove(p.path)
 		livePendingHooks.release(p.path)
 		return nil, err
 	}
 	return p, nil
 }
 
-func (p *pendingHookOccurrence) save() error {
+// publish writes the occurrence and syncs its directory.
+func (p *pendingHookOccurrence) publish() error {
 	data, err := json.Marshal(p)
 	if err != nil {
 		return err
@@ -169,11 +174,39 @@ func (p *pendingHookOccurrence) save() error {
 	return syncDaemonDir(filepath.Dir(p.path))
 }
 
-func (p *pendingHookOccurrence) setFinal(resp agentHookResponse, elapsed time.Duration) error {
+// setFinal records the answer the hook took and reports whether the
+// published occurrence carries it, which is what recovery will audit. A
+// failed rewrite can still have replaced the file, so the file is read back.
+func (p *pendingHookOccurrence) setFinal(resp agentHookResponse, elapsed time.Duration) (bool, error) {
+	next := *p
 	final := pendingResponse(resp)
-	p.Final = &final
-	p.ElapsedNanos = int64(elapsed)
-	return p.save()
+	next.Final = &final
+	next.ElapsedNanos = int64(elapsed)
+	err := next.publish()
+	if err == nil || next.finalPublished() {
+		*p = next
+		return true, err
+	}
+	return false, err
+}
+
+// finalPublished reports whether the occurrence file on disk carries a final
+// answer.
+func (p *pendingHookOccurrence) finalPublished() bool {
+	data, err := safefile.ReadRegularFileBounded(p.path, maxPendingHookBytes)
+	if err != nil {
+		return false
+	}
+	var published pendingHookOccurrence
+	return json.Unmarshal(data, &published) == nil && published.ID == p.ID && published.Final != nil
+}
+
+// publishedResponse is the answer recovery audits for this occurrence.
+func (p *pendingHookOccurrence) publishedResponse() agentHookResponse {
+	if p.Final != nil {
+		return p.Final.response()
+	}
+	return p.Unconfirmed.response()
 }
 
 func (p *pendingHookOccurrence) remove() error {
@@ -219,9 +252,17 @@ func (o *pendingHookOwners) release(path string) {
 	delete(o.paths, path)
 }
 
-// defaultPendingHookRetryInterval is how often recovery retries occurrences
-// it could not audit yet (the audit store was not ready or not writable).
-const defaultPendingHookRetryInterval = 30 * time.Second
+const (
+	// defaultPendingHookRetryInterval is how often recovery looks again for
+	// occurrences nobody could audit yet: the audit store was not ready or
+	// not writable, at startup or for a live handler.
+	defaultPendingHookRetryInterval = 30 * time.Second
+	// A listener waits for the first recovery pass at most this long, and
+	// only until the pass has handled this many entries. The rest is
+	// recovered while the gateway serves.
+	defaultPendingHookStartupBudget  = 2 * time.Second
+	defaultPendingHookStartupEntries = 64
+)
 
 // pendingHookQuarantineSuffix marks an occurrence file recovery refused. It
 // is kept for inspection and no longer read.
@@ -234,19 +275,54 @@ var pendingHookReported = struct {
 	seen map[string]struct{}
 }{seen: map[string]struct{}{}}
 
-// ensurePendingHookRecovery runs one recovery pass before the first API
-// listener of this server serves hooks. Recovery never stops the gateway: an
-// entry it cannot read is skipped or quarantined with a finding, and an entry
-// it cannot audit yet stays on disk and is retried in the background.
+// ensurePendingHookRecovery starts this server's recovery and gives its
+// first pass a bounded head start before the listener serves: until the pass
+// has handled defaultPendingHookStartupEntries entries or
+// defaultPendingHookStartupBudget has passed, whichever is first. A large
+// backlog or a busy audit store never holds a listener longer. Recovery never
+// stops the gateway: an entry it cannot read is skipped or quarantined with a
+// finding, and an entry it cannot audit yet stays on disk for a later pass.
 func (a *APIServer) ensurePendingHookRecovery(ctx context.Context) {
 	a.pendingHookRecoveryOnce.Do(func() {
-		if a.recoverPendingHookOccurrences(ctx) {
-			go a.retryPendingHookRecovery(ctx)
+		budget := a.pendingHookStartupBudget
+		if budget <= 0 {
+			budget = defaultPendingHookStartupBudget
 		}
+		a.pendingHookStartup = make(chan struct{})
+		a.pendingHookStartupDeadline = time.Now().Add(budget)
+		go a.runPendingHookRecovery(ctx, a.pendingHookStartup)
 	})
+	wait := time.NewTimer(time.Until(a.pendingHookStartupDeadline))
+	defer wait.Stop()
+	select {
+	case <-a.pendingHookStartup:
+	case <-wait.C:
+	case <-ctx.Done():
+	}
 }
 
-func (a *APIServer) retryPendingHookRecovery(ctx context.Context) {
+// runPendingHookRecovery runs the first pass, opening startup after its
+// startup share of entries, then looks again every retry interval while the
+// server runs: an occurrence a live handler could not audit (the store was
+// busy or not writable) is recovered then, without a restart.
+func (a *APIServer) runPendingHookRecovery(ctx context.Context, startup chan struct{}) {
+	var opened sync.Once
+	open := func() { opened.Do(func() { close(startup) }) }
+	defer open()
+	limit := a.pendingHookStartupEntries
+	if limit <= 0 {
+		limit = defaultPendingHookStartupEntries
+	}
+	handled := 0
+	a.recoverPendingHookOccurrences(ctx, func() {
+		if handled++; handled >= limit {
+			open()
+		}
+	})
+	open()
+	if a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() {
+		return
+	}
 	interval := a.pendingHookRetryInterval
 	if interval <= 0 {
 		interval = defaultPendingHookRetryInterval
@@ -259,9 +335,7 @@ func (a *APIServer) retryPendingHookRecovery(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		if !a.recoverPendingHookOccurrences(ctx) {
-			return
-		}
+		a.recoverPendingHookOccurrences(ctx, nil)
 	}
 }
 
@@ -284,79 +358,80 @@ func (a *APIServer) reportPendingHookProblem(kind, entry string, err error) {
 	}
 }
 
-// recoverPendingHookOccurrences audits the occurrences an earlier process
-// (or an earlier server of this process) left behind. A pending entry with no
-// durable receipt outcome is deliberately unconfirmed: a restart cannot infer
-// what the previous process's confirmation reached. It reports whether an
-// entry is still waiting for a later pass.
-func (a *APIServer) recoverPendingHookOccurrences(ctx context.Context) (retry bool) {
+// recoverPendingHookOccurrences audits the occurrences an earlier process,
+// an earlier server of this process or a handler that could not finish left
+// behind. A pending entry with no durable receipt outcome is deliberately
+// unconfirmed: a restart cannot infer what the previous process's
+// confirmation reached. entryDone, when set, runs after each entry. An entry
+// that is not audited yet stays on disk for the next pass.
+func (a *APIServer) recoverPendingHookOccurrences(ctx context.Context, entryDone func()) {
 	if a == nil || a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() {
-		return false
+		return
 	}
 	dir := a.pendingHookDir()
 	if dir == "" {
-		return false
+		return
 	}
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return false
+		return
 	}
 	if err != nil {
 		a.reportPendingHookProblem("unreadable directory", pendingHookDirName, err)
-		return true
+		return
 	}
 	if err := safefile.ValidatePrivateDirectory(dir); err != nil {
 		// Nothing in a directory that is not private is trusted. Its
 		// entries wait until the directory is repaired.
 		a.reportPendingHookProblem("directory protection drift", pendingHookDirName, err)
-		return true
+		return
 	}
 	for _, entry := range entries {
 		if ctx.Err() != nil {
-			return true
+			return
 		}
-		if a.recoverPendingHookEntry(ctx, dir, entry) {
-			retry = true
+		a.recoverPendingHookEntry(ctx, dir, entry)
+		if entryDone != nil {
+			entryDone()
 		}
 	}
-	return retry
 }
 
-// recoverPendingHookEntry handles one directory entry and reports whether it
-// must be retried. A panic in one entry is a finding, never a gateway exit.
-func (a *APIServer) recoverPendingHookEntry(ctx context.Context, dir string, entry fs.DirEntry) (retry bool) {
+// recoverPendingHookEntry handles one directory entry. A panic in one entry
+// is a finding, never a gateway exit.
+func (a *APIServer) recoverPendingHookEntry(ctx context.Context, dir string, entry fs.DirEntry) {
 	name := entry.Name()
 	// An interrupted atomic rewrite can leave its unpublished temp. The last
 	// published JSON file is still the recovery authority.
 	if strings.HasPrefix(name, ".safefile-") || strings.HasSuffix(name, pendingHookQuarantineSuffix) {
-		return false
+		return
 	}
 	id, ok := strings.CutSuffix(name, ".json")
 	if !ok || uuid.Validate(id) != nil {
 		// Not ours (a Finder or editor file, a subdirectory): left alone.
 		a.reportPendingHookProblem("foreign entry skipped", name, errors.New("not a pending occurrence"))
-		return false
+		return
 	}
 	path := filepath.Join(dir, name)
 	if !livePendingHooks.claim(path) {
 		// A handler of this process still owns it, or another recovery
 		// pass is replaying it.
-		return false
+		return
 	}
 	defer livePendingHooks.release(path)
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.reportPendingHookProblem("recovery panic", name, fmt.Errorf("%v", recovered))
-			retry = true
 		}
 	}()
 	p, err := readPendingHookOccurrence(path, id, entry)
 	if errors.Is(err, fs.ErrNotExist) {
 		// Finalized and removed after this pass listed the directory.
-		return false
+		return
 	}
 	if err != nil {
-		return a.quarantinePendingHookOccurrence(path, name, err)
+		a.quarantinePendingHookOccurrence(path, name, err)
+		return
 	}
 	req := p.Request.request(p.ID, p.BodyBytes)
 	resp := p.Unconfirmed.response()
@@ -369,18 +444,16 @@ func (a *APIServer) recoverPendingHookEntry(ctx context.Context, dir string, ent
 	persistCtx = withRedactionDecision(persistCtx, resp.RedactionEnabled)
 	result := a.finalizeAgentHook(persistCtx, req.ConnectorName, req, resp,
 		p.RawEventIDs, nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra)
-	if !result.AuditPersisted || !result.DecisionPersisted {
+	if !result.AuditPersisted || !result.DecisionSettled {
 		// Kept on disk: stable IDs make a later pass skip whichever
 		// record already landed.
 		a.reportPendingHookProblem("audit not persisted yet", name,
-			fmt.Errorf("audit=%t hook_decision=%t", result.AuditPersisted, result.DecisionPersisted))
-		return true
+			fmt.Errorf("audit=%t hook_decision=%t", result.AuditPersisted, result.DecisionSettled))
+		return
 	}
 	if err := p.remove(); err != nil {
 		a.reportPendingHookProblem("cleanup failed", name, err)
-		return true
 	}
-	return false
 }
 
 func readPendingHookOccurrence(path, id string, entry fs.DirEntry) (*pendingHookOccurrence, error) {
@@ -407,14 +480,13 @@ func readPendingHookOccurrence(path, id string, entry fs.DirEntry) (*pendingHook
 }
 
 // quarantinePendingHookOccurrence renames an occurrence recovery refused, so
-// later passes skip it, and records the finding. It reports a retry only
-// when the rename itself failed.
-func (a *APIServer) quarantinePendingHookOccurrence(path, name string, cause error) bool {
+// later passes skip it, and records the finding. A failed rename is tried
+// again by the next pass.
+func (a *APIServer) quarantinePendingHookOccurrence(path, name string, cause error) {
 	a.reportPendingHookProblem("invalid occurrence quarantined", name, cause)
 	if err := os.Rename(path, path+pendingHookQuarantineSuffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		a.reportPendingHookProblem("quarantine failed", name, err)
-		return true
+		return
 	}
 	_ = syncDaemonDir(filepath.Dir(path))
-	return false
 }

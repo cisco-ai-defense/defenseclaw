@@ -75,12 +75,19 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
-	// Both API listeners wait for the same first recovery pass before
-	// serving; recovery never stops either of them.
+	// Both API listeners give the same first recovery pass a bounded head
+	// start (ensurePendingHookRecovery); recovery never stops either of them.
 	pendingHookRecoveryOnce sync.Once
-	// pendingHookRetryInterval overrides the background retry interval
-	// (tests); zero is defaultPendingHookRetryInterval.
-	pendingHookRetryInterval time.Duration
+	// pendingHookStartup closes once the first pass has handled its startup
+	// share of entries; listeners stop waiting for it at
+	// pendingHookStartupDeadline.
+	pendingHookStartup         chan struct{}
+	pendingHookStartupDeadline time.Time
+	// Test overrides; zero is the default (defaultPendingHookRetryInterval,
+	// defaultPendingHookStartupBudget, defaultPendingHookStartupEntries).
+	pendingHookRetryInterval  time.Duration
+	pendingHookStartupBudget  time.Duration
+	pendingHookStartupEntries int
 	// sandboxAuthority is owned by this server and initialized on first use.
 	sandboxAuthority sandboxAuthorityHolder
 
