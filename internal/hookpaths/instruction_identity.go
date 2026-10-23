@@ -38,9 +38,6 @@ const InstructionIdentityKey = "\x00instruction-identity"
 // that lists a file's names, so such a file may be an instruction file.
 const InstructionIdentityUnknown = "?"
 
-// maxInstructionLinkNames bounds the names one file is checked under.
-const maxInstructionLinkNames = 1024
-
 // InstructionFileName returns the protected name that base spells: exactly,
 // or without case when foldCase (Windows, where the file system ignores it).
 func InstructionFileName(base string, foldCase bool) (string, bool) {

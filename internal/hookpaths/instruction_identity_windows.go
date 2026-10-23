@@ -12,6 +12,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// maxInstructionLinkNames bounds the names one file is checked under.
+const maxInstructionLinkNames = 1024
+
 var (
 	modKernel32            = windows.NewLazySystemDLL("kernel32.dll")
 	procFindFirstFileNameW = modKernel32.NewProc("FindFirstFileNameW")
