@@ -568,7 +568,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				if !finalized {
 					persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 					defer cancelPersist()
-					finalization := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, true, sandboxHookAuditExtra(ctx))
+					finalization := a.finalizeAgentHook(a.pendingHookDecidedContext(persistCtx, pending, resp),
+						connectorName, req, resp, rawEventIDs, b, elapsed, true, sandboxHookAuditExtra(ctx))
 					if finalization.AuditPersisted {
 						if err := a.finalizeHookCorrelationReceipt(persistCtx, req.CorrelationReceipt); err != nil {
 							fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
@@ -744,8 +745,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				// closes the managed hook before the proposal is offered.
 				resp = pendingFailureHookDecision(resp)
 				persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
-				finalization := a.finalizeAgentHook(persistCtx, connectorName, req, resp,
-					rawEventIDs, b, time.Since(t0), panicked, auditExtra)
+				finalization := a.finalizeAgentHook(a.pendingHookDecidedContext(persistCtx, pending, resp),
+					connectorName, req, resp, rawEventIDs, b, time.Since(t0), panicked, auditExtra)
 				a.settlePendingHook(persistCtx, pending, finalization)
 				cancelPersist()
 				finalized = true
@@ -766,6 +767,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			wire := renderAgentHookResponseForProfile(profile, wireResp)
 			wire["delivery_receipt"] = pending.ID
 			a.scheduleSandboxHookReceiptRecovery(pending.ID)
+			// The first request is done; a later authenticated receipt owns
+			// this journal row. The bounded recovery pass may now inspect it.
+			pendingHooksInFlight.Delete(pending.ID)
 			finalized = true
 			attemptedWrite = true
 			a.writeJSON(w, http.StatusOK, wire)
@@ -795,16 +799,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 		defer cancelPersist()
-		finalization := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, auditExtra)
-		// A verdict whose audit row could not be written comes back as the
-		// fail-mode verdict (finalizeAgentHook); the agent, a second Copilot
-		// delivery and the AID accounting all get that one.
+		finalization := a.finalizeAgentHook(a.pendingHookDecidedContext(persistCtx, pending, resp),
+			connectorName, req, resp, rawEventIDs, b, elapsed, panicked, auditExtra)
+		// When a non-receipted answer has not been sent, the caller gets
+		// the same closed verdict recorded after an audit write failure.
 		resp = finalization.Response
 		if delivery == nil && finalization.AuditFailedClosed {
-			// Not delivered yet (no receipt channel): the agent gets the
-			// fail-mode verdict its audit row recorded. A delivered answer
-			// (GAP-0286 receipt) already reached the agent; its audit row
-			// and dedupe record carry the fail-mode verdict.
 			wireResp = resp
 		}
 		if !panicked && resp.Action != hookActionUnconfirmed {

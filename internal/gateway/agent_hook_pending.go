@@ -11,10 +11,12 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/google/uuid"
@@ -25,16 +27,39 @@ import (
 // journaled in the audit store before the answer is offered
 // (audit.Store.JournalHookDelivery): one power-loss durable row with only
 // the facts needed to audit the call without its receipt, no raw hook body,
-// tool arguments or response output. The handler deletes the row once its
-// records are settled. A row whose gateway process died first is audited by
-// the next process, as the decision the call has without a receipt.
+// tool arguments or response output. Once the gateway knows the decision the
+// call has, the row records it too, before any record of the call is written.
+// The handler deletes the row once its records are settled. A row whose
+// handler could not write them is audited later, by the next gateway process
+// or, when the journal fills up, by this one: as the decision the row records,
+// or as the decision the call has without a receipt.
 const pendingHookRecoveredReason = "managed hook receipt recovered after gateway restart"
 
+// pendingHookJournalRows bounds the journal. Rows pile up only while the
+// records of the calls cannot be written; a full journal refuses the next
+// call (a 503 the managed hook resolves closed) and starts a recovery pass.
+var pendingHookJournalRows = 10000
+
+// pendingHookRecoveryBatch is the number of journal rows recovery reads at a
+// time. A pass stops after pendingHookRecoveryFailures rows in a row whose
+// records could not be written: the store still refuses them.
+const (
+	pendingHookRecoveryBatch    = 100
+	pendingHookRecoveryFailures = 3
+)
+
+// pendingHookDrainInterval spaces the recovery passes a full journal starts.
+var pendingHookDrainInterval = 15 * time.Second
+
 // hookDeliveryProcessID tells this process's journal rows from those of a
-// gateway process that has stopped. Rows of this process belong to its live
-// handlers, also those of a server a config reload replaced, so recovery
-// never takes them over.
+// gateway process that has stopped. Rows of this process whose handler is
+// still running (pendingHooksInFlight), also one of a server a config reload
+// replaced, are never taken over by recovery.
 var hookDeliveryProcessID = uuid.NewString()
+
+// pendingHooksInFlight holds the journal row IDs of this process's running
+// handlers.
+var pendingHooksInFlight sync.Map
 
 func (a *APIServer) deliveryProcessID() string {
 	if a.hookDeliveryProcessID != "" {
@@ -86,6 +111,11 @@ type pendingHookResponse struct {
 	EvaluationID     string
 	RuleIDs          []string
 	RedactionEnabled *bool
+	// Reason and SourceReason are kept for the decided answer only
+	// (pendingHookOccurrence.Decided), so its recovered records are the
+	// records the live handler wrote.
+	Reason       string `json:",omitempty"`
+	SourceReason string `json:",omitempty"`
 }
 
 func pendingResponse(resp agentHookResponse) pendingHookResponse {
@@ -118,8 +148,11 @@ type pendingHookOccurrence struct {
 	// Proposed is the evaluated answer the gateway offers. NoReceipt is the
 	// decision the call has if no receipt arrives: a policy block under a
 	// closed hook stays a block, anything else is unconfirmed.
-	Proposed     pendingHookResponse
-	NoReceipt    pendingHookResponse
+	Proposed  pendingHookResponse
+	NoReceipt pendingHookResponse
+	// Decided is the decision the live handler audits, recorded before it
+	// writes the records.
+	Decided      *pendingHookResponse `json:",omitempty"`
 	Envelope     audit.CorrelationEnvelope
 	Identity     AgentIdentity
 	RawEventIDs  []string
@@ -188,7 +221,8 @@ func (s sandboxPendingHookReceipt) response(proposed pendingHookResponse) agentH
 // offered, and gives req the occurrence IDs its records carry. On an error
 // the answer must not be offered. The IDs are set even then: if the row
 // landed anyway, recovery completes the records the caller writes instead
-// of auditing the call a second time.
+// of auditing the call a second time. The caller ends with
+// settlePendingHook.
 func (a *APIServer) journalHookDelivery(
 	ctx context.Context, req *agentHookRequest, proposed agentHookResponse,
 	rawEventIDs []string, bodyBytes int64, elapsed time.Duration,
@@ -229,13 +263,48 @@ func (a *APIServer) journalHookDelivery(
 	if err != nil {
 		return p, err
 	}
-	return p, a.store.JournalHookDelivery(ctx, p.ID, a.deliveryProcessID(), data)
+	pendingHooksInFlight.Store(p.ID, struct{}{})
+	err = a.store.JournalHookDelivery(ctx, p.ID, a.deliveryProcessID(), data, pendingHookJournalRows)
+	if errors.Is(err, audit.ErrHookDeliveryJournalFull) {
+		a.drainPendingHooks()
+	}
+	return p, err
+}
+
+// pendingHookDecidedContext records resp, the decision the call has, in its
+// journal row before the caller writes the records of the call with the
+// returned context. A record leaves for the remote destinations even when
+// the local store refuses it (GAP-1536), so recovery must write the same
+// decision: it replays a recorded one. Where the decision could not be
+// recorded, the records leave only once the local store keeps them, so the
+// remote destinations never get a decision recovery writes differently.
+func (a *APIServer) pendingHookDecidedContext(ctx context.Context, p *pendingHookOccurrence, resp agentHookResponse) context.Context {
+	if p == nil || a.store == nil {
+		return ctx
+	}
+	decided := pendingResponse(resp)
+	decided.Reason, decided.SourceReason = resp.Reason, resp.SourceReason
+	p.Decided = &decided
+	data, err := json.Marshal(p)
+	if err == nil {
+		// No row: the journal refused it, so no recovery follows.
+		_, err = a.store.RecordHookDeliveryVerdict(ctx, p.ID, data)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] hook delivery decision not journaled id=%s; its records wait for the local store: %v\n", p.ID, err)
+		return observability.WithRemoteExport(ctx, observability.RemoteExportAfterLocalWrite)
+	}
+	return ctx
 }
 
 // settlePendingHook deletes the journal row once both records of the call
-// are settled. Otherwise the row stays for the next gateway process.
+// are settled. Otherwise the row stays for recovery.
 func (a *APIServer) settlePendingHook(ctx context.Context, p *pendingHookOccurrence, result hookFinalizationResult) {
-	if p == nil || !result.AuditPersisted || !result.DecisionSettled {
+	if p == nil {
+		return
+	}
+	defer pendingHooksInFlight.Delete(p.ID)
+	if !result.AuditPersisted || !result.DecisionSettled {
 		return
 	}
 	if err := a.store.ForgetHookDelivery(ctx, p.ID); err != nil {
@@ -247,13 +316,35 @@ func (a *APIServer) settlePendingHook(ctx context.Context, p *pendingHookOccurre
 // config reload starts a new server beside the old one.
 var pendingHookRecovery sync.Mutex
 
+// pendingHookDrainAt is when a full journal last started a recovery pass.
+var pendingHookDrainAt atomic.Int64
+
 // startPendingHookRecovery audits, in the background, the journal rows
 // earlier gateway processes left. Listeners never wait for it, and nothing
 // it meets stops the gateway: a row it cannot audit yet stays for the next
-// start.
+// pass.
 func (a *APIServer) startPendingHookRecovery(ctx context.Context) {
 	a.pendingHookRecoveryOnce.Do(func() { go a.recoverPendingHooks(ctx) })
 }
+
+// drainPendingHooks starts a recovery pass in the background when the
+// journal is full, at most one per pendingHookDrainInterval, so the journal
+// empties once the store takes records again.
+func (a *APIServer) drainPendingHooks() {
+	now, last := time.Now().UnixNano(), pendingHookDrainAt.Load()
+	if now-last < int64(pendingHookDrainInterval) || !pendingHookDrainAt.CompareAndSwap(last, now) {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		a.recoverPendingHooks(ctx)
+	}()
+}
+
+// errPendingHookNotWritten is a journal row whose records the store did not
+// take.
+var errPendingHookNotWritten = errors.New("records not written")
 
 func (a *APIServer) recoverPendingHooks(ctx context.Context) {
 	if a == nil || a.store == nil || a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() {
@@ -261,17 +352,38 @@ func (a *APIServer) recoverPendingHooks(ctx context.Context) {
 	}
 	pendingHookRecovery.Lock()
 	defer pendingHookRecovery.Unlock()
-	entries, err := a.store.UnauditedHookDeliveries(ctx, a.deliveryProcessID())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[gateway] hook delivery journal unreadable; kept for the next start: %v\n", err)
-		return
-	}
-	for _, entry := range entries {
-		if ctx.Err() != nil {
+	var after audit.HookDeliveryJournalEntry
+	failures := 0
+	for {
+		entries, err := a.store.HookDeliveries(ctx, after, pendingHookRecoveryBatch)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[gateway] hook delivery journal unreadable; kept for the next pass: %v\n", err)
 			return
 		}
-		if err := a.recoverPendingHook(ctx, entry); err != nil {
-			fmt.Fprintf(os.Stderr, "[gateway] hook delivery id=%s not recovered; kept for the next start: %v\n", entry.ID, err)
+		for _, entry := range entries {
+			after = entry
+			if entry.ProcessID == a.deliveryProcessID() {
+				if _, live := pendingHooksInFlight.Load(entry.ID); live {
+					continue
+				}
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			err := a.recoverPendingHook(ctx, entry)
+			if err == nil {
+				failures = 0
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "[gateway] hook delivery id=%s not recovered; kept for the next pass: %v\n", entry.ID, err)
+			if errors.Is(err, errPendingHookNotWritten) {
+				if failures++; failures >= pendingHookRecoveryFailures {
+					return
+				}
+			}
+		}
+		if len(entries) < pendingHookRecoveryBatch {
+			return
 		}
 	}
 }
@@ -304,8 +416,6 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 		}
 		sandboxHookReceiptLock(p.ID).Lock()
 		defer sandboxHookReceiptLock(p.ID).Unlock()
-		// An acknowledgement can update the journal while startup recovery
-		// waits for the receipt window. Reload after taking the same lock.
 		latest, found, err := a.store.HookDelivery(ctx, p.ID)
 		if err != nil {
 			return err
@@ -320,7 +430,7 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 			return a.store.ForgetHookDelivery(ctx, p.ID)
 		}
 	}
-	resp, err := a.pendingHookRecoveryResponse(ctx, &p)
+	resp, export, err := a.pendingHookRecoveryResponse(ctx, &p)
 	if err != nil {
 		return err
 	}
@@ -333,36 +443,48 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 	persistCtx = ContextWithAgentIdentity(persistCtx, p.Identity)
 	persistCtx = enrichAgentHookContext(persistCtx, req)
 	persistCtx = withRedactionDecision(persistCtx, resp.RedactionEnabled)
+	persistCtx = observability.WithRemoteExport(persistCtx, export)
 	result := a.finalizeAgentHook(persistCtx, req.ConnectorName, req, resp,
 		p.RawEventIDs, nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra)
 	if !result.AuditPersisted || !result.DecisionSettled {
 		// Stable IDs make the next pass skip whichever record landed.
-		return fmt.Errorf("audit=%t hook_decision=%t", result.AuditPersisted, result.DecisionSettled)
+		return fmt.Errorf("%w: audit=%t hook_decision=%t", errPendingHookNotWritten, result.AuditPersisted, result.DecisionSettled)
 	}
 	return a.store.ForgetHookDelivery(ctx, p.ID)
 }
 
-// pendingHookRecoveryResponse is the answer recovery audits. A record of
-// the occurrence that is already stored decides its missing companion, so
-// the two records of one call never disagree. With neither stored, the
-// call has its no-receipt decision.
-func (a *APIServer) pendingHookRecoveryResponse(ctx context.Context, p *pendingHookOccurrence) (agentHookResponse, error) {
+// pendingHookRecoveryResponse is the answer recovery audits, and when its
+// records leave for the remote destinations. A decision the live handler
+// recorded is replayed: its handler already sent the records that were
+// refused locally, so the replay is written locally only. Otherwise a record
+// of the occurrence that is already stored decides its missing companion, so
+// the two records of one call never disagree, and with neither stored the
+// call has its no-receipt decision. Those records leave once the local store
+// keeps them: a pass that cannot write them sends nothing, and the next pass
+// writes the same decision.
+func (a *APIServer) pendingHookRecoveryResponse(ctx context.Context, p *pendingHookOccurrence) (agentHookResponse, observability.RemoteExport, error) {
+	if p.Decided != nil {
+		resp := p.Decided.response()
+		resp.Reason, resp.SourceReason = p.Decided.Reason, p.Decided.SourceReason
+		return resp, observability.RemoteExportNone, nil
+	}
 	for _, id := range []string{p.ID, p.ID + "-decision"} {
 		action, found, err := a.store.StoredHookDecisionAction(ctx, id)
 		if err != nil {
-			return agentHookResponse{}, err
+			return agentHookResponse{}, 0, err
 		}
 		if found {
-			return p.responseFor(action), nil
+			return p.responseFor(action), observability.RemoteExportAfterLocalWrite, nil
 		}
 	}
 	if p.Final != nil {
 		if p.SandboxReceipt != nil && p.Final.Action == "block" {
-			return failedClosedHookDelivery(p.SandboxReceipt.response(p.Proposed), hookexec.ManagedGatewayNoAnswerReason), nil
+			return failedClosedHookDelivery(p.SandboxReceipt.response(p.Proposed), hookexec.ManagedGatewayNoAnswerReason),
+				observability.RemoteExportAfterLocalWrite, nil
 		}
-		return p.Final.response(), nil
+		return p.Final.response(), observability.RemoteExportAfterLocalWrite, nil
 	}
-	return p.NoReceipt.response(), nil
+	return p.NoReceipt.response(), observability.RemoteExportAfterLocalWrite, nil
 }
 
 // responseFor is the occurrence's answer whose decision is action, the

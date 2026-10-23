@@ -69,6 +69,9 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			if proposal.Action != "allow" || proposal.DeliveryReceipt == "" {
 				t.Fatalf("proposal = %+v, want allow and receipt id", proposal)
 			}
+			if _, live := pendingHooksInFlight.Load(proposal.DeliveryReceipt); live {
+				t.Fatal("buffered proposal still claims a running first handler")
+			}
 			entry, present, err := f.store.HookDelivery(t.Context(), proposal.DeliveryReceipt)
 			if err != nil || !present {
 				t.Fatalf("journaled proposal = %+v: %v", entry, err)
@@ -137,8 +140,8 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := f.store.UpdateHookDelivery(t.Context(), pending.ID, entry.Occurrence); err != nil {
-				t.Fatal(err)
+			if stored, err := f.store.RecordHookDeliveryVerdict(t.Context(), pending.ID, entry.Occurrence); err != nil || !stored {
+				t.Fatalf("update sandbox journal = %t: %v", stored, err)
 			}
 			if err := f.api.recoverPendingHook(t.Context(), entry); err != nil {
 				t.Fatal(err)
@@ -170,8 +173,8 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := f.store.UpdateHookDelivery(t.Context(), pending.ID, entry.Occurrence); err != nil {
-				t.Fatal(err)
+			if stored, err := f.store.RecordHookDeliveryVerdict(t.Context(), pending.ID, entry.Occurrence); err != nil || !stored {
+				t.Fatalf("update sandbox journal = %t: %v", stored, err)
 			}
 			if err := f.api.recoverPendingHook(t.Context(), entry); err != nil {
 				t.Fatal(err)
@@ -219,8 +222,8 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := f.store.UpdateHookDelivery(t.Context(), pending.ID, entry.Occurrence); err != nil {
-				t.Fatal(err)
+			if stored, err := f.store.RecordHookDeliveryVerdict(t.Context(), pending.ID, entry.Occurrence); err != nil || !stored {
+				t.Fatalf("update sandbox journal = %t: %v", stored, err)
 			}
 			if err := f.api.recoverPendingHook(t.Context(), entry); err != nil {
 				t.Fatal(err)

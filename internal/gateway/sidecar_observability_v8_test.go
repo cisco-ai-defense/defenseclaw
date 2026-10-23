@@ -18,6 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -88,6 +89,18 @@ func newSidecarRuntimeFixtureCollectingNo(
 	off ...observability.Bucket,
 ) sidecarRuntimeFixture {
 	t.Helper()
+	return newSidecarRuntimeFixtureExportingTo(t, signer, nil, off...)
+}
+
+// newSidecarRuntimeFixtureExportingTo is newSidecarRuntimeFixtureCollectingNo
+// with every log also sent to remote, when set, as a remote destination.
+func newSidecarRuntimeFixtureExportingTo(
+	t *testing.T,
+	signer audit.ProjectionIntegritySigner,
+	remote delivery.Adapter,
+	off ...observability.Bucket,
+) sidecarRuntimeFixture {
+	t.Helper()
 	previousInstanceID := gatewaylog.SidecarInstanceID()
 	gatewaylog.SetSidecarInstanceID("sidecar-runtime-test")
 	t.Cleanup(func() { gatewaylog.SetSidecarInstanceID(previousInstanceID) })
@@ -114,6 +127,15 @@ func newSidecarRuntimeFixtureCollectingNo(
 				Collect: config.ObservabilityV8CollectSource{Logs: &disabled},
 			}
 		}
+	}
+	if remote != nil {
+		source.Destinations = []config.ObservabilityV8DestinationSource{{
+			Name: "remote", Kind: config.ObservabilityV8DestinationConsole,
+			Send: &config.ObservabilityV8SendSource{
+				Signals: []observability.Signal{observability.SignalLogs},
+				Buckets: []observability.Bucket{"*"}, RedactionProfile: "none",
+			},
+		}}
 	}
 	plan, err := config.CompileObservabilityV8(source)
 	if err != nil {
@@ -143,18 +165,22 @@ func newSidecarRuntimeFixtureCollectingNo(
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := observabilityruntime.New(
-		t.Context(),
-		runtimegraph.ConfigFromPlan(plan, false),
-		observabilityruntime.Options{
-			Store: store, Engine: engine, Signer: signer, RecordBuilder: failureBuilder,
-			Reporter: &discardSidecarGraphReporter{}, RetentionController: retention,
-			TelemetryProviderFactory: telemetry.NewV8ProviderFactory(telemetry.V8ProviderOptions{
-				Version: "8.0.0", Environment: "test", ServiceInstanceID: "sidecar-runtime-test",
-				DefenseClawInstanceID: "sidecar-runtime-test",
-			}),
-		},
-	)
+	options := observabilityruntime.Options{
+		Store: store, Engine: engine, Signer: signer, RecordBuilder: failureBuilder,
+		Reporter: &discardSidecarGraphReporter{}, RetentionController: retention,
+		TelemetryProviderFactory: telemetry.NewV8ProviderFactory(telemetry.V8ProviderOptions{
+			Version: "8.0.0", Environment: "test", ServiceInstanceID: "sidecar-runtime-test",
+			DefenseClawInstanceID: "sidecar-runtime-test",
+		}),
+	}
+	if remote != nil {
+		options.DestinationAdapterFactory = destinationTestAdapterFactoryFunc(func(
+			context.Context, config.ObservabilityV8EffectiveDestination, telemetry.V8ResourceContext,
+		) (delivery.Adapter, observabilityruntime.DestinationAdapterCleanup, error) {
+			return remote, func(context.Context) error { return nil }, nil
+		})
+	}
+	runtime, err := observabilityruntime.New(t.Context(), runtimegraph.ConfigFromPlan(plan, false), options)
 	if err != nil {
 		t.Fatal(err)
 	}
