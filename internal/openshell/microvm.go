@@ -459,9 +459,9 @@ func executable(p string) bool {
 // /usr/libexec/openshell, /usr/local/libexec/openshell,
 // /usr/local/libexec), then the contacted gateway's executable directory
 // and adjacent libexec. An answering gateway is tied to its registered
-// listener before doctor uses its process; PATH is only a hint while no
-// gateway answers. A driver launched from another directory is found
-// through a child process of that same gateway.
+// listener before doctor uses its process. An unbound PATH gateway cannot
+// prove which driver the selected gateway will use. A driver launched from
+// another directory is found through a child process of that same gateway.
 // The second result is the earlier user directory when a gateway-adjacent
 // driver was selected and no driver_dir was configured.
 func (r *doctorRun) findVMDriver(ctx context.Context) (string, string) {
@@ -489,8 +489,6 @@ func (r *doctorRun) findVMDriver(ctx context.Context) (string, string) {
 		if running != nil {
 			gw = running.path
 		}
-	} else {
-		gw, _ = r.LookPath(GatewayBinary)
 	}
 	if filepath.IsAbs(gw) {
 		if configuredDir {
@@ -498,6 +496,10 @@ func (r *doctorRun) findVMDriver(ctx context.Context) (string, string) {
 			// fallback with driver_dir set is beside that executable.
 			if real, err := filepath.EvalSymlinks(gw); err == nil {
 				dirs = append(dirs, filepath.Dir(real))
+			} else {
+				// A running binary can be replaced while its sibling driver
+				// remains. Keep the directory ps saw if the path vanished.
+				dirs = append(dirs, filepath.Dir(gw))
 			}
 		} else {
 			bins := []string{filepath.Dir(gw)}

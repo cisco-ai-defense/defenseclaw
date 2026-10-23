@@ -212,8 +212,8 @@ func TestSetupUsesAGatewayRunAnotherWay(t *testing.T) {
 				// names running ones).
 				stops := "restarting it stops every sandbox on it\n"
 				if mac {
-					stops = "restarting it stops every sandbox on it (none runs now): stop a MicroVM sandbox you start before then first " +
-						"(`defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes; DefenseClaw's stop requests a disk sync; raw OpenShell stop on a gateway running 0.1.5 or later requests a guest flush before a planned stop, but on an older gateway save its work first); if a flush fails, changes after the last successful disk sync may be lost\n"
+					stops = "restarting it stops every sandbox on it (none runs now): save or sync a MicroVM guest's work first, then stop it before the restart " +
+						"(`defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or, for raw OpenShell sandboxes, save work outside the guest first on a gateway older than 0.1.5 because raw stop may not flush it, then `openshell sandbox stop NAME`; DefenseClaw's stop requests a disk sync; raw OpenShell stop on a gateway running 0.1.5 or later requests a guest flush before a planned stop); if a flush fails, changes after the last successful disk sync may be lost\n"
 				}
 				has(t, out, "✓ gateway configuration written; it takes effect when you restart the gateway\n",
 					"⚠ restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it); "+stops)
@@ -322,10 +322,10 @@ func TestSetupSaysTheRestartYouMakeStopsSandboxes(t *testing.T) {
 				lacks(t, out, "flushes")
 				return
 			}
-			has(t, out, "so it loads the change (DefenseClaw cannot restart it); restarting it stops every sandbox on it: first stop the MicroVM sandboxes "+
-				"running on it with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes; DefenseClaw's stop requests a disk sync; raw OpenShell stop on a gateway running 0.1.5 or later requests a guest flush before a planned stop, but on an older gateway save its work first; if a flush fails, changes after the last successful disk sync may be lost\n",
+			has(t, out, "so it loads the change (DefenseClaw cannot restart it); restarting it stops every sandbox on it: save or sync each MicroVM guest's work first, then stop the sandboxes "+
+				"running on it with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or, for raw OpenShell sandboxes, save work outside the guest first on a gateway older than 0.1.5 because raw stop may not flush it, then `openshell sandbox stop NAME`; DefenseClaw's stop requests a disk sync; raw OpenShell stop on a gateway running 0.1.5 or later requests a guest flush before a planned stop; if a flush fails, changes after the last successful disk sync may be lost\n",
 				last+"restarting it stops every MicroVM on it with no flush, so first stop each sandbox that OpenShell does not report stopped, or what it wrote "+
-					"since its last sync is lost: dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a` (DefenseClaw sandbox), or `openshell sandbox stop dc-claude-theirs-a` (raw OpenShell sandbox); dc-claude-theirs-b (ready): `defenseclaw sandbox stop dc-claude-theirs-b` (DefenseClaw sandbox), or `openshell sandbox stop dc-claude-theirs-b` (raw OpenShell sandbox)\n")
+					"since its last sync is lost: dc-claude-theirs-a (ready): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-claude-theirs-a` (DefenseClaw sandbox), or on an older or unknown gateway release, raw stop may not flush the guest: save its work outside the guest first, then `openshell sandbox stop dc-claude-theirs-a` (raw OpenShell sandbox); dc-claude-theirs-b (ready): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-claude-theirs-b` (DefenseClaw sandbox), or on an older or unknown gateway release, raw stop may not flush the guest: save its work outside the guest first, then `openshell sandbox stop dc-claude-theirs-b` (raw OpenShell sandbox)\n")
 			if ta.gateway.restarts != 0 || ta.gateway.applied != 0 || len(ta.gateway.written) != 1 {
 				t.Fatalf("restarts %d, applied %d, written %d", ta.gateway.restarts, ta.gateway.applied, len(ta.gateway.written))
 			}
@@ -376,7 +376,7 @@ func TestTeardownRestoresTheFilesOfAGatewayRunAnotherWay(t *testing.T) {
 			has(t, out, "✓ restored the OpenShell gateway configuration; restart the gateway yourself, the way you started it, so it runs on it")
 			if driver == "vm" {
 				has(t, out, strings.TrimSuffix(yourself, "every sandbox on it")+"every MicroVM on it with no flush, so first stop each sandbox that OpenShell does not report stopped, or what it wrote since its last sync is lost: "+
-					"dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a`")
+					"dc-claude-theirs-a (ready): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-claude-theirs-a`")
 			} else {
 				has(t, out, yourself+", and 1 sandbox runs on it now (dc-claude-theirs-a)")
 				lacks(t, out, "flushes")

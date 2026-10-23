@@ -501,7 +501,7 @@ func TestARestartChecksTheSandboxesRightBeforeItActs(t *testing.T) {
 	if err := fake.SetPhase(openshell.DefaultWorkspace, "dc-a", openshell.PhaseReady); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.cfg.Restart(context.Background()); !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "dc-a (ready): `defenseclaw sandbox stop dc-a`") || f.brewRestarts() != 0 {
+	if err := f.cfg.Restart(context.Background()); !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "dc-a (ready): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-a`") || f.brewRestarts() != 0 {
 		t.Fatalf("Restart under a MicroVM started after the consent = %v (restarts %d)", err, f.brewRestarts())
 	}
 	if n := fake.Calls(openshelltest.MethodStopSandbox); n != 0 {

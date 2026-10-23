@@ -251,6 +251,33 @@ func TestConfiguredVMDriverUsesRunningGatewaySibling(t *testing.T) {
 	expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusPass, runningDriver)
 }
 
+// A still-running gateway can have been replaced on disk during an upgrade.
+// Its sibling driver remains valid even if ps's executable path no longer
+// resolves through the filesystem.
+func TestConfiguredVMDriverUsesGatewaySiblingWhenBinaryWasReplaced(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.onLinuxMicroVMs()
+	f.atRelease(openshell.InstallerVersion)
+	if err := os.Remove(f.linuxDriverPath()); err != nil {
+		t.Fatal(err)
+	}
+	configuredDir := filepath.Join(f.home, "configured")
+	f.writeTOML(strings.Replace(linuxVMTOML, "[openshell.drivers.vm]\n",
+		"[openshell.drivers.vm]\ndriver_dir = \""+configuredDir+"\"\n", 1), f.started.Add(-time.Minute))
+	binDir := filepath.Join(f.home, "running", "bin")
+	missingGateway := filepath.Join(binDir, openshell.GatewayBinary)
+	driver := filepath.Join(binDir, "openshell-driver-vm")
+	touchExecutable(t, driver)
+	f.runner.On(driver+" --version", "openshell-driver-vm "+openshell.InstallerVersion+"\n", nil)
+	f.runner.On("ps -axww -o pid=,ppid=,uid=,args=", "  9999999 1 1000 "+missingGateway+"\n", nil)
+	f.contactedGatewayPID(9999999)
+	r := f.run()
+	if r.MicroVM == nil || r.MicroVM.DriverBinary != driver {
+		t.Fatalf("selected driver = %+v, want gateway sibling %q", r.MicroVM, driver)
+	}
+	expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusPass, driver)
+}
+
 // Several gateways can run under one uid. The selected registration's
 // listener identifies which executable may supply the sibling driver.
 func TestDoctorUsesContactedGatewaySiblingWithSeveralProcesses(t *testing.T) {
@@ -330,6 +357,34 @@ func TestDoctorDoesNotUseAnUnboundGatewaySibling(t *testing.T) {
 	}
 }
 
+func TestDoctorDoesNotUseAnotherGatewaySiblingWhenSelectedGatewayIsDown(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.onLinuxMicroVMs()
+	if err := os.Remove(f.linuxDriverPath()); err != nil {
+		t.Fatal(err)
+	}
+	configuredDir := filepath.Join(f.home, "configured")
+	f.writeTOML(strings.Replace(linuxVMTOML, "[openshell.drivers.vm]\n",
+		"[openshell.drivers.vm]\ndriver_dir = \""+configuredDir+"\"\n", 1), f.started.Add(-time.Minute))
+	otherDir := filepath.Join(f.home, "other", "bin")
+	otherGateway := filepath.Join(otherDir, openshell.GatewayBinary)
+	otherDriver := filepath.Join(otherDir, "openshell-driver-vm")
+	touchExecutable(t, otherGateway)
+	touchExecutable(t, otherDriver)
+	f.doctor.LookPath = func(name string) (string, error) {
+		if name == openshell.GatewayBinary {
+			return otherGateway, nil
+		}
+		return "/usr/bin/" + name, nil
+	}
+	f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
+	r := f.run()
+	if r.MicroVM == nil || r.MicroVM.DriverBinary != "" {
+		t.Fatalf("unbound PATH gateway supplied a driver while the selected gateway was down: %+v", r.MicroVM)
+	}
+	expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusFail, "openshell-driver-vm is not installed")
+}
+
 // Linux ps separates argv on spaces, including spaces in argv[0]. The
 // running executable's /proc link identifies its sibling even in that case.
 func TestConfiguredVMDriverUsesRunningGatewayWithSpaces(t *testing.T) {
@@ -360,6 +415,9 @@ func TestConfiguredVMDriverUsesRunningGatewayWithSpaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	if err := os.Remove(runningGateway); err != nil {
+		t.Fatal(err)
+	}
 	runningDriver := filepath.Join(runningDir, "openshell-driver-vm")
 	touchExecutable(t, runningDriver)
 	f.runner.On(runningDriver+" --version", "openshell-driver-vm "+openshell.InstallerVersion+"\n", nil)
@@ -369,7 +427,9 @@ func TestConfiguredVMDriverUsesRunningGatewayWithSpaces(t *testing.T) {
 	pathDriver := filepath.Join(pathDir, "openshell-driver-vm")
 	touchExecutable(t, pathDriver)
 	f.runner.On(pathDriver+" --version", "openshell-driver-vm 0.1.3\n", nil)
-	f.runner.On("ps -axww -o pid=,ppid=,uid=,args=", "  "+strconv.Itoa(cmd.Process.Pid)+" 1 1000 "+runningGateway+" 30\n", nil)
+	// ps argv is untrusted and can claim a different gateway. The real
+	// listener executable also has spaces that procps does not escape.
+	f.runner.On("ps -axww -o pid=,ppid=,uid=,args=", "  "+strconv.Itoa(cmd.Process.Pid)+" 1 1000 "+pathGateway+" 30\n", nil)
 	f.contactedGatewayPID(cmd.Process.Pid)
 	lookPath := f.doctor.LookPath
 	f.doctor.LookPath = func(name string) (string, error) {
@@ -380,7 +440,7 @@ func TestConfiguredVMDriverUsesRunningGatewayWithSpaces(t *testing.T) {
 	}
 	r := f.run()
 	if r.MicroVM == nil || r.MicroVM.DriverBinary != runningDriver {
-		t.Fatalf("selected driver = %+v, want running gateway sibling %q", r.MicroVM, runningDriver)
+		t.Fatalf("spoofed gateway argv selected another driver's path: %+v", r.MicroVM)
 	}
 	expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusPass, runningDriver)
 }

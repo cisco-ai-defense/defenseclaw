@@ -106,13 +106,14 @@ func TestHoldsGateway(t *testing.T) {
 // DefenseClaw starts none on it: a delete.
 func TestStopWayOn(t *testing.T) {
 	const (
-		stop      = "`defenseclaw sandbox stop dc-x` (DefenseClaw sandbox), or `openshell sandbox stop dc-x` (raw OpenShell sandbox)"
-		oldStop   = "`defenseclaw sandbox stop dc-x` (DefenseClaw sandbox), or save its work before `openshell sandbox stop dc-x` (raw OpenShell sandbox) on an older or unknown gateway release; raw stop may not flush the guest"
-		startStop = "`defenseclaw sandbox start dc-x`, then `defenseclaw sandbox stop dc-x` once it is ready"
+		stop      = "save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-x` (DefenseClaw sandbox), or `openshell sandbox stop dc-x` (raw OpenShell sandbox)"
+		oldStop   = "save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-x` (DefenseClaw sandbox), or on an older or unknown gateway release, raw stop may not flush the guest: save its work outside the guest first, then `openshell sandbox stop dc-x` (raw OpenShell sandbox)"
+		startStop = "`defenseclaw sandbox start dc-x`; save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-x` once it is ready"
 		del       = "`defenseclaw sandbox delete dc-x` (DefenseClaw sandbox) or `openshell sandbox delete dc-x` (raw OpenShell sandbox), which deletes it and its work"
-		ended     = "nothing in OpenShell writes this MicroVM's disk back or stops it: its VM still runs what its workload left running, " +
+		oldEnded  = "save or sync any accessible guest work first; on an older or unknown gateway release, raw stop may not flush the guest, so save its work outside the guest before trying `openshell sandbox stop dc-x` (raw OpenShell sandbox); only if OpenShell refuses stop or still reports the VM running, " + del
+		ended     = "save or sync any accessible guest work first; nothing in OpenShell writes this MicroVM's disk back or stops it: its VM still runs what its workload left running, " +
 			"and its start ends that VM with no flush first, so what the VM has not written to its disk is lost: " +
-			"`defenseclaw sandbox start dc-x --end-vm` ends the VM that way, then `defenseclaw sandbox stop dc-x` once it is ready; or " + del
+			"`defenseclaw sandbox start dc-x --end-vm` ends the VM that way, then `defenseclaw sandbox stop dc-x` once it is ready; for a raw OpenShell sandbox, try `openshell sandbox stop dc-x` (raw OpenShell sandbox) after saving work; only if OpenShell refuses stop, `openshell sandbox delete dc-x` deletes it and its work"
 	)
 	for _, tc := range []struct {
 		phase openshell.SandboxPhase
@@ -127,12 +128,12 @@ func TestStopWayOn(t *testing.T) {
 		{openshell.PhaseCompleted, "", true, ended},
 		{openshell.PhaseError, "MainProcessFailed: exited 1", true, ended},
 		{openshell.PhaseError, "ProvisioningTimedOut: window expired", true, "wait a minute for OpenShell's cleanup of the provisioning that timed out, then " + startStop +
-			" (OpenShell refuses to stop a sandbox whose provisioning timed out), or " + del},
+			" (OpenShell refuses to stop a sandbox whose provisioning timed out); for a raw OpenShell sandbox, `openshell sandbox start dc-x`, then save or sync its work before `openshell sandbox stop dc-x` (raw OpenShell sandbox) once it is ready"},
 		{openshell.PhaseError, "ProcessPollFailed: Bad file descriptor", true, stop},
 		{openshell.PhaseError, "", true, stop},
-		{openshell.PhaseCompleted, "", false, del + " (this OpenShell neither stops nor starts a completed MicroVM)"},
-		{openshell.PhaseError, "MainProcessFailed: exited 1", false, del + " (this OpenShell neither stops nor starts a sandbox in its error state)"},
-		{openshell.PhaseError, "", false, del + " (this OpenShell neither stops nor starts a sandbox in its error state)"},
+		{openshell.PhaseCompleted, "", false, oldEnded + " (older OpenShell cannot stop or start a completed MicroVM)"},
+		{openshell.PhaseError, "MainProcessFailed: exited 1", false, oldEnded + " (older OpenShell cannot stop or start a sandbox in its error state)"},
+		{openshell.PhaseError, "", false, oldEnded + " (older OpenShell cannot stop or start a sandbox in its error state)"},
 	} {
 		got := openshell.StopWayOn("dc-x", tc.phase, tc.said, tc.runs)
 		if got != tc.want {
@@ -167,9 +168,30 @@ func TestRawMicroVMRestartAdviceNamesItsControlSurface(t *testing.T) {
 func TestRawMicroVMRestartAdviceSavesWorkBeforeLegacyStop(t *testing.T) {
 	for _, phase := range []openshell.SandboxPhase{openshell.PhaseReady, openshell.PhaseStarting, openshell.PhaseProvisioning, openshell.PhaseUnknown} {
 		got := openshell.StopWayOn("raw-box", phase, "", false)
-		if !strings.Contains(got, "`openshell sandbox stop raw-box`") ||
-			!strings.Contains(got, "save its work before") || !strings.Contains(got, "older or unknown") {
+		warning := strings.Index(got, "raw stop may not flush")
+		if stop := strings.Index(got, "`openshell sandbox stop raw-box`"); stop < 0 || warning < 0 || warning >= stop ||
+			!strings.Contains(got, "save its work outside the guest first") || !strings.Contains(got, "older or unknown") {
 			t.Errorf("legacy or unknown gateway, %s: unsafe raw stop advice: %s", phase, got)
+		}
+	}
+}
+
+func TestRecoverableMicroVMRestartAdviceSavesWorkWithoutDeletion(t *testing.T) {
+	for _, tc := range []struct {
+		phase openshell.SandboxPhase
+		said  string
+	}{
+		{openshell.PhaseCompleted, ""},
+		{openshell.PhaseError, "MainProcessFailed: exited 1"},
+		{openshell.PhaseError, "ProvisioningTimedOut: window expired"},
+	} {
+		got := openshell.StopWayOn("dc-x", tc.phase, tc.said, true)
+		if strings.Contains(got, "`defenseclaw sandbox delete") || strings.Contains(got, "`openshell sandbox delete") &&
+			(!strings.Contains(got, "only if OpenShell refuses stop") || strings.Index(got, "`openshell sandbox stop") > strings.Index(got, "`openshell sandbox delete")) {
+			t.Errorf("recoverable %s (%s) offers deletion before exhausting stop: %s", tc.phase, tc.said, got)
+		}
+		if save, stop := strings.Index(got, "save or sync any accessible guest work first"), strings.Index(got, "`defenseclaw sandbox stop dc-x`"); save < 0 || stop < 0 || save >= stop {
+			t.Errorf("recoverable %s (%s) omits save-first stop path: %s", tc.phase, tc.said, got)
 		}
 	}
 }
@@ -263,18 +285,18 @@ var heldVariants = []struct {
 	cond  *v1.SandboxCondition
 	way   string
 }{
-	{"ready", openshell.PhaseReady, nil, "dc-x (ready): `defenseclaw sandbox stop dc-x`"},
+	{"ready", openshell.PhaseReady, nil, "dc-x (ready): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-x`"},
 	{"starting", openshell.PhaseStarting, nil, "dc-x (starting): wait until"},
 	{"provisioning", openshell.PhaseProvisioning, nil, "dc-x (provisioning): wait until"},
 	{"stopping", openshell.PhaseStopping, nil, "dc-x (stopping): wait until"},
 	{"unknown", openshell.PhaseUnknown, nil, "dc-x (unknown): wait until"},
 	{"unnamed", "Hibernating", nil, "dc-x (hibernating): wait until"},
-	{"completed", openshell.PhaseCompleted, nil, "dc-x (completed): nothing in OpenShell writes this MicroVM's disk back or stops it"},
-	{"failed", openshell.PhaseError, &failedMain, "dc-x (error): nothing in OpenShell writes this MicroVM's disk back or stops it"},
-	{"unpolled", openshell.PhaseError, &unpolled, "dc-x (error): `defenseclaw sandbox stop dc-x`"},
+	{"completed", openshell.PhaseCompleted, nil, "dc-x (completed): save or sync any accessible guest work first; nothing in OpenShell writes this MicroVM's disk back or stops it"},
+	{"failed", openshell.PhaseError, &failedMain, "dc-x (error): save or sync any accessible guest work first; nothing in OpenShell writes this MicroVM's disk back or stops it"},
+	{"unpolled", openshell.PhaseError, &unpolled, "dc-x (error): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-x`"},
 	{"timedout", openshell.PhaseError, &timedOut, "dc-x (error): wait a minute for OpenShell's cleanup"},
-	{"imagefail", openshell.PhaseError, &v1.SandboxCondition{Type: "Ready", Status: "False", Reason: "ImagePreparationFailed", Message: "no space left on device"}, "dc-x (error): `defenseclaw sandbox stop dc-x`"},
-	{"noreason", openshell.PhaseError, nil, "dc-x (error): `defenseclaw sandbox stop dc-x`"},
+	{"imagefail", openshell.PhaseError, &v1.SandboxCondition{Type: "Ready", Status: "False", Reason: "ImagePreparationFailed", Message: "no space left on device"}, "dc-x (error): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-x`"},
+	{"noreason", openshell.PhaseError, nil, "dc-x (error): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-x`"},
 }
 
 // heldGateway is a MicroVM gateway with the sandbox dc-x as v, plus a
@@ -345,12 +367,13 @@ func TestTheGatewayStopsOnlyOnceOpenShellReportsEveryMicroVMStopped(t *testing.T
 		}
 	}
 
-	// A gateway older than the release that runs sandboxes: an ended one
-	// can only be deleted, a ready one still stops.
+	// A gateway older than the release that runs sandboxes: try a raw
+	// stop after saving work, and delete only if OpenShell refuses it.
 	c, f := heldGateway(t, openshell.PhaseCompleted, nil)
 	f.SetRelease("0.1.3")
 	if err := openshell.PrepareUpgrade(context.Background(), c, pull, noMicroVMs); !errors.Is(err, openshell.ErrSandboxesRunning) ||
-		!strings.Contains(err.Error(), "dc-x (completed): `defenseclaw sandbox delete dc-x` (DefenseClaw sandbox) or `openshell sandbox delete dc-x` (raw OpenShell sandbox), which deletes it and its work (this OpenShell neither stops nor starts a completed MicroVM)") {
+		!strings.Contains(err.Error(), "dc-x (completed): save or sync any accessible guest work first; on an older or unknown gateway release, raw stop may not flush the guest") ||
+		!strings.Contains(err.Error(), "only if OpenShell refuses stop or still reports the VM running, `defenseclaw sandbox delete dc-x`") {
 		t.Errorf("upgrade from 0.1.3 under a completed MicroVM: %v", err)
 	}
 

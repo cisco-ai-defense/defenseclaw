@@ -2592,9 +2592,14 @@ func lastNonEmptyLine(s string) string {
 // virtualization flags, /dev/kvm opened read-write as the user (the test the
 // driver itself meets), and openshell-driver-vm in the rendered driver_dir
 // when set, or in the user's and system directories otherwise, followed by
-// the executable listening on this account's managed gateway port.
+// the executable listening on this account's managed gateway port, or the
+// executable its unit will start when the port is still free.
 func daemonVMProbe(s sandboxrelay.DaemonSettings) openshell.VMProbeResult {
 	home, _ := os.UserHomeDir()
+	return openshell.VMProbe{DriverDirs: daemonVMDriverDirs(s, home, openshell.GatewayExecutableOnPort(gatewayPort(s)))}.Run()
+}
+
+func daemonVMDriverDirs(s sandboxrelay.DaemonSettings, home, gatewayExecutable string) []string {
 	dir := ""
 	if path := s.Enterprise.GatewayConfigPath; path != "" {
 		if data, err := readBounded(path, 1<<20); err == nil && data != nil {
@@ -2603,7 +2608,10 @@ func daemonVMProbe(s sandboxrelay.DaemonSettings) openshell.VMProbeResult {
 			}
 		}
 	}
-	return openshell.VMProbe{DriverDirs: openshell.UserVMDriverDirs(home, dir, openshell.GatewayExecutableOnPort(gatewayPort(s)))}.Run()
+	if gatewayExecutable == "" {
+		gatewayExecutable = newAccountOpenShell(runtime.GOOS, os.Geteuid(), home, nil).gatewayBinary(s)
+	}
+	return openshell.UserVMDriverDirs(home, dir, gatewayExecutable)
 }
 
 // readBounded reads a regular file of at most limit bytes; a missing file

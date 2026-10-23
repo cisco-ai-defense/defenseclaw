@@ -69,14 +69,14 @@ func (r *doctorRun) processes(ctx context.Context) []process {
 		path := strings.Join(f[3:], " ")
 		if linux {
 			path = f[3]
-			// procps prints argv without escaping spaces in argv[0]. When
-			// that first word cannot name the gateway or driver, ask the
-			// kernel for the executable of a candidate process instead of
-			// selecting an unrelated gateway from PATH.
-			if base := filepath.Base(path); base != GatewayBinary && base != vmDriverBinary &&
-				(strings.Contains(line, GatewayBinary) || strings.Contains(line, vmDriverBinary)) {
+			// argv[0] is process-controlled and procps does not escape its
+			// spaces. Use the kernel's executable for this account's PID when
+			// available, so another gateway's argv cannot supply its driver.
+			if err1 == nil && err3 == nil && owner == uid {
 				if exe, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe"); err == nil && filepath.IsAbs(exe) {
-					path = exe
+					// Linux marks an unlinked running binary this way. Its
+					// directory can still hold the driver the process uses.
+					path = strings.TrimSuffix(exe, " (deleted)")
 				}
 			}
 		}

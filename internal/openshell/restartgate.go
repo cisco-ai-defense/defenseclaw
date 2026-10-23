@@ -107,11 +107,12 @@ func HoldsGateway(p SandboxPhase, said string, stopFlushes bool) bool {
 // also names OpenShell's own.
 func StopWayOn(name string, p SandboxPhase, said string, runs bool) string {
 	dcStop := "`defenseclaw sandbox stop " + name + "`"
-	rawStop := "`openshell sandbox stop " + name + "` (raw OpenShell sandbox)"
+	rawStopCommand := "`openshell sandbox stop " + name + "` (raw OpenShell sandbox)"
+	rawStop := rawStopCommand
 	if !runs {
-		rawStop = "save its work before " + rawStop + " on an older or unknown gateway release; raw stop may not flush the guest"
+		rawStop = "on an older or unknown gateway release, raw stop may not flush the guest: save its work outside the guest first, then " + rawStop
 	}
-	stop := dcStop + " (DefenseClaw sandbox), or " + rawStop
+	stop := "save or sync any accessible guest work first, then " + dcStop + " (DefenseClaw sandbox), or " + rawStop
 	del := "`defenseclaw sandbox delete " + name + "` (DefenseClaw sandbox) or `openshell sandbox delete " + name +
 		"` (raw OpenShell sandbox), which deletes it and its work"
 	switch {
@@ -120,14 +121,14 @@ func StopWayOn(name string, p SandboxPhase, said string, runs bool) string {
 	case p != PhaseCompleted && p != PhaseError:
 		return "wait until `openshell sandbox list` shows it ready or stopped, then " + stop + " if it is ready"
 	case !runs && p == PhaseCompleted:
-		return del + " (this OpenShell neither stops nor starts a completed MicroVM)"
+		return "save or sync any accessible guest work first; on an older or unknown gateway release, raw stop may not flush the guest, so save its work outside the guest before trying " + rawStopCommand + "; only if OpenShell refuses stop or still reports the VM running, " + del + " (older OpenShell cannot stop or start a completed MicroVM)"
 	case !runs:
-		return del + " (this OpenShell neither stops nor starts a sandbox in its error state)"
+		return "save or sync any accessible guest work first; on an older or unknown gateway release, raw stop may not flush the guest, so save its work outside the guest before trying " + rawStopCommand + "; only if OpenShell refuses stop or still reports the VM running, " + del + " (older OpenShell cannot stop or start a sandbox in its error state)"
 	case p == PhaseError && ProvisioningTimedOut(said):
-		return "wait a minute for OpenShell's cleanup of the provisioning that timed out, then `defenseclaw sandbox start " + name + "`, then " + dcStop +
-			" once it is ready (OpenShell refuses to stop a sandbox whose provisioning timed out), or " + del
+		return "wait a minute for OpenShell's cleanup of the provisioning that timed out, then `defenseclaw sandbox start " + name + "`; save or sync any accessible guest work first, then " + dcStop +
+			" once it is ready (OpenShell refuses to stop a sandbox whose provisioning timed out); for a raw OpenShell sandbox, `openshell sandbox start " + name + "`, then save or sync its work before " + rawStop + " once it is ready"
 	case p == PhaseCompleted || p == PhaseError && LingeringVM(p, said, false) && MainProcessFailed(said):
-		return LingeringVMLoss + ": `defenseclaw sandbox start " + name + " --end-vm` ends the VM that way, then " + dcStop + " once it is ready; or " + del
+		return "save or sync any accessible guest work first; " + LingeringVMLoss + ": `defenseclaw sandbox start " + name + " --end-vm` ends the VM that way, then " + dcStop + " once it is ready; for a raw OpenShell sandbox, try " + rawStop + " after saving work; only if OpenShell refuses stop, `openshell sandbox delete " + name + "` deletes it and its work"
 	}
 	return stop
 }
