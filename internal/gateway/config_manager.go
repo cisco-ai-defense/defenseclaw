@@ -128,8 +128,8 @@ const configReloadStartupQuietPeriod = 25 * time.Millisecond
 // caused: a referenced asset (rule pack, Rego module) changed on disk.
 const configDiffAssets = "assets"
 
-// errGenerationUnchanged reports an asset reload whose rebuilt generation
-// has the live generation's digest; nothing is swapped.
+// errGenerationUnchanged reports a rebuild that matches the live generation;
+// nothing is swapped.
 var errGenerationUnchanged = errors.New("config reload: generation unchanged")
 
 type ConfigDiff struct {
@@ -147,9 +147,9 @@ type configReloadSource struct {
 	sourceName string
 	raw        []byte
 	compiledV8 *config.ObservabilityV8CompiledConfig
-	// recoveryOnly permits a managed rebuild solely to prove that the
-	// restored config and assets still match the published generation.
-	recoveryOnly bool
+	// proveUnchanged permits a managed rebuild solely to prove that config
+	// and assets still match the published generation, without publishing.
+	proveUnchanged bool
 }
 
 type configSnapshotApplyFunc func(
@@ -1295,15 +1295,17 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	startupBoot := !assets && !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
 		sha256.Sum256(source.raw) == m.startupSource
 	pendingBundle := m.pendingBundleGeneration(source.raw)
-	// A rejected hand edit can be repaired by restoring the exact applied
-	// bytes. The sidecar must compare a fresh build, including referenced
-	// assets, with its published generation before clearing health. A changed
-	// generation cannot be activated here without a new signed bundle.
-	recoveryOnly := m.rejected && !pendingBundle && m.appliedRaw != nil &&
-		bytes.Equal(m.appliedRaw, source.raw) && len(diff.Changed) == 0 &&
+	// A watched asset can be checked without a new bundle only when the
+	// config bytes are the ones already running. At startup those are the
+	// exact boot bytes; later they are the last applied bytes. The same proof
+	// repairs a standing rejection after the operator restores those bytes.
+	// The sidecar rebuilds all referenced assets and refuses any difference.
+	knownBytes := m.appliedRaw != nil && bytes.Equal(m.appliedRaw, source.raw) ||
+		m.appliedRaw == nil && m.startupKnown && sha256.Sum256(source.raw) == m.startupSource
+	proveUnchanged := !pendingBundle && knownBytes && (assets || m.rejected) &&
 		oldCfg.StandaloneEnterprise() && next.StandaloneEnterprise()
 	if (oldCfg.StandaloneEnterprise() || next.StandaloneEnterprise()) && !startupBoot &&
-		!pendingBundle && !recoveryOnly &&
+		!pendingBundle && !proveUnchanged &&
 		(assets || m.rejected || !bytes.Equal(m.appliedRaw, source.raw) || len(diff.Changed) > 0) {
 		err := fmt.Errorf("config reload refused: this managed computer takes config and policy from a signed policy bundle; apply a new signed bundle")
 		m.rejected = true
@@ -1316,10 +1318,12 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		}
 		return err
 	}
-	setPendingRestart(pendingRestart)
-	if len(pendingRestart) > 0 {
-		fmt.Fprintf(os.Stderr, "[config] restart the gateway to apply %s; the rest of the change applies now\n",
-			strings.Join(pendingRestart, ", "))
+	if !proveUnchanged {
+		setPendingRestart(pendingRestart)
+		if len(pendingRestart) > 0 {
+			fmt.Fprintf(os.Stderr, "[config] restart the gateway to apply %s; the rest of the change applies now\n",
+				strings.Join(pendingRestart, ", "))
+		}
 	}
 	// A standing rejection also forces a rebuild: the repair (an asset
 	// restored, a bad config edit reverted) changes nothing the diff sees,
@@ -1385,12 +1389,12 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		m.recordLoadError(ctx, "apply_unavailable", nil)
 		return fmt.Errorf("config reload schema v8 requires a source-aware apply callback")
 	}
-	source.recoveryOnly = recoveryOnly
+	source.proveUnchanged = proveUnchanged
 	applyStarted := time.Now()
 	applyErr := m.applySnapshot(ctx, oldCfg, next, diff, cloneConfigReloadSource(source))
 	applyElapsed = time.Since(applyStarted)
-	if recoveryOnly && applyErr == nil {
-		applyErr = fmt.Errorf("config reload refused: restored managed generation was not proven unchanged; apply a new signed policy bundle")
+	if proveUnchanged && applyErr == nil {
+		applyErr = fmt.Errorf("config reload refused: managed generation was not proven unchanged; apply a new signed policy bundle")
 	}
 	if errors.Is(applyErr, errGenerationUnchanged) {
 		// The rebuild succeeded and matches the live generation: nothing to
@@ -1400,17 +1404,17 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		m.rejected = false
 		m.rejectedAssets.Store(nil)
 		clearGenerationBuildError()
-		if !recoveryOnly {
+		if !proveUnchanged || m.appliedRaw == nil {
 			exportCandidateKey()
 			recordHandEdit(ctx, next, m.path, source.raw)
 			refreshConfigGeneration(source.raw)
-			// The startup reconcile of the boot bytes applies nothing new: they
-			// become the applied bytes, so a later event for the same bytes
-			// does not attribute their writer again.
-			if m.appliedRaw == nil && m.startupKnown && sha256.Sum256(source.raw) == m.startupSource {
-				m.appliedRaw = source.raw
-			}
 			version.SetContentHash(source.raw)
+		}
+		// The startup reconcile of the boot bytes applies nothing new: they
+		// become the applied bytes, so a later event for the same bytes
+		// does not attribute their writer again.
+		if m.appliedRaw == nil && m.startupKnown && sha256.Sum256(source.raw) == m.startupSource {
+			m.appliedRaw = source.raw
 		}
 		if m.health != nil {
 			state, msg := StateRunning, ""
