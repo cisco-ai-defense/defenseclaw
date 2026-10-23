@@ -316,7 +316,8 @@ func TestRemovedTeardownChangesOnlyTheScriptAndTokens(t *testing.T) {
 						plant(t, filepath.Join(h.dataDir, "hooks", hookConfigSidecarName+".openhands"))
 					}
 					h.opts.ManagedEnterprise = managed
-					skip := append([]string{h.script(c)}, h.tokens(c)...)
+					// The lock changes only to seal the stub (requireSealed).
+					skip := append([]string{h.script(c), filepath.Join(h.dataDir, hookContractLockFile)}, h.tokens(c)...)
 					before := h.snapshot(t, skip...)
 					conn, _ := RetiredConnector(c.name)
 					for run := 1; run <= 2; run++ {
@@ -325,6 +326,7 @@ func TestRemovedTeardownChangesOnlyTheScriptAndTokens(t *testing.T) {
 						}
 						requireRemovedSame(t, "teardown", h.snapshot(t, skip...), before)
 						h.requireStub(t, c)
+						h.requireSealed(t, c, removedStubDigest(c))
 						h.requireRevoked(t, c)
 					}
 					if err := conn.VerifyClean(h.opts); err != nil {

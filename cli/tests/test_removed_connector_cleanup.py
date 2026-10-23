@@ -405,6 +405,41 @@ class DoctorTests(_Host):
         self.assertIn(config, check["detail"])
         self.assertIn("remove every hook whose command runs openhands-hook.sh", check["detail"])
 
+    # T8 smoke review loop round 2: an OpenHands hook script that is gone
+    # while hooks.json still runs it does not block (OpenHands lets the call
+    # through when the hook fails to start). The row fails and names the
+    # teardown, which writes the stub; a Windows launcher registration needs
+    # no script and stays a warning.
+    def test_fails_while_a_registration_runs_a_script_that_is_gone(self):
+        config = self.openhands()
+        script = os.path.join(self.hooks, "openhands-hook.sh")
+        os.remove(script)
+        items = self.items("openhands")
+        self.assertEqual(items[script].what, removed_connectors.SCRIPT_GONE_WHAT)
+        self.assertIn("connector teardown --connector openhands, which writes the stub", items[script].step)
+        result = _DoctorResult()
+        with (
+            patch.object(cmd_doctor, "_json_mode", True),
+            patch.object(removed_connectors, "leftovers", lambda data_dir: _leftovers(data_dir, self.home)),
+        ):
+            _check_removed_connector_cleanup(SimpleNamespace(data_dir=self.data), result)
+        [check] = result.checks
+        self.assertEqual(check["status"], "fail")
+        self.assertIn(config, check["detail"])
+
+    def test_a_gone_script_with_only_a_launcher_registration_is_not_unblocked(self):
+        config = self.openhands()
+        os.remove(os.path.join(self.hooks, "openhands-hook.sh"))
+        _write(
+            config,
+            json.dumps(
+                {"pre_tool_use": [{"hooks": [{"type": "command", "command": "defenseclaw-hook --connector openhands"}]}]}
+            ),
+        )
+        items = self.items("openhands")
+        self.assertNotIn(os.path.join(self.hooks, "openhands-hook.sh"), items)
+        self.assertIn(config, items)
+
     def test_prints_no_row_without_leftovers(self):
         result = _DoctorResult()
         with patch.object(removed_connectors, "leftovers", lambda data_dir: _leftovers(data_dir, self.home)):

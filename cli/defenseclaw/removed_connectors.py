@@ -41,6 +41,10 @@ _MARKER_LINES = 3
 STUB_PHRASE = "support was removed in DefenseClaw 1.0.4"
 _MODULE = "defenseclaw_omnigent_policy"
 _POLICY_KEY = "defenseclaw_guardrail"
+# A removed connector's script that is gone while an agent config still runs
+# or imports it: that agent does not block its calls (removed.go
+# RemovedScriptGoneWhat). doctor fails on it.
+SCRIPT_GONE_WHAT = "gone, while an agent config above still runs or imports it, so DefenseClaw does not block those calls"
 
 
 @dataclass(frozen=True)
@@ -100,13 +104,22 @@ def _text_names(c: _Removed, text: str) -> bool:
     return "openhands-hook.sh" in lower or bool(_LAUNCHER_FLAG.search(text))
 
 
-def _value_names(c: _Removed, value: object) -> bool:
+def _script_names(c: _Removed, text: str) -> bool:
+    """Whether one config text runs or imports the script file itself.
+
+    A Windows registration of the native launcher (``--connector openhands``)
+    needs no script: the launcher reaches the retired route, which blocks.
+    """
+    return (_MODULE if c.name == "omnigent" else "openhands-hook.sh") in text.lower()
+
+
+def _value_names(c: _Removed, value: object, names=_text_names) -> bool:
     """Whether a string or key anywhere in a decoded JSON or YAML value names the script."""
     stack, seen = [value], set()
     while stack:
         item = stack.pop()
         if isinstance(item, str):
-            if _text_names(c, item):
+            if names(c, item):
                 return True
         elif isinstance(item, (dict, list, tuple)):
             # YAML aliases share one object: visit it once.
@@ -115,7 +128,7 @@ def _value_names(c: _Removed, value: object) -> bool:
             seen.add(id(item))
             if isinstance(item, dict):
                 for key, val in item.items():
-                    if _text_names(c, str(key)):
+                    if names(c, str(key)):
                         return True
                     stack.append(val)
             else:
@@ -123,13 +136,13 @@ def _value_names(c: _Removed, value: object) -> bool:
     return False
 
 
-def _config_names(c: _Removed, data: bytes) -> tuple[bool, str]:
+def _config_names(c: _Removed, data: bytes, names=_text_names) -> tuple[bool, str]:
     """Whether an agent config still runs or imports the script, and why it could not be checked.
 
     The bytes and the decoded values (JSON for hooks.json, YAML for
     config.yaml) are checked, so a name written with escapes is found too.
     """
-    if _text_names(c, data.decode("utf-8", "replace")):
+    if names(c, data.decode("utf-8", "replace")):
         return True, ""
     if len(data) > _READ_LIMIT:
         return False, f"it is larger than {_READ_LIMIT >> 20} MiB"
@@ -142,7 +155,7 @@ def _config_names(c: _Removed, data: bytes) -> tuple[bool, str]:
     except (UnicodeDecodeError, ValueError, yaml.YAMLError, RecursionError) as exc:
         kind = "JSON" if c.name == "openhands" else "YAML"
         return False, f"it is not {kind}: {exc}"
-    return _value_names(c, doc), ""
+    return _value_names(c, doc, names), ""
 
 
 def _same_path(left: str, right: str) -> bool:
@@ -343,6 +356,9 @@ def _kept_token(c: _Removed, token: str) -> Leftover:
 def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
     items: list[Leftover] = []
     teardown = f"run defenseclaw-gateway connector teardown --connector {c.name}"
+    # A config that runs or imports the script file, or that could not be read
+    # or checked (it may).
+    runs_script = False
     for path in _config_paths(data_dir, c, home):
         try:
             if not os.path.exists(path):
@@ -351,7 +367,10 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
                 data = fh.read(_READ_LIMIT + 1)
         except OSError as exc:
             items.append(Leftover(path, f"could not be read ({exc})", "check it by hand: " + c.config_step))
+            runs_script = True
             continue
+        script_named, script_why = _config_names(c, data, _script_names)
+        runs_script = runs_script or script_named or bool(script_why)
         names, why = _config_names(c, data)
         if names:
             items.append(Leftover(path, c.config_what, c.config_step))
@@ -398,7 +417,11 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
         )
         items.append(Leftover(script, what, _foreign_step(c)))
         token_step = f"follow the step for {script} first"
-    elif state != "absent":
+    elif state == "absent":
+        if runs_script:
+            step = f"{teardown}, which writes the stub that blocks every call; or {c.config_step}"
+            items.append(Leftover(script, SCRIPT_GONE_WHAT, step))
+    else:
         items.append(Leftover(script, state, "delete it once nothing above runs it"))
     if c.name == "openhands":
         record = os.path.join(hooks, ".hookcfg.openhands")

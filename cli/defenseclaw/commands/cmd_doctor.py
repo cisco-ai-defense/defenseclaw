@@ -16135,16 +16135,23 @@ def _check_removed_connector_cleanup(cfg, r: _DoctorResult) -> None:
     Each thing left is listed with the step to remove it; a host with none
     prints no row.
     """
-    from defenseclaw.removed_connectors import leftovers
+    from defenseclaw.removed_connectors import SCRIPT_GONE_WHAT, leftovers
 
     for left in leftovers(str(getattr(cfg, "data_dir", "") or "")):
         steps = "; ".join(f"{item.path}: {item.what} (to remove: {item.step})" for item in left.items)
+        # A registration whose script is gone does not block: an upgrade that
+        # left one is not finished (GAP-0833 class).
+        unblocked = any(item.what == SCRIPT_GONE_WHAT for item in left.items)
         _emit(
-            "warn",
+            "fail" if unblocked else "warn",
             f"Removed connector [{left.label}]",
             f"removed in DefenseClaw 1.0.4; left for you to remove by hand: {steps}",
             r=r,
-            remediation=f"do each step above; until then {left.label} is blocked by DefenseClaw's stub",
+            remediation=(
+                f"run defenseclaw-gateway connector teardown --connector {left.connector}, then do each step above"
+                if unblocked
+                else f"do each step above; until then {left.label} is blocked by DefenseClaw's stub"
+            ),
         )
 
 
