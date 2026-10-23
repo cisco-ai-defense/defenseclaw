@@ -58,20 +58,27 @@ func (e *Env) bundleStoreForGroup(gid int) *enterprisebundle.Store {
 // failed(interrupted) and its staging copy goes; the last good bundle keeps
 // enforcing. An applied bundle that was not confirmed is confirmed or failed
 // against the deployment and the gateway (settleUnconfirmedBundle).
-func (l *lifecycle) settleBundles(ctx context.Context, record *Deployment) {
+func (l *lifecycle) settleBundles(ctx context.Context, record *Deployment) (pending bool) {
 	store := l.env.bundleStore()
 	report, err := store.Settle(l.env.installedBundleDirs()...)
 	if err != nil {
 		l.result.AddWarning(codeBundleStateUnreadable, "could not settle the policy bundle store: "+err.Error())
-		return
+		return true
 	}
 	if n := len(report.Interrupted); n > 0 {
 		l.result.AddWarning(codeBundleInterrupted, fmt.Sprintf(
 			"%d policy bundle(s) a previous run received were not applied (failed: interrupted); the last good bundle keeps enforcing", n))
 	}
-	for _, rc := range report.Unconfirmed {
-		l.settleUnconfirmedBundle(ctx, store, record, rc)
+	if len(report.Pending) > 0 {
+		pending = true
+		l.result.AddWarning(enterprisebundle.WarnBundlePending, "an applied policy bundle remains pending because its confirmation prerequisite is unavailable")
 	}
+	for _, rc := range report.Unconfirmed {
+		if l.settleUnconfirmedBundle(ctx, store, record, rc) {
+			pending = true
+		}
+	}
+	return pending
 }
 
 // describeBundle fills Result.Bundle from the store; nil when this device

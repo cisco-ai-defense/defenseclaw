@@ -524,8 +524,9 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.AddError(codeState, err.Error())
 		return 0
 	}
+	settlePending := false
 	if l.opts.Action != ActionUninstall {
-		l.settleBundles(ctx, record)
+		settlePending = l.settleBundles(ctx, record)
 	}
 	if record != nil {
 		r.Installed = true
@@ -533,6 +534,14 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		if l.opts.Action != ActionUninstall {
 			l.recoverInterruptedRotation(ctx, record)
 		}
+	}
+	if settlePending && l.opts.Bundle == "" {
+		// A plain ensure, repair or package upgrade would select the last
+		// confirmed bundle below. Do not replace an applied bundle while its
+		// receipt cannot be confirmed or disproved.
+		r.AddError(codeBundleNotConfirmed, "an applied policy bundle is still pending confirmation; restore the gateway or missing verification evidence and retry this command")
+		l.describe(ctx, record, false)
+		return enterprisestatus.BusyExitCode(env.GOOS)
 	}
 	if l.supersededApplyRun(record) {
 		// A transaction leaves a queued apply run alone. When that

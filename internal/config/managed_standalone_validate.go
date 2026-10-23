@@ -51,6 +51,9 @@ func ValidateManagedStandaloneConfig(raw []byte, cfg *Config, plan *Observabilit
 	if bind := strings.TrimSpace(cfg.Gateway.APIBind); bind != "" && bind != "127.0.0.1" {
 		return fmt.Errorf("config gateway.api_bind %q must be 127.0.0.1", bind)
 	}
+	if err := ValidateManagedGuardrailProxyBind(cfg); err != nil {
+		return err
+	}
 	if port := cfg.Gateway.APIPort; port != 0 && port != 18970 {
 		return fmt.Errorf("config gateway.api_port %d must be 18970: the socket unit owns that listener", port)
 	}

@@ -120,6 +120,15 @@ func checkConfigV8Candidate(path, dataDir string) (*loadedConfigV8File, error) {
 	if err != nil {
 		return nil, err
 	}
+	if loaded.runtime.StandaloneEnterprise() {
+		if err := config.ValidateManagedGuardrailProxyBind(loaded.runtime); err != nil {
+			return nil, &configV8SourceError{version: loaded.runtime.ConfigVersion, err: &config.V8SemanticError{
+				Path: "$.guardrail.host", Summary: "managed guardrail proxy must bind to loopback",
+				Expected: "localhost or a literal loopback address",
+				Action:   "set guardrail.host to 127.0.0.1",
+			}}
+		}
+	}
 	err = config.CheckCandidateAssets(loaded.runtime)
 	if err == nil {
 		err = checkJSONLDestinationPaths(loaded.compiled, "")

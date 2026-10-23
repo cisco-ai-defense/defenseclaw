@@ -80,7 +80,7 @@ const (
 func windowsBundlePendingReportMessage(report enterprisebundle.SettleReport) string {
 	for _, id := range report.Pending {
 		if reason := report.PendingReasons[id]; reason != "" {
-			return fmt.Sprintf("%d policy bundle(s) remain applied and pending; receipt %s cannot be sealed because %s; repair the missing confirmation prerequisite with a signed bundle delivery",
+			return fmt.Sprintf("%d policy bundle(s) remain pending; receipt %s cannot be confirmed because %s; restore the missing evidence and retry ensure",
 				len(report.Pending), id, boundedPolicyMessage(reason))
 		}
 	}
@@ -229,11 +229,21 @@ func settleWindowsAppliedBundle(driver *enterprisebundle.Driver, installed []byt
 	installedSHA := sha256HexBytes(installed)
 	for _, rc := range receipts {
 		if rc.State != enterprisebundle.StateApplied || rc.ConfigSHA256 != installedSHA || policy == nil ||
-			!driver.TransactionApplied(rc, installedSHA, policy) || policy.EffectiveDigest != rc.EffectivePolicyDigest ||
-			policy.Digest != rc.EffectivePolicyDigest {
+			!driver.TransactionApplied(rc, installedSHA, policy) {
 			continue
 		}
-		if err := enterprisebundle.ConfirmPolicyDigests(rc.ExpectedDigest, policy.EffectiveDigest, policy.Digest, rc.DigestComparable); err == nil {
+		want, comparable := rc.EffectivePolicyDigest, rc.DigestComparable
+		if policy.EffectiveDigest != want || policy.Digest != want {
+			// A newer gateway can enforce a different digest for the same
+			// signed bundle. Confirm only after verifying its stored bytes and
+			// recomputing the digest with this build.
+			want, comparable, err = driver.VerifiedReceiptDigest(rc)
+			if err != nil {
+				continue
+			}
+		}
+		if policy.EffectiveDigest == want && policy.Digest == want &&
+			enterprisebundle.ConfirmPolicyDigests(rc.ExpectedDigest, want, policy.Digest, comparable) == nil {
 			_, err = driver.Store.Confirm(rc)
 			if errors.Is(err, enterprisebundle.ErrConfirmationPrerequisiteMissing) {
 				// The gateway proves the config, but a legacy receipt may have
