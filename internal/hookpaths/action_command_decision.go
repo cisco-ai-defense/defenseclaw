@@ -18,7 +18,16 @@ import (
 // protected file, or that a write-capable command has an unresolved program or
 // target. The caller must enforce the same result with and without client
 // resolved-write evidence.
+//
+// A call with no command text (a subagent delegation, a file or MCP tool)
+// runs no shell, so there is nothing for this proof to decide on any OS: its
+// own path facts judge it. The Windows grammar used to read such a call as a
+// dynamic command and blocked every one of them (GAP-0958). A launcher with
+// an empty child (cmd /c, pwsh -Command) still fails closed below.
 func ActionCommandDecision(command, cwd, home string) string {
+	if strings.TrimSpace(command) == "" {
+		return ""
+	}
 	return actionCommandDecision(command, cwd, home, 0)
 }
 
