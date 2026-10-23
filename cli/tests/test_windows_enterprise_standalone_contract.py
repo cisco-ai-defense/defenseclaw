@@ -1261,3 +1261,137 @@ foreach ($rollback in @($false, $true)) {
             ("Microsoft.PowerShell.Management\\Remove-Item -LiteralPath $directory", "Remove-Item -LiteralPath $directory"),
         ],
     )
+
+
+_UNINSTALL_PRECHECK_HARNESS = r"""
+$global:Calls = [Collections.Generic.List[string]]::new()
+function Assert-DefenseClawAdministrator { $global:Calls.Add('admin') }
+function Get-DefenseClawDeploymentMetadata {
+    param([hashtable]$Layout)
+    $global:Calls.Add('metadata')
+    return $global:Metadata
+}
+function Test-DefenseClawMetadataInstalled {
+    param($Metadata)
+    return [bool]$Metadata.installed
+}
+function Assert-DefenseClawStandaloneInstallTreeNotInUse {
+    param([hashtable]$Layout, [string]$GatewayServiceName, [string]$GuardianServiceName, [int]$SelfUninstallCallerPID)
+    $global:Calls.Add("install-tree:$SelfUninstallCallerPID")
+    if ($global:TreeInUse) {
+        throw 'uninstall_in_use: defenseclaw-acp.exe (pid 4) runs from C:\bin\, so DefenseClaw cannot remove its files; nothing was changed.'
+    }
+}
+function Assert-DefenseClawStandaloneStateFilesNotInUse {
+    param([hashtable]$Layout, [string]$GatewayServiceName, [string]$GuardianServiceName, [int]$SelfUninstallCallerPID)
+    $global:Calls.Add("state-files:$SelfUninstallCallerPID")
+    if ($global:StateInUse) {
+        throw 'uninstall_in_use: a SIEM forwarder holds runtime\audit.db, which the purge deletes, so DefenseClaw cannot remove its data; nothing was changed.'
+    }
+}
+$root = '__ROOT__'
+$layout = @{ PendingPath = [IO.Path]::Combine($root, 'install', 'pending.json') }
+function Invoke-Case([string]$Name, $Metadata, [bool]$Pending, [bool]$TreeInUse, [bool]$StateInUse) {
+    $global:Calls.Clear()
+    $global:Metadata = $Metadata
+    $global:TreeInUse = $TreeInUse
+    $global:StateInUse = $StateInUse
+    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($layout.PendingPath))
+    if ($Pending) { [IO.File]::WriteAllText($layout.PendingPath, '{}') }
+    elseif ([IO.File]::Exists($layout.PendingPath)) { [IO.File]::Delete($layout.PendingPath) }
+    $outcome = ''
+    $report = $null
+    try {
+        $report = Invoke-DefenseClawStandaloneUninstallPrecheck -Layout $layout `
+            -GatewayServiceName 'DefenseClawGateway' -GuardianServiceName 'DefenseClawGuardian' -SelfUninstallCallerPID 4242
+        $outcome = 'ok'
+    }
+    catch {
+        $outcome = $_.Exception.Message
+    }
+    [pscustomobject]@{
+        name = $Name
+        outcome = $outcome
+        calls = @($global:Calls)
+        precheck = ($null -ne $report -and [bool]$report.uninstall_precheck -and [bool]$report.ok -and $report.schema_version -eq 1)
+    } | ConvertTo-Json -Compress
+}
+Invoke-Case 'installed, nothing in use' ([pscustomobject]@{ installed = $true }) $false $false $false
+Invoke-Case 'a program runs from the install folder' ([pscustomobject]@{ installed = $true }) $false $true $false
+Invoke-Case 'a program holds a data file' ([pscustomobject]@{ installed = $true }) $false $false $true
+Invoke-Case 'pending transaction' ([pscustomobject]@{ installed = $true }) $true $true $true
+Invoke-Case 'tombstone' ([pscustomobject]@{ installed = $false }) $false $true $true
+Invoke-Case 'no deployment record' $null $false $true $true
+"""
+
+
+def test_uninstall_precheck_reads_the_uninstall_refusals_and_changes_nothing(tmp_path: Path) -> None:
+    """Review P2 (q-win-lifecycle loop round 3), executed: the read-only
+    precheck the CLI runs before an uninstall removes the protected session
+    keys throws exactly the uninstall's own refusals for an installed
+    deployment (a program runs from or holds a file in the install folder, or
+    holds a data file the purge deletes), naming the self-uninstall caller,
+    and passes a pending transaction or a deployment that is not installed,
+    which the uninstall recovers or finishes first. It reaches the module
+    only as a standalone Status request carried in the environment, so the
+    installer's parameter set is unchanged and an installer that does not
+    know it answers a plain status."""
+    import json
+
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    module = _text(MODULE)
+    harness = tmp_path / "uninstall-precheck.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n"
+        + _function_body(module, "Invoke-DefenseClawStandaloneUninstallPrecheck")
+        + "\n"
+        + _UNINSTALL_PRECHECK_HARNESS.replace("__ROOT__", str(tmp_path / "state")),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    cases = {case["name"]: case for case in map(json.loads, completed.stdout.strip().splitlines())}
+
+    def calls(name: str) -> list[str]:
+        value = cases[name]["calls"]
+        return [value] if isinstance(value, str) else list(value or [])
+
+    clean = cases["installed, nothing in use"]
+    assert clean["outcome"] == "ok" and clean["precheck"], clean
+    assert calls("installed, nothing in use") == ["admin", "metadata", "install-tree:4242", "state-files:4242"]
+    tree = cases["a program runs from the install folder"]
+    assert tree["outcome"].startswith("uninstall_in_use: ") and "nothing was changed" in tree["outcome"]
+    assert calls("a program runs from the install folder") == ["admin", "metadata", "install-tree:4242"]
+    state = cases["a program holds a data file"]
+    assert state["outcome"].startswith("uninstall_in_use: ") and "audit.db" in state["outcome"]
+    assert calls("a program holds a data file") == ["admin", "metadata", "install-tree:4242", "state-files:4242"]
+    assert cases["pending transaction"]["outcome"] == "ok" and calls("pending transaction") == ["admin"]
+    for name in ("tombstone", "no deployment record"):
+        assert cases[name]["outcome"] == "ok" and cases[name]["precheck"], cases[name]
+        assert calls(name) == ["admin", "metadata"], cases[name]
+
+    # The module runs it only for a standalone Status, before the status
+    # report; the installer maps the CLI's request onto it only for Status,
+    # clears the variable, and takes only a pid.
+    dispatcher = _function_body(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    status = dispatcher[dispatcher.index("    if ($Action -eq 'Status') {") :]
+    status = status[: status.index("\n    }\n")]
+    assert status.index("Invoke-DefenseClawStandaloneUninstallPrecheck") < status.index("Get-DefenseClawLifecycleStatus")
+    assert "throw '-UninstallPrecheck is valid only with a standalone Status'" in dispatcher
+    installer = _text(INSTALLER)
+    request = installer[installer.index("$uninstallPrecheckRequest = ") :]
+    request = request[: request.index("\n        }\n")]
+    assert "SetEnvironmentVariable('DEFENSECLAW_STANDALONE_UNINSTALL_PRECHECK', $null, 'Process')" in request
+    assert "$Action -eq 'Status'" in request and "-cmatch '^[0-9]{1,9}$'" in request
+    assert "$arguments['UninstallPrecheck'] = $true" in request
+    go = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
+    assert 'windowsEnterpriseUninstallPrecheckVariable = "DEFENSECLAW_STANDALONE_UNINSTALL_PRECHECK"' in go
+

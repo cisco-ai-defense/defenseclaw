@@ -34477,6 +34477,54 @@ function Invoke-DefenseClawNuclearUninstall {
     }
 }
 
+function Invoke-DefenseClawStandaloneUninstallPrecheck {
+    <#
+        The read-only refusals of a standalone Uninstall, which the CLI reads
+        before it removes the protected session record keys: a refused
+        uninstall changed nothing, so every published allow keeps proving
+        its session during a gateway outage (q-win-lifecycle review, loop
+        round 3). It takes no lock and changes nothing. A pending transaction
+        and a deployment that is not installed pass: the uninstall recovers
+        or finishes them first, which changes the host, and checks after
+        that. Otherwise it throws what Invoke-DefenseClawUninstallLifecycle
+        throws, before any change, when a program runs from or holds a file
+        in the install folder (GAP-0942) or holds a data file the uninstall
+        deletes (GAP-0136): uninstall_in_use.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [int]$SelfUninstallCallerPID
+    )
+    Assert-DefenseClawAdministrator
+    $report = [pscustomobject]@{
+        schema_version     = 1
+        ok                 = $true
+        action             = 'status'
+        uninstall_precheck = $true
+    }
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf) {
+        return $report
+    }
+    $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+    if ($null -eq $metadata -or -not (Test-DefenseClawMetadataInstalled -Metadata $metadata)) {
+        return $report
+    }
+    Assert-DefenseClawStandaloneInstallTreeNotInUse `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -SelfUninstallCallerPID $SelfUninstallCallerPID
+    # A standalone uninstall always removes the machine state (-Purge).
+    Assert-DefenseClawStandaloneStateFilesNotInUse `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -SelfUninstallCallerPID $SelfUninstallCallerPID
+    return $report
+}
+
 function Invoke-DefenseClawUninstallLifecycle {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -35772,7 +35820,12 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # Standalone Verify only: the Verify of an ensure that found the
         # deployment compliant also collects old managed runtime generations
         # (Invoke-DefenseClawStandaloneRuntimeGenerationCollect, GAP-0211).
-        [switch]$CollectRuntimeGenerations
+        [switch]$CollectRuntimeGenerations,
+        # Standalone Status only: answer, instead, the read-only refusals of
+        # an Uninstall (Invoke-DefenseClawStandaloneUninstallPrecheck), which
+        # the CLI reads before an uninstall removes the protected session
+        # record keys.
+        [switch]$UninstallPrecheck
     )
     Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
     if ($Action -eq 'Recover' -and -not (Test-DefenseClawStandaloneProfile)) {
@@ -35922,8 +35975,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     if ($CollectRuntimeGenerations -and ($Action -ne 'Verify' -or -not (Test-DefenseClawStandaloneProfile))) {
         throw '-CollectRuntimeGenerations is valid only with a standalone Verify'
     }
+    if ($UninstallPrecheck -and ($Action -ne 'Status' -or -not (Test-DefenseClawStandaloneProfile))) {
+        throw '-UninstallPrecheck is valid only with a standalone Status'
+    }
     if ($SelfUninstallCallerPID -lt 0 -or
-        ($SelfUninstallCallerPID -gt 0 -and $Action -ne 'Uninstall')) {
+        ($SelfUninstallCallerPID -gt 0 -and $Action -ne 'Uninstall' -and -not $UninstallPrecheck)) {
         throw '-SelfUninstallCallerPID is valid only as a positive PID with Uninstall'
     }
     if ($NoStart -and $Action -notin @('Install', 'Upgrade', 'Repair')) {
@@ -36091,6 +36147,13 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -AllowMissingCertificationCodexHome
+        if ($UninstallPrecheck) {
+            return Invoke-DefenseClawStandaloneUninstallPrecheck `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName `
+                -SelfUninstallCallerPID $SelfUninstallCallerPID
+        }
         return Get-DefenseClawLifecycleStatus `
             -Action $Action `
             -Layout $layout `

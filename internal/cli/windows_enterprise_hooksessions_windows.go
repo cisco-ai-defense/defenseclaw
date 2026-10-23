@@ -41,11 +41,13 @@ import (
 // blocks when they are missing, untrusted, or were not written under the
 // current key.
 //
-// The kill switch (1.0.4 guard loop): install, upgrade, repair, ensure and
-// uninstall take the key lock (beginWindowsHookSessionKeyChange) and remove
-// every key before their first change, and hold the lock to their end, so
-// the hook guardian makes no key meanwhile. A refusal that only read the
-// request comes before the keys go and leaves every record as it was. An
+// The kill switch (1.0.4 guard loop): install, upgrade, repair and ensure
+// take the key lock (beginWindowsHookSessionKeyChange) and, with uninstall,
+// remove every key before their first change, and hold the lock to their
+// end, so the hook guardian makes no key meanwhile. A refusal that only read
+// the request or the recorded deployment, an uninstall's own refusals
+// included (precheckWindowsEnterpriseStandaloneUninstall), comes before the
+// keys go and leaves every record as it was. An
 // install, upgrade, repair or ensure stops when the lock cannot be taken or
 // a key cannot be shown dead. Those that finish without an error put the folder's owner and
 // DACL back and only then give every account a new key; uninstall removes
@@ -130,8 +132,11 @@ func windowsHookSessionKeyChange(action string) bool {
 type windowsHookSessionKeyChangeRun struct {
 	action  string
 	release func()
-	killed  bool
-	killErr error
+	// bestEffort is an uninstall's: it goes on when a key cannot be shown
+	// dead, and removes the record folder and the keys at its end.
+	bestEffort bool
+	killed     bool
+	killErr    error
 }
 
 // kill removes every account's key (killWindowsHookSessionKey) the first
@@ -145,6 +150,9 @@ func (run *windowsHookSessionKeyChangeRun) kill() error {
 	if !run.killed {
 		run.killed = true
 		run.killErr = killWindowsHookSessionKey(run.action)
+		if run.bestEffort {
+			run.killErr = nil
+		}
 	}
 	return run.killErr
 }
@@ -161,9 +169,9 @@ func (run *windowsHookSessionKeyChangeRun) kill() error {
 // it was. An install, upgrade, repair or ensure stops with an error when the
 // lock cannot be taken or a key cannot be shown dead: it would put the
 // record folder's trust back while an earlier allow could still prove
-// itself. An uninstall only removes the keys, at once, and goes on; it
-// removes the folder and the keys at its end. The caller releases the lock
-// once the action finished.
+// itself. An uninstall takes no lock, and its kill, after its read-only
+// refusals, only tries and goes on; it removes the folder and the keys at
+// its end. The caller releases the lock once the action finished.
 func beginWindowsHookSessionKeyChange(ctx context.Context, action string, opts *windowsEnterpriseLifecycleOptions) (*windowsHookSessionKeyChangeRun, error) {
 	run := &windowsHookSessionKeyChangeRun{release: func() {}}
 	if !windowsHookSessionKeyChange(action) || !windowsEnterpriseIsElevated() {
@@ -172,7 +180,7 @@ func beginWindowsHookSessionKeyChange(ctx context.Context, action string, opts *
 	if action == "uninstall" {
 		// It removes the record folder and the keys at its end; a lock held
 		// across it would only keep the installer from removing its state.
-		_ = killWindowsHookSessionKey(action)
+		run.action, run.bestEffort = action, true
 		return run, nil
 	}
 	lockPath, err := windowsHookSessionKeyLock()

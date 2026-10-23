@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // GAP-0352: the protected session record folder is owned by Administrators;
@@ -466,5 +467,282 @@ func TestWindowsRefusedConfigReplacementKeepsTheSessionKeys(t *testing.T) {
 	}
 	if got, readErr := os.ReadFile(host.configPath); readErr != nil || string(got) != installed {
 		t.Fatalf("the refused repair changed config.yaml: %q, %v", got, readErr)
+	}
+}
+
+// Review P2 (q-win-lifecycle loop round 3): the installer refuses some
+// requests for the recorded deployment before it changes anything (a
+// deferred install over an installed deployment; an install, an upgrade, or
+// a repair without both policy files or with --no-start while the deployment
+// waits for its deferred configuration). The lifecycle refuses them itself,
+// before the session keys go, so the allow published before the run still
+// proves its process. The runs it lets go on remove the keys before the
+// installer, as before: a tombstone, a completing repair, and a pending
+// transaction, whose recovery changes the record first.
+func TestWindowsRecordedDeploymentRefusalsKeepTheSessionKeys(t *testing.T) {
+	root, identity := windowsHookSessionTestHost(t)
+	kills := windowsHookSessionKillCounter(t, root)
+	installerRuns := stubWindowsHookSessionTestInstaller(t)
+	originalInspector, originalPending := windowsEnterpriseDeploymentInspector, windowsEnterpriseStandaloneTransactionPending
+	originalPort, originalStaged, originalEnrolled := windowsEnterpriseConfigAPIPort, windowsEnterpriseStagedConnectors, windowsEnterpriseEnrolledConnectors
+	originalHookRuntime := windowsEnterpriseHookRuntimeDir
+	t.Cleanup(func() {
+		windowsEnterpriseDeploymentInspector, windowsEnterpriseStandaloneTransactionPending = originalInspector, originalPending
+		windowsEnterpriseConfigAPIPort, windowsEnterpriseStagedConnectors, windowsEnterpriseEnrolledConnectors = originalPort, originalStaged, originalEnrolled
+		windowsEnterpriseHookRuntimeDir = originalHookRuntime
+	})
+	windowsEnterpriseHookRuntimeDir = func() (string, error) { return "", nil }
+	windowsEnterpriseConfigAPIPort = func(string) (int, error) { return 18970, nil }
+	windowsEnterpriseStagedConnectors = func(string) ([]string, error) { return []string{"codex"}, nil }
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return []string{"codex"}, nil }
+	var recorded winpath.EnterpriseDeployment
+	pending := false
+	windowsEnterpriseDeploymentInspector = func(profile string) (winpath.EnterpriseDeployment, error) {
+		if profile != managed.ProfileStandalone {
+			return winpath.EnterpriseDeployment{Profile: profile, State: winpath.EnterpriseDeploymentAbsent}, nil
+		}
+		deployment := recorded
+		deployment.Profile = profile
+		return deployment, nil
+	}
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return pending }
+	installed := winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled}
+	waiting := winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled, DeferredConfigPending: true}
+	for _, tc := range []struct {
+		name, action      string
+		deployment        winpath.EnterpriseDeployment
+		pending           bool
+		config, manifest  string
+		deferred, noStart bool
+		refused           bool
+	}{
+		{name: "deferred install over an installed deployment", action: "install", deployment: installed, deferred: true, refused: true},
+		{name: "deferred install over a deferred deployment", action: "install", deployment: waiting, deferred: true, refused: true},
+		{name: "install while the deferred configuration waits", action: "install", deployment: waiting,
+			config: `C:\stage\config.yaml`, manifest: `C:\stage\targets.yaml`, refused: true},
+		{name: "upgrade while the deferred configuration waits", action: "upgrade", deployment: waiting, config: `C:\stage\config.yaml`, refused: true},
+		{name: "repair without --manifest while the deferred configuration waits", action: "repair", deployment: waiting,
+			config: `C:\stage\config.yaml`, refused: true},
+		{name: "repair with --no-start while the deferred configuration waits", action: "repair", deployment: waiting,
+			config: `C:\stage\config.yaml`, manifest: `C:\stage\targets.yaml`, noStart: true, refused: true},
+		{name: "deferred install over a tombstone", action: "install",
+			deployment: winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentTombstone}, deferred: true},
+		{name: "deferred install over no deployment", action: "install",
+			deployment: winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentAbsent}, deferred: true},
+		{name: "repair that completes the deferred configuration", action: "repair", deployment: waiting,
+			config: `C:\stage\config.yaml`, manifest: `C:\stage\targets.yaml`},
+		{name: "install over a pending transaction while the deferred configuration waits", action: "install", deployment: waiting, pending: true,
+			config: `C:\stage\config.yaml`, manifest: `C:\stage\targets.yaml`},
+		{name: "install over an installed deployment", action: "install", deployment: installed,
+			config: `C:\stage\config.yaml`, manifest: `C:\stage\targets.yaml`},
+	} {
+		key := windowsHookSessionTestAllow(t, root, identity)
+		*kills, *installerRuns = 0, 0
+		recorded, pending = tc.deployment, tc.pending
+		opts := &windowsEnterpriseLifecycleOptions{profile: "standalone", resolvedProfile: "standalone", jsonOutput: true,
+			configPath: tc.config, manifestPath: tc.manifest, deferredConfig: tc.deferred, noStart: tc.noStart}
+		result, err := runWindowsHookSessionTestAction(t, tc.action, opts)
+		if !tc.refused {
+			if *kills != 1 || *installerRuns != 1 || windowsHookSessionTestProves(root, identity, key) {
+				t.Fatalf("%s: a run that goes on must remove the keys before the installer: kills %d, installer runs %d, errors %+v (%v)",
+					tc.name, *kills, *installerRuns, result.Errors, err)
+			}
+			continue
+		}
+		if commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
+			!strings.Contains(result.Errors[0].Message, "nothing was changed") {
+			t.Fatalf("%s: refusal %v, errors %+v", tc.name, err, result.Errors)
+		}
+		if *kills != 0 || *installerRuns != 0 || !windowsHookSessionTestProves(root, identity, key) {
+			t.Fatalf("%s: a refusal that changed nothing removed the session keys %d time(s), installer runs %d", tc.name, *kills, *installerRuns)
+		}
+	}
+}
+
+// windowsHookSessionInstallerDocument is an installer run whose schema-1
+// JSON document has these fields.
+func windowsHookSessionInstallerDocument(t *testing.T, fields map[string]any) windowsEnterpriseStandaloneRun {
+	t.Helper()
+	document := map[string]any{"schema_version": 1}
+	for name, value := range fields {
+		document[name] = value
+	}
+	body, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := windowsEnterpriseStandaloneRun{Output: body}
+	if ok, _ := document["ok"].(bool); !ok {
+		run.ExitCode = 1
+	}
+	return run
+}
+
+// Review P2 (q-win-lifecycle loop round 3): an uninstall the installer
+// refuses because a program runs from, or holds a file in, the install
+// folder or holds a data file (uninstall_in_use), or because a root is
+// squatted, changed nothing. The lifecycle reads those refusals first, with
+// the installer's own read-only precheck (a Status that names the
+// self-uninstall caller), so the keys stay and the allow published before
+// the run still proves its process; a PowerShell 7 no uninstall can run on
+// is refused the same way. Any other precheck answer, an installer that
+// does not know the precheck included, lets the uninstall go on, and it
+// removes the keys before the installer's uninstall. A forced uninstall and
+// a tombstone skip the precheck.
+func TestWindowsRefusedUninstallKeepsTheSessionKeys(t *testing.T) {
+	root, identity := windowsHookSessionTestHost(t)
+	kills := windowsHookSessionKillCounter(t, root)
+	stubWindowsHookSessionTestInstaller(t)
+	originalInspector, originalFootprint, originalPolicy := windowsEnterpriseDeploymentInspector, windowsEnterpriseStandaloneFootprint, windowsEnterprisePolicyDigest
+	t.Cleanup(func() {
+		windowsEnterpriseDeploymentInspector, windowsEnterpriseStandaloneFootprint, windowsEnterprisePolicyDigest = originalInspector, originalFootprint, originalPolicy
+	})
+	windowsEnterpriseStandaloneFootprint = func() (bool, error) { return true, nil }
+	windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, nil }
+	state := winpath.EnterpriseDeploymentInstalled
+	windowsEnterpriseDeploymentInspector = func(profile string) (winpath.EnterpriseDeployment, error) {
+		if profile != managed.ProfileStandalone {
+			return winpath.EnterpriseDeployment{Profile: profile, State: winpath.EnterpriseDeploymentAbsent}, nil
+		}
+		return winpath.EnterpriseDeployment{Profile: profile, State: state}, nil
+	}
+	const precheck = windowsEnterpriseUninstallPrecheckVariable + "=4242"
+	installedStatus := map[string]any{"ok": true, "action": "status", "installed": true, "gateway_ready": false}
+	uninstallFailed := map[string]any{"ok": false, "action": "uninstall", "installed": true, "error": "lifecycle_error: the test stops the uninstall here"}
+	inUse := "uninstall_in_use: defenseclaw-acp.exe (pid 4) runs from C:\\Program Files\\Cisco\\DefenseClaw\\bin\\, so DefenseClaw cannot remove its files; nothing was changed."
+	for _, tc := range []struct {
+		name     string
+		state    winpath.EnterpriseDeploymentState
+		force    bool
+		precheck func() (windowsEnterpriseStandaloneRun, error)
+		refusal  string // the error code of a refused uninstall, "" for one that goes on
+		runs     string
+	}{
+		{name: "a program runs from the install folder", refusal: "uninstall_in_use", runs: "Status " + precheck + " | Status",
+			precheck: func() (windowsEnterpriseStandaloneRun, error) {
+				return windowsHookSessionInstallerDocument(t, map[string]any{"ok": false, "action": "status", "error": inUse, "errors": []string{inUse}}), nil
+			}},
+		{name: "a squatted root", refusal: "root_squatted", runs: "Status " + precheck + " | Status",
+			precheck: func() (windowsEnterpriseStandaloneRun, error) {
+				message := "root_squatted: C:\\ProgramData\\Cisco\\DefenseClaw is owned by a standard user, not an administrator"
+				return windowsHookSessionInstallerDocument(t, map[string]any{"ok": false, "action": "status", "error": message}), nil
+			}},
+		{name: "no PowerShell 7", refusal: "powershell7_required", runs: "Status " + precheck,
+			precheck: func() (windowsEnterpriseStandaloneRun, error) {
+				return windowsEnterpriseStandaloneRun{}, fmt.Errorf("%w: PowerShell 7 (x64 MSI) is not installed", errPowerShell7Required)
+			}},
+		{name: "a precheck that finds nothing", runs: "Status " + precheck + " | Uninstall",
+			precheck: func() (windowsEnterpriseStandaloneRun, error) {
+				return windowsHookSessionInstallerDocument(t, map[string]any{"ok": true, "action": "status", "uninstall_precheck": true}), nil
+			}},
+		{name: "an installer without the precheck", runs: "Status " + precheck + " | Uninstall",
+			precheck: func() (windowsEnterpriseStandaloneRun, error) {
+				return windowsHookSessionInstallerDocument(t, installedStatus), nil
+			}},
+		{name: "a precheck failure the uninstall may repair", runs: "Status " + precheck + " | Uninstall",
+			precheck: func() (windowsEnterpriseStandaloneRun, error) {
+				message := "deployment.json has an access list the uninstall repairs"
+				return windowsHookSessionInstallerDocument(t, map[string]any{"ok": false, "action": "status", "error": message}), nil
+			}},
+		{name: "a precheck that cannot start", runs: "Status " + precheck + " | Uninstall",
+			precheck: func() (windowsEnterpriseStandaloneRun, error) {
+				return windowsEnterpriseStandaloneRun{}, errors.New("the installer exited with code 1")
+			}},
+		{name: "a forced uninstall", force: true, runs: "Uninstall " + windowsEnterpriseForcedUninstallVariable + "=1"},
+		{name: "a tombstone", state: winpath.EnterpriseDeploymentTombstone, runs: "Uninstall"},
+	} {
+		key := windowsHookSessionTestAllow(t, root, identity)
+		*kills = 0
+		state = winpath.EnterpriseDeploymentInstalled
+		if tc.state != "" {
+			state = tc.state
+		}
+		var runs []string
+		windowsEnterpriseStandaloneRunner = func(ctx context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
+			action := windowsEnterpriseInstallerAction(args)
+			label := strings.Join(append([]string{action}, windowsEnterpriseInstallerRequestEnvironment(ctx, args)...), " ")
+			runs = append(runs, label)
+			switch {
+			case label == "Status "+precheck:
+				return tc.precheck()
+			case action == "Status":
+				return windowsHookSessionInstallerDocument(t, installedStatus), nil
+			case action == "Uninstall":
+				if *kills != 1 {
+					t.Fatalf("%s: the uninstall ran before the keys were removed (%d removals)", tc.name, *kills)
+				}
+				return windowsHookSessionInstallerDocument(t, uninstallFailed), nil
+			}
+			t.Fatalf("%s: unexpected installer run %q", tc.name, args)
+			return windowsEnterpriseStandaloneRun{}, nil
+		}
+		opts := &windowsEnterpriseLifecycleOptions{profile: "standalone", resolvedProfile: "standalone", jsonOutput: true, force: tc.force}
+		command := &cobra.Command{}
+		var stdout bytes.Buffer
+		command.SetOut(&stdout)
+		command.SetErr(&bytes.Buffer{})
+		err := runWindowsEnterpriseStandaloneAction(context.Background(), command, "uninstall", opts, `C:\stage\install-enterprise.ps1`,
+			[]string{"-Action", "Uninstall", "-SelfUninstallCallerPID", "4242"})
+		var result enterprisestatus.Result
+		if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+			t.Fatalf("%s: decode %q: %v", tc.name, stdout.String(), decodeErr)
+		}
+		if got := strings.Join(runs, " | "); got != tc.runs {
+			t.Fatalf("%s: installer runs %q, want %q", tc.name, got, tc.runs)
+		}
+		if tc.refusal == "" {
+			if *kills != 1 || windowsHookSessionTestProves(root, identity, key) {
+				t.Fatalf("%s: an uninstall that goes on must remove the keys: kills %d (%v)", tc.name, *kills, err)
+			}
+			continue
+		}
+		if err == nil || len(result.Errors) == 0 || result.Errors[0].Code != tc.refusal || result.Action != "uninstall" {
+			t.Fatalf("%s: refusal %v, action %q, errors %+v", tc.name, err, result.Action, result.Errors)
+		}
+		if *kills != 0 || !windowsHookSessionTestProves(root, identity, key) {
+			t.Fatalf("%s: a refused uninstall removed the session keys %d time(s)", tc.name, *kills)
+		}
+	}
+}
+
+// The uninstall precheck reaches the installer only as a Status request: an
+// installer that does not know it answers a plain status, never an
+// uninstall.
+func TestWindowsUninstallPrecheckIsAskedOnlyOfAStatus(t *testing.T) {
+	ctx := context.WithValue(context.Background(), windowsEnterpriseUninstallPrecheckKey{}, "0")
+	if env := windowsEnterpriseInstallerRequestEnvironment(ctx, []string{"-Action", "Status", "-Json"}); strings.Join(env, " ") != windowsEnterpriseUninstallPrecheckVariable+"=0" {
+		t.Fatalf("status environment %q", env)
+	}
+	for _, action := range []string{"Uninstall", "Repair", "Verify"} {
+		if env := windowsEnterpriseInstallerRequestEnvironment(ctx, []string{"-Action", action}); len(env) != 0 {
+			t.Fatalf("%s environment %q", action, env)
+		}
+	}
+	if env := windowsEnterpriseInstallerRequestEnvironment(context.Background(), []string{"-Action", "Status"}); len(env) != 0 {
+		t.Fatalf("a plain status asks for %q", env)
+	}
+}
+
+// The same for an install that finds an untrusted scanner runtime it cannot
+// remove (GAP-0490): that refusal reads only, so it comes before the keys go.
+func TestWindowsUnremovableScannerRuntimeRefusalKeepsTheSessionKeys(t *testing.T) {
+	root, identity := windowsHookSessionTestHost(t)
+	key := windowsHookSessionTestAllow(t, root, identity)
+	kills := windowsHookSessionKillCounter(t, root)
+	installerRuns := stubWindowsHookSessionTestInstaller(t)
+	seamDir, seamCheck := windowsScannerRuntimeDir, windowsScannerRuntimeTreeCheck
+	t.Cleanup(func() { windowsScannerRuntimeDir, windowsScannerRuntimeTreeCheck = seamDir, seamCheck })
+	runtime := filepath.Join(t.TempDir(), "not-the-scanner-runtime")
+	if err := os.MkdirAll(runtime, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	windowsScannerRuntimeDir = func() (string, error) { return runtime, nil }
+	windowsScannerRuntimeTreeCheck = func(string) error { return errors.New(`BUILTIN\Users can add files to the python folder`) }
+	result, err := runWindowsHookSessionTestAction(t, "install", &windowsEnterpriseLifecycleOptions{profile: "standalone", resolvedProfile: "standalone", jsonOutput: true})
+	if err == nil || !windowsBundleHasCode(result.Errors, "scanner_runtime_untrusted") {
+		t.Fatalf("install over an unremovable untrusted scanner runtime: %v, errors %+v", err, result.Errors)
+	}
+	if *kills != 0 || *installerRuns != 0 || !windowsHookSessionTestProves(root, identity, key) {
+		t.Fatalf("a refusal that changed nothing removed the session keys %d time(s), installer runs %d", *kills, *installerRuns)
 	}
 }
