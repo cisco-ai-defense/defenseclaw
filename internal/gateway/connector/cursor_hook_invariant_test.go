@@ -40,7 +40,9 @@ import (
 // requested failure mode and input, returning stdout/stderr/exit error.
 func runCursorHookAgainst(t *testing.T, apiAddr, failMode, input string) (string, string, error) {
 	t.Helper()
-	return runCursorHookWithInput(t, apiAddr, failMode, true, input)
+	home := t.TempDir()
+	installNativeGatewayForHookTest(t, home)
+	return runCursorHookWithInput(t, apiAddr, failMode, true, input, "HOME="+home)
 }
 
 // stubGatewayAddr stands up an httptest server that returns the given

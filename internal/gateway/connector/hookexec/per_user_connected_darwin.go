@@ -42,7 +42,7 @@ func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
 		case 'u':
 			owner, _ = strconv.Atoi(line[1:])
 		case 'n':
-			if owner == os.Geteuid() && strings.HasPrefix(strings.TrimPrefix(line[1:], "TCP "), want) {
+			if owner == os.Geteuid() && connectedSocketNameMatches(line[1:], want) {
 				return nil
 			}
 		}

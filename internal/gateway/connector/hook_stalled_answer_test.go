@@ -59,6 +59,7 @@ func TestClosedShellHookCutsAStalledAnswerAtTheToolCallBudget(t *testing.T) {
 		t.Run(agent.conn.Name(), func(t *testing.T) {
 			requests.Store(0)
 			home := t.TempDir()
+			installNativeGatewayForHookTest(t, home)
 			dataDir := filepath.Join(home, ".defenseclaw")
 			hookDir := filepath.Join(dataDir, "hooks")
 			opts := SetupOpts{DataDir: dataDir, APIAddr: addr, APIToken: "scoped-test-token", HookFailMode: "closed"}

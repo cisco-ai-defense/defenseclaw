@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -42,6 +43,15 @@ func VerifyPerUserConnectedTuple(local, remote string) error {
 		return fmt.Errorf("connected gateway endpoint is not loopback")
 	}
 	return verifyPerUserConnectedTuple(client, server)
+}
+
+// connectedSocketNameMatches accepts lsof's optional protocol and state text
+// while requiring both TCP endpoint ports to match exactly. A prefix match
+// could mistake a different same-account connection for the accepted socket.
+func connectedSocketNameMatches(name, want string) bool {
+	name = strings.TrimPrefix(name, "TCP ")
+	tuple, _, _ := strings.Cut(strings.TrimSpace(name), " ")
+	return tuple == want
 }
 
 // PerUserHookReply is the bounded response sent back to an in-agent plugin.
