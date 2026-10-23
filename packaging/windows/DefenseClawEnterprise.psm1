@@ -31714,6 +31714,28 @@ function Invoke-DefenseClawPreLayoutRecovery {
     }
 }
 
+function Test-DefenseClawPreLayoutRecoveryPending {
+    <#
+        Whether a record an interrupted lifecycle left is present that
+        Invoke-DefenseClawPreLayoutRecovery recovers before the lifecycle
+        reads the deployment record: a pending transaction, a state-purge
+        intent, a self-uninstall receipt or an install-rollback intent. Their
+        recovery can change the record (a first install interrupted after it
+        wrote the installed record but before it cleared pending.json rolls
+        back to no deployment), so a refusal read from the record waits for
+        that recovery and checks after it (S2 review, loop round 2).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    foreach ($name in @('PendingPath', 'PurgeIntentPath', 'SelfUninstallReceiptPath', 'InstallRollbackIntentPath')) {
+        $path = [string]$Layout[$name]
+        if (-not [string]::IsNullOrWhiteSpace($path) -and
+            (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Assert-DefenseClawDeferredInstallIsFresh {
     param(
         [Parameter(Mandatory)][hashtable]$Layout
@@ -34483,10 +34505,10 @@ function Invoke-DefenseClawStandaloneUninstallPrecheck {
         before it removes the protected session record keys: a refused
         uninstall changed nothing, so every published allow keeps proving
         its session during a gateway outage (q-win-lifecycle review, loop
-        round 3). It takes no lock and changes nothing. A pending transaction
-        and a deployment that is not installed pass: the uninstall recovers
-        or finishes them first, which changes the host, and checks after
-        that. Otherwise it throws what Invoke-DefenseClawUninstallLifecycle
+        round 3). It takes no lock and changes nothing. A record of an
+        interrupted lifecycle (Test-DefenseClawPreLayoutRecoveryPending) and
+        a deployment that is not installed pass: the uninstall recovers or
+        finishes them first, which changes the host, and checks after that. Otherwise it throws what Invoke-DefenseClawUninstallLifecycle
         throws, before any change, when a program runs from or holds a file
         in the install folder (GAP-0942) or holds a data file the uninstall
         deletes (GAP-0136): uninstall_in_use.
@@ -34504,7 +34526,7 @@ function Invoke-DefenseClawStandaloneUninstallPrecheck {
         action             = 'status'
         uninstall_precheck = $true
     }
-    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf) {
+    if (Test-DefenseClawPreLayoutRecoveryPending -Layout $Layout) {
         return $report
     }
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
@@ -36267,8 +36289,12 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # gateway refuses a Secure Client config with fleet.enabled when it
         # loads it (resolveEnterpriseConfig).
     }
+    # Before the lock only without a record to recover: its recovery, after
+    # the lock, can change the deployment record, and the check after it
+    # decides (Test-DefenseClawPreLayoutRecoveryPending).
     if ($Action -eq 'Install' -and $DeferredConfig -and
-        (Test-DefenseClawStandaloneProfile)) {
+        (Test-DefenseClawStandaloneProfile) -and
+        -not (Test-DefenseClawPreLayoutRecoveryPending -Layout $layout)) {
         Assert-DefenseClawDeferredInstallIsFresh -Layout $layout
     }
     Initialize-DefenseClawManagedRoot `

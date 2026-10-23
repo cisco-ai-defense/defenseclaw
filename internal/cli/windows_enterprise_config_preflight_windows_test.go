@@ -178,3 +178,71 @@ func TestWindowsStandaloneConfigPreflightRefusesEnvironmentSecrets(t *testing.T)
 		}
 	}
 }
+
+// S2 review (loop round 2): the lifecycle leaves to the installer every
+// refusal it would read from the deployment record while a record of an
+// interrupted lifecycle waits for the installer's recovery, which runs
+// first and can change it: a pending transaction under the run's
+// --state-root, and a state-purge intent, self-uninstall receipt or
+// install-rollback intent of any scope in the lifecycle folder. The helper
+// files a self-uninstall leaves, another receipt, a short name and a
+// folder are none of them; a lifecycle folder it cannot read counts.
+func TestWindowsEnterpriseStandaloneRecoveryRecords(t *testing.T) {
+	scope := strings.Repeat("ab", 32)
+	for _, tc := range []struct {
+		name    string
+		pending bool
+		files   []string
+		dirs    []string
+		want    bool
+	}{
+		{name: "nothing recorded"},
+		{name: "pending transaction under the state root", pending: true, want: true},
+		{name: "state-purge intent", files: []string{"purge-" + scope + ".json"}, want: true},
+		{name: "self-uninstall receipt", files: []string{"self-uninstall-" + scope + ".json"}, want: true},
+		{name: "install-rollback intent", files: []string{"install-rollback-" + scope + ".json"}, want: true},
+		{name: "upper-case scope", files: []string{"install-rollback-" + strings.ToUpper(scope) + ".json"}, want: true},
+		{name: "not a recovery record", files: []string{
+			"lifecycle.lock",
+			"managed-hook-contract-cleanup-" + scope + ".json",
+			"managed-hook-contract-cleanup-" + scope + ".report.json",
+			"self-uninstall-" + scope + ".ps1",
+			"self-uninstall-" + scope + ".environment",
+			"purge-0.json",
+			"install-rollback-" + scope + ".json.tmp",
+		}, dirs: []string{"purge-" + scope + ".json"}},
+	} {
+		stateRoot, lifecycleDir := t.TempDir(), t.TempDir()
+		if tc.pending {
+			if err := os.MkdirAll(filepath.Join(stateRoot, "install"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(stateRoot, "install", "pending.json"), []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, name := range tc.files {
+			if err := os.WriteFile(filepath.Join(lifecycleDir, name), []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, name := range tc.dirs {
+			if err := os.Mkdir(filepath.Join(lifecycleDir, name), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := windowsEnterpriseStandaloneRecoveryRecords(stateRoot, lifecycleDir); got != tc.want {
+			t.Fatalf("%s: recovery pending = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if windowsEnterpriseStandaloneRecoveryRecords("", filepath.Join(t.TempDir(), "absent")) {
+		t.Fatal("an absent lifecycle folder counts as a recovery record")
+	}
+	unreadable := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(unreadable, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !windowsEnterpriseStandaloneRecoveryRecords("", unreadable) {
+		t.Fatal("a lifecycle folder that cannot be read does not leave the refusal to the installer")
+	}
+}

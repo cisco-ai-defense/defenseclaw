@@ -2121,31 +2121,40 @@ func (d *SandboxDaemon) readyHarnesses() []string {
 // Ready is called directly (GAP-0534). Profiles match per connector, so each
 // candidate gets its own view: the first agent's profile forbidding
 // sandboxes does not refuse a run of an agent whose profile allows them,
-// whose create then judges that run. A view the gateway does not answer
-// fails the ready closed with its reason unless another candidate is
-// allowed; a view that times out ends the asking.
+// whose create then judges that run. Every candidate is asked at once,
+// within one view's bound (managedViewTimeout), so an agent whose view is
+// slow or unanswered neither holds up nor refuses a ready another agent's
+// profile allows: the first allowed answer readies. With none allowed, a
+// view the gateway did not answer fails the ready closed with its reason
+// (the earliest candidate's, so the daemon's own agent's first); else the
+// organization's refusal stands.
 func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []string) error {
-	var viewErr error
-	for _, name := range candidates {
-		viewCtx, cancel := context.WithTimeout(ctx, managedViewTimeout)
-		view, _, err := d.managedExplain(viewCtx, sandboxapi.ExplainRequest{Harness: name}, nil)
-		timedOut := viewCtx.Err() != nil
-		cancel()
-		if err != nil {
-			if viewErr == nil {
-				viewErr = err
-			}
-			if timedOut {
-				break
-			}
-			continue
-		}
-		if view.Allowed {
+	askCtx, cancel := context.WithTimeout(ctx, managedViewTimeout)
+	defer cancel()
+	type answer struct {
+		index   int
+		allowed bool
+		err     error
+	}
+	answers := make(chan answer, len(candidates))
+	for index, name := range candidates {
+		go func() {
+			view, _, err := d.managedExplain(askCtx, sandboxapi.ExplainRequest{Harness: name}, nil)
+			answers <- answer{index: index, allowed: err == nil && view.Allowed, err: err}
+		}()
+	}
+	errs := make([]error, len(candidates))
+	for range candidates {
+		a := <-answers
+		if a.allowed {
 			return nil
 		}
+		errs[a.index] = a.err
 	}
-	if viewErr != nil {
-		return viewErr
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
 	}
 	return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
 		Message: "Your organization doesn't allow sandboxes for your account.", Detail: sandboxrelay.ReasonNotAllowed}

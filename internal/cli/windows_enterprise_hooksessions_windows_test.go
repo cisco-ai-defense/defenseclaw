@@ -477,17 +477,21 @@ func TestWindowsRefusedConfigReplacementKeepsTheSessionKeys(t *testing.T) {
 // waits for its deferred configuration). The lifecycle refuses them itself,
 // before the session keys go, so the allow published before the run still
 // proves its process. The runs it lets go on remove the keys before the
-// installer, as before: a tombstone, a completing repair, and a pending
-// transaction, whose recovery changes the record first.
+// installer, as before: a tombstone, a completing repair, and a record of
+// an interrupted lifecycle (a pending transaction, a purge intent, a
+// self-uninstall receipt or an install-rollback intent), whose recovery can
+// change the record first: a first deferred install interrupted after it
+// wrote the installed record but before it cleared pending.json is retried,
+// not refused from that record (S2 review, loop round 2).
 func TestWindowsRecordedDeploymentRefusalsKeepTheSessionKeys(t *testing.T) {
 	root, identity := windowsHookSessionTestHost(t)
 	kills := windowsHookSessionKillCounter(t, root)
 	installerRuns := stubWindowsHookSessionTestInstaller(t)
-	originalInspector, originalPending := windowsEnterpriseDeploymentInspector, windowsEnterpriseStandaloneTransactionPending
+	originalInspector, originalPending := windowsEnterpriseDeploymentInspector, windowsEnterpriseStandaloneRecoveryPending
 	originalPort, originalStaged, originalEnrolled := windowsEnterpriseConfigAPIPort, windowsEnterpriseStagedConnectors, windowsEnterpriseEnrolledConnectors
 	originalHookRuntime := windowsEnterpriseHookRuntimeDir
 	t.Cleanup(func() {
-		windowsEnterpriseDeploymentInspector, windowsEnterpriseStandaloneTransactionPending = originalInspector, originalPending
+		windowsEnterpriseDeploymentInspector, windowsEnterpriseStandaloneRecoveryPending = originalInspector, originalPending
 		windowsEnterpriseConfigAPIPort, windowsEnterpriseStagedConnectors, windowsEnterpriseEnrolledConnectors = originalPort, originalStaged, originalEnrolled
 		windowsEnterpriseHookRuntimeDir = originalHookRuntime
 	})
@@ -505,7 +509,7 @@ func TestWindowsRecordedDeploymentRefusalsKeepTheSessionKeys(t *testing.T) {
 		deployment.Profile = profile
 		return deployment, nil
 	}
-	windowsEnterpriseStandaloneTransactionPending = func() bool { return pending }
+	windowsEnterpriseStandaloneRecoveryPending = func(*windowsEnterpriseLifecycleOptions) bool { return pending }
 	installed := winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled}
 	waiting := winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled, DeferredConfigPending: true}
 	for _, tc := range []struct {
@@ -533,6 +537,10 @@ func TestWindowsRecordedDeploymentRefusalsKeepTheSessionKeys(t *testing.T) {
 			config: `C:\stage\config.yaml`, manifest: `C:\stage\targets.yaml`},
 		{name: "install over a pending transaction while the deferred configuration waits", action: "install", deployment: waiting, pending: true,
 			config: `C:\stage\config.yaml`, manifest: `C:\stage\targets.yaml`},
+		{name: "deferred install retried over the record an interrupted first install wrote", action: "install",
+			deployment: installed, pending: true, deferred: true},
+		{name: "deferred install retried over a deferred record with recovery pending", action: "install",
+			deployment: waiting, pending: true, deferred: true},
 		{name: "install over an installed deployment", action: "install", deployment: installed,
 			config: `C:\stage\config.yaml`, manifest: `C:\stage\targets.yaml`},
 	} {

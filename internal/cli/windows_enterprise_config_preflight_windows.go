@@ -9,8 +9,10 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -318,6 +320,59 @@ var windowsEnterpriseStandaloneTransactionPending = func() bool {
 	}
 	_, err = os.Lstat(filepath.Join(filepath.Dir(roots.MetadataPath), "pending.json"))
 	return err == nil
+}
+
+// windowsEnterpriseStandaloneRecoveryPending reports a record an
+// interrupted lifecycle left that the installer recovers, under its lock,
+// before it reads the deployment record for a refusal
+// (Invoke-DefenseClawPreLayoutRecovery): a pending transaction, in the
+// production StateRoot or this run's --state-root, and a state-purge intent,
+// self-uninstall receipt or install-rollback intent in the profile's
+// lifecycle folder. Their recovery can change the record (an interrupted
+// first install rolls back to no deployment), so a refusal read from the
+// record before that is the installer's to make. Tests replace it.
+var windowsEnterpriseStandaloneRecoveryPending = func(opts *windowsEnterpriseLifecycleOptions) bool {
+	if windowsEnterpriseStandaloneTransactionPending() {
+		return true
+	}
+	stateRoot, lifecycleDir := "", ""
+	if opts != nil {
+		stateRoot = strings.TrimSpace(opts.stateRoot)
+	}
+	if roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone); err == nil {
+		lifecycleDir = roots.LifecycleDir
+	}
+	return windowsEnterpriseStandaloneRecoveryRecords(stateRoot, lifecycleDir)
+}
+
+// windowsEnterpriseLifecycleRecoveryRecord names the lifecycle-folder
+// records Invoke-DefenseClawPreLayoutRecovery recovers. Each name carries
+// its scope's SHA-256, which this does not compute: any scope's record
+// counts, which only leaves the refusal to the installer.
+var windowsEnterpriseLifecycleRecoveryRecord = regexp.MustCompile(`^(purge|self-uninstall|install-rollback)-[0-9a-f]{64}\.json$`)
+
+// windowsEnterpriseStandaloneRecoveryRecords reports a pending transaction
+// under stateRoot (when set) or a recovery record in lifecycleDir (when
+// set). A folder it cannot read counts as holding one.
+func windowsEnterpriseStandaloneRecoveryRecords(stateRoot, lifecycleDir string) bool {
+	if stateRoot != "" {
+		if _, err := os.Lstat(filepath.Join(stateRoot, "install", "pending.json")); err == nil {
+			return true
+		}
+	}
+	if lifecycleDir == "" {
+		return false
+	}
+	entries, err := os.ReadDir(lifecycleDir)
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && windowsEnterpriseLifecycleRecoveryRecord.MatchString(strings.ToLower(entry.Name())) {
+			return true
+		}
+	}
+	return false
 }
 
 // windowsEnterpriseStandaloneRepairRulePackPreflight checks the rule packs

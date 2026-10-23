@@ -1290,15 +1290,22 @@ function Assert-DefenseClawStandaloneStateFilesNotInUse {
     }
 }
 $root = '__ROOT__'
-$layout = @{ PendingPath = [IO.Path]::Combine($root, 'install', 'pending.json') }
-function Invoke-Case([string]$Name, $Metadata, [bool]$Pending, [bool]$TreeInUse, [bool]$StateInUse) {
+$layout = @{
+    PendingPath = [IO.Path]::Combine($root, 'install', 'pending.json')
+    PurgeIntentPath = [IO.Path]::Combine($root, 'lifecycle', 'purge-scope.json')
+    SelfUninstallReceiptPath = [IO.Path]::Combine($root, 'lifecycle', 'self-uninstall-scope.json')
+    InstallRollbackIntentPath = [IO.Path]::Combine($root, 'lifecycle', 'install-rollback-scope.json')
+}
+function Invoke-Case([string]$Name, $Metadata, $Pending, [bool]$TreeInUse, [bool]$StateInUse) {
     $global:Calls.Clear()
     $global:Metadata = $Metadata
     $global:TreeInUse = $TreeInUse
     $global:StateInUse = $StateInUse
-    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($layout.PendingPath))
-    if ($Pending) { [IO.File]::WriteAllText($layout.PendingPath, '{}') }
-    elseif ([IO.File]::Exists($layout.PendingPath)) { [IO.File]::Delete($layout.PendingPath) }
+    foreach ($record in @('PendingPath', 'PurgeIntentPath', 'SelfUninstallReceiptPath', 'InstallRollbackIntentPath')) {
+        [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($layout[$record]))
+        if ($Pending -ceq $record) { [IO.File]::WriteAllText($layout[$record], '{}') }
+        elseif ([IO.File]::Exists($layout[$record])) { [IO.File]::Delete($layout[$record]) }
+    }
     $outcome = ''
     $report = $null
     try {
@@ -1316,12 +1323,15 @@ function Invoke-Case([string]$Name, $Metadata, [bool]$Pending, [bool]$TreeInUse,
         precheck = ($null -ne $report -and [bool]$report.uninstall_precheck -and [bool]$report.ok -and $report.schema_version -eq 1)
     } | ConvertTo-Json -Compress
 }
-Invoke-Case 'installed, nothing in use' ([pscustomobject]@{ installed = $true }) $false $false $false
-Invoke-Case 'a program runs from the install folder' ([pscustomobject]@{ installed = $true }) $false $true $false
-Invoke-Case 'a program holds a data file' ([pscustomobject]@{ installed = $true }) $false $false $true
-Invoke-Case 'pending transaction' ([pscustomobject]@{ installed = $true }) $true $true $true
-Invoke-Case 'tombstone' ([pscustomobject]@{ installed = $false }) $false $true $true
-Invoke-Case 'no deployment record' $null $false $true $true
+Invoke-Case 'installed, nothing in use' ([pscustomobject]@{ installed = $true }) '' $false $false
+Invoke-Case 'a program runs from the install folder' ([pscustomobject]@{ installed = $true }) '' $true $false
+Invoke-Case 'a program holds a data file' ([pscustomobject]@{ installed = $true }) '' $false $true
+Invoke-Case 'pending transaction' ([pscustomobject]@{ installed = $true }) 'PendingPath' $true $true
+Invoke-Case 'state-purge intent' ([pscustomobject]@{ installed = $true }) 'PurgeIntentPath' $true $true
+Invoke-Case 'self-uninstall receipt' ([pscustomobject]@{ installed = $true }) 'SelfUninstallReceiptPath' $true $true
+Invoke-Case 'install-rollback intent' ([pscustomobject]@{ installed = $true }) 'InstallRollbackIntentPath' $true $true
+Invoke-Case 'tombstone' ([pscustomobject]@{ installed = $false }) '' $true $true
+Invoke-Case 'no deployment record' $null '' $true $true
 """
 
 
@@ -1346,6 +1356,8 @@ def test_uninstall_precheck_reads_the_uninstall_refusals_and_changes_nothing(tmp
     harness.write_text(
         "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n"
         + _function_body(module, "Invoke-DefenseClawStandaloneUninstallPrecheck")
+        + "\n"
+        + _function_body(module, "Test-DefenseClawPreLayoutRecoveryPending")
         + "\n"
         + _UNINSTALL_PRECHECK_HARNESS.replace("__ROOT__", str(tmp_path / "state")),
         encoding="utf-8",
@@ -1373,7 +1385,10 @@ def test_uninstall_precheck_reads_the_uninstall_refusals_and_changes_nothing(tmp
     state = cases["a program holds a data file"]
     assert state["outcome"].startswith("uninstall_in_use: ") and "audit.db" in state["outcome"]
     assert calls("a program holds a data file") == ["admin", "metadata", "install-tree:4242", "state-files:4242"]
-    assert cases["pending transaction"]["outcome"] == "ok" and calls("pending transaction") == ["admin"]
+    # S2 review (loop round 2): every record the uninstall recovers first,
+    # not only a pending transaction, leaves the refusal to the uninstall.
+    for name in ("pending transaction", "state-purge intent", "self-uninstall receipt", "install-rollback intent"):
+        assert cases[name]["outcome"] == "ok" and calls(name) == ["admin"], cases[name]
     for name in ("tombstone", "no deployment record"):
         assert cases[name]["outcome"] == "ok" and cases[name]["precheck"], cases[name]
         assert calls(name) == ["admin", "metadata"], cases[name]
@@ -1394,3 +1409,95 @@ def test_uninstall_precheck_reads_the_uninstall_refusals_and_changes_nothing(tmp
     assert "$arguments['UninstallPrecheck'] = $true" in request
     go = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
     assert 'windowsEnterpriseUninstallPrecheckVariable = "DEFENSECLAW_STANDALONE_UNINSTALL_PRECHECK"' in go
+
+
+_PRE_LAYOUT_RECOVERY_PENDING_HARNESS = r"""
+$root = '__ROOT__'
+$layout = @{
+    PendingPath = [IO.Path]::Combine($root, 'state', 'install', 'pending.json')
+    PurgeIntentPath = [IO.Path]::Combine($root, 'lifecycle', 'purge-scope.json')
+    SelfUninstallReceiptPath = [IO.Path]::Combine($root, 'lifecycle', 'self-uninstall-scope.json')
+    InstallRollbackIntentPath = [IO.Path]::Combine($root, 'lifecycle', 'install-rollback-scope.json')
+    ManagedHookContractCleanupReceiptPath = [IO.Path]::Combine($root, 'lifecycle', 'managed-hook-contract-cleanup-scope.json')
+    MetadataPath = [IO.Path]::Combine($root, 'state', 'install', 'deployment.json')
+}
+foreach ($path in $layout.Values) { [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path)) }
+[IO.File]::WriteAllText($layout.MetadataPath, '{}')
+foreach ($record in @('', 'PendingPath', 'PurgeIntentPath', 'SelfUninstallReceiptPath', 'InstallRollbackIntentPath',
+        'ManagedHookContractCleanupReceiptPath', 'MetadataPath', 'PendingPath:dir')) {
+    foreach ($name in @('PendingPath', 'PurgeIntentPath', 'SelfUninstallReceiptPath', 'InstallRollbackIntentPath',
+            'ManagedHookContractCleanupReceiptPath')) {
+        if ([IO.File]::Exists($layout[$name])) { [IO.File]::Delete($layout[$name]) }
+        if ([IO.Directory]::Exists($layout[$name])) { [IO.Directory]::Delete($layout[$name]) }
+    }
+    if ($record -ceq 'PendingPath:dir') { [void][IO.Directory]::CreateDirectory($layout.PendingPath) }
+    elseif ($record -cne '' -and $record -cne 'MetadataPath') { [IO.File]::WriteAllText($layout[$record], '{}') }
+    [pscustomobject]@{
+        record = $record
+        pending = [bool](Test-DefenseClawPreLayoutRecoveryPending -Layout $layout)
+    } | ConvertTo-Json -Compress
+}
+"""
+
+
+def test_deferred_install_freshness_waits_for_pre_layout_recovery(tmp_path: Path) -> None:
+    """S2 review (loop round 2): a first deferred Install interrupted after it
+    wrote the installed deployment record but before it cleared pending.json
+    is retried, not refused from that partial record: the pre-lock freshness
+    check runs only without a record Invoke-DefenseClawPreLayoutRecovery
+    recovers first (a pending transaction, a state-purge intent, a
+    self-uninstall receipt or an install-rollback intent), whose recovery can
+    change the record; the check after that recovery, under the lock, still
+    refuses a deferred Install over an installed deployment. Executed for the
+    predicate, read for where it guards."""
+    import json
+
+    module = _text(MODULE)
+    entry = _function_body(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    lock = entry.index("$lifecycleLock = Enter-DefenseClawLifecycleLock -Layout $layout")
+    recovery = entry.index("$preLayoutRecovery = Invoke-DefenseClawPreLayoutRecovery")
+    checks = [i for i in range(len(entry)) if entry.startswith("Assert-DefenseClawDeferredInstallIsFresh -Layout $layout", i)]
+    assert len(checks) == 2, checks
+    before, after = checks
+    assert before < lock < recovery < after
+    guard = entry[entry.rindex("if ($Action -eq 'Install' -and $DeferredConfig", 0, before) : before]
+    assert "-not (Test-DefenseClawPreLayoutRecoveryPending -Layout $layout)" in guard
+    guard = entry[entry.rindex("if ($Action -eq 'Install' -and $DeferredConfig", 0, after) : after]
+    assert "Test-DefenseClawPreLayoutRecoveryPending" not in guard
+    precheck = _function_body(module, "Invoke-DefenseClawStandaloneUninstallPrecheck")
+    assert "if (Test-DefenseClawPreLayoutRecoveryPending -Layout $Layout) {" in precheck
+    prelayout = _function_body(module, "Invoke-DefenseClawPreLayoutRecovery")
+    for name in ("PendingPath", "PurgeIntentPath"):
+        assert f"$Layout.{name}" in prelayout, name
+    assert "Get-DefenseClawInstallRollbackIntent" in prelayout and "Invoke-DefenseClawSelfUninstallRecovery" in prelayout
+
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    harness = tmp_path / "pre-layout-recovery-pending.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n"
+        + _function_body(module, "Test-DefenseClawPreLayoutRecoveryPending")
+        + "\n"
+        + _PRE_LAYOUT_RECOVERY_PENDING_HARNESS.replace("__ROOT__", str(tmp_path / "root")),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    pending = {case["record"]: case["pending"] for case in map(json.loads, completed.stdout.strip().splitlines())}
+    assert pending == {
+        "": False,
+        "PendingPath": True,
+        "PurgeIntentPath": True,
+        "SelfUninstallReceiptPath": True,
+        "InstallRollbackIntentPath": True,
+        "ManagedHookContractCleanupReceiptPath": False,
+        "MetadataPath": False,
+        "PendingPath:dir": False,
+    }, pending
