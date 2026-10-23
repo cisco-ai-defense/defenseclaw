@@ -225,6 +225,11 @@ func settleWindowsAppliedBundle(driver *enterprisebundle.Driver, installed []byt
 		}
 		if err := enterprisebundle.ConfirmPolicyDigests(rc.ExpectedDigest, policy.EffectiveDigest, policy.Digest, rc.DigestComparable); err == nil {
 			_, err = driver.Store.Confirm(rc)
+			if errors.Is(err, enterprisebundle.ErrConfirmationPrerequisiteMissing) {
+				// The gateway proves the config, but a legacy receipt may have
+				// lost its trust anchors. Status still reports it as applied.
+				continue
+			}
 			return err == nil, err
 		}
 	}

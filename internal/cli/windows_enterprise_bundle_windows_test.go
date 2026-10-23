@@ -1402,6 +1402,54 @@ func TestWindowsRetryWithAnchorsRecoversLegacyAppliedReceiptWithoutAnchors(t *te
 	assertWindowsBundleInstalledAnchors(t, layout, readWindowsBundleAnchors(t, e.anchors), "after legacy receipt failed")
 }
 
+func TestWindowsStatusKeepsLegacyAppliedReceiptPendingWithoutAnchors(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "legacy-status.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	layout := stubWindowsBundleHost(t)
+	cmd, _ := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts); done || err != nil {
+		t.Fatalf("prepare legacy delivery: done=%t err=%v", done, err)
+	}
+	cleanupPreparedWindowsBundle(t, opts)
+	rc := opts.bundle.prepared.Receipt
+	recordWindowsBundleTestCommit(t, layout, rc, opts.bundle.prepared.Config)
+	policy := windowsBundlePolicy
+	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return nil }
+	finishWindowsEnterpriseBundle(cmd, opts, newWindowsEnterpriseStandaloneResult("ensure", opts))
+	if got := windowsBundleReceiptState(t, layout, rc.ReceiptID); got.State != enterprisebundle.StateApplied {
+		t.Fatalf("legacy receipt = %+v", got)
+	}
+	stage, previous, err := windowsReceiptAnchorPaths(layout, rc.ReceiptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{stage, previous} {
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, nil, "after legacy anchor loss")
+	windowsBundlePolicy = policy // The gateway proves the signed config is enforced.
+	for range 2 {
+		pending, err := settleWindowsBundleStatusReport(t.Context())
+		if err != nil {
+			t.Fatalf("status could not report the pending receipt: %v", err)
+		}
+		if len(pending) != 1 || pending[0].ReceiptID != rc.ReceiptID || pending[0].State != enterprisebundle.StateApplied {
+			t.Fatalf("status pending receipts = %+v", pending)
+		}
+		if got := windowsBundleReceiptState(t, layout, rc.ReceiptID); got.State != enterprisebundle.StateApplied {
+			t.Fatalf("status changed legacy receipt = %+v", got)
+		}
+	}
+}
+
 func TestWindowsPendingReceiptCannotBorrowEarlierTrustAnchors(t *testing.T) {
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})

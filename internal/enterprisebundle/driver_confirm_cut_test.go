@@ -174,6 +174,47 @@ func TestStoreSettleCompletesOnlyTheReceiptTheStateNames(t *testing.T) {
 	}
 }
 
+func TestDriverSettleRunKeepsNamedReceiptPendingWithoutConfirmationPrerequisite(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	p, err := d.Prepare(t.Context(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proven := installPreparedBundle(t, d, p)
+	if err := d.Store.Advance(p.Receipt, enterprisebundle.StateApplied, func(rc *enterprisebundle.Receipt) {
+		rc.EffectivePolicyDigest, rc.ConfigGeneration = proven.EffectiveDigest, proven.Generation
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rc := p.Receipt
+	ref := enterprisebundle.Ref{BundleID: rc.BundleID, Version: rc.Version, ManifestSHA256: rc.ManifestSHA256, Dir: rc.Dir,
+		SignerKeyID: rc.SignerKeyID, EffectivePolicyDigest: rc.EffectivePolicyDigest, ConfigGeneration: rc.ConfigGeneration,
+		ConfirmedAt: "2026-06-01T00:00:00.000Z"}
+	raw, err := json.Marshal(enterprisebundle.State{SchemaVersion: enterprisebundle.StateSchemaVersion, Current: &ref, Floor: rc.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(d.Store.StatePath(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.Store.BeforeConfirm = func(*enterprisebundle.Receipt) error {
+		return fmt.Errorf("legacy trust anchors absent: %w", enterprisebundle.ErrConfirmationPrerequisiteMissing)
+	}
+	for range 2 {
+		report, rollback, err := d.SettleRun(p.Config, &proven)
+		if err != nil {
+			t.Fatalf("settle refused a pending receipt: %v", err)
+		}
+		if len(rollback) != 0 || !slices.Contains(report.Pending, rc.ReceiptID) || slices.Contains(report.Completed, rc.ReceiptID) {
+			t.Fatalf("settle report = %+v, rollback = %+v", report, rollback)
+		}
+		if got := receiptOf(t, d, rc.ReceiptID); got.State != enterprisebundle.StateApplied || got.ConfirmedAt != "" {
+			t.Fatalf("named receipt was confirmed without anchors: %+v", got)
+		}
+	}
+}
+
 func receiptOf(t *testing.T, d *enterprisebundle.Driver, id string) *enterprisebundle.Receipt {
 	t.Helper()
 	receipts, err := d.Store.Receipts()
