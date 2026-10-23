@@ -2036,6 +2036,27 @@ namespace $nativeNamespace
             byte[] securityDescriptor,
             string expectedIdentity)
         {
+            return SetDirectoryDaclNoFollowCore(
+                path, securityDescriptor, expectedIdentity, true);
+        }
+
+        // Shared vendor ancestors may inherit permissions from their owners.
+        // Edit only our ACE; do not turn their DACL into a protected one.
+        public static PathSecuritySnapshot SetSharedDirectoryDaclNoFollow(
+            string path,
+            byte[] securityDescriptor,
+            string expectedIdentity)
+        {
+            return SetDirectoryDaclNoFollowCore(
+                path, securityDescriptor, expectedIdentity, false);
+        }
+
+        private static PathSecuritySnapshot SetDirectoryDaclNoFollowCore(
+            string path,
+            byte[] securityDescriptor,
+            string expectedIdentity,
+            bool protectDacl)
+        {
             const uint FILE_READ_ATTRIBUTES = 0x00000080;
             const uint READ_CONTROL = 0x00020000;
             const uint WRITE_DAC = 0x00040000;
@@ -2102,7 +2123,7 @@ namespace $nativeNamespace
                         handle,
                         SE_FILE_OBJECT,
                         DACL_SECURITY_INFORMATION |
-                            PROTECTED_DACL_SECURITY_INFORMATION,
+                            (protectDacl ? PROTECTED_DACL_SECURITY_INFORMATION : 0),
                         IntPtr.Zero,
                         IntPtr.Zero,
                         dacl,
@@ -4757,27 +4778,117 @@ function Get-DefenseClawManagedRootAncestors {
 $script:StateAncestorTraverseRights =
     [Security.AccessControl.FileSystemRights]::ReadAndExecute
 
-# A state-root ancestor is a shared vendor directory this installer does not
-# own, so the owner and every other ACE are preserved and one ACE is added.
-# The ACE is not inherited, keeping the grant off sibling trees.
-function Add-DefenseClawStateAncestorTraverseRule {
+# Clone and edit only the named explicit ACE. All other ACE bytes, including
+# the administrator's BUILTIN Users entries, retain their original masks.
+function Update-DefenseClawSharedRawDescriptor {
     param(
-        [Parameter(Mandatory)][Security.AccessControl.DirectorySecurity]$Security,
-        [Parameter(Mandatory)][string]$GatewayServiceSID
+        [Parameter(Mandatory)][Security.AccessControl.RawSecurityDescriptor]$Descriptor,
+        [Parameter(Mandatory)][string]$SID,
+        [Parameter(Mandatory)][ValidateSet('Add', 'Replace', 'Remove', 'RemoveExact')][string]$Action,
+        [int]$AccessMask = 0
     )
-    $identity = [Security.Principal.SecurityIdentifier]::new($GatewayServiceSID)
-    # Repeated installs converge on exactly one ACE for this SID.
-    [void]$Security.PurgeAccessRules($identity)
-    [void]$Security.AddAccessRule(
-        [Security.AccessControl.FileSystemAccessRule]::new(
-            $identity,
-            $script:StateAncestorTraverseRights,
-            [Security.AccessControl.InheritanceFlags]::None,
-            [Security.AccessControl.PropagationFlags]::None,
-            [Security.AccessControl.AccessControlType]::Allow
+    $identity = [Security.Principal.SecurityIdentifier]::new($SID)
+    if ($null -eq $Descriptor.DiscretionaryAcl) {
+        throw 'shared directory has no DACL'
+    }
+    $bytes = [byte[]]::new($Descriptor.BinaryLength)
+    $Descriptor.GetBinaryForm($bytes, 0)
+    $updated = [Security.AccessControl.RawSecurityDescriptor]::new($bytes, 0)
+    $matches = [Collections.Generic.List[int]]::new()
+    for ($index = 0; $index -lt $updated.DiscretionaryAcl.Count; $index++) {
+        $ace = $updated.DiscretionaryAcl[$index]
+        if ($ace -isnot [Security.AccessControl.KnownAce] -or
+            $null -eq $ace.SecurityIdentifier -or
+            $ace.SecurityIdentifier.Value -cne $identity.Value -or
+            ([int]$ace.AceFlags -band
+                [int][Security.AccessControl.AceFlags]::Inherited) -ne 0) {
+            continue
+        }
+        if ($Action -eq 'RemoveExact' -and
+            ($ace -isnot [Security.AccessControl.CommonAce] -or
+                $ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed -or
+                $ace.AceFlags -ne [Security.AccessControl.AceFlags]::None -or
+                [int]$ace.AccessMask -ne $AccessMask -or $ace.IsCallback -or $ace.OpaqueLength -ne 0)) {
+            continue
+        }
+        $matches.Add($index)
+    }
+    if ($Action -eq 'RemoveExact' -and $matches.Count -gt 1) {
+        throw 'the recorded shared directory ACE cannot be identified exactly'
+    }
+    if ($Action -eq 'Replace' -and $matches.Count -eq 1) {
+        $existing = $updated.DiscretionaryAcl[$matches[0]]
+        if ($existing -is [Security.AccessControl.CommonAce] -and
+            $existing.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed -and
+            $existing.AceFlags -eq [Security.AccessControl.AceFlags]::None -and
+            [int]$existing.AccessMask -eq $AccessMask -and
+            -not $existing.IsCallback -and $existing.OpaqueLength -eq 0) {
+            return [pscustomobject]@{ Descriptor = $updated; Changed = $false }
+        }
+    }
+    if ($Action -ne 'Add') {
+        for ($index = $matches.Count - 1; $index -ge 0; $index--) {
+            $updated.DiscretionaryAcl.RemoveAce($matches[$index])
+        }
+    }
+    if ($Action -in @('Add', 'Replace')) {
+        $ace = [Security.AccessControl.CommonAce]::new(
+            [Security.AccessControl.AceFlags]::None,
+            [Security.AccessControl.AceQualifier]::AccessAllowed,
+            $AccessMask, $identity, $false, $null
         )
+        $insert = $updated.DiscretionaryAcl.Count
+        for ($index = 0; $index -lt $updated.DiscretionaryAcl.Count; $index++) {
+            if (([int]$updated.DiscretionaryAcl[$index].AceFlags -band
+                    [int][Security.AccessControl.AceFlags]::Inherited) -ne 0) {
+                $insert = $index
+                break
+            }
+        }
+        $updated.DiscretionaryAcl.InsertAce($insert, $ace)
+    }
+    elseif ($matches.Count -eq 0) {
+        return [pscustomobject]@{ Descriptor = $updated; Changed = $false }
+    }
+    return [pscustomobject]@{ Descriptor = $updated; Changed = $true }
+}
+
+# Shared vendor ancestors belong to other products too. FileSystemSecurity's
+# AddAccessRule/Set-Acl projection can widen an unrelated BUILTIN Users mask.
+# Edit through the pinned directory handle and compare every ACE on readback.
+function Set-DefenseClawSharedDirectoryRawAce {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$SID,
+        [Parameter(Mandatory)][ValidateSet('Add', 'Replace', 'Remove', 'RemoveExact')][string]$Action,
+        [int]$AccessMask = 0
     )
-    return $Security
+    $native = Initialize-DefenseClawNativeSecurity
+    $before = $native::GetDirectorySecuritySnapshotNoFollow($Path)
+    $actual = [Security.AccessControl.RawSecurityDescriptor]::new(
+        [byte[]]$before.SecurityDescriptor, 0
+    )
+    $edit = Update-DefenseClawSharedRawDescriptor `
+        -Descriptor $actual -SID $SID -Action $Action -AccessMask $AccessMask
+    if (-not $edit.Changed) { return $false }
+    $updated = [Security.AccessControl.RawSecurityDescriptor]$edit.Descriptor
+    $expected = [byte[]]::new($updated.BinaryLength)
+    $updated.GetBinaryForm($expected, 0)
+    $after = $native::SetSharedDirectoryDaclNoFollow(
+        $Path, $expected, [string]$before.Identity
+    )
+    $published = [Security.AccessControl.RawSecurityDescriptor]::new(
+        [byte[]]$after.SecurityDescriptor, 0
+    )
+    $protectedFlag = [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
+    if ([string]$after.Identity -cne [string]$before.Identity -or
+        $published.Owner.Value -cne $actual.Owner.Value -or
+        $published.Group.Value -cne $actual.Group.Value -or
+        ($published.ControlFlags -band $protectedFlag) -ne ($actual.ControlFlags -band $protectedFlag) -or
+        -not (Test-DefenseClawExactRawDACL -Actual $published -Expected $updated)) {
+        throw "shared directory changed outside the requested ACE: $Path"
+    }
+    return $true
 }
 
 function Grant-DefenseClawStateAncestorTraverse {
@@ -4789,13 +4900,9 @@ function Grant-DefenseClawStateAncestorTraverse {
     )
     Assert-DefenseClawNoReparsePath -Path $Path
     Assert-DefenseClawTrustedAncestor -Path $Path
-    $security = Add-DefenseClawStateAncestorTraverseRule `
-        -Security (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path) `
-        -GatewayServiceSID $GatewayServiceSID
-    Microsoft.PowerShell.Security\Set-Acl `
-        -LiteralPath $Path `
-        -AclObject $security `
-        -ErrorAction Stop
+    [void](Set-DefenseClawSharedDirectoryRawAce `
+        -Path $Path -SID $GatewayServiceSID -Action Replace `
+        -AccessMask ([int]$script:StateAncestorTraverseRights -bor 0x100000))
     Assert-DefenseClawStateAncestorTraverse `
         -Path $Path `
         -GatewayServiceSID $GatewayServiceSID
@@ -4855,28 +4962,8 @@ function Revoke-DefenseClawStateAncestorTraverse {
     }
     Assert-DefenseClawNoReparsePath -Path $Path
     Assert-DefenseClawTrustedAncestor -Path $Path
-    $security = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
-    $explicit = $false
-    foreach ($rule in $security.Access) {
-        if ($rule.IsInherited) {
-            continue
-        }
-        if ((ConvertTo-DefenseClawSID -Identity $rule.IdentityReference) -eq
-            $GatewayServiceSID) {
-            $explicit = $true
-            break
-        }
-    }
-    if (-not $explicit) {
-        return
-    }
-    [void]$security.PurgeAccessRules(
-        [Security.Principal.SecurityIdentifier]::new($GatewayServiceSID)
-    )
-    Microsoft.PowerShell.Security\Set-Acl `
-        -LiteralPath $Path `
-        -AclObject $security `
-        -ErrorAction Stop
+    [void](Set-DefenseClawSharedDirectoryRawAce `
+        -Path $Path -SID $GatewayServiceSID -Action Remove)
 }
 
 # What a standard user's hook needs on the standalone vendor directory to
@@ -5019,8 +5106,8 @@ function Test-DefenseClawStandaloneVendorUsersRead {
     return (($granted -band $required) -eq $required)
 }
 
-# The explicit Users allow entries on the vendor directory alone: the entry
-# AddAccessRule merges a this-folder Users grant into.
+# The explicit Users allow entries on the vendor directory alone. Setup reads
+# these masks to add only missing rights in a separate raw ACE.
 function Get-DefenseClawVendorUsersThisFolderRules {
     param([Parameter(Mandatory)][Security.AccessControl.DirectorySecurity]$Security)
     return @($Security.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) |
@@ -5198,6 +5285,14 @@ function Grant-DefenseClawStandaloneVendorUsersRead {
     }
     Assert-DefenseClawNoReparsePath -Path $Path
     Assert-DefenseClawTrustedAncestor -Path $Path
+    if ($null -ne $record) {
+        # A different installer may have reset the shared vendor DACL. Drop
+        # only our exact recorded ACE if it remains, then calculate a fresh
+        # separate ACE against the administrator's current Users grants.
+        [void](Set-DefenseClawSharedDirectoryRawAce `
+            -Path $Path -SID $script:UsersSID -Action RemoveExact `
+            -AccessMask ([int]$record.AddedRights))
+    }
     $security = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
     $present = [int64]0
     foreach ($rule in @(Get-DefenseClawVendorUsersThisFolderRules -Security $security)) {
@@ -5205,36 +5300,20 @@ function Grant-DefenseClawStandaloneVendorUsersRead {
     }
     $added = [int64]$script:VendorDirectoryUsersRights -band (-bnot $present)
     if ($added -eq 0) {
-        Register-DefenseClawVendorUsersReadGrantScope -Path $Path -Scope $Scope -Record $record
+        if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $Path)) {
+            throw "the shared vendor directory still denies standard users the required read grant: $Path"
+        }
+        if ($null -ne $record) { Remove-DefenseClawVendorUsersReadGrant }
         return
     }
-    $recordedRights = [int64]0
-    $recordedScopes = [string[]]@()
-    if ($null -ne $record) {
-        $recordedRights = [int64]$record.AddedRights
-        $recordedScopes = [string[]]$record.Scopes
-    }
-    Set-DefenseClawVendorUsersReadGrant -Path $Path -AddedRights ($recordedRights -bor $added) -Scopes ([string[]]@(@($recordedScopes) + $Scope))
-    [void]$security.AddAccessRule(
-        [Security.AccessControl.FileSystemAccessRule]::new(
-            [Security.Principal.SecurityIdentifier]::new($script:UsersSID),
-            $script:VendorDirectoryUsersRights,
-            [Security.AccessControl.InheritanceFlags]::None,
-            [Security.AccessControl.PropagationFlags]::None,
-            [Security.AccessControl.AccessControlType]::Allow
-        )
-    )
-    try {
-        Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
-    }
-    catch {
-        if ($null -eq $record) {
-            Remove-DefenseClawVendorUsersReadGrant
-        }
-        else {
-            Set-DefenseClawVendorUsersReadGrant -Path $Path -AddedRights $recordedRights -Scopes $recordedScopes
-        }
-        throw
+    $scopes = if ($null -ne $record) { @(@($record.Scopes) + $Scope) } else { @($Scope) }
+    # Record before publication. If the raw ACL write is interrupted, the
+    # next repair can retry and uninstall can still remove an applied ACE.
+    Set-DefenseClawVendorUsersReadGrant -Path $Path -AddedRights $added -Scopes $scopes
+    [void](Set-DefenseClawSharedDirectoryRawAce `
+        -Path $Path -SID $script:UsersSID -Action Add -AccessMask ([int]$added))
+    if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $Path)) {
+        throw "the shared vendor directory still denies standard users the required read grant: $Path"
     }
 }
 
@@ -5273,31 +5352,8 @@ function Revoke-DefenseClawStandaloneVendorUsersRead {
         (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Container)) {
         Assert-DefenseClawNoReparsePath -Path $Path
         Assert-DefenseClawTrustedAncestor -Path $Path
-        $security = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
-        $changed = $false
-        foreach ($rule in @(Get-DefenseClawVendorUsersThisFolderRules -Security $security)) {
-            $rights = [int64]$rule.FileSystemRights -band 0xffffffffL
-            if (($rights -band $added) -eq 0) {
-                continue
-            }
-            [void]$security.RemoveAccessRuleSpecific($rule)
-            $kept = $rights -band (-bnot $added)
-            if ($kept -ne 0) {
-                [void]$security.AddAccessRule(
-                    [Security.AccessControl.FileSystemAccessRule]::new(
-                        [Security.Principal.SecurityIdentifier]::new($script:UsersSID),
-                        [Security.AccessControl.FileSystemRights][int]$kept,
-                        [Security.AccessControl.InheritanceFlags]::None,
-                        [Security.AccessControl.PropagationFlags]::None,
-                        [Security.AccessControl.AccessControlType]::Allow
-                    )
-                )
-            }
-            $changed = $true
-        }
-        if ($changed) {
-            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
-        }
+        [void](Set-DefenseClawSharedDirectoryRawAce `
+            -Path $Path -SID $script:UsersSID -Action RemoveExact -AccessMask ([int]$added))
     }
     Remove-DefenseClawVendorUsersReadGrant
 }
@@ -22925,9 +22981,10 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
     <#
         Standalone only. Runs under the lifecycle lock, after any pending
         transaction was recovered and before Upgrade, Repair, Reconcile or
-        Uninstall opens its own transaction. When the enumerator republished
-        targets.yaml since the last transaction and the guardian has already
-        activated it (Get-DefenseClawStandaloneManifestAdoption), rebind the
+        Uninstall opens its own transaction; a fresh Install also runs it
+        after commit and before journal retirement. When the enumerator has
+        republished targets.yaml since the last transaction and the guardian
+        has already activated it (Get-DefenseClawStandaloneManifestAdoption), rebind the
         committed activation evidence to that manifest, so every later exact
         binding check of the transaction sees one manifest generation. Only
         manifest_sha256 and target_count change; the state and the deployment
@@ -25585,7 +25642,7 @@ function Assert-DefenseClawUninstallStateTreeNoReparse {
         'remove only the link with: cmd /c del /a "' + $path + '"'
     }
     throw (
-        "managed state contains a reparse point: $path. The uninstall stopped before it changed anything " +
+        "state_invalid: managed state contains a reparse point: $path. The uninstall stopped before it changed anything " +
         "and the deployment is still installed. DefenseClaw does not follow or remove links in its state folder: " +
         $removal + ' (the folder it points to is not changed), then run the uninstall again'
     )
@@ -32587,6 +32644,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         throw $operationError
     }
     try {
+        if ($Action -eq 'Install' -and (Test-DefenseClawStandaloneProfile)) {
+            # The enumerator can publish a new protected targets manifest
+            # after readiness. Rebind only one the guardian has adopted
+            # before the committed journal checks that exact manifest.
+            [void](Sync-DefenseClawStandaloneManagedHooksActivationBinding `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName)
+        }
         [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `

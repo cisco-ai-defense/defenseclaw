@@ -73,6 +73,47 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 	}
 }
 
+func TestDevinTeardownRevokesScopedCredentialAndEmptyBackupDirectory(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	opts := SetupOpts{
+		DataDir:      dataDir,
+		ConfigHome:   filepath.Join(t.TempDir(), "devin"),
+		APIAddr:      "127.0.0.1:18970",
+		APIToken:     "test-token",
+		HookFailMode: "closed",
+	}
+	conn := NewDevinConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureHookAPIToken(dataDir, "devin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatal(err)
+	}
+	token, err := HookAPITokenFilePath(dataDir, "devin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(token); !os.IsNotExist(err) {
+		t.Fatalf("removed Devin credential remains: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dataDir, "connector_backups", "devin")); !os.IsNotExist(err) {
+		t.Fatalf("empty Devin backup directory remains: %v", err)
+	}
+	// A cached agent process can still call the old hook path. The disabled
+	// tombstone is deliberately retained until the agent exits.
+	tombstone, err := os.ReadFile(filepath.Join(dataDir, "hooks", "devin-hook.sh"))
+	if err != nil || !bytes.Contains(tombstone, []byte("disabled tombstone")) ||
+		!bytes.Contains(tombstone, []byte("exit 2")) {
+		t.Fatalf("cached hook path must block with a disabled tombstone: %v, %q", err, tombstone)
+	}
+}
+
 func TestHardeningJQFallbackRejectsStructuredOutputWithoutParser(t *testing.T) {
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("bash is required")
@@ -1154,6 +1195,9 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			if err := conn.Setup(context.Background(), opts); err != nil {
 				t.Fatalf("Setup: %v", err)
 			}
+			if _, err := EnsureHookAPIToken(dataDir, conn.Name()); err != nil {
+				t.Fatalf("issue scoped hook token: %v", err)
+			}
 			if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
 				t.Fatalf("OwnedHooksPresent after Setup = %t, %v; want true, nil", present, err)
 			}
@@ -1206,6 +1250,9 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			}
 			if err := conn.Teardown(context.Background(), opts); err != nil {
 				t.Fatalf("Teardown: %v", err)
+			}
+			if token, err := LoadHookAPIToken(dataDir, conn.Name()); err != nil || token != "" {
+				t.Fatalf("removed %s still authenticates with scoped token: %q, %v", conn.Name(), token, err)
 			}
 			if _, err := os.Stat(cfgPath); err == nil {
 				t.Fatalf("config file still exists after teardown of previously missing config: %s", cfgPath)

@@ -571,6 +571,7 @@ func TestWindowsEnterpriseStandaloneFailureCodes(t *testing.T) {
 		{"invalid arguments: --profile must be secure_client or standalone", "invalid_arguments", 1639},
 		{"powershell7_required: the standalone enterprise lifecycle requires PowerShell 7", "powershell7_required", 1603},
 		{"profile_conflict: a Cisco Secure Client DefenseClaw deployment exists", "profile_conflict", 1603},
+		{"state_invalid: managed state contains a reparse point: C:\\ProgramData\\Cisco\\DefenseClaw\\secrets", "state_invalid", 1603},
 		{"Install requires -Config", "lifecycle_error", 1603},
 	} {
 		result := enterprisestatus.New("install", "standalone", "windows", "1.4.0")

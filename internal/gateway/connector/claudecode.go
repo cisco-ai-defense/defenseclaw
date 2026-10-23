@@ -319,6 +319,11 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 		}
 	}
 	if len(errs) == 0 {
+		if err := revokePerUserHookAPIToken(opts, c.Name()); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) == 0 {
 		if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeClaude); err != nil {
 			errs = append(errs, fmt.Sprintf("revoke scoped OTLP token: %v", err))
 		}

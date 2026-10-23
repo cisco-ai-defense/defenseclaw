@@ -56,6 +56,78 @@ func windowsChangeEvents(t *testing.T, spool string) []enterprisestatus.ChangeEv
 	return out
 }
 
+func TestWindowsChangeSpoolParentDescriptorForEveryCreationStep(t *testing.T) {
+	// rel-1-0-4:GAP-0747, GAP-0759, GAP-0690: preparing reserved must
+	// never restamp change-events with the public bundles descriptor.
+	const sid = "S-1-5-80-1-2-3-4-5"
+	bundles := filepath.Join(t.TempDir(), "bundles")
+	spool := filepath.Join(bundles, enterprisestatus.ChangeEventsDirName)
+	for _, tc := range []struct {
+		name, parent, want string
+	}{
+		{"first event", bundles, windowsBundleDirectorySDDL(sid)},
+		{"first reservation", spool, windowsBundleVersionSDDL(sid, true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := windowsChangeSpoolParentSDDL(tc.parent, spool, sid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("parent %s descriptor = %s, want %s", tc.parent, got, tc.want)
+			}
+		})
+	}
+	if _, err := windowsChangeSpoolParentSDDL(filepath.Dir(bundles), spool, sid); err == nil {
+		t.Fatal("an unrelated parent received a bundle descriptor")
+	}
+}
+
+func TestWindowsFirstChangeEventAndReservationKeepCanonicalACLs(t *testing.T) {
+	if !windowsEnterpriseIsElevated() {
+		t.Skip("setting the Administrators owner requires elevation")
+	}
+	const sid = "S-1-5-80-1-2-3-4-5"
+	bundles := filepath.Join(windowsBundleScratchDir(t), "bundles")
+	spool := filepath.Join(bundles, enterprisestatus.ChangeEventsDirName)
+	reserved := filepath.Join(spool, enterprisestatus.ChangeReservedDirName)
+	for pass := 0; pass < 2; pass++ {
+		for _, dir := range []string{spool, reserved} {
+			err := prepareChangeSpoolDirectory(dir, func(parent string) error {
+				sddl, err := windowsChangeSpoolParentSDDL(parent, spool, sid)
+				if err != nil {
+					return err
+				}
+				return createWindowsBundleDirectory(parent, sddl)
+			}, func(path string) error {
+				return createWindowsBundleDirectory(path, windowsBundleVersionSDDL(sid, true))
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, check := range []struct{ path, sddl string }{
+			{bundles, windowsBundleDirectorySDDL(sid)},
+			{spool, windowsBundleVersionSDDL(sid, true)},
+			{reserved, windowsBundleVersionSDDL(sid, true)},
+		} {
+			actual, err := windows.GetNamedSecurityInfo(check.path, windows.SE_FILE_OBJECT,
+				windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected, err := windows.SecurityDescriptorFromString(check.sddl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			matches, err := windowsEnterpriseExactDescriptorMatch(actual, expected)
+			if err != nil || !matches {
+				t.Fatalf("pass %d: %s has %s, want %s (%v)", pass, check.path, actual.String(), check.sddl, err)
+			}
+		}
+	}
+}
+
 func assertNoWindowsChangeReservations(t *testing.T, spool string) {
 	t.Helper()
 	entries, err := os.ReadDir(filepath.Join(spool, enterprisestatus.ChangeReservedDirName))

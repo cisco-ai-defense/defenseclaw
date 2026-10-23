@@ -145,9 +145,15 @@ func TestOpenCodeSetup_WritesBridgePlugin(t *testing.T) {
 	if err != nil || !current {
 		t.Fatalf("OpenCode registration publication = %v, %v; want plugin plus custody receipt", current, err)
 	}
+	if _, err := EnsureHookAPIToken(opts.DataDir, conn.Name()); err != nil {
+		t.Fatalf("issue scoped plugin credential: %v", err)
+	}
 
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
+	}
+	if token, err := LoadHookAPIToken(opts.DataDir, conn.Name()); err != nil || token != "" {
+		t.Fatalf("removed OpenCode plugin still authenticates: %q, %v", token, err)
 	}
 	if _, err := os.Stat(pluginPath); !os.IsNotExist(err) {
 		t.Fatalf("plugin still present after teardown (err=%v)", err)

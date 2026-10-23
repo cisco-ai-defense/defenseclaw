@@ -2302,7 +2302,8 @@ func TeardownSubprocessEnforcement(opts SetupOpts) error {
 //
 //   - Shebang is /bin/sh (not /bin/bash) so the tombstone runs on
 //     minimal hosts where /bin/bash is absent (Alpine, distroless,
-//     some BSDs). The body is literal `exit 0`; POSIX sh is enough.
+//     some BSDs). POSIX sh is enough. Devin's per-user cached path exits 2
+//     after token revocation; the usual disabled body exits 0.
 //   - Line 2 carries the v0 schema marker so scriptHasMarker /
 //     isOwnedHook recognise the tombstone as DefenseClaw-owned.
 //     v0 is the "older than any tagged version" sentinel; any
@@ -2327,6 +2328,15 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 	// DACL; the generic private descriptor made a later rollback refuse to
 	// remove the tombstone, which left the deployment pending.
 	body := disabledHookTombstone(vendorLabel)
+	if vendorLabel == "devin" && !pluginSecureClientProfile(opts) {
+		// A cached Devin process can still execute the old absolute hook path
+		// after removal. Keep it blocked until that process exits; this path
+		// cannot become an implicit allow when its credential is revoked.
+		body = "#!/bin/sh\n" +
+			"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
+			"echo 'defenseclaw: Devin hook was removed; restart Devin before using it' >&2\n" +
+			"exit 2\n"
+	}
 	if opts.FailedSetupFailClosed && failedSetupPlaceholderBlocks[scriptName] {
 		body = failedSetupHookPlaceholder(vendorLabel)
 	}

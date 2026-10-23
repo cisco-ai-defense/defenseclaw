@@ -172,7 +172,12 @@ func (c *ZeptoClawConnector) Teardown(ctx context.Context, opts SetupOpts) error
 	if len(errs) > 0 {
 		return fmt.Errorf("zeptoclaw teardown errors: %s", strings.Join(errs, "; "))
 	}
-	return nil
+	if !opts.ManagedEnterprise && opts.DataDir != "" {
+		if err := c.VerifyClean(opts); err != nil {
+			return fmt.Errorf("zeptoclaw verify clean before token revocation: %w", err)
+		}
+	}
+	return revokePerUserHookAPIToken(opts, c.Name())
 }
 
 func (c *ZeptoClawConnector) VerifyClean(opts SetupOpts) error {

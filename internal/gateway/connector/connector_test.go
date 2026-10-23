@@ -3119,8 +3119,14 @@ func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
 			if !strings.Contains(content, "disabled tombstone") {
 				t.Errorf("tombstone missing operator-visible 'disabled tombstone' tag:\n%s", content)
 			}
-			if !strings.Contains(content, "exit 0") {
-				t.Errorf("tombstone does not exit 0 — cached PIDs will not fail-safe:\n%s", content)
+			wantExit := "exit 0"
+			if c.name == "devin" {
+				// A cached Devin session can still invoke its old hook path
+				// after teardown. Keep that invocation closed.
+				wantExit = "exit 2"
+			}
+			if !strings.Contains(content, wantExit) {
+				t.Errorf("tombstone does not use %s for %s:\n%s", wantExit, c.name, content)
 			}
 			if strings.Contains(content, c.hookAPI) {
 				t.Errorf("tombstone still forwards stale payloads to %s:\n%s", c.hookAPI, content)

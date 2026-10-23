@@ -85,6 +85,16 @@ def _function_body(text: str, name: str) -> str:
     return text[start : end + 3]
 
 
+def test_fresh_install_rebinds_adopted_hook_manifest_before_retiring_its_journal() -> None:
+    # rel-1-0-4:GAP-0686: an enumerator may publish targets after the
+    # install's activation proof, before journal retirement.
+    install = _function_body(_text(MODULE), "Invoke-DefenseClawInstallLikeLifecycle")
+    committed = install.rfind("Complete-DefenseClawTransaction -SnapshotPath $snapshot -Layout $Layout")
+    retired = install.rfind("-Action retire)")
+    rebound = install.find("Sync-DefenseClawStandaloneManagedHooksActivationBinding", committed)
+    assert 0 <= committed < rebound < retired
+
+
 def test_profile_roots_are_named_in_one_place_and_agree() -> None:
     module = _functions_naming(_text(MODULE), SECURE_CLIENT)
     assert set(module) <= ALLOWED_MODULE_FUNCTIONS, {

@@ -103,6 +103,8 @@ Devin CLI cannot run in a sandbox yet. The image is **unverified**, so `defensec
 
 The contract was reviewed against Devin CLI `3000.4.25` on Windows, macOS and Linux. On Linux it is also pinned to `3000.11.3`, which a live check showed delivers `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` under these names and honors exit-code-2 blocks on `UserPromptSubmit` and `PreToolUse` (`PermissionRequest` and `PostCompaction` are not verified). Any other CLI from `3000.4.25` on, on every OS, runs as an untested newer version unless known broken ([version policy](/docs/reference/apis/hook-contracts#version-policy)). On Windows a CLI older than `3000.4.25` has no contract, so setup refuses it in observe and action mode.
 
+`defenseclaw setup remove devin --yes` removes DefenseClaw's Devin hook entries and, after the gateway restart verifies removal, revokes `hooks/.hook-devin.token` and removes an empty `connector_backups/devin` folder. The `hooks/devin-hook.sh` path remains as a blocking tombstone for Devin processes that cached it; restart Devin after removal. Devin's own `%APPDATA%/devin` or `~/.config/devin` directory and a credential lock file may remain. `--no-restart` defers hook and credential teardown until the next gateway start.
+
 ## Verdict mapping
 
 | Event | DefenseClaw role |

@@ -6,6 +6,7 @@ package connector
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -17,6 +18,68 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+func TestPerUserDedicatedConnectorTeardownRevokesScopedCredential(t *testing.T) {
+	for _, name := range []string{"codex", "claudecode", "kiro", "openclaw", "zeptoclaw"} {
+		t.Run(name, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			dataDir := filepath.Join(root, "data")
+			opts := SetupOpts{
+				DataDir:      dataDir,
+				APIAddr:      "127.0.0.1:18970",
+				ProxyAddr:    "127.0.0.1:4000",
+				APIToken:     "fixture gateway credential",
+				HookFailMode: "closed",
+				WorkspaceDir: filepath.Join(root, "workspace"),
+			}
+			var conn Connector
+			switch name {
+			case "codex":
+				before := CodexConfigPathOverride
+				CodexConfigPathOverride = filepath.Join(root, "codex", "config.toml")
+				t.Cleanup(func() { CodexConfigPathOverride = before })
+				conn = NewCodexConnector()
+			case "claudecode":
+				before := ClaudeCodeSettingsPathOverride
+				ClaudeCodeSettingsPathOverride = filepath.Join(root, "claude", "settings.json")
+				t.Cleanup(func() { ClaudeCodeSettingsPathOverride = before })
+				conn = NewClaudeCodeConnector()
+			case "kiro":
+				before := KiroHomeOverride
+				KiroHomeOverride = filepath.Join(root, "kiro")
+				t.Cleanup(func() { KiroHomeOverride = before })
+				conn = NewKiroConnector()
+			case "openclaw":
+				before := OpenClawHomeOverride
+				OpenClawHomeOverride = filepath.Join(root, "openclaw")
+				t.Cleanup(func() { OpenClawHomeOverride = before })
+				conn = NewOpenClawConnector()
+			case "zeptoclaw":
+				before := ZeptoClawConfigPathOverride
+				ZeptoClawConfigPathOverride = filepath.Join(root, "zeptoclaw", "config.json")
+				t.Cleanup(func() { ZeptoClawConfigPathOverride = before })
+				conn = NewZeptoClawConnector()
+			}
+			if name != "openclaw" && name != "zeptoclaw" {
+				if err := conn.Setup(context.Background(), opts); err != nil {
+					t.Fatalf("setup %s: %v", name, err)
+				}
+			}
+			if err := os.MkdirAll(dataDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := EnsureHookAPIToken(dataDir, name); err != nil {
+				t.Fatalf("issue scoped credential: %v", err)
+			}
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("teardown %s: %v", name, err)
+			}
+			if token, err := LoadHookAPIToken(dataDir, name); err != nil || token != "" {
+				t.Fatalf("removed %s still authenticates with scoped token: %q, %v", name, token, err)
+			}
+		})
+	}
+}
 
 func assertHookAPITokenRejectedByEnsureAndLoad(t *testing.T, want string, fixture func(*testing.T) string) {
 	t.Helper()

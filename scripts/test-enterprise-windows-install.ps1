@@ -21,6 +21,8 @@
       5. /uninstall JSON=1 removes the services, the marker, the Add/Remove
          Programs entry, the installed CLI and every DefenseClaw machine-policy
          file, and detect.ps1 stops detecting
+      6. A second /ensure after uninstall installs cleanly, verifies, and can
+         uninstall again (GAP-0686)
 
     With -UpgradeFrom it is the enterprise upgrade lane instead of step 1:
     the previous release's Setup /ensure installs with the same config, then
@@ -640,6 +642,27 @@ try {
     $detected = Invoke-Detect
     if ($detected.ExitCode -eq 0) { Fail "detect.ps1 still detects a deployment after uninstall: $($detected.Output)" }
     Write-Host 'detect.ps1: not detected'
+
+    if (-not $UpgradeFrom) {
+        Step 'Setup /ensure after uninstall installs a second time'
+        $run = Invoke-Lifecycle -Name '07-setup-ensure-after-uninstall' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+        Assert-Result $run 'setup-ensure-after-uninstall' (@('--action', 'ensure', '--changed', '--installed', '--version', $Version, '--ready') +
+            $installedChecks + @('--allow-warning', 'ensure_install'))
+        Assert-ServicesRunning
+        Assert-PolicyApplied
+
+        Step 'installed CLI verify after the second install'
+        $run = Invoke-Lifecycle -Name '08-verify-after-reinstall' -FilePath $cli -Arguments @('enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
+        Assert-Result $run 'verify-after-reinstall' (@('--action', 'verify', '--installed', '--version', $Version, '--ready') + $installedChecks)
+
+        Step 'Setup /uninstall after the second install'
+        $run = Invoke-Lifecycle -Name '09-setup-uninstall-again' -FilePath $Setup -Arguments @('/uninstall', 'JSON=1')
+        Assert-Result $run 'setup-uninstall-again' @('--action', 'uninstall', '--changed', '--not-installed')
+        Assert-ServicesGone
+        if (Test-Path -LiteralPath $markerKey) { Fail "$markerKey remains after the second uninstall" }
+        if (Test-Path -LiteralPath $cli) { Fail "$cli remains after the second uninstall" }
+        Assert-PolicyGone 'after the second uninstall'
+    }
 
     Write-Host ''
     Write-Host "install lane passed: Windows Setup $Version (results in $ResultsRoot)"

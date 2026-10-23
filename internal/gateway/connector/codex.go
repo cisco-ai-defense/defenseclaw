@@ -562,6 +562,9 @@ func (c *CodexConnector) teardownLocked(ctx context.Context, opts SetupOpts) err
 	if err := c.VerifyClean(opts); err != nil {
 		return fmt.Errorf("codex teardown: verify clean before token revocation: %w", err)
 	}
+	if err := revokePerUserHookAPIToken(opts, c.Name()); err != nil {
+		return fmt.Errorf("codex teardown: %w", err)
+	}
 	if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeCodex); err != nil {
 		return fmt.Errorf("codex teardown: revoke scoped OTLP token: %w", err)
 	}

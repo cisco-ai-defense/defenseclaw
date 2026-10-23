@@ -182,6 +182,13 @@ function Confirm-Step([string]$Prompt, [switch]$DefaultNo) {
 }
 
 function Get-Field($Object, [string]$Name) {
+    # A newly written lifecycle record is an OrderedDictionary until the
+    # next process reads its JSON. Its keys are not PSObject properties in
+    # Windows PowerShell 5.1; use dictionary lookup for that in-memory path.
+    if ($Object -is [Collections.IDictionary]) {
+        if ($Object.Contains($Name)) { return $Object[$Name] }
+        return $null
+    }
     if ($null -ne $Object -and $Object.PSObject.Properties[$Name]) { return $Object.PSObject.Properties[$Name].Value }
     return $null
 }
@@ -1182,6 +1189,28 @@ function Get-ConfiguredConnectors {
     return @(@(Get-Field $state "names") + @(Get-Field $state "name") | Where-Object { $_ -and $_ -ne "none" } | ForEach-Object { [string]$_ })
 }
 
+function Get-EffectiveConfigConnectors {
+    # Older gateways may not have status --json. In that case the installed
+    # connector roster must come from the effective config, including an
+    # external DEFENSECLAW_CONFIG, before this run records its rollback point.
+    $path = if ($env:DEFENSECLAW_CONFIG) { $env:DEFENSECLAW_CONFIG } else { Join-Path $DataDir "config.yaml" }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return @() }
+    $python = Join-Path $Staging "venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { $python = Join-Path $Venv "Scripts\python.exe" }
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw "Cannot read the effective config's connectors without a checked Python environment: $path" }
+    # Windows PowerShell 5.1 strips embedded double quotes from native argv.
+    # Keep Python's string literals single-quoted so -c receives valid code.
+    $code = 'import json,sys,yaml; from defenseclaw.connector_paths import normalize; c=yaml.safe_load(open(sys.argv[1],encoding=''utf-8'')); c=c if isinstance(c,dict) else {}; g=c.get(''guardrail'') or {}; g=g if isinstance(g,dict) else {}; m=g.get(''connectors'') or {}; claw=c.get(''claw'') or {}; claw=claw if isinstance(claw,dict) else {}; names=[n for n,v in m.items() if isinstance(n,str) and n.strip() and not (isinstance(v,dict) and v.get(''enabled'') is False)] if isinstance(m,dict) and m else [g.get(''connector'') or claw.get(''mode'')]; print(json.dumps(sorted({normalize(n) for n in names if isinstance(n,str) and n.strip()})))'
+    $probe = Get-NativeProbe $python @("-I", "-c", $code, $path)
+    if ($probe.Exit -ne 0) { throw "Cannot read the effective config's connectors: $path" }
+    try {
+        $decoded = $probe.Output | ConvertFrom-Json -ErrorAction Stop
+        # Windows PowerShell 5.1 emits a JSON array as one object. Enumerate
+        # it explicitly or the caller sees one "System.Object[]" connector.
+        return @($decoded | ForEach-Object { [string]$_ })
+    } catch { throw "Cannot parse the effective config's connector roster: $path" }
+}
+
 function Test-ConnectorConfigured {
     return @(Get-ConfiguredConnectors).Count -gt 0
 }
@@ -1303,20 +1332,66 @@ function Publish-File([string]$New, [string]$Destination) {
 }
 
 function Invoke-AtomicReplace([string]$New, [string]$Destination) {
-    # One rename of $New over $Destination (MoveFileEx with
-    # MOVEFILE_REPLACE_EXISTING and MOVEFILE_WRITE_THROUGH): at every instant
-    # the path names the old file or the new one. Windows refuses it, and
-    # changes nothing, while the installed file runs as a program or another
-    # program holds it.
+    # FileRenameInfoEx atomically replaces a name when existing open handles
+    # permit it. A mapped executable image can still refuse the replacement;
+    # Switch-InPlace retries for a short idle window (GAP-0732).
     if (-not ("DefenseClawInstall.Rename" -as [type])) {
-        Add-Type -Namespace DefenseClawInstall -Name Rename -MemberDefinition @'
-[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-public static extern bool MoveFileExW(string existingFileName, string newFileName, int flags);
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace DefenseClawInstall {
+    public static class Rename {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(string name, uint access, uint share,
+            IntPtr security, uint creation, uint flags, IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetFileInformationByHandle(SafeFileHandle file, int infoClass,
+            IntPtr info, uint length);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool MoveFileExW(string oldName, string newName, int flags);
+
+        public static void Replace(string source, string destination) {
+            // DELETE is the access needed to rename the staged source. Share
+            // read, write and delete so readers cannot strand this handle.
+            using (SafeFileHandle file = CreateFileW(source, 0x10000, 7, IntPtr.Zero, 3, 0x80, IntPtr.Zero)) {
+                if (file.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+                byte[] name = Encoding.Unicode.GetBytes(Path.GetFullPath(destination));
+                int rootOffset = IntPtr.Size == 8 ? 8 : 4;
+                int lengthOffset = IntPtr.Size == 8 ? 16 : 8;
+                int nameOffset = IntPtr.Size == 8 ? 20 : 12;
+                IntPtr info = Marshal.AllocHGlobal(nameOffset + name.Length + 2);
+                try {
+                    // FILE_RENAME_FLAG_REPLACE_IF_EXISTS |
+                    // FILE_RENAME_FLAG_POSIX_SEMANTICS, FileRenameInfoEx = 22.
+                    Marshal.WriteInt32(info, 3);
+                    Marshal.WriteIntPtr(info, rootOffset, IntPtr.Zero);
+                    Marshal.WriteInt32(info, lengthOffset, name.Length);
+                    Marshal.Copy(name, 0, IntPtr.Add(info, nameOffset), name.Length);
+                    Marshal.WriteInt16(info, nameOffset + name.Length, 0);
+                    if (SetFileInformationByHandle(file, 22, info, (uint)(nameOffset + name.Length + 2))) return;
+                    int error = Marshal.GetLastWin32Error();
+                    // Older Windows/filesystems do not support FileRenameInfoEx.
+                    // Keep the original atomic rename for those hosts.
+                    if ((error == 1 || error == 87) && MoveFileExW(source, destination, 0x9)) return;
+                    if (error == 1 || error == 87) error = Marshal.GetLastWin32Error();
+                    throw new Win32Exception(error);
+                } finally {
+                    Marshal.FreeHGlobal(info);
+                }
+            }
+        }
+    }
+    }
 '@
     }
-    if (-not [DefenseClawInstall.Rename]::MoveFileExW($New, $Destination, 0x9)) {
-        throw (New-Object ComponentModel.Win32Exception ([Runtime.InteropServices.Marshal]::GetLastWin32Error()))
-    }
+    [DefenseClawInstall.Rename]::Replace($New, $Destination)
 }
 
 function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) {
@@ -1324,20 +1399,23 @@ function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) 
     # the old launcher for replacement and can deny a concurrent hook's
     # execution with a sharing violation (GAP-0352); its partial-failure
     # recovery also cannot prove uninterrupted availability. A running hook
-    # or scanner may refuse the rename. Retry while the whole old launcher
-    # remains callable, then refuse the upgrade without changing it.
-    for ($waited = 0; ; $waited++) {
+    # or scanner may refuse the rename. Windows will also refuse replacing a
+    # mapped executable image, even with POSIX rename semantics. Registered
+    # calls arriving once a second can phase-lock a 500 ms retry to the busy
+    # part of every call. Probe each 25 ms gap while the whole old launcher
+    # remains callable, then refuse without changing it if no gap appears.
+    for ($attempt = 0; ; $attempt++) {
         try {
             Invoke-AtomicReplace $New $Destination
             return
         } catch {
             $reason = $_.Exception.Message
         }
-        if (-not (Test-Path -LiteralPath $New) -or $waited -ge 2 * $Seconds) {
+        if (-not (Test-Path -LiteralPath $New) -or $attempt -ge 40 * $Seconds) {
             Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
             throw "Could not replace $Destination in place ($reason); it was left as it was. Retry the same install command after the running hook finishes"
         }
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds 25
     }
 }
 
@@ -1620,7 +1698,21 @@ function Get-LifecycleState {
     $connectors = @()
     if ($running) {
         $report = Get-GatewayHealthReport $gateway
-        if ($report) { $connectors = @(Get-GuardedConnectors $report) }
+        # The old gateway's JSON can be absent or omit an enabled hook.
+        # A connector it explicitly reports as not running was already
+        # unhealthy, so requiring it here would make upgrade and rollback
+        # impossible. The effective config is authoritative over a stale
+        # active_connector.json, including with external DEFENSECLAW_CONFIG.
+        if ($report) { $reported = @(Get-GuardedConnectors $report) } else { $reported = @() }
+        $notRunning = @()
+        if ($report) {
+            $notRunning = @(@(Get-Field (Get-Field $report "health") "connectors") |
+                Where-Object { $_ -and [string](Get-Field $_ "state") -ne "running" } |
+                ForEach-Object { [string](Get-Field $_ "name") })
+        }
+        $enabled = @(Get-EffectiveConfigConnectors)
+        $connectors = @($reported + @($enabled | Where-Object { $notRunning -notcontains $_ }) |
+            Where-Object { $_ -and $_ -ne "none" } | Sort-Object -Unique)
     }
     $external = Get-ExternalConfig
     return [ordered]@{
@@ -1760,13 +1852,16 @@ function Close-AllHooks([string[]]$Gateways) {
 }
 
 function Test-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors = @(), [switch]$RequireDigest, [bool]$RequireProtected = $true,
-        [string]$SetupRoot = "") {
+        [string]$SetupRoot = "", [switch]$AllowLegacyStatus) {
     # Step 3: what is wrong with the live install, empty when it is proven.
     # $Bins: the SHA-256 each managed binary must have. $GatewayRunning: the
     # gateway must run from this install. $Connectors: those it must guard.
     # -RequireDigest: a gateway that cannot report the live config's policy
     # digest fails too (this release's gateway can; an older restored one
     # may not).
+    # -AllowLegacyStatus applies only to restoring a recorded pre-1.0.4
+    # binary set. Those gateways may have no JSON status, but exact binary
+    # and config hashes plus their legacy status still permit recovery.
     $problems = @()
     $expected = ConvertTo-Map $Bins
     foreach ($name in $ManagedBinaries) {
@@ -1804,8 +1899,13 @@ function Test-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors
         foreach ($name in @($Connectors | Where-Object { $_ })) {
             if ($guarded -notcontains $name) { $problems += "connector $name is not guarded again: the gateway does not report its hooks running" }
         }
-    } elseif ((Invoke-Native $gateway @("status") -Quiet) -ne 0) {
-        $problems += "the gateway does not answer its health check"
+    } else {
+        if (-not $AllowLegacyStatus) {
+            $problems += "a usable JSON health report is unavailable, so the gateway's connectors cannot be proven"
+        }
+        if ((Invoke-Native $gateway @("status") -Quiet) -ne 0) {
+            $problems += "the gateway does not answer its health check"
+        }
     }
     $digest = Get-GatewayDigestProblem $gateway
     if ($digest -eq "unsupported") {
@@ -1822,7 +1922,7 @@ function Set-RecoveryPending([string]$Flag = "RestorePending") {
 }
 
 function Wait-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors = @(), [switch]$RequireDigest,
-        [bool]$RequireProtected = $true, [string]$SetupRoot = "") {
+        [bool]$RequireProtected = $true, [string]$SetupRoot = "", [switch]$AllowLegacyStatus) {
     # Test-LifecycleProof, asked again for a while when a running gateway is
     # part of the proof: a gateway that just passed its start readiness can
     # take a few seconds to report its connectors and its policy generation.
@@ -1831,7 +1931,7 @@ function Wait-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors
     if ($null -eq $limit) { $limit = 30 }
     $clock = [Diagnostics.Stopwatch]::StartNew()
     while ($true) {
-        $problems = @(Test-LifecycleProof $Bins $GatewayRunning $Connectors -RequireDigest:$RequireDigest -RequireProtected $RequireProtected -SetupRoot $SetupRoot)
+        $problems = @(Test-LifecycleProof $Bins $GatewayRunning $Connectors -RequireDigest:$RequireDigest -RequireProtected $RequireProtected -SetupRoot $SetupRoot -AllowLegacyStatus:$AllowLegacyStatus)
         if (-not $problems.Count -or -not $GatewayRunning -or $clock.Elapsed.TotalSeconds -ge $limit) { return $problems }
         Start-Sleep -Seconds 2
     }
@@ -1881,7 +1981,8 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped, [switch]$Outl
     $bins = Get-Field $Manifest "Bins"
     $protected = [bool](Get-Field $Manifest "BinDirProtected")
     $setupRoot = [string](Get-Field $Manifest "SetupRoot")
-    $problems = @(Wait-LifecycleProof $bins $running @(Get-Field $Manifest "Connectors") -RequireProtected $protected -SetupRoot $setupRoot)
+    $allowLegacyStatus = [string](Get-Field $Manifest "From") -match '^(?:0\.8\.10|1\.0\.[0-3])$'
+    $problems = @(Wait-LifecycleProof $bins $running @(Get-Field $Manifest "Connectors") -RequireProtected $protected -SetupRoot $setupRoot -AllowLegacyStatus:$allowLegacyStatus)
     $drift = @()
     $configChanged = $false
     $config = [string](Get-Field $Manifest "Config")
@@ -1897,12 +1998,13 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped, [switch]$Outl
     # about its hooks.
     $unguarded = @()
     if ($Outlived -and $problems.Count -and
-        -not @(Test-LifecycleProof $bins $running @() -RequireProtected $protected -SetupRoot $setupRoot).Count) {
+        -not @(Test-LifecycleProof $bins $running @() -RequireProtected $protected -SetupRoot $setupRoot -AllowLegacyStatus:$allowLegacyStatus).Count) {
         # Only connectors the record names are not guarded.
         $report = if ($setupRoot) { $null } else { Get-GatewayHealthReport (Join-Path $BinDir "defenseclaw-gateway.exe") }
         $kept = @(@(Get-Field (Get-Field $report "health") "connectors") | ForEach-Object { [string](Get-Field $_ "name") }) +
             @(Get-ConfiguredConnectors)
-        $configPath = Join-Path $DataDir "config.yaml"
+        $configPath = Get-ExternalConfig
+        if (-not $configPath) { $configPath = Join-Path $DataDir "config.yaml" }
         $configText = if (Test-Path -LiteralPath $configPath -PathType Leaf) { [IO.File]::ReadAllText($configPath) } else { "" }
         foreach ($problem in $problems) {
             $name = if ($problem -match '^connector (\S+) is not guarded again') { $Matches[1] } else { "" }
@@ -1963,6 +2065,20 @@ function Save-BinarySnapshot {
     Copy-BinDir (Join-Path $Snap "bin")
     Install-HookFirst $Snap
     Set-Content -LiteralPath (Join-Path $Snap "BIN_SAVED") -Value "" -Encoding Ascii
+}
+
+function Finish-EarlySnapshotRestore($Recorded) {
+    if (Test-RecoveryPending) { return }
+    if ($Run.UnprovenReplacement) {
+        # The copy in the slot was put back, but a still-open transaction
+        # from an older installer did not prove its binary baseline.
+        # Comparing the restored files with that empty map falsely reports
+        # every binary as foreign. Retain the record for the next run.
+        Set-RecoveryPending
+        Write-Warn "The hook snapshot was restored, but an earlier interrupted install never proved its binary baseline. Its lifecycle record remains; retry after the previous hook call finishes"
+        return
+    }
+    try { Assert-LifecycleRestored $Recorded } catch { Write-Err $_.Exception.Message }
 }
 
 function Save-Snapshot {
@@ -2948,7 +3064,8 @@ function Resume-InterruptedRun {
         # The rollback's record proves its target, not the install it left.
         if ($manifest -and (Get-Field $manifest "Operation") -eq "rollback") {
             if ($restart -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "rolled-back" }
-            $problems = @(Wait-LifecycleProof (Get-Field $manifest "TargetBins") $restart)
+            $legacyTarget = [string](Get-Field $manifest "To") -match '^(?:0\.8\.10|1\.0\.[0-3])$'
+            $problems = @(Wait-LifecycleProof (Get-Field $manifest "TargetBins") $restart -AllowLegacyStatus:$legacyTarget)
             if ($problems.Count) {
                 Set-RecoveryPending
                 Die "The finished rollback is not proven: $($problems -join '; '). Fix the cause, then run: $(Get-LifecycleNextStep)"
@@ -2986,7 +3103,8 @@ function Resume-InterruptedRun {
         if (Test-SameBinaries (Get-BinariesState $BinDir) $target) {
             $wanted = [bool](Get-Field $manifest "StartAfter")
             if ($wanted -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "rolled-back" }
-            $problems = @(Wait-LifecycleProof $target $wanted)
+            $legacyTarget = [string](Get-Field $manifest "To") -match '^(?:0\.8\.10|1\.0\.[0-3])$'
+            $problems = @(Wait-LifecycleProof $target $wanted -AllowLegacyStatus:$legacyTarget)
             if ($problems.Count) {
                 Set-RecoveryPending
                 Die "The finished rollback is not proven: $($problems -join '; '). Fix the cause, then run: $(Get-LifecycleNextStep)"
@@ -3502,7 +3620,10 @@ function Invoke-Rollback {
     # for a 0.x one (GAP-0486): never "Now running" with the gateway down.
     $problems = @()
     if ($startAfter -and (Start-Gateway) -notin @(0, 3)) { $problems += "the gateway of DefenseClaw $backTo did not start" }
-    else { $problems = @(Wait-LifecycleProof (Get-Field $Manifest "TargetBins") $startAfter) }
+    else {
+        $legacyTarget = $backTo -match '^(?:0\.8\.10|1\.0\.[0-3])$'
+        $problems = @(Wait-LifecycleProof (Get-Field $Manifest "TargetBins") $startAfter -AllowLegacyStatus:$legacyTarget)
+    }
     if ($problems.Count) {
         return Undo-Rollback "DefenseClaw $backTo is not proven running ($($problems -join '; '))" $current $backTo $savedWasRunning $quarantined $conversionAttempted
     }
@@ -3892,11 +4013,9 @@ function Invoke-Install {
         $failure = $_
         Stop-HookFailModeHold
         Undo-EarlySnapshot $Snap
-        # Nothing else changed yet: prove the install is the recorded one,
-        # which drops the record. An unfinished undo keeps it and the lock.
-        if (-not (Test-RecoveryPending)) {
-            try { Assert-LifecycleRestored $Manifest } catch { Write-Err $_.Exception.Message }
-        }
+        # A proven baseline retires its record; a prior unproven baseline
+        # stays locked without claiming the current attempt changed binaries.
+        Finish-EarlySnapshotRestore $Manifest
         throw $failure
     }
     # From here to the rollback copy the new hook is live while the old
@@ -4011,7 +4130,7 @@ function Invoke-Install {
     $provenGateway = $startNew -and -not $sealOnly
     # Only connectors this release supports on Windows are required again: a
     # retired one (or the default openclaw entry) has no hooks to put back.
-    $guardedBefore = if ($startRc -eq 0) { @(@(Get-Field $Manifest "Connectors") | Where-Object { $ConnectorChoices -contains $_ -and $_ -ne "none" }) } else { @() }
+    $guardedBefore = @(@(Get-Field $Manifest "Connectors") | Where-Object { $ConnectorChoices -contains $_ -and $_ -ne "none" })
     $problems = @(Wait-LifecycleProof $stagedBinaries $provenGateway $guardedBefore -RequireDigest:$provenGateway)
     if ($problems.Count) {
         foreach ($problem in $problems) { Write-Err $problem }

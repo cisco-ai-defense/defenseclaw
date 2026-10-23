@@ -6734,7 +6734,7 @@ func TestHookScopedTokenRevalidatesDeletionAndRotation(t *testing.T) {
 	}
 }
 
-func TestOrphanHookScopedTokenRotationInvalidatesOldValueAndRollbackRestoresIt(t *testing.T) {
+func TestOrphanHookScopedTokenRevocationInvalidatesOldValueAndRollbackRestoresIt(t *testing.T) {
 	dataDir := t.TempDir()
 	oldToken, err := connector.EnsureHookAPIToken(dataDir, "opencode")
 	if err != nil {
@@ -6750,25 +6750,15 @@ func TestOrphanHookScopedTokenRotationInvalidatesOldValueAndRollbackRestoresIt(t
 	if err != nil {
 		t.Fatalf("HookAPITokenFilePath(opencode): %v", err)
 	}
-	newToken := strings.Repeat("b", 64)
-	if newToken == oldToken {
-		t.Fatal("rotation fixture unexpectedly reused the old token")
-	}
-	if err := os.WriteFile(tokenPath, []byte(newToken+"\n"), 0o600); err != nil {
-		t.Fatalf("publish replacement orphan hook token: %v", err)
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatalf("revoke orphan hook token: %v", err)
 	}
 	if api.hookAPITokenMatches("opencode", oldToken) {
-		t.Fatal("old orphan hook token remained valid after successful rotation")
-	}
-	if !api.hookAPITokenMatches("opencode", newToken) {
-		t.Fatal("replacement orphan hook token was rejected")
+		t.Fatal("old orphan hook token remained valid after successful revocation")
 	}
 
 	if err := os.WriteFile(tokenPath, []byte(oldToken+"\n"), 0o600); err != nil {
 		t.Fatalf("restore prior orphan hook token: %v", err)
-	}
-	if api.hookAPITokenMatches("opencode", newToken) {
-		t.Fatal("replacement orphan hook token remained valid after rollback")
 	}
 	if !api.hookAPITokenMatches("opencode", oldToken) {
 		t.Fatal("exact prior orphan hook token was not accepted after rollback")

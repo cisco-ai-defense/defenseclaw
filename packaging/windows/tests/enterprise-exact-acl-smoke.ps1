@@ -26,6 +26,7 @@ $expected = [ordered]@{
     InstallFile = 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)'
     ServiceInstallDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;OICI;0x1200a9;;;$serviceSID)"
     ServiceInstallFile = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)(A;;0x1200a9;;;$serviceSID)"
+    SecureClientMarkerDirectory = 'O:SYG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)'
     StateDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$serviceSID)"
     AdminDirectory = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
     AdminFile = 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)'
@@ -52,6 +53,7 @@ $expected = [ordered]@{
 $directoryKinds = @(
     'InstallDirectory',
     'ServiceInstallDirectory',
+    'SecureClientMarkerDirectory',
     'StateDirectory',
     'AdminDirectory',
     'ConfigDirectory',
@@ -221,6 +223,7 @@ $pairings = [ordered]@{
     InstallFile = 'Install'
     ServiceInstallDirectory = 'ServiceInstall'
     ServiceInstallFile = 'ServiceInstall'
+    SecureClientMarkerDirectory = 'Install'
     StateDirectory = 'State'
     AdminDirectory = 'Admin'
     AdminFile = 'Admin'
@@ -361,44 +364,57 @@ if (-not $kindSetsAgree) {
 # it must not take the owner or drop an ACE it did not add.
 $ancestorCases = & $module {
     param($GatewaySID)
-    $vendorDirectory = {
-        param($SDDL)
+    $path = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'dc-shared-' + [Guid]::NewGuid().ToString('N'))
+    try {
+        [void][IO.Directory]::CreateDirectory($path)
         $security = [Security.AccessControl.DirectorySecurity]::new()
-        $security.SetSecurityDescriptorSddlForm($SDDL)
-        return $security
+        $security.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a0;;;BU)')
+        Microsoft.PowerShell.Security\Set-Acl -LiteralPath $path -AclObject $security
+        $native = Initialize-DefenseClawNativeSecurity
+        $snapshot = $native::GetDirectorySecuritySnapshotNoFollow($path)
+        $before = [Security.AccessControl.RawSecurityDescriptor]::new(
+            [byte[]]$snapshot.SecurityDescriptor, 0)
+        $inheritable = [Security.AccessControl.RawSecurityDescriptor]::new(
+            "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;$GatewaySID)")
+        $collapsed = Update-DefenseClawSharedRawDescriptor `
+            -Descriptor $inheritable -SID $GatewaySID -Action Replace -AccessMask 0x1200a9
+        $priorGrant = @($collapsed.Descriptor.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
+            $_ -is [Security.AccessControl.KnownAce] -and $_.SecurityIdentifier.Value -ceq $GatewaySID
+        })
+        [void](Set-DefenseClawSharedDirectoryRawAce -Path $path -SID $GatewaySID -Action Replace -AccessMask 0x1200a9)
+        $snapshot = $native::GetDirectorySecuritySnapshotNoFollow($path)
+        $granted = [Security.AccessControl.RawSecurityDescriptor]::new(
+            [byte[]]$snapshot.SecurityDescriptor, 0)
+        [void](Set-DefenseClawSharedDirectoryRawAce -Path $path -SID $GatewaySID -Action Replace -AccessMask 0x1200a9)
+        $snapshot = $native::GetDirectorySecuritySnapshotNoFollow($path)
+        $twice = [Security.AccessControl.RawSecurityDescriptor]::new(
+            [byte[]]$snapshot.SecurityDescriptor, 0)
+        [void](Set-DefenseClawSharedDirectoryRawAce -Path $path -SID $GatewaySID -Action Remove)
+        $snapshot = $native::GetDirectorySecuritySnapshotNoFollow($path)
+        $after = [Security.AccessControl.RawSecurityDescriptor]::new(
+            [byte[]]$snapshot.SecurityDescriptor, 0)
+        [pscustomobject]@{
+            widened_prior_grant_collapsed = ($collapsed.Changed -and $priorGrant.Count -eq 1 -and
+                $priorGrant[0].AccessMask -eq 0x1200a9 -and
+                $priorGrant[0].AceFlags -eq [Security.AccessControl.AceFlags]::None)
+            tree_not_seized = (@($priorGrant | Microsoft.PowerShell.Core\Where-Object {
+                ([int]$_.AceFlags -band 0x03) -ne 0
+            }).Count -eq 0)
+            foreign_vendor_ace_preserved = @($granted.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
+                $_ -is [Security.AccessControl.KnownAce] -and $_.SecurityIdentifier.Value -ceq 'S-1-5-32-545' -and
+                $_.AccessMask -eq 0x1200a0
+            }).Count -eq 1
+            owner_preserved = $granted.Owner.Value -ceq $before.Owner.Value
+            traverse_ace_not_inherited = @($granted.DiscretionaryAcl | Microsoft.PowerShell.Core\Where-Object {
+                $_ -is [Security.AccessControl.KnownAce] -and $_.SecurityIdentifier.Value -ceq $GatewaySID -and
+                $_.AccessMask -eq 0x1200a9 -and $_.AceFlags -eq [Security.AccessControl.AceFlags]::None
+            }).Count -eq 1
+            repeat_grant_is_idempotent = (Test-DefenseClawExactRawDACL -Actual $twice -Expected $granted)
+            revoke_keeps_every_foreign_ace = (Test-DefenseClawExactRawDACL -Actual $after -Expected $before)
+        }
     }
-    $sddlOf = {
-        param($Security)
-        return $Security.GetSecurityDescriptorSddlForm(
-            [Security.AccessControl.AccessControlSections]::All
-        )
-    }
-    # Administrators-owned, with a second product's ACE on it.
-    $shared = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)'
-    $granted = & $sddlOf (Add-DefenseClawStateAncestorTraverseRule `
-        -Security (& $vendorDirectory $shared) `
-        -GatewayServiceSID $GatewaySID)
-
-    $twice = & $sddlOf (Add-DefenseClawStateAncestorTraverseRule `
-        -Security (Add-DefenseClawStateAncestorTraverseRule `
-            -Security (& $vendorDirectory $shared) `
-            -GatewayServiceSID $GatewaySID) `
-        -GatewayServiceSID $GatewaySID)
-
-    # An inheritable grant collapses to the non-inherited one.
-    $widened = & $sddlOf (Add-DefenseClawStateAncestorTraverseRule `
-        -Security (& $vendorDirectory (
-            $shared + "(A;OICI;FA;;;$GatewaySID)"
-        )) `
-        -GatewayServiceSID $GatewaySID)
-
-    [pscustomobject]@{
-        foreign_vendor_ace_preserved = $granted -match [regex]::Escape('(A;OICI;0x1200a9;;;BU)')
-        owner_preserved = $granted.StartsWith('O:BAG:BA')
-        traverse_ace_not_inherited = $granted -match [regex]::Escape("(A;;0x1200a9;;;$GatewaySID)")
-        tree_not_seized = -not ($granted -match [regex]::Escape("(A;OICI;0x1200a9;;;$GatewaySID)"))
-        repeat_grant_is_idempotent = $twice -ceq $granted
-        widened_prior_grant_collapsed = $widened -ceq $granted
+    finally {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
     }
 } $serviceSID
 foreach ($property in $ancestorCases.psobject.Properties) {
@@ -934,6 +950,8 @@ if ($null -eq $nativeDescriptor.DiscretionaryAcl) {
     installer_verifier_pairings_checked = $pairingsChecked
     acl_kind_sets_agree = [bool]$kindSetsAgree
     state_ancestor_grant_is_additive = $true
+    widened_prior_grant_collapsed = [bool]$ancestorCases.widened_prior_grant_collapsed
+    tree_not_seized = [bool]$ancestorCases.tree_not_seized
     managed_ipc_scope_cleanup_exact = $true
     managed_ipc_other_service_ace_preserved = $true
     managed_ipc_cleanup_idempotent = $true

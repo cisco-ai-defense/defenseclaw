@@ -1638,14 +1638,56 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
-		return withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
+		if err := withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
 			return c.teardown(ctx, opts, configPath)
-		})
+		}); err != nil {
+			return err
+		}
+	} else {
+		if c.name == "copilot" {
+			removeOrphanedCopilotVSCodeLocalRendersForPerUser(opts)
+		}
+		if err := c.teardown(ctx, opts, ""); err != nil {
+			return err
+		}
 	}
-	if c.name == "copilot" {
-		removeOrphanedCopilotVSCodeLocalRendersForPerUser(opts)
+	if !opts.ManagedEnterprise && opts.DataDir != "" {
+		// A cached hook command finds its disabled tombstone after teardown.
+		// Revoke only once the host registration is proven gone.
+		if err := c.VerifyClean(opts); err != nil {
+			if !c.pluginArtifact {
+				return err
+			}
+			// An operator-edited plugin remains by design; its registration
+			// cannot be proven gone, so keep the credential for this teardown.
+		} else {
+			if err := revokePerUserHookAPIToken(opts, c.name); err != nil {
+				return err
+			}
+		}
 	}
-	return c.teardown(ctx, opts, "")
+	if c.name == "devin" && !opts.ManagedEnterprise {
+		backupDir := filepath.Join(opts.DataDir, "connector_backups", c.name)
+		info, err := os.Lstat(backupDir)
+		switch {
+		case os.IsNotExist(err):
+			return nil
+		case err != nil:
+			return fmt.Errorf("devin inspect backup directory: %w", err)
+		case !info.IsDir() || info.Mode()&os.ModeSymlink != 0:
+			return fmt.Errorf("devin backup directory is not a regular directory: %s", backupDir)
+		}
+		entries, err := os.ReadDir(backupDir)
+		if err != nil {
+			return fmt.Errorf("devin list backup directory: %w", err)
+		}
+		if len(entries) == 0 {
+			if err := os.Remove(backupDir); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("devin remove empty backup directory: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermesConfigPath string) error {
