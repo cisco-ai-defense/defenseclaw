@@ -403,7 +403,7 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 		"timeout":           "unconfirmed/no_answer",
 		"delivered":         "allow",
 		"rejected":          "block/rejected",
-		"disconnected":      "block/no_answer",
+		"disconnected":      "unconfirmed/no_answer",
 		"legacy-no-receipt": "unconfirmed/no_answer",
 		"prompt":            "allow",
 		"open-timeout":      "unconfirmed/no_answer",
@@ -416,7 +416,7 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 	}
 	// Every call has its hook_decision, an unconfirmed one included: the
 	// hook result stays a technical ok (schema enum ok|panic).
-	wantDecisions := []string{"allow/ok", "allow/ok", "block/ok", "block/ok", "unconfirmed/ok", "unconfirmed/ok", "unconfirmed/ok"}
+	wantDecisions := []string{"allow/ok", "allow/ok", "block/ok", "allow/ok", "unconfirmed/ok", "unconfirmed/ok", "unconfirmed/ok"}
 	if got := f.decisions(t); strings.Join(got, ",") != strings.Join(wantDecisions, ",") {
 		t.Errorf("hook_decision records = %v, want %v", got, wantDecisions)
 	}
@@ -662,8 +662,8 @@ func TestUnreceiptedManagedHookDecisions(t *testing.T) {
 		{"claudecode", "Stop", true, "allow"},
 		{"codex", "PreToolUse", false, "unconfirmed"},
 		{"copilot", "preToolUse", false, "unconfirmed"},
-		{"opencode", "tool.execute.before", true, "block"},
-		{"claudecode", "UserPromptSubmit", true, "block"},
+		{"opencode", "tool.execute.before", true, "unconfirmed"},
+		{"claudecode", "UserPromptSubmit", true, "unconfirmed"},
 	} {
 		if got := api.unreceiptedHookDecision(tc.hungUp, tc.connector, tc.event, allow).Action; got != tc.want {
 			t.Errorf("%s %s (hung up %v) = %q, want %q", tc.connector, tc.event, tc.hungUp, got, tc.want)
@@ -678,6 +678,31 @@ func TestUnreceiptedManagedHookDecisions(t *testing.T) {
 	}
 }
 
+// A missing receipt across a downgrade or gateway restart does not prove
+// the older hook blocked. In observe mode the hook may have allowed an alert.
+func TestManagedHangupWithoutReceiptDoesNotClaimAnEnforcedBlock(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
+	api := &APIServer{scannerCfg: cfg}
+	for _, tc := range []struct {
+		name string
+		resp agentHookResponse
+	}{
+		{"legacy_downgrade", agentHookResponse{Action: "allow", RawAction: "allow", Mode: "action", Severity: "NONE"}},
+		{"observe_restart", agentHookResponse{Action: "allow", RawAction: "block", Mode: "observe", Severity: "HIGH", WouldBlock: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, got := range []agentHookResponse{
+				api.unreceiptedHookDecision(true, "claudecode", "PreToolUse", tc.resp),
+				api.deliveredHookDecision("claudecode", tc.resp, ""),
+			} {
+				if got.Action != hookActionUnconfirmed || got.Mode != tc.resp.Mode || got.RawAction != tc.resp.RawAction {
+					t.Fatalf("audit verdict = %+v, want unconfirmed with the evaluated mode and raw action", got)
+				}
+			}
+		})
+	}
+}
+
 func TestManagedHookMissingReceiptRecordsOnlyKnownEnforcement(t *testing.T) {
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
 	api := &APIServer{scannerCfg: cfg}
@@ -686,22 +711,20 @@ func TestManagedHookMissingReceiptRecordsOnlyKnownEnforcement(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		mode    string
-		hungUp  bool
 		offered agentHookResponse
 		receipt string
 		want    string
 	}{
 		{name: "allow without receipt", offered: allow, want: "unconfirmed"},
-		{name: "pre-answer hang-up", hungUp: true, offered: allow, want: "block"},
 		{name: "policy block without receipt", offered: block, want: "block"},
 		{name: "open outage cannot confirm policy block", mode: "open", offered: block, want: "unconfirmed"},
-		{name: "open outage before answer", mode: "open", hungUp: true, offered: allow, want: "unconfirmed"},
+		{name: "open mode without receipt", mode: "open", offered: allow, want: "unconfirmed"},
 		{name: "acknowledged allow", offered: allow, receipt: hookexec.HookDeliveryReceiptAck, want: "allow"},
 		{name: "hook rejected allow", offered: allow, receipt: hookexec.HookDeliveryReceiptBlock, want: "block"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg.Guardrail.HookFailMode = tc.mode
-			got := api.deliveredHookDecision(tc.hungUp, "codex", tc.offered, tc.receipt)
+			got := api.deliveredHookDecision("codex", tc.offered, tc.receipt)
 			if got.Action != tc.want {
 				t.Fatalf("audited action = %q, want %q", got.Action, tc.want)
 			}

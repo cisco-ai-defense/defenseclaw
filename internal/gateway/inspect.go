@@ -1750,20 +1750,8 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// user PII. Callers who need raw evidence for triage set
 	// X-DefenseClaw-Reveal-PII: 1; we record that fact in the
 	// canonical compliance history so every reveal is discoverable.
-	reveal := wantsReveal(r)
+	reveal := a.auditInspectReveal(r, "/api/v1/inspect/tool", req.Tool, verdict)
 	responseVerdict := verdict.sanitizeForResponse(reveal)
-	if reveal {
-		// Audit the reveal BEFORE exposing the raw response. The reveal
-		// occurrence is deliberately content-free: the preceding canonical
-		// guardrail/finding records already contain the source evidence and
-		// receive the destination's configured redaction projection. Copying
-		// that evidence into this mandatory compliance record would add no
-		// forensic value and could expose it through the mandatory floor.
-		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionInspectReveal), req.Tool,
-			fmt.Sprintf("severity=%s remote=%s reason_present=%t finding_count=%d",
-				verdict.Severity, r.RemoteAddr, strings.TrimSpace(verdict.Reason) != "",
-				len(verdict.DetailedFindings)))
-	}
 	// The worker only classifies the managed AID fail-open reason. Account for
 	// it after this handler has selected the allow result; the 504
 	// path returns above and deliberately records nothing because installed
@@ -1775,6 +1763,24 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 // inspectToolAuditEvent is the inspect-tool-* audit row.
 func (a *APIServer) inspectToolAuditEvent(r *http.Request, action, tool, details string) audit.Event {
 	return a.inspectAuditEvent(r, "/api/v1/inspect/tool", action, tool, details)
+}
+
+// auditInspectReveal records who requested which route's raw evidence and
+// when, before releasing it. The event carries no evidence. An unavailable
+// audit writer leaves the ordinary redacted response in place.
+func (a *APIServer) auditInspectReveal(r *http.Request, route, target string, verdict *ToolInspectVerdict) bool {
+	if !wantsReveal(r) || verdict == nil || a.logger == nil {
+		return false
+	}
+	event := a.inspectAuditEvent(r, route, string(audit.ActionInspectReveal), target,
+		fmt.Sprintf("severity=%s remote=%s reason_present=%t finding_count=%d",
+			verdict.Severity, r.RemoteAddr, strings.TrimSpace(verdict.Reason) != "",
+			len(verdict.DetailedFindings)))
+	if err := a.logger.LogEventCtx(r.Context(), event); err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] inspect reveal audit failed route=%s: %v\n", route, err)
+		return false
+	}
+	return true
 }
 
 // inspectAuditEvent is the audit row of a direct /api/v1/inspect/* call. It

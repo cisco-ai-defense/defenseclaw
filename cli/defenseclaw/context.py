@@ -32,6 +32,9 @@ class AppContext:
     def __init__(self) -> None:
         self.cfg = None
         self.store = None
+        # A read-only status command can still query the running gateway when
+        # the local audit database cannot be opened.
+        self.audit_store_error = ""
         self.logger = None
         # Set only by the root CLI when ``setup`` starts without config.yaml.
         # The setup group uses it to admit the trusted-paths bootstrap and

@@ -524,8 +524,20 @@ def cli(ctx: click.Context) -> None:
     except Exception as exc:
         from defenseclaw.audit_capacity import audit_open_failure_notice
 
-        ux.echo(audit_open_failure_notice(app.cfg.audit_db, exc), err=True)
-        raise SystemExit(1)
+        notice = audit_open_failure_notice(app.cfg.audit_db, exc)
+        if invoked == "status":
+            # The gateway's authenticated health still reports active audit
+            # write failures and tool blocks while this volume is full.
+            # Keep --json pure so operators can parse that live evidence.
+            try:
+                app.store.close()
+            except Exception:  # noqa: BLE001 - status must survive a broken store.
+                pass
+            app.audit_store_error = notice
+            app.store = None
+        else:
+            ux.echo(notice, err=True)
+            raise SystemExit(1)
 
     if source_is_v8 and not getattr(app, "config_problems", None):
         app.logger = Logger.from_config(app.cfg)

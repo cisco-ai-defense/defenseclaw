@@ -452,7 +452,6 @@ def status(app: AppContext, as_json: bool) -> None:
                 ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
             ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
-
         ux.section("Activity")
         if counts is not None:
             for label, val in (
@@ -463,6 +462,10 @@ def status(app: AppContext, as_json: bool) -> None:
                     val = ux.dim("not counted (too many audit events to count quickly; list them: defenseclaw alerts)")
                 ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
+            ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
+    elif db_error := getattr(app, "audit_store_error", ""):
+        for section in ("Enforcement", "Activity"):
+            ux.section(section)
             ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
 
     _print_moved_audit_store(str(getattr(cfg, "audit_db", "") or ""))
@@ -1943,6 +1946,8 @@ def _status_payload(app) -> dict:
     else:
         payload["enforcement"] = None
         payload["activity"] = None
+        if error := getattr(app, "audit_store_error", ""):
+            payload["audit_db_error"] = error
 
     config_invalid = bool(getattr(app, "config_problems", None))
     skip_live_health = config_invalid and profile != "secure_client"
@@ -1965,6 +1970,15 @@ def _status_payload(app) -> dict:
         payload["sidecar"] = {"running": None, "reason": "not checked while config.yaml is invalid"}
     else:
         payload["sidecar"] = {"running": health is not None}
+    if health is not None:
+        # These live counters remain available while the CLI's own audit DB
+        # open fails, and survive a transient write fault in the gateway.
+        payload["tool_blocks"] = sum(
+            max(0, _safe_int(row.get("tool_blocks")))
+            for row in _fetch_health_connectors(health=health).values()
+        )
+        if failure := _gateway_audit_write_failure(health):
+            payload["audit_write_failure"] = failure
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)

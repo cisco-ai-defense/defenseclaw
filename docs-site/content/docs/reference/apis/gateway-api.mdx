@@ -807,9 +807,10 @@ endpoint's `detailed_findings` objects. Pattern-rule entries normally use
 the hook evaluation produced correlation data.
 
 For `/api/v1/inspect/*`, evidence is redacted by default.
-`X-DefenseClaw-Reveal-PII: 1` requests raw response evidence. The tool-inspect
-handler records an `inspect-reveal` audit event; the request, response, and
-tool-response handlers currently reveal without that extra audit event.
+`X-DefenseClaw-Reveal-PII: 1` requests raw response evidence. Every inspect
+route records a content-free, attributed `inspect-reveal` audit event before
+returning raw evidence. If that event cannot be written, the response stays
+redacted.
 
 ## Sandbox API
 

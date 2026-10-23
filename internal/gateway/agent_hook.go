@@ -734,7 +734,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					connectorName, pendingErr)
 				// The proposal never leaves this process without a durable
 				// occurrence. The hook's non-200 response takes its outage mode.
-				resp = a.deliveredHookDecision(true, connectorName, resp, "")
+				// No answer was offered and no pending occurrence was saved.
+				// This is a proven outage rather than a missing receipt.
+				if a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) == "open" {
+					resp = unconfirmedHookDelivery(resp)
+				} else if resp.Action != "block" {
+					resp = failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
+				}
 				persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 				_ = a.finalizeAgentHook(persistCtx, connectorName, req, resp,
 					rawEventIDs, b, time.Since(t0), panicked, auditExtra)
@@ -759,7 +765,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			if receipt == hookexec.HookDeliveryReleased {
 				resp = a.unreceiptedHookDecision(hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
 			} else {
-				resp = a.deliveredHookDecision(hungUpBeforeAnswer, connectorName, resp, receipt)
+				resp = a.deliveredHookDecision(connectorName, resp, receipt)
 			}
 		} else {
 			resp = a.unreceiptedHookDecision(hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
@@ -970,19 +976,26 @@ func (a *APIServer) finalizeAgentHook(
 			auditErr = a.logConnectorHookAuditEnvelope(ctx, env)
 			result.AuditPersisted = auditErr == nil
 		})
-		if !result.AuditPersisted && !panicked && !req.pendingRecovery && !errors.Is(auditErr, errHookAuditNotConfigured) {
+		if !result.AuditPersisted && !panicked && !errors.Is(auditErr, errHookAuditNotConfigured) {
 			if auditErr == nil {
 				auditErr = errors.New("the audit section panicked")
 			}
-			closed, denied := a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
-			if denied {
-				resp = closed
-				env.adoptVerdict(resp)
-				result.Enforced, result.Response, result.AuditFailedClosed = env.Enforced, resp, true
-				safeSection("span", func() {
-					enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
-					enrichAgentHookSpan(ctx, req, resp, elapsed)
-				})
+			denied := false
+			if req.pendingOccurrenceID == "" {
+				// A pending occurrence preserves the delivery state for
+				// recovery. Never report a retroactive block that the agent
+				// did not receive.
+				closed, shouldDeny := a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
+				denied = shouldDeny
+				if denied {
+					resp = closed
+					env.adoptVerdict(resp)
+					result.Enforced, result.Response, result.AuditFailedClosed = env.Enforced, resp, true
+					safeSection("span", func() {
+						enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
+						enrichAgentHookSpan(ctx, req, resp, elapsed)
+					})
+				}
 			}
 			fmt.Fprintf(os.Stderr, "[gateway] hook audit persistence failed connector=%s event=%s action=%s denied_for_audit=%t: %v\n",
 				connectorName, req.HookEventName, resp.Action, denied, auditErr)
