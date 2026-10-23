@@ -38,8 +38,8 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Mapping
-from contextlib import ExitStack
+from collections.abc import Iterator, Mapping
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10350,26 +10350,20 @@ def _apply_hook_connector_setup(
     if restart:
         click.echo()
         click.echo("  Restarting gateway to wire connector runtime and telemetry...")
-        previous_codex_setup = os.environ.get("DEFENSECLAW_EXPLICIT_CODEX_SETUP")
-        if connector == "codex":
-            os.environ["DEFENSECLAW_EXPLICIT_CODEX_SETUP"] = os.path.abspath(connector_paths.codex_home())
         try:
-            _restart_services(
-                cfg.data_dir,
-                cfg.gateway.host,
-                cfg.gateway.port,
-                connector=connector,
-                connectors=_guarded_connectors(cfg, _actives),
-                wait_for_connector_ready=True,
-            )
+            forward_root = _selected_codex_setup_root() if connector == "codex" else None
+            with _temporary_codex_setup_marker(forward_root) if connector == "codex" else nullcontext():
+                _restart_services(
+                    cfg.data_dir,
+                    cfg.gateway.host,
+                    cfg.gateway.port,
+                    connector=connector,
+                    connectors=_guarded_connectors(cfg, _actives),
+                    wait_for_connector_ready=True,
+                )
         except Exception as exc:  # noqa: BLE001 — readiness failure triggers transaction rollback.
-            _rollback_failed_connector_application(app, setup_snapshot, exc)
-        finally:
-            if connector == "codex":
-                if previous_codex_setup is None:
-                    os.environ.pop("DEFENSECLAW_EXPLICIT_CODEX_SETUP", None)
-                else:
-                    os.environ["DEFENSECLAW_EXPLICIT_CODEX_SETUP"] = previous_codex_setup
+            with _temporary_codex_setup_marker(None) if connector == "codex" else nullcontext():
+                _rollback_failed_connector_application(app, setup_snapshot, exc)
         if connector == "hermes":
             ux.echo("  ✓ Hermes on-disk hook registration staged")
             if _hermes_hosts_idle():
@@ -12336,7 +12330,7 @@ def _agent_settings_refusal(cfg, connector: str, *, workspace_dir: str | None = 
     data_dir = str(cfg.data_dir)
     env = {**os.environ, "DEFENSECLAW_HOME": data_dir}
     if connector == "codex":
-        selected_root = os.path.abspath(connector_paths.codex_home())
+        selected_root = _selected_codex_setup_root()
         env["CODEX_HOME"] = selected_root
         env["DEFENSECLAW_EXPLICIT_CODEX_SETUP"] = selected_root
     workspace = _resolve_connector_workspace(workspace_dir)
@@ -12368,6 +12362,31 @@ def _agent_settings_refusal(cfg, connector: str, *, workspace_dir: str | None = 
         f"{label}: {_GATEWAY_RESTART_STEP_RE.sub('', reason)}. Setup changed nothing and the gateway keeps "
         "running as it was; after the fix, run the same setup command again."
     )
+
+
+def _selected_codex_setup_root() -> str:
+    return os.path.abspath(connector_paths.codex_home())
+
+
+@contextmanager
+def _temporary_codex_setup_marker(root: str | None) -> Iterator[None]:
+    """Select a Codex migration only for its forward gateway restart.
+
+    Rollback clears the marker so the gateway pins the prior registration's
+    root, even if an inherited marker happens to match the new root.
+    """
+    previous = os.environ.get("DEFENSECLAW_EXPLICIT_CODEX_SETUP")
+    if root is None:
+        os.environ.pop("DEFENSECLAW_EXPLICIT_CODEX_SETUP", None)
+    else:
+        os.environ["DEFENSECLAW_EXPLICIT_CODEX_SETUP"] = root
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("DEFENSECLAW_EXPLICIT_CODEX_SETUP", None)
+        else:
+            os.environ["DEFENSECLAW_EXPLICIT_CODEX_SETUP"] = previous
 
 
 def _prune_orphaned_connector_hooks(cfg, connector: str) -> tuple[list[str], str]:
@@ -16736,17 +16755,20 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
             if hasattr(app.cfg, "active_connector") and normalize_connector(app.cfg.active_connector()) in focus
             else focus[0]
         )
+        migrate_codex_root = "codex" in focus
         try:
-            _restart_services(
-                data_dir,
-                app.cfg.gateway.host,
-                app.cfg.gateway.port,
-                connector=primary,
-                connectors=batch_targets,
-                wait_for_connector_ready=True,
-                start_if_stopped=True,
-                required_connectors=frozenset(focus),
-            )
+            forward_root = _selected_codex_setup_root() if migrate_codex_root else None
+            with _temporary_codex_setup_marker(forward_root) if migrate_codex_root else nullcontext():
+                _restart_services(
+                    data_dir,
+                    app.cfg.gateway.host,
+                    app.cfg.gateway.port,
+                    connector=primary,
+                    connectors=batch_targets,
+                    wait_for_connector_ready=True,
+                    start_if_stopped=True,
+                    required_connectors=frozenset(focus),
+                )
             for connector, audit_mode in batch_audits:
                 _log_setup_action(
                     app,
@@ -16757,7 +16779,8 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
         except Exception as exc:  # noqa: BLE001 — readiness failure rolls the whole batch back.
             snapshot = ctx.meta.get(_SETUP_BATCH_ROLLBACK_KEY)
             if isinstance(snapshot, _SetupConfigSnapshot):
-                _rollback_failed_connector_application(app, snapshot, exc)
+                with _temporary_codex_setup_marker(None) if migrate_codex_root else nullcontext():
+                    _rollback_failed_connector_application(app, snapshot, exc)
             raise
         if "omnigent" in batch_targets:
             ux.echo(
