@@ -135,15 +135,10 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		_ = json.NewEncoder(w).Encode(decision)
 		return
 	}
-	refusal, delivered := writeFencedForeignHookAllow(w, decision, answerBy)
-	if refusal != "" {
+	if refusal, _ := writeFencedForeignHookAllow(w, decision, answerBy); refusal != "" {
 		release()
 		unlock()
 		writeManagedHookRefusal(w, http.StatusServiceUnavailable, refusal)
-		return
-	}
-	if !delivered {
-		return
 	}
 }
 
