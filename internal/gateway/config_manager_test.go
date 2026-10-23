@@ -1140,7 +1140,8 @@ func TestAPIServerHookPostureUsesPublishedRuntimeConfig(t *testing.T) {
 		}
 	}
 	if boot.EffectiveGuardrailModeForConnector("codex") != "observe" ||
-		boot.EffectiveHookFailModeForConnector("codex") != "open" {
+		boot.EffectiveHookFailModeForConnector("codex") != "closed" ||
+		boot.ConfiguredHookFailModeForConnector("codex") != "open" {
 		t.Fatal("API posture read mutated the immutable boot snapshot")
 	}
 }
@@ -1224,12 +1225,40 @@ func TestHookFailModeChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
 	oldCfg.Guardrail.HookFailMode = "open"
 	newCfg := cloneConfig(oldCfg)
 	newCfg.Guardrail.HookFailMode = "closed"
-	if !hookFailModeNeedsSetup(oldCfg, newCfg) {
+	if !hookPolicyNeedsSetup(oldCfg, newCfg) {
 		t.Fatal("hook fail mode change with self-heal off did not re-run the connector setup")
 	}
 	oldCfg.Guardrail.HookSelfHeal, newCfg.Guardrail.HookSelfHeal = true, true
-	if hookFailModeNeedsSetup(oldCfg, newCfg) {
+	if hookPolicyNeedsSetup(oldCfg, newCfg) {
 		t.Fatal("hook fail mode change with self-heal on re-ran the setup; the hook guards apply it")
+	}
+}
+
+func TestHookModeAndHILTChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*config.Config)
+	}{
+		{"mode only", func(c *config.Config) { c.Guardrail.Mode = "action" }},
+		{"HILT only", func(c *config.Config) { c.Guardrail.HILT.Enabled = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldCfg := config.DefaultConfig()
+			oldCfg.Guardrail.Enabled = true
+			oldCfg.Guardrail.Connector = "codex"
+			oldCfg.Guardrail.Mode = "observe"
+			oldCfg.Guardrail.HookFailMode = "closed"
+			oldCfg.Guardrail.HookSelfHeal = false
+			newCfg := cloneConfig(oldCfg)
+			tc.edit(newCfg)
+			if !hookPolicyNeedsSetup(oldCfg, newCfg) {
+				t.Fatal("hook policy change with self-heal off did not re-run connector setup")
+			}
+			newCfg.Guardrail.HookSelfHeal = true
+			if hookPolicyNeedsSetup(oldCfg, newCfg) {
+				t.Fatal("hook policy change with self-heal on re-ran connector setup")
+			}
+		})
 	}
 }
 

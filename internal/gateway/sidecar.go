@@ -2042,9 +2042,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// A connector added, removed, enabled or disabled re-runs the connector
 	// setup in-process and restarts the install watcher, which watches the
 	// skill and plugin dirs of the connectors. Secure Client never gets here
-	// with such a change: diffConfigs keeps it restart-required. A hook fail
-	// mode change no hook guard rewrites re-runs the setup too.
-	guardrailRestart := connectorSetChanged(oldCfg, newCfg) || hookFailModeNeedsSetup(oldCfg, newCfg)
+	// with such a change: diffConfigs keeps it restart-required. A hook runtime
+	// policy change no hook guard rewrites re-runs the setup too.
+	guardrailRestart := connectorSetChanged(oldCfg, newCfg) || hookPolicyNeedsSetup(oldCfg, newCfg)
 	watcherRestart := watcherNeedsRestart(oldCfg, newCfg) || guardrailRestart
 	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg) || discoveryAssetsChanged(previousGen, newCfg)
 	privateUpstreamsReload := !reflect.DeepEqual(
@@ -2522,22 +2522,28 @@ func connectorSetChanged(oldCfg, newCfg *config.Config) bool {
 	return !reflect.DeepEqual(connectorHookSettings(oldCfg.Guardrail.Connectors), connectorHookSettings(newCfg.Guardrail.Connectors))
 }
 
-// hookFailModeNeedsSetup reports a hook fail mode change that no hook guard
-// applies: with hook self-heal off (refreshHookGuardPolicies has no guard to
-// refresh) the connector setup runs again, so the generated hooks carry the
-// new fail mode without a gateway restart. The enterprise hook guardian owns
-// managed hooks, and Secure Client keeps its behaviour.
-func hookFailModeNeedsSetup(oldCfg, newCfg *config.Config) bool {
+// hookPolicyNeedsSetup reports a runtime hook-policy change that no hook guard
+// applies. With self-heal off, connector setup runs again so the generated
+// hooks carry the new mode, HILT and fail-mode settings without a restart.
+// The enterprise hook guardian owns managed hooks; Secure Client is unchanged.
+func hookPolicyNeedsSetup(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil || !newCfg.Guardrail.Enabled || newCfg.Guardrail.HookSelfHeal ||
 		managed.IsManagedEnterprise(newCfg.DeploymentMode) || newCfg.SecureClientIntegration() {
 		return false
 	}
 	for _, name := range newCfg.ActiveConnectors() {
-		if oldCfg.EffectiveHookFailModeForConnector(name) != newCfg.EffectiveHookFailModeForConnector(name) {
+		if hookRuntimePolicyChanged(oldCfg, newCfg, name) {
 			return true
 		}
 	}
 	return false
+}
+
+func hookRuntimePolicyChanged(oldCfg, newCfg *config.Config, name string) bool {
+	return oldCfg.EffectiveHookFailModeForConnector(name) != newCfg.EffectiveHookFailModeForConnector(name) ||
+		oldCfg.ConfiguredHookFailModeForConnector(name) != newCfg.ConfiguredHookFailModeForConnector(name) ||
+		oldCfg.EffectiveGuardrailModeForConnector(name) != newCfg.EffectiveGuardrailModeForConnector(name) ||
+		oldCfg.EffectiveHILTForConnector(name).Enabled != newCfg.EffectiveHILTForConnector(name).Enabled
 }
 
 // connectorHookSettings keeps, per connector, only whether its hooks are
@@ -2721,12 +2727,10 @@ func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
 	})
 }
 
-// refreshHookGuardPolicies re-renders the hooks of every hook-only connector
-// whose effective hook fail mode the published config changed. The fail mode is
-// baked into the generated hook scripts and the agent's registration, and it
-// follows the guardrail mode (action uses the global fail mode, observe is
-// open), so a mode change through any writer must reach them without a
-// restart. It runs off the reload path: Setup rewrites agent config files.
+// refreshHookGuardPolicies re-renders hook-only connectors when the published
+// runtime policy changes. A saved per-user open value leaves the effective
+// fail mode closed, so mode and HILT changes must be compared separately.
+// It runs off the reload path: Setup rewrites agent config files.
 func (s *Sidecar) refreshHookGuardPolicies(oldCfg, newCfg *config.Config) {
 	if s == nil || oldCfg == nil || newCfg == nil || !newCfg.Guardrail.Enabled || !newCfg.Guardrail.HookSelfHeal ||
 		managed.IsManagedEnterprise(newCfg.DeploymentMode) || newCfg.SecureClientIntegration() {
@@ -2740,16 +2744,15 @@ func (s *Sidecar) refreshHookGuardPolicies(oldCfg, newCfg *config.Config) {
 	s.hookGuardsMu.RUnlock()
 	for _, guard := range guards {
 		conn := guard.activeConnector()
-		// A per-user Cursor's outage mode also follows the config's explicit
-		// value (connector.OutageHookFailMode), which can change alone.
+		// A per-user Cursor's outage mode also follows the explicit value,
+		// which can change alone without changing the resolved fail mode.
 		if conn == nil || proxyShouldBindForConnector(conn, &newCfg.Guardrail) ||
-			(oldCfg.EffectiveHookFailModeForConnector(conn.Name()) == newCfg.EffectiveHookFailModeForConnector(conn.Name()) &&
-				oldCfg.ConfiguredHookFailModeForConnector(conn.Name()) == newCfg.ConfiguredHookFailModeForConnector(conn.Name())) {
+			!hookRuntimePolicyChanged(oldCfg, newCfg, conn.Name()) {
 			continue
 		}
 		go func() {
 			if err := guard.RefreshPolicy(context.Background()); err != nil {
-				fmt.Fprintf(os.Stderr, "[hook-guard] hook fail mode refresh for %s: %v\n", conn.Name(), err)
+				fmt.Fprintf(os.Stderr, "[hook-guard] hook policy refresh for %s: %v\n", conn.Name(), err)
 			}
 		}()
 	}
