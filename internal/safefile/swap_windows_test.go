@@ -138,20 +138,20 @@ func TestCompareAndSwapFileWaitsForAnOpenWriter(t *testing.T) {
 func TestRemoveFileIfUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hooks.json")
-	if _, err := RemoveFileIfUnchanged(path, []byte("ours"), 16, nil); !errors.Is(err, ErrSwapRaced) {
+	if _, err := RemoveFileIfUnchanged(path, SwapExpectation{Data: []byte("ours")}, 16, nil); !errors.Is(err, ErrSwapRaced) {
 		t.Fatalf("remove a missing file: %v", err)
 	}
 	if err := os.WriteFile(path, []byte("newer save"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RemoveFileIfUnchanged(path, []byte("ours"), 16, nil); !errors.Is(err, ErrSwapRaced) {
+	if _, err := RemoveFileIfUnchanged(path, SwapExpectation{Data: []byte("ours")}, 16, nil); !errors.Is(err, ErrSwapRaced) {
 		t.Fatalf("remove another file: %v", err)
 	}
 	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "newer save"})
 	if err := os.WriteFile(path, []byte("ours"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if result, err := RemoveFileIfUnchanged(path, []byte("ours"), 16, nil); err != nil || !result.Swapped {
+	if result, err := RemoveFileIfUnchanged(path, SwapExpectation{Data: []byte("ours")}, 16, nil); err != nil || !result.Swapped {
 		t.Fatalf("remove our file: %+v err=%v", result, err)
 	}
 	requireSwapDirForTest(t, dir, map[string]string{})
@@ -171,7 +171,7 @@ func TestRemoveFileIfUnchangedRemovesAReadOnlyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
-	if _, err := RemoveFileIfUnchanged(path, []byte("ours"), 16, nil); !errors.Is(err, ErrSwapRaced) {
+	if _, err := RemoveFileIfUnchanged(path, SwapExpectation{Data: []byte("ours")}, 16, nil); !errors.Is(err, ErrSwapRaced) {
 		t.Fatalf("remove another read-only file: %v", err)
 	}
 	requireSwapDirForTest(t, dir, map[string]string{"requirements.toml": "newer save"})
@@ -184,7 +184,7 @@ func TestRemoveFileIfUnchangedRemovesAReadOnlyFile(t *testing.T) {
 	if err := os.Chmod(path, 0o400); err != nil {
 		t.Fatal(err)
 	}
-	if result, err := RemoveFileIfUnchanged(path, []byte("ours"), 16, nil); err != nil || !result.Swapped {
+	if result, err := RemoveFileIfUnchanged(path, SwapExpectation{Data: []byte("ours")}, 16, nil); err != nil || !result.Swapped {
 		t.Fatalf("remove our read-only file: %+v err=%v", result, err)
 	}
 	requireSwapDirForTest(t, dir, map[string]string{})
