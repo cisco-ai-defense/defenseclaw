@@ -104,12 +104,30 @@ func isTracestateChar(c byte) bool {
 	}
 }
 
+// managedOpenCodeBackgroundEvent names callbacks that can report runtime
+// health but cannot admit a tool. Their failures are diagnostics even when
+// the native hook's unused answer happens to be allow- or block-shaped.
+func managedOpenCodeBackgroundEvent(opts Options, sp spec) bool {
+	if sp.connector != "opencode" || !managedNativeDecision(opts) || secureClientHook(opts) {
+		return false
+	}
+	if NeutralLifecycleEvent(sp.connector, opts.Event) {
+		return true
+	}
+	switch strings.TrimSpace(opts.Event) {
+	case "defenseclaw.plugin.loaded", "tool.execute.after":
+		return true
+	}
+	return false
+}
+
 // logHookFailure appends one JSON line to Home/logs/hook-failures.jsonl,
 // when Home exists, mirroring defenseclaw_log_hook_failure. Best-effort: any
 // error is ignored so a read-only home or full disk never changes the hook's
 // decision. blocked is the delivery outcome the caller applies; a connector
 // without a fail-closed contract records what the call got instead
-// (loggedFailMode), so the fail-open report finds the calls that ran.
+// (loggedFailMode), so the fail-open report finds the calls that ran. Managed
+// OpenCode callbacks that cannot admit a tool are diagnostics.
 func logHookFailure(opts Options, sp spec, reason, category, failMode string, blocked bool) {
 	if sp.failOpenOnly {
 		blocked = loggedFailMode(opts, sp, failMode) == "closed"
@@ -124,7 +142,9 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		defer close(done)
 	}
 	outcome := "fail_closed"
-	if !blocked {
+	if managedOpenCodeBackgroundEvent(opts, sp) {
+		outcome = "diagnostic"
+	} else if !blocked {
 		outcome = "fail_open"
 		// Quote diagnostics so an unexpected transport error cannot forge lines.
 		// Never include request/response bodies or authentication credentials.

@@ -2781,9 +2781,9 @@ func failClosedStopEvent(opts Options, sp spec) bool {
 
 // logDeliberateAllow records a failure that a reviewed rule answers with the
 // connector's neutral allow (a stop/session-end event, or a Cursor event with
-// no block response). The record carries the fail_open outcome, but the
-// generic "inspection bypassed" warning is left out: the caller prints its own
-// explanation, which is the first line the agent shows.
+// no block response). The generic "inspection bypassed" warning is left out:
+// the caller prints its own explanation, which is the first line the agent
+// shows. Managed OpenCode background events have a diagnostic outcome.
 func logDeliberateAllow(opts Options, sp spec, reason, category string) {
 	quiet := opts
 	quiet.Stderr = io.Discard
