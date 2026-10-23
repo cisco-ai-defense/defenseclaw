@@ -314,6 +314,7 @@ func (t copilotTarget) Verify(opts Options) (State, error) {
 		state.Route = RouteUnsupported
 		return state, nil
 	}
+	verifyWindowsHookExecutable(opts, "Copilot", &state)
 	if err := copilotEditorPolicy(opts, &state, false); err != nil {
 		return state, err
 	}
