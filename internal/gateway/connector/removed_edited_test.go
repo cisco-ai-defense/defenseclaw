@@ -9,7 +9,6 @@ package connector
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -158,77 +157,66 @@ func TestRemovedTeardownSavesAnEditedOmnigentModule(t *testing.T) {
 	})
 }
 
-// Finding 1's class: the edit is saved before every write that replaces
-// it: the write into the file (every hard-linked name gets the stub, the
-// edit is saved once), and the rename after a write into the file failed,
-// which saves what is there then (an edit made after the first read too).
+// Finding 1's class: the edit is saved before the rename that replaces it,
+// and so is a change made after the first read. A hard-linked module is
+// left whole under every name, with its tokens, whatever the save did; once
+// its other names are gone the next run saves nothing again and renames the
+// stub over it.
 func TestRemovedTeardownSavesTheEditBeforeEveryWrite(t *testing.T) {
 	c := removedOmnigent
 	t.Run("hard links", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			t.Skip("Windows renames the stub only; a hard-linked module keeps its bytes (TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript)")
-		}
 		h := newRemovedHost(t)
 		h.stage(t, c)
 		writeRemovedFile(t, h.script(c), removedOmnigentEditedModule, 0o600)
 		links := h.removedHardLinks(t, c)
-		first, err := os.Stat(links[0])
+		first, err := os.Stat(h.script(c))
 		if err != nil {
 			t.Fatal(err)
+		}
+		err = c.Teardown(context.Background(), h.opts)
+		h.requireLeftStep(t, c, err, c.hardLinkStep(h.script(c)))
+		requireRemovedNamesWhole(t, first, removedOmnigentEditedModule, append([]string{h.script(c)}, links...))
+		for _, link := range links {
+			if err := os.Remove(link); err != nil {
+				t.Fatal(err)
+			}
 		}
 		if err := c.Teardown(context.Background(), h.opts); err != nil {
 			t.Fatal(err)
 		}
-		h.requireStubUnderEveryName(t, c, first, links)
+		h.requireStub(t, c)
 		h.requireEditedSaved(t, c, removedOmnigentEditedModule)
 		if copies := h.editedCopies(t, c); len(copies) != 1 {
 			t.Fatalf("saved copies = %v, want one", copies)
 		}
 	})
-	t.Run("the rename after the write into the file failed", func(t *testing.T) {
+	t.Run("a change after the first read", func(t *testing.T) {
 		h := newRemovedHost(t)
 		h.stage(t, c)
 		writeRemovedFile(t, h.script(c), removedOmnigentEditedModule, 0o600)
 		later := removedOmnigentEditedModule + "# a later change\n"
-		removedInPlaceSeams(t, func(file *os.File, data []byte, offset int64, call int) (int, error) {
-			// Another change lands, then the write fails before a byte.
-			if err := os.WriteFile(h.script(c), []byte(later), 0o600); err != nil {
-				t.Fatal(err)
+		saveWrite := removedKeepEditedWrite
+		t.Cleanup(func() { removedKeepEditedWrite = saveWrite })
+		changed := false
+		removedKeepEditedWrite = func(saved string, data []byte, perm os.FileMode) error {
+			if err := saveWrite(saved, data, perm); err != nil {
+				return err
 			}
-			return 0, syscall.EIO
-		}, nil)
+			if !changed {
+				// Another change lands while the first save is made.
+				changed = true
+				if err := os.WriteFile(h.script(c), []byte(later), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return nil
+		}
 		if err := c.Teardown(context.Background(), h.opts); err != nil {
 			t.Fatalf("Teardown: %v", err)
 		}
 		h.requireStub(t, c)
 		h.requireEditedSaved(t, c, removedOmnigentEditedModule)
-		if runtime.GOOS != "windows" {
-			// Windows never writes into the file, so the later change never
-			// lands there.
-			h.requireEditedSaved(t, c, later)
-		}
-	})
-	t.Run("the write into the file saves what it reads", func(t *testing.T) {
-		h := newRemovedHost(t)
-		h.stage(t, c)
-		writeRemovedFile(t, h.script(c), removedOmnigentEditedModule, 0o600)
-		var got []byte
-		err := c.writeStubInPlace(h.script(c), func(old []byte, _ os.FileInfo) error {
-			got = append([]byte(nil), old...)
-			return errors.New("the disk is full")
-		})
-		if runtime.GOOS == "windows" {
-			if err == nil {
-				t.Fatal("Windows wrote into the file")
-			}
-			return
-		}
-		if err == nil || !strings.Contains(err.Error(), "the disk is full") || string(got) != removedOmnigentEditedModule {
-			t.Fatalf("writeStubInPlace = %v, saved %q; want the save of the bytes it read to stop it", err, got)
-		}
-		if data, _ := os.ReadFile(h.script(c)); string(data) != removedOmnigentEditedModule {
-			t.Fatalf("a failed save let the write change the module: %q", data)
-		}
+		h.requireEditedSaved(t, c, later)
 	})
 }
 
@@ -324,6 +312,9 @@ func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
 		// failSave: the save cannot be made (a link at its name); the
 		// module, its tokens and the link stay.
 		failSave bool
+		// leftLinked: the module still has another name after the save,
+		// so the teardown leaves it whole with its tokens.
+		leftLinked bool
 	}{
 		"a hard link to the module": {
 			prepare: func(t *testing.T, h *removedHost, saved string) prepared {
@@ -332,9 +323,10 @@ func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
 			},
 		},
 		"a hard link to the module, which has another name too": {
-			// Windows never writes into a file with more names; it keeps
-			// the module and its tokens (TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript).
-			unixOnly: true,
+			// The module keeps its other name, so it is left whole with its
+			// tokens (TestRemovedTeardownNeverWritesIntoTheOldScript); the
+			// name at the copy's name still becomes a copy of its own.
+			leftLinked: true,
 			prepare: func(t *testing.T, h *removedHost, saved string) prepared {
 				removedLinkOrSkip(t, h.script(c), saved)
 				removedLinkOrSkip(t, h.script(c), filepath.Join(h.home, "elsewhere", c.script))
@@ -391,6 +383,15 @@ func TestRemovedTeardownSavesTheEditToACopyOfItsOwn(t *testing.T) {
 				t.Fatal(err)
 			}
 			err = c.Teardown(context.Background(), h.opts)
+			if tc.leftLinked {
+				h.requireLeftStep(t, c, err, c.hardLinkStep(h.script(c)))
+				if data, _ := os.ReadFile(h.script(c)); string(data) != string(edit) {
+					t.Fatalf("the hard-linked module was changed: %q", data)
+				}
+				h.requireEditedSaved(t, c, string(edit))
+				requireRemovedCopyOfItsOwn(t, saved, module)
+				return
+			}
 			if tc.failSave {
 				if err == nil || !strings.Contains(err.Error(), "save the edited") || !strings.Contains(err.Error(), "its tokens were kept") {
 					t.Fatalf("Teardown = %v, want the failed save and the tokens kept", err)

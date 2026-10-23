@@ -374,8 +374,8 @@ func TestRemovedConnectorLockEntryIsNeverCleared(t *testing.T) {
 }
 
 // A known token-path refusal is found before the stub changes anything. Once
-// the stub is written, a later failure keeps it in place so a retry can finish
-// without putting an old hook back. VerifyClean fails until cleanup finishes.
+// the stub is renamed over the script, a later failure keeps it there so a
+// retry can finish without putting an old hook back. VerifyClean fails until cleanup finishes.
 func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 	for _, c := range removedConnectorsUnderTest() {
 		t.Run(c.name+"/a token cannot be revoked", func(t *testing.T) {
@@ -438,9 +438,10 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 				t.Fatal("VerifyClean passed with the old hook in place")
 			}
 		})
-		// The stub is written into the script, but its copy cannot be
-		// renamed over it: the script blocks already, the tokens stay until
-		// the next start, which revokes them.
+		// The stub's copy cannot be renamed over the script: the old
+		// script is left whole, the same file with its bytes, and the
+		// tokens stay until the next start, which renames the stub and
+		// revokes them. Nothing is ever written into the old script.
 		t.Run(c.name+"/the stub's copy cannot be renamed", func(t *testing.T) {
 			if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 				t.Skip("directory modes do not stop writes here")
@@ -448,31 +449,33 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 			h := newRemovedHost(t)
 			h.stage(t, c)
 			hooks := filepath.Join(h.dataDir, "hooks")
-			skip := append([]string{h.script(c)}, h.tokens(c)...)
-			before := h.snapshot(t, skip...)
+			old, err := os.ReadFile(h.script(c))
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, err := os.Stat(h.script(c))
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := h.snapshot(t)
 			if err := os.Chmod(hooks, 0o500); err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.Chmod(hooks, 0o700) })
 			conn, _ := RetiredConnector(c.name)
-			if err := conn.Teardown(context.Background(), h.opts); err == nil || !strings.Contains(err.Error(), "could not be renamed over it") {
-				t.Fatalf("Teardown = %v, want the rename failure", err)
+			if err := conn.Teardown(context.Background(), h.opts); err == nil || !strings.Contains(err.Error(), "rename the stub that blocks every call over") ||
+				!strings.Contains(err.Error(), "its tokens were kept") {
+				t.Fatalf("Teardown = %v, want the rename failure and the tokens kept", err)
 			}
 			if err := os.Chmod(hooks, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if data, err := os.ReadFile(h.script(c)); err != nil || string(data) != c.tombstone {
-				t.Fatalf("%s = %q, %v; want the stub written into it", h.script(c), data, err)
-			}
-			for _, token := range h.tokens(c) {
-				if _, err := os.Lstat(token); err != nil {
-					t.Fatalf("token %s was revoked before the teardown finished: %v", token, err)
-				}
-			}
+			requireRemovedNamesWhole(t, first, string(old), []string{h.script(c)})
+			h.requireTokensKept(t, c)
 			if err := conn.VerifyClean(h.opts); err == nil {
-				t.Fatal("VerifyClean passed with the tokens left")
+				t.Fatal("VerifyClean passed with the old script at the path")
 			}
-			requireRemovedSame(t, "a teardown whose rename failed", h.snapshot(t, skip...), before)
+			requireRemovedSame(t, "a teardown whose rename failed", h.snapshot(t), before)
 			if err := conn.Teardown(context.Background(), h.opts); err != nil {
 				t.Fatalf("retry: %v", err)
 			}

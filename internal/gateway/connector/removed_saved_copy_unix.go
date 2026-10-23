@@ -19,10 +19,8 @@
 package connector
 
 import (
-	"errors"
 	"fmt"
 	"os"
-	"syscall"
 )
 
 // removedSavedCopyPrivate refuses a saved copy of an edited module that
@@ -30,28 +28,6 @@ import (
 func removedSavedCopyPrivate(info os.FileInfo) error {
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		return fmt.Errorf("its mode is %o, not private (600)", perm)
-	}
-	return nil
-}
-
-// removedInPlaceRefusal says why the stub may not be written into a removed
-// connector's script file (nil when it may): only a file that the owner of
-// its hooks folder owns is written in place. So a name in the hooks folder
-// that leads to another account's file with DefenseClaw's marker (a
-// root-owned managed hook) never makes a privileged teardown write it; it
-// gets the rename, or keeps its tokens when it has other names. until 1.1,
-// with removed.go.
-func removedInPlaceRefusal(file, folder os.FileInfo) error {
-	fileStat, ok := file.Sys().(*syscall.Stat_t)
-	if !ok {
-		return errors.New("its owner cannot be read")
-	}
-	folderStat, ok := folder.Sys().(*syscall.Stat_t)
-	if !ok {
-		return errors.New("the hooks folder's owner cannot be read")
-	}
-	if fileStat.Uid != folderStat.Uid {
-		return errors.New("another account than the hooks folder's owner owns it")
 	}
 	return nil
 }

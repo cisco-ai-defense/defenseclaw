@@ -5,13 +5,15 @@
 package connector
 
 // until 1.1: the safety net for the teardown-only OpenHands and OmniGent
-// connectors (removed.go, G-deadcode review loop round 1): the stub is
-// written into the script file itself, so every name of it (a hard link)
-// blocks, and a copy is renamed over the path. Delete with removed.go.
+// connectors (removed.go): the stub is renamed over the script path in one
+// atomic step and never written into the old file, and a script with more
+// than one name (a hard link) is left whole, with its tokens. Delete with
+// removed.go.
 
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +30,21 @@ func removedLongOld(c removedOnlyConnector) string {
 		return removedOmnigent103Module + strings.Repeat("# the 1.0.3 module goes on\n", 120)
 	}
 	return removedOpenHands103Script + strings.Repeat("# the 1.0.3 hook goes on\n", 120)
+}
+
+// removedOldScripts are the old scripts of c the teardown replaces: the
+// 1.0.3 one, a longer one, a shorter one than the stub, and (OpenHands) the
+// stub an older teardown left that exits 0.
+func removedOldScripts(c removedOnlyConnector) []struct{ name, body string } {
+	olds := []struct{ name, body string }{
+		{"the 1.0.3 script", map[string]string{removedOpenHandsID: removedOpenHands103Script, removedOmnigentID: removedOmnigent103Module}[c.name]},
+		{"a 1.0.3 script longer than the stub", removedLongOld(c)},
+		{"a script shorter than the stub", c.marker + "6\n" + "exit 0\n"},
+	}
+	if c.name == removedOpenHandsID {
+		olds = append(olds, struct{ name, body string }{"a stub that exits 0", disabledHookTombstone(c.label)})
+	}
+	return olds
 }
 
 // requireRemovedHookBlocks runs an OpenHands hook script and requires the
@@ -62,46 +79,97 @@ func (h *removedHost) removedHardLinks(t *testing.T, c removedOnlyConnector) []s
 	return links
 }
 
-// requireStubUnderEveryName checks the hard links still name the old file
-// and hold the stub (with the tail for a longer old script), which blocks.
-func (h *removedHost) requireStubUnderEveryName(t *testing.T, c removedOnlyConnector, first os.FileInfo, links []string) {
+// removedHoldOld opens the old script file, so its bytes can be read after
+// the teardown whatever names it has left; an open handle adds no name. On
+// Windows it returns nil: a handle there may keep the rename from
+// replacing the file.
+func removedHoldOld(t *testing.T, path string) *os.File {
 	t.Helper()
-	for _, link := range links {
-		info, err := os.Stat(link)
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	return file
+}
+
+// requireRemovedOldWhole checks that the old file still holds exactly old:
+// nothing ever wrote into it.
+func requireRemovedOldWhole(t *testing.T, file *os.File, old string) {
+	t.Helper()
+	if file == nil {
+		return
+	}
+	got := make([]byte, len(old)+len(removedOpenHandsTombstone)+1)
+	n, err := file.ReadAt(got, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+	if string(got[:n]) != old {
+		t.Fatalf("the old script file was written into: it holds %q, want its old bytes %q", got[:n], old)
+	}
+}
+
+// requireRemovedNamesWhole checks that every name still names the old file
+// and holds its old bytes.
+func requireRemovedNamesWhole(t *testing.T, first os.FileInfo, old string, names []string) {
+	t.Helper()
+	for _, name := range names {
+		info, err := os.Stat(name)
 		if err != nil || !os.SameFile(first, info) {
-			t.Fatalf("%s is not the old file any more (%v)", link, err)
+			t.Fatalf("%s is not the old file any more (%v)", name, err)
 		}
-		if info.Mode().Perm() != c.mode {
-			t.Fatalf("%s mode %v, want %v", link, info.Mode(), c.mode)
-		}
-		data, err := os.ReadFile(link)
-		if err != nil || c.classifyScript(data) != removedScriptStub {
-			t.Fatalf("%s = %q, %v; want the stub", link, data, err)
-		}
-		if c.name == removedOpenHandsID {
-			requireRemovedHookBlocks(t, link)
+		if data, err := os.ReadFile(name); err != nil || string(data) != old {
+			t.Fatalf("%s = %q, %v; want the old bytes, whole", name, data, err)
 		}
 	}
 }
 
-// Safety net, finding 2's class: a marked script with more names (a hard
-// link) gets the stub written into the file itself, so every name blocks,
-// and the path gets a copy renamed over it. The tokens go, VerifyClean
-// passes, nothing else changes, and a second run changes nothing. On
-// Windows the stub is only renamed: a hard-linked file keeps its bytes and
-// its tokens (so an old module still reaches the route that blocks), with
-// the step.
-func TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript(t *testing.T) {
+// Review fix (Q-windows loop round 2): the teardown wrote the stub into
+// the live old script before it renamed a copy over the path. A short
+// write whose old bytes could not be put back left part of the stub over
+// the old script under every name: with a short old script, only the
+// stub's first comment lines, a script that exits 0 (an allow) without
+// reaching the gateway, while a hard-linked file kept its tokens. Now the
+// old file is never written. A script with one name gets the stub renamed
+// over its path and its old file keeps its bytes. A script with more names
+// is left whole under every name with its tokens; the teardown, VerifyClean
+// and the leftovers give the step, a second run changes nothing, and once
+// the other names are gone the next run renames the stub and revokes the
+// tokens. The same holds on Windows, which never wrote into the file.
+func TestRemovedTeardownNeverWritesIntoTheOldScript(t *testing.T) {
 	for _, c := range removedConnectorsUnderTest() {
-		olds := []struct{ name, body string }{
-			{"the 1.0.3 script", map[string]string{removedOpenHandsID: removedOpenHands103Script, removedOmnigentID: removedOmnigent103Module}[c.name]},
-			{"a 1.0.3 script longer than the stub", removedLongOld(c)},
-		}
-		if c.name == removedOpenHandsID {
-			olds = append(olds, struct{ name, body string }{"a stub that exits 0", disabledHookTombstone(c.label)})
-		}
-		for _, old := range olds {
-			t.Run(c.name+"/"+old.name, func(t *testing.T) {
+		for _, old := range removedOldScripts(c) {
+			t.Run(c.name+"/one name/"+old.name, func(t *testing.T) {
+				h := newRemovedHost(t)
+				h.stage(t, c)
+				writeRemovedFile(t, h.script(c), old.body, c.mode)
+				h.recordWritten(t, c)
+				first, err := os.Stat(h.script(c))
+				if err != nil {
+					t.Fatal(err)
+				}
+				held := removedHoldOld(t, h.script(c))
+				if err := c.Teardown(context.Background(), h.opts); err != nil {
+					t.Fatalf("Teardown: %v", err)
+				}
+				requireRemovedOldWhole(t, held, old.body)
+				h.requireStub(t, c)
+				h.requireRevoked(t, c)
+				if err := c.VerifyClean(h.opts); err != nil {
+					t.Fatalf("VerifyClean: %v", err)
+				}
+				if info, err := os.Stat(h.script(c)); err != nil || os.SameFile(first, info) {
+					t.Fatalf("the path still names the old file (%v); want the stub renamed over it", err)
+				}
+				if c.name == removedOpenHandsID && runtime.GOOS != "windows" {
+					requireRemovedHookBlocks(t, h.script(c))
+				}
+			})
+			t.Run(c.name+"/hard links/"+old.name, func(t *testing.T) {
 				h := newRemovedHost(t)
 				h.stage(t, c)
 				writeRemovedFile(t, h.script(c), old.body, c.mode)
@@ -111,34 +179,30 @@ func TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				skip := append(append([]string{h.script(c)}, links...), h.tokens(c)...)
-				before := h.snapshot(t, skip...)
+				held := removedHoldOld(t, h.script(c))
+				names := append([]string{h.script(c)}, links...)
+				before := h.snapshot(t)
 				err = c.Teardown(context.Background(), h.opts)
-				if runtime.GOOS == "windows" {
-					h.requireLeftStep(t, c, err, c.hardLinkStep(h.script(c)))
-					return
+				h.requireLeftStep(t, c, err, c.hardLinkStep(h.script(c)))
+				requireRemovedOldWhole(t, held, old.body)
+				requireRemovedNamesWhole(t, first, old.body, names)
+				requireRemovedSame(t, "teardown of a hard-linked script", h.snapshot(t), before)
+				if err := c.Teardown(context.Background(), h.opts); err == nil {
+					t.Fatal("a second teardown of the hard-linked script passed")
 				}
-				if err != nil {
-					t.Fatalf("Teardown: %v", err)
+				requireRemovedSame(t, "a second teardown of a hard-linked script", h.snapshot(t), before)
+				// The step: delete the other names, then run the teardown.
+				for _, link := range links {
+					if err := os.Remove(link); err != nil {
+						t.Fatal(err)
+					}
 				}
+				if err := c.Teardown(context.Background(), h.opts); err != nil {
+					t.Fatalf("the teardown after the step: %v", err)
+				}
+				requireRemovedOldWhole(t, held, old.body)
 				h.requireStub(t, c)
 				h.requireRevoked(t, c)
-				if err := c.VerifyClean(h.opts); err != nil {
-					t.Fatalf("VerifyClean: %v", err)
-				}
-				if info, err := os.Stat(h.script(c)); err != nil || os.SameFile(first, info) {
-					t.Fatalf("the path still names the old file (%v); want the copy renamed over it", err)
-				}
-				h.requireStubUnderEveryName(t, c, first, links)
-				if c.name == removedOpenHandsID {
-					requireRemovedHookBlocks(t, h.script(c))
-				}
-				requireRemovedSame(t, "teardown of a hard-linked script", h.snapshot(t, skip...), before)
-				again := h.snapshot(t)
-				if err := c.Teardown(context.Background(), h.opts); err != nil {
-					t.Fatalf("second Teardown: %v", err)
-				}
-				requireRemovedSame(t, "a second teardown", h.snapshot(t), again)
 			})
 		}
 		t.Run(c.name+"/a hard-linked file without the marker", func(t *testing.T) {
@@ -169,175 +233,46 @@ func TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript(t *testing.T) {
 	}
 }
 
-// removedInPlaceSeams replaces the in-place writes until the returned func
-// (or the end of the test) puts them back. writeAt gets the call's number.
-func removedInPlaceSeams(t *testing.T, writeAt func(file *os.File, data []byte, offset int64, call int) (int, error), truncate func(*os.File, int64) error) func() {
-	t.Helper()
-	saveWrite, saveTruncate := removedInPlaceWriteAt, removedInPlaceTruncate
-	restore := func() { removedInPlaceWriteAt, removedInPlaceTruncate = saveWrite, saveTruncate }
-	t.Cleanup(restore)
-	calls := 0
-	if writeAt != nil {
-		removedInPlaceWriteAt = func(file *os.File, data []byte, offset int64) (int, error) {
-			calls++
-			return writeAt(file, data, offset, calls)
-		}
-	}
-	if truncate != nil {
-		removedInPlaceTruncate = truncate
-	}
-	return restore
-}
-
-// removedWritePart writes the first half of data, then fails (a full disk).
-func removedWritePart(file *os.File, data []byte, offset int64) (int, error) {
-	n, err := file.WriteAt(data[:len(data)/2], offset)
-	if err != nil {
-		return n, err
-	}
-	return n, syscall.ENOSPC
-}
-
-// Safety net, finding 2: a write of the stub into a hard-linked file that
-// fails part way never leaves a name with part of the stub before the old
-// script. The old bytes are put back, or every name already begins with the
-// whole stub, which blocks. The tokens stay (an old hook reaches the route
-// that blocks), the teardown and VerifyClean fail with the step, nothing is
-// renamed (so the next start still sees the other names), and the next run
-// writes the stub under every name and revokes the tokens.
-func TestRemovedInPlaceWriteThatFailsLeavesNoPartScript(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("on Windows the stub is only renamed over the path")
-	}
-	pass := func(file *os.File, data []byte, offset int64) (int, error) { return file.WriteAt(data, offset) }
-	type failure struct {
-		name      string
-		only      string // a connector name, "" for both
-		long      bool
-		writeAt   func(file *os.File, data []byte, offset int64, call int) (int, error)
-		truncate  func(*os.File, int64) error
-		want      string
-		keepsOld  bool // every name keeps the old bytes
-		stubFirst bool // every name begins with the whole stub
-	}
-	failures := []failure{
-		{name: "the stub's write fails part way", writeAt: func(f *os.File, d []byte, o int64, call int) (int, error) {
-			if call == 1 {
-				return removedWritePart(f, d, o)
-			}
-			return pass(f, d, o)
-		}, want: "were put back", keepsOld: true},
-		{name: "the stub's write fails part way over a longer script", long: true, writeAt: func(f *os.File, d []byte, o int64, call int) (int, error) {
-			if call == 1 {
-				return removedWritePart(f, d, o)
-			}
-			return pass(f, d, o)
-		}, want: "were put back", keepsOld: true},
-		{name: "the stub's write writes nothing", writeAt: func(f *os.File, d []byte, o int64, call int) (int, error) {
-			if call == 1 {
-				return 0, syscall.ENOSPC
-			}
-			return pass(f, d, o)
-		}, want: "nothing was changed", keepsOld: true},
-		{name: "the bytes cannot be put back either", writeAt: func(f *os.File, d []byte, o int64, call int) (int, error) {
-			switch call {
-			case 1:
-				return removedWritePart(f, d, o)
-			case 2:
-				return 0, syscall.EIO
-			}
-			return pass(f, d, o)
-		}, want: "may hold part of the stub"},
-		{name: "the tail after the stub fails", only: removedOpenHandsID, long: true, writeAt: func(f *os.File, d []byte, o int64, call int) (int, error) {
-			if call == 2 {
-				return removedWritePart(f, d, o)
-			}
-			return pass(f, d, o)
-		}, want: "begins with the whole stub", stubFirst: true},
-		{name: "the old tail cannot be cut", long: true, truncate: func(*os.File, int64) error { return syscall.EIO },
-			want: "old tail could not be cut", stubFirst: true},
-	}
+// Review fix (Q-windows loop round 2), the failure half: a rename of the
+// stub that fails (a full disk, an I/O error) leaves the old script whole
+// at the path, under the same file, with its tokens; the teardown and
+// VerifyClean fail, and the next run renames the stub and revokes them.
+func TestRemovedStubRenameThatFailsLeavesTheOldScriptWhole(t *testing.T) {
 	for _, c := range removedConnectorsUnderTest() {
-		for _, f := range failures {
-			if f.only != "" && f.only != c.name {
-				continue
-			}
-			t.Run(c.name+"/"+f.name, func(t *testing.T) {
-				h := newRemovedHost(t)
-				h.stage(t, c)
-				old := map[string]string{removedOpenHandsID: removedOpenHands103Script, removedOmnigentID: removedOmnigent103Module}[c.name]
-				if f.long {
-					old = removedLongOld(c)
-				}
-				writeRemovedFile(t, h.script(c), old, c.mode)
-				h.recordWritten(t, c)
-				links := h.removedHardLinks(t, c)
-				first, err := os.Stat(h.script(c))
-				if err != nil {
-					t.Fatal(err)
-				}
-				names := append([]string{h.script(c)}, links...)
-				before := h.snapshot(t, names...)
-				restore := removedInPlaceSeams(t, f.writeAt, f.truncate)
-				err = c.Teardown(context.Background(), h.opts)
-				if err == nil || !strings.Contains(err.Error(), f.want) || !strings.Contains(err.Error(), "To finish: "+c.hardLinkStep(h.script(c))) ||
-					!strings.Contains(err.Error(), "its tokens were kept") {
-					t.Fatalf("Teardown = %v, want %q, the step and the tokens kept", err, f.want)
-				}
-				h.requireTokensKept(t, c)
-				if err := c.VerifyClean(h.opts); err == nil {
-					t.Fatal("VerifyClean passed while the old file may still run")
-				}
-				requireRemovedSame(t, "a failed write into the file", h.snapshot(t, names...), before)
-				for _, name := range names {
-					info, err := os.Stat(name)
-					if err != nil || !os.SameFile(first, info) {
-						t.Fatalf("%s is not the old file any more (%v): nothing may be renamed", name, err)
-					}
-					data, err := os.ReadFile(name)
+		for _, old := range removedOldScripts(c) {
+			for _, cause := range []error{syscall.ENOSPC, syscall.EIO} {
+				t.Run(c.name+"/"+old.name+"/"+cause.Error(), func(t *testing.T) {
+					h := newRemovedHost(t)
+					h.stage(t, c)
+					writeRemovedFile(t, h.script(c), old.body, c.mode)
+					h.recordWritten(t, c)
+					first, err := os.Stat(h.script(c))
 					if err != nil {
 						t.Fatal(err)
 					}
-					if f.keepsOld && string(data) != old {
-						t.Fatalf("%s = %q; want the old bytes put back", name, data)
+					held := removedHoldOld(t, h.script(c))
+					save := removedStubPublish
+					t.Cleanup(func() { removedStubPublish = save })
+					removedStubPublish = func(string, []byte, os.FileMode) error { return cause }
+					err = c.Teardown(context.Background(), h.opts)
+					if err == nil || !errors.Is(err, cause) || !strings.Contains(err.Error(), "its tokens were kept") {
+						t.Fatalf("Teardown = %v, want %v and the tokens kept", err, cause)
 					}
-					if f.stubFirst {
-						if !strings.HasPrefix(string(data), c.tombstone) {
-							t.Fatalf("%s = %q; want the whole stub first", name, data)
-						}
-						if c.name == removedOpenHandsID {
-							requireRemovedHookBlocks(t, name)
-						}
+					requireRemovedOldWhole(t, held, old.body)
+					requireRemovedNamesWhole(t, first, old.body, []string{h.script(c)})
+					h.requireTokensKept(t, c)
+					if err := c.VerifyClean(h.opts); err == nil {
+						t.Fatal("VerifyClean passed with the old script at the path")
 					}
-				}
-				restore()
-				if err := c.Teardown(context.Background(), h.opts); err != nil {
-					t.Fatalf("the next run: %v", err)
-				}
-				// The path holds the stub: the renamed copy, or (when only the
-				// cut failed) the whole stub with its tail already written.
-				if data, err := os.ReadFile(h.script(c)); err != nil || c.classifyScript(data) != removedScriptStub {
-					t.Fatalf("%s = %q, %v; want the stub", h.script(c), data, err)
-				}
-				h.requireRevoked(t, c)
-				h.requireStubUnderEveryName(t, c, first, links)
-			})
-		}
-		// A file with one name gets the rename whatever the write into it did.
-		t.Run(c.name+"/one name, the bytes cannot be put back", func(t *testing.T) {
-			h := newRemovedHost(t)
-			h.stage(t, c)
-			removedInPlaceSeams(t, func(f *os.File, d []byte, o int64, call int) (int, error) {
-				if call == 1 {
-					return removedWritePart(f, d, o)
-				}
-				return 0, syscall.EIO
-			}, nil)
-			if err := c.Teardown(context.Background(), h.opts); err != nil {
-				t.Fatalf("Teardown: %v", err)
+					removedStubPublish = save
+					if err := c.Teardown(context.Background(), h.opts); err != nil {
+						t.Fatalf("the next run: %v", err)
+					}
+					requireRemovedOldWhole(t, held, old.body)
+					h.requireStub(t, c)
+					h.requireRevoked(t, c)
+				})
 			}
-			h.requireStub(t, c)
-			h.requireRevoked(t, c)
-		})
+		}
 	}
 }
