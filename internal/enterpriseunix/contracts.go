@@ -374,7 +374,7 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		return
 	}
 	for _, agent := range agents {
-		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified {
+		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified || agent.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete {
 			// No hook contract: the agent runs with no DefenseClaw hook, so
 			// the deployment does not cover it (GAP-0151).
 			r.CoverageComplete = false
@@ -384,6 +384,18 @@ func (l *lifecycle) describeUnprotectedAgents() {
 			continue
 		}
 		r.AddWarning(agent.Code, agent.Message())
+		if agent.InstallPath != "" && (l.opts.Action == ActionStatus || l.opts.Action == ActionVerify) && env.ReportLaunchCoverage != nil && agent.UID != nil {
+			reason := "unsupported_installed_version"
+			if agent.Version == "" {
+				reason = "installed_version_unverified"
+			}
+			if err := env.ReportLaunchCoverage(context.Background(), managed.LaunchCoverageReport{
+				Connector: agent.Connector, Reason: reason, UID: *agent.UID,
+				InstallPath: agent.InstallPath, Version: agent.Version,
+			}); err != nil {
+				r.AddWarning(codeManagedLaunchAuditUnavailable, "could not audit the unprotected "+agent.Connector+" install: "+err.Error())
+			}
+		}
 	}
 	if len(agents) > 0 {
 		r.SecurityComplete = false

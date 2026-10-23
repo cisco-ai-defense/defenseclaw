@@ -479,6 +479,17 @@ func newTestHost(t *testing.T, goos string) *testHost {
 	env.DockerEngine = func(context.Context, string) error { return nil }
 	env.fillDefaults()
 	h.env = env
+	if goos == "linux" {
+		// An empty fake process table still has a boot-time record. Tests
+		// that need an unavailable process scan remove this file explicitly.
+		stat := env.P("/proc/stat")
+		if err := os.MkdirAll(filepath.Dir(stat), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(stat, []byte(fmt.Sprintf("btime %d\n", time.Now().Unix())), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return h
 }
 

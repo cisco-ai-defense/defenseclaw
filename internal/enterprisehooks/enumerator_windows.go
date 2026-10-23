@@ -375,6 +375,21 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 				report(agent)
 			}
 		}
+		if standalone && rowContext.report != nil {
+			// A selected, supported CLI is not evidence that every copy
+			// this account can launch reads the machine policy.
+			for _, install := range DiscoverWindowsPrivateAgentInstalls(profile.Home, connectors) {
+				if install.Incomplete {
+					rowContext.report(UnprotectedAgent{User: rowContext.user, SID: profile.SID, Connector: install.Connector,
+						Code:   UnprotectedCodeInstallScanIncomplete,
+						Reason: "the bounded scan of this account's private agent installs was incomplete; use application control to exclude unapproved agent binaries"})
+					continue
+				}
+				rowContext.report(UnprotectedAgent{User: rowContext.user, SID: profile.SID, Connector: install.Connector,
+					Version: install.Version, InstallPath: install.Path, Code: UnprotectedCodeHookContractUnverified,
+					Reason: privateInstallReason(install.Connector, install.Version)})
+			}
+		}
 		for _, conn := range connectors {
 			_, known := previous[previousManifestKey(profile.SID, conn)]
 			// An exempt user gets no new per-user connector rows, but keeps the

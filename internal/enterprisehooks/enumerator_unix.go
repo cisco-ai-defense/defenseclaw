@@ -81,9 +81,10 @@ type UnixDiscoverFunc func(ctx context.Context, account unixidentity.Account, co
 // reasons for connectors without one, and the connector's app and
 // extension installs.
 type UnixDiscovery struct {
-	Versions map[string]string
-	Reasons  map[string]string
-	Surfaces map[string][]connector.AgentSurface
+	Versions        map[string]string
+	Reasons         map[string]string
+	Surfaces        map[string][]connector.AgentSurface
+	PrivateInstalls []PrivateAgentInstall
 }
 
 // UnixDiscoverSurfacesFunc is UnixDiscoverFunc plus the app and extension
@@ -315,12 +316,15 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	// discovered, so the gateway can refuse a user whose only installs are
 	// refused surfaces.
 	var surfaceOnly []string
+	var machineInspect []string
 	for _, name := range connectors {
 		if _, off := ownershipOff[name]; off || connectorListed(perUser, name) {
 			continue
 		}
 		if _, isMachine := machinePolicy[name]; isMachine && enrollment.UnverifiedVersionsFor(name) == config.EnterpriseUnverifiedRefuse {
 			surfaceOnly = append(surfaceOnly, name)
+		} else if isMachine {
+			machineInspect = append(machineInspect, name)
 		}
 	}
 
@@ -552,19 +556,57 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		}
 		var versions, reasons map[string]string
 		var surfaces map[string][]connector.AgentSurface
+		var privateInstalls []PrivateAgentInstall
+		discoveryFailed := false
 		surfacesKnown := false
 		if check.State == HomeAvailable && opts.DiscoverSurfaces != nil {
-			found, err := opts.DiscoverSurfaces(ctx, account, append(append([]string{}, perUser...), surfaceOnly...))
+			all := append(append(append([]string{}, perUser...), surfaceOnly...), machineInspect...)
+			found, err := opts.DiscoverSurfaces(ctx, account, all)
 			if err != nil {
+				discoveryFailed = true
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
 			versions, reasons, surfaces = found.Versions, found.Reasons, found.Surfaces
+			privateInstalls = found.PrivateInstalls
 			surfacesKnown = err == nil
 		} else if check.State == HomeAvailable && opts.Discover != nil {
 			var err error
-			versions, reasons, err = opts.Discover(ctx, account, perUser)
+			all := append(append(append([]string{}, perUser...), surfaceOnly...), machineInspect...)
+			versions, reasons, err = opts.Discover(ctx, account, all)
 			if err != nil {
+				discoveryFailed = true
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
+			}
+		}
+		if discoveryFailed {
+			for _, conn := range machineInspect {
+				report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: conn,
+					Code:   UnprotectedCodeInstallScanIncomplete,
+					Reason: "the account's agent versions and private installs could not be inspected this cycle"})
+			}
+		}
+		for _, conn := range machineInspect {
+			if version := versions[conn]; version != "" {
+				if refused := unixNewRowVersionRefused(conn, version); refused != "" {
+					report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: conn,
+						Version: version, Code: UnprotectedCodeHookContractUnverified,
+						Reason: refused + "; this installed copy may ignore managed hooks and the version floor, so its tool calls are not protected"})
+				}
+			} else if reason := reasons[conn]; UnixAgentInstalledWithoutVersion(reason) {
+				report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: conn,
+					Code: UnprotectedCodeHookContractUnverified, Reason: reason + "; its managed hook contract cannot be verified"})
+			}
+		}
+		for _, install := range privateInstalls {
+			if install.Incomplete {
+				report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID),
+					Connector: install.Connector, Code: UnprotectedCodeInstallScanIncomplete,
+					Reason: "the bounded scan of this account's private agent installs was incomplete; use application control to exclude unapproved agent binaries"})
+				continue
+			}
+			if reason := privateInstallReason(install.Connector, install.Version); reason != "" {
+				report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: install.Connector,
+					Version: install.Version, InstallPath: install.Path, Code: UnprotectedCodeHookContractUnverified, Reason: reason})
 			}
 		}
 		report.Unprotected = append(report.Unprotected, applyKiroIDESurface(name, account.UID, versions, reasons)...)

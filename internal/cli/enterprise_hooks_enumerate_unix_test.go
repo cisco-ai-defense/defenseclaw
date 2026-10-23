@@ -94,6 +94,30 @@ func TestEnumerateCommandDryRunDiscoversThroughTheWorker(t *testing.T) {
 	}
 }
 
+func TestEnumerateDiscoverPrivateInstallsKeepsPathsInsideAccountHome(t *testing.T) {
+	home := t.TempDir()
+	prior := enterpriseHookWorkerRunner
+	t.Cleanup(func() { enterpriseHookWorkerRunner = prior })
+	enterpriseHookWorkerRunner = func(context.Context, enterpriseHookWorkerAccount, enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		return enterpriseHookWorkerResponse{PrivateInstalls: []enterprisehooks.PrivateAgentInstall{
+			{Connector: "claudecode", Version: "2.0.77", Path: filepath.Join(home, "old", "node_modules", "@anthropic-ai", "claude-code")},
+			{Connector: "claudecode", Version: "2.0.77", Path: "/etc/shadow"},
+			{Connector: "claudecode", Version: "$(id)", Path: filepath.Join(home, "unreadable")},
+			{Connector: "disabled", Version: "1.0.0", Path: filepath.Join(home, "disabled")},
+		}}, nil
+	}
+	account := unixidentity.Account{Name: "alice", UID: os.Getuid(), GID: os.Getgid(), Home: home}
+	found, err := enterpriseHooksEnumerateDiscoverAll(context.Background(), account, []string{"claudecode"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found.PrivateInstalls) != 3 || found.PrivateInstalls[0].Version != "2.0.77" ||
+		found.PrivateInstalls[0].Path != filepath.Join(home, "old", "node_modules", "@anthropic-ai", "claude-code") ||
+		!found.PrivateInstalls[1].Incomplete || found.PrivateInstalls[2].Version != "" {
+		t.Fatalf("untrusted worker install claims = %+v", found.PrivateInstalls)
+	}
+}
+
 // The parent re-validated worker versions by re-extracting them, which
 // stripped the trailing "v" of "1.2.0-dev" and dropped the version.
 func TestEnumerateDiscoverKeepsPrereleaseVersionsEndingInV(t *testing.T) {

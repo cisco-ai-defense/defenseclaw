@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
@@ -25,6 +26,7 @@ const windowsManagedLaunchScanUnknown = "managed_launch_scan_unknown"
 const windowsManagedLaunchAuditUnavailable = "managed_launch_audit_unavailable"
 
 var windowsManagedLaunchAudit = reportWindowsManagedLaunchCoverage
+var windowsManagedInstallAudit = reportWindowsManagedInstallCoverage
 var windowsManagedLaunchAuditEndpoint = managedScanGatewayEndpoint
 var windowsManagedLaunchEnvironment = agentprocess.LaunchEnvironmentForPID
 
@@ -99,13 +101,6 @@ func applyWindowsEnterpriseLaunchCoverage(result *enterprisestatus.Result) {
 // canonical audit alert. Its request contains fixed classifications and
 // process identity, never argv, environment or prompt text.
 func reportWindowsManagedLaunchCoverage(process inventory.AgentProcess, connector, reason string) error {
-	base, token, managedHost, err := windowsManagedLaunchAuditEndpoint()
-	if err != nil {
-		return err
-	}
-	if !managedHost || token == "" {
-		return errors.New("managed gateway audit endpoint is unavailable")
-	}
 	details := map[string]any{"connector": connector, "process_pid": process.PID,
 		"coverage_reason": reason, "coverage_state": "incomplete"}
 	if !process.StartedAt.IsZero() {
@@ -115,9 +110,34 @@ func reportWindowsManagedLaunchCoverage(process inventory.AgentProcess, connecto
 		details["actor_id_kind"] = "windows_sid"
 		details["actor_id"] = process.OwnerSID
 	}
+	return postWindowsManagedCoverageAlert("managed-launch-coverage", windowsManagedLaunchUninspected, details)
+}
+
+func reportWindowsManagedInstallCoverage(agent enterprisehooks.UnprotectedAgent) error {
+	reason := "unsupported_installed_version"
+	if agent.Version == "" {
+		reason = "installed_version_unverified"
+	}
+	details := map[string]any{"connector": agent.Connector, "agent_install_path": agent.InstallPath,
+		"agent_version": agent.Version, "coverage_reason": reason, "coverage_state": "incomplete"}
+	if agent.SID != "" {
+		details["actor_id_kind"] = "windows_sid"
+		details["actor_id"] = agent.SID
+	}
+	return postWindowsManagedCoverageAlert("managed-install-coverage", "managed_agent_install_unprotected", details)
+}
+
+func postWindowsManagedCoverageAlert(source, summary string, details map[string]any) error {
+	base, token, managedHost, err := windowsManagedLaunchAuditEndpoint()
+	if err != nil {
+		return err
+	}
+	if !managedHost || token == "" {
+		return errors.New("managed gateway audit endpoint is unavailable")
+	}
 	body, err := json.Marshal(map[string]any{"kind": "alert", "alert": map[string]any{
-		"source": "managed-launch-coverage", "severity": "HIGH",
-		"summary": windowsManagedLaunchUninspected, "details": details,
+		"source": source, "severity": "HIGH",
+		"summary": summary, "details": details,
 	}})
 	if err != nil {
 		return err

@@ -19,6 +19,40 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+func TestManagedLaunchEmptyLinuxProcIsInspectable(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"),
+		ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	h.publishLedger([]byte("ledger\n"))
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		if warning := messagesOf(result.Warnings, "managed_launch_scan_unknown"); warning != "" {
+			t.Fatalf("%s treated an empty Linux process table as an unknown scan: %s", action, warning)
+		}
+		requireOK(t, result)
+	}
+}
+
+func TestManagedLaunchUnavailableLinuxProcLowersHealth(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"),
+		ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	h.publishLedger([]byte("ledger\n"))
+	if err := os.Remove(h.env.P("/proc/stat")); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		if warning := messagesOf(result.Warnings, "managed_launch_scan_unknown"); warning == "" ||
+			result.CoverageComplete || result.SecurityComplete {
+			t.Fatalf("%s claimed complete coverage without a process scan: %+v", action, result)
+		}
+		if action == ActionVerify {
+			requireError(t, result, "managed_launch_scan_unknown")
+		}
+	}
+}
+
 func TestLinuxDirectoryAgentNormalLaunchUsesNSSHome(t *testing.T) {
 	h := newTestHost(t, "linux")
 	h.env.ReportLaunchCoverage = func(context.Context, managed.LaunchCoverageReport) error { return nil }
@@ -152,6 +186,87 @@ func TestManagedOpenCodePureLaunchLowersStatusAndVerifyOnUnix(t *testing.T) {
 			}
 			if len(audited) != 3 || audited[2].Connector != "hermes" || audited[2].Reason != "hermes_safe_mode" {
 				t.Fatalf("other connector's bypass was not audited: %+v", audited)
+			}
+		})
+	}
+}
+
+func TestManagedClaudePrivateNPMLaunchIsUnverifiedOnUnix(t *testing.T) {
+	const script = "/home/ubuntu/sa104r8-old/node_modules/@anthropic-ai/claude-code/cli.js"
+	if got := agentCLIOf([]string{"node", script}); got != "claude" {
+		t.Fatalf("private npm script classified as %q", got)
+	}
+	if got := claudeManagedLaunchCoverage([]string{"/home/alice/.local/share/claude/versions/2.0.77"}); got != "claude_version_unverified" {
+		t.Fatalf("old native release classified as %q", got)
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"),
+				ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+			var audited []managed.LaunchCoverageReport
+			h.env.ReportLaunchCoverage = func(_ context.Context, report managed.LaunchCoverageReport) error {
+				audited = append(audited, report)
+				return nil
+			}
+			const pid = 7180
+			if goos == "linux" {
+				writeHostFile(t, h, "/proc/stat", fmt.Sprintf("btime %d\n", time.Now().Unix()))
+				writeHostFile(t, h, fmt.Sprintf("/proc/%d/cmdline", pid), "node\x00"+script+"\x00")
+				writeHostFile(t, h, fmt.Sprintf("/proc/%d/stat", pid),
+					fmt.Sprintf("%d (node) S 1 %d %s1000 0 0", pid, pid, strings.Repeat("0 ", 16)))
+			} else {
+				h.runner.ps = fmt.Sprintf("%d %d 00:00:05 node %s", pid, os.Getuid(), script)
+				setDarwinProcessArgv(t, func(int) ([]string, error) { return []string{"node", script}, nil })
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				if result.CoverageComplete || result.SecurityComplete ||
+					!strings.Contains(messagesOf(result.Warnings, codeManagedLaunchUninspected), "claudecode (pid 7180)") {
+					t.Fatalf("%s %s missed private Claude session: %+v", goos, action, result)
+				}
+			}
+			if len(audited) != 2 || audited[0].Connector != "claudecode" || audited[0].Reason != "claude_npm_launch_unverified" {
+				t.Fatalf("private Claude launch audit = %+v", audited)
+			}
+		})
+	}
+}
+
+func TestManagedKiroResumePlacementIsUnverifiedOnUnix(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"),
+				ConfigFile: machinePolicyConfig(t, h, "kiro")}))
+			var audited []managed.LaunchCoverageReport
+			h.env.ReportLaunchCoverage = func(_ context.Context, report managed.LaunchCoverageReport) error {
+				audited = append(audited, report)
+				return nil
+			}
+			const pid = 7192
+			if goos == "linux" {
+				writeHostFile(t, h, "/proc/stat", fmt.Sprintf("btime %d\n", time.Now().Unix()))
+				writeHostFile(t, h, fmt.Sprintf("/proc/%d/cmdline", pid), "kiro-cli\x00--resume-id\x00cloud-session-id\x00")
+				writeHostFile(t, h, fmt.Sprintf("/proc/%d/stat", pid),
+					fmt.Sprintf("%d (kiro-cli) S 1 %d %s1000 0 0", pid, pid, strings.Repeat("0 ", 16)))
+			} else {
+				h.runner.ps = fmt.Sprintf("%d %d 00:00:05 kiro-cli --resume-id cloud-session-id", pid, os.Getuid())
+				setDarwinProcessArgv(t, func(int) ([]string, error) {
+					return []string{"kiro-cli", "--resume-id", "cloud-session-id"}, nil
+				})
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				warning := messagesOf(result.Warnings, codeManagedLaunchUninspected)
+				if result.CoverageComplete || result.SecurityComplete ||
+					!strings.Contains(warning, "kiro (pid 7192)") || !strings.Contains(warning, "placement could not be verified") {
+					t.Fatalf("%s %s missed Kiro resume: %+v", goos, action, result)
+				}
+			}
+			if len(audited) != 2 || audited[0].Connector != "kiro" ||
+				audited[0].Reason != "kiro_resume_placement_unverified" {
+				t.Fatalf("Kiro resume coverage audit = %+v", audited)
 			}
 		})
 	}

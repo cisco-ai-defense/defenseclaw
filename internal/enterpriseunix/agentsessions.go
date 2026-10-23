@@ -115,6 +115,9 @@ func agentCLIOf(argv []string) string {
 			continue
 		}
 		script := strings.TrimSuffix(filepath.Base(argument), filepath.Ext(argument))
+		if filepath.Base(argument) == "cli.js" && strings.Contains(filepath.ToSlash(argument), "/@anthropic-ai/claude-code/") {
+			return "claude"
+		}
 		if agentCLINames[script] {
 			return script
 		}

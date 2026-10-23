@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -20,7 +22,7 @@ var managedLaunchReasons = map[string]map[string]bool{
 	"amp": {"amp_plugin_config_relocated": true, "launch_arguments_unverified": true,
 		"launch_environment_unverified": true},
 	"kiro": {"kiro_hook_config_relocated": true, "kiro_alternate_agent": true,
-		"kiro_cloud_session": true, "launch_arguments_unverified": true,
+		"kiro_cloud_session": true, "kiro_resume_placement_unverified": true, "launch_arguments_unverified": true,
 		"launch_environment_unverified": true},
 	"devin": {"devin_config_override": true, "user_config_relocated": true,
 		"launch_arguments_unverified": true, "launch_environment_unverified": true},
@@ -29,6 +31,11 @@ var managedLaunchReasons = map[string]map[string]bool{
 		"launch_environment_unverified": true},
 	"antigravity": {"user_config_relocated": true, "launch_arguments_unverified": true,
 		"launch_environment_unverified": true},
+	"claudecode": {"unsupported_installed_version": true, "installed_version_unverified": true,
+		"claude_npm_launch_unverified": true, "claude_version_unverified": true,
+		"launch_arguments_unverified": true},
+	"codex":   {"unsupported_installed_version": true, "installed_version_unverified": true},
+	"copilot": {"unsupported_installed_version": true, "installed_version_unverified": true},
 }
 
 // The root lifecycle reports what it saw in the OS process table. The
@@ -53,21 +60,38 @@ func (a *APIServer) handleManagedLaunchCoverageAudit(w http.ResponseWriter, r *h
 	var report managed.LaunchCoverageReport
 	var extra any
 	if decoder.Decode(&report) != nil || decoder.Decode(&extra) != io.EOF ||
-		report.PID <= 0 || report.UID < 0 || uint64(report.UID) > uint64(^uint32(0)) ||
+		report.UID < 0 || uint64(report.UID) > uint64(^uint32(0)) ||
 		!managedLaunchReasons[report.Connector][report.Reason] {
 		http.Error(w, "invalid launch coverage report", http.StatusBadRequest)
 		return
 	}
-	started, err := time.Parse(time.RFC3339Nano, report.StartedAt)
-	if err != nil || started.IsZero() {
-		http.Error(w, "invalid process start", http.StatusBadRequest)
-		return
+	install := report.Reason == "unsupported_installed_version" || report.Reason == "installed_version_unverified"
+	if install {
+		if report.PID != 0 || report.StartedAt != "" || !filepath.IsAbs(report.InstallPath) ||
+			len(report.InstallPath) > 512 || strings.ContainsAny(report.InstallPath, "\x00\r\n") || len(report.Version) > 128 {
+			http.Error(w, "invalid install coverage report", http.StatusBadRequest)
+			return
+		}
+	} else {
+		started, err := time.Parse(time.RFC3339Nano, report.StartedAt)
+		if report.PID <= 0 || err != nil || started.IsZero() || report.InstallPath != "" || report.Version != "" {
+			http.Error(w, "invalid process start", http.StatusBadRequest)
+			return
+		}
 	}
-	details := map[string]any{"connector": report.Connector, "process_pid": report.PID,
-		"process_started_at": report.StartedAt, "coverage_reason": report.Reason,
+	details := map[string]any{"connector": report.Connector, "coverage_reason": report.Reason,
 		"coverage_state": "incomplete", "actor_id_kind": string(useridentity.KindPOSIXUID),
 		"actor_id": report.UID}
-	if err := a.logger.LogAlert("managed-launch-coverage", "HIGH", "managed_launch_uninspected", details); err != nil {
+	source, summary := "managed-launch-coverage", "managed_launch_uninspected"
+	if install {
+		details["agent_install_path"] = report.InstallPath
+		details["agent_version"] = report.Version
+		source, summary = "managed-install-coverage", "managed_agent_install_unprotected"
+	} else {
+		details["process_pid"] = report.PID
+		details["process_started_at"] = report.StartedAt
+	}
+	if err := a.logger.LogAlert(source, "HIGH", summary, details); err != nil {
 		http.Error(w, "audit emission failed", http.StatusServiceUnavailable)
 		return
 	}

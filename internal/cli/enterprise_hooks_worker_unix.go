@@ -273,8 +273,9 @@ type enterpriseHookWorkerResponse struct {
 	Reasons  map[string]string                  `json:"reasons,omitempty"`
 	// Surfaces are the discovered app and extension installs per connector
 	// (user-influenced; the parent validates them).
-	Surfaces map[string][]connector.AgentSurface          `json:"surfaces,omitempty"`
-	Cleanup  map[string]enterpriseHookWorkerCleanupReport `json:"cleanup,omitempty"`
+	Surfaces        map[string][]connector.AgentSurface          `json:"surfaces,omitempty"`
+	PrivateInstalls []enterprisehooks.PrivateAgentInstall        `json:"private_installs,omitempty"`
+	Cleanup         map[string]enterpriseHookWorkerCleanupReport `json:"cleanup,omitempty"`
 	// Blocks are the foreign-hook blocks the user's hooks recorded since
 	// the last cleanup (user-influenced; only logged).
 	Blocks        []enterprisepolicy.BlockSummary `json:"blocks,omitempty"`
@@ -456,7 +457,8 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 				}
 			}
 		}
-		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons, Surfaces: surfaces}, 0)
+		installs := enterprisehooks.DiscoverUnixPrivateAgentInstalls(request.Home, request.Connectors)
+		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons, Surfaces: surfaces, PrivateInstalls: installs}, 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {
 			if target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModeBlockPersonalClaude {

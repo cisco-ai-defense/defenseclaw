@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -186,6 +187,41 @@ func TestWindowsManagedLaunchCoverageNormalProfilesStayHealthy(t *testing.T) {
 	}
 }
 
+func TestWindowsManagedKiroResumePlacementIsUnverified(t *testing.T) {
+	priorConnectors, priorProcesses, priorAudit := windowsEnterpriseEnrolledConnectors, windowsEnterpriseAgentProcesses, windowsManagedLaunchAudit
+	priorEnvironment := windowsManagedLaunchEnvironment
+	priorProfile := enterpriseHookSIDProfilePath
+	t.Cleanup(func() {
+		windowsEnterpriseEnrolledConnectors, windowsEnterpriseAgentProcesses = priorConnectors, priorProcesses
+		windowsManagedLaunchAudit, windowsManagedLaunchEnvironment = priorAudit, priorEnvironment
+		enterpriseHookSIDProfilePath = priorProfile
+	})
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return []string{"kiro"}, nil }
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+		return []inventory.AgentProcess{{PID: 7192, Connector: "kiro", User: `DCFC\alice`, OwnerSID: "S-1-5-21-111-222-333-1001",
+			Args: []string{"kiro-cli.exe", "--resume-id", "cloud-session-id"}, ArgsKnown: true}}, nil
+	}
+	windowsManagedLaunchEnvironment = func(int) (map[string]string, error) { return map[string]string{}, nil }
+	enterpriseHookSIDProfilePath = func(string) (string, error) { return `C:\Users\alice`, nil }
+	var audited []string
+	windowsManagedLaunchAudit = func(_ inventory.AgentProcess, connector, reason string) error {
+		audited = append(audited, connector+":"+reason)
+		return nil
+	}
+	for _, action := range []string{"status", "verify"} {
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
+		result.Installed, result.CoverageComplete, result.SecurityComplete = true, true, true
+		applyWindowsEnterpriseLaunchCoverage(result)
+		if result.CoverageComplete || result.SecurityComplete || len(result.Warnings) != 1 ||
+			!strings.Contains(result.Warnings[0].Message, "kiro_resume_placement_unverified") {
+			t.Fatalf("%s missed Kiro cloud resume: %+v", action, result)
+		}
+	}
+	if len(audited) != 2 || audited[0] != "kiro:kiro_resume_placement_unverified" {
+		t.Fatalf("Kiro resume audits = %+v", audited)
+	}
+}
+
 func TestWindowsManagedLaunchCoverageWritesCanonicalGatewayAuditWithoutArguments(t *testing.T) {
 	priorEndpoint := windowsManagedLaunchAuditEndpoint
 	t.Cleanup(func() { windowsManagedLaunchAuditEndpoint = priorEndpoint })
@@ -228,5 +264,21 @@ func TestWindowsManagedLaunchCoverageWritesCanonicalGatewayAuditWithoutArguments
 	if !ok || details["connector"] != "opencode" || details["coverage_reason"] != "opencode_pure" ||
 		details["process_pid"] != float64(7133) || details["actor_id"] != process.OwnerSID {
 		t.Fatalf("missing safe process identity: %+v", details)
+	}
+	install := enterprisehooks.UnprotectedAgent{SID: process.OwnerSID, Connector: "claudecode", Version: "2.0.77",
+		InstallPath: `C:\Users\alice\private\node_modules\@anthropic-ai\claude-code`}
+	if err := reportWindowsManagedInstallCoverage(install); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(<-bodies, &captured); err != nil {
+		t.Fatal(err)
+	}
+	alert, ok = captured["alert"].(map[string]any)
+	if !ok || alert["summary"] != "managed_agent_install_unprotected" || alert["source"] != "managed-install-coverage" {
+		t.Fatalf("missing private install alert: %+v", captured)
+	}
+	details, ok = alert["details"].(map[string]any)
+	if !ok || details["agent_install_path"] != install.InstallPath || details["agent_version"] != "2.0.77" || details["actor_id"] != process.OwnerSID {
+		t.Fatalf("private install audit lost copy identity: %+v", details)
 	}
 }

@@ -90,6 +90,34 @@ func TestWindowsStandaloneStatusAndVerifyReportUnprotectedAgents(t *testing.T) {
 	}
 }
 
+func TestWindowsPrivateClaudeInstallReportsAndAuditsEachCopy(t *testing.T) {
+	const sid = "S-1-5-21-1-2-3-1001"
+	agents := []enterprisehooks.UnprotectedAgent{
+		{User: "alice", SID: sid, Connector: "claudecode", Version: "2.0.77", InstallPath: `C:\Users\alice\old-a\node_modules\@anthropic-ai\claude-code`, Code: enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "unsupported version"},
+		{User: "alice", SID: sid, Connector: "claudecode", Version: "1.0.128", InstallPath: `C:\Users\alice\old-b\node_modules\@anthropic-ai\claude-code`, Code: enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "unsupported version"},
+	}
+	stubWindowsUnprotectedAgents(t, agents, nil)
+	previous := windowsManagedInstallAudit
+	t.Cleanup(func() { windowsManagedInstallAudit = previous })
+	var audited []string
+	windowsManagedInstallAudit = func(agent enterprisehooks.UnprotectedAgent) error {
+		audited = append(audited, agent.InstallPath+":"+agent.Version)
+		return nil
+	}
+	for _, action := range []string{"status", "verify"} {
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
+		result.CoverageComplete, result.SecurityComplete = true, true
+		applyWindowsEnterpriseUnprotectedAgents(result)
+		if result.CoverageComplete || result.SecurityComplete || len(result.Warnings) != 2 ||
+			!strings.Contains(result.Warnings[0].Message, "old-a") || !strings.Contains(result.Warnings[1].Message, "old-b") {
+			t.Fatalf("%s private installs: %+v", action, result)
+		}
+	}
+	if len(audited) != 4 || !strings.Contains(audited[0], "old-a") || !strings.Contains(audited[3], "old-b") {
+		t.Fatalf("Windows install audits = %+v", audited)
+	}
+}
+
 // A config that enrols no connector (before GAP-0221 the loader dropped the
 // documented claudecode: {} entries) left every service healthy and verify
 // passing while DefenseClaw protected no agent: verify fails on it, status

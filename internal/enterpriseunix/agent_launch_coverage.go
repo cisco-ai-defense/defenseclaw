@@ -29,6 +29,9 @@ func pluginLaunchConnectorName(name string) string {
 	if name == "agy" {
 		return "antigravity"
 	}
+	if name == "claude" {
+		return "claudecode"
+	}
 	return name
 }
 
@@ -56,7 +59,7 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 	for _, name := range enterprisehooks.EffectiveUnixHookConnectors(cfg, connector.NewDefaultRegistry()) {
 		enabled[name] = true
 	}
-	if !enabled["opencode"] && !enabled["amp"] && !enabled["kiro"] &&
+	if !enabled["claudecode"] && !enabled["opencode"] && !enabled["amp"] && !enabled["kiro"] &&
 		!enabled["devin"] && !enabled["hermes"] && !enabled["antigravity"] {
 		return
 	}
@@ -80,7 +83,8 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 	}
 	for _, session := range sessions {
 		name := pluginLaunchConnectorName(session.Agent)
-		if session.UID == 0 || session.UID == record.ServiceUID || !enabled[name] || !pluginLaunchConnector(session.Agent) {
+		if session.UID == 0 || session.UID == record.ServiceUID || !enabled[name] ||
+			(!pluginLaunchConnector(session.Agent) && session.Agent != "claude") {
 			continue
 		}
 		l.describePluginLaunchSession(ctx, session, name)
@@ -90,7 +94,12 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 func (l *lifecycle) describePluginLaunchSession(ctx context.Context, session agentSession, name string) {
 	env, result := l.env, l.result
 	who, home := env.pluginLaunchAccount(ctx, session.UID)
-	reason := enterprisestatus.PluginLaunchCoverage(name, session.Args, session.Env, session.EnvKnown, home)
+	reason := ""
+	if name == "claudecode" {
+		reason = claudeManagedLaunchCoverage(session.Args)
+	} else {
+		reason = enterprisestatus.PluginLaunchCoverage(name, session.Args, session.Env, session.EnvKnown, home)
+	}
 	if reason == "" && !session.ArgsKnown {
 		reason = "launch_arguments_unverified"
 	}
@@ -147,6 +156,8 @@ func launchCoverageExplanation(reason string) string {
 		return "Kiro selected an agent other than the managed DefenseClaw agent"
 	case "kiro_cloud_session":
 		return "Kiro selected a cloud session outside local managed hooks"
+	case "kiro_resume_placement_unverified":
+		return "Kiro may resume a cloud session outside local managed hooks; its placement could not be verified"
 	case "devin_config_override":
 		return "Devin selected another config file"
 	case "hermes_safe_mode":
@@ -159,7 +170,28 @@ func launchCoverageExplanation(reason string) string {
 		return "OpenCode's user config directory was relocated; the per-user plugin may be absent"
 	case "launch_arguments_unverified":
 		return "the process arguments could not be verified"
+	case "claude_npm_launch_unverified":
+		return "a Claude Code npm script can be a separate copy whose managed hook contract cannot be verified from its process arguments"
+	case "claude_version_unverified":
+		return "the running Claude Code release has no verified managed hook contract"
 	default:
 		return strings.ReplaceAll(reason, "_", " ")
 	}
+}
+
+func claudeManagedLaunchCoverage(argv []string) string {
+	if len(argv) == 0 {
+		return "launch_arguments_unverified"
+	}
+	if isScriptHost(filepath.Base(argv[0])) && len(argv) > 1 && agentCLIOf(argv) == "claude" {
+		return "claude_npm_launch_unverified"
+	}
+	const nativeVersions = "/.local/share/claude/versions/"
+	if before, version, ok := strings.Cut(argv[0], nativeVersions); ok && before != "" && version != "" {
+		version = strings.SplitN(version, "/", 2)[0]
+		if connector.ResolveHookContract("claudecode", version).Status != connector.HookCompatibilityKnown {
+			return "claude_version_unverified"
+		}
+	}
+	return ""
 }

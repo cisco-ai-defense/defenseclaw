@@ -7,11 +7,13 @@
 package enterpriseunix
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // An agent the enumerator found installed for a user but could not enroll
@@ -63,5 +65,44 @@ func TestUnprotectedAgentsAreVisible(t *testing.T) {
 		if w.Code == codeAgentUnprotected {
 			t.Fatalf("an empty record still reports: %+v", w)
 		}
+	}
+}
+
+func TestPrivateClaudeInstallMakesUnixStatusAndVerifyIncomplete(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			h := newTestHost(t, platform)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			uid := 1001
+			install := "/home/alice/private/node_modules/@anthropic-ai/claude-code"
+			if platform == "darwin" {
+				install = "/Users/alice/private/node_modules/@anthropic-ai/claude-code"
+			}
+			data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+				User: "alice", UID: &uid, Connector: "claudecode", Version: "2.0.77", InstallPath: install,
+				Code:   enterprisehooks.UnprotectedCodeHookContractUnverified,
+				Reason: "version 2.0.77 has no managed hook contract",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath)), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var audited []managed.LaunchCoverageReport
+			h.env.ReportLaunchCoverage = func(_ context.Context, report managed.LaunchCoverageReport) error {
+				audited = append(audited, report)
+				return nil
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				if result.SecurityComplete || result.CoverageComplete || !strings.Contains(messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeHookContractUnverified), install) {
+					t.Fatalf("%s %s hid private Claude: coverage=%v security=%v warnings=%+v", platform, action, result.CoverageComplete, result.SecurityComplete, result.Warnings)
+				}
+			}
+			if len(audited) != 2 || audited[0].InstallPath != install || audited[0].Version != "2.0.77" || audited[0].Reason != "unsupported_installed_version" {
+				t.Fatalf("private install audit = %+v", audited)
+			}
+		})
 	}
 }

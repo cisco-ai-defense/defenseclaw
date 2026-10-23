@@ -94,6 +94,7 @@ func PluginLaunchCoverage(connector string, argv []string, env map[string]string
 		if len(args) != 0 {
 			args = args[1:]
 		}
+		resume := false
 		for index, arg := range args {
 			if arg == "--" {
 				break
@@ -101,12 +102,18 @@ func PluginLaunchCoverage(connector string, argv []string, env map[string]string
 			if arg == "--cloud" {
 				return "kiro_cloud_session"
 			}
+			if arg == "--resume-id" || strings.HasPrefix(arg, "--resume-id=") {
+				resume = true
+			}
 			if arg == "--agent" && (index+1 >= len(args) || args[index+1] != "defenseclaw") {
 				return "kiro_alternate_agent"
 			}
 			if selected, ok := strings.CutPrefix(arg, "--agent="); ok && selected != "defenseclaw" {
 				return "kiro_alternate_agent"
 			}
+		}
+		if resume {
+			return "kiro_resume_placement_unverified"
 		}
 		if !envKnown {
 			return "launch_environment_unverified"

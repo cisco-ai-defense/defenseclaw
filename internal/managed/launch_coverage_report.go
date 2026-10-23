@@ -11,6 +11,10 @@ type LaunchCoverageReport struct {
 	PID       int    `json:"pid"`
 	UID       int    `json:"uid"`
 	StartedAt string `json:"started_at"`
+	// InstallPath and Version describe a static, runnable copy. Such a
+	// report has PID zero and no process start time.
+	InstallPath string `json:"install_path,omitempty"`
+	Version     string `json:"version,omitempty"`
 }
 
 const LaunchCoverageReportPath = "/api/v1/managed/launch-coverage"
