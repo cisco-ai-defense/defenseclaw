@@ -35,3 +35,26 @@ func TestPerUserGatewayClientDoesNotTrustManagedModeFromEnvironment(t *testing.T
 		t.Fatalf("managed environment bypassed per-user socket proof: called=%t error=%v", called, err)
 	}
 }
+
+func TestManagedGatewayClientKeepsServiceAccountTransportDuringUpgrade(t *testing.T) {
+	previousFactory := perUserGatewayClientFactory
+	previousSecureClient := secureClientHost
+	previousWindowsManaged := managedHostWindowsStandalone
+	t.Cleanup(func() {
+		perUserGatewayClientFactory = previousFactory
+		secureClientHost = previousSecureClient
+		managedHostWindowsStandalone = previousWindowsManaged
+	})
+	secureClientHost = func() bool { return false }
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	perUserGatewayClientFactory = func(time.Duration, string) (*http.Client, error) {
+		t.Fatal("managed service account was required to match the CLI account")
+		return nil, nil
+	}
+	c := config.DefaultConfig()
+	c.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	client, err := gatewayPeerClient(c, "127.0.0.1", 18970, time.Second)
+	if err != nil || client == nil {
+		t.Fatalf("managed gateway transport was refused: client=%v error=%v", client, err)
+	}
+}

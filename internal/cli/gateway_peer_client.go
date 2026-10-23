@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"runtime"
 	"strconv"
 	"time"
 
@@ -32,12 +31,7 @@ func gatewayPeerClient(c *config.Config, host string, port int, timeout time.Dur
 		return &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: nil}, CheckRedirect: refuseGatewayPeerRedirect}, nil
 	}
 	if c != nil && (c.StandaloneEnterprise() || managed.IsManagedEnterprise(c.DeploymentMode)) {
-		layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
-		if err == nil {
-			if _, err = managed.LoadRuntimeDescriptor(layout.DescriptorPath); err == nil {
-				return &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: nil}, CheckRedirect: refuseGatewayPeerRedirect}, nil
-			}
-		}
+		return &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: nil}, CheckRedirect: refuseGatewayPeerRedirect}, nil
 	}
 	return perUserGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)))
 }
