@@ -368,18 +368,22 @@ func TestCursorAdapterPreservesSuccessfulLauncherResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(cursorAdapterHelperMode, "success")
-	// A cold Go test helper may take over a second to start on a loaded
-	// Windows runner. This checks the successful response, not a 1 s budget.
-	adapter := renderCursorAdapterForTest(t, executable, "closed", true, 5_000)
-	stdout, stderr, code := runCursorAdapterTest(
-		t, adapter, `{"source":"cursor-adapter-probe"}`,
-	)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr)
-	}
-	assertCursorAllowJSON(t, stdout)
-	if stderr != "" {
-		t.Fatalf("stderr = %q, want empty", stderr)
+	for _, mode := range []string{"closed", "open"} {
+		t.Run(mode, func(t *testing.T) {
+			// A cold Go test helper may take over a second to start on a
+			// loaded Windows runner. This checks the successful response.
+			adapter := renderCursorAdapterForTest(t, executable, mode, true, 5_000)
+			stdout, stderr, code := runCursorAdapterTest(
+				t, adapter, `{"source":"cursor-adapter-probe"}`,
+			)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr)
+			}
+			assertCursorAllowJSON(t, stdout)
+			if stderr != "" {
+				t.Fatalf("stderr = %q, want empty", stderr)
+			}
+		})
 	}
 }
 
@@ -441,16 +445,15 @@ func TestCursorAdapterExceptionEmitsFailClosedJSON(t *testing.T) {
 	}
 }
 
-func TestCursorAdapterExceptionFailsOpenOnlyWhenConfigured(t *testing.T) {
+func TestCursorAdapterExceptionClosesWithOpenOutageMode(t *testing.T) {
 	missingHook := filepath.Join(t.TempDir(), "missing-hook.exe")
 	adapter := renderCursorAdapterForTest(t, missingHook, "open", false, 1_000)
 	stdout, stderr, code := runCursorAdapterTest(
 		t, adapter, `{"source":"cursor-adapter-probe"}`,
 	)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want fail-open 0; stderr=%q", code, stderr)
+	if code != 2 || !strings.Contains(stdout, `"permission":"deny"`) {
+		t.Fatalf("local failure allowed with open outage mode: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
-	assertCursorAllowJSON(t, stdout)
 	if !strings.Contains(stderr, "Cursor hook adapter failed") {
 		t.Fatalf("stderr = %q, want adapter failure diagnostic", stderr)
 	}
@@ -507,16 +510,14 @@ func TestCursorMappedAdapterUsesCurrentSIDNotPeerPolicy(t *testing.T) {
 					t.Fatal(err)
 				}
 				stdout, stderr, code := runCursorAdapterTest(t, adapter, `{"source":"cursor-adapter-probe"}`)
-				if mode == "open" && failure != "block" {
-					if code != 0 {
-						t.Fatalf("open user blocked: code=%d stderr=%q", code, stderr)
+				if code != 2 || !strings.Contains(stdout, `"permission":"deny"`) {
+					t.Fatalf("local adapter failure or valid denial allowed: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+				}
+				if failure != "block" {
+					loggedOpen := strings.Contains(stderr, "open gateway-outage mode does not apply")
+					if loggedOpen != (mode == "open") {
+						t.Fatalf("adapter used another SID's outage mode: mode=%s stderr=%q", mode, stderr)
 					}
-					assertCursorAllowJSON(t, stdout)
-					if !strings.Contains(stderr, "WARNING hook fail-open; inspection bypassed connector=cursor") {
-						t.Fatal("missing fail-open diagnostic")
-					}
-				} else if code != 2 || !strings.Contains(stdout, `"permission":"deny"`) {
-					t.Fatalf("closed/unenrolled user or valid denial allowed: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 				}
 			})
 		}

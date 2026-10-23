@@ -9,7 +9,7 @@ keywords:
   - DEFENSECLAW_FAIL_MODE
 ---
 
-One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows (`open`) or blocks (`closed`) when the gateway cannot give a usable answer. Per-user and Secure Client hooks apply it to transport failures and invalid responses; managed standalone hooks allow only the specific outages described below. Per-user Cursor in observe mode registers `failClosed: false`, but its running DefenseClaw hook blocks supported events during a gateway outage by default. Only an explicit `open` in the config opens that outage. The mode is installed with the hooks: the environment does not set it, and one variable, `DEFENSECLAW_STRICT_AVAILABILITY`, can only make an outage stricter ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
+One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows (`open`) or blocks (`closed`) when the gateway cannot give a usable answer. Per-user and Secure Client hooks apply it to transport failures and invalid responses; managed standalone hooks allow only the specific outages described below. Per-user Cursor in observe mode registers `failClosed: true`, and its running DefenseClaw hook blocks supported events during a gateway outage by default. Only an explicit `open` in the config opens that outage. The mode is installed with the hooks: the environment does not set it, and one variable, `DEFENSECLAW_STRICT_AVAILABILITY`, can only make an outage stricter ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
 
 ## Controls
 
@@ -32,7 +32,7 @@ The rendered outage mode resolves, in observe and action mode alike, from:
 3. The global `guardrail.hook_fail_mode`.
 4. `closed` outside Secure Client; `open` under it.
 
-Any value other than `open` (in any case) is `closed`. Per-user Cursor action mode always closes hook outages even if the config selects `open`. In observe mode its running hook uses the configured outage mode, which is `closed` by default. Cursor still registers `failClosed: true` in action and `failClosed: false` in observe; the latter does not make a running hook allow a gateway outage. If Cursor cannot start or its hook times out, the host's registration limit applies. On a managed computer Cursor follows the administrator's resolved fail mode.
+Any value other than `open` (in any case) is `closed`. Per-user Cursor action mode always closes hook outages even if the config selects `open`. In observe mode its running hook uses the configured outage mode, which is `closed` by default. Outside Secure Client, Cursor writes `failClosed: true` in action and observe mode, so a hook process that never answers blocks; an explicit `open` applies to gateway outages the running hook sees, not to a stopped or killed hook process. On a managed computer the running hook follows the administrator's resolved fail mode.
 
 ### Refusals that ignore the fail mode
 
@@ -58,7 +58,7 @@ Under the Secure Client integration only, hooks fail open: an unset `guardrail.h
 | Connector | Behavior |
 | --- | --- |
 | GitHub Copilot CLI, Antigravity | The hooks follow the effective mode on Linux, macOS and Windows; the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) gives the result per install. Copilot and Antigravity still run a call when the hook times out or cannot start. Under Secure Client they stay open. |
-| Hermes | Its own hook has no fail-closed surface, but the DefenseClaw hook follows the effective mode on Linux, macOS and Windows: `closed` blocks a tool call while the gateway is down or answers unusably. Hermes itself still runs a call when the hook times out or cannot start. |
+| Hermes | The DefenseClaw hook follows the effective mode on Linux, macOS and Windows: `closed` blocks while the gateway is down or answers unusably. On the reviewed Hermes 0.21 contract Setup also sets `fail_closed: true` on `pre_tool_call`, so a timed-out hook or spawn error blocks after the agent reloads it. A killed hook can still fail open with a non-2 exit and empty stdout; Hermes 0.19/0.20 also fail open on timeout. |
 | OpenClaw, ZeptoClaw | Proxy-backed, no hooks. Requests are blocked while the gateway is down, whatever `guardrail.hook_fail_mode` says. `guardrail fail-mode` lists them as `closed (proxy-backed, no hooks ...)`. |
 
 A GitHub Copilot hook whose registered command names no event DefenseClaw reviewed is refused in fail mode `closed`, and a managed one in every fail mode. Copilot can block only `preToolUse` and `permissionRequest`, and its payload does not name the event, so the hook answers with both of Copilot's deny fields. An Antigravity hook registered without its event denies a tool call in fail mode `closed` and gives anything else its no-op answer. `verify` reports a DefenseClaw hook registered for an event DefenseClaw does not publish, and `ensure` rewrites the drop-in. On a per-user install `defenseclaw doctor` names the entry, and `defenseclaw setup <connector>` registers it again.
@@ -74,8 +74,8 @@ These outcomes apply to supported blocking events. Stop and session-end exceptio
 | Gateway service not running, restarting or giving no answer in time | Allow. | Allow only when the hook proves an eligible service outage; an unverified peer, a port held by another process or another transport error blocks. The foreign-hook guard can also block. | Block. |
 | Gateway 5xx, also when the body after it is cut off | Allow. | Block. | Block. |
 | Connector authentication missing | Allow where the connector supports fail-open; Amp's actionable boundaries always block a missing credential. | Block. | Block. |
-| Gateway returns 4xx (also when the body after it is cut off, and a 429 whose resend cannot be answered within the answer budget), malformed JSON or no action | Allow where the connector supports fail-open. | Block. | Block. |
-| Hook input over its bounded payload | Refuse to process it, allow. | Block. | Refuse to process it, block where the connector supports a block response. |
+| Gateway returns 4xx (also when the body after it is cut off, and a 429 whose resend cannot be answered within the answer budget), malformed response JSON or no action | Allow where the connector supports fail-open, except a gateway refusal marked `malformed_hook_payload`, which blocks outside Secure Client. | Block. | Block. |
+| Hook input over its bounded payload | Per-user hooks refuse and block; Secure Client keeps its open behavior. | Block. | Refuse to process it, block where the connector supports a block response. |
 | Valid gateway verdict | Honor the connector and event mapping. | Same. | Same. Fail mode does not make an observation-only event blocking. |
 | Internal evaluator error (a recovered panic) | Allow with `would_block`, a warning, an audit row with result `panic` and telemetry. | Block supported events, in observe mode too; allow stop and session-end events. | Block supported events, otherwise allow with `would_block`; audit row and telemetry either way. Secure Client allows and audits. |
 | Ordered-chain state unavailable or inconsistent | Keep the current event's standalone verdict; skip only the chain join. | Same. | Same. Chain storage never creates or removes a single-event block. |

@@ -736,7 +736,13 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 
 	covered := map[string]bool{}
 	for _, connectorName := range sharedDefaultRegistry().Names() {
-		profile := (&APIServer{scannerCfg: config.DefaultConfig()}).hookProfileForConnector(connectorName)
+		// Resolve the same unversioned contract the per-case temporary
+		// deployment uses. A cached agent version in the developer's home
+		// can select a different contract and make this matrix depend on
+		// whatever agent happened to run on the test host.
+		profileConfig := config.DefaultConfig()
+		profileConfig.DataDir = t.TempDir()
+		profile := (&APIServer{scannerCfg: profileConfig}).hookProfileForConnector(connectorName)
 		if !profile.Capabilities.CanBlock {
 			continue
 		}

@@ -175,11 +175,10 @@ func TestCursorHook_NeverEmptyStdout(t *testing.T) {
 	})
 }
 
-// TestCursorHooks_ObserveModeWritesFailClosedFalse pins the config
-// side: a default / observe (non-closed) install must write
-// failClosed:false so an empty or slow hook can never be misread as a
-// fail-closed block.
-func TestCursorHooks_ObserveModeWritesFailClosedFalse(t *testing.T) {
+// TestCursorHooks_ObserveModeClosesProcessFailure pins the host failure
+// contract: observe still allows ordinary hook decisions, but a hook process
+// that never answers must block instead of silently running a tool.
+func TestCursorHooks_ObserveModeClosesProcessFailure(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "hooks.json")
 	prev := CursorHooksPathOverride
@@ -187,7 +186,7 @@ func TestCursorHooks_ObserveModeWritesFailClosedFalse(t *testing.T) {
 	t.Cleanup(func() { CursorHooksPathOverride = prev })
 
 	conn := NewCursorConnector()
-	// No explicit HookFailMode => default (observe / non-closed) install.
+	// No explicit HookFailMode => default observe install.
 	opts := SetupOpts{
 		DataDir:  filepath.Join(dir, "dc"),
 		APIAddr:  "127.0.0.1:18970",
@@ -200,11 +199,11 @@ func TestCursorHooks_ObserveModeWritesFailClosedFalse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read cursor hooks: %v", err)
 	}
-	if !strings.Contains(string(data), `"failClosed": false`) {
-		t.Fatalf("observe-mode cursor hooks must write failClosed:false, got:\n%s", string(data))
+	if !strings.Contains(string(data), `"failClosed": true`) {
+		t.Fatalf("observe-mode cursor hooks must close process failure, got:\n%s", string(data))
 	}
-	if strings.Contains(string(data), `"failClosed": true`) {
-		t.Fatalf("observe-mode cursor hooks must not write failClosed:true, got:\n%s", string(data))
+	if strings.Contains(string(data), `"failClosed": false`) {
+		t.Fatalf("observe-mode cursor hooks contain an open process-failure path:\n%s", string(data))
 	}
 }
 

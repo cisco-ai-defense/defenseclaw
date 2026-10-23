@@ -48,6 +48,7 @@ func (l *lifecycle) describeStatusV2(record *Deployment) {
 	}
 	r := l.result
 	l.describeConnectors(record)
+	r.AddHookProcessFailureWarnings()
 	if r.Identity == nil {
 		r.Identity = enterprisestatus.IdentityGatewayNotReady()
 	}

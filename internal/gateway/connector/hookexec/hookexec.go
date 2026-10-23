@@ -1055,6 +1055,12 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 		}
 		return failUnreachable(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
+	case (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusRequestEntityTooLarge) &&
+		refusalReason(body) == MalformedHookPayloadReason && !opts.SecureClient:
+		// A malformed event is a local check failure, never a gateway
+		// outage. An explicit per-user open setting cannot turn it into
+		// a tool call whose pre-tool fields DefenseClaw never parsed.
+		return failResponse(opts, sp, "closed", "gateway refused malformed hook payload")
 	case resp.StatusCode == http.StatusForbidden && refusalReason(body) == SurfaceUnverifiedReason:
 		// A policy decision, not a failure: block in every fail mode (a stop
 		// event keeps its neutral allow).
@@ -1978,9 +1984,13 @@ func handleUnavailableHome(opts Options, sp spec, failMode, reason string) int {
 // handleOversized mirrors the per-connector oversized-payload branch. prefix
 // is the start of the payload the hook read before it stopped at its cap.
 func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int {
-	// Oversized input is not an outage: closed on a standalone host in every
-	// fail mode (bounded review P1).
+	// An input the hook cannot fully read is a local parse failure, never
+	// an outage. Outside Secure Client it closes even if a per-user hook
+	// had an explicit open outage preference.
 	failMode = managedNonOutageMode(&opts, failMode)
+	if !opts.SecureClient {
+		failMode, opts.FailMode = "closed", "closed"
+	}
 	if !sp.failOpenOnly && failMode == "closed" && failClosedStopEvent(opts, sp) {
 		return allowFailClosedStop(opts, sp, "stdin body exceeded cap", "transport")
 	}

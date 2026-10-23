@@ -72,15 +72,15 @@ describe('Cursor observe outage mode', () => {
     assert.match(page('features/guardrail.mdx'), /Per-user Cursor in observe mode still blocks a supported event during a gateway outage/i);
     assert.match(page('reference/commands/installer.mdx'), /Per-user Cursor observe also blocks supported events during a gateway outage/i);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
-    assert.match(managedRegistration, /"failClosed": mode == "closed"/);
-    assert.match(page('reference/connectors/cursor.mdx'), /failClosed` value follows the administrator's resolved fail mode/i);
+    assert.match(managedRegistration, /"failClosed": true,/);
+    assert.match(page('reference/connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call. The administrator's resolved fail mode decides/i);
     assert.ok(!/per-user Cursor in observe mode fails open/i.test(failModes));
 
     const overview = page('connectors/cursor.mdx').split('## What it can block or ask')[1]?.split('## Files it changes')[0] ?? '';
     assert.match(overview, /Observe mode.{0,120}policy findings without blocking/i);
     assert.match(overview, /gateway outage.{0,100}blocks supported events by default/i);
     const mapping = page('reference/connectors/cursor.mdx').split('## Verdict mapping')[1]?.split('## Native ask')[0] ?? '';
-    assert.match(mapping, /\| Observe \| `failClosed: false` \|[^|]*policy findings[^|]*gateway outage/i);
+    assert.match(mapping, /\| Observe \| `failClosed: true` \|[^|]*policy findings[^|]*gateway outage/i);
     assert.ok(!/observe cannot become blocking/i.test(mapping));
   });
 });

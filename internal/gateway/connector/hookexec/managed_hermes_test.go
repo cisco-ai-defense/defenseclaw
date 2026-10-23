@@ -257,7 +257,7 @@ func TestManagedHermesUnboundEventBlocksRefusedInput(t *testing.T) {
 				if result.code != 0 {
 					t.Fatalf("code %d, want 0 (stderr %q)", result.code, result.stderr)
 				}
-				if managed && tc.blocks {
+				if tc.blocks {
 					message := hermesBlockMessage(t, result.stdout)
 					if !strings.HasPrefix(message, "DefenseClaw blocked this tool call: ") {
 						t.Fatalf("message %q, want a tool-call block", message)

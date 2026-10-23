@@ -1521,6 +1521,8 @@ const hookScriptMaxBytes = 1 << 20
 // closed too.
 var bakedAdapterFailModeOpens = strings.NewReplacer(
 	`[Console]::Out.Write('{"continue":true}')`, `[Console]::Out.Write('`+cursorAdapterClosedResponse+`')`,
+	"            [Console]::Error.WriteLine('defenseclaw: open gateway-outage mode does not apply to local Cursor adapter failure')\r\n\r\n", "",
+	"            [Console]::Error.WriteLine('defenseclaw: open gateway-outage mode does not apply to local Cursor adapter failure')\n\n", "",
 	"$exitCode = 0\r\n", "$exitCode = 2\r\n",
 	"$exitCode = 0\n", "$exitCode = 2\n",
 	copilotAdapterOpenFailure, copilotAdapterClosedFailure,
@@ -1575,8 +1577,8 @@ func closeBakedHookFailMode(path string, opens *strings.Replacer) (bool, error) 
 // Client. Two opens are not an operator's and are not applied here: a
 // per-user Cursor open, which resolveHookFailMode takes from the guardrail
 // mode (observe), is closed unless the config sets open
-// (opts.ConfiguredHookFailMode; Cursor's registration still follows its
-// mode), and CapableHookFailMode's lowering of closed to open for a vendor
+// (opts.ConfiguredHookFailMode; Cursor's host registration separately closes
+// hook-process failure), and CapableHookFailMode's lowering of closed to open for a vendor
 // hook surface that cannot fail closed is the vendor's limit.
 func OutageHookFailMode(opts SetupOpts, conn Connector) string {
 	mode := resolveHookFailMode(opts, conn)

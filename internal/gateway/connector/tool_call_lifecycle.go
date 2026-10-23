@@ -788,7 +788,7 @@ func hermesToolCallLifecycleV2() ToolCallLifecycleContract {
 		"https://github.com/NousResearch/hermes-agent/blob/345cd2b057a452236de401d3534b8502a7465e8d/hermes_cli/plugins.py",
 	}
 	contract.Limitations = []string{
-		"Only pre_tool_call can block. Exit code 2 now blocks pre_tool_call; other non-zero exits still parse stdout. Timeouts and spawn errors fail open unless the hook spec sets fail_closed.",
+		"Only pre_tool_call can block. Exit code 2 blocks pre_tool_call; Setup sets fail_closed on its v2 pre_tool_call entry outside Secure Client, so timeouts and spawn errors block. A killed hook can still fail open with a non-2 exit and empty stdout. Other events cannot block.",
 		"A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state.",
 	}
 	return contract

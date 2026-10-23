@@ -139,26 +139,19 @@ end {
         [Console]::Error.WriteLine("defenseclaw: Cursor hook adapter failed: " + $_.Exception.Message)
 {{if .CursorTargetModesJSON64}}        if (-not $responseWritten) {
             if ($failMode -ceq 'open') {
-                [Console]::Error.WriteLine('defenseclaw: WARNING hook fail-open; inspection bypassed connector=cursor reason=adapter_delivery_failure')
-                [Console]::Out.Write('{"continue":true}')
-                $exitCode = 0
-            } else {
-                [Console]::Out.Write('{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}')
-                $exitCode = 2
+                [Console]::Error.WriteLine('defenseclaw: open gateway-outage mode does not apply to local Cursor adapter failure')
             }
+            [Console]::Out.Write('{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}')
+            $exitCode = 2
         }
 {{else}}        if (-not $responseWritten) {
 {{if eq .FailMode "open"}}
-            [Console]::Out.Write('{"continue":true}')
-{{else}}
-            [Console]::Out.Write('{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}')
+            [Console]::Error.WriteLine('defenseclaw: open gateway-outage mode does not apply to local Cursor adapter failure')
 {{end}}
+            [Console]::Out.Write('{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}')
+            $exitCode = 2
         }
-{{if eq .FailMode "open"}}
-        $exitCode = 0
-{{else}}
-        $exitCode = 2
-{{end}}{{end}}
+{{end}}
     }
     # powershell.exe -Command reduces a non-zero exit from an invoked script
     # to the generic process code 1. Cursor distinguishes the adapter's exact

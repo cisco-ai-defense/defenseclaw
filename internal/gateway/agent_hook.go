@@ -300,18 +300,25 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					apiRequestBodyMaxBytes+1,
 				)
 				a.writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
-					"error": "request body too large",
+					"error": "request body too large", "reason": hookexec.MalformedHookPayloadReason,
 				})
 				return
 			}
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_json", 0)
-			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body", "reason": hookexec.MalformedHookPayloadReason})
 			return
 		}
 		payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(bytes.NewReader(rawBody)))
 		if err != nil {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_json", 0)
-			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body", "reason": hookexec.MalformedHookPayloadReason})
+			return
+		}
+		if _, reason := hookEventEnvelope(payload); reason != "" {
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", reason, int64(len(rawBody)))
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "malformed hook event: " + reason, "reason": hookexec.MalformedHookPayloadReason,
+			})
 			return
 		}
 		registeredEvent := ""
@@ -323,12 +330,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			event := strings.TrimSpace(r.Header.Get("X-DefenseClaw-Antigravity-Event"))
 			if event == "" {
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_event", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Antigravity hook event registration is required"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Antigravity hook event registration is required", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			}
 			if !validAntigravityHookEvent(event) {
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Antigravity hook event"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Antigravity hook event", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			}
 			registeredEvent = event
@@ -341,7 +348,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			event := strings.TrimSpace(r.Header.Get("X-DefenseClaw-Copilot-Event"))
 			if event == "" {
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_event", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot hook event registration is required"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot hook event registration is required", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			}
 			// GAP-1903: the VS Code Local harness also runs the per-user
@@ -362,23 +369,23 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				// body cannot pick a weaker event's handling.
 				if !connector.ValidCopilotVSCodeLocalHookEvent(event) {
 					a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
-					a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event"})
+					a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event", "reason": hookexec.MalformedHookPayloadReason})
 					return
 				}
 				if payloadString(payload, "hook_event_name") != event {
 					a.recordConnectorHookRejection(r.Context(), connectorName, event, "harness_event_mismatch", int64(len(b)))
-					a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "harness_event_mismatch"})
+					a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "harness_event_mismatch", "reason": hookexec.MalformedHookPayloadReason})
 					return
 				}
 				r = r.WithContext(withCopilotVSCodeLocal(r.Context()))
 			} else if !connector.ValidCopilotHookEvent(event) {
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			}
 			if hookName := payloadString(payload, "hookName"); hookName != "" && hookName != event {
 				a.recordConnectorHookRejection(r.Context(), connectorName, event, "bound_event_mismatch", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot stdin event does not match installer-bound event"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot stdin event does not match installer-bound event", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			}
 			registeredEvent = event
@@ -392,15 +399,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			switch {
 			case boundEvent == "":
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_bound_event", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "installer-bound Codex hook event is required"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "installer-bound Codex hook event is required", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			case stdinEvent == "" || stdinEvent != boundEvent:
 				a.recordConnectorHookRejection(r.Context(), connectorName, boundEvent, "bound_event_mismatch", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Codex stdin event does not match installer-bound event"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Codex stdin event does not match installer-bound event", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			case boundContract == "":
 				a.recordConnectorHookRejection(r.Context(), connectorName, boundEvent, "missing_bound_contract", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "installer-bound Codex hook contract is required"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "installer-bound Codex hook contract is required", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			case profile.ContractID == "" || boundContract != profile.ContractID:
 				a.recordConnectorHookRejection(r.Context(), connectorName, boundEvent, "bound_contract_mismatch", int64(len(b)))
@@ -408,7 +415,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				return
 			case !eventIn(boundEvent, profile.SupportedEvents):
 				a.recordConnectorHookRejection(r.Context(), connectorName, boundEvent, "event_outside_contract", int64(len(b)))
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Codex hook event is not registered by protected runtime contract"})
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Codex hook event is not registered by protected runtime contract", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			}
 		}
@@ -427,7 +434,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		if registeredEvent != "" && !eventIn(registeredEvent, profile.SupportedEvents) {
 			a.recordConnectorHookRejection(r.Context(), connectorName, registeredEvent, "event_outside_contract", int64(len(b)))
-			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event is outside the active contract"})
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event is outside the active contract", "reason": hookexec.MalformedHookPayloadReason})
+			return
+		}
+		if reason := malformedHookPayloadReason(connectorName, rawBody, payload, registeredEvent); reason != "" {
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", reason, int64(len(rawBody)))
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed hook event: " + reason, "reason": hookexec.MalformedHookPayloadReason})
 			return
 		}
 		runtime := hookRuntimeForProfile(profile)
@@ -436,7 +448,18 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// request mints.
 		agentIdentityID := resolveHookAgentIdentity(r.Context(), agentHookRequest{ConnectorName: connectorName, Payload: payload}).ID
 		req := normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, rawBody, profile, registeredEvent, agentIdentityID)
+		if len(profile.SupportedEvents) > 0 && !eventIn(req.HookEventName, profile.SupportedEvents) {
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "event_outside_contract", int64(len(rawBody)))
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "hook event is outside the active contract", "reason": hookexec.MalformedHookPayloadReason,
+			})
+			return
+		}
 		toolRoute := profile.ToolCallLifecycle.RouteForEvent(req.HookEventName)
+		if (connectorName == "claudecode" || connectorName == "codex") &&
+			req.HookEventName == "PreToolUse" && !preToolFieldsValid(payload) {
+			req.ToolCallUnparsed = true
+		}
 		if toolRoute == connector.ToolEventRouteStructuredAction ||
 			profile.ToolCallLifecycle.Version == 0 && isGenericToolInspectionEvent(req.HookEventName) {
 			if !hookToolCallJSONUnambiguous(connectorName, rawBody) {
@@ -456,7 +479,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		a.hermesTasks.fill(&req)
 		if req.HookEventName == "" {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_event", int64(len(b)))
-			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event name is required"})
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event name is required", "reason": hookexec.MalformedHookPayloadReason})
 			return
 		}
 		req.ReportedCWD = strings.TrimSpace(req.CWD)
@@ -663,6 +686,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// An uncertain identity refuses before any profile-specific gate can
 		// replace its missing-fact explanation.
 		resp, gated := a.refuseProfileHook(ctx, profile, connectorName, req, b, payload)
+		if !gated && req.ToolCallUnparsed &&
+			toolRoute == connector.ToolEventRouteStructuredAction {
+			a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
+			resp = unparsedStructuredHookResponse(profile, req)
+			gated = true
+		}
 		sandboxGate := requireSandboxOutcome{}
 		if !gated {
 			// The require-sandbox gate answers a host run of a connector

@@ -886,24 +886,24 @@ func TestCodexUserPromptSubmitBlockSchema(t *testing.T) {
 	})
 }
 
-// --- Oversized payload: fail-open allows, fail-closed emits per-connector ---
+// --- Oversized payload: closed outside Secure Client ---
 
 func TestOversizedPayload(t *testing.T) {
 	big := strings.Repeat("a", 64)
-	t.Run("fail open allows, never calls gateway", func(t *testing.T) {
+	t.Run("per-user open still blocks, never calls gateway", func(t *testing.T) {
 		rt := ok(`{"action":"allow"}`)
 		r := run(t, "claudecode", rt, func(o *Options) {
 			o.MaxBody = 8
 			o.Stdin = strings.NewReader(big)
 		})
-		if r.code != 0 {
-			t.Fatalf("code = %d, want 0", r.code)
+		if r.code != blockExit {
+			t.Fatalf("code = %d, want %d", r.code, blockExit)
 		}
 		if rt.requests != 0 {
 			t.Fatalf("gateway called %d times on oversized payload, want 0", rt.requests)
 		}
-		if r.stdout != "" {
-			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		if !strings.Contains(r.stdout, `"decision":"block"`) {
+			t.Errorf("stdout = %q, want native block", r.stdout)
 		}
 	})
 
@@ -1514,7 +1514,7 @@ func TestCopilotFailureContract(t *testing.T) {
 					if result.stdout != want {
 						t.Fatalf("managed: stdout=%q stderr=%q, want %q", result.stdout, result.stderr, want)
 					}
-				case hook == "per-user open":
+				case hook == "per-user open" && tc.name != "oversized":
 					if result.stdout != "" {
 						t.Fatalf("per-user open: stdout=%q stderr=%q, want the fail-open result", result.stdout, result.stderr)
 					}

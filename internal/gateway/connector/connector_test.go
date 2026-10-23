@@ -10096,7 +10096,8 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			wantFailMode: "closed",
 		},
 		{
-			// Cursor's observe registration is fail-open (failClosed false),
+			// Cursor's observe verdicts are nonblocking, but its host
+			// registration closes an unanswered hook process.
 			// but no operator chose an open for its outages: the hook blocks
 			// while the gateway is down (OutageHookFailMode).
 			name:         "cursor_empty_opts_close_outages",

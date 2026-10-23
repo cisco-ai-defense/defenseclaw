@@ -3075,7 +3075,7 @@ func TestCopilotHookContractReconciliationIsEventBoundAndVersionExact(t *testing
 	}
 }
 
-func TestCursorHooks_ActionIsFailClosedAndObserveRefreshIsFailOpen(t *testing.T) {
+func TestCursorHooks_ProcessFailureBlocksAfterObserveRefresh(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "hooks.json")
 	prev := CursorHooksPathOverride
@@ -3101,8 +3101,9 @@ func TestCursorHooks_ActionIsFailClosedAndObserveRefreshIsFailOpen(t *testing.T)
 		t.Fatalf("Cursor action hooks must all be fail-closed:\n%s", string(data))
 	}
 
-	// Refreshing the same connector in observe mode must replace the
-	// managed entries rather than retaining stale host-side enforcement.
+	// Observe mode still returns normal would-block decisions, but a hook
+	// process that never answers must not turn into an unaudited tool call.
+	// Refresh must replace the old host-side failure contract.
 	opts.GuardrailMode = "observe"
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("observe refresh Setup: %v", err)
@@ -3118,12 +3119,15 @@ func TestCursorHooks_ActionIsFailClosedAndObserveRefreshIsFailOpen(t *testing.T)
 			t.Fatalf("Cursor %s entries = %d after refresh, want 1", event, len(entries))
 		}
 		entry, _ := entries[0].(map[string]interface{})
-		if entry["failClosed"] != false {
-			t.Fatalf("Cursor %s retained failClosed=true after observe refresh: %#v", event, entry)
+		if entry["failClosed"] != true {
+			t.Fatalf("Cursor %s can fail open after observe refresh: %#v", event, entry)
 		}
 		if fmt.Sprint(entry["timeout"]) != "30" {
 			t.Fatalf("Cursor %s timeout=%#v, want 30 seconds", event, entry["timeout"])
 		}
+	}
+	if conn.effectiveFailClosed(SetupOpts{ManagedEnterprise: true, SecureClientHookDelivery: true, HookFailMode: "open"}) {
+		t.Fatal("Secure Client's explicit open Cursor delivery mode changed")
 	}
 }
 
@@ -3317,8 +3321,8 @@ func TestCursorHooks_RefreshMigratesNativeCommandAndUpdatesFailClosed(t *testing
 			foreignFound = true
 		case strings.Contains(command, "cursor-hook.ps1"):
 			managedCount++
-			if item["failClosed"] != false {
-				t.Fatalf("observe adapter retained failClosed=true: %#v", item)
+			if item["failClosed"] != true {
+				t.Fatalf("observe adapter can fail open after migration: %#v", item)
 			}
 		case command == legacyNative:
 			t.Fatalf("legacy direct-native command survived refresh: %#v", item)

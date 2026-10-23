@@ -2639,6 +2639,12 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts Se
 }
 
 func (c *hookOnlyConnector) effectiveFailClosed(opts SetupOpts) bool {
+	if c != nil && c.name == "cursor" && !opts.SecureClientHookDelivery {
+		// Cursor's host flag covers a hook process that never answers. The
+		// rendered hook still makes the configured gateway-outage decision
+		// when it runs, including an administrator's explicit open choice.
+		return true
+	}
 	cap := c.HookCapabilities(opts)
 	return cap.SupportsFailClosed && resolveHookFailMode(opts, c) == "closed"
 }
@@ -3765,7 +3771,7 @@ func setupHermesFiles(opts SetupOpts, configPath, hookScript string) (err error)
 		return err
 	}
 
-	if err = patchHermesHooks(configPath, hookScript, opts.HookExecutable); err != nil {
+	if err = patchHermesHooks(configPath, hookScript, opts.HookExecutable, opts); err != nil {
 		return err
 	}
 	if err = byPath[configPath].markOwned(); err != nil {
@@ -4305,7 +4311,11 @@ func hermesPluginPaths(configPath string) []string {
 	return uniqueNonEmptyStrings(paths)
 }
 
-func patchHermesHooks(path, hookScript, hookExecutable string) error {
+func patchHermesHooks(path, hookScript, hookExecutable string, setup ...SetupOpts) error {
+	var opts SetupOpts
+	if len(setup) > 0 {
+		opts = setup[0]
+	}
 	cfg, err := readYAMLObject(path)
 	if err != nil {
 		return err
@@ -4321,7 +4331,7 @@ func patchHermesHooks(path, hookScript, hookExecutable string) error {
 	hookCommand := hermesConfiguredHookCommand(hookScript, hookExecutable)
 	recognizedCommands := hermesRecognizedHookCommands(hookCommand)
 	for _, spec := range hermesRequiredHooks {
-		entry := hermesHookEntry(hookCommand, spec.matcher)
+		entry := hermesHookEntry(hookCommand, spec.event, spec.matcher, opts)
 		reconciled, reconcileErr := reconcileHermesHookEntries(hooks[spec.event], recognizedCommands, entry)
 		if reconcileErr != nil {
 			return fmt.Errorf("reconcile Hermes event %s: %w", spec.event, reconcileErr)
@@ -4485,10 +4495,20 @@ func preserveTrailingTopLevelYAMLTrivia(data []byte, start, end int) int {
 }
 
 // hermesHookEntry is the one handler Setup registers for a Hermes event.
-func hermesHookEntry(hookCommand, matcher string) map[string]interface{} {
+func hermesHookEntry(hookCommand, event, matcher string, opts SetupOpts) map[string]interface{} {
 	entry := map[string]interface{}{
 		"command": hookCommand,
 		"timeout": 30,
+	}
+	contractID := strings.TrimSpace(opts.HookContractID)
+	if contractID == "" {
+		contractID = ResolveHookContract("hermes", opts.AgentVersion).Contract.ContractID
+	}
+	if event == "pre_tool_call" && contractID == "hermes-hooks-v2" && !shellHookSecureClientProfile(opts) {
+		// Hermes 0.21+ blocks a spawn failure or timeout only when this
+		// setting is present. A killed process can still fail open on its
+		// non-2 exit with empty stdout; v1 and other events cannot use it.
+		entry["fail_closed"] = true
 	}
 	if matcher != "" {
 		entry["matcher"] = matcher

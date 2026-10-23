@@ -428,8 +428,8 @@ func TestStandaloneManagedOpenCodeFailOpenAnswersAnExplicitAllow(t *testing.T) {
 // Bounded review P1: oversized tool input reaches handleOversized before the
 // gateway is contacted. On a standalone host it is not an outage, so it is
 // blocked in fail mode open for every connector, and the managed OpenCode
-// plugin never gets its explicit allow for it. Per-user hooks keep their
-// open result.
+// plugin never gets its explicit allow for it. Per-user hooks close malformed
+// input as well: an open outage preference cannot make an unread call safe.
 func TestStandaloneManagedOversizedInputBlocksUnderOpenForEveryConnector(t *testing.T) {
 	events := map[string]string{
 		"claudecode": "PreToolUse",
@@ -454,13 +454,13 @@ func TestStandaloneManagedOversizedInputBlocksUnderOpenForEveryConnector(t *test
 			t.Fatalf("%s: oversized input got an explicit allow: %q", connector, result.stdout)
 		}
 	}
-	// A per-user hook in fail mode open keeps its open result.
+	// A per-user hook in fail mode open closes unread input too.
 	perUser := run(t, "codex", ok(`{"action":"allow"}`), func(o *Options) {
 		o.MaxBody = 8
 		o.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_input":{"command":"` + strings.Repeat("x", 64) + `"}}`)
 	})
-	if blocked(perUser) {
-		t.Fatalf("per-user open: oversized input must keep the open result: code=%d stdout=%q", perUser.code, perUser.stdout)
+	if !blocked(perUser) {
+		t.Fatalf("per-user open: oversized input was allowed: code=%d stdout=%q", perUser.code, perUser.stdout)
 	}
 }
 

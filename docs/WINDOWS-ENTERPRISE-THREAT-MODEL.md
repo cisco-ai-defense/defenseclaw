@@ -932,7 +932,16 @@ to the scan; runtime hook rules still apply to its tool calls.
     ([R18](ENTERPRISE-THREAT-MODEL.md#residual-risks)). Claude Code and
     Codex treat a hook that exits without code 2 or times out as
     non-blocking, so both run the call after the user kills or stops their
-    own hook.
+    own hook. `status` and `verify` now warn `hook_process_fail_open` and
+    report `security_complete: false` for affected enabled connectors. The
+    gateway cannot audit a pre-tool request that never reached it; protect the
+    hook process from user signals with application control or EDR. Kiro CLI
+    2.x also lets a slow pre-tool hook time out; Antigravity has no documented
+    timeout-deny setting, although the T7 stop drill blocked in its tested
+    build. Hermes 0.19/0.20 can run after hook process failure; reviewed
+    0.21 now blocks a timeout or spawn error after Setup writes
+    `fail_closed` and the agent restarts; a killed hook can still fail
+    open on its non-2 exit.
 23. The managed OpenCode plugin
     (`C:\Program Files\Cisco\DefenseClaw\share\opencode\defenseclaw.js`)
     grants `BUILTIN\Users` `FILE_WRITE_ATTRIBUTES` besides read and execute,

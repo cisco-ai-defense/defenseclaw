@@ -388,7 +388,7 @@ func TestCursorReconcileWritesOnlyExplicitConfigHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(hooks, []byte(`"failClosed": false`)) ||
+	if !bytes.Contains(hooks, []byte(`"failClosed": true`)) ||
 		!bytes.Contains(hooks, []byte(`"preToolUse"`)) {
 		t.Fatalf("Cursor reconcile wrote an incomplete registration: %s", hooks)
 	}

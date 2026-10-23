@@ -21,6 +21,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -189,9 +190,9 @@ func sandboxShellCallMistyped(tc workdirShellCall) (string, bool) {
 	return "", false
 }
 
-// TestSandboxShellCallsAreJudged pins that the shell tool call of every
-// sandboxed harness reaches the command rules, and is blocked with the
-// marker rule's plain reason, whatever else the call names:
+// TestSandboxShellCallsAreJudged pins that a readable shell tool call of
+// every sandboxed harness reaches the command rules and is blocked with
+// the marker rule's plain reason, whatever else the call names:
 //   - its own working directory (a subdirectory of the mounted /work/app,
 //     the workspace itself, one outside the mount, a relative one). Left as
 //     a second working directory next to the request's (mapped to the host
@@ -200,7 +201,8 @@ func sandboxShellCallMistyped(tc workdirShellCall) (string, bool) {
 //   - an argument the connector's projection does not list, or a listed one
 //     with a value of another type. Either left the parse partial, so one
 //     extra argument turned a block into an allow. The command is now also
-//     judged on its own.
+//     judged on its own. A malformed top-level Cursor cwd is refused by the
+//     event validator before the command projection runs.
 func TestSandboxShellCallsAreJudged(t *testing.T) {
 	installSandboxMarkerRules(t)
 	f := newSandboxIngressFixture(t)
@@ -230,6 +232,16 @@ func TestSandboxShellCallsAreJudged(t *testing.T) {
 					t.Fatal("the variant did not change the call")
 				}
 				_, token := f.mint(t, "dc-"+tc.connector+"-"+strconv.Itoa(i)+"-"+variant, tc.connector, tc.version, tc.contract, f.project)
+				if tc.connector == "cursor" && variant == "mistyped" {
+					// This variant also makes Cursor's top-level cwd numeric.
+					// The event validator now rejects that malformed envelope
+					// before the sandbox command projection can run.
+					rec := f.do(t, http.MethodPost, tc.path, token, body, tc.headers...)
+					if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"reason":"malformed_hook_payload"`) {
+						t.Fatalf("malformed Cursor cwd was not refused: %d %s", rec.Code, rec.Body.String())
+					}
+					return
+				}
 				resp := f.hook(t, tc.path, token, body, tc.headers...)
 				if resp["action"] != "block" || resp["raw_action"] != "block" {
 					t.Fatalf("verdict = %v", resp)

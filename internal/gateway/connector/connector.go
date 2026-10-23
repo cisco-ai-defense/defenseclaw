@@ -192,8 +192,8 @@ type SetupOpts struct {
 	SecureClientHookDelivery bool
 
 	// GuardrailMode is the effective connector policy mode. Cursor uses it to
-	// render a blocking, fail-closed user hook for action and a nonblocking,
-	// fail-open user hook for observe. An empty value is treated as observe.
+	// render blocking decisions in action and would-block decisions in observe.
+	// Its standalone registration closes hook-process failure in both modes.
 	GuardrailMode string
 
 	// HILTEnabled tells connectors with native approval surfaces to wire

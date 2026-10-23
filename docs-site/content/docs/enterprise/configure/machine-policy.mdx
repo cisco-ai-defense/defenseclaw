@@ -144,4 +144,4 @@ Export formats and the `--live` requirements are in [Detail](/docs/enterprise/co
 
 ## Vendor limits
 
-Some gaps come from the agents themselves: Claude Code `--bare` skips the managed `SessionStart` hook, old Claude Code and Copilot CLI builds can skip machine policy, OpenCode pure mode loads no plugins, and Amp has no machine-wide plugin location. [Detail](/docs/enterprise/configure/reference#vendor-limits) and [Residual risks](/docs/enterprise/plan/threat-model#residual-risks).
+Some gaps come from the agents themselves: Codex and Claude Code treat a killed or timed-out `PreToolUse` hook as non-blocking, Claude Code `--bare` skips the managed `SessionStart` hook, old Claude Code and Copilot CLI builds can skip machine policy, OpenCode pure mode loads no plugins, and Amp has no machine-wide plugin location. Standalone `status` and `verify` warn `hook_process_fail_open` and set `security_complete: false` for enabled agents with this hook process risk. [Detail](/docs/enterprise/configure/reference#vendor-limits) and [Residual risks](/docs/enterprise/plan/threat-model#residual-risks).

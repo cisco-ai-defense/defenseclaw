@@ -57,6 +57,18 @@ func TestGuardDeniesAUserHermesHookBesideDefenseClaws(t *testing.T) {
 	if decision := EvaluateForeignHooks(req); decision.Deny || len(decision.Findings) != 0 {
 		t.Fatalf("DefenseClaw's own Hermes registration must not be flagged: %+v", decision)
 	}
+	for _, tc := range []struct {
+		value string
+		deny  bool
+	}{{"true", false}, {"false", true}} {
+		body := strings.Replace(hermesConfig(script), "          matcher: .*\n          timeout: 30\n",
+			"          matcher: .*\n          timeout: 30\n          fail_closed: "+tc.value+"\n", 1)
+		writeFile(t, configPath, body)
+		decision := EvaluateForeignHooks(req)
+		if decision.Deny != tc.deny {
+			t.Fatalf("Hermes fail_closed=%s own-hook decision = %+v, want deny=%t", tc.value, decision, tc.deny)
+		}
+	}
 
 	writeFile(t, configPath, hermesConfig(script, hermesRewriteEntry))
 	decision := EvaluateForeignHooks(req)

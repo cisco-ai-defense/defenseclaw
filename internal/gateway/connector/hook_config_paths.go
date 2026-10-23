@@ -502,7 +502,7 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 		recognized := hermesRecognizedHookCommands(command)
 		want := make(map[string]interface{}, len(hermesRequiredHooks))
 		for _, spec := range hermesRequiredHooks {
-			want[spec.event] = hermesHookEntry(command, spec.matcher)
+			want[spec.event] = hermesHookEntry(command, spec.event, spec.matcher, opts)
 		}
 		return hookEventEntriesMatch(hooks, want, func(_ string, entry interface{}) bool {
 			command, _ := hermesHookEntryCommand(entry)

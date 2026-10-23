@@ -108,16 +108,15 @@ Claude Code (`PreToolUse`, in Manual mode only; other permission modes block), C
 
 Every listed connector can block a gateway outage. Copilot CLI, Antigravity and
 Hermes hooks block delivery failures when the effective mode is `closed`, the default.
-Those agents can still allow a call when the hook times out or cannot start; the
-table marks that limit separately from the hook's deny response.
+Hermes 0.21+ blocks a `pre_tool_call` on hook spawn error or timeout when Setup has written `fail_closed: true`; it can still run after a killed hook exits non-2 with empty stdout. Earlier Hermes contracts also fail open on timeout. Other agents may still allow a call when the hook process times out or cannot start. The table marks gateway delivery behavior separately from agent-side process failure.
 
-- Fail-closed means the hook blocks when it cannot reach the gateway. A hook process that dies or times out is non-blocking in Claude Code, Codex and Devin (see the [enterprise threat model](/docs/enterprise/plan/threat-model#residual-risks)).
+- Fail-closed in this matrix means the running hook blocks when it cannot reach the gateway. A killed or timed-out pre-tool hook is non-blocking in Claude Code and Codex; a killed pre-tool hook can be non-blocking in Devin. Kiro CLI 2.x can run after hook timeout, and Antigravity has no documented timeout-deny setting. See the [enterprise threat model](/docs/enterprise/plan/threat-model#residual-risks).
 - On a managed standalone host, hooks use the administrator's resolved fail mode,
   also in observe mode. The default is `closed`. If the administrator explicitly selects `open`,
   a gateway outage can allow the call. Oversized input, a gateway 5xx, an unusable
   answer and other transport errors still block. See [Fail modes](/docs/reference/configuration/fail-modes).
 - On a per-user install, fail-open calls recorded by the shell hooks, native hook and OpenCode plugin become a `guardrail-degraded` alert when the gateway starts again. Amp does not write these failure records ([Fail modes](/docs/reference/configuration/fail-modes#reporting-and-diagnosis)).
-- Cursor is mode-matched: action writes `failClosed: true` and observe writes `failClosed: false`.
+- Cursor writes `failClosed: true` outside Secure Client in action and observe mode. Observe still allows ordinary calls and records `would_block` findings; the host flag covers a hook process that cannot answer.
 
 ### I want to run the agent in an OpenShell sandbox
 

@@ -99,7 +99,7 @@ func runOutageToolCall(t *testing.T, home, dataDir string, call outageToolCall) 
 
 // The owner rule (hooks fail closed everywhere except Secure Client) for the
 // per-user hooks of agents without a fail-closed hook contract of their own,
-// and for Cursor, whose observe registration is fail-open: with the gateway
+// and for Cursor, whose observe verdicts are nonblocking: with the gateway
 // down, this release's Copilot, Antigravity and Cursor hooks block a tool
 // call unless the config opens their outages. Before r104 W3 G3-upg the
 // Copilot and Antigravity renders were lowered to open for an unset mode
