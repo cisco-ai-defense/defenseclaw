@@ -681,36 +681,45 @@ def _foreign_loopback_listener_uncached(
 
 
 def _verify_connected_gateway_socket(sock: socket.socket, host: str, port: int) -> None:
-    """Prove the accepted server socket before urllib3 writes request bytes."""
+    """Prove the accepted server socket before urllib3 writes request bytes.
+
+    A per-user gateway's socket must belong to this account and a managed
+    gateway's to its service (GAP-0962): another account that binds the port
+    while the gateway restarts receives no byte.
+    """
     from defenseclaw.upgrade_shim import _windows_managed_profile, managed_descriptor
 
-    if managed_descriptor() or (os.name == "nt" and _windows_managed_profile()):
-        return
+    descriptor = managed_descriptor()
+    managed = bool(descriptor) or (os.name == "nt" and bool(_windows_managed_profile()))
     remote = sock.getpeername()
     local = sock.getsockname()
     if remote[1] != port or (host.strip("[]") != "localhost" and remote[0] != host.strip("[]")):
         raise GatewayListenerNotOwnedError("connected gateway endpoint changed")
-    binary = canonical_install_path()
     try:
-        for path in (
-            os.path.dirname(os.path.dirname(os.path.dirname(binary))),
-            os.path.dirname(os.path.dirname(binary)),
-            os.path.dirname(binary),
-            binary,
-        ):
-            info = os.lstat(path)
-            if stat.S_ISLNK(info.st_mode) or (os.name != "nt" and (
-                info.st_uid != os.geteuid() or info.st_mode & 0o022
-            )):
-                raise OSError("untrusted gateway helper path")
-        if os.name != "nt" and not os.access(binary, os.X_OK):
-            raise OSError("gateway helper is not executable")
+        if managed:
+            binary = _managed_connected_socket_helper(descriptor)
+        else:
+            binary = canonical_install_path()
+            for path in (
+                os.path.dirname(os.path.dirname(os.path.dirname(binary))),
+                os.path.dirname(os.path.dirname(binary)),
+                os.path.dirname(binary),
+                binary,
+            ):
+                info = os.lstat(path)
+                if stat.S_ISLNK(info.st_mode) or (os.name != "nt" and (
+                    info.st_uid != os.geteuid() or info.st_mode & 0o022
+                )):
+                    raise OSError("untrusted gateway helper path")
+            if os.name != "nt" and not os.access(binary, os.X_OK):
+                raise OSError("gateway helper is not executable")
 
         def format_addr(endpoint) -> str:
             return f"{_url_host(endpoint[0])}:{endpoint[1]}"
 
         result = subprocess.run(
-            [binary, "hook-verify-connected", "--local", format_addr(local), "--remote", format_addr(remote)],
+            [binary, "hook-verify-connected", "--local", format_addr(local), "--remote", format_addr(remote)]
+            + (["--managed"] if managed else []),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -721,6 +730,26 @@ def _verify_connected_gateway_socket(sock: socket.socket, host: str, port: int) 
         raise GatewayListenerNotOwnedError("connected gateway owner could not be verified") from exc
     if result.returncode != 0:
         raise GatewayListenerNotOwnedError("connected gateway socket belongs to another account or is unverified")
+
+
+def _managed_connected_socket_helper(descriptor: str | None) -> str:
+    """The managed package's gateway, which checks the managed socket owner.
+
+    On Linux and macOS it is the package gateway the runtime descriptor names,
+    held by root and writable by no one else; on Windows the packaged CLI's
+    gateway sibling, or this account's own gateway.
+    """
+    if os.name == "nt":
+        binary = packaged_windows_gateway_path() or canonical_install_path()
+        if os.path.islink(binary) or not _is_runnable_file(binary):
+            raise OSError("managed gateway helper is unavailable")
+        return binary
+    from defenseclaw.file_permissions import trusted_posix_executable_path
+
+    binary = _MANAGED_GATEWAY_BINARIES.get(descriptor or "")
+    if not binary:
+        raise OSError("managed gateway helper is unavailable")
+    return trusted_posix_executable_path(binary)
 
 
 class _GatewayVerifiedConnection(HTTPConnection):

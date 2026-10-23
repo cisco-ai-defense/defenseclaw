@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -19,28 +18,9 @@ import (
 // for a client connection that is already open. The Python CLI invokes this
 // before urllib3 writes headers or a body on that connection.
 func VerifyPerUserConnectedTuple(local, remote string) error {
-	parse := func(raw string) (*net.TCPAddr, error) {
-		host, portText, err := net.SplitHostPort(raw)
-		if err != nil {
-			return nil, err
-		}
-		ip := net.ParseIP(host)
-		port, err := strconv.Atoi(portText)
-		if ip == nil || err != nil || port < 1 || port > 65535 {
-			return nil, fmt.Errorf("connected gateway endpoint is invalid")
-		}
-		return &net.TCPAddr{IP: ip, Port: port}, nil
-	}
-	client, err := parse(local)
+	client, server, err := parseConnectedTuple(local, remote)
 	if err != nil {
 		return err
-	}
-	server, err := parse(remote)
-	if err != nil {
-		return err
-	}
-	if !client.IP.IsLoopback() || !server.IP.IsLoopback() {
-		return fmt.Errorf("connected gateway endpoint is not loopback")
 	}
 	return verifyPerUserConnectedTuple(client, server)
 }
@@ -125,32 +105,12 @@ func PostPerUserHook(ctx context.Context, apiAddr, path string, headers map[stri
 }
 
 // verifiedPerUserHTTPClient proves the owner of the connected socket before
-// net/http can write a hook credential or event. Each request gets a fresh
-// connection so retries and redirects must pass verification again.
+// net/http can write a hook credential or event (verifiedGatewayHTTPClient).
 func verifiedPerUserHTTPClient(
 	timeout time.Duration,
 	apiAddr string,
 	dial func(context.Context, string, string) (net.Conn, error),
 	verify func(net.Conn) error,
 ) *http.Client {
-	return &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			DisableKeepAlives: true,
-			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-				if address != apiAddr || (network != "tcp" && network != "tcp4") {
-					return nil, fmt.Errorf("per-user gateway target %q is not configured endpoint %q", address, apiAddr)
-				}
-				conn, err := dial(ctx, network, address)
-				if err != nil {
-					return nil, err
-				}
-				if err := verify(conn); err != nil {
-					_ = conn.Close()
-					return nil, fmt.Errorf("per-user gateway connected listener is unverified: %w", err)
-				}
-				return conn, nil
-			},
-		},
-	}
+	return verifiedGatewayHTTPClient(timeout, apiAddr, "per-user gateway", dial, verify)
 }

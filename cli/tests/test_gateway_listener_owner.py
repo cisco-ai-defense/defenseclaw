@@ -50,6 +50,58 @@ def test_cli_checks_connected_socket_before_sending_after_listener_replacement()
         thread.join(timeout=2)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the managed runtime descriptor is a Linux and macOS contract")
+def test_managed_cli_sends_nothing_until_the_gateway_service_owns_the_socket(tmp_path) -> None:
+    """GAP-0962: while a managed gateway restarts, another account can bind its
+    port. The CLI hands each connected socket to the package gateway, which
+    checks that root or the gateway service account owns it, before any byte
+    (here the bearer) is written."""
+    received: list[str] = []
+
+    class Peer(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            received.append(self.headers.get("Authorization", ""))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Peer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    helper = tmp_path / "defenseclaw-gateway"
+    calls = tmp_path / "calls"
+
+    def write_helper(code: int) -> None:
+        helper.write_text(f"#!/bin/sh\nprintf '%s ' \"$@\" >> '{calls}'\nexit {code}\n", encoding="utf-8")
+        helper.chmod(0o755)
+
+    descriptor = "/opt/cisco/defenseclaw/etc/managed-runtime.json"
+    try:
+        client = gateway.OrchestratorClient(host="127.0.0.1", port=server.server_port, token="private-token")
+        with (
+            mock.patch("defenseclaw.upgrade_shim.managed_descriptor", return_value=descriptor),
+            mock.patch.dict(gateway._MANAGED_GATEWAY_BINARIES, {descriptor: str(helper)}),
+            mock.patch.object(gateway, "_unproven_per_user_gateway_target", return_value=""),
+        ):
+            write_helper(1)
+            with pytest.raises(requests.ConnectionError):
+                client.status()
+            assert received == []
+            assert "hook-verify-connected" in calls.read_text() and "--managed" in calls.read_text()
+
+            write_helper(0)
+            client.status()
+            assert received == ["Bearer private-token"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_mac_status_and_doctor_name_a_peer_listener_hidden_from_lsof() -> None:
     from defenseclaw.commands import cmd_doctor
 

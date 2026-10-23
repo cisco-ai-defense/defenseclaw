@@ -392,7 +392,14 @@ func enterpriseGatewayGet(path string, out any) (string, error) {
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("X-DefenseClaw-Token", token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	// The token goes only to a listener the gateway service owns
+	// (GAP-0962); the request context bounds the wait.
+	client, err := gatewayPeerClient(cfg, gatewayClientHost(cfg), cfg.Gateway.APIPort, 0)
+	if err != nil {
+		return "", fmt.Errorf("the gateway at %s could not be verified (%v), so the request was not sent; check the deployment with: %s",
+			host, err, enterpriseDiscoveryStatusHint())
+	}
+	resp, err := client.Do(req)
 	if errors.Is(err, context.DeadlineExceeded) && !secureClient {
 		return "", fmt.Errorf("the gateway at %s took the connection but did not answer within %g s; it is running, and a request "+
 			"that waits for the directory (SSSD or the domain controller) can take that long. Try again", host, wait.Seconds())

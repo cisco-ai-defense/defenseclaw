@@ -819,7 +819,12 @@ func windowsStandaloneGatewayHealth() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: 1500 * time.Millisecond, Transport: &http.Transport{Proxy: nil}}
+	// The default port may be another listener; it must not answer for the
+	// gateway (GAP-0962).
+	client, err := managedGatewayClientForURL(base, 1500*time.Millisecond)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := client.Get(base + "/health")
 	if err != nil {
 		return nil, err
@@ -845,7 +850,12 @@ func windowsStandaloneGatewayStatus() []byte {
 		return nil
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	// Never hand the administrator's token to another account that holds
+	// the port while the gateway restarts (GAP-0962).
+	client, err := managedGatewayClientForURL(base, 5*time.Second)
+	if err != nil {
+		return nil
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil

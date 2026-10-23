@@ -71,17 +71,24 @@ func init() {
 	rootCmd.AddCommand(cmd)
 
 	var local, remote string
+	var managedPeer bool
 	verify := &cobra.Command{
 		Use:         "hook-verify-connected",
 		Hidden:      true,
 		Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		Args:        cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
+			if managedPeer {
+				// The managed gateway service, not this account, must own
+				// the connected socket (GAP-0962).
+				return hookexec.VerifyManagedConnectedTuple(local, remote, managedGatewayPeer())
+			}
 			return hookexec.VerifyPerUserConnectedTuple(local, remote)
 		},
 	}
 	verify.Flags().StringVar(&local, "local", "", "connected client endpoint")
 	verify.Flags().StringVar(&remote, "remote", "", "connected gateway endpoint")
+	verify.Flags().BoolVar(&managedPeer, "managed", false, "require the managed gateway service as the socket owner")
 	_ = verify.MarkFlagRequired("local")
 	_ = verify.MarkFlagRequired("remote")
 	rootCmd.AddCommand(verify)
