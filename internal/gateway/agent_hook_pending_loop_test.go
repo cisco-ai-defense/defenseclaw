@@ -144,3 +144,40 @@ func TestPendingHookRecoveryLoopAuditsARowALiveHandlerLeft(t *testing.T) {
 		t.Fatalf("eviction alerts = %v, want none", alerts)
 	}
 }
+
+// While the store keeps refusing the records of a row, the loop spaces its
+// tries: the first retry comes a retry interval after the first try, the
+// next one twice that later, and the row is evicted after its last try, so
+// its tries span a store outage instead of following each other.
+func TestPendingHookRecoveryLoopSpacesTheTriesOfARefusedRow(t *testing.T) {
+	f := newManagedHookAuditFixture(t, nil)
+	interval := pendingHookRecoveryRetryInterval
+	t.Cleanup(func() { pendingHookRecoveryRetryInterval = interval })
+	pendingHookRecoveryRetryInterval = 300 * time.Millisecond
+	const session = "refused-for-good"
+	orphanPendingHook(t, f, session, pendingAllow)
+	lift := refuseAuditInserts(t, f, "audit_events", `NEW.session_id = '`+session+`' AND NEW.action <> 'alert'`)
+	defer lift()
+	seen := map[int]time.Time{}
+	runAPIUntil(t, f.restartedAPI(t, true), func() bool {
+		now := time.Now()
+		if len(pendingEntries(t, f)) == 0 {
+			seen[pendingHookRecoveryAttempts+1] = now
+			return true
+		}
+		if tries := pendingHookAttempts(t, f); seen[tries].IsZero() {
+			seen[tries] = now
+		}
+		return false
+	})
+	slack := 60 * time.Millisecond
+	second, last := seen[2].Sub(seen[1]), seen[pendingHookRecoveryAttempts+1].Sub(seen[2])
+	if seen[1].IsZero() || seen[2].IsZero() || second < pendingHookRecoveryRetryInterval-slack ||
+		last < 2*pendingHookRecoveryRetryInterval-slack {
+		t.Fatalf("tries seen at %v: second try %v after the first, eviction %v after it; want at least %v and %v",
+			seen, second, last, pendingHookRecoveryRetryInterval, 2*pendingHookRecoveryRetryInterval)
+	}
+	if alerts := f.evictionAlerts(t); alerts[session] != 1 {
+		t.Fatalf("eviction alerts = %v, want one for the row", alerts)
+	}
+}

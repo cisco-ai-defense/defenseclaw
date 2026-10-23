@@ -572,8 +572,13 @@ var (
 // pendingHookRecoveryRetryInterval is how long the recovery loop waits
 // before it tries again a row it could not audit (the store refused its
 // records or its deletion, or the journal could not be read), and before
-// it takes a row that was left for it (pendingHookRecoveryWake).
-var pendingHookRecoveryRetryInterval = 15 * time.Second
+// it takes a row that was left for it (pendingHookRecoveryWake). While
+// passes keep leaving such a row, each wait doubles, up to
+// pendingHookRecoveryRetryMaxFactor intervals, so the tries of a row span
+// minutes of a store outage before it is evicted.
+var pendingHookRecoveryRetryInterval = time.Minute
+
+const pendingHookRecoveryRetryMaxFactor = 16
 
 // pendingHookRecoveryWake tells the recovery loop that a row was left for
 // it: a handler could not settle its call, or a full-journal drain pass
@@ -626,14 +631,15 @@ func (a *APIServer) startPendingHookRecovery(ctx context.Context) {
 // bounded pass at a time: a pass at start, for the rows earlier gateway
 // processes left; the next pass at once after a pass that stopped at its
 // bound; a pass retry later after a pass that left a row it could not
-// audit, or could not read the journal; and a pass retry after a row was
-// left for it (pendingHookRecoveryWake). A row leaves the journal within
+// audit, or could not read the journal, the wait doubling while passes
+// keep leaving one; and a pass retry after a row was left for it
+// (pendingHookRecoveryWake). A row leaves the journal within
 // pendingHookRecoveryAttempts tries, so the loop goes idle once the
 // journal holds only rows of running handlers.
 func (a *APIServer) runPendingHookRecovery(ctx context.Context, retry time.Duration) {
 	next := time.NewTimer(0)
 	defer next.Stop()
-	armed := true
+	armed, wait := true, retry
 	for {
 		select {
 		case <-ctx.Done():
@@ -649,10 +655,12 @@ func (a *APIServer) runPendingHookRecovery(ctx context.Context, retry time.Durat
 		switch a.recoverPendingHooks(ctx) {
 		case pendingHookPassMore:
 			next.Reset(0)
+			wait = retry
 		case pendingHookPassRetry:
-			next.Reset(retry)
+			next.Reset(wait)
+			wait = min(2*wait, pendingHookRecoveryRetryMaxFactor*retry)
 		default:
-			armed = false
+			armed, wait = false, retry
 		}
 	}
 }
