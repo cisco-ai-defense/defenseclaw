@@ -53,12 +53,18 @@ func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) 
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	attempts := 0
+	counts := make(map[string]int)
 	for _, row := range rows {
-		attempts += row.Attempts
+		if row.SID != sid || row.Report.Reason != refusalpipe.ReasonSIDUnregistered {
+			t.Fatalf("unexpected refusal row after the stop: %+v", row)
+		}
+		counts[row.Report.Connector] += row.Attempts
 	}
-	if len(rows) != 3 || attempts != 51 {
-		t.Fatalf("rows after the stop = %+v (attempts %d), want 3 rows covering all 51 refusals", rows, attempts)
+	// The writer may take the first connector row before the open-window count
+	// is queued, or the bounded queue may merge them while the writer waits.
+	if len(rows) < 2 || len(rows) > 3 || len(counts) != 2 ||
+		counts["claudecode"] != 50 || counts["codex"] != 1 {
+		t.Fatalf("rows after the stop = %+v, want both connectors and all 51 refusals", rows)
 	}
 }
 
