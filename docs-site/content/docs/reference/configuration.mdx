@@ -1412,7 +1412,7 @@ Restart the gateway to apply guardrail.hook_self_heal: defenseclaw-gateway resta
 | --- | --- |
 | `data_dir`, `observability.local.path`, `observability.local.judge_bodies_path` | Storage identity: the files the process opened at start |
 | `gateway` (the listener, API port and credentials; except `gateway.watcher.*` and the `gateway.config_reload` keys other than `mode`) | The listeners and credentials the process owns |
-| `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies` | The guardrail listener, whether it runs, and start-up settings |
+| `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies`, `guardrail.wolf` | The guardrail listener, whether it runs, and start-up settings, including the local Wolf worker |
 | `guardrail.hook_self_heal`, `guardrail.hook_self_heal_debounce_ms` | The hook guard |
 | `claw`, `agent`, `routing`, `plugin_dir` | Paths, identity, the model router and the connector plugins, captured at start |
 | `deployment_mode`, `enterprise.profile`, `enterprise.network` | The deployment boundary |
@@ -1440,3 +1440,9 @@ Connector wiring (hook scripts, agent files) is not re-applied by a reload:
 run `defenseclaw-gateway restart` or `defenseclaw setup <connector>` for that.
 These commands belong to the **Go gateway** (`defenseclaw-gateway`), not the
 Python CLI; the Python CLI has no top-level `gateway` group.
+
+## Optional Wolf Defender scanner
+
+`guardrail.wolf` configures an opt-in OSS CPU ONNX tool-response lane. All its keys
+require a gateway restart. See [Wolf Defender](/docs/guardrail/wolf-defender) for
+Small/Full selection, defaults, prerequisites and refusal semantics.

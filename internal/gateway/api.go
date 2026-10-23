@@ -70,10 +70,11 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health *SidecarHealth
-	client *Client
-	store  *audit.Store
-	logger *audit.Logger
+	localContent atomic.Pointer[localContentBinding]
+	health       *SidecarHealth
+	client       *Client
+	store        *audit.Store
+	logger       *audit.Logger
 	// sandboxAuthority is owned by this server and initialized on first use.
 	sandboxAuthority sandboxAuthorityHolder
 
@@ -1152,6 +1153,19 @@ func (a *APIServer) apiPortHeld(hasHookSocket bool, err error) bool {
 }
 
 func (a *APIServer) Run(ctx context.Context) error {
+	if a.scannerCfg != nil && a.scannerCfg.Guardrail.Wolf.Enabled {
+		if a.managedAIDOnly() || a.scannerCfg.StandaloneEnterprise() {
+			return fmt.Errorf("wolf defender is available only in OSS deployments")
+		}
+		worker, err := startWolf(ctx, a.scannerCfg.Guardrail.Wolf)
+		if err != nil {
+			return err
+		}
+		defer worker.Close()
+		if err := a.SetLocalToolResponseScanner(worker, a.scannerCfg.Guardrail.Wolf.Threshold); err != nil {
+			return err
+		}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
 	mux.HandleFunc("/health", a.handleHealth)

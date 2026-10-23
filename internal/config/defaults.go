@@ -196,6 +196,7 @@ func DefaultConfig() *Config {
 			AnchorName: "com.defenseclaw",
 		},
 		Guardrail: GuardrailConfig{
+			Wolf:                        DefaultWolfConfig(),
 			Mode:                        "observe",
 			ScannerMode:                 "both",
 			Host:                        "",

@@ -1754,6 +1754,7 @@ func holdRestartRequired(running, next *config.Config, restart []string) *config
 func holdGuardrailProcessSettings(g *config.GuardrailConfig, running config.GuardrailConfig) {
 	g.Host, g.Port, g.Enabled, g.Connector = running.Host, running.Port, running.Enabled, running.Connector
 	g.ScannerMode, g.RetainJudgeBodies = running.ScannerMode, running.RetainJudgeBodies
+	g.Wolf = running.Wolf
 	g.HookSelfHeal, g.HookSelfHealDebounceMs = running.HookSelfHeal, running.HookSelfHealDebounceMs
 }
 

@@ -1,0 +1,132 @@
+---
+title: Wolf Defender (experimental)
+description: Optional offline ONNX prompt-injection inspection of tool results in OSS gateways.
+---
+
+Wolf Defender is an optional local tool-response scanner. It is disabled by default.
+This integration is experimental and intended for OSS deployments. Managed enterprise,
+Secure Client, remote-only scanning and Windows are unsupported and refused when enabled.
+
+## You need
+
+| Requirement | Tier | Provisioning |
+| --- | --- | --- |
+| Trusted Python environment containing this DefenseClaw checkout | Optional (required when enabled) | Install the checkout into an operator-controlled environment. Use its absolute Python path. |
+| `onnxruntime==1.30.0`, `tokenizers==0.23.2`, compatible NumPy | Optional (required when enabled) | Explicitly install into that environment. No runtime installation or download occurs. |
+| Small or Full official ONNX snapshot | Optional (required when enabled) | Provision the pinned files below before enabling. Model storage and CPU memory must be available for each worker. |
+| macOS or Linux with CPUExecutionProvider | Optional (required when enabled) | Other execution providers and Windows are not supported. Platform coverage beyond the development host requires maintainer verification. |
+
+The worker uses isolated Python module execution (`-I`) to exclude current-directory
+and user-site imports. No model weights, tokenizer assets or third-party runtime libraries are included in
+this contribution. Both official model cards identify the model license as Apache-2.0;
+review their terms and retain their notices when provisioning separately.
+
+## Provision and activate
+
+Install this checkout and the optional runtime in a trusted environment, for example:
+
+```sh
+uv venv /absolute/path/wolf-runtime
+uv pip install --python /absolute/path/wolf-runtime/bin/python -e .
+uv pip install --python /absolute/path/wolf-runtime/bin/python onnxruntime==1.30.0 tokenizers==0.23.2 numpy
+```
+
+Download the selected public snapshot using your normal artifact provisioning process:
+
+| Variant | Hugging Face repository | Pinned revision |
+| --- | --- | --- |
+| `small` | `patronus-studio/wolf-defender-prompt-injection-small` | `bcab2eff97bcabd7227849639e2d0d7a61b46c92` |
+| `full` | `patronus-studio/wolf-defender-prompt-injection` | `a77e7b669f079c3ad7e72e4ad10f3bd173ac4f4d` |
+
+Preserve `config.json`, `tokenizer.json`, and
+`onnx/int8_int4_embeddings/model.onnx` under `model_dir`. The worker checks all
+three SHA-256 digests against the variant-specific manifest in `defenseclaw.wolf`.
+Only those pinned mixed INT8/INT4 artifacts are supported here. Neither the model
+directory, runtime nor installed Python package may be writable by untrusted tool content.
+
+Use the existing configuration writer to set these keys; this YAML shows the resulting
+`guardrail.wolf` block alongside an enabled guardrail:
+
+```yaml
+guardrail:
+  enabled: true
+  mode: observe
+  scanner_mode: local
+  wolf:
+    enabled: true
+    variant: small  # small | full; use the matching model_dir
+    model_dir: /absolute/path/wolf-small
+    python_executable: /absolute/path/wolf-runtime/bin/python
+    threshold: 0.5
+    threads: 2
+    window_tokens: 510
+    overlap_tokens: 64
+    max_tokens: 8192
+    max_windows: 20
+    timeout_ms: 500
+    startup_timeout_ms: 30000
+```
+
+Run `defenseclaw doctor`, then restart the gateway. Every `guardrail.wolf` change
+requires a process restart. Startup refuses unavailable dependencies, incompatible
+assets and checksum mismatches before that listener serves requests. Start with
+`observe`; `action` enforces blocking. The threshold is a configuration default,
+not a calibrated false-positive-rate claim. Full may require a larger startup or
+request budget on your host; request budgets are limited to 5 seconds.
+
+## Interception and decisions
+
+The scanner runs at the existing tool-result boundaries:
+
+- `/api/v1/inspect/tool-response`, before legacy content truncation;
+- native message inspection with `direction: tool_result`, excluding verified source scope;
+- OpenAI-compatible chat-completion proxy input messages with `role: tool`, including
+  requests without a user message and prompt heartbeat/startup bypass cases.
+
+Ordinary user/system messages, completion output, non-tool roles and routes which
+never enter these boundaries are outside this lane's scope. Existing findings are
+preserved; the local lane can escalate a decision but cannot clear an existing denial.
+The normal gateway response and audit projection contain `local-model:prompt-injection`
+or `local-model:scan-unavailable` findings. Raw content, runtime exception details and
+model paths are not added to those reasons.
+
+Tokenization uses bounded overlapping windows without silent tail truncation. An
+incomplete scan, byte/token/window limit, invalid reply, busy worker or runtime error
+produces a blocking local verdict. Existing `observe` policy converts this into an
+allow with `would_block`; it does **not** provide fail-closed enforcement. Use `action`
+when refusal must prevent forwarding.
+
+A proxy request may contain at most 16 `role: tool` messages (including replayed
+history). The limit is checked before inference and produces
+`local-model:tool-message-limit` when exceeded. Each accepted message receives a
+fresh `timeout_ms` budget; the caller's cancellation/deadline still applies.
+The local lane therefore takes at most 16 times the per-call budget: 8 seconds
+at the 500 ms default, or 80 seconds at the 5-second maximum, unless the caller
+ends the request sooner. The cap also applies in observe mode, where the
+refusal is recorded without enforcing a block.
+
+Each listener owns one persistent subprocess, with one in-flight scan and no queue.
+The hook API and enabled proxy therefore load separate model instances. Plan memory
+for both; the model is loaded only while opted in. A timeout or broken protocol kills
+the affected worker, so late replies cannot be reused for another request. Subsequent
+requests receive unavailable verdicts until the listener/gateway restarts. There is
+no automatic recovery, shared model pool, GPU support, model auto-update or managed
+asset deployment in this draft.
+
+## Public model background
+
+- Official [Full model](https://huggingface.co/patronus-studio/wolf-defender-prompt-injection)
+  and [Small model](https://huggingface.co/patronus-studio/wolf-defender-prompt-injection-small)
+  provide model provenance and published model evaluations.
+- The independent [arXiv preprint 2610.03448](https://arxiv.org/abs/2610.03448)
+  evaluates Wolf Defender **Full**. Its findings do not establish Small's quality or
+  validate this integration's quantized artifacts, windowing or runtime configuration.
+- [Apache Camel's integration](https://camel.apache.org/components/next/others/semantic-wolf-defender.html)
+  uses **Small v2 FP32** and documents a Linux x86-64 CPU validation scope. This
+  contribution uses different quantized artifacts and is not a port of Camel's code.
+- [TrustyAI's guardrail configuration](https://github.com/trustyai-explainability/trustyai-service-operator/blob/main/config/configmaps/nemo-guardrails/default-guardrails-injection.yaml)
+  references the **Full** repository in its local prompt-injection configuration.
+
+These references describe external research and integrations. None certifies the
+DefenseClaw integration or guarantees protection. This contribution makes no model
+quality or production robustness claim and includes no model benchmark results.

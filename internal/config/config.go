@@ -1613,11 +1613,12 @@ type HILTConfig struct {
 }
 
 type GuardrailConfig struct {
-	Enabled     bool   `mapstructure:"enabled"              yaml:"enabled"`
-	Mode        string `mapstructure:"mode"                 yaml:"mode"`
-	ScannerMode string `mapstructure:"scanner_mode"         yaml:"scanner_mode"`
-	Host        string `mapstructure:"host"                 yaml:"host,omitempty"`
-	Port        int    `mapstructure:"port"                 yaml:"port"`
+	Wolf        WolfConfig `mapstructure:"wolf" yaml:"wolf,omitempty"`
+	Enabled     bool       `mapstructure:"enabled"              yaml:"enabled"`
+	Mode        string     `mapstructure:"mode"                 yaml:"mode"`
+	ScannerMode string     `mapstructure:"scanner_mode"         yaml:"scanner_mode"`
+	Host        string     `mapstructure:"host"                 yaml:"host,omitempty"`
+	Port        int        `mapstructure:"port"                 yaml:"port"`
 
 	// Connector selects the active agent framework adapter. Written by
 	// `defenseclaw setup` and read by the sidecar at boot. When empty,
@@ -2101,6 +2102,9 @@ func validateGuardrailLevel(field, value string) error {
 func (g *GuardrailConfig) Validate() error {
 	if g == nil {
 		return nil
+	}
+	if err := g.Wolf.Validate(); err != nil {
+		return err
 	}
 	if err := validateGuardrailLevel("guardrail.block_at", g.BlockAt); err != nil {
 		return err
@@ -3042,6 +3046,12 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
 	}
+	if cfg.Guardrail.Wolf.Enabled && (cfg.SecureClientIntegration() || cfg.StandaloneEnterprise() || cfg.Guardrail.ScannerMode == "remote") {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "guardrail_invalid")
+		}
+		return nil, fmt.Errorf("config: guardrail: guardrail.wolf requires OSS local/both scanner mode")
+	}
 	if err := cfg.ValidateGuardrailProfiles(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
@@ -3783,6 +3793,18 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("application_protection.connectors", map[string]any{})
 
 	viper.SetDefault("guardrail.enabled", false)
+	viper.SetDefault("guardrail.wolf.enabled", false)
+	viper.SetDefault("guardrail.wolf.variant", "small")
+	viper.SetDefault("guardrail.wolf.model_dir", "")
+	viper.SetDefault("guardrail.wolf.python_executable", "")
+	viper.SetDefault("guardrail.wolf.threshold", .5)
+	viper.SetDefault("guardrail.wolf.threads", 2)
+	viper.SetDefault("guardrail.wolf.window_tokens", 510)
+	viper.SetDefault("guardrail.wolf.overlap_tokens", 64)
+	viper.SetDefault("guardrail.wolf.max_tokens", 8192)
+	viper.SetDefault("guardrail.wolf.max_windows", 20)
+	viper.SetDefault("guardrail.wolf.timeout_ms", 500)
+	viper.SetDefault("guardrail.wolf.startup_timeout_ms", 30000)
 	viper.SetDefault("guardrail.mode", "observe")
 	// "closed" is the safer default — transport, authentication, and
 	// invalid-response failures BLOCK supported events rather than silently

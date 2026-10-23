@@ -744,6 +744,23 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 		return nil
 	}
 
+	if p.cfg.Wolf.Enabled {
+		if ManagedEnterpriseActive() || secureClientGeneration() {
+			return fmt.Errorf("wolf defender is available only in OSS deployments")
+		}
+		worker, err := startWolf(ctx, p.cfg.Wolf)
+		if err != nil {
+			return err
+		}
+		defer worker.Close()
+		inspector, ok := p.inspector.(*GuardrailInspector)
+		if !ok {
+			return fmt.Errorf("wolf defender requires the gateway guardrail inspector")
+		}
+		if err := inspector.SetLocalToolResponseScanner(worker, p.cfg.Wolf.Threshold); err != nil {
+			return err
+		}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", p.handleChatCompletion)
 	mux.HandleFunc("/chat/completions", p.handleChatCompletion)
@@ -1395,9 +1412,8 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
 	// payload from these allowlists while the original prompt still flows
 	// upstream.
-	if userText != "" &&
-		!isHeartbeatMessage(userText, partial.Messages) &&
-		!isSessionStartupMessage(userText) {
+	if p.requiresLocalToolInspection(partial.Messages) || (userText != "" &&
+		!isHeartbeatMessage(userText, partial.Messages) && !isSessionStartupMessage(userText)) {
 		meta := proxyLLMEventMeta(p, r, &passthroughReqForTelemetry, provider)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, label)
 		passthroughPromptID = meta.PromptID
@@ -2964,9 +2980,8 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
 	// payload from these allowlists while the original prompt still flows
 	// upstream.
-	if inspectText != "" &&
-		!isHeartbeatMessage(userText, req.Messages) &&
-		!isSessionStartupMessage(userText) {
+	if p.requiresLocalToolInspection(req.Messages) || (inspectText != "" &&
+		!isHeartbeatMessage(userText, req.Messages) && !isSessionStartupMessage(userText)) {
 		meta := proxyLLMEventMeta(p, r, &req, promptProviderName)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, req.Model)
 		promptID = meta.PromptID

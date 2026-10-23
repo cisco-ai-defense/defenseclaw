@@ -109,6 +109,7 @@ RESTART_KEYS = (
     "guardrail.connector",
     "guardrail.scanner_mode",
     "guardrail.retain_judge_bodies",
+    "guardrail.wolf",
     "guardrail.hook_self_heal",
     "guardrail.hook_self_heal_debounce_ms",
     "claw",

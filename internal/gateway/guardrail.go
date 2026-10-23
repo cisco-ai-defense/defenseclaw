@@ -224,7 +224,8 @@ type guardrailSpanEmitter struct {
 // GuardrailInspector orchestrates local pattern scanning, Cisco AI Defense,
 // the LLM judge, and OPA policy evaluation.
 type GuardrailInspector struct {
-	scannerMode string
+	localContent atomic.Pointer[localContentBinding]
+	scannerMode  string
 	// ciscoClient is the remote AI Defense inspector (nil disables the
 	// remote lane). Its concrete implementation is chosen at boot:
 	// *CiscoInspectClient for opensource / BYO-key installs, or
@@ -703,6 +704,22 @@ func (g *GuardrailInspector) inspect(ctx context.Context, direction, content, ra
 	verdict := g.inspectStrategy(ctx, strategy, direction, content, messages, model, mode)
 	if raw != "" {
 		verdict = mergePromptVerdicts(verdict, g.inspectStrategy(ctx, strategy, direction, raw, messages, model, mode))
+	}
+	// Merge after the raw recheck: no later baseline result can clear a local block.
+	if direction == "prompt" {
+		if lv := g.inspectLocalToolMessages(ctx, messages); lv != nil {
+			if verdict == nil {
+				verdict = lv
+			} else {
+				verdict.Action = "block"
+				if severityRank[lv.Severity] > severityRank[verdict.Severity] {
+					verdict.Severity = lv.Severity
+				}
+				verdict.Findings = append(verdict.Findings, lv.Findings...)
+				verdict.Reason += "; " + lv.Reason
+				verdict.ScannerSources = append(verdict.ScannerSources, lv.Scanner)
+			}
+		}
 	}
 
 	elapsed := time.Since(start)

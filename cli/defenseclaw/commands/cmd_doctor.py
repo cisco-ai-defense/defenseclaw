@@ -2905,6 +2905,37 @@ def _check_inventory_storage(cfg, r: _DoctorResult) -> None:
     )
 
 
+def _check_wolf(cfg, r: _DoctorResult) -> None:
+    """Optional runtime: no process or asset reads while disabled."""
+    from dataclasses import asdict
+
+    wolf = getattr(getattr(cfg, "guardrail", None), "wolf", None)
+    if wolf is None or wolf.enabled is not True:
+        _emit("skip", "Wolf Defender (Optional)", "off (guardrail.wolf.enabled is false)",
+              r=r, check_id="doctor.guardrail.wolf", reason_code="wolf-disabled")
+        return
+    remedy = "See guardrail/wolf-defender: provision pinned assets and an absolute Python runtime; restart the gateway"
+    try:
+        if not Path(wolf.python_executable).is_absolute() or not Path(wolf.model_dir).is_absolute():
+            raise ValueError("absolute paths required")
+        if sys.platform not in {"darwin", "linux"}:
+            raise ValueError("unsupported platform")
+        proc = subprocess.run(
+            [wolf.python_executable, "-I", "-m", "defenseclaw.wolf", "--check"],
+            input=json.dumps(asdict(wolf)) + "\n", capture_output=True, text=True,
+            timeout=wolf.startup_timeout_ms / 1000,
+            env={"HF_HUB_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false", "PYTHONNOUSERSITE": "1"},
+        )
+        if proc.returncode != 0 or json.loads(proc.stdout).get("ready") is not True:
+            raise ValueError("runtime unavailable")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        _emit("fail", "Wolf Defender (Optional)", "enabled but CPU runtime or pinned assets are unavailable",
+              r=r, check_id="doctor.guardrail.wolf", reason_code="wolf-unavailable", remediation=remedy)
+        return
+    _emit("pass", "Wolf Defender (Optional)", f"{wolf.variant}: pinned CPU model loads (no quality evaluation)",
+          r=r, check_id="doctor.guardrail.wolf")
+
+
 def _check_guardrail_profile(cfg, r: _DoctorResult) -> None:
     """Name the guardrail profile the gateway resolves for this account."""
     from defenseclaw.commands.cmd_guardrail import profile_status_text
@@ -12534,6 +12565,7 @@ def doctor(
         _doctor_subsection("Scanners")
     r.set_section("scanners")
     _check_scanners(cfg, r)
+    _check_wolf(cfg, r)
     _check_scan_coverage(cfg, r)
 
     if not json_out:

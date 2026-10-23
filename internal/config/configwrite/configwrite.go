@@ -528,7 +528,7 @@ var restartKeys = []string{
 	"observability.local.judge_bodies_path",
 	"gateway",
 	"guardrail.host", "guardrail.port", "guardrail.enabled", "guardrail.connector",
-	"guardrail.scanner_mode", "guardrail.retain_judge_bodies",
+	"guardrail.scanner_mode", "guardrail.retain_judge_bodies", "guardrail.wolf",
 	"guardrail.hook_self_heal", "guardrail.hook_self_heal_debounce_ms",
 	"claw", "agent", "routing", "plugin_dir",
 	"deployment_mode", "enterprise.profile", "enterprise.network", "enterprise.openshell",

@@ -1930,6 +1930,79 @@
           "pattern": "^(|[a-z0-9][a-z0-9_-]{0,63})$",
           "default": "",
           "description": "Profile for subjects no assignment selects. Empty keeps the guardrail.* configuration."
+        },
+        "wolf": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Optional offline CPU Wolf Defender tool-response scanner; OSS only; restart required.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "variant": {
+              "type": "string",
+              "enum": [
+                "small",
+                "full"
+              ],
+              "default": "small"
+            },
+            "model_dir": {
+              "type": "string"
+            },
+            "python_executable": {
+              "type": "string"
+            },
+            "threshold": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "exclusiveMaximum": 1,
+              "default": 0.5
+            },
+            "threads": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32,
+              "default": 2
+            },
+            "window_tokens": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 2046,
+              "default": 510
+            },
+            "overlap_tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2045,
+              "default": 64
+            },
+            "max_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32768,
+              "default": 8192
+            },
+            "max_windows": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 128,
+              "default": 20
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000,
+              "default": 500
+            },
+            "startup_timeout_ms": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 120000,
+              "default": 30000
+            }
+          }
         }
       }
     },

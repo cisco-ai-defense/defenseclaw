@@ -8,6 +8,7 @@
     "disabling",
     "semantic-routing",
     "unified-llm-key",
+    "wolf-defender",
     "---Benchmarks---",
     "benchmarks",
     "llm-judge-benchmark"

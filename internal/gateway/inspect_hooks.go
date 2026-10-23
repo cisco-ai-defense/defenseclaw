@@ -320,6 +320,13 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 			outputStr = semanticOutput
 		}
 	}
+	// Inspect complete semantic output before the legacy prefix truncation.
+	var semanticOutput string
+	localText := outputStr
+	if json.Unmarshal(req.Output, &semanticOutput) == nil {
+		localText = semanticOutput
+	}
+	localVerdict := a.inspectLocalToolResponse(r.Context(), localText)
 	outputStr = truncateInspectContent(outputStr, maxInspectContentLen)
 
 	fmt.Fprintf(os.Stderr, "[inspect] >>> post-tool tool=%q output_len=%d exit_code=%d\n",
@@ -364,6 +371,9 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	if localVerdict != nil {
+		verdict = mergeWithLaneVerdict(verdict, localVerdict, "local-model:")
+	}
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)

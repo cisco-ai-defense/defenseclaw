@@ -461,7 +461,7 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 		// Tag lane findings so operators can tell them apart from
 		// regex / CodeGuard hits when reading the audit log.
 		for _, f := range aid.Findings {
-			local.Findings = append(local.Findings, findingTag+f)
+			local.Findings = append(local.Findings, findingTag+strings.TrimPrefix(f, findingTag))
 		}
 		// Synthesize structured DetailedFindings from each lane finding so
 		// the downstream emission pipeline (emitInspectVerdictFindings →
@@ -1310,6 +1310,11 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	// LLM round-trip when the local lanes were already decisive.
 	if jv := a.hookJudgeInspect(ctx, req, content, verdict); jv != nil {
 		verdict = mergeWithJudgeVerdict(verdict, jv)
+	}
+	if req.Direction == "tool_result" && req.contentScope != ruleContentScopeSource {
+		if lv := a.inspectLocalToolResponse(ctx, content); lv != nil {
+			verdict = mergeWithLaneVerdict(verdict, lv, "local-model:")
+		}
 	}
 	if req.contentScope == ruleContentScopeSource {
 		clampSourceScopeVerdict(verdict)

@@ -2487,6 +2487,9 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		return false
 	}
 	oldG, newG := oldCfg.Guardrail, newCfg.Guardrail
+	if oldG.Wolf != newG.Wolf {
+		return true
+	}
 	if oldCfg.SecureClientIntegration() || newCfg.SecureClientIntegration() {
 		// Secure Client keeps the restart set it had before the configuration
 		// generation (issue #1092): its hook decisions read the start-time
