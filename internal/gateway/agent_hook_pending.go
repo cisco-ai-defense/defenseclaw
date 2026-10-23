@@ -357,6 +357,9 @@ func (a *APIServer) pendingHookRecoveryResponse(ctx context.Context, p *pendingH
 		}
 	}
 	if p.Final != nil {
+		if p.SandboxReceipt != nil && p.Final.Action == "block" {
+			return failedClosedHookDelivery(p.SandboxReceipt.response(p.Proposed), hookexec.ManagedGatewayNoAnswerReason), nil
+		}
 		return p.Final.response(), nil
 	}
 	return p.NoReceipt.response(), nil
