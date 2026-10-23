@@ -141,7 +141,7 @@ const hermesTUIShellHooksFix = "https://github.com/NousResearch/hermes-agent/com
 // install reports); each scheme needs its own range.
 var knownBrokenAgentVersions = map[string][]KnownBrokenAgentVersion{
 	// The OpenShell image pins Hermes 0.19.0 (the newest on PyPI) and is
-	// not changed here; its TUI is GAP-0978's sandbox follow-up.
+	// not changed here; its TUI is GAP-1036.
 	"hermes": {
 		{Min: "0.19.0", Max: "0.21.1", Reason: hermesTUIWithoutShellHooks, Issue: hermesTUIShellHooksFix, HostOnly: true},
 		{Min: "2026.7.20", Max: "2026.9.7", Reason: hermesTUIWithoutShellHooks, Issue: hermesTUIShellHooksFix, HostOnly: true},
