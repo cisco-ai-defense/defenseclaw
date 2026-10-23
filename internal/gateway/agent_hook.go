@@ -1049,11 +1049,19 @@ func (a *APIServer) finalizeAgentHook(
 			auditErr = a.logConnectorHookAuditEnvelope(ctx, env)
 			result.AuditPersisted = auditErr == nil
 		})
+		// A delivered answer backed by a pending occurrence (w3-g3-obs)
+		// already reached the agent, and recovery writes its row from the
+		// published occurrence: the records keep the answer the agent got
+		// instead of a fail-mode verdict it never saw.
+		recoverable := req.pendingOccurrenceID != "" && (receipted || req.pendingRecovery)
 		if !result.AuditPersisted && !panicked && !errors.Is(auditErr, errHookAuditNotConfigured) {
 			if auditErr == nil {
 				auditErr = errors.New("the audit section panicked")
 			}
-			closed, denied := a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
+			closed, denied := resp, false
+			if !recoverable {
+				closed, denied = a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
+			}
 			if denied {
 				resp = closed
 				env.adoptVerdict(resp)
