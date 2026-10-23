@@ -42,11 +42,16 @@ func TestClaudeCodeWorkspaceUpgradeChecksRequestedScope(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			predecessorSettings = []byte(strings.ReplaceAll(strings.ReplaceAll(string(predecessorSettings), "{home}", home), "{data_dir}", dataDir))
+			// The golden is JSON: raw Windows backslashes would become escapes.
+			predecessorSettings = []byte(strings.ReplaceAll(strings.ReplaceAll(string(predecessorSettings), "{home}", filepath.ToSlash(home)), "{data_dir}", filepath.ToSlash(dataDir)))
 			userPath := filepath.Join(home, ".claude", "settings.json")
 			if err := os.WriteFile(userPath, predecessorSettings, 0o600); err != nil {
 				t.Fatal(err)
 			}
+			ownUpgradeFixtureForTest(t, userPath)
+			previousSettingsPath := connector.ClaudeCodeSettingsPathOverride
+			connector.ClaudeCodeSettingsPathOverride = userPath
+			t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = previousSettingsPath })
 			oldPolicy := filepath.Join(oldWorkspace, ".claude", "settings.json")
 			if err := os.WriteFile(oldPolicy, []byte(`{"disableAllHooks":true}`), 0o600); err != nil {
 				t.Fatal(err)
@@ -135,19 +140,14 @@ func TestCodexRootUpgradePrecheckInspectsSelectedRoot(t *testing.T) {
 			t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", "")
 			dataDir := testenv.PrivateTempDir(t)
 			defer withConnectorState(t, dataDir, "codex")()
-			conn := connector.NewCodexConnector()
-			if err := conn.Setup(context.Background(), connector.SetupOpts{
-				DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "test-token", HookFailMode: "closed",
-			}); err != nil {
-				t.Fatalf("register previous Codex root: %v", err)
-			}
+			registerPriorCodexRootForTest(t, dataDir, oldRoot)
 			oldPath := filepath.Join(oldRoot, "config.toml")
 			newPath := filepath.Join(newRoot, "config.toml")
 			predecessorSettings, err := os.ReadFile(filepath.Join("..", "gateway", "connector", "testdata", "predecessor_1_0_2_1_0_3", "codex.toml"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			predecessorSettings = []byte(strings.ReplaceAll(strings.ReplaceAll(string(predecessorSettings), "{home}", home), "{data_dir}", dataDir))
+			predecessorSettings = []byte(strings.ReplaceAll(strings.ReplaceAll(string(predecessorSettings), "{home}", filepath.ToSlash(home)), "{data_dir}", filepath.ToSlash(dataDir)))
 			if err := os.WriteFile(oldPath, predecessorSettings, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -155,12 +155,27 @@ func TestCodexRootUpgradePrecheckInspectsSelectedRoot(t *testing.T) {
 			if err := os.WriteFile(newPath, []byte("[features]\nhooks = false\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if stdout, stderr, code := runConnectorCmd(t, "check-agent-settings", "--connector", "codex", "--json"); code != 0 {
-				t.Fatalf("ordinary check should still see previous root: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+			check := func() (int, string) {
+				t.Helper()
+				stdout, stderr, code := runConnectorCmd(t, "check-agent-settings", "--connector", "codex", "--json")
+				var result struct {
+					Refused bool   `json:"refused"`
+					Reason  string `json:"reason"`
+				}
+				if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+					t.Fatalf("decode check result %q: %v (stderr=%q)", stdout, err, stderr)
+				}
+				if result.Refused != (code == 1) {
+					t.Fatalf("check exit %d disagrees with %q", code, stdout)
+				}
+				return code, result.Reason
+			}
+			if code, reason := check(); code != 0 {
+				t.Fatalf("ordinary check should still see previous root: code=%d reason=%q", code, reason)
 			}
 			t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", newRoot)
-			if stdout, stderr, code := runConnectorCmd(t, "check-agent-settings", "--connector", "codex", "--json"); code != 1 || !strings.Contains(stdout, newPath) {
-				t.Fatalf("bad selected root was accepted: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+			if code, reason := check(); code != 1 || !strings.Contains(reason, newPath) {
+				t.Fatalf("bad selected root was accepted: code=%d reason=%q", code, reason)
 			}
 			if err := os.WriteFile(oldPath, append(append([]byte(nil), predecessorSettings...), []byte("\n[features]\nhooks = false\n")...), 0o600); err != nil {
 				t.Fatal(err)
@@ -169,12 +184,12 @@ func TestCodexRootUpgradePrecheckInspectsSelectedRoot(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", "")
-			if stdout, stderr, code := runConnectorCmd(t, "check-agent-settings", "--connector", "codex", "--json"); code != 1 || !strings.Contains(stdout, oldPath) {
-				t.Fatalf("ordinary check ignored previous-root refusal: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+			if code, reason := check(); code != 1 || !strings.Contains(reason, oldPath) {
+				t.Fatalf("ordinary check ignored previous-root refusal: code=%d reason=%q", code, reason)
 			}
 			t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", newRoot)
-			if stdout, stderr, code := runConnectorCmd(t, "check-agent-settings", "--connector", "codex", "--json"); code != 0 || !strings.Contains(stdout, `"refused":false`) {
-				t.Fatalf("good selected root was refused: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+			if code, reason := check(); code != 0 {
+				t.Fatalf("good selected root was refused: code=%d reason=%q", code, reason)
 			}
 		})
 	}
