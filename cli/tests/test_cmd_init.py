@@ -49,6 +49,22 @@ from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 from tests.helpers import record_test_setup_agent_selections
 
 
+def test_init_health_probe_refuses_an_unverified_gateway() -> None:
+    from defenseclaw.commands.cmd_init import _check_sidecar_health
+    from defenseclaw.gateway import GatewayListenerNotOwnedError
+
+    with (
+        patch("time.sleep"),
+        patch("defenseclaw.gateway.OrchestratorClient") as client,
+        patch("urllib.request.urlopen") as raw,
+    ):
+        client.return_value.health.side_effect = GatewayListenerNotOwnedError("foreign listener")
+        raw.return_value.__enter__.return_value.status = 200
+        raw.return_value.__enter__.return_value.read.return_value = b'{"status":"healthy"}'
+        assert _check_sidecar_health(18970, retries=1) is None
+        raw.assert_not_called()
+
+
 def _trusted_prefixes_from_config(data_dir: str) -> list[str]:
     import yaml
 

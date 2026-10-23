@@ -424,7 +424,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		// must fail closed during readiness.
 		requirements.verifyConnectorHookTokens = expectedConnectorState.HookTokenFingerprints != nil ||
 			expectedConnectorState.OrphanHookTokenFingerprints != nil
-		requirements.verifyConnectorOTLP = true
+		requirements.verifyConnectorOTLP = rotationNativeOTLPRequired(cfg)
 	} else {
 		// Upstream agent drift refused at admission is not a start failure the
 		// previous release would avoid: leave the gateway running and report it.
@@ -489,6 +489,13 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		return hookContractAdmissionStartError(refused, snap.Guardrail.LastError)
 	}
 	return nil
+}
+
+// Per-user upgrades remove native exporter settings and scoped OTLP tokens.
+// Rotation must only require the native exporter probe on deployments that
+// still install those exporters.
+func rotationNativeOTLPRequired(cfg *config.Config) bool {
+	return cfg != nil && (cfg.StandaloneEnterprise() || cfg.SecureClientIntegration())
 }
 
 // gatewayStartAdmissionRefusedExitCode reports a gateway that is running but

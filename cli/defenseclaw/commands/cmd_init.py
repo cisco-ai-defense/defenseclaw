@@ -3753,27 +3753,21 @@ def _read_pid(pid_file: str) -> int | None:
 
 def _check_sidecar_health(api_port: int, retries: int = 3, bind: str = "127.0.0.1") -> dict | None:
     """Poll the sidecar REST API and return parsed health JSON (or None)."""
-    import json as _json
     import time
-    import urllib.error
-    import urllib.request
 
-    host = f"[{bind}]" if ":" in bind and not bind.startswith("[") else bind
-    url = f"http://{host}:{api_port}/health"
-    for i in range(retries):
+    import requests
+
+    from defenseclaw.gateway import OrchestratorClient
+
+    client = OrchestratorClient(host=bind, port=api_port, timeout=3)
+    for _ in range(retries):
         time.sleep(1)
         try:
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                if resp.status == 200:
-                    body = resp.read().decode("utf-8", errors="replace")
-                    try:
-                        health = _json.loads(body)
-                    except (_json.JSONDecodeError, TypeError):
-                        health = None
-                    _print_health_summary(health)
-                    return health
-        except (urllib.error.URLError, OSError, ValueError):
+            health = client.health()
+            if isinstance(health, dict):
+                _print_health_summary(health)
+                return health
+        except (requests.RequestException, OSError, ValueError, TypeError):
             pass
 
     click.echo("  Health:        not responding")
