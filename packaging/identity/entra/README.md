@@ -2,7 +2,7 @@
 
 Scripts and example configs for using Microsoft Entra ID users with DefenseClaw
 identity-based guardrail profiles. The guide that goes with them is published at
-<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/identity-entra-id/>.
+<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/identity/entra-id/>.
 
 DefenseClaw never calls Entra ID or Microsoft Graph. It reads who a user is from the
 operating system: the SID and sign-in token on Windows, NSS on Linux, Open Directory on

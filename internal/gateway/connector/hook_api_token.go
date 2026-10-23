@@ -574,12 +574,15 @@ func RemoveHookAPIToken(dataDir, connectorName string) error {
 }
 
 // LoadHookAPITokens loads connector-scoped hook API tokens for known connector
-// names. Missing tokens are omitted.
+// names. Missing tokens are omitted, and so are the tokens of the connectors
+// 1.0.4 removed: an upgraded host keeps the OpenHands one only so old hooks
+// reach the route that blocks them (removed.go keepHookToken); it
+// authenticates nothing.
 func LoadHookAPITokens(dataDir string, connectorNames []string) (map[string]string, error) {
 	out := map[string]string{}
 	for _, name := range connectorNames {
 		scope, err := normalizeHookAPITokenScope(name)
-		if err != nil {
+		if err != nil || IsRemovedConnector(scope) {
 			continue
 		}
 		tokenPath, err := HookAPITokenFilePath(dataDir, scope)

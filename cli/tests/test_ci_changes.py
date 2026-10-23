@@ -62,7 +62,7 @@ FAKE_REPO = {
         "func TestHealthDocsLinks(t *testing.T) {}\n"
     ),
     "internal/cli/docs_paths_test.go": 'var sandboxDoc = "sandboxes.mdx"\n',
-    "scripts/gen_envvars_docs.py": 'OUT = "docs-site/content/docs/reference/env-vars.mdx"\n',
+    "scripts/gen_envvars_docs.py": 'OUT = "docs-site/content/docs/reference/configuration/env-vars.mdx"\n',
     "scripts/live-connector-e2e/test-windows.ps1": "$ci = '.github\\workflows\\windows-native.yml'\n",
 }
 
@@ -145,7 +145,7 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
             id="docs-pinned-by-go-helper-runs-package",
         ),
         pytest.param(
-            ["docs-site/content/docs/reference/env-vars.mdx"],
+            ["docs-site/content/docs/reference/configuration/env-vars.mdx"],
             {"checks"},
             "",
             [],

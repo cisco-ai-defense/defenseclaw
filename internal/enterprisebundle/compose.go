@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	"slices"
 	"time"
 )
 
@@ -38,13 +39,19 @@ type ComposeInput struct {
 	ProductVersion string
 	HostPlatform   string
 	Digester       PolicyDigester
+
+	// SecretValues are the values of the credentials config.yaml
+	// references, by name: each secret_refs entry binds its value
+	// (CredentialValueSHA256). The manifest never carries a value.
+	SecretValues map[string][]byte
 }
 
 // Compose runs the full validator over the files and returns the manifest
 // and its exact bytes: the inline-secret scan, the canonical config load,
-// secret_refs from the credentials config.yaml names (all required),
-// files[], the per-platform effective digests and the reachability
-// warnings. It refuses errors; warnings never block.
+// secret_refs from the credentials config.yaml names (all required, each
+// bound to its value in SecretValues), files[], the per-platform effective
+// digests and the reachability warnings. It refuses errors; warnings never
+// block.
 func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 	b := &Bundle{Files: in.Bundle.Files}
 	if err := CheckInlineSecrets(b); err != nil {
@@ -66,7 +73,16 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 	}
 	refs := make([]SecretRef, 0, len(names))
 	for _, name := range names {
-		refs = append(refs, SecretRef{Ref: SecretRefScheme + name, Required: true})
+		value, ok := in.SecretValues[name]
+		if !ok {
+			return nil, nil, refuse(CodeSecretRefUnbound, "secret_refs", "config.yaml references the credential %s; give its value with --secret-file %s=<file> so the bundle binds it", safePath(name), safePath(name))
+		}
+		refs = append(refs, SecretRef{Ref: SecretRefScheme + name, Required: true, ValueSHA256: CredentialValueSHA256(in.TenantID, name, value)})
+	}
+	for name := range in.SecretValues {
+		if !slices.Contains(names, name) {
+			return nil, nil, refuse(CodeManifestInvalid, "secret_refs", "a value is given for the credential %s, which config.yaml does not reference", safePath(name))
+		}
 	}
 	ruleWarnings, _, err := RuleNotBlockingWarnings(cfg)
 	if err != nil {

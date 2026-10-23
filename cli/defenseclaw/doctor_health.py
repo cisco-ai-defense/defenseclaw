@@ -566,7 +566,7 @@ def assess_connector_health(
     return tuple(findings)
 
 
-def connector_agent_missing(data_dir: str, connector: str) -> bool:
+def connector_agent_missing(data_dir: str, connector: str, *, last_activity_at: Any = None) -> bool:
     """Whether ``connector``'s agent is not installed, so nothing runs the
     hooks setup staged for it (GAP-0513).
 
@@ -574,23 +574,85 @@ def connector_agent_missing(data_dir: str, connector: str) -> bool:
     recorded discovery scan found no installation and no executable, however
     old it is, because neither ``status`` nor ``doctor`` rescans and the
     cache's one-day lifetime made a staged connector RUNNING again on day
-    two. An executable on PATH now (an agent installed after the scan,
-    GAP-0052) and a verified harness image for the connector (the
-    sandbox-only layout, in which setup and the gateway admit the connector
-    for the agent inside the image) are not missing. Without a recorded scan
-    there is no proof, so the answer is then False. Nothing is scanned or
-    run.
+    two. A verified harness image for the connector (the sandbox-only
+    layout, in which setup and the gateway admit the connector for the
+    agent inside the image) is not missing. An executable on the PATH of
+    the shell that runs status or doctor is no proof either way: that shell
+    is not the agent, and any file named like the agent on its PATH would
+    otherwise turn a negative scan into a healthy RUNNING row (1.0.4
+    review, loop round 4). Such an agent counts once ``defenseclaw agent
+    discover --refresh`` records it or the gateway takes a hook call from
+    it; until then status and doctor only name it (GAP-0052). Without a
+    recorded scan there is no proof, so the answer is then False. Nothing
+    is scanned or run.
+
+    ``last_activity_at`` is the gateway's last authenticated hook call for
+    the connector (``ConnectorHealth.last_activity_at``). A call after the
+    scan proves the agent runs (Claude Code started from an absolute path or
+    an IDE after a scan that missed it), so the stale scan is no proof; with
+    a scan time that cannot be read, the live call wins too.
     """
 
     if not _last_scan_found_no_agent(data_dir, connector):
         return False
-    from defenseclaw.inventory import agent_discovery
-
-    if agent_discovery.binary_on_path(connector):
+    if hook_call_after_scan(data_dir, last_activity_at):
         return False
     from defenseclaw.sandbox_images import verified_harness_contract
 
     return verified_harness_contract(data_dir, connector) is None
+
+
+def hook_call_after_scan(data_dir: str, last_activity_at: Any) -> str:
+    """The gateway's last authenticated hook call for a connector, as RFC
+    3339 UTC, when it came after the last agent discovery scan (or the scan
+    time cannot be read); "" otherwise. Status and doctor both take it as
+    proof that the agent runs (connector_agent_missing)."""
+
+    activity = _parse_timestamp(last_activity_at)
+    if activity is None:
+        return ""
+    scanned = _last_scan_time(data_dir)
+    if scanned is not None and activity <= scanned:
+        return ""
+    return activity.isoformat().replace("+00:00", "Z")
+
+
+def _parse_timestamp(value: Any):
+    """An RFC 3339 timestamp (Go's nanosecond form included) as an aware
+    UTC datetime, or None."""
+
+    from datetime import datetime, timezone
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = re.sub(r"(\.\d{6})\d+", r"\1", value.strip()).replace("Z", "+00:00").replace("z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _last_scan_time(data_dir: str):
+    """The ``scanned_at`` of agent_discovery.json, or None."""
+
+    import json
+
+    from defenseclaw.inventory.agent_discovery import _cache_path
+
+    if not isinstance(data_dir, str) or not data_dir or "\x00" in data_dir:
+        return None
+    try:
+        path = _cache_path(data_dir=data_dir)
+        if path.stat().st_size > 4 << 20:
+            return None
+        with open(path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return _parse_timestamp(payload.get("scanned_at") if isinstance(payload, Mapping) else None)
 
 
 def _last_scan_found_no_agent(data_dir: str, connector: str) -> bool:

@@ -44,7 +44,7 @@ import (
 //   - claudecode response carries the top-level "claude_code_output"
 //     key (Claude Code reads that exact field).
 //   - codex response carries "codex_output".
-//   - Amp and OmniGent consume the canonical top-level action directly.
+//   - Amp consumes the canonical top-level action directly.
 //   - every other connector returns "hook_output".
 //   - all responses carry the canonical action/mode/severity fields.
 //
@@ -112,13 +112,6 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			expectAction:   "block",
 		},
 		{
-			connector:      "openhands",
-			event:          "pre_tool_use",
-			toolName:       "terminal",
-			topLevelOutput: "hook_output",
-			expectAction:   "block",
-		},
-		{
 			connector:      "antigravity",
 			event:          "PreToolUse",
 			toolName:       "run_command",
@@ -164,15 +157,6 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			connector:      "amp",
 			event:          "tool.call",
 			toolName:       "async_shell_command",
-			topLevelOutput: "",
-			expectAction:   "block",
-		},
-		{
-			connector: "omnigent",
-			event:     "PreToolUse",
-			toolName:  "bash",
-			// The Python policy consumes the canonical top-level action
-			// directly; OmniGent has no nested hook response envelope.
 			topLevelOutput: "",
 			expectAction:   "block",
 		},

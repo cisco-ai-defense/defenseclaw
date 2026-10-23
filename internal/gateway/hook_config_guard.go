@@ -69,9 +69,12 @@ var newHookConfigFSWatcher = fsnotify.NewWatcher
 var errHookRepairSuppressed = errors.New("hook registration repair is suppressed during connector transition")
 
 type hookRuntimePolicy struct {
-	hookFailMode  string
-	guardrailMode string
-	hiltEnabled   bool
+	hookFailMode string
+	// configuredHookFailMode is the config's explicit value
+	// (SetupOpts.ConfiguredHookFailMode): a per-user Cursor's outage mode.
+	configuredHookFailMode string
+	guardrailMode          string
+	hiltEnabled            bool
 }
 
 type hookRuntimePolicyResolver func(connectorName string) (hookRuntimePolicy, func(), bool)
@@ -650,6 +653,7 @@ func (g *HookConfigGuard) repairCurrent(
 	// installedFailMode is the hook fail mode the connector's hooks were last
 	// rendered with; the resolver below replaces it with the current one.
 	installedFailMode := strings.ToLower(strings.TrimSpace(opts.HookFailMode))
+	installedOutage := connector.OutageHookFailMode(opts, conn)
 	renderedOpts := opts
 	var releasePolicy func()
 	if policyResolver != nil {
@@ -666,6 +670,7 @@ func (g *HookConfigGuard) repairCurrent(
 			return errors.New("authoritative hook runtime fail mode is invalid")
 		}
 		opts.HookFailMode = policy.hookFailMode
+		opts.ConfiguredHookFailMode = policy.configuredHookFailMode
 		opts.GuardrailMode = policy.guardrailMode
 		opts.HILTEnabled = policy.hiltEnabled
 	}
@@ -684,7 +689,11 @@ func (g *HookConfigGuard) repairCurrent(
 	// Check the files against the policy that rendered them. A legitimate
 	// fail-mode change makes Windows Codex evidence differ from the new
 	// options even while every stored registration is intact.
-	failModeDrift := policyResolver != nil && installedFailMode != "" && installedFailMode != opts.HookFailMode
+	// A per-user Cursor's outage mode can change while its resolved mode
+	// (its guardrail mode) does not: an explicit open set or removed.
+	failModeDrift := policyResolver != nil &&
+		((installedFailMode != "" && installedFailMode != opts.HookFailMode) ||
+			installedOutage != connector.OutageHookFailMode(opts, conn))
 	checkOpts := opts
 	if failModeDrift {
 		checkOpts = renderedOpts
@@ -867,6 +876,7 @@ func (g *HookConfigGuard) activeConnector() connector.Connector {
 func (g *HookConfigGuard) adoptRenderedPolicy(opts connector.SetupOpts) {
 	g.mu.Lock()
 	g.opts.HookFailMode = opts.HookFailMode
+	g.opts.ConfiguredHookFailMode = opts.ConfiguredHookFailMode
 	g.opts.GuardrailMode = opts.GuardrailMode
 	g.opts.HILTEnabled = opts.HILTEnabled
 	g.mu.Unlock()

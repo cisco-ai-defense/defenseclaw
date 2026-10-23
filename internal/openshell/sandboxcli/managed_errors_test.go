@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // On a managed computer a launch refusal read "blocked by …: <sentence>:
@@ -39,6 +40,12 @@ func TestManagedLaunchRefusalsReadInTheOrganizationsWords(t *testing.T) {
 		want string
 	}{
 		{"second account", busy, busy.Message},
+		{"outdated service", &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Detail: sandboxrelay.ReasonDaemonOutdated,
+			Message: "Your sandbox service is outdated; stop your sandboxes with defenseclaw sandbox stop NAME, then retry."},
+			"Your sandbox service is outdated; stop your sandboxes with defenseclaw sandbox stop NAME, then retry."},
+		{"authorized driver switch", &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Detail: sandboxrelay.DetailSetupChanging,
+			Message: "Stop your sandboxes with defenseclaw sandbox stop NAME, then retry to finish the authorized update."},
+			"Stop your sandboxes with defenseclaw sandbox stop NAME, then retry to finish the authorized update."},
 		{"profile revoked", &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Detail: "sandbox_not_allowed",
 			Message: "Your organization doesn't allow sandboxes for your account."},
 			"Blocked by your organization's DefenseClaw policy: Your organization doesn't allow sandboxes for your account (profile contractors).\n" + contact},

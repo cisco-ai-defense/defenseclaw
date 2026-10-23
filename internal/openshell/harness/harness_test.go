@@ -64,7 +64,7 @@ func TestRegistry(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("OpenShell sandbox artifacts are not rendered on Windows hosts")
 	}
-	if want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "omnigent", "opencode", "openhands"}; !slices.Equal(Names(), want) || !sort.StringsAreSorted(Names()) {
+	if want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode"}; !slices.Equal(Names(), want) || !sort.StringsAreSorted(Names()) {
 		t.Fatalf("Names() = %v, want %v", Names(), want)
 	}
 	catalog := map[string]bool{}
@@ -190,14 +190,11 @@ func TestInstallStepsPinContract(t *testing.T) {
 		{"hermes-below-contract", Hermes, "0.18.2", nil, ErrUnknownContract},
 		{"hermes-above-contracts", Hermes, "0.22.0", nil, ErrUnknownContract},
 		{"hermes-not-exact", Hermes, "latest", nil, nil},
-		{"openhands-pin", OpenHands, "", []string{"'openhands==1.16.0'", "is not the pinned"}, nil},
-		{"openhands-below-contract", OpenHands, "1.11.0", nil, ErrUnknownContract},
 		{"antigravity-pin", Antigravity, "", []string{"sha512sum -c", "1.2.12-5784551402897408", "aarch64)", "x86_64)", "is not the pinned"}, nil},
 		{"antigravity-below-contract", Antigravity, "1.1.7", nil, ErrUnknownContract},
 		{"antigravity-unpinned-build", Antigravity, "1.2.13", nil, nil},
 		// Inside the host contract (>=0.7.0), but its image never fires
 		// AfterAgentResponse (RT-A-2).
-		{"omnigent-below-sandbox-floor", OmniGent, "0.12.0", nil, ErrUnknownContract},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			steps, err := tc.spec.InstallSteps(tc.version)
@@ -490,39 +487,16 @@ func TestLaunchArgv(t *testing.T) {
 			[]string{HermesLauncherPath, "chat", "-q", "fix it", "-Q", "--yolo", "--provider", "defenseclaw", "-m", HermesMantleDefaultModel}},
 		{"hermes-safe-anthropic", Hermes, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.AnthropicID},
 			[]string{HermesLauncherPath, "--provider", "anthropic"}},
-		{"openhands-headless-yolo", OpenHands, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "p", CredentialProfile: profiles.OpenAIID},
-			[]string{OpenHandsLauncherPath, "--headless", "--exit-without-confirmation", "-t", "p", "--always-approve", "--override-with-envs"}},
-		{"openhands-interactive-safe", OpenHands, LaunchOptions{Mode: Interactive}, []string{OpenHandsLauncherPath}},
 		{"antigravity-headless-yolo", Antigravity, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "p", CredentialProfile: profiles.GeminiID},
 			[]string{AntigravityLauncherPath, "-p", "p", "--dangerously-skip-permissions"}},
 		{"antigravity-interactive", Antigravity, LaunchOptions{Mode: Interactive, Args: []string{"--model", "gemini-3.1-pro"}},
 			[]string{AntigravityLauncherPath, "--model", "gemini-3.1-pro"}},
-		// The OmniGent sandbox agent names no model: a credential profile
 		// brings its default, or the caller passes one.
-		{"omnigent-headless-mantle", OmniGent, LaunchOptions{Mode: Headless, Prompt: "p", CredentialProfile: profiles.BedrockMantleOpenAIID},
-			[]string{OmniGentLauncherPath, "run", "-p", "p", "--model", omnigentMantleModel}},
-		{"omnigent-mantle-own-model", OmniGent, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.BedrockMantleOpenAIID, Args: []string{"--model=openai.gpt-oss-120b"}},
-			[]string{OmniGentLauncherPath, "run", "--model=openai.gpt-oss-120b"}},
-		{"omnigent-openai-model", OmniGent, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.OpenAIID, Args: []string{"--model", "gpt-5-mini"}},
-			[]string{OmniGentLauncherPath, "run", "--model", "gpt-5-mini"}},
 		// `sandbox connect NAME -- --continue` continues the sandbox agent's
 		// latest conversation (OG-U2).
-		{"omnigent-continue", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"--model", "mock-model", "--continue"}},
-			[]string{OmniGentLauncherPath, "run", "--model", "mock-model", "--continue"}},
-		// The shell wrapper forwards `omnigent run …` as typed, OmniGent's
 		// own resume hint among them, after the sandbox's stored arguments
 		// on a resume: the subcommand is dropped, not taken for the agent.
-		{"omnigent-wrapped-run", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"run", "--model", "gpt-5-mini"}},
-			[]string{OmniGentLauncherPath, "run", "--model", "gpt-5-mini"}},
-		{"omnigent-wrapped-resume", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"--model", "mock-model", "run",
-			connector.SandboxCanonicalDir("omnigent") + "/agent", "--model", "mock-model", "--resume", "b2b58f42"}},
-			[]string{OmniGentLauncherPath, "run", "--model", "mock-model", connector.SandboxCanonicalDir("omnigent") + "/agent",
-				"--model", "mock-model", "--resume", "b2b58f42"}},
 		// An option's value, the agent, and anything after it stay.
-		{"omnigent-run-as-values", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"-p", "run", "--resume", "run", "--tools", "run", "./agent", "run"}},
-			[]string{OmniGentLauncherPath, "run", "-p", "run", "--resume", "run", "--tools", "run", "./agent", "run"}},
-		{"omnigent-resume-picker", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"--resume", "--model=m", "run"}},
-			[]string{OmniGentLauncherPath, "run", "--resume", "--model=m"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := tc.spec.LaunchArgv(tc.opts)
@@ -535,13 +509,12 @@ func TestLaunchArgv(t *testing.T) {
 		spec *Spec
 		opts LaunchOptions
 	}{
-		"headless-no-prompt":       {ClaudeCode, LaunchOptions{Mode: Headless}},
-		"unknown-mode":             {ClaudeCode, LaunchOptions{Mode: "detached"}},
-		"foreign-profile":          {ClaudeCode, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.OpenAIID}},
-		"antigravity-openai":       {Antigravity, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.OpenAIID}},
-		"omnigent-openai-no-model": {OmniGent, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.OpenAIID}},
+		"headless-no-prompt": {ClaudeCode, LaunchOptions{Mode: Headless}},
+		"unknown-mode":       {ClaudeCode, LaunchOptions{Mode: "detached"}},
+		"foreign-profile":    {ClaudeCode, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.OpenAIID}},
+		"antigravity-openai": {Antigravity, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.OpenAIID}},
 	} {
-		if _, err := tc.spec.LaunchArgv(tc.opts); err == nil || name == "omnigent-openai-no-model" && !strings.Contains(err.Error(), "--model") {
+		if _, err := tc.spec.LaunchArgv(tc.opts); err == nil {
 			t.Errorf("%s: launch argv rendered or the error does not say what is missing: %v", name, err)
 		}
 	}
@@ -598,12 +571,8 @@ func TestEnv(t *testing.T) {
 		{"hermes mantle", Hermes, EnvOptions{CredentialProfile: profiles.BedrockMantleOpenAIID, BedrockRegion: "us-west-2"}, map[string]string{
 			connector.HermesSandboxProviderBaseURLEnv: "https://bedrock-mantle.us-west-2.api.aws/v1", "NO_PROXY": mantleWest,
 		}},
-		{"openhands mantle", OpenHands, EnvOptions{CredentialProfile: profiles.BedrockMantleOpenAIID},
-			map[string]string{"LLM_BASE_URL": "https://bedrock-mantle.us-east-1.api.aws/v1", "OPENHANDS_SUPPRESS_BANNER": "1"}},
 		{"antigravity gemini", Antigravity, EnvOptions{CredentialProfile: profiles.GeminiID},
 			map[string]string{"NO_PROXY": "generativelanguage.googleapis.com,host.openshell.internal"}},
-		{"omnigent mantle", OmniGent, EnvOptions{CredentialProfile: profiles.BedrockMantleOpenAIID, BedrockRegion: "eu-west-1"},
-			map[string]string{"OPENAI_BASE_URL": "https://bedrock-mantle.eu-west-1.api.aws/v1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := tc.opts
@@ -672,7 +641,6 @@ func TestProbeVersionPatterns(t *testing.T) {
 		{Kiro, "kiro-cli-chat 2.24.1", "2.24.1"},
 		{Devin, "devin 3000.4.25 (7e8e528a)", "3000.4.25"},
 		{Hermes, "Hermes Agent v0.19.0 (2026.7.20)\n", "0.19.0"},
-		{OpenHands, "OpenHands CLI 1.16.0\n", "1.16.0"},
 		{Antigravity, "1.2.12\n", "1.2.12"},
 	} {
 		if m := tc.spec.Probe().VersionRE.FindStringSubmatch(strings.TrimSpace(tc.out)); len(m) != 2 || m[1] != tc.want {
@@ -724,10 +692,6 @@ func TestBypassArgs(t *testing.T) {
 			[]string{"--permission-mode", "auto"}, []string{"--permission-mode", "dangerous", "--permission-mode=autonomous"}},
 		{"hermes yolo prefixes", Hermes, []string{"--y", "--yo", "--yol", "--yolo", "-m", "m"}, []string{"-m", "m"}, []string{"--y", "--yo", "--yol", "--yolo"}},
 		{"hermes other options", Hermes, []string{"--yes", "--yolo-extra", "--", "--yolo"}, []string{"--yes", "--yolo-extra", "--", "--yolo"}, nil},
-		{"openhands approve prefixes", OpenHands,
-			[]string{"--a", "--always", "--always-approve", "--y", "--yolo", "--ll", "--llm-approve", "-t", "x"},
-			[]string{"-t", "x"}, []string{"--a", "--always", "--always-approve", "--y", "--yolo", "--ll", "--llm-approve"}},
-		{"openhands ambiguous", OpenHands, []string{"--l", "--headless"}, []string{"--l", "--headless"}, nil},
 		{"agy go flags", Antigravity,
 			[]string{"--dangerously-skip-permissions", "-dangerously-skip-permissions", "--dangerously-skip-permissions=true", "-dangerously-skip-permissions=1", "-p", "x"},
 			[]string{"-p", "x"}, []string{"--dangerously-skip-permissions", "-dangerously-skip-permissions", "--dangerously-skip-permissions=true", "-dangerously-skip-permissions=1"}},
@@ -760,11 +724,7 @@ func TestBypassArgs(t *testing.T) {
 				added = append(added, arg)
 			}
 		}
-		// OmniGent has no permission prompts of its own to skip: its
 		// policies, DefenseClaw's among them, decide in the server.
-		if len(added) == 0 && name != "omnigent" {
-			t.Errorf("%s: a yolo launch adds no flag", name)
-		}
 		if kept, _ := spec.BypassArgs(added); len(kept) != 0 {
 			t.Errorf("%s: safe launches keep the yolo flags %q", name, kept)
 		}

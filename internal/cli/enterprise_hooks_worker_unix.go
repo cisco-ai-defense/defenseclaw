@@ -169,6 +169,13 @@ type enterpriseHookWorkerRequest struct {
 	// TimeoutSeconds replaces enterpriseHookWorkerTimeout for this worker
 	// (remove-all's retry of a worker that timed out).
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// CleanupFence tells a foreign_cleanup worker that the guardian passed
+	// the cleanup fence pipes (enterprise_hooks_worker_fence_unix.go). The
+	// guardian sets it from cleanupFence.
+	CleanupFence bool `json:"cleanup_fence,omitempty"`
+	// cleanupFence is the guardian's side of those pipes; it never leaves
+	// the guardian.
+	cleanupFence *enterpriseForeignHookFenceSession
 }
 
 // enterpriseHookWorkerCopilotVSCode is what the user's home should hold
@@ -437,8 +444,16 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 				return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("the foreign cleanup does not take mode %q", target.Mode)}, 3)
 			}
 		}
+		var fence enterpriseForeignHookCleanupFence
+		if request.CleanupFence {
+			pipe, err := openEnterpriseHookWorkerFencePipe()
+			if err != nil {
+				return respond(enterpriseHookWorkerResponse{Error: err.Error()}, 3)
+			}
+			fence = pipe
+		}
 		now := time.Now()
-		response := enterpriseHookWorkerResponse{Cleanup: runEnterpriseHookWorkerForeignCleanup(request, now)}
+		response := enterpriseHookWorkerResponse{Cleanup: runEnterpriseHookWorkerForeignCleanup(request, now, fence)}
 		if request.CopilotVSCode != nil {
 			response.CopilotVSCode = runEnterpriseHookWorkerCopilotVSCode(request)
 		}
@@ -956,7 +971,7 @@ func enterpriseHookWorkerConfigReferenceLine(data []byte, customDataDir string) 
 		"defenseclaw-managed-hook", "x-defenseclaw-source", "x-defenseclaw-client",
 		"x-defenseclaw-token", "defenseclaw-hook", "defenseclaw-gateway",
 		"defenseclaw.js", "defenseclaw.ts", "defenseclaw.json",
-		"defenseclaw_omnigent_policy", "defenseclaw.listener-proof.v1",
+		"defenseclaw.listener-proof.v1",
 	}
 	for index, raw := range bytes.Split(data, []byte{'\n'}) {
 		line := strings.TrimSpace(string(raw))
@@ -1159,6 +1174,7 @@ func runEnterpriseHookWorker(
 	request.Version = enterpriseHookWorkerProtocolVersion
 	request.UID, request.GID = account.UID, account.GID
 	request.User, request.Home = account.User, account.Home
+	request.CleanupFence = request.cleanupFence != nil
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return enterpriseHookWorkerResponse{}, err
@@ -1194,7 +1210,12 @@ func runEnterpriseHookWorker(
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = 2 * time.Second
+	stopFence, err := attachEnterpriseHookWorkerFence(ctx, cmd, request)
+	if err != nil {
+		return enterpriseHookWorkerResponse{}, err
+	}
 	runErr := cmd.Run()
+	stopFence()
 	forwardEnterpriseHookWorkerStderr(account, stderr)
 	if ctx.Err() != nil {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w", account.UID, ctx.Err())
@@ -1261,8 +1282,7 @@ func enterpriseHookWorkerCredential(account enterpriseHookWorkerAccount, supplem
 }
 
 // enterpriseHookWorkerPath lets connector setup find an agent where
-// discovery found it (OmniGent locates itself on PATH), after the system
-// directories so they always win. The worker runs as the user, so the
+// discovery found it, after the system directories so they always win. The worker runs as the user, so the
 // user-owned entries grant nothing the user does not already have; a
 // standalone worker leaves out machine directories another account could
 // change (enterprisehooks.UnixAgentSearchDirsFor).
@@ -1353,8 +1373,10 @@ func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterprise
 		go func(i int) {
 			defer wg.Done()
 			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
 			response, err := enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)
+			// The slot is free before done runs: a removal record that waits
+			// for its account's lock never holds off another account's worker.
+			<-semaphore
 			outcomes[i] = enterpriseHookWorkerOutcome{Job: jobs[i], Response: response, Err: err}
 			if done != nil {
 				done(outcomes[i])

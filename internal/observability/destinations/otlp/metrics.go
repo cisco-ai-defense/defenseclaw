@@ -20,10 +20,12 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
+	"go.opentelemetry.io/otel/attribute"
 	metricgrpc "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	metrichttp "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"go.opentelemetry.io/otel/sdk/resource"
 	"google.golang.org/grpc"
 )
 
@@ -170,6 +172,7 @@ func (factory *Factory) newPeriodicMetricReader(ctx context.Context, selected ma
 	if selected != nil {
 		sdkExporter = &filteredMetricExporter{inner: exporter, selected: selected}
 	}
+	sdkExporter = restrictedResourceMetricExporter{Exporter: sdkExporter}
 	options := []sdkmetric.PeriodicReaderOption{sdkmetric.WithInterval(interval)}
 	if timeout := factory.config.Batch.ExportTimeout; timeout > 0 {
 		options = append(options, sdkmetric.WithTimeout(timeout))
@@ -248,6 +251,59 @@ func (exporter *filteredMetricExporter) Export(ctx context.Context, source *metr
 		return nil
 	}
 	return exporter.inner.Export(ctx, filtered)
+}
+
+// restrictedResourceMetricExporter sends the managed sandbox counters
+// (observability.ResourceRestrictedMetric) in an export of their own, with
+// the resource cut to observability.RestrictedMetricResourceKey, so a
+// collector that turns resource attributes into labels gives them no host,
+// tenant or device label. Every other metric keeps the full resource.
+type restrictedResourceMetricExporter struct{ sdkmetric.Exporter }
+
+func (exporter restrictedResourceMetricExporter) Export(ctx context.Context, source *metricdata.ResourceMetrics) error {
+	if source == nil {
+		return exporter.Exporter.Export(ctx, source)
+	}
+	general := &metricdata.ResourceMetrics{Resource: source.Resource}
+	restricted := &metricdata.ResourceMetrics{}
+	for _, scope := range source.ScopeMetrics {
+		var kept, cut []metricdata.Metrics
+		for _, metric := range scope.Metrics {
+			if observability.ResourceRestrictedMetric(metric.Name) {
+				cut = append(cut, metric)
+			} else {
+				kept = append(kept, metric)
+			}
+		}
+		if len(kept) > 0 {
+			general.ScopeMetrics = append(general.ScopeMetrics, metricdata.ScopeMetrics{Scope: scope.Scope, Metrics: kept})
+		}
+		if len(cut) > 0 {
+			restricted.ScopeMetrics = append(restricted.ScopeMetrics, metricdata.ScopeMetrics{Scope: scope.Scope, Metrics: cut})
+		}
+	}
+	if len(restricted.ScopeMetrics) == 0 {
+		return exporter.Exporter.Export(ctx, source)
+	}
+	restricted.Resource = restrictedMetricResource(source.Resource)
+	var err error
+	if len(general.ScopeMetrics) > 0 {
+		err = exporter.Exporter.Export(ctx, general)
+	}
+	return errors.Join(err, exporter.Exporter.Export(ctx, restricted))
+}
+
+func restrictedMetricResource(full *resource.Resource) *resource.Resource {
+	if full == nil {
+		return resource.Empty()
+	}
+	var kept []attribute.KeyValue
+	for iter := full.Iter(); iter.Next(); {
+		if kv := iter.Attribute(); observability.RestrictedMetricResourceKey(string(kv.Key)) {
+			kept = append(kept, kv)
+		}
+	}
+	return resource.NewWithAttributes(full.SchemaURL(), kept...)
 }
 
 func (exporter *filteredMetricExporter) ForceFlush(ctx context.Context) error {

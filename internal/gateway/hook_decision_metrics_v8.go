@@ -17,7 +17,6 @@ import (
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -102,7 +101,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 		}
 		builder, buildErr := observability.NewFamilyBuilder(
 			observability.ClockFunc(func() time.Time { return time.Now().UTC() }),
-			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			observability.TimeOrderedOccurrenceIDs,
 		)
 		if buildErr != nil {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
@@ -458,7 +457,7 @@ func hookDecisionV8Outcome(action, result string) observability.Outcome {
 		return observability.OutcomeAllowed
 	case "block":
 		return observability.OutcomeBlocked
-	case "confirm":
+	case "confirm", hookActionUnconfirmed:
 		return observability.OutcomePartial
 	default:
 		return observability.OutcomeCompleted

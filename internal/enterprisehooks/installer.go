@@ -268,7 +268,7 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err)
 			}
 			if !present {
-				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name())
+				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", conn.Name(), ownedHookAbsentDetail(conn, setupOpts))
 			}
 			// Match validateHookContract's mode selection so Verify does not
 			// load and re-hash the lock in bounded/managed mode on Unix
@@ -562,6 +562,14 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		}
 
 		return withOwnerCredentials(uid, gid, func() error {
+			// Held until the hook contract lock names this connector: a
+			// removal of the account's last other connector would take the
+			// shared scripts Setup writes (lockSharedHookRuntime).
+			unlock, err := lockSharedHookRuntime(ctx, home)
+			if err != nil {
+				return err
+			}
+			defer unlock()
 			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
 			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
 			lockWriteAttempted := false
@@ -596,11 +604,6 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 					}
 				}
 				return errors.Join(failures...)
-			}
-			// OpenHands on macOS admits only a protected, setup-selected
-			// executable: record the user's own image before setup.
-			if err := selectManagedAgentExecutable(home, dataDir, conn.Name(), &setupOpts); err != nil {
-				return err
 			}
 			// A rollback removes what Setup adds below the data directory
 			// (GAP-0509).
@@ -640,7 +643,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err))
 			}
 			if !present {
-				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name()))
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", conn.Name(), ownedHookAbsentDetail(conn, setupOpts)))
 			}
 			// See Verify for the rationale: keep Install's persistence
 			// mode consistent with validateHookContract's drift check.
@@ -1464,7 +1467,7 @@ func standaloneAcceptsAgentVersionChange(resolution connector.HookContractResolu
 // the standalone profile; standalone keeps fail-closed delivery, its version
 // gates and its refusals.
 func secureClientHookDelivery() bool {
-	return secureClientHookDeliveryHost && !standaloneProfileProcess()
+	return secureClientHookDeliveryHost && !standaloneProfileProcess() && connector.SecureClientDeploymentVerified()
 }
 
 // secureClientHookDeliveryHost reports whether this OS has a Secure Client
@@ -1492,7 +1495,7 @@ func hookContractsIncompatible(previous, current connector.HookContractLockEntry
 	}
 	previousID := strings.TrimSpace(previous.ContractID)
 	currentID := strings.TrimSpace(current.ContractID)
-	// A connector whose hooks are not version-gated (Kiro, OpenHands) has no
+	// A connector whose hooks are not version-gated (Kiro) has no
 	// contract to verify; it stays compatible while it keeps the not-gated
 	// status and contract it was installed with. Without this every install
 	// after the first, and every verify, would select open delivery and
@@ -1571,4 +1574,16 @@ func agentVersionStatus(connectorName, agentVersion string) string {
 		return connector.UntestedNewerVersionReasonPrefix
 	}
 	return ""
+}
+
+// ownedHookAbsentDetail is the reason an owned-hook check found no accepted
+// registration, for verify and install errors. The guardian's watch log and
+// status show it, so an agent rewriting its own config is diagnosable without
+// rerunning the check by hand.
+func ownedHookAbsentDetail(conn connector.Connector, opts connector.SetupOpts) string {
+	reason := strings.TrimSpace(connector.OwnedHooksAbsentReason(conn, opts))
+	if reason == "" {
+		return "owned hook command not present"
+	}
+	return "owned hook command not present: " + reason
 }

@@ -217,3 +217,41 @@ func TestWindowsCopilotVSCodeUserOwnsTheLocalHookFile(t *testing.T) {
 		t.Fatalf("hook file left behind: %v", err)
 	}
 }
+
+// The machine-policy pass holds no removal lock of its own while it cleans
+// a user's hooks: a slow scan that removes nothing never keeps the
+// account's gateway exchanges waiting.
+func TestWindowsForeignCleanupHoldsNoLockWhileItCleans(t *testing.T) {
+	useForeignHookGuardian(t, nil)
+	previousOptions, previousProfiles := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles
+	previousCleanup, previousBlocks := enterpriseForeignHookCleanup, enterpriseForeignHookCollectBlocks
+	t.Cleanup(func() {
+		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles = previousOptions, previousProfiles
+		enterpriseForeignHookCleanup, enterpriseForeignHookCollectBlocks = previousCleanup, previousBlocks
+		enterpriseHookWindowsForeignCleanupState.last, enterpriseHookWindowsForeignCleanupState.fingerprint = time.Time{}, ""
+	})
+	enterpriseHookWindowsForeignCleanupState.last, enterpriseHookWindowsForeignCleanupState.fingerprint = time.Time{}, ""
+	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
+		return enterprisepolicy.Options{}, []string{"cursor"}, true, nil
+	}
+	const alice = "S-1-5-21-1-2-3-1001"
+	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) {
+		return []enterprisehooks.TargetCredentials{{UserHome: `C:\Users\alice`, UID: -1, GID: -1, SID: alice}}, nil
+	}
+	enterpriseForeignHookCollectBlocks = func(enterprisehooks.TargetCredentials) ([]enterprisepolicy.BlockSummary, int, error) {
+		return nil, 0, nil
+	}
+	calls := 0
+	enterpriseForeignHookCleanup = func(enterprisehooks.TargetCredentials, string, string) (enterprisepolicy.CleanupResult, error) {
+		calls++
+		if !accountRemovalLockFree(t, alice, 200*time.Millisecond) {
+			t.Error("the machine-policy pass holds the account's removal lock while it scans")
+		}
+		return enterprisepolicy.CleanupResult{}, nil
+	}
+	var log bytes.Buffer
+	enterpriseHookStandalonePlatformFinish(context.Background(), &log, nil, time.Now())
+	if calls != 1 {
+		t.Fatalf("cleanup calls = %d\n%s", calls, log.String())
+	}
+}

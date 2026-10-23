@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Contracts for the Tetragon fleet examples (packaging/mdm/linux/examples/tetragon).
 
-The guide at docs-site/content/docs/enterprise/tetragon.mdx embeds these files
+The guide at docs-site/content/docs/enterprise/runtime/tetragon.mdx embeds these files
 verbatim. These checks keep them honest: they parse, the config template renders
 for every ring and fits the config schema, every DefenseClaw command they run is
 documented in the CLI reference, the fleet script summarizes correctly against a
@@ -26,8 +26,8 @@ yaml = pytest.importorskip("yaml")
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "packaging" / "mdm" / "linux" / "examples" / "tetragon"
-GUIDE = ROOT / "docs-site" / "content" / "docs" / "enterprise" / "tetragon.mdx"
-CLI_REFERENCE = ROOT / "docs-site" / "content" / "docs" / "reference" / "cli.mdx"
+GUIDE = ROOT / "docs-site" / "content" / "docs" / "enterprise" / "runtime" / "tetragon-reference.mdx"
+CLI_REFERENCE = ROOT / "docs-site" / "content" / "docs" / "reference" / "commands" / "cli.mdx"
 SCHEMA = ROOT / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json"
 
 PLAYS = ("harden-tetragon.yml", "defenseclaw-tetragon.yml", "fleet-readiness.yml", "emergency-pause.yml")

@@ -71,6 +71,9 @@ type rulePackWireResponse struct {
 	Valid       bool                       `json:"valid"`
 	Summary     *guardrail.RulePackSummary `json:"summary,omitempty"`
 	Error       *rulePackWireDiagnostic    `json:"error,omitempty"`
+	// Warnings are the valid pack's detection-only rules, as the text output
+	// prints them, so `defenseclaw guardrail validate-pack` shows them too.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 var rulePackCmd = &cobra.Command{
@@ -161,11 +164,15 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 	}
 
 	summary := rp.Summary()
+	warnings, note := rulePackDetectionOnlyWarnings(rp)
 	response := rulePackWireResponse{
 		WireVersion: rulePackWireVersion,
 		Kind:        "validation",
 		Valid:       true,
 		Summary:     &summary,
+	}
+	if rulePackValidateJSON {
+		response.Warnings = boundedRulePackWireWarnings(warnings)
 	}
 	problem := ""
 	if rulePackValidateDir != "" {
@@ -176,6 +183,11 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 		// gateway will refuse (GAP-1274).
 		fmt.Fprintf(cmd.OutOrStdout(), "rule pack syntax is valid: %d files, %d rules, digest %s\n",
 			summary.RuleFileCount, summary.RuleCount, summary.Digest)
+		if !rulePackSecureClient() {
+			// The pin is printed before the failure so the operator can
+			// pin the pack once its permissions are fixed (GAP-0757).
+			fmt.Fprintf(cmd.OutOrStdout(), "custom_packs pin: sha256:%s\n", summary.FilesDigest)
+		}
 		return fmt.Errorf("the gateway cannot load this pack: %s", problem)
 	}
 	if err := writeRulePackValidation(cmd.OutOrStdout(), response, rulePackValidateJSON); err != nil {
@@ -185,33 +197,65 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: the gateway cannot load this pack: %s\n", problem)
 	}
 	if !rulePackValidateJSON {
-		var customerIDs, shippedIDs []string
-		for _, ruleFile := range rp.RuleFiles {
-			if ruleFile == nil {
-				continue
-			}
-			for _, rule := range ruleFile.Rules {
-				if rule.Enabled != nil && !*rule.Enabled || !rule.ToolCallOnly || rule.Expression != "" {
-					continue
-				}
-				id := safeRulePackWireText(rule.ID, 64, "(unsafe rule id)")
-				if shippedToolCallRegexIDs[rule.ID] {
-					shippedIDs = append(shippedIDs, id)
-				} else {
-					customerIDs = append(customerIDs, id)
-				}
-			}
+		for _, warning := range warnings {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warning)
 		}
-		sort.Strings(customerIDs)
-		for _, id := range customerIDs {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: customer rule %s uses tool_call_only without an expression; its tool-call pattern matches use the regex fallback, which is detection-only and cannot block\n", id)
-		}
-		if len(customerIDs) > 0 && len(shippedIDs) > 0 {
-			sort.Strings(shippedIDs)
-			fmt.Fprintf(cmd.ErrOrStderr(), "note: known shipped rule IDs using the same fallback: %s\n", strings.Join(shippedIDs, ", "))
+		if note != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "note: %s\n", note)
 		}
 	}
 	return nil
+}
+
+// rulePackDetectionOnlyWarnings names each enabled customer rule that uses
+// tool_call_only without an expression, and notes the shipped rules that use
+// the same fallback when there is one.
+func rulePackDetectionOnlyWarnings(rp *guardrail.RulePack) (warnings []string, note string) {
+	var customerIDs, shippedIDs []string
+	for _, ruleFile := range rp.RuleFiles {
+		if ruleFile == nil {
+			continue
+		}
+		for _, rule := range ruleFile.Rules {
+			if rule.Enabled != nil && !*rule.Enabled || !rule.ToolCallOnly || rule.Expression != "" {
+				continue
+			}
+			id := safeRulePackWireText(rule.ID, 64, "(unsafe rule id)")
+			if shippedToolCallRegexIDs[rule.ID] {
+				shippedIDs = append(shippedIDs, id)
+			} else {
+				customerIDs = append(customerIDs, id)
+			}
+		}
+	}
+	sort.Strings(customerIDs)
+	for _, id := range customerIDs {
+		warnings = append(warnings, "customer rule "+id+" uses tool_call_only without an expression; its tool-call "+
+			"pattern matches use the regex fallback, which is detection-only and cannot block")
+	}
+	if len(customerIDs) > 0 && len(shippedIDs) > 0 {
+		sort.Strings(shippedIDs)
+		note = "known shipped rule IDs using the same fallback: " + strings.Join(shippedIDs, ", ")
+	}
+	return warnings, note
+}
+
+// maxRulePackWireWarnings is the most warnings a JSON result carries, the
+// limit of the `defenseclaw guardrail validate-pack` bridge
+// (_MAX_WARNINGS in cli/defenseclaw/rulepack_validation.py). A valid pack
+// can hold up to 4096 detection-only rules.
+const maxRulePackWireWarnings = 256
+
+// boundedRulePackWireWarnings keeps a JSON result's warnings within
+// maxRulePackWireWarnings: past it, the last line counts the rest.
+func boundedRulePackWireWarnings(warnings []string) []string {
+	if len(warnings) <= maxRulePackWireWarnings {
+		return warnings
+	}
+	kept := append([]string(nil), warnings[:maxRulePackWireWarnings-1]...)
+	return append(kept, fmt.Sprintf("%d more customer rules use tool_call_only without an expression; "+
+		"their tool-call pattern matches use the regex fallback, which is detection-only and cannot block",
+		len(warnings)-len(kept)))
 }
 
 func writeRulePackValidation(w io.Writer, response rulePackWireResponse, asJSON bool) error {

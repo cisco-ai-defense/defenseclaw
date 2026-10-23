@@ -24,6 +24,7 @@ interface ConnectorRow {
     askEvents: string[];
     blockEvents: string[];
     supportsFailClosed: boolean;
+    blocksDeliveryFailures?: boolean;
     scope: 'user' | 'workspace';
   };
   // OpenShell sandbox support. "artifacts" means DefenseClaw renders the
@@ -235,7 +236,12 @@ export function CapabilityMatrix() {
                 )}
               </Td>
               <Td>
-                <Tick on={c.hooks.supportsFailClosed} />
+                <Tick on={c.hooks.supportsFailClosed || c.hooks.blocksDeliveryFailures === true} />
+                {c.hooks.blocksDeliveryFailures && !c.hooks.supportsFailClosed && (
+                  <div className="mt-1 text-xs text-fd-muted-foreground">
+                    Timeout or spawn failure can allow
+                  </div>
+                )}
               </Td>
               <Td>
                 <Sandbox sandbox={c.sandbox} />

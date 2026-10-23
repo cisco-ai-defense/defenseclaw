@@ -237,14 +237,14 @@ func TestACPScopedTokenRequiresPrivateRegularFile(t *testing.T) {
 	dataDir := writePrivateACPToken(t, "scoped-token")
 	path := filepath.Join(dataDir, "acp", ".token")
 	api := &APIServer{scannerCfg: &config.Config{DataDir: dataDir}}
-	if !api.acpAPITokenMatches("scoped-token") || api.acpAPITokenMatches("wrong") {
-		t.Fatal("scoped ACP token comparison failed")
+	if token, ok := api.loadACPAPIToken(); !ok || token != "scoped-token" {
+		t.Fatalf("private ACP token was not loaded: ok=%v", ok)
 	}
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(path, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if api.acpAPITokenMatches("scoped-token") {
+		if _, ok := api.loadACPAPIToken(); ok {
 			t.Fatal("group/world-readable ACP token was accepted")
 		}
 	}
@@ -300,10 +300,13 @@ func TestACPEnterpriseCredentialPinsRequestBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(evaluation))
-	authenticated, ok := api.authenticateACPToken(r, credential.Token)
+	// The signed transport resolves the credential by its key ID and pins
+	// its scope to the request (authenticateACPSignedRequest).
+	matched, _, ok := acp.MatchEnterpriseCredentialKeyID(dataDir, acp.HTTPAuthKeyID(credential.Token))
 	if !ok {
-		t.Fatal("managed credential did not authenticate")
+		t.Fatal("managed credential did not resolve")
 	}
+	authenticated := r.WithContext(withACPEnterpriseCredential(r.Context(), matched))
 	w := httptest.NewRecorder()
 	api.handleACPEvaluate(w, authenticated)
 	if w.Code != http.StatusOK {

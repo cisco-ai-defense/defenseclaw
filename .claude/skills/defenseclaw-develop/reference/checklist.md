@@ -23,7 +23,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 - [ ] **M-CFG-8** Store a reference to a credential (`*_env` name or credential reference), never the value. Extend masking for any new sensitive field. Why: `config show` and logs must not print secrets.
   Check: `pytest cli/tests/test_cmd_config.py`. Evidence: `internal/config/secret_ref_v8.go`, `cli/defenseclaw/commands/cmd_config.py` (`@sym:_SECRET_FIELDS`).
 - [ ] **M-CFG-9** No second source for a setting: no new hidden env var, flag or side file that overrides `config.yaml`. Why: it breaks provenance in `config get --effective` and managed control.
-  Check: grep the diff for `Getenv` and `os.environ`. Evidence: `docs-site/content/docs/reference/source-of-truth.mdx`.
+  Check: grep the diff for `Getenv` and `os.environ`. Evidence: `docs-site/content/docs/reference/configuration/source-of-truth.mdx`.
 - [ ] **M-CFG-10** Register every `DEFENSECLAW_*` variable with a managed policy, then regenerate the docs. Security opt-outs are `ignore` or `tighten_only` and surface in doctor. Why: a codebase-coverage test fails on an unregistered name; an inherited variable must not weaken a managed host.
   Check: `python scripts/gen_envvars_docs.py --check` and `go test ./internal/envvars`. Evidence: `internal/envvars/registry.json`, `cli/tests/test_envvars_codebase_coverage.py`.
 - [ ] **M-CFG-11** Pin any file a setting points to (rule pack, policy asset) by sha256 digest in the config. A mismatch keeps the previous generation. Why: a changed file must not take effect silently.
@@ -58,7 +58,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 - [ ] **M-POL-10** First-party allow entries are content-bound, not name-trusted. Why: a folder named like a first-party skill could switch off scanning.
   Check: `go test ./internal/policy -run FirstParty`. Evidence: `internal/policy/first_party_verify.go`.
 - [ ] **M-POL-11** Every new failure mode (gateway down, missing token, bad response) resolves through the effective fail mode, with a test and a docs entry. Why: a failure path that opens silently is a policy bypass.
-  Check: `go test ./internal/gateway/... -run FailMode`. Evidence: `docs-site/content/docs/reference/fail-modes.mdx`, `cli/defenseclaw/fail_mode.py`.
+  Check: `go test ./internal/gateway/... -run FailMode`. Evidence: `docs-site/content/docs/reference/configuration/fail-modes.mdx`, `cli/defenseclaw/fail_mode.py`.
 - [ ] **S-POL-1** Add hard negatives (previews, help, loopback, failed results, mismatched identities) with every new blocking rule. Why: name heuristics are not proof of production.
   Check: `go test ./internal/gateway -run 'ProtectiveProfile|BenignNeighbors'`. Evidence: `benchmarks/fixtures/`, `policies/guardrail-use-cases/`.
 - [ ] **S-POL-2** Measure attack recall on attack data and false-positive rate on separate benign data. Why: an attack-only fixture cannot show noise.
@@ -68,7 +68,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 
 - [ ] **M-ID-1** Only verified identity selects a profile (kernel or credential verified uid or SID plus OS directory facts). Never headers, payloads, env or claimed session facts. Why: a client-supplied identity would pick a looser profile.
   Check: `go test ./internal/gateway -run GuardrailProfile`. Evidence: `internal/gateway/guardrail_profile.go`, `internal/useridentity/directory.go`.
-- [ ] **M-ID-2** No lenient fallback in matching: a failed directory lookup selects the lookup-failed or default profile, a stale name matches nobody, names compare through the shared normalizers. Why: a failed lookup that lands in a looser profile is a bypass.
+- [ ] **M-ID-2** No lenient fallback in matching: refuse when an assignment needs an identity fact the OS has not confirmed, naming that fact; otherwise use only proven matches or the default. A stale name matches nobody, and names compare through the shared normalizers. Why: a failed lookup that lands in a looser profile is a bypass.
   Check: `go test ./internal/gateway ./internal/useridentity`. Evidence: `internal/useridentity/principal.go`.
 - [ ] **M-ID-3** Policy visibility is own-only for users and admin-only otherwise, enforced server side (loopback plus token, or privileged peer). Any new endpoint, status field or telemetry attribute naming a policy, profile, digest, group or account is gated and tested per caller class. Why: a field that names another account's policy, group or digest discloses it to every local user.
   Check: `go test ./internal/gateway -run 'PolicyBlockOnlyToAnAdministrator|PolicyPrivacy|ProfileExplain'`. Evidence: `internal/gateway/health_policy_privacy_test.go`.
@@ -79,7 +79,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 - [ ] **M-ID-6** Sandbox and OpenShell profile settings may only tighten the admin floor. Why: a profile that loosens it, or a looser default profile, is a gap during a directory outage.
   Check: `go test ./internal/config -run 'Tighten|Sandbox'`. Evidence: `internal/config/openshell_tighten.go`.
 - [ ] **M-ID-7** A new identity source reads OS facts only (never an IdP API or identity credentials), marks each fact verified or claimed, and states per-OS limits. Why: the product promise is no IdP calls.
-  Check: `go test ./internal/useridentity ./internal/unixidentity`. Evidence: `docs-site/content/docs/enterprise/identity-and-authentication.mdx`.
+  Check: `go test ./internal/useridentity ./internal/unixidentity`. Evidence: `docs-site/content/docs/enterprise/identity/authentication.mdx`.
 - [ ] **M-ID-8** Agent identity IDs stay deterministic; changing a namespace or input needs a migration (stop and ask). Why: assignments and audit trails key on them.
   Check: `go test ./internal/agentidentity`. Evidence: `internal/agentidentity/agentidentity.go`.
 - [ ] **M-ID-9** Profiles and identity routes stay unreachable under the Secure Client profile. Why: it must stay byte-identical.
@@ -106,15 +106,15 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 - [ ] **M-DEP-9** Managed listeners stay on loopback; any new listener needs a managed-mode validator. Why: a machine-wide service must not expose every user's policy surface.
   Check: `go test ./internal/config -run 'Listener|Loopback'`. Evidence: `internal/config/config.go`.
 - [ ] **M-DEP-10** State per mode (OSS, standalone, Secure Client) where a feature exists. A requested but unavailable feature reports a reason code, never silently does nothing. Why: an admin who writes a no-op key believes they are protected.
-  Check: `go test ./internal/config -run 'Tetragon|ManagedIPC'`. Evidence: `docs-site/content/docs/enterprise/machine-policy.mdx`.
+  Check: `go test ./internal/config -run 'Tetragon|ManagedIPC'`. Evidence: `docs-site/content/docs/enterprise/configure/machine-policy.mdx`.
 - [ ] **M-DEP-11** A hot config apply is allowed only when nothing else differs and no changed key is restart-required; a rejected reload keeps enforcing the previous policy. Why: running policy would differ from committed config.
   Check: `go test ./internal/enterpriseunix -run 'Hot|AppliedPolicy|PolicyOmitted'` and `go test ./internal/config/configwrite -run ManagedRestartRequired`. Evidence: `internal/enterpriseunix/hotapply.go`.
 - [ ] **M-DEP-12** A per-user surface (installer, updater, auto-start, daemon) refuses beside a managed install. Why: a per-user gateway is a second, unmanaged enforcement point.
   Check: `pytest cli/tests/test_upgrade_shim.py -k 'install_sh or managed'` and `pytest cli/tests/test_windows_enterprise_standalone_contract.py -k refuses_a_managed_host`. Evidence: `scripts/install.sh`, `internal/managed/runtime_descriptor.go`.
 - [ ] **M-DEP-13** A managed host never writes raw prompts or model output to disk; new trace or capture features refuse or need explicit admin opt-in. Why: a root service would collect every user's prompts.
-  Check: `go test ./internal/config -run 'Trace|Enterprise'`. Evidence: `docs-site/content/docs/enterprise/threat-model.mdx`.
+  Check: `go test ./internal/config -run 'Trace|Enterprise'`. Evidence: `docs-site/content/docs/enterprise/plan/threat-model.mdx`.
 - [ ] **M-DEP-14** State and test the off switch in every mode: OSS (a `config.yaml` key that setup, the CLI and the TUI can flip), standalone and MDM-managed (an `enterprise.*` closed-list value `off` that no user config can override), Secure Client (unreachable). A test turns it off in each mode and asserts the feature does nothing and starts nothing. Why: a feature without a managed off switch cannot be staged or withdrawn across a fleet.
-  Check: `go test ./internal/config -run 'Enterprise|Managed'` plus the feature's off-path test. Evidence: `internal/config/enterprise.go`, `docs-site/content/docs/enterprise/configuration.mdx`.
+  Check: `go test ./internal/config -run 'Enterprise|Managed'` plus the feature's off-path test. Evidence: `internal/config/enterprise.go`, `docs-site/content/docs/enterprise/configure/configuration.mdx`.
 - [ ] **M-DEP-15** A connector on a managed host needs a route decision per OS in `RouteFor`; the default arm is `unsupported`, so a missing connector is silently unmanaged. Why: the host would report success while the agent is uncovered.
   Check: `go test ./internal/enterprisepolicy ./internal/enterprisehooks`. Evidence: `internal/enterprisepolicy/types.go`, `.claude/skills/defenseclaw-add-connector/reference/enterprise.md`.
 - [ ] **M-DEP-16** A managed artifact that gains a feature gets a verify counterpart that fails on artifacts rendered before the feature, so the guardian re-renders after an upgrade. Why: an upgrade that leaves old hook scripts leaves the new protection off while status reads healthy.
@@ -133,7 +133,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 - [ ] **M-REQ-4** Add a detection check with a stable ID that ends in pass, warn, fail or skip with a copy-paste fix (sudo marked), never a traceback. Surface it in `defenseclaw doctor` (and `status` when operators act on it). Why: operators learn what is missing before it fails.
   Check: `defenseclaw doctor --json` on a host without the requirement. Evidence: `internal/openshell/doctor.go`, `cli/defenseclaw/commands/cmd_doctor.py`.
 - [ ] **M-REQ-5** Document the requirement in `docs-site` in a "You need" table (versions, disk, rights, first-start caveats) and in the install prerequisites. Why: it is the operator's only pre-flight list.
-  Check: `grep -rn '<name>' docs-site/content/docs`. Evidence: `docs-site/content/docs/get-started/install.mdx`, `docs-site/content/docs/sandboxes/linux.mdx`.
+  Check: `grep -rn '<name>' docs-site/content/docs`. Evidence: `docs-site/content/docs/get-started/install.mdx`, `docs-site/content/docs/how-to/sandboxes/set-up-on-linux.mdx`.
 - [ ] **M-REQ-6** Test the missing case: binary, daemon, KVM, key or platform absent, asserting severity, reason code and fix text. Why: only the happy path gets tested otherwise.
   Check: `pytest cli/tests/test_cmd_doctor_sandbox.py` and `go test ./internal/openshell/...`. Evidence: `internal/openshell/doctor_test.go`.
 - [ ] **M-REQ-7** Refuse unsupported platforms by name in code even when config says enabled; never silently downgrade a required backend. Why: a config copied from another OS must not read as active.
@@ -156,11 +156,11 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 - [ ] **M-SBX-2** Driver choice (docker, vm, auto, fallback) is an explicit setting with a typed refusal; a required MicroVM never falls back to Docker; macOS never uses Docker. Why: a silent downgrade weakens required isolation.
   Check: `go test ./internal/openshell -run SelectDriver`. Evidence: `internal/openshell/driver_select.go`.
 - [ ] **M-SBX-3** Keep the Python `sandbox` commands in lockstep with the Go command tree and its golden file. Why: the two CLIs drift.
-  Check: `go test ./internal/cli ./internal/openshell/sandboxcli`. Evidence: `internal/cli/testdata/sandbox_commands.json`, `docs-site/content/docs/reference/sandbox-cli.mdx`.
+  Check: `go test ./internal/cli ./internal/openshell/sandboxcli`. Evidence: `internal/cli/testdata/sandbox_commands.json`, `docs-site/content/docs/reference/sandboxes/cli.mdx`.
 - [ ] **M-SBX-4** Built-in and custom sandbox packs load through the strict pack loader; keep `@sym:BuiltinPackNames` ordered loosest to strictest; a change to a built-in pack or egress feed updates the embedded copy and its test. Why: a leniently loaded pack or a stale feed changes sandbox posture silently.
-  Check: `go test ./policies/sandbox/... ./internal/openshell/packs/...`. Evidence: `policies/sandbox/packs.go`, `policies/sandbox/egress/embed_test.go`, `docs-site/content/docs/sandboxes/policy-packs.mdx`.
+  Check: `go test ./policies/sandbox/... ./internal/openshell/packs/...`. Evidence: `policies/sandbox/packs.go`, `policies/sandbox/egress/embed_test.go`, `docs-site/content/docs/reference/sandboxes/policy.mdx`.
 - [ ] **M-SBX-5** Sandbox traffic leaves only through the DefenseClaw egress proxy and the rendered OpenShell policy; credentialed endpoints (hook ingress, LLM) are reachable only through their scoped rules. Why: a direct route bypasses egress policy and telemetry.
-  Check: `go test ./internal/openshell/egress/... ./internal/openshell/policy/...`. Evidence: `internal/openshell/egress`, `internal/openshell/policy`, `docs-site/content/docs/sandboxes/network.mdx`.
+  Check: `go test ./internal/openshell/egress/... ./internal/openshell/policy/...`. Evidence: `internal/openshell/egress`, `internal/openshell/policy`, `docs-site/content/docs/reference/sandboxes/network.mdx`.
 - [ ] **M-SBX-6** Each sandbox authenticates with its own binding (random bearer stored only as a hash, scoped to one connector's hook routes); managed registrations and saved decisions stay scoped to the caller's uid; relayed calls use the sandboxrelay contract. Why: a shared or unscoped credential lets one sandbox or user act as another.
   Check: `go test ./internal/sandboxauth/... ./internal/sandboxreg/... ./internal/sandboxrelay/...`. Evidence: `internal/sandboxauth`, `internal/sandboxreg`, `internal/sandboxrelay`.
 - [ ] **M-SBX-7** Any feature that lets sandboxed code write into the mounted project keeps the nested-repository guard. Why: a planted `.git` config runs code on the host.
@@ -246,7 +246,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 - [ ] **M-OBS-5** Do not reintroduce the retired v7 runtime outside the upgrade and recovery boundaries. Why: the hard-cut gate fails.
   Check: `make check-observability-v8-hard-cut`. Evidence: `scripts/check_observability_v8_hard_cut.py`.
 - [ ] **M-OBS-6** Redact once at the projection boundary through redaction profiles; state the privacy class and effective profile of any new field or destination. Why: dashboards are not a redaction boundary.
-  Check: `go test ./internal/redaction ./internal/observability`. Evidence: `docs-site/content/docs/observability/redaction.mdx`.
+  Check: `go test ./internal/redaction ./internal/observability`. Evidence: `docs-site/content/docs/reference/observability/redaction.mdx`.
 - [ ] **M-OBS-7** Dashboard and provider-shape changes keep source and packaged copies in sync. Why: queries on missing metrics render plausible zeros.
   Check: `make check-grafana-dashboards check-provider-coverage`. Evidence: `scripts/check_grafana_dashboards.py`, `test/testdata/llm-endpoints.json`.
 
@@ -259,7 +259,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 - [ ] **M-DOC-3** Internal links resolve and new pages are listed in the section navigation. Why: unlisted pages are invisible.
   Check: `cd docs-site && npm run validate-links`. Evidence: `docs-site/content/docs/meta.json`.
 - [ ] **M-DOC-4** Never hand-edit generated docs (env-var reference, `docs-site/data/policy-*.json` assets); run the generator. Why: CI diffs them.
-  Check: `python scripts/gen_envvars_docs.py --check`. Evidence: `docs-site/content/docs/reference/env-vars.mdx`.
+  Check: `python scripts/gen_envvars_docs.py --check`. Evidence: `docs-site/content/docs/reference/configuration/env-vars.mdx`.
 - [ ] **S-DOC-1** Add a `CHANGELOG.md` entry under Unreleased for operator-visible changes, leading with the symptom and the fix. Why: it is the development rollup.
   Evidence: `CHANGELOG.md`.
 - [ ] **S-DOC-2** Pin new connector or platform claims with a test. Why: an unpinned claim drifts from the code without failing any test.
@@ -268,7 +268,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 ## SEC: security
 
 - [ ] **M-SEC-1** No credentials in config, logs, audit rows, telemetry, fixtures or PR text. Write secret-bearing files through the safe-file helper with private modes. Why: leaks survive in backups and MDM scripts.
-  Check: `pytest cli/tests/test_secure_write_permissions.py`. Evidence: `internal/safefile`, `docs-site/content/docs/reference/keys.mdx`.
+  Check: `pytest cli/tests/test_secure_write_permissions.py`. Evidence: `internal/safefile`, `docs-site/content/docs/reference/configuration/keys.mdx`.
 - [ ] **M-SEC-2** Privileged discovery code (root or SYSTEM) never follows user-controlled paths: bounded homes, no-follow, regular files, size caps. Why: a symlink in a home becomes a privileged read.
   Check: `go test ./internal/enterprisehooks -run 'Home|Bounded'`. Evidence: `internal/enterprisehooks/home_bounded_unix.go`.
 - [ ] **M-SEC-3** Pin GitHub Actions by commit SHA, keep workflow permissions read-only at workflow scope, and keep PR-controlled code away from elevated tokens. Why: the workflow lint job and the Pages deploy depend on it.

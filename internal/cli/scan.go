@@ -52,6 +52,16 @@ Checks for hardcoded secrets, unsafe exec calls, SQL injection, weak crypto,
 path traversal, and more across Python, JS/TS, Go, Java, Ruby, PHP, Shell,
 YAML, JSON, XML, C/C++, and Rust files.`,
 	Args: cobra.ExactArgs(1),
+	// On a managed Linux or macOS host the scan runs in process without the audit store,
+	// which the gateway service account owns: an administrator's scan
+	// failed with "untrusted owner" (GAP-0052). Elsewhere it records its
+	// result there as before.
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if _, unix := managedHostUnixRecord(nil); unix {
+			return policyConfigOnlyPreRunE(cmd, args)
+		}
+		return rootPersistentPreRunE(cmd, args)
+	},
 	RunE: runScanCode,
 }
 
@@ -106,7 +116,9 @@ func runScanCode(cmd *cobra.Command, args []string) error {
 		if cfg != nil {
 			dataDir = strings.TrimSpace(cfg.DataDir)
 		}
-		if dataDir == "" {
+		if dataDir == "" || (auditLog == nil && managedStandaloneHost()) {
+			// This administrator-only scan has no persistent result. Its local
+			// projection must not open the service account's correlation key.
 			redactor, err = scanoutput.NewEphemeralRedactor()
 		} else {
 			redactor, err = scanoutput.LoadRedactor(dataDir)

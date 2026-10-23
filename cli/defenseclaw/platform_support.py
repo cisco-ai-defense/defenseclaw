@@ -119,16 +119,6 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
         "Hermes native shell hooks use a direct DefenseClaw executable on native "
         "Windows x64; restart any open Hermes session after setup so it loads them.",
     ),
-    "openhands": ConnectorPlatformSupport(
-        UNSUPPORTED,
-        "OpenHands CLI requires WSL; DefenseClaw does not implement a WSL connector path.",
-    ),
-    "omnigent": ConnectorPlatformSupport(
-        SUPPORTED,
-        "OmniGent is supported on native Windows in degraded mode; "
-        "DefenseClaw uses its awaited in-process policy API "
-        "without terminal wrapping or filesystem/network sandbox parity.",
-    ),
     "openclaw": ConnectorPlatformSupport(
         UNSUPPORTED,
         "DefenseClaw on Windows is hook-only; OpenClaw integration requires the guardrail proxy.",
@@ -158,8 +148,6 @@ WINDOWS_UNSUPPORTED_FEATURES: frozenset[str] = frozenset(
     {
         "sandbox",
         "enterprise-hooks",
-        "openhands",
-        "omnigent-terminal-sandbox",
         "openclaw",
         "zeptoclaw",
     }

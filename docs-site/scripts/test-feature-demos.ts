@@ -18,7 +18,7 @@ import {
 
 const connectorIds = new Set(matrix.connectors.map((connector) => connector.id));
 const cursorStory = readFileSync(
-  new URL('../content/docs/stories/cursor-secret-exfil.mdx', import.meta.url),
+  new URL('../content/docs/how-to/guardrail/stop-a-secret-upload.mdx', import.meta.url),
   'utf8',
 );
 const approvedFixtureHosts = new Set([
@@ -52,9 +52,7 @@ describe('command generator shell safety', () => {
       matrix.connectors.map((connector) => [connector.id, connector.windowsSupport]),
     );
     assert.equal(statuses.size, matrix.connectors.length);
-    assert.equal(statuses.get('omnigent'), 'degraded');
     assert.equal(statuses.get('openclaw'), 'unsupported');
-    assert.equal(statuses.get('openhands'), 'unsupported');
     assert.equal(statuses.get('zeptoclaw'), 'unsupported');
     for (const status of statuses.values()) {
       assert.match(status, /^(supported|degraded|unsupported)$/);
@@ -258,7 +256,7 @@ describe('feature demo catalog', () => {
   });
 
   it('identifies the enforcement write counter as config generation', () => {
-    const page = readFileSync(new URL('../content/docs/reference/gateway-api.mdx', import.meta.url), 'utf8');
+    const page = readFileSync(new URL('../content/docs/reference/apis/gateway-api.mdx', import.meta.url), 'utf8');
     assert.match(page, /returns the new config writer generation/);
     assert.match(page, /`\/health.policy.generation`/);
     assert.doesNotMatch(page, /returns the new policy generation/);

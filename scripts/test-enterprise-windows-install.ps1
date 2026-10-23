@@ -25,12 +25,12 @@
     With -UpgradeFrom it is the enterprise upgrade lane instead of step 1:
     the previous release's Setup /ensure installs with the same config, then
     this Setup's /ensure upgrades it. The upgrade must report the applied
-    policy, keep the secrets and the guardian ledger, and write
-    migration-v9.json plus config.yaml.v8.bak for v8 input. A v8 config is
-    migrated, so its policy comes from a newer config generation; a v9 one
-    (a 1.x previous release) keeps its bytes and its generation.
-    Steps 2-5 then run on the upgraded deployment. The source config, upgraded
-    config and any migration record are kept in -ResultsRoot for
+    policy, keep the secrets (a protected credential the lane stores on the
+    previous release with enterprise secret set) and the guardian ledger. The
+    version 9 config keeps its bytes and its generation. The previous release
+    must be 1.x: no 0.x release ships a standalone enterprise Setup.
+    Steps 2-5 then run on the upgraded deployment. The source and upgraded
+    config are kept in -ResultsRoot for
     scripts/check_enterprise_upgrade_config.py. The rollback drill of the
     Linux and macOS upgrade lanes is not run here: the Windows Setup
     transaction has no lifecycle test fault.
@@ -160,6 +160,45 @@ function Assert-ServicesRunning {
         if ($service.Status -ne 'Running') { Fail "service $name is $($service.Status), want Running" }
     }
     Write-Host "services running: $($serviceNames -join ' ')"
+}
+
+# A secret set restarts the gateway and returns once the service starts.
+function Wait-ServicesRunning([int]$Seconds = 60) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        $pending = @($serviceNames | Where-Object { (Get-Service -Name $_ -ErrorAction SilentlyContinue).Status -ne 'Running' })
+        if ($pending.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    Assert-ServicesRunning
+}
+
+# The protected credential the upgrade lane stores on the previous release.
+# Its value is random, so only the credential this run stored can match.
+$upgradeSecretName = 'ci-upgrade-lane'
+$script:UpgradeSecretValue = ''
+
+function Test-UpgradeSecretKept {
+    $path = Join-Path $secretsDirectory $upgradeSecretName
+    if (-not $script:UpgradeSecretValue -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    $stored = [IO.File]::ReadAllBytes($path)
+    $want = [Text.Encoding]::UTF8.GetBytes($script:UpgradeSecretValue)
+    return [Linq.Enumerable]::SequenceEqual([byte[]]$stored, [byte[]]$want)
+}
+
+function Add-UpgradeSecret([string]$Name) {
+    $script:UpgradeSecretValue = 'ci-upgrade-lane-' + [guid]::NewGuid().ToString('N')
+    $result = Join-Path $ResultsRoot "$Name.json"
+    $log = Join-Path $ResultsRoot "$Name.log"
+    $script:UpgradeSecretValue | & $cli enterprise secret set --name $upgradeSecretName --from-stdin --json > $result 2> $log
+    $exitCode = $LASTEXITCODE
+    Write-Host "$Name exited $exitCode"
+    if ($exitCode -ne 0) {
+        if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 20 | ForEach-Object { Write-Host "  stderr: $_" } }
+        Fail "enterprise secret set exited $exitCode"
+    }
+    if (-not (Test-UpgradeSecretKept)) { Fail "enterprise secret set did not store $(Join-Path $secretsDirectory $upgradeSecretName)" }
+    Wait-ServicesRunning
 }
 
 function Assert-ServicesGone {
@@ -296,11 +335,6 @@ function Invoke-Detect {
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (@($output) -join "`n").Trim() }
 }
 
-function Get-FileSha([string]$Path) {
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return 'absent' }
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
-}
-
 # One digest over every file name and content under a folder.
 function Get-TreeSha([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return 'absent' }
@@ -388,6 +422,7 @@ if ($UpgradeFrom) {
         throw "-UpgradeFrom must be the absolute path of an existing Setup: $UpgradeFrom"
     }
     if (-not $PreviousVersion) { throw '-UpgradeFrom needs -PreviousVersion' }
+    if ($PreviousVersion -match '^v?0\.') { throw "-PreviousVersion ${PreviousVersion}: no 0.x release ships a standalone enterprise Setup; upgrade from 1.x" }
     $UpgradeFrom = (Resolve-Path -LiteralPath $UpgradeFrom).Path
 }
 if (-not $ResultsRoot) {
@@ -439,14 +474,12 @@ try {
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not protect $stage" }
     & icacls.exe $stage /setowner '*S-1-5-32-544' | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not set the owner of $stage" }
-    $sourceConfigVersion = if ($UpgradeFrom -and $PreviousVersion -match '^v?0\.') { 8 } else { 9 }
     # A standalone Windows host without a policy_dir keeps the embedded rule
     # packs only while the config names none: rule_pack: default would select
     # the default pack of a policy_dir this host does not have, and the Setup
     # refuses it ("policy_dir is not set").
-    $rulePackLines = if ($sourceConfigVersion -eq 8) { @('  rule_pack_dir: ""') } else { @() }
     $configText = @(
-        "config_version: $sourceConfigVersion"
+        'config_version: 9'
         'deployment_mode: managed_enterprise'
         'enterprise:'
         '  profile: standalone'
@@ -456,7 +489,6 @@ try {
         'guardrail:'
         '  enabled: true'
         '  mode: observe'
-        $rulePackLines
         '  connectors:'
         '    claudecode:'
         '      enabled: true'
@@ -479,13 +511,13 @@ try {
         Assert-ServicesRunning
         Assert-PolicyApplied
         Copy-Item -LiteralPath $config -Destination (Join-Path $ResultsRoot 'config-before.yaml')
+        Step "store a protected credential on the previous release ($PreviousVersion)"
+        Add-UpgradeSecret '01-previous-secret'
         $run = Invoke-Lifecycle -Name '01-previous-status' -FilePath $cli -Arguments @('enterprise', 'windows', 'status', '--profile', 'standalone', '--json')
         Assert-Result $run 'previous-status' (@('--action', 'status', '--installed', '--version', $PreviousVersion) + $installedChecks)
         $previousGeneration = Get-ConfigGeneration $run.Result
-        # A v8 config is migrated, so the upgrade applies a new config
-        # generation; a v9 one keeps its bytes and its generation.
-        $generationFloor = if ($sourceConfigVersion -eq 8) { $previousGeneration } else { $previousGeneration - 1 }
-        $previousConfigSha = Get-FileSha $installedConfig
+        # The version 9 config keeps its bytes, so its generation does not drop.
+        $generationFloor = $previousGeneration - 1
         $previousSecretsSha = Get-TreeSha $secretsDirectory
         $previousLedgerTargets = Get-LedgerTargets $guardianLedger
 
@@ -494,14 +526,9 @@ try {
         Assert-Result $run 'setup-ensure-upgrade' (@('--action', 'ensure', '--changed', '--installed', '--version', $Version, '--ready') +
             $installedChecks + @('--allow-warning', 'ensure_upgrade', '--policy-applied', '--config-generation-above', [string]$generationFloor))
         Assert-ServicesRunning
-        $record = Join-Path (Split-Path -Parent $installedConfig) 'migration-v9.json'
-        if ($sourceConfigVersion -eq 8) {
-            if (-not (Test-Path -LiteralPath $record -PathType Leaf)) { Fail "the upgrade wrote no $record" }
-            if ((Get-FileSha "$installedConfig.v8.bak") -ne $previousConfigSha) { Fail "$installedConfig.v8.bak is not the previous config" }
-            Copy-Item -LiteralPath $record -Destination (Join-Path $ResultsRoot 'migration-v9.json')
-        }
         Copy-Item -LiteralPath $installedConfig -Destination (Join-Path $ResultsRoot 'config-upgraded.yaml')
         if ((Get-TreeSha $secretsDirectory) -ne $previousSecretsSha) { Fail "the upgrade changed the secrets under $secretsDirectory" }
+        if (-not (Test-UpgradeSecretKept)) { Fail "the upgrade did not keep the bytes of the protected credential $upgradeSecretName" }
         if ((Get-LedgerTargets $guardianLedger) -ne $previousLedgerTargets) { Fail "the upgrade changed the protected targets in the guardian ledger $guardianLedger" }
     }
     else {

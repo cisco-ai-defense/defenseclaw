@@ -1075,6 +1075,7 @@ func TestFindWindowsEnterpriseInstallerRejectsDirectoryAndSymlink(t *testing.T) 
 }
 
 func TestFindWindowsEnterpriseInstallerRejectsUserControlledScriptAndModule(t *testing.T) {
+	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	root := t.TempDir()
 	installer := filepath.Join(root, "install-enterprise.ps1")
 	module := filepath.Join(root, "DefenseClawEnterprise.psm1")

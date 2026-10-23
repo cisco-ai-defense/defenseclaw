@@ -175,3 +175,30 @@ func (s *ContinuousDiscoveryService) privacyScopeKnown(sig AISignal) bool {
 	}
 	return true
 }
+
+// scanRootPrivacySkipped reports a configured scan root that lies in a
+// prompting home folder, or is reached through a link (at or above it) that
+// leads into one, on macOS without Full Disk Access. Each element is checked
+// before the root is opened, so a work alias of ~/Documents is not walked
+// (GAP-1201).
+func (s *ContinuousDiscoveryService) scanRootPrivacySkipped(root string) bool {
+	if s == nil || s.opts.SecureClient || discoveryGOOS != "darwin" {
+		return false
+	}
+	root = filepath.Clean(root)
+	if !filepath.IsAbs(root) {
+		return false
+	}
+	sep := string(filepath.Separator)
+	ancestor := sep
+	for _, part := range strings.Split(strings.TrimPrefix(root, sep), sep) {
+		if part == "" {
+			continue
+		}
+		ancestor = filepath.Join(ancestor, part)
+		if s.macOSTCCSkipped(ancestor) || s.modelLinkPrivacySkipped(ancestor) {
+			return true
+		}
+	}
+	return false
+}

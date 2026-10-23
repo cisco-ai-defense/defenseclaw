@@ -114,6 +114,9 @@ var refusedHomeTrees = []string{
 // only project-relative names ("settings.json"), so none is ever shared
 // (credentialTrees). Those under ~/.config are covered by ".config".
 // Devin Desktop still reads its pre-rename folders (legacyconnector).
+// OpenHands and OmniGent have no DefenseClaw connector any more, but they
+// can still be installed and load what their folders hold, so the folders
+// stay protected like those of other agents DefenseClaw does not ship.
 var harnessHomeTrees = append([]string{
 	".claude", ".codex", ".cursor", ".copilot", ".gemini",
 	".devin", ".amp", ".opencode", ".hermes", ".openhands",

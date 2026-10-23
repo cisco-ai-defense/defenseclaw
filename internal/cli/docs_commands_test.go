@@ -23,11 +23,7 @@ import (
 // PersistentPreRunE or any command callback, so no operator config, database,
 // or daemon state is touched.
 func TestDocumentedGatewayCommandsParse(t *testing.T) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test source path")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
+	repoRoot := cliTestRepoRoot(t)
 	docRoots := []string{
 		filepath.Join(repoRoot, "docs-site", "content", "docs"),
 		filepath.Join(repoRoot, "docs"),
@@ -52,7 +48,7 @@ func TestDocumentedGatewayCommandsParse(t *testing.T) {
 			resetDocumentedGatewayCommandState(t, rootCmd)
 			defer resetDocumentedGatewayCommandState(t, rootCmd)
 
-			fields := strings.Fields(documented.command)
+			fields := documentedCommandFields(documented.command)
 			if len(fields) < 1 || fields[0] != "defenseclaw-gateway" {
 				t.Fatalf("invalid extracted command %q", documented.command)
 			}
@@ -88,6 +84,43 @@ func TestDocumentedGatewayCommandsParse(t *testing.T) {
 	}
 
 	t.Logf("validated %d documented defenseclaw-gateway commands", len(commands))
+}
+
+// documentedCommandFields splits a documented command the way a shell
+// would for the examples the docs use: on blanks, with a single- or
+// double-quoted span (such as --summary "Block HIGH for eng") kept as one
+// argument and its quotes removed.
+func documentedCommandFields(command string) []string {
+	var fields []string
+	var current strings.Builder
+	inField := false
+	var quote rune
+	for _, r := range command {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				current.WriteRune(r)
+			}
+		case r == '"' || r == '\'':
+			quote = r
+			inField = true
+		case r == ' ' || r == '\t' || r == '\n':
+			if inField {
+				fields = append(fields, current.String())
+				current.Reset()
+				inField = false
+			}
+		default:
+			current.WriteRune(r)
+			inField = true
+		}
+	}
+	if inField {
+		fields = append(fields, current.String())
+	}
+	return fields
 }
 
 // resetDocumentedGatewayCommandState restores flag defaults throughout the

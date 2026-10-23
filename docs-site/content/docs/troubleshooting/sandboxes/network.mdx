@@ -1,0 +1,81 @@
+---
+title: Sandbox network problems
+description: Fix sites a sandbox cannot reach, git or npm over SSH, TLS-inspecting proxies and the ssh wrapper.
+keywords:
+  - sandbox network
+  - sandbox egress
+  - TLS inspection
+---
+
+The sandbox sends all traffic through DefenseClaw. These are the network failures you may see.
+
+## A tool cannot reach a site
+
+**You see:** a tool fails to connect, or `curl: (56) CONNECT tunnel failed, response 403`.
+
+**Cause:** the egress proxy blocked the site. Git over SSH and databases do not go through the web proxy.
+
+**Fix:** look for the block in `defenseclaw sandbox activity` and [unblock it](/docs/how-to/sandboxes/unblock-a-site). Use HTTPS remotes, or `--host-port` for a service on your machine.
+
+**Check:** the feed shows `✓` for the site.
+
+## Git or npm fails over SSH
+
+**You see:** `ssh: connect to host github.com port 22: Permission denied`.
+
+**Cause:** no SSH leaves a sandbox, and no unblock opens it. npm resolves `github:OWNER/REPO` and `git+ssh://` dependencies to SSH.
+
+**Fix:** `git remote set-url origin https://github.com/OWNER/REPO.git`. Write dependencies as `git+https://github.com/OWNER/REPO.git`. Claude Code, Codex, Copilot CLI, Cursor and Devin agents are told this after the refused call.
+
+**Check:** the git command succeeds.
+
+## Project folder mounts show as disabled
+
+**You see:** the doctor's **Project bind mounts** check warns that mounts are off.
+
+**Cause:** bind mounts are off on the Docker driver. On a Mac the doctor skips this check because every run works on a copy.
+
+**Fix:** run `defenseclaw sandbox doctor --fix`, or setup again.
+
+**Check:** the check reads `enabled for the docker driver`.
+
+## Model calls fail behind a TLS-inspecting proxy
+
+**You see:**
+
+```text
+  ✗ Sandbox TLS trust          TLS inspection: api.anthropic.com, api.openai.com present a certificate from "Corp Root CA", which this computer trusts but sandboxes do not, …
+```
+
+**Cause:** a proxy that decrypts TLS (Cisco Secure Access, Umbrella, Zscaler) re-signs certificates with your organization's root CA. Your computer trusts it, a sandbox does not. Two programs make a sandbox's connections: OpenShell's supervisor makes the model calls with its own trust store, which cannot be extended; everything else (package installs, git, MCP servers, web fetches) trusts the CAs you name in `openshell.trusted_ca_bundle`.
+
+**Fix:** ask IT to exempt the model provider hosts your agents use from TLS inspection (`api.anthropic.com`, `api.openai.com`, `api.githubcopilot.com`, `bedrock-mantle.<region>.api.aws`). For everything else, save the proxy's root CA as a PEM file and name it:
+
+```bash
+defenseclaw config set openshell.trusted_ca_bundle ~/certs/proxy-root-ca.pem
+defenseclaw sandbox doctor
+```
+
+The next run rebuilds the harness image with the CA in its system store, and each sandbox points `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS` and `DENO_CERT` at OpenShell's bundle plus your CAs. Only the CAs in that file are added. On a managed computer your administrator sets the key. A sandbox's model provider host is open only to the agent's own programs, so a `curl` you run cannot reach it whatever the egress policy says.
+
+**Check:** the **Sandbox TLS trust** check passes once the provider hosts are exempt.
+
+## The sandbox cannot upload the project copy
+
+**You see:** ``upload the project copy: the upload to <name> did not arrive …``.
+
+**Cause:** OpenShell reported the upload done but the files went elsewhere, for example into another sandbox through an ssh connection shared between sandboxes.
+
+**Fix:** run `defenseclaw sandbox doctor` and read **SSH connection sharing**. If your `~/.ssh/config` turns on `ControlMaster` for `Host *`, add a `Host sandbox` block with `ControlMaster no` and `ControlPath none` above it. DefenseClaw turns sharing off for every OpenShell command it runs, so only `openshell sandbox connect`, `upload`, `download` or `forward` that you run yourself are affected.
+
+**Check:** the check reads `off for the OpenShell sessions DefenseClaw runs`.
+
+## The ssh wrapper is refused
+
+**You see:** ``ssh shim: DefenseClaw found no directory for an ssh with connection sharing off …``, or ``ssh shim: <path>/ssh, the first ssh on PATH, does not keep connection sharing off …``.
+
+**Cause:** DefenseClaw runs OpenShell with a small `ssh` wrapper in a private folder in your temporary directory. It skips a temporary directory other users could change or that is mounted `noexec`, and falls back to `~/.defenseclaw/openshell-ssh`. This error means neither worked. The second message means the first `ssh` on your `PATH` is a wrapper that adds its own `ControlMaster`, `ControlPath`, `-S` or `-M`.
+
+**Fix:** point `TMPDIR` at a folder only you can write, on a filesystem that runs programs (`mkdir -p -m 700 ~/.cache/tmp; export TMPDIR=~/.cache/tmp`). Or make the wrapper pass its arguments to ssh without options of its own, or put OpenSSH's directory (the message names it, often `/usr/bin`) before the wrapper's on `PATH`. To see why `ssh -G` failed, run the `ssh -G -o ProxyCommand=true sandbox` command the message names.
+
+**Check:** the **SSH connection sharing** check passes.

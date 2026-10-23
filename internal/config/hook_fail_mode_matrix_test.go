@@ -21,7 +21,7 @@ import "testing"
 //
 // Anything but "open" (any case) is closed, a typo included.
 func TestEveryConnectorHookFailModeMatrix(t *testing.T) {
-	names := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode", "openhands"}
+	names := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode"}
 	deployments := []struct {
 		name, mode, profile string
 		unset               string

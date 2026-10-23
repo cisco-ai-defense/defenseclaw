@@ -857,7 +857,8 @@ func writeEnterpriseSetupFailureAs(stdout, stderr io.Writer, name string, opts e
 // writeEnterpriseSetupFailureFor reports a failure of Setup itself. With
 // JSON=1 the standalone Setup prints the lifecycle's schema-2 result, so an
 // MDM reads one shape whether Setup or the lifecycle refused (GAP-0562). It
-// reports no deployment state: nothing was inspected.
+// reports no deployment state unless Setup's bounded timeout recovery
+// proved one: its replay left no lifecycle record, and its status is shown.
 func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, name string, opts enterpriseSetupOptions, err error, exitCode int) {
 	if !standalone || !opts.JSON || err == nil {
 		writeEnterpriseSetupFailureAs(stdout, stderr, name, opts, err)
@@ -882,6 +883,17 @@ func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, n
 	case errors.As(err, &timeout):
 		code = "lifecycle_timeout"
 	}
+	if timeout.recovery != nil {
+		// Recovery is a second, successful lifecycle query of the host. Keep
+		// its proven deployment and service state, while this Setup request
+		// still fails because its first child hit TIMEOUTSECONDS.
+		recovered := *timeout.recovery
+		recovered.Action = action
+		recovered.AddError(code, err.Error())
+		recovered.Finish("windows", exitCode)
+		_ = json.NewEncoder(stdout).Encode(&recovered)
+		return
+	}
 	result.AddError(code, err.Error())
 	result.AddWarning("health_not_checked", "Setup stopped before the lifecycle reported on this computer, so installed, services and readiness are not evaluated; "+
 		name+" /status JSON=1 reports them")
@@ -891,17 +903,29 @@ func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, n
 
 // enterpriseSetupLifecycleTimeout is a lifecycle run Setup stopped at its
 // TIMEOUTSECONDS limit.
-type enterpriseSetupLifecycleTimeout struct{ error }
+type enterpriseSetupLifecycleTimeout struct {
+	error
+	recovery *enterprisestatus.Result
+}
 
 func (err enterpriseSetupLifecycleTimeout) Unwrap() error { return err.error }
 
-// standaloneEnterpriseSetupTimeout names what a stopped run may have left
-// and the command that recovers it: a run stopped mid-transaction leaves it
-// pending with the services stopped, which only an ensure run as
-// LocalSystem recovers (GAP-0509). The recovery run gets the longest limit:
-// leaving TIMEOUTSECONDS out, as the hint said, keeps the default, which a
-// run that hit it would hit again (GAP-1063).
+// standaloneEnterpriseSetupTimeout names the manual retry when Setup's own
+// bounded replay could not prove restoration. That retry gets the longest
+// limit: omitting TIMEOUTSECONDS would use the default the run hit.
 func standaloneEnterpriseSetupTimeout(opts enterpriseSetupOptions, cause error) error {
+	return standaloneEnterpriseSetupTimeoutWithRecovery(opts, cause, nil)
+}
+
+func standaloneEnterpriseSetupTimeoutWithRecovery(opts enterpriseSetupOptions, cause error, report *enterprisestatus.Result) error {
+	if report != nil {
+		return enterpriseSetupLifecycleTimeout{error: fmt.Errorf(
+			"enterprise %s did not finish within TIMEOUTSECONDS=%d and Setup stopped it (%w). "+
+				"Setup replayed its pending transaction and no lifecycle record remains; this result is the recovered deployment's status, "+
+				"and the requested action did not finish. Run %s /status JSON=1, then retry the requested action",
+			opts.Action, int(opts.LifecycleTimeout/time.Second), cause, standaloneSetupArtifactName,
+		), recovery: report}
+	}
 	config := opts.Config
 	if strings.TrimSpace(config) == "" {
 		config = "<config.yaml>"
@@ -913,7 +937,7 @@ func standaloneEnterpriseSetupTimeout(opts enterpriseSetupOptions, cause error) 
 	if limit >= maximum {
 		recovery = fmt.Sprintf("/ensure CONFIG=%s JSON=1 TIMEOUTSECONDS=%d again to recover (%d seconds is the longest limit)", config, maximum, maximum)
 	}
-	return enterpriseSetupLifecycleTimeout{fmt.Errorf(
+	return enterpriseSetupLifecycleTimeout{error: fmt.Errorf(
 		"enterprise %s did not finish within TIMEOUTSECONDS=%d and Setup stopped it (%w). It may have left a lifecycle transaction pending with the DefenseClaw services stopped: "+
 			"run %s /status JSON=1 to check, then run Setup as LocalSystem with %s",
 		opts.Action, limit, cause, standaloneSetupArtifactName, recovery,

@@ -40,7 +40,7 @@ const codeAgentSessionsRestart = "agent_sessions_restart_required"
 // registers hooks for.
 var agentCLINames = map[string]bool{
 	"claude": true, "codex": true, "cursor-agent": true, "copilot": true, "opencode": true, "amp": true,
-	"devin": true, "hermes": true, "openhands": true, "omnigent": true, "agy": true, "kiro-cli": true,
+	"devin": true, "hermes": true, "agy": true, "kiro-cli": true,
 }
 
 // agentsReadingHooksLive pick up DefenseClaw's hooks without a restart: a

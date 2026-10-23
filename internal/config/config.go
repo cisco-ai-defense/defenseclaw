@@ -78,7 +78,7 @@ const (
 	// Connector.Name() in internal/gateway/connector and with the
 	// `defenseclaw.claw.mode` enum in schemas/otel/resource.schema.json):
 	// "zeptoclaw", "claudecode", "codex", "hermes", "cursor",
-	// "devin", "copilot", "openhands", "antigravity". Constants for those modes
+	// "devin", "copilot", "antigravity". Constants for those modes
 	// are intentionally not introduced here yet — they're used as
 	// raw strings by Config.activeConnector() (see internal/config/
 	// claw.go) which dispatches to per-connector readers. Promoting
@@ -1885,9 +1885,8 @@ type PerConnectorGuardrailConfig struct {
 
 // normalizeConnectorKey canonicalizes a connector name for
 // guardrail.connectors map lookups: trim, lowercase, and fold the known
-// hyphen/underscore aliases onto their canonical registry name. It is
-// the leaf-package counterpart of the Python connector_paths.normalize
-// alias table and must be kept in sync with it. Unlike that helper this
+// hyphen/underscore aliases onto their canonical registry name. Unlike the
+// Python connector_paths.normalize helper this
 // one returns "" for an empty/whitespace input rather than defaulting to
 // "openclaw": callers (connectorOverride / HasConnector) guard the empty
 // case separately so an unset connector falls through to the global
@@ -1896,6 +1895,7 @@ func normalizeConnectorKey(name string) string {
 	n := strings.ToLower(strings.TrimSpace(name))
 	switch n {
 	case "open-hands", "open_hands":
+		// until 1.1: recognize old config aliases before dropping this connector.
 		return "openhands"
 	case "claude-code", "claude_code":
 		return "claudecode"
@@ -1912,9 +1912,9 @@ func normalizeConnectorKey(name string) string {
 //
 // Lookup is connector-name-insensitive: an exact key hit is the fast
 // path, otherwise keys are compared after normalizeConnectorKey so that
-// a request for the registry-canonical name (e.g. "openhands") resolves
+// a request for the registry-canonical name (e.g. "claudecode") resolves
 // an override written with different case or a hyphen/underscore alias
-// (e.g. "OpenHands", "open-hands"). This matches HasConnector and keeps
+// (e.g. "Claude-Code", "claude_code"). This matches HasConnector and keeps
 // every Effective*() resolver consistent with the boot loop, which keys
 // connectors by their canonical registry name.
 func (g *GuardrailConfig) connectorOverride(connector string) (PerConnectorGuardrailConfig, bool) {
@@ -2115,7 +2115,7 @@ func (g *GuardrailConfig) Validate() error {
 	}
 	sort.Strings(names)
 	// Reject two distinct keys that canonicalize to the same connector
-	// (e.g. "OpenHands" + "openhands", or "open-hands" + "openhands").
+	// (e.g. "claude-code" + "claudecode").
 	// connectorOverride() resolves keys through normalizeConnectorKey, so a
 	// duplicate would make per-connector lookups (mode, fail mode, HILT) and
 	// the active-connector roster depend on Go map iteration order — a
@@ -2913,6 +2913,7 @@ func loadConfigSourceCheckedWithLayout(
 	// Move retired connector IDs to their replacement before any connector
 	// key is normalized or checked for duplicates.
 	migrateLegacyConnectorIDs(&cfg)
+	dropRetiredConnectorSettings(&cfg)
 
 	if err := checkRuntimeConfigVersion(cfg.ConfigVersion, resolvesToSecureClient(&cfg, pinnedDeploymentMode)); err != nil {
 		return nil, err

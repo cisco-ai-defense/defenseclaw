@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,9 @@ from defenseclaw.connector_paths import (
     amp_policy_plugin_path,
     codex_home,
     connector_config_files,
+    connector_home,
+    copilot_home,
+    hermes_config_path,
     normalize,
 )
 from defenseclaw.file_lock import _lock_file_exclusive, _unlock_file
@@ -33,7 +36,13 @@ _MAX_RUNTIME_FILE = 2 * 1024 * 1024
 # about 148 MiB, so a 128 MiB cap hashed it as '' and reported
 # registration-digest-stale on every check (GAP-1922).
 _MAX_DIGEST_FILE = 1024 * 1024 * 1024
-_FAIL_MODE_PATTERN = re.compile(r"FAIL_MODE=\"\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\}\"")
+# The installed mode of a rendered Unix hook: FAIL_MODE="closed" since 1.0.4
+# (the hook reads no fail mode from the environment, GAP-0315),
+# FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}" in 1.0.3 and older renders and
+# in Secure Client renders (#1163).
+_FAIL_MODE_PATTERN = re.compile(
+    r"^FAIL_MODE=\"(?:(open|closed)|\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\})\"", re.MULTILINE
+)
 _OPENCODE_FAIL_MODE_PATTERN = re.compile(r'const\s+DC_FAIL_MODE\s*=\s*"(open|closed)"\s*;')
 _AMP_FAIL_MODE_PATTERN = re.compile(r'\bconst\s+DC_FAIL_MODE:\s*string\s*=\s*"(open|closed)"')
 _EXPECTED_CONTRACTS = {
@@ -50,29 +59,33 @@ _EXPECTED_CONTRACTS = {
     ),
     "devin": frozenset({"devin-hooks-v1"}),
 }
+# Copilot CLI, Antigravity and Hermes have no fail-closed hook contract of
+# their own: each lets a call run when its hook times out or cannot start.
+# Their hooks block every other failure through the agent's native deny when
+# the fail mode is closed, so they follow it everywhere except under Secure
+# Client (upstream_fail_open).
 _UPSTREAM_FAIL_OPEN_CONNECTORS = frozenset({"antigravity", "copilot", "hermes"})
-# The hook script each Unix shell registration must name (the connectors in
-# _EXPECTED_CONTRACTS that _unix_registration_freshness checks).
+_UPSTREAM_LIMIT_LABELS = {"antigravity": "Antigravity", "copilot": "Copilot", "hermes": "Hermes"}
+# The hook script each Unix shell registration must name
+# (_unix_registration_freshness): the connectors in _EXPECTED_CONTRACTS and
+# Hermes, whose hook reads its event from the payload.
 _UNIX_REGISTRATION_HOOK_SCRIPTS = {
     "claudecode": "claude-code-hook.sh",
     "codex": "codex-hook.sh",
     "devin": "devin-hook.sh",
+    "hermes": "hermes-hook.sh",
 }
 
 
 def upstream_fail_open(cfg: Any, connector: str) -> bool:
     """Whether *connector*'s hooks fail open whatever is configured.
 
-    Copilot CLI, Antigravity and Hermes have no fail-closed hook contract of
-    their own. A managed deployment outside Secure Client blocks their tool
-    calls through the connector's native deny instead, so they follow the
-    administrator's fail mode there (Config.managed_outside_secure_client).
-    The per-user Hermes hook (the Linux
-    and macOS shell hook and the Windows native hook) blocks a call it cannot
-    check through Hermes' block directive when its fail mode is closed, so
-    an unset fail mode resolves closed there as for every other connector
-    (rel-1-0-3 GAP-0150, GAP-0269); only the Secure Client profile keeps
-    Hermes open, as its hook render does (CapableHookFailMode).
+    Only the Secure Client profile keeps Copilot CLI, Antigravity and Hermes
+    open, as its hook render does (CapableHookFailMode). Per-user hooks (the
+    Linux and macOS shell hooks and the Windows native hook) and a managed
+    deployment outside Secure Client (Config.managed_outside_secure_client)
+    block a call they cannot check through the agent's native deny, so they
+    follow the configured fail mode; an unset one is closed.
     """
     name = normalize(connector)
     if name not in _UPSTREAM_FAIL_OPEN_CONNECTORS:
@@ -80,9 +93,16 @@ def upstream_fail_open(cfg: Any, connector: str) -> bool:
     standalone = getattr(cfg, "managed_outside_secure_client", None)
     if callable(standalone) and standalone():
         return False
-    if name == "hermes":
-        return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
-    return True
+    return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+
+
+def upstream_hook_limit(connector: str) -> str:
+    """The vendor limit of a closed Copilot CLI, Antigravity or Hermes hook, or ""."""
+
+    label = _UPSTREAM_LIMIT_LABELS.get(normalize(connector))
+    if not label:
+        return ""
+    return f"DefenseClaw failures block; {label} itself lets a call run when the hook times out or cannot start"
 
 
 _SHARED_RUNTIME_CONNECTORS = frozenset({"claudecode", "codex"})
@@ -116,6 +136,9 @@ class ConnectorFailModeState:
     runtime: str | None
     sources: tuple[tuple[str, str | None], ...]
     drift: tuple[str, ...]
+    # The vendor limit a closed hook of this connector keeps
+    # (upstream_hook_limit), or "".
+    limit: str = ""
 
     @property
     def current(self) -> bool:
@@ -143,9 +166,14 @@ class ConnectorFailModeState:
             return "config"
         source = "config"
         for candidate, mode in self.sources:
-            if candidate in {"config", "registration-lock"} or mode is None:
+            # Claude Code's settings env is registration evidence only: no
+            # hook reads a fail mode from its environment.
+            if candidate in {"config", "registration-lock", "claude-env"} or mode is None:
                 continue
             source = candidate
+        if source == "config":
+            # No installed state names a mode, so the hook fails closed.
+            return "no-installed-mode"
         return source
 
     @property
@@ -158,14 +186,19 @@ class ConnectorFailModeState:
         config.yaml next to ``open`` in its observe-mode hooks is intended;
         reporting says so instead of looking like drift (GAP-0129). Every
         other connector follows its configured value in observe mode too.
+        A closed Copilot CLI, Antigravity or Hermes hook names the vendor
+        limit it keeps instead.
         """
 
-        if self.configured == self.desired or self.effective != self.desired:
-            return ""
-        return (
-            f"observe mode keeps hooks fail-{self.desired}; "
-            f"guardrail.hook_fail_mode={self.configured} applies in action mode"
-        )
+        notes = []
+        if self.limit and self.effective == "closed":
+            notes.append(self.limit)
+        elif self.configured != self.desired and self.effective == self.desired:
+            notes.append(
+                f"observe mode keeps hooks fail-{self.desired}; "
+                f"guardrail.hook_fail_mode={self.configured} applies in action mode"
+            )
+        return "; ".join(notes)
 
     def to_report(self) -> dict[str, Any]:
         """Return the canonical JSON-friendly reporting projection."""
@@ -204,24 +237,37 @@ def resolve_connector_fail_mode(
     sources: list[tuple[str, str | None]] = [("config", configured)]
     drift: list[str] = []
 
+    sidecar_drift = _shared_hook_sidecar_drift(cfg)
+    if sidecar_drift:
+        drift.append(sidecar_drift)
+    if name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+        state = _resolve_native_deny_fail_mode(cfg, name, configured, desired)
+        if sidecar_drift:
+            return replace(state, drift=(*state.drift, sidecar_drift))
+        return state
+
     runtime_source = _platform_runtime_source(cfg, name)
     sources.append(runtime_source)
     runtime = runtime_source[1]
     if runtime_source[0].endswith("-legacy"):
         drift.append("windows-sidecar-legacy")
-    process_env = str(os.environ.get("DEFENSECLAW_FAIL_MODE", "")).strip().lower()
-    # Amp and OpenCode bake the mode into their installed plugins. The
-    # invoking CLI process cannot override an already-loaded registration.
-    if name not in {"amp", "opencode"} and process_env in _VALID_MODES:
-        sources.append(("process-env", process_env))
-        runtime = process_env
+    if runtime is None and runtime_source[0].startswith("windows-sidecar"):
+        # The native Windows hook reads its mode from this sidecar alone and
+        # fails closed when the file is missing or unreadable or names no mode
+        # for the connector (readHookSidecar), so status reports that.
+        runtime = "closed"
+    # The hooks read no fail mode from any environment (GAP-0315): not this
+    # shell's, which is not the agent's, and not the agent's either, so
+    # neither is an input here.
 
     workspace = _connector_workspace(cfg)
     if name == "claudecode":
         claude_env, registered = _claude_registration_state(workspace)
+        # Setup still writes the mode into Claude Code's settings env, which
+        # hook renders from 1.0.3 and older read until the upgrade's connector
+        # refresh re-renders them: a stale value there is registration drift,
+        # never the runtime mode.
         sources.append(("claude-env", claude_env))
-        if claude_env is not None:
-            runtime = claude_env
         if not registered:
             drift.append("registration-missing")
     # Windows Codex registration is a structured event matrix whose native
@@ -277,6 +323,156 @@ def resolve_connector_fail_mode(
     )
 
 
+def _resolve_native_deny_fail_mode(cfg: Any, name: str, configured: str, desired: str) -> ConnectorFailModeState:
+    """Resolve a Copilot CLI, Antigravity or Hermes hook from what it renders.
+
+    Their hooks record the mode in the hook script (Linux, macOS) or in
+    .hookcfg (the Windows native hook). A rendered mode other than the
+    configured one is drift: an open hook while config says closed lets calls
+    run with the gateway down. So is a registration lock that records another
+    mode, and a live registration that does not run this install's hook with
+    each reviewed event exactly: it may still select an older open hook.
+    """
+
+    sources: list[tuple[str, str | None]] = [("config", configured)]
+    drift: list[str] = []
+    runtime_source = _platform_runtime_source(cfg, name)
+    sources.append(runtime_source)
+    runtime = runtime_source[1]
+    if runtime_source[0].endswith("-legacy"):
+        drift.append("windows-sidecar-legacy")
+    if runtime is None and runtime_source[0].startswith("windows-sidecar"):
+        # As for every other connector: the native Windows hook fails closed
+        # when its sidecar is missing or names no mode (readHookSidecar).
+        runtime = "closed"
+    # No hook reads a fail mode from any environment (GAP-0315), so neither
+    # this shell's DEFENSECLAW_FAIL_MODE nor the agent's is an input here.
+    lock_mode, lock_drift = _registration_lock_state(cfg, name)
+    sources.append(("registration-lock", lock_mode))
+    if lock_mode != desired:
+        drift.append("registration-stale")
+    if lock_drift:
+        drift.append(lock_drift)
+    try:
+        registration = _native_deny_registration_freshness(cfg, name)
+    except Exception:  # noqa: BLE001 - an unreadable registration is not current, never a crash.
+        registration = "registration-unverified"
+    if registration:
+        drift.append(registration)
+    for source, mode in sources[1:]:
+        if mode is None:
+            drift.append(f"{source}-missing")
+        elif mode != desired:
+            drift.append(f"{source}-{mode}")
+    return ConnectorFailModeState(
+        connector=name,
+        desired=desired,
+        configured=configured,
+        runtime=runtime,
+        sources=tuple(sources),
+        drift=tuple(dict.fromkeys(drift)),
+        limit=upstream_hook_limit(name),
+    )
+
+
+# The sources that record the mode a connector's installed hook or plugin was
+# rendered with (_platform_runtime_source).
+_RENDERED_SOURCES = frozenset(
+    {"hook-script", "windows-sidecar", "windows-sidecar-legacy", "amp-plugin", "opencode-plugin"}
+)
+
+
+def _native_deny_registration_path(cfg: Any, name: str) -> str:
+    """Where Setup registers the Copilot CLI, Antigravity or Hermes hook (doctor reads the same file)."""
+
+    if name == "copilot":
+        workspace = _connector_workspace(cfg)
+        data_dir = os.path.realpath(str(cfg.data_dir))
+        inside = False
+        if workspace:
+            try:
+                inside = os.path.commonpath([os.path.realpath(workspace), data_dir]) == data_dir
+            except ValueError:
+                inside = False
+        if workspace and not inside:
+            return os.path.join(workspace, ".github", "hooks", "defenseclaw.json")
+        return os.path.join(copilot_home(), "hooks", "defenseclaw.json")
+    if name == "antigravity":
+        return os.path.join(connector_home("antigravity"), "hooks.json")
+    return hermes_config_path()
+
+
+def _native_deny_registration_freshness(cfg: Any, name: str) -> str | None:
+    """Drift when the live Copilot CLI, Antigravity or Hermes registration is not this install's hook.
+
+    Copilot and Antigravity name no event in their hook input, so each
+    registered command must bind its reviewed event exactly; Hermes' hook
+    reads the event from the payload, so its registration must name the hook.
+    A Windows Hermes registration that waits for Hermes to restart is current:
+    rendering it again changes nothing.
+    """
+
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+        # The administrator-owned registration is enterprise verify's.
+        return None
+    if _is_windows():
+        from defenseclaw.doctor_hooks import (
+            _packaged_windows_install_root,
+            validate_windows_copilot_hook_registration,
+            validate_windows_hook_registration,
+        )
+
+        locked = _registration_hook_config_paths(cfg, name)
+        install_root = _packaged_windows_install_root(str(cfg.data_dir)) or str(Path.home() / ".local" / "bin")
+        common = {
+            "config_path": locked[0] if locked else _native_deny_registration_path(cfg, name),
+            "data_dir": str(cfg.data_dir),
+            "install_root": install_root,
+            "search_path": os.environ.get("PATH", ""),
+            "pathext": os.environ.get("PATHEXT", ""),
+        }
+        if name == "copilot":
+            check = validate_windows_copilot_hook_registration(**common, workspace_dir=_connector_workspace(cfg))
+        else:
+            check = validate_windows_hook_registration(connector=name, **common)
+        if check.healthy or check.state == "pending-reload":
+            return None
+        return f"registration-{check.state}"
+    if name == "hermes":
+        return _unix_registration_freshness(cfg, name)
+    from defenseclaw.doctor_hooks import unix_hook_event_binding_problem
+
+    state, _detail = unix_hook_event_binding_problem(
+        name,
+        _native_deny_registration_path(cfg, name),
+        str(Path(cfg.data_dir) / "hooks" / f"{name}-hook.sh"),
+    )
+    return f"registration-{state}" if state else None
+
+
+def report_renders_fail_mode(report: dict[str, Any]) -> bool:
+    """Whether the connector of a connector_fail_mode_report has a hook or plugin that records its mode."""
+
+    return any(
+        isinstance(source, dict) and source.get("name") in _RENDERED_SOURCES for source in report.get("sources") or ()
+    )
+
+
+def rendered_fail_mode(report: dict[str, Any]) -> str | None:
+    """The fail mode the installed hook of a connector_fail_mode_report was rendered with, or None.
+
+    ``effective`` also counts an inherited DEFENSECLAW_FAIL_MODE=closed, which
+    only the process reading the report has: the agent that runs the hook may
+    not. A hook rendered open is open for every agent without it.
+    """
+
+    for source in report.get("sources") or ():
+        if isinstance(source, dict) and source.get("name") in _RENDERED_SOURCES:
+            mode = source.get("mode")
+            return mode if mode in _VALID_MODES else None
+    return None
+
+
 def connector_fail_mode_report(
     cfg: Any,
     connector: str,
@@ -304,7 +500,7 @@ def connector_fail_mode_report(
                 {"name": f"{name}-upstream", "mode": "open"},
             ],
         }
-    if name in _EXPECTED_CONTRACTS or name == "opencode":
+    if name in _EXPECTED_CONTRACTS or name == "opencode" or name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
         return resolve_connector_fail_mode(
             cfg,
             name,
@@ -337,30 +533,147 @@ def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]
     return "hook-script", _read_baked_hook_mode(Path(cfg.data_dir) / "hooks" / script_name)
 
 
+def _shared_hook_sidecar_drift(cfg: Any) -> str | None:
+    """A malformed shared map is runtime drift even when a baked hook matches."""
+
+    data = _read_small_file(Path(cfg.data_dir) / "hooks" / ".hookcfg")
+    if data is None:
+        return None
+    values, _ = _native_hook_sidecar_values(data)
+    return "shared-sidecar-malformed" if _MALFORMED_SIDECAR in values else None
+
+
 def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, bool]:
+    """The mode the native Windows hook reads from .hookcfg for *connector*, and whether it is a legacy value.
+
+    It is read as the hook reads it (readHookSidecar, hookSidecarFailMode in
+    internal/cli/hook.go): the connector's version 2 entry, then the legacy
+    mode, and KEY=value lines otherwise. The hook runs "open" in any case
+    open and anything else closed, so a value other than open or closed (in
+    any case) is None: no installer rendered it.
+    """
+
     data = _read_small_file(path)
     if data is None:
         return None, False
+    values, current = _native_hook_sidecar_values(data)
+    if _MALFORMED_SIDECAR in values:
+        return "closed", False
+    key = _native_hook_sidecar_key(connector)
+    if current and key in values:
+        # A version 2 connector entry never falls back to the legacy mode
+        # (hooks-upg loop 3); a value no installer writes is no readable mode.
+        mode = values[key].strip().lower()
+        return (mode if mode in _VALID_MODES else None), False
+    value = values.get(key, "")
+    legacy = not current
+    if not value:
+        value = values.get("DEFENSECLAW_FAIL_MODE", "")
+        legacy = legacy or bool(value)
+    mode = value.strip().lower()
+    return (mode if mode in _VALID_MODES else None), legacy
+
+
+_AMBIGUOUS_SIDECAR_VALUE = "\x00ambiguous"
+_MALFORMED_SIDECAR = "\x00malformed"
+
+
+def _native_hook_sidecar_key(connector: str) -> str:
+    name = connector.strip().upper()
+    for char in "-_ ":
+        name = name.replace(char, "")
+    return "DEFENSECLAW_FAIL_MODE_" + name
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"JSON constant {value} is not JSON")
+
+
+def _go_json_field(payload: dict[str, Any], name: str) -> Any:
+    """The value Go's decoder gives struct field *name*: keys match case-insensitively, the last one wins."""
+
+    found: Any = None
+    for key, value in payload.items():
+        if key.lower() == name:
+            found = value
+    return found
+
+
+def _go_string_map(values: dict[str, Any]) -> bool:
+    """Whether Go decodes *values* into a map[string]string (null entries are empty strings)."""
+
+    return all(value is None or isinstance(value, str) for value in values.values())
+
+
+def _native_hook_sidecar_values(data: str) -> tuple[dict[str, str], bool]:
+    """The KEY=value map the native hook builds from .hookcfg, and whether it was version 2 JSON."""
+
     try:
-        payload = json.loads(data)
+        payload = json.loads(data, parse_constant=_reject_json_constant)
+        parsed = True
     except (TypeError, ValueError):
         payload = None
-    if isinstance(payload, dict) and int(payload.get("version", 0) or 0) >= 2:
-        modes = payload.get("fail_modes")
-        if isinstance(modes, dict):
-            value = modes.get(normalize(connector))
-            if str(value or "").strip() in _VALID_MODES:
-                return normalize_fail_mode(value), False
-        legacy_value = str(payload.get("legacy_fail_mode") or "").strip().lower()
-        if legacy_value in _VALID_MODES:
-            return legacy_value, True
-        return None, False
-    for line in data.splitlines():
-        key, separator, value = line.strip().partition("=")
-        if separator and key.removeprefix("export ").strip() == "DEFENSECLAW_FAIL_MODE":
-            value = value.strip().strip("\"'").lower()
-            return (value if value in _VALID_MODES else None), True
-    return None, True
+        parsed = False
+    if isinstance(payload, dict):
+        version = _go_json_field(payload, "version")
+        gateway = _go_json_field(payload, "gateway_addr")
+        legacy = _go_json_field(payload, "legacy_fail_mode")
+        legacy_source = _go_json_field(payload, "legacy_fail_mode_source")
+        sources = _go_json_field(payload, "fail_mode_sources")
+        has_modes = any(key.lower() == "fail_modes" for key in payload)
+        modes = _go_json_field(payload, "fail_modes")
+        decodes = (
+            (version is None or type(version) is int)
+            and (gateway is None or isinstance(gateway, str))
+            and (legacy is None or isinstance(legacy, str))
+            and (legacy_source is None or isinstance(legacy_source, str))
+            and (sources is None or (isinstance(sources, dict) and _go_string_map(sources)))
+        )
+        if decodes and (version or 0) >= 2:
+            if has_modes and (not isinstance(modes, dict) or not _go_string_map(modes)):
+                # readHookSidecar: malformed connector state closes every connector.
+                return {_MALFORMED_SIDECAR: "closed", "DEFENSECLAW_FAIL_MODE": "closed"}, True
+            out: dict[str, str] = {}
+            for connector, value in (modes or {}).items():
+                key = _native_hook_sidecar_key(str(connector))
+                value = value if (value or "").strip() else "closed"
+                if key in out and out[key].strip().lower() != value.strip().lower():
+                    # Go ranges over the map in random order: either value may win.
+                    value = _AMBIGUOUS_SIDECAR_VALUE
+                out[key] = value
+            if legacy:
+                out["DEFENSECLAW_FAIL_MODE"] = legacy
+            return out, True
+    if parsed or data.lstrip()[:1] in ("{", "["):
+        # As readHookSidecar: JSON that is not a v2 sidecar, or that does not
+        # parse, is malformed state and closes every connector, never
+        # KEY=value lines (1.0.4 lead directive).
+        return {_MALFORMED_SIDECAR: "closed", "DEFENSECLAW_FAIL_MODE": "closed"}, True
+    out = {}
+    for line in data.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.removeprefix("export ").partition("=")
+        if not separator:
+            continue
+        key = key.strip()
+        if key:
+            out[key] = _go_unquote_or_trim(value.strip())
+    return out, False
+
+
+def _go_unquote_or_trim(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            decoded = None
+        if isinstance(decoded, str):
+            return decoded
+    elif len(value) >= 2 and value[0] == value[-1] == "`" and "`" not in value[1:-1]:
+        return value[1:-1]
+    return value.strip("\"'")
 
 
 def _read_baked_hook_mode(path: Path) -> str | None:
@@ -368,7 +681,7 @@ def _read_baked_hook_mode(path: Path) -> str | None:
     if data is None:
         return None
     match = _FAIL_MODE_PATTERN.search(data)
-    return match.group(1) if match else None
+    return (match.group(1) or match.group(2)) if match else None
 
 
 def _read_opencode_plugin_mode(cfg: Any) -> str | None:

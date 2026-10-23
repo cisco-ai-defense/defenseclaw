@@ -50,10 +50,8 @@ type OTLPPathTokenScope string
 const (
 	// Every hook-only connector that persists an OTLP credential in agent
 	// configuration gets a distinct namespace here.
-	OTLPScopeCodex     OTLPPathTokenScope = "codex"
-	OTLPScopeClaude    OTLPPathTokenScope = "claudecode"
-	OTLPScopeOmnigent  OTLPPathTokenScope = "omnigent"
-	OTLPScopeOpenHands OTLPPathTokenScope = "openhands"
+	OTLPScopeCodex  OTLPPathTokenScope = "codex"
+	OTLPScopeClaude OTLPPathTokenScope = "claudecode"
 )
 
 // OTLPPathTokenScopes returns the closed allow-list of scopes that
@@ -62,7 +60,7 @@ const (
 // guaranteeing that a new scope can never be added in one half of
 // the codebase without the other.
 func OTLPPathTokenScopes() []OTLPPathTokenScope {
-	return []OTLPPathTokenScope{OTLPScopeCodex, OTLPScopeClaude, OTLPScopeOmnigent, OTLPScopeOpenHands}
+	return []OTLPPathTokenScope{OTLPScopeCodex, OTLPScopeClaude}
 }
 
 // OTLPPathTokenScopeForConnector returns the path-token namespace owned by a
@@ -74,10 +72,6 @@ func OTLPPathTokenScopeForConnector(connectorName string) (OTLPPathTokenScope, b
 		return OTLPScopeCodex, true
 	case "claudecode":
 		return OTLPScopeClaude, true
-	case "omnigent":
-		return OTLPScopeOmnigent, true
-	case "openhands":
-		return OTLPScopeOpenHands, true
 	default:
 		return "", false
 	}
@@ -358,7 +352,10 @@ func removeOTLPPathTokenUniqueTemps(tokenPath string) error {
 	return nil
 }
 
-func removeOwnedOTLPPathTokenFile(path string) error {
+// checkOwnedOTLPPathTokenFile performs the same identity and ownership checks
+// as removal without mutating the path. Retired connector cleanup uses it to
+// reject a bad token path before writing its deny stub.
+func checkOwnedOTLPPathTokenFile(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -396,6 +393,13 @@ func removeOwnedOTLPPathTokenFile(path string) error {
 		return err
 	}
 	if err := file.Close(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func removeOwnedOTLPPathTokenFile(path string) error {
+	if err := checkOwnedOTLPPathTokenFile(path); err != nil {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

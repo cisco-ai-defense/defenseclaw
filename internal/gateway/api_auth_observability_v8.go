@@ -17,7 +17,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -183,9 +182,7 @@ func emitProtectedBoundaryAuthenticationFailureV8(
 		}
 		correlation := authenticationFailureCorrelation(ctx)
 		clock := observability.ClockFunc(func() time.Time { return time.Now().UTC() })
-		ids := observability.OccurrenceIDGeneratorFunc(func() (string, error) {
-			return uuid.NewString(), nil
-		})
+		ids := observability.TimeOrderedOccurrenceIDs
 
 		if admission == router.AdmissionFloor {
 			builder, buildErr := observability.NewRecordBuilder(clock, ids)
@@ -299,7 +296,7 @@ func recordAuthenticationFailureMetricV8(
 			}
 			builder, err := observability.NewFamilyBuilder(
 				observability.ClockFunc(func() time.Time { return observedAt }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if err != nil {
 				return observability.Record{}, &apiAuthenticationV8Error{}
@@ -372,7 +369,6 @@ func apiAuthenticationFailureLogReason(reason string) string {
 		"invalid_scoped_path_token",
 		"invalid_acp_signed_request",
 		"missing_acp_authenticated_transport",
-		"invalid_acp_scoped_token",
 		acpCallerAccountMismatchReason,
 		acpCallerAccountUnverifiedReason:
 		return reason

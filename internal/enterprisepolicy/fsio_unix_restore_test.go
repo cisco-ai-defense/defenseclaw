@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -57,6 +58,59 @@ func TestRestorePublishedDirsAddsOnlyTheMissingModeBits(t *testing.T) {
 	result, err := VerifyAll(opts, []string{"claudecode"})
 	if err != nil || !containsString(result.MachinePolicyConnectors, "claudecode") {
 		t.Fatalf("verify after the repair: %+v, %v", result, err)
+	}
+}
+
+// GAP-0924: Codex opens /etc/codex/requirements.toml by name, so the repair
+// of an administrator's 0700 /etc/codex adds search only: listing it showed
+// its unrelated files to every account. Search alone lets any account open
+// a file it can name, so while an unrelated file there grants other
+// accounts access the repair leaves the directory as it is and names it.
+func TestRestorePublishedDirsAddsOnlySearchAboveASingleFile(t *testing.T) {
+	withHigherSources(t)
+	opts := publishTestOptions(t)
+	if _, err := Publish(opts, []string{"codex"}); err != nil {
+		t.Fatal(err)
+	}
+	vendor := filepath.Join(opts.Root, "etc/codex")
+	notes := filepath.Join(vendor, "admin-notes.toml")
+	if err := os.WriteFile(notes, []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(notes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(vendor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := RestorePublishedPolicyDirs(opts)
+	if !errors.Is(err, errPublishedDirExposes) || !strings.Contains(err.Error(), notes) || len(restored) != 0 {
+		t.Fatalf("restore with a readable unrelated file = %v, %v; want it refused, naming %s", restored, err, notes)
+	}
+	if info, err := os.Stat(vendor); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("%s: mode %v (%v) after the refused repair, want 0700", vendor, info.Mode().Perm(), err)
+	}
+	published, err := Publish(opts, []string{"codex"})
+	if err != nil || published.Complete() {
+		t.Fatalf("publish with a readable unrelated file = %+v, %v; want codex not covered", published, err)
+	}
+	for _, state := range published.States {
+		if state.Connector == "codex" && !strings.Contains(strings.Join(state.Conflicts, "; "), notes) {
+			t.Fatalf("the codex conflicts do not name %s: %v", notes, state.Conflicts)
+		}
+	}
+	if err := os.Chmod(notes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restored, err = RestorePublishedPolicyDirs(opts)
+	if err != nil || !containsString(restored, vendor) {
+		t.Fatalf("restore published dirs = %v, %v", restored, err)
+	}
+	if info, err := os.Stat(vendor); err != nil || info.Mode().Perm() != 0o711 {
+		t.Fatalf("%s: mode %v (%v) after the repair, want 0711", vendor, info.Mode().Perm(), err)
+	}
+	if problem := publishedDirProblem(opts, filepath.Join("/etc/codex", "requirements.toml")); problem != "" {
+		t.Fatalf("a searchable /etc/codex is still reported: %s", problem)
 	}
 }
 

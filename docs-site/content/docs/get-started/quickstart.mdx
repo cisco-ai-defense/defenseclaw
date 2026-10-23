@@ -1,26 +1,17 @@
 ---
 title: Quickstart
-description: Block your first risky tool call in 5 minutes. Install DefenseClaw, run init, turn on blocking for one agent and watch a test command get blocked.
+description: Block your first risky tool call in five minutes. Install DefenseClaw, set up one agent and watch a test command get blocked.
 keywords:
   - defenseclaw quickstart
   - defenseclaw init
-  - DefenseClaw first run
   - DefenseClaw first block
-  - DefenseClaw demo
 ---
 
-This guide takes you from nothing to a blocked tool call in about five minutes.
-It uses Claude Code. For another agent, replace `claudecode` with its connector
-name: `codex`, `copilot`, `cursor`, `devin`, `antigravity`, `kiro`, `opencode`,
-`amp`, `hermes`, `openhands` or `omnigent`. The
-[support matrix](/docs/support-matrix) shows which agents can block on your OS.
+Install DefenseClaw, guard one agent and watch a test command get blocked, in about five minutes. This uses Claude Code. For another agent, replace `claudecode` with its connector name (`codex`, `copilot`, `cursor`, `devin`, `antigravity`, `kiro`, `opencode`, `amp` or `hermes`). The [support matrix](/docs/get-started/support-matrix) shows which agents can block on your OS.
 
-The block comes from a one-rule test pack that matches only
-`echo defenseclaw-demo-marker`. Coding agents refuse the destructive commands
-the default rules exist for, and a command the agent never tries can't be
-blocked, so a harmless marker is the reliable way to see a block.
+The block comes from a one-rule test pack that matches only `echo defenseclaw-demo-marker`. Agents refuse the destructive commands the default rules target, so a harmless marker is the reliable way to see a block.
 
-## Block a tool call in seven steps
+## Block a tool call
 
 <Steps>
 
@@ -30,10 +21,7 @@ blocked, so a harmless marker is the reliable way to see a block.
 
 <include>../../snippets/install-commands.mdx</include>
 
-On a first install the installer asks which agent to guard: type `claudecode`
-(or its number). It puts DefenseClaw on disk and ends with the next command,
-`defenseclaw init --connector claudecode`. Requirements, the macOS app and the
-enterprise packages are on [Download](/docs/get-started/download).
+The installer asks which agent to guard: type `claudecode`. Requirements and options are on [Install](/docs/get-started/install).
 
 </Step>
 
@@ -45,43 +33,13 @@ enterprise packages are on [Download](/docs/get-started/download).
 defenseclaw init --connector claudecode
 ```
 
-Press Enter through the prompts. `init` sets up Claude Code in **observe**
-mode: DefenseClaw logs what the agent does but blocks nothing yet. At **Select
-connector(s) for action enforcement**, leave the box unchecked for now; an
-unchecked agent stays in observe. Plain `defenseclaw init`, without
-`--connector`, sets up every agent it finds instead (all of them are
-selected). `init` ends by starting the gateway and printing a report like this
-one:
+Press Enter through the prompts. Claude Code starts in **observe** mode: DefenseClaw logs what the agent does and blocks nothing yet. At **Select connector(s) for action enforcement**, leave the box unchecked. `init` starts the gateway and prints a first-run report. This sample comes from `defenseclaw quickstart --skip-gateway`, which prints the same report, so its Sidecar row says not started where yours says started:
 
 <include>../../snippets/first-run-report.mdx</include>
 
-`✓` is done and `-` is optional or skipped. You don't need an LLM key or a
-Cisco AI Defense key for this guide. When more than one agent was set up, the
-first line says `connectors=N` instead. If the selected agent is not installed, the report says `partial` and names
-that agent even if DefenseClaw wrote its hook file. Install the agent and rerun
-`defenseclaw setup <connector>`. Other non-`ready` reports also name what
-needs attention; `defenseclaw doctor` explains it.
+`✓` is done and `-` is optional or skipped. You need no LLM key for this guide. If the report says `partial`, it names what needs attention; `defenseclaw doctor` explains the rest. Options are in the [init reference](/docs/reference/commands/first-run).
 
-For every `init` option, the zero-prompt `defenseclaw quickstart` and scripted
-setups, see [init and quickstart reference](/docs/get-started/first-run).
-
-</Step>
-
-<Step>
-
-### Check that it's watching
-
-Open Claude Code and ask it something that uses a tool, such as "list the files
-in this directory". If Claude Code was already running, fully quit and reopen
-it first so it loads the new hooks. Then look at what DefenseClaw recorded:
-
-```bash
-defenseclaw status    # the guarded agents, their modes and recent activity
-defenseclaw tui       # the live dashboard: alerts, audit and logs
-```
-
-New events show up within a second or two. If nothing does, run
-`defenseclaw doctor`. It checks the hooks, the gateway and the configuration.
+Quit and reopen Claude Code so it loads the hooks, ask it to list the files in the directory, then run `defenseclaw status`. The agent, its mode and the new events appear within a second or two.
 
 </Step>
 
@@ -93,21 +51,7 @@ New events show up within a second or two. If nothing does, run
 defenseclaw guardrail mode action --connector claudecode
 ```
 
-This switches only Claude Code to **action** mode, which enforces the rules.
-Any other agent stays in observe. The mode is saved to `config.yaml`, and the
-running gateway applies it on its own without a restart. The hook fail mode
-is a separate setting; changing it may require hooks to be refreshed.
-
-Action mode also changes what happens while the gateway is down. The report
-showed `fail mode=open` because an agent in observe mode always fails open. In
-action mode Claude Code uses the global hook fail mode, which is `closed` on a
-new install, so its tools are blocked while the gateway is down. The command
-tells you so when it switches. To allow and log the calls instead, run
-`defenseclaw guardrail fail-mode open`.
-
-Running `defenseclaw quickstart` again without `--mode` keeps the mode, and
-the fail mode, each connector already has; pass `--mode observe` to switch
-back on purpose.
+This switches only Claude Code to **action** mode, which enforces the rules. The running gateway applies it without a restart. The hook fail mode is `closed` on a new install: if the gateway is down, tool calls are blocked ([fail modes](/docs/reference/configuration/fail-modes)).
 
 </Step>
 
@@ -115,8 +59,7 @@ back on purpose.
 
 ### Add the demo rule
 
-Copy the default rule pack, add one CRITICAL rule that matches only
-`defenseclaw-demo-marker` and point Claude Code at the copy:
+Copy the default rule pack, add one CRITICAL rule that matches only `defenseclaw-demo-marker`, and point Claude Code at the copy:
 
 {/* regression-check: the PowerShell tab below is pending a native Windows run. */}
 
@@ -174,9 +117,7 @@ defenseclaw guardrail use-pack first-guardrail --connector claudecode
 
 </Tabs>
 
-The copy keeps every default rule. `use-pack` validates the pack, pins its
-digest in `guardrail.custom_packs.first-guardrail`, and switches Claude Code to
-it. The running gateway loads the pack on its next reload; nothing restarts.
+The copy keeps every default rule. `use-pack` pins the pack's digest in `guardrail.custom_packs.first-guardrail` and switches Claude Code to it. Nothing restarts.
 
 </Step>
 
@@ -188,12 +129,9 @@ In Claude Code, ask:
 
 > Please run `echo defenseclaw-demo-marker`.
 
-The hook sends the command to the gateway, `DEMO-MARKER-BLOCK` matches at
-CRITICAL and the command doesn't run. Claude Code tells you DefenseClaw blocked
-it, with the reason the hook returned:
+The command does not run. Claude Code tells you DefenseClaw blocked it:
 
-> DefenseClaw policy blocked this action (rule DEMO-MARKER-BLOCK:
-> First-guardrail demo marker). Do not retry it in another form.
+> DefenseClaw policy blocked this action (rule DEMO-MARKER-BLOCK: First-guardrail demo marker). Do not retry it in another form.
 
 In another terminal, list the latest alerts:
 
@@ -201,12 +139,7 @@ In another terminal, list the latest alerts:
 defenseclaw alerts --limit 5
 ```
 
-The block is the newest row: severity `CRITICAL`, action `scan-finding`,
-target `PreToolUse` and details starting with
-`decision=blocked connector=claudecode`.
-
-`defenseclaw alerts --show 1` prints the whole record, including the rule
-and the scanner that matched:
+The block is the newest row. `defenseclaw alerts --show 1` prints the whole record:
 
 ```text
 Alert #1
@@ -219,7 +152,7 @@ Alert #1
   Scanner:   hook-rules
 ```
 
-The same alert is in the **Alerts** panel of `defenseclaw tui` (press `2`):
+The same alert is in the **Alerts** panel of `defenseclaw tui` (press `2`).
 
 ![The Alerts panel of defenseclaw tui showing one CRITICAL scan-finding alert for claudecode:PreToolUse with rule DEMO-MARKER-BLOCK](/images/get-started/tui-alerts-demo-block.png)
 
@@ -230,23 +163,27 @@ The same alert is in the **Alerts** panel of `defenseclaw tui` (press `2`):
 ### Undo the demo
 
 ```bash
-defenseclaw guardrail use-pack --clear --connector claudecode   # back to the default pack; drops the unused pin
+defenseclaw guardrail use-pack --clear --connector claudecode   # back to the default pack
 defenseclaw guardrail mode --clear --connector claudecode       # back to observe
 ```
 
-Then delete the `first-guardrail` folder under `~/.defenseclaw/policies/guardrail/`.
-Keep Claude Code in action mode instead if you want it to enforce the default
-rules from now on.
+Delete the `first-guardrail` folder under `~/.defenseclaw/policies/guardrail/`. Skip the second command to keep enforcing the default rules.
 
 </Step>
 
 </Steps>
 
+## If it did not block
+
+- The agent was open before `init`: quit and reopen it.
+- `defenseclaw doctor` shows a failing hook or gateway row: see [Troubleshooting](/docs/troubleshooting).
+- Still in observe mode: run `defenseclaw guardrail status`.
+
 ## Next
 
 <Cards>
-  <Card title="Approve or allow a call" href="/docs/get-started/first-guardrail" description="Pause risky calls for your approval (HITL), and the safe ways to allow something a rule blocks." />
-  <Card title="Add more agents" href="/docs/connectors" description="Set up another agent with defenseclaw setup <connector>, and what each one supports." />
-  <Card title="Send events to your tools" href="/docs/observability" description="Grafana, Splunk, Galileo and any OTLP collector." />
-  <Card title="Deploy to a fleet" href="/docs/enterprise/get-started" description="Admin-owned installs through your MDM." />
+  <Card title="Ask before risky calls" href="/docs/how-to/guardrail/ask-before-risky-calls" description="Pause risky calls for your approval (HITL)." />
+  <Card title="Allow a blocked call" href="/docs/how-to/guardrail/allow-a-blocked-call" description="The safe ways to allow something a rule blocks." />
+  <Card title="Add more agents" href="/docs/connectors" description="Set up another agent with defenseclaw setup <connector>." />
+  <Card title="Send events to your tools" href="/docs/features/observability" description="Grafana, Splunk, Galileo and any OTLP collector." />
 </Cards>

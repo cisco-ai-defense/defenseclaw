@@ -257,6 +257,31 @@ def matrix_lines(mode: str, block_at: str, alert_at: str, hilt: str) -> tuple[st
     return tuple(lines)
 
 
+# Widest pair line compact_matrix_lines keeps: the detail pane below the
+# table is 68 cells wide at 80 columns.
+_COMPACT_MATRIX_WIDTH = 66
+
+
+def compact_matrix_lines(mode: str, block_at: str, alert_at: str, hilt: str) -> tuple[str, ...]:
+    """The matrix two severities per line, for the short detail pane.
+
+    At 80x24 that pane shows four lines, so one severity per line put
+    MEDIUM and LOW out of view. Falls back to one per line when a pair
+    does not fit.
+    """
+    lines = [line.strip() for line in matrix_lines(mode, block_at, alert_at, hilt)]
+    if len(lines) < 2:
+        return matrix_lines(mode, block_at, alert_at, hilt)
+    left = max(len(line) for line in lines[0::2])
+    pairs = [
+        f"  {lines[index]:<{left}}   {lines[index + 1]}".rstrip() if index + 1 < len(lines) else f"  {lines[index]}"
+        for index in range(0, len(lines), 2)
+    ]
+    if max(len(line) for line in pairs) > _COMPACT_MATRIX_WIDTH:
+        return matrix_lines(mode, block_at, alert_at, hilt)
+    return tuple(pairs)
+
+
 def actions_weaken(before: tuple[tuple[str, str], ...], after: tuple[tuple[str, str], ...]) -> tuple[str, ...]:
     """Severities whose action gets weaker (block → ask → alert → allow)."""
     old = dict(before)
@@ -824,6 +849,7 @@ POLICY_KEYMAP: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("s", "Opt-in packs, Rule families: next scope (global, then each connector)", ("optin", "families")),
     ("Enter", "Policies: pick and activate a policy · Rule packs: switch a pack", ("policies", "packs")),
     ("i / Enter", "Details of the highlighted row (Enter on Posture, Chains, Families)", POLICY_VIEWS),
+    ("PgUp/PgDn", "Scroll the details when they sit under the table", POLICY_VIEWS),
     ("Esc / q", "Close the details", POLICY_VIEWS),
     ("r", "Refresh", POLICY_VIEWS),
 )
@@ -1742,11 +1768,15 @@ class PoliciesPanelModel:
             columns = ("", "Policy", "Block", "Alert")
         return columns, tuple(rows)
 
-    def aside(self) -> tuple[str, tuple[str, ...]]:
-        """``(title, lines)`` describing the highlighted row ("" title when nothing)."""
+    def aside(self, *, compact: bool = False) -> tuple[str, tuple[str, ...]]:
+        """``(title, lines)`` describing the highlighted row ("" title when nothing).
+
+        ``compact`` is the short pane under the table on a small terminal:
+        the posture puts its severity actions first there.
+        """
         view = self.view
         if view == "posture":
-            return self._posture_aside()
+            return self._posture_aside(compact=compact)
         if view == "optin":
             return self._protection_aside()
         if view == "chains":
@@ -1768,7 +1798,7 @@ class PoliciesPanelModel:
             return ""
         return "\n".join((title, *lines))
 
-    def _posture_aside(self) -> tuple[str, tuple[str, ...]]:
+    def _posture_aside(self, *, compact: bool = False) -> tuple[str, tuple[str, ...]]:
         row = self.selected_scope()
         if row is None:
             return "", ()
@@ -1781,19 +1811,30 @@ class PoliciesPanelModel:
             source = "its own mode"
         else:
             source = "global mode"
-        lines = [
-            posture_summary(scope, mode, block, alert, hilt),
-            "",
-            f"Tool calls ({mode}, {source}):",
-            *matrix_lines(mode, block, alert, hilt),
-            self.levels_line(row),
-            "",
-            self._pack_line(row),
-        ]
+        if compact:
+            # Four lines show at 80x24: the actions for every severity come
+            # first, then what they mean.
+            lines = [
+                f"Tool calls ({mode}, {source}):",
+                *compact_matrix_lines(mode, block, alert, hilt),
+                posture_summary(scope, mode, block, alert, hilt),
+                self.levels_line(row),
+                self._pack_line(row),
+            ]
+        else:
+            lines = [
+                posture_summary(scope, mode, block, alert, hilt),
+                "",
+                f"Tool calls ({mode}, {source}):",
+                *matrix_lines(mode, block, alert, hilt),
+                self.levels_line(row),
+                "",
+                self._pack_line(row),
+            ]
         from defenseclaw.policy_catalog import inert_hilt_warning
 
         if note := inert_hilt_warning(hilt, block):
-            lines.insert(1, "Warning: " + note)
+            lines.insert(len(lines) - 3 if compact else 1, "Warning: " + note)
         protection = self.scope_protection(row)
         if protection:
             titles = [str(_attr(self.protection_pack(name), "title")) or name for name in protection]

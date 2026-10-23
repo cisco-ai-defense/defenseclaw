@@ -129,6 +129,13 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 						result.Connector, result.User)
 				}
 				removed = append(removed, message)
+			} else if !directoryLookupsFailing(r.Warnings) {
+				// A miss the enumerator has not confirmed, with no directory
+				// outage to explain it, is a target the guardian could not
+				// protect: it stays and is reported (GAP-1133).
+				failed = append(failed, fmt.Sprintf("%s for user %s is not protected: the guardian's last reconcile could not "+
+					"resolve the account, and the enumerator has not confirmed that it is gone; the guardian protects it again "+
+					"once the account resolves", result.Connector, result.User))
 			}
 			continue
 		}

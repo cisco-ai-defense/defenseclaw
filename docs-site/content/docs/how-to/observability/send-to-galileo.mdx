@@ -1,0 +1,87 @@
+---
+title: Send to Galileo
+description: Send DefenseClaw traces to Galileo Cloud or a self-hosted Galileo deployment and keep other destinations running.
+keywords:
+  - Galileo
+  - defenseclaw setup galileo
+  - OTLP traces
+---
+
+Galileo receives traces only, over OTLP HTTP. Metrics and logs keep going to your other destinations. Per user, Galileo shows which agent ran, its model and tool calls, and the rule that blocked a turn.
+
+## Before you start
+
+- A Galileo API key, and the project and Log stream names.
+- Scanner, AI discovery and audit records are not traces, so Galileo does not receive them.
+
+## Steps
+
+1. Set the key and add the destination. `--persist-api-key` copies the key into the owner-only `~/.defenseclaw/.env`. The key is never written to `config.yaml`.
+
+   ```bash
+   export GALILEO_API_KEY='...'
+
+   defenseclaw setup galileo \
+     --non-interactive \
+     --project defenseclaw \
+     --logstream production \
+     --persist-api-key
+   ```
+
+   Add `--dry-run` first to preview:
+
+   ```text
+     Galileo configuration preview
+     -----------------------------
+     Action:      ADD
+     Deployment:  cloud
+     Destination: galileo
+     Endpoint:    https://api.galileo.ai/otel/traces
+     Project:     defenseclaw
+     Log stream:  production
+     Signals:     traces
+     Delivery:    real-time after each completed model/tool operation (<=1s batch delay)
+     Config:      config.yaml (changed)
+   ```
+
+   For a self-hosted deployment, pass `--deployment self-hosted --console-url https://console.galileo.example.com`. DefenseClaw derives the API host from the console URL. If your host names differ, pass the full address with `--trace-endpoint`.
+
+2. Send a test trace.
+
+   ```bash
+   defenseclaw setup galileo test
+   ```
+
+   {/* needs-live-capture: `setup galileo test` output against a live Galileo project */}
+
+   The test writes one content-free two-span trace to the project and prints its trace ID after Galileo accepts it.
+
+## Check it worked
+
+```bash
+defenseclaw setup galileo status
+```
+
+`status` shows the endpoint, the signals and how many spans were delivered, rejected or failed. In Galileo, open the project's Log stream and look for the test trace. Filter out DefenseClaw's own checks with `defenseclaw.telemetry.canary: "true"`.
+
+If the API key is missing, `defenseclaw setup galileo status` and `defenseclaw status` exit 1 and name the missing key. `defenseclaw status` then prints `Sidecar: not checked` until you fix the config; `defenseclaw-gateway status` still shows the running gateway.
+
+## Keep local Grafana and Galileo together
+
+Run `defenseclaw setup local-observability up` and the Galileo setup. They are separate destinations, each with its own queue. A Galileo outage does not stop Grafana, and the reverse.
+
+Leave `send` and `routes` unset on the `galileo` destination. DefenseClaw then sends only the six span types Galileo can index. Setting `send` or `routes` replaces that set, and Galileo rejects any span it cannot index as `unsupported_shape`. To redact only Galileo, set a profile on its route; see [Redact before export](/docs/how-to/observability/redact-before-export).
+
+## Undo
+
+```bash
+defenseclaw setup galileo disable
+defenseclaw setup galileo remove --yes
+```
+
+`disable` keeps the configuration; `remove` deletes the destination and keeps the shared API key. `enable` turns it back on.
+
+## Next
+
+- [What Galileo receives](/docs/reference/observability#galileo-traces): span families, metadata keys and the delivery funnel.
+- [Telemetry identity](/docs/reference/observability/telemetry-identity)

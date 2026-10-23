@@ -89,19 +89,11 @@ func (e *Env) loadedMacOSAgents(ctx context.Context, a SandboxAccount) ([]loaded
 	var out []loadedLaunchAgent
 	uid := strconv.Itoa(a.UID)
 	for _, domain := range []string{"gui/" + uid, "user/" + uid} {
-		domainResult, err := e.Runner.Run(ctx, "launchctl", "print", domain)
+		exists, err := e.macOSAgentDomainExists(ctx, domain)
 		if err != nil {
-			message := string(domainResult.Stdout) + " " + string(domainResult.Stderr) + " " + err.Error()
-			if strings.Contains(message, "Could not find domain") || strings.Contains(message, "No such process") || launchdNotLoaded(err) {
-				continue
-			}
-			if strings.HasPrefix(domain, "gui/") && guiDomainUnsupported(domainResult, message) && !e.ownsConsole(a.UID) {
-				// No GUI session: launchd sets the jobs up at the next login.
-				continue
-			}
 			return nil, fmt.Errorf("inspect LaunchAgent domain %s of %s: %w", domain, a.Name, err)
 		}
-		if !strings.Contains(string(domainResult.Stdout), domain+" = {") {
+		if !exists {
 			continue
 		}
 		disabled, err := e.Runner.Run(ctx, "launchctl", "print-disabled", domain)
@@ -129,6 +121,24 @@ func (e *Env) loadedMacOSAgents(ctx context.Context, a SandboxAccount) ([]loaded
 	return out, nil
 }
 
+func (e *Env) macOSAgentDomainExists(ctx context.Context, domain string) (bool, error) {
+	res, err := e.Runner.Run(ctx, "launchctl", "print", domain)
+	if err != nil {
+		message := string(res.Stdout) + " " + string(res.Stderr) + " " + err.Error()
+		if strings.Contains(message, "Could not find domain") || strings.Contains(message, "No such process") || launchdNotLoaded(err) {
+			return false, nil
+		}
+		if strings.HasPrefix(domain, "gui/") && guiDomainUnsupported(res, message) {
+			// macOS can leave /dev/console owned by the last logged-out
+			// user. This answer means that user has no live GUI domain,
+			// regardless of the console's owner (GAP-0316 / GAP-0260).
+			return false, nil
+		}
+		return false, err
+	}
+	return strings.Contains(string(res.Stdout), domain+" = {"), nil
+}
+
 // guiDomainUnsupported matches launchd's answer for the gui domain of an
 // account without a GUI session on macOS 15: exit 125 with "Domain does not
 // support specified action" rather than "Could not find domain" (GAP-0639).
@@ -136,11 +146,17 @@ func guiDomainUnsupported(res CommandResult, message string) bool {
 	return res.ExitCode == 125 && strings.Contains(message, "Domain does not support specified action")
 }
 
-// ownsConsole reports whether uid owns /dev/console, the GUI login session. An
-// unreadable console counts as owned, so the launchctl failure stays an error.
-func (e *Env) ownsConsole(uid int) bool {
+// activeMacOSConsoleSession requires both a live GUI domain and the current
+// console owner. Neither an inactive fast-user-switch domain nor a stale
+// /dev/console owner alone establishes an active GUI console session.
+// It is used only for reload advice, never for hook authorization.
+func (e *Env) activeMacOSConsoleSession(ctx context.Context, uid int) (bool, error) {
+	exists, err := e.macOSAgentDomainExists(ctx, "gui/"+strconv.Itoa(uid))
+	if err != nil || !exists {
+		return false, err
+	}
 	owner, _, err := e.OwnerOf(e.P("/dev/console"))
-	return err != nil || owner == uid
+	return err == nil && owner == uid, err
 }
 
 // reloadMacOSAgent uses the same bootout/bootstrap sequence that recovered the
@@ -148,7 +164,9 @@ func (e *Env) ownsConsole(uid int) bool {
 // RunAtLoad; an idle job remains idle until its next sandbox command.
 func (e *Env) reloadMacOSAgent(ctx context.Context, job loadedLaunchAgent, failed bool) error {
 	target := job.domain + "/" + job.label
-	if _, err := e.Runner.Run(ctx, "launchctl", "bootout", target); err != nil {
+	// The account's drain boots the sandbox agent out first
+	// (drainAccount): one that is not loaded any more is out already.
+	if res, err := e.Runner.Run(ctx, "launchctl", "bootout", target); err != nil && !bootoutNotLoaded(res, err) {
 		return fmt.Errorf("boot out %s: %w", target, err)
 	}
 	plist := e.P(filepath.Join("/Library/LaunchAgents", job.label+".plist"))
@@ -260,13 +278,23 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 				state.Pending[key] = old
 			}
 		}
-		if statusErr != nil || status.Running > 0 {
-			count := status.Running
+		if statusErr != nil || status.busy() > 0 {
+			count := status.busy()
 			if statusErr != nil {
 				count = -1
 			}
 			state.Pending[key] = pending{User: a.Name, UID: a.UID, Home: a.Home, Kind: "launchd", Reason: "the signed gateway binary or a loaded LaunchAgent changed", Since: e.Now().UTC().Format(time.RFC3339), Sandboxes: count}
 			l.result.AddWarning(codeSandboxPending, fmt.Sprintf("LaunchAgent reload for %s waits for its running sandboxes to stop", a.Name))
+			continue
+		}
+		// A reload of a job that runs stops it, the gateway's with its
+		// MicroVMs: under the account's drain only, which checks again what
+		// the status above read.
+		release, derr := l.drainAccount(ctx, e.sandboxOps(), a, status)
+		if derr != nil {
+			state.Pending[key] = pending{User: a.Name, UID: a.UID, Home: a.Home, Kind: "launchd", Reason: "the signed gateway binary or a loaded LaunchAgent changed (" + derr.Error() + ")",
+				Since: e.Now().UTC().Format(time.RFC3339), Sandboxes: -1}
+			l.result.AddWarning(codeSandboxPending, fmt.Sprintf("LaunchAgent reload for %s waits: %v", a.Name, derr))
 			continue
 		}
 		var failed error
@@ -285,6 +313,7 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 			}
 			l.openshellChange("reloaded %s for %s after its program or job failed", job.label, a.Name)
 		}
+		release()
 		if failed != nil {
 			state.Pending[key] = pending{User: a.Name, UID: a.UID, Home: a.Home, Kind: "launchd", Reason: "the signed gateway binary or a loaded LaunchAgent changed (" + failed.Error() + ")", Since: e.Now().UTC().Format(time.RFC3339)}
 			next := "repair retries it"

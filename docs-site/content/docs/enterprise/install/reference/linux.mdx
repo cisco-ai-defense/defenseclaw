@@ -1,0 +1,374 @@
+---
+title: Linux deployment reference
+description: Layout, systemd units, SELinux, secrets, the tarball install, user namespaces, Tetragon, sandboxes, per-user installs, removal and upgrades for the standalone DefenseClaw deployment on Linux.
+keywords:
+  - DefenseClaw Linux enterprise reference
+  - systemd units
+  - SELinux
+  - user namespaces
+  - tarball install
+---
+
+Reference for the [Linux standalone deployment](/docs/enterprise/install/linux). The install steps are on that page.
+
+## SELinux, FIPS and secrets
+
+| Topic | Detail |
+| --- | --- |
+| SELinux | Supported, for unconfined and confined users. Where SELinux is enabled the lifecycle loads a small `defenseclaw` policy module (`semodule -l`) that labels the hook socket `defenseclaw_hook_sock_t` and the gateway binary `defenseclaw_gateway_exec_t`, so the gateway runs in its own domain, `defenseclaw_gateway_t`. Every user domain may connect to that domain and to no other service; the gateway still authorizes each caller by uid. Uninstall removes the module. `status` and `verify` warn `selinux_module_missing` while confined users cannot reach the socket, and the lifecycle warns `selinux_relabel` or `selinux_module` if relabeling or loading fails |
+| FIPS mode | RHEL 9 in FIPS mode is supported with the rpm |
+| Application control | With fapolicyd, the deb and rpm ship every file an agent loads, so package-database trust covers them. After a payload install, add `/opt/defenseclaw/` to a trust file ([Application control](/docs/enterprise/plan/threat-model#application-control-must-allow-defenseclaw-files)) |
+
+If a payload install reports that the staged gateway could not run, check
+fapolicyd trust, SELinux policy, execute permission and `noexec` mount options.
+
+The systemd version decides how the gateway reads secrets, and how much of the
+units' sandboxing applies (systemd ignores directives it does not know; RHEL 8 runs
+without `ProtectHostname`, `ProtectKernelLogs`, `ProtectClock`, `ProtectProc` and
+`ProcSubset`; the [Linux threat model](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/LINUX-ENTERPRISE-THREAT-MODEL.md#review-scope)
+lists each):
+
+| systemd | Secrets |
+| --- | --- |
+| 247 or later | `/etc/defenseclaw/secrets` is `root:root 0700`, each file `0600`. The gateway receives them through `LoadCredential=` |
+| 239 to 246 | `/etc/defenseclaw/secrets` is `root:defenseclaw 0750`, each file `0640` |
+
+## Layout
+
+| Item | Path | Owner and mode |
+| --- | --- | --- |
+| Binaries | `/opt/defenseclaw/bin`: `defenseclaw-gateway`, `defenseclaw-hook`, `defenseclaw-sensor-helper`, and `defenseclaw-acp` when present | `root`, `0755` |
+| Managed OpenCode plugin | `/opt/defenseclaw/share/opencode/defenseclaw.js` | `root`, `0644` |
+| Config | `/etc/defenseclaw/config.yaml` | `root:defenseclaw`, `0640` |
+| Policies | `/etc/defenseclaw/policies` | `root:defenseclaw`, `0750` |
+| Secrets | `/etc/defenseclaw/secrets` | See above |
+| Target manifest | `/etc/defenseclaw/hook-guardian/targets.yaml` (the enumerator writes it) | Directory `root:defenseclaw`, `0750` |
+| Runtime descriptor | `/etc/defenseclaw/managed-runtime.json` | `root`, `0644` |
+| Machine-policy summary | `/etc/defenseclaw/machine-policy.json` | Readable by users |
+| Lifecycle state | `/var/lib/defenseclaw-enterprise`: lock, snapshots, deployment record, `last-package-result.json`, `last-activation-failure.log`, the last applied and a rejected config | `root`, `0700` |
+| Sensor helper state | `/var/lib/defenseclaw-sensor`: the policy names loaded into Tetragon, their state and a pause record | `root`, `0700` |
+| Gateway data | `/var/lib/defenseclaw` | `defenseclaw`, `0700` |
+| Authorization ledger | `/var/lib/defenseclaw-hook-guardian`, with each user's latest AI Discovery scan in `ai-discovery/` | `root:defenseclaw`, `0750` |
+| Logs | `/var/log/defenseclaw`: empty unless a `jsonl` destination writes there. Services log to the journal ([Logs and events](/docs/enterprise/operate/operations#logs-and-events)) | `defenseclaw`, `0750` |
+| Hook socket | `/run/defenseclaw-hook/hook.sock` | Directory `defenseclaw`, `0755`. Socket `0666`: every user may connect, and the gateway authorizes each caller by uid |
+| Sandbox launcher | `/usr/bin/defenseclaw`, a link to `defenseclaw-gateway` that offers users only the `sandbox` commands | `root`, `0755` |
+| Sandbox state | `/var/lib/defenseclaw/sandbox/`, and `/etc/defenseclaw/openshell/gateway.toml` when `enterprise.openshell` is set | `defenseclaw`, `0600` files; `root` |
+
+The gateway runs as the `defenseclaw` system account, created with
+`systemd-sysusers` or `useradd`. An existing `defenseclaw` account with a login
+shell is refused and reported, because whoever signs in as it could stop the
+gateway. Remove it with `userdel defenseclaw` or give it `/usr/sbin/nologin`, then
+run `ensure` again.
+
+| Unit | Runs as | What it does |
+| --- | --- | --- |
+| `defenseclaw-gateway.service` | `defenseclaw`, no capabilities | Policy engine and hook API. `Type=notify`, 60 s watchdog, `Restart=always`. Config, binaries and ledger are read-only to it |
+| `defenseclaw-gateway-api.socket` | PID 1 | Listens on `127.0.0.1:18970` |
+| `defenseclaw-gateway-hook.socket` | PID 1 | Listens on `/run/defenseclaw-hook/hook.sock` |
+| `defenseclaw-hook-guardian.service` | root, bounded capabilities | Always running. Reconciles each user's hooks every minute through a worker that runs as that user, which also runs the user's AI Discovery scan. Every 5 seconds it checks the hook binary and Claude Code's `90-defenseclaw.json` drop-in; if either is gone or changed it logs `tamper:` and starts `defenseclaw-enterprise-apply.service`, whose `ensure` puts them back |
+| `defenseclaw-hook-guardian-reconcile.service` | root | One immediate reconcile, on demand |
+| `defenseclaw-hook-enumerator.service` | root, homes read-only | Rewrites the target manifest every five minutes (in `auto` enrollment mode) |
+| `defenseclaw-sensor-helper.service` | root | Answers the gateway's fixed AI Discovery requests. Starts after `tetragon.service` and reads a running Tetragon |
+| `defenseclaw-enterprise-apply.path` | PID 1 | Runs `ensure --reason path` when the config, secrets or policies change |
+| `defenseclaw-enterprise-verify.timer` | PID 1 | Runs `verify` daily, with up to one hour of random delay |
+| `defenseclaw-sandbox.socket`, `.service`, `defenseclaw-openshell-gateway.service` | Each user (systemd user units) | The user's sandbox daemon and, in `setup` mode, OpenShell gateway ([Sandboxes](/docs/enterprise/runtime/sandboxes)) |
+
+The package installs units in `/usr/lib/systemd/system`; a tarball install writes
+them to `/etc/systemd/system`. Put host-specific drop-ins in
+`/etc/systemd/system/<unit>.d/`. The lifecycle writes its own drop-ins
+(`30-defenseclaw-tetragon.conf`, `40-defenseclaw-agent-prefixes.conf`,
+`50-defenseclaw-paths.conf`, `60-defenseclaw-credentials.conf`,
+`70-defenseclaw-network.conf`) and `verify` does not report them as overrides.
+
+<Flow
+  direction="TB"
+  caption="Linux. systemd opens 127.0.0.1:18970 and /run/defenseclaw-hook/hook.sock at boot and keeps them open while the gateway restarts, so a hook that connects mid-restart waits for the real gateway. The hook sends nothing until it has checked that root or defenseclaw owns the socket, and the gateway learns the caller's uid from the kernel."
+>
+  <Zone id="l0" label="Z0 · Admin and OS (root)" tone="trusted">
+    <Node id="sd" kind="generic">{`systemd\nholds both sockets`}</Node>
+  </Zone>
+  <Zone id="l4" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="agent" kind="agent">{`AI agent\nruns as the user`}</Node>
+    <Node id="hook" kind="connector">{`defenseclaw-hook\nchecks the socket owner`}</Node>
+  </Zone>
+  <Zone id="l2" label="Z2 · Gateway (defenseclaw)" tone="restricted">
+    <Node id="gw" kind="gateway">{`Gateway\nallows or blocks`}</Node>
+  </Zone>
+  <Edge from="sd" to="gw" label="hands over sockets" />
+  <Edge from="agent" to="hook" label="runs per tool call" />
+  <Edge from="hook" to="gw" label="asks over hook.sock" />
+</Flow>
+
+<Flow
+  direction="TB"
+  caption="Linux. The enumerator lists the users to protect in /etc/defenseclaw/hook-guardian/targets.yaml. Every minute the guardian, which runs as root, starts a short-lived worker as each listed user, and the worker puts back DefenseClaw's hooks in that user's agent config. Root never writes a user's files with its own rights."
+>
+  <Zone id="l1" label="Z1 · Services (root)" tone="privileged">
+    <Node id="enum" kind="generic">{`Enumerator\nlists the users`}</Node>
+    <Node id="grd" kind="generic">{`Guardian\nchecks every minute`}</Node>
+  </Zone>
+  <Zone id="l3" label="Z3 · Admin-owned files" tone="protected">
+    <Node id="tgt" kind="policy">{`Target manifest\ntargets.yaml`}</Node>
+  </Zone>
+  <Zone id="l4b" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="wrk" kind="generic">{`Per-user worker\nruns as the user`}</Node>
+    <Node id="ucfg" kind="agent">{`Agent config\nin the user's home`}</Node>
+  </Zone>
+  <Edge from="enum" to="tgt" label="writes" />
+  <Edge from="grd" to="tgt" label="reads" />
+  <Edge from="grd" to="wrk" label="starts, as the user" />
+  <Edge from="wrk" to="ucfg" label="repairs hooks" />
+</Flow>
+
+## Install from the tarball
+
+Use the tarball on hosts without dpkg or rpm. The payload folder and its binaries
+must be owned by root and not writable by group or others:
+
+```bash
+VERSION=1.0.4  # the release you deploy
+ARCH=amd64        # or arm64
+PAYLOAD="/root/defenseclaw-enterprise-${VERSION}"
+sudo install -d -o root -g root -m 0700 "$PAYLOAD"
+sudo tar -xzf "defenseclaw-enterprise-${VERSION}-linux-${ARCH}.tar.gz" \
+  -C "$PAYLOAD" --no-same-owner --no-same-permissions
+sudo chmod -R go-w "$PAYLOAD"
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --json
+```
+
+`ensure` installs when nothing is installed, applies a different payload,
+re-applies a changed config, repairs a deployment that fails verification, and
+otherwise does nothing. Add `--config <absolute path>` for a config elsewhere and
+`--no-start` to stage with the services stopped. A host installed from the package
+refuses a tarball upgrade (`package_owned_binaries`). A hand-built layout stops the
+install with `unmanaged_layout_present`; `--adopt-existing` backs it up to
+`/var/lib/defenseclaw-enterprise` and takes it over.
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success, or nothing to do |
+| `1` | Failure. A failed install, upgrade or repair is rolled back, and a refusal before any change leaves the computer as it was. For `status` and `verify`, the deployment is unhealthy |
+| `2` | Invalid arguments |
+| `75` | Another lifecycle run holds the lock. Retry later |
+
+## Users who are enrolled
+
+The enumerator finds accounts through NSS, so directory users (LDAP, SSSD, Active
+Directory) count as well as local ones. It skips:
+
+- accounts below `UID_MIN` from `/etc/login.defs` (1000 when unset), and local
+  accounts above `UID_MAX` (60000 when unset). `enterprise.enrollment.uid_min`
+  changes the minimum and `uid_max` caps local and directory accounts alike;
+- accounts with a nologin shell, unless in `include_users`;
+- accounts whose home is outside `/home` and `/var/home`. Add roots with
+  `enterprise.enrollment.home_roots`; `include_users` does not override this;
+- accounts in `exclude_users` or `exempt_users`, and accounts the group filters
+  leave out;
+- `root`, uid 65534 and `nobody`, always.
+
+See [Enrollment](/docs/enterprise/configure/enrollment).
+
+## Gateway sandbox
+
+The gateway unit runs with an empty capability bounding set and a strict systemd
+sandbox (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=true`, private
+devices and `/tmp`, `ProtectProc=invisible`, no SUID or namespace changes, and the
+`@system-service` system-call set). Config, binaries and the ledger are
+read-only to it. The guardian is bounded to `CAP_CHOWN CAP_DAC_OVERRIDE
+CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID`, and the enumerator to the
+same without `CAP_DAC_OVERRIDE`. Do not edit the units; put host-specific
+settings in a drop-in and never widen the gateway sandbox.
+
+- A drop-in may set ordering, resource limits, restart and timeout tuning, and
+  host environment (a proxy, a CA bundle). `status` and `verify` list such
+  drop-ins as the warning `unit_drop_in`.
+- Any other setting in a drop-in DefenseClaw did not write (`User`, `ProtectHome`,
+  `ExecStart`, `ReadWritePaths`), an `Environment` line that sets a `DEFENSECLAW_*`
+  or loader variable, and an empty `Environment=` line fail `status` and `verify`.
+- The managed gateway reads `/etc/defenseclaw/config.yaml` and `/var/lib/defenseclaw`
+  only, and ignores `DEFENSECLAW_CONFIG` and `DEFENSECLAW_HOME`.
+
+```bash
+sudo systemctl show defenseclaw-gateway.service \
+  -p User -p NoNewPrivileges -p CapabilityBoundingSet \
+  -p ProtectSystem -p ProtectHome -p ReadOnlyPaths -p ReadWritePaths
+```
+
+## User namespaces
+
+On most distributions as shipped (Ubuntu 24.04 and RHEL 9 included), `verify`
+reports `ok: true` with one warning, `unprivileged_user_namespaces`. Where standard
+users can create a private user and mount namespace, an agent started inside one
+can be given its own view of the machine-policy files, the runtime descriptor and
+`/run/defenseclaw-hook`, outside your enforcement
+([Residual risks](/docs/enterprise/plan/threat-model#residual-risks)). The warning
+names the host setting that closes it:
+
+| Host | Setting |
+| --- | --- |
+| Ubuntu 24.04 and other AppArmor hosts where `kernel.apparmor_restrict_unprivileged_userns` is `1` | `kernel.apparmor_restrict_unprivileged_unconfined=1` |
+| Any host | `user.max_user_namespaces=0`, which turns user namespaces off for everyone but root |
+
+```bash
+# Ubuntu 24.04: keep the setting across reboots, then load it.
+echo 'kernel.apparmor_restrict_unprivileged_unconfined = 1' |
+  sudo tee /etc/sysctl.d/60-defenseclaw-userns.conf
+sudo sysctl --system
+```
+
+Weigh the trade-off first: the command sandboxes of Codex and Claude Code use
+bubblewrap, which needs user namespaces. With `user.max_user_namespaces=0` those
+sandboxes cannot start, nor can rootless containers. On stock Ubuntu 24.04,
+Codex's bundled bubblewrap already fails
+(`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`), so its shell
+calls fail until the user chooses `--sandbox danger-full-access` or approves
+running outside the sandbox. DefenseClaw's hooks inspect each tool call whether or
+not the agent's own sandbox runs. An agent started inside a private user namespace
+that was not given such a view (`unshare -Ur`) fails closed ("this agent runs in a
+private user namespace ... Start the agent from your normal login session"), and
+the gateway records `enterprise_managed_user_namespace`.
+
+## Tetragon and AI Discovery Plane C
+
+AI Discovery runtime detection has three planes: A watches inference compute, B
+attributes network traffic and C records agent actions from kernel events
+([Runtime planes](/docs/reference/scanning/ai-discovery/#runtime-planes)). Plane C
+runs in the root sensor helper. It is opt-in: set `ai_discovery.runtime.enabled`
+and `ai_discovery.runtime.enable_host_plane` to `true`. If the computer runs
+[Tetragon](https://tetragon.io), the helper uses it as a better source (`consume`),
+reports the events of your own Tetragon policies that hit an AI agent, and can load
+a small fixed set of kernel controls through it (`observe`, then `enforce`).
+DefenseClaw does not install or configure Tetragon, never writes to
+`/etc/tetragon` and never changes a policy of yours. The fleet task flow, hardening
+settings, `enterprise linux tetragon verify`, approval, pause and removal are in
+[Tetragon on a Linux fleet](/docs/enterprise/runtime/tetragon); how this fits with hooks,
+sandboxes and the egress proxy is in [Agent segmentation](/docs/appendix/coverage-by-layer).
+
+## Sandboxes
+
+A Linux standalone install can run coding agents in OpenShell sandboxes under the
+sandbox policy of each person's directory group. They are off until
+`openshell.enabled` is on. The rpm and deb package the `defenseclaw` launcher and
+the user units; you provide OpenShell (`install: prerequisite`) or let each
+person's daemon download it (`install: setup`). The Docker driver needs Docker
+Engine 28 or newer with BuildKit, Landlock ABI 3 or newer (`sandbox doctor`
+reports the running kernel's ABI) and the person in the `docker` group. The
+optional MicroVM driver also needs `/dev/kvm`, the `kvm` group and `e2fsprogs`, and
+falls back to Docker where KVM does not work. `ensure` and `verify` print a row
+for each piece.
+
+Membership in `docker` is root-equivalent: a member can read and change what root
+can, including `/etc/defenseclaw/config.yaml`, the protected credentials and the
+services' environment. The only mitigation is to add only the accounts that run
+sandboxes; `ensure`, `status` and `verify` count the enrolled accounts in the
+group (`docker_group_members`). A member can also run an agent in a plain
+container outside DefenseClaw, bypassing `sandbox.required_for`, so
+administrators who need `required_for` to hold against deliberate users must not
+give them Docker access. There is no root-owned image and lifecycle service to
+close this limit. Keys, recipes and what people see are in
+[Sandboxes on managed computers](/docs/enterprise/runtime/sandboxes).
+
+## Per-user installs
+
+On a computer with `/etc/defenseclaw/managed-runtime.json` the per-user product
+refuses to run: `install.sh` refuses and changes nothing, `defenseclaw upgrade`
+refuses, and the per-user gateway refuses to start. Nothing migrates a per-user
+install. Before you deploy, have each user run
+`defenseclaw uninstall --binaries --yes` (add `--all` to delete `~/.defenseclaw`;
+[Uninstall](/docs/get-started/install/)).
+
+A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy the
+device enforces: `defenseclaw config get`, `guardrail`, `status` and other
+per-user commands exit `3` and name it, and `doctor` reports the device as managed.
+That is the per-user CLI, where one is still on the user's `PATH`; the packaged
+`defenseclaw` refuses those commands with exit `2`.
+
+A per-user gateway still running holds the managed port `127.0.0.1:18970` unless
+its user moved it. The install then stops before it changes anything with
+`api_port_held`, naming the process and the `kill` command. The package install
+completes, with the error in `last-package-result.json`. Stop that gateway or move
+it, then run `defenseclaw-gateway enterprise linux ensure --from-package`. A
+per-user gateway on another port keeps running; the install, `status` and `verify`
+name each such account with `per_user_gateway_running`.
+
+## Remove
+
+Run these as root from `/opt/defenseclaw/bin`.
+
+| Goal | Command |
+| --- | --- |
+| Stop and remove the deployment, its config, secrets and logs, most of its data and lifecycle state, and the `defenseclaw` account. Each user keeps `~/.defenseclaw`, and your policies in `/etc/defenseclaw/policies` stay. When an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` stay with the root-only record `/var/lib/defenseclaw-enterprise/openshell-state.kept.json`. They are root-owned while the service account is gone; the next `ensure` adopts them | `defenseclaw-gateway enterprise linux uninstall --json` |
+| Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `defenseclaw-gateway enterprise linux uninstall --purge --json` |
+| Keep the config, secrets, data and logs (and the account) for a reinstall | `defenseclaw-gateway enterprise linux uninstall --keep-state --json` |
+| Keep only the `defenseclaw` account | Add `--keep-service-account` |
+
+Uninstall removes each user's DefenseClaw hook registrations and DefenseClaw's own
+machine-policy entries first; administrator entries stay. If the sensor helper
+loaded policies into Tetragon, it deletes those `defenseclaw-*` policies before
+removing any file ([Remove the policies, or downgrade](/docs/enterprise/runtime/tetragon/)).
+The result's `kept:` line names accounts that still have `~/.defenseclaw` or
+per-user binaries. With `--purge` it also stops each enrolled user's per-user
+gateway and removes `~/.defenseclaw`, the empty agent folders DefenseClaw created,
+the per-user binaries in `~/.local/bin` and DefenseClaw's wheels in `~/.cache/uv`;
+a user's own DefenseClaw install from before enrollment is first moved to
+`~/.defenseclaw-backup-<UTC time>`. Use `--purge` instead of a plain uninstall to
+delete user data: the plain uninstall removes the enrollment record a later
+`--purge` needs, and a purge after it warns `per_user_state_remaining`. To clean up
+afterward, run `ensure --from-package --config <file>` and then `uninstall --purge`,
+or delete the files by hand. If uninstall reports an error, it keeps the deployment
+record, config and state so you can fix the cause and rerun. The plain uninstall
+keeps `/etc/defenseclaw/policies` (root-owned, mode `0751`) and removes the vendor
+policies in `/opt/defenseclaw/share/policies`; `--purge` removes your policies too.
+To turn the deployment on again, run `ensure --from-package --config <file>` on a
+package host, or stage the payload and run `"$PAYLOAD/defenseclaw-gateway"
+enterprise linux ensure --payload "$PAYLOAD" --config <file>`. After an uninstall
+or reinstall, ask users to restart their agents (`agent_sessions_restart_required`).
+
+On a package host `uninstall` leaves the package's binaries and units, so dpkg or
+rpm still lists `defenseclaw-enterprise`. Removing the package runs `uninstall`:
+
+| Package command | Effect |
+| --- | --- |
+| `apt remove defenseclaw-enterprise` | Runs plain `uninstall`, then removes the package files and `/opt/defenseclaw/share/policies`. The config, most state and the `defenseclaw` account go, also after a failed package install that rolled back; `/etc/defenseclaw/policies` stays. If an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `redaction-correlation.key` stay; each user keeps `~/.defenseclaw`. Use lifecycle `--purge` for a clean image |
+| `apt purge defenseclaw-enterprise` | Runs the same plain lifecycle uninstall, then deletes what it left of `/etc/defenseclaw`, `/var/lib/defenseclaw` (including `sandbox` and `redaction-correlation.key`), `/var/lib/defenseclaw-hook-guardian` and `/var/log/defenseclaw`, plus lifecycle state except the root-owned `lifecycle.lock`. It does not purge each enrolled account's home; run lifecycle `--purge` first. The sandboxes accounts kept in their homes are no longer known to a later install, because their registrations are gone: pull their work first |
+| `dnf remove defenseclaw-enterprise` | Runs plain `uninstall`, then removes the package files and `/opt/defenseclaw/share/policies`. Same results as `apt remove`, including the sandbox store and key that an account's kept sandboxes leave behind; delete `/etc/defenseclaw/policies` by hand when you no longer need it |
+
+If `uninstall` refuses before any change (`uninstall_precheck_refused`) or stops
+before removing the binaries (`uninstall_incomplete`), apt or dnf fails and keeps
+the package files. Its result stays in `last-package-result.json`. Fix the cause it
+names, then run the removal again.
+
+To remove everything from a package host, including each user's data, purge with
+the lifecycle first, while the binary still exists:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json
+sudo apt purge defenseclaw-enterprise
+# RHEL and derivatives:
+# sudo dnf remove defenseclaw-enterprise
+```
+
+On a tarball host, `uninstall --purge` removes everything, including `/opt/defenseclaw`.
+
+## Upgrades and changes
+
+- **Upgrade.** Install the newer package with apt or dnf, or run `ensure` with the
+  newer tarball. The lifecycle refuses an older release unless you pass
+  `--allow-downgrade`, and the package refuses an older package unless
+  `/var/lib/defenseclaw-enterprise/allow-downgrade` exists
+  ([Upgrade](/docs/enterprise/operate/lifecycle#upgrade), [Roll back](/docs/enterprise/operate/lifecycle#roll-back)).
+  The first `ensure` of a new release migrates an older `config_version` and keeps
+  `config.yaml.v8.bak` and `migration-v9.json`.
+- **A package older than the config.** The package refuses to install, before it
+  replaces any file, when `config.yaml` has a `config_version` newer than the
+  release reads. Install a release that reads it, or push a config with the older
+  version first.
+- **Change the config.** Replace `/etc/defenseclaw/config.yaml`. The apply path
+  unit runs `ensure`, which validates and applies it or rolls back
+  ([Change the config](/docs/enterprise/operate/lifecycle#change-the-config)).
+  In bundle mode the edit is reverted; deliver a new signed bundle.
+- **Tetragon.** Read [Remove the policies, or downgrade](/docs/enterprise/runtime/tetragon/)
+  before you downgrade below the first release that supports Tetragon, and
+  [Upgrades](/docs/enterprise/runtime/tetragon#upgrades) when a release changes a kernel
+  control.
+- **Failures.** See [Lifecycle error codes](/docs/troubleshooting/enterprise#lifecycle-error-codes).

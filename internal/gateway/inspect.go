@@ -751,6 +751,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		)
 	}
 	ruleFindings := dispatchTrustedAction(ctx, action)
+	ruleFindings, provedHighWrite := provedHighWriteFindings(ctx, action, ruleFindings)
 
 	// CodeGuard: scan file content for any file-write tool.
 	//
@@ -791,6 +792,9 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		runtimeAction := guardrailActionForConnectorFindings(
 			a.decisionConfig(ctx), req.Connector, ruleFindings, true,
 		)
+		if provedHighWrite {
+			runtimeAction = guardrailActionBlock
+		}
 		if enforceableSeverity != "NONE" {
 			codeGuardAction := guardrailActionForConnector(
 				a.decisionConfig(ctx), req.Connector, enforceableSeverity, true,
@@ -1392,6 +1396,9 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *guardrail.RulePack {
 	connector = canonicalConnectorRulePackKey(connector)
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil && resolved.derived != nil {
+		if meet := resolved.set.meet(resolved.decision.Name); meet != nil {
+			return meet.rulePack(ctx, a, resolved.set, connector)
+		}
 		key := effectiveRulePackKey(resolved.derived, connector)
 		if pack := resolved.set.packs[key]; pack != nil {
 			return pack
@@ -1546,6 +1553,9 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.refuseProfileInspect(w, r, "/api/v1/inspect/tool", "inspect-tool-block", "tool") {
 		return
 	}
 

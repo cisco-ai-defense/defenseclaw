@@ -25,7 +25,8 @@ import (
 // `defenseclaw-gateway hook session-facts` only when it is stale. A shell
 // cannot resolve the Go key, so the file also carries EnvKey, the raw
 // session variables (SessionFactsEnvKey); the shell reuses a header for the
-// same variables for five minutes, by the file's age.
+// same variables for five minutes, by the file's age, unless a FILE or DIR
+// credential cache is newer than the file (GAP-1139).
 
 // SessionFactsCacheTTL is how long the hook reuses its cached facts.
 const SessionFactsCacheTTL = 5 * time.Minute
@@ -43,6 +44,7 @@ type sessionFactsCacheFile struct {
 	Key       string    `json:"key"`
 	EnvKey    string    `json:"env_key"`
 	WrittenAt time.Time `json:"written_at"`
+	ExpiresAt int64     `json:"expires_at"`
 	Header    string    `json:"header"`
 }
 
@@ -96,7 +98,7 @@ func cachedSessionFactsHeader(path, key, envKey string, now time.Time) (string, 
 // at now: its modification time too, which the shell hooks age it by.
 // Errors are ignored by the caller: the cache is an optimisation.
 func writeSessionFactsCache(path, key, envKey, header string, now time.Time) error {
-	data, err := json.Marshal(sessionFactsCacheFile{Key: key, EnvKey: envKey, WrittenAt: now.UTC(), Header: header})
+	data, err := json.Marshal(sessionFactsCacheFile{Key: key, EnvKey: envKey, WrittenAt: now.UTC(), ExpiresAt: now.Add(SessionFactsCacheTTL).Unix(), Header: header})
 	if err != nil {
 		return err
 	}

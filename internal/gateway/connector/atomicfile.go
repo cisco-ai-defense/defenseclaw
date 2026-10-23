@@ -50,6 +50,32 @@ func atomicWriteFileWithPublisher(
 	if err != nil {
 		return err
 	}
+	return atomicWriteFileAt(path, writePath, data, perm, publish, false)
+}
+
+// atomicReplaceFileNoFollow is atomicWriteFile for a path that must be a
+// regular file or absent: it never writes through a link. A link or other
+// non-regular file there is an error, and the rename replaces the directory
+// entry itself, so a link put there after the check is replaced, not
+// followed. It renames a new file over path even when path already holds
+// data and perm: path then names a new file, apart from every other name
+// (hard link) of the old one. until 1.1: only the removed connectors'
+// teardown (removed.go) uses it.
+func atomicReplaceFileNoFollow(path string, data []byte, perm os.FileMode) error {
+	info, err := os.Lstat(path)
+	switch {
+	case err == nil && !info.Mode().IsRegular():
+		return fmt.Errorf("%s is not a regular file", path)
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("lstat %s: %w", path, err)
+	}
+	return atomicWriteFileAt(path, path, data, perm, atomicFilePublish, true)
+}
+
+// atomicWriteFileAt writes data to writePath, path or the file a link at path
+// leads to. A writePath that already holds data and perm is left as it is,
+// unless always is set.
+func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, publish atomicFilePublisher, always bool) error {
 	// In an account home bound for the enterprise per-user code, a path
 	// that leads out of the home is never changed, nor a folder created
 	// there; a write that would change nothing is still fine (rel-1-0-3
@@ -69,7 +95,7 @@ func atomicWriteFileWithPublisher(
 	// on Windows, where a replacement is a file-identity transition and must not
 	// churn NTFS metadata. The platform helper validates the effective owner-only
 	// DACL instead of comparing Go's synthetic 0666 FileMode to 0600.
-	if atomicFileAlreadyMatches(writePath, data, perm) {
+	if !always && atomicFileAlreadyMatches(writePath, data, perm) {
 		return nil
 	}
 
@@ -122,18 +148,25 @@ func atomicWriteFileWithPublisher(
 	// The staged file was synced before publication. POSIX rename additionally
 	// needs an explicit parent-directory fsync.
 	if runtime.GOOS != "windows" {
-		directory, err := os.Open(dir)
-		if err != nil {
-			return fmt.Errorf("open parent directory for sync: %w", err)
-		}
-		syncErr := directory.Sync()
-		closeErr := directory.Close()
-		if syncErr != nil {
-			return fmt.Errorf("sync parent directory: %w", syncErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("close parent directory after sync: %w", closeErr)
-		}
+		return atomicFileSyncParent(dir)
+	}
+	return nil
+}
+
+// atomicFileSyncParent syncs dir after a rename into it. A failure leaves the
+// new file in place; tests replace it to prove callers handle that.
+var atomicFileSyncParent = func(dir string) error {
+	directory, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open parent directory for sync: %w", err)
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil {
+		return fmt.Errorf("sync parent directory: %w", syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close parent directory after sync: %w", closeErr)
 	}
 	return nil
 }

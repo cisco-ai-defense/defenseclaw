@@ -3199,6 +3199,20 @@ attributes:
     overrides: {max_utf8_bytes: 28, pattern: '^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$'}
     notes: the bundle id, or r- and a ULID for a delivery whose manifest could not be read
   introduced_in: telemetry-registry-v2
+- id: defenseclaw.policy.bundle.delivery_id
+  type: string
+  brief: Caller-supplied delivery id of one policy bundle apply
+  examples: ['acme-agent:d-000913']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128, pattern: '^[A-Za-z0-9._:-]{1,128}$'}
+    notes: the --delivery-id of enterprise bundle apply, opaque and not authenticated; absent when the apply had none
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.policy.bundle.state
   type: string
   brief: Terminal state of a policy bundle receipt
@@ -3266,6 +3280,118 @@ attributes:
     id: digest-v1
     overrides: {max_utf8_bytes: 71, pattern: '^sha256:[0-9a-f]{64}$'}
     notes: for a failed receipt the digest of the last good policy that kept enforcing
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.config.change.id
+  type: string
+  brief: Identifier of one trust anchor or credential change record on a standalone managed device
+  examples: [c-01JB8Z4X6T2Q9V3M5N7P1R0S4W]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 28, pattern: '^c-[0-7][0-9A-HJKMNP-TV-Z]{25}$'}
+    notes: c-<ULID> the enterprise lifecycle writes into the change spool; the gateway reports each one once
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.config.change.reason_code
+  type: string
+  brief: Closed code of a refused or failed trust anchor or credential change
+  examples: [anchor_invalid]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64, pattern: '^[a-z][a-z0-9_]{0,63}$'}
+    notes: the errors[].code of the command (anchor_invalid, anchor_insecure, invalid_arguments, change_failed and the others of the management agent contract); absent when the change was applied
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.trust_anchors.sha256
+  type: string
+  brief: SHA-256 of the trust anchor file installed by the change
+  examples: [3f0a8c1e5b7d9f2a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64, pattern: '^[0-9a-f]{64}$'}
+    notes: lowercase hex of the file bytes; trust anchors hold public keys only
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.trust_anchors.previous_sha256
+  type: string
+  brief: SHA-256 of the trust anchor file the change replaced
+  examples: [9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a5c7e9b1d]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64, pattern: '^[0-9a-f]{64}$'}
+    notes: absent when no anchor file was installed before
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.trust_anchors.key_ids.added
+  type: string[]
+  brief: Signing key ids the new trust anchor file adds
+  examples: [[fleet-2026-11]]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 4096, max_item_utf8_bytes: 128}
+    notes: key_id values of the anchor file, sorted; never a public key
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.trust_anchors.key_ids.removed
+  type: string[]
+  brief: Signing key ids the new trust anchor file no longer holds
+  examples: [[fleet-2026-10]]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 4096, max_item_utf8_bytes: 128}
+    notes: key_id values of the replaced anchor file, sorted; never a public key
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.secret.name
+  type: string
+  brief: Name of the protected credential a change set or removed
+  examples: [splunk-hec-token]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 63, pattern: '^[a-z0-9][a-z0-9-]{0,62}$'}
+    notes: the --name of enterprise secret set or remove; a name the command refused is left out. Never the value or a hash of it
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.secret.action
+  type: string
+  brief: What a protected credential change did
+  examples: [set]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [set, remove]}
+    notes: the enterprise secret verb
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.metric.policy.bundle.result
   type: string
@@ -12758,6 +12884,214 @@ groups:
     route_selector: true
     compatibility_profiles:
     - local-observability-v1
+- id: metric.defenseclaw.sandbox.managed.refusals
+  type: metric
+  brief: Managed sandbox refusals (host run refused, sandbox unavailable, access refused) by reason, guardrail profile, driver and harness connector; no user or sandbox label.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.driver
+    requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.sandbox.managed.refusals
+    instrument_type: counter
+    value_type: int64
+    unit: '{refusal}'
+    description: Managed sandbox refusals (host run refused, sandbox unavailable, access refused) by reason, guardrail profile, driver and harness connector; no user or sandbox label.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.sandbox.managed.reason
+        label: reason
+      - ref: defenseclaw.guardrail.profile.name
+        label: profile
+      - ref: defenseclaw.sandbox.driver
+        label: driver
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.sandbox.managed.asks
+  type: metric
+  brief: Managed sandbox asks decided by the gateway, by result, reason, guardrail profile, driver and harness connector; no user or sandbox label.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.approval.result
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.driver
+    requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.sandbox.managed.asks
+    instrument_type: counter
+    value_type: int64
+    unit: '{ask}'
+    description: Managed sandbox asks decided by the gateway, by result, reason, guardrail profile, driver and harness connector; no user or sandbox label.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.approval.result
+        label: result
+      - ref: defenseclaw.sandbox.managed.reason
+        label: reason
+      - ref: defenseclaw.guardrail.profile.name
+        label: profile
+      - ref: defenseclaw.sandbox.driver
+        label: driver
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.sandbox.managed.foreign_items
+  type: metric
+  brief: Foreign sandboxes, containers and network rules found on a managed host, by kind, action, guardrail profile, driver and harness connector; no user or sandbox label.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.kind
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.managed.action
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.driver
+    requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.sandbox.managed.foreign_items
+    instrument_type: counter
+    value_type: int64
+    unit: '{item}'
+    description: Foreign sandboxes, containers and network rules found on a managed host, by kind, action, guardrail profile, driver and harness connector; no user or sandbox label.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.kind
+        label: kind
+      - ref: defenseclaw.sandbox.managed.action
+        label: action
+      - ref: defenseclaw.guardrail.profile.name
+        label: profile
+      - ref: defenseclaw.sandbox.driver
+        label: driver
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.sandbox.managed.provisional
+  type: metric
+  brief: Provisional managed sandbox resolutions (registered on the offline floor, or resolved once the directory lookup answered), by result, guardrail profile, driver and harness connector; no user or sandbox label.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.result
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.driver
+    requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.sandbox.managed.provisional
+    instrument_type: counter
+    value_type: int64
+    unit: '{resolution}'
+    description: Provisional managed sandbox resolutions (registered on the offline floor, or resolved once the directory lookup answered), by result, guardrail profile, driver and harness connector; no user or sandbox label.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.result
+        label: result
+      - ref: defenseclaw.guardrail.profile.name
+        label: profile
+      - ref: defenseclaw.sandbox.driver
+        label: driver
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.sandbox.managed.drift
+  type: metric
+  brief: OpenShell settings drift found on a managed sandbox, by setting, guardrail profile, driver and harness connector; no user or sandbox label.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.openshell.settings.field
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.driver
+    requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.sandbox.managed.drift
+    instrument_type: counter
+    value_type: int64
+    unit: '{drift}'
+    description: OpenShell settings drift found on a managed sandbox, by setting, guardrail profile, driver and harness connector; no user or sandbox label.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.openshell.settings.field
+        label: field
+      - ref: defenseclaw.guardrail.profile.name
+        label: profile
+      - ref: defenseclaw.sandbox.driver
+        label: driver
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
 - id: log.config.bundle.receipt
   type: log
   brief: 'Canonical config.bundle.receipt log identity; one record for every signed policy bundle receipt that ends confirmed or failed on a standalone managed device.'
@@ -12770,6 +13104,8 @@ groups:
     requirement_level: required
   - ref: defenseclaw.policy.bundle.state
     requirement_level: required
+  - ref: defenseclaw.policy.bundle.delivery_id
+    requirement_level: recommended
   - ref: defenseclaw.policy.bundle.id
     requirement_level: recommended
   - ref: defenseclaw.policy.bundle.version
@@ -12857,6 +13193,101 @@ groups:
     bucket: compliance.activity
     family_schema_version: 1
     route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.config.trust_anchors.changed
+  type: log
+  brief: 'Canonical config.trust_anchors.changed log identity; one record per trust anchor install on a standalone managed device that changed the anchor file, was refused or failed. It carries hashes and key ids only.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.compliance.activity
+  attributes:
+  - ref: defenseclaw.config.change.id
+    requirement_level: required
+  - ref: defenseclaw.trust_anchors.sha256
+    requirement_level: recommended
+  - ref: defenseclaw.trust_anchors.previous_sha256
+    requirement_level: recommended
+  - ref: defenseclaw.trust_anchors.key_ids.added
+    requirement_level: recommended
+  - ref: defenseclaw.trust_anchors.key_ids.removed
+    requirement_level: recommended
+  - ref: defenseclaw.config.change.reason_code
+    requirement_level: recommended
+  body_fields: []
+  log:
+    event_name: config.trust_anchors.changed
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    - rejected
+    route_selector: true
+    mandatory_floor:
+    - control_plane_mutation
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.config.secret.changed
+  type: log
+  brief: 'Canonical config.secret.changed log identity; one record per protected credential set or removed on a standalone managed device. It never carries the value or a hash of it.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.compliance.activity
+  attributes:
+  - ref: defenseclaw.config.change.id
+    requirement_level: required
+  - ref: defenseclaw.secret.name
+    requirement_level: required
+  - ref: defenseclaw.secret.action
+    requirement_level: required
+  body_fields: []
+  log:
+    event_name: config.secret.changed
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    route_selector: true
+    mandatory_floor:
+    - control_plane_mutation
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.config.secret.change_failed
+  type: log
+  brief: 'Canonical config.secret.change_failed log identity; one record per protected credential set or removal that was refused or failed on a standalone managed device. It never carries the value or a hash of it.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.compliance.activity
+  attributes:
+  - ref: defenseclaw.config.change.id
+    requirement_level: required
+  - ref: defenseclaw.secret.name
+    requirement_level: recommended
+  - ref: defenseclaw.secret.action
+    requirement_level: required
+  - ref: defenseclaw.config.change.reason_code
+    requirement_level: required
+  body_fields: []
+  log:
+    event_name: config.secret.change_failed
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - failed
+    - rejected
+    route_selector: true
+    mandatory_floor:
+    - control_plane_mutation
     compatibility_profiles:
     - local-observability-v1
 - id: log.fleet.alert
@@ -15323,6 +15754,21 @@ producer_identity_sets:
   - event_name: config.bundle.receipt
     bucket: compliance.activity
     family: log.config.bundle.receipt
+- id: identity_set.config_trust_anchors_changed
+  identities:
+  - event_name: config.trust_anchors.changed
+    bucket: compliance.activity
+    family: log.config.trust_anchors.changed
+- id: identity_set.config_secret_changed
+  identities:
+  - event_name: config.secret.changed
+    bucket: compliance.activity
+    family: log.config.secret.changed
+- id: identity_set.config_secret_change_failed
+  identities:
+  - event_name: config.secret.change_failed
+    bucket: compliance.activity
+    family: log.config.secret.change_failed
 - id: identity_set.fleet_alert
   identities:
   - event_name: fleet.alert
@@ -19708,6 +20154,42 @@ producer_mappings:
   source: internal/audit/actions.go
   event_name_policy: context_required
   allowed_context_identity_set: identity_set.config_bundle_receipt
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: config.trust_anchors.changed
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.config_trust_anchors_changed
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: config.secret.changed
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.config_secret_changed
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: config.secret.change_failed
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.config_secret_change_failed
   severity_policy: canonical_or_info
   mandatory_rules:
   - control_plane_mutation

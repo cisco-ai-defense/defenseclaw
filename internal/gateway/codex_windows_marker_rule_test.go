@@ -111,7 +111,7 @@ func TestWindowsConnectorMarkerRuleUsesCompleteCMDWrapperArgv(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, connectorName := range []string{
-		"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "omnigent", "opencode",
+		"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode",
 	} {
 		t.Run(connectorName, func(t *testing.T) {
 			for _, command := range []string{

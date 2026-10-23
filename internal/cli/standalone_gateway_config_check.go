@@ -202,6 +202,16 @@ func checkJSONLDestinationPaths(compiled *config.ObservabilityV8CompiledConfig, 
 					"or point the destination at a folder it can write", folder, gatewayAccount),
 			}
 		}
+		if rotation := destination.Transport.Rotation; rotation != nil && rotation.Compress {
+			// Compression reads each rotated file back (GAP-1432).
+			if err := standaloneServiceCanReadRotatedFile(path, gatewayAccount); err != nil {
+				return &config.V8SemanticError{
+					Path:    "$.observability.destinations",
+					Summary: fmt.Sprintf("destination %q writes %s, but %v", destination.Name, path, err),
+					Action:  "grant that account Modify on the existing file (or let it inherit the folder permissions), or set rotation compress to false on the destination",
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -228,6 +238,17 @@ func standaloneNearestExistingFolder(path string) string {
 // A seam for tests.
 var standaloneServiceCanWriteFile = func(path, serviceAccount string) error {
 	err := managed.ValidateServiceCanWriteFile(path, serviceAccount)
+	if managed.IsServiceAccountUnresolved(err) {
+		return nil
+	}
+	return err
+}
+
+// standaloneServiceCanReadRotatedFile checks that the gateway service
+// account can read back the rotated files of a jsonl destination that
+// compresses them (a no-op off Windows). A seam for tests.
+var standaloneServiceCanReadRotatedFile = func(path, serviceAccount string) error {
+	err := managed.ValidateServiceCanReadRotatedFile(path, serviceAccount)
 	if managed.IsServiceAccountUnresolved(err) {
 		return nil
 	}

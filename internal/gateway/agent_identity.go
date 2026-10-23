@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // agentIdentityFromContext returns the agent identity
@@ -46,12 +47,24 @@ type agentIdentityFacts struct {
 	MachineHash string
 	UserID      string
 	UserName    string
-	Connector   string
-	InstallFP   string
+	// UserDomain is the useridentity.AccountDomains of the user's verified
+	// facts when the hook ran (agentIdentityAccountDomains), and
+	// UserIncarnation the account token of the account that held the uid
+	// (agentIdentityAccountToken).
+	UserDomain      string
+	UserIncarnation string
+	Connector       string
+	InstallFP       string
 	// InstallHint is a config root the agent claimed (a CLAUDE_CONFIG_DIR or
 	// CODEX_HOME style override seen in the payload) that differs from
 	// InstallFP. It is recorded for operators and never moves the ID.
 	InstallHint string
+	// LegacyID is the identity 1.0.0 to 1.0.3 gave this agent
+	// (agentidentity.LegacyAgentID), "" when it is ID. A guardrail profile
+	// assignment may still name it (profileAgentBridge); LegacyClaim says
+	// whether the upgrade bound it to this agent's account.
+	LegacyID    string
+	LegacyClaim profileAgentClaim
 }
 
 // agentIdentityConfig is the config the gateway resolves connector config
@@ -99,16 +112,23 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		// to the other admin views. defenseclaw.user.name stays bare. The
 		// account the ID is keyed on comes first: the listing tells a
 		// removed account's identity by it (GAP-0947).
-		UserName:  firstNonEmpty(account, user.Name),
-		Connector: connectorName,
-		InstallFP: agentIdentityInstallFP(connectorName, user),
+		UserName:        firstNonEmpty(account, user.Name),
+		UserDomain:      agentIdentityAccountDomains(user.ID),
+		UserIncarnation: agentIdentityAccountToken(agentidentity.NormalizeUserID(user.ID)),
+		Connector:       connectorName,
+		InstallFP:       agentIdentityInstallFP(connectorName, user),
 	}
-	facts.ID = agentidentity.AgentID(agentidentity.Inputs{
+	inputs := agentidentity.Inputs{
 		MachineHash: facts.MachineHash, UserID: facts.UserID, Account: account,
-		Connector: facts.Connector, InstallFP: facts.InstallFP,
-	})
+		Connector: facts.Connector, InstallFP: facts.InstallFP, Incarnation: agentIdentityAccountIncarnation(user),
+	}
+	facts.ID = agentidentity.AgentID(inputs)
 	if facts.ID == "" {
 		return agentIdentityFacts{}
+	}
+	facts.LegacyID = agentidentity.LegacyAgentID(inputs)
+	if facts.LegacyID != "" {
+		facts.LegacyClaim = legacyAgentClaim(facts.LegacyID, facts.UserID, facts.MachineHash, account, user.Self)
 	}
 	facts.Verified = machineVerified && user.Verified
 	if hint := claimedInstallHint(req.Payload); hint != "" &&
@@ -116,6 +136,22 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		facts.InstallHint = hint
 	}
 	return facts
+}
+
+// agentIdentityAccountDomains is the provenance an agent identity row keeps
+// of the account a uid's hooks ran as: the useridentity.AccountDomains of
+// the verified facts the gateway cached for the uid. "" for a SID, which no
+// other account is given, and while no facts are cached.
+func agentIdentityAccountDomains(userID string) string {
+	userID = agentidentity.NormalizeUserID(userID)
+	if userID == "" || agentidentity.IsSID(userID) {
+		return ""
+	}
+	facts, _, ok := peerDirectoryCache().peek(userID)
+	if !ok {
+		return ""
+	}
+	return useridentity.AccountDomains(facts)
 }
 
 // hookAgentIdentityUser picks the user an agent identity belongs to, most
@@ -170,6 +206,21 @@ func agentIdentityAccount(user agentIdentityUser) string {
 	return ""
 }
 
+// agentIdentityAccountIncarnation is the account incarnation a uid's agent
+// identity is keyed on besides its name (agentidentity.Inputs.Incarnation):
+// "" for the first account the gateway saw hold the uid, and the token of
+// any other one (agentIdentityIncarnation). One bare name, uid and home in
+// two domains derived one agent ID, so the second account got the first
+// one's match.agents profile and its row of the agent identities ledger
+// (review of GAP-0947). A per-user gateway's own account and a SID are never
+// handed on.
+func agentIdentityAccountIncarnation(user agentIdentityUser) string {
+	if user.Self || agentidentity.IsSID(agentidentity.NormalizeUserID(user.ID)) {
+		return ""
+	}
+	return agentIdentityIncarnation(user.ID)
+}
+
 var gatewaySelf struct {
 	once sync.Once
 	user agentIdentityUser
@@ -217,7 +268,7 @@ func agentIdentityInstallFP(connectorName string, user agentIdentityUser) string
 	cfg := agentIdentityConfig.Load()
 	if user.Self {
 		switch strings.ToLower(strings.TrimSpace(connectorName)) {
-		case "claudecode", "codex", "hermes", "opencode", "omnigent":
+		case "claudecode", "codex", "hermes", "opencode":
 		default:
 			return filepath.Clean(cfg.ConnectorHomeDir(connectorName))
 		}
@@ -247,8 +298,6 @@ func connectorConfigRootRelative(cfg *config.Config, connectorName string) strin
 		return ".hermes"
 	case "opencode":
 		return filepath.Join(".config", "opencode")
-	case "omnigent":
-		return ".omnigent"
 	}
 	if cached, ok := connectorConfigRootRel.Load(connectorName); ok {
 		return cached.(string)
@@ -404,6 +453,7 @@ func inventoryAgentIdentityID(connectorName, userID, userName string) string {
 	return agentidentity.AgentID(agentidentity.Inputs{
 		MachineHash: machine, UserID: agentidentity.NormalizeUserID(user.ID), Account: account,
 		Connector: connectorName, InstallFP: agentIdentityInstallFP(connectorName, user),
+		Incarnation: agentIdentityAccountIncarnation(user),
 	})
 }
 

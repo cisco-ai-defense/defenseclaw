@@ -6,6 +6,7 @@ package enterprisestatus
 import (
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"time"
 )
@@ -110,25 +111,26 @@ func (r *Result) SetBundleSessions(status SessionRestartStatus) {
 	}
 }
 
-// SetBundleReceiptWarnings exposes a receipt's digest markers in lifecycle
-// status text as well as in its bundle JSON block.
+// SetBundleReceiptWarnings exposes a receipt's digest and publish markers
+// in lifecycle status text as well as in its bundle JSON block.
 func (r *Result) SetBundleReceiptWarnings() {
 	if r == nil || r.Bundle == nil {
 		return
 	}
 	for _, code := range r.Bundle.WarningCodes {
-		if code != "digest_unverifiable" && code != "digest_layout_unverifiable" {
+		message, ok := bundleReceiptWarningMessages[code]
+		if !ok || slices.ContainsFunc(r.Warnings, func(w Message) bool { return w.Code == code }) {
 			continue
-		}
-		for _, warning := range r.Warnings {
-			if warning.Code == code {
-				return
-			}
-		}
-		message := "the signer used a different product version, so its signed digest cannot be compared with this build's; bundle file hashes and the gateway-versus-installed digest were checked"
-		if code == "digest_layout_unverifiable" {
-			message = "the device's non-standard managed layout changed the effective digest; the signed digest matched this device's digest for the standard layout, and the gateway's enforcing digest was recorded"
 		}
 		r.AddWarning(code, message)
 	}
+}
+
+// bundleReceiptWarningMessages are the receipt warning codes a lifecycle
+// result also lists in warnings[].
+var bundleReceiptWarningMessages = map[string]string{
+	"digest_unverifiable":        "the signer used a different product version, so its signed digest cannot be compared with this build's; bundle file hashes and the gateway-versus-installed digest were checked",
+	"digest_layout_unverifiable": "the device's non-standard managed layout changed the effective digest; the signed digest matched this device's digest for the standard layout, and the gateway's enforcing digest was recorded",
+	"receipt_publish_failed":     "the public copy of this receipt (receipt-events/ and receipt.json) could not be written, so the gateway does not report it; this result and bundle status are the record",
+	"receipt_events_dropped":     "receipt-events/ was full of events the gateway had not reported (is the gateway running?), so the oldest were removed and are missing from the audit log; bundle status lists the newest receipts",
 }

@@ -5,6 +5,7 @@ package enterprisebundle_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -32,6 +33,14 @@ func gatewayDigester(ctx context.Context, cfg *config.Config, raw []byte, goos, 
 // The digest the gateway then computes from the installed config alone must
 // equal the staged one, or the apply never confirms (digest_mismatch).
 func TestSettingsOnlyBundleStagedDigestMatchesGateway(t *testing.T) {
+	for _, identicalBase := range []bool{false, true} {
+		t.Run(fmt.Sprintf("identical-base=%t", identicalBase), func(t *testing.T) {
+			testSettingsOnlyBundleStagedDigestMatchesGateway(t, identicalBase)
+		})
+	}
+}
+
+func testSettingsOnlyBundleStagedDigestMatchesGateway(t *testing.T, identicalBase bool) {
 	_, here, _, _ := runtime.Caller(0)
 	srcPack := filepath.Join(filepath.Dir(here), "..", "..", "policies", "guardrail", "default")
 	root := t.TempDir()
@@ -89,9 +98,12 @@ func TestSettingsOnlyBundleStagedDigestMatchesGateway(t *testing.T) {
 	if !ok {
 		t.Fatal("receipt has no principal to record")
 	}
-	if _, err := configwrite.Locked(ctx, configPath, opt, func() (bool, error) {
-		return true, os.WriteFile(configPath, installed, 0o600)
-	}); err != nil {
+	if identicalBase {
+		if err := os.WriteFile(configPath, installed, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := configwrite.ReplaceDocument(ctx, configPath, installed, opt); err != nil {
 		t.Fatal(err)
 	}
 

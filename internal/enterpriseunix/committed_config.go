@@ -152,8 +152,9 @@ func (l *lifecycle) revertRejectedConfig(record *Deployment, committed, planned 
 // written again since the rollback put its file in place is newer still and
 // stays (GAP-1379), also one with the same bytes as the restored file (an
 // administrator pushing the last applied config again), which is another
-// file or a later write of it (GAP-1411).
-func (l *lifecycle) restoreNewerConfig(record *Deployment, newer []byte) {
+// file or a later write of it (GAP-1411). gid is the service group that
+// reads config.yaml.
+func (l *lifecycle) restoreNewerConfig(gid int, newer []byte) {
 	env, r := l.env, l.result
 	if current, err := sha256File(env.P(env.Layout.ConfigPath)); err == nil && current != l.rollbackConfigSHA {
 		return
@@ -164,8 +165,13 @@ func (l *lifecycle) restoreNewerConfig(record *Deployment, newer []byte) {
 			return
 		}
 	}
-	owner := fileOwner{UID: 0, GID: record.ServiceGID}
-	if err := env.writeFileAtomic(env.P(env.Layout.ConfigPath), newer, 0o640, owner); err != nil {
+	// A failed first install removed the config directory it created with
+	// the file.
+	err := mkdirParents(filepath.Dir(env.P(env.Layout.ConfigPath)))
+	if err == nil {
+		err = env.writeFileAtomic(env.P(env.Layout.ConfigPath), newer, 0o640, fileOwner{UID: 0, GID: gid})
+	}
+	if err != nil {
 		r.AddWarning(codeConfigReverted, "the config.yaml written during this run could not be put back ("+err.Error()+"); the last applied config is in place, push the newer config.yaml again")
 		return
 	}

@@ -17,7 +17,7 @@ import (
 // is also served (the Unix hook socket), and the routes that do not take the
 // gateway token (tokenAuth): the ACP signed routes and the listener proof.
 func TestGatewayAPIDocsDescribeHealthAndAuthExceptions(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "gateway-api.mdx"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "apis", "gateway-api.mdx"))
 	if err != nil {
 		t.Fatal(err)
 	}

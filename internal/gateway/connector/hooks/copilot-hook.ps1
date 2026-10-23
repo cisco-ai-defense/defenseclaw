@@ -2,8 +2,10 @@
 # Copilot CLI on Windows sends each hook event as UTF-8 JSON on stdin. The
 # release hook launcher uses the GUI subsystem, so Start-Process cannot be
 # trusted to inherit redirected stdin/stdout. This adapter preserves the bytes
-# in memory, waits inside Copilot's 30-second hook budget, and deliberately
-# fails open on integration errors to match the Copilot connector contract.
+# in memory and waits inside Copilot's 30-second hook budget. When the
+# launcher is missing, fails or times out, a closed fail mode denies a tool
+# call with Copilot's native answer (Copilot ignores a failed hook process);
+# only an open one lets it run.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -22,6 +24,7 @@ $timeoutMS = {{.CopilotHookTimeoutMS}}
 $process = $null
 $started = $false
 $stdinClosed = $false
+$responseWritten = $false
 $deadline = [System.Diagnostics.Stopwatch]::StartNew()
 
 try {
@@ -89,16 +92,26 @@ try {
 
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
+    # The native hook answers a tool boundary on stdout with exit 0, a failed
+    # check too; a launcher that exits non-zero without an answer crashed.
+    if ($stdout.Length -eq 0 -and $process.ExitCode -ne 0) {
+        if ($stderr.Length -gt 0) {
+            [Console]::Error.Write($stderr)
+        }
+        throw "DefenseClaw hook launcher exited $($process.ExitCode) without an answer"
+    }
     if ($stdout.Length -gt 0) {
         [Console]::Out.Write($stdout)
+        $responseWritten = $true
     }
     if ($stderr.Length -gt 0) {
         [Console]::Error.Write($stderr)
     }
 }
 catch {
-    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)
-}
+{{if eq .FailMode "open"}}    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)
+{{else}}    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed: ' + $_.Exception.Message); if (-not $responseWritten) { if ($Event -ceq 'preToolUse') { [Console]::Out.Write('{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}') } elseif ($Event -ceq 'permissionRequest') { [Console]::Out.Write('{"behavior":"deny","message":"DefenseClaw hook failed closed"}') } }
+{{end}}}
 finally {
     if ($started -and -not $process.HasExited) {
         try {

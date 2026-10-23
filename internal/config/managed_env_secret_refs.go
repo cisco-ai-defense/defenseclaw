@@ -22,7 +22,7 @@ import (
 
 // EnterpriseSettingsReferenceURL is the enterprise settings reference; the
 // managed packages ship no per-user CLI to print the schema with.
-const EnterpriseSettingsReferenceURL = "https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/configuration/#settings-reference"
+const EnterpriseSettingsReferenceURL = "https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/configure/settings/"
 
 // ManagedEnvSecretReferences lists the environment-backed destination
 // secrets of an administrator config.

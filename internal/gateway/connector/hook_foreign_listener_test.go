@@ -83,6 +83,10 @@ func TestHostHooksCheckTheListenerBeforeSending(t *testing.T) {
 		if !strings.HasSuffix(name, ".sh") || strings.HasPrefix(name, "_") {
 			continue
 		}
+		if name == claudeCodeOTLPHeadersHelperScript {
+			// It sends nothing; its own test covers its check (GAP-1421).
+			continue
+		}
 		body, err := hookFS.ReadFile("hooks/" + name)
 		if err != nil {
 			t.Fatal(err)

@@ -23,31 +23,6 @@ import (
 	"testing"
 )
 
-func TestOpenHandsProfileDecodeMapsSDKEventTypes(t *testing.T) {
-	for raw, want := range map[string]string{
-		"PreToolUse": "pre_tool_use", "PostToolUse": "post_tool_use", "UserPromptSubmit": "user_prompt_submit",
-		"Stop": "stop", "SessionStart": "session_start", "SessionEnd": "session_end",
-		" PreToolUse ": "pre_tool_use", "pre_tool_use": "", "Unknown": "",
-	} {
-		if got := openHandsProfileDecode(map[string]interface{}{"event_type": raw}).HookEventName; got != want {
-			t.Errorf("event_type %q decoded to %q, want %q", raw, got, want)
-		}
-	}
-	if got := openHandsProfileDecode(map[string]interface{}{"event_type": 3}).HookEventName; got != "" {
-		t.Errorf("non-string event_type decoded to %q", got)
-	}
-	// The contract's block events use the mapped names.
-	profile := NewOpenHandsConnector().HookProfile(SetupOpts{})
-	if profile.Decode == nil {
-		t.Fatal("openhands profile has no event decoder")
-	}
-	for _, event := range []string{"pre_tool_use", "user_prompt_submit", "stop"} {
-		if !stringSliceContains(profile.Capabilities.BlockEvents, event) {
-			t.Errorf("block events %v lack %s", profile.Capabilities.BlockEvents, event)
-		}
-	}
-}
-
 type trustedShellArgsCase struct {
 	name, tool, args string
 	ok               bool
@@ -69,25 +44,6 @@ func checkTrustedShellArgs(t *testing.T, project func(string, json.RawMessage) (
 			}
 		})
 	}
-}
-
-func TestOpenHandsTrustedShellArgs(t *testing.T) {
-	checkTrustedShellArgs(t, OpenHandsTrustedShellArgs, `{"command":"echo hi > /tmp/x"}`, []trustedShellArgsCase{
-		{"sdk-terminal-action", "terminal", `{"command":"echo hi > /tmp/x","is_input":false,"timeout":null,"reset":false,"kind":"TerminalAction"}`, true},
-		{"model-labels", "terminal", `{"command":"echo hi > /tmp/x","security_risk":"LOW","summary":"write","timeout":30}`, true},
-		{"command-only", "terminal", `{"command":"echo hi > /tmp/x"}`, true},
-		// Input to the running process is judged as a shell command.
-		{"input-to-running-process", "terminal", `{"command":"echo hi > /tmp/x","is_input":true}`, true},
-		{"reset", "terminal", `{"command":"echo hi > /tmp/x","reset":true}`, true},
-		{"input-flag-not-bool", "terminal", `{"command":"echo hi > /tmp/x","is_input":"yes"}`, false},
-		{"other-kind", "terminal", `{"command":"echo hi > /tmp/x","kind":"FileEditorAction"}`, false},
-		{"unknown-field", "terminal", `{"command":"echo hi > /tmp/x","cwd":"/"}`, false},
-		{"duplicate-command", "terminal", `{"command":"echo hi > /tmp/x","command":"ls"}`, false},
-		{"command-not-string", "terminal", `{"command":["echo","hi"]}`, false},
-		{"no-command", "terminal", `{"is_input":false}`, false},
-		{"not-an-object", "terminal", `"echo hi"`, false},
-		{"other-tool", "file_editor", `{"command":"view","path":"/x"}`, false},
-	})
 }
 
 func TestAntigravityTrustedShellArgs(t *testing.T) {
@@ -215,7 +171,6 @@ func TestTrustedShellArgs(t *testing.T) {
 		// Shell tools that name no directory are left alone.
 		{"claudecode", "claudecode", "Bash", `{"command":"ls","cwd":"/w"}`, "", "", false},
 		{"copilot", "copilot", "bash", `{"command":"ls","cwd":"/w"}`, "", "", false},
-		{"openhands", "openhands", "terminal", `{"command":"ls","cwd":"/w"}`, "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, cwd, ok := TrustedShellArgs(tc.connector, tc.tool, json.RawMessage(tc.args))
@@ -274,8 +229,6 @@ func TestShellCommandArgs(t *testing.T) {
 		{"argv", "codex", "Bash", `{"command":["bash","-lc","ls"],"dc_unlisted_arg":1}`, `{"command":["bash","-lc","ls"]}`},
 		{"repeated", "kiro", "shell", `{"command":"ls","command":"echo hi > /tmp/x"}`, `{"command":"echo hi > /tmp/x"}`},
 		{"agy", "antigravity", "run_command", `{"CommandLine":"a && b","Cwd":7,"dc_unlisted_arg":1}`, `{"CommandLine":"a && b"}`},
-		{"openhands", "openhands", "terminal", `{"command":"ls","kind":"Other"}`, `{"command":"ls"}`},
-		{"omnigent", "omnigent", "sys_os_shell", `{"command":"ls","dc_unlisted_arg":1}`, `{"command":"ls"}`},
 		{"claudecode", "claudecode", "Bash", `{"command":"ls","dc_unlisted_arg":1}`, `{"command":"ls"}`},
 		{"connector-case", " Cursor ", "Shell", `{"command":"ls","cwd":7}`, `{"command":"ls"}`},
 		// A case twin of the command key stays, for the conflict check.

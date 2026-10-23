@@ -116,6 +116,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	// trusted, so the refusal reports the running deployment as a refused
 	// config that parses does (GAP-0103).
 	suppliedConfigRefusal error
+	// suppliedConfigUnreadable marks a suppliedConfigRefusal for a file
+	// that could not be opened or read: a preflight failure (1603), not
+	// invalid arguments.
+	suppliedConfigUnreadable bool
 	// runningDeploymentLabel marks a run that refused its config before it
 	// changed anything: every warning from index
 	// runningDeploymentWarningsFrom on, those the finish adds included, is
@@ -132,6 +136,9 @@ type windowsEnterpriseLifecycleOptions struct {
 	bundlePath           string
 	trustAnchors         string
 	refuseCapabilityLoss bool
+	// deferRestart refuses a bundle whose config change restarts the
+	// gateway (enterprise bundle apply --defer-restart).
+	deferRestart bool
 	// bundleLockWait is how long the run waits for another bundle run to
 	// release bundle.lock (`enterprise bundle apply --lock-wait`); 0 tries
 	// once, as Setup and `enterprise windows ensure` do.
@@ -156,6 +163,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	// transaction owns Codex's machine policy, so the change, a signed
 	// bundle's included, goes to that transaction (GAP-0033).
 	codexTargetTransaction bool
+	// hotConfigRestoreFailed is set when a failed hot config apply could not
+	// put the previous config or its enrolled targets back; ensure stops
+	// instead of starting the upgrade transaction.
+	hotConfigRestoreFailed bool
 	// ignoredDeploymentRecords lists deployment records profile resolution
 	// found but ignored because an administrator did not write them. Only
 	// the standalone result reports them.
@@ -185,6 +196,9 @@ type windowsEnterpriseLifecycleOptions struct {
 	// Set by a standalone PowerShell run whose own exit succeeded while a
 	// descendant still held an inherited output pipe.
 	powerShellPipeWaitDelayed bool
+	// scannerRuntimeRetired names the untrusted scanner runtime this run
+	// removed before the services started (GAP-0490).
+	scannerRuntimeRetired string
 	// activationStartedAt is when a standalone change action started, and
 	// installedBeforeRun whether a deployment was installed then: a run
 	// that installs one records its activation (GAP-0967), dated when the
@@ -291,6 +305,9 @@ func init() {
 	for _, action := range []string{"install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall", "ensure"} {
 		enterpriseWindowsCmd.AddCommand(newWindowsEnterpriseLifecycleCommand(action))
 	}
+	recovery := newWindowsEnterpriseLifecycleCommand("recover")
+	recovery.Hidden = true // Setup uses this once after a timed-out lifecycle child.
+	enterpriseWindowsCmd.AddCommand(recovery)
 	enterpriseWindowsCmd.AddCommand(newWindowsServiceConfigValidationCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsStandaloneFleetInspectCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsCodexRequirementsCommand())
@@ -445,7 +462,7 @@ func runWindowsEnterpriseLifecycle(
 	// likewise refuses before loading the installer module (GAP-0640), and
 	// so does reconcile, which ran the module and answered 1603 with
 	// installed:false for a deployment that exists (GAP-0931).
-	if (windowsEnterpriseMutationAction(action) || action == "uninstall" || action == "reconcile") && !windowsEnterpriseIsElevated() &&
+	if (windowsEnterpriseMutationAction(action) || action == "uninstall" || action == "reconcile" || action == "recover") && !windowsEnterpriseIsElevated() &&
 		managed.IsStandaloneProfile(opts.profile) {
 		// A trusted Secure Client record already makes this request invalid.
 		// Preserve its profile refusal before the standalone elevation check.
@@ -576,7 +593,7 @@ func runWindowsEnterpriseLifecycle(
 		}
 	}
 	if windowsEnterpriseStandalone(opts) && action == "repair" {
-		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(); err != nil {
+		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(opts.configPath); err != nil {
 			return writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
 		}
 	}
@@ -990,7 +1007,7 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 	if opts == nil {
 		return errors.New("Windows enterprise lifecycle options are unavailable")
 	}
-	mutationAction := action == "install" || action == "upgrade" || action == "repair"
+	mutationAction := action == "install" || action == "upgrade" || action == "repair" || action == "recover"
 	mutationSecurityOptionUsed := opts.attestAgentApplicationControl ||
 		opts.attestClaudeEffectivePolicy ||
 		opts.coreHardeningCertification
@@ -1286,10 +1303,7 @@ func runWindowsEnterprisePowerShellEngineWithRunner(
 						exit.ExitCode(),
 					))
 				} else {
-					failures = append(failures, fmt.Errorf(
-						"windows enterprise installer exited with code %d",
-						exit.ExitCode(),
-					))
+					failures = append(failures, windowsEnterpriseInstallerExitFailure(exit.ExitCode()))
 				}
 			} else {
 				failures = append(failures, fmt.Errorf("Windows enterprise installer: %w", runErr))

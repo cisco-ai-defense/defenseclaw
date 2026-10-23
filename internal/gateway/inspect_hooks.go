@@ -27,8 +27,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/google/uuid"
 )
 
 // inspectMode returns the authenticated connector's guardrail mode for the
@@ -136,6 +136,9 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if a.refuseProfileInspect(w, r, "/api/v1/inspect/request", "inspect-request-block", "pre-request") {
+		return
+	}
 
 	var req RequestInspectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -220,6 +223,9 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if a.refuseProfileInspect(w, r, "/api/v1/inspect/response", "inspect-response-block", "post-response") {
+		return
+	}
 
 	var req ResponseInspectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -299,6 +305,9 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.refuseProfileInspect(w, r, "/api/v1/inspect/tool-response", "inspect-tool-response-block", "tool") {
 		return
 	}
 
@@ -459,7 +468,7 @@ func (a *APIServer) raiseToolResultAlert(ctx context.Context, event audit.Event,
 	// event its id first: the webhook payload then carries the id of the audit
 	// row, and the delivery can be matched to the alert (GAP-0218).
 	if event.ID == "" {
-		event.ID = uuid.New().String()
+		event.ID = observability.NewTimeOrderedID()
 	}
 	_ = a.logger.LogEventCtx(ctx, event)
 	if a.webhookSource == nil {
@@ -501,7 +510,15 @@ func (a *APIServer) sensitiveToolResultAlert(ctx context.Context, connectorName,
 		if resolved == nil || resolved.set != g.Profiles {
 			resolved = resolveGuardrailProfileFor(ctx, g.Profiles)
 		}
-		if resolved != nil && resolved.derived != nil {
+		var meet *profileMeet
+		if resolved != nil {
+			meet = g.Profiles.meet(resolved.decision.Name)
+		}
+		if meet != nil {
+			if selected := meet.rulePack(ctx, a, g.Profiles, connectorName); selected != nil {
+				pack = selected
+			}
+		} else if resolved != nil && resolved.derived != nil {
 			key := effectiveRulePackKey(resolved.derived, connectorName)
 			if key != effectiveRulePackKey(g.Profiles.base, connectorName) {
 				if selected := g.Profiles.packs[key]; selected != nil {

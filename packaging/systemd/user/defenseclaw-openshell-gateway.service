@@ -31,7 +31,7 @@
 
 [Unit]
 Description=OpenShell gateway for DefenseClaw sandboxes
-Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/sandboxes/
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/runtime/sandboxes/
 StartLimitIntervalSec=120
 StartLimitBurst=5
 

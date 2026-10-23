@@ -722,6 +722,53 @@ if ($SecretName) {
     }
 }
 
+function Set-WrapperSecret {
+    param([string[]]$Extra = @())
+    try {
+        $deployment = Get-DefenseClawInstalledDeployment
+        if ($null -eq $deployment) { throw 'the deployment did not register its marker' }
+        $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -StandardInputPath $secret -ArgumentList (@(
+            'enterprise', 'secret', 'set', '--name', $SecretName, '--from-stdin', '--json') + $Extra)
+    } catch {
+        Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' "storing credential '$SecretName' failed: $($_.Exception.Message)"
+    }
+    if ($run.ExitCode -ne 0) {
+        $detail = ([string]$run.StdErr).Trim()
+        if ($detail.Length -gt 1024) { $detail = $detail.Substring(0, 1024) }
+        Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' "storing credential '$SecretName' failed (exit $($run.ExitCode)): $detail"
+    }
+    Write-WrapperLog -Message "stored credential $SecretName"
+}
+
+function Test-WrapperSecretSetBundle {
+    # True when the installed CLI's secret set takes --bundle: --version-json
+    # reports secret_set_bundle (from 1.0.4). An older CLI binds no
+    # credential value and refuses the flag.
+    param([Parameter(Mandatory = $true)][string]$Cli)
+    try {
+        $run = Invoke-DefenseClawNative -FilePath $Cli -ArgumentList @('--version-json') -TimeoutSeconds 120
+        if ($run.ExitCode -ne 0) { return $false }
+        $document = ([string]$run.StdOut).Trim() | ConvertFrom-Json -ErrorAction Stop
+        return ($document.secret_set_bundle -eq $true)
+    } catch {
+        return $false
+    }
+}
+
+# A credential delivered with a bundle to an installed deployment is stored
+# first, with the bundle: the apply refuses a stored value the bundle does
+# not sign, and a credential the confirmed bundle signs changes only to a
+# value a newer signed bundle signs (secret set --bundle). With -SetupPath,
+# or an installed CLI before 1.0.4, which takes no --bundle, the credential
+# is stored after the lifecycle as before.
+$secretStored = $false
+$installedDeployment = $null
+if ($secret -and $bundle -and -not $SetupPath) { $installedDeployment = Get-DefenseClawInstalledDeployment }
+if ($null -ne $installedDeployment -and (Test-WrapperSecretSetBundle -Cli $installedDeployment.Cli)) {
+    Set-WrapperSecret -Extra @('--bundle', $bundle)
+    $secretStored = $true
+}
+
 $exitCode = 0
 try {
     if ($SetupPath) {
@@ -757,21 +804,8 @@ try {
     Exit-Wrapper $script:ExitFailure 'mdm_lifecycle_launch_failed' $_.Exception.Message
 }
 
-if ($exitCode -eq 0 -and $secret) {
-    try {
-        $deployment = Get-DefenseClawInstalledDeployment
-        if ($null -eq $deployment) { throw 'the deployment did not register its marker' }
-        $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -StandardInputPath $secret -ArgumentList @(
-            'enterprise', 'secret', 'set', '--name', $SecretName, '--from-stdin', '--json')
-    } catch {
-        Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' "storing credential '$SecretName' failed: $($_.Exception.Message)"
-    }
-    if ($run.ExitCode -ne 0) {
-        $detail = ([string]$run.StdErr).Trim()
-        if ($detail.Length -gt 1024) { $detail = $detail.Substring(0, 1024) }
-        Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' "storing credential '$SecretName' failed (exit $($run.ExitCode)): $detail"
-    }
-    Write-WrapperLog -Message "stored credential $SecretName"
+if ($exitCode -eq 0 -and $secret -and -not $secretStored) {
+    Set-WrapperSecret
 }
 Remove-WrapperStaging
 exit $exitCode

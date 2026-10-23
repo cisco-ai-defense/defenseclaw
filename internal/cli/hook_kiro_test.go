@@ -124,7 +124,7 @@ func TestHookPreRunFailureUsesTheConnectorsBlockingExit(t *testing.T) {
 		{name: "kiro managed, connector spelled with =", args: []string{"--connector=kiro", "--not-a-hook-flag", "--enterprise-managed"}, want: 2},
 		{name: "kiro closed in the hook sidecar", args: []string{"--connector", "kiro", "--hook-surface", "v9"}, sidecar: `{"version":2,"fail_modes":{"kiro":"closed"}}`, want: 2},
 		{name: "kiro fail open keeps 1", args: []string{"--connector", "kiro", "--not-a-hook-flag", "--fail-mode", "open"}, want: 1},
-		{name: "kiro open in the hook sidecar keeps 1", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"kiro":"open"}}`, want: 1},
+		{name: "kiro open in the hook sidecar keeps 1", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"kiro":"open"},"fail_mode_sources":{"kiro":"config"}}`, want: 1},
 		{name: "kiro unset fails closed", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, want: 2},
 		{name: "kiro sidecar without kiro fails closed", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"codex":"open"}}`, want: 2},
 		{name: "codex unknown flag", args: []string{"--connector", "codex", "--not-a-hook-flag", "--fail-mode", "closed"}, want: 1},

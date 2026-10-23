@@ -1093,3 +1093,84 @@ func TestValidateConnectorReconciliationRejectsUnsafeState(t *testing.T) {
 		t.Fatal("unsupported connector operation was accepted")
 	}
 }
+
+// until 1.1: the teardown of a removed connector changes only its policy
+// module and tokens and records nothing, so a removed connector is never
+// residue that keeps DataRoot, even with a stale manual-cleanup record from
+// an earlier 1.0.4 build there; what it leaves is shown to the user instead.
+func TestReconcileRemovedConnectorsNeverKeepsDataRootForLeftovers(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	transaction := setupTransaction{
+		ID:                         strings.Repeat("9", 32),
+		DataRoot:                   filepath.Join(root, "data"),
+		PreviousConnectors:         []string{"omnigent", "codex"},
+		PreviousOmnigentConfigHome: filepath.Join(root, "omnigent"),
+		PreviousCodexHome:          filepath.Join(root, "codex"),
+	}
+	stale := filepath.Join(transaction.DataRoot, "removed_connector_cleanup", "omnigent.json")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte(`{"items":[{"path":"p","step":"s"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var actions []string
+	recorder := reconcileRemovedConnectors(transaction, filepath.Join(root, "gateway.exe"), nil,
+		func(_, _, connectorName, action string, _ []string) error {
+			actions = append(actions, connectorName+":"+action)
+			return nil
+		})
+	if len(recorder.failures) != 0 {
+		t.Fatalf("failures = %+v, want none", recorder.failures)
+	}
+	if !strings.Contains(strings.Join(actions, ","), "omnigent:teardown,omnigent:verify") {
+		t.Fatalf("actions = %v, want the OmniGent teardown and verify", actions)
+	}
+}
+
+func resetRemovedConnectorNotes(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		removedConnectorNotes.Lock()
+		removedConnectorNotes.byConnector, removedConnectorNotes.order = nil, nil
+		removedConnectorNotes.Unlock()
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+// The leftovers the maintenance gateway's teardown lists reach the user: the
+// JSON line of the captured output (stderr lines around it) is read, the
+// latest teardown of a connector wins, and output without a list adds none.
+func TestRemovedConnectorTeardownLeftoversAreShown(t *testing.T) {
+	resetRemovedConnectorNotes(t)
+	if got := removedConnectorNotesText(); got != "" {
+		t.Fatalf("notes before any teardown = %q", got)
+	}
+	recordRemovedConnectorLeftovers("omnigent", []byte("[connector] warning on stderr\n"+
+		`{"connector":"omnigent","action":"teardown","ok":true,"leftovers":[{"path":"C:\\old","what":"old","step":"old"}]}`+"\n"))
+	recordRemovedConnectorLeftovers("omnigent", []byte(
+		`{"connector":"omnigent","action":"teardown","ok":true,"leftovers":[`+
+			`{"path":"C:\\Users\\u\\.omnigent\\config.yaml","what":"OmniGent still imports DefenseClaw's policy module from here","step":"remove defenseclaw_omnigent_policy from policy_modules"},`+
+			`{"path":"C:\\Users\\u\\.defenseclaw\\hooks\\defenseclaw_omnigent_policy.py","what":"the stub that blocks every OmniGent call","step":"delete it once nothing above runs it"}]}`+"\n"+
+			"trailing text\n"))
+	recordRemovedConnectorLeftovers("omnigent", []byte("not json\n"))
+	got := removedConnectorNotesText()
+	for _, want := range []string{
+		"OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:",
+		`C:\Users\u\.omnigent\config.yaml: OmniGent still imports DefenseClaw's policy module from here. To remove: remove defenseclaw_omnigent_policy from policy_modules.`,
+		`defenseclaw_omnigent_policy.py: the stub that blocks every OmniGent call. To remove: delete it once nothing above runs it.`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("notes = %q, want %q", got, want)
+		}
+	}
+	if strings.Contains(got, `C:\old`) {
+		t.Fatalf("notes kept an earlier teardown's list: %q", got)
+	}
+	recordRemovedConnectorLeftovers("omnigent", []byte(`{"connector":"omnigent","action":"teardown","ok":true,"leftovers":[]}`))
+	if got := removedConnectorNotesText(); got != "" {
+		t.Fatalf("notes after a teardown that left nothing = %q, want none", got)
+	}
+}

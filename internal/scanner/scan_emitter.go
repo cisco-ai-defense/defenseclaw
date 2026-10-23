@@ -159,7 +159,7 @@ func EmitScanResult(
 	}
 	scanID = strings.TrimSpace(result.ScanID)
 	if scanID == "" {
-		scanID = uuid.New().String()
+		scanID = uuid.Must(uuid.NewV7()).String()
 	} else if _, parseErr := uuid.Parse(scanID); parseErr != nil {
 		return "", fmt.Errorf("scanner: EmitScanResult: invalid scan ID")
 	}
@@ -169,7 +169,7 @@ func EmitScanResult(
 	result.ScanID = scanID
 
 	for i := range result.Findings {
-		result.Findings[i].FindingOccurrenceID = uuid.NewString()
+		result.Findings[i].FindingOccurrenceID = uuid.Must(uuid.NewV7()).String()
 		result.Findings[i].RuleID = EnsureRuleID(&result.Findings[i], result.Scanner)
 		// Auto-populate DataAxis labels when the finding creator left
 		// them blank. The enricher (installed by the guardrail wiring

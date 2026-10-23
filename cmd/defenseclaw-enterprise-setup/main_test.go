@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 )
 
@@ -812,5 +813,43 @@ func TestStandaloneSetupTimeoutNamesTheRecovery(t *testing.T) {
 		!strings.Contains(result.Errors[0].Message, `as LocalSystem with /ensure CONFIG=C:\stage\config.yaml JSON=1 TIMEOUTSECONDS=7200`) ||
 		!strings.Contains(result.Errors[0].Message, "TIMEOUTSECONDS=60") || strings.Contains(result.Errors[0].Message, "leaving TIMEOUTSECONDS out") {
 		t.Fatalf("timeout result = %s (%v)", stdout.String(), err)
+	}
+}
+
+func TestStandaloneSetupTimeoutReportsTheRecoveredDeployment(t *testing.T) {
+	opts := enterpriseSetupOptions{Action: "ensure", JSON: true, LifecycleTimeout: time.Minute}
+	recovered := enterprisestatus.New("recover", "standalone", "windows", "1.0.3")
+	recovered.Installed = true
+	recovered.InstalledVersion = "1.0.3"
+	recovered.TransactionPending = false
+	recovered.Services = append(recovered.Services, enterprisestatus.Service{
+		Name: "DefenseClawGateway", Kind: "gateway", State: "running", Required: true,
+	})
+	recovered.Finish("windows", enterpriseFailureExitCode)
+	var stdout, stderr bytes.Buffer
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts,
+		standaloneEnterpriseSetupTimeoutWithRecovery(opts, context.DeadlineExceeded, recovered), enterpriseFailureExitCode)
+	var result struct {
+		Action             string `json:"action"`
+		OK                 bool   `json:"ok"`
+		ExitCode           int    `json:"exit_code"`
+		Installed          bool   `json:"installed"`
+		InstalledVersion   string `json:"installed_version"`
+		TransactionPending bool   `json:"transaction_pending"`
+		Services           []struct {
+			Name  string `json:"name"`
+			State string `json:"state"`
+		} `json:"services"`
+		Errors []struct {
+			Code string `json:"code"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.Action != "ensure" ||
+		result.OK || result.ExitCode != enterpriseFailureExitCode || !result.Installed ||
+		result.InstalledVersion != "1.0.3" || result.TransactionPending ||
+		len(result.Services) != 1 || result.Services[0].Name != "DefenseClawGateway" ||
+		result.Services[0].State != "running" || len(result.Errors) != 1 ||
+		result.Errors[0].Code != "lifecycle_timeout" || stderr.Len() != 0 {
+		t.Fatalf("timeout lost recovered deployment proof: %s (%v)", stdout.String(), err)
 	}
 }

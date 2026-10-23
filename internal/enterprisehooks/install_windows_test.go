@@ -2737,6 +2737,12 @@ func currentWindowsTestSID(t *testing.T) *windows.SID {
 	if err != nil || user == nil || user.User.Sid == nil {
 		t.Fatalf("current Windows token user: %v", err)
 	}
+	// These fixtures target the account running the test, and production
+	// refuses LocalSystem as a target (the refusal has its own tests). Run
+	// as LocalSystem there is no interactive account to target.
+	if user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+		t.Skip("skipped as LocalSystem: the fixture targets the running account, and enterprise hooks refuse LocalSystem as a target; run the package as an interactive administrator")
+	}
 	return user.User.Sid
 }
 

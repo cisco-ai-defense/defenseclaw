@@ -63,7 +63,6 @@ from defenseclaw.connector_paths import (
     connector_home,
     devin_hook_config_path,
     hermes_config_path,
-    omnigent_config_path,
 )
 from defenseclaw.file_permissions import (
     atomic_write_private_bytes,
@@ -789,11 +788,9 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
     "kiro",
 )
 
@@ -811,6 +808,11 @@ class AgentSignal:
     configured: bool = False
     active: bool = False
     mode: str = ""
+    # Candidates ahead of binary_path that the version probe passed over. A
+    # later scan that does not probe carries the version only while exactly
+    # these are still ahead of it, so a newly preferred binary is not
+    # reported at the old one's version.
+    skipped_binaries: tuple[str, ...] = ()
 
 
 @dataclass
@@ -869,18 +871,6 @@ _SPECS: dict[str, _AgentSpec] = {
         "copilot",
         ("--version",),
     ),
-    "openhands": _AgentSpec(
-        (
-            ".openhands/hooks.json",
-            "~/.openhands/hooks.json",
-            "~/.openhands/mcp.json",
-            "~/.openhands/settings.json",
-            "~/.openhands/agent_settings.json",
-            "~/.openhands/cli_config.json",
-        ),
-        "openhands",
-        ("--version",),
-    ),
     "antigravity": _AgentSpec(
         # The documented global hooks file is configuration evidence, but
         # configuration alone never proves an installed official client.
@@ -919,11 +909,6 @@ _SPECS: dict[str, _AgentSpec] = {
             ".amp/settings.jsonc",
         ),
         "amp",
-        ("--version",),
-    ),
-    "omnigent": _AgentSpec(
-        ("~/.omnigent/config.yaml",),
-        "omnigent",
         ("--version",),
     ),
     "kiro": _AgentSpec(
@@ -973,7 +958,8 @@ def _configured_probe_names(data_dir: str | os.PathLike[str] | None) -> frozense
 
 
 def restrict_probes(connectors: list[str]) -> Any:
-    """Run only the CLIs of ``connectors`` in this command's discovery scans.
+    """Run only the CLIs of ``connectors`` and of the connectors the config
+    already enrolls in this command's discovery scans.
 
     ``init --connector copilot`` ran every installed agent CLI as a version
     probe, and those CLIs wrote their own config and cache folders
@@ -1175,15 +1161,17 @@ def discover_agents(
 
     scanned_at = _format_rfc3339(_now_utc())
     require_trusted, _prefixes = _ai_discovery_trust_config(data_dir)
-    probe_only = _PROBE_ONLY.get()
-    if probe_only is None:
-        probe_only = _configured_probe_names(data_dir)
+    # A restricted scan still probes every connector the config enrolls: the
+    # gateway reads each one's version from this cache when setup restarts it,
+    # so an enrolled agent that updated itself since the last scan came back
+    # unversioned and the gateway could not start (GAP-0547).
+    probe_only = _configured_probe_names(data_dir) | (_PROBE_ONLY.get() or frozenset())
     shared = _FRESH_SCANS.get()
     shared_key = (
         str(config_path_for_data_dir(data_dir)),
         require_trusted,
         tuple(_prefixes),
-        tuple(sorted(probe_only)) if probe_only is not None else None,
+        tuple(sorted(probe_only)),
     )
     if shared is not None and shared_key in shared:
         reused = shared[shared_key]
@@ -1203,7 +1191,7 @@ def discover_agents(
                     data_dir=data_dir,
                     require_trusted_binary_paths=require_trusted,
                     include_workspace_config=False,
-                    probe=probe_only is None or name in probe_only,
+                    probe=name in probe_only,
                 ),
                 DISCOVERABLE_CONNECTORS,
             )
@@ -1251,6 +1239,17 @@ def _keep_versions_of_slow_unchanged_agents(
     requires it) is under a trusted prefix; an agent that was removed has
     no file there and is reported as not installed. Windows keeps its
     protected selection rules.
+
+    An agent that is not probed is reported at its first binary candidate;
+    the last scan may have probed a later one (``cursor`` before ``agent``,
+    GAP-0002). That still counts as the same selection only while the
+    candidates ahead of it are exactly the ones that probe passed over and
+    are unchanged since; a new or changed one ahead could answer, so the
+    agent stays unversioned until probed. A binary outside the trusted
+    prefixes (when discovery requires them) never keeps a version. An
+    installed agent that was never probed has no version to keep; it keeps
+    its binary path, so an upgrade run without the agents on PATH does not
+    report it as not installed (rel-1-0-3 GAP-0277).
     """
     not_found = not _is_windows_host()
     slow = [
@@ -1284,12 +1283,28 @@ def _keep_versions_of_slow_unchanged_agents(
             continue
         version = str(previous.get("version") or "")
         previous_binary = str(previous.get("binary_path") or "")
-        if not version or not previous_binary or (signal.binary_path and previous_binary != signal.binary_path):
+        if not previous_binary:
             continue
-        if not signal.binary_path and (
-            not os.path.isfile(previous_binary)
-            or (require_trusted_binary_paths and not _is_trusted_binary_path(previous_binary, data_dir=data_dir))
-        ):
+        if require_trusted_binary_paths and not _is_trusted_binary_path(previous_binary, data_dir=data_dir):
+            continue
+        skipped = signal.skipped_binaries
+        if not signal.binary_path:
+            if not os.path.isfile(previous_binary):
+                continue
+            skipped = _recorded_skipped_binaries(previous)
+        elif previous_binary != signal.binary_path:
+            if signal.error != VERSION_NOT_PROBED:
+                continue
+            ahead = _unchanged_candidates_ahead(signal.name, previous_binary, previous, previous_scan.timestamp())
+            if ahead is None:
+                continue
+            skipped = ahead
+        if not version:
+            never_probed = previous.get("installed") is True and previous.get("error") == VERSION_NOT_PROBED
+            if not signal.binary_path and never_probed:
+                signal.binary_path = previous_binary
+                signal.error = VERSION_NOT_PROBED
+                signal.installed = True
             continue
         try:
             changed_at = os.stat(os.path.realpath(previous_binary)).st_mtime
@@ -1301,6 +1316,37 @@ def _keep_versions_of_slow_unchanged_agents(
         signal.version = version
         signal.error = ""
         signal.installed = True
+        signal.skipped_binaries = skipped
+
+
+def _recorded_skipped_binaries(previous: dict[str, Any]) -> tuple[str, ...]:
+    recorded = previous.get("skipped_binaries")
+    if not isinstance(recorded, list):
+        return ()
+    return tuple(str(path) for path in recorded if isinstance(path, str))
+
+
+def _unchanged_candidates_ahead(
+    name: str,
+    previous_binary: str,
+    previous: dict[str, Any],
+    previous_scan: float,
+) -> tuple[str, ...] | None:
+    """Return the candidates ahead of *previous_binary* when they are exactly
+    the ones the last probe passed over and none changed since, else None."""
+    candidates = _binary_candidates_for_agent(name, _SPECS.get(name, _AgentSpec((), "", ("--version",))))
+    if previous_binary not in candidates:
+        return None
+    ahead = tuple(candidates[: candidates.index(previous_binary)])
+    if ahead != _recorded_skipped_binaries(previous):
+        return None
+    for candidate in ahead:
+        try:
+            if os.stat(os.path.realpath(candidate)).st_mtime >= previous_scan:
+                return None
+        except OSError:
+            return None
+    return ahead
 
 
 def first_installed(disc: AgentDiscovery, fallback: str = "codex") -> str:
@@ -1452,9 +1498,6 @@ def _agent_config_path(name: str, *, include_workspace_config: bool = True) -> s
         config_candidates = _dedup_nonempty_candidates(
             (amp_managed_settings_path(), *config_candidates)
         )
-    elif name == "omnigent":
-        config_path = omnigent_config_path()
-        config_candidates = (config_path,)
     elif name == "devin":
         workspace = os.getcwd()
         config_candidates = _dedup_nonempty_candidates(
@@ -1496,6 +1539,7 @@ def _scan_agent(
         require_trusted_binary_paths = True
     probe_errors: list[str] = []
     timed_out = ""
+    skipped: tuple[str, ...] = ()
     missing_state = _missing_probe_state(name) if binary_candidates else ([], [])
     for candidate in binary_candidates:
         candidate_version, candidate_error = _version_for_agent_binary(
@@ -1510,6 +1554,7 @@ def _scan_agent(
             version = candidate_version
             error = ""
             version_ok = True
+            skipped = binary_candidates[: binary_candidates.index(candidate)]
             break
         if candidate_error:
             probe_errors.append(f"{candidate}: {candidate_error}")
@@ -1528,6 +1573,7 @@ def _scan_agent(
         )
         if candidate_version and not candidate_error:
             binary_path, version, version_ok = timed_out, candidate_version, True
+            skipped = binary_candidates[: binary_candidates.index(timed_out)]
     if missing_state[0]:
         _record_probe_state(missing_state, data_dir=data_dir)
     if not version_ok and probe_errors:
@@ -1536,6 +1582,7 @@ def _scan_agent(
         # A trusted binary that is only slow is installed; its version stays
         # unknown, so action mode still refuses it until a probe answers.
         binary_path = timed_out
+        skipped = binary_candidates[: binary_candidates.index(timed_out)]
 
     installed = bool(binary_path) and (version_ok or bool(timed_out))
     return AgentSignal(
@@ -1546,6 +1593,7 @@ def _scan_agent(
         version=version,
         error=error,
         configured=bool(config_path),
+        skipped_binaries=tuple(skipped),
     )
 
 
@@ -2118,12 +2166,11 @@ def _version_for_binary(
     binary_name = _binary_command_name(binary_path)
     env = None
     timeout = VERSION_TIMEOUT_SECONDS
-    if binary_name in {"openhands", "hermes"}:
-        # OpenHands' --version loads the whole Python agent stack (15 s idle
-        # on Linux); Hermes' runs a synchronous update check (17.5 s on
-        # Windows), and a timeout made init drop an enrolled Hermes (GAP-1604).
+    if binary_name == "hermes":
+        # Hermes runs a synchronous update check (17.5 s on Windows), and a
+        # timeout made init drop an enrolled Hermes (GAP-1604).
         timeout = 30.0
-    elif binary_name in {"claude", "omnigent"} or (
+    elif binary_name == "claude" or (
         os.name == "nt" and binary_name in {"amp", "agent", "copilot", "cursor-agent"}
     ):
         timeout = 8.0
@@ -2134,8 +2181,6 @@ def _version_for_binary(
         # Keep discovery bounded, but do not reject the authentic client at
         # the generic two-second budget before signature/version admission.
         timeout = 10.0
-    if binary_name == "openhands":
-        env = {**os.environ, "OPENHANDS_SUPPRESS_BANNER": "1"}
     if timeout_override is not None:
         timeout = max(timeout, timeout_override)
 
@@ -2170,7 +2215,7 @@ def _version_for_binary(
         return "", f"version probe exited {result.returncode}"
     if not stdout:
         return "", "version probe returned empty stdout"
-    return _version_line_for_binary(binary_path, stdout), ""
+    return _version_line_for_binary(stdout), ""
 
 
 def _version_for_agent_binary(
@@ -2424,16 +2469,9 @@ def _windows_file_version_for_binary(
         return "", f"version metadata probe failed: {exc}"
 
 
-def _version_line_for_binary(binary_path: str, stdout: str) -> str:
+def _version_line_for_binary(stdout: str) -> str:
     lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-    if not lines:
-        return ""
-    binary_name = _binary_command_name(binary_path)
-    if binary_name == "openhands":
-        for line in reversed(lines):
-            if "openhands cli" in line.lower():
-                return line
-    return lines[0]
+    return lines[0] if lines else ""
 
 
 def _first_existing_file(candidates: tuple[str, ...]) -> str:
@@ -2456,11 +2494,13 @@ def _which(binary_name: str) -> str:
 
 
 def binary_on_path(connector: str) -> str:
-    """The connector's agent executable on PATH now, or "" (a lookup, no run).
+    """The connector's agent executable on this process's PATH now, or "" (a lookup, no run).
 
-    Doctor reads discovery evidence that is cached for a day and never runs
-    an agent itself, so this tells an agent installed after the last scan
-    from one that is missing (GAP-0052)."""
+    Doctor and status read discovery evidence that is cached for a day and
+    never run an agent themselves, so this names an agent that may have been
+    installed after the last scan (GAP-0052). It is a hint, never proof: the
+    caller's PATH is not the agent's, and only a refreshed scan or a hook
+    call the gateway took makes the agent count (1.0.4 review, loop round 4)."""
     spec = _SPECS.get(_normalize_connector(connector))
     if spec is None or not spec.binary_name:
         return ""
@@ -2767,6 +2807,7 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
                 version=str(raw.get("version") or ""),
                 error=str(raw.get("error") or ""),
                 configured=bool(raw.get("configured")),
+                skipped_binaries=_recorded_skipped_binaries(raw),
             )
     except Exception:
         return None
@@ -2822,8 +2863,6 @@ def _normalize_connector(value: str | None) -> str:
     name = value.strip().lower()
     if name in {"claude-code", "claude_code", "claude"}:
         return "claudecode"
-    if name in {"open-hands", "open_hands"}:
-        return "openhands"
     return name
 
 

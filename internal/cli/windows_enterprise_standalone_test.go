@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -802,6 +803,66 @@ func TestWindowsEnterpriseUnparseableConfigRefusalReportsTheRunningDeployment(t 
 	}
 }
 
+// GAP-0537: a --config that does not exist is refused like one that does not
+// parse, after the status probe, so the refusal reports the running
+// deployment instead of health_not_checked and no enrollment. It stays a
+// preflight failure (1603).
+func TestWindowsEnterpriseMissingConfigRefusalReportsTheRunningDeployment(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
+	// The running deployment enrolls one target.
+	state := t.TempDir()
+	layout := managed.StandaloneLayout{
+		ConfigPath:      filepath.Join(state, "config.yaml"),
+		ManifestPath:    filepath.Join(state, "targets.yaml"),
+		DataDir:         filepath.Join(state, "runtime"),
+		GuardianAuthDir: filepath.Join(state, "hook-guardian-state"),
+	}
+	if err := os.WriteFile(layout.ManifestPath, []byte("version: 1\ntargets:\n"+
+		"  - {sid: S-1-12-1-1-2-3-1001, connector: cursor, enabled: true, deferred: true}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousLayout := windowsEnterpriseHotConfigLayout
+	t.Cleanup(func() { windowsEnterpriseHotConfigLayout = previousLayout })
+	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
+	opts := ensureTestOptions()
+	opts.configPath = filepath.Join(t.TempDir(), "absent.yaml")
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", opts); err != nil || opts.suppliedConfigRefusal == nil {
+		t.Fatalf("missing config: %v, deferred refusal %v", err, opts.suppliedConfigRefusal)
+	}
+	status := installedStatus("status")
+	status["cursor_target_enabled"] = true
+	stub := &ensureStub{t: t, replies: []map[string]any{status}}
+	stub.install(t)
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	refused, err := refuseWindowsEnterpriseStandaloneSuppliedConfig(context.Background(), command, "ensure", opts, `C:\stage\install-enterprise.ps1`)
+	if !refused || commandExitCode(err) != 1603 || len(stub.calls) != 1 || stub.calls[0][1] != "Status" {
+		t.Fatalf("refused=%v exit %d, installer runs %q", refused, commandExitCode(err), stub.calls)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Installed || len(result.Errors) != 1 || result.Errors[0].Code != "preflight_failed" ||
+		!strings.Contains(result.Errors[0].Message, "absent.yaml") ||
+		windowsBundleHasCode(result.Warnings, windowsEnterpriseHealthNotChecked) {
+		t.Fatalf("result %+v", result)
+	}
+	if result.Enrollment.Targets != 1 {
+		t.Fatalf("enrollment %+v, want the running deployment's 1 target", result.Enrollment)
+	}
+	// The running deployment's advisory is reported, labelled as its own.
+	if !windowsBundleHasCode(result.Warnings, "cursor_agent_prompt_hook_unavailable") {
+		t.Fatalf("warnings %+v lack the running deployment's advisory", result.Warnings)
+	}
+	for _, warning := range result.Warnings {
+		if !strings.HasPrefix(warning.Message, enterprisestatus.RunningDeploymentPrefix) {
+			t.Fatalf("warning %s is not labelled as the running deployment's: %q", warning.Code, warning.Message)
+		}
+	}
+}
+
 // GAP-1433: an ensure or upgrade whose config is refused first recovers a
 // pending transaction with a repair that carries no sources, so the refusal
 // reports the restored deployment instead of leaving the services stopped.
@@ -1114,6 +1175,171 @@ func TestWindowsEnterpriseEnsureProbesCarryNoMutationInputs(t *testing.T) {
 	}
 	if !result.OK || !result.Noop || result.NoopReason != "compliant" {
 		t.Fatalf("result %+v", result)
+	}
+}
+
+// A compliant ensure runs the recorded Cursor correction once, and only after
+// its Verify accepted the deployment (the repair's rule-pack preflight is
+// TestWindowsEnsureRepairRefusesUnloadableRulePacksBeforeItStops).
+func TestWindowsCompliantEnsureRunsRecordedCursorRepairOnce(t *testing.T) {
+	originalPending, originalElevated := windowsEnterpriseCursorMigrationRepairPending, windowsEnterpriseIsElevated
+	originalTransaction := windowsEnterpriseStandaloneTransactionPending
+	t.Cleanup(func() {
+		windowsEnterpriseCursorMigrationRepairPending, windowsEnterpriseIsElevated = originalPending, originalElevated
+		windowsEnterpriseStandaloneTransactionPending = originalTransaction
+	})
+	stubWindowsEnterpriseRulePackPreflight(t, func(string, string, string) error { return nil })
+	originalBuild := windowsEnterpriseStandaloneRulePackBuild
+	t.Cleanup(func() { windowsEnterpriseStandaloneRulePackBuild = originalBuild })
+	windowsEnterpriseStandaloneRulePackBuild = func(*config.Config) error { return nil }
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return false }
+	windowsEnterpriseIsElevated = func() bool { return true }
+	pending := true
+	windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) { return pending, nil }
+	for _, tc := range []struct {
+		calls []string
+		noop  bool
+	}{
+		{calls: []string{"Status", "Verify", "Repair"}},
+		{calls: []string{"Status", "Verify"}, noop: true},
+	} {
+		replies := make([]map[string]any, 0, len(tc.calls))
+		for _, action := range tc.calls {
+			replies = append(replies, installedStatus(strings.ToLower(action)))
+		}
+		stub := &ensureStub{t: t, replies: replies}
+		stub.install(t)
+		var stdout bytes.Buffer
+		command := &cobra.Command{}
+		command.SetOut(&stdout)
+		opts := ensureTestOptions()
+		opts.configPath, opts.manifestPath = "", ""
+		if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+			t.Fatal(err)
+		}
+		var calls []string
+		for _, call := range stub.calls {
+			calls = append(calls, call[1])
+		}
+		if !reflect.DeepEqual(calls, tc.calls) {
+			t.Fatalf("installer calls %v, want %v", calls, tc.calls)
+		}
+		var result enterprisestatus.Result
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || !result.OK || result.Noop != tc.noop {
+			t.Fatalf("ensure result %+v (%v)", result, err)
+		}
+		pending = false
+	}
+}
+
+// Every repair ensure selects restarts the gateway on the installed config,
+// so each one, the recorded Cursor correction included, is refused before
+// anything stops when the gateway cannot load that config's rule packs
+// (GAP-0672): the running gateway keeps its last good policy. Only Status and
+// Verify run, with or without a supplied config.
+func TestWindowsEnsureRepairRefusesUnloadableRulePacksBeforeItStops(t *testing.T) {
+	originalPending, originalElevated := windowsEnterpriseCursorMigrationRepairPending, windowsEnterpriseIsElevated
+	originalBuild, originalTransaction := windowsEnterpriseStandaloneRulePackBuild, windowsEnterpriseStandaloneTransactionPending
+	t.Cleanup(func() {
+		windowsEnterpriseCursorMigrationRepairPending, windowsEnterpriseIsElevated = originalPending, originalElevated
+		windowsEnterpriseStandaloneRulePackBuild, windowsEnterpriseStandaloneTransactionPending = originalBuild, originalTransaction
+	})
+	stubWindowsEnterpriseRulePackPreflight(t, func(string, string, string) error { return nil })
+	windowsEnterpriseStandaloneRulePackBuild = func(*config.Config) error {
+		return errors.New("digest sha256:9760 does not match guardrail.custom_packs.acme.digest")
+	}
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return false }
+	windowsEnterpriseIsElevated = func() bool { return true }
+	for _, tc := range []struct {
+		name          string
+		cursorPending bool
+		verifyFails   bool
+		withConfig    bool
+	}{
+		{name: "recorded Cursor repair", cursorPending: true},
+		{name: "recorded Cursor repair with a supplied config", cursorPending: true, withConfig: true},
+		{name: "failed verify with a recorded Cursor repair", cursorPending: true, verifyFails: true},
+		{name: "failed verify", verifyFails: true},
+		{name: "failed verify with a supplied config", verifyFails: true, withConfig: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) { return tc.cursorPending, nil }
+			verify := installedStatus("verify")
+			if tc.verifyFails {
+				verify["ok"] = false
+				verify["errors"] = []string{"managed ACL is invalid"}
+			}
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), verify}}
+			stub.install(t)
+			var stdout bytes.Buffer
+			command := &cobra.Command{}
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			opts := ensureTestOptions()
+			if !tc.withConfig {
+				opts.configPath, opts.manifestPath = "", ""
+			}
+			err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+			var calls []string
+			for _, call := range stub.calls {
+				calls = append(calls, call[1])
+			}
+			if !reflect.DeepEqual(calls, []string{"Status", "Verify"}) {
+				t.Fatalf("installer calls %v, want Status and Verify only (no Repair)", calls)
+			}
+			if commandExitCode(err) == 0 {
+				t.Fatalf("ensure = %v, want a failed exit", err)
+			}
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.OK || result.Noop || len(result.Errors) != 1 || result.Errors[0].Code != "preflight_failed" ||
+				!strings.Contains(result.Errors[0].Message, "keeps its last good policy") {
+				t.Fatalf("ensure result %+v, want the rule-pack refusal", result)
+			}
+		})
+	}
+}
+
+func TestWindowsCursorRepairPlannerKeepsMigrationGuards(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	const key = "guardrail.connectors.cursor.hook_fail_mode"
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\nguardrail:\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := config.MigrationRecord{
+		SchemaVersion: config.MigrationRecordSchemaVersion, FromVersion: 8, ToVersion: 9, Actor: "lifecycle",
+		MigratedAt:   "2026-09-01T00:00:00Z",
+		SourceSHA256: strings.Repeat("c", 64), ResultSHA256: configwrite.SHA256Hex(raw),
+		Moved: []config.MigrationMove{{Source: "config", From: key, To: key, Value: "open"}},
+	}
+	if err := config.WriteMigrationRecord(path, record); err != nil {
+		t.Fatal(err)
+	}
+	previousLayout, previousBundle := windowsEnterpriseHotConfigLayout, managedStandaloneBundleCurrent
+	t.Cleanup(func() {
+		windowsEnterpriseHotConfigLayout, managedStandaloneBundleCurrent = previousLayout, previousBundle
+	})
+	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{ConfigPath: path}, nil
+	}
+	managedStandaloneBundleCurrent = func() (bool, error) { return false, nil }
+	if pending, err := windowsEnterpriseCursorMigrationRepairPending(); err != nil || !pending {
+		t.Fatalf("proven migration not planned: %v, %v", pending, err)
+	}
+	managedStandaloneBundleCurrent = func() (bool, error) { return true, nil }
+	if pending, err := windowsEnterpriseCursorMigrationRepairPending(); err != nil || pending {
+		t.Fatalf("bundle config planned for repair: %v, %v", pending, err)
+	}
+	managedStandaloneBundleCurrent = func() (bool, error) { return false, nil }
+	if err := os.WriteFile(path, append(raw, '#'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := windowsEnterpriseCursorMigrationRepairPending(); err != nil || pending {
+		t.Fatalf("changed config planned for repair: %v, %v", pending, err)
 	}
 }
 
@@ -2576,7 +2802,9 @@ func TestWindowsEnterpriseRefusedPowerShellReportsRecordedDeployment(t *testing.
 	}
 	notChecked := false
 	for _, warning := range result.Warnings {
-		notChecked = notChecked || warning.Code == windowsEnterpriseHealthNotChecked
+		notChecked = notChecked || (warning.Code == windowsEnterpriseHealthNotChecked &&
+			strings.Contains(warning.Message, "enrollment") && strings.Contains(warning.Message, "PowerShell 7") &&
+			strings.Contains(warning.Message, "restore") && strings.Contains(warning.Message, "then"))
 	}
 	if !result.Installed || len(result.Services) != 4 || len(result.Errors) != 1 ||
 		result.Errors[0].Code != "powershell7_untrusted" || !notChecked {
@@ -3130,12 +3358,17 @@ func TestWindowsEnterpriseStandaloneRepairRulePackPreflight(t *testing.T) {
 		return errors.New("digest sha256:9760 does not match guardrail.custom_packs.acme.digest")
 	}
 	windowsEnterpriseStandaloneTransactionPending = func() bool { return false }
-	err := windowsEnterpriseStandaloneRepairRulePackPreflight()
+	err := windowsEnterpriseStandaloneRepairRulePackPreflight("")
 	if err == nil || !strings.Contains(err.Error(), "keeps its last good policy") || !strings.Contains(err.Error(), "nothing was changed") {
 		t.Fatalf("repair preflight = %v, want a refusal that keeps the running gateway", err)
 	}
+	// GAP-1194: a repair that supplies a valid replacement config installs
+	// that config; the pack only the old config selects does not block it.
+	if err := windowsEnterpriseStandaloneRepairRulePackPreflight(`C:\stage\config.yaml`); err != nil {
+		t.Fatalf("repair preflight with a supplied config = %v, want the old config's packs ignored", err)
+	}
 	windowsEnterpriseStandaloneTransactionPending = func() bool { return true }
-	if err := windowsEnterpriseStandaloneRepairRulePackPreflight(); err != nil {
+	if err := windowsEnterpriseStandaloneRepairRulePackPreflight(""); err != nil {
 		t.Fatalf("repair preflight with a pending transaction = %v, want it left to the recovery", err)
 	}
 }
@@ -3264,5 +3497,156 @@ func TestWindowsEnterpriseResultNamesSignedOutUntrustedFolders(t *testing.T) {
 	}
 	if len(result.Errors) != 0 || !enterpriseInformationalWarningCodes[windowsEnterpriseUntrustedUserFolderCode] {
 		t.Fatalf("a signed-out untrusted folder became an error: %+v", result.Errors)
+	}
+}
+
+// G-small loop 4, finding 2: only a missing migration-v9.json, or a config a
+// signed bundle owns, means no recorded Cursor correction. A record that is
+// there but cannot be read (more than the bound, not a file) or decoded is an
+// error, as is a layout that names no config: ensure must not report the
+// deployment compliant while the record may prove Cursor's fail mode
+// rewritten to open.
+func TestWindowsCursorRepairPlannerRefusesARecordItCannotRead(t *testing.T) {
+	previousLayout, previousBundle := windowsEnterpriseHotConfigLayout, managedStandaloneBundleCurrent
+	t.Cleanup(func() {
+		windowsEnterpriseHotConfigLayout, managedStandaloneBundleCurrent = previousLayout, previousBundle
+	})
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\nguardrail:\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n")
+	for _, tc := range []struct {
+		name    string
+		place   func(recordPath string) error
+		bundle  bool
+		wantErr bool
+	}{
+		{name: "no record", place: func(string) error { return nil }},
+		{name: "undecodable", place: func(p string) error { return os.WriteFile(p, []byte(`{"moved":[`), 0o600) }, wantErr: true},
+		// G-small loop round 2: a record that decodes without the fields
+		// every migration writes is not "no correction".
+		{name: "an empty object", place: func(p string) error { return os.WriteFile(p, []byte(`{}`), 0o600) }, wantErr: true},
+		{name: "null", place: func(p string) error { return os.WriteFile(p, []byte(`null`), 0o600) }, wantErr: true},
+		{name: "no result digest", place: func(p string) error {
+			return os.WriteFile(p, []byte(`{"schema_version":1,"from_version":8,"to_version":9,"migrated_at":"2026-09-01T00:00:00Z","actor":"lifecycle","source_sha256":"`+strings.Repeat("c", 64)+`","moved":[{"source":"config","from":"guardrail.connectors.cursor.hook_fail_mode","to":"guardrail.connectors.cursor.hook_fail_mode","value":"open"}]}`), 0o600)
+		}, wantErr: true},
+		{name: "past the bound", place: func(p string) error {
+			if err := os.WriteFile(p, []byte(`{"schema_version":1}`), 0o600); err != nil {
+				return err
+			}
+			return os.Truncate(p, windowsEnterpriseHotConfigMaxBytes+1)
+		}, wantErr: true},
+		{name: "a directory", place: func(p string) error { return os.Mkdir(p, 0o700) }, wantErr: true},
+		{name: "unreadable record, bundle config", place: func(p string) error { return os.Mkdir(p, 0o700) }, bundle: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.place(config.MigrationRecordPath(path)); err != nil {
+				t.Fatal(err)
+			}
+			windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
+				return managed.StandaloneLayout{ConfigPath: path}, nil
+			}
+			managedStandaloneBundleCurrent = func() (bool, error) { return tc.bundle, nil }
+			pending, err := windowsEnterpriseCursorMigrationRepairPending()
+			if pending || (err != nil) != tc.wantErr {
+				t.Fatalf("pending = %v, %v; want false with error=%v", pending, err, tc.wantErr)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), config.MigrationV9RecordFile) {
+				t.Fatalf("error %q does not name %s", err, config.MigrationV9RecordFile)
+			}
+		})
+	}
+	for name, layout := range map[string]func() (managed.StandaloneLayout, error){
+		"layout failed": func() (managed.StandaloneLayout, error) {
+			return managed.StandaloneLayout{}, errors.New("ProgramData is not trusted")
+		},
+		"no config named": func() (managed.StandaloneLayout, error) { return managed.StandaloneLayout{}, nil },
+	} {
+		windowsEnterpriseHotConfigLayout = layout
+		if pending, err := windowsEnterpriseCursorMigrationRepairPending(); pending || err == nil {
+			t.Fatalf("%s: pending = %v, %v; want an error", name, pending, err)
+		}
+	}
+}
+
+// G-small loop 4, finding 2: an elevated ensure that cannot tell whether the
+// recorded Cursor correction is owed fails with preflight_failed, with or
+// without a supplied config. It never reports compliance and runs no Repair.
+func TestWindowsEnsureFailsWhenItCannotReadTheCursorRecord(t *testing.T) {
+	originalPending, originalElevated := windowsEnterpriseCursorMigrationRepairPending, windowsEnterpriseIsElevated
+	originalBuild, originalTransaction := windowsEnterpriseStandaloneRulePackBuild, windowsEnterpriseStandaloneTransactionPending
+	t.Cleanup(func() {
+		windowsEnterpriseCursorMigrationRepairPending, windowsEnterpriseIsElevated = originalPending, originalElevated
+		windowsEnterpriseStandaloneRulePackBuild, windowsEnterpriseStandaloneTransactionPending = originalBuild, originalTransaction
+	})
+	stubWindowsEnterpriseRulePackPreflight(t, func(string, string, string) error { return nil })
+	windowsEnterpriseStandaloneRulePackBuild = func(*config.Config) error { return nil }
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return false }
+	windowsEnterpriseIsElevated = func() bool { return true }
+	windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) {
+		return false, errors.New(`read C:\ProgramData\Cisco\DefenseClaw\etc\migration-v9.json: exceeds 4194304 bytes`)
+	}
+	for _, withConfig := range []bool{false, true} {
+		stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+		stub.install(t)
+		var stdout bytes.Buffer
+		command := &cobra.Command{}
+		command.SetOut(&stdout)
+		command.SetErr(&bytes.Buffer{})
+		opts := ensureTestOptions()
+		if !withConfig {
+			opts.configPath, opts.manifestPath = "", ""
+		}
+		err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+		for _, call := range stub.calls {
+			if call[1] != "Status" && call[1] != "Verify" {
+				t.Fatalf("config=%v: installer calls %v, want no change action", withConfig, stub.calls)
+			}
+		}
+		if commandExitCode(err) == 0 {
+			t.Fatalf("config=%v: ensure = %v, want a failed exit", withConfig, err)
+		}
+		var result enterprisestatus.Result
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.OK || result.Noop || len(result.Errors) != 1 || result.Errors[0].Code != "preflight_failed" ||
+			!strings.Contains(result.Errors[0].Message, "recorded Cursor fail-mode repair") {
+			t.Fatalf("config=%v: ensure result %+v, want preflight_failed", withConfig, result)
+		}
+	}
+}
+
+// G-small: a migration-v9.json that is a link, dangling or live, is an
+// error for the Cursor repair planner, never no record: a dangling link read
+// through its path looked missing, and ensure reported compliance while the
+// recorded Cursor correction stayed unapplied.
+func TestWindowsCursorRepairPlannerRefusesALinkedRecord(t *testing.T) {
+	previousLayout, previousBundle := windowsEnterpriseHotConfigLayout, managedStandaloneBundleCurrent
+	t.Cleanup(func() {
+		windowsEnterpriseHotConfigLayout, managedStandaloneBundleCurrent = previousLayout, previousBundle
+	})
+	managedStandaloneBundleCurrent = func() (bool, error) { return false, nil }
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\nguardrail:\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n")
+	for _, live := range []bool{false, true} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "record.json")
+		if live {
+			if err := os.WriteFile(target, []byte(`{"schema_version":1}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		symlinkOrSkip(t, target, config.MigrationRecordPath(path))
+		windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
+			return managed.StandaloneLayout{ConfigPath: path}, nil
+		}
+		pending, err := windowsEnterpriseCursorMigrationRepairPending()
+		if pending || err == nil || !strings.Contains(err.Error(), config.MigrationV9RecordFile) {
+			t.Fatalf("live=%v: pending = %v, %v; want an error naming %s", live, pending, err, config.MigrationV9RecordFile)
+		}
 	}
 }

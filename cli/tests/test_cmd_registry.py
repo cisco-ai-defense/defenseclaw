@@ -674,19 +674,6 @@ class TestRegistryRequire(RegistryCommandTestBase):
         self.assertEqual(result.exit_code, 0)
         self.assertFalse(self.app.cfg.asset_policy.mcp.registry_required)
 
-    def test_require_toggle_is_audited(self):
-        # GAP-1518: turning the requirement on or off is an audited change.
-        for flag, state in (("--enabled", "true"), ("--disabled", "false")):
-            with patch.object(self.app, "logger", MagicMock()) as logger:
-                result = self.invoke(["require", "--type", "mcp", flag, "--connector", "openhands"])
-            self.assertEqual(result.exit_code, 0, result.output)
-            actions = [
-                c.args for c in logger.log_action.call_args_list
-                if c.args[0] == "registry-require" and c.args[2].startswith("require ")
-            ]
-            self.assertEqual(len(actions), 1, actions)
-            self.assertEqual(actions[0][1], "asset_policy.connectors.openhands.mcp.registry")
-            self.assertIn(f"require scope=asset_policy.connectors.openhands.mcp.registry required={state}", actions[0][2])
 
     def test_require_with_gateway_down_saves_warns_and_exits_zero(self):
         # GAP-2236: the change is saved; a stopped gateway skips only the event.
@@ -1029,31 +1016,6 @@ class TestRegistryRequire(RegistryCommandTestBase):
         self.assertEqual(payload["already_compliant_connectors"], ["claudecode", "codex"])
         self.assertFalse(payload["global_changed"])
 
-    def test_require_uses_normalized_active_roster_and_existing_alias_key(self):
-        from defenseclaw.config import (
-            PerConnectorAssetPolicy,
-            PerConnectorAssetTypePolicy,
-        )
-
-        self._activate("Codex", "open-hands")
-        self.app.cfg.asset_policy.connectors = {
-            "codex": PerConnectorAssetPolicy(
-                mcp=PerConnectorAssetTypePolicy(registry_required=False),
-            ),
-            "open_hands": PerConnectorAssetPolicy(
-                mcp=PerConnectorAssetTypePolicy(registry_required=False),
-            ),
-        }
-        self.app.cfg.save()
-
-        result = self.invoke(["require", "--type", "mcp", "--enabled", "--json"])
-
-        self.assertEqual(result.exit_code, 0, result.output)
-        payload = json.loads(result.output)
-        self.assertEqual(payload["active_connectors"], ["codex", "openhands"])
-        self.assertIsNone(self.app.cfg.asset_policy.connectors["codex"].mcp.registry_required)
-        self.assertIsNone(self.app.cfg.asset_policy.connectors["open_hands"].mcp.registry_required)
-        self.assertNotIn("openhands", self.app.cfg.asset_policy.connectors)
 
     def test_require_verification_failure_rolls_back_and_reports_failed_connectors(self):
         import yaml

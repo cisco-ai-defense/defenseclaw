@@ -26,7 +26,7 @@ func TestLLMTrafficModeForConnector(t *testing.T) {
 	proxy := []string{"openclaw", "zeptoclaw"}
 	hooks := []string{
 		"claudecode", "codex", "hermes", "cursor", "devin",
-		"copilot", "openhands", "antigravity", "opencode", "omnigent", "amp", "kiro",
+		"copilot", "antigravity", "opencode", "amp", "kiro",
 	}
 	for _, name := range proxy {
 		if got := LLMTrafficModeForConnector(name); got != LLMTrafficModeProxy {

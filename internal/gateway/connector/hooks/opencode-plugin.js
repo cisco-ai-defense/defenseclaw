@@ -34,12 +34,14 @@ import { lstat } from "node:fs/promises";
 {{else}}import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { lstat, mkdir, open } from "node:fs/promises";
 {{end}}import { {{if not .Sandbox}}homedir, {{end}}userInfo } from "node:os";
-{{if not .Sandbox}}import { dirname, join } from "node:path";
+{{if not .Sandbox}}import { stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 {{end}}
 // DC_-prefixed constants are non-secret values baked in at setup time, not
 // env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
 const DC_API_ADDR = "{{.APIAddr}}";
 {{if .Sandbox}}const DC_FAIL_MODE = "closed"; // sandbox hooks always fail closed
+const DC_TRANSPORT_FAIL_MODE = DC_FAIL_MODE;
 const DC_TIMEOUT_MS = {{.SandboxMaxTime}}000;
 const DC_RETRY_TIMEOUT_MS = {{.SandboxRetryMaxTime}}000;
 const DC_PLUGIN_URL = import.meta.url;
@@ -53,6 +55,11 @@ const DC_FOREIGN_GUARD = "";
 const DC_INSTALL_MARKER = "";
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}";
 const DC_FAIL_MODE = "{{if and .Managed (not .SecureClient)}}closed{{else}}{{.FailMode}}{{end}}"; // "open" or "closed"
+// The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the process
+// environment is not read (GAP-0315). As in the shell hooks,
+// DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035); it can
+// never open a closed plugin.
+const DC_TRANSPORT_FAIL_MODE = ["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || "")) ? "closed" : DC_FAIL_MODE;
 // Standalone managed installs talk to the gateway's peer-authorized unix
 // hook socket instead of the TCP API: the gateway identifies the caller by
 // kernel-verified uid, so no bearer token leaves this process, and a user
@@ -104,7 +111,7 @@ let DC_MCP_IDENTITY_STATUS = "unverified";
 // see whose session a request belongs to; the plugin is in-session and can.
 // A value that is not a safe header field is dropped rather than sanitized, so
 // a hostile account name cannot smuggle a second header into every hook call.
-function defenseclawIdentityHeaders() {
+async function defenseclawIdentityHeaders() {
   const headers = {};
   let info;
   try {
@@ -122,7 +129,7 @@ function defenseclawIdentityHeaders() {
   if (defenseclawSafeIdentityValue(info.username)) {
     headers["X-DefenseClaw-User-Name"] = info.username;
   }
-  const facts = defenseclawSessionFactsHeader();
+  const facts = await defenseclawSessionFactsHeader();
   if (facts !== "") {
     headers["X-DefenseClaw-Session-Facts"] = facts;
   }
@@ -141,9 +148,51 @@ const DC_SESSION_FACTS_TTL_MS = 300000;
 const DC_SESSION_FACTS_RETRY_MS = 30000;
 let DC_SESSION_FACTS = { key: "", value: "", until: 0 };
 
-function defenseclawFullSessionFacts() {
+// The modification time of this login's FILE or DIR Kerberos credential
+// cache is part of the session facts key: a new kinit into the same cache
+// changes the principal while every session variable stays the same
+// (GAP-1139). KCM, KEYRING and API caches have no file; the variables alone
+// key them. The stat runs off the event loop and gets
+// DC_CREDENTIAL_CACHE_STAT_MS; calls share one stat, and one still
+// unanswered after that (a stalled network or FUSE mount) reads as null: the
+// call sends the session variables alone.
+const DC_CREDENTIAL_CACHE_STAT_MS = 250;
+let DC_CREDENTIAL_CACHE_STAT = { pending: null, since: 0 };
+
+async function defenseclawCredentialCacheStamp() {
+  const name = String(process.env.KRB5CCNAME || "");
+  let path = name;
+  if (name === "") path = typeof process.getuid === "function" ? "/tmp/krb5cc_" + process.getuid() : "";
+  else if (name.startsWith("FILE:")) path = name.slice(5);
+  else if (name.startsWith("DIR::")) path = name.slice(5);
+  else if (name.startsWith("DIR:")) path = name.slice(4);
+  if (!path.startsWith("/")) return "";
+  const now = Date.now();
+  if (DC_CREDENTIAL_CACHE_STAT.pending === null) {
+    const pending = stat(path).then((info) => String(info.mtimeMs), () => "");
+    DC_CREDENTIAL_CACHE_STAT = { pending, since: now };
+    pending.then(() => {
+      if (DC_CREDENTIAL_CACHE_STAT.pending === pending) DC_CREDENTIAL_CACHE_STAT = { pending: null, since: 0 };
+    });
+  }
+  const left = DC_CREDENTIAL_CACHE_STAT.since + DC_CREDENTIAL_CACHE_STAT_MS - now;
+  if (left <= 0) return null;
+  let timer;
+  const overdue = new Promise((resolve) => { timer = setTimeout(resolve, left, null); });
+  try {
+    return await Promise.race([DC_CREDENTIAL_CACHE_STAT.pending, overdue]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function defenseclawFullSessionFacts() {
   const env = process.env;
-  const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY].map((v) => String(v || "")).join("|");
+  const stamp = await defenseclawCredentialCacheStamp();
+  // The binary would wait on a stalled credential cache too.
+  if (stamp === null) return "";
+  const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY, stamp]
+    .map((v) => String(v || "")).join("|");
   const now = Date.now();
   if (DC_SESSION_FACTS.key === key && now < DC_SESSION_FACTS.until) return DC_SESSION_FACTS.value;
   let value = "";
@@ -164,8 +213,8 @@ function defenseclawFullSessionFacts() {
 {{end}}// defenseclawSessionFactsHeader renders the claimed SSH and logind session
 // facts as the X-DefenseClaw-Session-Facts value the hook runner also sends.
 // Each value is dropped unless it matches the header's allowlisted charset.
-function defenseclawSessionFactsHeader() {
-{{if not .Sandbox}}  const full = defenseclawFullSessionFacts();
+async function defenseclawSessionFactsHeader() {
+{{if not .Sandbox}}  const full = await defenseclawFullSessionFacts();
   if (full !== "") return full;
 {{end}}  const env = process.env;
   const address = String(env.SSH_CONNECTION || "").trim().split(/\s+/)[0] || "";
@@ -589,12 +638,11 @@ async function defenseclawLogFailOpen(reason, category) {
     // unless the managed deployment itself was uninstalled.
     if (await defenseclawDeploymentRemoved()) return null;
     if (actionable) return { reason: "DefenseClaw hook credential is unavailable." };
-{{if not .Sandbox}}    await defenseclawLogFailOpen("hook credential unavailable", "transport");
-{{end}}    return null;
+    return null;
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
-  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...(await defenseclawIdentityHeaders()) };
   if (token) headers["Authorization"] = "Bearer " + token;
   try {
     const payload = {
@@ -624,11 +672,12 @@ async function defenseclawLogFailOpen(reason, category) {
       signal: controller.signal,
     }, token), controller.signal);{{end}}
     if (!res.ok) {
-      // Gateway answered with a bad status (auth/5xx). Honor fail mode.
-      if (DC_FAIL_MODE === "closed") {
+      // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
+      // is an outage, as in the shell hooks, so strict availability closes it.
+      if ((res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE) === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
-{{if not .Sandbox}}      await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
+{{if not .Sandbox}}      if (actionable) await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
 {{end}}      return null;
     }
     const data = await res.json();
@@ -638,7 +687,7 @@ async function defenseclawLogFailOpen(reason, category) {
     }
 {{else}}{{if not .SecureClient}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
 {{if not .Managed}}      if (DC_FAIL_MODE === "open") {
-        await defenseclawLogFailOpen("invalid gateway verdict", "response");
+        if (actionable) await defenseclawLogFailOpen("invalid gateway verdict", "response");
         return null;
       }
 {{end}}
@@ -659,11 +708,11 @@ async function defenseclawLogFailOpen(reason, category) {
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
-    if (DC_FAIL_MODE === "closed") {
+    if (DC_TRANSPORT_FAIL_MODE === "closed") {
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }
-{{if not .Sandbox}}    await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");
+{{if not .Sandbox}}    if (actionable) await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");
 {{end}}    return null;
   } finally {
     clearTimeout(timer);
@@ -694,7 +743,7 @@ async function defenseclawPostLoadHeartbeat(cwd) {
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
-  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...(await defenseclawIdentityHeaders()) };
   if (token) headers["Authorization"] = "Bearer " + token;
   try {
 {{if .Sandbox}}    await defenseclawFetch(headers, JSON.stringify({
@@ -739,7 +788,7 @@ async function defenseclawPostLifecycle(event, cwd) {
   const info = properties.info || {};
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
-  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...(await defenseclawIdentityHeaders()) };
   if (token) headers["Authorization"] = "Bearer " + token;
   try {
     await {{if .Sandbox}}defenseclawFetch(headers, JSON.stringify({

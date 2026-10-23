@@ -602,6 +602,12 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
     configured = _configured_update_source()
     if configured:
         os.environ[REPO_ENV] = configured.rstrip("/")
+    # until 1.1: older OmniGent setups may select their config relative to
+    # the caller's directory. Bind these paths before the installer handoff.
+    for name in ("OMNIGENT_CONFIG_HOME", "OMNIGENT_CONFIG"):
+        value = os.environ.get(name, "")
+        if value and not os.path.isabs(value):
+            os.environ[name] = os.path.abspath(os.path.expanduser(value))
     if os.name == "nt":
         # The running CLI holds files in .venv open; start the installer in its
         # own console and exit so it can replace them.
@@ -645,7 +651,8 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
     sys.stdout.flush()
     sys.stderr.flush()
     try:
-        os.chdir(workdir)
+        # path is absolute; keep the caller's directory for relative vendor
+        # paths handed to an installer from an older release.
         os.execv(bash, [bash, path, *args])
     except OSError as exc:
         shutil.rmtree(workdir, ignore_errors=True)

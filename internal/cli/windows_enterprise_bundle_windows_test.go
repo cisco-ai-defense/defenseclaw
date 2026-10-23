@@ -39,11 +39,14 @@ func TestWindowsBundleHotWriteRecordsPrincipalAndSignedMetadata(t *testing.T) {
 	opts := &windowsEnterpriseLifecycleOptions{bundle: &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{
 		BundleID: id, Version: 3, Principal: "control-plane:acme/alice", SignerKeyID: "k1", ChangeSummary: "guardrail pack update",
 	}}}}
-	got := windowsHotConfigWriteOptions(opts, "abc")
+	got, bundle, err := windowsHotConfigWriteOptions(opts, "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got.Actor != "control-plane:acme/alice" || got.LocalActor != configwrite.CurrentOSActor() || got.Bundle.ID != id || got.Bundle.Version != 3 ||
 		got.Bundle.SignerKeyID != "k1" || got.Reason != configwrite.BundleReason(id, 3, "guardrail pack update") ||
-		!got.Lifecycle || got.ExpectSHA256 != "abc" {
-		t.Fatalf("Windows bundle hot write = %+v", got)
+		!got.Lifecycle || got.ExpectSHA256 != "abc" || bundle.ID != id || bundle.Version != 3 {
+		t.Fatalf("Windows bundle hot write = %+v, adoption identity %+v", got, bundle)
 	}
 }
 
@@ -60,10 +63,13 @@ func TestWindowsBundleHotWriteAttributesAppliedAudit(t *testing.T) {
 	opts := &windowsEnterpriseLifecycleOptions{bundle: &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{
 		BundleID: id, Version: 3, Principal: "control-plane:acme/alice", SignerKeyID: "k1", ChangeSummary: "guardrail pack update",
 	}}}}
-	_, err := configwrite.Locked(context.Background(), layout.ConfigPath,
-		windowsHotConfigWriteOptions(opts, configwrite.SHA256Hex(previous)), func() (bool, error) {
-			return true, os.WriteFile(layout.ConfigPath, []byte("config_version: 9\nguardrail:\n  enabled: true\n"), 0o600)
-		})
+	opt, _, err := windowsHotConfigWriteOptions(opts, configwrite.SHA256Hex(previous))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = configwrite.Locked(context.Background(), layout.ConfigPath, opt, func() (bool, error) {
+		return true, os.WriteFile(layout.ConfigPath, []byte("config_version: 9\nguardrail:\n  enabled: true\n"), 0o600)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,9 +124,9 @@ func TestWindowsStatusSettlesOnlyEnforcedAppliedReceipt(t *testing.T) {
 		digest     string
 		want       bool
 	}{
-		{"enforced", 7, windowsBundleTestDigest, true},
-		{"wrong generation", 6, windowsBundleTestDigest, false},
-		{"wrong digest", 7, "sha256:" + strings.Repeat("2", 64), false},
+		{"enforced", 1, windowsBundleTestDigest, true},
+		{"wrong generation", 2, windowsBundleTestDigest, false},
+		{"wrong digest", 1, "sha256:" + strings.Repeat("2", 64), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			layout := stubWindowsBundleHost(t)
@@ -134,6 +140,7 @@ func TestWindowsStatusSettlesOnlyEnforcedAppliedReceipt(t *testing.T) {
 			}
 			if err := driver.Store.Advance(rc, enterprisebundle.StateVerified, func(r *enterprisebundle.Receipt) {
 				r.ManifestSHA256 = strings.Repeat("a", 64)
+				r.Principal, r.SignerKeyID = "operator:alice", "k1"
 				r.ExpectedDigest = windowsBundleTestDigest
 				r.SetDigestComparison(true, false, false)
 			}); err != nil {
@@ -143,14 +150,15 @@ func TestWindowsStatusSettlesOnlyEnforcedAppliedReceipt(t *testing.T) {
 				t.Fatal(err)
 			}
 			installed := []byte("config_version: 9\n")
+			generation := recordWindowsBundleTestCommit(t, layout, rc, installed)
 			if err := driver.Store.Advance(rc, enterprisebundle.StateApplied, func(r *enterprisebundle.Receipt) {
 				r.ConfigSHA256 = configwrite.SHA256Hex(installed)
 				r.EffectivePolicyDigest = windowsBundleTestDigest
-				r.ConfigGeneration = 7
+				r.ConfigGeneration = generation
 			}); err != nil {
 				t.Fatal(err)
 			}
-			policy := &enterprisebundle.GatewayPolicy{EffectiveDigest: tc.digest, Digest: tc.digest, Generation: tc.generation, Applied: true}
+			policy := &enterprisebundle.GatewayPolicy{EffectiveDigest: tc.digest, Digest: tc.digest, Generation: tc.generation, BundleID: rc.BundleID, BundleVersion: rc.Version, Applied: true}
 			got, err := settleWindowsAppliedBundle(driver, installed, policy)
 			if err != nil || got != tc.want {
 				t.Fatalf("settled=%v, err=%v", got, err)
@@ -175,6 +183,26 @@ func TestWindowsStatusSettlesOnlyEnforcedAppliedReceipt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// recordWindowsBundleTestCommit uses the lifecycle writer rather than treating
+// an identical config file as evidence that this signed bundle was installed.
+func recordWindowsBundleTestCommit(t *testing.T, layout managed.StandaloneLayout, rc *enterprisebundle.Receipt, raw []byte) uint64 {
+	t.Helper()
+	opt, ok := enterprisebundle.GenerationOptions(rc)
+	if !ok {
+		t.Fatal("bundle receipt has no principal")
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.ConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	result, err := configwrite.Locked(t.Context(), layout.ConfigPath, opt, func() (bool, error) {
+		return true, os.WriteFile(layout.ConfigPath, raw, 0o600)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result.Generation
 }
 
 func windowsBundleScratchDir(t *testing.T) string {
@@ -458,7 +486,20 @@ func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 	})
 	windowsBundleLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
 	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy {
-		return &enterprisebundle.GatewayPolicy{EffectiveDigest: windowsBundleTestDigest, Digest: windowsBundleTestDigest, Generation: 3, Applied: true}
+		policy := &enterprisebundle.GatewayPolicy{EffectiveDigest: windowsBundleTestDigest, Digest: windowsBundleTestDigest, Applied: true}
+		state, err := configwrite.ReadGenerationState(layout.ConfigPath)
+		if err != nil {
+			return policy
+		}
+		policy.Generation, policy.BundleID, policy.BundleVersion = state.Generation, state.BundleID, state.BundleVersion
+		receipts, _ := newWindowsBundleDriver(layout).Store.Receipts()
+		for _, rc := range receipts {
+			if rc.BundleID == state.BundleID && rc.Version == state.BundleVersion {
+				policy.EffectiveDigest, policy.Digest = rc.ExpectedDigest, rc.ExpectedDigest
+				break
+			}
+		}
+		return policy
 	}
 	windowsBundleSleep = func(time.Duration) {}
 	windowsBundleTrust = func(string) error { return nil }
@@ -683,7 +724,7 @@ func TestWindowsBundleRetryProtectsInstalledUnconfirmedVersion(t *testing.T) {
 		t.Fatalf("sign exit %d: %s", code, out)
 	}
 	layout := stubWindowsBundleHost(t)
-	if _, err := installWindowsBundleAnchors(e.anchors, newWindowsBundleDriver(layout).AnchorsPath); err != nil {
+	if _, _, err := installWindowsBundleAnchors(e.anchors, newWindowsBundleDriver(layout).AnchorsPath); err != nil {
 		t.Fatal(err)
 	}
 	anchorsBefore := readWindowsBundleAnchors(t, newWindowsBundleDriver(layout).AnchorsPath)
@@ -1007,6 +1048,10 @@ func TestWindowsBundleGatewayRestartReachesEveryReceiptSurface(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	recordWindowsBundleTestCommit(t, layout, run.prepared.Receipt, run.prepared.Config)
+	policy := *windowsBundlePolicy(t.Context())
+	policy.EffectiveDigest, policy.Digest = digest, digest
+	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return &policy }
 	run.gatewayRestarted = true
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
 	result.Policy = &enterprisestatus.PolicyState{EffectiveDigest: digest,
@@ -1109,7 +1154,7 @@ func TestWindowsEnsureRefusesCrossHostDigestMismatch(t *testing.T) {
 			})
 			layout := stubWindowsBundleHost(t)
 			installed := newWindowsBundleDriver(layout).AnchorsPath
-			if _, err := installWindowsBundleAnchors(e.anchors, installed); err != nil {
+			if _, _, err := installWindowsBundleAnchors(e.anchors, installed); err != nil {
 				t.Fatal(err)
 			}
 			before, err := os.ReadFile(installed)
@@ -1258,7 +1303,7 @@ func TestWindowsRefusedBundleKeepsInstalledAnchors(t *testing.T) {
 			}
 			layout := stubWindowsBundleHost(t)
 			installed := newWindowsBundleDriver(layout).AnchorsPath
-			if _, err := installWindowsBundleAnchors(e.anchors, installed); err != nil {
+			if _, _, err := installWindowsBundleAnchors(e.anchors, installed); err != nil {
 				t.Fatal(err)
 			}
 			before, err := os.ReadFile(installed)
@@ -1318,6 +1363,7 @@ func windowsKilledApplyReceipt(t *testing.T, driver *enterprisebundle.Driver, bu
 	}
 	if err := driver.Store.Advance(rc, enterprisebundle.StateVerified, func(r *enterprisebundle.Receipt) {
 		r.ManifestSHA256 = strings.Repeat("a", 64)
+		r.Principal, r.SignerKeyID = "operator:alice", "k1"
 		r.ExpectedDigest = windowsBundleTestDigest
 		r.SetDigestComparison(true, false, false)
 	}); err != nil {
@@ -1332,10 +1378,15 @@ func windowsKilledApplyReceipt(t *testing.T, driver *enterprisebundle.Driver, bu
 	if until == enterprisebundle.StateStaged {
 		return rc
 	}
+	layout, err := windowsBundleLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := recordWindowsBundleTestCommit(t, layout, rc, config)
 	if err := driver.Store.Advance(rc, enterprisebundle.StateApplied, func(r *enterprisebundle.Receipt) {
 		r.ConfigSHA256 = configwrite.SHA256Hex(config)
 		r.EffectivePolicyDigest = windowsBundleTestDigest
-		r.ConfigGeneration = 3
+		r.ConfigGeneration = generation
 	}); err != nil {
 		t.Fatal(err)
 	}

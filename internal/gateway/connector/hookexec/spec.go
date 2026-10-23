@@ -40,7 +40,7 @@ const (
 	// / hermes)
 	styleHookEcho
 	// styleHookEchoDecision: echo hook_output, then exit 2 if its
-	// `decision` is deny/block. (openhands-hook.sh)
+	// `decision` is deny/block. (devin-hook.sh)
 	styleHookEchoDecision
 	// styleActionStderr: no stdout echo; on action=block write reason to
 	// stderr + exit 2. (amp-plugin)
@@ -196,14 +196,6 @@ var specs = map[string]spec{
 		oversizedClosed:   failResult{exit: blockExit},
 		unreachableStrict: failResult{exit: blockExit},
 		responseClosed:    failResult{exit: blockExit},
-	},
-	"openhands": {
-		connector: "openhands", hookName: "openhands-hook", errLabel: "openhands",
-		subject: "openhands hook", endpoint: "/api/v1/openhands/hook",
-		outputField: "hook_output", style: styleHookEchoDecision,
-		oversizedClosed:   failResult{body: `{"decision":"deny","reason":"` + tooLarge + `"}`, exit: blockExit},
-		unreachableStrict: failResult{body: `{"decision":"deny","reason":"` + failedClosed + `"}`, exit: blockExit},
-		responseClosed:    failResult{body: `{"decision":"deny","reason":"` + failedClosed + `"}`, exit: blockExit},
 	},
 }
 

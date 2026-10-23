@@ -429,6 +429,18 @@ func (c *Config) secureClientHookFailModes() bool {
 		(runtime.GOOS != "linux" || managed.NormalizeEnterpriseProfile(c.Enterprise.Profile) != "")
 }
 
+// ConfiguredHookFailModeForConnector is the hook fail mode the config sets
+// explicitly for connector (configuredHookFailModeForConnector), or "" when
+// it sets none. A per-user Cursor's resolved mode follows its guardrail mode,
+// so only this says whether an operator opened its hooks for an outage
+// (connector.OutageHookFailMode).
+func (c *Config) ConfiguredHookFailModeForConnector(connector string) string {
+	if c == nil {
+		return ""
+	}
+	return c.configuredHookFailModeForConnector(connector)
+}
+
 // configuredHookFailModeForConnector is the explicit hook fail mode the
 // config sets for connector, canonicalized (explicitHookFailMode): the
 // automatic-protection overlay first, then the connector's own value, then

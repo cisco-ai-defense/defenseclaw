@@ -76,6 +76,9 @@ ACTION_TOOL_RESULT: Final[str] = "tool-result"
 # Operator mutations (v7 Activity)
 ACTION_CONFIG_UPDATE: Final[str]   = "config-update"
 ACTION_CONFIG_BUNDLE_RECEIPT: Final[str] = "config.bundle.receipt"
+ACTION_CONFIG_TRUST_ANCHORS_CHANGED: Final[str] = "config.trust_anchors.changed"
+ACTION_CONFIG_SECRET_CHANGED: Final[str] = "config.secret.changed"
+ACTION_CONFIG_SECRET_CHANGE_FAILED: Final[str] = "config.secret.change_failed"
 ACTION_POLICY_UPDATE: Final[str]   = "policy-update"
 ACTION_POLICY_RELOAD: Final[str]   = "policy-reload"
 ACTION_ACTION: Final[str]          = "action"
@@ -356,6 +359,9 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_TOOL_RESULT,
     ACTION_CONFIG_UPDATE,
     ACTION_CONFIG_BUNDLE_RECEIPT,
+    ACTION_CONFIG_TRUST_ANCHORS_CHANGED,
+    ACTION_CONFIG_SECRET_CHANGED,
+    ACTION_CONFIG_SECRET_CHANGE_FAILED,
     ACTION_POLICY_UPDATE,
     ACTION_POLICY_RELOAD,
     ACTION_ACTION,

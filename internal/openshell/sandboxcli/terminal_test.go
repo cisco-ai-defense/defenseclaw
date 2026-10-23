@@ -295,7 +295,7 @@ func TestSessionLeavesASandboxAnotherSessionIsAttachedTo(t *testing.T) {
 	t.Run("the session that started it", func(t *testing.T) {
 		ta := newTestApp(t, "u\n")
 		// The other session resumed the sandbox this run creates.
-		defer ta.holdSession(sbName)()
+		defer holdTestSession(t, ta, sbName)()
 		ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Rm: true}))
 		check(t, ta, sbName)
 	})
@@ -305,13 +305,13 @@ func TestSessionLeavesASandboxAnotherSessionIsAttachedTo(t *testing.T) {
 		sb.Snapshot = &sandboxapi.SnapshotInfo{Kind: "git", CreatedAt: time.Now().Add(-time.Hour)}
 		ta.daemon.add(sb)
 		runAnswers(ta, "", "")
-		defer ta.holdSession("m1-b")()
+		defer holdTestSession(t, ta, "m1-b")()
 		ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "m1-b", Rm: true}))
 		check(t, ta, "m1-b")
 	})
 	t.Run("once the other session ended", func(t *testing.T) {
 		ta := newTestApp(t, "y\n")
-		ta.holdSession(sbName)()
+		holdTestSession(t, ta, sbName)()
 		ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
 		ta.wantCalls(t, 1, "POST", sbName+"/stop")
 	})
@@ -319,7 +319,7 @@ func TestSessionLeavesASandboxAnotherSessionIsAttachedTo(t *testing.T) {
 	ta := newTestApp(t, "y\ny\n")
 	ta.daemon.add(folderSandbox(ta, "ready"))
 	runAnswers(ta, "", "")
-	defer ta.holdSession("proj-0a1b")()
+	defer holdTestSession(t, ta, "proj-0a1b")()
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
 	has(t, ta.output(), "Sandbox proj-0a1b (ready, mount) already holds this folder, and 1 session is attached to it. Resume it? [Y/n]")
 }
@@ -328,16 +328,16 @@ func TestSessionLeavesASandboxAnotherSessionIsAttachedTo(t *testing.T) {
 // a process that is gone, it no longer counts, and a count removes it.
 func TestSessionLeases(t *testing.T) {
 	ta := newTestApp(t, "")
-	if n := ta.attachedSessions("box"); n != 0 {
+	if n := countSessions(t, ta, "box"); n != 0 {
 		t.Fatalf("attached = %d before any session", n)
 	}
-	one, two := ta.holdSession("box"), ta.holdSession("box")
-	if n := ta.attachedSessions("box"); n != 2 {
+	one, two := holdTestSession(t, ta, "box"), holdTestSession(t, ta, "box")
+	if n := countSessions(t, ta, "box"); n != 2 {
 		t.Fatalf("attached = %d, want 2", n)
 	}
 	one()
 	one()
-	if n := ta.attachedSessions("box"); n != 1 {
+	if n := countSessions(t, ta, "box"); n != 1 {
 		t.Fatalf("attached = %d after one release, want 1", n)
 	}
 	two()
@@ -348,7 +348,7 @@ func TestSessionLeases(t *testing.T) {
 	// A lease file nobody holds (its process died).
 	stale := filepath.Join(dir, "4242-0a0b0c0d0e0f"+leaseSuffix)
 	writeFile(t, stale, "")
-	if n := ta.attachedSessions("box"); n != 0 {
+	if n := countSessions(t, ta, "box"); n != 0 {
 		t.Fatalf("attached = %d with only a stale lease", n)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {

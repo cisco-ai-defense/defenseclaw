@@ -20,7 +20,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
-	"github.com/google/uuid"
 )
 
 // compatibilityAuditV8Options selects only facts already authorized by the
@@ -269,7 +268,7 @@ func newRuntimeAlertV8GeneratedMetric(event Event, source string) (RuntimeV8Gene
 			}
 			builder, err := observability.NewFamilyBuilder(
 				observability.ClockFunc(func() time.Time { return event.Timestamp.UTC() }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if err != nil {
 				return observability.Record{}, err

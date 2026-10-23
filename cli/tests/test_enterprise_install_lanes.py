@@ -173,62 +173,103 @@ def test_checker_upgrade_gate_options(tmp_path: Path) -> None:
     assert "  - the result reports no policy" in result.stderr.splitlines(), result.stderr
 
 
-def test_upgrade_config_check_requires_every_v8_value_kept_or_recorded(tmp_path: Path) -> None:
-    import hashlib
-
-    before = b"config_version: 8\nguardrail:\n  mode: observe\n  connectors:\n    codex: {enabled: true}\nskill_actions:\n  high: {install: block}\n"
-    (tmp_path / "v8.yaml").write_bytes(before)
-    record = {
-        "from_version": 8,
-        "to_version": 9,
-        "source_sha256": hashlib.sha256(before).hexdigest(),
-        "moved": [{"from": "skill_actions.high.install", "to": "admission.skill.actions.high"}],
-        "conflicts": [],
-    }
-    (tmp_path / "record.json").write_text(json.dumps(record), encoding="utf-8")
+def test_upgrade_config_check_requires_a_v9_source_and_every_value_kept(tmp_path: Path) -> None:
+    before = "config_version: 9\nguardrail:\n  mode: observe\n  connectors:\n    codex: {enabled: true}\n"
+    (tmp_path / "before.yaml").write_text(before, encoding="utf-8")
 
     def run(after: str) -> subprocess.CompletedProcess[str]:
-        (tmp_path / "v9.yaml").write_text(after, encoding="utf-8")
+        (tmp_path / "after.yaml").write_text(after, encoding="utf-8")
         return subprocess.run(
-            [sys.executable, str(SCRIPTS / "check_enterprise_upgrade_config.py"), "--before", str(tmp_path / "v8.yaml"),
-             "--after", str(tmp_path / "v9.yaml"), "--record", str(tmp_path / "record.json")],
+            [sys.executable, str(SCRIPTS / "check_enterprise_upgrade_config.py"), "--before", str(tmp_path / "before.yaml"),
+             "--after", str(tmp_path / "after.yaml")],
             capture_output=True, text=True, timeout=60, check=False,
         )
 
-    kept = "config_version: 9\nguardrail:\n  mode: observe\n  connectors:\n    codex: {enabled: true}\nadmission:\n  skill:\n    actions: {high: block}\n"
-    assert run(kept).returncode == 0, run(kept).stderr
-    moved_changed = run(kept.replace("actions: {high: block}", "actions: {high: allow}"))
-    assert moved_changed.returncode == 1
-    assert "skill_actions.high.install moved to admission.skill.actions.high" in moved_changed.stderr
-    record["moved"].append({"from": "update_check", "to": "update.check", "value": False})
-    (tmp_path / "v8.yaml").write_bytes(before + b"update_check: true\n")
-    record["source_sha256"] = hashlib.sha256((tmp_path / "v8.yaml").read_bytes()).hexdigest()
-    (tmp_path / "record.json").write_text(json.dumps(record), encoding="utf-8")
-    changed_boolean = run(kept + "update: {check: false}\n")
-    assert changed_boolean.returncode == 1
-    assert "update_check moved to update.check" in changed_boolean.stderr
-    changed = run(kept.replace("mode: observe", "mode: action"))
+    assert run(before).returncode == 0, run(before).stderr
+    changed = run(before.replace("mode: observe", "mode: action"))
     assert changed.returncode == 1
     assert "  - guardrail.mode changed from 'observe' to 'action'" in changed.stderr.splitlines()
+    gone = run("config_version: 9\nguardrail:\n  mode: observe\n")
+    assert "  - guardrail.connectors.codex.enabled is gone" in gone.stderr.splitlines()
+    (tmp_path / "before.yaml").write_text(before.replace("config_version: 9", "config_version: 8"), encoding="utf-8")
+    v8 = run(before)
+    assert v8.returncode == 1
+    assert "want 9 (the lanes upgrade from 1.x)" in v8.stderr
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
-def test_unix_upgrade_lane_applies_v8_to_previous_package(tmp_path: Path) -> None:
+def test_unix_upgrade_lane_refuses_a_0x_previous_release(tmp_path: Path) -> None:
+    # No 0.x release ships a standalone enterprise package, and 0.8.10 has no
+    # enterprise secret set or ensure --from-package; the lane used to write a
+    # version 8 config for one and then fail later on a missing command.
+    for previous in ("0.8.10", "v0.8.10"):
+        result = subprocess.run(
+            ["bash", str(UNIX_LANE), "--package", str(tmp_path / "new.deb"), "--version", "1.0.4",
+             "--upgrade-from", str(tmp_path / "old.deb"), "--previous-version", previous],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        assert result.returncode == 2, result.stderr
+        assert "no 0.x release ships a standalone enterprise package" in result.stderr
     lane = UNIX_LANE.read_text(encoding="utf-8")
     writer = re.search(r"^write_admin_config\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
-    upgrade = re.search(r"^upgrade_lane\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
-    assert writer and upgrade
-    assert "write_admin_config" in upgrade.group(0)
+    assert writer
     env = {**os.environ, "stage": str(tmp_path), "data_dir": str(tmp_path / "data"),
-           "vendor_policy_dir": str(tmp_path / "policy"), "upgrade_from": str(tmp_path / "previous.pkg")}
-    # A 0.8.x package reads only version 8 (GAP-0496); a 1.x one gets version 9 (GAP-0510).
-    for previous, want in (("0.8.10", "config_version: 8\n"), ("1.0.0", "config_version: 9\n")):
-        result = subprocess.run(["bash", "-c", writer.group(0) + "\nwrite_admin_config"],
-                                env={**env, "previous_version": previous}, capture_output=True, text=True, check=False)
-        assert result.returncode == 0, result.stderr
-        text = (tmp_path / "config.yaml").read_text()
-        assert text.startswith(want), (previous, text)
-        assert ("rule_pack: default" in text) == (want == "config_version: 9\n"), text
+           "vendor_policy_dir": str(tmp_path / "policy")}
+    result = subprocess.run(["bash", "-c", writer.group(0) + "\nwrite_admin_config"], env=env,
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    text = (tmp_path / "config.yaml").read_text()
+    assert text.startswith("config_version: 9\n") and "  rule_pack: default\n" in text, text
+
+
+def test_windows_upgrade_lane_refuses_a_0x_previous_release() -> None:
+    lane = (SCRIPTS / "test-enterprise-windows-install.ps1").read_text(encoding="utf-8")
+    checks = lane[lane.index("if ($UpgradeFrom) {"):lane.index("if (-not $ResultsRoot) {")]
+    assert "no 0.x release ships a standalone enterprise Setup" in checks
+    assert "config_version: 8" not in lane and "v8.bak" not in lane and "migration-v9.json" not in lane
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
+def test_unix_upgrade_lane_checks_a_stored_credential_survives(tmp_path: Path) -> None:
+    # The secrets check hashed an empty store before and after the upgrade,
+    # which proves nothing; the lane now stores a credential first.
+    lane = UNIX_LANE.read_text(encoding="utf-8")
+    upgrade = re.search(r"^upgrade_lane\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
+    helpers = re.search(r"^upgrade_secret_name=.*?^upgrade_secret_kept\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
+    assert upgrade and helpers, "the upgrade lane has no protected-credential fixture"
+    body = upgrade.group(0)
+    assert body.index("seed_upgrade_secret") < body.index('previous_secrets_sha=$(tree_sha "$secrets_dir")')
+    assert body.index("lifecycle 06-upgrade") < body.index("upgrade_secret_kept ||")
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    gateway = tmp_path / "gateway"
+    gateway.write_text(
+        '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = --name ] && n=$2; shift; done\n'
+        'IFS= read -r v; printf %s "$v" >"$FAKE_SECRETS/$n"\n',
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    (tmp_path / "results").mkdir()
+    script = helpers.group(0) + (
+        '\ndie() { echo "FAIL: $*" >&2; exit 1; }\n'
+        "seed_upgrade_secret 02-previous-secret\n"
+        "upgrade_secret_kept || exit 3\n"
+        'printf x >>"$secrets_dir/$upgrade_secret_name"\n'
+        "! upgrade_secret_kept || exit 4\n"
+    )
+    env = {**os.environ, "gateway": str(gateway), "secrets_dir": str(secrets), "results": str(tmp_path / "results"),
+           "FAKE_SECRETS": str(secrets)}
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert (secrets / "ci-upgrade-lane").read_text().startswith("ci-upgrade-lane-")
+
+
+def test_windows_upgrade_lane_checks_a_stored_credential_survives() -> None:
+    lane = (SCRIPTS / "test-enterprise-windows-install.ps1").read_text(encoding="utf-8")
+    upgrade = lane[lane.index("if ($UpgradeFrom) {"):lane.index("Step 'Setup /ensure with an administrator config")]
+    assert "function Add-UpgradeSecret" in lane and "enterprise secret set --name $upgradeSecretName --from-stdin" in lane
+    assert upgrade.index("Add-UpgradeSecret") < upgrade.index("$previousSecretsSha = Get-TreeSha")
+    assert upgrade.index("01-setup-ensure-upgrade") < upgrade.index("Test-UpgradeSecretKept")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")

@@ -1872,3 +1872,55 @@ func TestConfigManagerWatchesAssetsBesideConfig(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// A rejected config_version 8 candidate does not change the scanner key the
+// running generation reads: the inline key its in-memory migration moves to
+// a variable is exported only when a reload accepts it.
+func TestConfigManagerRejectedV8CandidateKeepsTheActiveScannerKey(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	t.Setenv("VIRUSTOTAL_API_KEY", "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	write := func(mode, key string) []byte {
+		raw := []byte("config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  mode: " + mode +
+			"\nscanners:\n  skill_scanner:\n    use_virustotal: true\n    virustotal_api_key: " + key + "\nobservability: {}\n")
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	raw := write("observe", "vt-active-key")
+	initial, err := loadRuntimeConfigCandidate(path, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("VIRUSTOTAL_API_KEY"); got != "" {
+		t.Fatal("loading a candidate exported its inline key")
+	}
+	takeCandidateKeyExport(initial)()
+	if got := os.Getenv("VIRUSTOTAL_API_KEY"); got != "vt-active-key" {
+		t.Fatal("the accepted configuration's key is not exported")
+	}
+	reject := true
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+		if reject {
+			return errors.New("candidate rejected")
+		}
+		return nil
+	})
+	write("action", "vt-rejected-key")
+	if err := mgr.Reload(context.Background(), "test"); err == nil {
+		t.Fatal("the reload was not rejected")
+	}
+	if got := os.Getenv("VIRUSTOTAL_API_KEY"); got != "vt-active-key" {
+		t.Fatal("a rejected candidate replaced the scanner key the running generation reads")
+	}
+	reject = false
+	if err := mgr.Reload(context.Background(), "test"); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("VIRUSTOTAL_API_KEY"); got != "vt-rejected-key" {
+		t.Fatal("the accepted candidate's rotated key is not exported")
+	}
+}

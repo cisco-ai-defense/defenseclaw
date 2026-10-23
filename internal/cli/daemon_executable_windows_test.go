@@ -27,7 +27,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -395,11 +394,7 @@ func reserveExecutableTestPort(t *testing.T) int {
 
 func executableTestRepoRoot(t *testing.T) string {
 	t.Helper()
-	_, sourceFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("locate test source")
-	}
-	return filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", ".."))
+	return cliTestRepoRoot(t)
 }
 
 // seedExecutableTestRulePack installs the shipped default rule pack where an
@@ -417,6 +412,9 @@ func seedExecutableTestRulePack(t *testing.T, home string) {
 func buildGatewayExecutable(t *testing.T) string {
 	t.Helper()
 	repoRoot := executableTestRepoRoot(t)
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("needs a Go toolchain to build the gateway: " + err.Error())
+	}
 	binary := filepath.Join(t.TempDir(), "defenseclaw-gateway.exe")
 	// A cold -trimpath build of the gateway takes 80-145 s on a hosted
 	// Windows runner and has passed 180 s under load, so allow 6 minutes.

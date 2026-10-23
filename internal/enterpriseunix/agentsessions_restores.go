@@ -28,7 +28,7 @@ var guardianRestoreReader = enterprisehooks.ReadGuardianRestoreRecord
 // agentConnectors names the connector of each agent CLI agentCLIOf reports.
 var agentConnectors = map[string]string{
 	"claude": "claudecode", "codex": "codex", "cursor-agent": "cursor", "copilot": "copilot", "opencode": "opencode",
-	"amp": "amp", "devin": "devin", "hermes": "hermes", "openhands": "openhands", "omnigent": "omnigent",
+	"amp": "amp", "devin": "devin", "hermes": "hermes",
 	"agy": "antigravity", "kiro-cli": "kiro",
 }
 

@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -344,6 +345,9 @@ func TestHookFloodProbe(t *testing.T) {
 	for flood := 1; flood <= floods; flood++ {
 		session := fmt.Sprintf("hook-flood-probe-%d", flood)
 		latencies := make([]time.Duration, calls)
+		// An `echo ok` call is allowed; a block here is a failed check (an
+		// audit row the store could not write fails closed).
+		var blocked atomic.Int64
 		var cpuFile *os.File
 		startCPU := func(name string) {
 			if out == "" {
@@ -391,6 +395,12 @@ func TestHookFloodProbe(t *testing.T) {
 				api.handleAgentHook("claudecode").ServeHTTP(recorder,
 					httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(body)))
 				latencies[index] = time.Since(began)
+				var answer struct {
+					Action string `json:"action"`
+				}
+				if json.Unmarshal(recorder.Body.Bytes(), &answer) != nil || answer.Action != "allow" {
+					blocked.Add(1)
+				}
 			}(index)
 			if index == calls/6 {
 				stopCPU()
@@ -437,6 +447,14 @@ func TestHookFloodProbe(t *testing.T) {
 				guard.passes, guard.writer, guard.deferred, guard.restarted, guard.truncated, guard.failed,
 				guard.held.Round(time.Millisecond), guard.heldMax.Round(time.Millisecond), guard.passMax.Round(time.Millisecond),
 				guard.walMax, guard.syncs, guard.syncMax.Round(time.Millisecond))
+		}
+		all := slices.Clone(latencies)
+		slices.Sort(all)
+		t.Logf("flood %d all %d calls p50=%v p99=%v p999=%v max=%v not_allowed=%d", flood, calls,
+			all[calls/2].Round(time.Microsecond), all[calls*99/100].Round(time.Microsecond),
+			all[calls*999/1000].Round(time.Microsecond), all[calls-1].Round(time.Microsecond), blocked.Load())
+		if blocked.Load() > int64(calls/1000) {
+			t.Errorf("flood %d: %d of %d calls were not allowed, over 0.1%%", flood, blocked.Load(), calls)
 		}
 		for _, violation := range hookFloodFlatnessViolations(minutes) {
 			t.Errorf("flood %d is not flat: %s", flood, violation)

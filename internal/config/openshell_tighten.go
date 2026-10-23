@@ -655,6 +655,9 @@ func (c *Config) SandboxFloor(profile string) (OpenShellAdminConfig, string, err
 	if c == nil {
 		return OpenShellAdminConfig{}, "", errors.New("sandbox floor: configuration is unavailable")
 	}
+	if members, ok := ProfileMeetMembers(profile); ok {
+		return c.meetSandboxFloor(members)
+	}
 	var overlay *OpenShellAdminConfig
 	if name := strings.TrimSpace(profile); name != "" {
 		p, ok := c.Guardrail.Profiles[name]

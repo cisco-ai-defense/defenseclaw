@@ -62,8 +62,8 @@ func TestToolCallHooksClassify(t *testing.T) {
 		{"kiro", "preToolUse", "", true, none}, {"kiro", "postToolUse", "", false, ran},
 		{"copilot", "preToolUse", "", true, none}, {"copilot", "postToolUse", "", false, ran}, {"copilot", "postToolUseFailure", "", false, failed},
 		{"devin", "PreToolUse", "", true, none}, {"devin", "PostToolUse", "", false, ran},
-		{"hermes", "pre_tool_call", "", true, none}, {"hermes", "post_tool_call", "", false, ran}, {"openhands", "PreToolUse", "", true, none},
-		{"antigravity", "PostToolUse", "", false, ran}, {"omnigent", "PreToolUse", "", true, none},
+		{"hermes", "pre_tool_call", "", true, none}, {"hermes", "post_tool_call", "", false, ran},
+		{"antigravity", "PostToolUse", "", false, ran},
 		// Exact vendor spellings of each harness only; a connector with no reviewed hooks names nothing.
 		{"", "preToolUse", "", false, none}, {"claudecode", "post_tool_use", "", false, none}, {"claudecode", "PermissionRequest", "", false, none},
 		{"claudecode", "PostToolBatch", "", false, none}, {"claudecode", "SessionStart", "", false, none}, {"codex", "PermissionDenied", "", false, none},
@@ -92,7 +92,7 @@ func TestToolCallHooksClassify(t *testing.T) {
 func TestToolCallHooksKeying(t *testing.T) {
 	want := map[string]toolCallKeying{
 		"claudecode": keyByID, "codex": keyByID, "cursor": keyByID, "opencode": keyByID, "amp": keyByID, "kiro": keyByContent,
-		"copilot": keyByContent, "devin": keyByContent, "hermes": keyNone, "openhands": keyNone, "antigravity": keyNone, "omnigent": keyNone,
+		"copilot": keyByContent, "devin": keyByContent, "hermes": keyNone, "antigravity": keyNone,
 	}
 	if len(toolCallHooksByConnector) != len(want) {
 		t.Fatalf("toolCallHooksByConnector lists %d connectors, want %d", len(toolCallHooksByConnector), len(want))
@@ -330,9 +330,7 @@ func TestHookTamperPerHarness(t *testing.T) {
 		{connector: "copilot", pre: "preToolUse", post: "postToolUse", byContent: true, paired: true},
 		{connector: "devin", pre: "PreToolUse", post: "PostToolUse", byContent: true, paired: true},
 		{connector: "hermes", pre: "pre_tool_call", post: "post_tool_call"},
-		{connector: "openhands", pre: "PreToolUse", post: "PostToolUse"},
 		{connector: "antigravity", pre: "PreToolUse", post: "PostToolUse"},
-		{connector: "omnigent", pre: "PreToolUse", post: "PostToolUse"},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {
 			e, name := newEnv(t, nil), "tamper"+tc.connector

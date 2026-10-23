@@ -1,0 +1,10 @@
+{
+  "title": "Scanning and discovery",
+  "pages": [
+    "scan-a-skill",
+    "scan-an-mcp-server",
+    "block-or-allow-an-asset",
+    "subscribe-to-a-registry",
+    "find-ai-on-this-machine"
+  ]
+}

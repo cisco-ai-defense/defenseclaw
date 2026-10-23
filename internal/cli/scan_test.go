@@ -220,6 +220,7 @@ func TestScanResultV7RedactsSecretsFromFindingText(t *testing.T) {
 }
 
 func TestScanResultV7SafeFieldsAndExplicitLineRemainExact(t *testing.T) {
+	skipIfLocalSystem(t, "the per-user redaction key store does not run as LocalSystem (the gateway service names its service SID)")
 	line := 9
 	r := &scanner.ScanResult{
 		Scanner: "codeguard", Target: `C:\work\repo\main.go`, Timestamp: time.Now(),
@@ -284,6 +285,7 @@ func TestScanResultV7ExplicitRawOptionIsLocalProjectionOnly(t *testing.T) {
 }
 
 func TestScanResultV7SynthesizesRuleIDBeforeRedaction(t *testing.T) {
+	skipIfLocalSystem(t, "the per-user redaction key store does not run as LocalSystem (the gateway service names its service SID)")
 	const title = "Prompt injection: role override attempt"
 	r := &scanner.ScanResult{
 		Scanner: "clawshield-injection",
@@ -419,6 +421,7 @@ func TestScanResultV7PreservesFindingScanner(t *testing.T) {
 }
 
 func TestRunScanCodePersistsStandaloneFindingLifecycle(t *testing.T) {
+	skipIfLocalSystem(t, "the per-user redaction key store does not run as LocalSystem (the gateway service names its service SID)")
 	dir := t.TempDir()
 	target := filepath.Join(dir, "exec.py")
 	if err := os.WriteFile(target, []byte("os.system(cmd)\n"), 0o600); err != nil {

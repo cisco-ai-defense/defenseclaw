@@ -600,7 +600,6 @@ func TestPerUserAgentIdentityIgnoresGatewayEnvironmentOverrides(t *testing.T) {
 	for _, tc := range []struct{ connector, variable string }{
 		{"claudecode", "CLAUDE_CONFIG_DIR"}, {"codex", "CODEX_HOME"},
 		{"hermes", "HERMES_HOME"}, {"opencode", "OPENCODE_CONFIG_DIR"},
-		{"omnigent", "OMNIGENT_CONFIG_HOME"},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {
 			t.Setenv(tc.variable, "")

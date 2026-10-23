@@ -22,7 +22,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 )
 
 // Retention tuning. Variables rather than constants so tests can exercise
@@ -126,21 +129,107 @@ func (s *InventoryStore) PruneScanHistory(ctx context.Context, cutoff time.Time,
 // ON DELETE CASCADE of PruneScanHistory never reaches it; without this pass
 // the agents and users of a removed account stay listed for ever. An agent
 // that runs again is recorded again under the same id, which is derived
-// from the account and install, not stored state.
+// from the account and install, not stored state. The records the gateway's
+// 1.0.3 assignment bridge reads are kept aside first
+// (retireLegacyAgentIdentities).
 func (s *InventoryStore) PruneAgentIdentities(ctx context.Context, cutoff time.Time) (int, error) {
 	if s == nil || s.db == nil || s.legacySchema {
 		return 0, nil
 	}
-	if err := ensureAgentIdentitiesTable(ctx, s.db); err != nil {
-		return 0, fmt.Errorf("inventory store: prune agent identities: %w", err)
-	}
-	res, err := s.execDB(ctx, "agent_identities_prune",
-		`DELETE FROM agent_identities WHERE last_seen < ?`, formatAgentIdentityTime(cutoff))
+	removed := 0
+	err := s.runInTx(ctx, "agent_identities_prune", func(tx *sql.Tx) error {
+		if err := ensureAgentIdentitiesTable(ctx, tx); err != nil {
+			return err
+		}
+		stale := formatAgentIdentityTime(cutoff)
+		if err := retireLegacyAgentIdentities(ctx, tx, stale); err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx, `DELETE FROM agent_identities WHERE last_seen < ?`, stale)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		removed = int(n)
+		return nil
+	})
 	if err != nil {
 		return 0, fmt.Errorf("inventory store: prune agent identities: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
+	return removed, nil
+}
+
+// retireLegacyAgentIdentities copies, from the records last seen before
+// stale, the ones the gateway's 1.0.3 assignment bridge links an agents
+// entry by into agent_identities_retired: a record 1.0.0 to 1.0.3 wrote for
+// a qualified account (agentidentity.LegacyAgentID), and a record of another
+// domain's namesake of such a record's account, uid and machine, which makes
+// it ambiguous. Pruned, they would leave the entry matching no one, and a
+// later, weaker assignment would apply in its place. They are never listed.
+// Remove with agentidentity.LegacyAgentID.
+func retireLegacyAgentIdentities(ctx context.Context, tx *sql.Tx, stale string) error {
+	rows, err := tx.QueryContext(ctx, `SELECT agent_id, user_id, COALESCE(user_name, ''), connector, COALESCE(install_fp, ''), machine_hash, last_seen < ?
+		FROM agent_identities WHERE instr(user_name, '@') > 0 OR instr(user_name, '\') > 0
+		UNION ALL SELECT agent_id, user_id, COALESCE(user_name, ''), connector, COALESCE(install_fp, ''), machine_hash, 0
+		FROM agent_identities_retired`, stale)
+	if err != nil {
+		return err
+	}
+	type candidate struct {
+		id, holder, domain string
+		legacy, stale      bool
+	}
+	var candidates []candidate
+	// legacyDomains are the domains of the legacy records per machine, uid
+	// and account key.
+	legacyDomains := map[string]map[string]bool{}
+	for rows.Next() {
+		var rec AgentIdentityRecord
+		var old bool
+		if err := rows.Scan(&rec.AgentID, &rec.UserID, &rec.UserName, &rec.Connector, &rec.InstallFP, &rec.MachineHash, &old); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		legacyID := agentidentity.LegacyAgentID(agentidentity.Inputs{
+			MachineHash: rec.MachineHash, UserID: rec.UserID, Account: rec.UserName,
+			Connector: rec.Connector, InstallFP: rec.InstallFP,
+		})
+		if legacyID == "" {
+			continue
+		}
+		c := candidate{
+			id:     rec.AgentID,
+			holder: rec.MachineHash + "\x00" + agentidentity.NormalizeUserID(rec.UserID) + "\x00" + agentidentity.AccountKey(rec.UserName),
+			domain: agentidentity.AccountDomain(rec.UserName), legacy: strings.EqualFold(legacyID, rec.AgentID), stale: old,
+		}
+		if c.legacy {
+			if legacyDomains[c.holder] == nil {
+				legacyDomains[c.holder] = map[string]bool{}
+			}
+			legacyDomains[c.holder][c.domain] = true
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, c := range candidates {
+		keep := c.legacy
+		for domain := range legacyDomains[c.holder] {
+			keep = keep || domain != c.domain
+		}
+		if !c.stale || !keep {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO agent_identities_retired (`+agentIdentityColumns+`) SELECT `+
+			agentIdentityColumns+` FROM agent_identities WHERE agent_id = ?`, c.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ScanHistoryCompaction reports the space-reclaim step that follows a prune.

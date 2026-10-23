@@ -95,6 +95,30 @@ func TestScrubCursor_NoOpWhenNoDCEntries(t *testing.T) {
 	}
 }
 
+// GAP-1421: a purge also takes out the per-user otelHeadersHelper, whose
+// script it deletes with the hooks folder, and the helper's refresh interval;
+// an operator's own helper stays.
+func TestScrubClaudeCode_StripsTheDefenseClawOTLPHeadersHelper(t *testing.T) {
+	dir := t.TempDir()
+	for helper, keep := range map[string]bool{
+		"/home/alice/.defenseclaw/hooks/claude-code-otel-headers.sh": false,
+		"/usr/local/bin/my-headers":                                  true,
+	} {
+		path := filepath.Join(dir, "settings.json")
+		writeFile(t, path, `{"otelHeadersHelper": "`+helper+`", "env": {"CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS": "60000"}}`)
+		if _, err := scrubClaudeCodeFile(path, scrubDefaultMarkers); err != nil {
+			t.Fatalf("scrubClaudeCodeFile: %v", err)
+		}
+		out := readFile(t, path)
+		if strings.Contains(out, helper) != keep {
+			t.Errorf("helper %s kept = %v, want %v:\n%s", helper, !keep, keep, out)
+		}
+		if strings.Contains(out, "CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS") {
+			t.Errorf("helper refresh interval still present after scrub:\n%s", out)
+		}
+	}
+}
+
 // TestScrubClaudeCode_StripsManagedEnvKeys covers the DefenseClaw-owned
 // keys in Claude Code's settings.json env block. Kept in sync with
 // claudeCodeOtelEnvKeys in the Go connector — a divergence between the

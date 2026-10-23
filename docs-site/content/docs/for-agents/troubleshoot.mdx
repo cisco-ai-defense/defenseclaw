@@ -1,0 +1,97 @@
+---
+title: Troubleshoot DefenseClaw
+description: A runbook for an AI agent to collect DefenseClaw health data, map failures to known fixes, apply only safe ones and report.
+keywords:
+  - DefenseClaw troubleshooting agent
+  - defenseclaw doctor json
+  - agent runbook
+---
+
+{/* sources: troubleshooting/index, troubleshooting/doctor, cli/defenseclaw/commands/cmd_doctor.py, cmd_status.py */}
+
+<Callout title="Hand this page to your agent">
+Paste this into your agent:
+
+```text
+Read https://cisco-ai-defense.github.io/defenseclaw/docs/for-agents/troubleshoot/llms.md and follow it. Collect first, ask me before any fix that changes something.
+```
+</Callout>
+
+You are an AI agent. Find out why DefenseClaw is not working, map each failure to a known fix, apply only the safe ones the user approves, and report.
+
+## Hard rules
+
+1. Observe first. Do not switch to action mode, change a fail mode, disable a connector, unblock a site or edit `config.yaml` by hand without the user's yes to that exact change.
+2. Never print a key, token, `.env`, `hooks/` or `device.key`. Redact them from anything you quote.
+3. Stop on a managed computer: a command that prints `This computer is managed` or `This device is managed` (exit `2` or `3`), or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`, means the administrator owns DefenseClaw. Tell the user to contact them.
+4. Do not open `audit.db` or attach it to a report.
+
+## Steps
+
+1. Collect health. Read-only.
+
+   ```bash
+   defenseclaw doctor --json
+   ```
+
+   Expected: JSON with `"outcome"`, `"exit_code"`, `"passed"`, `"failed"`, `"warned"`, `"skipped"` and a `checks` list. Each check has `check_id`, `status` (`pass`, `warn`, `fail`, `skip`), `label`, `detail` and `remediation`.
+   If the command is not found, DefenseClaw is not installed or `~/.local/bin` is not on `PATH`; see [Set up DefenseClaw](/docs/for-agents/set-up).
+
+2. Collect state. Read-only.
+
+   ```bash
+   defenseclaw status --json
+   defenseclaw-gateway status
+   ```
+
+   Expected: `sidecar.running` is `true`; each connector shows its `mode` and `fail_mode.effective`.
+   If `config_errors` is present, run `defenseclaw config validate` and quote the field it names.
+
+3. Read the last gateway log lines, locally, and quote only the error lines.
+
+   ```bash
+   tail -n 40 ~/.defenseclaw/gateway.log
+   ```
+
+   Expected: start lines and no repeated errors.
+   If it differs: redact secrets before quoting. Never paste the whole file.
+
+4. Map each `fail` and `warn` check to an entry on [Troubleshooting](/docs/troubleshooting) by its label or message. Common ones:
+
+   | Check says | Safe fix (ask first) | Needs the user's decision |
+   | --- | --- | --- |
+   | gateway not running | `defenseclaw-gateway start` | None |
+   | stale generated script, hooks not found | `defenseclaw setup <connector> --yes` and restart the agent | None |
+   | no gateway token configured | `defenseclaw doctor --fix --dry-run`, then `--fix --yes` | Rotating tokens |
+   | `config.yaml` invalid | none: show the field it names | The edit itself |
+   | nothing is blocked | `defenseclaw guardrail status` | Switching to action mode |
+   | tools blocked while gateway down | start the gateway | Changing the fail mode |
+
+5. Preview repairs. Never skip this.
+
+   ```bash
+   defenseclaw doctor --fix --dry-run
+   ```
+
+   Expected: a list of the repairs that would run, with their risk. Nothing changes.
+   If a repair is `disruptive` (it restarts the gateway), say so before asking.
+
+6. Apply only what the user approved, one repair at a time, then re-check.
+
+   ```bash
+   defenseclaw doctor --fix --yes --fix-id <REPAIR_ID>
+   defenseclaw doctor --json
+   ```
+
+   Expected: the repair is `applied` and the check now has `"status": "pass"`.
+   If it differs: stop, do not try another repair, and report both outputs.
+
+## Report
+
+Reply with:
+
+- Symptom the user gave, and the OS.
+- Failing checks: label, detail and the Troubleshooting entry you matched.
+- Fixes applied (command, result) and fixes you proposed but did not apply.
+- Decisions that belong to the user.
+- Whether `doctor --json` now exits `0`.

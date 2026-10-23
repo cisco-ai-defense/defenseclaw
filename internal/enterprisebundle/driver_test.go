@@ -7,6 +7,7 @@
 package enterprisebundle_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/base64"
@@ -17,6 +18,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -53,13 +56,114 @@ func driverFor(t *testing.T, f *fixture) *enterprisebundle.Driver {
 	store := enterprisebundle.NewStore(filepath.Join(root, "etc", enterprisebundle.BundlesDirName), filepath.Join(root, "lifecycle"))
 	store.Now = func() time.Time { return verifyAt }
 	return &enterprisebundle.Driver{
-		Store: store, AnchorsPath: anchorsPath, AnchorTrust: func(string) error { return nil },
+		Store: store, ConfigPath: filepath.Join(root, "etc", "config.yaml"), AnchorsPath: anchorsPath, AnchorTrust: func(string) error { return nil },
 		Platform: runtime.GOOS, ProductVersion: "1.0.2", Now: func() time.Time { return verifyAt }, Digester: digester,
 	}
 }
 
 func enforcing(digest string) enterprisebundle.GatewayPolicy {
 	return enterprisebundle.GatewayPolicy{EffectiveDigest: digest, Digest: digest, Generation: 4, Applied: true}
+}
+
+// installPreparedBundle models the lifecycle commit, including its durable
+// signed-bundle attribution, before the gateway adopts that generation.
+func installPreparedBundle(t *testing.T, d *enterprisebundle.Driver, p *enterprisebundle.Prepared) enterprisebundle.GatewayPolicy {
+	t.Helper()
+	opt, ok := enterprisebundle.GenerationOptions(p.Receipt)
+	if !ok {
+		t.Fatal("bundle receipt has no principal")
+	}
+	result, err := configwrite.Locked(t.Context(), d.ConfigPath, opt, func() (bool, error) {
+		return true, os.WriteFile(d.ConfigPath, p.Config, 0o600)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := enforcing(p.Receipt.ExpectedDigest)
+	policy.Generation = result.Generation
+	policy.BundleID, policy.BundleVersion = p.Receipt.BundleID, p.Receipt.Version
+	return policy
+}
+
+func TestDriverInterruptedIdenticalConfigKeepsConfirmedBundle(t *testing.T) {
+	settings := strings.Replace(bundleConfig(t), "  signature_packs:\n    - discovery/signature-packs/team.json\n  confidence_policy_path: discovery/confidence.yaml\n", "", 1)
+	f := newFixture(t, settings, nil)
+	d := driverFor(t, f)
+	current, err := d.Prepare(t.Context(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := installPreparedBundle(t, d, current)
+	if _, err := d.Finish(current, current.ConfigSHA256, nil, policy, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.in.Version++
+	f.in.BundleID = "b-01JA0000000000000000000042"
+	_, raw, err := enterprisebundle.Compose(t.Context(), f.in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The run that staged B started from A's installed config.
+	d.EnforcedConfig = current.Config
+	staged, err := d.Prepare(t.Context(), f.signed(t, raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(current.Config, staged.Config) {
+		t.Fatal("regression requires identical rendered configs")
+	}
+	report, rollback, err := d.SettleRun(current.Config, &policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rollback) != 0 || len(report.Interrupted) != 1 || report.Interrupted[0] != staged.Receipt.ReceiptID {
+		t.Fatalf("an identical config the confirmed bundle committed was named for a rollback: report %+v, rollback %v", report, rollback)
+	}
+	state, err := d.Store.LoadState()
+	if err != nil || state.Current == nil || state.Current.BundleID != current.Receipt.BundleID || state.Floor != current.Receipt.Version {
+		t.Fatalf("an interrupted delivery replaced the applied bundle: %+v, %v", state, err)
+	}
+	receipts, err := d.Store.Receipts()
+	if err != nil || len(receipts) == 0 || receipts[0].State != enterprisebundle.StateFailed || receipts[0].ConfigGeneration != 0 {
+		t.Fatalf("unapplied receipt borrowed the installed generation: %+v, %v", receipts, err)
+	}
+	// A retry can recover after a real lifecycle commit even though its
+	// bytes are identical: the generation and the gateway now identify B.
+	retry, err := d.Prepare(t.Context(), f.signed(t, raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy = installPreparedBundle(t, d, retry)
+	if _, _, err := d.SettleRun(retry.Config, &policy); err != nil {
+		t.Fatal(err)
+	}
+	state, err = d.Store.LoadState()
+	if err != nil || state.Current == nil || state.Current.BundleID != retry.Receipt.BundleID || state.Floor != retry.Receipt.Version {
+		t.Fatalf("proven retry was not confirmed: %+v, %v", state, err)
+	}
+}
+
+func TestDriverStageDiskFullKeepsAClassifiedReceipt(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	d.Store.EnsureStageDirectory = func(_, path string) error {
+		return &os.PathError{Op: "mkdir", Path: path, Err: syscall.ENOSPC}
+	}
+	p, err := d.Prepare(t.Context(), f.bundle, nil)
+	if enterprisebundle.CodeOf(err) != enterprisebundle.Code("disk_full") || p == nil || p.Receipt == nil {
+		t.Fatalf("stage error = %+v, %v; want disk_full receipt", p, err)
+	}
+	receipts, err := d.Store.Receipts()
+	if err != nil || len(receipts) != 1 || receipts[0].State != enterprisebundle.StateFailed ||
+		receipts[0].ErrorCode != enterprisebundle.Code("disk_full") {
+		t.Fatalf("persisted receipts = %+v, %v; want failed disk_full", receipts, err)
+	}
+	if runtime.GOOS == "windows" {
+		// Native Windows writes report ERROR_DISK_FULL (112), not ENOSPC.
+		if got := enterprisebundle.CodeOf(enterprisebundle.StageError(syscall.Errno(112))); got != enterprisebundle.Code("disk_full") {
+			t.Fatalf("Windows disk-full code = %s", got)
+		}
+	}
 }
 
 func TestDriverConfirmedRollbackRecordsSignedProvenance(t *testing.T) {
@@ -75,7 +179,7 @@ func TestDriverConfirmedRollbackRecordsSignedProvenance(t *testing.T) {
 	if p.Receipt.RollbackOf != earlier {
 		t.Fatalf("verified receipt rollback_of = %q", p.Receipt.RollbackOf)
 	}
-	if _, err := d.Finish(p, p.ConfigSHA256, nil, enforcing(p.Receipt.ExpectedDigest), false, nil); err != nil {
+	if _, err := d.Finish(p, p.ConfigSHA256, nil, installPreparedBundle(t, d, p), false, nil); err != nil {
 		t.Fatal(err)
 	}
 	last, _, err := d.Store.Latest()
@@ -183,7 +287,8 @@ func TestDriverConfirmationChecksSignedDigestOnAllPlatforms(t *testing.T) {
 				if tc.mismatch {
 					digest = gatewayDigest
 				}
-				policy := enforcing(digest)
+				policy := installPreparedBundle(t, d, p)
+				policy.Digest, policy.EffectiveDigest = digest, digest
 				if tc.gatewayMismatch {
 					policy.Digest = gatewayDigest
 					policy.Applied = false
@@ -327,7 +432,7 @@ func TestDriverConfirmsOnlyAnInstalledAndEnforcedBundle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("third prepare: %v", err)
 	}
-	st, err := d.Finish(good, good.ConfigSHA256, nil, enforcing(good.Receipt.ExpectedDigest), true, rollback)
+	st, err := d.Finish(good, good.ConfigSHA256, nil, installPreparedBundle(t, d, good), true, rollback)
 	if err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
@@ -344,6 +449,21 @@ func TestDriverConfirmsOnlyAnInstalledAndEnforcedBundle(t *testing.T) {
 	}
 	if !again.AlreadyApplied || again.Receipt != nil || again.ConfigSHA256 != good.ConfigSHA256 {
 		t.Fatalf("repeat delivery = %+v", again)
+	}
+	// Setup CONFIG= restoring these same signed bytes must retain the
+	// confirmed principal even after the delivery receipts are pruned.
+	if err := os.Remove(filepath.Join(d.Store.LifecycleDir, enterprisebundle.ReceiptsDirName, good.Receipt.ReceiptID+".json")); err != nil {
+		t.Fatal(err)
+	}
+	d.RefuseRestart = func(_, _ []byte) string { return "the confirmed config restores a restart setting" }
+	deferred, deferErr := d.Prepare(ctx, f.bundle, nil)
+	if enterprisebundle.CodeOf(deferErr) != enterprisebundle.CodeRestartDeferred || deferred.Receipt.State != enterprisebundle.StateFailed {
+		t.Fatalf("repeated restart delivery was not deferred: %+v, %v", deferred, deferErr)
+	}
+	d.RefuseRestart = nil
+	opt, recorded, generationErr := d.ConfigGenerationOptions(good.Config)
+	if generationErr != nil || !recorded || opt.Actor != good.Receipt.Principal || opt.Bundle.ID != good.Receipt.BundleID {
+		t.Fatalf("confirmed config attribution = %+v, %v, %v", opt, recorded, generationErr)
 	}
 
 	tampered := *f.bundle
@@ -366,29 +486,81 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 		rollback bool
 		// staged: the transaction committed the config but the run stopped
 		// before Finish moved the receipt to applied.
-		staged bool
+		staged        bool
+		markedCurrent bool
+		// uncommitted: the installed bytes equal the staged bundle's config,
+		// which names no version directory of its own, but no lifecycle
+		// commit of that bundle recorded them: "config" is a non-bundle
+		// lifecycle generation (a CONFIG install), "none" no generation
+		// record, "other" a generation of another bundle.
+		uncommitted string
 	}{
 		{name: "enforced", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest, Applied: true}, holds: true, confirm: true},
 		{name: "gateway enforces another policy", policy: &enterprisebundle.GatewayPolicy{Digest: "sha256:" + fmt.Sprintf("%064d", 2), Applied: true}, holds: true, rollback: true},
 		{name: "config rolled back", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest, Applied: true}},
 		{name: "committed, run stopped before finish", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest, Applied: true}, holds: true, staged: true, confirm: true},
 		{name: "committed, gateway does not enforce it", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest}, holds: true, staged: true, rollback: true},
+		{name: "state marker without this receipt's proof, no live confirmation", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest}, holds: true, markedCurrent: true, rollback: true},
+		{name: "state marker without this receipt's proof, live confirmation", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest, Applied: true}, holds: true, markedCurrent: true, confirm: true},
+		{name: "identical config bytes, config install generation", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest, Applied: true}, holds: true, staged: true, uncommitted: "config"},
+		{name: "identical config bytes, gateway does not enforce", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest}, holds: true, staged: true, uncommitted: "config"},
+		{name: "identical config bytes, no generation record", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest, Applied: true}, holds: true, staged: true, uncommitted: "none"},
+		{name: "identical config bytes, another bundle's generation", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest, Applied: true}, holds: true, staged: true, uncommitted: "other"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newFixture(t, bundleConfig(t), nil)
+			settings := bundleConfig(t)
+			if tc.uncommitted != "" {
+				settings = strings.Replace(settings, "  signature_packs:\n    - discovery/signature-packs/team.json\n  confidence_policy_path: discovery/confidence.yaml\n", "", 1)
+			}
+			f := newFixture(t, settings, nil)
 			d := driverFor(t, f)
+			if tc.uncommitted != "" {
+				// The identical bytes were installed before the run: it
+				// started from them (the receipt's base record).
+				base, err := enterprisebundle.RenderConfig(f.bundle, d.Store.VersionDir("unused"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				d.EnforcedConfig = base
+			}
 			p, err := d.Prepare(ctx, f.bundle, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
+			if tc.uncommitted != "" && len(enterprisebundle.VersionDirsNamed(p.Config, d.Store.BundlesDir)) != 0 {
+				t.Fatal("identical-bytes case requires a config that names no version directory")
+			}
+			var committed enterprisebundle.GatewayPolicy
+			switch tc.uncommitted {
+			case "":
+				committed = installPreparedBundle(t, d, p)
+			case "none":
+				if err := os.WriteFile(d.ConfigPath, p.Config, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Lifecycle: true}
+				if tc.uncommitted == "other" {
+					opt = configwrite.Options{Actor: p.Receipt.Principal, Lifecycle: true,
+						Bundle: configwrite.BundleRef{ID: "b-01JA0000000000000000000099", Version: p.Receipt.Version + 1, SignerKeyID: p.Receipt.SignerKeyID}}
+				}
+				result, err := configwrite.Locked(ctx, d.ConfigPath, opt, func() (bool, error) {
+					return true, os.WriteFile(d.ConfigPath, p.Config, 0o600)
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				committed.Generation = result.Generation
+			}
 			policy := *tc.policy
+			policy.Generation, policy.BundleID, policy.BundleVersion = committed.Generation, committed.BundleID, committed.BundleVersion
 			policy.EffectiveDigest = p.Receipt.ExpectedDigest
 			if policy.Digest == gatewayDigest {
 				policy.Digest = p.Receipt.ExpectedDigest
 			}
 			if !tc.staged {
 				if err := d.Store.Advance(p.Receipt, enterprisebundle.StateApplied, func(rc *enterprisebundle.Receipt) {
-					rc.EffectivePolicyDigest, rc.ConfigSHA256 = p.Receipt.ExpectedDigest, p.ConfigSHA256
+					rc.EffectivePolicyDigest, rc.ConfigSHA256, rc.ConfigGeneration = p.Receipt.ExpectedDigest, p.ConfigSHA256, committed.Generation
 				}); err != nil {
 					t.Fatal(err)
 				}
@@ -397,19 +569,45 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 			if tc.holds {
 				installed = p.Config
 			}
+			if tc.markedCurrent {
+				rc := p.Receipt
+				state := enterprisebundle.State{SchemaVersion: enterprisebundle.StateSchemaVersion, Floor: rc.Version,
+					Current: &enterprisebundle.Ref{BundleID: rc.BundleID, Version: rc.Version, ManifestSHA256: rc.ManifestSHA256, Dir: rc.Dir}}
+				raw, err := json.Marshal(state)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(d.Store.StatePath(), raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			report, rollback, err := d.SettleRun(installed, &policy)
 			if err != nil {
 				t.Fatal(err)
 			}
 			st, _ := d.Store.LoadState()
-			if confirmed := st.Current != nil && st.Current.BundleID == p.Receipt.BundleID; confirmed != tc.confirm {
+			receipts, err := d.Store.Receipts()
+			if err != nil || len(receipts) != 1 {
+				t.Fatalf("receipts = %+v, %v", receipts, err)
+			}
+			if confirmed := receipts[0].State == enterprisebundle.StateConfirmed; confirmed != tc.confirm {
 				t.Fatalf("confirmed = %v (report %+v)", confirmed, report)
+			}
+			if tc.confirm && (st.Current == nil || st.Current.BundleID != p.Receipt.BundleID) {
+				t.Fatalf("confirmed receipt has no matching current bundle: %+v", st)
 			}
 			if (len(rollback) == 1) != tc.rollback {
 				t.Fatalf("rollback = %v", rollback)
 			}
-			if tc.staged && len(report.Interrupted) != 0 {
+			if tc.staged && tc.uncommitted == "" && len(report.Interrupted) != 0 {
 				t.Fatalf("a committed bundle config was reported as never applied: %+v", report)
+			}
+			// Matching bytes without the bundle's commit: the run that staged
+			// it never installed anything, so the installed config stays the
+			// last good one (no rollback target to discard).
+			if tc.uncommitted != "" && (len(report.Interrupted) != 1 || report.Interrupted[0] != p.Receipt.ReceiptID ||
+				receipts[0].State != enterprisebundle.StateFailed || string(receipts[0].ErrorCode) != string(enterprisebundle.CodeInterrupted)) {
+				t.Fatalf("an uncommitted identical-config receipt was not settled as interrupted: report %+v, receipt %+v", report, receipts[0])
 			}
 		})
 	}

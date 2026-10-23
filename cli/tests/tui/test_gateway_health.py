@@ -18,7 +18,6 @@ from defenseclaw.tui.app import (
     DefenseClawTUI,
     GatewayHealthResult,
     _fetch_gateway_health,
-    _project_omnigent_effective_readiness,
 )
 from defenseclaw.tui.models import HintState
 from defenseclaw.tui.panels.overview import (
@@ -115,117 +114,10 @@ def test_authenticated_sidecar_uses_api_bind_port_and_token_in_hook_only_topolog
     assert captured["port"] != 4000
 
 
-def test_tui_projects_stale_omnigent_for_singular_and_plural_health(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    detail = "server record is stale; effective policy config is unverified"
-    calls: list[object] = []
-
-    def readiness(config: object) -> tuple[str, str]:
-        calls.append(config)
-        return "warn", detail
-
-    monkeypatch.setattr(
-        "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-        readiness,
-    )
-    config = _config()
-    opencode = ConnectorHealth(
-        name="opencode",
-        state="running",
-        source="manual",
-        load_heartbeat_at="2026-08-04T23:00:00Z",
-    )
-    snapshot = HealthSnapshot(
-        connector=ConnectorHealth(name="omnigent", state="running", source="automatic"),
-        connectors=(
-            ConnectorHealth(name="omnigent", state="running", source="automatic"),
-            ConnectorHealth(name="codex", state="running"),
-            opencode,
-        ),
-    )
-
-    projected = _project_omnigent_effective_readiness(config, snapshot)
-
-    assert projected.connector is not None
-    assert projected.connector.state == "degraded"
-    assert projected.connector.source == "automatic"
-    assert [(row.name, row.state) for row in projected.connectors] == [
-        ("omnigent", "degraded"),
-        ("codex", "running"),
-        ("opencode", "running"),
-    ]
-    assert projected.connectors[2] is opencode
-    assert projected.connectors[2].source == "manual"
-    assert projected.connectors[2].load_heartbeat_at == "2026-08-04T23:00:00Z"
-    assert calls == [config]
-
-    single = OverviewPanelModel(OverviewConfig(claw_mode="omnigent"))
-    single.set_health(projected)
-    assert single.subsystem_state("agent") == "degraded"
-
-    multi = OverviewPanelModel(
-        OverviewConfig(
-            claw_mode="omnigent",
-            connector_modes=(("omnigent", "action"), ("codex", "observe")),
-        )
-    )
-    multi.set_health(HealthSnapshot(connectors=projected.connectors[:2]))
-    assert multi.subsystem_state("agent") == "degraded"
 
 
-def test_tui_preserves_verified_omnigent_runtime_state(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-        lambda _config: ("pass", "live effective config verified through --config"),
-    )
-    snapshot = HealthSnapshot(
-        connector=ConnectorHealth(name="omnigent", state="running"),
-        connectors=(ConnectorHealth(name="omnigent", state="running"),),
-    )
-
-    projected = _project_omnigent_effective_readiness(_config(), snapshot)
-
-    assert projected.connector is not None
-    assert projected.connector.state == "running"
-    assert projected.connectors[0].state == "running"
 
 
-def test_tui_readiness_error_degrades_omnigent_without_failing_gateway_probe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    health = _healthy_payload()
-    health["connector"] = {"name": "omnigent", "state": "running", "source": "manual"}
-    health["connectors"] = [{"name": "omnigent", "state": "running", "source": "manual"}]
-
-    class FakeClient:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
-
-        def status(self) -> dict[str, object]:
-            return {
-                "runtime": {"pid": 4242, "data_dir": _DATA_DIR},
-                "health": health,
-            }
-
-    def unavailable(_config: object) -> tuple[str, str]:
-        raise OSError("evidence unavailable")
-
-    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", FakeClient)
-    monkeypatch.setattr(
-        "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-        unavailable,
-    )
-
-    result = _fetch_gateway_health(_config())
-
-    assert result.state == "running"
-    assert result.snapshot is not None
-    assert result.snapshot.connector is not None
-    assert result.snapshot.connector.state == "degraded"
-    assert result.snapshot.connectors[0].state == "degraded"
 
 
 def test_authenticated_sidecar_rejects_foreign_runtime_data_dir(

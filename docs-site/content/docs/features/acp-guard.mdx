@@ -1,0 +1,74 @@
+---
+title: ACP guard
+description: "Put DefenseClaw between an ACP editor and its coding agent so every prompt, output, permission, file and terminal message is checked."
+keywords:
+  - Agent Client Protocol
+  - ACP guard
+  - Zed
+  - JetBrains
+  - Kiro
+---
+
+The ACP guard sits between an editor that speaks the Agent Client Protocol (ACP), such as Zed or JetBrains, and the coding agent it runs. The editor keeps its normal agent experience. Every message between the two passes through DefenseClaw policy first.
+
+<Flow
+  direction="TB"
+  caption="The editor starts defenseclaw-acp instead of the agent. The guard asks the local gateway for a verdict on each message before it forwards it. An agent entry that the editor launches directly does not pass through the guard."
+>
+  <Node id="editor" kind="operator">{`Editor\nZed or JetBrains`}</Node>
+  <Node id="guard" kind="connector" emphasis>{`ACP guard\ndefenseclaw-acp`}</Node>
+  <Node id="bypass" kind="generic">{`Direct agent entry\nnot guarded`}</Node>
+  <Node id="agent" kind="agent">{`ACP agent\nKiro, Cursor, …`}</Node>
+  <Node id="gateway" kind="gateway">{`Gateway on loopback\nchecks each message`}</Node>
+  <Node id="policy" kind="policy">{`Policy\nrules, scanners, judge`}</Node>
+  <Node id="audit" kind="datastore">{`Audit and telemetry\nlocal SQLite, OTLP`}</Node>
+  <Edge from="editor" to="guard" label="starts, stdio" variant="bidirectional" />
+  <Edge from="editor" to="bypass" label="if set up separately" variant="dashed" />
+  <Edge from="guard" to="agent" label="checked messages" variant="bidirectional" />
+  <Edge from="guard" to="gateway" label="asks, encrypted" />
+  <Edge from="gateway" to="policy" label="evaluates" />
+  <Edge from="gateway" to="audit" label="records" />
+</Flow>
+
+## How it works
+
+- `defenseclaw acp setup` replaces the editor's agent entry with a `DefenseClaw · <agent>` entry that starts `defenseclaw-acp`.
+- The guard checks prompts, agent output, permission requests, file and terminal calls, and vendor extensions.
+- It talks only to the gateway on a loopback address. Each request is encrypted and each verdict is authenticated, so another process on the port cannot read content or fake a verdict.
+- Setup starts in observe mode: it records and never blocks. Add `--activate` for action mode.
+- In action mode a blocked prompt ends that turn, and the editor shows the reason as an agent message.
+- Policy is set per editor and agent pair through [profiles](/docs/reference/apis/acp-guard#configuration), so one editor can enforce on one agent and observe another.
+
+## Supported agents
+
+`defenseclaw acp catalog` prints the list. Only agents with their own ACP mode are guarded. Other connectors are guarded through their [hooks](/docs/connectors).
+
+| Agent | Entry point | Status |
+| --- | --- | --- |
+| Kiro | `kiro-cli acp` | Tested with Zed |
+| Cursor | `agent acp` | Cataloged |
+| OpenCode | `opencode acp` | Cataloged |
+| Hermes | `hermes acp` | Cataloged |
+| GitHub Copilot CLI | `copilot --acp --stdio` | Cataloged |
+| Devin | `devin acp` | Cataloged |
+
+Zed is tested. JetBrains is cataloged. A cataloged entry point matches the vendor's documentation; it does not mean DefenseClaw tested that editor and agent together.
+
+## What it does not do
+
+- It does not stop an agent entry the editor launches without `defenseclaw-acp`. `defenseclaw acp detect` lists those entries.
+- It can only withhold what the agent sends. An agent that runs its own tools may already have run a step when its output is blocked. Keep the agent's connector hooks in action mode next to the guard to stop a step before it runs.
+- An organization-wide "only these agents" rule also needs IDE policy and operating-system application control.
+
+## Managed computers
+
+`defenseclaw acp setup` is for a per-user install. On an enterprise managed computer an administrator enrolls each user, editor and agent with `defenseclaw-gateway enterprise acp enroll`, and the user then runs the setup command it reports, `defenseclaw-gateway enterprise acp setup`. The administrator tools are `enroll`, `list`, `verify` and `revoke`; `list` shows each enrollment and whether its user has run setup. Secure Client deployments are not covered.
+
+## Next
+
+All guides: [How-to > Agents and models](/docs/how-to/agents). Reference: [Contracts and APIs](/docs/reference/apis).
+
+<Cards>
+  <Card title="Guard an ACP editor" href="/docs/how-to/agents/guard-an-acp-editor" description="Put Kiro behind the guard in Zed, find unguarded agents, guard several agents." />
+  <Card title="ACP guard reference" href="/docs/reference/apis/acp-guard" description="What is checked, failure behavior, configuration, telemetry and routes." />
+</Cards>

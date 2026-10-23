@@ -83,7 +83,7 @@ def _no_password_compose_model() -> dict[str, object]:
             "grafana": {
                 "environment": {
                     "GF_AUTH_ANONYMOUS_ENABLED": "true",
-                    "GF_AUTH_ANONYMOUS_ORG_ROLE": "Admin",
+                    "GF_AUTH_ANONYMOUS_ORG_ROLE": "Viewer",
                     "GF_AUTH_DISABLE_LOGIN_FORM": "true",
                 },
                 "ports": [
@@ -415,7 +415,7 @@ def test_low_level_entrypoint_propagates_no_password_as_machine_safe_output(
     captured = capsys.readouterr()
     assert code == 0
     assert json.loads(captured.out) == CONTRACT
-    assert "anonymous Admin" in captured.err
+    assert "anonymous read-only Viewer" in captured.err and "Admin" not in captured.err
     controller.up.assert_called_once_with(
         timeout=180,
         wait=False,
@@ -690,6 +690,26 @@ def test_no_password_mode_rejects_password_overlay_or_non_loopback_publish(
             wait=False,
             grafana_access_mode=GRAFANA_ACCESS_NO_PASSWORD,
         )
+
+
+@pytest.mark.parametrize("role", ["Admin", "Editor", "admin", ""])
+def test_no_password_mode_refuses_any_anonymous_role_but_viewer(controller, role: str) -> None:
+    # fix/r104-windows: anonymous Grafana access is read-only. A stack file
+    # from an earlier release or a local override that would make anonymous
+    # visitors Admin (or Editor, or leave the role to Grafana's default) is
+    # refused before anything starts, never kept.
+    subject, runner = controller
+    subject._verify_grafana_no_password = MagicMock()
+    model = _no_password_compose_model()
+    environment = model["services"]["grafana"]["environment"]
+    if role:
+        environment["GF_AUTH_ANONYMOUS_ORG_ROLE"] = role
+    else:
+        del environment["GF_AUTH_ANONYMOUS_ORG_ROLE"]
+    runner.add(tuple(subject.compose_argv("config", "--format", "json")), stdout=json.dumps(model))
+    with pytest.raises(LocalStackError, match="GF_AUTH_ANONYMOUS_ORG_ROLE must be 'Viewer'"):
+        subject.up(wait=False, grafana_access_mode=GRAFANA_ACCESS_NO_PASSWORD)
+    assert not any(command[-2:] == ("up", "--detach") for command, *_rest in runner.calls)
 
 
 def test_no_wait_runtime_auth_failure_stops_grafana(controller) -> None:

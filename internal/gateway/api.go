@@ -41,21 +41,22 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -89,9 +90,12 @@ type APIServer struct {
 	// caller identity: each identity has its own session store, so callers
 	// never wait on each other's exchanges.
 	foreignHookSessionLocks keyedMutex
-	// foreignHookRemovals caches the hook guardian foreign-hook removal
-	// ledger the session exchanges check.
-	foreignHookRemovals foreignHookRemovalCache
+	// foreignHookRemovals reads the hook guardian foreign-hook removal
+	// ledger on every session exchange.
+	foreignHookRemovals foreignHookRemovalSource
+	// foreignHookOwed are the revocations of protected session records the
+	// operating system refused, tried again until they take.
+	foreignHookOwed foreignHookRevocationsOwed
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
@@ -295,10 +299,10 @@ type APIServer struct {
 	hookSpawnLineageMu                sync.Mutex
 	hookSpawnIntents                  map[string]hookSpawnIntent
 	hookSpawnIntentOrder              []string
+	hookSpawnTakenCalls               map[string]time.Time
 	hookChildThreads                  map[string]hookChildThread
 	hookChildThreadOrder              []string
 	copilotSubagents                  []copilotPendingSubagent
-	codexPendingThreads               []codexPendingThread
 	hookSessionStates                 map[string]hookSessionState
 	hookSessionStateOrder             []string
 	// hookLifecycleHistoryRead holds the session keys whose signed lifecycle
@@ -630,7 +634,10 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
 	presented = strings.TrimSpace(presented)
-	if name == "" || presented == "" {
+	// until 1.1: the hook token an upgraded host keeps for a connector 1.0.4
+	// removed (OpenHands) authenticates nothing; old hooks reach the route
+	// that blocks them whatever the token.
+	if name == "" || presented == "" || connector.IsRemovedConnector(name) {
 		return false
 	}
 
@@ -1358,10 +1365,39 @@ func (a *APIServer) Run(ctx context.Context) error {
 
 	// The Windows standalone hook reports the calls it refuses for an
 	// unenrolled account here (GAP-1242); a no-op on every other profile.
-	// It stops with this run of the API server.
+	// It stops with this run of the API server, which waits, bounded, for
+	// its last rows (GAP-1253).
 	refusalCtx, stopRefusals := context.WithCancel(ctx)
-	defer stopRefusals()
-	go a.serveUnenrolledRefusals(refusalCtx)
+	refusalsDone := make(chan struct{})
+	defer func() {
+		stopRefusals()
+		select {
+		case <-refusalsDone:
+		case <-time.After(unenrolledRefusalStopTimeout):
+		}
+	}()
+	go func() {
+		defer close(refusalsDone)
+		a.serveUnenrolledRefusals(refusalCtx)
+	}()
+
+	// A revocation of an account's protected session records that the
+	// operating system refused is tried again until it takes, and once more
+	// as this run stops (foreign_hook_revocation_owed.go); a no-op where the
+	// gateway publishes no records.
+	revocationsCtx, stopRevocations := context.WithCancel(ctx)
+	revocationsDone := make(chan struct{})
+	defer func() {
+		stopRevocations()
+		select {
+		case <-revocationsDone:
+		case <-time.After(foreignHookRevocationStopTimeout):
+		}
+	}()
+	go func() {
+		defer close(revocationsDone)
+		a.retryOwedForeignHookRevocations(revocationsCtx, foreignHookRevocationRetryEvery)
+	}()
 
 	errCh := make(chan error, 2)
 	if hookSrv != nil {
@@ -1615,7 +1651,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			// nobody, and the whole team falls to the default profile:
 			// status and verify report it (GAP-0704). The last check is
 			// served; a stale one is refreshed in the background.
-			if warnings := liveGuardrailProfiles.Load().healthProfileWarnings(); len(warnings) > 0 {
+			if warnings := standaloneProfileWarnings(liveGuardrailProfiles.Load(), cfg); len(warnings) > 0 {
 				setHealthProfileWarnings(body, "profile_warnings", "profile_warning_count", warnings, rootPeer)
 			}
 			// Non-secret fingerprints of the per-user credential keys that
@@ -1800,15 +1836,16 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"connector_modes": a.connectorModesSummary(r.Context()),
 	}
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil && !cfg.SecureClientIntegration() {
-		if set := a.guardrailProfileSet(); set != nil {
+		set := a.guardrailProfileSet()
+		if set != nil {
 			status["profile_assignment_warnings"] = set.assignmentWarnings(true)
-			// What /health lists only to root on the hook socket: Windows
-			// status and verify read it here with the gateway credential
-			// (GAP-1268).
-			if cfg.StandaloneEnterprise() {
-				if warnings := set.healthProfileWarnings(); len(warnings) > 0 {
-					status["profile_warnings"] = warnings
-				}
+		}
+		// What /health lists only to root on the hook socket: Windows
+		// status and verify read it here with the gateway credential
+		// (GAP-1268).
+		if cfg.StandaloneEnterprise() {
+			if warnings := standaloneProfileWarnings(set, cfg); len(warnings) > 0 {
+				status["profile_warnings"] = warnings
 			}
 		}
 	}
@@ -1843,6 +1880,12 @@ func (a *APIServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	}
 	if !connector.IsLoopback(r) {
 		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "shutdown is restricted to loopback clients"})
+		return
+	}
+	// A managed standalone gateway is a system service: its service manager
+	// starts and stops it, and the gateway token does not.
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil && cfg.StandaloneEnterprise() {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": managedShutdownRefusal})
 		return
 	}
 	if a.shutdownRequester == nil {
@@ -1883,6 +1926,33 @@ func (a *APIServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// managedShutdownRefusal answers a shutdown request on a managed standalone
+// computer.
+const managedShutdownRefusal = "this gateway is managed by the computer's administrator and runs as a system service; it is not stopped over the API"
+
+// managedBundlePolicyReloadRefusal answers /policy/reload on a managed
+// standalone computer that takes its policy from signed bundles.
+const managedBundlePolicyReloadRefusal = "this computer takes its policy from signed policy bundles; deliver a new signed bundle instead of reloading the policy over the API"
+
+// bundleAnchorsPath is where a standalone managed computer keeps the bundle
+// trust anchors (tests replace it).
+var bundleAnchorsPath = func() (string, error) { return enterprisebundle.AnchorsPath(runtime.GOOS) }
+
+// signedBundleMode reports whether a managed standalone computer takes its
+// policy from signed bundles: its trust anchors are installed. An anchors
+// path the gateway cannot check counts as installed.
+func signedBundleMode(cfg *config.Config) bool {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return false
+	}
+	path, err := bundleAnchorsPath()
+	if err != nil {
+		return true
+	}
+	_, err = os.Lstat(path)
+	return err == nil || !errors.Is(err, fs.ErrNotExist)
+}
+
 func sameRuntimeDataDir(left, right string) bool {
 	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
 		return false
@@ -1905,7 +1975,7 @@ func sameRuntimeDataDir(left, right string) bool {
 //	  "connector":  "codex" | "claudecode" | "openclaw" | "zeptoclaw",
 //	  "mode":       "guardrail" | "observability", // legacy data-path field
 //	  "policy_mode": "observe" | "action",
-//	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks" | "omnigent_policy_api",
+//	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks",
 //	  "telemetry":  ["hooks", "otel", "notify"],   // active channels
 //	  "proxy_intercept": true | false,
 //	}
@@ -1981,8 +2051,8 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 	// connector, showed up in `defenseclaw-gateway status` as "Data path:
 	// DefenseClaw proxy" in the same output whose Guardrail subsystem said
 	// "proxy_port: closed" and "the local guardrail proxy is not in the LLM
-	// data path". The list below now contributes only the telemetry channels
-	// and OmniGent's policy-API surface, which are genuinely per-connector.
+	// data path". The list below now contributes only the telemetry
+	// channels, which are genuinely per-connector.
 	if !connectorProxyBindsByName(name) {
 		mode = "observability"
 		intercept = false
@@ -1998,14 +2068,9 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "devin", "copilot", "openhands",
+	case "hermes", "cursor", "devin", "copilot",
 		"antigravity", "opencode", "amp", "kiro":
 		telemetry = []string{"hooks"}
-	case "omnigent":
-		// OmniGent enforces through its own policy API rather than the
-		// shared lifecycle-hook bridge, so it keeps a distinct surface.
-		surface = "omnigent_policy_api"
-		telemetry = []string{"policy-api"}
 	default:
 		// openclaw / zeptoclaw / unknown: enforcement is the only
 		// supported mode today. Hooks are wired by the connector;
@@ -2903,7 +2968,7 @@ func scanAPIResponseEnvelope(result *scanner.ScanResult) map[string]interface{} 
 		bySev[string(f.Severity)]++
 	}
 	return map[string]interface{}{
-		"scan_id":                    uuid.New().String(),
+		"scan_id":                    observability.NewTimeOrderedID(),
 		"verdict":                    string(result.MaxSeverity()),
 		"provenance":                 version.Current(),
 		"findings_count_by_severity": bySev,
@@ -3790,6 +3855,11 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
+// Unwrap lets http.ResponseController reach the connection through the
+// metrics writer (read deadlines, full duplex, and the bounded write of
+// handleForeignHookSession).
+func (sw *statusWriter) Unwrap() http.ResponseWriter { return sw.ResponseWriter }
+
 type authenticatedInspectConnectorKey struct{}
 
 func withAuthenticatedInspectConnector(ctx context.Context, connectorName string) context.Context {
@@ -3831,6 +3901,12 @@ func requestGatewayToken(r *http.Request) string {
 // and never reaches next.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// until 1.1: a removed connector's hook route blocks every call
+		// before any credential check (retired_connector_hook.go): with a
+		// valid token, a revoked one, none or a sandbox credential.
+		if serveRetiredConnectorHook(w, r) {
+			return
+		}
 		if r.URL.Path == "/health" && r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
 			return
@@ -4007,20 +4083,10 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
-		if isACPAPIPath(r.URL.Path) && connector.IsLoopback(r) {
-			if authenticated, ok := a.authenticateACPToken(r, token); ok {
-				r = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
-				next.ServeHTTP(w, r)
-				return
-			}
-			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_scoped_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") && connector.IsLoopback(r) && token != "" {
 			hookScope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
 			registered := false
-			if a.connectorRegistry != nil {
+			if a.connectorRegistry != nil && !connector.IsRemovedConnector(hookScope) {
 				_, registered = a.connectorRegistry.Get(hookScope)
 			}
 			if registered {
@@ -4268,7 +4334,11 @@ func maxBodyMiddleware(next http.Handler, maxBytes int64) http.Handler {
 func bodyLimitMiddleware(next http.Handler, maxBytes func(*http.Request) int64) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
-			r.Body = http.MaxBytesReader(w, r.Body, maxBytes(r))
+			limit := maxBytes(r)
+			if r.Header.Get(hookexec.HookDeliveryReceiptHeader) == "1" {
+				limit += int64(len(hookexec.HookDeliveryReceiptBlock))
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -4478,6 +4548,16 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	recordFailure := func(reason string) {
 		_ = a.recordAPIPolicyReloadMetricV8(r.Context(), "failed")
 		_ = a.emitAPIPolicyReloadRejectedV8(r.Context(), reason)
+	}
+	// With signed bundles, a policy becomes active only through a verified
+	// bundle apply, which the lifecycle confirms against the running gateway.
+	if signedBundleMode(a.runtimeConfigSnapshot()) {
+		recordFailure(managedBundlePolicyReloadRefusal)
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error":  managedBundlePolicyReloadRefusal,
+			"status": "refused",
+		})
+		return
 	}
 
 	// Secure Client keeps the reload check of main (issue #1092): it fails

@@ -25,7 +25,6 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func stringSliceContains(values []string, needle string) bool {
@@ -904,40 +903,6 @@ func TestConfig_InstalledSkillCandidates(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestConfig_WorkspaceScopedOpenHandsPathsUsePinnedWorkspace(t *testing.T) {
-	root := t.TempDir()
-	home := filepath.Join(root, "home")
-	testenv.SetHome(t, home)
-	workspace := filepath.Join(root, "repo")
-	cfg := &Config{
-		Claw: ClawConfig{
-			Mode:         ClawMode("openhands"),
-			WorkspaceDir: workspace,
-		},
-	}
-
-	if got, want := cfg.ConnectorWorkspaceDir(), workspace; got != want {
-		t.Fatalf("ConnectorWorkspaceDir() = %q, want %q", got, want)
-	}
-	if got, want := cfg.ConnectorHomeDir("openhands"), filepath.Join(workspace, ".openhands"); got != want {
-		t.Fatalf("ConnectorHomeDir(openhands) = %q, want %q", got, want)
-	}
-
-	dirs := cfg.SkillDirsForConnector("openhands")
-	if !stringSliceContains(dirs, filepath.Join(workspace, ".agents", "skills")) {
-		t.Fatalf("OpenHands skill dirs = %v, want pinned workspace .agents/skills", dirs)
-	}
-	if !stringSliceContains(dirs, filepath.Join(workspace, ".openhands", "skills")) {
-		t.Fatalf("OpenHands skill dirs = %v, want pinned workspace .openhands/skills", dirs)
-	}
-	if !stringSliceContains(dirs, filepath.Join(workspace, ".openhands", "microagents")) {
-		t.Fatalf("OpenHands skill dirs = %v, want pinned workspace .openhands/microagents", dirs)
-	}
-	if !stringSliceContains(dirs, filepath.Join(home, ".openhands", "cache", "skills", "public-skills", "skills")) {
-		t.Fatalf("OpenHands skill dirs = %v, want user public skills cache", dirs)
 	}
 }
 

@@ -39,15 +39,12 @@ _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
+# A per-user render is never a managed or Secure Client hook: those markers
+# come only from a managed render (the branch above), never from the
+# agent's environment, where they would change how the per-user hook answers
+# a missing token.
+unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
-  # A registered closed hook cannot treat missing local state as retirement.
-  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
-    echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
-    exit 2
-  fi
-  exit 0
-fi
 {{end}}
 
 # Plan B4 / S0.4: shell-side hook hardening.
@@ -70,7 +67,19 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 RUNTIME_CONNECTOR="{{.ConnectorName}}"
 FAIL_MODE="closed"
 readonly RUNTIME_CONNECTOR FAIL_MODE{{else}}RUNTIME_CONNECTOR="$(defenseclaw_shared_runtime_connector "$HOOK_DIR")"
-FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"{{end}}
+FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"{{end}}{{if not .Managed}}
+# A missing or disabled DEFENSECLAW_HOME is not retirement for a hook
+# installed closed. This one script serves every connector, so its installed
+# mode is the sidecar next to it (HOOK_DIR), read above, not a render-time
+# value: missing or unreadable state reads closed, and an inherited closed
+# mode or strict availability tightens it, as every later failure (GAP-0315).
+if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
+    exit 2
+  fi
+  exit 0
+fi{{end}}
 
 # Avarice F-2025 / chain F-3397: authenticate inspection calls. See
 # inspect-request.sh for the full rationale.
@@ -93,7 +102,7 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 # bearer in its environment.
 unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
-CONTENT="$(defenseclaw_read_stdin_capped)" || {
+CONTENT="$(defenseclaw_read_stdin_capped fail_closed)" || {
   echo "defenseclaw: inspect response refusing oversized payload" >&2
   exit 2
 }
@@ -103,7 +112,7 @@ API_ADDR="{{.APIAddr}}"
 # Transport and response failures respect FAIL_MODE;
 # DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
 fail_unreachable() {
-  defenseclaw_log_hook_failure inspect inspect-response "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure inspect inspect-response "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "response" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
@@ -112,7 +121,11 @@ fail_unreachable() {
 }
 
 fail_response() {
-  defenseclaw_log_hook_failure inspect inspect-response "$1" response "$FAIL_MODE"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
+  # outage only (no answer or a 5xx, fail_unreachable). A refusal (4xx,
+  # 429) or an unusable answer blocks: the agent can provoke either.
+  FAIL_MODE="closed"
+{{end}}  defenseclaw_log_hook_delivery_failure inspect inspect-response "$1" response "$FAIL_MODE"
   echo "defenseclaw: inspect-response hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
@@ -122,7 +135,7 @@ fail_response() {
 
 # Avarice F-2025 / chain F-3397: 401/403 always fail closed.
 fail_unauthorized() {
-  defenseclaw_log_hook_failure inspect inspect-response "$1" response "closed"
+  defenseclaw_log_hook_failure inspect inspect-response "$1" response closed fail_closed
   echo "defenseclaw: inspect-response hook auth rejected: $1 (fail-closed override)" >&2
   exit 2
 }
@@ -130,11 +143,11 @@ fail_unauthorized() {
 {{if not .SecureClient}}# Refuse a checked call when no complete JSON parser is available.
 if ! command -v jq >/dev/null 2>&1 && ! _dc_python3_usable; then
   if defenseclaw_should_fail_closed_on_unreachable; then
-    defenseclaw_log_hook_failure inspect inspect-response "DefenseClaw needs jq or python3 to check this call" response closed
+    defenseclaw_log_hook_failure inspect inspect-response "DefenseClaw needs jq or python3 to check this call" response closed fail_closed
     echo "defenseclaw: DefenseClaw needs jq or python3 to check this call; blocking response" >&2
     exit 2
   fi
-  defenseclaw_log_hook_failure inspect inspect-response "DefenseClaw needs jq or python3 to check this call" response open
+  defenseclaw_log_hook_failure inspect inspect-response "DefenseClaw needs jq or python3 to check this call" response open fail_open
   echo "defenseclaw: DefenseClaw needs jq or python3 to check this call; allowing response (fail mode open)" >&2
   exit 0
 fi

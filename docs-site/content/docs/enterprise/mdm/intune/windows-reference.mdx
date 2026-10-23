@@ -1,0 +1,240 @@
+---
+title: Intune on Windows reference
+description: Packager parameters, the custom rule pack app, why the Win32 app values are what they are, how Remediations work, and the troubleshooting table for the DefenseClaw Intune recipe on Windows.
+keywords:
+  - New-DefenseClawIntunePackage
+  - Intune Remediations
+  - rule pack app
+  - Intune Win32 troubleshooting
+---
+
+Reference for [Intune on Windows](/docs/enterprise/mdm/intune/windows).
+
+## Packager parameters
+
+| Parameter | Meaning |
+| --- | --- |
+| `-SetupPath` | The Setup. Required. |
+| `-Sha256` | The Setup's pin. Required with hash-pinned trust; the script refuses a Setup that does not match. |
+| `-TrustMode` | `HashPinned` (default) or `Authenticode`. |
+| `-AllowedSigners` | With `Authenticode`: SHA-256 thumbprints of accepted signer certificates, comma-separated or repeated. |
+| `-ConfigPath` | The config. Without one the first install fails with `1639`. Leave it out of a bundle package and of an upgrade for a device in bundle mode, which refuses it with `bundle_required`. |
+| `-BundlePath` | A signed policy bundle (`.dcbundle`) for a bundle app. Not with `-ConfigPath`; needs `-BaseConfigPath` and `-RequireBundle`. |
+| `-BaseConfigPath` | With `-BundlePath`: the config of the base app. The packager refuses it unless its `guardrail:` block is the bundle's, apart from `custom_packs.<pack>.path`, and its `claude_code:`, `codex:`, `connector_hooks:` and `application_protection:` blocks are the bundle's or absent from both. No other setting is compared. |
+| `-TrustAnchorPath` | With `-BundlePath`: the bundle trust anchor file to install. |
+| `-RequireBundle` | With `-BundlePath`: the bundle version or id the generated `detect-bundle.ps1` requires. |
+| `-OutputDirectory` | Where to write. Required. Its `content` folder must not exist yet. |
+| `-IntuneWinAppUtil` | Path to `IntuneWinAppUtil.exe`. When set, the script also builds the `.intunewin`. |
+| `-ProductVersion` | The release version. The script prints it in the detection rule and records it. |
+
+The packager requires a `config_version: 9` config and refuses an inline
+`api_key`. The base config must be plain ASCII with LF or CRLF line endings (no
+tab, lone CR or non-ASCII byte, even in a comment; one UTF-8 byte order mark is
+allowed). It also refuses a top-level key that is not plain lowercase (a tag,
+anchor, escape or `?` key) and a quoted value or `{...}` or `[...]` that
+continues on the next line.
+
+With `-BundlePath`, the `-BaseConfigPath` row above lists the blocks the packager
+compares. Copy other enforcement settings, such as `asset_policy:`, into the base
+config too if they must apply before the bundle app runs.
+
+The script verifies the Setup against `-Sha256` (and, for Authenticode, its
+signer); writes `content\` with the Setup, `config.yaml`,
+`Install-DefenseClawIntune.ps1` and `intune-package.json` (the SHA-256 pins
+`setup_sha256` and `config_sha256`, the trust mode and the allowed signers); wraps
+`content\` into `Install-DefenseClawIntune.intunewin`; and prints the values to
+enter in the admin center.
+
+## Custom rule pack app
+
+The kit's `Install-DefenseClawRulePack.ps1` and `Detect-DefenseClawRulePack.ps1`
+are a reference rule-pack app. They are Windows PowerShell 5.1 scripts, so Intune
+runs them as they are. The install script copies the pack folder to
+`C:\ProgramData\DefenseClaw-RulePacks\<pack>` (or `-PacksRoot`), then sets what
+Setup checks:
+
+- on the parent folder: owner Administrators, no inherited entries, Full control
+  for SYSTEM and Administrators, Read & execute for
+  `NT SERVICE\DefenseClawGateway`, no `Users` or `Authenticated Users` entry;
+- on the pack and everything in it: the same entries, owner Administrators.
+
+`-PacksRoot` must be a folder of its own, because the install replaces its owner
+and permissions. The script refuses (`1639`) a drive root, a Windows, program,
+profile or DefenseClaw folder such as `C:\ProgramData` or `C:\Windows`, an
+existing non-empty folder it did not set up, and one that holds anything other
+than rule pack folders. It writes a `.defenseclaw-rule-packs` file in the folder,
+and also accepts a folder that already has the permissions above, for example one
+set up by hand from the [Windows guide](/docs/enterprise/install/windows#2-write-the-config).
+
+The script sets the parent folder's permissions with `Set-Acl`, by SID. The app
+runs before the base app, so the gateway service does not exist yet, and `icacls`
+cannot grant its SID until it does (it fails with `1332`). It then checks the
+copy and the permissions of the pack, its parent and every folder above, and
+exits `0`. Run again, it changes nothing when everything is in place and repairs
+only what differs; a changed pack is copied beside the old one and swapped in. It
+exits `1603` with the problem when a check fails, and `1639` for invalid
+arguments.
+
+1. On the workstation, put the reviewed pack folder (its name is the
+   `guardrail.custom_packs` name) next to the two scripts in a content folder, and
+   print the pack's tree SHA-256 and the commands the install runs, without
+   changing anything:
+
+   ```powershell
+   .\Install-DefenseClawRulePack.ps1 -PackName my-pack -PlanOnly
+   ```
+
+2. In your copy of `Detect-DefenseClawRulePack.ps1`, set the defaults of
+   `$PackName` and `$ExpectedTreeSha256` (and `$PacksRoot` if you changed it).
+   Intune runs detection scripts without arguments.
+3. Wrap the content folder with `IntuneWinAppUtil.exe` (setup file
+   `Install-DefenseClawRulePack.ps1`) and create the Win32 app:
+
+| Setting | Value |
+| --- | --- |
+| Install command | `%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawRulePack.ps1 -PackName my-pack -ExpectedTreeSha256 <tree sha256>` |
+| Uninstall command | The same with `-Remove` instead of `-ExpectedTreeSha256 <tree sha256>` |
+| Install behavior | **System** |
+| Return codes | Keep the defaults; `1603` and `1639` report Failed |
+| Detection rules | **Use a custom detection script**: your `Detect-DefenseClawRulePack.ps1`, *Run script as 32-bit process on 64-bit clients*: **No**, *Enforce script signature check and run script silently*: **No** (or **Yes** after you sign the script) |
+| Assignments | The same device groups as the base app; the base app's dependency installs it first |
+
+The detection script reports the pack installed only when the folder has the
+expected tree SHA-256, only SYSTEM and Administrators own and can change it and
+its parent, no standard user can read them, and the gateway service can read
+them. Otherwise Intune runs the install command again, which repairs it. The
+pack's digest in the config (`guardrail.custom_packs.<pack>.digest`) still pins
+its files for the gateway.
+
+If you deliver the pack another way, for example a pinned HTTPS download, it needs
+the same permissions. When the gateway cannot read the pack folder or its parent,
+Setup refuses the base app with `1639` and prints an `icacls` fix that names
+`NT SERVICE\DefenseClawGateway`. `icacls` cannot resolve that name before the
+first install (`1332`), so on a new device set the parent folder from an elevated
+prompt with `Set-Acl`, then retry the base app:
+
+```powershell
+$Packs = 'C:\ProgramData\DefenseClaw-RulePacks'
+$Acl = Get-Acl -LiteralPath $Packs
+$Acl.SetSecurityDescriptorSddlForm('O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274)', 'Owner, Access')
+Set-Acl -LiteralPath $Packs -AclObject $Acl
+icacls "$Packs\my-pack" /reset /T /C
+```
+
+## Why the Win32 app values are what they are
+
+- **The launcher.** Setup refuses relative and environment-expanded paths, and
+  the Intune content folder is not known in advance.
+  `Install-DefenseClawIntune.ps1` re-checks the pins in `intune-package.json`,
+  builds the absolute `CONFIG=` path, runs
+  `DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure JSON=1 CONFIG=...`
+  (adding `ALLOWEDSIGNERS=` for Authenticode), prints the result document and
+  exits with Setup's code. A tampered or incomplete package fails with
+  `mdm_hash_mismatch` or `mdm_package_incomplete` (`1603`).
+- **`Sysnative`** starts the 64-bit Windows PowerShell from the 32-bit Intune
+  host, as Microsoft recommends for 64-bit installs.
+- **The uninstall command** names `powershell.exe` and the launcher without a
+  path, because Intune does not expand environment variables in uninstall
+  commands. The launcher re-checks the Setup pin and runs
+  `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` (`-Purge`
+  adds `PURGE=1`). Setup refuses an uninstall with `uninstall_in_use`, before it
+  changes anything, while a program runs from
+  `C:\Program Files\Cisco\DefenseClaw\bin` (often an Intune detection or
+  Remediations script that runs the installed CLI for a few seconds). With
+  `-Purge`, Setup also refuses while a program has a file in
+  `C:\ProgramData\Cisco\DefenseClaw` open, for example a SIEM forwarder reading
+  `runtime\audit.db`. The launcher runs Setup again, at most 6 times, each after
+  the named programs exit or 20 seconds pass. If Setup still refuses, the
+  launcher exits `1618`, which Intune retries, and its result names each program,
+  its process id and account. An app whose uninstall command is Setup itself
+  fails such an uninstall with `1603` and is not retried. The kit's detection and
+  Remediations scripts start no installed CLI while a lifecycle run holds the
+  lock.
+- **Version comparison, greater than or equal to.** A newer installed version
+  still counts as installed, so an older app never tries to replace it.
+
+If you prefer a script, `packaging/mdm/windows/detect.ps1` works as a custom
+detection script. Intune runs detection scripts without arguments, so set the
+default of `$MinimumVersion` in your copy's `param()` block to the app's version.
+It reads the 64-bit registry view, so the **Run script as 32-bit process on
+64-bit clients** setting does not matter.
+
+## Config-aware detection script
+
+Use this instead of the registry rule when you roll out a config-only change. Not for a device in bundle mode: it refuses a config package with `bundle_required`, so deliver a new bundle app with its `detect-bundle.ps1`. Replace the two values at the top with the minimum version and the `config_sha256` value from the new package's `intune-package.json`:
+
+```powershell
+$minimum = [version]'X.Y.Z'
+$configSha256 = 'replace-with-config_sha256-from-intune-package.json'
+$base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+$key = $base.OpenSubKey('SOFTWARE\Cisco\DefenseClaw\Enterprise')
+if ($null -eq $key) { exit 1 }
+$version = [string]$key.GetValue('ProductVersion')
+$stateRoot = [string]$key.GetValue('StateRoot')
+$key.Dispose()
+$base.Dispose()
+$core = ($version -split '[-+]')[0]
+if (-not $core -or [version]$core -lt $minimum) { exit 1 }
+$config = Join-Path $stateRoot 'etc\config.yaml'
+if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { exit 1 }
+$actual = (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $configSha256.ToLowerInvariant()) { exit 1 }
+Write-Output "DefenseClaw Enterprise $version"
+exit 0
+```
+
+## Remediations
+
+A Remediations package re-checks the deployment on a schedule and repairs it from the installed payload. Create it in **Devices** > **Manage devices** > **Scripts and remediations** > **Create script package**:
+
+| Setting | Value |
+| --- | --- |
+| Detection script file | `Remediate-Detect.ps1` |
+| Remediation script file | `Remediate-Fix.ps1` |
+| Run this script using the logged-on credentials | **No** (runs as SYSTEM) |
+| Enforce script signature check | **No**, or **Yes** after you sign both scripts with a certificate in the devices' Trusted Publishers store. With **Yes**, the scripts run under the device's PowerShell execution policy (Windows clients default to `Restricted`, so set `AllSigned` or `RemoteSigned`) and must be saved as UTF-8 without a byte-order mark |
+| Run script in 64-bit PowerShell | **No** (the default). The scripts work in either |
+| Schedule | **Daily**, or **Hourly** every 4 to 8 hours |
+
+If you assign the package with Microsoft Graph, read the assignment back: Graph can accept `runRemediationScript: true` and store `false`, and scheduled runs then only detect. When it reads `false`, turn on the remediation script for that assignment in the admin center. An on-demand run (**Run remediation** on the device) runs both scripts either way.
+
+`Remediate-Detect.ps1` runs the installed CLI's `enterprise windows verify --profile standalone --json`. It exits `0` on a healthy host, on a host without the deployment (installing is the Win32 app's job), and while another lifecycle run holds the lock. Otherwise it exits `1` and starts the remediation. Its one line names the failing check: each DefenseClaw service that is not running with its start mode, or else the first error.
+
+`Remediate-Fix.ps1` first checks the same way. When the only problem is a stopped or disabled hook guardian or enumerator while the gateway runs, it sets that service back to automatic start, starts it and verifies again without touching the gateway. Otherwise it runs `enterprise windows ensure --profile standalone --json`, which verifies and repairs from the installed payload, or does nothing. A repair stops every DefenseClaw service, so the gateway is down for one to two minutes and hooks fail closed meanwhile. It exits with the lifecycle's code. After an upgrade that a restart or power loss cut off, the installed (older) CLI rolls the change back: the line says `repaired (recovered_pending_transaction): ensure rolled back an interrupted lifecycle change`, names the release that runs again, and asks you to run the newer Setup `/ensure` again (the Win32 app retries it).
+
+Both scripts print one short line, because Intune keeps 2,048 characters of output. The full result is in `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`. Remediations cannot install, upgrade or change the config; the Win32 app does those. Nor can they put back a missing scanner runtime (one an antivirus quarantined from `C:\ProgramData\Cisco\DefenseClaw-ScannerRuntime`, say): `Remediate-Fix.ps1` exits `1603`, reports `scanner_runtime_unavailable` and names Setup `/repair`. Deploy `DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1` from the Win32 app content, as a second Win32 app or a platform script that runs as SYSTEM.
+
+A missing hook binary is the same case. If an antivirus quarantines `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`, Claude Code treats the hook that cannot start as a non-blocking error and runs the tool call until the file is back, which is a fail-open window. The hook guardian checks for the file every 5 seconds and restores it from its protected copy, and Setup `/ensure` and `/repair` restore it from their payload. Exclude `C:\Program Files\Cisco\DefenseClaw\bin` from quarantine in your EDR policy so the window does not open.
+
+On a computer installed from the unsigned Setup, the Remediations `ensure` keeps the marker's `hash_pinned` trust mode, so `detect.ps1`, `uninstall.ps1` and later runs keep accepting the unsigned CLI.
+
+## Troubleshoot
+
+| Where | What |
+| --- | --- |
+| `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\AppWorkload.log` | Intune's view of the Win32 app: download, install command, exit code, detection |
+| `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\HealthScripts.log` | Remediations runs |
+| `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log` | Every lifecycle result, one JSON line per run |
+| `%WINDIR%\Logs\DefenseClaw\mdm-wrapper.log` | The generic wrapper's steps, when you use it |
+| `DefenseClaw` event log, source "DefenseClaw Lifecycle" | Installed, upgraded, repaired, failed, busy and refused events |
+
+To see the current state on a device, from an elevated PowerShell:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone --json
+```
+
+| Symptom | Likely cause |
+| --- | --- |
+| Install fails with `1639` | No config in the package, or its `enterprise.profile` is not `standalone`. |
+| Install fails with `1639` and `invalid_arguments` | The config does not parse, is not UTF-8, does not validate, or sits where a standard user can change it. `errors[].message` names the line or the folder and the fix. |
+| Install fails with `1639`: the gateway service cannot read the guardrail rule pack | The rule pack is missing, or `NT SERVICE\DefenseClawGateway` cannot read it or the folder above it. Deliver it with the [rule-pack app](#custom-rule-pack-app) as a dependency, or set the permissions with the `Set-Acl` lines there, then retry. |
+| A gateway scan refuses a project inside a user profile | Run the scan as the signed-in user or move the project outside the profile. Scanner children inherit the gateway's write-restricted LocalSystem token. |
+| Setup reports `user_runtime_folder_untrusted` | The upgrade went on; only that account's old hook runtime copies stay, inert, in a folder whose permissions DefenseClaw could not verify. Inspect the folder named in the warning, reset its permissions or remove it if the account no longer uses DefenseClaw, then run Setup `/ensure` again. With a pending transaction the run fails with `1603` and names the same remedy. |
+| Install fails with `1603`: a named service fails during start or stop | Inspect the Windows service events and that service's log, then run Setup `/ensure` again. A standalone start has a 30-second SCM request budget and a 60-second running-state budget; each stop wait has 30 seconds. |
+| Install fails with `1603` and `powershell7_required` | The PowerShell 7 dependency did not install, or is a preview build. |
+| Install fails with `1603` and `mdm_hash_mismatch` | The package content changed after the packager pinned it. Rebuild it. |
+| Intune reports `1618` and retries | Another lifecycle run held the lock. Intune retries three times, five minutes apart. |
+| Uninstall reports `1618` with `uninstall_in_use` | A program kept running from `C:\Program Files\Cisco\DefenseClaw\bin`, or (for the `-Purge` app) kept a file in `C:\ProgramData\Cisco\DefenseClaw` open, through every Setup run. Nothing was changed, unless the message says only the data folder is left: then DefenseClaw is removed and the next run deletes that folder. The message names each program, its process id, account and parent, and the file it has open. Intune retries; if the program stays, close it or sign the account out. |
+| The app installs again every day | The detection rule does not match what Setup installed: check the key path, the 64-bit setting and the version. |
+| Graph still shows Installed after uninstall | The app install report lagged device detection by more than 15 minutes in the live test. Check local Intune detection or `enterprise windows status`. |

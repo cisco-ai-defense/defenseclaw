@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -92,7 +93,15 @@ func (l *Lifecycle) dockerRunArgs() ([]string, error) {
 	}
 	configDir := filepath.Dir(l.configPath)
 	configFile := filepath.Base(l.configPath)
-	return []string{
+	bindMode := "ro"
+	if runtime.GOOS == "linux" {
+		// Docker relabels only this generated directory for the private
+		// container. The bind stays read-only, and the container uses the
+		// host file owner to read the 0700/0600 directory and config without
+		// DAC override capabilities.
+		bindMode = "ro,Z"
+	}
+	args := []string{
 		"run", "-d", "--pull=missing",
 		"--name", l.containerName,
 		"--label", srContainerNameLabel,
@@ -100,13 +109,19 @@ func (l *Lifecycle) dockerRunArgs() ([]string, error) {
 		"--security-opt=no-new-privileges:true",
 		"--read-only",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-		"-v", fmt.Sprintf("%s:/app/config:ro", configDir),
+	}
+	if runtime.GOOS == "linux" {
+		args = append(args, "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
+	}
+	args = append(args,
+		"-v", fmt.Sprintf("%s:/app/config:%s", configDir, bindMode),
 		// The stock v0.3.0 entrypoint binds the classification API to
 		// container port 8080. Port is the operator-selected host port.
 		"-p", fmt.Sprintf("127.0.0.1:%d:%d", l.port, DefaultAPIPort),
 		image,
 		fmt.Sprintf("/app/config/%s", configFile),
-	}, nil
+	)
+	return args, nil
 }
 
 // Start launches only the router container via Docker.

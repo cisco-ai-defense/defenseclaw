@@ -859,3 +859,26 @@ func (ta *testApp) deletedOne() bool {
 	}
 	return false
 }
+
+// #1200: the MCP row counts the servers the project defines, and says
+// whether the pack lets them start.
+func TestManagedExplainRowCountsProjectMCPServers(t *testing.T) {
+	m := managedExplainFixture()
+	m.MCPIncluded, m.MCPBlocked = nil, nil
+	m.MCPProjectCount, m.MCPProjectBlocked = 1, true
+	row := func() string {
+		for _, r := range managedExplainRows(m, time.Now()) {
+			if r.label == "MCP" {
+				return r.text
+			}
+		}
+		return ""
+	}
+	if got := row(); got != "0 of your servers included; the project's 1 server doesn't start (the pack blocks project servers)" {
+		t.Fatalf("MCP row = %q", got)
+	}
+	m.MCPProjectCount, m.MCPProjectBlocked = 2, false
+	if got := row(); !strings.HasSuffix(got, "the project's 2 servers start (the pack allows project servers)") {
+		t.Fatalf("MCP row = %q", got)
+	}
+}

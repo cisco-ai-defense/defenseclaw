@@ -34,6 +34,15 @@ func TestAccessContact(t *testing.T) {
 	}
 }
 
+func TestManagedRefusalDoesNotRepeatContact(t *testing.T) {
+	for _, value := range []string{RequestAccessFallback, "Contact your IT help desk", "your IT help desk"} {
+		got := ManagedRefusal("This destination is blocked", "contractors", "", value)
+		if !strings.HasSuffix(got, "Need an exception? Contact your IT help desk") {
+			t.Fatalf("contact %q: %q", value, got)
+		}
+	}
+}
+
 // On a managed computer the off message never names another account, never
 // sends the user to setup, and ends with the organization's contact.
 func TestOffMessageManaged(t *testing.T) {

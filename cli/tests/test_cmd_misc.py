@@ -2068,7 +2068,8 @@ class TestSetupSplunkCommand(unittest.TestCase):
             setup, ["splunk"], obj=self.app,
             input=user_input, catch_exceptions=False,
         )
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Docker is not installed", result.output)
         self.assertNotIn("Local Splunk configured", result.output)
         mock_preflight.assert_called_once()
 

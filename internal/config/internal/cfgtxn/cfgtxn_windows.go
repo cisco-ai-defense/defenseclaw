@@ -85,3 +85,14 @@ func replaceDurable(source, target string) error {
 
 // syncDir is a no-op: MOVEFILE_WRITE_THROUGH already flushes the rename.
 func syncDir(string) error { return nil }
+
+// syncFile flushes path, its security descriptor included
+// (FlushFileBuffers, which needs write access).
+func syncFile(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
+}

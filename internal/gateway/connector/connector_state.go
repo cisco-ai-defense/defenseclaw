@@ -905,11 +905,6 @@ func saveHookContractLockEntry(
 			return err
 		}
 	}
-	if runtime.GOOS == "darwin" && entry.Connector == "openhands" {
-		if err := validateOpenHandsDarwinLockPublication(dataDir, entry); err != nil {
-			return err
-		}
-	}
 	path := filepath.Join(dataDir, hookContractLockFile)
 	return withFileLockMode(path, managedEnterprise, func() error {
 		entry.HookScriptDigests = cloneHookScriptDigests(entry.HookScriptDigests)
@@ -1076,6 +1071,14 @@ func ClearHookContractLockEntryForMode(
 	managedEnterprise bool,
 ) error {
 	if strings.TrimSpace(dataDir) == "" {
+		return nil
+	}
+	if IsRemovedConnector(connectorName) {
+		// until 1.1: a removed connector's teardown changes only its hook
+		// script and tokens (removed.go). Its lock entry and .hookcfg
+		// state stay, in every mode: the shared files hold the surviving
+		// connectors' entries too, and only their own writer may change
+		// them.
 		return nil
 	}
 	connectorName = normalizeConnectorName(connectorName)
@@ -1281,10 +1284,8 @@ func protectedSetupSelectionConnectorForOS(connectorName, goos string) bool {
 	connectorName = normalizeConnectorName(connectorName)
 	switch strings.ToLower(strings.TrimSpace(goos)) {
 	case "windows":
-		return connectorName == "codex" || connectorName == "hermes" || connectorName == "omnigent" ||
+		return connectorName == "codex" || connectorName == "hermes" ||
 			connectorName == "opencode" || connectorName == "amp"
-	case "darwin":
-		return connectorName == "openhands"
 	default:
 		return false
 	}
@@ -1351,7 +1352,11 @@ func HookRuntimeRegistrationCurrent(
 	if err != nil || !exists {
 		return false, err
 	}
-	if !hookRuntimeFlatEvidenceCurrent(flatBody, "codex", wantMode) {
+	flatSource := HookFailModeSourceConfig
+	if opts.ManagedEnterprise {
+		flatSource = ""
+	}
+	if !hookRuntimeFlatEvidenceCurrent(flatBody, "codex", wantMode, flatSource) {
 		return false, nil
 	}
 
@@ -1415,13 +1420,12 @@ func HookRuntimeRegistrationCurrent(
 	return true, nil
 }
 
-func hookRuntimeFlatEvidenceCurrent(body []byte, connectorName, failMode string) bool {
-	expected := fmt.Sprintf(
-		"DEFENSECLAW_CONNECTOR=%s\nDEFENSECLAW_FAIL_MODE=%s\n",
+func hookRuntimeFlatEvidenceCurrent(body []byte, connectorName, failMode, source string) bool {
+	return bytes.Equal(body, hookRuntimeFlatRecord(
 		normalizeConnectorName(connectorName),
 		normalizeHookFailMode(failMode),
-	)
-	return bytes.Equal(body, []byte(expected))
+		source,
+	))
 }
 
 // RequiresHookRuntimeRegistrationEvidence identifies the concrete Windows
@@ -1741,7 +1745,8 @@ func HookScriptDigests(opts SetupOpts, conn Connector) map[string]string {
 	}
 	out := map[string]string{}
 	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
-		data, err := os.ReadFile(path)
+		// On Windows the paths include the installed hook binary.
+		data, err := readNativeFileShared(path)
 		if err != nil {
 			continue
 		}
@@ -2236,21 +2241,6 @@ func protectedAuthorityFromSelection(
 
 func LoadCachedAgentVersion(dataDir, connectorName string) string {
 	normalizedName := normalizeConnectorName(connectorName)
-	if runtime.GOOS == "darwin" && normalizedName == "openhands" {
-		if entry, exists := loadProtectedHookContractEntry(dataDir, normalizedName); exists {
-			if selection, supersedes := supersedingProtectedSetupSelection(dataDir, normalizedName, entry); supersedes {
-				return selection.RawVersion
-			}
-			if validSetupSelectedAgentExecutableEvidence(entry, normalizedName) {
-				return strings.TrimSpace(entry.RawAgentVersion)
-			}
-			return ""
-		}
-		if selection, ok := loadSetupAgentSelection(dataDir, normalizedName); ok {
-			return selection.RawVersion
-		}
-		return ""
-	}
 	if runtime.GOOS == "windows" && normalizedName == "codex" {
 		if entry, exists := loadProtectedCodexContractEntry(dataDir); exists {
 			if validCodexAgentExecutableEvidence(entry) {
@@ -2266,7 +2256,7 @@ func LoadCachedAgentVersion(dataDir, connectorName string) string {
 		}
 		return ""
 	}
-	if normalizedName == "hermes" || normalizedName == "omnigent" || normalizedName == "opencode" || normalizedName == "amp" {
+	if normalizedName == "hermes" || normalizedName == "opencode" || normalizedName == "amp" {
 		if runtime.GOOS == "windows" {
 			authority, ok := loadProtectedSetupExecutableAuthority(dataDir, normalizedName)
 			if !ok {
@@ -2294,21 +2284,6 @@ func LoadCachedAgentVersion(dataDir, connectorName string) string {
 // established discovery-cache behavior.
 func LoadCachedAgentExecutable(dataDir, connectorName string) string {
 	normalizedName := normalizeConnectorName(connectorName)
-	if runtime.GOOS == "darwin" && normalizedName == "openhands" {
-		if entry, exists := loadProtectedHookContractEntry(dataDir, normalizedName); exists {
-			if selection, supersedes := supersedingProtectedSetupSelection(dataDir, normalizedName, entry); supersedes {
-				return selection.Executable
-			}
-			if validSetupSelectedAgentExecutableEvidence(entry, normalizedName) {
-				return strings.TrimSpace(entry.AgentExecutable)
-			}
-			return ""
-		}
-		if selection, ok := loadSetupAgentSelection(dataDir, normalizedName); ok {
-			return selection.Executable
-		}
-		return ""
-	}
 	if runtime.GOOS == "windows" && normalizedName == "codex" {
 		if entry, exists := loadProtectedCodexContractEntry(dataDir); exists {
 			if validCodexAgentExecutableEvidence(entry) {
@@ -2321,7 +2296,7 @@ func LoadCachedAgentExecutable(dataDir, connectorName string) string {
 		}
 		return ""
 	}
-	if normalizedName == "hermes" || normalizedName == "omnigent" || normalizedName == "opencode" || normalizedName == "amp" {
+	if normalizedName == "hermes" || normalizedName == "opencode" || normalizedName == "amp" {
 		if runtime.GOOS == "windows" {
 			authority, ok := loadProtectedSetupExecutableAuthority(dataDir, normalizedName)
 			if !ok {

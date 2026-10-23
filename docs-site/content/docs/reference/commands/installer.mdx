@@ -1,0 +1,129 @@
+---
+title: Installer
+description: Options, environment, exit codes, startup behavior and checksum verification for install.sh and install.ps1.
+keywords:
+  - install.sh options
+  - install.ps1 parameters
+  - DefenseClaw installer exit codes
+  - DefenseClaw cosign checksums
+---
+
+`install.sh` (macOS and Linux) and `install.ps1` (Windows) install, upgrade, repair and roll back DefenseClaw for one account. The one-line commands are on [Install](/docs/get-started/install).
+
+The installer downloads the release's gateway, CLI wheel and a hash-pinned list of the CLI's Python dependencies, and checks each file against `checksums.txt`. With `cosign` 2.0 or later it also verifies the Sigstore signature on `checksums.txt`. It installs `uv` if you do not have it. Either check failing stops the install before it changes anything.
+
+## Options
+
+| `install.sh` | `install.ps1` | What it does |
+| --- | --- | --- |
+| `--yes`, `-y` | `-Yes` | Do not prompt. |
+| `--version X.Y.Z` | `-Version X.Y.Z` | Install a specific release (runs that release's installer). |
+| `--local DIR` | `-Local DIR` | Take every release file from a directory instead of GitHub. An empty value is a usage error (exit 2). |
+| `--rollback` | `-Rollback` | Restore the install the last upgrade replaced. |
+| `--connector NAME` | `-Connector NAME` | First install only: the agent to guard. `none` configures no agent. |
+| `--no-openclaw` | `-NoOpenclaw` | First install only: same as connector `none`. |
+| `--quickstart` | `-Quickstart` | Run `defenseclaw quickstart` afterwards when nothing is configured yet. |
+| `--quickstart-mode MODE` | `-QuickstartMode MODE` | `observe` or `action` for that quickstart (implies quickstart). |
+| | `-NoPersistPath` | Do not change the user `PATH` in the registry. |
+| | `-CosignPath FILE` | The `cosign` to check the release signature with. |
+| | `-AcceptCurrentInstall` | When an earlier run's restore is not proven back only because you changed `config.yaml` or the connectors since, keep the install as it is now. The binaries, the bin folder and the gateway are still checked. When another installer (an older release's) replaced the programs the run recorded, retire that record and install this release over them; they are not started. The error says when this applies and gives the full command. |
+| `--help`, `-h` | `-Help` | Show the installer's help. |
+
+Options that take a value also accept `--name=value`. `defenseclaw quickstart --help` lists the connector names.
+
+## Environment
+
+| Variable | What it does |
+| --- | --- |
+| `DEFENSECLAW_HOME` | Data directory. Default `~/.defenseclaw`. Use the same value for every command, including `defenseclaw upgrade`. |
+| `DEFENSECLAW_REPO` | A mirror base URL for a first install (see [Mirror](#mirror)). Deprecated alias of `update.source`. |
+| `DEFENSECLAW_GATEWAY_AUTOSTART=0` | Set in an agent's environment: its hooks do not start a stopped gateway. |
+
+### Mirror
+
+```bash
+curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | DEFENSECLAW_REPO=https://mirror.example.com/defenseclaw bash
+```
+
+A first install has no `config.yaml`, so the variable is the only way to name a mirror. Afterwards, `update.source` does the same for `defenseclaw upgrade` ([Upgrade](/docs/appendix/upgrade-from-0-8#install-from-a-mirror)). A mirror changes only where files come from. The installer still checks the release signature against the official identity, so a mirror needs `cosign` 2.0 or later.
+
+## Exit codes
+
+`install.ps1` reports these when run as a file; `irm | iex` reports a failure as an error.
+
+| Code | Meaning |
+| --- | --- |
+| `0` | DefenseClaw is installed. |
+| `1` | Not installed. An upgrade puts the previous install back. |
+| `2` | Nothing changed: an unknown option or value, such as a misspelled flag or a connector not on the list. |
+| `3` | Installed, but a connector needs attention before it is guarded again. Run `defenseclaw doctor`. |
+| `4` | Installed, but the first-run quickstart failed. The installer prints the `defenseclaw quickstart ...` command to run again. |
+
+## Platforms
+
+macOS on Apple silicon (`arm64`), Linux on `x86_64` and `arm64`, Windows on `x64` (PowerShell 5.1 or 7, Windows 10 or newer and Server 2019 or newer). Intel Macs are unsupported: the installer stops before changing anything, and Rosetta does not change that. Windows on ARM64 is not certified. Installing as `root` works but is discouraged, because DefenseClaw is per-user by design.
+
+## What the install creates
+
+The tree and the programs are listed in [Paths](/docs/reference/configuration/paths#what-the-install-creates).
+
+## Startup behavior
+
+On Linux and macOS the gateway runs as a background process of your account. It starts with `defenseclaw quickstart`, `defenseclaw setup` or `defenseclaw-gateway start`. The install adds no systemd unit, LaunchAgent or login item. When the gateway is not running (after a reboot, for example), the next hook call of an agent starts it in the background and sends its request again. This applies to the shell hooks of Claude Code, Codex, Cursor, GitHub Copilot, Devin, Hermes, Kiro and Antigravity. The OpenCode and Amp plugins do not start it. On Windows a hook starts a stopped gateway too.
+
+A hook call that meets a gateway restart is retried for up to about 3 seconds. A longer outage ends the call with `gateway restarting or not running`: a fail-closed hook blocks it, never allows it. On Windows a per-user hook for a tool call waits at most about 3.5 seconds for the decision (about 4 seconds when the gateway is checking with Cisco AI Defense or the LLM judge), then applies its fail mode.
+
+A hook does not start the gateway:
+
+- after `defenseclaw-gateway stop`, until you run `defenseclaw-gateway start` or `restart`;
+- while an install or upgrade runs;
+- for 60 seconds after a hook start failed (see `~/.defenseclaw/gateway.log`);
+- when `DEFENSECLAW_GATEWAY_AUTOSTART=0` is set.
+
+While the gateway is down, fail-closed hooks block agent calls, in observe mode too. Only hooks set to `hook_fail_mode: open` let them through, with a `gateway unreachable` line on stderr ([Fail modes](/docs/reference/configuration/fail-modes#which-value-applies)). When `gateway.watchdog.enabled` is set and the gateway process stops on its own, the watchdog starts it again after `gateway.watchdog.debounce` failed health checks. A gateway that runs but does not answer is not restarted by a hook or the watchdog: check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`.
+
+## Verify a download
+
+The one-line installers verify what they download. For a file you download yourself, such as the macOS app `.dmg` or an enterprise package, fetch `checksums.txt` and `checksums.txt.bundle` from the same release, then in the download folder:
+
+```bash
+FILE=name-of-the-downloaded-file
+REPO=https://github.com/cisco-ai-defense/defenseclaw
+cosign verify-blob --bundle checksums.txt.bundle \
+  --certificate-identity "$REPO/.github/workflows/release.yaml@refs/heads/main" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+grep "  $FILE\$" checksums.txt | sha256sum -c -
+```
+
+On macOS use `shasum -a 256 -c -` in place of `sha256sum -c -`. The signing identity is built into the installer and the CLI, not read from a setting. On Windows, compare the file's hash with its line in `checksums.txt`:
+
+```powershell
+$File = 'DefenseClawSetup-Enterprise-Standalone-x64.exe'
+(Get-FileHash ".\$File" -Algorithm SHA256).Hash.ToLower()
+Select-String -Path .\checksums.txt -Pattern ('  ' + [regex]::Escape($File) + '$')
+```
+
+Windows release executables are not Authenticode-signed; their integrity comes from the signed checksum set.
+
+## Enterprise release files
+
+`<version>` is the release number without the `v`. Guides: [Windows](/docs/enterprise/install/windows), [macOS](/docs/enterprise/install/macos), [Linux](/docs/enterprise/install/linux). Start with [Deploy to a fleet](/docs/enterprise/get-started).
+
+```text title="Enterprise release files"
+# Windows x64: the Setup program and its payload manifest
+DefenseClawSetup-Enterprise-Standalone-x64.exe
+DefenseClawSetup-Enterprise-Standalone-x64.payload-manifest.json
+
+# macOS (Apple silicon)
+defenseclaw-enterprise-<version>-darwin-arm64.pkg
+defenseclaw-enterprise-<version>-darwin-arm64.tar.gz
+
+# Linux: RPM, DEB (preview) or archive, for amd64 or arm64
+defenseclaw-enterprise-<version>-linux-amd64.rpm
+defenseclaw-enterprise-<version>-linux-arm64.rpm
+defenseclaw-enterprise-<version>-linux-amd64.deb
+defenseclaw-enterprise-<version>-linux-arm64.deb
+defenseclaw-enterprise-<version>-linux-amd64.tar.gz
+defenseclaw-enterprise-<version>-linux-arm64.tar.gz
+```

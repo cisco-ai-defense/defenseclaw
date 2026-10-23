@@ -1,0 +1,9 @@
+{
+  "title": "Sandboxes",
+  "pages": [
+    "cli",
+    "policy",
+    "network",
+    "telemetry"
+  ]
+}

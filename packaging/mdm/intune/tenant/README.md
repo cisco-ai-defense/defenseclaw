@@ -6,7 +6,7 @@ launcher and Remediations scripts) and to the macOS and Linux wrappers in `../..
 `../../linux`. It talks to Graph only, never to a device, and DefenseClaw never calls Graph.
 
 The guide that goes with it is published at
-<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune-tenant/>. It covers the
+<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune/tenant/>. It covers the
 licences, the admin center settings that need a person, device enrollment, groups and identity.
 
 Guardrail profiles in the config you deliver apply to the standalone profile. The Secure Client
@@ -41,7 +41,7 @@ python3 intune_tenant.py groups --name defenseclaw-windows --apply
 python3 intune_tenant.py groups --add-device PC-0042:defenseclaw-windows --apply
 python3 intune_tenant.py assign-app --app "DefenseClaw Enterprise" --group defenseclaw-windows
 python3 intune_tenant.py remediation --group defenseclaw-windows --daily-at 02:00
-python3 intune_tenant.py macos-script --name "DefenseClaw Enterprise" --file ./defenseclaw-enterprise.sh --group defenseclaw-macos
+python3 intune_tenant.py macos-script --name "DefenseClaw Enterprise" --file ../../macos/defenseclaw-enterprise.sh --group defenseclaw-macos
 python3 intune_tenant.py status --app "DefenseClaw Enterprise" --remediation "DefenseClaw Enterprise health"
 ```
 

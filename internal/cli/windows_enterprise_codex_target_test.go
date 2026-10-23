@@ -18,6 +18,32 @@ package cli
 
 import "testing"
 
+func TestWindowsConfigCodexTargetNeedsReconcile(t *testing.T) {
+	const withCodex = "config_version: 9\nguardrail:\n  connectors:\n    codex: {}\n    claudecode: {}\n"
+	const claudeOnly = "config_version: 9\nguardrail:\n  connectors:\n    claudecode: {}\n"
+	for _, tc := range []struct {
+		name, config, metadata string
+		want                   bool
+	}{
+		{"discovered after install", withCodex, `{"codex_target_enabled":false}`, true},
+		{"stale enabled record", claudeOnly, `{"codex_target_enabled":true}`, true},
+		{"matching enabled", withCodex, `{"codex_target_enabled":true}`, false},
+		{"matching disabled", claudeOnly, `{"codex_target_enabled":false}`, false},
+		{"old release missing field", withCodex, `{}`, true},
+		{"missing disabled evidence", claudeOnly, `{}`, true},
+		{"null", withCodex, `{"codex_target_enabled":null}`, true},
+		{"wrong type", withCodex, `{"codex_target_enabled":"true"}`, true},
+		{"invalid metadata", withCodex, `{`, true},
+		{"invalid config", "guardrail: [codex]", `{"codex_target_enabled":false}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := windowsConfigCodexTargetNeedsReconcile([]byte(tc.config), []byte(tc.metadata)); got != tc.want {
+				t.Fatalf("needs reconcile = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 // GAP-0033: a config change that turns Codex protection on or off is the
 // upgrade transaction's on Windows; every other connector change is not.
 func TestWindowsConfigCodexTargetChanged(t *testing.T) {

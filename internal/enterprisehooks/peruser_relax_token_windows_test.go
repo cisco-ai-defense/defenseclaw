@@ -114,7 +114,7 @@ func TestRelaxedScopedHookTokenCanBeRepublishedByItsOwner(t *testing.T) {
 	}
 	windowsRelaxTestSetDACL(t, tokenPath, windowsRelaxTestFormat(windowsRelaxTestHardenedFile, owner))
 	target := windowsGenericManagedTarget{home: filepath.Dir(dataDir), sid: owner, dataDir: dataDir}
-	changed, err := relaxWindowsStandalonePerUserTokenFile(target, tokenPath)
+	changed, err := relaxWindowsStandalonePerUserFile(target, tokenPath)
 	if err != nil || !changed {
 		t.Fatalf("relax hardened hook token: changed=%v err=%v", changed, err)
 	}
@@ -134,7 +134,7 @@ func TestRelaxedScopedHookTokenCanBeRepublishedByItsOwner(t *testing.T) {
 	if string(raw) != newToken+"\n" {
 		t.Fatal("republication did not publish the new token bytes")
 	}
-	if changed, err := relaxWindowsStandalonePerUserTokenFile(target, tokenPath); err != nil || changed {
+	if changed, err := relaxWindowsStandalonePerUserFile(target, tokenPath); err != nil || changed {
 		t.Fatalf("relax an owner-private token again: changed=%v err=%v", changed, err)
 	}
 }

@@ -58,6 +58,12 @@ type box struct {
 	cred      egress.Credential
 	phase     audit.SandboxPhase
 	creating  bool
+	// createCfg is the configuration a managed daemon's create pinned
+	// (WithCreateConfig), which the sandbox this create reserved resolves
+	// under until the daemon keeps its registration (EndCreate).
+	// It binds this box, never its name: a same-name create that fails on
+	// the name lends nothing to the sandbox that holds it.
+	createCfg *config.Config
 	deleted   bool
 	orphaned  bool
 	missing   bool
@@ -123,6 +129,9 @@ type box struct {
 	// hooks.on_silence: stop) scheduled this session's stop.
 	tamperStop  bool
 	silenceSent bool
+	// oldSupervisorStop is set while a stop of a session on an old
+	// supervisor is scheduled (scheduleOldSupervisorStop).
+	oldSupervisorStop bool
 	// toolHostsSaid are the harness tool hosts whose refusal the feed
 	// explained (firstToolHostRefusal).
 	toolHostsSaid map[string]bool
@@ -409,6 +418,7 @@ func auditPhase(p openshell.SandboxPhase) audit.SandboxPhase {
 // Manager.mu.
 func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhase, trigger audit.SandboxLifecycleTrigger,
 	force bool, cond *audit.SandboxCondition, exit *int32) {
+	release := m.gatewayRelease()
 	m.mu.Lock()
 	if b.phase == phase && !force {
 		m.mu.Unlock()
@@ -442,6 +452,13 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		m.tel.forgetSandbox(b.rec.Name)
 		if previous != audit.SandboxPhaseReady {
 			b.rec.Sessions++
+			// The session runs the supervisor of the gateway it started on
+			// (unknown while no gateway is connected: the last one's). One
+			// back from stopping is the session a stop failed to end
+			// (restorePhase): it keeps the supervisor it ran (GAP-0415).
+			if release != "" && previous != audit.SandboxPhaseStopping {
+				b.rec.SessionRelease = release
+			}
 		}
 		// A restarted daemon that finds the sandbox still ready keeps the
 		// time it became ready (uptime); a real transition takes now.
@@ -459,7 +476,11 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		b.rec.SessionYolo = nil
 	}
 	b.rec.Phase = string(phase)
-	b.rec.PhaseReason = ""
+	// A republished error phase (a restarted daemon's reconcile) says
+	// nothing new of why: the record's reason stays.
+	if phase != audit.SandboxPhaseError || cond != nil || previous != phase {
+		b.rec.PhaseReason = ""
+	}
 	if retainedPhase(phase) {
 		// A record from before the field (a restarted daemon's) counts
 		// from now: never longer than the floor allows from when it is seen.
@@ -469,7 +490,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	} else {
 		b.rec.StoppedAt = time.Time{}
 	}
-	if phase == audit.SandboxPhaseError {
+	if phase == audit.SandboxPhaseError && (cond != nil || previous != phase) {
 		b.rec.PhaseReason = errorPhaseReason(cond)
 	}
 	// The record written below keeps the hook counts reached so far.
@@ -501,12 +522,11 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	if !unchanged {
 		msg := lifecycleMessage(rec.Name, phase)
 		if phase == audit.SandboxPhaseError {
-			// Why, and the way on: OpenShell neither stops nor starts a
-			// sandbox in its error phase (GAP-0278).
+			// Why, and the way on (GAP-0278).
 			if rec.PhaseReason != "" {
 				msg += " (" + rec.PhaseReason + ")"
 			}
-			msg += "; " + errorPhaseWayOn(rec.Name, rec.WorkdirMode, rec.PhaseReason)
+			msg += "; " + errorPhaseWayOn(rec.Name, rec.PhaseReason, m.upgradeWayOn(release), stopLosesWrites(rec.Driver))
 		}
 		m.feed.Publish(sandboxapi.ActivityEvent{
 			Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
@@ -517,26 +537,313 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "MEDIUM",
 			Reason: sandboxapi.ReasonUnflushedStop, Message: unflushedStopMessage(rec.Name)})
 	}
+	if phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(rec.SessionRelease) {
+		// Once a session, and again for a restarted daemon that finds it
+		// still running: either way DefenseClaw stops it (GAP-0415).
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
+			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorMessage(rec.Name, rec.SessionRelease, m.upgradeWayOn(release))})
+		m.scheduleOldSupervisorStop(b)
+	}
 	m.syncGuard(b, phase)
 	m.syncObserve(b, phase)
 }
 
-// errorPhaseWayOn is what to do about a sandbox in OpenShell's error phase,
-// which it can neither stop nor start: its container stopped (a Docker
-// restart stops every one) or its workload failed. Deleting it keeps the
-// folder's changes, and with --keep-snapshot the undo point; a copy's work
-// that was never pulled goes with it.
-func errorPhaseWayOn(name, mode, reason string) string {
-	if reason == overlayDiskFullText {
+// phaseMissing is the phase of the view of a sandbox OpenShell no longer
+// has, whose state DefenseClaw still holds.
+const phaseMissing audit.SandboxPhase = "missing"
+
+// HoldsCompute reports whether the sandbox v, as the manager reports it,
+// keeps what stops its OpenShell gateway on its own (a managed setup
+// switch, the daemon's idle stop of the gateway, its exit for a pending
+// restart) from stopping it: openshell.HoldsGateway on its phase (as
+// sandboxapi spells it), error-phase reason and compute driver ("" is
+// docker). Only OpenShell's own state releases a MicroVM: stopped,
+// deleting, deleted, missing (OpenShell no longer has it), or the error
+// state with its VM gone. Every other phase holds, an unknown or empty
+// one included, and so does a MicroVM whose workload completed or failed,
+// which keeps running until it is deleted or its gateway stops (GAP-0012),
+// with what its workload left running, and which OpenShell does not stop.
+func HoldsCompute(v sandboxapi.Sandbox) bool {
+	return holdsCompute(audit.SandboxPhase(v.Phase), v.Driver, v.PhaseReason)
+}
+
+// holdsCompute is HoldsCompute on a sandbox's phase, driver and
+// error-phase reason (the record's PhaseReason).
+func holdsCompute(phase audit.SandboxPhase, driver, reason string) bool {
+	switch phase {
+	case audit.SandboxPhaseStopped, audit.SandboxPhaseDeleting, audit.SandboxPhaseDeleted, phaseMissing:
+		return false
+	case audit.SandboxPhaseCompleted:
+		return openshell.HoldsGateway(openshell.PhaseCompleted, reason, !stopLosesWrites(driver))
+	case audit.SandboxPhaseError:
+		return openshell.HoldsGateway(openshell.PhaseError, reason, !stopLosesWrites(driver))
+	}
+	return true
+}
+
+// stopLosesWrites reports a compute driver (a record's: "" is docker) whose
+// stop does not keep what the workload has not synced: the MicroVM driver,
+// and one this build does not know.
+func stopLosesWrites(driver string) bool {
+	d, ok := openshell.LookupDriver(driver)
+	return !ok || !d.StopFlushes
+}
+
+// errorPhaseWayOn is what to do about a sandbox in OpenShell's error phase:
+// its container stopped (a Docker restart stops every one), its workload
+// failed, or OpenShell gave up provisioning it. A gateway that runs
+// sandboxes (openshell.SupportedMin and later) stops a sandbox in that phase
+// and starts it again after (NVIDIA/OpenShell#4231), which keeps the
+// sandbox and its work, except after a provisioning timeout: OpenShell
+// refuses that stop while its own cleanup reclaims what the attempt started,
+// and a start after the cleanup provisions the sandbox again. An older
+// gateway can neither stop nor start it: upgrade (upgradeWayOn, "" on a
+// gateway that runs sandboxes) is how OpenShell is upgraded first, and the
+// way on after it is the one of the upgraded gateway, which for a
+// provisioning timeout is still the start with no stop. On a MicroVM
+// (microVM) that holds the gateway (openshell.HoldsGateway: every error
+// state but a VM that is gone) the upgrade is refused, since that VM may
+// still run and the older gateway neither stops nor starts it: only its
+// delete lets the upgrade go ahead.
+func errorPhaseWayOn(name, reason, upgrade string, microVM bool) string {
+	switch {
+	case reason == overlayDiskFullText:
 		return overlayDiskWayOn(name)
+	case upgrade != "" && microVM && openshell.HoldsGateway(openshell.PhaseError, reason, false):
+		return "this OpenShell can neither stop nor start a sandbox in its error state, and DefenseClaw stops no OpenShell gateway, so upgrades none, " +
+			"while OpenShell has not reported a MicroVM on it stopped: `defenseclaw sandbox delete " + name + "` deletes it and its work, after which " + upgrade
+	case upgrade != "" && openshell.ProvisioningTimedOut(reason):
+		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then wait a minute for OpenShell's cleanup of " +
+			"the provisioning that timed out and `defenseclaw sandbox start " + name + "` (no stop: OpenShell " + openshell.SupportedMin +
+			" refuses to stop a sandbox whose provisioning timed out), which provisions it again"
+	case upgrade != "":
+		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then `defenseclaw sandbox stop " + name +
+			"` and `defenseclaw sandbox start " + name + "`, which keep the sandbox and its work"
+	case microVM && openshell.LingeringVM(openshell.PhaseError, reason, false):
+		// Its stop is returned as it is, and its start ends the VM with
+		// no flush: neither keeps all of its work.
+		return openshell.StopWayOn(name, openshell.PhaseError, reason, true)
+	case openshell.ProvisioningTimedOut(reason):
+		return "OpenShell gave up provisioning it and refuses to stop it while its own cleanup reclaims what it started: wait a minute, then `defenseclaw sandbox start " +
+			name + "` (no stop), which provisions it again; a start that says the cleanup is still pending is tried again a little later"
 	}
-	way := "OpenShell can neither stop nor start a sandbox in its error state (its container stopped: Docker restarted, or the workload failed): " +
-		"`defenseclaw sandbox delete " + name + " --keep-snapshot` keeps the undo point and the folder's changes, then run again"
-	if mode == config.OpenShellWorkdirCopy {
-		way = "OpenShell can neither stop nor start a sandbox in its error state (its container stopped: Docker restarted, or the workload failed), " +
-			"and its copy's work that was not pulled cannot be read any more: `defenseclaw sandbox delete " + name + "`, then run again"
+	return "fix what stopped it (start Docker again, for one), then `defenseclaw sandbox stop " + name +
+		"` and `defenseclaw sandbox start " + name + "`, which keep the sandbox and its work"
+}
+
+// upgradeWayOn is how this host's OpenShell is upgraded when the gateway
+// release (as its health reported it) runs no sandbox work
+// (openshell.SupportedMin), "" when it does or no gateway answered. On a
+// managed computer the release is the administrator's.
+func (m *Manager) upgradeWayOn(release string) string {
+	v, err := openshell.ParseVersion(release)
+	if err != nil || openshell.CheckSandboxRelease(v) == nil {
+		return ""
 	}
-	return way
+	if m.managedMode() {
+		return "on this managed computer the OpenShell release is your administrator's (enterprise.openshell.version): ask IT for " +
+			openshell.InstallerVersion + " or later; where DefenseClaw installs OpenShell for you, your gateway moves to it once OpenShell reports each of " +
+			"your sandboxes stopped (`defenseclaw sandbox stop NAME` flushes and stops a running one; this OpenShell neither stops nor starts a MicroVM " +
+			"whose workload completed or that is in its error state, which only `defenseclaw sandbox delete NAME` ends, with its work)"
+	}
+	return "upgrade OpenShell " + v.String() + " to " + openshell.InstallerVersion + " in place with `defenseclaw sandbox setup --install-openshell`"
+}
+
+// lingeringStartRefusal refuses the start of the sandbox name, which
+// OpenShell reports as sb on a gateway of driver d (reason: the record's
+// error-phase reason, for a sandbox whose conditions say none), when it is
+// a MicroVM whose VM may still run what its workload left running
+// (openshell.LingeringVM): OpenShell's start ends that VM with no flush
+// first, and nothing in OpenShell writes its disk back before, so what it
+// has not written to its disk is lost. Only a start that asks for that
+// (endVM: `start --end-vm`) goes ahead.
+func lingeringStartRefusal(name string, d openshell.Driver, sb *openshell.Sandbox, reason string, endVM bool) error {
+	if endVM || sb == nil {
+		return nil
+	}
+	said := openshell.FailureReason(sb)
+	if said == "" {
+		said = reason
+	}
+	if !openshell.LingeringVM(sb.Status.Phase, said, d.StopFlushes) {
+		return nil
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+		Message: "sandbox " + name + " was not started: it is a MicroVM that OpenShell reports " + strings.ToLower(string(sb.Status.Phase)) + "; " + openshell.LingeringVMLoss,
+		Detail: "`defenseclaw sandbox start " + name + " --end-vm` starts it all the same, and what its VM had not written to its disk is lost; `defenseclaw sandbox delete " +
+			name + "` deletes it and its work"}
+}
+
+// migrateBootstrap moves the Docker bootstrap of the sandbox name (sb, as
+// OpenShell reports it) that an OpenShell before 0.1.5 wrote to the format
+// of the gateway's release, which is 0.1.5 or later here
+// (sandboxReleaseRefusal), through Options.MigrateBootstrap, before a start
+// on a docker gateway. One it cannot move refuses the start: OpenShell's
+// start would fail on it, and nothing has changed yet.
+func (m *Manager) migrateBootstrap(gw *Gateway, name string, sb *openshell.Sandbox) error {
+	if m.opts.MigrateBootstrap == nil || gw.Driver.Name != openshell.DriverDocker || sb == nil || sb.ID == "" {
+		return nil
+	}
+	moved, err := m.opts.MigrateBootstrap(sb.ID)
+	if err != nil {
+		return legacyBootstrapError(name, gw.Version, err)
+	}
+	if len(moved) > 0 {
+		m.logf("sandbox %s: moved the Docker bootstrap an OpenShell before 0.1.5 wrote to the format of OpenShell %s (%s)", name, gw.Version, strings.Join(moved, ", "))
+	}
+	return nil
+}
+
+// legacyBootstrapRefusal is the failed start of the sandbox name whose
+// Docker bootstrap OpenShell release could not read because an OpenShell
+// before 0.1.5 wrote it (one migrateBootstrap did not find: the gateway
+// keeps its state in another folder, or one it could not list); nil for
+// another error.
+func legacyBootstrapRefusal(name, release string, err error) error {
+	if err == nil || !strings.Contains(err.Error(), "unknown field `outer_fence`") {
+		return nil
+	}
+	return legacyBootstrapError(name, release, err)
+}
+
+// legacyBootstrapError refuses the start of the sandbox name, whose Docker
+// bootstrap is still the one an OpenShell before 0.1.5 wrote.
+func legacyBootstrapError(name, release string, err error) error {
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+		Message: "sandbox " + name + " was not started: an OpenShell older than 0.1.5 created it, and OpenShell " + release +
+			" cannot read the Docker bootstrap it kept for it: " + err.Error(),
+		Detail: "DefenseClaw moves that bootstrap to the new format at the start, in OpenShell's state folder ($XDG_STATE_HOME/openshell, else ~/.local/state/openshell, " +
+			"under docker-sandbox-tokens): once its files there are yours and writable, `defenseclaw sandbox start " + name + "` again; the sandbox and its work are kept"}
+}
+
+// sandboxReleaseRefusal refuses sandbox work (a create, a start) on a
+// gateway older than openshell.SupportedMin.
+func (m *Manager) sandboxReleaseRefusal(gw *Gateway) error {
+	v, err := openshell.ParseVersion(gw.Version)
+	if err != nil {
+		return sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the OpenShell gateway reported an unrecognized release %q, so DefenseClaw runs no sandbox on it", gw.Version)
+	}
+	if err := openshell.CheckSandboxRelease(v); err != nil {
+		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: err.Error(), Detail: m.upgradeWayOn(gw.Version)}
+	}
+	return nil
+}
+
+// oldSupervisorWarning is the sandbox's warning while its session runs the
+// supervisor of an OpenShell release older than openshell.SupportedMin
+// (oldSupervisorMessage), which DefenseClaw stops (stopOldSupervisor): a
+// stop that has not happened yet, or failed.
+const oldSupervisorWarning = "this session may run the supervisor of an OpenShell older than " + openshell.SupportedMin +
+	", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494): " +
+	"DefenseClaw stops it, `defenseclaw sandbox exec` runs nothing in it, and `defenseclaw sandbox connect` stops it and starts it again " +
+	"on OpenShell " + openshell.SupportedMin + " or later"
+
+// oldSupervisorMessage is the feed's warning about the sandbox name whose
+// session started on OpenShell release (a record from before DefenseClaw
+// kept it: ""), older than openshell.SupportedMin: it runs that release's
+// supervisor until it stops, whatever the gateway runs now, so DefenseClaw
+// stops it (stopOldSupervisor). upgrade is the way on of a gateway that
+// starts no sandbox (Manager.upgradeWayOn).
+func oldSupervisorMessage(name, release, upgrade string) string {
+	msg := "⚠ " + name + "'s session started on OpenShell " + release + ", whose network broker can let the sandbox's connections bypass its policy " +
+		"(NVIDIA/OpenShell#4494), and it keeps that supervisor while it runs: "
+	if release == "" {
+		msg = "⚠ " + name + "'s session started before DefenseClaw kept the OpenShell release a session starts on, so it may run a supervisor older than " +
+			openshell.SupportedMin + ", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494): "
+	}
+	msg += "DefenseClaw stops it now, as `defenseclaw sandbox stop " + name + "` does; "
+	if upgrade != "" {
+		return msg + upgrade + ", then `defenseclaw sandbox start " + name + "` starts it on that release's supervisor"
+	}
+	return msg + "`defenseclaw sandbox start " + name + "` (or `connect`) starts it again on this gateway's supervisor"
+}
+
+// scheduleOldSupervisorStop stops in the background the sandbox of b, which
+// is ready on the supervisor of an OpenShell release older than
+// openshell.SupportedMin, or of one its record does not name (a record from
+// DefenseClaw 1.0.3 or older), unless that session is over by then. That
+// supervisor's network broker can let the sandbox's connections bypass its
+// policy (NVIDIA/OpenShell#4494) for as long as the session runs, whatever
+// the gateway runs now, so DefenseClaw leaves none running (GAP-0415): the
+// next start runs the gateway's own supervisor, and a gateway older than
+// SupportedMin starts none (sandboxReleaseRefusal). Once a stop is
+// scheduled, another sight of the session waits for it.
+func (m *Manager) scheduleOldSupervisorStop(b *box) {
+	m.mu.Lock()
+	if b.oldSupervisorStop {
+		m.mu.Unlock()
+		return
+	}
+	b.oldSupervisorStop = true
+	name, bindingID := b.rec.Name, b.rec.BindingID
+	m.mu.Unlock()
+	m.tamperStops.Add(1)
+	go func() {
+		defer m.tamperStops.Done()
+		defer func() {
+			m.mu.Lock()
+			b.oldSupervisorStop = false
+			m.mu.Unlock()
+		}()
+		m.stopOldSupervisor(name, bindingID)
+	}()
+}
+
+// retryOldSupervisorStop schedules the stop of b again while its session is
+// still ready on an old supervisor: a stop that failed (stopOldSupervisor)
+// returned it to ready, which lifecycle sees as no transition, so each
+// reconcile tries again, and the reconcile interval is the backoff
+// (GAP-0415).
+func (m *Manager) retryOldSupervisorStop(b *box) {
+	m.mu.Lock()
+	old := b.phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(b.rec.SessionRelease)
+	m.mu.Unlock()
+	if old {
+		m.scheduleOldSupervisorStop(b)
+	}
+}
+
+// stopOldSupervisor stops the sandbox name while the session bindingID
+// still runs an old supervisor (scheduleOldSupervisorStop). A stop that
+// fails leaves it running on it: the feed says so, and its view tells the
+// CLI (sandboxapi.Sandbox.OldSupervisor), whose exec refuses it and whose
+// connect stops it first.
+func (m *Manager) stopOldSupervisor(name, bindingID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
+	defer cancel()
+	b, unlock, err := m.lockBox(name)
+	if err != nil {
+		m.logf("old supervisor: stop %s: %v", name, err)
+		return
+	}
+	defer unlock()
+	m.mu.Lock()
+	release := b.rec.SessionRelease
+	current := b.rec.BindingID == bindingID && b.phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(release)
+	m.mu.Unlock()
+	if !current {
+		return
+	}
+	if err := m.stop(ctx, b); err != nil {
+		m.logf("old supervisor: stop %s: %v", name, err)
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
+			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorStopFailed(name, release, err)})
+		return
+	}
+	m.logf("old supervisor: stopped %s", name)
+}
+
+// oldSupervisorStopFailed is the feed's line for the sandbox name whose
+// session runs the supervisor of OpenShell release ("" when its record
+// names none) and which DefenseClaw could not stop (err).
+func oldSupervisorStopFailed(name, release string, err error) string {
+	which := "OpenShell " + release
+	if release == "" {
+		which = "an OpenShell release older than " + openshell.SupportedMin + ", as far as DefenseClaw knows"
+	}
+	return "⚠ DefenseClaw could not stop " + name + ", whose session still runs the supervisor of " + which +
+		" (NVIDIA/OpenShell#4494): " + err.Error() + "; stop it with `defenseclaw sandbox stop " + name +
+		"`: until it stops, `defenseclaw sandbox exec` runs nothing in it, and `defenseclaw sandbox connect` stops it first"
 }
 
 // unflushedStopMessage is the feed's warning about the MicroVM name that
@@ -596,12 +903,20 @@ func overlayDiskRefusal(name string, err error) error {
 
 // errorPhaseRefusal is OpenShell's refusal to stop or start the sandbox
 // name in its error phase as people read it ("Conflict: sandbox must be
-// Stopped, Completed, or a failed main-process Error to start"), or nil.
-func errorPhaseRefusal(name, mode, reason string, err error) error {
-	if err == nil || !openshell.IsConflict(err) || !strings.Contains(err.Error(), "current phase: Error") {
+// Stopped, Completed, or a failed main-process Error to start", or the
+// refusals after a provisioning timeout), or nil.
+func (m *Manager) errorPhaseRefusal(name, reason, driver string, err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case openshell.ProvisioningTimedOut(err.Error()):
+		if !openshell.ProvisioningTimedOut(reason) {
+			reason = "sandbox provisioning timed out"
+		}
+	case !openshell.IsConflict(err) || !strings.Contains(err.Error(), "current phase: Error"):
 		return nil
 	}
-	return errorPhaseError(name, mode, reason)
+	return errorPhaseError(name, reason, m.upgradeWayOn(m.gatewayRelease()), stopLosesWrites(driver))
 }
 
 // errorPhaseNow is errorPhaseRefusal for an operation whose error does not
@@ -610,13 +925,13 @@ func errorPhaseRefusal(name, mode, reason string, err error) error {
 // (restorePhase); nil unless that is the error phase (GAP-0337).
 func (m *Manager) errorPhaseNow(b *box) error {
 	m.mu.Lock()
-	name, mode, reason := b.rec.Name, b.rec.WorkdirMode, b.rec.PhaseReason
+	name, reason, driver := b.rec.Name, b.rec.PhaseReason, b.rec.Driver
 	inError := b.sb != nil && auditPhase(b.sb.Status.Phase) == audit.SandboxPhaseError
 	m.mu.Unlock()
 	if !inError {
 		return nil
 	}
-	return errorPhaseError(name, mode, reason)
+	return errorPhaseError(name, reason, m.upgradeWayOn(m.gatewayRelease()), stopLosesWrites(driver))
 }
 
 // connectionClosed reports a call that failed because the client's
@@ -627,12 +942,12 @@ func connectionClosed(err error) bool {
 }
 
 // errorPhaseError explains name's error phase, with the way on.
-func errorPhaseError(name, mode, reason string) error {
+func errorPhaseError(name, reason, upgrade string, microVM bool) error {
 	msg := name + " is in OpenShell's error state"
 	if reason != "" {
 		msg += ": " + reason
 	}
-	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: msg, Detail: errorPhaseWayOn(name, mode, reason)}
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: msg, Detail: errorPhaseWayOn(name, reason, upgrade, microVM)}
 }
 
 func lifecycleMessage(name string, phase audit.SandboxPhase) string {
@@ -870,7 +1185,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 	case b.retained:
 		v.Phase = string(audit.SandboxPhaseDeleted)
 	case b.missing:
-		v.Phase = "missing"
+		v.Phase = string(phaseMissing)
 	case b.sb != nil:
 		v.Phase = strings.ToLower(string(b.sb.Status.Phase))
 		v.ExitCode = b.sb.Status.ExitCode
@@ -896,6 +1211,10 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		}
 		v.StartedAt = started
 		v.UptimeSeconds = int64(m.now().Sub(started) / time.Second)
+	}
+	if b.phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(r.SessionRelease) {
+		v.Warnings = append(slices.Clone(v.Warnings), oldSupervisorWarning)
+		v.OldSupervisor = true
 	}
 	v.Hooks = sandboxapi.HookCoverage{
 		LastHookAt: b.hooks.lastHook, LastOTLPAt: b.hooks.lastOTLP, HookRequests: b.hooks.requests,

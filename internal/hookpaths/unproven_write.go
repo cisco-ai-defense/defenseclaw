@@ -158,7 +158,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
-		program, static := StaticWord(call.Args[0], home)
+		program, static := staticProgramWord(call.Args[0], home)
 		if !static {
 			set("dynamic-command", false)
 			return true
@@ -223,7 +223,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 				return true
 			}
 			if code, language, found := wrappedInterpreterCode(words); found {
-				if class, dynamic := unprovenInterpreterCode(code, language, cwd, home); class != "" {
+				if class, dynamic := unprovenInterpreterCode(code, language, cwd, home, false); class != "" {
 					set(class, dynamic)
 					return true
 				}
@@ -299,7 +299,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 				if len(call.Args) >= 2 {
 					if script, static := StaticWord(call.Args[1], home); static {
 						if content, ok := readIndirectSource(script, cwd); ok {
-							if class, dynamic := unprovenInterpreterCode(content, language, cwd, home); class != "" {
+							if class, dynamic := unprovenInterpreterCode(content, language, cwd, home, !pythonCallSetsImportPath(call)); class != "" {
 								set(class, dynamic)
 							}
 							if protectedReachFromText(content, cwd, home) &&
@@ -313,7 +313,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 				return true
 			}
 			if fixed && unprovenWriter.MatchString(code) {
-				if class, dynamic := unprovenInterpreterCode(code, language, cwd, home); class != "" {
+				if class, dynamic := unprovenInterpreterCode(code, language, cwd, home, !pythonCallSetsImportPath(call)); class != "" {
 					set(class, dynamic)
 				}
 				// A dynamic argument can steer code through argv, unless
@@ -797,7 +797,7 @@ func provedOrdinaryInterpreterPrefix(words []string, cwd, home string) bool {
 	if !found {
 		return false
 	}
-	class, _ := unprovenInterpreterCode(code, language, cwd, home)
+	class, _ := unprovenInterpreterCode(code, language, cwd, home, false)
 	return class == "" && interpreterProtectedUseSafe(code, language, cwd, home)
 }
 
@@ -1217,7 +1217,7 @@ func functionBodyMayWrite(body *syntax.Stmt, cwd, home string) bool {
 				code, _, fixed := interpreterCodeOperand(call, program, home)
 				if !fixed || len(literalInterpreterWrites(code, program)) > 0 {
 					mayWrite = true
-				} else if class, _ := unprovenInterpreterCode(code, program, cwd, home); class != "" {
+				} else if class, _ := unprovenInterpreterCode(code, program, cwd, home, !pythonCallSetsImportPath(call)); class != "" {
 					mayWrite = true
 				}
 			} else if !static || !slicesContainsString(dataPrograms, program) &&
@@ -1254,28 +1254,10 @@ var (
 	pythonPathAssignment = regexp.MustCompile(`^([A-Za-z_]\w*)\s*=\s*(?:pathlib\.)?Path(?:\.home\(\)(?:\s*/\s*['"][^'"\\]*['"])*|\(\s*['"]([^'"\\]+)['"]\s*\))$`)
 )
 
-var pythonHomePath = regexp.MustCompile(`\b(?:pathlib\.)?Path\.home\(\)((?:\s*/\s*['"][^'"\\]*['"])+)`)
-
 // pythonStringWriterText reports writer call text outside executable code.
 func pythonStringWriterText(code string) bool {
 	for _, location := range unprovenWriter.FindAllStringIndex(code, -1) {
 		if !pythonExecutableCodePosition(code, location[0]) {
-			return true
-		}
-	}
-	return false
-}
-
-// pythonProtectedHomePath reports a Path.home() / "..." expression, in code or
-// string text, that reaches a protected file or the SSH directory.
-func pythonProtectedHomePath(code, home string) bool {
-	protected, ssh := newProtectedFiles(home), filepath.Join(home, ".ssh")
-	for _, match := range pythonHomePath.FindAllStringSubmatch(code, 64) {
-		path := home
-		for _, segment := range strings.Split(match[1], "/")[1:] {
-			path = filepath.Join(path, strings.Trim(strings.TrimSpace(segment), `'"`))
-		}
-		if protectedReachPath(path, protected, ssh) {
 			return true
 		}
 	}
@@ -1314,20 +1296,42 @@ func pythonReboundReceiver(code string, call int) (string, bool) {
 	return destination, bound
 }
 
-func unprovenInterpreterCode(code, language, cwd, home string) (string, bool) {
+// PythonInertTextMasked is supplied by guardrail, which imports hookpaths.
+// With no callback, every byte remains potentially executable.
+var PythonInertTextMasked func(code, cwd string) string
+
+func pythonCallSetsImportPath(call *syntax.CallExpr) bool {
+	for _, assignment := range call.Assigns {
+		if assignment.Name == nil {
+			return true
+		}
+		if assignment.Name.Value == "PYTHONPATH" || assignment.Name.Value == "PYTHONHOME" {
+			return true
+		}
+	}
+	return false
+}
+
+func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (string, bool) {
 	if len(code) > 16<<10 {
 		return "interpreter-path", true
 	}
-	if (language == "python" || strings.HasPrefix(language, "python3")) && pythonStringWriterText(code) &&
-		pythonProtectedHomePath(code, home) {
-		// exec, eval, an f-string field, getattr or an agent-controlled
-		// sitecustomize or import can run string text, so a writer spelled
-		// in a string is not proved inert once the code builds the path.
+	scan := code
+	if maskInert && PythonInertTextMasked != nil &&
+		(language == "python" || strings.HasPrefix(language, "python3")) {
+		if masked := PythonInertTextMasked(code, cwd); len(masked) == len(code) {
+			scan = masked
+		}
+	}
+	if (language == "python" || strings.HasPrefix(language, "python3")) &&
+		scan == code && pythonStringWriterText(code) {
+		// A local module, import-path override or an executable string can
+		// run writer text that otherwise looks like inert Python data.
 		return "interpreter-path", true
 	}
 	if language == "python" || strings.HasPrefix(language, "python3") {
-		for _, location := range literalCopyCall.FindAllStringIndex(code, -1) {
-			if !pythonExecutableCodePosition(code, location[0]) {
+		for _, location := range literalCopyCall.FindAllStringIndex(scan, -1) {
+			if scan != code && !pythonExecutableCodePosition(code, location[0]) {
 				continue
 			}
 			api := strings.TrimSuffix(code[location[0]:location[1]], "(")
@@ -1378,9 +1382,9 @@ func unprovenInterpreterCode(code, language, cwd, home string) (string, bool) {
 			}
 		}
 	}
-	for _, location := range unprovenWriter.FindAllStringIndex(code, -1) {
+	for _, location := range unprovenWriter.FindAllStringIndex(scan, -1) {
 		if (language == "python" || strings.HasPrefix(language, "python3")) &&
-			!pythonExecutableCodePosition(code, location[0]) {
+			scan != code && !pythonExecutableCodePosition(code, location[0]) {
 			continue
 		}
 		call, ok := literalBoundedCall(code, location[1]-1)

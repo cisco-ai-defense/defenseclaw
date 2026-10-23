@@ -123,7 +123,7 @@ Before starting, pick the closest sibling and list its footprint: `git grep -l -
 
 ## 7. Docs
 - [ ] `docs-site/content/docs/connectors/<id>.mdx` with one `## Platform support` in the exact table form. Verify: `test_connector_pages_are_the_canonical_cross_platform_support_source`.
-- [ ] `connectors/meta.json` page. Verify: the same test.
+- [ ] `../<id>` entry in `connectors/(hook-connectors)/meta.json` or `(proxy-connectors)/meta.json`, and the same in `reference/connectors/`. Verify: the same test.
 - [ ] `connectors/index.mdx` platform row, families card, capability summary, count. Verify: platform row only (the same test).
 - [ ] `connectors/compatibility.mdx` rows, plus a pin test. Verify: the new pin.
 - [ ] `docs-site/data/capability-matrix.json` row (`windowsSupport` matching platform support). Verify: `TestDocsCapabilityMatrixMatchesConnectors`, `npm run test:feature-demos`.

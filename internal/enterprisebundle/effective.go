@@ -193,7 +193,8 @@ func loadConfigAtPath(b *Bundle, root, configPath, dataDir, platform string) (*c
 
 // bundleSecretProbe lets the canonical observability compiler check a bundle
 // before the target device's protected credentials are available. Verify's
-// secret_refs check confirms their presence on the device.
+// secret_refs check reads them on the device and compares each value with
+// the value_sha256 the bundle signs.
 type bundleSecretProbe struct{}
 
 func (bundleSecretProbe) ResolveObservabilitySecret(string) (string, bool) { return "probe", true }

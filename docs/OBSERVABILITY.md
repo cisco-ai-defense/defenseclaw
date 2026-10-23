@@ -2,7 +2,7 @@
 
 Configuration, setup, routing, redaction, destinations, dashboards, upgrades,
 and troubleshooting are documented in the
-[published observability guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/).
+[published observability guide](https://cisco-ai-defense.github.io/defenseclaw/docs/features/observability/).
 This file only maps the config-v8 implementation and its authoring sources.
 
 ## Authoritative sources
@@ -27,19 +27,19 @@ It is a schema artifact, not a second operator guide.
 
 ## Bundled integrations
 
-- [Local OpenTelemetry, Prometheus, Loki, Tempo, and Grafana](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/local-observability/)
-- [Grafana dashboard catalog](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/grafana-dashboards/)
-- [Agent360](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/agent360/)
-- [Splunk](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/splunk/)
-- [Galileo](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/galileo/)
+- [Local OpenTelemetry, Prometheus, Loki, Tempo, and Grafana](https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/run-grafana-locally/)
+- [Grafana dashboard catalog](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/observability/dashboards/)
+- [Agent360](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/observability/dashboards/#agent360)
+- [Splunk](https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/send-to-splunk/)
+- [Galileo](https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/send-to-galileo/)
 
 ## Alert runbooks
 
 The bundled Prometheus annotations target these canonical website sections:
 
-- [Schema violations](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/#runbook-schema-violations)
-- [Block SLO](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/#runbook-block-slo)
-- [Exporter stalled](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/#runbook-exporter-stalled)
-- [Audit sink](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/#runbook-audit-sink)
+- [Schema violations](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/observability/#runbook-schema-violations)
+- [Block SLO](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/observability/#runbook-block-slo)
+- [Exporter stalled](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/observability/#runbook-exporter-stalled)
+- [Audit sink](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/observability/#runbook-audit-sink)
 
 Keep those published anchors stable when changing alert annotations.

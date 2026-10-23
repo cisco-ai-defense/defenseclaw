@@ -2,7 +2,7 @@
 
 User setup, flags, destination configuration, and troubleshooting are
 maintained in the
-[published Splunk guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/splunk/).
+[published Splunk guide](https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/send-to-splunk/).
 
 This directory contains the Terraform source imported by
 `defenseclaw setup splunk dashboards apply`:

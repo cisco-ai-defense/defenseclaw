@@ -205,6 +205,13 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 			if view.use == "profile-explain" && query.Get("user") == "" {
 				return invalidLifecycleArguments(fmt.Errorf("--user is required to explain a guardrail profile"))
 			}
+			if view.use == "profile-explain" {
+				// The account as root resolves it, so explain needs no root-only
+				// lookup in the gateway service (GAP-0500).
+				if facts := enterpriseExplainCallerFacts(query.Get("user")); facts != "" {
+					query.Set("caller_facts", facts)
+				}
+			}
 			if aiOnly {
 				query.Set("ai_only", "true")
 			}
@@ -245,7 +252,19 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 				if _, err := enterpriseIdentityViewGet(path, &answer); err != nil {
 					return enterpriseIdentityViewError(err)
 				}
-				return printEnterpriseIdentityView(cmd.OutOrStdout(), addSandboxToProfileExplain(answer, cfg))
+				if err := printEnterpriseIdentityView(cmd.OutOrStdout(), addSandboxToProfileExplain(answer, cfg)); err != nil {
+					return err
+				}
+				// The gateway answers an account it cannot resolve with
+				// lookup_error and no user id; the answer is printed and the
+				// command fails, as `defenseclaw guardrail profile explain`
+				// does. A resolved account with no matching profile succeeds.
+				if lookupErr := unresolvedProfileExplainAccount(answer); lookupErr != "" {
+					failure := withExitCode(fmt.Errorf("user lookup failed: %s", lookupErr), enterprisestatus.UnixExitFailure)
+					silenceJSONReportedError(cmd, asJSON, failure)
+					return failure
+				}
+				return nil
 			}
 			if err := writeEnterpriseIdentityView(cmd.OutOrStdout(), path); err != nil {
 				return enterpriseIdentityViewError(err)
@@ -305,26 +324,37 @@ func enterpriseIdentityViewError(err error) error {
 	return withExitCode(err, enterprisestatus.UnixExitFailure)
 }
 
-// refuseUnknownIdentityViewAccount refuses a --user that names no account,
-// with the reason profile-explain gives and the spellings the view takes.
-func refuseUnknownIdentityViewAccount(user string) error {
+// unresolvedProfileExplainAccount returns the gateway's lookup_error when
+// the account it was asked about did not resolve (no subject.user_id).
+func unresolvedProfileExplainAccount(answer json.RawMessage) string {
 	var resolved struct {
 		LookupError string `json:"lookup_error"`
 		Subject     struct {
 			UserID string `json:"user_id"`
 		} `json:"subject"`
 	}
-	if _, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?user="+url.QueryEscape(user), &resolved); err != nil {
+	if json.Unmarshal(answer, &resolved) != nil || resolved.Subject.UserID != "" {
+		return ""
+	}
+	return resolved.LookupError
+}
+
+// refuseUnknownIdentityViewAccount refuses a --user that names no account,
+// with the reason profile-explain gives and the spellings the view takes.
+func refuseUnknownIdentityViewAccount(user string) error {
+	var answer json.RawMessage
+	if _, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?user="+url.QueryEscape(user), &answer); err != nil {
 		return enterpriseIdentityViewError(err)
 	}
-	if resolved.Subject.UserID != "" || resolved.LookupError == "" {
+	lookupErr := unresolvedProfileExplainAccount(answer)
+	if lookupErr == "" {
 		return nil
 	}
 	spellings := "the account name, user@domain as id prints it, DOMAIN\\name or the uid"
 	if runtime.GOOS == "windows" {
 		spellings = "the account name, DOMAIN\\name, .\\name or the SID"
 	}
-	return invalidLifecycleArguments(fmt.Errorf("%s; --user takes %s", resolved.LookupError, spellings))
+	return invalidLifecycleArguments(fmt.Errorf("%s; --user takes %s", lookupErr, spellings))
 }
 
 // enterprisePlatformGOOS is the GOOS of an `enterprise <platform>` group.

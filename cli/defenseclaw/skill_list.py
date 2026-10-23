@@ -184,8 +184,6 @@ def _list_skills_from_filesystem(
             skill_dir, connector=connector or cfg.active_connector()
         ):
             entry = discovered.name
-            if _is_openhands_installed_container(skill_dir, entry):
-                continue
             full = discovered.path
             if entry in seen:
                 continue
@@ -204,12 +202,6 @@ def _list_skills_from_filesystem(
     return rows
 
 
-def _is_openhands_installed_container(skill_dir: str, entry: str) -> bool:
-    return (
-        entry == "installed"
-        and os.path.basename(skill_dir) == "skills"
-        and os.path.basename(os.path.dirname(skill_dir)) == ".openhands"
-    )
 
 
 def _skill_dir_is_eligible(path: str) -> bool:

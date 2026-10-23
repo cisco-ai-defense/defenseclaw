@@ -47,7 +47,7 @@ func TestHookConnectorFromArgsAcceptsStandalonePerUserHookConnectors(t *testing.
 		}
 	}
 	// A plugin-only connector never executes the hook binary.
-	for _, name := range []string{"amp", "openhands"} {
+	for _, name := range []string{"amp"} {
 		if _, err := hookConnectorFromArgs([]string{"hook", "--connector", name}); err == nil {
 			t.Fatalf("%s accepted as an enterprise-managed hook connector", name)
 		}

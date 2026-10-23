@@ -308,7 +308,7 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 
 // TestResolveWatcherDirs_HookOnlyConnectorMatrix locks the watcher
 // contract for the hook-only connectors (hermes, cursor,
-// copilot, openhands). Two contracts differ from the
+// copilot). Two contracts differ from the
 // claudecode/codex matrix above and are pinned here:
 //
 //  1. Hermes exposes documented user/workspace plugins as read-only
@@ -320,7 +320,7 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 //     surface rather than applying one connector's plugin semantics to all
 //     hook-only connectors.
 //
-//  2. Skills support varies: hermes/cursor/copilot/openhands
+//  2. Skills support varies: hermes/cursor/copilot
 //     advertise their own skill paths so src.Skill must be
 //     watcherDirsFromConnector and the slice must contain a
 //     framework-owned subpath. This split is what justifies a dedicated
@@ -370,13 +370,6 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 			expectPluginSrc:  watcherDirsFromConnector,
 			expectPluginNone: true,
 		},
-		{
-			name:            "openhands",
-			ctor:            func() connector.Connector { return connector.NewOpenHandsConnector() },
-			expectSkillSrc:  watcherDirsFromConnector,
-			expectSkillFrag: filepath.Join(".agents", "skills"),
-			expectPluginSrc: watcherDirsFromDefault,
-		},
 	}
 
 	wcfg := config.GatewayWatcherConfig{}
@@ -409,27 +402,6 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 				t.Errorf("plugin dirs = %v, want empty for connector-owned command inventory", pluginDirs)
 			}
 		})
-	}
-}
-
-func TestResolveWatcherDirs_OpenHandsUsesPinnedWorkspace(t *testing.T) {
-	t.Parallel()
-
-	workspace := filepath.Join(t.TempDir(), "repo")
-	cfg := &config.Config{
-		Claw: config.ClawConfig{WorkspaceDir: workspace},
-	}
-	wcfg := config.GatewayWatcherConfig{}
-	wcfg.Skill.Enabled = true
-	wcfg.Plugin.Enabled = true
-
-	skillDirs, _, src := resolveWatcherDirs(cfg, connector.NewOpenHandsConnector(), wcfg)
-
-	if src.Skill != watcherDirsFromConnector {
-		t.Fatalf("skill source = %q, want %q", src.Skill, watcherDirsFromConnector)
-	}
-	if !anyContains(skillDirs, filepath.Join(workspace, ".agents", "skills")) {
-		t.Fatalf("OpenHands skill dirs = %v, want pinned workspace %s", skillDirs, workspace)
 	}
 }
 

@@ -320,7 +320,7 @@ func TestWindowsHomeGrantsIncludeTraversalAttributes(t *testing.T) {
 
 func TestVisualStudioEnabledNamesAcceptsShortEnumeration(t *testing.T) {
 	enabled, ok := visualStudioEnabledNames(func(limit int) ([]string, error) {
-		if limit != visualStudioMaxExtensions {
+		if limit != visualStudioMaxEnabledNames+1 {
 			t.Fatalf("limit = %d", limit)
 		}
 		return []string{"Example.Tool,1.0"}, io.EOF

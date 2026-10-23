@@ -41,34 +41,6 @@ class ModePickerHarness(App[str | None]):
         self.result = result
 
 
-def test_mode_picker_choices_cover_go_connectors() -> None:
-    assert [choice.wire for choice in MODE_PICKER_CHOICES] == [
-        "openclaw",
-        "zeptoclaw",
-        "claudecode",
-        "codex",
-        "hermes",
-        "cursor",
-        "devin",
-        "copilot",
-        "openhands",
-        "antigravity",
-        "opencode",
-        "amp",
-        "omnigent",
-        "kiro",
-    ]
-    assert choice_for_wire("claude-code").wire == "claudecode"
-    assert choice_for_hotkey("c").wire == "codex"
-    assert choice_for_hotkey("i").wire == "amp"
-    assert choice_for_hotkey("m").wire == "omnigent"
-    assert "refresh hooks" in preview_for_switch("codex", "codex")
-    assert "synchronous TypeScript policy plugin" in preview_for_switch("openclaw", "amp")
-    assert "ALLOW/ASK/DENY" in preview_for_switch("openclaw", "omnigent")
-    assert "Python policy runtime" in preview_for_switch("omnigent", "omnigent")
-    cursor = choice_for_wire("cursor")
-    assert "event-scoped deny" in cursor.tagline
-    assert "no native human approval" in cursor.tagline
 
 
 def test_mode_picker_hint_is_built_from_visible_rows() -> None:

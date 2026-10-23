@@ -1,0 +1,75 @@
+---
+title: Connector reference
+description: How connectors are built inside DefenseClaw, and the reference page for each agent's hook contract, files and limits.
+keywords:
+  - connector interface
+  - hook connector
+  - proxy connector
+---
+
+Every connector implements one Go interface, defined in [`internal/gateway/connector/connector.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/connector.go). Each connector reports only the capabilities its agent offers, so proxy routing, hooks, subprocess wrapping, telemetry and approval support differ per agent. Use the [capability matrix](/docs/reference/apis/capability-matrix) to compare them and the [hook contracts](/docs/reference/apis/hook-contracts) page for supported agent versions.
+
+## Per-agent pages
+
+Every reference page uses the same sections in the same order: Install surface, Hook events, Verdict mapping, Native ask, Fail mode, Limits.
+
+| Agent | Type | User page | Reference |
+| --- | --- | --- | --- |
+| Claude Code | Hook | [Claude Code](/docs/connectors/claudecode) | [Reference](/docs/reference/connectors/claudecode) |
+| Codex | Hook | [Codex](/docs/connectors/codex) | [Reference](/docs/reference/connectors/codex) |
+| GitHub Copilot CLI | Hook | [Copilot](/docs/connectors/copilot) | [Reference](/docs/reference/connectors/copilot) |
+| Cursor | Hook | [Cursor](/docs/connectors/cursor) | [Reference](/docs/reference/connectors/cursor) |
+| Devin | Hook | [Devin](/docs/connectors/devin) | [Reference](/docs/reference/connectors/devin) |
+| Antigravity | Hook | [Antigravity](/docs/connectors/antigravity) | [Reference](/docs/reference/connectors/antigravity) |
+| Kiro | Hook | [Kiro](/docs/connectors/kiro) | [Reference](/docs/reference/connectors/kiro) |
+| OpenCode | Plugin | [OpenCode](/docs/connectors/opencode) | [Reference](/docs/reference/connectors/opencode) |
+| Amp | Plugin | [Amp](/docs/connectors/amp) | [Reference](/docs/reference/connectors/amp) |
+| Hermes | Hook | [Hermes](/docs/connectors/hermes) | [Reference](/docs/reference/connectors/hermes) |
+| OpenClaw | Proxy | [OpenClaw](/docs/connectors/openclaw) | [Reference](/docs/reference/connectors/openclaw) |
+| ZeptoClaw | Proxy | [ZeptoClaw](/docs/connectors/zeptoclaw) | [Reference](/docs/reference/connectors/zeptoclaw) |
+
+## The interface
+
+| Method | Runs | Purpose |
+| --- | --- | --- |
+| `Name`, `Description` | Always | Identify the connector. |
+| `ToolInspectionMode`, `SubprocessPolicy` | Always | Report how tool calls are inspected and whether setup installs PATH shims. |
+| `Setup` | When an agent is wired in | Back up the agent config and add DefenseClaw's hooks, plugin or provider entries. |
+| `Teardown` | When an agent is taken out | Restore the config, or remove only DefenseClaw's entries. |
+| `VerifyClean` | After `Teardown`, and before another connector's `Setup` | Fail with a list of leftover hooks, env files, config patches or shims. |
+| `Authenticate` | On each request | Accept or refuse the caller. |
+| `Route` | On each proxied LLM request | Read the request signals the proxy needs. |
+| `SetCredentials` | At gateway boot | Give the connector the gateway token and master key. |
+
+Two optional interfaces cover the rest. `HookEndpoint` lets a connector declare its hook route, for example `/api/v1/codex/hook`, which the gateway's API server registers when it starts. `NotifyEndpoint` does the same for an auxiliary notify bridge. Cursor and the other hook-only connectors share `hook_only.go`. Other connectors have a file of their own, such as `claudecode.go`, `codex.go` and `devin.go`.
+
+<Flow
+  direction="TB"
+  caption="When a connector is installed or removed. The gateway and the enterprise installer call Setup. The connector commands, switching connectors and uninstalling call Teardown, and VerifyClean then checks for leftovers."
+>
+  <Node id="setup" kind="connector">{`Wire the agent in\nSetup backs up the config\nand adds the hooks`}</Node>
+  <Node id="teardown" kind="connector">{`Take it out\nTeardown restores the config`}</Node>
+  <Node id="verify" kind="connector">{`Check it is clean\nVerifyClean finds no leftovers`}</Node>
+  <Edge from="setup" to="teardown" label="on removal" variant="dashed" />
+  <Edge from="teardown" to="verify" label="then" />
+</Flow>
+
+<Flow
+  direction="TB"
+  caption="On every LLM request through the guardrail proxy. Authenticate accepts the gateway token (X-DC-Auth), the master key (Authorization: Bearer), or a loopback caller when no gateway token is set. Route reads the upstream, model, API key, stream flag and headers."
+>
+  <Node id="agent" kind="agent">{`Agent\nLLM request`}</Node>
+  <Node id="auth" kind="connector">{`Check the caller\nAuthenticate`}</Node>
+  <Node id="route" kind="connector">{`Read the request\nRoute`}</Node>
+  <Edge from="agent" to="auth" label="proxied" />
+  <Edge from="auth" to="route" label="accepted" />
+</Flow>
+
+## Hook and proxy paths
+
+| | Hook connector | Proxy connector |
+| --- | --- | --- |
+| Data path | The agent talks to its upstream directly. | The agent's model calls go through the guardrail proxy (port 4000 by default). |
+| Enforcement | Only the events the selected hook contract declares as blocking. | Request and response policy in the proxy, plus tool-call checks. |
+| Several at once | Yes, each with its own posture under `guardrail.connectors.<name>`. | No. A proxy connector owns the traffic plane. |
+| OS | Linux, macOS, Windows | Linux, macOS |

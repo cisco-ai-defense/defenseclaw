@@ -99,15 +99,59 @@ func windowsReadOnlyExtraReservedSID(sid, target string) bool {
 	return false
 }
 
+// windowsReadOnlyExtraBroadPrincipals are well-known groups that cover every
+// user, every logon of a kind (Windows adds the Dialup, Network, Batch,
+// Interactive and Service groups to the token of every such logon), or every
+// app container. An agent sandbox grants
+// its own group, never one of these, so a read grant to one is not tolerated.
+var windowsReadOnlyExtraBroadPrincipals = map[string]bool{
+	"S-1-1-0":      true, // Everyone
+	"S-1-2-0":      true, // Local
+	"S-1-2-1":      true, // Console Logon
+	"S-1-5-1":      true, // Dialup
+	"S-1-5-2":      true, // Network
+	"S-1-5-3":      true, // Batch
+	"S-1-5-4":      true, // Interactive
+	"S-1-5-6":      true, // Service
+	"S-1-5-7":      true, // Anonymous Logon
+	"S-1-5-11":     true, // Authenticated Users
+	"S-1-5-14":     true, // Remote Interactive Logon
+	"S-1-5-113":    true, // Local account
+	"S-1-5-114":    true, // Local account and member of Administrators group
+	"S-1-5-32-545": true, // Users
+	"S-1-5-32-546": true, // Guests
+	"S-1-5-32-547": true, // Power Users
+	"S-1-5-32-555": true, // Remote Desktop Users
+	"S-1-15-2-1":   true, // ALL APPLICATION PACKAGES
+	"S-1-15-2-2":   true, // ALL RESTRICTED APPLICATION PACKAGES
+}
+
+// windowsReadOnlyExtraBroadSID reports whether sid is a broad group: one of
+// windowsReadOnlyExtraBroadPrincipals, or Domain Users (513) or Domain Guests
+// (514) under any S-1-5-21-<a>-<b>-<c> domain.
+func windowsReadOnlyExtraBroadSID(sid string) bool {
+	sid = strings.ToUpper(strings.TrimSpace(sid))
+	if windowsReadOnlyExtraBroadPrincipals[sid] {
+		return true
+	}
+	if !strings.HasPrefix(sid, "S-1-5-21-") {
+		return false
+	}
+	parts := strings.Split(sid, "-")
+	return len(parts) == 8 && (parts[7] == "513" || parts[7] == "514")
+}
+
 // windowsReadOnlyExtraACE reports whether entry is an extra grant a managed
 // folder may carry: an explicit access-allowed ACE whose rights are all read
-// rights, for a principal the canonical DACL does not name.
+// rights, for a principal the canonical DACL does not name and that is not a
+// broad group.
 func windowsReadOnlyExtraACE(entry windowsDACLEntry, target string) bool {
 	return entry.aceType == windowsACEAccessAllowedType &&
 		entry.flags&^windowsACEExplicitInheritFlags == 0 &&
 		windowsReadOnlyAccessMask(entry.mask) &&
 		strings.TrimSpace(entry.sid) != "" &&
-		!windowsReadOnlyExtraReservedSID(entry.sid, target)
+		!windowsReadOnlyExtraReservedSID(entry.sid, target) &&
+		!windowsReadOnlyExtraBroadSID(entry.sid)
 }
 
 // windowsReadOnlyExtraTolerantPath reports whether path names a folder that

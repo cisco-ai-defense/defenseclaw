@@ -85,6 +85,7 @@ type GenerationState struct {
 // Writer is who records a generation and why, and the policy bundle it
 // installs (only the enterprise lifecycle sets the bundle fields).
 type Writer struct {
+	GenerationFloor          uint64
 	Actor                    string
 	LocalActor               string
 	Reason                   string
@@ -334,19 +335,16 @@ func (t *Txn) RecordGeneration(configSHA256 string, w Writer) (GenerationState, 
 		TransactionSummary:       w.TransactionSummary,
 	}
 	previous, err := ReadGenerationState(t.path)
-	switch err {
-	case nil:
-		next.Generation = previous.Generation + 1
-	default:
-		// Missing or corrupt: say so. A corrupt file may still carry a
-		// readable counter (ReadGenerationState salvages it); never go
-		// backwards from it.
-		next.Generation = 1
+	if err != nil {
+		// Preserve a salvageable counter and any live counter the lifecycle
+		// proved before stopping the gateway.
 		next.GenerationReset = true
-		if previous.Generation > 0 {
-			next.Generation = previous.Generation + 1
-		}
 	}
+	previousCounter := max(previous.Generation, w.GenerationFloor)
+	if previousCounter == ^uint64(0) {
+		return GenerationState{}, errors.New("configwrite: generation counter exhausted; restore the last verified generation record before retrying")
+	}
+	next.Generation = previousCounter + 1
 	encoded, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
 		return GenerationState{}, fmt.Errorf("configwrite: encode %s: %w", GenerationFileName, err)
@@ -358,19 +356,23 @@ func (t *Txn) RecordGeneration(configSHA256 string, w Writer) (GenerationState, 
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return GenerationState{}, fmt.Errorf("configwrite: read %s before update: %w", path, readErr)
 	}
+	// An existing record keeps its read access: the enterprise lifecycle
+	// gives it to the service group (0640), and a literal 0600 took that
+	// away on every update (p0 GAP-1153). Write and execute bits for group
+	// and other are never kept.
 	mode := os.FileMode(0o600)
 	if existed {
 		info, statErr := os.Stat(path)
 		if statErr != nil {
 			return GenerationState{}, fmt.Errorf("configwrite: stat %s before update: %w", path, statErr)
 		}
-		mode = info.Mode().Perm()
+		mode = info.Mode().Perm() & 0o644
 	}
 	write := t.generationWrite
 	if write == nil {
 		write = WriteFileDurable
 	}
-	if err := write(path, encoded, 0o600); err != nil {
+	if err := write(path, encoded, mode); err != nil {
 		// WriteFileDurable may have renamed the file before a directory fsync
 		// failed. Put the old record back before Commit restores config.yaml.
 		current, currentErr := os.ReadFile(path)
@@ -405,6 +407,27 @@ func (t *Txn) RecordGeneration(configSHA256 string, w Writer) (GenerationState, 
 // write-through on Windows), then an fsync of the directory on POSIX. A
 // failed directory fsync is an error.
 func WriteFileDurable(path string, data []byte, mode os.FileMode) error {
+	return WriteFileDurablePublished(path, data, mode, nil)
+}
+
+// SyncDir flushes dir so a new entry in it is durable (fsync on POSIX; a
+// no-op on Windows, where NTFS journals the directory).
+func SyncDir(dir string) error { return syncDir(dir) }
+
+// SyncFile flushes path, its owner and access included.
+func SyncFile(path string) error { return syncFile(path) }
+
+// syncPublished flushes the temp file again after publish changed its
+// owner and access, so the rename never makes durable a file whose access
+// a power loss can take back. A test replaces it.
+var syncPublished = syncFile
+
+// WriteFileDurablePublished is WriteFileDurable with publish run on the
+// written and closed temp file before the rename, to give it its final
+// owner and access: path never exists with the temp file's. The temp file
+// is flushed again after publish, before the rename. A publish error
+// removes the temp file and leaves path as it was.
+func WriteFileDurablePublished(path string, data []byte, mode os.FileMode, publish func(tmp string) error) error {
 	if mode == 0 {
 		mode = 0o600
 	}
@@ -433,6 +456,14 @@ func WriteFileDurable(path string, data []byte, mode os.FileMode) error {
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("configwrite: close %s: %w", tmpName, err)
+	}
+	if publish != nil {
+		if err := publish(tmpName); err != nil {
+			return err
+		}
+		if err := syncPublished(tmpName); err != nil {
+			return fmt.Errorf("configwrite: fsync %s after publish: %w", tmpName, err)
+		}
 	}
 	if err := replaceDurable(tmpName, path); err != nil {
 		return fmt.Errorf("configwrite: replace %s: %w", path, err)

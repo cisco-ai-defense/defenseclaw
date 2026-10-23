@@ -886,16 +886,12 @@ func friendlyConnectorName(name string) string {
 		return "Devin"
 	case "copilot":
 		return "GitHub Copilot CLI"
-	case "openhands":
-		return "OpenHands"
 	case "antigravity":
 		return "Antigravity"
 	case "opencode":
 		return "OpenCode"
 	case "amp":
 		return "Amp"
-	case "omnigent":
-		return "OmniGent"
 	case "kiro":
 		return "Kiro"
 	default:

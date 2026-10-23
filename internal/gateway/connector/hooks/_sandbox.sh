@@ -138,7 +138,7 @@ defenseclaw_sandbox_require_token() {
   if [ -z "$reason" ]; then
     return 0
   fi
-  defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport closed
+  defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport closed fail_closed
   echo "defenseclaw: ${reason}, blocking ${subject} (sandbox hooks fail closed)" >&2
   exit 2
 }

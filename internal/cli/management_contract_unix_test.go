@@ -422,13 +422,16 @@ func TestManagementContractUnixSecretFlagErrorsPrintTheFailureDocument(t *testin
 	}
 }
 
-// TestManagementContractBundleApplyArgumentErrorsPrintNoJSON pins guide
-// section 2.3: on a managed device, `bundle apply` argument errors print
-// nothing on stdout and exit 2, so the agent classifies them by the exit
-// code alone (bundle verify and anchors install print invalid_arguments).
-func TestManagementContractBundleApplyArgumentErrorsPrintNoJSON(t *testing.T) {
+// TestManagementContractBundleApplyArgumentErrors: on a managed device, a
+// `bundle apply --json` argument error prints one refusal document with
+// invalid_arguments and exits 2, also when --json follows the bad argument
+// (the parse stopped before it). Without --json stdout stays empty.
+func TestManagementContractBundleApplyArgumentErrors(t *testing.T) {
+	schemas := contracttest.Compile(t)
 	e := newBundleCLIEnv(t)
 	bundleDevice(t, e)
+	savedArgs := secretRawArgs
+	t.Cleanup(func() { secretRawArgs = savedArgs })
 	bundle := filepath.Join(e.dir, "policy.dcbundle")
 	for name, args := range map[string][]string{
 		"no --bundle":           {"apply", "--json"},
@@ -447,9 +450,17 @@ func TestManagementContractBundleApplyArgumentErrorsPrintNoJSON(t *testing.T) {
 		"--delivery-id with a non-ASCII": {"apply", "--bundle", bundle, "--delivery-id", "agent\u00e97", "--json"},
 	} {
 		t.Run(name, func(t *testing.T) {
+			secretRawArgs = func() []string { return append([]string{"enterprise", "bundle"}, args...) }
 			out, code := runBundle(t, args...)
-			if out != "" || code != 2 {
-				t.Fatalf("apply %v: exit %d, stdout %q; want exit 2 and no stdout", args, code, out)
+			doc := schemas.Validate(t, "bundle-refused.schema.json", []byte(out))
+			errs, _ := doc["errors"].([]any)
+			if code != 2 || len(errs) != 1 || errs[0].(map[string]any)["code"] != "invalid_arguments" || strings.Count(out, `"schema_version"`) != 1 {
+				t.Fatalf("apply %v: exit %d, stdout %q; want exit 2 and one invalid_arguments document", args, code, out)
+			}
+			secretRawArgs = func() []string { return nil }
+			text := args[:len(args)-1]
+			if out, code := runBundle(t, text...); out != "" || code != 2 {
+				t.Fatalf("apply %v without --json: exit %d, stdout %q; want exit 2 and no stdout", text, code, out)
 			}
 		})
 	}

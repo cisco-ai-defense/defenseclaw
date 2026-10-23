@@ -447,7 +447,17 @@ func TestRulePackRejectsTooManySemanticRules(t *testing.T) {
 		Category: "custom",
 		Rules:    rules,
 	}}
-	requireRulePackError(t, pack.Validate(), "semantic_rule_count_limit")
+	err := pack.Validate()
+	requireRulePackError(t, err, "semantic_rule_count_limit")
+	// GAP-0965: the refusal names the count and the limit, no file of the
+	// composed catalog, and how to fix it.
+	var packErr *RulePackError
+	if !errors.As(err, &packErr) || packErr.Path != "." ||
+		!strings.Contains(packErr.Reason, fmt.Sprintf("%d rules with an expression", maxSemanticRules+1)) ||
+		!strings.Contains(packErr.Reason, fmt.Sprintf("limit of %d", maxSemanticRules)) ||
+		!strings.Contains(packErr.CandidateRemedy(), "fewer rules") {
+		t.Fatalf("refusal %#v, remedy %q", packErr, packErr.CandidateRemedy())
+	}
 }
 
 func TestLoadRulePackDuplicateRulesAndCategories(t *testing.T) {

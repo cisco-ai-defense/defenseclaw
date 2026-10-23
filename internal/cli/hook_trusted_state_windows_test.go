@@ -127,6 +127,8 @@ func stageTrustedNativeHookForTest(t *testing.T, failMode string) (string, strin
 		"version":      2,
 		"gateway_addr": "127.0.0.1:18971",
 		"fail_modes":   map[string]string{"claudecode": failMode},
+		// This release renders the sidecar with the source of each mode.
+		"fail_mode_sources": map[string]string{"claudecode": "config"},
 	}
 	data, err = json.Marshal(sidecar)
 	if err != nil {
@@ -167,7 +169,11 @@ func TestBuildHookOptionsPackagedWindowsIgnoresLooseningProjectEnv(t *testing.T)
 	}
 }
 
-func TestBuildHookOptionsPackagedWindowsAllowsTighteningProjectEnv(t *testing.T) {
+// The packaged hook keeps its installed fail mode: DEFENSECLAW_FAIL_MODE in
+// the agent's environment is not read, so status, which reads the same
+// sidecar, reports what runs (1.0.4 lead directive). Strict availability and
+// a lower body cap still tighten.
+func TestBuildHookOptionsPackagedWindowsTakesItsInstalledModeAndTighteningKnobs(t *testing.T) {
 	_, trustedHome := stageTrustedNativeHookForTest(t, "open")
 	t.Setenv("DEFENSECLAW_HOME", filepath.Join(t.TempDir(), "attacker-home"))
 	t.Setenv("DEFENSECLAW_FAIL_MODE", "closed")
@@ -175,8 +181,8 @@ func TestBuildHookOptionsPackagedWindowsAllowsTighteningProjectEnv(t *testing.T)
 	t.Setenv("DEFENSECLAW_HOOK_MAX_BODY", "4096")
 
 	opts := buildHookOptions("claudecode", "PreToolUse", "", "")
-	if opts.Home != trustedHome || opts.FailMode != "closed" || !opts.StrictAvailability || opts.MaxBody != 4096 {
-		t.Fatalf("tightening environment was not honored safely: %+v", opts)
+	if opts.Home != trustedHome || opts.FailMode != "open" || !opts.StrictAvailability || opts.MaxBody != 4096 {
+		t.Fatalf("the installed mode or a tightening knob was not honored: %+v", opts)
 	}
 }
 

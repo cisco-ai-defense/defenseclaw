@@ -16,6 +16,7 @@
 
 """Tests for the guardrail integration — config, utilities, and CLI command."""
 
+import copy
 import hashlib
 import json
 import os
@@ -1086,10 +1087,11 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(self.app.cfg.guardrail.connector, "claudecode")
         self.assertEqual(self.app.cfg.guardrail.mode, "action")
 
-    def test_non_interactive_missing_action_connector_downgrades_to_observe(self):
+    def test_non_interactive_missing_action_connector_refuses_without_saving(self):
         from defenseclaw.commands.cmd_setup import setup
 
         self.app.cfg.claw.home_dir = self.tmp_dir
+        before = copy.deepcopy(self.app.cfg.guardrail)
         signal = SimpleNamespace(version="", installed=False, error="", binary_path="")
         disc = SimpleNamespace(agents={"claudecode": signal})
 
@@ -1117,11 +1119,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 obj=self.app,
             )
 
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("Claude Code: connector was not detected locally", result.output)
-        self.assertIn("Claude Code: requested action mode was refused", result.output)
-        self.assertEqual(self.app.cfg.guardrail.connector, "claudecode")
-        self.assertEqual(self.app.cfg.guardrail.mode, "observe")
+        self.assertIn("defenseclaw setup guardrail", result.output)
+        self.assertEqual(self.app.cfg.guardrail, before)
 
     def test_non_interactive_codex_observe_flag_enables_enforcement(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1749,9 +1750,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         checked = {call.args[0] for call in version_check.call_args_list}
         self.assertEqual(checked, {"codex", "claudecode"})
 
-    def test_interactive_multi_connector_downgrades_refused_action_mode(self):
-        """Action connectors refused by setup guardrail validation fall back
-        to observe so status reflects effective posture after the run."""
+    def test_interactive_multi_connector_refuses_unverified_action_mode(self):
         from defenseclaw.commands.cmd_setup import setup
         from defenseclaw.config import PerConnectorGuardrailConfig
 
@@ -1763,6 +1762,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             "cursor": PerConnectorGuardrailConfig(mode="action"),
             "claudecode": PerConnectorGuardrailConfig(mode="action"),
         }
+        before = copy.deepcopy(gc)
 
         def version_gate(connector, *, mode="observe", **_kwargs):
             return not (connector == "cursor" and mode == "action")
@@ -1784,14 +1784,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 input="\n" * 15,
             )
 
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn(
-            "Cursor: requested action mode was refused; configuring observe mode instead.",
-            result.output,
-        )
-        execute_setup.assert_called_once()
-        self.assertEqual(gc.connectors["cursor"].mode, "observe")
-        self.assertEqual(gc.connectors["claudecode"].mode, "action")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("did not pass connector preflight", result.output)
+        execute_setup.assert_not_called()
+        self.assertEqual(self.app.cfg.guardrail, before)
 
     def test_interactive_multi_connector_offers_hilt_when_any_action(self):
         """In multi-connector mode HILT is gated on whether ANY connector
@@ -2348,69 +2344,6 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 f"must not restart openclaw when a different connector is selected; got {commands}",
             )
 
-    @patch("defenseclaw.commands.cmd_setup.ux.subhead")
-    @patch("defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api", return_value=True)
-    @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=True)
-    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-    def test_multi_connector_omnigent_hint_reports_gateway_ready_policy_unverified(
-        self,
-        _mock_restart,
-        _mock_wait,
-        _mock_api,
-        mock_subhead,
-    ):
-        from defenseclaw.commands.cmd_setup import _restart_services
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_services(
-                tmpdir,
-                connector=None,
-                connectors=["codex", "omnigent"],
-                wait_for_connector_ready=True,
-            )
-
-        messages = [call.args[0] for call in mock_subhead.call_args_list]
-        self.assertTrue(any("DefenseClaw gateway registration is ready" in message for message in messages))
-        self.assertTrue(any("loaded policy generation" in message for message in messages))
-        self.assertTrue(any("unverified pending reload/restart" in message for message in messages))
-        self.assertTrue(all("enforcement via" not in message for message in messages))
-
-    @patch("defenseclaw.commands.cmd_setup.ux.subhead")
-    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-    def test_multi_connector_restart_without_readiness_gate_names_only_omnigent(
-        self,
-        _mock_restart,
-        mock_subhead,
-    ):
-        # GAP-2630: `agent discovery enable` restarts without a readiness
-        # wait; the roster must not read "registration is not verified".
-        from defenseclaw.commands.cmd_setup import _restart_services
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_services(tmpdir, connector="codex", connectors=["codex", "claudecode", "omnigent"])
-
-        messages = [call.args[0] for call in mock_subhead.call_args_list]
-        self.assertTrue(all("not verified" not in message for message in messages))
-        self.assertTrue(any("enforcement via" in message for message in messages))
-        self.assertTrue(any(m.startswith("OmniGent:") and "defenseclaw doctor" in m for m in messages))
-
-    @patch("defenseclaw.commands.cmd_setup.ux.subhead")
-    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-    def test_omnigent_hint_without_readiness_gate_does_not_claim_gateway_ready(
-        self,
-        _mock_restart,
-        mock_subhead,
-    ):
-        from defenseclaw.commands.cmd_setup import _restart_services
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_services(tmpdir, connector="omnigent")
-
-        messages = [call.args[0] for call in mock_subhead.call_args_list]
-        self.assertTrue(any("gateway registration is not verified" in message for message in messages))
-        self.assertTrue(all("gateway registration is ready" not in message for message in messages))
-        self.assertTrue(all("enforcement via" not in message for message in messages))
-
     @patch("defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
@@ -2533,8 +2466,8 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 return value
 
             for requested in (
-                ["claudecode", "codex", "cursor", "omnigent"],
-                ["claudecode", "codex", "cursor", "omnigent", "opencode"],
+                ["claudecode", "codex", "cursor", ],
+                ["claudecode", "codex", "cursor",  "opencode"],
             ):
                 with self.subTest(requested=requested):
                     clock = Clock()
@@ -2686,7 +2619,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             def sleep(self, _seconds):
                 self.now += 10.0
 
-        expected = ["claudecode", "codex", "cursor", "omnigent", "opencode"]
+        expected = ["claudecode", "codex", "cursor",  "opencode"]
         baseline = {name: f"old-{name}" for name in expected}
         clock = Clock()
 
@@ -2769,7 +2702,6 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             "codex",
             "copilot",
             "devin",
-            "omnigent",
             "opencode",
         ]
         clock = SimpleNamespace(now=0.0)
@@ -2823,7 +2755,6 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             "codex",
             "copilot",
             "devin",
-            "omnigent",
             "opencode",
         ]
         clock = SimpleNamespace(now=0.0)

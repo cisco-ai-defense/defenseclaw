@@ -101,6 +101,10 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 			{Path: l.LogDir, Mode: 0o755, Owner: root},
 			{Path: filepath.Join(l.LogDir, "gateway"), Mode: 0o750, Owner: service},
 			{Path: l.HookSocketDir, Mode: 0o755, Owner: service},
+			// The gateway's protected foreign-hook session records: the
+			// gateway makes one 0700 folder per account in it, readable by
+			// that account through one ACL entry (GAP-0352).
+			{Path: l.HookSessionDir, Mode: 0o711, Owner: service},
 		}
 	}
 	return []desiredDir{
@@ -125,6 +129,10 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 		// tmpfiles recreates it at boot; the gateway binds hook.sock here
 		// when it runs without socket activation.
 		{Path: l.HookSocketDir, Mode: 0o755, Owner: service},
+		// The gateway's protected foreign-hook session records (GAP-0352);
+		// tmpfiles recreates it at boot with the hook socket directory, which
+		// holds the records' key.
+		{Path: l.HookSessionDir, Mode: 0o711, Owner: service},
 	}
 }
 

@@ -253,6 +253,10 @@ type Env struct {
 	// RefuseCapabilityLoss makes a bundle apply refuse capability loss
 	// before it changes the installed config.
 	RefuseCapabilityLoss bool
+	// DeferRestart makes a bundle apply refuse, before it changes anything,
+	// a bundle whose config change restarts the gateway (restart_deferred,
+	// the retry exit code).
+	DeferRestart bool
 	// bundleFault is a test seam: it runs at each named phase of a bundle
 	// apply (received, verified, staged, transaction, applied, committed)
 	// and an error fails the apply there; at committed the run stops before

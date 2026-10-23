@@ -55,10 +55,20 @@ class PolicyCompilerExitTest(unittest.TestCase):
                 ('unsupported_canary', 'iot_extensions:\n  canary:\n    enabled: true\n', ()),
                 ('unsupported_rate', 'iot_extensions:\n  rate_limits:\n    tool_calls_per_minute: 1\n', ()),
                 ('unsupported_escalation', 'iot_extensions:\n  escalation_mode:\n    net_fetch: sync_block\n', ()),
+                ('policy_name', 'name: 1\n', ()),
+                ('sequence_action', 'iot_extensions:\n  capability_sequences:\n    - sequence: [read_fs, send_msg]\n      action: typo\n', ()),
+                ('sequence_type', 'iot_extensions:\n  capability_sequences:\n    - sequence: read_fs\n', ()),
+                ('unknown_capability', 'iot_extensions:\n  capability_sequences:\n    - sequence: [read_fs, typo]\n', ()),
+                ('long_sequence', 'iot_extensions:\n  capability_sequences:\n    - sequence: [read_fs, read_fs, read_fs, read_fs, send_msg]\n', ()),
+                ('runtime_action', 'skill_actions:\n  critical:\n    runtime: typo\n', ()),
+                ('unknown_severity', 'skill_actions:\n  typo:\n    runtime: disable\n', ()),
+                ('canary_type', 'iot_extensions:\n  canary:\n    baseline_blocks_per_min: true\n', ()),
                 ('reserved_version', VALID.read_text(), ('--version', '65535')),
                 ('oversize', VALID.read_text(), ('--target-partition-size', '1')),
             ):
                 with self.subTest(name=name):
+                    work = Path(temp) / name
+                    work.mkdir()
                     policy = work / f'{name}.yaml'
                     policy.write_text(source)
                     result = self.compile(work, policy, *extra)
@@ -72,6 +82,10 @@ class PolicyCompilerExitTest(unittest.TestCase):
             work = Path(temp)
             result = self.compile(work, work / 'missing.yaml')
             self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('Cannot read policy input:', result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+            self.assertFalse((work / 'policy.bin').exists())
+            self.assertFalse((work / 'policy_tables.h').exists())
 
     def test_valid_policy_compiles(self):
         with tempfile.TemporaryDirectory() as temp:

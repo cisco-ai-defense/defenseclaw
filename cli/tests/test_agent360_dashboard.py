@@ -1104,7 +1104,7 @@ def test_collector_derives_agent_span_metrics_and_fans_them_to_prometheus() -> N
     assert "receivers: [otlp, spanmetrics/agent360]" in config
     assert "exporters: [prometheusremotewrite/prometheus, debug]" in config
     assert "deltatocumulative:" in config
-    assert "processors: [resource, deltatocumulative, batch]" in config
+    assert "processors: [resource, filter/managed-sandbox-out, deltatocumulative, batch]" in config
     assert "endpoint: 0.0.0.0:8889" not in config
     assert "readers:" in config
     assert "without_type_suffix: true" in config

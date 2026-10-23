@@ -253,11 +253,25 @@ func (b *bundleHost) signed(version uint64, cfg string) *enterprisebundle.Bundle
 		writeRooted(t, filepath.Join(root, filepath.FromSlash(name)), content)
 		files.Files[name] = []byte(content)
 	}
+	// Bind each credential to the value the host stores, else to one it
+	// does not hold.
+	names, err := enterprisebundle.ConfigCredentials([]byte(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string][]byte{}
+	for _, name := range names {
+		value, err := os.ReadFile(b.env.P(filepath.Join(b.env.Layout.SecretsDir, name)))
+		if err != nil {
+			value = []byte("unstored-" + name)
+		}
+		values[name] = value
+	}
 	_, manifest, err := enterprisebundle.Compose(context.Background(), enterprisebundle.ComposeInput{
 		Bundle: files, Root: root, BundleID: fmt.Sprintf("b-01JA%022d", version), TenantID: "acme", DeviceGroup: "eng",
 		Platforms: []string{b.env.GOOS}, Version: version, CreatedAt: time.Now().Add(-time.Hour), CreatedBy: "operator:mdm-admin",
 		ChangeSummary: fmt.Sprintf("version %d", version), ProductVersion: b.env.ProductVersion, HostPlatform: b.env.GOOS,
-		Digester: b.env.BundleDigester,
+		Digester: b.env.BundleDigester, SecretValues: values,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -414,6 +428,33 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 	after, _ := b.env.bundleStore().Receipts()
 	if !r.Noop || r.NoopReason != "already_applied" || len(after) != len(receipts) {
 		t.Fatalf("retry: noop = %v (%s), receipts %d -> %d", r.Noop, r.NoopReason, len(receipts), len(after))
+	}
+}
+
+// A repeated delivery inherits an old confirmed receipt. It must not reuse
+// that confirmation when the running gateway reports a different policy,
+// even if ensure restored the signed config bytes.
+func TestBundleRepeatRefusesCachedConfirmationWhenGatewayDigestDiffers(t *testing.T) {
+	for _, drift := range []bool{false, true} {
+		b := newBundleHost(t)
+		_, _, restart := bundleConfigs(b.testHost)
+		path := b.dir(1, restart)
+		requireOK(t, b.apply(path))
+		if drift {
+			configPath := b.env.P(b.env.Layout.ConfigPath)
+			original, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, append(original, []byte("\n# local drift\n")...), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}
+		b.frozen = "sha256:" + strings.Repeat("0", 64)
+		r := b.apply(path)
+		if r.OK || r.Bundle != nil && r.Bundle.State == enterprisebundle.StateConfirmed {
+			t.Fatalf("drift=%v: repeat reused confirmation while gateway policy differs: %+v", drift, r)
+		}
 	}
 }
 

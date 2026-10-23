@@ -356,7 +356,7 @@ func TestIsLoopback(t *testing.T) {
 
 func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	active := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp", "kiro"}
+	active := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "antigravity", "opencode", "amp", "kiro"}
 	for _, name := range active {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("default registry missing %q", name)
@@ -2796,7 +2796,8 @@ func TestClaudeCode_Teardown_RestoresSettings(t *testing.T) {
 	settingsDir := filepath.Join(dir, "claude-settings")
 	os.MkdirAll(settingsDir, 0o755)
 	settingsPath := filepath.Join(settingsDir, "settings.json")
-	os.WriteFile(settingsPath, []byte(`{"existingKey": true}`), 0o644)
+	original := []byte("{\"env\":{\"FIXTURE\":\"preserve\"}}\n")
+	os.WriteFile(settingsPath, original, 0o644)
 
 	ClaudeCodeSettingsPathOverride = settingsPath
 	defer func() { ClaudeCodeSettingsPathOverride = "" }()
@@ -2814,6 +2815,16 @@ func TestClaudeCode_Teardown_RestoresSettings(t *testing.T) {
 	}
 
 	data, _ := os.ReadFile(settingsPath)
+	if !bytes.Equal(data, original) {
+		t.Fatalf("teardown changed pristine settings bytes: %q, want %q", data, original)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("repeated Teardown: %v", err)
+	}
+	data, _ = os.ReadFile(settingsPath)
+	if !bytes.Equal(data, original) {
+		t.Fatalf("repeated teardown changed pristine bytes: %q", data)
+	}
 	var settings map[string]interface{}
 	json.Unmarshal(data, &settings)
 
@@ -2958,9 +2969,6 @@ func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
 			if conn.Name() == "hermes" {
 				opts = prepareHermesSetupAdmissionFixture(t, opts)
 			}
-			if conn.Name() == "openhands" {
-				opts = prepareOpenHandsSetupAdmissionFixture(t, opts)
-			}
 			return conn, opts
 		}
 	}
@@ -3050,12 +3058,6 @@ func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
 			hookScript: "copilot-hook.sh",
 			hookAPI:    "/api/v1/copilot/hook",
 			setup:      hookOnlySetup(".json", NewCopilotConnector, &CopilotHooksPathOverride),
-		},
-		{
-			name:       "openhands",
-			hookScript: "openhands-hook.sh",
-			hookAPI:    "/api/v1/openhands/hook",
-			setup:      hookOnlySetup(".json", NewOpenHandsConnector, &OpenHandsHooksPathOverride),
 		},
 		{
 			name:       "antigravity",
@@ -3682,39 +3684,6 @@ func TestCodex_Authenticate_LoopbackWarnOnce(t *testing.T) {
 	}
 	if n := strings.Count(got, "[SECURITY] codex: rejecting loopback"); n != 1 {
 		t.Errorf("expected exactly 1 warn-once line, got %d:\n%s", n, got)
-	}
-}
-
-func TestAuthenticateHookBridgeRequest_MasterKeyOnlyWarnsOnLoopbackBypass(t *testing.T) {
-	testStderrMu.Lock()
-	origStderr := os.Stderr
-	pipeR, pipeW, err := os.Pipe()
-	if err != nil {
-		testStderrMu.Unlock()
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	os.Stderr = pipeW
-	t.Cleanup(func() {
-		os.Stderr = origStderr
-		_ = pipeW.Close()
-		_ = pipeR.Close()
-		testStderrMu.Unlock()
-	})
-
-	var warned sync.Once
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/omnigent/hook", nil)
-	r.RemoteAddr = "127.0.0.1:54321"
-	if !authenticateHookBridgeRequest(r, "", "master-key", "omnigent", "test bridge", &warned) {
-		t.Fatal("loopback bridge request should be accepted")
-	}
-
-	os.Stderr = origStderr
-	if err := pipeW.Close(); err != nil {
-		t.Fatalf("close pipe writer: %v", err)
-	}
-	captured, _ := io.ReadAll(pipeR)
-	if got := string(captured); !strings.Contains(got, "[SECURITY] omnigent: loopback request accepted") {
-		t.Fatalf("stderr missing configured-credential bypass warning:\n%s", got)
 	}
 }
 
@@ -4505,19 +4474,18 @@ log_user_prompt = false
 // Asserts the platform-specific artifact plus the canonical TOML argv array:
 // Windows writes ["<hook.exe>", "notify"] with no shell bridge; Unix writes
 // ["bash", "<DataDir>/notify-bridge.sh"] and keeps the operator-only bridge.
-func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
+func TestCodex_Setup_RegistersNoNotifierAndRemovesAnOldOne(t *testing.T) {
+	// Codex hands its notify program the turn record (prompt, reply, working
+	// directory) as a command-line argument, readable by other accounts. Setup
+	// registers no notifier outside Secure Client, removes the one an older
+	// Setup wrote with its bridge, and puts the account's own notifier back.
 	dir := t.TempDir()
 	if runtime.GOOS == "windows" {
 		setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`)
 	}
 	configPath := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(configPath, []byte(`model = "gpt-5"
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
-
 	c := NewCodexConnector()
 	opts := SetupOpts{
 		DataDir:   dir,
@@ -4525,79 +4493,79 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 		APIAddr:   "127.0.0.1:18970",
 		APIToken:  "test-token-codex-notify",
 	}
+	notifyOf := func() (interface{}, bool) {
+		t.Helper()
+		raw, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var parsed map[string]interface{}
+		if err := toml.Unmarshal(raw, &parsed); err != nil {
+			t.Fatalf("invalid TOML after Setup: %v", err)
+		}
+		v, ok := parsed["notify"]
+		return v, ok
+	}
+
+	// A fresh install keeps the account's own notifier and adds none.
+	if err := os.WriteFile(configPath, []byte("model = \"gpt-5\"\nnotify = [\"/usr/local/bin/my-notifier\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-
-	bridgePath := filepath.Join(dir, "notify-bridge.sh")
-	if runtime.GOOS == "windows" {
-		if _, err := os.Stat(bridgePath); !os.IsNotExist(err) {
-			t.Fatalf("Windows setup left Bash notify bridge behind: %v", err)
-		}
-	} else {
-		info, err := os.Stat(bridgePath)
-		if err != nil {
-			t.Fatalf("notify-bridge.sh missing — agent-turn-complete telemetry won't fire: %v", err)
-		}
-		if info.Mode().Perm() != 0o700 {
-			t.Errorf("notify-bridge.sh mode = %v, want 0o700 (operator-only managed executable)", info.Mode().Perm())
-		}
-		bridge, err := os.ReadFile(bridgePath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(bridge), "test-token-codex-notify") {
-			t.Error("bridge embeds APIToken instead of loading the managed connector-scoped token sidecar")
-		}
-		tokenPath, err := HookAPITokenFilePath(dir, "codex")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(string(bridge), shellSingleQuote(tokenPath)) {
-			t.Errorf("bridge missing connector-scoped token sidecar path %q", tokenPath)
-		}
-		if !strings.Contains(string(bridge), "127.0.0.1:18970/api/v1/codex/notify") {
-			t.Errorf("bridge missing gateway notify endpoint URL; body:\n%s", bridge)
-		}
+	if v, _ := notifyOf(); !codexValueMatches(v, []string{"/usr/local/bin/my-notifier"}) {
+		t.Fatalf("notify after a fresh Setup = %v, want the account's own notifier only", v)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "notify-bridge.sh")); !os.IsNotExist(err) {
+		t.Fatalf("Setup wrote a notify bridge: %v", err)
 	}
 
-	// config.toml notify entry must be the array shape codex parses.
-	raw, _ := os.ReadFile(configPath)
-	var parsed map[string]interface{}
-	if err := toml.Unmarshal(raw, &parsed); err != nil {
-		t.Fatalf("invalid TOML after Setup: %v", err)
-	}
-	notify, ok := parsed["notify"].([]interface{})
-	if !ok {
-		t.Fatalf("notify entry not an array (got %T) — codex would silently disable the bridge", parsed["notify"])
-	}
-	if len(notify) != 2 {
-		t.Fatalf("notify array has %d entries, want 2; got %v", len(notify), notify)
-	}
+	// An older Setup's notifier and bridge are removed on the next Setup, and
+	// the notifier it chained is put back.
+	old := codexShellNotifyCommand(opts)
 	if runtime.GOOS == "windows" {
-		if first, _ := notify[0].(string); first != `C:\Program Files\DefenseClaw\defenseclaw-hook.exe` {
-			t.Errorf("notify[0] = %q, want installed no-console hook path", first)
-		}
-		if second, _ := notify[1].(string); second != "notify" {
-			t.Errorf("notify[1] = %q, want native notify subcommand", second)
-		}
-		if strings.Contains(strings.ToLower(string(raw)), "bash") ||
-			strings.Contains(strings.ToLower(string(raw)), "curl") ||
-			strings.Contains(strings.ToLower(string(raw)), "jq") {
-			t.Errorf("Windows config contains a Unix notify dependency:\n%s", raw)
-		}
-	} else {
-		if first, _ := notify[0].(string); first != "bash" {
-			t.Errorf("notify[0] = %q, want \"bash\"", first)
-		}
-		if second, _ := notify[1].(string); !strings.HasSuffix(second, "/notify-bridge.sh") {
-			t.Errorf("notify[1] = %q, want path ending in /notify-bridge.sh", second)
-		}
+		old = codexNativeNotifyCommand()
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]interface{}{}
+	if err := parseCodexTOML(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg["notify"] = old
+	out, err := editCodexOwnedTOML(raw, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notify-bridge.sh"), []byte("#!/usr/bin/env bash\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := c.ownedHookContractPresent(opts); err != nil || present {
+		t.Fatalf("hook contract with an old DefenseClaw notifier = %v, %v; want broken so the guard re-runs Setup", present, err)
+	}
+	// The guardian's message names the cause: a notifier this profile does not
+	// register (train T2: main's absent reasons combined with w2b-g-sec's
+	// Secure Client-only notifier).
+	if reason := c.ownedHookContractAbsentReason(opts); !strings.Contains(reason, "does not register") {
+		t.Fatalf("absent reason with an old DefenseClaw notifier = %q, want the left-over notifier named", reason)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("second Setup: %v", err)
+	}
+	if v, _ := notifyOf(); !codexValueMatches(v, []string{"/usr/local/bin/my-notifier"}) {
+		t.Fatalf("notify after re-running Setup = %v, want the account's own notifier back", v)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "notify-bridge.sh")); !os.IsNotExist(err) {
+		t.Fatalf("Setup left the old notify bridge: %v", err)
 	}
 }
 
-// TestCodex_Setup_RejectsExplicitlyDisabledHooks prevents the installer from
-// reporting success when the user's active Codex configuration disables hooks.
 func TestCodex_Setup_RejectsExplicitlyDisabledHooks(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -6140,118 +6108,6 @@ func TestCodex_TeardownPreservesUnrelatedHooksJSONEntries(t *testing.T) {
 	}
 }
 
-func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T) {
-	opts := SetupOpts{APIAddr: "127.0.0.1:18970"}
-	legacy := map[string]interface{}{
-		"log_user_prompt": false,
-		"exporter": map[string]interface{}{
-			"otlp-http": map[string]interface{}{
-				"endpoint": "http://127.0.0.1:18970/v1/logs",
-				"protocol": "json",
-				"headers": map[string]interface{}{
-					"x-defenseclaw-client": "codex-otel/1.0",
-					"x-defenseclaw-source": "codex",
-				},
-			},
-		},
-	}
-	if !codexOtelBlockLooksManaged(legacy, opts) {
-		t.Fatal("legacy DefenseClaw-managed Codex [otel] block was not recognized")
-	}
-	for _, signal := range []string{"logs", "metrics", "traces"} {
-		current := map[string]interface{}{
-			"metrics_exporter": map[string]interface{}{
-				"otlp-http": map[string]interface{}{
-					"endpoint": "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/" + signal,
-					"protocol": "json",
-				},
-			},
-		}
-		if !codexOtelBlockLooksManaged(current, opts) {
-			t.Fatalf("headerless scoped Codex %s endpoint was not recognized", signal)
-		}
-	}
-	loopbackAlias := map[string]interface{}{
-		"trace_exporter": map[string]interface{}{
-			"otlp-http": map[string]interface{}{
-				"endpoint": "http://localhost:18970/otlp/codex/" + strings.Repeat("b", 64) + "/v1/traces",
-			},
-		},
-	}
-	if !codexOtelBlockLooksManaged(loopbackAlias, opts) {
-		t.Fatal("equivalent local Codex scoped endpoint was not recognized")
-	}
-	portDrift := map[string]interface{}{
-		"exporter": map[string]interface{}{
-			"otlp-http": map[string]interface{}{
-				"endpoint": "http://127.0.0.1:43189/otlp/codex/" + strings.Repeat("c", 64) + "/v1/logs",
-			},
-		},
-	}
-	if !codexOtelBlockLooksManaged(portDrift, opts) {
-		t.Fatal("scoped Codex endpoint was not recognized after gateway API port drift")
-	}
-	legacyPortDrift := map[string]interface{}{
-		"metrics_exporter": map[string]interface{}{
-			"otlp-http": map[string]interface{}{
-				"endpoint": "http://localhost:43189/v1/metrics",
-				"headers": map[string]interface{}{
-					"x-defenseclaw-client": "codex-otel/1.0",
-					"x-defenseclaw-source": "codex",
-				},
-			},
-		},
-	}
-	if !codexOtelBlockLooksManaged(legacyPortDrift, opts) {
-		t.Fatal("legacy Codex endpoint was not recognized after gateway API port drift")
-	}
-	for marker, headers := range map[string]map[string]interface{}{
-		"source only": {"x-defenseclaw-source": "codex"},
-		"client only": {"x-defenseclaw-client": "codex-otel/1.0"},
-	} {
-		ambiguousLegacyDrift := map[string]interface{}{
-			"exporter": map[string]interface{}{
-				"otlp-http": map[string]interface{}{
-					"endpoint": "http://127.0.0.1:43189/v1/logs",
-					"headers":  headers,
-				},
-			},
-		}
-		if codexOtelBlockLooksManaged(ambiguousLegacyDrift, opts) {
-			t.Errorf("port-drifted legacy endpoint with %s was classified as managed", marker)
-		}
-	}
-
-	user := map[string]interface{}{
-		"exporter": map[string]interface{}{
-			"otlp-http": map[string]interface{}{
-				"endpoint": "https://otel.example.com/v1/logs",
-				"protocol": "json",
-				"headers":  map[string]interface{}{"x-defenseclaw-source": "codex"},
-			},
-		},
-	}
-	if codexOtelBlockLooksManaged(user, opts) {
-		t.Fatal("non-DefenseClaw Codex [otel] block was classified as managed")
-	}
-	for name, endpoint := range map[string]string{
-		"short token":       "http://127.0.0.1:18970/otlp/codex/abc/v1/logs",
-		"remote host":       "http://collector.example/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
-		"query":             "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs?x=1",
-		"empty query":       "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs?",
-		"other scope":       "http://127.0.0.1:18970/otlp/openhands/" + strings.Repeat("a", 64) + "/v1/logs",
-		"missing port":      "http://localhost/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
-		"zero port":         "http://localhost:0/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
-		"oversized port":    "http://localhost:70000/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
-		"shared no headers": "http://127.0.0.1:18970/v1/logs",
-	} {
-		candidate := map[string]interface{}{"exporter": map[string]interface{}{"otlp-http": map[string]interface{}{"endpoint": endpoint}}}
-		if codexOtelBlockLooksManaged(candidate, opts) {
-			t.Errorf("operator-owned/nonmatching endpoint %q classified as managed", name)
-		}
-	}
-}
-
 func TestRestoreCodexOtelEntriesRemovesManagedExporterAfterGatewayPortDrift(t *testing.T) {
 	cfg := map[string]interface{}{
 		"otel": map[string]interface{}{
@@ -7278,8 +7134,8 @@ func TestWriteShimScripts_ContentHasAPIAddr(t *testing.T) {
 
 func TestWriteHookScript(t *testing.T) {
 	dir := t.TempDir()
-	if err := WriteHookScript(dir, "127.0.0.1:18970"); err != nil {
-		t.Fatalf("WriteHookScript failed: %v", err)
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", ""); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken failed: %v", err)
 	}
 
 	path := filepath.Join(dir, "inspect-tool.sh")
@@ -7295,8 +7151,8 @@ func TestWriteHookScript(t *testing.T) {
 func TestWriteHookScript_ContentHasAPIAddr(t *testing.T) {
 	dir := t.TempDir()
 	addr := "127.0.0.1:18970"
-	if err := WriteHookScript(dir, addr); err != nil {
-		t.Fatalf("WriteHookScript: %v", err)
+	if err := WriteHookScriptsWithToken(dir, addr, ""); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
 	data, err := os.ReadFile(filepath.Join(dir, "inspect-tool.sh"))
@@ -7311,8 +7167,8 @@ func TestWriteHookScript_ContentHasAPIAddr(t *testing.T) {
 func TestWriteAllHookScripts_CreatesAllFour(t *testing.T) {
 	dir := t.TempDir()
 	addr := "127.0.0.1:18970"
-	if err := WriteAllHookScripts(dir, addr); err != nil {
-		t.Fatalf("WriteAllHookScripts: %v", err)
+	if err := WriteHookScriptsWithToken(dir, addr, ""); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
 	expected := []string{
@@ -7643,8 +7499,8 @@ func containsAuthBearer(curlHeaders, token string) bool {
 
 func TestHookScripts_ReturnsList(t *testing.T) {
 	scripts := HookScripts()
-	if len(scripts) != 13 {
-		t.Errorf("HookScripts() returned %d scripts, want 13", len(scripts))
+	if len(scripts) != 12 {
+		t.Errorf("HookScripts() returned %d scripts, want 12", len(scripts))
 	}
 }
 
@@ -8216,8 +8072,8 @@ func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 		t.Fatalf("DiscoverPlugins on empty dir: %v", err)
 	}
 	// Should still have only built-in connectors
-	if r.Len() != 14 {
-		t.Errorf("expected 14 built-in connectors, got %d", r.Len())
+	if r.Len() != 12 {
+		t.Errorf("expected 12 built-in connectors, got %d", r.Len())
 	}
 }
 
@@ -8449,8 +8305,11 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if !strings.Contains(headers, "x-defenseclaw-source=claudecode") {
 		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing source attribution; got %q", headers)
 	}
-	if !slices.Contains(splitOTelHeader(headers), "authorization=Bearer "+scoped) {
-		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing connector-scoped Authorization; got %q", headers)
+	// Windows writes the bearer as a literal header; a per-user Linux or
+	// macOS install gets it from the otelHeadersHelper (GAP-1421).
+	staticBearer := runtime.GOOS == "windows"
+	if slices.Contains(splitOTelHeader(headers), "authorization=Bearer "+scoped) != staticBearer {
+		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS Authorization (static %v) got %q", staticBearer, headers)
 	}
 	for _, key := range []string{
 		"OTEL_EXPORTER_OTLP_HEADERS",
@@ -8459,9 +8318,12 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
 	} {
 		value, _ := env[key].(string)
-		if !strings.Contains(value, "authorization=Bearer "+scoped) || strings.Contains(value, "Bearer%20") {
-			t.Errorf("%s does not use Claude's literal managed Authorization contract", key)
+		if strings.Contains(value, "authorization=Bearer "+scoped) != staticBearer || strings.Contains(value, "Bearer%20") {
+			t.Errorf("%s does not use Claude's managed Authorization contract", key)
 		}
+	}
+	if _, helper := settings[claudeCodeOTLPHeadersHelperKey]; helper == staticBearer {
+		t.Errorf("otelHeadersHelper present = %v, want %v", helper, !staticBearer)
 	}
 	probes, err := LoadClaudeCodeNativeOTLPProbes()
 	if err != nil {
@@ -8520,6 +8382,8 @@ func TestApplyClaudeCodeManagedOtelEnvMigratesPercentEncodedNativeOTLPBearer(t *
 		DataDir:       dir,
 		APIAddr:       "127.0.0.1:18970",
 		OTLPPathToken: scopedToken,
+		// The static bearer contract (Windows and managed installs).
+		GOOS: "windows",
 	}
 	applyClaudeCodeManagedOtelEnv(legacyEnv, buildClaudeCodeOtelEnv(opts))
 	settings := map[string]interface{}{"env": legacyEnv}
@@ -9932,7 +9796,10 @@ func TestHookScript_FailureLogWriteErrorStaysQuiet(t *testing.T) {
 	}
 }
 
-func TestHookScript_FailureLogEscapesFailMode(t *testing.T) {
+// TestHookScript_FailureLogIgnoresAForgedEnvFailMode: the environment no
+// longer supplies the fail mode a per-user hook logs (GAP-0315), so a forged
+// DEFENSECLAW_FAIL_MODE can neither reopen the hook nor reach the failure log.
+func TestHookScript_FailureLogIgnoresAForgedEnvFailMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -9949,8 +9816,8 @@ func TestHookScript_FailureLogEscapesFailMode(t *testing.T) {
 		"DEFENSECLAW_HOME="+dcHome,
 		"DEFENSECLAW_FAIL_MODE=open\"\n,\"forged\":\"yes",
 	)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("hook should fail-open (exit 0) on transport failure by default, got: %v", err)
+	if exitErr, ok := cmd.Run().(*exec.ExitError); !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("closed hook should block (exit 2) on transport failure, got: %v", exitErr)
 	}
 
 	failureLog, err := os.ReadFile(filepath.Join(dcHome, "logs", "hook-failures.jsonl"))
@@ -9965,11 +9832,8 @@ func TestHookScript_FailureLogEscapesFailMode(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
 		t.Fatalf("hook failure log is not valid JSON: %v\n%s", err, lines[0])
 	}
-	if _, ok := record["forged"]; ok {
-		t.Fatalf("fail_mode injected a forged JSON field: %#v", record)
-	}
-	if got := record["fail_mode"]; !strings.Contains(got, `forged`) || !strings.Contains(got, `"`) {
-		t.Fatalf("fail_mode was not preserved as an escaped string value: %#v", record)
+	if _, ok := record["forged"]; ok || record["fail_mode"] != "closed" || strings.Contains(string(failureLog), "forged") {
+		t.Fatalf("failure record took the environment's value: %#v", record)
 	}
 }
 
@@ -10129,28 +9993,58 @@ func TestHookScript_401WithoutOwnGateway_NamesAnotherListener(t *testing.T) {
 	}
 }
 
-// TestHookScript_FailOpen_Override covers the operator override:
-// DEFENSECLAW_FAIL_MODE=open allows both response and transport failures even
-// when the baked-in template default is closed. Strict availability can still
-// force this path closed, as covered above.
-func TestHookScript_FailOpen_Override(t *testing.T) {
+// TestHookScript_EnvFailModeOnlyTightens covers GAP-0315: an inherited
+// DEFENSECLAW_FAIL_MODE=open cannot reopen a per-user hook installed closed,
+// and DEFENSECLAW_FAIL_MODE=closed still closes one installed open. Only the
+// persisted mode (guardrail fail-mode) opens a hook.
+// TestHookScript_EnvFailModeIsNotRead: the installed mode is the hook's fail
+// mode. DEFENSECLAW_FAIL_MODE in the agent's environment neither reopens a
+// closed hook nor closes an open one (1.0.4 lead directive), so status, which
+// reads the render, reports what runs.
+func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
-	dir := t.TempDir()
-	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:1", "tok-test"); err != nil {
-		t.Fatalf("WriteHookScriptsWithToken: %v", err)
-	}
-
-	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
-	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
-	cmd.Env = append(os.Environ(),
-		"PATH="+os.Getenv("PATH"),
-		"DEFENSECLAW_FAIL_MODE=open",
-	)
-	err := cmd.Run()
-	if err != nil {
-		t.Errorf("hook should fail-open (exit 0) when DEFENSECLAW_FAIL_MODE=open, got: %v", err)
+	for _, agent := range []struct {
+		conn    Connector
+		script  string
+		args    []string
+		payload string
+	}{
+		{NewCodexConnector(), "codex-hook.sh", []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v1"}, `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`},
+		{NewClaudeCodeConnector(), "claude-code-hook.sh", nil, `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`},
+	} {
+		for _, tc := range []struct {
+			installed, env string
+			wantBlock      bool
+		}{
+			{"closed", "open", true},
+			{"closed", "OPEN", true},
+			{"open", "closed", false},
+			{"open", "Closed", false},
+			{"open", " CLOSED ", false},
+			{"open", "", false},
+			{"closed", "", true},
+		} {
+			t.Run(agent.conn.Name()+"/"+tc.installed+"/env="+tc.env, func(t *testing.T) {
+				home := t.TempDir()
+				hookDir := filepath.Join(home, "hooks")
+				opts := SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "scoped-test-token", HookFailMode: tc.installed}
+				if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, agent.conn); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, agent.script)}, agent.args...)...)
+				cmd.Stdin = strings.NewReader(agent.payload)
+				cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DEFENSECLAW_HOME=" + home,
+					"DEFENSECLAW_GATEWAY_AUTOSTART=0", "DEFENSECLAW_FAIL_MODE=" + tc.env}
+				out, err := cmd.CombinedOutput()
+				blocked := err != nil || strings.Contains(string(out), `"decision":"block"`) ||
+					strings.Contains(string(out), `"permission":"deny"`) || strings.Contains(string(out), `"permissionDecision":"deny"`)
+				if blocked != tc.wantBlock {
+					t.Fatalf("installed %s env %q: blocked=%v want %v err=%v\n%s", tc.installed, tc.env, blocked, tc.wantBlock, err, out)
+				}
+			})
+		}
 	}
 }
 
@@ -10202,18 +10096,35 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			wantFailMode: "closed",
 		},
 		{
-			name:         "cursor_empty_opts_match_vendor_fail_open_default",
+			// Cursor's observe registration is fail-open (failClosed false),
+			// but no operator chose an open for its outages: the hook blocks
+			// while the gateway is down (OutageHookFailMode).
+			name:         "cursor_empty_opts_close_outages",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1"},
+			connector:    NewCursorConnector(),
+			hookFile:     "cursor-hook.sh",
+			wantFailMode: "closed",
+		},
+		{
+			name:         "cursor_observe_with_an_inherited_closed_closes_outages",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "observe", HookFailMode: "closed", ConfiguredHookFailMode: "closed"},
+			connector:    NewCursorConnector(),
+			hookFile:     "cursor-hook.sh",
+			wantFailMode: "closed",
+		},
+		{
+			name:         "cursor_observe_keeps_an_explicit_open",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"},
 			connector:    NewCursorConnector(),
 			hookFile:     "cursor-hook.sh",
 			wantFailMode: "open",
 		},
 		{
-			name:         "cursor_observe_ignores_inherited_closed",
-			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "observe", HookFailMode: "closed"},
+			name:         "cursor_action_closes_an_explicit_open",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "action", HookFailMode: "closed", ConfiguredHookFailMode: "open"},
 			connector:    NewCursorConnector(),
 			hookFile:     "cursor-hook.sh",
-			wantFailMode: "open",
+			wantFailMode: "closed",
 		},
 		{
 			name:         "cursor_action_forces_mode_matched_closed",
@@ -10281,8 +10192,8 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			// agent will see at runtime — substitution failures
 			// that leave a literal `{{.FailMode}}` would surface
 			// here, not just in a unit test of the helper.
-			wantLine := "FAIL_MODE=\"${DEFENSECLAW_FAIL_MODE:-" + tc.wantFailMode + "}\""
-			if !strings.Contains(rendered, wantLine) {
+			wantLine := "\nFAIL_MODE=\"" + tc.wantFailMode + "\"\n" + perUserInstalledModeComment
+			if !strings.Contains(rendered, wantLine) || strings.Contains(rendered, perUserEnvFailModeRead) {
 				t.Errorf("rendered hook missing %q\nfull script:\n%s", wantLine, rendered)
 			}
 		})
@@ -11228,7 +11139,6 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 		{"cursor", func() Connector { return NewCursorConnector() }},
 		{"devin", func() Connector { return NewDevinConnector() }},
 		{"copilot", func() Connector { return NewCopilotConnector() }},
-		{"openhands", func() Connector { return NewOpenHandsConnector() }},
 	}
 
 	for _, c := range cases {
@@ -11322,6 +11232,10 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		cursorScripts = append(cursorScripts, "cursor-hook.ps1")
 	}
+	claudeScripts := withVendor("claude-code-hook.sh")
+	if runtime.GOOS != "windows" {
+		claudeScripts = append(claudeScripts, claudeCodeOTLPHeadersHelperScript)
+	}
 	copilotScripts := withVendor("copilot-hook.sh")
 	if runtime.GOOS == "windows" {
 		copilotScripts = append(copilotScripts, "copilot-hook.ps1")
@@ -11335,12 +11249,11 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		{func() Connector { return NewZeptoClawConnector() }, "zeptoclaw", generic},
 		{func() Connector { return NewOpenClawConnector() }, "openclaw", generic},
 		{func() Connector { return NewCodexConnector() }, "codex", withVendor("codex-hook.sh")},
-		{func() Connector { return NewClaudeCodeConnector() }, "claudecode", withVendor("claude-code-hook.sh")},
+		{func() Connector { return NewClaudeCodeConnector() }, "claudecode", claudeScripts},
 		{func() Connector { return NewHermesConnector() }, "hermes", withVendor("hermes-hook.sh")},
 		{func() Connector { return NewCursorConnector() }, "cursor", cursorScripts},
 		{func() Connector { return NewDevinConnector() }, "devin", withVendor("devin-hook.sh")},
 		{func() Connector { return NewCopilotConnector() }, "copilot", copilotScripts},
-		{func() Connector { return NewOpenHandsConnector() }, "openhands", withVendor("openhands-hook.sh")},
 		{func() Connector { return NewAntigravityConnector() }, "antigravity", withVendor("antigravity-hook.sh")},
 	}
 
@@ -11389,7 +11302,6 @@ func TestConnector_HookScriptProvider_MatchesAgentPaths(t *testing.T) {
 		NewCursorConnector(),
 		NewDevinConnector(),
 		NewCopilotConnector(),
-		NewOpenHandsConnector(),
 	}
 	for _, conn := range connectors {
 		hsp, ok := conn.(HookScriptProvider)
@@ -11431,10 +11343,8 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 		{"cursor", func() Connector { return NewCursorConnector() }, []EnvScope{EnvScopeNone}},
 		{"devin", func() Connector { return NewDevinConnector() }, []EnvScope{EnvScopeNone}},
 		{"copilot", func() Connector { return NewCopilotConnector() }, []EnvScope{EnvScopeNone}},
-		{"openhands", func() Connector { return NewOpenHandsConnector() }, []EnvScope{EnvScopeNone}},
 		{"antigravity", func() Connector { return NewAntigravityConnector() }, []EnvScope{EnvScopeNone}},
 		{"opencode", func() Connector { return NewOpenCodeConnector() }, []EnvScope{EnvScopeNone}},
-		{"omnigent", func() Connector { return NewOmnigentConnector() }, []EnvScope{EnvScopeNone, EnvScopeProcess}},
 		{"amp", func() Connector { return NewAMPConnector() }, []EnvScope{EnvScopeNone}},
 	}
 
@@ -11481,8 +11391,7 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 // contract: every proxy-bound built-in connector exposes a
 // HasUsableProviders() hook so the sidecar boot path can refuse to
 // start when no LLM upstream is configured. Hook-only connectors
-// (codex, claudecode, hermes, cursor, devin, copilot,
-// openhands)
+// (codex, claudecode, hermes, cursor, devin, copilot)
 // do not interpose on chat traffic, so the probe does not apply.
 func TestConnector_ProviderProbe_ProxyBuiltinsImplement(t *testing.T) {
 	connectors := []Connector{
@@ -11667,6 +11576,10 @@ func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
 //   - openclaw   owns no vendor template (fetch-interceptor plugin)
 //   - zeptoclaw  owns no vendor template (config-only)
 func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
+	claudeHooks := []string{"claude-code-hook.sh"}
+	if runtime.GOOS != "windows" {
+		claudeHooks = append(claudeHooks, claudeCodeOTLPHeadersHelperScript)
+	}
 	cursorHooks := []string{"cursor-hook.sh"}
 	copilotHooks := []string{"copilot-hook.sh"}
 	if runtime.GOOS == "windows" {
@@ -11678,13 +11591,12 @@ func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 		ctor func() Connector
 		want []string
 	}{
-		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []string{"claude-code-hook.sh"}},
+		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, claudeHooks},
 		{"codex", func() Connector { return NewCodexConnector() }, []string{"codex-hook.sh"}},
 		{"hermes", func() Connector { return NewHermesConnector() }, []string{"hermes-hook.sh"}},
 		{"cursor", func() Connector { return NewCursorConnector() }, cursorHooks},
 		{"devin", func() Connector { return NewDevinConnector() }, []string{"devin-hook.sh"}},
 		{"copilot", func() Connector { return NewCopilotConnector() }, copilotHooks},
-		{"openhands", func() Connector { return NewOpenHandsConnector() }, []string{"openhands-hook.sh"}},
 		{"antigravity", func() Connector { return NewAntigravityConnector() }, []string{"antigravity-hook.sh"}},
 		{"openclaw", func() Connector { return NewOpenClawConnector() }, nil},
 		{"zeptoclaw", func() Connector { return NewZeptoClawConnector() }, nil},
@@ -12073,8 +11985,8 @@ func TestWriteHookHelpers_RewritesOlder(t *testing.T) {
 
 // TestWriteHookScriptsWithToken_PreservesNewerHelper exercises the
 // full setup-time path operators actually hit. Even when the entry
-// is `WriteHookScriptsWithToken` (used by the OpenClaw connector
-// via the back-compat `WriteHookScript` shim), a newer-on-disk
+// is `WriteHookScriptsWithToken` (used by the OpenClaw connector),
+// a newer-on-disk
 // `_hardening.sh` survives the call. Catches a regression where a
 // future caller bypasses writeHookHelpers and reaches for the embed
 // directly.
@@ -12277,5 +12189,150 @@ func TestOpenClaw_IsBundledPlugin(t *testing.T) {
 	os.WriteFile(pkg, append(data, ' '), 0o644)
 	if c.IsBundledPlugin(extDir) {
 		t.Fatal("a plugin with a changed file was recognized as DefenseClaw's own")
+	}
+}
+
+func TestAuthenticateHookBridgeRequest_MasterKeyOnlyWarnsOnLoopbackBypass(t *testing.T) {
+	testStderrMu.Lock()
+	origStderr := os.Stderr
+	pipeR, pipeW, err := os.Pipe()
+	if err != nil {
+		testStderrMu.Unlock()
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = pipeW
+	t.Cleanup(func() {
+		os.Stderr = origStderr
+		_ = pipeW.Close()
+		_ = pipeR.Close()
+		testStderrMu.Unlock()
+	})
+
+	var warned sync.Once
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/cursor/hook", nil)
+	r.RemoteAddr = "127.0.0.1:54321"
+	if !authenticateHookBridgeRequest(r, "", "master-key", "cursor", "test bridge", &warned) {
+		t.Fatal("loopback bridge request should be accepted")
+	}
+
+	os.Stderr = origStderr
+	if err := pipeW.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	captured, _ := io.ReadAll(pipeR)
+	if got := string(captured); !strings.Contains(got, "[SECURITY] cursor: loopback request accepted") {
+		t.Fatalf("stderr missing configured-credential bypass warning:\n%s", got)
+	}
+}
+
+func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T) {
+	opts := SetupOpts{APIAddr: "127.0.0.1:18970"}
+	legacy := map[string]interface{}{
+		"log_user_prompt": false,
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://127.0.0.1:18970/v1/logs",
+				"protocol": "json",
+				"headers": map[string]interface{}{
+					"x-defenseclaw-client": "codex-otel/1.0",
+					"x-defenseclaw-source": "codex",
+				},
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(legacy, opts) {
+		t.Fatal("legacy DefenseClaw-managed Codex [otel] block was not recognized")
+	}
+	for _, signal := range []string{"logs", "metrics", "traces"} {
+		current := map[string]interface{}{
+			"metrics_exporter": map[string]interface{}{
+				"otlp-http": map[string]interface{}{
+					"endpoint": "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/" + signal,
+					"protocol": "json",
+				},
+			},
+		}
+		if !codexOtelBlockLooksManaged(current, opts) {
+			t.Fatalf("headerless scoped Codex %s endpoint was not recognized", signal)
+		}
+	}
+	loopbackAlias := map[string]interface{}{
+		"trace_exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://localhost:18970/otlp/codex/" + strings.Repeat("b", 64) + "/v1/traces",
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(loopbackAlias, opts) {
+		t.Fatal("equivalent local Codex scoped endpoint was not recognized")
+	}
+	portDrift := map[string]interface{}{
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://127.0.0.1:43189/otlp/codex/" + strings.Repeat("c", 64) + "/v1/logs",
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(portDrift, opts) {
+		t.Fatal("scoped Codex endpoint was not recognized after gateway API port drift")
+	}
+	legacyPortDrift := map[string]interface{}{
+		"metrics_exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://localhost:43189/v1/metrics",
+				"headers": map[string]interface{}{
+					"x-defenseclaw-client": "codex-otel/1.0",
+					"x-defenseclaw-source": "codex",
+				},
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(legacyPortDrift, opts) {
+		t.Fatal("legacy Codex endpoint was not recognized after gateway API port drift")
+	}
+	for marker, headers := range map[string]map[string]interface{}{
+		"source only": {"x-defenseclaw-source": "codex"},
+		"client only": {"x-defenseclaw-client": "codex-otel/1.0"},
+	} {
+		ambiguousLegacyDrift := map[string]interface{}{
+			"exporter": map[string]interface{}{
+				"otlp-http": map[string]interface{}{
+					"endpoint": "http://127.0.0.1:43189/v1/logs",
+					"headers":  headers,
+				},
+			},
+		}
+		if codexOtelBlockLooksManaged(ambiguousLegacyDrift, opts) {
+			t.Errorf("port-drifted legacy endpoint with %s was classified as managed", marker)
+		}
+	}
+
+	user := map[string]interface{}{
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "https://otel.example.com/v1/logs",
+				"protocol": "json",
+				"headers":  map[string]interface{}{"x-defenseclaw-source": "codex"},
+			},
+		},
+	}
+	if codexOtelBlockLooksManaged(user, opts) {
+		t.Fatal("non-DefenseClaw Codex [otel] block was classified as managed")
+	}
+	for name, endpoint := range map[string]string{
+		"short token":       "http://127.0.0.1:18970/otlp/codex/abc/v1/logs",
+		"remote host":       "http://collector.example/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"query":             "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs?x=1",
+		"empty query":       "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs?",
+		"other scope":       "http://127.0.0.1:18970/otlp/claudecode/" + strings.Repeat("a", 64) + "/v1/logs",
+		"missing port":      "http://localhost/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"zero port":         "http://localhost:0/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"oversized port":    "http://localhost:70000/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"shared no headers": "http://127.0.0.1:18970/v1/logs",
+	} {
+		candidate := map[string]interface{}{"exporter": map[string]interface{}{"otlp-http": map[string]interface{}{"endpoint": endpoint}}}
+		if codexOtelBlockLooksManaged(candidate, opts) {
+			t.Errorf("operator-owned/nonmatching endpoint %q classified as managed", name)
+		}
 	}
 }

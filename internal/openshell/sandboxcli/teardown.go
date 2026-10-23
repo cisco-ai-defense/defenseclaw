@@ -642,6 +642,9 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 			a.ok("restored the OpenShell gateway configuration; this account's " + openshell.GatewayService +
 				" service is not running, so it loads it when it starts")
 		case err != nil:
+			if errors.Is(err, openshell.ErrUnflushed) {
+				err = fmt.Errorf("%w; after stopping the named sandbox, retry `defenseclaw sandbox teardown`", err)
+			}
 			fail("restore the gateway configuration", err)
 		default:
 			a.ok("restored the OpenShell gateway configuration and restarted it")

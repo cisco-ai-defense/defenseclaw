@@ -1,0 +1,11 @@
+{
+  "title": "Intune",
+  "pages": [
+    "tenant",
+    "windows",
+    "macos",
+    "linux",
+    "windows-reference",
+    "tenant-reference"
+  ]
+}

@@ -401,12 +401,12 @@ func TestLifecycleOnlySessionStartAndEndEmitGeneratedTransitions(t *testing.T) {
 	for _, event := range []string{"session_start", "session_end"} {
 		payload := map[string]interface{}{
 			"hook_event_name": event,
-			"session_id":      "openhands-lifecycle-only",
-			"agent_id":        "openhands-root",
+			"session_id":      "copilot-lifecycle-only",
+			"agent_id":        "copilot-root",
 			"agent_type":      "root",
 		}
 		api.emitAgentHookLLMEvent(
-			t.Context(), normalizeAgentHookRequest("openhands", payload), nil,
+			t.Context(), normalizeAgentHookRequest("copilot", payload), nil,
 		)
 	}
 

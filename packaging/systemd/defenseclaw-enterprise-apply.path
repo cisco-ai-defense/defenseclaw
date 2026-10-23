@@ -5,7 +5,7 @@
 
 [Unit]
 Description=Apply DefenseClaw managed configuration changes
-Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/install/linux/
 
 [Path]
 PathChanged=/etc/defenseclaw/config.yaml

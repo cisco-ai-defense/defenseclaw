@@ -39,8 +39,8 @@ const (
 // 127), and with them `make test` and every node-gyp build (GAP-0350). In a
 // process whose real and effective ids are the same the flag changes
 // nothing, so the shim drops it there. Upstream: NVIDIA/OpenShell#4102 (its
-// fix, #4104, lets such calls through); drop the shim and the wrapper once
-// the OpenShell floor has it.
+// fix, #4104, lets such calls through, and is not merged as of 0.1.5); drop
+// the shim and the wrapper once the OpenShell floor has it.
 const makeSpawnSource = `// DefenseClaw: GNU make starts its recipes in an OpenShell sandbox.
 #define _GNU_SOURCE
 #include <dlfcn.h>

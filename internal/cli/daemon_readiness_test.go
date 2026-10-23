@@ -924,36 +924,6 @@ func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testi
 	}
 }
 
-func TestVerifyRotationConnectorOTLPAuthenticationSkipsOpenHandsWithoutExporter(t *testing.T) {
-	// GAP-1513: OpenHands has no native OTLP exporter off macOS, so setup
-	// mints no scoped credential and rotation must not require one.
-	originalLoader := loadRotationOTLPPathToken
-	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
-	codexToken := strings.Repeat("c", 64)
-	loadRotationOTLPPathToken = func(_ string, scope connector.OTLPPathTokenScope) (string, error) {
-		if scope == connector.OTLPScopeCodex {
-			return codexToken, nil
-		}
-		return "", nil
-	}
-	seen := map[string]int{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen[r.Header.Get("X-DefenseClaw-Source")]++
-		w.WriteHeader(http.StatusMethodNotAllowed)
-	}))
-	defer srv.Close()
-
-	err := verifyRotationConnectorOTLPAuthentication(
-		srv.Client(), srv.URL+"/status", t.TempDir(), []string{"codex", "openhands"},
-	)
-	if err != nil {
-		t.Fatalf("verifyRotationConnectorOTLPAuthentication() error = %v, want OpenHands skipped", err)
-	}
-	if seen["codex"] != 1 || seen["openhands"] != 0 {
-		t.Fatalf("probes = %v, want one codex probe and none for openhands", seen)
-	}
-}
-
 func TestVerifyRotationConnectorOTLPAuthenticationFailsClosedWithoutLeakingCredential(t *testing.T) {
 	originalLoader := loadRotationOTLPPathToken
 	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
@@ -2259,5 +2229,131 @@ func TestFetchSidecarHealthRejectsOversizedDocument(t *testing.T) {
 	_, err := fetchSidecarHealth(srv.Client(), srv.URL)
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("error = %v, want bounded-document diagnostic", err)
+	}
+}
+
+// Review fix (G-deadcode loop round 2): an upgraded host keeps the hook token
+// of a connector 1.0.4 removed (OpenHands; connector/removed.go
+// keepHookToken), rotate-token replaces it like every persisted sidecar and
+// hands its fingerprint to the restart check. The 1.0.4 gateway refuses that
+// token on the inspect route (401), so requiring the 405 of an accepted token
+// rolled every such rotation back. A removed connector's retained token must
+// now match its fingerprint on disk and be refused; a shipped connector's
+// token must still be accepted. Delete the removed-connector half in 1.1.
+func TestVerifyRotationConnectorHookAuthenticationRequiresRemovedConnectorRefusal(t *testing.T) {
+	dataDir := t.TempDir()
+	tokens := map[string]string{}
+	expected := rotationHookTokenFingerprints{}
+	for _, name := range []string{"codex", "omnigent", "openhands"} {
+		token, err := connector.EnsureHookAPIToken(dataDir, name)
+		if err != nil || token == "" {
+			t.Fatalf("EnsureHookAPIToken(%s) = %q, %v", name, token, err)
+		}
+		tokens[name] = token
+		expected[name] = rotationHookTokenFingerprint(token)
+	}
+
+	// gateway answers like the 1.0.4 gateway: a codex token is accepted (405
+	// on the GET probe), a removed connector's token gets removedStatus, and
+	// codexStatus overrides codex's answer when it is not zero.
+	gateway := func(removedStatus, codexStatus int) (*httptest.Server, func() map[string]int) {
+		var mu sync.Mutex
+		seen := map[string]int{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			scope := r.Header.Get("X-DefenseClaw-Connector")
+			mu.Lock()
+			seen[r.URL.Path+":"+scope]++
+			mu.Unlock()
+			if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer "+tokens[scope] {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			if connector.IsRemovedConnector(scope) {
+				w.WriteHeader(removedStatus)
+				return
+			}
+			if codexStatus != 0 {
+				w.WriteHeader(codexStatus)
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}))
+		return srv, func() map[string]int {
+			mu.Lock()
+			defer mu.Unlock()
+			out := make(map[string]int, len(seen))
+			for key, count := range seen {
+				out[key] = count
+			}
+			return out
+		}
+	}
+
+	for _, refusal := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		srv, seen := gateway(refusal, 0)
+		if err := verifyRotationConnectorHookAuthentication(srv.Client(), srv.URL+"/status", dataDir, expected); err != nil {
+			srv.Close()
+			t.Fatalf("retained removed-connector tokens refused with HTTP %d: rotation check error = %v, want success", refusal, err)
+		}
+		probes := seen()
+		srv.Close()
+		for _, name := range []string{"openhands", "omnigent"} {
+			if probes["/api/v1/inspect/tool:"+name] != 1 {
+				t.Fatalf("inspect probes for the retained %s token = %d, want 1 (%v)", name, probes["/api/v1/inspect/tool:"+name], probes)
+			}
+			if probes["/api/v1/"+name+"/hook:"+name] != 0 {
+				t.Fatalf("the retired %s hook route was probed: %v", name, probes)
+			}
+		}
+		for _, path := range []string{"/api/v1/inspect/tool:codex", "/api/v1/codex/hook:codex", "/api/v1/codex/notify:codex"} {
+			if probes[path] != 1 {
+				t.Fatalf("probes for %s = %d, want 1 (%v)", path, probes[path], probes)
+			}
+		}
+	}
+
+	// A retained token the gateway accepts again, or any answer that is not a
+	// refusal, fails the check closed.
+	for _, status := range []int{http.StatusMethodNotAllowed, http.StatusOK, http.StatusNoContent, http.StatusNotFound, http.StatusInternalServerError} {
+		srv, _ := gateway(status, 0)
+		err := verifyRotationConnectorHookAuthentication(srv.Client(), srv.URL+"/status", dataDir, expected)
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "removed in 1.0.4") || !strings.Contains(err.Error(), fmt.Sprint(status)) {
+			t.Fatalf("retained removed-connector token answered with HTTP %d: error = %v, want a fail-closed refusal requirement", status, err)
+		}
+		for _, token := range tokens {
+			if strings.Contains(err.Error(), token) {
+				t.Fatal("the rotation check error leaked a scoped hook token")
+			}
+		}
+	}
+
+	// A shipped connector next to the removed ones must still be accepted.
+	srv, _ := gateway(http.StatusUnauthorized, http.StatusUnauthorized)
+	err := verifyRotationConnectorHookAuthentication(srv.Client(), srv.URL+"/status", dataDir, expected)
+	srv.Close()
+	if err == nil || !strings.Contains(err.Error(), "connector codex") || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("refused codex token next to removed scopes: error = %v, want codex fail-closed", err)
+	}
+
+	// The retained token's file must still match its rotation fingerprint and
+	// exist; neither failure sends any probe.
+	srv, seen := gateway(http.StatusUnauthorized, 0)
+	defer srv.Close()
+	stale := rotationHookTokenFingerprints{"openhands": strings.Repeat("0", 64)}
+	if err := verifyRotationConnectorHookAuthentication(srv.Client(), srv.URL+"/status", dataDir, stale); err == nil ||
+		!strings.Contains(err.Error(), "openhands") || !strings.Contains(err.Error(), "rotation expectation") {
+		t.Fatalf("stale retained openhands token: error = %v, want a fingerprint mismatch", err)
+	}
+	if err := os.Remove(filepath.Join(dataDir, "hooks", ".hook-omnigent.token")); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRotationConnectorHookAuthentication(srv.Client(), srv.URL+"/status", dataDir,
+		rotationHookTokenFingerprints{"omnigent": expected["omnigent"]}); err == nil ||
+		!strings.Contains(err.Error(), "omnigent") || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("missing retained omnigent token: error = %v, want unavailable", err)
+	}
+	if probes := seen(); len(probes) != 0 {
+		t.Fatalf("probes after a fingerprint or file failure = %v, want none", probes)
 	}
 }

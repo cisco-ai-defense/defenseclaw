@@ -287,6 +287,31 @@ func TestSandboxPolicySourcesFollowTheResolvedFloor(t *testing.T) {
 	}
 }
 
+// GAP-0102: a profile's when_unavailable: alert cannot loosen an unset base,
+// which is refuse; profile-explain showed no value and named the profile.
+// It shows refuse, the organization's.
+func TestSandboxPolicyShowsTheWinningWhenUnavailable(t *testing.T) {
+	sandboxViewsFixture(t, 0)
+	cfg.OpenShell.Admin = config.OpenShellAdminConfig{}
+	cfg.Guardrail.Profiles["contractors"] = config.GuardrailProfile{Sandbox: &config.OpenShellAdminConfig{
+		RequiredFor: []string{"claudecode"}, WhenUnavailable: config.OpenShellWhenUnavailableAlert,
+	}}
+	sandboxFloorFor = (*config.Config).SandboxFloor
+	view := sandboxPolicyOf(cfg, "contractors")
+	if view.FloorError != "" {
+		t.Fatal(view.FloorError)
+	}
+	if got := view.Floor["when_unavailable"]; got != config.OpenShellWhenUnavailableRefuse {
+		t.Errorf("floor when_unavailable = %v, want refuse", got)
+	}
+	if got := view.Sources["when_unavailable"]; got != sandboxapi.ExplainSourceOrganization {
+		t.Errorf("when_unavailable source = %q, want organization", got)
+	}
+	if got := view.Sources["required_for"]; got != sandboxapi.ExplainSourceProfile {
+		t.Errorf("required_for source = %q, want profile", got)
+	}
+}
+
 func TestEnterpriseSandboxListUserFilterIgnoresCase(t *testing.T) {
 	_, platform := sandboxViewsFixture(t, 0)
 	out, err := runSandboxView(t, platform, "list", "--user", "ALICE", "--json")

@@ -17,6 +17,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -284,6 +285,20 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 		opt = bundleOpt
 		opt.ExpectSHA256 = configwrite.SHA256Hex(raw)
 	}
+	// A staged bundle binds the bytes already installed through the
+	// generation record alone. An unreadable record is the only evidence of
+	// what installed them: refuse before the step migrates, records or
+	// re-permissions anything, so the transaction fails and keeps it.
+	if err := configwrite.RefuseUnprovenBundleBinding(path, opt); err != nil {
+		return err
+	}
+	// Without a bundle an unreadable record is still the only evidence of
+	// the generation the gateway enforces: never reset it (GAP-0236). A
+	// record that decodes only in part (a truncated write) proves no counter
+	// either; the Windows ensure recovers a provable one before this step.
+	if _, err := configwrite.ReadGenerationState(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("cannot prove the previous config generation from %s; restore that file from the last verified administrator backup, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1", configwrite.GenerationPath(path))
+	}
 	restoreACL, err := keepConfigDACL(path)
 	if err != nil {
 		return fmt.Errorf("read the access control list of %s: %w", path, err)
@@ -328,8 +343,7 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 	}
 	if state, err := configwrite.ReadGenerationState(path); err == nil &&
 		state.ConfigSHA256 == configwrite.SHA256Hex(raw) &&
-		(opt.Bundle.ID == "" || state.Actor == opt.Actor && state.BundleID == opt.Bundle.ID &&
-			state.BundleVersion == opt.Bundle.Version && state.SignerKeyID == opt.Bundle.SignerKeyID) {
+		(opt.Bundle.ID == "" || managedStandaloneGenerationMatches(state, raw, opt)) {
 		// Already recorded, but the record still takes the DACL of the
 		// config: an uninstall that keeps state leaves it administrator-only,
 		// and the gateway service reads it for its generation (GAP-0293).
@@ -345,15 +359,23 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 // for the installed config through the config writer (lifecycle actor,
 // compare-and-swap on raw), then its migration record. An open the 1.0.0-1.0.2
 // migration wrote is not the administrator's, and managed hooks honour an
-// explicit open since 1.0.3. No record means no change.
+// explicit open since 1.0.3. No record means no change; a record that is
+// there but cannot be read or decoded (G-small loop 4), or that decodes
+// without the fields every migration writes (G-small loop round 2,
+// config.DecodeMigrationRecord), is an error, so the step never reports a
+// Cursor fail mode the record proves rewritten as settled.
 func repairManagedStandaloneCursorFailMode(ctx context.Context, path string, raw []byte, opt configwrite.Options) (bool, error) {
-	recordRaw, err := os.ReadFile(config.MigrationRecordPath(path))
+	recordPath := config.MigrationRecordPath(path)
+	recordRaw, err := readManagedMigrationRecord(recordPath, managedMigrationRecordMaxBytes)
 	if err != nil {
+		return false, err
+	}
+	if recordRaw == nil {
 		return false, nil
 	}
-	var record config.MigrationRecord
-	if json.Unmarshal(recordRaw, &record) != nil {
-		return false, nil
+	record, err := config.DecodeMigrationRecord(recordRaw)
+	if err != nil {
+		return false, fmt.Errorf("decode %s: %w", recordPath, err)
 	}
 	repaired, updated, ok := config.RepairMigratedCursorFailMode(raw, record)
 	if !ok {
@@ -364,6 +386,54 @@ func repairManagedStandaloneCursorFailMode(ctx context.Context, path string, raw
 		return false, fmt.Errorf("restore the migrated Cursor hook_fail_mode in %s: %w", path, err)
 	}
 	return true, config.WriteMigrationRecord(path, updated)
+}
+
+// managedMigrationRecordMaxBytes bounds a migration-v9.json read, as the
+// Windows lifecycle bounds the config it sits beside.
+const managedMigrationRecordMaxBytes = 4 << 20
+
+// readManagedMigrationRecord reads the migration-v9.json at path, which the
+// lifecycle writes as a plain file next to the installed config: nil and no
+// error only when nothing is at path. Anything else there (a directory, a
+// symbolic link, a junction or another reparse point, a link whose target is
+// gone included), a record past limit, or one that changes while it is read
+// is an error, never no record. Reads that followed the path took a dangling
+// link for a missing record, and ensure reported compliance while the Cursor
+// correction the record may prove stayed unapplied (G-small).
+func readManagedMigrationRecord(path string, limit int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file (mode %s)", path, info.Mode().Type())
+	}
+	if info.Size() > limit {
+		return nil, fmt.Errorf("%s exceeds %d bytes", path, limit)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	if !os.SameFile(info, opened) {
+		return nil, fmt.Errorf("read %s: it was replaced while it was read", path)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("%s exceeds %d bytes", path, limit)
+	}
+	return raw, nil
 }
 
 // recordRestoredManagedStandaloneConfig records the config.yaml a lifecycle
@@ -448,4 +518,49 @@ func printConfigMigrateResult(cmd *cobra.Command, result *config.MigrateV9Result
 		fmt.Fprintf(out, "Wrote %s.\n", strings.Join(result.Written, ", "))
 	}
 	return nil
+}
+
+// repairManagedStandaloneConfigGeneration changes metadata only after exact
+// approved bytes and a proven previous counter have been established.
+func repairManagedStandaloneConfigGeneration(ctx context.Context, path string, approved []byte, floor uint64) (bool, error) {
+
+	opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure (recovered config generation)", GenerationFloor: floor}
+	if bundleOpt, ok, err := managedStandaloneBundleGeneration(path, approved); err != nil {
+		return false, err
+	} else if ok {
+		opt = bundleOpt
+		opt.GenerationFloor = max(bundleOpt.GenerationFloor, floor)
+	}
+	opt.RecordSHA256 = configwrite.SHA256Hex(approved)
+	if opt.GenerationFloor == 0 {
+		return false, fmt.Errorf("cannot prove the previous config generation; restore %s from the last verified administrator backup, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1", configwrite.GenerationPath(path))
+	}
+	restoreACL, err := keepConfigDACL(path)
+	if err != nil {
+		return false, err
+	}
+	changed := false
+	_, err = configwrite.Locked(ctx, path, opt, func() (bool, error) {
+		installed, err := os.ReadFile(path)
+		if err != nil {
+			return false, err
+		}
+		if !bytes.Equal(installed, approved) {
+			return false, configwrite.ErrConflict
+		}
+		state, readErr := configwrite.ReadGenerationState(path)
+		changed = readErr != nil || !managedStandaloneGenerationMatches(state, installed, opt)
+		return changed, nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return changed, restoreACL(configwrite.GenerationPath(path))
+}
+
+func managedStandaloneGenerationMatches(state configwrite.GenerationState, raw []byte, opt configwrite.Options) bool {
+	return state.Generation > 0 && state.Generation >= opt.GenerationFloor &&
+		state.ConfigSHA256 == configwrite.SHA256Hex(raw) && !configwrite.IsHandEditActor(state.Actor) &&
+		(opt.Bundle.ID == "" || state.Actor == opt.Actor && state.BundleID == opt.Bundle.ID &&
+			state.BundleVersion == opt.Bundle.Version && state.SignerKeyID == opt.Bundle.SignerKeyID)
 }

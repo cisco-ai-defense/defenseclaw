@@ -2379,7 +2379,7 @@ func committedAgentHookChainPanicBlock(
 	switch strings.ToLower(strings.TrimSpace(req.ConnectorName)) {
 	case "claudecode":
 		next.HookOutput = claudeCodeOutput(
-			claudeCodeHookRequest{HookEventName: req.HookEventName},
+			claudeCodeHookRequest{HookEventName: req.HookEventName, PermissionMode: payloadString(req.Payload, "permission_mode")},
 			next.Action,
 			next.RawAction,
 			next.Reason,

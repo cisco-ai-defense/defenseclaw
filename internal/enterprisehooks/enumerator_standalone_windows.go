@@ -65,21 +65,26 @@ type windowsStandaloneRowContext struct {
 // unprotected reports an installed agent that has no row: it is not
 // enrolled.
 func (c windowsStandaloneRowContext) unprotected(row *ManifestTarget, version, reason string) {
-	consequence := "it runs without DefenseClaw hooks"
-	if windowsStandaloneMachinePolicyConnector(row.Connector) {
-		consequence = "its machine-policy hooks refuse this user's tool calls until it is enrolled"
-		switch strings.ToLower(strings.TrimSpace(row.Connector)) {
-		case "cursor":
-			if !windowsCursorMachinePolicyPublished() {
-				consequence = windowsCursorUnpublishedConsequence
-			}
-		case "codex":
-			if !windowsCodexMachinePolicyPublished() {
-				consequence = windowsCodexUnpublishedConsequence
-			}
+	c.reportAgent(row, version, reason, windowsUnenrolledConsequence(row.Connector))
+}
+
+// windowsUnenrolledConsequence says what happens to the tool calls of a user
+// no row enrolls for connector.
+func windowsUnenrolledConsequence(connector string) string {
+	if !windowsStandaloneMachinePolicyConnector(connector) {
+		return "it runs without DefenseClaw hooks"
+	}
+	switch strings.ToLower(strings.TrimSpace(connector)) {
+	case "cursor":
+		if !windowsCursorMachinePolicyPublished() {
+			return windowsCursorUnpublishedConsequence
+		}
+	case "codex":
+		if !windowsCodexMachinePolicyPublished() {
+			return windowsCodexUnpublishedConsequence
 		}
 	}
-	c.reportAgent(row, version, reason, consequence)
+	return "its machine-policy hooks refuse this user's tool calls until it is enrolled"
 }
 
 // windowsCursorUnpublishedConsequence is the unprotected-agent consequence for

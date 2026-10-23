@@ -36,7 +36,7 @@ func packagedDockerHost(t *testing.T) *osHost {
 			t.Fatal(err)
 		}
 	}
-	h.runner.replies = map[string]fakeReply{"rpm -q --qf %{VERSION} openshell": {result: CommandResult{Stdout: []byte("0.1.3")}}}
+	h.runner.replies = map[string]fakeReply{"rpm -q --qf %{VERSION} openshell": {result: CommandResult{Stdout: []byte("0.1.5")}}}
 	return h
 }
 

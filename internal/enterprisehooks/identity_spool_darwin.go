@@ -31,6 +31,12 @@ import (
 
 const macOSIdentityToolTimeout = 10 * time.Second
 
+// bindIdentitySpoolUPN binds nothing on macOS: the guardian keeps no
+// InfoPipe UPN there (KeepVerifiedInfoPipeUPN needs an SSSD domain).
+func bindIdentitySpoolUPN(context.Context, int, string, string, bool) UPNBinding {
+	return UPNBindingUnknown
+}
+
 func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccount, now time.Time) (IdentitySpoolRecord, error) {
 	name := strings.TrimSpace(account.User)
 	if name == "" || strings.ContainsAny(name, "/\x00\n") || strings.HasPrefix(name, "-") {

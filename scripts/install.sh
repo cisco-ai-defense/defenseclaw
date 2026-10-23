@@ -59,6 +59,17 @@ readonly OFFICIAL_RELEASE_BASE="https://github.com/${DEFAULT_REPO}"
 readonly RELEASE_SIGNER='^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
 readonly DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 export DEFENSECLAW_HOME
+# until 1.1: a 0.8.x or 1.0.x OmniGent setup may have used a relative
+# config override. Bind it to the caller's directory before the installer
+# starts a gateway from its own runtime directory. Nothing is changed in the
+# caller's shell; the child gateway and the cleanup reporter see one path.
+for retired_config_var in OMNIGENT_CONFIG_HOME OMNIGENT_CONFIG; do
+    retired_config_value="${!retired_config_var:-}"
+    case "${retired_config_value}" in
+        ""|/*|"~"|"~/"*) ;;
+        *) export "${retired_config_var}=$(pwd -P)/${retired_config_value}" ;;
+    esac
+done
 readonly VENV="${DEFENSECLAW_HOME}/.venv"
 readonly BIN_DIR="${HOME}/.local/bin"
 readonly PREVIOUS="${DEFENSECLAW_HOME}/previous"
@@ -102,7 +113,7 @@ readonly MANAGED_LINKS="defenseclaw skill-scanner mcp-scanner"
 readonly BUSY_SHIM_MARK="# Written by the DefenseClaw installer while it replaces the install"
 # Data-dir entries that are install machinery, not user data.
 readonly NOT_DATA=".venv .uv previous previous.new .repair .rollback-hold .rollback-hold.done .staging .failed-* installer logs .install.lock backups"
-readonly CONNECTOR_CHOICES="codex claudecode zeptoclaw openclaw hermes cursor devin copilot openhands antigravity opencode amp omnigent kiro none"
+readonly CONNECTOR_CHOICES="codex claudecode zeptoclaw openclaw hermes cursor devin copilot antigravity opencode amp kiro none"
 
 if [[ -t 1 ]] || [[ "${FORCE_COLOR:-}" == "1" ]]; then
     RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -239,7 +250,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --yes|-y) YES=true ;;
         --version)
-            [[ $# -ge 2 ]] || usage_error "--version needs a value such as 1.2.3"
+            # An empty --version= picked the latest release (GAP-0012).
+            [[ $# -ge 2 && -n "$2" ]] || usage_error "--version needs a value such as 1.2.3"
+            is_version "${2#v}" || usage_error "--version must look like 1.2.3, got '$2'"
             TARGET_VERSION="${2#v}"; shift ;;
         --local)
             # An empty --local= ran from the current folder (GAP-1336).
@@ -270,9 +283,6 @@ done
 if [[ "${NO_OPENCLAW}" == true ]]; then
     [[ "${CONNECTOR}" != openclaw ]] || die "--no-openclaw cannot be combined with --connector openclaw"
     CONNECTOR="${CONNECTOR:-none}"
-fi
-if [[ -n "${TARGET_VERSION}" ]] && ! is_version "${TARGET_VERSION}"; then
-    die "--version must look like 1.2.3, got '${TARGET_VERSION}'"
 fi
 
 printf "\n${BOLD}  DefenseClaw Installer${NC}\n"
@@ -484,17 +494,121 @@ installed_version() {
 
 stop_gateway() {
     # stop_gateway BINARY: stop the running gateway, preferring its own binary.
-    local binary="$1" pid waited=0
+    # The stop is the install's, not the operator's: the gateway.stopped
+    # marker `defenseclaw-gateway stop` writes is taken away again unless the
+    # operator's was already there. A hook that runs while the install holds
+    # .install.lock then reports a restart, not an operator stop; the hooks of
+    # 1.0.2 and earlier read only that marker (GAP-0140). The lock keeps every
+    # hook from starting the gateway meanwhile.
+    local binary="$1" pid waited=0 marker="${DEFENSECLAW_HOME}/gateway.stopped" operator_stop=false
     pid="$(gateway_pid || true)"
     [[ -n "${pid}" ]] || return 0
+    [[ -e "${marker}" || -L "${marker}" ]] && operator_stop=true
     if [[ -x "${binary}" ]]; then
         "${binary}" stop >/dev/null 2>&1 || true
     fi
+    [[ "${operator_stop}" == true ]] || rm -f "${marker:?}"
     while [[ -n "$(gateway_pid || true)" && ${waited} -lt 30 ]]; do
         sleep 1; waited=$((waited + 1))
         [[ ${waited} -eq 15 ]] && kill "${pid}" 2>/dev/null || true
+        # A gateway still shutting down at 25s is killed, as install.ps1
+        # does: one whose hook writer waits on the fail-mode hold
+        # (hold_hook_fail_modes) cannot finish its own shutdown.
+        [[ ${waited} -eq 25 ]] && kill -KILL "${pid}" 2>/dev/null || true
     done
     [[ -z "$(gateway_pid || true)" ]]
+}
+
+hook_fail_mode_refresh_probe() {
+    # 0: the staged gateway has 'connector refresh-fail-modes'. 1: an older
+    # one (a downgrade), which prints the connector help for an unknown
+    # subcommand and sets its own modes when it starts. 2: any other answer
+    # (an error, no output): the hooks cannot be shown safe.
+    local help="" rc=0
+    help="$("${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --help 2>&1)" || rc=$?
+    [[ ${rc} -eq 0 && "${help}" == *"connector refresh-fail-modes"* ]] && return 0
+    [[ ${rc} -eq 0 && "${help}" == *"defenseclaw-gateway connector [command]"* ]] && return 1
+    warn "The new gateway did not answer 'connector refresh-fail-modes --help' (exit ${rc})"
+    return 2
+}
+
+refresh_hook_fail_modes() {
+    # Set the installed hooks' outage fail modes (hooks/.hookcfg, its flat
+    # records and the open a connector script bakes) from the config with the
+    # staged gateway: an earlier release may have recorded or baked open for a
+    # mode nobody set, which its hooks follow while the gateway is down for
+    # the swap. An open the config sets stays open, from a DEFENSECLAW_CONFIG
+    # outside the data directory too. Used when no gateway runs; a running
+    # one gets hold_hook_fail_modes.
+    [[ -d "${DEFENSECLAW_HOME}/hooks" ]] || return 0
+    local probe=0
+    hook_fail_mode_refresh_probe || probe=$?
+    case ${probe} in
+        0) "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --data-dir "${DEFENSECLAW_HOME}" ;;
+        1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+HOLD_PID=""
+HOLD_LOG=""
+hold_hook_fail_modes() {
+    # hold_hook_fail_modes PID: refresh_hook_fail_modes for the running
+    # gateway PID, which is about to stop. The staged gateway refreshes, holds
+    # the lock every release's hook writer takes until PID has exited, and
+    # refreshes again: the old gateway may render its hooks again while it
+    # runs or shuts down, and they would follow that open while it is down.
+    # Returns once the first refresh is written and the lock held;
+    # finish_hook_fail_mode_hold waits for the rest.
+    [[ -d "${DEFENSECLAW_HOME}/hooks" ]] || return 0
+    local probe=0 waited=0
+    hook_fail_mode_refresh_probe || probe=$?
+    case ${probe} in
+        0) ;;
+        1) return 0 ;;
+        *) return 1 ;;
+    esac
+    HOLD_LOG="${STAGING}/refresh-fail-modes.log"
+    : >"${HOLD_LOG}"
+    "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --data-dir "${DEFENSECLAW_HOME}" \
+        --hold-until-exit "$1" >"${HOLD_LOG}" 2>&1 &
+    HOLD_PID=$!
+    while ! grep -q "Holding the hook fail modes" "${HOLD_LOG}" 2>/dev/null; do
+        if ! kill -0 "${HOLD_PID}" 2>/dev/null; then
+            finish_hook_fail_mode_hold || true
+            return 1
+        fi
+        if [[ ${waited} -ge 600 ]]; then
+            warn "The new gateway did not set the hooks' fail modes within a minute"
+            end_hook_fail_mode_hold
+            return 1
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+}
+
+finish_hook_fail_mode_hold() {
+    # Wait for the hold, which ends once the gateway it holds for has exited,
+    # and show what it said.
+    [[ -n "${HOLD_PID}" ]] || return 0
+    local rc=0
+    wait "${HOLD_PID}" || rc=$?
+    HOLD_PID=""
+    if [[ ${rc} -eq 0 ]]; then
+        grep -v "Holding the hook fail modes" "${HOLD_LOG}" || true
+    else
+        cat "${HOLD_LOG}" >&2 || true
+    fi
+    return ${rc}
+}
+
+end_hook_fail_mode_hold() {
+    # Let go of the hold early: the gateway did not stop.
+    [[ -n "${HOLD_PID}" ]] || return 0
+    kill "${HOLD_PID}" 2>/dev/null || true
+    wait "${HOLD_PID}" 2>/dev/null || true
+    HOLD_PID=""
 }
 
 warn_running_sandboxes() {
@@ -645,19 +759,14 @@ if [[ "${ROLLBACK}" == true ]]; then
             *) rollback_rc=1 ;;
         esac
     fi
-    # A 0.x release has no rollback command, and its gateway writes its own
-    # connector registrations only once it runs: never leave it down.
-    if [[ ${rollback_rc} -eq 1 ]] && version_lt "${back_to}" 1.0.0; then
+    # A rollback is done only once its gateway runs: one that does not start
+    # is undone for a 1.x release as for a 0.x one, which has no rollback
+    # command and writes its own connector registrations only once it runs
+    # (GAP-0486, the Windows twin). undo_rollback exits 1.
+    if [[ ${rollback_rc} -eq 1 ]]; then
         undo_rollback "The gateway of DefenseClaw ${back_to} did not start"
     fi
-    if [[ ${rollback_rc} -eq 1 ]]; then
-        # The swap is done, but the hooks are unguarded: say so, and exit 1.
-        warn "Now running DefenseClaw ${back_to}, but its gateway is not up, so agent hooks are not guarded until it is"
-        # A start that said why it failed already printed the command that fixes it.
-        [[ -n "${START_EXPLAINED:-}" ]] || info "Start it with: defenseclaw-gateway start (its log: ${DEFENSECLAW_HOME}/gateway.log)"
-    else
-        ok "Now running DefenseClaw ${back_to}."
-    fi
+    ok "Now running DefenseClaw ${back_to}."
     forward="defenseclaw rollback"
     if version_lt "${back_to}" 1.0.0; then
         forward="bash ${PREVIOUS}/installer/install.sh --rollback"
@@ -875,15 +984,28 @@ if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" 
     pick_connector
 fi
 
-if [[ -n "${PREV_VERSION}" ]] && version_lt "${PREV_VERSION}" 1.0.0; then
-    find_legacy_leftovers
-fi
 WAS_RUNNING=false
 RESTORED_NOTE="Your previous install is back."
-[[ -n "$(gateway_pid || true)" ]] && WAS_RUNNING=true
+OLD_GATEWAY_PID="$(gateway_pid || true)"
+[[ -n "${OLD_GATEWAY_PID}" ]] && WAS_RUNNING=true
 if [[ "${WAS_RUNNING}" == true ]]; then
+    hold_hook_fail_modes "${OLD_GATEWAY_PID}" \
+        || die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
     info "Stopping the gateway"
-    stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The running gateway did not stop; nothing was changed"
+    if ! stop_gateway "${BIN_DIR}/defenseclaw-gateway"; then
+        end_hook_fail_mode_hold
+        die "The running gateway did not stop; nothing was changed"
+    fi
+    # The hold refreshes again once the gateway has exited.
+    if ! finish_hook_fail_mode_hold; then
+        restart_old
+        rm -rf "${STAGING}"
+        drop_new_uv
+        die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down. ${RESTORED_NOTE}"
+    fi
+else
+    refresh_hook_fail_modes \
+        || die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
 fi
 
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]; then
@@ -914,6 +1036,9 @@ if [[ "${WAS_RUNNING}" == true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "
     warn "The gateway was running without a configuration; run 'defenseclaw init' to set it up"
 fi
 if [[ "${WAS_RUNNING}" == true ]]; then
+    # An older setup can remove working hooks after the same refresh error.
+    # Interrupted recovery must preserve this refusal too.
+    : > "${SNAP}/GATEWAY_RESTART_UNPROVEN"
     set +e
     start_gateway
     START_RC=$?
@@ -925,9 +1050,10 @@ if [[ "${WAS_RUNNING}" == true ]]; then
         drop_staging
         die "DefenseClaw ${VERSION} was not installed. ${RESTORED_NOTE} Log: ${LOG}"
     fi
+    rm -f "${SNAP}/GATEWAY_RESTART_UNPROVEN"
 fi
 finish_swap
-record_legacy_leftovers
+report_retired_connector_leftovers
 trap - HUP PIPE
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
@@ -1088,94 +1214,6 @@ install_uv() {
     fi
     rm -rf "${tmp}"
     return 1
-}
-
-# What a 0.8.x install left outside the data dir without a record (GAP-0908).
-# When uv was missing, the 0.8.x installer ran uv's own installer into BIN_DIR
-# and that uv filled uv's default cache; when Cosign was missing it ran a
-# temporary one that left ~/.sigstore. It kept no marker, and it reused a uv
-# the user already had, so the upgrade from 0.8.x records these for
-# `defenseclaw uninstall --all --binaries` only on evidence a user's own uv
-# or Cosign cannot meet. LEGACY_WINDOW covers the 0.8.x steps between uv's
-# installer and the venv: the Python check, the release policy and Cosign,
-# the connector menu and the gateway download.
-#   uv, uvx and uv's cache: legacy_uv_from_0_8 below.
-#   ~/.sigstore: only with that uv, no cosign on PATH, it holds only the
-#     public Sigstore TUF cache, and everything in it is newer than uv's
-#     receipt and none of it newer than the venv: the 0.8.x installer ran its
-#     temporary Cosign after uv, so no other Cosign has used it. A ten-minute
-#     window alone claimed a cache the user had made just before (GAP-1262).
-readonly LEGACY_WINDOW=600
-LEGACY_UV_RECORD="" LEGACY_LEFTOVERS=""
-mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
-# legacy_uv_from_0_8 succeeds only when all of this holds:
-#   - uv's receipt is a plain file of this account that names BIN_DIR, only
-#     uv and uvx, and the version BIN_DIR/uv reports and the 0.8.x venv was
-#     made with (pyvenv.cfg "uv ="); it was written at most LEGACY_WINDOW
-#     seconds before that venv;
-#   - BIN_DIR/uv and uvx are plain files of this account;
-#   - uv's default cache is a plain folder of this account; nothing in it is
-#     older than the receipt (a uv the user had before has a history there);
-#     every unpacked wheel in it was unpacked after the 0.8.x venv was made
-#     (the 0.8.x installer installs only into that venv) and is one that venv
-#     holds, DefenseClaw's among them; and uv has no tools installed.
-# A uv the user had earlier, used for anything else, or updated since fails
-# this and stays the user's; uninstall then names what it leaves.
-legacy_uv_from_0_8() {
-    local cfg=$1 venv_t=$2 version receipt receipt_t cache site entry info name
-    version="$(awk -F' *= *' '$1 == "uv" {print $2}' "${cfg}")"
-    receipt="${XDG_CONFIG_HOME:-${HOME}/.config}/uv/uv-receipt.json"
-    cache="${XDG_CACHE_HOME:-${HOME}/.cache}/uv"
-    [[ -n "${version}" ]] || return 1
-    [[ -z "${UV_CACHE_DIR:-}" || "${UV_CACHE_DIR}" == "${DEFENSECLAW_HOME}/.uv/cache" ]] || return 1
-    [[ -f "${receipt}" && ! -L "${receipt}" && -O "${receipt}" ]] || return 1
-    receipt_t="$(mtime_of "${receipt}")" || return 1
-    (( venv_t >= receipt_t && venv_t - receipt_t <= LEGACY_WINDOW )) || return 1
-    grep -qF '"binaries":["uv","uvx"]' "${receipt}" || return 1
-    grep -qF "\"install_prefix\":\"${BIN_DIR}\"" "${receipt}" || return 1
-    grep -qF "\"version\":\"${version}\"" "${receipt}" || return 1
-    for name in uv uvx; do
-        [[ -f "${BIN_DIR}/${name}" && ! -L "${BIN_DIR}/${name}" && -O "${BIN_DIR}/${name}" ]] || return 1
-    done
-    [[ "$("${BIN_DIR}/uv" --version 2>/dev/null | awk '{print $2}')" == "${version}" ]] || return 1
-    [[ ! -e "${XDG_DATA_HOME:-${HOME}/.local/share}/uv/tools" ]] || return 1
-    [[ -d "${cache}" && ! -L "${cache}" && -O "${cache}" ]] || return 1
-    [[ -z "$(find "${cache}" -maxdepth 2 ! -newer "${receipt}" -print -quit 2>/dev/null || echo error)" ]] || return 1
-    [[ -z "$(find "${cache}" -mindepth 2 -maxdepth 2 -path '*/archive-v*/*' ! -newer "${cfg}" -print -quit 2>/dev/null || echo error)" ]] || return 1
-    site="$(find "${cfg%/*}/lib" -mindepth 2 -maxdepth 2 -name site-packages -type d -print -quit 2>/dev/null)"
-    [[ -n "${site}" ]] && compgen -G "${cache}/archive-v*/*/defenseclaw-*.dist-info" >/dev/null || return 1
-    for entry in "${cache}"/archive-v*/*; do
-        for info in "${entry}"/*.dist-info; do
-            [[ -d "${info}" && ! -L "${info}" && -d "${site}/${info##*/}" ]] || return 1
-        done
-    done
-}
-find_legacy_leftovers() {
-    local cfg="${DEFENSECLAW_HOME}/.venv/pyvenv.cfg" venv_t sigstore receipt
-    [[ -f "${cfg}" && ! -L "${cfg}" ]] || return 0
-    venv_t="$(mtime_of "${cfg}")" || return 0
-    if legacy_uv_from_0_8 "${cfg}" "${venv_t}"; then
-        LEGACY_UV_RECORD="$(sha256_of "${BIN_DIR}/uv")  uv"$'\n'"$(sha256_of "${BIN_DIR}/uvx")  uvx"
-        LEGACY_LEFTOVERS="uv-cache"
-    fi
-    sigstore="${HOME}/.sigstore"
-    receipt="${XDG_CONFIG_HOME:-${HOME}/.config}/uv/uv-receipt.json"
-    if [[ -n "${LEGACY_UV_RECORD}" && -d "${sigstore}" && ! -L "${sigstore}" && -O "${sigstore}" ]] && ! has cosign \
-        && [[ -z "$(find "${sigstore}" ! -newer "${receipt}" -print -quit 2>/dev/null || echo error)" ]] \
-        && [[ -z "$(find "${sigstore}" -mindepth 1 -newer "${cfg}" -print -quit 2>/dev/null || echo error)" ]] \
-        && [[ -z "$(find "${sigstore}" -mindepth 1 -maxdepth 2 ! -path "${sigstore}/root" \
-            ! -path "${sigstore}/root/tuf-repo-cdn.sigstore.dev" ! -path "${sigstore}/root/tuf-repo-cdn.sigstore.dev.json" \
-            -print -quit 2>/dev/null || echo error)" ]]; then
-        LEGACY_LEFTOVERS+="${LEGACY_LEFTOVERS:+$'\n'}sigstore"
-    fi
-}
-# After the swap. `defenseclaw uninstall --binaries` removes the 0.8.x uv
-# while it still matches this record, the one install_uv writes too.
-record_legacy_leftovers() {
-    if [[ -n "${LEGACY_UV_RECORD}" && ! -e "${BIN_DIR}/defenseclaw-uv.sha256" ]]; then
-        printf '%s\n' "${LEGACY_UV_RECORD}" > "${BIN_DIR}/defenseclaw-uv.sha256" || true
-    fi
-    [[ -z "${LEGACY_LEFTOVERS}" ]] || printf '%s\n' "${LEGACY_LEFTOVERS}" > "${DEFENSECLAW_HOME}/legacy-install-leftovers" || true
 }
 
 # A failed install removes what it added for uv: the uv and uvx it
@@ -1589,7 +1627,8 @@ swap_app() {
 }
 
 restore_snapshot() {
-    local failed="" binary link name dest kept=true restored=true moved free_mb
+    local failed="" binary link name dest kept=true restored=true moved free_mb keep_stopped=false
+    [[ ! -e "${SNAP}/GATEWAY_RESTART_UNPROVEN" ]] || keep_stopped=true
     # A restore that stops part-way (a full disk) keeps the snapshot, and the
     # next run finishes it from what this one recorded there: FAILED_DIR names
     # the folder that keeps the failed install, VENV_BACK and DATA_ASIDE mark
@@ -1695,7 +1734,7 @@ restore_snapshot() {
         return 0
     fi
     rm -rf "${SNAP}" || true
-    restart_old
+    restart_old "${keep_stopped}"
     if [[ "${kept}" == true ]]; then
         warn "The failed ${VERSION} install was kept in ${failed} ($(du -sh "${failed}" 2>/dev/null | awk '{print $1}')) for troubleshooting"
         info "Your previous install and its data are back; it is safe to remove the copy with: rm -rf '${failed}'"
@@ -1706,6 +1745,14 @@ restore_snapshot() {
 }
 
 restart_old() {
+    if [[ "${1:-false}" == true ]]; then
+        local gateway_command
+        printf -v gateway_command '%q' "${BIN_DIR}/defenseclaw-gateway"
+        RESTORED_NOTE="Your previous install is back, with its gateway kept stopped to preserve its hook registration."
+        warn "${RESTORED_NOTE}"
+        info "Resolve the startup error (close the agent if its settings are in use), then run: ${gateway_command} start"
+        return 0
+    fi
     if [[ "${WAS_RUNNING}" == true ]]; then
         start_gateway >/dev/null 2>&1 && return 0
         # Say plainly that the gateway that ran before is down now (GAP-1349).
@@ -1843,6 +1890,27 @@ finish_swap() {
     find -H "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
         -exec rm -rf {} + 2>/dev/null || true
     ok "Installed DefenseClaw ${VERSION}"
+}
+
+# until 1.1: the removed connectors' teardown deliberately keeps vendor
+# configs and import paths for manual cleanup. The gateway may complete its
+# deny-only script replacement during start, but its daemon log is not the
+# installer's output. List the remaining paths and exact steps here too.
+report_retired_connector_leftovers() {
+    local notes
+    if ! notes="$("${VENV}/bin/python" -I - "${DEFENSECLAW_HOME}" <<'PY'
+import sys
+from defenseclaw.removed_connectors import leftovers
+
+for left in leftovers(sys.argv[1]):
+    for line in left.lines():
+        print(line)
+PY
+)"; then
+        warn "Could not check removed connector leftovers; run 'defenseclaw status' for manual cleanup steps"
+        return 0
+    fi
+    [[ -z "${notes}" ]] || printf '\n%s\n' "${notes}"
 }
 
 # A rollback parks the data written since the upgrade in previous/, and a 0.x

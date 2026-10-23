@@ -111,7 +111,7 @@ func hostHookGoldenCases() []hostHookGoldenCase {
 		}
 	})
 	add("legacy/all-scripts-no-token", func(t *testing.T, dir string) {
-		if err := WriteAllHookScripts(dir, "127.0.0.1:18999"); err != nil {
+		if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18999", ""); err != nil {
 			t.Fatal(err)
 		}
 	})

@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
@@ -724,12 +725,7 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 	}
 
 	for _, row := range run.Rows {
-		label := row.Connector
-		if row.User != "" {
-			label += "@" + row.User
-		} else if row.UserHome != "" {
-			label += "@" + row.UserHome
-		}
+		label := enterpriseHookReconcileRowLabel(row)
 		if row.OK {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s reconciled%s\n", Style("✓", "fg=green", "bold"), label, enterpriseHookAgentVersionNote(row))
 		} else if row.Pending {
@@ -2165,6 +2161,10 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	if cfg == nil {
 		return run, fmt.Errorf("enterprise hooks reconcile: config is not loaded")
 	}
+	// Every pass, after its removals: outage allows work again once the
+	// gateway or an earlier pass removed the protected session record key
+	// (GAP-0352).
+	defer ensureEnterpriseForeignHookSessionKey(os.Stderr)
 	if enterpriseHooksStandaloneUnixActive() {
 		started := time.Now()
 		run, err := runEnterpriseHookReconcileOnceStandaloneUnix(ctx)
@@ -3102,6 +3102,46 @@ func enterpriseHookReconcileRowsHash(rows []enterpriseHookReconcileRow) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// enterpriseHookReconcileRowLabel names a reconcile row as connector@user,
+// connector@home when the row has no user name, or connector@SID when it has
+// neither (a Windows target that failed before its profile path resolved).
+func enterpriseHookReconcileRowLabel(row enterpriseHookReconcileRow) string {
+	label := row.Connector
+	if row.User != "" {
+		label += "@" + row.User
+	} else if row.UserHome != "" {
+		label += "@" + row.UserHome
+	} else if row.SID != "" {
+		label += "@" + row.SID
+	}
+	return label
+}
+
+// enterpriseHookReconcileLogMaxDetail bounds one failure reason in the watch
+// log, so a long error cannot flood it.
+const enterpriseHookReconcileLogMaxDetail = 1024
+
+// enterpriseHookReconcileLogDetail keeps a log field (a target label or a
+// failure reason) on one bounded line. Control characters, which a user name,
+// profile path or error text could carry, become spaces first, so a field
+// cannot start a new log line or emit terminal escape sequences.
+func enterpriseHookReconcileLogDetail(detail string) string {
+	detail = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, detail)
+	detail = strings.Join(strings.Fields(detail), " ")
+	if detail == "" {
+		return "no reason recorded"
+	}
+	if runes := []rune(detail); len(runes) > enterpriseHookReconcileLogMaxDetail {
+		detail = string(runes[:enterpriseHookReconcileLogMaxDetail]) + "…"
+	}
+	return detail
+}
+
 // enterpriseHookReconcileChanged treats an authenticated successful repair as
 // a change even when the stable row outcome remains OK before and after it.
 // Otherwise a restored hook would be mislabeled no_change=true.
@@ -3131,6 +3171,17 @@ func writeEnterpriseHookReconcileLog(
 			watchDirs,
 			triggerTag,
 		)
+		// The counts alone do not say which target failed or why; a changed
+		// outcome names each failing target once. Unchanged reconciles stay a
+		// single line, and `enterprise hooks status` repeats the reasons.
+		for _, row := range run.Rows {
+			if row.OK || row.Pending {
+				continue
+			}
+			fmt.Fprintf(writer, "[hook-guardian] target %s failed: %s\n",
+				enterpriseHookReconcileLogDetail(enterpriseHookReconcileRowLabel(row)),
+				enterpriseHookReconcileLogDetail(row.Error))
+		}
 		return
 	}
 	// Log at DEBUG-ish cadence: one line per no-change reconcile is useful
@@ -3613,6 +3664,16 @@ func writeEnterpriseHookGuardianState(
 // prepareEnterpriseHookAuthorizationDir creates (or re-hardens) the
 // protected directory that holds the guardian's records and returns it.
 func prepareEnterpriseHookAuthorizationDir(dataDir string) (string, error) {
+	authorizationDir, err := hardenEnterpriseHookAuthorizationDir(dataDir)
+	if err != nil {
+		return "", err
+	}
+	return authorizationDir, nil
+}
+
+// hardenEnterpriseHookAuthorizationDir creates (or re-hardens) the protected
+// directory that holds the guardian's records and returns it.
+func hardenEnterpriseHookAuthorizationDir(dataDir string) (string, error) {
 	authorizationDir := managed.HookGuardianAuthorizationDir(dataDir)
 	if info, statErr := os.Lstat(authorizationDir); statErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {

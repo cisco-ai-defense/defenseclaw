@@ -1869,6 +1869,58 @@ def test_failed_setup_rollback_keeps_a_newer_token(tmp_path: Path, monkeypatch: 
     assert source["observability"]["destinations"][0]["name"] == "hec"
 
 
+def test_failed_setup_rollback_waits_out_a_concurrent_setup_of_the_same_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GAP-1320: setup A stages a new token and fails; setup B, run meanwhile,
+    # commits the same token for the existing destination. A's rollback must
+    # not restore the old token under B's committed update: B waits for A.
+    import threading
+
+    from defenseclaw.observability import v8_writer
+
+    _stub_canonical_v8_gateway(monkeypatch)
+    (tmp_path / "config.yaml").write_text("config_version: 8\nobservability: {}\n")
+    key = PRESETS["splunk-hec"].token_env
+    monkeypatch.delenv(key, raising=False)
+
+    def add(token: str, endpoint: str = "https://hec.example.com:8088/services/collector"):
+        return _add_v8_destination(
+            str(tmp_path), PRESETS["splunk-hec"], {"endpoint": endpoint},
+            name="hec", enabled=True, signals=None, token_value=token,
+            target=None, dry_run=False,
+        )
+
+    add("old")
+    original_mutate = v8_writer.mutate_v8_config
+    main = threading.current_thread()
+    failures: list[BaseException] = []
+
+    def other_setup() -> None:
+        try:
+            add("new", "https://hec2.example.com:8088/services/collector")
+        except BaseException as exc:  # noqa: BLE001 - reported below.
+            failures.append(exc)
+
+    other = threading.Thread(target=other_setup)
+
+    def failing_commit(*args, **kwargs):
+        if threading.current_thread() is not main:
+            return original_mutate(*args, **kwargs)
+        other.start()
+        other.join(1.0)
+        raise RuntimeError("first setup failed")
+
+    monkeypatch.setattr(v8_writer, "mutate_v8_config", failing_commit)
+    with pytest.raises(RuntimeError, match="first setup failed"):
+        add("new")
+    other.join(10)
+
+    assert not other.is_alive() and not failures, failures
+    assert dotenv_values(tmp_path / ".env")[key] == "new"
+    assert "hec2.example.com" in (tmp_path / "config.yaml").read_text()
+
+
 def test_remove_refuses_a_reordered_destination_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from defenseclaw.observability import v8_writer
 

@@ -24,9 +24,12 @@ import (
 // rel-1-0-3 GAP-0037: a managed standalone render keeps the closed fail mode
 // the managed config resolved, for Cursor in observe mode and for the
 // connectors without a fail-closed hook contract of their own. Secure Client
-// and per-user renders keep their rules; the per-user Hermes hook blocks its
-// own failures, so it keeps closed (GAP-0150, GAP-0269).
+// keeps its rules. The per-user Hermes, Copilot and Antigravity hooks block
+// their own failures, so they keep closed (GAP-0150, GAP-0269, r104 W3
+// G3-upg), and a per-user Cursor in observe closes its outages unless the
+// config opens them.
 func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
+	useVerifiedSecureClientDeployment(t)
 	standalone := SetupOpts{ManagedEnterprise: true, ManagedHookSocket: "/run/defenseclaw/hook.sock", HookFailMode: "closed", GuardrailMode: "observe"}
 	secureClient := SetupOpts{ManagedEnterprise: true, HookFailMode: "closed", GuardrailMode: "observe"}
 	perUser := SetupOpts{HookFailMode: "closed", GuardrailMode: "observe"}
@@ -41,24 +44,29 @@ func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 		{"standalone copilot", NewCopilotConnector(), standalone, "closed"},
 		{"secure client hermes", NewHermesConnector(), secureClient, "open"},
 		{"secure client cursor observe", NewCursorConnector(), secureClient, "open"},
-		{"per-user cursor observe", NewCursorConnector(), perUser, "open"},
+		{"per-user cursor observe", NewCursorConnector(), perUser, "closed"},
+		{"per-user cursor observe, explicit open", NewCursorConnector(), SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open", GuardrailMode: "observe"}, "open"},
 		{"per-user hermes", NewHermesConnector(), perUser, "closed"},
-		{"per-user copilot", NewCopilotConnector(), perUser, "open"},
+		{"per-user copilot", NewCopilotConnector(), perUser, "closed"},
+		{"per-user antigravity", NewAntigravityConnector(), perUser, "closed"},
+		{"secure client copilot", NewCopilotConnector(), secureClient, "open"},
+		{"secure client antigravity", NewAntigravityConnector(), secureClient, "open"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := CapableHookFailMode(test.opts, test.conn, resolveHookFailMode(test.opts, test.conn)); got != test.want {
+			if got := renderedHookFailMode(test.opts, test.conn); got != test.want {
 				t.Fatalf("rendered fail mode = %q, want %q", got, test.want)
 			}
 		})
 	}
 }
 
-// A managed shell hook takes only its rendered fail mode: a fail mode in the
-// environment cannot reopen it. Per-user hooks keep the override.
+// A managed shell hook takes only its rendered fail mode, and so does a
+// per-user hook: neither reads DEFENSECLAW_FAIL_MODE (GAP-0315, 1.0.4 lead
+// directive).
 func TestManagedShellHooksIgnoreTheEnvironmentFailMode(t *testing.T) {
 	for _, name := range []string{
 		"antigravity-hook.sh", "claude-code-hook.sh", "codex-hook.sh", "cursor-hook.sh",
-		"devin-hook.sh", "hermes-hook.sh", "kiro-hook.sh", "openhands-hook.sh",
+		"devin-hook.sh", "hermes-hook.sh", "kiro-hook.sh",
 	} {
 		for _, managed := range []bool{true, false} {
 			scripts, err := renderHookScripts("127.0.0.1:18970", "closed", ".token", []string{name}, managed, strings.TrimSuffix(name, "-hook.sh"), true, "", "", false, false)
@@ -70,15 +78,10 @@ func TestManagedShellHooksIgnoreTheEnvironmentFailMode(t *testing.T) {
 					continue
 				}
 				body := string(script.body)
-				// A managed hook bakes only the rendered value; a per-user
-				// hook keeps the environment override.
-				override := strings.Contains(body, `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"`)
+				reads := strings.Contains(body, perUserEnvFailModeRead)
 				pinned := strings.Contains(body, "\nFAIL_MODE=\"closed\"")
-				if managed && (override || !pinned) {
-					t.Errorf("%s managed: environment override = %v, rendered fail mode pinned = %v", name, override, pinned)
-				}
-				if !managed && !override {
-					t.Errorf("%s per-user: environment override missing", name)
+				if reads || !pinned {
+					t.Errorf("%s managed=%v: reads DEFENSECLAW_FAIL_MODE = %v, rendered fail mode pinned = %v", name, managed, reads, pinned)
 				}
 			}
 		}
@@ -123,6 +126,13 @@ func runStandaloneHermesHook(t *testing.T, f *hookSocketFixture) (int, string, s
 // DEFENSECLAW_FAIL_MODE=open in the environment.
 func runStandaloneShellHook(t *testing.T, f *hookSocketFixture, conn Connector, script string, args []string, stdin string) (int, string, string) {
 	t.Helper()
+	return runStandaloneShellHookInMode(t, f, conn, script, args, stdin, "closed")
+}
+
+// runStandaloneShellHookInMode is runStandaloneShellHook with the
+// administrator's hook fail mode failMode.
+func runStandaloneShellHookInMode(t *testing.T, f *hookSocketFixture, conn Connector, script string, args []string, stdin, failMode string) (int, string, string) {
+	t.Helper()
 	curlPath, err := exec.LookPath("curl")
 	if err != nil {
 		t.Skip("curl is required to run shell hooks")
@@ -135,7 +145,7 @@ func runStandaloneShellHook(t *testing.T, f *hookSocketFixture, conn Connector, 
 		HookAPIToken:       "connector-scoped-token",
 		HookAPITokenScoped: true,
 		ManagedEnterprise:  true,
-		HookFailMode:       "closed",
+		HookFailMode:       failMode,
 		GuardrailMode:      "observe",
 		ManagedHookSocket:  f.socket,
 		ManagedServiceUID:  os.Getuid(),

@@ -33,7 +33,7 @@ func TestMCPScanRefusesProfilePathBeforeStartingChild(t *testing.T) {
 		}
 		return refused
 	}
-	runMCPScannerCommand = func(*exec.Cmd) error {
+	runMCPScannerCommand = func(context.Context, *exec.Cmd) error {
 		childStarted = true
 		return nil
 	}

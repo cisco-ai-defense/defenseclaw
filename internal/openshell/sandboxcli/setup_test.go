@@ -458,6 +458,65 @@ func upgradableReport(edit func(*openshell.DoctorReport)) func(context.Context, 
 	})
 }
 
+// TestSetupNeedsTheUpgradeOnAReleaseThatRunsNoSandbox: on the OpenShell
+// 0.1.1 to 0.1.4 that DefenseClaw 1.0.0 to 1.0.3 left, the daemon runs no
+// sandbox (openshell.SupportedMin, NVIDIA/OpenShell#4494), so the Gateway
+// check fails. That failure does not stop setup before the in-place upgrade
+// it offers, which --yes and --install-openshell take (the owner's floor:
+// a legacy host upgrades on the next install); a release kept with
+// --non-interactive stops setup after, on that check, with the upgrade as
+// the way on.
+func TestSetupNeedsTheUpgradeOnAReleaseThatRunsNoSandbox(t *testing.T) {
+	v, _ := openshell.ParseVersion("0.1.1")
+	old := upgradableReport(func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDGatewayVersion)
+		c.Status, c.Detail = openshell.StatusFail, (&openshell.ErrSandboxRelease{Found: v}).Error()
+		c.Fix = &openshell.Fix{Summary: "upgrade OpenShell to " + openshell.InstallerVersion + " in place", Command: "defenseclaw sandbox setup --install-openshell"}
+	})
+	for _, tc := range []struct {
+		name     string
+		o        SetupOptions
+		upgraded bool
+	}{
+		{"-n keeps it and stops on the Gateway check", SetupOptions{NonInteractive: true}, false},
+		{"--yes upgrades it", SetupOptions{Yes: true}, true},
+		{"--install-openshell upgrades it", SetupOptions{NonInteractive: true, InstallOpenShell: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := setupApp(t, "", "", true)
+			useGateway(ta)
+			inst := &fakeInstaller{}
+			ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+				if inst.upgraded {
+					return hostReport(nil)(ctx, d)
+				}
+				return old(ctx, d)
+			}
+			ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+				inst.consent = consent
+				return inst
+			}
+			o := tc.o
+			o.SkipImages, o.NoWrappers = true, true
+			err := ta.Setup(bg, o)
+			if inst.upgraded != tc.upgraded || inst.ran {
+				t.Fatalf("upgraded %v (installed %v), want %v\n%s", inst.upgraded, inst.ran, tc.upgraded, ta.output())
+			}
+			if tc.upgraded {
+				ta.ok(t, err)
+				has(t, ta.output(), "OpenShell upgraded to "+openshell.InstallerVersion)
+				lacks(t, ta.output(), "runs no DefenseClaw sandbox")
+				return
+			}
+			wantErr(t, err, "the OpenShell gateway is not usable yet (Gateway version)")
+			// The upgrade was offered (and kept) before setup stopped.
+			has(t, ta.output(), "OpenShell 0.1.1 at /usr/bin/openshell; OpenShell "+openshell.InstallerVersion+" fixes a supervisor bug",
+				"✗ Gateway version: OpenShell 0.1.1 runs no DefenseClaw sandbox: before "+openshell.SupportedMin,
+				"→ upgrade OpenShell to "+openshell.InstallerVersion+" in place: defenseclaw sandbox setup --install-openshell")
+		})
+	}
+}
+
 // TestSetupOffersTheUpgrade: OpenShell 0.1.1 works, so setup asks before
 // it upgrades it in place (no by default, which --yes and -n take) and
 // says what the upgrade fixes and how to run it later; --install-openshell
@@ -469,8 +528,8 @@ func upgradableReport(edit func(*openshell.DoctorReport)) func(context.Context, 
 func TestSetupOffersTheUpgrade(t *testing.T) {
 	const later = "→ upgrade OpenShell to " + openshell.InstallerVersion + " in place: defenseclaw sandbox setup --install-openshell\n"
 	const names = "(dc-claude-theirs-a, dc-claude-theirs-b)"
-	question := "Upgrade OpenShell 0.1.1 to " + openshell.InstallerVersion + " in place with NVIDIA's installer? (sudo; sha256 verified; pulls OpenShell's " +
-		openshell.InstallerVersion + " supervisor images from ghcr.io; restarts the gateway: it drops the connections of the 2 sandboxes running on it " + names + ") [y/N]"
+	question := "Upgrade OpenShell 0.1.1 to " + openshell.InstallerVersion + " in place with NVIDIA's installer? (OpenShell 0.1.1 runs no DefenseClaw sandbox; sudo; sha256 verified; pulls OpenShell's " +
+		openshell.InstallerVersion + " supervisor images from ghcr.io; restarts the gateway: it drops the connections of the 2 sandboxes running on it " + names + ") [Y/n]"
 	flag := SetupOptions{NonInteractive: true, InstallOpenShell: true}
 	for _, tc := range []struct {
 		name     string
@@ -483,9 +542,11 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 		upgraded bool
 		says     []string
 	}{
-		{"a terminal answers no by default", "\n", true, SetupOptions{}, "", 2, nil, false, []string{question, later}},
+		// A legacy release runs no sandbox: the upgrade is the default.
+		{"a terminal answers yes by default", "\ny\n", true, SetupOptions{}, "", 2, nil, true, []string{question, "Run this plan?", "OpenShell upgraded to " + openshell.InstallerVersion}},
+		{"a terminal answers no", "n\n", true, SetupOptions{}, "", 2, nil, false, []string{question, later}},
 		{"a terminal answers yes", "y\ny\n", true, SetupOptions{}, "", 2, nil, true, []string{question, "Run this plan?", "OpenShell upgraded to " + openshell.InstallerVersion}},
-		{"--yes keeps it", "", true, SetupOptions{Yes: true}, "", 2, nil, false, []string{later}},
+		{"--yes upgrades it", "", true, SetupOptions{Yes: true}, "", 2, nil, true, []string{"OpenShell upgraded to " + openshell.InstallerVersion}},
 		{"-n keeps it", "", false, SetupOptions{NonInteractive: true}, "", 2, nil, false, []string{later}},
 		{"--install-openshell upgrades it", "", false, flag, "", 2, nil, true,
 			[]string{"upgrading OpenShell 0.1.1 to " + openshell.InstallerVersion + " restarts the gateway: it drops the connections of the 2 sandboxes running on it"}},
@@ -493,14 +554,16 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 			[]string{"⚠ OpenShell 0.1.1 is kept: Docker could not pull the images the upgraded gateway starts with (docker pull: no such host): let Docker reach ghcr.io"}},
 		// The restart would stop a running MicroVM without a flush.
 		{"MicroVMs running", "", true, SetupOptions{}, openshell.DriverVM, 2, nil, false,
-			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the 2 MicroVM sandboxes running on it " +
-				names + " without a flush", "→ stop them first (`defenseclaw sandbox stop NAME` flushes their disks), then upgrade: `defenseclaw sandbox setup --install-openshell`"}},
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, and DefenseClaw makes it only once OpenShell " +
+				"reports every MicroVM sandbox on the gateway stopped, which it does not for these: dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a` (DefenseClaw sandbox), or `openshell sandbox stop dc-claude-theirs-a` (raw OpenShell sandbox); " +
+				"dc-claude-theirs-b (ready): `defenseclaw sandbox stop dc-claude-theirs-b` (DefenseClaw sandbox), or `openshell sandbox stop dc-claude-theirs-b` (raw OpenShell sandbox); then try again", "→ then upgrade: `defenseclaw sandbox setup --install-openshell`"}},
 		{"MicroVMs running, --install-openshell", "", false, flag, openshell.DriverVM, 2, nil, false,
-			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the 2 MicroVM sandboxes"}},
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, and DefenseClaw makes it only once OpenShell"}},
 		{"no MicroVM running", "", false, flag, openshell.DriverVM, 0, nil, true,
 			[]string{"upgrading OpenShell 0.1.1 to " + openshell.InstallerVersion + " restarts the gateway: no sandbox runs on it now"}},
 		{"a MicroVM started meanwhile", "", false, flag, openshell.DriverVM, 0, fmt.Errorf("%w (dc-late): stop them first", openshell.ErrSandboxesRunning), true,
-			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade's gateway restart would stop running MicroVM sandboxes without a flush (dc-late): stop them first"}},
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade was not run: its gateway restart stops every MicroVM on the gateway with no flush, so DefenseClaw upgrades only " +
+				"once OpenShell reports each sandbox on it stopped (dc-late): stop them first"}},
 		// GAP-0056, GAP-0064: sudo refused or cancelled before the script.
 		{"no sudo", "", false, flag, "", 0, fmt.Errorf("%w: cancelled at sudo's password prompt", openshell.ErrSudo), true,
 			[]string{"⚠ OpenShell 0.1.1 is kept, the upgrade did not run: the install needs sudo: cancelled at sudo's password prompt",
@@ -547,7 +610,7 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 				lacks(t, ta.output(), "OpenShell upgraded")
 			}
 			if tc.o.Yes || tc.o.NonInteractive || tc.driver == openshell.DriverVM && tc.running > 0 {
-				lacks(t, ta.output(), "Upgrade OpenShell 0.1.1")
+				lacks(t, ta.output(), "Upgrade OpenShell 0.1.1", "Run this plan?")
 			}
 		})
 	}
@@ -628,7 +691,7 @@ func TestSetupSaysWhatToDoWhenHomebrewFails(t *testing.T) {
 	}
 	has(t, ta.output(), "✗ install OpenShell: Homebrew could not install the nvidia/openshell formula\n",
 		"Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants",
-		"then run `defenseclaw sandbox setup` again", "docs/sandboxes/guide/#troubleshooting")
+		"then run `defenseclaw sandbox setup` again", "docs/troubleshooting/sandboxes/")
 
 	// "Your Xcode (26.2) at /Applications/Xcode.app is too outdated. Please
 	// update to Xcode 27.0 (or delete it).", with the Command Line Tools
@@ -1586,43 +1649,6 @@ func TestSetupTelemetryQuestionSaysItRestartsTheGateway(t *testing.T) {
 	}
 }
 
-// TestSetupHarnessLines pins the harness part of setup: one line per
-// harness it sets up with the model credential or the next step, the
-// --harness hint, the others by the names the command line takes, and an
-// image question for a harness nobody named (manual test R2-34).
-func TestSetupHarnessLines(t *testing.T) {
-	ta := setupApp(t, "y\nn\n", "", true)
-	ta.env["ANTHROPIC_API_KEY"] = "sk-test"
-	ta.images.missing = map[string]bool{"claudecode": true, "codex": true}
-	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true}))
-	has(t, ta.output(),
-		"  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):\n"+
-			"    Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓\n"+
-			"    Codex (codex)         model credential none found: before the first run, set OPENAI_API_KEY, or set AWS_BEARER_TOKEN_BEDROCK for Amazon Bedrock; or log in inside the sandbox\n"+
-			"  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands\n",
-		"Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]",
-		"Build the Codex image now?",
-		"skipped: the Codex image (the first `defenseclaw sandbox run codex` builds it, or `defenseclaw sandbox image build codex`)")
-	lacks(t, ta.output(), "[x]", "Credentials:")
-	if !slices.Equal(ta.images.built, []string{"claudecode"}) {
-		t.Fatalf("images built = %v, want only the one agreed to", ta.images.built)
-	}
-	// A harness named with --harness is asked for: its image is built
-	// without a question, and an image already built is only checked.
-	ta = setupApp(t, "", "", true)
-	ta.images.missing = map[string]bool{"codex": true}
-	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true, Harnesses: []string{"codex"}}))
-	if strings.Contains(ta.output(), "image now?") || !slices.Equal(ta.images.built, []string{"codex"}) {
-		t.Fatalf("images built = %v:\n%s", ta.images.built, ta.output())
-	}
-	ta.out.Reset()
-	ta.images.built, ta.images.missing = nil, nil
-	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true}))
-	if strings.Contains(ta.output(), "image now?") || !slices.Equal(ta.images.built, []string{"codex"}) {
-		t.Fatalf("a current image was asked about: built = %v:\n%s", ta.images.built, ta.output())
-	}
-}
-
 // TestSetupCredentialFollowsOpenShellLLM pins that setup's credential line
 // reports what the configured openshell.llm choice finds: a provider
 // without its key is a refused run (no sandbox to log in inside), none
@@ -1742,6 +1768,20 @@ func TestDoctorNamesTheOrganizationConstraints(t *testing.T) {
 	}
 }
 
+// GAP-0087 (#1209): an openshell.admin block with only required_for
+// printed an empty constraint list on a per-user gateway, where the key
+// refuses no host run. The row names it and says it has no effect there.
+func TestDoctorSaysRequiredForHasNoEffectOnAPerUserGateway(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.Cfg.OpenShell.Admin = config.OpenShellAdminConfig{RequiredFor: []string{"claudecode"}}
+	c := ta.adminCheck()
+	want := "advisory (you own config.yaml and can change it): sandbox required for claudecode; " +
+		"required_for has no effect on a per-user gateway: only a managed computer refuses host runs"
+	if c.Status != openshell.StatusPass || c.Detail != want {
+		t.Fatalf("row = %s %q\nwant      %q", c.Status, c.Detail, want)
+	}
+}
+
 func TestDoctorCountsADownGatewayOnce(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.daemon.status.Available = false
@@ -1808,9 +1848,11 @@ func TestDoctorJudgesMicroVMsAgainstTheAdminMaximum(t *testing.T) {
 }
 
 // TestDoctorFixAsksBeforeARestartStopsSandboxes: a fix that restarts a
-// MicroVM gateway stops every sandbox running on it, once its disk is
-// flushed. With none running it is a yes by default, as every fix; with
-// some running it names them and is a no by default, which --yes takes.
+// MicroVM gateway stops every sandbox on it with no flush, so the restart
+// is refused while OpenShell does not report one stopped: the question
+// names each with how to stop it. With none running it is a yes by
+// default, as every fix; with some running it is a no by default, which
+// --yes takes.
 // On docker, whose stop keeps what a container wrote, nothing changes.
 func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	applied := 0
@@ -1824,7 +1866,8 @@ func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	}
 	report := on(openshell.DriverVM)
 	const question = `Fix "MicroVM resources": raise them and restart the gateway?`
-	const stops = "MicroVM resources: this restarts the OpenShell gateway, which stops the 1 sandbox running on it (dc-claude-theirs-a), once their disks are flushed"
+	const stops = "MicroVM resources: this restarts the OpenShell gateway, and DefenseClaw makes it only once OpenShell reports every MicroVM sandbox on the gateway stopped, " +
+		"which it does not for these: dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a` (DefenseClaw sandbox), or `openshell sandbox stop dc-claude-theirs-a` (raw OpenShell sandbox); then try again"
 
 	ta := newTestApp(t, "\n")
 	ta.IO.TTY = true
@@ -1840,7 +1883,7 @@ func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	ta.HostDoctor = report
 	runningOn(t, ta, 1)
 	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
-	has(t, ta.output(), stops, "not fixed with --yes while sandboxes run on the gateway")
+	has(t, ta.output(), stops, "not fixed with --yes while OpenShell does not report every MicroVM sandbox on the gateway stopped")
 	_ = ta.fresh().RunDoctor(bg, DoctorOptions{Fix: true, Yes: true, Output: OutputJSON})
 	if applied != 0 {
 		t.Fatalf("--yes applied the fix %d times", applied)
@@ -2044,7 +2087,7 @@ func TestDoctorWrapperHintNamesAConfiguredHarness(t *testing.T) {
 		want      string
 	}{
 		{nil, "none (`defenseclaw sandbox enable claude` makes `claude` run sandboxed)"},
-		{[]string{"kiro", "hermes", "openhands"}, "none (`defenseclaw sandbox enable hermes` makes `hermes` run sandboxed)"},
+		{[]string{"kiro", "hermes"}, "none (`defenseclaw sandbox enable hermes` makes `hermes` run sandboxed)"},
 		{[]string{"kiro"}, "none"},
 	} {
 		ta := newTestApp(t, "")
@@ -2341,4 +2384,41 @@ func TestTeardownWithTheDaemonStopped(t *testing.T) {
 			t.Fatalf("the binding was revoked under a running daemon: %v", err)
 		}
 	})
+}
+
+// TestSetupHarnessLines pins the harness part of setup: one line per
+// harness it sets up with the model credential or the next step, the
+// --harness hint, the others by the names the command line takes, and an
+// image question for a harness nobody named (manual test R2-34).
+func TestSetupHarnessLines(t *testing.T) {
+	ta := setupApp(t, "y\nn\n", "", true)
+	ta.env["ANTHROPIC_API_KEY"] = "sk-test"
+	ta.images.missing = map[string]bool{"claudecode": true, "codex": true}
+	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true}))
+	has(t, ta.output(),
+		"  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):\n"+
+			"    Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓\n"+
+			"    Codex (codex)         model credential none found: before the first run, set OPENAI_API_KEY, or set AWS_BEARER_TOKEN_BEDROCK for Amazon Bedrock; or log in inside the sandbox\n"+
+			"  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, opencode\n",
+		"Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]",
+		"Build the Codex image now?",
+		"skipped: the Codex image (the first `defenseclaw sandbox run codex` builds it, or `defenseclaw sandbox image build codex`)")
+	lacks(t, ta.output(), "[x]", "Credentials:")
+	if !slices.Equal(ta.images.built, []string{"claudecode"}) {
+		t.Fatalf("images built = %v, want only the one agreed to", ta.images.built)
+	}
+	// A harness named with --harness is asked for: its image is built
+	// without a question, and an image already built is only checked.
+	ta = setupApp(t, "", "", true)
+	ta.images.missing = map[string]bool{"codex": true}
+	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true, Harnesses: []string{"codex"}}))
+	if strings.Contains(ta.output(), "image now?") || !slices.Equal(ta.images.built, []string{"codex"}) {
+		t.Fatalf("images built = %v:\n%s", ta.images.built, ta.output())
+	}
+	ta.out.Reset()
+	ta.images.built, ta.images.missing = nil, nil
+	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true}))
+	if strings.Contains(ta.output(), "image now?") || !slices.Equal(ta.images.built, []string{"codex"}) {
+		t.Fatalf("a current image was asked about: built = %v:\n%s", ta.images.built, ta.output())
+	}
 }

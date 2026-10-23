@@ -335,7 +335,7 @@ function buildRecipes(strict: PresetBundle, balanced?: PresetBundle): Recipe[] {
   // lookup the recipe still ships, just without seed samples.
   const RULE_HINTS: Record<string, { examples: string[]; counterexamples: string[]; why?: string }> = {
     'SEC-AWS-KEY': {
-      examples: ['AKIAIOSFODNN7EXAMPLE', 'ASIA1234567890ABCDEFGHIJ'],
+      examples: ['AKIA' + '0'.repeat(16), 'ASIA' + '0'.repeat(16)],
       counterexamples: ['BANANAFRUITNOTAKEY', 'AKI', 'AKIAtoolow'],
     },
     'SEC-OPENAI-V2': {
@@ -514,8 +514,8 @@ function buildScenarios(): Scenario[] {
       id: 'admission-medium-mcp',
       title: 'MEDIUM MCP scan',
       domain: 'admission',
-      description: 'An MCP server scan found a MEDIUM finding. Default policy clears it; strict rejects.',
-      expectedVerdict: 'rejected',
+      description: 'An MCP server scan found a MEDIUM finding. Balanced warns and keeps it enabled; Strict rejects.',
+      expectedVerdict: 'warning',
       input: {
         target_type: 'mcp',
         target_name: 'context-server',

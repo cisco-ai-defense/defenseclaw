@@ -1,0 +1,75 @@
+---
+title: Gateway, key and observability problems
+description: Fix a stopped or frozen gateway, a held port, an invalid config, a missing gateway token or LLM key, and a failing observability destination.
+keywords:
+  - DefenseClaw gateway not running
+  - gateway token
+  - LLM judge off
+  - observability destination degraded
+---
+
+Fixes for the gateway, the keys it needs and the destinations it exports to.
+
+## Tool calls blocked with `gateway restarting or not running`
+
+**Cause.** The gateway is stopped, and the hook is fail-closed. This holds in observe mode too.
+
+**Fix.** `defenseclaw-gateway status`, then `defenseclaw-gateway start`. A hook does not start a stopped gateway after `defenseclaw-gateway stop`, during an upgrade, for 60 seconds after a failed start, or with `DEFENSECLAW_GATEWAY_AUTOSTART=0`. Read `~/.defenseclaw/gateway.log` for the start error.
+
+**Check.** `defenseclaw-gateway status` shows running.
+
+## `gateway did not answer`
+
+**Cause.** The gateway runs but is frozen. Neither a hook nor the watchdog restarts it.
+
+**Fix.** `defenseclaw-gateway restart`.
+
+**Check.** `defenseclaw doctor` shows the sidecar row as `[PASS]`.
+
+## The API port is held by another account
+
+**Cause.** On a shared host, another account's gateway uses the default port. The installer stops before changing anything.
+
+**Fix.** Run the `defenseclaw setup gateway --api-port <free port>` command it prints, then upgrade again.
+
+**Check.** `defenseclaw status` shows your gateway's API port.
+
+## `refusing to run ... gateway executable ... can be changed by another account`
+
+**Cause.** The gateway file or a directory above it is writable by others.
+
+**Fix.** The message names the command, for example `chmod go-w <file>`. Run it as the file's owner.
+
+**Check.** `defenseclaw doctor` shows `Config validation` as `[PASS]`.
+
+## `Config validation` fails after an edit
+
+**Cause.** `config.yaml` is invalid. A running gateway keeps the config it started with.
+
+**Fix.** `defenseclaw config validate`, fix the field it names, save.
+
+**Check.** `defenseclaw doctor` shows `Policy` as `[PASS]` with the new digest.
+
+## `no gateway token is configured`
+
+**Cause.** The gateway has never started on this account, or its token was removed.
+
+**Fix.** `defenseclaw doctor --fix` (previews with `--dry-run`). It never prints the token.
+
+**Check.** `Gateway authentication` is `[PASS]`.
+
+## `the LLM judge is off`
+
+**Cause.** No LLM key is configured. The local rules work without one.
+
+**Fix.** To add the judge: `defenseclaw setup llm`, or follow [Set up an LLM key](/docs/how-to/agents/set-up-an-llm-key). Check what is set with `defenseclaw keys list`.
+
+**Check.** `defenseclaw doctor` shows `LLM API key` and `LLM reachable` as `[PASS]`.
+
+## A destination fails or shows degraded
+
+**Cause.** The endpoint, key or route is wrong. Repeated failures pause that destination.
+
+**Fix.** `defenseclaw observability plan`, then `defenseclaw doctor` (Observability rows). Fix and reload the destination, or `defenseclaw setup observability disable NAME`.
+
+**Check.** The doctor row is `[PASS]`. Local audit history kept working throughout.

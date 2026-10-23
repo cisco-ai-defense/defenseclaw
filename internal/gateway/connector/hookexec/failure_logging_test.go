@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,7 @@ func TestDeliveryFailureDiagnostics(t *testing.T) {
 						var home string
 						r := run(t, connector, rt, func(opts *Options) {
 							home = opts.Home
+							opts.FailureLogHome = userLogHome(opts.Home)
 							opts.FailMode = mode
 							opts.StrictAvailability = strict
 							opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_input":{"command":"private-payload-marker"}}`)
@@ -120,5 +122,135 @@ func TestFailOpenDiagnosticEscapesReason(t *testing.T) {
 	var record map[string]string
 	if err := json.Unmarshal(failure, &record); err != nil || record["reason"] != "offline\nforged" || record["outcome"] != "fail_open" {
 		t.Fatalf("invalid escaped record: %v: %s", err, failure)
+	}
+}
+
+func TestManagedNativeOutageLogsInCallingUsersHome(t *testing.T) {
+	for _, mode := range []string{"open", "closed"} {
+		t.Run(mode, func(t *testing.T) {
+			userHome := filepath.Join(t.TempDir(), ".defenseclaw")
+			var runtimeHome string
+			r := run(t, "codex", &stubRT{err: fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)}, func(opts *Options) {
+				runtimeHome = opts.Home
+				opts.ManagedEnterprise = true
+				opts.ManagedStandalone = true
+				opts.ManagedUnixSocket = "/not-used-by-stub/hook.sock"
+				opts.ExplainUnenrolledAccount = true
+				opts.FailMode = mode
+				opts.FailureLogHome = func() string { return userHome }
+			})
+			data, err := os.ReadFile(filepath.Join(userHome, "logs", "hook-failures.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Count(data, []byte{'\n'}) != 1 {
+				t.Fatalf("want one outage row, got %q", data)
+			}
+			var row map[string]string
+			if err := json.Unmarshal(bytes.TrimSpace(data), &row); err != nil {
+				t.Fatal(err)
+			}
+			wantOutcome := "fail_closed"
+			if mode == "open" {
+				wantOutcome = "fail_open"
+			}
+			if row["fail_mode"] != mode || row["outcome"] != wantOutcome || row["category"] != "transport" {
+				t.Fatalf("unexpected outage row: %v", row)
+			}
+			if _, err := os.Stat(filepath.Join(runtimeHome, "logs", "hook-failures.jsonl")); !os.IsNotExist(err) {
+				t.Fatalf("runtime home received user log: %v", err)
+			}
+			if blocked(r) != (mode == "closed") {
+				t.Fatalf("outage decision in mode %s: %+v", mode, r)
+			}
+		})
+	}
+}
+
+// A managed hook whose account resolves no diagnostic directory (HOME unset,
+// a failed account lookup) writes no row, and never one into the
+// administrator-owned enforcement home it runs with.
+func TestManagedFailureLogNeverFallsBackToTheEnforcementHome(t *testing.T) {
+	for name, resolver := range map[string]func() string{"no resolver": nil, "unresolved account": func() string { return "" }} {
+		for _, mode := range []string{"open", "closed"} {
+			t.Run(name+" "+mode, func(t *testing.T) {
+				var runtimeHome string
+				r := run(t, "codex", &stubRT{err: fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)}, func(opts *Options) {
+					runtimeHome = opts.Home
+					opts.ManagedEnterprise = true
+					opts.ManagedStandalone = true
+					opts.ManagedUnixSocket = "/not-used-by-stub/hook.sock"
+					opts.ExplainUnenrolledAccount = true
+					opts.FailMode = mode
+					opts.FailureLogHome = resolver
+				})
+				if blocked(r) != (mode == "closed") {
+					t.Fatalf("outage decision in mode %s changed: %+v", mode, r)
+				}
+				if _, err := os.Stat(filepath.Join(runtimeHome, "logs", "hook-failures.jsonl")); !os.IsNotExist(err) {
+					t.Fatalf("the enforcement home received a managed row: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestManagedCodexBindingErrorUsesShellWording(t *testing.T) {
+	var logHome string
+	r := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
+		logHome = filepath.Join(t.TempDir(), ".defenseclaw")
+		opts.FailureLogHome = func() string { return logHome }
+		opts.ManagedEnterprise = true
+		opts.ManagedStandalone = true
+		opts.ExplainUnenrolledAccount = true
+		opts.FailMode = "open"
+		opts.Stdin = strings.NewReader(`{"hook_event_name":"PostToolUse"}`)
+	})
+	if !blocked(r) || r.rt.requests != 0 || !strings.Contains(r.stdout, "codex hook binding error") ||
+		!strings.Contains(r.stderr, "defenseclaw: codex hook binding error:") ||
+		strings.Contains(r.stdout, "gateway returned an answer") {
+		t.Fatalf("binding denial: %+v", r)
+	}
+	data, err := os.ReadFile(filepath.Join(logHome, "logs", "hook-failures.jsonl"))
+	if err != nil || bytes.Count(data, []byte{'\n'}) != 1 {
+		t.Fatalf("binding log %q: %v", data, err)
+	}
+}
+
+// A managed Codex Stop hook with a binding error (malformed stdin or a
+// mismatched hook_event_name) keeps the neutral Stop rule: blocking Stop
+// keeps Codex running and repeats the failing hook. The diagnostic keeps
+// the binding-error wording and the row is logged once.
+func TestManagedCodexStopBindingErrorKeepsTheNeutralStopRule(t *testing.T) {
+	for name, payload := range map[string]string{
+		"malformed":  `{`,
+		"mismatched": `{"hook_event_name":"PreToolUse"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			logHome := filepath.Join(t.TempDir(), ".defenseclaw")
+			r := run(t, "codex", ok(`{"action":"block"}`), func(opts *Options) {
+				opts.FailureLogHome = func() string { return logHome }
+				opts.ManagedEnterprise = true
+				opts.ManagedStandalone = true
+				opts.ExplainUnenrolledAccount = true
+				opts.FailMode = "closed"
+				opts.Event = "Stop"
+				opts.Stdin = strings.NewReader(payload)
+			})
+			if blocked(r) || r.rt.requests != 0 || !strings.Contains(r.stderr, "codex hook binding error") {
+				t.Fatalf("Stop binding error was not answered with the neutral allow: %+v", r)
+			}
+			data, err := os.ReadFile(filepath.Join(logHome, "logs", "hook-failures.jsonl"))
+			if err != nil || bytes.Count(data, []byte{'\n'}) != 1 {
+				t.Fatalf("binding log %q: %v", data, err)
+			}
+			var row map[string]any
+			if err := json.Unmarshal(bytes.TrimSpace(data), &row); err != nil {
+				t.Fatal(err)
+			}
+			if row["category"] != "response" || !strings.Contains(fmt.Sprint(row["reason"]), "codex hook binding error") {
+				t.Fatalf("unexpected binding row: %v", row)
+			}
+		})
 	}
 }

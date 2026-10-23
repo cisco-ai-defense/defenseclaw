@@ -9147,11 +9147,9 @@ def _connector_setup_alias(wire: str) -> str:
         "cursor",
         "devin",
         "copilot",
-        "openhands",
         "antigravity",
         "opencode",
         "amp",
-        "omnigent",
         "kiro",
     }:
         return normalized

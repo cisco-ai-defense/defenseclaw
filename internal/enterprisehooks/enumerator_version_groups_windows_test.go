@@ -27,6 +27,8 @@ const (
 	testLocalUserTwo     = testMachineDomainSID + "-1002"
 )
 
+// stubActiveSessions stubs the active sessions; the users signed in are
+// those same users (stubSignedInSessions adds a disconnected one).
 func stubActiveSessions(t *testing.T, sessions map[string][]string) {
 	t.Helper()
 	previous := windowsActiveSessionGroups
@@ -35,6 +37,26 @@ func stubActiveSessions(t *testing.T, sessions map[string][]string) {
 		out := map[string][]string{}
 		for sid, groups := range sessions {
 			out[sid] = append([]string{}, groups...)
+		}
+		return out, nil
+	}
+	sids := make([]string, 0, len(sessions))
+	for sid := range sessions {
+		sids = append(sids, sid)
+	}
+	stubSignedInSessions(t, sids...)
+}
+
+// stubSignedInSessions stubs the users who have a session, active or
+// disconnected.
+func stubSignedInSessions(t *testing.T, sids ...string) {
+	t.Helper()
+	previous := windowsSignedInSessionUsers
+	t.Cleanup(func() { windowsSignedInSessionUsers = previous })
+	windowsSignedInSessionUsers = func() (map[string]bool, error) {
+		out := map[string]bool{}
+		for _, sid := range sids {
+			out[canonicalManifestTargetSID(sid)] = true
 		}
 		return out, nil
 	}
@@ -232,7 +254,9 @@ func TestWindowsEnrollmentGroupPrimitivesAgainstThisHost(t *testing.T) {
 	if _, err := readWindowsLocalGroupDirectMembers(machine + "-500"); err == nil {
 		t.Fatal("a user SID must not read as a local group")
 	}
-	if _, err := readWindowsActiveSessionGroups(); err != nil {
+	// A test runner without the privilege to read session tokens leaves
+	// every session's user unidentified.
+	if _, err := readWindowsActiveSessionGroups(); err != nil && !errors.Is(err, errWindowsSessionsUnidentified) {
 		t.Fatalf("active sessions: %v", err)
 	}
 }

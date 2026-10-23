@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode"
@@ -256,6 +257,109 @@ func PipeName(gatewayService string) (string, error) {
 type Answer struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+	// Refresh, on a refresh answer that is not OK, names what the refresh
+	// did not publish while it published the rest. A gateway that does not
+	// know the field reads the answer as a failed refresh and refuses every
+	// call, so it is safe in both directions of an upgrade.
+	Refresh *RefreshIncomplete `json:"refresh_incomplete,omitempty"`
+}
+
+// maxRefreshRecords bounds the records an incomplete refresh names, so its
+// answer fits a frame; past it, the refresh is incomplete for every user of
+// the connectors involved.
+const maxRefreshRecords = 128
+
+// RefreshIncomplete is the error of a refresh that published some of the
+// enrolled users' MCP server records but not all. The records it published
+// are current, so the gateway reads them again; it refuses only the tool
+// calls whose own record is not confirmed: every call of a connector in
+// Connectors (its record folder could not be written), and the calls of
+// the user of each record in Records.
+type RefreshIncomplete struct {
+	Connectors []string        `json:"connectors,omitempty"`
+	Records    []RefreshRecord `json:"records,omitempty"`
+	// Detail is the enumerator's description of the failures.
+	Detail string `json:"-"`
+}
+
+// RefreshRecord is the record of one enrolled account and connector that a
+// refresh could not publish.
+type RefreshRecord struct {
+	Connector string `json:"connector"`
+	SID       string `json:"sid,omitempty"`
+	Home      string `json:"home,omitempty"`
+}
+
+func (e *RefreshIncomplete) Error() string {
+	if e == nil {
+		return "the MCP server refresh is incomplete"
+	}
+	if strings.TrimSpace(e.Detail) != "" {
+		return e.Detail
+	}
+	parts := append([]string(nil), e.Connectors...)
+	for _, record := range e.Records {
+		parts = append(parts, record.Connector+" "+record.SID)
+	}
+	return "the MCP servers of " + strings.Join(parts, ", ") + " were not published"
+}
+
+// Refuses reports whether a tool call of connector by the user whose home is
+// home has no confirmed record. An empty home (the caller is not known)
+// is refused when any record of the connector is unconfirmed, and so is any
+// call when a record names no home, or when e names nothing at all.
+func (e *RefreshIncomplete) Refuses(connector, home string) bool {
+	if e == nil {
+		return false
+	}
+	if len(e.Connectors) == 0 && len(e.Records) == 0 {
+		return true
+	}
+	connector = strings.TrimSpace(connector)
+	for _, name := range e.Connectors {
+		if strings.EqualFold(strings.TrimSpace(name), connector) {
+			return true
+		}
+	}
+	home = strings.TrimSpace(home)
+	for _, record := range e.Records {
+		if !strings.EqualFold(strings.TrimSpace(record.Connector), connector) {
+			continue
+		}
+		recordHome := strings.TrimSpace(record.Home)
+		if home == "" || recordHome == "" || strings.EqualFold(refreshHomeKey(recordHome), refreshHomeKey(home)) {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshHomeKey is home as Refuses compares it: cleaned, without a
+// trailing separator, on any OS the gateway runs on.
+func refreshHomeKey(home string) string {
+	return strings.TrimRight(filepath.Clean(home), `\/`)
+}
+
+// bounded is e with at most maxRefreshRecords records: past them, the
+// connectors of the records are named instead, which refuses every call of
+// those connectors.
+func (e *RefreshIncomplete) bounded() *RefreshIncomplete {
+	out := &RefreshIncomplete{Connectors: append([]string(nil), e.Connectors...), Detail: e.Detail}
+	if len(e.Records) <= maxRefreshRecords {
+		out.Records = append([]RefreshRecord(nil), e.Records...)
+		return out
+	}
+	seen := map[string]bool{}
+	for _, name := range out.Connectors {
+		seen[strings.ToLower(name)] = true
+	}
+	for _, record := range e.Records {
+		if key := strings.ToLower(record.Connector); !seen[key] {
+			seen[key] = true
+			out.Connectors = append(out.Connectors, record.Connector)
+		}
+	}
+	return out
 }
 
 // WriteFrame writes one frame: its kind, the big-endian payload length and

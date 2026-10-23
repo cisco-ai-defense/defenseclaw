@@ -14,6 +14,8 @@ package connector
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,54 +23,87 @@ import (
 	"testing"
 )
 
-// GAP-0150: a per-user Hermes hook with an unset hook_fail_mode resolves
-// closed outside Secure Client; only an explicit "open" renders open.
-func TestPerUserHermesHookKeepsTheResolvedFailMode(t *testing.T) {
-	for _, tc := range []struct {
-		name, mode, want string
-	}{
-		{name: "unset", mode: "", want: "closed"},
-		{name: "closed", mode: "closed", want: "closed"},
-		{name: "open", mode: "open", want: "open"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			opts := SetupOpts{
-				DataDir:       filepath.Join(dir, "dc"),
-				APIAddr:       "127.0.0.1:18970",
-				APIToken:      "tok-test",
-				HookFailMode:  tc.mode,
-				GuardrailMode: "action",
-				WorkspaceDir:  dir,
-			}
-			hookDir := filepath.Join(dir, "hooks")
-			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewHermesConnector()); err != nil {
-				t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
-			}
-			body, err := os.ReadFile(filepath.Join(hookDir, "hermes-hook.sh"))
-			if err != nil {
-				t.Fatalf("read hermes-hook.sh: %v", err)
-			}
-			if want := `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-` + tc.want + `}"`; !strings.Contains(string(body), want) {
-				t.Fatalf("hermes-hook.sh does not render %s", want)
-			}
-			flat, err := os.ReadFile(filepath.Join(hookDir, hookConfigSidecarName+".hermes"))
-			if err != nil {
-				t.Fatalf("read the Hermes runtime record: %v", err)
-			}
-			if want := "DEFENSECLAW_FAIL_MODE=" + tc.want + "\n"; !strings.Contains(string(flat), want) {
-				t.Fatalf("runtime record = %q, want %q", flat, want)
-			}
-			if got := HookFailClosed(opts, NewHermesConnector()); got != (tc.want == "closed") {
-				t.Fatalf("HookFailClosed = %v, want %v", got, tc.want == "closed")
-			}
-		})
+// A per-user Copilot CLI, Antigravity or Hermes hook with an unset
+// hook_fail_mode resolves closed outside Secure Client; only an explicit
+// "open" renders open. No hook reads DEFENSECLAW_FAIL_MODE (GAP-0315).
+func TestPerUserNativeDenyHookKeepsTheResolvedFailMode(t *testing.T) {
+	scripts := map[string]string{"antigravity": "antigravity-hook.sh", "copilot": "copilot-hook.sh", "hermes": "hermes-hook.sh"}
+	for _, conn := range nativeDenyConnectors() {
+		for _, tc := range []struct {
+			name, mode, want string
+		}{
+			{name: "unset", mode: "", want: "closed"},
+			{name: "closed", mode: "closed", want: "closed"},
+			{name: "open", mode: "open", want: "open"},
+		} {
+			t.Run(conn.Name()+"/"+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				opts := SetupOpts{
+					DataDir:       filepath.Join(dir, "dc"),
+					APIAddr:       "127.0.0.1:18970",
+					APIToken:      "tok-test",
+					HookFailMode:  tc.mode,
+					GuardrailMode: "action",
+					WorkspaceDir:  dir,
+				}
+				hookDir := filepath.Join(dir, "hooks")
+				if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+					t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+				}
+				body, err := os.ReadFile(filepath.Join(hookDir, scripts[conn.Name()]))
+				if err != nil {
+					t.Fatalf("read %s: %v", scripts[conn.Name()], err)
+				}
+				if want := "\nFAIL_MODE=\"" + tc.want + "\"\n"; !strings.Contains(string(body), want) || strings.Contains(string(body), perUserEnvFailModeRead) {
+					t.Fatalf("%s does not render %s, or reads DEFENSECLAW_FAIL_MODE", scripts[conn.Name()], want)
+				}
+				if strings.Contains(string(body), "\nFAIL_MODE=\"open\"\n") != (tc.want == "open") {
+					t.Fatalf("%s renders another fail mode next to %s", scripts[conn.Name()], tc.want)
+				}
+				flat, err := os.ReadFile(filepath.Join(hookDir, hookConfigSidecarName+"."+conn.Name()))
+				if err != nil {
+					t.Fatalf("read the %s runtime record: %v", conn.Name(), err)
+				}
+				if want := "DEFENSECLAW_FAIL_MODE=" + tc.want + "\n"; !strings.Contains(string(flat), want) {
+					t.Fatalf("runtime record = %q, want %q", flat, want)
+				}
+				if got := HookFailClosed(opts, conn); got != (tc.want == "closed") {
+					t.Fatalf("HookFailClosed = %v, want %v", got, tc.want == "closed")
+				}
+			})
+		}
 	}
 }
 
-// GAP-0150: with the gateway down, the per-user Hermes hook rendered with an
-// unset fail mode prints Hermes' block directive with the next step, so the
-// tool call does not run.
+// runPerUserHook runs a rendered per-user hook with the gateway down and a
+// clean DEFENSECLAW_* environment.
+func runPerUserHook(t *testing.T, script, stdin string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
+	home := t.TempDir()
+	cmd := exec.Command("bash", append([]string{script}, args...)...)
+	cmd.Stdin = strings.NewReader(stdin)
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "DEFENSECLAW_") {
+			env = append(env, kv)
+		}
+	}
+	cmd.Env = append(env, "DEFENSECLAW_HOME="+home, "HOME="+home)
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code = exitErr.ExitCode()
+	} else if err != nil {
+		t.Fatalf("run %s: %v", script, err)
+	}
+	return out.String(), errb.String(), code
+}
+
+// With the gateway down, the per-user Hermes hook rendered with an unset
+// fail mode prints Hermes' block directive with the next step, so the tool
+// call does not run.
 func TestPerUserHermesHookBlocksAToolCallWhileTheGatewayIsDown(t *testing.T) {
 	if _, err := exec.LookPath("curl"); err != nil {
 		t.Skip("curl not available")
@@ -85,21 +120,94 @@ func TestPerUserHermesHookBlocksAToolCallWhileTheGatewayIsDown(t *testing.T) {
 	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewHermesConnector()); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
-	home := t.TempDir()
-	cmd := exec.Command("bash", filepath.Join(hookDir, "hermes-hook.sh"))
-	cmd.Stdin = strings.NewReader(`{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"echo ok"}}`)
-	var env []string
-	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "DEFENSECLAW_") {
-			env = append(env, kv)
+	out, errOut, _ := runPerUserHook(t, filepath.Join(hookDir, "hermes-hook.sh"),
+		`{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"echo ok"}}`)
+	if !strings.Contains(out, `"action":"block"`) || !strings.Contains(out, "defenseclaw-gateway ") {
+		t.Fatalf("stdout = %q (stderr %q), want a Hermes block directive that names a defenseclaw-gateway next step", out, errOut)
+	}
+}
+
+// With the gateway down, the per-user Copilot CLI hook rendered with an unset
+// or closed fail mode denies preToolUse and permissionRequest with Copilot's
+// native deny and a reason that names the next step; an explicit open lets
+// the call run. Copilot's other events cannot block and stay neutral.
+func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not available")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	for _, mode := range []string{"", "closed", "open"} {
+		dir := t.TempDir()
+		hookDir := filepath.Join(dir, "hooks")
+		opts := SetupOpts{
+			DataDir:       filepath.Join(dir, "dc"),
+			APIAddr:       freeAPIAddr(t),
+			APIToken:      "tok-test",
+			HookFailMode:  mode,
+			GuardrailMode: "action",
+			WorkspaceDir:  dir,
+		}
+		if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewCopilotConnector()); err != nil {
+			t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+		}
+		script := filepath.Join(hookDir, "copilot-hook.sh")
+		for _, tc := range []struct{ event, field, deny string }{
+			{"preToolUse", "permissionDecisionReason", `"permissionDecision":"deny"`},
+			{"permissionRequest", "message", `"behavior":"deny"`},
+			{"sessionStart", "", ""},
+		} {
+			t.Run("mode "+map[string]string{"": "unset"}[mode]+mode+"/"+tc.event, func(t *testing.T) {
+				out, errOut, code := runPerUserHook(t, script,
+					`{"sessionId":"s","timestamp":1,"cwd":"/tmp","toolName":"bash","toolArgs":"{\"command\":\"echo ok\"}"}`,
+					"--event", tc.event)
+				if code != 0 {
+					t.Fatalf("exit %d, want 0 (stdout %q stderr %q)", code, out, errOut)
+				}
+				if mode == "open" || tc.deny == "" {
+					if strings.TrimSpace(out) != "" {
+						t.Fatalf("stdout %q, want no decision (stderr %q)", out, errOut)
+					}
+					return
+				}
+				if !strings.Contains(out, tc.deny) {
+					t.Fatalf("stdout %q, want %s (stderr %q)", out, tc.deny, errOut)
+				}
+				var answer map[string]string
+				if err := json.Unmarshal([]byte(out), &answer); err != nil {
+					t.Fatalf("stdout %q is not one JSON object: %v", out, err)
+				}
+				if reason := answer[tc.field]; !strings.HasPrefix(reason, "DefenseClaw blocked this tool call: ") ||
+					!strings.Contains(reason, "defenseclaw-gateway ") {
+					t.Fatalf("%s %q, want a DefenseClaw block that names a defenseclaw-gateway next step", tc.field, reason)
+				}
+			})
 		}
 	}
-	cmd.Env = append(env, "DEFENSECLAW_HOME="+home, "HOME="+home)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	_ = cmd.Run()
-	out := stdout.String()
-	if !strings.Contains(out, `"action":"block"`) || !strings.Contains(out, "defenseclaw-gateway ") {
-		t.Fatalf("stdout = %q (stderr %q), want a Hermes block directive that names a defenseclaw-gateway next step", out, stderr.String())
+}
+
+// With the gateway down, the per-user Antigravity hook rendered with an unset
+// fail mode denies PreToolUse with Antigravity's native deny.
+func TestPerUserAntigravityHookDeniesWhileTheGatewayIsDown(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not available")
+	}
+	dir := t.TempDir()
+	hookDir := filepath.Join(dir, "hooks")
+	opts := SetupOpts{
+		DataDir:       filepath.Join(dir, "dc"),
+		APIAddr:       freeAPIAddr(t),
+		APIToken:      "tok-test",
+		GuardrailMode: "action",
+		WorkspaceDir:  dir,
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewAntigravityConnector()); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	out, errOut, code := runPerUserHook(t, filepath.Join(hookDir, "antigravity-hook.sh"),
+		`{"conversationId":"c1","toolCall":{"name":"run_command","args":{"CommandLine":"echo ok","Cwd":"/tmp"}}}`, "PreToolUse")
+	if code != 0 || !strings.Contains(out, `"decision":"deny"`) {
+		t.Fatalf("exit %d stdout %q (stderr %q), want Antigravity's native deny", code, out, errOut)
 	}
 }

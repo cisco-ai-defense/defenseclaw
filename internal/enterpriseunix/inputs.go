@@ -91,7 +91,8 @@ func (l *lifecycle) inputsChanged() bool {
 func (l *lifecycle) settleInputChanges(ctx context.Context, code int) int {
 	env, r := l.env, l.result
 	for pass := 0; l.inputsChanged(); pass++ {
-		if len(r.Errors) > 0 || pass == maxInputFollowUps {
+		// A stopped run starts no follow-up; the apply trigger runs it.
+		if len(r.Errors) > 0 || pass == maxInputFollowUps || l.interrupted() {
 			l.retriggerApply(ctx)
 			return code
 		}
@@ -100,7 +101,7 @@ func (l *lifecycle) settleInputChanges(ctx context.Context, code int) int {
 			return code
 		}
 		r.AddWarning(codeInputChanged, "config.yaml or a protected credential changed while this run applied the previous version; applied the change in a follow-up transaction")
-		next := &lifecycle{env: env, opts: Options{Action: ActionEnsure, Reason: codeInputChanged, NoStart: record.NoStart}, result: r}
+		next := &lifecycle{env: env, opts: Options{Action: ActionEnsure, Reason: codeInputChanged, NoStart: record.NoStart, Interrupted: l.opts.Interrupted}, result: r}
 		// In bundle mode the follow-up applies the config of the current
 		// bundle again, never an in-place edit of config.yaml.
 		if !next.useCurrentBundleConfig() {

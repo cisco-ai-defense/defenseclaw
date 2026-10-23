@@ -553,7 +553,6 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
-// withArticle is name after "a" or "an": "an OpenHands", "a Codex".
 func withArticle(name string) string {
 	if name != "" && strings.ContainsRune("AEIOUaeiou", rune(name[0])) {
 		return "an " + name

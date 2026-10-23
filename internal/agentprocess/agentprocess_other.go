@@ -21,6 +21,9 @@ func newLookup() (func(int) (Process, error), func()) {
 	}, func() {}
 }
 
+// clockUnitsPerSecond is the unit of currentClock.
+const clockUnitsPerSecond = 0
+
 func currentClock() (string, int64, bool) { return "", 0, false }
 
 func executablePath(int) string { return "" }

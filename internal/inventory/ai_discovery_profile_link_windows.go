@@ -52,6 +52,35 @@ func discoveryPathThroughLink(root, path string) bool {
 	return !strings.EqualFold(final, strings.TrimRight(finalRoot, `\`)+`\`+rel)
 }
 
+// platformDiscoveryResolvedPath opens path for its attributes alone,
+// following every reparse point, and returns the final path Windows names
+// for the opened folder.
+func platformDiscoveryResolvedPath(path string) (string, bool) {
+	ptr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return "", false
+	}
+	handle, err := windows.CreateFile(ptr, windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return "", false
+	}
+	defer windows.CloseHandle(handle)
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	n, err := windows.GetFinalPathNameByHandle(handle, &buf[0], uint32(len(buf)), 0) // FILE_NAME_NORMALIZED, VOLUME_NAME_DOS
+	if err != nil || n == 0 || n >= uint32(len(buf)) {
+		return "", false
+	}
+	final := windows.UTF16ToString(buf[:n])
+	if strings.HasPrefix(final, `\\?\UNC\`) {
+		final = `\\` + final[len(`\\?\UNC\`):]
+	} else {
+		final = strings.TrimPrefix(final, `\\?\`)
+	}
+	return filepath.Clean(final), true
+}
+
 // discoveryNoFollowFacts opens path for its attributes alone, without
 // following a final reparse point, and returns its attributes and final path
 // (empty when Windows cannot name it). ok is false when path cannot be opened.

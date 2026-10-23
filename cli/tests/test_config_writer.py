@@ -29,6 +29,14 @@ from defenseclaw.config_writer import Change
 from defenseclaw.observability.v8_config import V8ConfigError
 
 
+@pytest.fixture(autouse=True)
+def _offline_config_writer_audit(monkeypatch):
+    """Writer unit tests do not emit facts to the developer's live gateway."""
+    from defenseclaw.logger import Logger
+
+    monkeypatch.setattr(Logger, "from_config", classmethod(lambda cls, cfg: cls.no_runtime()))
+
+
 def _reference_page(name: str) -> str:
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     with open(os.path.join(root, "docs-site", "content", "docs", "reference", name), encoding="utf-8") as stream:
@@ -99,6 +107,11 @@ def test_unset_removes_a_dependent_pair_in_one_write(tmp_path, monkeypatch):
         tmp_path,
         "openshell:\n  admin:\n    required_pack: balanced\n    required_pack_digest: sha256:" + "ab" * 32 + "\n",
     )
+    # A live gateway must never affect a writer unit test or receive its events.
+    def refuse_transport(*_args, **_kwargs):
+        pytest.fail("config writer test reached the host gateway")
+
+    monkeypatch.setattr("defenseclaw.logger._GatewayConfigRecorder.emit_cli_observability", refuse_transport)
     pack, digest = "openshell.admin.required_pack", "openshell.admin.required_pack_digest"
     with (
         patch.object(cmd_config.config_module, "config_path", return_value=tmp_path / "config.yaml"),
@@ -536,7 +549,22 @@ def test_plain_error_names_the_key_without_the_validator_internals():
 
     # The CLI reference quotes this message for a rejected `config set`.
     shown = f"Error: config.yaml was not changed: {config_writer.plain_error(block_at)}\n"
-    assert shown in _reference_page("cli.mdx")
+    assert shown in _reference_page("commands/cli.mdx")
+
+
+@pytest.mark.parametrize("relative", ["proxy-root-ca.pem", "./proxy-root-ca.pem", "certs/root.pem", "../root.pem"])
+def test_relative_trusted_ca_refusal_names_the_path_requirement(tmp_path, monkeypatch, relative):
+    # rel-1-0-3 GAP-0180: the real writer validates before touching config.yaml.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path)
+    before = (tmp_path / "config.yaml").read_bytes()
+    with pytest.raises(V8ConfigError) as refused:
+        config_writer.apply([Change("openshell.trusted_ca_bundle", relative)], "cli:test", "t", path=path)
+    message = config_writer.plain_error(refused.value, value=relative)
+    assert "openshell.trusted_ca_bundle" in message
+    assert "absolute path" in message and "~/" in message
+    assert (tmp_path / "config.yaml").read_bytes() == before
+    assert not os.path.exists(config_writer.generation_path(path))
 
 
 def test_plain_error_reports_length_and_write_directory() -> None:
@@ -544,9 +572,12 @@ def test_plain_error_reports_length_and_write_directory() -> None:
 
     from defenseclaw.observability.v8_config import V8ConfigError
 
-    too_long = V8ConfigError("config.yaml", "$.guardrail.block_message", "maxLength", "check the value")
-    assert config_writer.plain_error(too_long, value="B" * 5000) == (
-        "guardrail.block_message is longer than 4096 characters (it has 5000)"
+    # The field's own limit, never a fixed 4096 (GAP-1040).
+    too_long = V8ConfigError("config.yaml", "$.tenant_id", "maxLength", "use a string of at most 256 characters")
+    assert config_writer.plain_error(too_long, value="T" * 257) == "tenant_id is longer than 256 characters (it has 257)"
+    unknown = V8ConfigError("config.yaml", "$.guardrail.block_message", "maxLength", "check the value")
+    assert config_writer.plain_error(unknown, value="B" * 5000) == (
+        "guardrail.block_message is longer than the field allows (it has 5000)"
     )
     denied = OSError(errno.EACCES, "Permission denied", "/home/u/.defenseclaw/.config.yaml.candidate-abc.yaml")
     assert config_writer.plain_error(denied) == "cannot write in /home/u/.defenseclaw: permission denied"
@@ -603,7 +634,7 @@ def test_an_enterprise_openshell_change_needs_a_restart_and_the_sandbox_floor_st
 
 def test_source_of_truth_page_lists_every_restart_required_key():
     """The page names each key config set reports as restart-required, not a shorter list."""
-    page = _reference_page("source-of-truth.mdx")
+    page = _reference_page("configuration/source-of-truth.mdx")
     section = page.split("Most keys apply with no restart.", 1)[1].split("`config set` says so", 1)[0]
     missing = [
         key
@@ -921,3 +952,16 @@ def test_config_actor_uses_os_identity_when_environment_is_forged(monkeypatch):
     monkeypatch.setenv("LOGNAME", "pretend")
     monkeypatch.setenv("USER", "pretend")
     assert config_writer.current_actor() == f"cli:{expected}"
+
+
+def test_schema_length_error_names_the_fields_limit() -> None:
+    # GAP-1040: the Python validator carries the schema's maxLength.
+    from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
+
+    raw = ("config_version: 9\nobservability: {}\nopenshell:\n  admin:\n    request_access: " + "a" * 513 + "\n").encode()
+    with pytest.raises(V8ConfigError) as caught:
+        load_validate_v8(raw, source_name="config.yaml")
+    assert caught.value.keyword == "maxLength"
+    assert config_writer.plain_error(caught.value, value="a" * 513) == (
+        "openshell.admin.request_access is longer than 512 characters (it has 513)"
+    )

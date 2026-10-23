@@ -110,7 +110,7 @@ func managedSetupFlags(gatewayURL, tokenFile string) string {
 			if runtime.GOOS == "windows" {
 				flags += " --data-dir '" + strings.ReplaceAll(dataDir, "'", "''") + "'"
 			} else {
-				flags += fmt.Sprintf(" --data-dir %q", dataDir)
+				flags += " --data-dir '" + strings.ReplaceAll(dataDir, "'", "'\\''") + "'"
 			}
 		}
 	}

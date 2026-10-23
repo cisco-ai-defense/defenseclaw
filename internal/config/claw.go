@@ -434,16 +434,12 @@ func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([
 		return readMCPServersDevin(workspaceDir)
 	case "copilot":
 		return readMCPServersCopilot(workspaceDir)
-	case "openhands":
-		return readMCPServersOpenHands()
 	case "opencode":
 		return readMCPServersOpenCode(workspaceDir)
 	case "amp":
 		return readMCPServersAMP(workspaceDir)
 	case "antigravity":
 		return readMCPServersAntigravity(workspaceDir)
-	case "omnigent":
-		return nil, nil
 	default:
 		if c == nil {
 			return nil, nil
@@ -1052,11 +1048,6 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 		return configHome
 	case "copilot":
 		return filepath.Join(home, ".copilot")
-	case "openhands":
-		if workspace := c.ConnectorWorkspaceDir(); workspace != "" {
-			return filepath.Join(workspace, ".openhands")
-		}
-		return filepath.Join(home, ".openhands")
 	case "antigravity":
 		// agy's marketing-facing install dir; matches
 		// connector_paths.connector_home("antigravity") on the Python
@@ -1073,11 +1064,6 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 		// Amp uses this same config home on macOS, Linux, and native
 		// Windows (%USERPROFILE%\.config\amp).
 		return filepath.Join(home, ".config", "amp")
-	case "omnigent":
-		if configHome := strings.TrimSpace(os.Getenv("OMNIGENT_CONFIG_HOME")); configHome != "" {
-			return expandPath(configHome)
-		}
-		return filepath.Join(home, ".omnigent")
 	case "kiro":
 		// Kiro IDE and Kiro CLI share ~/.kiro; matches
 		// connector_paths.connector_home("kiro") on the Python side. It used to
@@ -1219,7 +1205,7 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".devin", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
 		}, legacyconnector.DesktopLegacySkillPaths(home, cwd)...))
-	case "opencode", "omnigent", "kiro":
+	case "opencode", "kiro":
 		// These connectors have no documented local skills surface (Kiro's
 		// reusable context is steering docs and specs). Keep them isolated
 		// from OpenClaw's skill directories: the install watcher creates the
@@ -1239,17 +1225,6 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			filepath.Join(home, ".copilot", "skills"),
 			workspaceJoin(cwd, ".github", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
-		})
-	case "openhands":
-		return dedupNonEmpty([]string{
-			workspaceJoin(cwd, ".agents", "skills"),
-			workspaceJoin(cwd, ".openhands", "skills"),
-			workspaceJoin(cwd, ".openhands", "microagents"),
-			filepath.Join(home, ".agents", "skills"),
-			filepath.Join(home, ".openhands", "skills"),
-			filepath.Join(home, ".openhands", "microagents"),
-			filepath.Join(home, ".openhands", "skills", "installed"),
-			filepath.Join(home, ".openhands", "cache", "skills", "public-skills", "skills"),
 		})
 	default:
 		return c.skillDirsOpenClaw()
@@ -1305,7 +1280,7 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 			filepath.Join(home, ".config", "amp", "plugins"),
 			workspaceJoin(cwd, ".amp", "plugins"),
 		})
-	case "cursor", "devin", "copilot", "openhands", "opencode", "omnigent", "kiro":
+	case "cursor", "devin", "copilot", "opencode", "kiro":
 		return nil
 	default:
 		return c.pluginDirsOpenClaw()
@@ -1871,11 +1846,6 @@ func readMCPServersCopilot(workspaceDir string) ([]MCPServerEntry, error) {
 		}
 	}
 	return dedupMCPEntries(entries), nil
-}
-
-func readMCPServersOpenHands() ([]MCPServerEntry, error) {
-	home, _ := os.UserHomeDir()
-	return readMCPFromDotMCPJSON(filepath.Join(home, ".openhands", "mcp.json"))
 }
 
 // readMCPServersAntigravity reads Antigravity-native MCP config. agy

@@ -192,6 +192,26 @@ func repairWindowsTargetOwnedPathDACLNoFollowWithACL(
 	if build == nil {
 		return fmt.Errorf("enterprise hooks: DACL repair has no target DACL")
 	}
+	return withWindowsTargetOwnedDACLHandleNoFollow(home, path, target, directory, func(handle windows.Handle) error {
+		acl, err := build(target, directory)
+		if err != nil {
+			return err
+		}
+		if err := setWindowsObjectDACLNoPropagation(handle, acl, directory); err != nil {
+			return fmt.Errorf("enterprise hooks: restore canonical target DACL by handle: %w", err)
+		}
+		return nil
+	})
+}
+
+// Bind both inspection and mutation to the same no-follow handle, walking
+// every child relative to the verified profile root. Teardown uses this too:
+// checking a pathname and then opening it for WRITE_DAC can follow a parent
+// junction substituted between those operations.
+func withWindowsTargetOwnedDACLHandleNoFollow(home, path string, target *windows.SID, directory bool, apply func(windows.Handle) error) error {
+	if apply == nil {
+		return errors.New("enterprise hooks: DACL handle operation is missing")
+	}
 	homeAbs, err := filepath.Abs(home)
 	if err != nil {
 		return err
@@ -262,21 +282,9 @@ func repairWindowsTargetOwnedPathDACLNoFollowWithACL(
 		handle = child
 	}
 
-	acl, err := build(target, directory)
-	if err != nil {
-		return err
-	}
-	// DACL-only repair. The final handle was opened with WRITE_DAC +
-	// FILE_READ_ATTRIBUTES and no WRITE_OWNER, so this write MUST NOT pass
-	// OWNER_SECURITY_INFORMATION; setWindowsObjectDACLNoPropagation writes
-	// the DACL alone. validateWindowsGuardianACLHandle has already required
-	// the final element to be target-owned, whether this walker runs under
-	// the target token or on the LocalSystem guardian thread. No code path
-	// transfers ownership of an admin-owned element.
-	if err := setWindowsObjectDACLNoPropagation(handle, acl, directory); err != nil {
-		return fmt.Errorf("enterprise hooks: restore canonical target DACL by handle: %w", err)
-	}
-	return nil
+	// The final handle has WRITE_DAC and no WRITE_OWNER. Inspection and the
+	// DACL-only write happen before it closes, after the owner/link checks.
+	return apply(handle)
 }
 
 // setWindowsObjectDACLNoPropagation replaces the protected DACL of exactly the

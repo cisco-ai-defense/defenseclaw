@@ -1,0 +1,56 @@
+---
+title: Policies
+description: How DefenseClaw decides whether to allow, alert, ask or block - rule packs, the optional LLM judge, suppressions, the session correlator and admission.
+keywords:
+  - DefenseClaw policies
+  - rule pack
+  - LLM judge
+  - suppressions
+  - session correlator
+---
+
+A policy is what turns a finding into an action. DefenseClaw checks each prompt, model reply and tool call against a rule pack, optionally asks an LLM judge for a second opinion, and then maps the worst severity to `allow`, `alert`, `confirm` or `block`. The connector turns that action into the agent's own allow, ask or deny.
+
+<DefenseClawDemo scenario="policy-decision-trace" />
+
+## How a decision is made
+
+<Flow
+  direction="TB"
+  caption="One prompt, reply or tool call. A rule match is enough on its own; the judge is optional. Suppressions only remove judge findings. The block and alert levels, and human approval (HITL), pick the action. The session correlator is separate: it reads saved findings afterwards and never changes the request."
+>
+  <Node id="event" kind="generic">{`Prompt, reply or tool call`}</Node>
+  <Node id="rules" kind="policy">{`Rule pack\nCEL · regex · secrets · injection`}</Node>
+  <Node id="judge" kind="policy">{`LLM judge (optional)\nsuppressions remove known noise`}</Node>
+  <Node id="levels" kind="policy">{`Block and alert levels\nHITL below the block level`}</Node>
+  <Node id="verdict" kind="generic">{`allow · alert · confirm · block`}</Node>
+  <Edge from="event" to="rules" label="scanned" />
+  <Edge from="rules" to="judge" label="if the judge is on" variant="dashed" />
+  <Edge from="rules" to="levels" label="findings" />
+  <Edge from="judge" to="levels" label="adds findings" />
+  <Edge from="levels" to="verdict" label="returns" />
+</Flow>
+
+- **Rule pack.** A folder of YAML rules, judge prompts and suppressions. Three ship with DefenseClaw: `permissive`, `default` and `strict`. The pack also sets the default [block and alert levels](/docs/reference/policy/thresholds). The balanced/default enabled catalog currently contains 239 local rules. Regexes compile during [rule-pack validation](/docs/how-to/policies/validate-a-rule-pack); an invalid expression rejects the complete candidate.
+- **Structured tool calls.** For a shell command or file write, the gateway first extracts the commands, paths and network targets, and CEL rules match those facts. A regex match on its own is recorded as detection only and does not block. See [deterministic detection](/docs/reference/policy/detection).
+- **LLM judge.** Off until you turn it on. It reads prompts, replies and tool calls for subtle injection, personal data and exfiltration. See [set up an LLM key](/docs/how-to/agents/set-up-an-llm-key).
+- **Suppressions.** Three lists in the pack drop known noise from the judge. They never silence a regex or CEL rule. See [tune the LLM judge](/docs/how-to/policies/tune-the-llm-judge).
+- **Session correlator.** Watches saved findings in one session and records a `CORR-*` finding when untrusted input, sensitive access and external egress happen in order. It is detection after the fact, not a block.
+- **Admission.** Skills, MCP servers and plugins are decided separately, by scan severity and the allow and block lists. See [scanning](/docs/features/scanning).
+
+## What it does not do
+
+- A level alone does not block in observe mode. Blocking needs action mode; see [the guardrail](/docs/features/guardrail).
+- A custom CEL rule cannot grant itself blocking power. A block needs complete facts and a connector that can stop the call before it runs.
+- The correlator never stops the request that completes a pattern.
+
+## Do it
+
+<Cards>
+  <Card title="Change block and alert levels" href="/docs/how-to/policies/change-block-and-alert-levels" description="Set block_at and alert_at globally, per agent or per profile." />
+  <Card title="Use a different rule pack" href="/docs/how-to/policies/use-a-different-rule-pack" description="Switch to strict or permissive." />
+  <Card title="Write a custom rule" href="/docs/how-to/policies/write-a-custom-rule" description="One CEL rule in your own pack." />
+  <Card title="Build a policy in the browser" href="/docs/how-to/policies/build-a-policy-in-the-browser" description="The policy creator." />
+</Cards>
+
+All guides: [How-to > Rules and policy](/docs/how-to/policies). Reference: [Guardrail and policy](/docs/reference/policy), [thresholds](/docs/reference/policy/thresholds), [rules](/docs/reference/policy/rules), [defaults](/docs/reference/policy/defaults), [detection](/docs/reference/policy/detection), [CEL](/docs/reference/policy/cel/engine).

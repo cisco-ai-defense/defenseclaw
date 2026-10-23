@@ -85,6 +85,10 @@ const (
 type bundleRun struct {
 	store   *enterprisebundle.Store
 	receipt *enterprisebundle.Receipt
+	// verifiedProductFloor came from this run's verified signed manifest. A
+	// replacement bundle can recover a damaged confirmed bundle without
+	// relying on the damaged bundle's unreadable minimum.
+	verifiedProductFloor string
 	// configSHA is the SHA-256 of the rendered config.yaml.
 	configSHA string
 	// confirmPending is set when the deployment committed the bundle config
@@ -121,22 +125,12 @@ func (e *Env) bundleVersionDir(name string) string {
 	return filepath.Join(e.Layout.ConfigDir, enterprisebundle.BundlesDirName, name)
 }
 
-// bundleMode reports whether the MDM installed trust anchors. Any entry at
+// bundleMode reports whether trust anchors are installed. Any entry at
 // the anchor path turns it on: a link or a file another account could write
 // is refused later (anchor_insecure), never read as bundle mode off.
 func (e *Env) bundleMode() bool {
 	_, err := os.Lstat(e.bundleAnchorsPath())
 	return err == nil
-}
-
-// bundleSecretPresent reports whether the enterprise secret store holds the
-// credential name (the value is never read).
-func (e *Env) bundleSecretPresent(name string) (bool, error) {
-	names, _, err := e.listSecrets()
-	if err != nil {
-		return false, err
-	}
-	return slices.Contains(names, name), nil
 }
 
 // fault runs the bundle test fault seam at phase; nil in production.
@@ -247,14 +241,29 @@ func (l *lifecycle) prepareBundleMode(ctx context.Context, record *Deployment) (
 	}
 	current, _, err := env.currentBundleConfig(env.bundleStore())
 	if err != nil {
-		r.AddError(codeBundleStateUnreadable, "cannot read the current policy bundle, so no config is applied: "+err.Error())
-		return stop()
+		// The run still repairs the host (services, hooks, permissions)
+		// with the config the last deployment committed, the config of the
+		// bundle that was current then; an in-place edit of config.yaml is
+		// reverted as in every bundle-mode run. Only bytes that match the
+		// deployment record qualify. A new signed bundle replaces the
+		// damaged one.
+		committed := env.committedDeploymentConfig(record)
+		if l.opts.ConfigFile != "" || committed == nil {
+			r.AddError(codeBundleStateUnreadable, "cannot read the current policy bundle, so no config is applied: "+err.Error())
+			return stop()
+		}
+		r.AddWarning(codeBundleStateUnreadable, "cannot read the current policy bundle, so the config the last deployment committed is kept; deliver a new signed bundle to replace it: "+err.Error())
+		if err := l.useBundleConfig(committed); err != nil {
+			r.AddError(codeState, err.Error())
+			return stop()
+		}
+		return 0, false
 	}
 	if l.opts.ConfigFile != "" {
 		given, err := readBounded(l.opts.ConfigFile, maxInputBytes)
 		if err != nil || current == nil || !bytes.Equal(given, current) {
 			r.AddError(codeBundleRequired, fmt.Sprintf(
-				"this device takes its policy from signed bundles (the MDM installed %s), so --config is not applied; deliver a signed bundle with `%s`",
+				"this device takes its policy from signed bundles (a trust anchor file is installed at %s), so --config is not applied; deliver a signed bundle with `%s`",
 				filepath.Join(env.Layout.ConfigDir, "trust", enterprisebundle.AnchorsName), bundleApplyCommand))
 			return stop()
 		}
@@ -269,10 +278,26 @@ func (l *lifecycle) prepareBundleMode(ctx context.Context, record *Deployment) (
 	return 0, false
 }
 
+// committedDeploymentConfig is the config the deployment record says was
+// applied: committed-config.yaml, else the installed config.yaml, when its
+// SHA-256 is the record's; nil when neither matches.
+func (e *Env) committedDeploymentConfig(record *Deployment) []byte {
+	if record == nil || record.ConfigSHA256 == "" {
+		return nil
+	}
+	for _, path := range []string{e.committedConfigPath(), e.P(e.Layout.ConfigPath)} {
+		if raw, err := readBounded(path, maxInputBytes); err == nil && sha256Bytes(raw) == record.ConfigSHA256 {
+			return raw
+		}
+	}
+	return nil
+}
+
 // takeInboxBundle returns the inbox bundle with the highest manifest version
 // ("" for none) and marks every inbox bundle processed: the run removes them
-// once it ends, whatever the outcome, as the receipt records it. A file that
-// is not administrator-controlled stops the run and stays.
+// once it ends, as the receipts record it, unless it deferred the bundle
+// (restart_deferred), which a later run retries. A file that is not
+// administrator-controlled stops the run and stays.
 func (l *lifecycle) takeInboxBundle() (string, error) {
 	env := l.env
 	dir := env.bundleInboxDir()
@@ -284,8 +309,9 @@ func (l *lifecycle) takeInboxBundle() (string, error) {
 		return "", fmt.Errorf("cannot read the bundle inbox: %w", err)
 	}
 	type candidate struct {
-		path    string
-		version uint64
+		path     string
+		bundleID string
+		version  uint64
 	}
 	var found []candidate
 	for _, entry := range entries {
@@ -301,7 +327,8 @@ func (l *lifecycle) takeInboxBundle() (string, error) {
 		if err := env.Trust(path, TrustAdminFile); err != nil {
 			return "", fmt.Errorf("the bundle inbox file %s is not administrator-controlled, so it is not applied: %v", name, err)
 		}
-		found = append(found, candidate{path: path, version: peekBundleVersion(path)})
+		id, version := peekBundleManifest(path)
+		found = append(found, candidate{path: path, bundleID: id, version: version})
 	}
 	if len(found) == 0 {
 		return "", nil
@@ -312,10 +339,39 @@ func (l *lifecycle) takeInboxBundle() (string, error) {
 		}
 		return found[i].path > found[j].path
 	})
-	for _, c := range found {
+	for i, c := range found {
 		l.inboxProcessed = append(l.inboxProcessed, c.path)
+		if i > 0 {
+			l.inboxSuperseded = append(l.inboxSuperseded, supersededInbox{bundleID: c.bundleID, version: c.version})
+		}
 	}
+	l.inboxTopVersion = found[0].version
 	return found[0].path, nil
+}
+
+// supersededInbox is an inbox bundle a run did not apply because the inbox
+// held a higher version.
+type supersededInbox struct {
+	bundleID string
+	version  uint64
+}
+
+// recordSupersededInbox gives each inbox bundle this run did not take a
+// receipt that ends as failed(superseded), so every delivery is accounted
+// for in bundle status and the receipt events. It runs once the outcome of
+// the bundle the run took is known, and not when that bundle was deferred.
+func (l *lifecycle) recordSupersededInbox(store *enterprisebundle.Store) {
+	for _, s := range l.inboxSuperseded {
+		receipt, err := store.Receive(s.bundleID, s.version, "")
+		if err == nil {
+			err = store.Fail(receipt, enterprisebundle.CodeSuperseded,
+				fmt.Sprintf("the bundle inbox also held version %d; a run takes only the highest inbox version", l.inboxTopVersion))
+		}
+		if err != nil {
+			l.result.AddWarning(codeBundleStateUnreadable, "cannot write the receipt of a superseded inbox bundle: "+err.Error())
+		}
+	}
+	l.inboxSuperseded = nil
 }
 
 // removeProcessedInbox removes the inbox files this run processed.
@@ -328,18 +384,19 @@ func (l *lifecycle) removeProcessedInbox() {
 	l.inboxProcessed = nil
 }
 
-// peekBundleVersion is the version the unverified manifest of the bundle at
-// path claims (0 when it cannot be read); it only orders the inbox.
-func peekBundleVersion(path string) uint64 {
+// peekBundleManifest is the bundle id and version the unverified manifest of
+// the bundle at path claims ("" and 0 when it cannot be read); they only
+// order the inbox and name the receipt of a superseded bundle.
+func peekBundleManifest(path string) (string, uint64) {
 	b, err := readBundleInput(path)
 	if err != nil {
-		return 0
+		return "", 0
 	}
 	m, err := enterprisebundle.DecodeManifest(b.Manifest)
 	if err != nil {
-		return 0
+		return "", 0
 	}
-	return m.Version
+	return m.BundleID, m.Version
 }
 
 // readBundleInput reads a .dcbundle file (no link followed, at most the
@@ -363,11 +420,21 @@ func readBundleInput(path string) (*enterprisebundle.Bundle, error) {
 // the ensure transaction with the rendered config, confirm, and the swap.
 func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
-	defer l.removeProcessedInbox()
 	store := env.bundleStore()
 	if record != nil {
 		store = env.bundleStoreForGroup(record.ServiceGID)
 	}
+	deferred := false
+	defer func() {
+		if deferred {
+			// Retried later: the inbox keeps the deferred bundle and the
+			// lower versions, and no receipt says another one was taken.
+			l.inboxProcessed, l.inboxSuperseded = nil, nil
+			return
+		}
+		l.recordSupersededInbox(store)
+		l.removeProcessedInbox()
+	}()
 	b, readErr := readBundleInput(l.opts.Bundle)
 	id, version, manifestSHA := "", uint64(0), ""
 	if readErr == nil {
@@ -405,7 +472,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	}
 	staging, err := store.Stage(receipt, b)
 	if err != nil {
-		return refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeArchiveInvalid, Detail: "cannot stage the bundle: " + err.Error()})
+		return refuse(enterprisebundle.StageError(err))
 	}
 	// Everything below reads the staged copy only.
 	staged, err := enterprisebundle.ReadDir(staging)
@@ -425,7 +492,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	}
 	res, err := enterprisebundle.Verify(ctx, enterprisebundle.VerifyInput{
 		Bundle: staged, Anchors: anchors, Platform: env.GOOS, Now: env.Now().UTC(), Confirmed: st.Confirmed(),
-		ProductVersion: env.ProductVersion, SecretPresent: env.bundleSecretPresent,
+		ProductVersion: env.ProductVersion, SecretValue: env.SecretValue, RequireSecretPresence: true,
 		DeviceLayout: func() *enterprisebundle.DeviceLayout {
 			layout := enterprisebundle.DeviceLayoutFromManaged(env.Layout)
 			return &layout
@@ -440,6 +507,16 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		return refuse(err)
 	}
 	if res.AlreadyApplied {
+		// The repeat installs the current bundle config again over an
+		// installed config that may have drifted: with --defer-restart a
+		// restart that change needs is deferred before any transaction.
+		if env.DeferRestart {
+			if reason := env.repeatRestartDeferral(store); reason != "" {
+				deferred = true
+				refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeRestartDeferred, Detail: reason})
+				return enterprisestatus.BusyExitCode(env.GOOS)
+			}
+		}
 		// A retry of the bundle that is current: its confirmed receipt stays
 		// the one status reports, and ensure re-applies its config (a no-op
 		// on a healthy host).
@@ -455,10 +532,29 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		if r.Noop {
 			r.NoopReason = "already_applied"
 		}
+		// The old receipt proves only that the bundle was enforced when it
+		// was first confirmed. A repeated delivery may repair config.yaml
+		// and restart the gateway without its policy ever converging. Do not
+		// report that cached confirmation as this delivery's outcome.
+		if code == 0 && len(r.Errors) == 0 {
+			current, err := store.CurrentSummary()
+			if err != nil || current == nil || r.Policy == nil || !r.Policy.Applied ||
+				r.Policy.EffectiveDigest != current.EffectivePolicyDigest ||
+				r.Policy.GatewayReportedDigest != current.EffectivePolicyDigest {
+				r.Noop, r.NoopReason = false, ""
+				// ensureInstalled describes the historical confirmed receipt.
+				// This repeated delivery has not earned that result block.
+				r.Bundle = nil
+				r.AddError(codeBundleNotConfirmed, fmt.Sprintf(
+					"the repeated policy bundle is installed, but the gateway has not confirmed its effective policy; check `defenseclaw-gateway enterprise bundle status`, then resubmit the same signed bundle with `%s`", bundleApplyCommand))
+				return code
+			}
+		}
 		l.describeCurrentBundle()
 		return code
 	}
 	m := res.Manifest
+	run.verifiedProductFloor = m.MinProductVersion
 	if err := store.Advance(receipt, enterprisebundle.StateVerified, func(rc *enterprisebundle.Receipt) {
 		rc.TenantID, rc.DeviceGroup, rc.Principal = m.TenantID, m.Target.DeviceGroup, m.CreatedBy
 		rc.ChangeSummary, rc.RollbackOf = m.ChangeSummary, m.RollbackOf
@@ -495,6 +591,14 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 			return refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeCapabilityLoss, Detail: "the bundle disables: " + strings.Join(loss, ", ")})
 		}
 	}
+	if env.DeferRestart {
+		// The classifier bundle verify reports as restart_prediction.
+		if reason := env.restartDeferral(current, rendered); reason != "" {
+			deferred = true
+			refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeRestartDeferred, Detail: reason})
+			return enterprisestatus.BusyExitCode(env.GOOS)
+		}
+	}
 	if _, err := store.Promote(receipt); err != nil {
 		return refuse(err)
 	}
@@ -513,8 +617,50 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	l.describeBundle()
 	if run.confirmPending && code == 0 {
 		code = enterprisestatus.BusyExitCode(env.GOOS)
+		l.scheduleBundleSettle(ctx, receipt)
 	}
 	return code
+}
+
+// restartDeferral is the restart_deferred detail of a change from the
+// installed config to rendered, as bundle verify predicts the restart; ""
+// when the change applies without one.
+func (e *Env) restartDeferral(installed, rendered []byte) string {
+	restart, err := configwrite.ManagedConfigRestartRequired(installed, rendered, configwrite.ManagedDefaultsFor(e.Layout))
+	return enterprisebundle.RestartDeferralReason(restart, err != nil || len(installed) == 0)
+}
+
+// repeatRestartDeferral is restartDeferral for a repeated delivery of the
+// current bundle: from the installed config to the current bundle config.
+// "" when the current bundle cannot be read; the repeat then refuses
+// without a transaction (useCurrentBundleConfig).
+func (e *Env) repeatRestartDeferral(store *enterprisebundle.Store) string {
+	rendered, _, err := e.currentBundleConfig(store)
+	if err != nil || rendered == nil {
+		return ""
+	}
+	installed, err := readBounded(e.P(e.Layout.ConfigPath), maxInputBytes)
+	if err != nil {
+		installed = nil
+	}
+	return e.restartDeferral(installed, rendered)
+}
+
+// scheduleBundleSettle makes the apply trigger settle a bundle this run left
+// applied but not confirmed (the gateway stopped reporting its policy). On
+// macOS the apply LaunchDaemon watches config.yaml and runs once this run
+// releases the lock (GAP-0042). On Linux the transaction stops the apply path
+// unit while it writes config.yaml, so that write never starts the apply
+// service: a deferred start does, once the gateway had time to come back,
+// bounded as every apply retry is (#1321).
+func (l *lifecycle) scheduleBundleSettle(ctx context.Context, receipt *enterprisebundle.Receipt) {
+	if l.env.GOOS != "linux" || receipt == nil {
+		return
+	}
+	// scheduleApplyRetry reports the deferred run (or its limit) as an
+	// input_changed warning; nothing scheduled leaves the resubmit, which
+	// not_confirmed already asks for.
+	_ = l.scheduleApplyRetry(ctx, fmt.Sprintf("policy bundle %s version %d is applied but the gateway has not confirmed it", receipt.BundleID, receipt.Version))
 }
 
 // lateConfirmMessage is the bundle_confirmed_after_interrupt warning.

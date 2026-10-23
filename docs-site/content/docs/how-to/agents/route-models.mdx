@@ -1,0 +1,114 @@
+---
+title: Route models
+description: Turn on semantic model routing so OpenClaw or ZeptoClaw requests go to the model backend that fits each prompt.
+keywords:
+  - DefenseClaw semantic routing
+  - vLLM Semantic Router
+  - OpenClaw model routing
+  - ZeptoClaw model routing
+---
+
+Semantic routing lets the gateway pick a model backend after it inspects a prompt and before it forwards the request. DefenseClaw runs a pinned vLLM Semantic Router container, asks it to classify each request, and forwards through the normal guardrail path. It applies to OpenClaw and ZeptoClaw requests sent as OpenAI-compatible `*/chat/completions`. Hook agents keep their own provider path.
+
+If the router is down, times out or returns an unknown model name, routing falls back to the original provider. Guardrail checks still run.
+
+## Before you start
+
+- OpenClaw or ZeptoClaw is configured in proxy mode. Native Windows is not supported.
+- For the managed router, Docker runs Linux containers on macOS or Linux. A remote router needs no Docker.
+- Each backend has an OpenAI-compatible Chat Completions endpoint. `base_url` is the origin, for example `https://api.openai.com`, without `/v1/chat/completions`.
+- Provider keys are in the environment or `~/.defenseclaw/.env`, never in `config.yaml`.
+
+## Steps
+
+1. Add a routing block to `~/.defenseclaw/config.yaml`. `name` is the alias the router returns; `decisions` pick one by keyword.
+
+   ```yaml title="~/.defenseclaw/config.yaml"
+   routing:
+     enabled: true
+     version: "0.3.0"
+     port: 8080
+     algorithm: static
+     models:
+       - name: fast
+         provider: openai
+         model: gpt-4o-mini
+         base_url: https://api.openai.com
+         api_key_env: OPENAI_API_KEY
+       - name: deep
+         provider: openai
+         model: gpt-4.1
+         base_url: https://api.openai.com
+         api_key_env: OPENAI_API_KEY
+     signals:
+       keywords:
+         - name: code-request
+           keywords: ["debug", "implement", "refactor"]
+           operator: OR
+     decisions:
+       - name: code
+         priority: 100
+         conditions:
+           - type: keyword
+             name: code-request
+         model_refs: [deep]
+       - name: default
+         priority: 1
+         model_refs: [fast]
+   ```
+
+2. Store the backend key.
+
+   ```bash
+   defenseclaw keys set OPENAI_API_KEY
+   ```
+
+3. Enable the router and restart the gateway.
+
+   ```bash
+   defenseclaw setup routing --enable
+   defenseclaw-gateway restart
+   ```
+
+   To use a router you run yourself, set `routing.remote.endpoint` (HTTPS for non-loopback endpoints) instead of starting the container.
+
+## Check it worked
+
+```bash
+defenseclaw setup routing --status
+docker ps --filter label=com.defenseclaw.component=semantic-router
+```
+
+A routed response carries these headers:
+
+```text
+X-Semantic-Router: routed
+X-Semantic-Router-Reason: decision=… model=… confidence=…
+```
+
+{/* needs-live-capture: the --status output while enabled, and the headers from a proxied request */}
+
+## Undo
+
+```bash
+defenseclaw setup routing --disable
+defenseclaw-gateway restart
+```
+
+Requests use their original provider again. Connector and guardrail config stay.
+
+## If it does not work
+
+| Symptom | Check |
+| --- | --- |
+| No container appears | Run `docker info`, then restart the gateway. |
+| No routing headers | The agent must be OpenClaw or ZeptoClaw and the path must end in `/chat/completions`. |
+| `unknown model alias` in the gateway log | The router's alias must match a `routing.models[].name`. |
+| Authentication errors from a backend | Check the key with `defenseclaw keys list`. |
+
+The classifier receives message roles and content. Keys, headers, tools and user ids are not sent. Port 8080 is the loopback classifier API, not a chat endpoint.
+
+## Next
+
+- [Guard an ACP editor](/docs/how-to/agents/guard-an-acp-editor)
+- [OpenClaw](/docs/connectors/openclaw) and [ZeptoClaw](/docs/connectors/zeptoclaw)

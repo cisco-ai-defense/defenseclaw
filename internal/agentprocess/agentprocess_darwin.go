@@ -26,6 +26,9 @@ const darwinZombie = 5
 func newLookup() (func(int) (Process, error), func()) { return lookupSysctl, func() {} }
 
 // currentClock reads the wall clock start times count, in microseconds.
+// clockUnitsPerSecond is the unit of currentClock.
+const clockUnitsPerSecond = 1_000_000
+
 func currentClock() (string, int64, bool) { return "", time.Now().UnixMicro(), true }
 
 // lookupSysctl reads kern.proc.pid.<pid>. A process that does not exist

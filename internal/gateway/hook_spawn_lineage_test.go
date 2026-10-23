@@ -131,17 +131,22 @@ func TestCodexThreadSpawnLinksTheChildSessionToItsParent(t *testing.T) {
 	}
 
 	// On a managed host the thread hooked 100 ms before the create_thread
-	// result reached the gateway, and its first rows were a root at depth 0.
-	// The call in flight links it from its first hook.
+	// result reached the gateway. The result links it: its retained state
+	// takes the parent, and its later hooks are rows of the child.
 	const earlyChild = "01a11c2f-0363-7e42-aabb-15f578154171"
 	emit(parentSession, "PreToolUse", "mcp__codex_tui__create_thread", nil)
 	emit(earlyChild, "SessionStart", "", nil)
-	early, ok := api.hookLifecycleSnapshot("codex", earlyChild, agentNodeID(identity, "codex", earlyChild, "root"))
-	if !ok || early.AgentDepth != 1 || early.ParentAgentID != parentAgent || early.ParentSessionID != parentSession {
-		t.Fatalf("a thread that hooks before the call result = %+v (retained %v), want depth 1 under %s", early, ok, parentAgent)
-	}
 	emit(parentSession, "PostToolUse", "mcp__codex_tui__create_thread",
 		map[string]any{"content": `{"threadId":"` + earlyChild + `"}`})
+	early, ok := api.hookLifecycleSnapshot("codex", earlyChild, agentNodeID(identity, "codex", earlyChild, "root"))
+	if !ok || early.AgentDepth != 1 || early.ParentAgentID != parentAgent || early.ParentSessionID != parentSession {
+		t.Fatalf("a thread that hooked before the call result = %+v (retained %v), want depth 1 under %s", early, ok, parentAgent)
+	}
+	emit(earlyChild, "PreToolUse", "Bash", nil)
+	if early, ok = api.hookLifecycleSnapshot("codex", earlyChild, agentNodeID(identity, "codex", earlyChild, "root")); !ok ||
+		early.AgentDepth != 1 || early.ParentAgentID != parentAgent {
+		t.Fatalf("the next hook of the thread = %+v (retained %v), want depth 1 under %s", early, ok, parentAgent)
+	}
 	const later = "01a11c30-0000-7000-8000-000000000002"
 	emit(later, "SessionStart", "", nil)
 	if root, ok := api.hookLifecycleSnapshot("codex", later, agentNodeID(identity, "codex", later, "root")); !ok || root.AgentDepth != 0 {
@@ -749,5 +754,47 @@ func TestReconcileHookParentRequiresSameAgentIdentity(t *testing.T) {
 	if got.ParentAgentID != parent.AgentID || got.RootAgentID != parent.RootAgentID ||
 		got.RootSessionID != parent.RootSessionID || !got.ParentLineageResolved {
 		t.Fatalf("same-identity parent session did not resolve: %+v", got)
+	}
+}
+
+// GAP-0533: Codex announces a spawned agent with SubagentStart in the caller's
+// session, before or after the spawn call's PostToolUse. A result that came
+// after the child's start re-created the call's intent, which tied with the
+// next spawn's, and that child's subagent_start became a root at depth 0.
+func TestCodexSubagentStartIsLinkedWhicheverOfItAndTheSpawnResultComesFirst(t *testing.T) {
+	api := &APIServer{}
+	const sessionID = "01a112f0-847b-7161-9d89-41cd7dba0533"
+	const identity = "agt-0000000000000533"
+	ctx := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: identity})
+	parentAgent := agentNodeID(identity, "codex", sessionID, "root")
+	emit := func(req codexHookRequest) {
+		req.SessionID = sessionID
+		api.emitCodexHookLLMEvent(ctx, req, nil, nil)
+	}
+	emit(codexHookRequest{HookEventName: "SessionStart", Payload: map[string]any{"source": "startup"}})
+	for i, resultFirst := range []bool{false, true, false, true} {
+		child := fmt.Sprintf("019a0000-0000-7000-8000-0000000005%02d", i)
+		turn, call := fmt.Sprintf("turn-%d", i), fmt.Sprintf("call-%d", i)
+		input := map[string]any{"message": "run echo ok and report"}
+		result := func() {
+			emit(codexHookRequest{HookEventName: "PostToolUse", TurnID: turn, ToolName: "spawn_agent", ToolUseID: call,
+				ToolInput: input, ToolResponse: map[string]any{"agent_id": child}, Payload: map[string]any{}})
+		}
+		emit(codexHookRequest{HookEventName: "PreToolUse", TurnID: turn, ToolName: "spawn_agent", ToolUseID: call,
+			ToolInput: input, Payload: map[string]any{}})
+		if resultFirst {
+			result()
+		}
+		emit(codexHookRequest{HookEventName: "SubagentStart", TurnID: turn, AgentID: child, AgentType: "default",
+			Payload: map[string]any{"agent_id": child, "agent_type": "default"}})
+		if !resultFirst {
+			result()
+		}
+		start, ok := api.hookLifecycleSnapshot("codex", sessionID, child)
+		if !ok || start.LifecycleEvent != "subagent_start" || start.AgentDepth != 1 || start.ParentAgentID != parentAgent ||
+			start.ParentSessionID != sessionID {
+			t.Fatalf("spawn %d (result first %v): subagent_start = %+v (retained %v), want depth 1 under %s",
+				i, resultFirst, start, ok, parentAgent)
+		}
 	}
 }

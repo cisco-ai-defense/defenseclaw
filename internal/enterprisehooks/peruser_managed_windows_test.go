@@ -293,9 +293,9 @@ func TestCertifyWindowsEnterpriseConnectorPerUserRequiresStandalone(t *testing.T
 	if err := certifyWindowsEnterpriseConnector("copilot", connector.NewDevinConnector()); err == nil {
 		t.Fatal("certified an impostor implementation under the copilot name")
 	}
-	if err := certifyWindowsEnterpriseConnector("openhands", connector.NewOpenHandsConnector()); err == nil ||
+	if err := certifyWindowsEnterpriseConnector("openclaw", connector.NewCodexConnector()); err == nil ||
 		!strings.Contains(err.Error(), "refused on native Windows") {
-		t.Fatalf("openhands refusal = %v", err)
+		t.Fatalf("openclaw refusal = %v", err)
 	}
 	// Secure Client connectors keep their exact certification.
 	if err := certifyWindowsEnterpriseConnector("codex", connector.NewCodexConnector()); err != nil {
@@ -318,7 +318,7 @@ func TestWindowsStandalonePerUserConnectorMappings(t *testing.T) {
 	// The effective hook connectors add the per-user ones only in standalone.
 	cfg := &config.Config{Guardrail: config.GuardrailConfig{
 		Connectors: map[string]config.PerConnectorGuardrailConfig{
-			"codex": {}, "copilot": {}, "amp": {}, "openhands": {},
+			"codex": {}, "copilot": {}, "amp": {},
 		},
 	}}
 	pinWindowsStandaloneProfileForTest(t, false)
@@ -350,7 +350,7 @@ func TestWindowsStandalonePerUserConnectorMappings(t *testing.T) {
 			t.Fatalf("%s canonical = %q err=%v", name, got, err)
 		}
 	}
-	for _, name := range []string{"Copilot", "openhands", "Kiro"} {
+	for _, name := range []string{"Copilot", "Kiro"} {
 		if _, err := canonicalWindowsManagedRuntimeConnector(name); err == nil {
 			t.Fatalf("%s accepted as a managed runtime connector", name)
 		}

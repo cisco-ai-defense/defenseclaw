@@ -102,6 +102,12 @@ def status_cell(model: Any, wizard: SetupWizard, status: TaskStatus) -> str:
         return "! last run failed"
     if run == "done":
         return f"{status.label} · ran ok"
+    # A check (sandbox doctor) leaves the setup state as it was, so say how
+    # the check went: after a failed one the row read "○ not set up".
+    if run == "check failed":
+        return "! check failed"
+    if run == "checked":
+        return f"{status.label} · check passed"
     return status.label
 
 
@@ -281,6 +287,11 @@ def task_detail(model: Any, wizard: SetupWizard, status: TaskStatus) -> Text:
         _line(text, "Now:", summary)
     else:
         _line(text, "Now:", status.label, glyph_style(status.label))
+    run = str(getattr(model, "wizard_status", {}).get(wizard, "") or "")
+    if run == "check failed":
+        _line(text, "Last check:", "failed. The result is in Activity (A).", TOKENS.accent_amber)
+    elif run == "checked":
+        _line(text, "Last check:", "passed.")
     how_to = " ".join(how_to.split())
     if how_to.startswith("Runs:"):
         _line(text, "Runs:", how_to[len("Runs:") :].strip())

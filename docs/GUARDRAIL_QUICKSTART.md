@@ -1,9 +1,9 @@
 # Guardrail quickstart
 
 Use the published
-[first-guardrail walkthrough](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/first-guardrail/)
+[first-guardrail walkthrough](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/quickstart/)
 and
-[guardrail setup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/guardrail/).
+[guardrail setup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/features/guardrail/).
 
 Those pages are the source of truth for installation, connector setup, modes,
 verification, tuning, disabling, and upgrades. This repository file preserves

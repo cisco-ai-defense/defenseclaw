@@ -237,32 +237,6 @@ def test_real_drop_reasons_still_warn_with_the_reason() -> None:
     assert "defenseclaw setup claude-code" in r.checks[-1]["remediation"]
 
 
-def test_removed_connectors_get_no_otlp_rows_or_setup_advice() -> None:
-    # GAP-1931: OpenClaw-only after removing the hook connectors.
-    def status(connector: str, **overrides) -> ConnectorCustodyStatus:
-        base = _custody_report().instances[0]
-        return dataclasses.replace(base, connector=connector, profile_version=f"{connector}-v1", **overrides)
-
-    report = ConnectorCustodyReport(
-        state="available",
-        reason="",
-        observation_window_hours=24,
-        instances=(
-            status("claudecode", drop_only_reasons=("invalid_record",)),
-            status("openclaw", drop_only_batches=0),
-            status("openhands", custody="external"),
-        ),
-    )
-    r = _DoctorResult()
-    cfg = mock.Mock(spec=["policy_connectors"])
-    cfg.policy_connectors.return_value = ["openclaw"]
-    cmd_doctor._check_connector_export_custody(report, r, configured=cmd_doctor._otlp_configured_connectors(cfg))
-    rows = {c["label"]: c for c in r.checks}
-    assert set(rows) == {"Connector OTLP: openclaw", "Connector OTLP: not configured"}
-    assert rows["Connector OTLP: openclaw"]["status"] == "pass"
-    removed = rows["Connector OTLP: not configured"]
-    assert removed["status"] == "skip" and "claudecode, openhands" in removed["detail"]
-    assert not any("setup" in c.get("remediation", "") for c in r.checks)
 
 
 def test_untracked_exporter_and_unattributed_credentials_read_plainly() -> None:
@@ -594,11 +568,6 @@ def test_disk_full_audit_writes_read_plainly(tmp_path) -> None:
     assert "free space" in row["remediation"]
 
 
-def test_omnigent_without_a_server_record_reads_plainly(tmp_path, monkeypatch) -> None:
-    # GAP-1067: no internal path hash as the main text.
-    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
-    pid, detail = cmd_doctor._omnigent_local_server_pid()
-    assert pid == 0 and detail == "OmniGent server has not started yet (no server record)"
 
 
 def test_windows_hermes_check_reads_python_command_lines() -> None:
@@ -749,8 +718,10 @@ def test_agent_installed_after_discovery_names_the_refresh() -> None:
     ):
         cmd_doctor._check_component_connector_compatibility(SimpleNamespace(data_dir=""), ["claudecode"], r)
     row = next(c for c in r.checks if c["label"] == "Connector compatibility: claudecode")
-    assert row["status"] == "warn"
-    assert "is installed now, after the last agent discovery" in row["detail"]
+    # The shell's PATH is no proof that the agent runs (1.0.4 review, loop
+    # round 4): still a failure, but the next step is the refresh.
+    assert row["status"] == "fail"
+    assert "/opt/bin/claude is on this shell's PATH, unverified" in row["detail"]
     assert row["remediation"].startswith("defenseclaw agent discover --refresh")
 
 

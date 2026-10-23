@@ -75,6 +75,7 @@ func TestManagedExplainMatchesGoldenSchema(t *testing.T) {
 		EgressAllowOnly: []string{"api.example.net"}, EgressBlock: []string{"bad.example"},
 		UserApprovals: "session", AllowUnblock: true, ForeignSandboxes: "stop",
 		MCPIncluded: []string{"docs"}, MCPBlocked: []ManagedMCP{{Name: "x", Reason: "organization_block"}},
+		MCPProjectCount: 1, MCPProjectBlocked: true,
 		WorkdirMode: "copy", AllowMount: false, AllowHostPorts: false, AllowYolo: true,
 		OnSilence: "alert", MaxSilenceAfter: "10m", ProcessTree: true, DeleteStoppedAfter: "30d",
 		Driver: "docker", DriverReason: "kvm_missing", DriverFallback: "docker",

@@ -113,6 +113,20 @@ func TestManagementContractWindowsSecret(t *testing.T) {
 	if doc := schemas.Validate(t, "secret-result.schema.json", []byte(out)); doc["ok"] != true || doc["action"] != "set" {
 		t.Fatalf("set result %s", out)
 	}
+	// An identical set keeps the contract v1 success shape, whose schema
+	// allows no other member, with the gateway stopped and running alike.
+	previousRestart := windowsSecretRestartGateway
+	t.Cleanup(func() { windowsSecretRestartGateway = previousRestart })
+	for _, running := range []bool{false, true} {
+		windowsSecretRestartGateway = func() (bool, error) { return running, nil }
+		out, err = runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, value+"\r\n")
+		if err != nil {
+			t.Fatalf("identical set (gateway running %v): %v", running, err)
+		}
+		if doc := schemas.Validate(t, "secret-result.schema.json", []byte(out)); doc["gateway_restarted"] != running || len(doc) != 5 {
+			t.Fatalf("identical set result (gateway running %v): %s", running, out)
+		}
+	}
 
 	out, err = runWindowsSecretCommand(t, "status", enterpriseSecretOptions{json: true}, "")
 	if err != nil {

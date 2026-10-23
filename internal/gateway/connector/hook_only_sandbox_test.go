@@ -85,10 +85,9 @@ func assertTamperRejected(t *testing.T, verify func([]byte) error, good []byte, 
 // TestSandboxArtifactsTamperTiers pins each overlay's tamper tier: managed
 // only where root-owned files alone carry the hooks; user where the workload
 // can load code into the process beside them (OpenCode and Amp plugins, the
-// Hermes home) or the harness reads them from HOME (Kiro, Devin, OpenHands,
 // agy).
 func TestSandboxArtifactsTamperTiers(t *testing.T) {
-	managed := map[string]bool{"claudecode": true, "codex": true, "copilot": true, "cursor": true, "omnigent": true}
+	managed := map[string]bool{"claudecode": true, "codex": true, "copilot": true, "cursor": true}
 	for _, tc := range sandboxGoldenTargets {
 		want := SandboxTamperTierUser
 		if managed[tc.connector] {
@@ -146,9 +145,6 @@ func TestSandboxArtifactsRefuseUnreviewedHarness(t *testing.T) {
 		{"cursor-desktop-major", NewCursorConnector(), SandboxRenderTarget{AgentVersion: "4.0.0"}, ""},
 		{"devin-newer", NewDevinConnector(), SandboxRenderTarget{AgentVersion: "3000.12.0"}, ""},
 		{"kiro-unpinned", NewKiroConnector(), SandboxRenderTarget{}, ""},
-		{"omnigent-newer", NewOmnigentConnector(), SandboxRenderTarget{AgentVersion: "0.14.0"}, ""},
-		{"omnigent-older", NewOmnigentConnector(), SandboxRenderTarget{AgentVersion: "0.6.0"}, ""},
-		{"omnigent-unpinned", NewOmnigentConnector(), SandboxRenderTarget{}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.target.IngressPort == 0 && tc.name != "port-zero" {

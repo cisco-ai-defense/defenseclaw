@@ -106,9 +106,16 @@ def normalize_connector(name: str | None) -> str:
     value = (name or "").strip().lower()
     if value in {"claude", "claude-code", "claude_code"}:
         return "claudecode"
-    if value in {"open-hands", "open_hands"}:
-        return "openhands"
     return value
+
+
+# Connectors whose hook answers a confirm verdict with the agent's own approval
+# prompt. The others turn confirm into an alert (raw_action=confirm kept).
+NATIVE_APPROVAL_CONNECTORS = frozenset({"claudecode", "openclaw", "copilot", "antigravity", "amp"})
+
+
+def has_native_approval_prompt(name: str | None) -> bool:
+    return normalize_connector(name) in NATIVE_APPROVAL_CONNECTORS
 
 
 def hook_contract_manifest() -> dict[str, Any]:

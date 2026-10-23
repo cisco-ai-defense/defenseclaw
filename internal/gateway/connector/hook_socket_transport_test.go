@@ -33,7 +33,7 @@ import (
 var shellHookSocketConnectorTemplates = []string{
 	"antigravity-hook.sh", "claude-code-hook.sh", "codex-hook.sh", "copilot-hook.sh",
 	"cursor-hook.sh", "devin-hook.sh", "hermes-hook.sh",
-	"kiro-hook.sh", "openhands-hook.sh",
+	"kiro-hook.sh",
 }
 
 // TestShellHookTemplatesCarryTheSocketTransportOnlyWhenConfigured: every
@@ -85,7 +85,10 @@ func TestShellHookTemplatesCarryTheSocketTransportOnlyWhenConfigured(t *testing.
 // recordingHookSocketGateway records each request and answers with response
 // (by default an allow that names the hook socket).
 type recordingHookSocketGateway struct {
-	response      any
+	response any
+	// serve, when set, answers the n-th request (from 1) itself unless it
+	// returns false.
+	serve         func(n int, w http.ResponseWriter) bool
 	mu            sync.Mutex
 	authorization []string
 	paths         []string
@@ -98,7 +101,11 @@ func (g *recordingHookSocketGateway) ServeHTTP(w http.ResponseWriter, r *http.Re
 	g.authorization = append(g.authorization, r.Header.Get("Authorization"))
 	g.paths = append(g.paths, r.URL.Path)
 	g.bodies = append(g.bodies, string(body))
+	n := len(g.paths)
 	g.mu.Unlock()
+	if g.serve != nil && g.serve(n, w) {
+		return
+	}
 	response := g.response
 	if response == nil {
 		response = map[string]interface{}{
@@ -196,77 +203,6 @@ func (f *hookSocketFixture) requireOnlyTheTrustedRequest(t *testing.T, path stri
 	if n := f.tcpConnections.Load(); n != 0 {
 		t.Fatalf("the standalone bridge connected to the TCP API port %d times", n)
 	}
-}
-
-// TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket runs a real
-// per-user shell hook rendered for a standalone install. It must reach the
-// gateway through the hook socket without a bearer, never touch the TCP
-// port (which another local user may hold), and fail closed without sending
-// anything when the socket directory could have been written by someone
-// else.
-func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
-	curlPath, err := exec.LookPath("curl")
-	if err != nil {
-		t.Skip("curl is required to run shell hooks")
-	}
-	f := newHookSocketFixture(t, "dcsh", nil)
-	dataDir := filepath.Join(f.root, "home", ".defenseclaw")
-	hookDir := filepath.Join(dataDir, "hooks")
-	opts := SetupOpts{
-		DataDir:            dataDir,
-		APIAddr:            f.held.Addr().String(),
-		APIToken:           "connector-scoped-token-shared-by-every-user",
-		HookAPIToken:       "connector-scoped-token-shared-by-every-user",
-		HookAPITokenScoped: true,
-		ManagedEnterprise:  true,
-		HookFailMode:       "closed",
-		ManagedHookSocket:  f.socket,
-		ManagedServiceUID:  os.Getuid(),
-	}
-	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewOpenHandsConnector()); err != nil {
-		t.Fatal(err)
-	}
-	hookPath := filepath.Join(hookDir, "openhands-hook.sh")
-	bakeHookPathForTest(t, hookPath, filepath.Dir(curlPath)+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
-
-	run := func() (int, string, string) {
-		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "bash", hookPath)
-		cmd.Env = append(os.Environ(), "HOME="+filepath.Join(f.root, "home"))
-		cmd.Stdin = strings.NewReader(`{"event_type":"PreToolUse","tool_name":"execute_bash","tool_input":{"command":"echo marker"}}`)
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout, cmd.Stderr = &stdout, &stderr
-		err := cmd.Run()
-		code := 0
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			code = exitErr.ExitCode()
-		} else if err != nil {
-			t.Fatalf("run hook: %v", err)
-		}
-		return code, stdout.String(), stderr.String()
-	}
-
-	if code, stdout, stderr := run(); code != 0 || !strings.Contains(stdout, "hook-socket") {
-		t.Fatalf("hook over the verified socket: exit %d stdout=%q stderr=%q", code, stdout, stderr)
-	}
-	f.untrustSocketDir(t)
-	if code, stdout, stderr := run(); code != 2 || !strings.Contains(stderr, "hook socket") {
-		t.Fatalf("untrusted socket directory: exit %d stdout=%q stderr=%q, want a closed failure", code, stdout, stderr)
-	}
-	// GAP-0581: a stopped gateway (no socket) is named as such, not as a
-	// socket ownership problem.
-	if err := os.Chmod(f.runDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(f.socket); err != nil {
-		t.Fatal(err)
-	}
-	if code, stdout, stderr := run(); code != 2 || !strings.Contains(stderr, "gateway service is not running") || strings.Contains(stderr, "not owned") {
-		t.Fatalf("stopped gateway: exit %d stdout=%q stderr=%q, want the gateway-stopped sentence", code, stdout, stderr)
-	}
-	f.requireOnlyTheTrustedRequest(t, "/api/v1/openhands/hook")
 }
 
 // TestManagedStandaloneCodexNotifyBridgeUsesOnlyTheVerifiedHookSocket runs
@@ -430,4 +366,116 @@ func TestPersonalClaudeHookChecksManagedHostBeforeGatewayFallback(t *testing.T) 
 			}
 		})
 	}
+}
+
+// TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket runs a real
+// per-user shell hook rendered for a standalone install. It must reach the
+// gateway through the hook socket without a bearer, never touch the TCP
+// port (which another local user may hold), and fail closed without sending
+// anything when the socket directory could have been written by someone
+// else.
+func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
+	curlPath, err := exec.LookPath("curl")
+	if err != nil {
+		t.Skip("curl is required to run shell hooks")
+	}
+	f := newHookSocketFixture(t, "dcsh", nil)
+	dataDir := filepath.Join(f.root, "home", ".defenseclaw")
+	hookDir := filepath.Join(dataDir, "hooks")
+	opts := SetupOpts{
+		DataDir:            dataDir,
+		APIAddr:            f.held.Addr().String(),
+		APIToken:           "connector-scoped-token-shared-by-every-user",
+		HookAPIToken:       "connector-scoped-token-shared-by-every-user",
+		HookAPITokenScoped: true,
+		ManagedEnterprise:  true,
+		HookFailMode:       "closed",
+		ManagedHookSocket:  f.socket,
+		ManagedServiceUID:  os.Getuid(),
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewDevinConnector()); err != nil {
+		t.Fatal(err)
+	}
+	hookPath := filepath.Join(hookDir, "devin-hook.sh")
+	bakeHookPathForTest(t, hookPath, filepath.Dir(curlPath)+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+
+	run := func() (int, string, string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "bash", hookPath)
+		cmd.Env = append(os.Environ(), "HOME="+filepath.Join(f.root, "home"))
+		cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"exec","tool_input":{"command":"echo marker"}}`)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		code := 0
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code = exitErr.ExitCode()
+		} else if err != nil {
+			t.Fatalf("run hook: %v", err)
+		}
+		return code, stdout.String(), stderr.String()
+	}
+
+	if code, stdout, stderr := run(); code != 0 || !strings.Contains(stdout, "hook-socket") {
+		t.Fatalf("hook over the verified socket: exit %d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	f.untrustSocketDir(t)
+	if code, stdout, stderr := run(); code != 2 || !strings.Contains(stderr, "hook socket") {
+		t.Fatalf("untrusted socket directory: exit %d stdout=%q stderr=%q, want a closed failure", code, stdout, stderr)
+	}
+	// A socket whose directory cannot establish the listener's identity is a
+	// trust failure even when the administrator selected open for outages.
+	opts.HookFailMode = "open"
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewDevinConnector()); err != nil {
+		t.Fatal(err)
+	}
+	bakeHookPathForTest(t, hookPath, filepath.Dir(curlPath)+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+	if code, stdout, stderr := run(); code != 2 || !strings.Contains(stderr, "peer_unverified") {
+		t.Fatalf("open mode with untrusted socket directory: exit %d stdout=%q stderr=%q, want a peer refusal", code, stdout, stderr)
+	}
+	// GAP-0581: a stopped gateway (no socket) is named as such, not as a
+	// socket ownership problem.
+	if err := os.Chmod(f.runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(f.socket); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(f.root, "other.sock"), f.socket); err != nil {
+		t.Fatal(err)
+	}
+	if code, stdout, stderr := run(); code != 2 || !strings.Contains(stderr, "peer_unverified") {
+		t.Fatalf("open mode with an untrusted socket symlink: exit %d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if err := os.Remove(f.socket); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := net.Listen("unix", f.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale.(*net.UnixListener).SetUnlinkOnClose(false)
+	if err := stale.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code, stdout, stderr := run(); code != 2 || !strings.Contains(stderr, "peer_unverified") {
+		t.Fatalf("open mode with a stale existing socket: exit %d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if err := os.Remove(f.socket); err != nil {
+		t.Fatal(err)
+	}
+	if code, stdout, stderr := run(); code != 0 || !strings.Contains(stderr, "gateway service is not running") {
+		t.Fatalf("open mode with a verified missing socket: exit %d stdout=%q stderr=%q, want an outage allow", code, stdout, stderr)
+	}
+	opts.HookFailMode = "closed"
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewDevinConnector()); err != nil {
+		t.Fatal(err)
+	}
+	bakeHookPathForTest(t, hookPath, filepath.Dir(curlPath)+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+	if code, stdout, stderr := run(); code != 2 || !strings.Contains(stderr, "gateway service is not running") || strings.Contains(stderr, "not owned") {
+		t.Fatalf("stopped gateway: exit %d stdout=%q stderr=%q, want the gateway-stopped sentence", code, stdout, stderr)
+	}
+	f.requireOnlyTheTrustedRequest(t, "/api/v1/devin/hook")
 }

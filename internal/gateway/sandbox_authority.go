@@ -232,7 +232,8 @@ func sandboxSubjectMatches(key []byte, reg sandboxreg.Registration, peer managed
 // sandboxFactsDigest is a registration's facts digest: DigestPrefix and
 // the HMAC of the directory facts a profile match uses (principal, UPN,
 // domain, directory, tenant, sorted groups) and whether they resolved. A
-// change re-matches the registration; it never refuses it.
+// change re-matches the registration without revoking it. Requests whose
+// assignments need the unresolved fact are refused until it is confirmed.
 func sandboxFactsDigest(key []byte, facts useridentity.DirectoryFacts, resolved bool) string {
 	groups := slices.Clone(facts.Groups)
 	for i := range groups {
@@ -491,11 +492,12 @@ func (a *APIServer) sandboxRegistrationFor(w http.ResponseWriter, auth *sandboxA
 // sandboxStandInName is the account name a new registration binds for peer:
 // the account database's, else, while it gives none (a directory outage), the
 // name the uid last resolved to, which a managed gateway keeps across
-// restarts. A new run then starts, provisional under the default profile,
-// instead of being refused with "your account can't be looked up" (GAP-0507);
-// sandboxCheckSubject applies the same stand-in to the calls that follow, and
-// revokes the registration if the directory later names another account.
-// "" when neither is known.
+// restarts, so the run is not refused with "your account can't be looked
+// up" (GAP-0507). The run is still refused, naming the missing fact, when an
+// assignment needs a fact the outage withholds; otherwise the proven or
+// default profile applies. sandboxCheckSubject applies the same stand-in to
+// the calls that follow, and revokes the registration if the directory later
+// names another account. "" when neither is known.
 func sandboxStandInName(peer managedHookPeer) string {
 	if name := strings.TrimSpace(peer.Name); name != "" {
 		return name
@@ -507,12 +509,12 @@ func sandboxStandInName(peer managedHookPeer) string {
 // the uid is not the one that registered it (a recycled uid, a renamed
 // account). While the account database gives no name for the uid (a
 // directory outage), the name the uid last resolved to stands in for it, so
-// a running sandbox keeps working and its re-match moves it to the default
-// profile, provisionally, instead of every hook failing (GAP-0506); a
-// recycled uid resolves through the account database that now holds it. A
-// peer with neither, or whose last name is not the registration's, can't be
-// told apart from another account: the call is refused (503) and the
-// registration kept.
+// a running sandbox keeps its last proven profile until the facts resolve
+// instead of every hook failing (GAP-0506); a call whose assignments need
+// the missing fact is refused, naming it. A recycled uid resolves through
+// the account database that now holds it. A peer with neither, or whose last
+// name is not the registration's, can't be told apart from another account:
+// the call is refused (503) and the registration kept.
 func (a *APIServer) sandboxCheckSubject(w http.ResponseWriter, auth *sandboxAuthority, peer managedHookPeer, reg sandboxreg.Registration) bool {
 	if strings.TrimSpace(peer.Name) == "" {
 		last := peer

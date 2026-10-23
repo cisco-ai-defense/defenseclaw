@@ -588,3 +588,84 @@ func TestMacOSPackageUpgradeWithoutOldOpenShellStateReloadsOnce(t *testing.T) {
 		t.Fatalf("repeated ensure of the same package inode reloaded it again: %v", f.mutated)
 	}
 }
+
+// TestMacOSLaunchAgentReloadStopsTheDaemonBeforeTheDrain: a reload of an
+// idle account's loaded jobs stops its gateway, so it runs under the drain,
+// and the drain only after the account's sandbox agent is out (a daemon
+// an older DefenseClaw started takes no lifecycle lock).
+func TestMacOSLaunchAgentReloadStopsTheDaemonBeforeTheDrain(t *testing.T) {
+	h, f, cfg := newLaunchdTestHost(t)
+	f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
+	h.ops.status[h.alice.UID] = SandboxStatus{Active: true}
+	path := h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".new", data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".new", path); err != nil {
+		t.Fatal(err)
+	}
+	h.ops.order = nil
+	requireOK(t, h.ensure(cfg))
+	if want := []string{"stop alice:daemon+socket", "drain alice", "release alice"}; !reflect.DeepEqual(h.ops.order, want) {
+		t.Fatalf("order = %v, want %v", h.ops.order, want)
+	}
+	if len(f.mutated) != 2 || !strings.Contains(f.mutated[0], "bootout gui/"+strconv.Itoa(h.alice.UID)+"/"+labelOpenShellGateway) {
+		t.Fatalf("mutations = %v", f.mutated)
+	}
+
+	// A daemon before 1.0.4 is killed, not booted out: its exit stopped the
+	// gateway under a MicroVM that completed before the drain could see it.
+	h2, f2, cfg2 := newLaunchdTestHost(t)
+	f2.jobs[h2.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
+	h2.ops.status[h2.alice.UID] = SandboxStatus{Active: true, Legacy: true}
+	path2 := h2.env.P(filepath.Join(h2.env.Layout.BinDir, binGateway))
+	data2, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path2+".new", data2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path2+".new", path2); err != nil {
+		t.Fatal(err)
+	}
+	h2.ops.order = nil
+	requireOK(t, h2.ensure(cfg2))
+	if want := []string{"stop alice:kill+daemon+socket", "drain alice", "release alice"}; !reflect.DeepEqual(h2.ops.order, want) {
+		t.Fatalf("legacy order = %v, want %v", h2.ops.order, want)
+	}
+}
+
+// bootoutGoneRunner answers launchctl as for a job the drain booted out
+// already: its bootout finds nothing to boot out.
+type bootoutGoneRunner struct{ calls []string }
+
+func (r *bootoutGoneRunner) Run(_ context.Context, name string, args ...string) (CommandResult, error) {
+	r.calls = append(r.calls, name+" "+strings.Join(args, " "))
+	switch args[0] {
+	case "bootout":
+		return CommandResult{Stderr: []byte("Boot-out failed: 3: No such process\n")}, errors.New("exit status 3")
+	case "print":
+		return CommandResult{Stdout: []byte(args[1] + " = {\n\tstate = running\n\truns = 1\n}\n")}, nil
+	}
+	return CommandResult{}, nil
+}
+
+// TestMacOSReloadOfAJobTheDrainBootedOut: the reload of the sandbox agent
+// the account's drain booted out first loads it again.
+func TestMacOSReloadOfAJobTheDrainBootedOut(t *testing.T) {
+	h, _, _ := newLaunchdTestHost(t)
+	r := &bootoutGoneRunner{}
+	h.env.Runner = r
+	job := loadedLaunchAgent{domain: "gui/" + strconv.Itoa(h.alice.UID), label: labelSandbox}
+	if err := h.env.reloadMacOSAgent(context.Background(), job, false); err != nil {
+		t.Fatalf("reload = %v (calls %v)", err, r.calls)
+	}
+	if len(r.calls) < 2 || !strings.HasPrefix(r.calls[1], "launchctl bootstrap gui/") {
+		t.Fatalf("calls = %v", r.calls)
+	}
+}

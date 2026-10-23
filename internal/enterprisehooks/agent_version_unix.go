@@ -68,10 +68,6 @@ type unixAgentProbe struct {
 	// sees homes read-only, and some agents (Hermes) refuse to print their
 	// version when they cannot take a lock in their state directory.
 	stateEnv string
-	// uvTool names a `uv tool install` environment (tool, distribution)
-	// whose dist-info directory carries the version, for Python CLIs that
-	// take too long to start for the --version probe.
-	uvTool [2]string
 	// stamp is a home-relative JSON install stamp that records the release
 	// ("displayVersion", else "baseVersion"), for CLIs that no longer print a
 	// version outside their own environment: a current Hermes refuses
@@ -92,8 +88,6 @@ var unixAgentProbes = map[string]unixAgentProbe{
 	"amp":        {npmPackages: []string{"@ampcode/cli"}, binaries: []string{"amp"}},
 	"devin":      {binaries: []string{"devin"}},
 	"hermes":     {binaries: []string{"hermes"}, stateEnv: "HERMES_HOME", stamp: ".hermes/hermes-agent/install-stamp.json"},
-	"openhands":  {binaries: []string{"openhands"}, uvTool: [2]string{"openhands", "openhands"}},
-	"omnigent":   {binaries: []string{"omnigent"}, uvTool: [2]string{"omnigent", "omnigent"}},
 	// "antigravity" is the IDE launcher, a desktop surface that is never
 	// run (DiscoverUnixAgentSurfaces).
 	"antigravity": {binaries: []string{"agy"}},
@@ -298,20 +292,17 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 			return version, ""
 		}
 	}
-	if probe.uvTool[0] != "" {
-		if version := readUVToolVersion(home, probe.uvTool[0], probe.uvTool[1]); version != "" {
-			return version, ""
-		}
-	}
+	stampVersion := ""
 	if probe.stamp != "" {
 		stamp := filepath.Join(home, filepath.FromSlash(probe.stamp))
 		if unixDiscoveryCandidateTrusted(home, stamp) {
-			if version := readUnixInstallStampVersion(stamp); version != "" {
-				return version, ""
-			}
+			stampVersion = readUnixInstallStampVersion(stamp)
 		}
 	}
 	if !allowExec {
+		if stampVersion != "" {
+			return stampVersion, ""
+		}
 		return "", fmt.Sprintf("no %s package metadata under this home", connector)
 	}
 	installedAt, installedNote := "", ""
@@ -335,6 +326,12 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 				}
 			}
 		}
+	}
+	// The install stamp names the release only when the CLI does not answer
+	// itself: only the installer rewrites the stamp, so a CLI upgraded
+	// another way leaves it naming the older release (GAP-1274).
+	if stampVersion != "" {
+		return stampVersion, ""
 	}
 	if installedAt != "" {
 		return "", UnixAgentUnversionedReasonPrefix + installedAt + installedNote
@@ -550,26 +547,6 @@ func unixMachineAgentBinDirs() []string {
 		dirs = append(dirs, filepath.Join(prefix, "bin"))
 	}
 	return dirs
-}
-
-// readUVToolVersion reads the version of distribution dist from the default
-// `uv tool install` environment of tool under home (OpenHands needs about
-// 11 s to answer --version, beyond the probe timeout).
-func readUVToolVersion(home, tool, dist string) string {
-	pattern := filepath.Join(home, ".local", "share", "uv", "tools", tool, "lib", "python*", "site-packages", dist+"-*.dist-info")
-	matches, err := filepath.Glob(pattern)
-	if err != nil || len(matches) != 1 {
-		return ""
-	}
-	info, err := os.Lstat(matches[0])
-	if err != nil || !info.IsDir() {
-		return ""
-	}
-	version := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(matches[0]), dist+"-"), ".dist-info")
-	if !validUnixAgentVersion(version) {
-		return ""
-	}
-	return version
 }
 
 // readUnixInstallStampVersion reads the release from a bounded install

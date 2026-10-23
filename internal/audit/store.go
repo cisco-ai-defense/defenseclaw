@@ -31,12 +31,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -238,11 +238,19 @@ type Store struct {
 	// checkpoints. It is opened on first use and closed with the store.
 	checkpointMu sync.Mutex
 	checkpointDB *sql.DB
+	// durableDB is a synchronous=FULL connection that makes committed
+	// writes power-loss durable (syncCommittedWrites). It is opened on
+	// first use under checkpointMu and closed with the store.
+	durableDB *sql.DB
 	// walGuardMu guards the checkpoint connection's data_version as of the
 	// previous WAL guard pass (CheckpointWALIfLarge).
 	walGuardMu      sync.Mutex
 	walGuardSeen    bool
 	walGuardVersion int64
+	// walBoundedMisses counts the bounded catch-ups in a row that gave the
+	// writer back before the log restarted (boundedCatchUpPolicy). Guarded
+	// by walGuardMu.
+	walBoundedMisses int
 	// walPressure is true while the last WAL guard pass left the log over
 	// its limit; background writers wait for it (awaitWALHeadroom).
 	walPressure atomic.Bool
@@ -1891,7 +1899,7 @@ func tableExists(ex dbExecer, table string) (bool, error) {
 	return count > 0, nil
 }
 
-// unreadAuditIndexes are audit_events indexes no query reads. Every hook
+// unreadAuditIndexes are audit.db indexes no query needs. Every hook
 // writes several audit rows, and each index is another B-tree page per row in
 // the write-ahead log (GAP-0246, B-26), so a store outside Secure Client drops
 // them after the migrations, which still create them as main does. The schema
@@ -1922,6 +1930,13 @@ var unreadAuditIndexes = []struct{ name, create string }{
 	{"idx_audit_source_timestamp", `CREATE INDEX IF NOT EXISTS idx_audit_source_timestamp ON audit_events(source, timestamp)`},
 	{"idx_audit_connector", `CREATE INDEX IF NOT EXISTS idx_audit_connector ON audit_events(connector)`},
 	{"idx_audit_action_connector_timestamp", `CREATE INDEX IF NOT EXISTS idx_audit_action_connector_timestamp ON audit_events(action, connector, timestamp DESC)`},
+	// These two are the leading columns of a unique index on the same table
+	// (sqlite_autoindex_correlation_identifiers_2 and the correlation_receipts
+	// primary key), which serves every query they served. Their keys are
+	// random digests, so each hook call wrote another random page of each
+	// (rel-1-0-3 GAP-0320).
+	{"idx_correlation_identifiers_exact", `CREATE INDEX IF NOT EXISTS idx_correlation_identifiers_exact ON correlation_identifiers(connector_instance_id, namespace, identifier_kind, value_digest)`},
+	{"idx_correlation_receipts_source", `CREATE INDEX IF NOT EXISTS idx_correlation_receipts_source ON correlation_receipts(connector_instance_id, source_key_digest)`},
 }
 
 // trimUnreadAuditIndexes drops the unread indexes, or on a Secure Client
@@ -2373,7 +2388,7 @@ func (s *Store) hasColumn(table, column string) (bool, error) {
 
 func (s *Store) LogEvent(e Event) error {
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -2518,7 +2533,7 @@ type SinkHealthInput struct {
 // InsertSinkHealth records a single sink delivery attempt outcome.
 func (s *Store) InsertSinkHealth(h SinkHealthInput) error {
 	if h.ID == "" {
-		h.ID = uuid.New().String()
+		h.ID = observability.NewTimeOrderedID()
 	}
 	if h.Timestamp.IsZero() {
 		h.Timestamp = time.Now().UTC()
@@ -2684,7 +2699,7 @@ func (b *JudgeBatch) InsertJudgeResponse(e JudgeResponse) error {
 		return nil
 	}
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -2842,7 +2857,7 @@ func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
 		return nil
 	}
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -3235,7 +3250,7 @@ func (s *Store) SetActionForConnector(targetType, targetName, connector, sourceP
 	if err != nil {
 		return fmt.Errorf("audit: marshal actions: %w", err)
 	}
-	id := uuid.New().String()
+	id := observability.NewTimeOrderedID()
 	now := time.Now().UTC()
 	_, err = s.execDB(context.Background(), "audit",
 		`INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
@@ -3265,7 +3280,7 @@ func (s *Store) SetActionFieldForConnector(targetType, targetName, connector, fi
 	if err := validateActionFieldAndValue(field, value); err != nil {
 		return err
 	}
-	id := uuid.New().String()
+	id := observability.NewTimeOrderedID()
 	now := time.Now().UTC()
 	path := "$." + field
 	initJSON := "{}"
@@ -4324,7 +4339,7 @@ func (s *Store) InsertNetworkEgressEvent(e NetworkEgressRow) error {
 	}
 	e.Details = netguard.ScrubURLsInText(e.Details)
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -4385,7 +4400,7 @@ type SnapshotRow struct {
 
 // SetTargetSnapshot upserts a snapshot baseline for drift comparison.
 func (s *Store) SetTargetSnapshot(targetType, targetPath, contentHash, depHashes, cfgHashes, endpoints, scanID, scannerFingerprint string) error {
-	id := uuid.New().String()
+	id := observability.NewTimeOrderedID()
 	now := time.Now().UTC()
 	_, err := s.execDB(context.Background(), "audit",
 		`INSERT INTO target_snapshots (id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at, scanner_fingerprint)
@@ -4554,6 +4569,10 @@ func (s *Store) Close() error {
 	if s.checkpointDB != nil {
 		err = errors.Join(err, s.checkpointDB.Close())
 		s.checkpointDB = nil
+	}
+	if s.durableDB != nil {
+		err = errors.Join(err, s.durableDB.Close())
+		s.durableDB = nil
 	}
 	s.checkpointMu.Unlock()
 	s.dbPathGuard.close()

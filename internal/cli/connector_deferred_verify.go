@@ -73,8 +73,10 @@ type deferredVerifyInstallState struct {
 	CursorHome           string `json:"cursor_home,omitempty"`
 	AntigravityConfigDir string `json:"antigravity_config_dir,omitempty"`
 	OpenCodeConfigDir    string `json:"opencode_config_dir,omitempty"`
-	OmnigentConfigHome   string `json:"omnigent_config_home,omitempty"`
-	HermesHome           string `json:"hermes_home,omitempty"`
+	// until 1.1: Setup still tears down a 1.0.x OmniGent install at uninstall
+	// (cmd/defenseclaw-setup), so the deferred verifier keeps its home binding.
+	OmnigentConfigHome string `json:"omnigent_config_home,omitempty"`
+	HermesHome         string `json:"hermes_home,omitempty"`
 }
 
 type deferredVerifyTransaction struct {
@@ -91,7 +93,7 @@ type deferredVerifyTransaction struct {
 	PreviousCursorHome           string                      `json:"previous_cursor_home,omitempty"`
 	PreviousAntigravityConfigDir string                      `json:"previous_antigravity_config_dir,omitempty"`
 	PreviousOpenCodeConfigDir    string                      `json:"previous_opencode_config_dir,omitempty"`
-	PreviousOmnigentConfigHome   string                      `json:"previous_omnigent_config_home,omitempty"`
+	PreviousOmnigentConfigHome   string                      `json:"previous_omnigent_config_home,omitempty"` // until 1.1: teardown of a 1.0.x OmniGent install
 	PreviousHermesHome           string                      `json:"previous_hermes_home,omitempty"`
 	CodexHome                    string                      `json:"codex_home,omitempty"`
 	ClaudeConfigDir              string                      `json:"claude_config_dir,omitempty"`
@@ -99,7 +101,7 @@ type deferredVerifyTransaction struct {
 	CursorHome                   string                      `json:"cursor_home,omitempty"`
 	AntigravityConfigDir         string                      `json:"antigravity_config_dir,omitempty"`
 	OpenCodeConfigDir            string                      `json:"opencode_config_dir,omitempty"`
-	OmnigentConfigHome           string                      `json:"omnigent_config_home,omitempty"`
+	OmnigentConfigHome           string                      `json:"omnigent_config_home,omitempty"` // until 1.1: teardown only
 	HermesHome                   string                      `json:"hermes_home,omitempty"`
 }
 
@@ -415,7 +417,7 @@ func deferredVerifyConfigHomes(transaction deferredVerifyTransaction, connectorN
 			add(previous.OpenCodeConfigDir)
 		}
 		add(filepath.Join(filepath.Dir(transaction.DataRoot), ".config", "opencode"))
-	case "omnigent":
+	case "omnigent": // until 1.1: removed in 1.0.4; Setup still tears down a 1.0.x install
 		add(transaction.PreviousOmnigentConfigHome, transaction.OmnigentConfigHome)
 		if previous != nil {
 			add(previous.OmnigentConfigHome)

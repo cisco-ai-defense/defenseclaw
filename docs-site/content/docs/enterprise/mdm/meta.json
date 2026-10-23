@@ -1,14 +1,13 @@
 {
   "title": "Install with an MDM",
   "pages": [
-    "intune-tenant",
-    "intune-windows",
-    "intune-macos",
-    "intune-linux",
+    "intune",
     "jamf",
     "kandji",
     "workspace-one",
     "configmgr",
-    "linux-config-management"
+    "linux-config-management",
+    "linux-config-recipes",
+    "reference"
   ]
 }

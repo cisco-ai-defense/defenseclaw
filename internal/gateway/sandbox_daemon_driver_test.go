@@ -161,3 +161,24 @@ func TestSandboxDaemonIdleDriverFollowsRefreshedAvailability(t *testing.T) {
 		}
 	}
 }
+
+// A stopped MicroVM sandbox stays the newest registration after the
+// organization moved to docker: Driver keeps naming its driver, and
+// NextDriver the managed gateway's choice for the next start, which image
+// build and prune follow while no gateway runs.
+func TestSandboxDaemonStatusNamesTheNextStartsDriver(t *testing.T) {
+	regs, err := loadDaemonRegistrations(filepath.Join(t.TempDir(), "registrations.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := regs.put(daemonRegistration{ID: "reg-vm", Sandbox: "stopped-vm", Driver: "vm", Confirmed: true, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	d := &SandboxDaemon{regs: regs, relay: &fakeRelay{}, logf: t.Logf}
+	d.settings = sandboxrelay.DaemonSettings{Enabled: true, Available: true, SelectedDriver: "docker",
+		Enterprise: sandboxrelay.EnterpriseOpenShell{Driver: "docker"}}
+	d.settingsAt.Store(time.Now().UnixNano())
+	if st := d.managedStatus(context.Background()); st.Driver != "vm" || st.NextDriver != "docker" {
+		t.Fatalf("status = driver %q, next %q; want vm (the stopped sandbox) and docker (the next start)", st.Driver, st.NextDriver)
+	}
+}

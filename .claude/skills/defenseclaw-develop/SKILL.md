@@ -63,8 +63,8 @@ Each principle maps to requirement IDs in `reference/checklist.md`.
 | A config key, schema, default, migration | CFG, DOC, PKG | `docs/CONFIG_FILES.md`, `schemas/README.md` |
 | A `DEFENSECLAW_*` environment variable | CFG, DEP, DOC | `internal/envvars/registry.json` |
 | Rego, admission, rule packs, detections | POL, TST, PERF | `docs/GUARDRAIL_RULE_PACKS.md` |
-| Profiles, assignments, directory facts, agent identity | ID, POL, SEC | `docs-site/content/docs/guardrail/user-and-group-policies.mdx` |
-| Enterprise, MDM, guardian, lifecycle, machine policy | DEP, PKG, SEC, TST | `docs-site/content/docs/enterprise/machine-policy.mdx`, `.github/managed-paths.txt` |
+| Profiles, assignments, directory facts, agent identity | ID, POL, SEC | `docs-site/content/docs/reference/policy/guardrail-profiles.mdx` |
+| Enterprise, MDM, guardian, lifecycle, machine policy | DEP, PKG, SEC, TST | `docs-site/content/docs/enterprise/configure/machine-policy.mdx`, `.github/managed-paths.txt` |
 | Sandboxes, OpenShell, drivers | SBX, REQ, DEP | `docs/SANDBOX.md` (contributor notes) |
 | Scanners, judges, local models | SCN, REQ | `reference/requirements-and-sandboxes.md` |
 | A new tool, model, daemon, package or network call | REQ, DEP, DOC | `internal/openshell/doctor.go` as the detection model |
@@ -80,7 +80,7 @@ Each principle maps to requirement IDs in `reference/checklist.md`.
 | The macOS app (`macos/DefenseClawMac`) | TST, SEC, PKG | `macos/DefenseClawMac/UPDATING.md`; run `make macos-app-test` |
 | The OpenClaw extension (`extensions/defenseclaw`) | TST, SEC, PKG | `scripts/extension_runtime_fingerprint.py`; run `make ts-test` |
 | Scanner plugins, YARA or scanner policies, `skills/codeguard` | POL, SEC, TST | `internal/policy/first_party_verify.go` (update the codeguard content signatures with `skills/codeguard`) |
-| Kernel sensor, Tetragon, egress firewall | REQ, DEP, SEC, PERF | `docs-site/content/docs/enterprise/tetragon.mdx`, `internal/firewall` |
+| Kernel sensor, Tetragon, egress firewall | REQ, DEP, SEC, PERF | `docs-site/content/docs/enterprise/runtime/tetragon.mdx`, `internal/firewall` |
 | Splunk bridge or dashboards | OBS, DOC | `bundles/splunk_o11y_dashboards` |
 | Connector | all that apply | `defenseclaw-add-connector` skill |
 

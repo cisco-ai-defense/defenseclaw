@@ -50,7 +50,7 @@ func TestSandboxPrerequisiteSkipsUntrustedBinaries(t *testing.T) {
 		}
 		return nil
 	}
-	cfg := sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite", "version": "0.1.3"})
+	cfg := sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite", "version": "0.1.5"})
 	r := h.ensure(cfg)
 	requireOK(t, r)
 	for _, row := range []string{"sandbox openshell cli", "sandbox openshell gateway", "sandbox microvm driver"} {
@@ -64,17 +64,17 @@ func TestSandboxPrerequisiteSkipsUntrustedBinaries(t *testing.T) {
 
 	h.writeExecutables(t, "/usr/local/bin/openshell", "/usr/local/bin/openshell-gateway", "/usr/local/libexec/openshell/openshell-driver-vm")
 	h.runner.replies = map[string]fakeReply{
-		"openshell --version":           {result: CommandResult{Stdout: []byte("openshell 0.1.3\n")}},
-		"openshell-gateway --version":   {result: CommandResult{Stdout: []byte("openshell-gateway 0.1.3\n")}},
-		"openshell-driver-vm --version": {result: CommandResult{Stdout: []byte("openshell-driver-vm 0.1.3\n")}},
+		"openshell --version":           {result: CommandResult{Stdout: []byte("openshell 0.1.5\n")}},
+		"openshell-gateway --version":   {result: CommandResult{Stdout: []byte("openshell-gateway 0.1.5\n")}},
+		"openshell-driver-vm --version": {result: CommandResult{Stdout: []byte("openshell-driver-vm 0.1.5\n")}},
 	}
 	r = h.ensure(cfg)
 	requireOK(t, r)
 	for row, want := range map[string]string{
-		"sandbox openshell cli":     "ok: 0.1.3 (/usr/local/bin/openshell)",
-		"sandbox openshell gateway": "ok: 0.1.3 (/usr/local/bin/openshell-gateway)",
-		"sandbox microvm driver":    "ok: 0.1.3 (/usr/local/libexec/openshell/openshell-driver-vm)",
-		"sandbox openshell release": "ok: openshell, openshell-gateway, openshell-driver-vm are all 0.1.3",
+		"sandbox openshell cli":     "ok: 0.1.5 (/usr/local/bin/openshell)",
+		"sandbox openshell gateway": "ok: 0.1.5 (/usr/local/bin/openshell-gateway)",
+		"sandbox microvm driver":    "ok: 0.1.5 (/usr/local/libexec/openshell/openshell-driver-vm)",
+		"sandbox openshell release": "ok: openshell, openshell-gateway, openshell-driver-vm are all 0.1.5",
 	} {
 		if state, _ := rowState(r, row); !strings.HasPrefix(state, want) {
 			t.Errorf("%s = %q, want %q", row, state, want)
@@ -87,23 +87,38 @@ func TestSandboxPrerequisiteSkipsUntrustedBinaries(t *testing.T) {
 
 // GAP-0245, GAP-0277: every part of the administrator's OpenShell is held
 // to the pin, and parts of different releases fail: the 0.1.1 gateway of
-// the rpm cannot run NVIDIA's 0.1.3 MicroVM driver.
+// the rpm cannot run NVIDIA's 0.1.5 MicroVM driver.
 func TestSandboxPrerequisiteVersions(t *testing.T) {
 	t.Run("a pin the root-owned release does not meet", func(t *testing.T) {
 		h := newOSHost(t, "darwin")
 		h.writeExecutables(t, "/usr/local/bin/openshell", "/usr/local/bin/openshell-gateway", "/usr/local/libexec/openshell/openshell-driver-vm")
 		h.runner.replies = map[string]fakeReply{
-			"openshell --version":           {result: CommandResult{Stdout: []byte("openshell 0.1.3\n")}},
-			"openshell-gateway --version":   {result: CommandResult{Stdout: []byte("openshell-gateway 0.1.3\n")}},
-			"openshell-driver-vm --version": {result: CommandResult{Stdout: []byte("openshell-driver-vm 0.1.3\n")}},
+			"openshell --version":           {result: CommandResult{Stdout: []byte("openshell 0.1.5\n")}},
+			"openshell-gateway --version":   {result: CommandResult{Stdout: []byte("openshell-gateway 0.1.5\n")}},
+			"openshell-driver-vm --version": {result: CommandResult{Stdout: []byte("openshell-driver-vm 0.1.5\n")}},
 		}
 		r := h.ensure(sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite", "version": "0.1.4"}))
 		requireOK(t, r)
 		for _, row := range []string{"sandbox openshell cli", "sandbox openshell gateway", "sandbox microvm driver"} {
-			if state, _ := rowState(r, row); !strings.HasPrefix(state, "missing:") || !strings.Contains(state, "0.1.3 is installed, enterprise.openshell.version pins 0.1.4") {
+			if state, _ := rowState(r, row); !strings.HasPrefix(state, "missing:") || !strings.Contains(state, "0.1.5 is installed, enterprise.openshell.version pins 0.1.4") {
 				t.Errorf("%s = %q, want the pin mismatch", row, state)
 			}
 		}
+		requireRefusedReleases(t, h, "0.1.5", "openshell cli", "openshell gateway", "microvm driver")
+	})
+	// GAP-0266: an installed release below SupportedMin is recorded with
+	// its version, so the gateway says it is installed and unsupported.
+	t.Run("an installed release older than the floor", func(t *testing.T) {
+		h := newOSHost(t, "linux")
+		h.writeExecutables(t, "/usr/bin/openshell", "/usr/bin/openshell-gateway", "/usr/libexec/openshell/openshell-driver-vm", "/usr/sbin/mke2fs")
+		h.runner.replies = map[string]fakeReply{
+			"rpm -q --qf %{VERSION} openshell":         {result: CommandResult{Stdout: []byte("0.1.3")}},
+			"rpm -q --qf %{VERSION} openshell-gateway": {result: CommandResult{Stdout: []byte("0.1.3")}},
+			"openshell-driver-vm --version":            {result: CommandResult{Stdout: []byte("openshell-driver-vm 0.1.3\n")}},
+		}
+		r := h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "vm"}))
+		requireOK(t, r)
+		requireRefusedReleases(t, h, "0.1.3", "openshell cli", "openshell gateway", "microvm driver")
 	})
 	t.Run("parts of different releases", func(t *testing.T) {
 		h := newOSHost(t, "linux")
@@ -111,12 +126,12 @@ func TestSandboxPrerequisiteVersions(t *testing.T) {
 		h.runner.replies = map[string]fakeReply{
 			"rpm -q --qf %{VERSION} openshell":         {result: CommandResult{Stdout: []byte("0.1.1")}},
 			"rpm -q --qf %{VERSION} openshell-gateway": {result: CommandResult{Stdout: []byte("0.1.1")}},
-			"openshell-driver-vm --version":            {result: CommandResult{Stdout: []byte("openshell-driver-vm 0.1.3\n")}},
+			"openshell-driver-vm --version":            {result: CommandResult{Stdout: []byte("openshell-driver-vm 0.1.5\n")}},
 		}
 		r := h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "vm"}))
 		requireOK(t, r)
 		state, _ := rowState(r, "sandbox openshell release")
-		if !strings.HasPrefix(state, "missing:") || !strings.Contains(state, "openshell 0.1.1, openshell-gateway 0.1.1, openshell-driver-vm 0.1.3 are not one release") {
+		if !strings.HasPrefix(state, "missing:") || !strings.Contains(state, "openshell 0.1.1, openshell-gateway 0.1.1, openshell-driver-vm 0.1.5 are not one release") {
 			t.Errorf("release row = %q", state)
 		}
 		var record openshell.PrerequisitesRecord
@@ -124,6 +139,32 @@ func TestSandboxPrerequisiteVersions(t *testing.T) {
 			t.Errorf("prerequisites.json = %+v %v, want not ready", record, err)
 		}
 	})
+}
+
+// requireRefusedReleases checks that the published prerequisites.json
+// names release for each of items, the OpenShell parts whose release the
+// lifecycle refused (GAP-0266).
+func requireRefusedReleases(t *testing.T, h *osHost, release string, items ...string) {
+	t.Helper()
+	var record struct {
+		Ready   bool `json:"ready"`
+		Missing []struct {
+			Item    string `json:"item"`
+			Version string `json:"version"`
+		} `json:"missing"`
+	}
+	if err := json.Unmarshal([]byte(h.read(h.env.prerequisitesPath())), &record); err != nil || record.Ready {
+		t.Fatalf("prerequisites.json = %+v %v, want not ready", record, err)
+	}
+	got := map[string]string{}
+	for _, m := range record.Missing {
+		got[m.Item] = m.Version
+	}
+	for _, item := range items {
+		if got[item] != release {
+			t.Errorf("prerequisites.json %s version = %q, want %q (missing %+v)", item, got[item], release, record.Missing)
+		}
+	}
 }
 
 // GAP-0472: the gateway runs only in DefenseClaw's own unit, whose shim sets
@@ -166,7 +207,7 @@ func TestSandboxSwitchLeavesUnusedAccountsAlone(t *testing.T) {
 	if err := os.MkdirAll(h.env.P(state), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	requireOK(t, h.ensure(sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite", "version": "0.1.3"})))
+	requireOK(t, h.ensure(sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite", "version": "0.1.5"})))
 
 	r := h.ensure(sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite", "version": "0.1.4"}))
 	requireOK(t, r)

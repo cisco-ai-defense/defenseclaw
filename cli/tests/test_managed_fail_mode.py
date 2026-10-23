@@ -30,7 +30,6 @@ CONNECTORS = (
     "hermes",
     "kiro",
     "opencode",
-    "openhands",
 )
 DEPLOYMENTS = {
     "per-user": ("", "", "closed"),
@@ -89,10 +88,10 @@ def test_hook_fail_mode_matrix(connector, deployment, mode, global_mode, connect
 def test_standalone_never_lowers_to_upstream_fail_open(connector):
     assert not upstream_fail_open(_config("standalone", "observe", "", connector, ""), connector)
     assert not upstream_fail_open(_config("standalone", "observe", "open", connector, ""), connector)
-    # Secure Client keeps the upstream fail-open; per-user Hermes blocks its
-    # own failures on every OS (GAP-0150, GAP-0269).
+    # Secure Client keeps the upstream fail-open; a per-user hook blocks its
+    # own failures with the agent's native deny on every OS.
     assert upstream_fail_open(_config("secure-client", "observe", "", connector, ""), connector)
-    assert upstream_fail_open(_config("per-user", "observe", "", connector, ""), connector) is (connector != "hermes")
+    assert not upstream_fail_open(_config("per-user", "observe", "", connector, ""), connector)
 
 
 def test_machine_marker_makes_any_managed_config_standalone(monkeypatch: pytest.MonkeyPatch) -> None:

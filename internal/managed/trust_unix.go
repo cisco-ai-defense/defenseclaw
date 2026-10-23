@@ -42,6 +42,28 @@ func ValidateTrustedConfigPath(path string) error {
 	return ValidateTrustedFilePath(path, "managed config")
 }
 
+// ValidateTrustedInstallMarkerDir accepts a Secure Client install marker
+// only when root owns it and every ancestor, with no group, other or ACL
+// writer and no symlink. An advisory installer ancestor cannot certify a
+// deployment profile that changes hook availability.
+func ValidateTrustedInstallMarkerDir(path, label string) error {
+	if path == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	for cur := clean; ; cur = filepath.Dir(cur) {
+		if err := validateTrustedPathElement(cur, true, label, false); err != nil {
+			return err
+		}
+		if cur == filepath.Dir(cur) {
+			return nil
+		}
+	}
+}
+
 // ValidateTrustedFilePath rejects managed_enterprise policy/input files that a
 // standard user could replace or edit. The managed service may run as a
 // dedicated non-root user, but authoritative inputs must stay admin-owned.

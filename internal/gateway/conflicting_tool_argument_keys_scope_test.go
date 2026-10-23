@@ -38,7 +38,9 @@ func TestConflictingToolArgumentKeysScope(t *testing.T) {
 		// One key repeated: every value of a reviewed key is a candidate.
 		{"command twice", actionfacts.Input{Tool: "exec", Args: json.RawMessage(`{"command":"true","command":"ls"}`)}, true, true, 2},
 		{"write path twice", actionfacts.Input{Tool: "write_file", Args: json.RawMessage(`{"path":"/w/a","content":"x","path":"/w/b"}`)}, true, true, 2},
-		{"command twice, same value", actionfacts.Input{Tool: "exec", Args: json.RawMessage(`{"command":"ls","command":"ls"}`)}, false, false, 0},
+		// A key repeated with the value it has is the one call it names: it
+		// is judged as that call, with no conservative finding (GAP-0691).
+		{"command twice, same value", actionfacts.Input{Tool: "exec", Args: json.RawMessage(`{"command":"ls","command":"ls"}`)}, true, false, 1},
 		{"unreviewed key twice", actionfacts.Input{Tool: "write_file", Args: json.RawMessage(`{"path":"/w/a","content":"x","note":"a","note":"b"}`)}, false, false, 0},
 		{"single key", actionfacts.Input{Tool: "Bash", Args: json.RawMessage(`{"command":"ls"}`)}, false, false, 0},
 		// An unknown extra key leaves every candidate partial: GAP-0686.

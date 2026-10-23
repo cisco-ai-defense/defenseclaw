@@ -257,9 +257,11 @@ var windowsEnterpriseStandaloneTransactionPending = func() bool {
 // restarted the gateway into a failed start and left it stopped for every
 // user (GAP-0672). Refused here, the running gateway keeps that policy. A
 // pending transaction is left to its recovery, which restores the packs the
-// deployment had.
-func windowsEnterpriseStandaloneRepairRulePackPreflight() error {
-	if windowsEnterpriseStandaloneTransactionPending() {
+// deployment had. A repair that supplies a config installs that config,
+// whose packs its own preflight already checked, so the packs only the old
+// config selects do not block it (GAP-1194).
+func windowsEnterpriseStandaloneRepairRulePackPreflight(suppliedConfig string) error {
+	if strings.TrimSpace(suppliedConfig) != "" || windowsEnterpriseStandaloneTransactionPending() {
 		return nil
 	}
 	layout, err := windowsEnterpriseStandaloneLayoutForPreflight()

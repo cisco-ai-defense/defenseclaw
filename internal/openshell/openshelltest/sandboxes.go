@@ -114,12 +114,28 @@ func (s *sandboxClient) Stop(ctx context.Context, workspace, name string) (*type
 	if err := s.f.enter(MethodStopSandbox); err != nil {
 		return nil, err
 	}
+	// Like OpenShell (0.1.3 and 0.1.5: ComputeRuntime::stop_sandbox), a
+	// sandbox whose workload completed, or whose main process failed (the
+	// error state with an exit code), is returned as it is: nothing is
+	// stopped, and its MicroVM is not flushed.
+	if sb, err := s.inner.Get(ctx, workspace, name); err == nil &&
+		(sb.Status.Phase == types.SandboxCompleted || sb.Status.Phase == types.SandboxError && sb.Status.ExitCode != nil) {
+		return sb, nil
+	}
 	return s.inner.Stop(ctx, workspace, name)
 }
 
 func (s *sandboxClient) Start(ctx context.Context, workspace, name string) (*types.Sandbox, error) {
 	if err := s.f.enter(MethodStartSandbox); err != nil {
 		return nil, err
+	}
+	if sb, err := s.inner.Get(ctx, workspace, name); err == nil &&
+		(sb.Status.Phase == types.SandboxCompleted || sb.Status.Phase == types.SandboxError && sb.Status.ExitCode != nil) {
+		// The VM still runs: the start ends it with no flush first.
+		s.f.mu.Lock()
+		s.f.lost = append(s.f.lost, s.f.unsynced[key(workspace, name)]...)
+		delete(s.f.unsynced, key(workspace, name))
+		s.f.mu.Unlock()
 	}
 	return s.inner.Start(ctx, workspace, name)
 }

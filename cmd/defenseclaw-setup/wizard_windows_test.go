@@ -373,7 +373,6 @@ func TestWizardChoiceMappings(t *testing.T) {
 		{Label: "Cursor Agent", Value: "cursor"},
 		{Label: "Hermes Agent", Value: "hermes"},
 		{Label: "Devin CLI", Value: "devin"},
-		{Label: "OmniGent (native degraded)", Value: "omnigent"},
 		{Label: "OpenCode", Value: "opencode"},
 	}
 	modes := []wizardChoice{
@@ -555,7 +554,6 @@ func TestWizardCompletionDescriptionMatchesConfiguredConnector(t *testing.T) {
 		{connector: "hermes", want: "Hermes hooks", reject: "fail-closed"},
 		{connector: "devin", want: "Devin CLI is configured", reject: "certified"},
 		{connector: "antigravity", want: "Google Antigravity is configured", reject: "defenseclaw init"},
-		{connector: "omnigent", want: "native degraded policy integration", reject: "trusted automatically"},
 		{connector: "opencode", want: "OpenCode is configured", reject: "certified"},
 		{connector: "none", want: "defenseclaw init", reject: "open /hooks"},
 	} {

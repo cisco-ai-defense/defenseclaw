@@ -35,7 +35,7 @@ func TestOpenCodePluginFailOpenWritesAHookFailureLine(t *testing.T) {
 			Event string `json:"hook_event_name"`
 		}
 		_ = json.Unmarshal(body, &payload)
-		if payload.Event == "tool.execute.before" {
+		if payload.Event == "tool.execute.before" || payload.Event == "tool.execute.after" {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -56,7 +56,8 @@ func TestOpenCodePluginFailOpenWritesAHookFailureLine(t *testing.T) {
 		TokenFileJS: javaScriptStringContent(token),
 		FailMode:    "open",
 	}
-	lines := runOpenCodePluginHarness(t, data, 1)
+	harness := strings.Replace(openCodePluginHarness, `console.log("allow");`, `await plugin["tool.execute.after"]({ tool: "bash", sessionID: "S", messageID: "M", callID: "C" + i }, { output: "marker" }); console.log("allow");`, 1)
+	lines := runNodeHarness(t, harness, writeRenderedPlugin(t, "opencode-plugin.js", "defenseclaw.mjs", data), "1")
 	if len(lines) == 0 || lines[0] != "allow" {
 		t.Fatalf("fail-open verdicts = %q, want allow", lines)
 	}

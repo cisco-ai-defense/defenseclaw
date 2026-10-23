@@ -209,6 +209,23 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 	if strings.ContainsAny(program, "$%`") || strings.HasPrefix(program, "(") {
 		return "dynamic-command"
 	}
+	// This decision has no body proof for these sourced or directly launched
+	// scripts and interpreter hosts. Fail closed on those forms.
+	if program == "." || program == "source" {
+		return "eval-source"
+	}
+	for _, extension := range []string{".ps1", ".psm1", ".cmd", ".bat", ".sh", ".bash", ".py", ".js", ".mjs", ".cjs", ".rb", ".pl", ".vbs", ".wsf"} {
+		if strings.HasSuffix(program, extension) {
+			return "interpreter-path"
+		}
+	}
+	if program == "python" || strings.HasPrefix(program, "python3") || program == "py" ||
+		program == "node" || program == "nodejs" || program == "ruby" ||
+		program == "perl" || program == "php" || program == "awk" ||
+		program == "gawk" || program == "mawk" || program == "nawk" ||
+		program == "wscript" || program == "cscript" || program == "mshta" {
+		return "interpreter-path"
+	}
 	if program == "eval" || program == "invoke-expression" || program == "iex" {
 		return "eval-source"
 	}

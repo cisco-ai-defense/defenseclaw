@@ -6,6 +6,7 @@ package enterprisehooks
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,5 +120,38 @@ func TestReadClaudeMCPSpoolIgnoresTheLegacyWorkDir(t *testing.T) {
 	var forged config.MCPServerEntry
 	if err := json.Unmarshal([]byte(`{"name":"srv","command":"npx","RunAsSID":"S-1-5-18","run_as_sid":"S-1-5-18"}`), &forged); err != nil || forged.RunAsSID != "" {
 		t.Fatalf("a configuration entry named the account a server starts as: %+v (%v)", forged, err)
+	}
+}
+
+// emptyJoinedError is a joined error with no errors in it.
+type emptyJoinedError struct{}
+
+func (emptyJoinedError) Error() string   { return "nothing" }
+func (emptyJoinedError) Unwrap() []error { return nil }
+
+// W2B-G-enum review loop 3: the refresh tells the gateway which records it
+// did not publish, so a publication's error is split into its records; any
+// other failure is the whole folder's.
+func TestMCPSpoolRecordFailuresNamesTheRecordsAndTheFolder(t *testing.T) {
+	alice := &MCPSpoolRecordError{Connector: "claudecode", SID: "S-1-5-21-1-1001", Home: `C:\Users\alice`, Err: errors.New("disk full")}
+	bob := &MCPSpoolRecordError{Connector: "claudecode", SID: "S-1-5-21-1-1002", Home: `C:\Users\bob`, Err: errors.New("held open")}
+	records, whole := MCPSpoolRecordFailures(errors.Join(errors.Join(nil, alice), bob))
+	if whole || len(records) != 2 || records[0] != alice || records[1] != bob {
+		t.Fatalf("records %v, whole %v; want alice and bob only", records, whole)
+	}
+	if _, whole := MCPSpoolRecordFailures(fmt.Errorf("create claudecode mcp spool: %w", errors.New("access denied"))); !whole {
+		t.Fatal("a folder failure must be the whole connector's")
+	}
+	if records, whole := MCPSpoolRecordFailures(errors.Join(alice, errors.New("set claudecode mcp spool protection"))); !whole || len(records) != 1 {
+		t.Fatalf("records %v, whole %v; want the record and the folder failure", records, whole)
+	}
+	if _, whole := MCPSpoolRecordFailures(emptyJoinedError{}); !whole {
+		t.Fatal("an error that names no record must be the whole connector's")
+	}
+	if records, whole := MCPSpoolRecordFailures(nil); whole || len(records) != 0 {
+		t.Fatal("no error named a failure")
+	}
+	if !strings.Contains(alice.Error(), "disk full") || !errors.Is(alice, alice.Err) {
+		t.Fatal("a record error must name and wrap its cause")
 	}
 }

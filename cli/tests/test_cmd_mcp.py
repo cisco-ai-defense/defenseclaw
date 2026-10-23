@@ -1442,6 +1442,30 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertIn("source=asset-policy-registry-required-observe", rows[0].details)
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_with_empty_registry_warn_is_warned_and_audited(self, mock_set):
+        # An empty required registry with registry_empty_action warn admits
+        # the server; the CLI added it with no warning and no audit row.
+        from defenseclaw.config import AssetPolicyConfig, AssetTypePolicy
+
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        self.app.cfg.asset_policy = AssetPolicyConfig(
+            enabled=True, mode="action",
+            mcp=AssetTypePolicy(registry_required=True, registry=[], registry_empty_action="warn"),
+        )
+
+        result = self.invoke(["set", "offreg", "--url", "https://x/mcp", "--skip-scan"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_set.assert_called_once()
+        self.assertIn("asset policy [hermes]", result.output)
+        self.assertIn("registry_empty_action: warn", result.output)
+        self.assertNotIn("action mode would block", result.output)
+        rows = [e for e in self.app.store.list_events(50) if e.action == "install-warning"]
+        self.assertEqual(len(rows), 1, [(e.action, e.target) for e in self.app.store.list_events(50)])
+        self.assertIn("registry_empty_action=warn", rows[0].details)
+        self.assertIn("source=asset-policy-registry-required-empty-warn", rows[0].details)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     @patch("defenseclaw.commands.cmd_mcp._run_scan")
     @patch("defenseclaw.enforce.admission.evaluate_admission")
     def test_set_post_scan_policy_block_refuses_write(self, mock_admit, mock_scan, mock_set):

@@ -7,6 +7,8 @@ package gateway
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -40,22 +42,27 @@ var profileExplainAccount = func(name string) (id, userName string, err error) {
 		if account, err = resolver.LookupUID(uid); err != nil {
 			return "", "", err
 		}
-	} else if twins := sameNameProfileAccounts(ctx, resolver, name, account); len(twins) > 0 {
+	} else if twins, err := sameNameProfileAccounts(ctx, resolver, name, account); len(twins) > 0 {
 		// A bare name a local and a directory account share names both:
 		// explaining the one NSS answers first hid the other (GAP-1087).
 		return "", "", ambiguousAccount(name, append([]unixidentity.Account{account}, twins...))
+	} else if err != nil {
+		// Whether a directory account shares the name is unknown: the bare
+		// name is refused, not taken for the local account (GAP-1131).
+		return "", "", err
 	}
 	return strconv.Itoa(account.UID), sanitizeLLMEventUser(account.Name), nil
 }
 
 // sameNameProfileAccounts lists the other accounts a bare name typed for an
 // administrator view also names (unixidentity.SameNameAccounts); none for a
-// qualified name or a uid.
-var sameNameProfileAccounts = func(ctx context.Context, r unixidentity.Resolver, name string, account unixidentity.Account) []unixidentity.Account {
+// qualified name or a uid. Its error is that of SameNameAccounts, when no
+// twin is known and the joined domains are not.
+var sameNameProfileAccounts = func(ctx context.Context, r unixidentity.Resolver, name string, account unixidentity.Account) ([]unixidentity.Account, error) {
 	if strings.ContainsAny(name, `@\`) || strings.Trim(name, "0123456789") == "" {
-		return nil
+		return nil, nil
 	}
-	twins := unixidentity.SameNameAccounts(ctx, r, account)
+	twins, err := unixidentity.SameNameAccounts(ctx, r, account)
 	for _, cached := range managedHookPeerHomes.cachedNamesakes(name, account.UID) {
 		found := false
 		for _, twin := range twins {
@@ -68,7 +75,10 @@ var sameNameProfileAccounts = func(ctx context.Context, r unixidentity.Resolver,
 			twins = append(twins, cached)
 		}
 	}
-	return twins
+	if len(twins) > 0 {
+		return twins, nil
+	}
+	return nil, err
 }
 
 // ambiguousAccount is the refusal of a bare name that names accounts.
@@ -81,22 +91,66 @@ func ambiguousAccount(name string, accounts []unixidentity.Account) error {
 }
 
 // adminViewDomainCouldHold reports whether the domain of a qualified --user
-// filter could hold a uid: always, as a uid does not tell a local account
-// from a directory one (GAP-1221).
-func adminViewDomainCouldHold(string, string) bool { return true }
+// filter held a uid no account holds now: a uid does not tell a local account
+// from a directory one (GAP-1221), nor one domain from another, so the domain
+// must be one the gateway knew the uid's account by (adminViewKnownDomain):
+// the name it last resolved to, or the facts its hooks cached (GAP-1263).
+func adminViewDomainCouldHold(user, id string) bool {
+	_, domain := useridentity.SplitQualifiedName(user)
+	var extra []string
+	if uid, err := strconv.Atoi(strings.TrimSpace(id)); err == nil && uid >= 0 {
+		_, lastDomain := useridentity.SplitQualifiedName(managedHookPeerLastName(uid))
+		extra = append(extra, lastDomain)
+	}
+	return adminViewKnownDomain(domain, id, extra...)
+}
 
-// profileExplainUnresolved resolves an account the platform resolver cannot
-// name through the OS account database (os/user), with its error.
+// profileExplainQualifiedName is the spelling NSS knows a short name by
+// (unixidentity.QualifiedUserName).
 var profileExplainQualifiedName = func(ctx context.Context, name string) string {
 	return unixidentity.QualifiedUserName(ctx, unixidentity.Default(ctx), name)
 }
 
+// profileExplainLocalAccount reports, with nil, that the platform resolver
+// shows name to be the local account that holds uid, alone
+// (unixidentity.ConfirmLocalAccount).
+var profileExplainLocalAccount = func(uid int, name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), profileExplainLookupTimeout)
+	defer cancel()
+	return unixidentity.ConfirmLocalAccount(unixidentity.Default(ctx), uid, name)
+}
+
+// profileExplainUnresolved resolves an account the platform resolver cannot
+// name through the OS account database (os/user), with its error.
+//
+// A lookup that refused the account is final: a uid more than one account
+// holds (the hook path gives it no facts), or an NSS answer for another
+// account than the one named (a cross-domain spelling). The OS database
+// then named a local account of the name and explain printed its profile
+// (review of GAP-1087, loop 4). For any other failure the account os/user
+// names is taken only when NSS shows it is the local account that holds its
+// uid, alone (profileExplainLocalAccount).
 func profileExplainUnresolved(name string, lookupErr error) (profileSubject, error) {
-	if local, err := lookupLocalProfileSubject(name); err == nil {
-		return local, nil
+	var shared *unixidentity.SharedUIDError
+	if errors.As(lookupErr, &shared) {
+		return profileSubject{UserName: name}, lookupErr
 	}
-	if cached, ok := profileExplainCachedSubject(name, time.Now()); ok {
+	var mismatch *unixidentity.NameMismatchError
+	if errors.As(lookupErr, &mismatch) {
+		return profileSubject{UserName: name}, unixidentity.AccountLookupError(name, "", lookupErr)
+	}
+	if local, err := lookupLocalProfileSubject(name); err == nil {
+		uid, convErr := strconv.Atoi(local.UserID)
+		if convErr == nil && profileExplainLocalAccount(uid, local.UserName) == nil {
+			return local, nil
+		}
+	}
+	cached, cachedErr := profileExplainCachedSubject(name, time.Now())
+	if cachedErr == nil {
 		return cached, nil
+	}
+	if !errors.Is(cachedErr, errNoCachedHolder) {
+		return profileSubject{UserName: name}, fmt.Errorf("%w: %w", unixidentity.AccountLookupError(name, "", lookupErr), cachedErr)
 	}
 	if subject, ok := profileExplainUID(strings.TrimSpace(name), lookupErr); ok {
 		return subject, nil
@@ -156,22 +210,23 @@ func profileExplainUID(name string, lookupErr error) (profileSubject, bool) {
 // hooks apply: the facts the gateway cached for the uid whose account had
 // that name (or that uid), within the hour they are served. Explain then
 // shows the hook's profile with the age of the facts, not a spelling error
-// (GAP-0899).
-var profileExplainCachedSubject = func(name string, now time.Time) (profileSubject, bool) {
-	uid, userName, ok := managedHookPeerHomes.cachedHolder(name)
-	if !ok {
-		return profileSubject{}, false
+// (GAP-0899). errNoCachedHolder when there are none; another error says why
+// the facts a qualified spelling names are not shown (cachedHolderFor).
+var profileExplainCachedSubject = func(name string, now time.Time) (profileSubject, error) {
+	uid, userName, err := managedHookPeerHomes.cachedHolderFor(name)
+	if err != nil {
+		return profileSubject{}, err
 	}
 	id := strconv.Itoa(uid)
 	// peek reports only facts a hook call would still get: within the hour,
 	// and from a guardian record still trusted.
 	facts, fetchedAt, ok := peerDirectoryCache().peek(id)
 	if !ok {
-		return profileSubject{}, false
+		return profileSubject{}, errNoCachedHolder
 	}
 	subject := profileSubjectFromVerified(VerifiedSubject{
 		UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, Directory: facts,
 	}, identityLookupBlocking.Load())
 	subject.cachedFactsAge = max(now.Sub(fetchedAt), time.Second)
-	return subject, true
+	return subject, nil
 }

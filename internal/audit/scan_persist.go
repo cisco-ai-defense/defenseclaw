@@ -11,8 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -114,7 +113,7 @@ func insertScanFindings(ex dbExecer, scanID, target string, findings []scanner.F
 
 		id := f.FindingOccurrenceID
 		if id == "" {
-			id = uuid.New().String()
+			id = observability.NewTimeOrderedID()
 			f.FindingOccurrenceID = id
 		}
 		_, err := ex.Exec(`

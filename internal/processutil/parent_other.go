@@ -22,3 +22,6 @@ import "os/exec"
 
 // exitWithParent has no kernel support here (macOS); cmd runs as is.
 func exitWithParent(_ *exec.Cmd) {}
+
+// killDescendantsAtExit is Linux only (parent_linux.go).
+func killDescendantsAtExit(_ *exec.Cmd) {}

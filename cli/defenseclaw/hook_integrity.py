@@ -248,7 +248,12 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
             continue
         expected = digests.get(script.name)
         if not script.exists():
-            problems.append(f"hook script {script} is missing")
+            # A link to a target that is gone: the agent cannot run it either,
+            # so the posture warning must say so (p0 GAP-1384).
+            problems.append(
+                f"hook script {script} links to a file that is missing, so the agent cannot run it and "
+                "DefenseClaw is not guarding its tool calls"
+            )
             break
         if expected and not os.access(script, os.R_OK):
             # chmod 000 (an antivirus quarantine, a restored backup): the

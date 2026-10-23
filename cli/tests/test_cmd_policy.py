@@ -218,6 +218,34 @@ class TestPolicyActivate(PolicyCommandTestBase):
         self.assertIn("activated", result.output)
         self.assertEqual(self.app.cfg.admission.defaults.actions["medium"]["install"], "block")
 
+    def test_activate_keeps_allow_apart_from_warn(self):
+        # p0 GAP-0998: --low-action allow became a warning on activation.
+        from defenseclaw.enforce.admission import compile_admission
+
+        self.invoke(["create", "lax", "--medium-action", "warn", "--low-action", "allow"])
+        result = self.invoke(["activate", "lax"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        actions = self.app.cfg.admission.defaults.actions
+        self.assertEqual(actions["low"], "allow")
+        self.assertEqual(actions["medium"], {"install": "none", "file": "none", "runtime": "enable"})
+        compiled = compile_admission(self.app.cfg, "plugin").actions
+        self.assertTrue(compiled["LOW"][1])
+        self.assertFalse(compiled["MEDIUM"][1])
+
+    def test_activate_refuses_an_allowed_verdict_on_a_blocking_action(self):
+        import yaml
+
+        self.invoke(["create", "odd"])
+        path = os.path.join(self.app.cfg.policy_dir, "odd.yaml")
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        data["skill_actions"]["low"] = {"install": "block", "file": "none", "runtime": "disable", "verdict": "allowed"}
+        with open(path, "w") as f:
+            yaml.safe_dump(data, f)
+        result = self.runner.invoke(policy, ["activate", "odd"], obj=self.app)
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("verdict", result.output)
+
     def test_activate_builtin_updates_watch_rescan_config(self):
         import yaml
 

@@ -247,12 +247,6 @@ def test_overview_service_cards_agent_detail_and_zero_request_guidance() -> None
     assert not any("gateway port" in notice.message for notice in notices)
 
 
-def test_omnigent_zero_traffic_notice_uses_policy_wording() -> None:
-    notice = zero_connector_requests_notice("omnigent", timedelta(minutes=2))
-
-    assert "0 policy events" in notice
-    assert "policy setup" in notice
-    assert "hook setup" not in notice
 
 
 def test_overview_v8_rows_merge_policy_and_exact_live_health_without_inference() -> None:
@@ -973,87 +967,6 @@ def test_sort_ai_discovery_signals_for_overview_tiebreakers() -> None:
     assert ordered[0].model.status == "loaded"
 
 
-def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -> None:
-    hermes_home = tmp_path / "hermes-home"
-    claude_home = tmp_path / "claude-home"
-    codex_home = tmp_path / "codex-home"
-    opencode_home = tmp_path / "opencode-home"
-    devin_config = tmp_path / "devin-config"
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
-    monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(opencode_home))
-    monkeypatch.setattr(connector_paths, "devin_config_home", lambda: str(devin_config))
-    cases = {
-        "hermes": "Hermes",
-        "cursor": "Cursor",
-        "devin": "Devin",
-        "copilot": "GitHub Copilot CLI",
-    }
-    for wire, want in cases.items():
-        assert friendly_connector_name(wire) == want
-
-    assert str(hermes_home / "config.yaml") in connector_source_label("hermes", "mcps")
-    assert str(hermes_home / "config.yaml") in connector_source_label("hermes", "config")
-    assert str(hermes_home / "skills") in connector_source_label("hermes", "skills")
-    assert str(hermes_home / "plugins") in connector_source_label("hermes", "plugins")
-    assert str(claude_home / "settings.json") in connector_source_label("claudecode", "config")
-    assert str(codex_home / "config.toml") in connector_source_label("codex", "config")
-    codex_skills = connector_source_label("codex", "skills")
-    codex_mcps = connector_source_label("codex", "mcps")
-    codex_plugins = connector_source_label("codex", "plugins")
-    assert "~/.agents/skills" in codex_skills
-    assert ".codex/skills" not in codex_skills
-    assert ".codex/config.toml" in codex_mcps
-    assert ".mcp.json" not in codex_mcps
-    assert ".claude-plugin/marketplace.json" in codex_plugins
-    assert "plugins/cache" in codex_plugins.replace("\\", "/")
-    assert ".cursor/skills" in connector_source_label("cursor", "skills")
-    assert "./.devin/hooks.v1.json" in connector_source_label("devin", "config")
-    assert str(devin_config / "mcp_config.json") in connector_source_label("devin", "mcps")
-    assert "closed beta" in connector_source_label("devin", "plugins")
-    assert ".github/mcp.json" in connector_source_label("copilot", "mcps")
-    # opencode MCP is now managed by DefenseClaw (read+write via the bridge
-    # path layer), so the source label points at its real config and no longer
-    # advertises "unmanaged in v1".
-    opencode_mcps = connector_source_label("opencode", "mcps")
-    assert ".config/opencode/opencode.json" in opencode_mcps
-    assert "~/.opencode/opencode.json" in opencode_mcps
-    assert str(opencode_home / "opencode.json") in opencode_mcps
-    assert "unmanaged" not in opencode_mcps
-    assert "OPENCODE_CONFIG" in opencode_mcps
-    assert "OPENCODE_CONFIG_CONTENT" in opencode_mcps
-    assert "enterprise precedence excluded" in opencode_mcps
-    assert str(opencode_home / "plugins" / "defenseclaw.js") in connector_source_label(
-        "opencode", "config"
-    )
-    assert str(opencode_home / "plugins" / "defenseclaw.js") in connector_source_label(
-        "opencode", "plugins"
-    )
-    assert "excluded from inventory and scans" in connector_source_label(
-        "opencode", "plugins"
-    )
-    assert ".opencode/{agent,agents}" in connector_source_label("opencode", "agents")
-    assert "CLAUDE.md fallback" in connector_source_label("opencode", "rules")
-    antigravity_mcps = connector_source_label("antigravity", "mcps")
-    assert ".gemini/config/mcp_config.json" in antigravity_mcps
-    assert ".agents/mcp_config.json" in antigravity_mcps
-    assert "hooks-only" not in antigravity_mcps
-    assert "unsupported" not in antigravity_mcps
-    assert ".gemini/config/skills" in connector_source_label("antigravity", "skills")
-    antigravity_plugins = connector_source_label("antigravity", "plugins")
-    assert ".gemini/config/plugins" in antigravity_plugins
-    assert "read/write" in antigravity_plugins
-    assert "OMNIGENT_CONFIG_HOME" in connector_source_label("omnigent", "config")
-    assert "OMNIGENT_CONFIG" in connector_source_label("omnigent", "config")
-    assert "--config" in connector_source_label("omnigent", "config")
-    assert "unsupported/unverified" in connector_source_label("omnigent", "mcps")
-    assert "unsupported" in connector_source_label("omnigent", "skills")
-
-    health = HealthSnapshot(connector=ConnectorHealth(name="codex"))
-    assert active_connector_name(health, "openclaw") == "codex"
-    assert active_connector_name(None, "claudecode") == "claudecode"
-    assert active_connector_name(None, "") == ""
 
 
 def test_multi_connector_rows_lists_each_connector_with_mode() -> None:

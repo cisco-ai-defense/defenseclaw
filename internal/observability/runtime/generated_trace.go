@@ -17,7 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -461,7 +460,7 @@ func (runtime *Runtime) startGeneratedTrace(
 	}
 	builder, builderErr := observability.NewFamilyBuilder(
 		observability.ClockFunc(func() time.Time { return time.Now().UTC() }),
-		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		observability.TimeOrderedOccurrenceIDs,
 	)
 	if builderErr != nil {
 		return ctx, nil, nil, generatedTraceError(GeneratedTraceUnavailable)

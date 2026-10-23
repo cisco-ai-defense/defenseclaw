@@ -145,6 +145,41 @@ func TestStandaloneGatewayConfigCheckRefusesAJSONLFolderTheServiceCannotWrite(t 
 	}
 }
 
+// GAP-1432: a compressing jsonl destination whose rotated files the gateway
+// service account cannot read back is refused; one that does not compress is
+// not asked about.
+func TestStandaloneGatewayConfigCheckRefusesACompressedJSONLTheServiceCannotReadBack(t *testing.T) {
+	folder := t.TempDir()
+	sink := filepath.Join(folder, "sink.jsonl")
+	const account = `NT SERVICE\DefenseClawGateway`
+	t.Setenv(managed.WindowsServiceAccountEnv, account)
+	restoreWrite, restoreRead := standaloneServiceCanWriteFile, standaloneServiceCanReadRotatedFile
+	t.Cleanup(func() { standaloneServiceCanWriteFile, standaloneServiceCanReadRotatedFile = restoreWrite, restoreRead })
+	standaloneServiceCanWriteFile = func(string, string) error { return nil }
+	var asked []string
+	standaloneServiceCanReadRotatedFile = func(path, serviceAccount string) error {
+		asked = append(asked, path+"|"+serviceAccount)
+		return errors.New("the gateway service account " + serviceAccount + " cannot read back the files it rotates in " + folder)
+	}
+	body := standaloneGatewayCheckConfig + "observability:\n  destinations:\n" +
+		"    - name: local-copy\n      kind: jsonl\n      path: '" + sink + "'\n"
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), `destination "local-copy"`) || !strings.Contains(err.Error(), "cannot read back") {
+		t.Fatalf("compressed jsonl the service cannot read back = %v", err)
+	}
+	if len(asked) != 1 || asked[0] != sink+"|"+account {
+		t.Fatalf("service read-back check calls = %q", asked)
+	}
+	asked = nil
+	body += "      rotation:\n        compress: false\n"
+	if err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), ""); err != nil {
+		t.Fatalf("uncompressed jsonl = %v", err)
+	}
+	if len(asked) != 0 {
+		t.Fatalf("an uncompressed destination was checked for read-back: %q", asked)
+	}
+}
+
 // GAP-0027: when the destination's folder does not exist yet, the grant names
 // the nearest folder that does (icacls fails on a missing one, rc 2); the
 // gateway creates the rest below it.

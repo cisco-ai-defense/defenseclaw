@@ -1,0 +1,691 @@
+---
+title: Fleet API
+description: "REST API for Edge Connector fleets: device registration and keys, policy and emergency distribution, threat intelligence, health and Prometheus metrics."
+keywords:
+  - Fleet API
+  - REST API
+  - device management
+  - policy distribution
+  - Prometheus metrics
+---
+
+The Fleet API is mounted at `/api/v1/fleet/` on the DefenseClaw gateway HTTP server (`gateway.api_port`, `18970` by default). Set `fleet.enabled: true` in the gateway's `config.yaml` to register these routes. It provides device management, policy distribution, threat intelligence, and observability endpoints for IoT fleets running the Edge Connector.
+
+| Route | What it does |
+| --- | --- |
+| `GET /devices`, `POST /devices` | List and register devices. |
+| `GET /devices/{id}` | One device. |
+| `POST /devices/{id}/rotate-key` | Replace a device key. |
+| `POST /devices/decommission-batch` | Decommission devices. |
+| `POST /policy/push`, `POST /policy/simulate` | Compile, sign and publish a policy, or dry-run it. |
+| `GET /policy/versions` | Stored policy versions. |
+| `POST /policy/emergency` | Publish a signed emergency command. |
+| `POST /threat-intel/push` | Revoke allowed hashes from the verdict cache. |
+| `GET /health`, `GET /metrics` | Fleet health and Prometheus metrics. |
+| `POST /token/rotate` | Rotate the admin token. |
+
+All paths are under `/api/v1/fleet`.
+
+## Authentication
+
+All endpoints require a Bearer token passed in the `Authorization` header. The admin token is read from `DCLAW_FLEET_API_TOKEN` on the server. Optional tenant-scoped tokens configured through `fleet.tenant_tokens` or `DCLAW_FLEET_TENANT_TOKENS` can access only their tenant's permitted data. The aggregate `/metrics` endpoint requires the admin token.
+
+```bash
+# GET request (read-only)
+curl -H "Authorization: Bearer $DCLAW_FLEET_API_TOKEN" \
+  https://gateway.example.com/api/v1/fleet/devices
+
+# POST request (state-changing — requires CSRF header)
+curl -X POST \
+  -H "Authorization: Bearer $DCLAW_FLEET_API_TOKEN" \
+  -H "X-DefenseClaw-Client: true" \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id":1,"fleet_id":2,"device_id":1001}' \
+  https://gateway.example.com/api/v1/fleet/devices
+```
+
+<Callout type="warn">
+If `DCLAW_FLEET_API_TOKEN` is not set, **all requests are rejected** with `401 Unauthorized`. Keep the gateway API on loopback or behind a trusted TLS and authentication boundary; the token is a bearer credential.
+</Callout>
+
+JSON API request and response bodies use `Content-Type: application/json`; `/metrics` returns Prometheus text. Request bodies are limited to 1 MB.
+
+### CSRF protection
+
+State-changing requests (`POST`, `PUT`, `DELETE`) through the gateway require the `X-DefenseClaw-Client` header. This is enforced by the gateway's CSRF middleware, not the fleet API itself. Direct fleet API calls (e.g., from the CLI) include this header automatically.
+
+---
+
+## Devices
+
+### List devices
+
+```
+GET /api/v1/fleet/devices
+```
+
+Returns all registered devices with an aggregate fleet summary.
+
+**Response** `200 OK`
+
+```json
+{
+  "devices": [
+    {
+      "device_id": 281483566646249,
+      "tenant_id": 1,
+      "fleet_id": 2,
+      "hw_profile": "rpi4",
+      "fw_version": "1.2.0",
+      "policy_version": 3,
+      "capabilities": 127,
+      "status": "online",
+      "last_heartbeat": "2026-10-05T14:32:00Z",
+      "last_audit_hmac": "base64...",
+      "site_id": "factory-east",
+      "registered_at": "2026-09-01T10:00:00Z",
+      "flags": 0,
+      "denied_total": 42,
+      "allowed_total": 18305,
+      "flash_writes": 1200
+    }
+  ],
+  "summary": {
+    "total": 150,
+    "online": 142,
+    "offline": 5,
+    "degraded": 2,
+    "lockdown": 1
+  }
+}
+```
+
+### Register a device
+
+```
+POST /api/v1/fleet/devices
+```
+
+Registers a new device with the fleet manager. Pre-register each production device with the authenticated API and provision its issued per-device key; MQTT auto-registration is limited to unmanaged local development. If a device with the same composite ID already exists, API re-registration returns `200 OK` instead of `201 Created` and replaces its device key. Provision the returned key on the device immediately. A decommissioned device additionally requires `force_reregister: true`. Registration fails closed if the credential store or mandatory pre-commit credential audit is unavailable. Moving a C device to a different tenant/fleet requires trusted flash reset and reprovisioning of its durable emergency state.
+
+**Request body**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `tenant_id` | uint16 | yes | Tenant identifier |
+| `fleet_id` | uint16 | yes | Fleet identifier |
+| `device_id` | uint32 | yes | Device identifier (must be non-zero) |
+| `hw_profile` | string | no | Hardware profile name (e.g., `rpi4`, `jetson-nano`) |
+| `fw_version` | string | no | Firmware version string |
+| `policy_version` | uint16 | no | Highest accepted policy version (anti-rollback watermark); after a canary rollback this can exceed the active partition's version |
+| `capabilities` | uint8 | no | Capability bitmask the device supports |
+| `force_reregister` | bool | no | Required to re-enable a decommissioned device |
+
+```json
+{
+  "tenant_id": 1,
+  "fleet_id": 2,
+  "device_id": 1001,
+  "hw_profile": "rpi4",
+  "fw_version": "1.2.0",
+  "policy_version": 3,
+  "capabilities": 127
+}
+```
+
+**Response** `201 Created` (new device)
+
+```json
+{
+  "device": {
+    "device_id": 281483566646249,
+    "tenant_id": 1,
+    "fleet_id": 2,
+    "hw_profile": "rpi4",
+    "fw_version": "1.2.0",
+    "policy_version": 3,
+    "capabilities": 127,
+    "status": "online",
+    "last_heartbeat": "0001-01-01T00:00:00Z",
+    "last_audit_hmac": null,
+    "site_id": "",
+    "registered_at": "2026-10-05T14:00:00Z",
+    "flags": 0,
+    "denied_total": 0,
+    "allowed_total": 0,
+    "flash_writes": 0
+  },
+  "device_key": "a1b2c3d4...hex-encoded-32-byte-key..."
+}
+```
+
+**Response** `200 OK` (device already exists)
+
+```json
+{
+  "device": {
+    "device_id": 281483566646249,
+    "tenant_id": 1,
+    "fleet_id": 2,
+    "status": "online"
+  },
+  "device_key": "new-hex-encoded-32-byte-key"
+}
+```
+
+<Callout type="warn">
+The `device_key` is returned on initial registration, re-registration, and explicit key rotation. Each response containing a new key invalidates the previous key; the key cannot be retrieved later. Provision it via `DCLAW_DEVICE_KEY` or `/etc/defenseclaw/device.key`. Registration returns `503` if the credential store is unavailable. Production key delivery requires HTTPS or a configured trusted TLS proxy.
+</Callout>
+
+**Status codes**
+
+| Status | Condition |
+| --- | --- |
+| `200` | Device already exists (idempotent) |
+| `201` | Device created |
+| `400` | Missing `device_id` or malformed JSON |
+| `403` | Token is not authorized for the tenant, or credential delivery channel is not protected |
+| `409` | Device was decommissioned; `force_reregister` is required |
+| `413` | Request body exceeds 1 MB |
+| `503` | Atomic credential/tombstone store or mandatory audit unavailable; existing registration and key are preserved so the request can be retried |
+
+### Rotate a device key
+
+```
+POST /api/v1/fleet/devices/{id}/rotate-key
+```
+
+Generates and persists a replacement 32-byte device HMAC key. The response returns `device_id`, `device_key`, and `status: "rotated"`; store the key securely and provision it on the device before sending more signed messages. This endpoint is rate limited to one rotation per device per minute and requires a configured key store. A tenant-scoped token can rotate only a device in that tenant. Production key delivery requires HTTPS or a configured trusted TLS proxy. Missing devices return `404`; an unavailable key store returns `501`.
+
+### Rotate the Fleet API token
+
+```
+POST /api/v1/fleet/token/rotate
+```
+
+Requires the admin token and returns a new 32-byte token once. Rotation invalidates the old admin token in the running gateway and is rate limited to once per minute. Save the returned token in the gateway's secret source: rotation is currently **in memory only** and does not update `DCLAW_FLEET_API_TOKEN`, so a restart without updating the secret restores the old token. Production token delivery requires HTTPS or a configured trusted TLS proxy.
+
+### Get device details
+
+```
+GET /api/v1/fleet/devices/{id}
+```
+
+Returns the full device record for a specific device. The `{id}` is the 64-bit composite device ID (not the raw `device_id`).
+
+**Response** `200 OK`
+
+```json
+{
+  "device_id": 281483566646249,
+  "tenant_id": 1,
+  "fleet_id": 2,
+  "hw_profile": "rpi4",
+  "fw_version": "1.2.0",
+  "policy_version": 3,
+  "capabilities": 127,
+  "status": "online",
+  "last_heartbeat": "2026-10-05T14:32:00Z",
+  "last_audit_hmac": "base64...",
+  "site_id": "factory-east",
+  "registered_at": "2026-09-01T10:00:00Z",
+  "flags": 0,
+  "denied_total": 42,
+  "allowed_total": 18305,
+  "flash_writes": 1200
+}
+```
+
+**Status codes**
+
+| Status | Condition |
+| --- | --- |
+| `200` | Device found |
+| `400` | Invalid `id` (not a valid uint64) |
+| `404` | Device not found |
+
+### Decommission devices (batch)
+
+```
+POST /api/v1/fleet/devices/decommission-batch
+```
+
+Removes multiple devices from the fleet in a single request. Returns which devices were decommissioned and which were not found. Each existing device needs a successful pre-commit credential audit before its key and tombstone can change.
+
+**Request body**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `devices` | array | yes | List of device identifiers (must not be empty) |
+| `devices[].tenant_id` | uint16 | yes | Tenant identifier |
+| `devices[].fleet_id` | uint16 | yes | Fleet identifier |
+| `devices[].device_id` | uint32 | yes | Device identifier |
+
+```json
+{
+  "devices": [
+    { "tenant_id": 1, "fleet_id": 2, "device_id": 1001 },
+    { "tenant_id": 1, "fleet_id": 2, "device_id": 1002 },
+    { "tenant_id": 1, "fleet_id": 2, "device_id": 9999 }
+  ]
+}
+```
+
+**Response** `200 OK`
+
+```json
+{
+  "batch_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "requested": 3,
+  "decommissioned": 2,
+  "status": "completed",
+  "not_found": [281483566655247]
+}
+```
+
+The `not_found` field is only present when one or more devices could not be found. Values are the 64-bit composite device IDs. A partial response may also include `audit_failed` or `persistence_failed` arrays of composite device IDs. Those devices were not durably decommissioned and need operator review/retry; successful siblings remain decommissioned. Tenant-scoped requests may include `tenant_denied_count` for skipped foreign-tenant entries.
+
+**Status codes**
+
+| Status | Condition |
+| --- | --- |
+| `200` | Batch completed (even if some devices were not found) |
+| `400` | Empty `devices` list or malformed JSON |
+| `207` | Partial failure (including a foreign-tenant entry) or 30-second batch deadline; inspect failure fields and `status` |
+
+---
+
+## Policy
+
+### Push policy
+
+```
+POST /api/v1/fleet/policy/push
+```
+
+Compiles a policy YAML, signs it with the explicit `DCLAW_OTA_HMAC_KEY` secret, stores the version, and publishes the signed binary to the target fleet's MQTT topic. The gateway assigns the wire version from stored fleet history, starting at 1 and increasing to 65534; a YAML `version` field does not select it. At 65534, a further push returns `409` and requires a new device policy lineage. A `200` response confirms broker publication, not device receipt or application. After an authenticated signed registration or heartbeat, the gateway can republish the latest stored policy to a device reporting an older version. Confirm application from a later signed heartbeat; MQTT publication alone is not an acknowledgment. Devices need the same secret and a production build with `-DDCLAW_ALLOW_HMAC_OTA=ON`. `DCLAW_OTA_KEY` is a public Ed25519 key name; the current C build has no Ed25519 verifier and does not use it as an HMAC secret. Emergency commands use the separate `DCLAW_EMERGENCY_KEY`.
+
+Policy compilation needs Python 3 and PyYAML on the gateway; see [policy compiler requirements](/docs/reference/edge-connector/configuration#policy-compiler-requirements). Fleet API routes and metrics exist only when `fleet.enabled: true`. The dashboard and scrape templates are in the separate `defenseclaw-fleet-assets.tar.gz` release asset.
+
+**Request body**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `tenant_id` | uint16 | yes | Tenant identifier |
+| `fleet_id` | uint16 | yes | Fleet identifier |
+| `policy_yaml` | string | yes | Raw YAML policy content |
+| `profile` | string | no | Build profile (defaults to `standard`) |
+
+```json
+{
+  "tenant_id": 1,
+  "fleet_id": 2,
+  "policy_yaml": "name: factory-east\nskill_actions:\n  critical:\n    runtime: disable\n  high:\n    runtime: disable\n",
+  "profile": "standard"
+}
+```
+
+**Response** `200 OK`
+
+```json
+{
+  "version": 1,
+  "blob_size": 2048,
+  "tenant_id": 1,
+  "fleet_id": 2,
+  "profile": "standard",
+  "status": "distributed"
+}
+```
+
+**Status codes**
+
+| Status | Condition |
+| --- | --- |
+| `200` | Policy compiled, signed, stored, and published to the broker; device application is unconfirmed |
+| `400` | Missing required fields, invalid policy, or unsupported profile |
+| `409` | The fleet policy version reached 65534; provision a new device policy lineage |
+| `413` | Request body or compiled policy exceeds its size limit |
+| `422` | Policy YAML cannot be compiled |
+| `500` | Signing or distribution failed |
+| `501` | Policy service not configured |
+
+### List policy versions
+
+```
+GET /api/v1/fleet/policy/versions?tenant_id={tenant_id}&fleet_id={fleet_id}
+```
+
+Returns all stored policy versions for a tenant/fleet pair, ordered newest first.
+
+**Query parameters**
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `tenant_id` | uint16 | yes | Tenant identifier |
+| `fleet_id` | uint16 | yes | Fleet identifier |
+
+**Response** `200 OK`
+
+```json
+{
+  "tenant_id": 1,
+  "fleet_id": 2,
+  "versions": [
+    {
+      "tenant_id": 1,
+      "fleet_id": 2,
+      "version": 4,
+      "profile": "standard",
+      "policy_bin": null,
+      "signature": null,
+      "created_at": "2026-10-05T14:00:00Z",
+      "distributed": true
+    },
+    {
+      "tenant_id": 1,
+      "fleet_id": 2,
+      "version": 3,
+      "profile": "standard",
+      "policy_bin": null,
+      "signature": null,
+      "created_at": "2026-09-20T10:30:00Z",
+      "distributed": true
+    }
+  ]
+}
+```
+
+**Status codes**
+
+| Status | Condition |
+| --- | --- |
+| `200` | Versions returned (may be empty list) |
+| `400` | Invalid or missing `tenant_id` / `fleet_id` |
+| `501` | Policy service not configured |
+
+### Simulate policy (dry run)
+
+```
+POST /api/v1/fleet/policy/simulate
+```
+
+Compiles a policy YAML without signing or distributing. Use this to validate policy changes before pushing them.
+
+**Request body**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `policy_yaml` | string | yes | Raw YAML policy content |
+| `profile` | string | no | Build profile (defaults to `standard`) |
+
+```json
+{
+  "policy_yaml": "name: test-policy\nversion: 1\nskill_actions:\n  critical:\n    runtime: disable\n",
+  "profile": "edge"
+}
+```
+
+**Response** `200 OK`
+
+```json
+{
+  "blob_size": 1536,
+  "payload_len": 1024,
+  "canary_baseline": 0,
+  "fits_target_profile": true,
+  "status": "dry-run compilation succeeded"
+}
+```
+
+**Status codes**
+
+| Status | Condition |
+| --- | --- |
+| `200` | Compilation succeeded (or policy service not configured, returns stub result) |
+| `400` | Malformed JSON |
+| `422` | Compilation failed (invalid policy YAML) |
+
+### Send emergency command
+
+```
+POST /api/v1/fleet/policy/emergency
+```
+
+Publishes a signed emergency command to the fleet MQTT topic. A `200` response confirms broker publication, not device receipt or execution. With clean MQTT sessions, devices offline at publication time miss the initial command. The gateway stores signed emergency history for the fleet and replays missed commands in predecessor order after an authenticated signed registration or heartbeat, up to 32 per pass; later heartbeats request subsequent pages. The 112-byte wire frame signs a predecessor sequence so a later command cannot silently bypass a missed lockdown. A history gap or unavailable durable store fails closed. Confirm the device's last-applied emergency sequence in a later signed heartbeat and its state during incident response.
+
+**Request body**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `tenant_id` | uint16 | yes | Tenant identifier |
+| `fleet_id` | uint16 | yes | Fleet identifier |
+| `command` | string | yes | One of: `BLOCK_ALL`, `ENTER_LOCKDOWN`, `RELEASE_LOCKDOWN`, `REVOKE_SESSIONS`, `FORCE_SYNC` |
+
+```json
+{
+  "tenant_id": 1,
+  "fleet_id": 2,
+  "command": "ENTER_LOCKDOWN"
+}
+```
+
+**Response** `200 OK`
+
+```json
+{
+  "tenant_id": 1,
+  "fleet_id": 2,
+  "command": "ENTER_LOCKDOWN",
+  "status": "distributed"
+}
+```
+
+| Command | Effect |
+| --- | --- |
+| `BLOCK_ALL` | A receiving device blocks every tool call |
+| `ENTER_LOCKDOWN` | A receiving device enters lockdown mode and blocks tool calls |
+| `RELEASE_LOCKDOWN` | A receiving device clears emergency lockdown and resumes normal policy evaluation |
+| `REVOKE_SESSIONS` | A receiving device terminates active agent sessions and clears its verdict cache |
+| `FORCE_SYNC` | A receiving device flushes its in-RAM audit buffer to durable storage |
+
+**Status codes**
+
+| Status | Condition |
+| --- | --- |
+| `200` | Emergency command published to the broker; device execution is unconfirmed |
+| `400` | Missing required fields or unknown command |
+| `500` | Distribution failed |
+| `501` | Policy service not configured |
+
+---
+
+## Threat Intelligence
+
+### Push threat intelligence
+
+```
+POST /api/v1/fleet/threat-intel/push
+```
+
+Revokes previously allowed file hashes from the gateway verdict cache. Optionally flushes the entire gateway cache for emergency response. For each registered tenant/fleet, the gateway also publishes a signed `REVOKE_SESSIONS` message to request device cache invalidation. Publication does not confirm delivery or execution. An offline device misses the initial message with clean MQTT sessions; the C connector flushes its local verdict cache on successful broker reconnect before resuming online tool decisions. The gateway can replay missed emergency commands in signed predecessor order from durable history after an authenticated signed registration or heartbeat. Until reconnect, a cached ALLOW may remain. Treat `device_cache_flushed: false` as a delivery limit, not a device acknowledgment.
+
+**Request body**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `revoke_allow_hashes` | string[] | no | List of SHA-256 hashes (64 hex chars each) to remove from the allow cache |
+| `emergency` | bool | no | If `true`, flush the entire verdict cache before processing individual revocations |
+
+```json
+{
+  "revoke_allow_hashes": [
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  ],
+  "emergency": false
+}
+```
+
+**Response** `202 Accepted` when all requested fleet publications succeed
+
+```json
+{
+  "revoked": 1,
+  "device_cache_flush_published": 2,
+  "device_cache_flush_target_fleets": 2,
+  "device_cache_flushed": false,
+  "warning": "MQTT publication does not confirm device receipt; offline devices may keep cached verdicts until reconnect or TTL expiry"
+}
+```
+
+If any fleet publication fails, the gateway returns `207 Multi-Status` with the successful publication count and a `device_cache_flush_failed` list of `"tenant_id/fleet_id"` strings. The gateway cache revocation still occurs. An empty or no-op request returns `202` with only `revoked`.
+
+**Status codes**
+
+| Status | Condition |
+| --- | --- |
+| `202` | Gateway cache revocations processed; requested device-cache flush messages published, if any. Device receipt is not confirmed |
+| `207` | Gateway cache revocations processed, but one or more fleet publications failed; inspect `device_cache_flush_failed` |
+| `400` | Invalid hex string or hash is not exactly 32 bytes (64 hex chars) |
+
+---
+
+## Observability
+
+### Fleet health
+
+```
+GET /api/v1/fleet/health
+```
+
+With the admin token, returns aggregate fleet status and verdict cache statistics. With a tenant-scoped token, returns only that tenant's device counts and policy versions under `fleet`; global cache statistics are omitted. A device's `policy_version` is its highest accepted anti-rollback version; after a canary rollback the active partition can be older. Check the persistent `CANARY_ROLLBACK` heartbeat flag or alert before treating the version distribution as active policy adoption.
+
+**Response** `200 OK`
+
+```json
+{
+  "fleet": {
+    "total_devices": 150,
+    "online": 142,
+    "offline": 5,
+    "degraded": 2,
+    "lockdown": 1,
+    "policy_versions": {
+      "3": 10,
+      "4": 140
+    }
+  },
+  "cache_hits": 1843920,
+  "cache_misses": 42817,
+  "cache_size": 8192
+}
+```
+
+### Prometheus metrics
+
+```
+GET /api/v1/fleet/metrics
+```
+
+Returns global metrics in Prometheus exposition format (`text/plain; version=0.0.4`). Scrape this endpoint with Prometheus using the **admin** bearer token; a tenant-scoped token receives `403 Forbidden` to prevent cross-tenant totals from leaking. The separate Fleet assets provide the dashboard and scrape example, both installed on request because the gateway REST API is bound to loopback by default. See [Fleet dashboard setup](/docs/reference/edge-connector/configuration#grafana-dashboard).
+
+**Response** `200 OK` (text/plain)
+
+```
+# HELP defenseclaw_fleet_devices_total Total registered devices
+# TYPE defenseclaw_fleet_devices_total gauge
+defenseclaw_fleet_devices_total{status="online"} 142
+defenseclaw_fleet_devices_total{status="offline"} 5
+defenseclaw_fleet_devices_total{status="degraded"} 2
+defenseclaw_fleet_devices_total{status="lockdown"} 1
+
+# HELP defenseclaw_fleet_heartbeats_received_total Total heartbeats received
+# TYPE defenseclaw_fleet_heartbeats_received_total counter
+defenseclaw_fleet_heartbeats_received_total 284910
+
+# HELP defenseclaw_fleet_blocks_total Total block verdicts
+# TYPE defenseclaw_fleet_blocks_total counter
+defenseclaw_fleet_blocks_total 4821
+
+# HELP defenseclaw_fleet_allows_total Total allow verdicts
+# TYPE defenseclaw_fleet_allows_total counter
+defenseclaw_fleet_allows_total 1893021
+
+# HELP defenseclaw_fleet_verdict_cache_hits_total Verdict cache hits
+# TYPE defenseclaw_fleet_verdict_cache_hits_total counter
+defenseclaw_fleet_verdict_cache_hits_total 1843920
+
+# HELP defenseclaw_fleet_verdict_cache_misses_total Verdict cache misses
+# TYPE defenseclaw_fleet_verdict_cache_misses_total counter
+defenseclaw_fleet_verdict_cache_misses_total 42817
+
+# HELP defenseclaw_fleet_verdict_cache_size Current cache entries
+# TYPE defenseclaw_fleet_verdict_cache_size gauge
+defenseclaw_fleet_verdict_cache_size 8192
+
+# HELP defenseclaw_fleet_policy_rollback_total Policy canary rollbacks
+# TYPE defenseclaw_fleet_policy_rollback_total counter
+defenseclaw_fleet_policy_rollback_total 0
+
+# HELP defenseclaw_fleet_alerts_total Fleet alerts emitted
+# TYPE defenseclaw_fleet_alerts_total counter
+defenseclaw_fleet_alerts_total 2
+
+# HELP defenseclaw_fleet_ota_rollbacks_total OTA canary rollbacks reported by devices
+# TYPE defenseclaw_fleet_ota_rollbacks_total counter
+defenseclaw_fleet_ota_rollbacks_total 0
+```
+
+**Available metrics**
+
+| Metric | Type | Description |
+| --- | --- | --- |
+| `defenseclaw_fleet_devices_total` | gauge | Registered devices by status (`online`, `offline`, `degraded`, `lockdown`) |
+| `defenseclaw_fleet_heartbeats_received_total` | counter | Total heartbeats received from all devices |
+| `defenseclaw_fleet_blocks_total` | counter | Total block verdicts across the fleet |
+| `defenseclaw_fleet_allows_total` | counter | Total allow verdicts across the fleet |
+| `defenseclaw_fleet_verdict_cache_hits_total` | counter | Server-side verdict cache hits |
+| `defenseclaw_fleet_verdict_cache_misses_total` | counter | Server-side verdict cache misses |
+| `defenseclaw_fleet_verdict_cache_size` | gauge | Current number of entries in the verdict cache |
+| `defenseclaw_fleet_policy_rollback_total` | counter | Policy canary rollback transitions reported by devices |
+| `defenseclaw_fleet_alerts_total` | counter | Fleet alerts emitted |
+| `defenseclaw_fleet_ota_rollbacks_total` | counter | OTA canary rollback transitions reported by devices |
+
+Both rollback counters increment when a device's authenticated heartbeat first changes from no `CANARY_ROLLBACK` flag to a flagged state. Repeated heartbeats carrying the persistent flag do not increment them again. The device's `policy_version` remains the accepted high-water version and does not prove that version is still active after rollback.
+
+---
+
+## Error format
+
+All error responses use a consistent JSON structure:
+
+```json
+{
+  "error": "human-readable error message"
+}
+```
+
+Some errors include an additional `detail` field with diagnostic information:
+
+```json
+{
+  "error": "failed to dispatch command",
+  "detail": "MQTT connection timeout"
+}
+```
+
+## Common status codes
+
+| Status | Meaning |
+| --- | --- |
+| `200` | Success |
+| `201` | Resource created |
+| `202` | Accepted (async processing) |
+| `400` | Bad request (validation error) |
+| `401` | Unauthorized (missing or invalid Bearer token) |
+| `404` | Resource not found |
+| `413` | Request body too large (exceeds 1 MB) |
+| `422` | Unprocessable entity (e.g., invalid policy YAML) |
+| `500` | Internal server error |
+| `501` | Not implemented (policy service not configured) |
+| `503` | Service unavailable (MQTT not configured) |

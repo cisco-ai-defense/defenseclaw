@@ -36,6 +36,7 @@ import (
 	"unicode/utf16"
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 var userHomeOverrideSessionMu sync.Mutex
@@ -651,6 +652,22 @@ func sameWindowsInstallPath(left, right string) bool {
 	return pathidentity.Same(left, right)
 }
 
+// openNativeReadOnly opens an installed file for a read-only check. It
+// shares delete access: an installer's replace of the hook binary failed
+// while a check that runs on every hook call held it (GAP-0200). The checks
+// keep their identity comparisons, which a replace fails. Tests replace it.
+var openNativeReadOnly = winpath.OpenReadShared
+
+// readNativeFileShared is os.ReadFile through openNativeReadOnly.
+func readNativeFileShared(path string) ([]byte, error) {
+	file, err := openNativeReadOnly(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return io.ReadAll(file)
+}
+
 func stableNativeWindowsPE(path string) bool {
 	if !nativeWindowsPathHasNoReparsePoints(path) {
 		return false
@@ -659,7 +676,7 @@ func stableNativeWindowsPE(path string) bool {
 	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
 		return false
 	}
-	file, err := os.Open(path)
+	file, err := openNativeReadOnly(path)
 	if err != nil {
 		return false
 	}
@@ -684,7 +701,7 @@ func readStableNativeWindowsFile(path string, limit int64) ([]byte, bool) {
 	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() || before.Size() > limit {
 		return nil, false
 	}
-	file, err := os.Open(path)
+	file, err := openNativeReadOnly(path)
 	if err != nil {
 		return nil, false
 	}

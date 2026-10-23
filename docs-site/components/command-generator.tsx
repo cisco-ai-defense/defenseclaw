@@ -543,9 +543,15 @@ export function buildCommand(
   }
 
   if (s.mode === 'action' && connectorRow && !connectorRow.hooks.supportsFailClosed) {
-    warnings.push(
-      `${connectorRow.label} does not support fail-closed enforcement. On guardrail failure the request will be allowed through; use 'defenseclaw guardrail fail-mode closed' only on connectors that support it.`,
-    );
+    if (['hermes', 'copilot', 'antigravity'].includes(connectorRow.id)) {
+      warnings.push(
+        `${connectorRow.label}'s DefenseClaw hook follows the configured fail mode: closed (the default) blocks gateway outages and unusable replies on supported pre-action events. The agent can still run a call if the hook times out or cannot start.`,
+      );
+    } else {
+      warnings.push(
+        `${connectorRow.label} does not guarantee fail-closed enforcement on every failure. Check its connector reference before relying on outage blocking.`,
+      );
+    }
   }
 
   return { lines, preExports, warnings };
@@ -1242,7 +1248,7 @@ function ConnectorOption({
       <span className="text-[11px] text-fd-muted-foreground">
         {row.hooks.canAskNative ? 'native ask' : 'non-pausing fallback'}
         {' · '}
-        {row.hooks.supportsFailClosed ? 'fail-closed ok' : 'fail-open only'}
+        {row.hooks.supportsFailClosed ? 'fail-closed ok' : 'no full fail-closed guarantee'}
       </span>
       {showWindowsSupport && (
         <span className="text-[11px] text-fd-muted-foreground">

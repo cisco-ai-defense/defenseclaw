@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from defenseclaw.commands import cmd_doctor
 from defenseclaw.commands.cmd_doctor import (
     _authenticated_origin_main_gateway_lifecycle_trust,
     _check_gateway_auth,
@@ -28,7 +29,9 @@ from defenseclaw.commands.cmd_doctor import (
     _gateway_listener_pid,
     _GatewayTrust,
     _http_probe,
+    _linux_gateway_listener_evidence,
     _linux_gateway_listener_pid,
+    _lsof_gateway_listener_evidence,
     _remove_stale_pid_if_unchanged,
     _run_fixers,
     _subsystem_expected_enabled,
@@ -432,6 +435,119 @@ def test_linux_listener_owner_filters_the_exact_connect_address(tmp_path):
     )
 
 
+def _proc_process(proc_root, pid: int, parent: int, executable, argv: bytes, sockets=()) -> None:
+    process = proc_root / str(pid)
+    (process / "fd").mkdir(parents=True)
+    (process / "stat").write_text(f"{pid} (defenseclaw-gat) S {parent} 1 1 0 -1\n", encoding="ascii")
+    (process / "cmdline").write_bytes(argv)
+    os.symlink(executable, process / "exe")
+    for index, inode in enumerate(sockets):
+        os.symlink(f"socket:[{inode}]", process / "fd" / str(3 + index))
+
+
+def _proc_listener(tmp_path, port: int):
+    proc_root = tmp_path / "proc"
+    (proc_root / "net").mkdir(parents=True)
+    header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
+    row = f"   0: 0100007F:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 12345 1\n"
+    (proc_root / "net" / "tcp").write_text(header + row, encoding="ascii")
+    (proc_root / "net" / "tcp6").write_text(header, encoding="ascii")
+    gateway = tmp_path / "defenseclaw-gateway"
+    gateway.write_bytes(b"gateway")
+    return proc_root, gateway
+
+
+@pytest.mark.skipif(os.name == "nt", reason="/proc socket layout is POSIX-only")
+def test_linux_listener_held_by_the_gateways_fork_before_exec_is_the_gateways(tmp_path):
+    # GAP-0535: between fork and exec a child of the gateway holds a copy of
+    # the listening socket and runs the gateway's image. On dc-rhel a scan
+    # saw such children every few seconds; doctor reported them as a second
+    # owner and printed FAIL Gateway home.
+    port = 18_970
+    proc_root, gateway = _proc_listener(tmp_path, port)
+    argv = os.fsencode(gateway) + b"\x00"
+    _proc_process(proc_root, 4242, 1, gateway, argv, ["12345"])
+    _proc_process(proc_root, 4243, 4242, gateway, argv, ["12345"])
+
+    evidence = _linux_gateway_listener_evidence(port, proc_root=str(proc_root))
+
+    assert (evidence.status, evidence.pid) == ("ok", 4242)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="/proc socket layout is POSIX-only")
+def test_linux_listener_second_owner_is_named_and_fails_closed(tmp_path):
+    port = 18_970
+    proc_root, gateway = _proc_listener(tmp_path, port)
+    other = tmp_path / "other"
+    other.write_bytes(b"other")
+    argv = os.fsencode(gateway) + b"\x00"
+    _proc_process(proc_root, 4242, 1, gateway, argv, ["12345"])
+    # A child that exec'd another program and kept the descriptor, and an
+    # unrelated process with the gateway's image, are real second owners.
+    _proc_process(proc_root, 4243, 4242, other, argv, ["12345"])
+    _proc_process(proc_root, 9001, 1, gateway, argv, ["12345"])
+
+    evidence = _linux_gateway_listener_evidence(port, proc_root=str(proc_root))
+
+    assert evidence.status == "ambiguous"
+    assert evidence.reason == (
+        "multiple processes own listeners for the configured API endpoint: PIDs 4242, 4243, 9001"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="/proc socket layout is POSIX-only")
+def test_linux_listener_holder_that_let_go_during_the_scan_is_not_an_owner(tmp_path):
+    port = 18_970
+    proc_root, gateway = _proc_listener(tmp_path, port)
+    other = tmp_path / "scanner"
+    other.write_bytes(b"scanner")
+    argv = os.fsencode(gateway) + b"\x00"
+    _proc_process(proc_root, 4242, 1, gateway, argv, ["12345"])
+    _proc_process(proc_root, 4243, 4242, other, b"scanner\x00", ["12345"])
+    original = cmd_doctor._linux_process_socket_inodes
+    seen: list[str] = []
+
+    def exec_after_first_look(process_path: str) -> set[str]:
+        # The child exec'd (closing the gateway's descriptors) after the
+        # scan read its fd table once.
+        if process_path.endswith("4243"):
+            seen.append(process_path)
+            if len(seen) > 1:
+                return set()
+        return original(process_path)
+
+    with patch.object(cmd_doctor, "_linux_process_socket_inodes", side_effect=exec_after_first_look):
+        evidence = _linux_gateway_listener_evidence(port, proc_root=str(proc_root))
+
+    assert (evidence.status, evidence.pid) == ("ok", 4242)
+
+
+def test_lsof_listener_held_by_the_gateways_fork_before_exec_is_the_gateways():
+    # GAP-0535 on macOS: lsof names the parent (R) and command (c).
+    completed = SimpleNamespace(
+        returncode=0,
+        stdout=(
+            "p4242\nR1\ncdefenseclaw-gateway\nf3\nn127.0.0.1:18970\n"
+            "p4243\nR4242\ncdefenseclaw-gateway\nf3\nn127.0.0.1:18970\n"
+        ),
+    )
+    with (
+        patch("defenseclaw.commands.cmd_doctor._trusted_lsof_path", return_value="/usr/sbin/lsof"),
+        patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=completed),
+    ):
+        evidence = _lsof_gateway_listener_evidence(18_970, host="127.0.0.1")
+    assert (evidence.status, evidence.pid) == ("ok", 4242)
+
+    completed.stdout = completed.stdout.replace("R4242\ncdefenseclaw-gateway", "R4242\ncpython3")
+    with (
+        patch("defenseclaw.commands.cmd_doctor._trusted_lsof_path", return_value="/usr/sbin/lsof"),
+        patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=completed),
+    ):
+        evidence = _lsof_gateway_listener_evidence(18_970, host="127.0.0.1")
+    assert evidence.status == "ambiguous"
+    assert evidence.reason.endswith(": PIDs 4242, 4243")
+
+
 def test_lsof_listener_owner_fails_closed_when_multiple_pids_are_reported():
     completed = SimpleNamespace(
         returncode=0,
@@ -465,7 +581,7 @@ def test_lsof_listener_owner_filters_the_exact_connect_address():
         assert _gateway_listener_pid(18_970, host="127.0.0.2") == 4242
 
     assert "-i4TCP:18970" in run.call_args.args[0]
-    assert "-Fpn" in run.call_args.args[0]
+    assert "-FpRcn" in run.call_args.args[0]
 
 
 def test_lsof_listener_owner_accepts_wildcard_bind_for_loopback_target():

@@ -12,7 +12,9 @@ import (
 )
 
 // answerWatchdogLogWait bounds the hook-failure log line the watchdog writes
-// after its answer: a stalled disk must not hold the process past it.
+// after its answer: a stalled disk must not hold the process past it. The
+// account lookup of a managed row is not inside it: that runs in the
+// background from the moment the watchdog is armed (failureLogHomeLookup).
 var answerWatchdogLogWait = 100 * time.Millisecond
 
 // answerWatchdog makes the answer budget of a tool call hold when the hook
@@ -34,11 +36,27 @@ var answerWatchdogLogWait = 100 * time.Millisecond
 // at the highest priority of the process (answerDeadlineWaiter), so
 // ordinary-priority work that fills the CPU does not delay it. It never
 // allows a call: its answer is the one the call gives when its gateway does
-// not answer in time.
+// not answer in time, and once the call logged a closed failure (an
+// unverified gateway peer, an invalid runtime) it is that call's closed
+// answer in every fail mode (claimFailureLog).
 type answerWatchdog struct {
-	mu       sync.Mutex
-	finished bool
-	fired    bool
+	mu             sync.Mutex
+	finished       bool
+	fired          bool
+	failureLogged  bool
+	failureLogDone chan struct{}
+	// closedKnown is set once the watchdog's answer is closed: the call
+	// logged a failure that is closed, the gateway answered 429
+	// (closeForBusyGateway) or an error status (gatewayAnsweredError).
+	closedKnown bool
+	// failureClosed is set only when the call itself logged a closed
+	// failure (claimFailureLog): the hook then blocks locally, and its
+	// delivery receipt says so. A 429 or an error status that a later
+	// answer replaced does not block the call, so it acknowledges.
+	failureClosed bool
+	// logHome is the background lookup of the invoking user's diagnostic
+	// directory of a managed call (cacheFailureLogHome).
+	logHome *failureLogHomeLookup
 
 	stdout, stderr io.Writer
 	out, err       bytes.Buffer
@@ -47,6 +65,7 @@ type answerWatchdog struct {
 	fallbackCode             int
 	logFailure               func()
 	exit                     func(int)
+	deliveryReceipt          func(bool, bool)
 
 	ceiling time.Time
 	waiter  *answerDeadlineWaiter
@@ -65,7 +84,11 @@ type AnswerWatchdog = answerWatchdog
 // some with no answer at all, because the watchdog was armed only inside Run
 // (GAP-0155, BM-03, BM-05). opts carries what the command line says
 // (Connector, Event, FailMode, HookSurface, ManagedEnterprise, SecureClient,
-// StartedAt, Exit); the payload names the event when the command does not.
+// StartedAt, Exit) and, for a managed hook, the resolver of the invoking
+// user's diagnostic directory (FailureLogHome); the payload names the event
+// when the command does not. That lookup starts before the watchdog can
+// fire, so a deadline that passes before Run adopts the watchdog still
+// leaves the call its hook-failures row.
 // Until Run adopts it the prepared answer is closed for a managed hook and
 // for a per-user hook whose command line does not say open. It returns nil
 // when the call has no answer deadline (not a tool call, a Secure Client
@@ -88,7 +111,10 @@ func ArmAnswerWatchdog(opts Options, payload []byte) *AnswerWatchdog {
 	failMode := "closed"
 	if opts.ManagedEnterprise {
 		opts.FailMode = "closed"
-		// A managed hook writes no failure log into the account's home.
+		// Not an enforcement home: a managed row goes only to the invoking
+		// user's diagnostic directory (FailureLogHome). An armed watchdog
+		// that dropped that resolver answered a deadline before Run with no
+		// row at all (G-small loop 4).
 		opts.Home = ""
 	} else if strings.EqualFold(strings.TrimSpace(opts.FailMode), "open") {
 		failMode = "open"
@@ -101,6 +127,7 @@ func ArmAnswerWatchdog(opts Options, payload []byte) *AnswerWatchdog {
 // output; Run returns through finish.
 func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceiling time.Time) *answerWatchdog {
 	w := &answerWatchdog{stdout: opts.Stdout, stderr: opts.Stderr, exit: opts.Exit, ceiling: ceiling, waiter: newAnswerDeadlineWaiter()}
+	w.cacheFailureLogHome(opts)
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = renderNoAnswer(*opts, sp, failMode)
 	opts.Stdout, opts.Stderr = &w.out, &w.err
 	opts.answerWatch = w
@@ -111,17 +138,18 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 // renderNoAnswer renders the answer of a call whose gateway did not answer
 // in time, and the failure log line it writes when it is given.
 func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []byte, code int, logFailure func()) {
-	if opts.answerSpentLocally {
-		// The answer is closed (failNoAnswer), and so is its log line.
-		failMode = "closed"
-	}
+	// The row and the rendered decision must use the same effective mode.
+	failMode = noAnswerFailMode(opts, failMode)
 	var out, errb bytes.Buffer
 	rendered := opts
 	rendered.Stdout, rendered.Stderr = &out, &errb
 	// Rendering only: the failure is logged when the watchdog answers.
 	rendered.Home = ""
+	rendered.FailureLogHome = nil
+	rendered.answerWatch = nil
 	code = failNoAnswer(rendered, sp, failMode)
 	logged := opts
+	logged.answerWatch = nil
 	// The rendered answer already carries any fail-open warning.
 	logged.Stderr = io.Discard
 	logFailure = func() {
@@ -137,19 +165,132 @@ func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []by
 }
 
 // adopt renders the watchdog's answer again for the call Run resolved (its
-// event, fail mode and runtime), unless it was already given.
-func (w *answerWatchdog) adopt(opts Options, sp spec, failMode string) {
-	stdout, stderr, code, logFailure := renderNoAnswer(opts, sp, failMode)
+// event, fail mode and runtime), unless it was already given. A call that
+// already logged a closed failure keeps a closed answer.
+func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
+	w.mu.Lock()
+	closed := w.closedKnown
+	w.mu.Unlock()
+	if closed {
+		failMode = "closed"
+	}
+	stdout, stderr, code, logFailure := renderNoAnswer(*opts, sp, failMode)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.fired {
+	if w.fired || (w.closedKnown && !closed) {
 		return
 	}
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
 }
 
-// hold points opts at the watchdog's held output (Run of an adopted call).
+// closeForBusyGateway makes the watchdog's answer the closed one of a call
+// the gateway answered 429 (opts.gatewayBusy): a deadline that passes while
+// the call waits to resend, or on a resend, is no outage. Safe on a nil
+// watchdog.
+func (w *answerWatchdog) closeForBusyGateway(opts Options, sp spec) {
+	if w == nil {
+		return
+	}
+	stdout, stderr, code, logFailure := renderNoAnswer(opts, sp, "closed")
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired {
+		return
+	}
+	w.closedKnown = true
+	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
+}
+
+// claimFailureLog runs first in logHookFailure, before anything there can
+// block (the account lookup of a managed row, a stalled disk). A failure
+// that is closed makes the watchdog's answer closed: an administrator's
+// fail mode open covers an outage only, and a known refusal (an unverified
+// gateway peer, an invalid runtime, a missing token) that waited on its log
+// line past the deadline got the watchdog's fail-open answer instead. It
+// returns the channel to close once the row is written, and false when the
+// watchdog already answered or the call's row is already claimed.
+func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool) (chan struct{}, bool) {
+	var out, errb []byte
+	var code int
+	var logFailure func()
+	if closed {
+		closedOpts := opts
+		closedOpts.FailMode = "closed"
+		out, errb, code, logFailure = renderNoAnswer(closedOpts, sp, "closed")
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired {
+		return nil, false
+	}
+	if closed {
+		w.closedKnown = true
+		w.failureClosed = true
+		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out, errb, code, logFailure
+	}
+	if w.failureLogged {
+		return nil, false
+	}
+	w.failureLogged = true
+	w.failureLogDone = make(chan struct{})
+	return w.failureLogDone, true
+}
+
+// failureLogHomeLookup resolves the invoking user's diagnostic directory of
+// a managed call once, in the background. The account lookup behind it (NSS,
+// Open Directory, a token Known Folder) can take longer than
+// answerWatchdogLogWait; started when the watchdog is armed it is done long
+// before the deadline, so the row of a call the watchdog answers is written
+// before the process ends.
+type failureLogHomeLookup struct {
+	done chan struct{}
+	home string
+}
+
+func startFailureLogHomeLookup(resolve func() string) *failureLogHomeLookup {
+	l := &failureLogHomeLookup{done: make(chan struct{})}
+	go func() {
+		defer close(l.done)
+		l.home = resolve()
+	}()
+	return l
+}
+
+// wait is the directory, once the lookup is done.
+func (l *failureLogHomeLookup) wait() string {
+	<-l.done
+	return l.home
+}
+
+// cacheFailureLogHome points a managed call's FailureLogHome at the
+// watchdog's lookup, and starts that lookup the first time: when the
+// watchdog is armed (ArmAnswerWatchdog with the hook command's resolver, or
+// Run), before its answer is rendered and before it can fire, and when Run
+// takes over an armed watchdog (hold), before anything there can log. The
+// call's rows, the watchdog's own included, use that one lookup. A call with no
+// resolver writes no managed row.
+func (w *answerWatchdog) cacheFailureLogHome(opts *Options) {
+	if !opts.ManagedEnterprise || opts.FailureLogHome == nil {
+		return
+	}
+	w.mu.Lock()
+	if w.logHome == nil {
+		w.logHome = startFailureLogHomeLookup(opts.FailureLogHome)
+	}
+	lookup := w.logHome
+	w.mu.Unlock()
+	opts.FailureLogHome = lookup.wait
+}
+
+// hold points opts at the watchdog's held output and at its lookup of the
+// call's diagnostic directory (Run of a call the hook command armed). Run
+// can fail and log before it adopts the watchdog (an invalid runtime, a
+// missing home, a broken binding): that row must use the lookup the
+// watchdog started when it was armed, not start a second one that can
+// stall past the deadline while the watchdog waits on it (G-small loop
+// round 3).
 func (w *answerWatchdog) hold(opts *Options) {
+	w.cacheFailureLogHome(opts)
 	opts.Stdout, opts.Stderr = &w.out, &w.err
 	opts.answerWatch = w
 }
@@ -167,7 +308,21 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	_, _ = w.stderr.Write(w.fallbackErr)
 	_, _ = w.stdout.Write(w.fallbackOut)
 	if w.exit == nil {
-		w.logFailure()
+		if !w.failureLogged {
+			w.logFailure()
+		}
+		return
+	}
+	if w.failureLogged {
+		if w.failureLogDone != nil {
+			timer := time.NewTimer(answerWatchdogLogWait)
+			select {
+			case <-w.failureLogDone:
+			case <-timer.C:
+			}
+			timer.Stop()
+		}
+		w.exit(w.fallbackCode)
 		return
 	}
 	logged := make(chan struct{})
@@ -185,6 +340,26 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	// Production exits here; the lock is never released, so the call's own
 	// output cannot follow the answer.
 	w.exit(w.fallbackCode)
+}
+
+// gatewayAnsweredError makes the watchdog's answer closed: the gateway
+// answered the call with an error status, so a deadline that passes after it
+// is no outage that an administrator's fail mode open lets through
+// (failAfterErrorStatus). Safe on a nil watchdog.
+func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec) {
+	if w == nil {
+		return
+	}
+	closedOpts := opts
+	closedOpts.FailMode = "closed"
+	out, errb, code, logFailure := renderNoAnswer(closedOpts, sp, "closed")
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired || w.closedKnown {
+		return
+	}
+	w.closedKnown = true
+	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out, errb, code, logFailure
 }
 
 // answered stands the watchdog down: the gateway's decision is in. Safe on
@@ -222,10 +397,22 @@ func (w *answerWatchdog) finish(code int) int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.fired {
+		if w.deliveryReceipt != nil {
+			w.deliveryReceipt(false, true)
+		}
 		return w.fallbackCode
 	}
 	w.finished = true
 	_, _ = w.stderr.Write(w.err.Bytes())
 	_, _ = w.stdout.Write(w.out.Bytes())
+	if w.deliveryReceipt != nil {
+		w.deliveryReceipt(true, w.failureClosed)
+	}
 	return code
+}
+
+func (w *answerWatchdog) setDeliveryReceipt(receipt func(bool, bool)) {
+	w.mu.Lock()
+	w.deliveryReceipt = receipt
+	w.mu.Unlock()
 }

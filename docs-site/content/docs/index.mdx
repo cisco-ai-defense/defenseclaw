@@ -1,61 +1,27 @@
 ---
 title: Overview
-description: DefenseClaw is the Cisco governance layer for AI coding agents. It scans what an agent installs, checks every prompt and tool call at runtime, and keeps an audit trail you can export.
+description: DefenseClaw is the Cisco guardrail for AI coding agents. It scans what an agent installs, checks each prompt and tool call, and keeps an audit trail.
 keywords:
   - DefenseClaw overview
-  - Cisco
   - AI agent guardrail
   - AI coding agent security
   - Claude Code guardrail
   - Codex guardrail
-  - AI agent audit log
 ---
 
-DefenseClaw enforces one rule: untrusted agent capabilities are scanned,
-governed, logged, and blocked when policy says they are unsafe.
+DefenseClaw checks what your AI coding agent installs and does. It scans skills and MCP servers, judges each prompt and tool call, blocks the unsafe ones when you ask it to, and records every decision.
 
 <DefenseClawDemo scenario="modes-same-event" variant="hitl" />
 
-## What you just saw
+The demo sends one synthetic Claude Code `PreToolUse` event with a HIGH finding through three modes:
 
-The demo sends one synthetic Claude Code `PreToolUse` event with a HIGH finding
-through three modes:
-
-- **Observe** lets the call run and records the evidence.
-- **Action** blocks it. The demo sets the block level to HIGH with
-  `defenseclaw guardrail block-at HIGH`. With the shipped default, action mode
-  blocks CRITICAL findings and only alerts on HIGH.
-- **Action + HITL** pauses the call and asks you inside Claude Code, because
-  Claude Code's `PreToolUse` hook supports a native approval prompt.
-
-CRITICAL findings always block, with or without HITL.
+- **Observe** lets the call run and records it.
+- **Action** blocks it. The demo sets the block level to HIGH; the shipped default blocks CRITICAL and alerts on HIGH.
+- **Action with human approval (HITL)** pauses the call and asks you inside Claude Code.
 
 <Cards>
-  <Card title="Quickstart in 5 minutes" href="/docs/get-started/quickstart" description="Install, set up an agent and watch DefenseClaw block a test command." />
-  <Card title="What is DefenseClaw?" href="/docs/get-started/what-is-defenseclaw" description="How the CLI, the gateway and your agent's hooks fit together, and what DefenseClaw doesn't do." />
-  <Card title="Capability matrix" href="/docs/connectors/capability-matrix" description="Which connectors can block, which can ask, which support fail-closed." />
-  <Card title="Stories" href="/docs/stories" description="Walkthroughs such as stopping rm -rf in Claude Code and catching prompt injection in Codex." />
-</Cards>
-
-## How it works
-
-DefenseClaw has three parts: the `defenseclaw` CLI, which sets everything up and
-shows you what happened; the `defenseclaw-gateway` sidecar, which makes every
-decision and records it; and a connector for each agent, the hooks or plugin
-that send the agent's prompts and tool calls to the gateway. Every decision
-you make lives in one file, `~/.defenseclaw/config.yaml`
-([how that works](/docs/reference/source-of-truth)).
-[What is DefenseClaw?](/docs/get-started/what-is-defenseclaw) shows the
-architecture and explains what DefenseClaw doesn't protect against.
-
-## What's in the box
-
-<Cards>
-  <Card title="Connectors" href="/docs/connectors" description="Claude Code, Codex, GitHub Copilot CLI, Cursor, Devin, OpenCode, Amp, Hermes, OpenHands, Antigravity, Kiro and OmniGent." />
-  <Card title="Guardrail" href="/docs/guardrail" description="The central setup command: modes, scanner backends, rule packs, the LLM judge and HITL." />
-  <Card title="Observe, action and HITL" href="/docs/hitl" description="Three modes that build on each other. Start by logging, then block, then ask a person when needed." />
-  <Card title="OpenShell sandboxes" href="/docs/sandboxes" description="Preview: run a coding agent inside an NVIDIA OpenShell sandbox on Linux or an Apple-silicon Mac." />
-  <Card title="Sandboxes on managed computers" href="/docs/enterprise/sandboxes" description="Enterprise: sandbox policy by directory group, required sandboxes, MicroVMs on Linux and macOS." />
-  <Card title="Support matrix" href="/docs/support-matrix" description="Which agents and features work on Linux, macOS and Windows, in each edition." />
-  <Card title="Reference" href="/docs/reference" description="CLI commands, gateway API, configuration files and environment variables." />
+  <Card title="Quickstart" href="/docs/get-started/quickstart" description="Install, set up an agent and watch DefenseClaw block a test command." />
+  <Card title="Install" href="/docs/get-started/install" description="One command for macOS, Linux or Windows." />
+  <Card title="For agents" href="/docs/for-agents" description="Hand DefenseClaw setup and troubleshooting to your AI agent." />
+  <Card title="Support matrix" href="/docs/get-started/support-matrix" description="Which agents and features work on which OS and edition." />
 </Cards>

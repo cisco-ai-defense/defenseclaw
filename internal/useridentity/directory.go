@@ -118,6 +118,14 @@ type DirectoryFacts struct {
 	// The gateway refreshes these facts soon and uses the default profile
 	// for group-dependent decisions (GAP-0243).
 	GroupsPartial bool `json:"groups_partial,omitempty"`
+	// UnconfirmedGroups are the gids among Groups, as numbers, that stay
+	// numbers although no NSS group service proved they have no name: one
+	// that cannot be asked or checked (Himmelblau, aad), or one whose answer
+	// the system's lookup did not take. The account is in those groups
+	// (initgroups proved it); their names are unknown, so a group
+	// assignment that names a group may or may not apply. Never emitted or
+	// stored.
+	UnconfirmedGroups []string `json:"-"`
 	// OnlyPrimaryGroup marks the facts of an SSSD account that SSSD listed in
 	// its primary group only (or only Domain Users, when SSSD gives it a
 	// private group), besides the /etc/group groups that list it. While SSSD
@@ -127,6 +135,29 @@ type DirectoryFacts struct {
 	// a failed lookup while the guardian finds SSSD offline for the account's
 	// domain. Never emitted or stored.
 	OnlyPrimaryGroup bool `json:"-"`
+	// AccountSID is the SID SSSD holds for the uid (Linux), "" for none. It
+	// binds a guardian record to the directory object it was resolved for,
+	// which the uid and name alone do not. Never emitted or stored.
+	AccountSID string `json:"-"`
+	// AccountRecord names the macOS local node record of the account (a
+	// digest of its listed record: uid, GeneratedUID, home and primary
+	// group), "" for none. An account deleted and created again under the
+	// same name and uid has another one, so the gateway keeps nothing proven
+	// for one account under the other's key. Never emitted or stored.
+	AccountRecord string `json:"-"`
+	// GuardianRecord says the hook guardian's current identity record of
+	// the account was merged into these facts (Linux and macOS): its UPN,
+	// or the absence of one, is what the guardian reported, not a fact still
+	// to come. Never emitted or stored.
+	GuardianRecord bool `json:"-"`
+	// SpoolSeenAt is when the guardian wrote the newest identity record or
+	// withdrawal of the account that the lookup of these facts read (Linux
+	// and macOS), zero for none. The gateway acts once on a record or a
+	// withdrawal written after it and never again on one the lookup already
+	// took into account, so a record that lacks a fact (a SID) or that the
+	// lookup refused does not discard the facts at every request. Never
+	// emitted or stored.
+	SpoolSeenAt time.Time `json:"-"`
 	// Source is the OS facility that resolved these facts, one of the
 	// Source* constants (defenseclaw.user.identity.source).
 	Source string `json:"source,omitempty"`

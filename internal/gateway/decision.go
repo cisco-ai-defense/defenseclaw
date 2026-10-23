@@ -169,6 +169,21 @@ func guardrailContentActionForGuardrail(gc *config.GuardrailConfig, connector, s
 	return guardrailActionForGuardrailConnector(gc, connector, severity, false)
 }
 
+// guardrailContentActionForGeneration is guardrailContentActionForGuardrail
+// with generation g's configuration and levels: a scan that pinned g decides
+// with g, whatever was published or set meanwhile (GAP-0927, GAP-0928).
+func guardrailContentActionForGeneration(g *Generation, connector, severity string) string {
+	cfg := g.Config
+	if ManagedEnterpriseActive() {
+		ref := cfg.Guardrail.EffectiveRulePackRef("")
+		blockThreshold, alertThreshold := guardrailProfileThresholds(packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref)))
+		return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold, false, 0)
+	}
+	blockThreshold, alertThreshold := guardrailThresholdRanks(ResolveThresholds(g, connector, ""))
+	return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold,
+		false, hiltMinRank(&cfg.Guardrail, connector))
+}
+
 // guardrailActionForGuardrailFindings maps the guardrail proxy's findings
 // for the request's connector.
 func guardrailActionForGuardrailFindings(

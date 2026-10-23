@@ -1,0 +1,81 @@
+---
+title: Scan a skill
+description: Scan one skill now, read the verdict, turn on the install watcher and release a quarantined skill.
+keywords:
+  - skill scan
+  - quarantine
+  - install watcher
+  - skill restore
+---
+
+Scan a skill before you trust it, and bring back one the scanner quarantined.
+
+## Before you start
+
+- A judge makes the scan accurate: `defenseclaw setup llm` and `defenseclaw keys set DEFENSECLAW_LLM_KEY`. Without one the scan runs the static rules only and `defenseclaw doctor` warns.
+- Python 3.11 or newer. See [Scanners](/docs/reference/scanning/scanners#availability).
+
+## Steps
+
+1. Scan a skill folder. Use `--path` for a folder, a skill name for an installed skill, or an archive URL.
+
+   ```bash
+   defenseclaw skill scan --path ~/code/risky-skill
+   ```
+
+   ```text
+     Source: ~/code/risky-skill
+       [WARN] risky-skill (5 findings) — max severity: CRITICAL
+           policy: rejected - the policy refuses this skill at install; the copy already on disk stays loaded until you act.
+             Block it: defenseclaw skill block risky-skill --connector openclaw
+     Skill:    risky-skill
+     Scanner:  policy quiet, judge off
+     Verdict:  CRITICAL (2 critical, 1 high, 1 low, 1 info)
+       [CRITICAL] PROMPT INJECTION detected by YARA
+         Location: SKILL.md:5
+         Generic prompt injection patterns: Ignore all previous instructions
+     …
+   ```
+
+   `judge off` shows because this run used `--no-use-llm`. With a judge, the line reads `judge on`. `defenseclaw skill scan --all` scans every skill of every configured connector.
+
+2. Read the verdict.
+
+   | Verdict | Meaning |
+   | --- | --- |
+   | `clean` or `allowed` | Nothing to act on. |
+   | `warning` | Installed and queued for review. See `defenseclaw alerts`. |
+   | `rejected` | The policy refuses it. The watcher quarantines the files. |
+
+3. Check the install watcher. It runs inside the gateway, is on by default, and scans new or changed skills in watched folders. A skill stays in place while it is scanned and moves to quarantine on a block-list match, a failed scan or a blocking verdict.
+
+   ```bash
+   defenseclaw skill list
+   ```
+
+   A skill shows `pending` or `scanning` until its verdict. To record verdicts without acting on them, set `gateway.watcher.skill.take_action` to `false`. Denied names and scanner failures are still blocked.
+
+## Release a quarantined skill
+
+After you have read the findings and decided the skill is fine, allow that copy and restore it:
+
+```bash
+defenseclaw skill allow risky-skill --connector claudecode --reason "reviewed"
+defenseclaw skill restore risky-skill --connector claudecode
+```
+
+`skill allow` pins the rule to the path of that copy, so another folder with the same name is still scanned. Do not lower `admission.skill.actions` to get one skill through. On a managed device these commands are refused; put the rule in the admin config.
+
+## Check it worked
+
+```bash
+defenseclaw config get asset_policy.skill.allowed
+defenseclaw skill info risky-skill
+```
+
+`skill info` shows `Policy: allowed`.
+
+## Next
+
+- [Block or allow an asset](/docs/how-to/scanning/block-or-allow-an-asset)
+- [Scanners reference](/docs/reference/scanning/scanners#skill-scanner): policy, judge, gate, custom policy by digest.

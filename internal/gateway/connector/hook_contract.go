@@ -889,44 +889,6 @@ var builtinHookContracts = map[string][]HookContract{
 			"Setup writes only ~/.gemini/config/hooks.json. Antigravity also discovers <workspace>/.agents/hooks.json.",
 		},
 	}},
-	"openhands": {{
-		Connector:               "openhands",
-		ContractID:              "openhands-hooks-v1",
-		MinAgentVersion:         "1.12.0",
-		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v6",
-		HookConfigPathTemplates: []string{"~/.openhands/hooks.json", "<workspace>/.openhands/hooks.json"},
-		ResponseFieldName:       "hook_output",
-		Events: []string{
-			"pre_tool_use",
-			"post_tool_use",
-			"user_prompt_submit",
-			"stop",
-			"session_start",
-			"session_end",
-		},
-		AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
-		Capabilities: HookCapability{
-			CanBlock:     true,
-			CanAskNative: false,
-			BlockEvents: []string{
-				"pre_tool_use",
-				"user_prompt_submit",
-				"stop",
-			},
-			SupportsFailClosed: true,
-			Scope:              "user,workspace",
-		},
-		SupportsTraceparent: true,
-		NativeOTLP:          false,
-		ToolCallLifecycle:   openHandsToolCallLifecycle(),
-		Notes: []string{
-			"OpenHands hooks use native snake_case event keys and install to ~/.openhands/hooks.json by default, with repo-local .openhands/hooks.json when a workspace is pinned.",
-			"OpenHands CLI 1.12.0 is the POSIX minimum because it first loads user-global ~/.openhands/hooks.json; source-reviewed against CLI 1.16.0 with no maximum. Windows retains its established unversioned hook contract. macOS remains uncertified until a durable green latest-version live run is recorded.",
-			"OpenHands blocks by exit code 2 and optional decision=deny JSON; no native ask surface is documented. Confirm becomes additionalContext only for user_prompt_submit; pre_tool_use and stop downgrades are audit-only.",
-			"Standalone OpenHands SDK 1.39.1 preserves a trace-only process-environment OTLP exporter; DefenseClaw integrates it only through the protected connector launch command on the reviewed macOS lane and does not persist launch variables.",
-		},
-	}},
 	"opencode": {{
 		Connector:               "opencode",
 		ContractID:              "opencode-hooks-v1",
@@ -1006,45 +968,6 @@ var builtinHookContracts = map[string][]HookContract{
 			"0.0.1785334225 is DefenseClaw's certification floor pinned to the current @ampcode/cli package build used for this contract snapshot; it is not an upstream-declared minimum plugin version.",
 		},
 	}},
-	"omnigent": {{
-		Connector:               "omnigent",
-		ContractID:              "omnigent-custom-policy-v1",
-		MinAgentVersion:         "0.7.0",
-		MaxAgentVersion:         "0.14.0",
-		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v1",
-		HookConfigPathTemplates: []string{"$OMNIGENT_CONFIG", "$OMNIGENT_CONFIG_HOME/config.yaml", "~/.omnigent/config.yaml"},
-		ResponseFieldName:       "",
-		Events: []string{
-			"UserPromptSubmit",
-			"PreToolUse",
-			"PostToolUse",
-			"AfterAgentResponse",
-			"BeforeModel",
-			"AfterModel",
-		},
-		AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
-		Capabilities: HookCapability{
-			CanBlock:           true,
-			CanAskNative:       true,
-			AskEvents:          []string{"UserPromptSubmit", "PreToolUse", "BeforeModel"},
-			BlockEvents:        []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "AfterAgentResponse", "BeforeModel", "AfterModel"},
-			SupportsFailClosed: true,
-			Scope:              "user",
-		},
-		SupportsTraceparent: true,
-		NativeOTLP:          true,
-		ToolCallLifecycle:   omniGentToolCallLifecycle(),
-		Notes: []string{
-			"OmniGent invokes DefenseClaw through its documented custom Python policy API; the installed callable translates DefenseClaw allow, confirm, and block verdicts to ALLOW, ASK, and DENY.",
-			"The bridge covers request, tool_call, tool_result, response, llm_request, and llm_response phases exposed by OmniGent's PolicyEvent schema.",
-			"DENY is authoritative on all six phases. Pre-action DENY prevents the action; post-phase DENY uses OmniGent's denial/sentinel behavior to suppress or replace onward-visible content but cannot roll back completed tool or model work. The bridge does not return custom replacement data.",
-			"ASK is native only for OmniGent's pre-action request, tool_call, and llm_request phases; post-phase confirm findings remain attributed audit and continue without an approval pause.",
-			"The in-process Python bridge forwards an active OpenTelemetry W3C trace context when present; otherwise DefenseClaw starts a new trace.",
-			"Optional native OTLP is inactive until the OmniGent launch process exports OMNIGENT_TELEMETRY_ENABLED=true and the standard OTLP variables; content capture remains disabled.",
-			"The v0.7-v0.13 PolicyEvent context exposes bounded usage, cost, model, harness, actor, and labels but no session identifier; v0.13 adds optional subtree_usage. The bridge marks that correlation gap and marks partial label projections.",
-		},
-	}},
 }
 
 func KnownHookContracts(connectorName string) []HookContract {
@@ -1062,25 +985,10 @@ func hookContractsForOS(connectorName, goos string) []HookContract {
 		contract.AIDSurfaces = append([]string(nil), contract.AIDSurfaces...)
 		contract.Notes = append([]string(nil), contract.Notes...)
 
-		// OpenHands exposes a trace-only standard-OTEL process environment on
-		// the reviewed macOS lane. DefenseClaw supplies scoped header auth only
-		// through its protected connector launch boundary and does not persist
-		// the launch environment.
 		// Windows and macOS stay on the Devin build they were reviewed
 		// against; the extra pin covers Linux only.
 		if (goos == "windows" || goos == "darwin") && contract.ContractID == "devin-hooks-v1" {
 			contract.ExactAgentVersions = []string{"3000.4.25"}
-		}
-		if contract.Connector == "openhands" && contract.ContractID == "openhands-hooks-v1" {
-			switch goos {
-			case "darwin":
-				contract.NativeOTLP = true
-			case "windows":
-				// Windows preserves the pre-POSIX compatibility band and has no
-				// DefenseClaw-managed native exporter.
-				contract.MinAgentVersion = "0.0.0"
-				contract.NativeOTLP = false
-			}
 		}
 		out[i] = contract
 	}
@@ -1590,8 +1498,6 @@ func normalizeConnectorName(name string) string {
 	switch name {
 	case "claude", "claude-code", "claude_code":
 		return "claudecode"
-	case "open-hands", "open_hands":
-		return "openhands"
 	default:
 		return name
 	}

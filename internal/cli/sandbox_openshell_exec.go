@@ -224,7 +224,10 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 			path = append([]string{e2fs}, path...)
 		}
 	}
-	tlsDir := filepath.Join(home, ".local", "state", "openshell", "tls")
+	// The gateway's state folder is DefaultStateHome: the environment
+	// below has no XDG_STATE_HOME, and the daemon finds the gateway's
+	// files there.
+	tlsDir := filepath.Join(openshell.DefaultStateHome(home), "openshell", "tls")
 	env := []string{
 		"HOME=" + home,
 		"PATH=" + strings.Join(path, ":"),
@@ -399,7 +402,7 @@ func openShellExecBridgeFor(configPath, home string) string {
 	if rendered, err := openshell.ParseRenderedGateway(data, nil); err != nil || rendered.ComputeDriver != openshell.DriverDocker {
 		return configPath
 	}
-	stateHome := filepath.Join(home, ".local", "state")
+	stateHome := openshell.DefaultStateHome(home)
 	if !openshell.DockerNamespaceInUse(stateHome, openshell.DefaultDockerNamespace) ||
 		!openShellExecDefaultNamespaceSandboxKept(stateHome) {
 		return configPath

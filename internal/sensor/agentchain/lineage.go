@@ -358,13 +358,19 @@ func (t *Tracker) ObserveProcessTable(rows []ProcessRow) {
 			learnt = append(learnt, record)
 		}
 	}
-	// A parent listed after its child in the same poll was unknown when the
-	// edge was learnt. Both rows describe the table at one moment.
+	// A parent listed after its child in the same poll was unknown, or still
+	// an earlier holder of its pid, when the edge was learnt. Both rows
+	// describe the table at one moment, so the edge names the parent row's
+	// instance.
+	polled := make(map[int]bool, len(learnt))
 	for _, record := range learnt {
-		if record.parentInstance == 0 {
+		polled[record.pid] = true
+	}
+	for _, record := range learnt {
+		if record.parentInstance == 0 || polled[record.ppid] {
 			record.parentInstance = t.instanceLocked(record.ppid)
 		}
-		if record.responsibleInstance == 0 && record.responsiblePID == record.ppid {
+		if record.responsiblePID == record.ppid && (record.responsibleInstance == 0 || polled[record.ppid]) {
 			record.responsibleInstance = record.parentInstance
 		}
 	}
@@ -787,13 +793,19 @@ func differentStart(recorded, observed time.Time) bool {
 }
 
 // confirmedParent reports whether parent is still the process the edge from
-// child named, link being the instance recorded with that edge. Two known
-// starts decide by order: a parent younger than its child is a later process
-// on the pid. With either start unknown only the instance can confirm it, so
-// an unknown start is unverified rather than a match: an exec-only child of an
+// child named, link being the instance recorded with that edge. An edge that
+// recorded another instance names an earlier holder of the pid, whatever the
+// starts say: a process that took the pid within startTolerance after the
+// child started is not its parent (GAP-1495). Otherwise two known starts
+// decide by order: a parent younger than its child is a later process on the
+// pid. With either start unknown only the instance can confirm it, so an
+// unknown start is unverified rather than a match: an exec-only child of an
 // agent that exited would otherwise take the identity of whatever now holds
 // that pid.
 func confirmedParent(parent, child *processRecord, link uint64) bool {
+	if link != 0 && link != parent.instance {
+		return false
+	}
 	if !parent.start.IsZero() && !child.start.IsZero() {
 		return !parent.start.After(child.start.Add(startTolerance))
 	}

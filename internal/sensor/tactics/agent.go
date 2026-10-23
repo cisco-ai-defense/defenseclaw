@@ -44,7 +44,7 @@ import (
 var agentProcessPattern = regexp.MustCompile(
 	`(?i)^(claude|codex|cursor|cursor-agent|aider|goose|crush|opencode|continue|` +
 		`cline|` + legacyconnector.ProcessName + `|copilot|copilot-language-server|gh-copilot|` +
-		`amp|devin|openhands|swe-agent|autogpt|agentgpt|babyagi|` +
+		`amp|devin|swe-agent|autogpt|agentgpt|babyagi|` +
 		`gptme|interpreter|open-interpreter|smol.*|langgraph.*|crewai.*)` +
 		`(\.(exe|cmd|bat|com|ps1))?$`)
 
@@ -207,7 +207,7 @@ type AgentRoot struct {
 var cliConnectors = map[string]string{
 	"claude": "claudecode", "codex": "codex", "cursor-agent": "cursor",
 	"copilot": "copilot", "opencode": "opencode", "amp": "amp", "devin": "devin",
-	"hermes": "hermes", "openhands": "openhands", "omnigent": "omnigent",
+	"hermes":   "hermes",
 	"kiro-cli": "kiro",
 }
 

@@ -1,0 +1,101 @@
+---
+title: Sandbox problems on Linux
+description: Fix Landlock, Docker, systemd linger and image-build problems for sandboxes on Linux.
+keywords:
+  - sandbox Linux
+  - Landlock
+  - Docker rootless
+  - BuildKit
+---
+
+Run `defenseclaw sandbox doctor` first. These are the Linux-only failures it reports, plus the folder problems of a live-mounted run.
+
+## The Landlock check fails
+
+**You see:** the **Landlock** check fails.
+
+**Cause:** the kernel does not report Landlock ABI 3 or newer with `landlock` in its `lsm=` list. OpenShell refuses to start a sandbox without it.
+
+**Fix:** boot a kernel with Landlock ABI 3 or newer (6.2 or newer upstream, or a distribution kernel with a backport), or switch to MicroVMs on a KVM host ([Linux setup](/docs/how-to/sandboxes/set-up-on-linux#run-sandboxes-in-microvms-with-kvm)).
+
+**Check:** `cat /sys/kernel/security/lsm` lists `landlock` and the check passes.
+
+## Docker is rootless or too old
+
+**You see:** the **Docker** check says rootless Docker, or Docker older than 28.
+
+**Cause:** sandboxes need a rootful Docker Engine 28 or newer. Rootless Docker keeps containers off the host network.
+
+**Fix:** install a rootful Engine and run `sudo usermod -aG docker $USER`, then log in again. With linger on, logging out does not restart your systemd user manager, so the gateway service still lacks the group (next entry).
+
+**Check:** the **Docker** check passes.
+
+## The gateway service started before you joined the docker group
+
+**You see:** the **Gateway service** check says it runs under a user manager that started before you joined the docker group, or setup's restart fails with ``the restarted gateway is not healthy`` and names `sudo systemctl restart user@<uid>.service`. Or a run fails with `permission denied` on `/var/run/docker.sock`, or ``the DefenseClaw daemon started before you joined the docker group``.
+
+**Cause:** your systemd user manager and the daemon keep the groups they started with.
+
+**Fix:** run `sudo systemctl restart user@$(id -u).service` (this stops your user services, which start again), then `defenseclaw-gateway restart`, then run setup again.
+
+**Check:** `defenseclaw sandbox doctor` passes the **Gateway service** and **Docker** checks.
+
+## `make` fails inside a sandbox
+
+**You see:** every `make` recipe fails with ``make: <command>: Operation not permitted`` (`Error 127`), and so do node-gyp builds.
+
+**Cause:** the sandbox runs an image built before DefenseClaw's `make` wrapper, or the agent ran `/usr/bin/make` by its full path.
+
+**Fix:** delete the sandbox and run again, which builds the current image. Run `make` by name.
+
+**Check:** `make test` runs inside the new sandbox.
+
+## Python HTTPS fails on an old kernel
+
+**You see:** on a kernel older than 5.19 (RHEL 9 runs 5.14), a Python program fails every HTTPS request with `[Errno 95] Operation not supported`.
+
+**Cause:** OpenShell cannot tell a program on those kernels whom its connection goes to, and Python's `ssl` module asks before every handshake. DefenseClaw works around it in the Python harnesses and the image's own Python (`python3`, `pip` and virtual environments made with them). A Python you download inside the sandbox, for example with `uv python install`, is not covered.
+
+**Fix:** use the image's `python3`, or `uv pip`, which is not affected.
+
+**Check:** the HTTPS request succeeds.
+
+## Docker BuildKit or buildx is missing
+
+**You see:** ``docker's buildx plugin is not available (`docker buildx version`: …)``, the **Docker BuildKit** check fails, or ``DOCKER_BUILDKIT=0 turns BuildKit off``.
+
+**Cause:** the harness images need BuildKit, which docker uses only through its buildx plugin. Without it docker falls back to a legacy builder that cannot build them (`the --chmod option requires BuildKit`). A `DOCKER_CONFIG` or `HOME` that points elsewhere hides the plugin.
+
+**Fix:** install the plugin (Docker Desktop includes it, on Linux it is `docker-buildx-plugin` from Docker's repository), point `DOCKER_CONFIG` at the config that has `cli-plugins/docker-buildx`, unset `DOCKER_BUILDKIT` or set it to `1`, then restart the daemon with `defenseclaw-gateway restart`. The daemon builds in the environment it started with.
+
+**Check:** the **Docker BuildKit** check passes.
+
+## An image build fails
+
+**You see:** an error ending with the last lines docker printed (up to 40, with anything token-shaped redacted).
+
+**Cause:** the build failed, whether `setup`, `image build` or the daemon ran it.
+
+**Fix:** read `~/.defenseclaw/logs/sandbox-image-<harness>.log`, or run `defenseclaw sandbox image build <harness> --verbose` to stream the build. The daemon log (`~/.defenseclaw/gateway.log`) has the lines under `OPENSHELL_IMAGE_BUILD_FAILED`.
+
+**Check:** `defenseclaw sandbox doctor` shows the image as hook-verified.
+
+## A folder cannot be mounted live or has no snapshot room
+
+**You see:** ``… cannot be mounted live: …; run with --copy to work on a copy``, or ``the folder (for its undo snapshot) is …, above the 1.0 GiB limit``.
+
+**Cause:** the folder's git state cannot be protected in place, or a folder without git passes the 1 GiB snapshot cap.
+
+**Fix:** add `--copy`. For the cap, make the folder a git repository, use `--copy`, or use `--no-snapshot` (no undo).
+
+**Check:** the run starts.
+
+## `npm install` fails with EROFS
+
+**You see:** in a live-mounted sandbox, `npm install` fails in a `prepare` script with `EROFS` under the folder the banner's **Protected** line marks as `the repository's core.hooksPath`.
+
+**Cause:** the project points git's hooks at that folder (husky does), and DefenseClaw keeps it read-only.
+
+**Fix:** run `npm install --ignore-scripts` in the sandbox, or work on a copy with `--copy`.
+
+**Check:** the install finishes.

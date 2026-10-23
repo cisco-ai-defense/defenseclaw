@@ -173,30 +173,6 @@ func TestConnectorHookWriterPreservesScopedAPITokenFormat(t *testing.T) {
 	}
 }
 
-func TestRemoveHookAPITokenRevokesAndRotatesOmnigentCredential(t *testing.T) {
-	dataDir := testenv.PrivateTempDir(t)
-	first, err := EnsureHookAPIToken(dataDir, "omnigent")
-	if err != nil {
-		t.Fatalf("EnsureHookAPIToken first: %v", err)
-	}
-	if err := RemoveHookAPIToken(dataDir, "omnigent"); err != nil {
-		t.Fatalf("RemoveHookAPIToken: %v", err)
-	}
-	if got, err := LoadHookAPIToken(dataDir, "omnigent"); err != nil || got != "" {
-		t.Fatalf("LoadHookAPIToken after removal = %q, %v; want absent", got, err)
-	}
-	if err := RemoveHookAPIToken(dataDir, "omnigent"); err != nil {
-		t.Fatalf("idempotent RemoveHookAPIToken: %v", err)
-	}
-	second, err := EnsureHookAPIToken(dataDir, "omnigent")
-	if err != nil {
-		t.Fatalf("EnsureHookAPIToken second: %v", err)
-	}
-	if second == first {
-		t.Fatal("OmniGent hook API token was reused after revocation")
-	}
-}
-
 func TestPublishHookAPITokenPublishesPrivateExactBytesAndPreservesNoopIdentity(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
 	token := strings.Repeat("a", 64)
@@ -522,5 +498,29 @@ func TestEnsureHookAPITokenReissuesAMalformedCredential(t *testing.T) {
 	}
 	if loaded, err := LoadHookAPIToken(dataDir, "claudecode"); err != nil || loaded != reissued {
 		t.Fatalf("LoadHookAPIToken after re-issue = %q, %v", loaded, err)
+	}
+}
+
+func TestRemoveHookAPITokenRevokesAndRotatesTheCredential(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	first, err := EnsureHookAPIToken(dataDir, "cursor")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken first: %v", err)
+	}
+	if err := RemoveHookAPIToken(dataDir, "cursor"); err != nil {
+		t.Fatalf("RemoveHookAPIToken: %v", err)
+	}
+	if got, err := LoadHookAPIToken(dataDir, "cursor"); err != nil || got != "" {
+		t.Fatalf("LoadHookAPIToken after removal = %q, %v; want absent", got, err)
+	}
+	if err := RemoveHookAPIToken(dataDir, "cursor"); err != nil {
+		t.Fatalf("idempotent RemoveHookAPIToken: %v", err)
+	}
+	second, err := EnsureHookAPIToken(dataDir, "cursor")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken second: %v", err)
+	}
+	if second == first {
+		t.Fatal("Cursor hook API token was reused after revocation")
 	}
 }

@@ -126,6 +126,20 @@ func LocalAccountRecords(ctx context.Context) (map[string]LocalAccountRecord, er
 	return platformLocalAccountRecords(ctx)
 }
 
+// LocalAccountRecordByName returns the record of the local account name as
+// LocalAccountRecords lists it, read for that account alone (macOS), and
+// false when the local node holds no such account. Other platforms have
+// none.
+func LocalAccountRecordByName(ctx context.Context, name string) (LocalAccountRecord, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validName(name); err != nil {
+		return LocalAccountRecord{}, false, err
+	}
+	return platformLocalAccountRecord(ctx, name)
+}
+
 // parseDSCLAttribute parses `dscl . -list /Users <attribute>` rows ("name
 // value"; a home may hold spaces, and a record without the attribute is
 // listed with no value) into name -> value.

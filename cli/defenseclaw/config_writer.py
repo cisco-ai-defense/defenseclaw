@@ -830,7 +830,10 @@ def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -
     match = _REASON_CODE.match(reason.strip())
     code, text = (match.group("code"), match.group("text")) if match else ("", reason.strip())
     if (code == "maxLength" or "maxLength constraint" in text) and isinstance(value, str):
-        return f"{name} is longer than 4096 characters (it has {len(value)})"
+        # The field's own limit, not one fixed number (GAP-1040).
+        limit = re.search(r"at most (\d+) characters", text)
+        bound = f"longer than {limit.group(1)} characters" if limit else "longer than the field allows"
+        return f"{name} is {bound} (it has {len(value)})"
     parts = [part.strip() for part in text.split("; ") if part.strip()]
     if code == "config_semantic_invalid" and parts:
         detail = _RULE_PACK_PREFIX.sub("", parts[0])
@@ -845,6 +848,8 @@ def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -
             message += " To stop using the deleted pack: defenseclaw guardrail use-pack default."
         return message
     if code == "pattern":
+        if name == "openshell.trusted_ca_bundle":
+            return f"{name} must be an absolute path or start with ~/ (for example, ~/proxy-root-ca.pem)."
         hint = " (sha256: followed by 64 hex digits)" if name.endswith("digest") else ""
         # A pattern of plain words (block_at) names them in the corrective action.
         allowed = text if text.startswith("use one of ") else ""

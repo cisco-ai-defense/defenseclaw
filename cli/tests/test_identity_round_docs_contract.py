@@ -49,7 +49,7 @@ def test_connector_prompts_and_scripted_mode() -> None:
 
 
 def test_domain_group_yaml_and_space_lookup() -> None:
-    text = page("guardrail/user-and-group-policies.mdx")
+    text = page("reference/policy/guardrail-profiles.mdx")
     quote = chr(39)
     slash = chr(92)
     assert quote + "CORP" + slash + "ML-Team" + quote in text
@@ -58,27 +58,27 @@ def test_domain_group_yaml_and_space_lookup() -> None:
 
 
 def test_macos_membership_cache_recovery() -> None:
-    text = page("guardrail/user-and-group-policies.mdx")
+    text = page("reference/policy/guardrail-profiles.mdx")
     assert "dscacheutil -flushcache" in text
     assert "dsmemberutil flushcache" in text
     assert "then explain the account, restart the gateway, or wait" in text
 
 
 def test_profile_enforcement_matches_install_mode() -> None:
-    text = page("guardrail/user-and-group-policies.mdx")
+    text = page("reference/policy/guardrail-profiles.mdx")
     assert "On a standalone enterprise install" in text
     assert "or move to a weaker one" in text
     assert "On a per-user install, the user owns the configuration" in text
 
 
 def test_authentication_cooldown_and_half_open_probe() -> None:
-    text = page("observability/index.mdx")
+    text = page("reference/observability/index.mdx")
     assert "Authentication failures open the affected route immediately for five minutes" in text
     assert "a half-open probe then retries it" in text
 
 
 def test_identity_redaction_warns_about_qualified_account_name() -> None:
-    text = page("observability/end-user-identity.mdx")
+    text = page("reference/observability/telemetry-identity.mdx")
     assert "Every redaction profile preserves `defenseclaw.user.name`" in text
     assert "alice@corp.example.com" in text
     assert "must not receive even the bare account name" in text  # the qualified form is only the principal (GAP-1082)

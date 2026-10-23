@@ -109,7 +109,10 @@ func launcherEnsureDaemon(ctx context.Context, client launcherStatusClient, goos
 			return nil, &launcherDaemonError{msg: "your sandbox service was started but does not answer; `defenseclaw sandbox doctor` shows why", err: err}
 		}
 	}
-	if status.Managed != nil && status.Managed.PendingRestart && status.Running == 0 {
+	// Busy, not Running: the restart takes the account's OpenShell gateway
+	// with it, which a MicroVM in OpenShell's error state, or a sandbox
+	// that starts, may still run on (sandboxapi.Status.Live).
+	if status.Managed != nil && status.Managed.PendingRestart && status.Busy() == 0 {
 		fmt.Fprintln(stderr, "defenseclaw: restarting your sandbox service to apply an update (no sandbox of yours is running)")
 		if err := launcherRestartDaemon(ctx, goos, uid); err != nil {
 			return status, fmt.Errorf("your sandbox service waits for a restart that failed: %v", err)

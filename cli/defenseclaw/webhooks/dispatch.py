@@ -69,6 +69,7 @@ class SyntheticEvent:
     severity: str
     run_id: str = ""
     trace_id: str = ""
+    host: str = field(default_factory=lambda: socket.gethostname())
 
     def to_go_json_dict(self) -> dict[str, Any]:
         return {
@@ -81,6 +82,7 @@ class SyntheticEvent:
             "severity": self.severity,
             "run_id": self.run_id,
             "trace_id": self.trace_id,
+            "host": self.host,
         }
 
 
@@ -244,17 +246,7 @@ def format_webex_payload(event: SyntheticEvent, room_id: str) -> bytes:
 
 
 def format_generic_payload(event: SyntheticEvent) -> bytes:
-    event_data: dict[str, Any] = {
-        "id": event.id,
-        "timestamp": event.timestamp,
-        "action": event.action,
-        "target": event.target,
-        "actor": event.actor,
-        "details": event.details,
-        "severity": event.severity,
-        "run_id": event.run_id,
-        "trace_id": event.trace_id,
-    }
+    event_data = event.to_go_json_dict()
     if "block" in event.action.lower():
         event_data["defenseclaw_blocked"] = True
         event_data["defenseclaw_reason"] = event.details
@@ -478,4 +470,3 @@ def _redact_payload_preview(payload: bytes, webhook_type: str, secret: str) -> s
         scrubbed = scrubbed.replace(secret, "<redacted>")
     # Truncate only after redaction so the preview stays short.
     return scrubbed[:200]
-

@@ -148,13 +148,11 @@ def _locked_webhook_mutation(func):
     return wrapped
 
 
-@_locked_webhook_mutation
-def apply_webhook(
+def build_webhook_entry(
     *,
     name: str | None,
     type_: str,
     url: str,
-    data_dir: str,
     secret_env: str | None = None,
     room_id: str | None = None,
     min_severity: str | None = None,
@@ -162,18 +160,8 @@ def apply_webhook(
     timeout_seconds: int | None = None,
     cooldown_seconds: int | None = None,
     enabled: bool = True,
-    dry_run: bool = False,
-) -> WebhookWriteResult:
-    """Insert/update a ``webhooks[]`` entry.
-
-    ``name`` is optional — when omitted, the writer derives a slug from
-    ``type + host`` (e.g. ``slack-hooks.slack.com``). Passing an
-    existing name updates that entry in place (with a warning).
-
-    ``cooldown_seconds=None`` preserves the Go dispatcher's default
-    (``webhookDefaultCooldown = 300s``). Pass ``0`` to disable the
-    cooldown and ``>0`` for an explicit override.
-    """
+) -> dict[str, Any]:
+    """Validate and normalize one entry without reading any webhook scope."""
     type_norm = (type_ or "").strip().lower()
     if type_norm not in VALID_TYPES:
         raise ValueError(
@@ -212,6 +200,60 @@ def apply_webhook(
             f"webhook name {derived_name!r} must match {_NAME_RE.pattern}",
         )
 
+    entry: dict[str, Any] = {
+        "name": derived_name,
+        "url": url,
+        "type": type_norm,
+        "min_severity": severity,
+        "events": list(events_list),
+        "timeout_seconds": timeout,
+        "enabled": bool(enabled),
+    }
+    # Only emit cooldown_seconds when the user explicitly set it; a
+    # missing key means "use the Go default" (nil pointer semantics).
+    if cooldown_seconds is not None:
+        entry["cooldown_seconds"] = int(cooldown_seconds)
+    if secret_env:
+        entry["secret_env"] = secret_env
+    if room_id:
+        entry["room_id"] = room_id
+
+    return entry
+
+
+@_locked_webhook_mutation
+def apply_webhook(
+    *,
+    name: str | None,
+    type_: str,
+    url: str,
+    data_dir: str,
+    secret_env: str | None = None,
+    room_id: str | None = None,
+    min_severity: str | None = None,
+    events: list[str] | tuple[str, ...] | None = None,
+    timeout_seconds: int | None = None,
+    cooldown_seconds: int | None = None,
+    enabled: bool = True,
+    dry_run: bool = False,
+) -> WebhookWriteResult:
+    """Insert/update a ``webhooks[]`` entry.
+
+    ``name`` is optional — when omitted, the writer derives a slug from
+    ``type + host`` (e.g. ``slack-hooks.slack.com``). Passing an
+    existing name updates that entry in place (with a warning).
+
+    ``cooldown_seconds=None`` preserves the Go dispatcher's default
+    (``webhookDefaultCooldown = 300s``). Pass ``0`` to disable the
+    cooldown and ``>0`` for an explicit override.
+    """
+    entry = build_webhook_entry(
+        name=name, type_=type_, url=url, secret_env=secret_env, room_id=room_id,
+        min_severity=min_severity, events=events, timeout_seconds=timeout_seconds,
+        cooldown_seconds=cooldown_seconds, enabled=enabled,
+    )
+    derived_name, type_norm, url = entry["name"], entry["type"], entry["url"]
+
     cfg_path = str(config_path_for_data_dir(data_dir))
     raw = _load_yaml(cfg_path)
     before = copy.deepcopy(raw)
@@ -244,23 +286,7 @@ def apply_webhook(
                     derived_name = prior_name
                     matched_by_url_only = True
 
-    entry: dict[str, Any] = {
-        "name": derived_name,
-        "url": url,
-        "type": type_norm,
-        "min_severity": severity,
-        "events": list(events_list),
-        "timeout_seconds": timeout,
-        "enabled": bool(enabled),
-    }
-    # Only emit cooldown_seconds when the user explicitly set it; a
-    # missing key means "use the Go default" (nil pointer semantics).
-    if cooldown_seconds is not None:
-        entry["cooldown_seconds"] = int(cooldown_seconds)
-    if secret_env:
-        entry["secret_env"] = secret_env
-    if room_id:
-        entry["room_id"] = room_id
+    entry["name"] = derived_name
 
     if existing_idx >= 0:
         if not matched_by_url_only:

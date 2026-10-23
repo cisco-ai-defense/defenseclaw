@@ -15,9 +15,17 @@ import (
 	"testing"
 )
 
+func useVerifiedSecureClientDeployment(t *testing.T) {
+	t.Helper()
+	previous := SecureClientDeploymentVerified
+	SecureClientDeploymentVerified = func() bool { return true }
+	t.Cleanup(func() { SecureClientDeploymentVerified = previous })
+}
+
 // Exercise the generated managed scripts, not just their rendered FAIL_MODE.
 // This is the Secure Client delivery contract (#1163): unset delivers open.
 func TestManagedHookDeliveryDefaultAndExplicitClosed(t *testing.T) {
+	useVerifiedSecureClientDeployment(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("native Windows uses the authenticated hook executor")
 	}
@@ -111,6 +119,30 @@ func TestManagedHookDeliveryDefaultAndExplicitClosed(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// An installed closed Secure Client hook must keep its delivery posture when
+// the agent supplies a conflicting process environment. These four templates
+// used to interpolate DEFENSECLAW_FAIL_MODE after the administrator rendered
+// them, so an unavailable gateway opened a closed hook (GAP-0461).
+func TestSecureClientShellHooksPinInstalledFailMode(t *testing.T) {
+	for _, asset := range []string{"antigravity-hook.sh", "devin-hook.sh", "hermes-hook.sh", "kiro-hook.sh"} {
+		t.Run(asset, func(t *testing.T) {
+			body, err := renderHookTemplate(asset, templateData{Managed: true, SecureClient: true, SecureClientDelivery: true, FailMode: "closed"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(body), "\nFAIL_MODE=\"closed\"") {
+				t.Fatal("closed installed mode was not rendered")
+			}
+			if strings.Contains(string(body), "${DEFENSECLAW_FAIL_MODE:-") {
+				t.Fatal("agent environment can override the installed fail mode")
+			}
+			if asset == "antigravity-hook.sh" && !strings.Contains(string(body), "_DC_BOOT_FAIL_MODE=\"closed\"") {
+				t.Fatal("an early Antigravity failure can open an installed closed hook")
+			}
+		})
 	}
 }
 
@@ -268,6 +300,7 @@ func TestManagedHookDeliveryOutsideSecureClientFailsClosed(t *testing.T) {
 // Cursor's action/observe rule applies everywhere else. Under Secure Client
 // an explicit mode wins for every connector (#1163).
 func TestResolveHookFailModeSecureClientOnlyOpenDefault(t *testing.T) {
+	useVerifiedSecureClientDeployment(t)
 	for _, tc := range []struct {
 		name string
 		opts SetupOpts

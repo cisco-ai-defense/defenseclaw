@@ -48,7 +48,10 @@ func TestMain(m *testing.M) {
 		serveCodexPolicyFixture()
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	restore := isolateTestHost()
+	code := m.Run()
+	restore()
+	os.Exit(code)
 }
 
 // serveCodexPolicyFixture makes a copied native Go test image behave like the
@@ -311,7 +314,6 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 	origDir := connectorFlagDataDir
 	origConfigHome := connectorFlagConfigHome
 	origExit := connectorExit
-	origLaunchOpenHands := connectorLaunchOpenHands
 	origCheckPlatformSupport := connectorCheckPlatformSupportOnHost
 
 	cfg = &config.Config{
@@ -333,7 +335,6 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 		connectorFlagDataDir = origDir
 		connectorFlagConfigHome = origConfigHome
 		connectorExit = origExit
-		connectorLaunchOpenHands = origLaunchOpenHands
 		connectorCheckPlatformSupportOnHost = origCheckPlatformSupport
 	}
 }
@@ -393,15 +394,6 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 		err = runConnectorPruneOrphans(cmd, nil)
 	case "reconcile":
 		err = runConnectorReconcile(cmd, nil)
-	case "launch":
-		launchArgs := []string{}
-		for index, value := range tail {
-			if value == "--" {
-				launchArgs = append(launchArgs, tail[index+1:]...)
-				break
-			}
-		}
-		err = runConnectorLaunch(cmd, launchArgs)
 	default:
 		t.Fatalf("unknown subcommand for harness: %s", sub)
 	}
@@ -409,69 +401,6 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 		fmt.Fprintln(&errb, err.Error())
 	}
 	return out.String(), errb.String(), exitCode
-}
-
-func TestConnectorLaunchForwardsOpenHandsArgumentsWithoutControlOutput(t *testing.T) {
-	dataDir := testenv.PrivateTempDir(t)
-	defer withConnectorState(t, dataDir, "openhands")()
-	connectorFlagName = "openhands"
-	connectorCheckPlatformSupportOnHost = func(name string) (string, error) {
-		if name != "openhands" {
-			t.Fatalf("platform check connector = %q", name)
-		}
-		return "", nil
-	}
-	var gotArgs []string
-	connectorLaunchOpenHands = func(
-		_ context.Context,
-		opts connector.SetupOpts,
-		args []string,
-		_ io.Reader,
-		stdout io.Writer,
-		stderr io.Writer,
-	) error {
-		if opts.DataDir != dataDir || opts.APIAddr != "127.0.0.1:18970" {
-			t.Fatalf("launch opts = %+v", opts)
-		}
-		gotArgs = append([]string(nil), args...)
-		_, _ = io.WriteString(stdout, "child stdout\n")
-		_, _ = io.WriteString(stderr, "child stderr\n")
-		return nil
-	}
-
-	stdout, stderr, exitCode := runConnectorCmd(
-		t,
-		"launch",
-		"--connector",
-		"openhands",
-		"--",
-		"--headless",
-		"-t",
-		"inspect this workspace",
-	)
-	if exitCode != 0 || stdout != "child stdout\n" || stderr != "child stderr\n" {
-		t.Fatalf("launch result = code:%d stdout:%q stderr:%q", exitCode, stdout, stderr)
-	}
-	wantArgs := []string{"--headless", "-t", "inspect this workspace"}
-	if !reflect.DeepEqual(gotArgs, wantArgs) {
-		t.Fatalf("OpenHands args = %v, want %v", gotArgs, wantArgs)
-	}
-	if connectorLaunchCmd.PersistentPreRunE == nil || connectorLaunchCmd.PersistentPostRun == nil {
-		t.Fatal("connector launch must use the co-resident config-only lifecycle")
-	}
-}
-
-func TestConnectorLaunchRejectsJSONAndNonOpenHands(t *testing.T) {
-	dataDir := testenv.PrivateTempDir(t)
-	defer withConnectorState(t, dataDir, "codex")()
-	connectorFlagJSON = true
-	if _, stderr, _ := runConnectorCmd(t, "launch", "--connector", "codex", "--json", "--"); !strings.Contains(stderr, "does not support --json") {
-		t.Fatalf("JSON rejection stderr = %q", stderr)
-	}
-	connectorFlagJSON = false
-	if _, stderr, _ := runConnectorCmd(t, "launch", "--connector", "codex", "--"); !strings.Contains(stderr, "supports only") {
-		t.Fatalf("connector rejection stderr = %q", stderr)
-	}
 }
 
 func assertConnectorReconcileStderr(t *testing.T, name, stderr string) {

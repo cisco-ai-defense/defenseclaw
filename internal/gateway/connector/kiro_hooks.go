@@ -118,6 +118,13 @@ func patchKiroV3Hooks(path, hookScript string) error {
 }
 
 func removeKiroV3Hooks(path, hookScript string) error {
+	return removeKiroV3HooksKeeping(path, hookScript, false)
+}
+
+// removeKiroV3HooksKeeping is removeKiroV3Hooks that, with operatorFile,
+// keeps a file left with no hooks: the operator had it before Setup
+// (kiroPristineIsOperators).
+func removeKiroV3HooksKeeping(path, hookScript string, operatorFile bool) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err
@@ -134,7 +141,7 @@ func removeKiroV3Hooks(path, hookScript string) error {
 	// file that holds nothing else is DefenseClaw's own and goes, instead
 	// of staying behind as an empty {"hooks": []}.
 	cfg["hooks"] = kept
-	if len(kept) == 0 && kiroFileIsDefenseClawOwned(cfg, hookScript) {
+	if len(kept) == 0 && !operatorFile && kiroFileIsDefenseClawOwned(cfg, hookScript) {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -270,6 +277,13 @@ func kiroUniversalHooksCurrent(list []interface{}, hookScript string) bool {
 }
 
 func removeKiroV2AgentHooks(path, hookScript string) error {
+	return removeKiroV2AgentHooksKeeping(path, hookScript, false)
+}
+
+// removeKiroV2AgentHooksKeeping is removeKiroV2AgentHooks that, with
+// operatorFile, keeps an agent file left looking like DefenseClaw's overlay:
+// the operator had it before Setup (kiroPristineIsOperators).
+func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err
@@ -283,7 +297,7 @@ func removeKiroV2AgentHooks(path, hookScript string) error {
 		} else {
 			cfg["hooks"] = kept
 		}
-		if kiroV2AgentIsDefenseClawOverlay(cfg) {
+		if !operatorFile && kiroV2AgentIsDefenseClawOverlay(cfg) {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return err
 			}
@@ -306,7 +320,7 @@ func removeKiroV2AgentHooks(path, hookScript string) error {
 	if len(hooks) == 0 {
 		delete(cfg, "hooks")
 	}
-	if kiroV2AgentIsDefenseClawOverlay(cfg) {
+	if !operatorFile && kiroV2AgentIsDefenseClawOverlay(cfg) {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}

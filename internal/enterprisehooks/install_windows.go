@@ -724,7 +724,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", target.conn.Name(), err))
 			}
 			if !present {
-				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", target.conn.Name()))
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", target.conn.Name(), ownedHookAbsentDetail(target.conn, target.setup)))
 			}
 			lockEntry, err := connector.NewHookContractLockEntryForMode(
 				target.setup,
@@ -1256,7 +1256,7 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", target.conn.Name(), err)
 	}
 	if !present {
-		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: canonical hook matrix is absent", target.conn.Name())
+		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: canonical hook matrix is absent: %s", target.conn.Name(), ownedHookAbsentDetail(target.conn, target.setup))
 	}
 	if err := verifyWindowsStandalonePluginRender(target); err != nil {
 		return err
@@ -1767,7 +1767,7 @@ func teardownWindowsGenericManagedTarget(
 	if len(remaining) != 0 {
 		return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration in %s", name, strings.Join(remaining, ", "))
 	}
-	return nil
+	return returnWindowsStandalonePatchedFilesToOwner(target, configPaths, footprint)
 }
 
 // windowsRelaxedPathsToRestoreAfterTeardown returns the paths relaxed for a
@@ -2484,7 +2484,11 @@ func inspectWindowsUserPathProtectionACL(
 		}
 		entry := windowsDACLEntry{aceType: ace.Header.AceType, flags: ace.Header.AceFlags, mask: uint32(ace.Mask)}
 		var sid *windows.SID
-		if ace.Header.AceType == windows.ACCESS_ALLOWED_ACE_TYPE {
+		switch ace.Header.AceType {
+		case windows.ACCESS_ALLOWED_ACE_TYPE, windows.ACCESS_DENIED_ACE_TYPE:
+			// Both share the ACE_HEADER, Mask, SidStart layout, so a rejected
+			// deny entry is named like an allow entry. Extended (object,
+			// callback) types keep no SID here.
 			sid = (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 			entry.sid = sid.String()
 		}
@@ -2502,7 +2506,13 @@ func inspectWindowsUserPathProtectionACL(
 			required,
 		)
 	case windowsDACLNonAllowedType:
-		return nil, fmt.Errorf("enterprise hooks: managed Windows DACL on %s contains non-canonical ACE type at index %d", path, result.index)
+		return nil, fmt.Errorf(
+			"enterprise hooks: managed Windows DACL on %s contains non-canonical ACE type %d at index %d (principal %s)",
+			path,
+			entries[result.index].aceType,
+			result.index,
+			windowsSIDString(sids[result.index]),
+		)
 	case windowsDACLUnexpectedEntry:
 		entry := entries[result.index]
 		return nil, fmt.Errorf(

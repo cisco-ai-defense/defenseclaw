@@ -40,9 +40,6 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 	if where == "" {
 		where = e.Layout.ConfigPath
 	}
-	if strings.Contains(err.Error(), "enterprise.profile=") && strings.Contains(err.Error(), "conflicts with immutable") {
-		return fmt.Sprintf("%s: enterprise.profile is fixed to standalone on this host; change the profile by reinstalling the deployment", where), true
-	}
 	var yamlErr *config.V8YAMLError
 	if errors.As(err, &yamlErr) {
 		field := configField(yamlErr.Path)
@@ -156,6 +153,12 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 		return fmt.Sprintf("%s%s: %s: %s. The settings reference: %s", where, lineSuffix(semanticErr.Line), configField(semanticErr.Path), reason, settingsReferenceURL), true
 	}
 	return "", false
+}
+
+// PlainConfigRefusal is plainConfigProblem for `config validate` on a
+// managed host, so it words a refusal the way ensure does (GAP-0087).
+func (e *Env) PlainConfigRefusal(err error, source string, raw []byte) (string, bool) {
+	return e.plainConfigProblem(err, source, raw)
 }
 
 var errManagedEnvReference = errors.New("an observability destination reads a secret from an environment variable")

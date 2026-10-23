@@ -164,7 +164,50 @@ type GuardRequest struct {
 	// StopAtFirstBlocking ends a remove-mode evaluation at the first
 	// unapproved finding; the hook needs only the decision.
 	StopAtFirstBlocking bool
+	// GuardRemoval, when set, runs each change cleanup makes to a user
+	// file: a plugin moved aside, or a config rewritten without its foreign
+	// hooks. paths names the files that change removes hooks from. It runs
+	// remove at most once and returns remove's error with its own. The
+	// guardian takes the machine's foreign-hook cleanup fence, runs remove,
+	// commits paths to the removal ledger and releases the fence, so the
+	// fence covers one change and never a scan. If remove does not run, the
+	// hook stays in place and is reported.
+	GuardRemoval func(paths []string, remove func() error) error
 }
+
+// errRemovalRefused is a GuardRemoval that returned without running the
+// removal or saying why.
+var errRemovalRefused = errors.New("foreign-hook removal refused")
+
+// guardedRemoval runs remove through r.GuardRemoval, if any. ran reports
+// whether remove ran and removeErr is its own error. err holds every error,
+// including one the guard returned after a removal that ran (a failed
+// ledger commit), which does not undo the removal.
+func (r GuardRequest) guardedRemoval(paths []string, remove func() error) (ran bool, removeErr, err error) {
+	if r.GuardRemoval == nil {
+		removeErr = remove()
+		return true, removeErr, removeErr
+	}
+	err = r.GuardRemoval(paths, func() error {
+		if ran {
+			return errors.New("foreign-hook removal ran twice")
+		}
+		ran = true
+		removeErr = remove()
+		return removeErr
+	})
+	if !ran && err == nil {
+		err = errRemovalRefused
+	}
+	if removeErr != nil && !errors.Is(err, removeErr) {
+		err = errors.Join(removeErr, err)
+	}
+	return ran, removeErr, err
+}
+
+// guardScanReadHook, when set, sees each path a scan reads. Tests use it to
+// check that cleanup holds no removal guard while it reads.
+var guardScanReadHook func(path string)
 
 // Scan budgets. Real hook trees are a few small files.
 const (
@@ -971,6 +1014,9 @@ func (s *guardScan) readFileLimit(path string, limit int64) ([]byte, bool, error
 	if err := s.check(); err != nil {
 		return nil, true, err
 	}
+	if guardScanReadHook != nil {
+		guardScanReadHook(path)
+	}
 	data, exists, err := readGuardFileLimit(path, limit)
 	if exists {
 		s.files++
@@ -985,6 +1031,9 @@ func (s *guardScan) readFileLimit(path string, limit int64) ([]byte, bool, error
 func (s *guardScan) readDir(path string) ([]fs.DirEntry, bool, error) {
 	if err := s.check(); err != nil {
 		return nil, true, err
+	}
+	if guardScanReadHook != nil {
+		guardScanReadHook(path)
 	}
 	entries, exists, err := readGuardDir(path)
 	if err == nil && len(entries) > guardDirEntryLimit {

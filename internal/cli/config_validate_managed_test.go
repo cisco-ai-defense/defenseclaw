@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -73,5 +74,44 @@ func TestConfigValidateRefusesManagedLiteralCandidates(t *testing.T) {
 	configValidateCmd.SetOut(&strings.Builder{})
 	if err := configValidateCmd.RunE(configValidateCmd, []string{path}); err != nil {
 		t.Fatalf("benign managed candidate refused: %v", err)
+	}
+}
+
+// GAP-0049: a staged managed candidate that omits openshell.pack_dir got the
+// loader's default under its own folder, so `config validate` refused a
+// custom pack in <policy_dir>/sandbox that ensure, with the installed
+// config, accepts. The default follows the file's data_dir and policy_dir.
+func TestConfigValidateFindsStagedCustomPacksInThePolicyDir(t *testing.T) {
+	t.Cleanup(func() { configValidateCmd.SetOut(nil); configValidateJSON, configValidateDataDir = false, "" })
+	// The pack's own checks (an administrator-owned file, as strict as the
+	// base) are not this test's: a test's files are the test user's.
+	old := config.SandboxProfilePackCheck
+	t.Cleanup(func() { config.SandboxProfilePackCheck = old })
+	config.SandboxProfilePackCheck = nil
+	dir := t.TempDir()
+	t.Setenv(managed.ConfigPathEnv, filepath.Join(dir, "installed", "config.yaml"))
+	policies := filepath.Join(dir, "policies")
+	pack := filepath.Join(policies, "sandbox", "site-strict")
+	if err := os.MkdirAll(pack, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pack, "pack.yaml"), []byte("version: 1\nname: site-strict\nextends: strict\nworkspace:\n  mode: copy\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(dir, "stage")
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(stage, "candidate.yaml")
+	body := "config_version: 9\ndeployment_mode: managed_enterprise\ndata_dir: " + filepath.Join(dir, "data") + "\npolicy_dir: " + policies +
+		"\nenterprise:\n  profile: standalone\nguardrail:\n  enabled: true\n  connectors:\n    claudecode: {}\n  default_profile: default\n" +
+		"  profiles:\n    default:\n      sandbox:\n        required_pack: site-strict\nopenshell:\n  enabled: true\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := &strings.Builder{}
+	configValidateCmd.SetOut(out)
+	if err := configValidateCmd.RunE(configValidateCmd, []string{path}); err != nil {
+		t.Fatalf("config validate refused a pack in the policy folder: %v", err)
 	}
 }

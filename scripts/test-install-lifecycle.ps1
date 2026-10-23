@@ -648,8 +648,9 @@ function Test-Shim {
     Check ((Get-Content -LiteralPath (Join-Path $DcHome "previous\VERSION") -ErrorAction SilentlyContinue) -eq $from) "previous\VERSION is not $from"
 }
 
-# Upgrade while DefenseClaw programs hold files: running .exe files are renamed
-# aside, and a program running from the venv stops the install before any change.
+# Upgrade while DefenseClaw programs hold files: running .exe files are swapped
+# in place (ReplaceFile keeps the old image as a .old-* backup while it runs),
+# and a program running from the venv stops the install before any change.
 function Test-FilesInUse {
     Enter-Lane files-in-use
     Check ((Install-Candidate $Seed) -eq 0) "install of $(Get-AssetVersion $Seed) failed"
@@ -678,7 +679,7 @@ function Test-FilesInUse {
     Assert-Versions $Target
     Assert-Healthy
     Check (-not $hook.HasExited) "the running hook was stopped"
-    Check (@(Get-ChildItem -LiteralPath $Bin -Filter "defenseclaw-hook.exe.old-*").Count -eq 1) "the running defenseclaw-hook.exe was not renamed aside"
+    Check (@(Get-ChildItem -LiteralPath $Bin -Filter "defenseclaw-hook.exe.old-*").Count -eq 1) "the running defenseclaw-hook.exe was not swapped in place (no .old-* backup)"
     Stop-Held
 
     Write-Log "re-run while the CLI runs from the venv (must stop, nothing changed)"

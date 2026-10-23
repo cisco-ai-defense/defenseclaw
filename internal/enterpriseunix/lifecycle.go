@@ -102,6 +102,13 @@ type Options struct {
 	// DeliveryID is the opaque `bundle apply --delivery-id` the bundle
 	// receipt records ("" for none; enterprisestatus.CheckDeliveryID).
 	DeliveryID string
+	// Interrupted is closed when the command got SIGTERM or an interrupt.
+	// A transaction then finishes the step it is in and rolls back at the
+	// next safe point (before it stops the services, before it writes the
+	// files, before it starts the services), and the run returns its result
+	// for the command to print. The signal used to kill the run mid-step,
+	// with no result, and a later run recovered it (I-1317). nil for none.
+	Interrupted <-chan struct{}
 }
 
 // Error codes in the lifecycle result.
@@ -125,10 +132,12 @@ const (
 	codeApply               = "apply_failed"
 	codeActivate            = "activation_failed"
 	codeRolledBack          = "rolled_back"
-	codeRollbackFailed      = "rollback_failed"
-	codeRecovered           = "recovered_interrupted_transaction"
-	codeUninstall           = "uninstall_failed"
-	codeUninstallPrecheck   = "uninstall_precheck_refused"
+	// codeInterrupted: a stop signal made the transaction roll back.
+	codeInterrupted       = "interrupted"
+	codeRollbackFailed    = "rollback_failed"
+	codeRecovered         = "recovered_interrupted_transaction"
+	codeUninstall         = "uninstall_failed"
+	codeUninstallPrecheck = "uninstall_precheck_refused"
 	// codeUninstallIncomplete: the uninstall stopped before removing the
 	// binaries, because per-user hook registrations or vendor machine policy
 	// still name them, and started the services again. The package removal
@@ -138,8 +147,11 @@ const (
 	codeReconcile           = "reconcile_failed"
 	codeVerify              = "verify_failed"
 	codeState               = "state_unreadable"
-	codeLeftovers           = "unmanaged_leftovers"
-	codeWSL                 = "wsl_distribution"
+	// codeHookSessionKey: the key of the protected foreign-hook session
+	// records could not be removed or made (GAP-0352).
+	codeHookSessionKey = "hook_session_records_unavailable"
+	codeLeftovers      = "unmanaged_leftovers"
+	codeWSL            = "wsl_distribution"
 	// codeConfigMetadataRestored: an unchanged config.yaml got its managed
 	// mode and owner back without a transaction (GAP-0941).
 	codeConfigMetadataRestored = "config_metadata_restored"
@@ -165,6 +177,11 @@ type lifecycle struct {
 	// reportChanges is set while a repair or ensure re-applies an installed
 	// deployment: the result then lists what the transaction changed.
 	reportChanges bool
+	// helperModeRestart is set when ensure applies because the running
+	// sensor helper reported another Tetragon mode than the config renders
+	// (helperModeDrift); the transaction's restart of the helper is the
+	// change it reports.
+	helperModeRestart bool
 	// perUserStateKept names the accounts whose per-user state the purge
 	// left in place (remove-all's state_failed: a pending cleanup still
 	// needs it, or its home was not available). Their session-facts cache
@@ -173,6 +190,9 @@ type lifecycle struct {
 	// perUserRemoved counts the per-user hook registrations an uninstall
 	// removed, for its summary.
 	perUserRemoved int
+	// floorCheckerKept: the uninstall kept the floor checker
+	// (keepFloorChecker), for its summary.
+	floorCheckerKept bool
 	// keptPerUser is what each enrolled account keeps after a default
 	// uninstall; keptKnown is false when the accounts record was unreadable.
 	keptPerUser []perUserKept
@@ -259,10 +279,48 @@ type lifecycle struct {
 	confirmedLate map[string]bool
 	// inboxProcessed are the bundle inbox files this run removes at its end.
 	inboxProcessed []string
+	// inboxSuperseded are the lower inbox versions this run did not apply,
+	// and inboxTopVersion the version it applied instead.
+	inboxSuperseded []supersededInbox
+	inboxTopVersion uint64
 }
 
 // noteChange records one change a repair or ensure made to an installed
 // deployment, so its result says what was repaired.
+// interrupted reports whether the command got a stop signal
+// (Options.Interrupted).
+func (l *lifecycle) interrupted() bool {
+	select {
+	case <-l.opts.Interrupted:
+		return true
+	default:
+		return false
+	}
+}
+
+// untilInterrupted is ctx, also cancelled when the command gets a stop
+// signal (Options.Interrupted). Call stop once it is no longer needed.
+func (l *lifecycle) untilInterrupted(ctx context.Context) (_ context.Context, stop func()) {
+	if l.opts.Interrupted == nil {
+		return ctx, func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-l.opts.Interrupted:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
+// interruptedError is the cause of a transaction rolled back for a stop
+// signal before step.
+func interruptedError(step string) error {
+	return fmt.Errorf("the run got a stop signal (SIGTERM or an interrupt) and rolled back before it %s; run it again", step)
+}
+
 func (l *lifecycle) noteChange(format string, args ...any) {
 	if l.reportChanges {
 		l.result.Changes = append(l.result.Changes, fmt.Sprintf(format, args...))
@@ -305,6 +363,34 @@ func Run(ctx context.Context, env *Env, opts Options) *enterprisestatus.Result {
 	l.result.Warnings = uniqueMessages(l.result.Warnings)
 	l.result.Finish(env.GOOS, failure)
 	return l.result
+}
+
+// What a repair that succeeded adds to its changes, so --json says what the
+// text output says (GAP-0020, GAP-0061).
+const (
+	// RepairNothingChanged is the change a repair of a healthy deployment
+	// lists.
+	RepairNothingChanged = "nothing to repair"
+	// RepairRestartedServices is listed by every repair that started the
+	// services (GAP-2030).
+	RepairRestartedServices = "restarted the DefenseClaw services to re-apply the deployment; `ensure` leaves a healthy deployment running"
+)
+
+// summarizeRepair ends the changes of a repair that succeeded: a healthy
+// deployment had nothing to repair, and repair re-applies the deployment,
+// so it stops and starts every service even then. With --no-start
+// (not_started) it started none.
+func (l *lifecycle) summarizeRepair() {
+	r := l.result
+	if len(r.Errors) > 0 {
+		return
+	}
+	if len(r.Changes) == 0 {
+		r.Changes = append(r.Changes, RepairNothingChanged)
+	}
+	if !hasMessageCode(r.Warnings, codeNotStarted) {
+		r.Changes = append(r.Changes, RepairRestartedServices)
+	}
 }
 
 // uniqueMessages drops repeats of an identical code and message, keeping
@@ -363,7 +449,16 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		l.reportNoSpace(err)
 		return 0
 	}
-	lock, err := env.acquireLock(ctx)
+	// A stop signal ends the wait for the lock: the run that waited could
+	// otherwise take it later and remove or change the deployment after
+	// the command was told to stop.
+	lockCtx, stopLockWait := l.untilInterrupted(ctx)
+	lock, err := env.acquireLock(lockCtx)
+	stopLockWait()
+	if err != nil && l.interrupted() {
+		r.AddError(codeInterrupted, "the run got a stop signal (SIGTERM or an interrupt) while it waited for the lifecycle lock; nothing was changed")
+		return 0
+	}
 	if err != nil {
 		if errors.Is(err, errLockBusy) {
 			r.AddError(codeBusy, err.Error()+"; "+lockBusyNextStep(env.LockTimeout))
@@ -393,6 +488,22 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		return 0
 	}
 	defer lock.release()
+	if l.interrupted() {
+		r.AddError(codeInterrupted, "the run got a stop signal (SIGTERM or an interrupt) before it started; nothing was changed")
+		return 0
+	}
+	// Once this run holds the lock, before anything changes (the kill
+	// switch, GAP-0352): no protected foreign-hook session record written
+	// before it proves anything once it started, not even one written under
+	// a key a run this one waited for made at its end.
+	if !l.killHookSessionKeys() {
+		return 0
+	}
+	// Registered after the lock, so it runs before the lock goes: only a run
+	// that finished without an error makes new keys (GAP-0352).
+	if l.opts.Action != ActionUninstall {
+		defer l.createHookSessionKey()
+	}
 	if l.opts.FromPackage && l.opts.Reason != "package" {
 		// Recorded before the lock goes, so a package run that waits for it
 		// writes its own result after this one.
@@ -450,7 +561,13 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		err := l.opts.Mutate(ctx)
 		resume()
 		if err != nil {
-			r.AddError(codeChange, err.Error())
+			// A bundle refusal (secret set to a value the signed bundle does
+			// not bind) keeps its code.
+			code := codeChange
+			if bundleCode := enterprisebundle.CodeOf(err); bundleCode != "" {
+				code = string(bundleCode)
+			}
+			r.AddError(code, err.Error())
 			return 0
 		}
 		if record == nil && l.opts.PayloadDir == "" && !l.opts.FromPackage {
@@ -492,7 +609,9 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		// The installed binaries are the payload of a repair without one: a
 		// missing hook binary refused it with payload_invalid (GAP-1217).
 		l.restoreTamperedHookBinary(ctx, record)
-		return l.settleInputChanges(ctx, l.apply(ctx, record))
+		code := l.settleInputChanges(ctx, l.apply(ctx, record))
+		l.summarizeRepair()
+		return code
 	case ActionEnsure:
 		if record == nil {
 			return l.settleInputChanges(ctx, l.freshInstall(ctx))
@@ -1122,6 +1241,16 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	p.version = p.payload.Version
 	if record != nil && !l.opts.AllowDowngrade && compareProductVersions(p.version, record.ProductVersion) < 0 {
 		return nil, &codedError{code: codeDowngrade, err: fmt.Errorf("payload version %s is older than the installed %s; downgrades are refused (rerun with --allow-downgrade to roll back deliberately)", p.version, record.ProductVersion)}
+	}
+	// Every candidate must meet an authenticated floor. A newly verified
+	// signed replacement supplies its own floor even when the previously
+	// confirmed bundle is damaged; other runs use the confirmed bundle.
+	if l.bundle != nil {
+		if err := bundleProductFloorRefusal(p.version, l.bundle.verifiedProductFloor); err != nil {
+			return nil, err
+		}
+	} else if err := env.BundleProductFloorRefusal(p.version); err != nil {
+		return nil, err
 	}
 	if l.opts.ProductVersion != "" && strings.TrimPrefix(l.opts.ProductVersion, "v") != p.version {
 		return nil, &codedError{code: codePayload, err: fmt.Errorf("payload version %s does not match --product-version %s", p.version, l.opts.ProductVersion)}
@@ -1831,13 +1960,16 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 		restored, err := l.rollback(ctx, snap, pending, false, keepNewerConfig, revertConfig)
 		if newerConfig != nil {
-			l.restoreNewerConfig(record, newerConfig)
+			l.restoreNewerConfig(record.ServiceGID, newerConfig)
 		}
 		if restored && record != nil && l.machinePolicyPublished {
 			l.restoreMachinePolicy(record)
 		}
-		if restored && record != nil && newerConfig == nil && l.configWrittenDuringRun != nil {
-			l.restoreNewerConfig(record, l.configWrittenDuringRun)
+		// Also after a failed first install: the snapshot removed the
+		// config.yaml it wrote, and a push made during activation is the
+		// administrator's file (p0 GAP-1410).
+		if restored && newerConfig == nil && l.configWrittenDuringRun != nil {
+			l.restoreNewerConfig(account.GID, l.configWrittenDuringRun)
 		} else {
 			l.configWrittenDuringRun = nil
 		}
@@ -1872,6 +2004,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			return failAndRollback(codeUnmanagedLayout, err)
 		}
 	}
+	if l.interrupted() {
+		return failAndRollback(codeInterrupted, interruptedError("stopped the services"))
+	}
 	keep := l.keepRunningDuringChange(p)
 	// The gateway that keeps running reloads config.yaml as soon as it is written.
 	l.generationExposed = hot
@@ -1880,6 +2015,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		keepSensorHelperRunning(keep, units)
 	}
 	l.quiesce(ctx, units, keep)
+	if l.interrupted() {
+		return failAndRollback(codeInterrupted, interruptedError("wrote the new files"))
+	}
 	pending.Phase = "apply"
 	_ = env.savePending(pending)
 
@@ -1947,6 +2085,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		return failAndRollback(codeApply, err)
 	}
 
+	if l.interrupted() {
+		return failAndRollback(codeInterrupted, interruptedError("started the services"))
+	}
 	pending.Phase = "activate"
 	_ = env.savePending(pending)
 	l.generationExposed = true
@@ -2385,6 +2526,71 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 		}
 	}
 	return changed, nil
+}
+
+// hookSessionKillKeys removes every account's key of the protected
+// foreign-hook session records (enterprisepolicy.KillAllPublishedSessionKeys)
+// and hookSessionRotateKeys gives every account a new one
+// (RotateAllPublishedSessionKeys); replaceable in tests.
+var (
+	hookSessionKillKeys   = enterprisepolicy.KillAllPublishedSessionKeys
+	hookSessionRotateKeys = enterprisepolicy.RotateAllPublishedSessionKeys
+)
+
+// killHookSessionKeys removes every account's key of the protected
+// foreign-hook session records (Layout.HookSessionDir) once the run holds
+// the lifecycle lock and before it changes anything: from then on no record
+// written before proves anything during an outage (the kill switch,
+// GAP-0352). The lifecycle lock is also the key lock
+// (enterprisepolicy.PublishedSessionKeysLockPath): no hook guardian makes a
+// key until the run made new ones and let the lock go. No record has to be
+// found, so whatever another account could do to the record folder or the
+// folders above it while they were loosened brings no allow back: only
+// root can make a key the hook accepts. A key that could not be removed but
+// is shadowed or marked revoked is a warning. A key that cannot be shown
+// dead stops every action but uninstall before it changes anything: an
+// install, upgrade, repair or ensure would put the record folders' trust
+// back while an earlier allow could still prove itself. An uninstall goes
+// on with a warning; it removes the record folder. It reports whether the
+// run may go on.
+func (l *lifecycle) killHookSessionKeys() bool {
+	e := l.env
+	if e.Layout.HookSessionDir == "" {
+		return true
+	}
+	err := hookSessionKillKeys(e.P(e.Layout.HookSessionDir))
+	switch {
+	case err == nil:
+	case !errors.Is(err, enterprisepolicy.ErrPublishedSessionKeyAlive):
+		l.result.AddWarning(codeHookSessionKey, "a protected foreign-hook session record key could not be removed before the run; the hook refuses it (a second key or a revocation mark): "+err.Error())
+	case l.opts.Action == ActionUninstall:
+		l.result.AddWarning(codeHookSessionKey, "the protected foreign-hook session record keys could not be shown dead before the uninstall: "+err.Error())
+	default:
+		l.result.AddError(codeHookSessionKey, "the protected foreign-hook session record keys could not be shown dead, so nothing was changed (a record written before this run could still allow a guarded call during a gateway outage): "+err.Error())
+		return false
+	}
+	return true
+}
+
+// createHookSessionKey gives every account of the protected foreign-hook
+// session records a new key once a run finished without an error, while it
+// still holds the lifecycle lock, whatever key an account has: no allow
+// published while the run changed the deployment outlives it. A run that
+// failed makes none: guarded connectors then block during a gateway outage
+// until a later run, or the hook guardian's next pass, makes them. A record
+// folder that does not exist gets none.
+func (l *lifecycle) createHookSessionKey() {
+	e := l.env
+	if e.Layout.HookSessionDir == "" || len(l.result.Errors) != 0 {
+		return
+	}
+	path := e.P(e.Layout.HookSessionDir)
+	if info, err := os.Lstat(path); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if err := hookSessionRotateKeys(path, enterprisepolicy.PublishedSessionTrust{}); err != nil {
+		l.result.AddWarning(codeHookSessionKey, "the protected foreign-hook session record keys could not be made, so guarded connectors block during a gateway outage until the next run or hook guardian pass: "+err.Error())
+	}
 }
 
 // metadataDiffers reports whether path's permission bits or owner differ
@@ -3008,6 +3214,10 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 	if l.machinePolicyDrift(p) {
 		return false, ""
 	}
+	if l.helperModeDrift(ctx, p) {
+		l.helperModeRestart = true
+		return false, ""
+	}
 	if l.policyAssetsChanged(ctx, record, account) {
 		return false, ""
 	}
@@ -3260,6 +3470,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// byte (enterprisepolicy restores the recorded preimage or edits only
 	// DefenseClaw's own entries).
 	policyLeft := false
+	var policyRemoved []string
 	if policy, err := env.MachinePolicy.RemoveAll(); err != nil {
 		errs = append(errs, fmt.Errorf("remove machine policy: %w", err))
 		policyLeft = true
@@ -3267,6 +3478,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		for _, state := range policy.States {
 			if state.Changed {
 				r.MachinePolicy[state.Connector] = state.ToStatus()
+				policyRemoved = append(policyRemoved, state.Connector)
 			}
 		}
 	}
@@ -3295,6 +3507,18 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		if err := errors.Join(errs...); err != nil {
 			r.AddError(codeUninstall, err.Error())
 		}
+		if record != nil {
+			// The deployment stays, so its vendor machine policy goes back
+			// before its services start: the entries of every connector the
+			// removal could withdraw were gone (Codex beside an immutable
+			// Claude Code file), and those agents ran without DefenseClaw
+			// while the kept deployment read as installed (r102 GAP-0473).
+			// What cannot be written back is named in a warning.
+			l.restoreMachinePolicy(record)
+			for _, connector := range policyRemoved {
+				delete(r.MachinePolicy, connector)
+			}
+		}
 		if failed := l.restoreUninstallServices(ctx, units, wasActive, wasEnabled); len(failed) > 0 {
 			r.AddError(codeUninstall, "could not start the services this uninstall stopped again ("+strings.Join(failed, "; ")+"); run `"+env.lifecycleCommand(ActionEnsure)+"` to restore the deployment")
 		}
@@ -3310,6 +3534,20 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		// for (GAP-1519).
 		r.AddError(codeUninstallIncomplete, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because "+strings.Join(holders, " and ")+" still name them; fix the cause and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
 		return 0
+	}
+	// A device that takes signed bundles keeps a copy of the gateway for the
+	// package scripts' release floor check: once the binaries are gone (a
+	// --keep-state uninstall, or one that fails after removing them) the
+	// installed gateway cannot answer, and a package below the confirmed
+	// bundle's floor would write its files before its postinstall ensure
+	// refused it. The machine state removal below takes the copy with the
+	// rest of the lifecycle state.
+	if !l.opts.Purge {
+		kept, err := env.keepFloorChecker(record)
+		if err != nil {
+			r.AddWarning(codeFloorCheckerNotKept, "could not keep the gateway that checks the release floor of the confirmed policy bundle ("+err.Error()+"); a package below that floor is refused only by its postinstall, after its files are in place")
+		}
+		l.floorCheckerKept = kept
 	}
 	// On Linux the deb/rpm removes its own files (the binaries, units and
 	// the managed OpenCode plugin). A macOS pkg has no uninstaller, so the
@@ -3653,6 +3891,9 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	switch {
 	case l.opts.KeepState:
 		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
+		if l.floorCheckerKept {
+			lines = append(lines, "kept a root-only copy of the gateway in "+filepath.Join(layout.LifecycleDir, floorCheckerDir)+": the package scripts run its release floor check of the confirmed policy bundle before a reinstall replaces any file")
+		}
 		if l.openshellRecordKept {
 			lines = append(lines, "kept the record of the sandbox setup the kept sandboxes were made under in "+layout.LifecycleDir)
 		}

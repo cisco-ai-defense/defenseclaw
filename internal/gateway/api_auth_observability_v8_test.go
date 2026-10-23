@@ -331,40 +331,6 @@ func TestAPIAuthenticationFailureV8EmissionFailureNeverFallsBack(t *testing.T) {
 	}
 }
 
-func TestOTLPPathAuthenticationFailureKeepsSpecializedTelemetryOwner(t *testing.T) {
-	fixture := newSidecarRuntimeFixture(t, true)
-	api := configuredAPIAuthenticationServer("gateway-token")
-	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
-		connector.OTLPScopeOmnigent: "scoped-token",
-	})
-	api.bindOTLPObservabilityRuntime(fixture.runtime)
-	handler := api.tokenAuth(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Fatal("invalid scoped path token reached handler")
-	}))
-	request := httptest.NewRequest(
-		http.MethodPost, "/otlp/omnigent/path-token-secret/v1/logs", strings.NewReader(`{"resourceLogs":[]}`),
-	)
-	request.RemoteAddr = "127.0.0.1:4242"
-	response := httptest.NewRecorder()
-
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusUnauthorized || response.Body.String() != "{\"error\":\"unauthorized\"}\n" {
-		t.Fatalf("response=%d %q", response.Code, response.Body.String())
-	}
-	if generic := readStoredAPIAuthenticationFailures(t, fixture.path); len(generic) != 0 {
-		t.Fatalf("OTLP path failure duplicated into compliance.activity: %#v", generic)
-	}
-	specialized := readStoredOTLPV8Events(t, fixture.path)
-	if len(specialized) != 1 || specialized[0].eventName != "telemetry.authentication.failed" ||
-		specialized[0].bucket != string(observability.BucketTelemetryIngest) || specialized[0].mandatory != 1 {
-		t.Fatalf("specialized OTLP authentication event=%#v", specialized)
-	}
-	if strings.Contains(specialized[0].payload, "path-token-secret") {
-		t.Fatalf("specialized OTLP event retained path token: %s", specialized[0].payload)
-	}
-}
-
 func TestAPIAuthenticationFailureV8ExportsGeneratedRouteAndReasonMetrics(t *testing.T) {
 	api, capture := bindHookModelV8Runtime(t, []string{"metrics"})
 
@@ -374,7 +340,7 @@ func TestAPIAuthenticationFailureV8ExportsGeneratedRouteAndReasonMetrics(t *test
 		gatewaylog.ErrCodeAuthMissingToken, "missing_token",
 	)
 	otlpRequest := httptest.NewRequest(
-		http.MethodPost, "/otlp/omnigent/path-token-secret/v1/logs", nil,
+		http.MethodPost, "/otlp/codex/path-token-secret/v1/logs", nil,
 	)
 	api.emitHTTPAuthFailure(
 		otlpRequest.Context(), otlpRequest, "untrusted-otlp-route-value",
@@ -407,5 +373,39 @@ func TestAPIAuthenticationFailureV8ExportsGeneratedRouteAndReasonMetrics(t *test
 			strings.Contains(point.attributes["http.route"], "untrusted") {
 			t.Fatalf("authentication metric leaked caller route: %+v", point)
 		}
+	}
+}
+
+func TestOTLPPathAuthenticationFailureKeepsSpecializedTelemetryOwner(t *testing.T) {
+	fixture := newSidecarRuntimeFixture(t, true)
+	api := configuredAPIAuthenticationServer("gateway-token")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeCodex: "scoped-token",
+	})
+	api.bindOTLPObservabilityRuntime(fixture.runtime)
+	handler := api.tokenAuth(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("invalid scoped path token reached handler")
+	}))
+	request := httptest.NewRequest(
+		http.MethodPost, "/otlp/codex/path-token-secret/v1/logs", strings.NewReader(`{"resourceLogs":[]}`),
+	)
+	request.RemoteAddr = "127.0.0.1:4242"
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized || response.Body.String() != "{\"error\":\"unauthorized\"}\n" {
+		t.Fatalf("response=%d %q", response.Code, response.Body.String())
+	}
+	if generic := readStoredAPIAuthenticationFailures(t, fixture.path); len(generic) != 0 {
+		t.Fatalf("OTLP path failure duplicated into compliance.activity: %#v", generic)
+	}
+	specialized := readStoredOTLPV8Events(t, fixture.path)
+	if len(specialized) != 1 || specialized[0].eventName != "telemetry.authentication.failed" ||
+		specialized[0].bucket != string(observability.BucketTelemetryIngest) || specialized[0].mandatory != 1 {
+		t.Fatalf("specialized OTLP authentication event=%#v", specialized)
+	}
+	if strings.Contains(specialized[0].payload, "path-token-secret") {
+		t.Fatalf("specialized OTLP event retained path token: %s", specialized[0].payload)
 	}
 }

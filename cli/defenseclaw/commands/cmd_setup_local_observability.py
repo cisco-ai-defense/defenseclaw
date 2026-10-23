@@ -35,6 +35,7 @@ from defenseclaw.observability.local_stack import (
     GRAFANA_ACCESS_NO_PASSWORD,
     GRAFANA_ACCESS_PASSWORD,
     GRAFANA_ADMIN_USER,
+    GRAFANA_ANONYMOUS_ROLE,
     GRAFANA_PASSWORD_FILE_NAME,
     LocalStackController,
     LocalStackError,
@@ -103,7 +104,8 @@ def local_observability(ctx: click.Context) -> None:
     default=None,
     help=(
         "Select Grafana access explicitly. New managed stacks default to a "
-        "password; existing anonymous stacks keep their current behavior."
+        "password; --no-password allows anonymous read-only (Viewer) access, "
+        "never Admin. Existing anonymous stacks keep anonymous access, read-only."
     ),
 )
 @click.option(
@@ -638,10 +640,11 @@ def _print_stack_summary(
         click.echo(
             f"    {ux.bold('Grafana:')}    "
             f"{contract.get('grafana_url', 'http://localhost:3000')}  "
-            "(anonymous Admin; no password)"
+            f"(anonymous {GRAFANA_ANONYMOUS_ROLE}, read-only; no password)"
         )
         click.echo(
-            "    warning: every local process can access Grafana as Admin; managed ports remain loopback-only",
+            "    warning: every local process can view Grafana's dashboards without a password (read-only); "
+            "managed ports remain loopback-only",
             err=True,
         )
     else:

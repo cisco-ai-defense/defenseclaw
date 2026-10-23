@@ -1,0 +1,116 @@
+---
+title: Deploy with Microsoft Entra ID
+description: Use Microsoft Entra ID users and groups with DefenseClaw on Entra-joined Windows, on Linux (Entra SSH sign-in, Himmelblau, or Entra Domain Services with SSSD) and on macOS with Platform SSO, and check what DefenseClaw records.
+keywords:
+  - DefenseClaw Entra ID
+  - Entra joined Windows
+  - AADSSHLoginForLinux
+  - Himmelblau
+  - Microsoft Entra Domain Services
+  - Platform SSO
+  - Entra group SID
+---
+
+DefenseClaw never calls Microsoft Entra ID or Microsoft Graph. A user signs in to the computer with Entra ID, the computer gives that user an operating system account, and DefenseClaw reads the account the way it reads any other: the SID and sign-in token on Windows, NSS on Linux, Open Directory on macOS. A `groups` assignment can name an Entra group only where the operating system knows the membership. What is read from where is in [How DefenseClaw knows who a user is](/docs/enterprise/identity/sources). Guardrail profiles apply to per-user installs and to the standalone enterprise profile; the Secure Client profile rejects them.
+
+<Callout type="warn" title="Not part of the 1.0.4 certification">
+Active Directory is the certified identity stack in 1.0.4. The Entra setups below were last verified live in October 2026 with Claude Code on Entra-joined Windows 11, Ubuntu 22.04 on Azure (Entra SSH sign-in), Ubuntu 24.04 with Himmelblau 5.0.0, RHEL 9.8 on Entra Domain Services, and macOS 15.8 with Platform SSO. Hybrid-joined Windows, Entra Kerberos and Himmelblau 4.x were not tested.
+</Callout>
+
+## Pick your setup
+
+| Setup | Users sign in with | DefenseClaw sees | A `groups` assignment can name |
+| --- | --- | --- | --- |
+| Entra-joined Windows 10 or 11 | Entra ID at the Windows sign-in screen | Directory `entra_id`, the user SID, the UPN and the tenant ID | Standalone enterprise: an Entra group by SID, once a built-in local group lists it ([step 2](#2-windows-entra-joined-computers)). Per-user install: no groups, use `users` |
+| Azure Linux VM with Entra SSH sign-in | `az ssh vm`, with the `aad` module | Directory `entra_id`, source `nss_aad`, the UPN | No Entra group: the module gives only a private group. Use `users`, or one of the two routes below |
+| Linux with Himmelblau | `ssh` with the Entra password, an MFA code and a Hello PIN | Directory `entra_id`, source `himmelblau`; the UPN when accounts are named by it | The user's Entra groups, by name ([Himmelblau](/docs/enterprise/identity/reference#himmelblau)) |
+| Linux joined to Microsoft Entra Domain Services | `ssh` with the Entra password, through SSSD | Directory `active_directory` and the domain. Per-user: source `sssd`; standalone enterprise: `sssd_infopipe` with the UPN | The synced Entra groups, as `name@domain` unless SSSD uses short names ([Entra Domain Services](/docs/enterprise/identity/reference#microsoft-entra-domain-services-with-sssd)) |
+| Mac with Platform SSO (Company Portal) | Entra ID at the macOS login window | Standalone enterprise: directory `entra_id`, source `macos_platform_sso`, the UPN. Per-user: directory `local` | No Entra group. A local group that carries the membership ([step 4](#4-macos-platform-sso)) |
+| Linux desktop enrolled in Intune | A local account; Intune does not sign users in | Directory `local` | Local groups |
+
+If a `groups` assignment matches no one, the usual cause is that the operating system does not know the Entra group. Check as the user with the OS's own tools: `whoami /groups` on Windows, `id` on Linux and macOS. If the group is not listed there, no DefenseClaw setting can match it.
+
+## Starter kit
+
+Scripts and example configs are in [`packaging/identity/entra`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/packaging/identity/entra). Every script has `--help`, reads credentials from the environment and changes nothing until you pass `--apply` (PowerShell: `-WhatIf` to preview). The file list is in [Identity detail](/docs/enterprise/identity/reference#starter-kit).
+
+## 1. Prepare the tenant
+
+DefenseClaw needs nothing special from the tenant. You need the groups and users your profiles will name, and the SID of each group. `entra_setup.py` creates them and prints a group's SID:
+
+```text
+group defenseclaw-ml-team
+      object id  6f1c9a0e-3b2d-4c58-9e71-a4b5c6d7e8f9
+      SID        S-1-12-1-1864145422-1280850733-3047453086-4192786374
+```
+
+Windows shows an Entra group only by this SID. The app registration and script commands are in [Identity detail](/docs/enterprise/identity/reference#1-prepare-the-tenant).
+
+## 2. Windows: Entra-joined computers
+
+Join the computer in **Settings** > **Accounts** > **Access work or school**. An Entra-joined computer puts an Entra group's SID into a sign-in token only when a built-in local group lists it; without that, a `groups` assignment that names the group matches no one. Run `Add-EntraGroupToLocalGroup.ps1` elevated (preview with `-WhatIf`), have the user sign out and in, and check with `Get-DefenseClawEntraIdentity.ps1 -GroupSid <sid>`. For a fleet, use an Intune policy; see [Entra groups on Windows](/docs/enterprise/identity/sources#entra-groups-on-windows). A per-user install on Windows has no group list, so only `users`, `connectors` and `agents` assignments match there. Details: [Identity detail](/docs/enterprise/identity/reference#2-windows-entra-joined-computers).
+
+## 3. Linux
+
+Linux has three ways to sign Entra users in, and only two give the host the user's Entra groups:
+
+| Route | Entra groups on the host |
+| --- | --- |
+| Azure Entra SSH sign-in (`aad` module) | None: each account has only its private group |
+| Himmelblau | The user's Entra groups, named in `id` and initgroups |
+| Entra Domain Services with SSSD | The synced Entra groups, as Active Directory groups |
+
+Setup commands for each route are in [Identity detail](/docs/enterprise/identity/reference#3-linux).
+
+## 4. macOS: Platform SSO
+
+Platform SSO signs Entra users in at the login window and links each local account to its Entra user, but does not put Entra groups into the macOS group database. A `groups` assignment can match only a local group that carries the membership; `macos-entra-group-bridge.sh` adds a user to such a group. The standalone enumerator reads the account's Entra UPN, so a `users` assignment by UPN works there. See [Identity detail](/docs/enterprise/identity/reference#4-macos-platform-sso).
+
+## 5. Map users and groups to profiles
+
+Write `users` assignments with the principal the host actually resolves, and use the SID for Entra groups on Windows.
+
+```yaml
+guardrail:
+  profiles:
+    strict: {mode: action, block_at: MEDIUM}
+    ml-team: {mode: observe}
+  profile_assignments:
+    - profile: ml-team
+      match:
+        users: ["alice@contoso.onmicrosoft.com"]
+    - profile: ml-team                       # standalone enterprise on Windows only
+      match:
+        groups: ["S-1-12-1-1864145422-1280850733-3047453086-4192786374"]
+  default_profile: strict
+ai_discovery:
+  include_user_principal: true               # put the UPN in records; off by default
+```
+
+<Callout type="warn" title="A per-user config belongs to the user">
+A per-user install reads the config from the user's own profile, so the user can change their profile. To enforce a policy the user cannot change, use the standalone enterprise profile, which reads the machine config.
+</Callout>
+
+Set a strict `default_profile`: a failed lookup lands on it ([why](/docs/how-to/policies/give-a-group-its-own-policy/)). Keys are in [User- and group-based policies](/docs/reference/policy/guardrail-profiles); the per-platform support table is in [Identity detail](/docs/enterprise/identity/reference#5-map-users-and-groups-to-profiles).
+
+## 6. Check
+
+Ask the gateway which profile a user gets. On Windows, name an Entra user by SID, as `AzureAD\Name`, by the bare name or by the UPN.
+
+```powershell
+# Standalone enterprise: run in an elevated Administrator prompt.
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user 'AzureAD\Alice' --connector claudecode
+```
+
+```bash
+defenseclaw guardrail profile explain --connector claudecode
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice --connector claudecode
+```
+
+`profile` names the profile and `match` says `user` or `group`; another Entra user gets `default_profile`. The fields the records carry are in [Entra ID fields, as seen live](/docs/enterprise/identity/sources#entra-id-fields-as-seen-live). Operation notes and troubleshooting are in [Identity detail](/docs/enterprise/identity/reference#7-what-to-expect-in-operation).
+
+<Cards>
+  <Card title="Entra groups on Windows" href="/docs/enterprise/identity/sources#entra-groups-on-windows" description="The token rule, the Intune recipe and the limits." />
+  <Card title="User- and group-based policies" href="/docs/reference/policy/guardrail-profiles" description="Write assignments, read the audit record, ship to managed hosts." />
+  <Card title="Prepare your Intune tenant" href="/docs/enterprise/mdm/intune/tenant" description="Licences, enrollment, groups and the scripts that set them up." />
+</Cards>

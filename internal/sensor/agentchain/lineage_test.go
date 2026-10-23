@@ -232,6 +232,51 @@ func TestReseededProcessKeepsItsIdentity(t *testing.T) {
 	}
 }
 
+// TestARecycledParentWithinTheStartToleranceIsNotTheParent is GAP-1495: a
+// benign shell starts a child and exits, and within two seconds of the
+// child's start an agent takes the shell's pid. The child's edge recorded the
+// shell's instance, so the agent is not its parent even though both starts
+// are known and the agent's lies within the tolerance.
+func TestARecycledParentWithinTheStartToleranceIsNotTheParent(t *testing.T) {
+	t.Parallel()
+	tracker := NewTracker()
+	start := int64(1_760_000_000) * int64(time.Second)
+	tracker.ObserveExecEvent(ExecObservation{PID: 100, PPID: 1, Name: "bash", StartNS: start})
+	tracker.ObserveExecEvent(ExecObservation{PID: 200, PPID: 100, Name: "python3", StartNS: start + int64(5*time.Second)})
+	tracker.ObserveExitEvent(100, "")
+	tracker.ObserveExecEvent(ExecObservation{PID: 100, PPID: 1, Name: "claude", StartNS: start + int64(6*time.Second)})
+	if attribution, ok := tracker.Attribute(200); ok {
+		t.Fatalf("the shell's child was attributed to the agent that reused its pid: %+v", attribution)
+	}
+	child := tracker.records[200]
+	parent := tracker.records[100]
+	if child.parentInstance == 0 || child.parentInstance == parent.instance {
+		t.Fatalf("child edge instance %d, parent instance %d: want the shell's earlier instance", child.parentInstance, parent.instance)
+	}
+	if confirmedParent(parent, child, child.parentInstance) {
+		t.Fatal("confirmedParent accepted a parent instance other than the one the edge recorded")
+	}
+}
+
+// TestAPollRelinksAChildListedBeforeItsRecycledParent pins the poll side of
+// GAP-1495: a child row listed before its parent's row, while the parent pid
+// still held an earlier process, names the parent row's instance once the
+// poll is read, so the stricter instance check keeps the true parent.
+func TestAPollRelinksAChildListedBeforeItsRecycledParent(t *testing.T) {
+	t.Parallel()
+	tracker := NewTracker()
+	start := int64(1_760_000_000) * int64(time.Second)
+	tracker.ObserveExecEvent(ExecObservation{PID: 100, PPID: 1, Name: "bash", StartNS: start})
+	later := time.Unix(0, start).Add(time.Hour)
+	tracker.ObserveProcessTable([]ProcessRow{
+		{PID: 200, PPID: 100, Name: "python3", Start: later.Add(5 * time.Second)},
+		{PID: 100, PPID: 1, Name: "claude", Start: later},
+	})
+	if attribution, ok := tracker.Attribute(200); !ok || attribution.AgentName != "claude" {
+		t.Fatalf("the child of the polled agent lost its attribution: %+v ok=%v", attribution, ok)
+	}
+}
+
 // TestProcessTablePollDoesNotRenameAKernelRecord pins that a poll row, whose
 // name is the 15-byte comm, does not overwrite what the kernel's exec record
 // said -- and that a row whose start shows another process does replace it.

@@ -303,8 +303,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 			return err
 		}
 	}
-	// A launch the harness cannot take (OmniGent with a profile that names
-	// no default model and no --model) fails before a sandbox exists.
+	// A launch the harness cannot take fails before a sandbox exists.
 	pre := harness.LaunchOptions{Mode: harness.Interactive, Yolo: !o.Safe, Args: o.Args}
 	if o.Prompt != "" {
 		pre.Mode, pre.Prompt = harness.Headless, o.Prompt
@@ -538,12 +537,8 @@ func printMode(spec *harness.Spec, args []string) bool {
 		return has("--no-interactive")
 	case "hermes":
 		return has("-q", "--query")
-	case "openhands":
-		return has("--headless")
 	case "antigravity":
 		return has("-p", "--print", "--prompt", "-print", "-prompt")
-	case "omnigent":
-		return has("-p", "--prompt")
 	}
 	return false
 }
@@ -564,9 +559,7 @@ func printHint(spec *harness.Spec) string {
 		return ` or -- --no-interactive "TEXT"`
 	case "hermes":
 		return ` or -- chat -q "TEXT"`
-	case "openhands":
-		return ` or -- --headless -t "TEXT"`
-	case "antigravity", "omnigent":
+	case "antigravity":
 		return ` or -- -p "TEXT"`
 	}
 	return ""
@@ -714,7 +707,7 @@ func (a *App) checkSandboxes(ctx context.Context, api API, ready bool) (*sandbox
 	}
 	a.noteManaged(st)
 	if !st.Enabled {
-		return nil, errors.New(st.OffMessage())
+		return nil, &DisabledError{Message: st.OffMessage() + sandboxRuntimeMissing()}
 	}
 	if !ready && readiesAtRun(api, st) {
 		return st, nil
@@ -1291,7 +1284,9 @@ func (a *App) resolveLiveMount(ctx context.Context, api API, spec *harness.Spec,
 func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sandbox, copyMode, repoChanged bool) (bool, error) {
 	run := a.runLaunchOf(sb)
 	held := fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder", sb.Name, sb.Phase, sb.WorkdirMode)
-	if n := a.attachedSessions(sb.Name); n > 0 {
+	if n, err := a.attachedSessions(sb.Name); err != nil {
+		a.warn("cannot count the sessions attached to " + sb.Name + ": " + err.Error())
+	} else if n > 0 {
 		// Both sessions share it: neither's end stops it under the other.
 		held += fmt.Sprintf(", and %s attached to it", plural(int64(n), "session is", "sessions are"))
 	}
@@ -2016,18 +2011,9 @@ var sessionKeys = map[string]string{
 	"opencode": "Esc interrupts OpenCode's turn; Ctrl-C (with an empty prompt) quits OpenCode, which ends the session",
 }
 
-// ownApprovals are the harnesses without a skip-permissions switch: their
-// approval pauses come from their own policies, DefenseClaw's among them.
-var ownApprovals = map[string]string{
-	"omnigent": "approvals from OmniGent's policies, DefenseClaw's included",
-}
-
-// permissionsText is the banner's permissions: skip-permissions on or off
-// (and why), or the harness's own policies.
+// permissionsText is the banner's permissions: skip-permissions on or off,
+// and why it is off.
 func (a *App) permissionsText(sb *sandboxapi.Sandbox) string {
-	if text, ok := ownApprovals[sb.Harness]; ok {
-		return text
-	}
 	if !sb.Launch.Yolo {
 		return "skip-permissions OFF (" + a.promptsKept(sb) + ")"
 	}

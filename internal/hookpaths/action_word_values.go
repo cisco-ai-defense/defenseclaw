@@ -133,6 +133,57 @@ func actionWordValue(word *syntax.Word, values actionValues, cwd, home string) (
 	return value, true
 }
 
+// actionBoundProgramWords accepts only a simple program parameter immediately
+// after its one literal assignment. A computed assignment, intervening command
+// or control flow can change the executable before the call runs.
+func actionBoundProgramWords(file *syntax.File, home string) map[*syntax.CallExpr]string {
+	bound := make(map[*syntax.CallExpr]string)
+	for i := 1; i < len(file.Stmts); i++ {
+		call, ok := file.Stmts[i].Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			continue
+		}
+		name, ok := actionSimpleProgramParameter(call.Args[0])
+		if !ok || len(file.Stmts[i-1].Redirs) != 0 {
+			continue
+		}
+		previous, ok := file.Stmts[i-1].Cmd.(*syntax.CallExpr)
+		if !ok || len(previous.Args) != 0 || len(previous.Assigns) != 1 {
+			continue
+		}
+		assignment := previous.Assigns[0]
+		if assignment.Name == nil || assignment.Name.Value != name || assignment.Append {
+			continue
+		}
+		value, fixed := StaticWord(assignment.Value, home)
+		if fixed && value != "" && !strings.ContainsAny(value, " \t\r\n*?[]\x00\x1f") {
+			bound[call] = value
+		}
+	}
+	return bound
+}
+
+func actionSimpleProgramParameter(word *syntax.Word) (string, bool) {
+	if word == nil || len(word.Parts) != 1 {
+		return "", false
+	}
+	part := word.Parts[0]
+	if quoted, ok := part.(*syntax.DblQuoted); ok {
+		if len(quoted.Parts) != 1 {
+			return "", false
+		}
+		part = quoted.Parts[0]
+	}
+	parameter, ok := part.(*syntax.ParamExp)
+	if !ok || parameter.Param == nil || parameter.Excl || parameter.Length || parameter.Width ||
+		parameter.IsSet || parameter.Slice != nil || parameter.Repl != nil || parameter.Exp != nil ||
+		parameter.NestedParam != nil || parameter.Flags != nil || len(parameter.Modifiers) != 0 || parameter.Index != nil {
+		return "", false
+	}
+	name := parameter.Param.Value
+	return name, name != "" && name != "@" && name != "*" && name != "#"
+}
+
 func actionSubstitutionValue(sub *syntax.CmdSubst, values actionValues, cwd, home string) (string, bool) {
 	if len(sub.Stmts) != 1 {
 		return "", false

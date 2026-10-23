@@ -473,12 +473,13 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 			if current.rows[name] {
 				continue
 			}
+			// The cleanup holds the cleanup fence only for each removal and
+			// records it in the removal ledger.
 			result, err := enterpriseForeignHookCleanup(current.creds, name, current.dataDir)
 			for _, finding := range result.Removed {
 				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: removed %s %s hook from %s (sha256:%s); backup in %s\n",
 					finding.Connector, dashIfEmpty(finding.Event), finding.Path, finding.Digest, result.BackupDir)
 			}
-			recordEnterpriseForeignHookRemovals(stderr, current.creds.SID, current.creds.UserHome, name, removedForeignHookPaths(result))
 			if err != nil {
 				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup for %s %s: %v\n", name, current.creds.UserHome, err)
 			}

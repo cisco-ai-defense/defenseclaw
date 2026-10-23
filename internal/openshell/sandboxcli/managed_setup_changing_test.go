@@ -25,6 +25,19 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
+func TestManagedOperationalRefusalsHaveOnlyTheRemedy(t *testing.T) {
+	m := &sandboxapi.ManagedStatus{Profile: "contractors", RequestAccess: sandboxapi.RequestAccessFallback}
+	for _, code := range []string{sandboxapi.CodeAdminViolation, sandboxapi.CodeUnavailable} {
+		for _, reason := range []string{sandboxrelay.ReasonDaemonOutdated, sandboxrelay.DetailSetupChanging} {
+			message := "Stop your sandboxes with `defenseclaw sandbox stop NAME`, then retry."
+			text, ok := managedErrorText(&sandboxapi.Error{Code: code, Message: message, Detail: reason}, m)
+			if !ok || text != message {
+				t.Fatalf("%s/%s: %q, %t", code, reason, text, ok)
+			}
+		}
+	}
+}
+
 // #1203: while the organization's switch of the sandbox driver is under
 // way, `run` and `doctor` say so and send nobody to IT for an exception;
 // a setup that is really missing keeps the contact.

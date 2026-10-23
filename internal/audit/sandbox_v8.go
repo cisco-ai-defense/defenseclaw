@@ -1908,7 +1908,7 @@ func (recorder *SandboxRecorder) newEvent(
 		timestamp = time.Now()
 	}
 	event := Event{
-		ID: uuid.NewString(), Timestamp: timestamp.UTC(), Action: string(action),
+		ID: observability.NewTimeOrderedID(), Timestamp: timestamp.UTC(), Action: string(action),
 		Target: target, Actor: "defenseclaw", Severity: severity, Connector: identity.Connector,
 	}
 	if ctx != nil {
@@ -2605,7 +2605,7 @@ func sandboxMetricEnvelope(event Event, snapshot RuntimeV8BuildContext) (observa
 func sandboxMetricBuilder(event Event) (*observability.FamilyBuilder, error) {
 	return observability.NewFamilyBuilder(
 		observability.ClockFunc(func() time.Time { return event.Timestamp.UTC() }),
-		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		observability.TimeOrderedOccurrenceIDs,
 	)
 }
 

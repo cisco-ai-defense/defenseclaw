@@ -1,0 +1,123 @@
+---
+title: Enrollment
+description: How DefenseClaw picks the users and agents to protect on Windows, Linux and macOS, the filters you can set, and what happens when users change.
+keywords:
+  - DefenseClaw enrollment
+  - hook enumerator
+  - target manifest
+  - include_groups
+  - unenrolled_users
+---
+
+Enrollment decides which users DefenseClaw protects. Two services do the work:
+
+- The **enumerator** finds eligible users and their agents every five minutes and writes the protected target manifest.
+- The **guardian** reads that manifest, writes DefenseClaw's hook registration into each enrolled user's agent config, and repairs it when it changes. It re-checks every target once a minute.
+
+An agent reads its hooks when it starts. A session that started before DefenseClaw was activated runs without it until the user restarts the agent. `ensure`, Setup, `status` and `verify` name such sessions with the `agent_sessions_restart_required` warning.
+
+<Flow
+  direction="TB"
+  caption="Both are system services that run as root (SYSTEM on Windows), and the manifest is a file only administrators can change. The guardian writes into a user's agent config as that user: through a worker process on Linux and macOS, and under the user's own signed-in session on Windows."
+>
+  <Node id="dir" kind="generic">{`User accounts\nand installed agents`}</Node>
+  <Node id="enum" kind="generic">{`Enumerator\nlooks every 5 minutes`}</Node>
+  <Node id="man" kind="policy">{`Target manifest\nwho to protect`}</Node>
+  <Node id="grd" kind="generic">{`Guardian\nrepairs on change`}</Node>
+  <Node id="cfg" kind="agent">{`User's agent config\nDefenseClaw hook added`}</Node>
+  <Edge from="dir" to="enum" label="found by" />
+  <Edge from="enum" to="man" label="adds each user" />
+  <Edge from="man" to="grd" label="read by" />
+  <Edge from="grd" to="cfg" label="writes as the user" />
+</Flow>
+
+Machine-policy agents (Codex, Claude Code, Cursor, Copilot, and OpenCode through its managed plugin) run DefenseClaw's hooks for every user on the machine; see [Machine policy](/docs/enterprise/configure/machine-policy). On Linux and macOS, enrollment therefore matters most for per-user agents and for how the gateway treats users it has not enrolled. On Windows every user must be enrolled. Terms are in [Concepts](/docs/enterprise/plan/concepts).
+
+## Choose who is enrolled
+
+Every key lives under `enterprise.enrollment`. Defaults are in [Enterprise settings](/docs/enterprise/configure/settings#enrollment).
+
+```yaml title="config.yaml (Linux example)"
+enterprise:
+  enrollment:
+    mode: auto                      # auto | manifest
+    include_users: [alice]          # enroll even if discovery misses her
+    exclude_users: [build]          # never enroll; wins over everything
+    include_groups: [developers]    # only members of this group
+    exclude_groups: [contractors]   # exclude wins over include
+    exempt_users: [svc-release]     # not enrolled; calls still inspected and logged
+    unenrolled_users: inspect       # inspect | deny
+```
+
+- `exclude_users` always wins. `exempt_users` skips enrollment but not inspection: the account's guardrail profile still applies.
+- `unenrolled_users` (Linux and macOS) decides what happens to a machine-policy agent for a user with no enrollment: `inspect` (default) still inspects, `deny` refuses. On Windows an unenrolled user always fails closed.
+- With `mode: manifest` you publish the target list yourself. The format is in the [detail page](/docs/enterprise/configure/reference#publish-the-target-list-yourself).
+- Linux and macOS also take `root`, `uid_min`, `uid_max`, `home_roots` and `agent_prefixes`. Windows does not apply them.
+
+### What each OS honors
+
+The filters, their order and the keys each OS ignores are in [Enrollment detail](/docs/enterprise/configure/reference#what-each-os-honors).
+
+## How users and agents are found
+
+The enumerator adds a row for a user and an agent only when it finds that agent installed for the user and can read its version. Windows reads the profile list; Linux uses NSS, logged-in sessions and the home roots; macOS uses local accounts, the console user and `/Users`. An agent installed in an unusual place is generally not found. On Linux and macOS, install shared agents under an `agent_prefixes` path. [Enrollment detail](/docs/enterprise/configure/reference#how-users-and-agents-are-found) lists every place searched.
+
+## Agents that cannot be enrolled
+
+When the enumerator finds an agent it cannot enroll, `status` and `verify` warn for that account and set `security_complete: false`. `verify` does not fail on it.
+
+| Code | Meaning |
+| --- | --- |
+| `hook_contract_unverified` | The installed version has no verified DefenseClaw hook contract, or its version could not be read. No hooks are installed for it. |
+| `surface_unverified` | A desktop app or editor extension has no verified engine version or hook delivery. |
+| `agent_unprotected` | The version could not be read, it is below the platform minimum, the user's home is untrusted (Linux and macOS), or enrollment is pending (Windows). |
+| `home_untrusted` | Linux and macOS: the account's home is untrusted and no agent could be listed. Remove group and other write from the home. |
+
+A per-user agent in this state runs without DefenseClaw hooks. Lowest supported versions are in [Supported agent versions](/docs/enterprise/configure/reference#supported-agent-versions).
+
+## Desktop apps and editor extensions
+
+Some agents also ship as a desktop app or editor extension that reads the same hook settings. A user who has only the app or extension is enrolled at the engine version it runs. `unverified_versions: report` (default) enrolls it; `refuse` does not enroll it and the gateway refuses its hook calls. See [Enrollment detail](/docs/enterprise/configure/reference#desktop-apps-and-editor-extensions).
+
+## Linux and macOS
+
+Accounts pass a fixed filter order: `exclude_users`, uid and login-shell checks, group filters, then a trusted home directory. Details are in [Enrollment detail](/docs/enterprise/configure/reference#linux-and-macos).
+
+### Home roots and install prefixes
+
+`home_roots` adds home parents and `agent_prefixes` adds administrator install prefixes. Entries must be absolute paths outside system and home directories. See [the detail](/docs/enterprise/configure/reference#home-roots-and-install-prefixes).
+
+## Windows
+
+- Only accounts with a profile on the machine can be enrolled, so a user is enrolled after their first sign-in.
+- The guardian enrolls an account only while it has an interactive desktop session (console or Remote Desktop). An SSH session, scheduled task or `runas` window does not count.
+- A hook call from a user who is not enrolled is refused with `enterprise_managed_sid_unregistered`.
+- The guardian writes into a user's agent config only while that user has a connected session; otherwise the row stays pending.
+
+### Group filters on Windows
+
+`include_groups` and `exclude_groups` cover local, Active Directory and Entra ID groups. Name groups by SID. A user whose membership is not known yet is pending: nothing is revoked until they next sign in. See [Group filters on Windows](/docs/enterprise/configure/reference#group-filters-on-windows) and [Entra groups on Windows](/docs/enterprise/identity/sources#entra-groups-on-windows).
+
+A group name that resolved before but does not resolve now (the directory is unreachable, or its lookup does not answer) keeps the SID it last resolved to, but that SID decides no one: the group may have been recreated under the same name with a new SID. Every user the entry would decide is pending until the name resolves again: they keep their existing hooks and get no new ones, and a signed-in user without hooks has their installed agents reported as `agent_unprotected`. A user another `exclude_groups` entry excludes is still excluded. While an `exclude_groups` name does not resolve, every other user is pending; while only an `include_groups` name does not resolve, a user another entry admits is still admitted. So an old SID never admits, excludes or revokes anyone. A local account of the computer is the exception: no domain group holds one, so a name written `DOMAIN\group` for another domain than the computer still decides local accounts as not members, and an `exclude_groups` entry of that kind does not hold back their hooks.
+
+## New, changed and removed users
+
+- **New user.** Enrolled on the next enumerator cycle, within five minutes once the account is signed in and the agent is installed. On Windows, Claude Code must also start once so its build can be verified; if that happens later, the five-minute wait starts then. Machine-policy agents run DefenseClaw hooks from the first call and block until enrollment.
+- **Excluded user or agent removed from the config.** Rows are removed on the next cycle, and the guardian removes DefenseClaw's own hook registration from that user's agent config. The user's own hooks stay.
+- **Deleted user (Linux and macOS).** Rows are removed after three consecutive definitive "no such user" cycles, 10 to 15 minutes. A directory outage never removes anyone. Run `enterprise linux repair` or `enterprise macos repair` as root to remove them at once.
+
+The full rules, including cleanup of signed-out users, are in [Enrollment detail](/docs/enterprise/configure/reference#new-changed-and-removed-users).
+
+## Check it worked
+
+On Linux and macOS, `enterprise hooks status` shows each row, including deferred, pending and failed installs:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks status
+```
+
+On Windows, run from an elevated prompt and read `enrollment.accounts`, which lists each account and connector as enrolled, pending or failed:
+
+```powershell
+defenseclaw enterprise windows status --profile standalone --json
+```

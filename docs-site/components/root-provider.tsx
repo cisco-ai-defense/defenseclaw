@@ -18,8 +18,11 @@ import { SiteScrollProgress } from '@/components/site-scroll-progress';
 // fetch (used during SSG/prerender), so eagerly importing the dialog
 // crashes the static export. Deferring to client-only mount lets the
 // browser resolve the URL against `window.location.origin` and the
-// search index loads on first interaction.
+// search index loads on first interaction only when provider preloading is
+// disabled below. `ssr: false` alone does not defer browser initialization.
 const SearchDialog = dynamic(() => import('./search'), { ssr: false });
+
+export const searchProviderOptions = { preload: false };
 
 export default function ClientRootProvider({
   children,
@@ -34,6 +37,7 @@ export default function ClientRootProvider({
           enableSystem: true,
         }}
         search={{
+          ...searchProviderOptions,
           SearchDialog,
         }}
       >

@@ -41,10 +41,11 @@ func (c *windowsGuardCaptureConnector) AgentPaths(opts connector.SetupOpts) conn
 // reach both, or the plugins render DC_FOREIGN_GUARD as "" (skipping the
 // guard) and verification never requires it. The capture connector takes a
 // name the dispatch routes like Amp and OpenCode (not Claude, Codex, Cursor
-// or Copilot) without the per-user agent discovery.
+// or Copilot) without the per-user agent discovery; it names no shipped
+// connector.
 func TestWindowsGenericLifecyclePassesTheForeignHookGuardToPlugins(t *testing.T) {
 	fixture := newWindowsGenericCodexFixture(t)
-	const name = "omnigent"
+	const name = "plugin-fixture"
 	var rendered, seen []string
 	registry := connector.NewRegistry()
 	registry.RegisterBuiltin(&windowsGuardCaptureConnector{

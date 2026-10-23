@@ -55,7 +55,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/google/uuid"
 )
 
 // guardrailListenAddr returns the TCP listen address for the guardrail HTTP server.
@@ -1084,6 +1083,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	r = p.withProxyAgent(r)
+	if refuseProfileProxy(w, r) {
+		return
+	}
 	// A hop the interceptor rewrote is agent traffic here too, so doctor does
 	// not report the OpenClaw Responses calls the proxy handled as a bypass
 	// (GAP-0245). Secure Client keeps the health record of main (issue #1092).
@@ -2386,6 +2388,51 @@ func providerRegistrySnapshot() (*configs.ProvidersConfig, []providerDomainEntry
 	return providerRegistry, providerDomains, ollamaPorts
 }
 
+// requestProviderRegistry is the provider registry of the generation a proxy
+// request pinned, so its upstream routing and its policy stamp come from one
+// generation (GAP-1294); nil outside a gateway.
+func requestProviderRegistry(ctx context.Context) *configs.ProvidersConfig {
+	g := pinnedGeneration(ctx)
+	if !g.published() || g.Providers == nil {
+		return nil
+	}
+	return &configs.ProvidersConfig{Providers: g.Providers.Providers, OllamaPorts: g.Providers.OllamaPorts}
+}
+
+// providerRegistry is the registry req routes with: its generation's, else
+// the process-wide one.
+func (req *ChatRequest) providerRegistry() *configs.ProvidersConfig {
+	if req != nil && req.providers != nil {
+		return req.providers
+	}
+	registry, _, _ := providerRegistrySnapshot()
+	return registry
+}
+
+// inferProviderFromRegistry is inferProviderFromURL with registry's domains
+// (nil: the process-wide ones).
+func inferProviderFromRegistry(targetURL string, registry *configs.ProvidersConfig) string {
+	if registry == nil {
+		return inferProviderFromURL(targetURL)
+	}
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, provider := range registry.Providers {
+		for _, domain := range provider.Domains {
+			if matchProviderDomain(host, u.Path, domain) {
+				return provider.Name
+			}
+		}
+	}
+	if isOllamaLoopback(targetURL, 0) {
+		return "ollama"
+	}
+	return ""
+}
+
 // inferProviderFromURL maps a target URL (from the X-DC-Target-URL header
 // set by the plugin's fetch interceptor) to a provider name. The domain list
 // is loaded from internal/configs/providers.json — the single source of truth
@@ -2443,7 +2490,7 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 		fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: using configured model %q provider=%q\n", cfgModel, p.cfg.LLM.Provider)
 	}
 
-	registry, _, _ := providerRegistrySnapshot()
+	registry := req.providerRegistry()
 	// Build an effective LLMConfig from the proxy config, with the
 	// already-resolved API key pinned inline so the dispatcher does
 	// not re-resolve (which would lose the connector token resolver
@@ -2539,7 +2586,7 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 		return p.resolveConfiguredProvider(req)
 	}
 
-	prefix := inferProviderFromURL(req.TargetURL + req.TargetPath)
+	prefix := inferProviderFromRegistry(req.TargetURL+req.TargetPath, req.providers)
 	if prefix == "" {
 		return nil
 	}
@@ -2590,7 +2637,7 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 	//      the inferred prefix is the overlay name, not "bedrock".
 	instanceName := strings.TrimSpace(p.cfg.LLM.InstanceName)
 	if instanceName != "" {
-		registry, _, _ := providerRegistrySnapshot()
+		registry := req.providerRegistry()
 		if registry != nil {
 			for _, prov := range registry.Providers {
 				if !strings.EqualFold(prov.Name, instanceName) {
@@ -2740,6 +2787,9 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 	r = p.withProxyAgent(r)
+	if refuseProfileProxy(w, r) {
+		return
+	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {
@@ -3119,6 +3169,9 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			}
 		}
 	}
+	// Both forwarding branches below route with the provider registry of
+	// the generation the request pinned (GAP-1294).
+	req.providers = requestProviderRegistry(r.Context())
 	emitPendingRoutedPrompt := func(ctx context.Context) string {
 		if !pendingRoutedPrompt {
 			return promptID
@@ -3131,7 +3184,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 		_, selectedPromptProvider := p.llmSystemAndProvider(req.Model)
 		if req.TargetURL != "" {
-			if inferred := inferProviderFromURL(rawForwardUpstreamURL(req.TargetURL, r.URL.RequestURI())); inferred != "" {
+			if inferred := inferProviderFromRegistry(rawForwardUpstreamURL(req.TargetURL, r.URL.RequestURI()), req.providers); inferred != "" {
 				selectedPromptProvider = inferred
 			}
 		}
@@ -4936,7 +4989,7 @@ func (p *GuardrailProxy) recordTelemetry(
 		// a join key. Finding emission receives this same key when detections
 		// exist; telemetry failures never force the decision log to invent a
 		// second identity.
-		verdict.EvaluationID = uuid.NewString()
+		verdict.EvaluationID = observability.NewTimeOrderedID()
 	}
 	if len(verdict.Findings) > 0 && !verdict.FindingsEmitted {
 		eval := p.emitGuardrailScanVerdictFindings(
@@ -4980,7 +5033,7 @@ func (p *GuardrailProxy) recordTelemetry(
 
 	if p.webhooks != nil && verdict.Action == "block" {
 		event := audit.Event{
-			ID:               uuid.New().String(),
+			ID:               observability.NewTimeOrderedID(),
 			Timestamp:        time.Now().UTC(),
 			Action:           string(audit.ActionGuardrailBlock),
 			Target:           model,
@@ -5673,7 +5726,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 	}
 
 	upstreamURL := rawForwardUpstreamURL(targetOrigin, r.URL.RequestURI())
-	providerName := inferProviderFromURL(upstreamURL)
+	providerName := inferProviderFromRegistry(upstreamURL, req.providers)
 	if selected := strings.TrimSpace(routedProvider); selected != "" {
 		providerName = selected
 	}
@@ -5713,7 +5766,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 	if len(req.RawBody) > 0 {
 		forwardBody = req.RawBody
 	}
-	forwardBody = applyProviderRequestOverrides(forwardBody, upstreamURL)
+	forwardBody = applyProviderRequestOverrides(forwardBody, upstreamURL, req.providers)
 
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
 	if err != nil {
@@ -6503,8 +6556,11 @@ func parseRawForwardSSEPayload(payload string) (string, []rawForwardToolCallDelt
 	return out.String(), toolCallDeltas, finishReasons
 }
 
-func applyProviderRequestOverrides(body []byte, targetURL string) []byte {
-	overrides := providerRequestOverridesForTarget(targetURL)
+// applyProviderRequestOverrides merges the request_overrides of the
+// provider targetURL belongs to in registry (nil: the process-wide one)
+// into body.
+func applyProviderRequestOverrides(body []byte, targetURL string, registry *configs.ProvidersConfig) []byte {
+	overrides := providerRequestOverridesForTarget(targetURL, registry)
 	if len(overrides) == 0 {
 		return body
 	}
@@ -6523,18 +6579,20 @@ func applyProviderRequestOverrides(body []byte, targetURL string) []byte {
 	return out
 }
 
-func providerRequestOverridesForTarget(targetURL string) map[string]interface{} {
-	providerName := inferProviderFromURL(targetURL)
+func providerRequestOverridesForTarget(targetURL string, registry *configs.ProvidersConfig) map[string]interface{} {
+	providerName := inferProviderFromRegistry(targetURL, registry)
 	if providerName == "" {
 		return nil
 	}
 
-	cfg, _, _ := providerRegistrySnapshot()
-	if cfg == nil {
+	if registry == nil {
+		registry, _, _ = providerRegistrySnapshot()
+	}
+	if registry == nil {
 		return nil
 	}
 
-	for _, provider := range cfg.Providers {
+	for _, provider := range registry.Providers {
 		if strings.EqualFold(provider.Name, providerName) {
 			return provider.RequestOverrides
 		}

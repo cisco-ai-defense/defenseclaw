@@ -89,6 +89,7 @@ func (f *doctorFixture) dropIn() string {
 func TestDoctorOnLinuxRunningMicroVMs(t *testing.T) {
 	f := newDoctorFixture(t)
 	f.onLinuxMicroVMs()
+	f.atRelease(openshell.InstallerVersion)
 	r := f.run()
 	var got []string
 	for _, c := range r.Checks {

@@ -1260,6 +1260,23 @@ func TestStartSendsTheModelKeyTheEnvironmentHoldsNow(t *testing.T) {
 	}
 }
 
+// TestStartEndVMAsksTheDaemonToEndTheVM: only `start --end-vm` tells the
+// daemon to start a MicroVM whose VM still runs, which OpenShell's start
+// ends with no flush (sandboxapi.StartRequest.EndVM); a plain start, and
+// the starts connect and pull make, never do.
+func TestStartEndVMAsksTheDaemonToEndTheVM(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("donebox"), copySandbox("other"))
+	ta.ok(t, ta.Start(bg, "donebox", StartOptions{EndVM: true}))
+	ta.ok(t, ta.Start(bg, "other", StartOptions{}))
+	var req sandboxapi.StartRequest
+	if bodies := ta.bodies("POST", "donebox/start"); len(bodies) != 1 || json.Unmarshal([]byte(bodies[0]), &req) != nil || !req.EndVM {
+		t.Fatalf("start --end-vm request = %v", bodies)
+	}
+	if bodies := ta.bodies("POST", "other/start"); len(bodies) != 1 || strings.Contains(bodies[0], "end_vm") {
+		t.Fatalf("a plain start asked to end the VM: %v", bodies)
+	}
+}
+
 // After a start and a stop whose look found the copy as the last pull read
 // it, that pull is reused, and the note says what holds: the copy has not
 // changed since that pull (it said the sandbox "has not run since" the pull,
@@ -1977,13 +1994,9 @@ func TestDetectLLM(t *testing.T) {
 		{"hermes openai", hermes, map[string]string{"OPENAI_API_KEY": "k", "ANTHROPIC_API_KEY": "a"}, "", "", profiles.OpenAIID, "OPENAI_API_KEY", false},
 		{"hermes anthropic", hermes, map[string]string{"ANTHROPIC_API_KEY": "a"}, "", "", profiles.AnthropicID, "ANTHROPIC_API_KEY", false},
 		{"hermes bedrock", hermes, map[string]string{EnvBedrockToken: "b"}, "", "bedrock", profiles.BedrockMantleOpenAIID, EnvBedrockToken, false},
-		{"openhands bedrock", get("openhands"), map[string]string{EnvBedrockToken: "b"}, "", "bedrock", profiles.BedrockMantleOpenAIID, EnvBedrockToken, false},
-		{"openhands openai", get("openhands"), map[string]string{"OPENAI_API_KEY": "k"}, "", "openai", profiles.OpenAIID, "OPENAI_API_KEY", false},
 		{"antigravity gemini", get("antigravity"), map[string]string{"GEMINI_API_KEY": "g"}, "", "", profiles.GeminiID, "GEMINI_API_KEY", false},
 		{"antigravity has no openai", get("antigravity"), map[string]string{"OPENAI_API_KEY": "k"}, "", "openai", "", "", true},
 		{"antigravity signs in inside", get("antigravity"), nil, "", "", "", "", false},
-		{"omnigent bedrock", get("omnigent"), map[string]string{EnvBedrockToken: "b"}, "", "bedrock", profiles.BedrockMantleOpenAIID, EnvBedrockToken, false},
-		{"omnigent openai", get("omnigent"), map[string]string{"OPENAI_API_KEY": "k"}, "", "", profiles.OpenAIID, "OPENAI_API_KEY", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -2089,7 +2102,7 @@ func TestPrintModeEveryHarness(t *testing.T) {
 	for name, args := range map[string][]string{
 		"claudecode": {"-p", "x"}, "codex": {"exec", "x"}, "opencode": {"run", "x"}, "copilot": {"--prompt=x"},
 		"amp": {"-x", "x"}, "cursor": {"--print", "x"}, "kiro": {"--no-interactive", "x"}, "devin": {"-p", "x"},
-		"hermes": {"chat", "-q", "x"}, "openhands": {"--headless", "-t", "x"}, "antigravity": {"-p", "x"}, "omnigent": {"--prompt=x"},
+		"hermes": {"chat", "-q", "x"}, "antigravity": {"-p", "x"},
 	} {
 		if spec := harnessSpec(t, name); !printMode(spec, args) || printMode(spec, []string{"--model", "m"}) {
 			t.Errorf("%s: printMode(%q) is wrong", name, args)

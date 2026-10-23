@@ -22,8 +22,7 @@ import (
 )
 
 // TestLaunchersEndWhatTheHarnessLeaves: every harness launcher lets the
-// supervisor end what its harness leaves running, except OmniGent's, whose
-// host daemon and server serve the next session, and the sandbox exec
+// supervisor end what its harness leaves running, while the sandbox exec
 // wrapper keeps what its command leaves. The setting is the launcher's own:
 // the preamble drops a value from the caller's environment.
 func TestLaunchersEndWhatTheHarnessLeaves(t *testing.T) {
@@ -42,10 +41,7 @@ func TestLaunchersEndWhatTheHarnessLeaves(t *testing.T) {
 		if pre < 0 {
 			t.Fatalf("%s launcher lacks the preamble", name)
 		}
-		switch {
-		case name == OmniGent.Name && at < pre:
-			t.Errorf("the OmniGent launcher does not keep its host daemon and server")
-		case name != OmniGent.Name && at >= 0:
+		if at >= 0 {
 			t.Errorf("the %s launcher keeps what %s leaves running", name, spec.DisplayName)
 		}
 	}
@@ -53,11 +49,7 @@ func TestLaunchersEndWhatTheHarnessLeaves(t *testing.T) {
 	if at := strings.LastIndex(env, keep); at < strings.Index(env, launcherPreamble) {
 		t.Error("the sandbox exec wrapper does not keep what its command leaves running")
 	}
-	// Only the wrapper names what it keeps: OmniGent's server is no news.
 	if at := strings.LastIndex(env, "\ndc_say_kept=1\n"); at < strings.Index(env, launcherPreamble) {
 		t.Error("the sandbox exec wrapper does not name what its command leaves running")
-	}
-	if omni := string(OmniGent.Launcher().Data); strings.Contains(omni, "\ndc_say_kept=1\n") {
-		t.Error("the OmniGent launcher names its own server")
 	}
 }

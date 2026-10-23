@@ -208,6 +208,46 @@ def test_explain_names_a_failed_lookup_instead_of_a_group_count(monkeypatch):
     assert "0 group(s)" not in result.output
 
 
+def test_explain_fails_for_an_account_it_could_not_resolve(monkeypatch):
+    """GAP-1239: an unknown account is printed, and the command exits 1."""
+    answer = {
+        "profiles_configured": True,
+        "profile": "",
+        "match": "default",
+        "subject": {"user_id": "", "user_name": "typo", "group_count": 0},
+        "lookup_error": "no account named typo",
+    }
+    result = _explain(monkeypatch, dict(answer), "--json")
+    assert result.exit_code == 1
+    assert json.loads(result.output)["lookup_error"] == "no account named typo"
+    result = _explain(monkeypatch, dict(answer))
+    assert result.exit_code == 1
+    assert "user lookup failed: no account named typo" in result.output
+    resolved = dict(answer, subject={"user_id": "1001", "user_name": "alice", "group_count": 0},
+                    lookup_error="directory unavailable")
+    assert _explain(monkeypatch, resolved, "--json").exit_code == 0
+
+
+def test_explain_prints_the_refusal_and_its_missing_fact(monkeypatch):
+    """GAP-0522: a refused decision names the missing fact, not just a profile."""
+    reason = ("DefenseClaw refused this request: this account's UPN is unconfirmed; run "
+              "`sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user 502` "
+              "to inspect the identity decision")
+    answer = {
+        "profiles_configured": True,
+        "profile": "strict",
+        "match": "default_lookup_failed",
+        "subject": {"user_id": "502", "user_name": "dcm-std1", "group_count": 2},
+        "unproven_facts": ["upn:unknown"],
+        "refused": True,
+        "refused_reason": reason,
+    }
+    result = _explain(monkeypatch, answer)
+    assert result.exit_code == 0
+    assert f"refused: {reason}" in result.output
+    assert "refused:" not in _explain(monkeypatch, dict(answer, refused=False, refused_reason="")).output
+
+
 def test_explain_match_line_names_default_lookup_failed(monkeypatch):
     """GAP-0275: "match: default" while requests get default_lookup_failed."""
     result = _explain(
@@ -457,3 +497,70 @@ def test_secure_client_hides_profile_command(monkeypatch):
     command_result = runner.invoke(cmd_guardrail.guardrail, ["profile", "list", "--json"], obj=app)
     assert command_result.exit_code == 2
     assert "No such command" in command_result.output
+
+
+def _scoped_agent_cfg(match):
+    cfg = default_config()
+    cfg.guardrail.profiles = {"base": GuardrailProfile(mode="observe"), "strict": GuardrailProfile(mode="action")}
+    cfg.guardrail.profile_assignments = [GuardrailProfileAssignment(profile="strict", match=match)]
+    return cfg
+
+
+def test_profile_overrides_attribute_no_agent_when_its_owner_is_unknown(monkeypatch):
+    # GAP-1054: a failed agent-identity query must not show another user's
+    # agent assignment as this account's.
+    from defenseclaw import gateway
+
+    cfg = _scoped_agent_cfg(GuardrailProfileMatch(agents=["agt-other"]))
+    monkeypatch.setattr(gateway, "current_profile_account", lambda **kwargs: ("alice", "alice"))
+
+    def unavailable(self, **_kwargs):
+        raise RuntimeError("identity store unavailable")
+
+    monkeypatch.setattr(gateway.OrchestratorClient, "agent_identities_all", unavailable)
+    monkeypatch.setattr(
+        gateway.OrchestratorClient,
+        "guardrail_profile_resolve",
+        lambda self, *, user="", connector="", agent="": {
+            "profile": "strict" if agent else "base",
+            "match": "agent" if agent else "default",
+        },
+    )
+    answer = gateway.current_user_guardrail_profile(cfg)
+    assert answer["overrides"] == []
+    # Review fix: no agent ID is named until its owner is confirmed.
+    assert answer["agent_assignments_unchecked"] is True
+    assert "agt-other" not in json.dumps(answer)
+    text = cmd_guardrail.profile_status_text(cfg, answer)
+    assert "strict for" not in text and "agt-other" not in text
+    assert "agent-scoped assignments not checked" in text
+
+
+def test_profile_overrides_name_an_agent_only_under_its_own_connector(monkeypatch):
+    # GAP-1270, GAP-1252: a Codex agent is never shown under a Claude Code
+    # assignment.
+    from defenseclaw import gateway
+
+    monkeypatch.setattr(gateway, "current_profile_account", lambda **kwargs: ("alice", "alice"))
+    monkeypatch.setattr(
+        gateway.OrchestratorClient,
+        "agent_identities_all",
+        lambda self, *, user: {"identities": [{"agent_id": "agt-codex", "connector": "codex"}]},
+    )
+    probes = []
+
+    def resolve(self, *, user="", connector="", agent=""):
+        probes.append((connector, agent))
+        return {"profile": "strict" if agent else "base", "match": "agent" if agent else "default"}
+
+    monkeypatch.setattr(gateway.OrchestratorClient, "guardrail_profile_resolve", resolve)
+    cfg = _scoped_agent_cfg(GuardrailProfileMatch(connectors=["claudecode"], agents=["agt-codex"]))
+    answer = gateway.current_user_guardrail_profile(cfg)
+    assert answer["overrides"] == []
+    assert ("claudecode", "agt-codex") not in probes
+
+    probes.clear()
+    cfg = _scoped_agent_cfg(GuardrailProfileMatch(connectors=["claudecode", "codex"], agents=["agt-codex"]))
+    answer = gateway.current_user_guardrail_profile(cfg)
+    assert [(o["connector"], o["agent"]) for o in answer["overrides"]] == [("codex", "agt-codex")]
+    assert "agent_assignments_unchecked" not in answer

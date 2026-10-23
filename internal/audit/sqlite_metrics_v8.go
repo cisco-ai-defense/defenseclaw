@@ -12,7 +12,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -38,7 +37,7 @@ func (l *Logger) RecordSQLiteBusyMetric(ctx context.Context, operation string) e
 			}
 			builder, err := observability.NewFamilyBuilder(
 				observability.ClockFunc(func() time.Time { return event.Timestamp.UTC() }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if err != nil {
 				return observability.Record{}, err
@@ -94,7 +93,7 @@ func (l *Logger) recordSchemaViolationMetricV8(ctx context.Context, eventType, c
 			}
 			builder, err := observability.NewFamilyBuilder(
 				observability.ClockFunc(func() time.Time { return event.Timestamp.UTC() }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if err != nil {
 				return observability.Record{}, err

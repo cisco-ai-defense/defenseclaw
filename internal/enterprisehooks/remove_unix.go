@@ -78,7 +78,7 @@ func RemoveUserHooks(ctx context.Context, opts InstallOptions) error {
 	return connector.WithUserHomeDir(home, func() error {
 		return withOwnerCredentials(uid, gid, func() error {
 			return connector.RemovalLeavingNoNewDirs(conn, setupOpts, func() error {
-				return removeUserHooksAs(ctx, conn, setupOpts, dataDir)
+				return removeUserHooksAs(ctx, conn, setupOpts, home, dataDir)
 			})
 		})
 	})
@@ -86,7 +86,7 @@ func RemoveUserHooks(ctx context.Context, opts InstallOptions) error {
 
 // removeUserHooksAs is RemoveUserHooks' removal, run with the user's
 // credentials and home.
-func removeUserHooksAs(ctx context.Context, conn connector.Connector, setupOpts connector.SetupOpts, dataDir string) error {
+func removeUserHooksAs(ctx context.Context, conn connector.Connector, setupOpts connector.SetupOpts, home, dataDir string) error {
 	if err := conn.Teardown(ctx, setupOpts); err != nil {
 		return fmt.Errorf("enterprise hooks: connector %s teardown failed: %w", conn.Name(), err)
 	}
@@ -98,6 +98,16 @@ func removeUserHooksAs(ctx context.Context, conn connector.Connector, setupOpts 
 	}
 	if err := connector.ClearHookContractLockEntry(dataDir, conn.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("enterprise hooks: clear hook contract lock for %s: %w", conn.Name(), err)
+	}
+	// The account's last connector takes the shared hook scripts with it,
+	// checked while no install of another connector is under way.
+	unlock, err := lockSharedHookRuntime(ctx, home)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := connector.RemoveUnusedSharedHookRuntime(dataDir); err != nil {
+		return fmt.Errorf("enterprise hooks: remove the unused shared hook runtime: %w", err)
 	}
 	return nil
 }

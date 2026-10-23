@@ -573,10 +573,9 @@ func Resolve(payload []byte) string {
 // hook command's --hook-surface value and bound event, the values the hook
 // sends the gateway; only Copilot reads them. A Copilot body is read in the
 // dialect the gateway selects from them (copilotargs.LocalDialect): the
-// CLI's toolName and toolArgs, or the VS Code Local harness's tool_name and
-// tool_input, through the copilotargs projection the gateway's Copilot
-// profiles use, so a freeform apply_patch, a toolArgs JSON string and a VS
-// Code Local tool name the gateway judges are the call resolved here. A body
+// CLI's toolName/toolArgs (or native PermissionRequest toolInput), or the VS
+// Code Local harness's tool_name/tool_input, through the copilotargs
+// projection the gateway's Copilot profiles use. A body
 // that spells the tool name, or the tool arguments, twice with different
 // values is marked incomplete: no client sends one, and an operand this map
 // does not list fails closed where the gateway cannot place it.
@@ -862,18 +861,27 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 // copilotCall returns the tool name and the projected arguments of a Copilot
 // hook body as the gateway's profile for its dialect reads them
 // (copilotargs.LocalDialect), and whether another spelling of the tool name
-// or of the arguments carries a different value. The profile reads only its
-// dialect's two fields; the other dialect's fields and the generic aliases
-// are spellings it ignores.
+// or of the arguments carries a different value. A native PermissionRequest
+// reads toolInput only when toolArgs is absent, through the projection the
+// gateway's profile uses (copilotargs.PermissionToolArgs): an edit whose
+// diff does not prove the declared target is incomplete. The other
+// dialect's fields and generic aliases are spellings the gateway ignores.
 func copilotCall(envelope map[string]json.RawMessage, surface, event string) (json.RawMessage, json.RawMessage, bool, bool) {
 	var hookEvent string
 	_ = json.Unmarshal(envelope["hook_event_name"], &hookEvent)
 	_, local := copilotargs.LocalDialect(surface, event)
 	toolNames := []string{"toolName", "tool_name"}
 	argNames := []string{"toolArgs", "tool_input", "toolInput", "tool_args", "args", "arguments"}
+	var nativeHook string
+	_ = json.Unmarshal(envelope["hookName"], &nativeHook)
+	_, hasToolArgs := envelope["toolArgs"]
+	nativePermission := !local && event == "permissionRequest" && nativeHook == "permissionRequest" &&
+		!hasToolArgs && aliasSet(envelope["toolInput"])
 	if local {
 		toolNames[0], toolNames[1] = toolNames[1], toolNames[0]
 		argNames[0], argNames[1] = argNames[1], argNames[0]
+	} else if nativePermission {
+		argNames[0], argNames[2] = argNames[2], argNames[0]
 	}
 	toolRaw, toolConflict := dialectAlias(envelope, toolNames)
 	rawArgs, argsConflict := dialectAlias(envelope, argNames)
@@ -897,6 +905,10 @@ func copilotCall(envelope map[string]json.RawMessage, surface, event string) (js
 	}
 	if local {
 		return toolRaw, copilotargs.LocalToolArgs(tool, value), toolConflict, argsConflict
+	}
+	if nativePermission {
+		projected := copilotargs.PermissionToolArgs(tool, value)
+		return toolRaw, projected, toolConflict, argsConflict || (tool == "edit" && len(projected) == 0)
 	}
 	return toolRaw, copilotargs.CLIToolArgs(tool, value), toolConflict, argsConflict
 }
@@ -1202,6 +1214,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds := false, false
 	var copyScopes []string
+	boundPrograms := actionBoundProgramWords(file, home)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, isCall := node.(*syntax.CallExpr)
 		if !isCall || len(call.Args) == 0 {
@@ -1212,6 +1225,13 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		static := make([]bool, len(args))
 		for i, arg := range args {
 			words[i], static[i] = staticShellWord(arg, env, home != "")
+		}
+		if !static[0] {
+			words[0], static[0] = staticProgramWord(args[0], home)
+		}
+		if !static[0] {
+			words[0], static[0] = boundPrograms[call]
+			static[0] = words[0] != ""
 		}
 		program, start := "", call.Pos()
 		if static[0] {

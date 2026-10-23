@@ -1,0 +1,109 @@
+---
+title: Write a custom rule
+description: Add one CEL rule to your own rule pack, validate it offline, pin it and check that it is active.
+keywords:
+  - custom rule
+  - CEL
+  - validate-pack
+  - use-pack
+---
+
+This page adds one rule that flags any command that reads `/srv/payments/secrets`. The rule goes in a copy of the default pack, so the bundled rules stay as they are.
+
+Before you start: DefenseClaw is initialized (`defenseclaw init`). The paths below are `~/.defenseclaw/...`; the sample output shows `/home/alice`.
+
+1. Copy the closest bundled pack.
+
+   ```bash
+   cp -r ~/.defenseclaw/policies/guardrail/default \
+         ~/.defenseclaw/policies/guardrail/my-org
+   ```
+
+2. Add a rules file with a category no other file uses.
+
+   ```yaml title="~/.defenseclaw/policies/guardrail/my-org/rules/my-org.yaml"
+   version: 1
+   category: my-org
+   rules:
+     - id: ORG-PAYMENTS-SECRETS
+       tool_call_only: true
+       expression: >-
+         f.commands.exists(c,
+         defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+         f.paths.exists(p, p.command_id == c.id &&
+         p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ &&
+         (p.resolved == '/srv/payments/secrets' ||
+         p.resolved.startsWith('/srv/payments/secrets/'))))
+       pattern: '(?i)(?:^|\s)/srv/payments/secrets(?:/|\s|$)'
+       title: "Payments secret directory read"
+       severity: CRITICAL
+       confidence: 0.95
+       tags: [credential, payments, file-sensitive]
+   ```
+
+   `expression` matches the parsed command and path facts; it joins the path to its command by `id`. `pattern` is the required regex fallback for calls the gateway cannot fully parse. A fallback match is recorded but does not block. The rule supplies the title and severity; the block and alert levels pick the action. Field names are in the [CEL authoring reference](/docs/reference/policy/cel/authoring).
+
+3. Validate the whole pack. This runs offline and does not touch the gateway.
+
+   ```bash
+   defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/my-org
+   ```
+
+   ```text
+   Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/my-org"
+     rules: 240/244 enabled across 8 files
+     components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
+     digest: b8f9965c2ff04e19c30558758b5ae3e56423480a85d7479cd0d90b26ed13e9e0
+     files digest: 4b04e4ffa078aff3ea14b708257ecb81a62c4e01611ba0b0b3063411888fa71b (the guardrail.custom_packs pin)
+   ```
+
+   The default pack has 243 rules in 7 files; yours has 244 in 8. Exit codes: `0` valid, `1` invalid, `2` validator unavailable.
+
+4. Pin the pack and switch to it.
+
+   ```bash
+   defenseclaw guardrail use-pack ~/.defenseclaw/policies/guardrail/my-org
+   ```
+
+   ```text
+     OK All connectors now use the 'my-org' rule pack. Saved (config generation 3). The gateway isn't running; it loads this when it starts.
+   ```
+
+   Add `--connector codex` to switch one agent. A running gateway loads the pack on its next reload.
+
+## Check it worked
+
+```bash
+defenseclaw guardrail list-packs
+defenseclaw config get guardrail.custom_packs
+```
+
+```text
+  * custom packs:
+      - my-org: /home/alice/.defenseclaw/policies/guardrail/my-org (used by global, codex)
+
+my-org:
+  digest: sha256:4b04e4ffa078aff3ea14b708257ecb81a62c4e01611ba0b0b3063411888fa71b
+  path: /home/alice/.defenseclaw/policies/guardrail/my-org
+```
+
+Compilation does not prove a connector supplies the facts your expression reads. In observe mode, run a real command that reads the directory and a near miss, then inspect the connector's native decision and its recent alerts:
+
+```bash
+defenseclaw alerts --limit 25 --connector claudecode
+defenseclaw alerts --show 1
+```
+
+Use the connector you tested and the alert number from the list. Secret findings hide rule IDs and titles in both alert views: this rule can appear as `redacted.secret.id-…` with the title `Secret finding`. Searching alerts for `ORG-PAYMENTS-SECRETS` will not find that redacted entry. Correlate the alert's connector, time and session with your test turn. For direct verification of the original ID, use the connector's native action verdict on a harmless matching test; observe-mode alert views cannot recover it. The pack path and files digest above establish which reviewed rules are configured; they do not prove a hook exercised this rule. No CLI injects synthetic facts.
+
+With the default pack's levels, this CRITICAL rule can block in action mode when the facts are complete. A HIGH rule would alert only.
+
+## Undo
+
+```bash
+defenseclaw guardrail use-pack default
+```
+
+This also removes the pin for `my-org`.
+
+Next: [validate a pack in CI](/docs/how-to/policies/validate-a-rule-pack), [regex patterns for the fallback](/docs/reference/policy/regex-cookbook), [pinned pack edits](/docs/reference/policy/rules#change-a-pinned-pack).

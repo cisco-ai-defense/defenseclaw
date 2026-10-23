@@ -476,9 +476,19 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	}
 	// A pack file a standard user came to own (or that turned writable)
 	// changes enforcement at the next restart with no trace (GAP-0552).
+	// A configured pack that is gone fails the next gateway restart, while
+	// the running gateway keeps the rules it loaded (p0 GAP-1207). Shipped
+	// packs are payload files, checked with the other installed files.
 	for _, label := range config.RulePackCheckOrder(record.RulePacks) {
 		dir := record.RulePacks[label]
-		if err := env.Trust(env.P(dir), TrustRulePack); err != nil && !errors.Is(err, os.ErrNotExist) {
+		shipped := pathWithin(dir, env.Layout.VendorPolicyDir)
+		if _, err := os.Lstat(env.P(dir)); errors.Is(err, os.ErrNotExist) {
+			if !shipped {
+				add("%s %q is missing: the gateway cannot load it when it restarts; restore the pack, or remove it from config.yaml and run ensure", label, dir)
+			}
+			continue
+		}
+		if err := env.Trust(env.P(dir), TrustRulePack); err != nil && (!shipped || !errors.Is(err, os.ErrNotExist)) {
 			add("%s %q is not administrator-controlled: %v; %s", label, dir, err, rulePackTrustAdvice)
 		}
 	}
@@ -1304,7 +1314,12 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			break
 		}
 		if warning = strings.TrimSpace(warning); warning != "" && len(warning) <= 1024 {
-			l.result.AddWarning(codeProfileAssignment, "guardrail profile "+warning)
+			// A warning about a setting ("guardrail: human approval ...")
+			// already names where it is.
+			if !strings.HasPrefix(warning, "guardrail") {
+				warning = "guardrail profile " + warning
+			}
+			l.result.AddWarning(codeProfileAssignment, warning)
 		}
 	}
 }
@@ -1332,8 +1347,8 @@ func (l *lifecycle) describeIdentityRecords() {
 	// The guardian removes the record of an account it no longer publishes
 	// (GAP-1113), so a stale record is one it still publishes and could not
 	// refresh: name the account and where the guardian says why.
-	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's oldest identity record, of uid %s, was last written at %s by "+
-		"this host's clock: the clock was stepped, the directory lookup for that account keeps failing, or the guardian is not "+
+	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's identity record of uid %s was last written at %s by "+
+		"this host's clock, over 30 minutes ago or in the future: the clock was stepped, the directory lookup for that account keeps failing, or the guardian is not "+
 		"running; records over an hour old are ignored, and accounts a guardrail profile assignment selects by UPN then get "+
 		"the default profile. The guardian rewrites them within about a minute of a clock step; if this persists, fix the "+
 		"lookup failure its log names for that uid (%s), or restart the hook guardian if it is not running",

@@ -21,7 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
-var keptDockerSettings = map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17671}
+var keptDockerSettings = map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5", "gateway_port": 17671}
 
 // requireDefaultNamespaceBridge checks that the account's kept 1.0.1
 // sandboxes stay reachable: the bridge render is in place next to the

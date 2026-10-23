@@ -14,22 +14,29 @@ package connector
 // resolved "closed" fail mode although the agent itself has no fail-closed
 // hook contract (HookCapability.SupportsFailClosed is false).
 //
-// That is the per-user Hermes hook on every OS. Hermes lets a call run when
-// one of its hooks times out or cannot start, which is why
-// SupportsFailClosed stays false, but it honours a block directive on the
-// hook's stdout. The Linux and macOS hermes-hook.sh and the Windows native
-// hook (hookexec) print one for every failure DefenseClaw itself sees when
-// their fail mode is closed: the gateway is down or does not answer, its
-// answer cannot be used, or the input is too large. Downgrading that render
-// to "open" let a per-user Hermes tool call run during a gateway outage with
-// a closed or unset hook_fail_mode (rel-1-0-3 GAP-0150 on Linux and macOS,
-// GAP-0269 on Windows, where the downgraded value is the fail mode the
-// native hook reads from .hookcfg), against the rule that hooks fail open
-// only under Secure Client. An explicit "open" still renders open.
+// That is the per-user Copilot CLI, Antigravity and Hermes hook on every OS.
+// Each of these agents lets a call run when its hook times out or cannot
+// start, which is why SupportsFailClosed stays false, but each honours a
+// native deny the hook prints: Copilot's permissionDecision / behavior deny,
+// Antigravity's PreToolUse decision deny and Hermes' block directive. The
+// Linux and macOS hook scripts and the Windows native hook (hookexec) print
+// that deny for every failure DefenseClaw itself sees when their fail mode
+// is closed: the gateway is down or does not answer, its answer cannot be
+// used, the token is missing, or the input is too large. Downgrading the
+// render to "open" let such a tool call run during a gateway outage with a
+// closed or unset hook_fail_mode, against the rule that hooks fail open only
+// under Secure Client. An explicit "open" still renders open.
 //
 // Managed renders keep their own rules: a standalone render is closed for
-// every connector (managedStandaloneRender), and Secure Client keeps Hermes
-// open.
+// every connector (managedStandaloneRender), and Secure Client keeps these
+// connectors open.
 func hookBlocksItsOwnFailures(opts SetupOpts, conn Connector) bool {
-	return conn != nil && conn.Name() == "hermes" && !opts.ManagedEnterprise
+	if conn == nil || opts.ManagedEnterprise {
+		return false
+	}
+	switch conn.Name() {
+	case "antigravity", "copilot", "hermes":
+		return true
+	}
+	return false
 }

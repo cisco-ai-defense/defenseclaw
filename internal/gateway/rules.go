@@ -47,8 +47,9 @@ type PatternRule struct {
 	// migratedLiteral is set by the generation compile for a migrated 0.8.x
 	// literal rule (guardrail.MigratedLiteralRule): a content scan runs its
 	// pattern over prompt and result text whatever its category, as 0.8.x
-	// did (GAP-1480).
-	migratedLiteral bool
+	// did (GAP-1480). markedMigratedLiteral is the rule's migrated_literal.
+	migratedLiteral       bool
+	markedMigratedLiteral bool
 }
 
 // RuleFinding is a structured finding produced by scanning tool args or content.
@@ -361,7 +362,7 @@ func compileRulePackGenerationWithCompiler(
 // migratedLiteralRule reports whether rule is a 0.8.x literal rule the
 // upgrade gave an expression from its literal (GAP-1469, GAP-1478).
 func migratedLiteralRule(rule PatternRule) bool {
-	return rule.Pattern != nil && guardrail.MigratedLiteralRule(rule.Pattern.String(), rule.Expression)
+	return rule.Pattern != nil && guardrail.MigratedLiteralRule(rule.Pattern.String(), rule.Expression, rule.markedMigratedLiteral)
 }
 
 func cloneRuleCategories(categories []ruleCategory) []ruleCategory {
@@ -590,6 +591,8 @@ func mergeRulePackCategories(
 				Severity:     r.Severity,
 				Confidence:   r.Confidence,
 				Tags:         append([]string(nil), r.Tags...),
+
+				markedMigratedLiteral: r.MigratedLiteral,
 			})
 		}
 		// An explicitly disabled category replaces defaults with zero rules.

@@ -71,6 +71,17 @@ func TestManagedCopilotWriteThroughHomeSymlinkUsesTheJudgedCall(t *testing.T) {
 	patch := func(path string) string {
 		return "*** Begin Patch\n*** Update File: " + path + "\n@@\n # base\n+ssh-ed25519 AAAA marker\n*** End Patch\n"
 	}
+	nativePermissionEdit := func(path string) map[string]any {
+		diff := "\ndiff --git a" + path + " b" + path + "\nindex 1234567..abcdef0 100644\n" +
+			"--- a" + path + "\n+++ b" + path + "\n@@ -1 +1 @@\n-# base\n+ssh-ed25519 AAAA marker\n"
+		return map[string]any{"hookName": "permissionRequest", "toolName": "edit",
+			"toolInput": map[string]any{"file_path": path, "diff": diff}}
+	}
+	invalidNativePermissionEdit := nativePermissionEdit(notes)
+	invalidInput := invalidNativePermissionEdit["toolInput"].(map[string]any)
+	invalidInput["diff"] = strings.Replace(invalidInput["diff"].(string), "+++ b"+notes, "+++ b"+keys, 1)
+	ambiguousNativePermissionEdit := nativePermissionEdit(notes)
+	ambiguousNativePermissionEdit["toolArgs"] = map[string]any{"path": notes, "old_str": "# base", "new_str": "another change"}
 	jsonText := func(v any) string { return string(mustJSON(t, v)) }
 	big := strings.Repeat("# k\n", 17000)
 	local := func(path string, extra map[string]any) map[string]any {
@@ -113,6 +124,10 @@ func TestManagedCopilotWriteThroughHomeSymlinkUsesTheJudgedCall(t *testing.T) {
 			"toolArgs": jsonText(map[string]any{"filePath": link, "content": "ssh-ed25519 AAAA marker\n"})}, true},
 		{"apply_patch of an ordinary file with a decoy tool_name", "", "preToolUse", map[string]any{"toolName": "apply_patch",
 			"tool_name": "read_file", "toolArgs": patch(notes)}, true},
+		{"native permission edit of ordinary file", "", "permissionRequest", nativePermissionEdit(notes), false},
+		{"native permission edit through home symlink", "", "permissionRequest", nativePermissionEdit(link), true},
+		{"native permission edit with mismatched diff target", "", "permissionRequest", invalidNativePermissionEdit, true},
+		{"native permission edit with two argument shapes", "", "permissionRequest", ambiguousNativePermissionEdit, true},
 		{"VS Code Local over-limit create_file with CLI decoys", connector.CopilotHookSurfaceVSCodeLocal, "PreToolUse",
 			local(link, cliDecoys), true},
 		{"VS Code Local over-limit create_file", connector.CopilotHookSurfaceVSCodeLocal, "PreToolUse", local(link, nil), true},

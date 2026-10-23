@@ -22,7 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -291,7 +290,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	})
 	failureBuilder, err := observability.NewRecordBuilder(
 		observability.ClockFunc(func() time.Time { return time.Now().UTC() }),
-		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		observability.TimeOrderedOccurrenceIDs,
 	)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
@@ -1092,7 +1091,7 @@ func (s *Sidecar) persistObservabilityV8DeliveryTransition(
 		}
 		builder, buildErr := observability.NewFamilyBuilder(
 			observability.ClockFunc(func() time.Time { return transition.OccurredAt.UTC() }),
-			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			observability.TimeOrderedOccurrenceIDs,
 		)
 		if buildErr != nil {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}

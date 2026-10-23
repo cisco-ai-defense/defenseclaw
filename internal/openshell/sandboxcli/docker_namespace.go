@@ -33,7 +33,7 @@ func (a *App) accountDockerNamespace(ctx context.Context, state *openshell.Gatew
 	if err != nil || home == "" {
 		return ""
 	}
-	listed, known := a.gatewaySandboxes(ctx, false)
+	listed, known := a.gatewaySandboxes(ctx)
 	if (known && len(listed) > 0) || openshell.DockerNamespaceInUse(openshell.UserStateHome(a.Getenv, home), openshell.DefaultDockerNamespace) {
 		a.note("your OpenShell gateway keeps its sandboxes in OpenShell's default Docker sandbox namespace, which the gateways of the other accounts on this computer share " +
 			"(when one of them starts, your running sandboxes stop); setup gives it a namespace of its own once no sandbox is left on it (`" + CommandName + " doctor` says how)")

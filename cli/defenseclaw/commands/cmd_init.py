@@ -89,11 +89,9 @@ def refuse_first_run_when_managed() -> None:
             "cursor",
             "devin",
             "copilot",
-            "openhands",
             "antigravity",
             "opencode",
             "amp",
-            "omnigent",
             "kiro",
             "none",
         ],
@@ -276,6 +274,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     # GAP-2593: the LLM key's env var name too.
     llm_api_key_env = _validated_api_key_env_name(llm_api_key_env, "'--llm-api-key-env'", "DEFENSECLAW_LLM_KEY")
     connector = _single_connector_option(connector)
+    _refuse_unknown_action_connectors(action_connectors, supplied=_option_supplied("action_connectors"))
     requested_connectors = []
     if connector:
         requested_connectors.append(_normalize_connector_arg(connector))
@@ -975,6 +974,39 @@ def _parse_connector_list(raw: str | None) -> list[str]:
     return out
 
 
+def _option_supplied(name: str) -> bool:
+    """Whether the operator passed option *name* (command line or env)."""
+    ctx = click.get_current_context(silent=True)
+    source = ctx.get_parameter_source(name) if ctx is not None else None
+    return source in (click.core.ParameterSource.COMMANDLINE, click.core.ParameterSource.ENVIRONMENT)
+
+
+def _refuse_unknown_action_connectors(raw: str | None, *, supplied: bool) -> None:
+    """Stop on an --action-connectors entry that is not a hook connector, or
+    on a supplied value that names none (``--action-connectors ,``).
+
+    The entry used to be skipped with a warning after the run had already
+    replaced the guarded roster, so a typo turned an enforcing install into
+    an observe-only one for another connector (GAP-0044). A value with no
+    names read as the option left out, so first run fell back to one
+    connector in observe.
+    """
+    from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
+
+    names = _parse_connector_list(raw)
+    if (supplied or (raw or "").strip()) and not names:
+        raise click.UsageError(
+            "--action-connectors names no connector; nothing was changed. "
+            f"Name one or more of: {', '.join(sorted(_HOOK_ENFORCED_CONNECTORS))}, or leave the option out."
+        )
+    unknown = [name for name in names if name not in _HOOK_ENFORCED_CONNECTORS]
+    if unknown:
+        raise click.UsageError(
+            f"--action-connectors: {', '.join(unknown)} is not a hook connector; nothing was changed. "
+            f"Choose from: {', '.join(sorted(_HOOK_ENFORCED_CONNECTORS))}."
+        )
+
+
 def _prompt_checkbox_selection(
     options: list[str],
     *,
@@ -1085,38 +1117,6 @@ def _prompt_trust_discovery_prefixes(
     )
 
 
-def _prompt_trust_protected_executables(
-    connectors: list[str],
-    *,
-    data_dir: str | os.PathLike[str] | None,
-    trusted_prompt_cache: dict[str, bool] | None = None,
-) -> None:
-    """Offer the trust prompt for an agent that protected setup would skip.
-
-    macOS OpenHands setup runs only an executable in a trusted directory. A
-    ``uv tool`` install puts a symlink on PATH whose target is not trusted,
-    so the selection skipped OpenHands with a copy-paste command (GAP-1058).
-    Ask here instead, the same way as for untrusted discovery binaries.
-    """
-    if platform_support.host_os() != "darwin":
-        return
-    if "openhands" not in {connector_paths.normalize(name) for name in connectors}:
-        return
-    from defenseclaw.agent_selection import untrusted_setup_executable
-    from defenseclaw.config import default_data_path
-
-    path = untrusted_setup_executable(os.fspath(data_dir or default_data_path()), "openhands")
-    if not path:
-        return
-    parent = os.path.dirname(path)
-    if trusted_prompt_cache is not None and parent in trusted_prompt_cache:
-        return
-    _confirm_trusted_prefix_rows(
-        [("openhands", path, parent)],
-        data_dir=data_dir,
-        trusted_prompt_cache=trusted_prompt_cache,
-        reason="Setup runs an agent only from a trusted directory; without it, init skips this agent.",
-    )
 
 
 def _confirm_trusted_prefix_rows(
@@ -1828,8 +1828,6 @@ def _build_noninteractive_connector_settings(
     the named ``--action-connectors`` enforced. The two flags are composable so
     scripts can declare exactly which agents observe and which act.
     """
-    from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
-
     action_list = _parse_connector_list(action_connectors)
 
     def _single(connector_name: str | None, *, discover: bool) -> list[dict]:
@@ -1874,13 +1872,6 @@ def _build_noninteractive_connector_settings(
     if observe_all:
         configured.extend(detected)
     for name in action_list:
-        if name not in _HOOK_ENFORCED_CONNECTORS:
-            if not quiet:
-                ux.echo(
-                    f"  ⚠ {name}: not a hook-enforced connector; skipping --action-connectors entry.",
-                    err=True,
-                )
-            continue
         if name not in detected:
             if not quiet:
                 ux.echo(
@@ -1946,11 +1937,6 @@ def _prompt_first_run(
     connectors = _prompt_connector_selection(
         connector,
         rescan_agents,
-        data_dir=data_dir,
-        trusted_prompt_cache=trusted_prompt_cache,
-    )
-    _prompt_trust_protected_executables(
-        connectors,
         data_dir=data_dir,
         trusted_prompt_cache=trusted_prompt_cache,
     )
@@ -2301,26 +2287,6 @@ def _activate_additional_connectors(
             raise click.ClickException(
                 "native-Windows OpenCode extras require a fresh receipt-bound exact SST selection"
             )
-
-    if platform_support.host_os() == "darwin" and primary_name != "openhands" and "openhands" in selected_keys:
-        # The macOS gateway installs OpenHands hooks only from a setup-selected,
-        # digest-pinned executable. Record it the way `setup openhands` does;
-        # when it cannot be verified, setup warns with the reason and the
-        # connector is left out instead of being listed as configured.
-        from defenseclaw.commands.cmd_setup import (
-            _capture_setup_config_snapshot,
-            _record_windows_setup_agent_selections,
-        )
-
-        openhands_selection = _record_windows_setup_agent_selections(
-            cfg.data_dir,
-            tuple(selected_keys),
-            _prior_snapshot=_capture_setup_config_snapshot(cfg),
-            required={primary_name},
-        )
-        if openhands_selection is None or openhands_selection.record_for("openhands") is None:
-            selected_keys.remove("openhands")
-            extras = [s for s in extras if connector_paths.normalize(s["connector"]) != "openhands"]
 
     # Rebuild the multi map from the connector selection made in this init
     # run. Reusing the old map would keep unchecked/stale connectors active in

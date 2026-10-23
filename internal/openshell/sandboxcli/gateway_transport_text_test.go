@@ -40,6 +40,15 @@ func TestGatewayTransportTextHidesRawGRPC(t *testing.T) {
 			t.Fatalf("%q -> %q", raw, got)
 		}
 	}
+	// The OpenShell CLI's chain when nothing listens on the gateway port: a
+	// delete's work check printed it (#1202).
+	for _, raw := range []string{
+		"workspace: inspect the sandbox copy (exit 1): Error:   × transport error |   ├─▶ tcp connect error |   ├─▶ tcp connect error: Connection refused (os error 111)",
+	} {
+		if got := gatewayTransportText(raw); got != "the OpenShell gateway does not answer" {
+			t.Fatalf("%q -> %q", raw, got)
+		}
+	}
 	for _, plain := range []string{"sandbox r5r is not running", "the sandbox's MicroVM disk is full"} {
 		if got := gatewayTransportText(plain); got != plain {
 			t.Fatalf("%q changed to %q", plain, got)

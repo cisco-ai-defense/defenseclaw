@@ -57,6 +57,6 @@ func windowsBundleApplyLifecycleOptions(cmd *cobra.Command, opts *bundleApplyOpt
 	}
 	return &windowsEnterpriseLifecycleOptions{
 		bundlePath: bundle, profile: managed.ProfileStandalone, jsonOutput: opts.json,
-		refuseCapabilityLoss: opts.refuseCapabilityLoss, bundleLockWait: opts.lockWait, bundleDeliveryID: opts.deliveryID,
+		refuseCapabilityLoss: opts.refuseCapabilityLoss, deferRestart: opts.deferRestart, bundleLockWait: opts.lockWait, bundleDeliveryID: opts.deliveryID,
 	}, nil
 }

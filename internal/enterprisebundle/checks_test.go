@@ -116,12 +116,19 @@ func TestCheckSecretRefs(t *testing.T) {
 	if err != nil || strings.Join(names, ",") != "ai-defense-api-key,galileo-api-key" {
 		t.Fatalf("credentials %v (%v)", names, err)
 	}
-	m := &Manifest{SecretRefs: []SecretRef{{Ref: "secret://ai-defense-api-key", Required: true}}}
+	bound := func(name string) SecretRef {
+		return SecretRef{Ref: SecretRefScheme + name, Required: true, ValueSHA256: CredentialValueSHA256("acme", name, []byte("value"))}
+	}
+	m := &Manifest{TenantID: "acme", SecretRefs: []SecretRef{bound("ai-defense-api-key")}}
 	wantCode(t, CheckSecretRefs(m, b), CodeManifestInvalid)
-	m.SecretRefs = append(m.SecretRefs, SecretRef{Ref: "secret://galileo-api-key"})
+	m.SecretRefs = append(m.SecretRefs, bound("galileo-api-key"))
 	if err := CheckSecretRefs(m, b); err != nil {
 		t.Fatal(err)
 	}
+	// A reference that signs the name only (every bundle signed before
+	// 1.0.4) binds no value: secret_ref_unbound.
+	m.SecretRefs[1].ValueSHA256 = ""
+	wantCode(t, CheckSecretRefs(m, b), CodeSecretRefUnbound)
 }
 
 func TestReachability(t *testing.T) {

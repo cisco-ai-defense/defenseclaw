@@ -759,6 +759,32 @@ func TestEnsureRefusesAnUntrustedRulePackUpFront(t *testing.T) {
 	}
 }
 
+// A configured custom pack deleted after ensure applied it fails the next
+// gateway restart; status and verify say so now (p0 GAP-1207).
+func TestVerifyReportsADeletedCustomRulePack(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	const pack = "/etc/defenseclaw/policies/guardrail/custom"
+	if err := os.MkdirAll(h.env.P(pack), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := writeChangedConfig(t, h, "rule_pack: default",
+		"rule_pack: acme\n  custom_packs:\n    acme: {path: "+pack+", digest: \"sha256:"+strings.Repeat("a", 64)+"\"}")
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: cfg}))
+	if r := h.run(Options{Action: ActionVerify}); strings.Contains(messagesOf(r.Errors, codeVerify), pack) {
+		t.Fatalf("verify reported the pack before it was deleted: %+v", r.Errors)
+	}
+	if err := os.RemoveAll(h.env.P(pack)); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if r.OK || !strings.Contains(messagesOf(r.Errors, codeVerify), pack+`" is missing`) {
+			t.Fatalf("%s did not report the deleted pack: %+v", action, r.Errors)
+		}
+	}
+}
+
 // `rulepack validate` runs as an administrator, so it asks whether the
 // service account could read the pack.
 func TestRulePackServiceReadProblemNamesAnUnreadablePack(t *testing.T) {
@@ -1359,8 +1385,26 @@ func TestStatusAndVerify(t *testing.T) {
 	if !strings.Contains(changes, "rewrote /etc/systemd/system/"+unitGateway) || !strings.Contains(changes, "started "+unitEnumerator+", which was not running") {
 		t.Fatalf("repair does not list what it changed: %q", repair.Changes)
 	}
-	if again := h.run(Options{Action: ActionRepair}); len(again.Changes) != 0 {
-		t.Fatalf("a repair of a healthy deployment lists changes: %q", again.Changes)
+	if !strings.HasSuffix(changes, RepairRestartedServices) || strings.Contains(changes, RepairNothingChanged) {
+		t.Fatalf("repair does not end with the service restart: %q", repair.Changes)
+	}
+	// A healthy deployment: --json says there was nothing to repair and
+	// that repair restarted the services (GAP-0020, GAP-0061).
+	again := h.run(Options{Action: ActionRepair})
+	requireOK(t, again)
+	if strings.Join(again.Changes, "\n") != RepairNothingChanged+"\n"+RepairRestartedServices {
+		t.Fatalf("a repair of a healthy deployment lists %q", again.Changes)
+	}
+	raw, err := json.Marshal(again)
+	if err != nil || !strings.Contains(string(raw), `"changes":["nothing to repair"`) {
+		t.Fatalf("the repair JSON has no changes list: %s %v", raw, err)
+	}
+	// With --no-start (not_started) it does not claim a restart.
+	stopped := &lifecycle{env: h.env, result: enterprisestatus.New(ActionRepair, "standalone", "linux", "1.0.0")}
+	stopped.result.AddWarning(codeNotStarted, "installed without starting the services (--no-start)")
+	stopped.summarizeRepair()
+	if strings.Join(stopped.result.Changes, "\n") != RepairNothingChanged {
+		t.Fatalf("a --no-start repair lists %q", stopped.result.Changes)
 	}
 }
 
@@ -1475,7 +1519,7 @@ func TestUnverifiedHookContractIsVisible(t *testing.T) {
 	state, _ := json.Marshal(map[string]any{"results": []map[string]any{
 		{"user": "alice", "connector": "codex", "ok": true},
 		{"user": "bob", "connector": "devin", "ok": false, "error": `enterprise hooks: connector devin agent version "3999.0.0" is not verified against a known hook contract: no hook contract matches normalized agent version`},
-		{"user": "carol", "connector": "omnigent", "ok": false, "error": "enterprise hooks: connector omnigent setup failed: interpreter is not in a trusted install prefix"},
+		{"user": "carol", "connector": "codex", "ok": false, "error": "enterprise hooks: connector codex setup failed: executable is not in a trusted install prefix"},
 	}})
 	if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
 		t.Fatal(err)
@@ -1496,7 +1540,7 @@ func TestUnverifiedHookContractIsVisible(t *testing.T) {
 	}
 	failedTarget := false
 	for _, w := range status.Warnings {
-		if w.Code == codeGuardianTargetFailed && strings.Contains(w.Message, "omnigent for user carol is not protected: connector omnigent setup failed") {
+		if w.Code == codeGuardianTargetFailed && strings.Contains(w.Message, "codex for user carol is not protected: connector codex setup failed") {
 			failedTarget = true
 		}
 	}
@@ -1520,9 +1564,9 @@ func TestGuardianTargetReasonKeepsItsRemedy(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	remedy := "install it under an administrator-owned prefix listed in enterprise.enrollment.agent_prefixes"
-	oversized := "connector omnigent setup failed: " + strings.Repeat("path/segment/", 300) + "python3.12 is refused; " + remedy
+	oversized := "connector codex setup failed: " + strings.Repeat("path/segment/", 300) + "python3.12 is refused; " + remedy
 	state, _ := json.Marshal(map[string]any{"results": []map[string]any{
-		{"user": "alice", "connector": "omnigent", "ok": false, "error": "enterprise hooks: " + oversized},
+		{"user": "alice", "connector": "codex", "ok": false, "error": "enterprise hooks: " + oversized},
 	}})
 	if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
 		t.Fatal(err)

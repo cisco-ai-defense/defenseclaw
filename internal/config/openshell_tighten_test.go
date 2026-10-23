@@ -625,54 +625,6 @@ func TestSandboxDefaultProfileWarningsPackStrictness(t *testing.T) {
 	}
 }
 
-func TestSandboxAdvisories(t *testing.T) {
-	cfg := sandboxProfilesFixture()
-	cfg.Guardrail.Profiles["offline-floor"].Sandbox.RequiredFor = []string{"claudecode", "openhands"}
-	cfg.Guardrail.ProfileAssignments = append(cfg.Guardrail.ProfileAssignments,
-		ProfileAssignment{Profile: "engineering", Match: ProfileMatch{Agents: []string{"agt-0123456789abcdef"}}})
-	cfg.OpenShell.Admin.RequestAccess = ""
-	// GAP-0393: a custom pack without a pin is named; a built-in or a pinned
-	// one is not.
-	cfg.Guardrail.Profiles["contractors"].Sandbox.RequiredPack = "/srv/packs/contractors/pack.yaml"
-	cfg.Guardrail.Profiles["engineering"].Sandbox.RequiredPack = "/srv/packs/engineering"
-	cfg.Guardrail.Profiles["engineering"].Sandbox.RequiredPackDigest = "sha256:" + strings.Repeat("a", 64)
-	cfg.Guardrail.Profiles["offline-floor"].Sandbox.RequiredPack = "strict"
-	got := strings.Join(cfg.SandboxAdvisories("windows"), "\n")
-	for _, want := range []string{
-		"required_for names openhands (offline-floor), which has no machine-owned hook on windows",
-		"guardrail.profile_assignments[3] reaches the sandbox floor of engineering only through match.agents or match.connectors",
-		`openshell.admin.request_access is empty: sandbox refusals end with "contact your IT help desk"`,
-		`guardrail.profiles["contractors"].sandbox.required_pack /srv/packs/contractors/pack.yaml has no required_pack_digest`,
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("missing advisory %q in:\n%s", want, got)
-		}
-	}
-	if strings.Contains(got, "claudecode (") || strings.Contains(got, "assignments[2]") ||
-		strings.Contains(got, "/srv/packs/engineering") || strings.Contains(got, "required_pack strict") {
-		t.Errorf("unexpected advisory in:\n%s", got)
-	}
-	if again := strings.Join(cfg.SandboxAdvisories("windows"), "\n"); again != got {
-		t.Errorf("advisories differ on a rerun:\n%s\n---\n%s", got, again)
-	}
-	linux := strings.Join(cfg.SandboxAdvisories("linux"), "\n")
-	if strings.Contains(linux, "openhands") {
-		t.Errorf("openhands has hooks on linux:\n%s", linux)
-	}
-	// GAP-0484: the pin advice names the reader root can run on a managed
-	// computer, not `defenseclaw sandbox pack show` (which needs a daemon).
-	for goos, want := range map[string]string{
-		"linux":   "`/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux sandbox pack-digest /srv/packs/contractors/pack.yaml` prints",
-		"darwin":  "enterprise macos sandbox pack-digest /srv/packs/contractors/pack.yaml` prints",
-		"windows": "`defenseclaw-gateway enterprise linux sandbox pack-digest /srv/packs/contractors/pack.yaml` (or `enterprise macos`) prints on a computer that runs sandboxes",
-	} {
-		got := strings.Join(cfg.SandboxAdvisories(goos), "\n")
-		if !strings.Contains(got, want) || strings.Contains(got, "pack show") {
-			t.Errorf("%s pin advice, want %q in:\n%s", goos, want, got)
-		}
-	}
-}
-
 // GAP-0535: a required_for connector whose hooks the standalone profile
 // does not publish through machine policy (Antigravity's are per user), or
 // whose machine policy the administrator turned off, is named; OpenCode's
@@ -791,6 +743,54 @@ func TestParseOpenShellFloorDuration(t *testing.T) {
 	for _, bad := range []string{"", "2w", "-1h", "+1h", "1.5d", "5"} {
 		if _, err := ParseOpenShellFloorDuration(bad); err == nil {
 			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestSandboxAdvisories(t *testing.T) {
+	cfg := sandboxProfilesFixture()
+	cfg.Guardrail.Profiles["offline-floor"].Sandbox.RequiredFor = []string{"claudecode", "example-plugin"}
+	cfg.Guardrail.ProfileAssignments = append(cfg.Guardrail.ProfileAssignments,
+		ProfileAssignment{Profile: "engineering", Match: ProfileMatch{Agents: []string{"agt-0123456789abcdef"}}})
+	cfg.OpenShell.Admin.RequestAccess = ""
+	// GAP-0393: a custom pack without a pin is named; a built-in or a pinned
+	// one is not.
+	cfg.Guardrail.Profiles["contractors"].Sandbox.RequiredPack = "/srv/packs/contractors/pack.yaml"
+	cfg.Guardrail.Profiles["engineering"].Sandbox.RequiredPack = "/srv/packs/engineering"
+	cfg.Guardrail.Profiles["engineering"].Sandbox.RequiredPackDigest = "sha256:" + strings.Repeat("a", 64)
+	cfg.Guardrail.Profiles["offline-floor"].Sandbox.RequiredPack = "strict"
+	got := strings.Join(cfg.SandboxAdvisories("windows"), "\n")
+	for _, want := range []string{
+		"required_for names example-plugin (offline-floor), which has no machine-owned hook on windows",
+		"guardrail.profile_assignments[3] reaches the sandbox floor of engineering only through match.agents or match.connectors",
+		`openshell.admin.request_access is empty: sandbox refusals end with "contact your IT help desk"`,
+		`guardrail.profiles["contractors"].sandbox.required_pack /srv/packs/contractors/pack.yaml has no required_pack_digest`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing advisory %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "claudecode (") || strings.Contains(got, "assignments[2]") ||
+		strings.Contains(got, "/srv/packs/engineering") || strings.Contains(got, "required_pack strict") {
+		t.Errorf("unexpected advisory in:\n%s", got)
+	}
+	if again := strings.Join(cfg.SandboxAdvisories("windows"), "\n"); again != got {
+		t.Errorf("advisories differ on a rerun:\n%s\n---\n%s", got, again)
+	}
+	linux := strings.Join(cfg.SandboxAdvisories("linux"), "\n")
+	if strings.Contains(linux, "example-plugin") {
+		t.Errorf("a plugin connector has hooks on linux:\n%s", linux)
+	}
+	// GAP-0484: the pin advice names the reader root can run on a managed
+	// computer, not `defenseclaw sandbox pack show` (which needs a daemon).
+	for goos, want := range map[string]string{
+		"linux":   "`/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux sandbox pack-digest /srv/packs/contractors/pack.yaml` prints",
+		"darwin":  "enterprise macos sandbox pack-digest /srv/packs/contractors/pack.yaml` prints",
+		"windows": "`defenseclaw-gateway enterprise linux sandbox pack-digest /srv/packs/contractors/pack.yaml` (or `enterprise macos`) prints on a computer that runs sandboxes",
+	} {
+		got := strings.Join(cfg.SandboxAdvisories(goos), "\n")
+		if !strings.Contains(got, want) || strings.Contains(got, "pack show") {
+			t.Errorf("%s pin advice, want %q in:\n%s", goos, want, got)
 		}
 	}
 }

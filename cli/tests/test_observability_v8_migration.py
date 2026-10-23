@@ -141,6 +141,20 @@ def _document(result: object) -> dict[str, object]:
     return document
 
 
+def test_v7_upgrade_drops_retired_connector_telemetry() -> None:
+    # until 1.1: an older installation may still have these connector blocks.
+    result = _convert(
+        "config_version: 7\n"
+        "observability:\n"
+        "  connectors:\n"
+        "    openhands: {webhooks: []}\n"
+        "    codex: {webhooks: []}\n"
+    )
+    connectors = _document(result)["observability"]["connectors"]
+    assert "openhands" not in connectors
+    assert "codex" in connectors
+
+
 def _destination(document: Mapping[str, object], name: str) -> dict[str, object]:
     observability = document["observability"]
     assert isinstance(observability, dict)
@@ -3351,32 +3365,11 @@ observability:
     assert destinations["codex-dup-2"]["routes"][0]["selector"]["connectors"] == ["codex"]
 
 
-@pytest.mark.parametrize(
-    ("legacy_name", "canonical"),
-    [("CoDeX", "codex"), ("open-hands", "openhands"), ("open_hands", "openhands")],
-)
-def test_connector_names_use_current_case_and_openhands_normalization(legacy_name: str, canonical: str) -> None:
-    result = _convert(
-        f"""config_version: 7
-observability:
-  connectors:
-    {legacy_name}:
-      webhooks:
-        - name: incident
-          type: generic
-          enabled: false
-          url: https://notifications.example.test
-      audit_sinks: []
-"""
-    )
-    observability = _document(result)["observability"]
-
-    assert list(observability["connectors"]) == [canonical]
 
 
 @pytest.mark.parametrize(
     ("first", "second"),
-    [("Codex", "codex"), ("open-hands", "open_hands"), ("OpenHands", "open_hands")],
+    [("Codex", "codex")],
 )
 def test_connector_alias_collisions_fail_before_candidate(first: str, second: str) -> None:
     source = f"""config_version: 7
@@ -3503,7 +3496,7 @@ audit_sinks:
         "redaction_profile": "v7-compatible",
     }
     action_selector = routes[1]["selector"]["actions"]
-    assert len(action_selector) == 234
+    assert len(action_selector) == 237
     assert "fleet.device.credential_provision_authorized" in action_selector
     assert "fleet.device.decommission_authorized" in action_selector
     assert "setup-redaction-policy" in action_selector

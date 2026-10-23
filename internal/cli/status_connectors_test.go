@@ -374,7 +374,7 @@ func TestPrintConnectorModes_SingleEntry(t *testing.T) {
 
 // Every connector the Python status names gets the same display name.
 func TestFriendlyConnectorNameMatchesThePythonStatus(t *testing.T) {
-	for name, want := range map[string]string{"amp": "Amp", "opencode": "OpenCode", "kiro": "Kiro", "omnigent": "OmniGent"} {
+	for name, want := range map[string]string{"amp": "Amp", "opencode": "OpenCode", "kiro": "Kiro"} {
 		if got := friendlyConnectorName(name); got != want {
 			t.Errorf("friendlyConnectorName(%q) = %q, want %q", name, got, want)
 		}
@@ -403,24 +403,6 @@ func TestPrintConnectorModes_AmpUsesHookPolicyWithoutProxy(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Amp Connector Mode output missing %q:\n%s", want, out)
-		}
-	}
-}
-
-func TestPrintConnectorModes_OmnigentPolicySurface(t *testing.T) {
-	modes := []connectorModeSummary{{
-		Connector:          "omnigent",
-		Mode:               "observability",
-		PolicyMode:         "action",
-		EnforcementSurface: "omnigent_policy_api",
-		Telemetry:          []string{"policy-api"},
-	}}
-
-	out := captureStdout(t, func() { printConnectorModes(modes) })
-
-	for _, want := range []string{"Data path:", "direct-to-upstream", "Policy mode:", "action", "omnigent policy api", "policy-api"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("OmniGent status missing %q:\n%s", want, out)
 		}
 	}
 }
@@ -475,45 +457,6 @@ func TestFetchConnectorModesNormalizesWildcardBind(t *testing.T) {
 
 	if len(modes) != 1 || modes[0].Connector != "codex" {
 		t.Fatalf("wildcard bind modes = %v, want codex", modes)
-	}
-}
-
-// A connector the config disables is not shown as enforced: status used to
-// list OmniGent with "Policy mode: action / Hook enforcement: yes" although
-// guardrail.connectors.omnigent.enabled was false.
-func TestPrintConnectorModesMarksADisabledConnectorAsNotEnforced(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"connector_modes":[`+
-			`{"connector":"codex","mode":"observability","policy_mode":"action","enforcement_surface":"agent_lifecycle_hooks",`+
-			`"telemetry":["hooks"],"proxy_intercept":false,"guardrail_mode":"action","hook_enforcement":true,"enabled":true},`+
-			`{"connector":"omnigent","mode":"observability","policy_mode":"action","enforcement_surface":"omnigent_policy_api",`+
-			`"telemetry":["policy-api"],"proxy_intercept":false,"guardrail_mode":"action","hook_enforcement":true,"enabled":false}]}`)
-	}))
-	defer srv.Close()
-	bind, port := splitHostPort(t, srv.URL)
-	cfg := config.DefaultConfig()
-	cfg.Gateway.APIBind = bind
-	cfg.Gateway.APIPort = port
-	modes := fetchConnectorModes(srv.Client(), cfg)
-	if len(modes) != 2 {
-		t.Fatalf("want 2 modes, got %v", modes)
-	}
-
-	out := captureStdout(t, func() { printConnectorModes(modes) })
-	codex, omnigent, found := strings.Cut(out, "OmniGent (omnigent)")
-	if !found {
-		t.Fatalf("OmniGent is missing from the roster:\n%s", out)
-	}
-	if !strings.Contains(omnigent, "disabled, not enforced") {
-		t.Errorf("disabled OmniGent is not marked as not enforced:\n%s", out)
-	}
-	for _, unwanted := range []string{"Hook enforcement:", "Policy mode:", "Enforcement:"} {
-		if strings.Contains(omnigent, unwanted) {
-			t.Errorf("disabled OmniGent still shows %q:\n%s", unwanted, out)
-		}
-	}
-	if !strings.Contains(codex, "Hook enforcement: yes") || strings.Contains(codex, "disabled") {
-		t.Errorf("enabled Codex lost its enforcement lines:\n%s", out)
 	}
 }
 
@@ -664,5 +607,44 @@ func TestPrintConnectors_OpenCodeMatchesCLIStatus(t *testing.T) {
 		if !strings.Contains(out, "Codex (codex) - RUNNING") {
 			t.Errorf("codex row changed:\n%s", out)
 		}
+	}
+}
+
+// A connector the config disables is not shown as enforced: status used to
+// list a connector with "Policy mode: action / Hook enforcement: yes" although
+// its guardrail.connectors.<name>.enabled was false.
+func TestPrintConnectorModesMarksADisabledConnectorAsNotEnforced(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"connector_modes":[`+
+			`{"connector":"codex","mode":"observability","policy_mode":"action","enforcement_surface":"agent_lifecycle_hooks",`+
+			`"telemetry":["hooks"],"proxy_intercept":false,"guardrail_mode":"action","hook_enforcement":true,"enabled":true},`+
+			`{"connector":"cursor","mode":"observability","policy_mode":"action","enforcement_surface":"agent_lifecycle_hooks",`+
+			`"telemetry":["hooks"],"proxy_intercept":false,"guardrail_mode":"action","hook_enforcement":true,"enabled":false}]}`)
+	}))
+	defer srv.Close()
+	bind, port := splitHostPort(t, srv.URL)
+	cfg := config.DefaultConfig()
+	cfg.Gateway.APIBind = bind
+	cfg.Gateway.APIPort = port
+	modes := fetchConnectorModes(srv.Client(), cfg)
+	if len(modes) != 2 {
+		t.Fatalf("want 2 modes, got %v", modes)
+	}
+
+	out := captureStdout(t, func() { printConnectorModes(modes) })
+	codex, cursor, found := strings.Cut(out, "Cursor (cursor)")
+	if !found {
+		t.Fatalf("Cursor is missing from the roster:\n%s", out)
+	}
+	if !strings.Contains(cursor, "disabled, not enforced") {
+		t.Errorf("disabled Cursor is not marked as not enforced:\n%s", out)
+	}
+	for _, unwanted := range []string{"Hook enforcement:", "Policy mode:", "Enforcement:"} {
+		if strings.Contains(cursor, unwanted) {
+			t.Errorf("disabled Cursor still shows %q:\n%s", unwanted, out)
+		}
+	}
+	if !strings.Contains(codex, "Hook enforcement: yes") || strings.Contains(codex, "disabled") {
+		t.Errorf("enabled Codex lost its enforcement lines:\n%s", out)
 	}
 }

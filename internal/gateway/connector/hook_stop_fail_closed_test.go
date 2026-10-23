@@ -162,7 +162,7 @@ type stopHookRun struct {
 func runPerUserHookForStop(t *testing.T, c Connector, script string, args []string, stdin, reply string, extraEnv ...string) stopHookRun {
 	t.Helper()
 	hooksDir := t.TempDir()
-	if err := WriteHookScriptsForConnectorObject(hooksDir, freeAPIAddr(t), "stop-scoped-token", c); err != nil {
+	if err := writePerUserHooksForTestFailMode(hooksDir, freeAPIAddr(t), "stop-scoped-token", c, extraEnv); err != nil {
 		t.Fatalf("write hooks: %v", err)
 	}
 	stubDir := t.TempDir()

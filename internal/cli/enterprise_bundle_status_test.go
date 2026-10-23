@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -619,5 +620,34 @@ func TestEnterpriseBundleStatusLayoutUnverifiableIsNotDigestDiffers(t *testing.T
 				t.Fatalf("layout_unverifiable=%t status: %s", layoutDependent, out)
 			}
 		})
+	}
+}
+
+// An installed anchor file that fails its checks is explained by a warning
+// on a device with no confirmed bundle too, so the absent anchors_summary
+// is never silent: malformed is anchor_invalid, untrusted anchor_insecure.
+func TestBundleStatusWarnsOfAnInvalidAnchorFileWithoutAConfirmedBundle(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	bundleDevice(t, e)
+	writeBundleTestFile(t, e.anchors, []byte("{not json"))
+	status := func() bundleStatusResult {
+		t.Helper()
+		out, code := runBundle(t, "status", "--json")
+		var result bundleStatusResult
+		if err := json.Unmarshal([]byte(out), &result); err != nil || code != 0 {
+			t.Fatalf("status exit %d, %v:\n%s", code, err, out)
+		}
+		if !result.BundleMode || result.Current != nil || result.AnchorsSummary != nil {
+			t.Fatalf("fresh device with a bad anchor file: bundle_mode %v, current %+v, anchors_summary %+v", result.BundleMode, result.Current, result.AnchorsSummary)
+		}
+		return result
+	}
+	if result := status(); !hasBundleWarning(result.Warnings, string(enterprisebundle.CodeAnchorInvalid)) {
+		t.Fatalf("malformed anchor file: warnings %+v, want anchor_invalid", result.Warnings)
+	}
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	bundleAnchorTrust = func(string) error { return errors.New("the anchor file is writable by another account") }
+	if result := status(); !hasBundleWarning(result.Warnings, string(enterprisebundle.CodeAnchorInsecure)) {
+		t.Fatalf("untrusted anchor file: warnings %+v, want anchor_insecure", result.Warnings)
 	}
 }

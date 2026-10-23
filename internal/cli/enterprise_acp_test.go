@@ -289,6 +289,7 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	}
 	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
 	if row, _ := listed[0].(map[string]any); row["token_copy"] != "present" || row["setup"] != "not run" ||
+		row["user_data_dir"] != filepath.Join(renamedHome, ".defenseclaw") ||
 		!strings.Contains(fmt.Sprint(row["note"]), "outside the home") {
 		t.Fatalf("list row after a rename = %v, want the copy found in the new home and a note", row)
 	}
@@ -312,7 +313,7 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := acp.MatchEnterpriseCredential(serviceData, credential.Token); !ok {
+	if _, _, ok := acp.MatchEnterpriseCredentialKeyID(serviceData, acp.HTTPAuthKeyID(credential.Token)); !ok {
 		t.Fatal("enrolled token did not authenticate")
 	}
 	if err := os.Remove(tokenPath); err != nil {
@@ -322,7 +323,7 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	failEnroll("the user token path is a directory")
-	if _, ok := acp.MatchEnterpriseCredential(serviceData, credential.Token); !ok {
+	if _, _, ok := acp.MatchEnterpriseCredentialKeyID(serviceData, acp.HTTPAuthKeyID(credential.Token)); !ok {
 		t.Fatal("a failed re-enrollment removed the working credential")
 	}
 	if err := os.Remove(tokenPath); err != nil {
@@ -333,7 +334,7 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	// after central policy has already been disabled.
 	cfg.ACP.Enabled = false
 	run(runEnterpriseACPRevoke)
-	if _, ok := acp.MatchEnterpriseCredential(serviceData, credential.Token); ok {
+	if _, _, ok := acp.MatchEnterpriseCredentialKeyID(serviceData, acp.HTTPAuthKeyID(credential.Token)); ok {
 		t.Fatal("revoked token still authenticated")
 	}
 	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {

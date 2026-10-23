@@ -197,70 +197,6 @@ func TestHookDecisionMetaReusesLifecycleExecutionAcrossStartTurnResumeAndChild(t
 	}
 }
 
-func TestHookDecisionMetaKeepsExplicitUnknownParentAgent(t *testing.T) {
-	root := llmEventMeta{
-		Source: "openhands", SessionID: "parent-session", AgentID: "retained-root",
-		RootAgentID: "retained-root", RootSessionID: "parent-session",
-		LifecycleID: "root-lifecycle", ExecutionID: "root-execution", AgentDepth: 0,
-	}
-	rootKey := hookSessionStateKey(root)
-	api := &APIServer{
-		hookSessionStates:     map[string]hookSessionState{rootKey: {meta: root}},
-		hookSessionStateOrder: []string{rootKey},
-	}
-	req := agentHookRequest{
-		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "child-session",
-		TurnID: "child-turn", AgentID: "child-agent", AgentName: "child", AgentType: "subagent",
-		ToolName: "Bash",
-		Payload: map[string]any{
-			"root_agent_id": "reported-root", "parent_agent_id": "explicit-unknown",
-			"parent_session_id": "parent-session", "agent_depth": 2,
-			"tool_call_id": "child-call",
-		},
-	}
-
-	meta, _, ok := api.hookDecisionMeta(t.Context(), req)
-	if !ok {
-		t.Fatal("hook decision meta was not produced")
-	}
-	if meta.ParentAgentID != "explicit-unknown" {
-		t.Fatalf("explicit unknown parent was replaced: %+v", meta)
-	}
-	if meta.RootAgentID != "reported-root" {
-		t.Fatalf("explicit lineage root was replaced by conversation fallback: %+v", meta)
-	}
-}
-
-func TestHookDecisionMetaResolvesParentSessionWhenParentAgentIsNotReported(t *testing.T) {
-	root := llmEventMeta{
-		Source: "openhands", SessionID: "parent-session", AgentID: "retained-root",
-		RootAgentID: "retained-root", RootSessionID: "parent-session",
-		LifecycleID: "root-lifecycle", ExecutionID: "root-execution", AgentDepth: 0,
-	}
-	rootKey := hookSessionStateKey(root)
-	api := &APIServer{
-		hookSessionStates:     map[string]hookSessionState{rootKey: {meta: root}},
-		hookSessionStateOrder: []string{rootKey},
-	}
-	req := agentHookRequest{
-		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "child-session",
-		TurnID: "child-turn", AgentID: "child-agent", AgentName: "child", AgentType: "subagent",
-		ToolName: "Bash",
-		Payload: map[string]any{
-			"parent_session_id": "parent-session", "agent_depth": 1,
-			"tool_call_id": "child-call",
-		},
-	}
-
-	meta, _, ok := api.hookDecisionMeta(t.Context(), req)
-	if !ok {
-		t.Fatal("hook decision meta was not produced")
-	}
-	if meta.ParentAgentID != root.AgentID || meta.RootAgentID != root.RootAgentID {
-		t.Fatalf("parent-session-only lineage was not reconciled: %+v", meta)
-	}
-}
-
 func TestMergeHookSessionLifecyclePreservesStoredInferredLineage(t *testing.T) {
 	t.Parallel()
 	stored := llmEventMeta{
@@ -622,7 +558,6 @@ func TestAllHookConnectorsNormalizeStableLifecycle(t *testing.T) {
 		{"cursor", "sessionStart", "sessionEnd", "session_start", "session_end"},
 		{"copilot", "sessionStart", "sessionEnd", "session_start", "session_end"},
 		{"antigravity", "PreInvocation", "Stop", "turn_start", "turn_end"},
-		{"openhands", "session_start", "session_end", "session_start", "session_end"},
 		{"opencode", "session.created", "session.deleted", "session_start", "session_end"},
 	}
 	for _, tt := range tests {
@@ -1015,32 +950,117 @@ func TestBoundedHookLLMSpanContent(t *testing.T) {
 	}
 }
 
-func TestHookToolInvocationQueuePreservesRepeatedSameToolCalls(t *testing.T) {
-	api := &APIServer{}
-	meta := llmEventMeta{
-		Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
+func TestBeforeToolSelectionHasBoundedToolLifecycle(t *testing.T) {
+	if got := canonicalHookLifecycleEvent("BeforeToolSelection"); got != "tool_start" {
+		t.Fatalf("lifecycle=%q want tool_start", got)
 	}
-	api.rememberHookToolInvocation(meta, "Bash", `{"command":"first"}`)
-	secondID := api.rememberHookToolInvocation(meta, "Bash", `{"command":"second"}`)
+	if got := hookLifecyclePhase("BeforeToolSelection", "tool_start", "active"); got != "tool" {
+		t.Fatalf("phase=%q want tool", got)
+	}
+}
 
-	// A decision on the second call (a block) ends that call's span, not the
-	// older pending one's, though no tool-call ID tells them apart (#1036).
-	second, ok := api.takeHookToolInvocation(meta, "Bash", secondID)
-	if !ok || second.arguments != `{"command":"second"}` {
-		t.Fatalf("named invocation=%+v ok=%v", second, ok)
+func TestHookDecisionMetaKeepsExplicitUnknownParentAgent(t *testing.T) {
+	root := llmEventMeta{
+		Source: "copilot", SessionID: "parent-session", AgentID: "retained-root",
+		RootAgentID: "retained-root", RootSessionID: "parent-session",
+		LifecycleID: "root-lifecycle", ExecutionID: "root-execution", AgentDepth: 0,
 	}
-	first, ok := api.takeHookToolInvocation(meta, "Bash", "")
-	if !ok || first.arguments != `{"command":"first"}` {
-		t.Fatalf("oldest queued invocation=%+v ok=%v", first, ok)
+	rootKey := hookSessionStateKey(root)
+	api := &APIServer{
+		hookSessionStates:     map[string]hookSessionState{rootKey: {meta: root}},
+		hookSessionStateOrder: []string{rootKey},
 	}
-	if len(api.hookToolInvocations) != 0 || len(api.hookToolInvocationOrder) != 0 {
-		t.Fatalf("tool queue not drained: %#v %#v", api.hookToolInvocations, api.hookToolInvocationOrder)
+	req := agentHookRequest{
+		ConnectorName: "copilot", HookEventName: "BeforeTool", SessionID: "child-session",
+		TurnID: "child-turn", AgentID: "child-agent", AgentName: "child", AgentType: "subagent",
+		ToolName: "Bash",
+		Payload: map[string]any{
+			"root_agent_id": "reported-root", "parent_agent_id": "explicit-unknown",
+			"parent_session_id": "parent-session", "agent_depth": 2,
+			"tool_call_id": "child-call",
+		},
 	}
+
+	meta, _, ok := api.hookDecisionMeta(t.Context(), req)
+	if !ok {
+		t.Fatal("hook decision meta was not produced")
+	}
+	if meta.ParentAgentID != "explicit-unknown" {
+		t.Fatalf("explicit unknown parent was replaced: %+v", meta)
+	}
+	if meta.RootAgentID != "reported-root" {
+		t.Fatalf("explicit lineage root was replaced by conversation fallback: %+v", meta)
+	}
+}
+
+func TestHookDecisionMetaResolvesParentSessionWhenParentAgentIsNotReported(t *testing.T) {
+	root := llmEventMeta{
+		Source: "copilot", SessionID: "parent-session", AgentID: "retained-root",
+		RootAgentID: "retained-root", RootSessionID: "parent-session",
+		LifecycleID: "root-lifecycle", ExecutionID: "root-execution", AgentDepth: 0,
+	}
+	rootKey := hookSessionStateKey(root)
+	api := &APIServer{
+		hookSessionStates:     map[string]hookSessionState{rootKey: {meta: root}},
+		hookSessionStateOrder: []string{rootKey},
+	}
+	req := agentHookRequest{
+		ConnectorName: "copilot", HookEventName: "BeforeTool", SessionID: "child-session",
+		TurnID: "child-turn", AgentID: "child-agent", AgentName: "child", AgentType: "subagent",
+		ToolName: "Bash",
+		Payload: map[string]any{
+			"parent_session_id": "parent-session", "agent_depth": 1,
+			"tool_call_id": "child-call",
+		},
+	}
+
+	meta, _, ok := api.hookDecisionMeta(t.Context(), req)
+	if !ok {
+		t.Fatal("hook decision meta was not produced")
+	}
+	if meta.ParentAgentID != root.AgentID || meta.RootAgentID != root.RootAgentID {
+		t.Fatalf("parent-session-only lineage was not reconciled: %+v", meta)
+	}
+}
+
+func TestHookToolCompletionIdentityUsesNativeIDOrPendingInvocation(t *testing.T) {
+	t.Run("native ID", func(t *testing.T) {
+		api := &APIServer{}
+		meta := llmEventMeta{
+			Source: "copilot", SessionID: "session", AgentID: "agent", TurnID: "turn",
+			ExecutionID: "execution", ToolID: "tool-call",
+		}
+		if _, ok := api.takeHookToolInvocation(meta, "Bash", ""); !ok {
+			t.Fatal("first native tool completion was suppressed")
+		}
+		if _, ok := api.takeHookToolInvocation(meta, "Bash", ""); !ok {
+			t.Fatal("native tool completion without an exact receipt was suppressed")
+		}
+		api.rememberHookToolInvocation(meta, "Bash", `{"command":"late replay"}`)
+		if got := len(api.hookToolInvocations[hookToolInvocationKey(meta, "Bash")]); got != 1 {
+			t.Fatalf("new native tool start after completion queued %d pending invocations want=1", got)
+		}
+	})
+
+	t.Run("no ID repeated calls", func(t *testing.T) {
+		api := &APIServer{}
+		meta := llmEventMeta{
+			Source: "copilot", SessionID: "session", AgentID: "agent", TurnID: "turn",
+			ExecutionID: "execution",
+		}
+		api.rememberHookToolInvocation(meta, "Bash", `{"command":"first"}`)
+		api.rememberHookToolInvocation(meta, "Bash", `{"command":"second"}`)
+		first, firstOK := api.takeHookToolInvocation(meta, "Bash", "")
+		second, secondOK := api.takeHookToolInvocation(meta, "Bash", "")
+		if !firstOK || !secondOK || first.id == "" || second.id == "" || first.id == second.id {
+			t.Fatalf("no-ID repeated completions first=%+v/%v second=%+v/%v", first, firstOK, second, secondOK)
+		}
+	})
 }
 
 func TestHookToolInvocationCacheIsExecutionScopedAndCompletionIsNotContentDeduped(t *testing.T) {
 	executionA := llmEventMeta{
-		Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
+		Source: "copilot", SessionID: "session", AgentID: "agent", TurnID: "turn",
 		ExecutionID: "execution-a",
 	}
 	executionB := executionA
@@ -1078,7 +1098,7 @@ func TestHookToolInvocationCacheIsExecutionScopedAndCompletionIsNotContentDedupe
 func TestHookToolInvocationExactIDDoesNotQueueTwiceButDoesNotSuppressCompletion(t *testing.T) {
 	api := &APIServer{}
 	meta := llmEventMeta{
-		Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
+		Source: "copilot", SessionID: "session", AgentID: "agent", TurnID: "turn",
 		ExecutionID: "execution", ToolID: "tool-call",
 	}
 	arguments := `{"command":"printf ok"}`
@@ -1099,7 +1119,7 @@ func TestHookToolInvocationExactIDDoesNotQueueTwiceButDoesNotSuppressCompletion(
 func TestHookToolInvocationNativeIDReplacesPendingArguments(t *testing.T) {
 	api := &APIServer{}
 	meta := llmEventMeta{
-		Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
+		Source: "copilot", SessionID: "session", AgentID: "agent", TurnID: "turn",
 		ExecutionID: "execution", ToolID: "tool-call",
 	}
 	api.rememberHookToolInvocation(meta, "Bash", `{"command":"printf old"}`)
@@ -1120,46 +1140,25 @@ func TestHookToolInvocationNativeIDReplacesPendingArguments(t *testing.T) {
 	}
 }
 
-func TestHookToolCompletionIdentityUsesNativeIDOrPendingInvocation(t *testing.T) {
-	t.Run("native ID", func(t *testing.T) {
-		api := &APIServer{}
-		meta := llmEventMeta{
-			Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
-			ExecutionID: "execution", ToolID: "tool-call",
-		}
-		if _, ok := api.takeHookToolInvocation(meta, "Bash", ""); !ok {
-			t.Fatal("first native tool completion was suppressed")
-		}
-		if _, ok := api.takeHookToolInvocation(meta, "Bash", ""); !ok {
-			t.Fatal("native tool completion without an exact receipt was suppressed")
-		}
-		api.rememberHookToolInvocation(meta, "Bash", `{"command":"late replay"}`)
-		if got := len(api.hookToolInvocations[hookToolInvocationKey(meta, "Bash")]); got != 1 {
-			t.Fatalf("new native tool start after completion queued %d pending invocations want=1", got)
-		}
-	})
-
-	t.Run("no ID repeated calls", func(t *testing.T) {
-		api := &APIServer{}
-		meta := llmEventMeta{
-			Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
-			ExecutionID: "execution",
-		}
-		api.rememberHookToolInvocation(meta, "Bash", `{"command":"first"}`)
-		api.rememberHookToolInvocation(meta, "Bash", `{"command":"second"}`)
-		first, firstOK := api.takeHookToolInvocation(meta, "Bash", "")
-		second, secondOK := api.takeHookToolInvocation(meta, "Bash", "")
-		if !firstOK || !secondOK || first.id == "" || second.id == "" || first.id == second.id {
-			t.Fatalf("no-ID repeated completions first=%+v/%v second=%+v/%v", first, firstOK, second, secondOK)
-		}
-	})
-}
-
-func TestBeforeToolSelectionHasBoundedToolLifecycle(t *testing.T) {
-	if got := canonicalHookLifecycleEvent("BeforeToolSelection"); got != "tool_start" {
-		t.Fatalf("lifecycle=%q want tool_start", got)
+func TestHookToolInvocationQueuePreservesRepeatedSameToolCalls(t *testing.T) {
+	api := &APIServer{}
+	meta := llmEventMeta{
+		Source: "copilot", SessionID: "session", AgentID: "agent", TurnID: "turn",
 	}
-	if got := hookLifecyclePhase("BeforeToolSelection", "tool_start", "active"); got != "tool" {
-		t.Fatalf("phase=%q want tool", got)
+	api.rememberHookToolInvocation(meta, "Bash", `{"command":"first"}`)
+	secondID := api.rememberHookToolInvocation(meta, "Bash", `{"command":"second"}`)
+
+	// A decision on the second call (a block) ends that call's span, not the
+	// older pending one's, though no tool-call ID tells them apart (#1036).
+	second, ok := api.takeHookToolInvocation(meta, "Bash", secondID)
+	if !ok || second.arguments != `{"command":"second"}` {
+		t.Fatalf("named invocation=%+v ok=%v", second, ok)
+	}
+	first, ok := api.takeHookToolInvocation(meta, "Bash", "")
+	if !ok || first.arguments != `{"command":"first"}` {
+		t.Fatalf("oldest queued invocation=%+v ok=%v", first, ok)
+	}
+	if len(api.hookToolInvocations) != 0 || len(api.hookToolInvocationOrder) != 0 {
+		t.Fatalf("tool queue not drained: %#v %#v", api.hookToolInvocations, api.hookToolInvocationOrder)
 	}
 }

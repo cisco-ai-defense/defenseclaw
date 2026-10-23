@@ -22,6 +22,8 @@ internal/enterprisepolicy/opencode_managed_plugin.js text eol=lf
 # The host variants of the Amp and OpenCode bridges; the plugin scanner pins
 # their SHA-256, so a Windows checkout must keep them LF as well.
 internal/gateway/connector/testdata/bridge_host/** text eol=lf
+# Released per-user hook renders the upgrade tests run as they shipped.
+internal/gateway/connector/testdata/released-hooks/** text eol=lf
 
 # Seeded guardrail rule packs are matched by SHA-256 of their exact bytes
 # (STOCK_PROFILE_DIGESTS); keep them LF on Windows checkouts too.

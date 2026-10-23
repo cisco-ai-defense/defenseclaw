@@ -1,0 +1,113 @@
+---
+title: Send to Splunk
+description: Send DefenseClaw logs to a local Splunk, a Splunk Enterprise HEC endpoint, or traces and metrics to Splunk Observability Cloud.
+keywords:
+  - defenseclaw setup splunk
+  - Splunk HEC
+  - Splunk Observability Cloud
+---
+
+`defenseclaw setup splunk` has three independent modes. Each adds its own destination, so you can run more than one.
+
+| Mode | Use it for | What it sends |
+| --- | --- | --- |
+| `--logs` | A local demo | Logs to a Splunk container in Docker, with the bundled app |
+| `--enterprise` | Your Splunk deployment | Logs through HEC |
+| `--o11y` | Splunk Observability Cloud | Traces and metrics over OTLP (logs optional) |
+
+## Before you start
+
+- For `--logs`: Docker running, and ports 8000 and 8088 free. On Windows, Docker Desktop with Linux containers.
+- For `--enterprise`: a HEC URL, a HEC token, and an index created ahead of time.
+- For `--o11y`: your realm (for example `us1`) and an access token.
+
+## Local Splunk
+
+1. Start it.
+
+   ```bash
+   defenseclaw setup splunk --logs --accept-splunk-license
+   ```
+
+   {/* needs-live-capture: output of `setup splunk --logs` (Docker not run on the shared dev host) */}
+
+   Setup exits nonzero if Docker is missing, its daemon is stopped, or a required port is busy. Fix the reported prerequisite and run the command again.
+
+   Setup starts Splunk in Free mode, installs the **DefenseClaw Local Mode** app, and adds a `splunk_hec` destination for index `defenseclaw_local`. Open [http://localhost:8000](http://localhost:8000). The HEC token stays hidden unless you pass `--show-credentials`.
+
+## Splunk Enterprise
+
+1. Put the token in the environment, then configure the destination.
+
+   ```bash
+   read -rs DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN && export DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN
+
+   defenseclaw setup splunk --enterprise --non-interactive \
+     --hec-endpoint https://splunk.example.com:8088/services/collector/event \
+     --index defenseclaw \
+     --sourcetype _json
+   ```
+
+   ```text
+     Splunk Enterprise configured (HEC)
+     Live HEC probe skipped.
+     Config saved to ~/.defenseclaw/config.yaml
+
+     Splunk Enterprise (HEC):
+       Status:      enabled
+       Destination: splunk-enterprise-splunk-example-com
+       HEC:         https://splunk.example.com:8088/services/collector/event
+       Buckets:     compliance.activity, security.finding, guardrail.evaluation, …
+       Redaction:   unredacted (none)
+   ```
+
+   The sample is from a run with `--skip-test`. Without it, setup sends one probe event and stops if HEC does not return 200. Use `--skip-test` behind a VPN.
+
+2. Use sourcetype `_json`, or `defenseclaw:json` if you also install a `props.conf` stanza with `KV_MODE = json` and `SHOULD_LINEMERGE = false`. Do not add `| spath` to searches on these sourcetypes; it doubles multivalue fields.
+
+For a collector on a private network, use `defenseclaw setup observability add splunk-enterprise --endpoint <url> --allow-private-networks`.
+
+## Splunk Observability Cloud
+
+1. Put the access token in the environment, then configure the destination.
+
+   ```bash
+   read -rs DEFENSECLAW_SETUP_SPLUNK_ACCESS_TOKEN && export DEFENSECLAW_SETUP_SPLUNK_ACCESS_TOKEN
+
+   defenseclaw setup splunk --o11y --non-interactive --realm us1 --traces --metrics --logs-export
+   ```
+
+   {/* needs-live-capture: output of `setup splunk --o11y` */}
+
+   Traces and metrics are on by default; `--logs-export` adds logs. Do not pass `--logs` here, because it starts the local Splunk container. To create the Splunk Observability dashboards and detectors, run `defenseclaw setup splunk dashboards apply`.
+
+## Check it worked
+
+```bash
+defenseclaw setup observability list
+defenseclaw observability destination test <destination-name> --write-probe
+```
+
+`--write-probe` sends one marked record. A plain test can pass even when HEC rejects events. In Splunk, search `index=defenseclaw sourcetype=_json` (local mode: `index=defenseclaw_local`).
+
+## Undo
+
+```bash
+defenseclaw setup splunk --disable --logs
+defenseclaw setup splunk --disable --enterprise
+defenseclaw setup splunk --disable --o11y
+```
+
+Each command disables its own destination and leaves the others alone. `--logs` also stops the local container.
+
+## If it fails
+
+- **Port 8000 or 8088 in use.** Free the port and run setup again. There is no port flag.
+- **HEC returns 403.** The token is wrong or HEC is off on that endpoint.
+- **Code 7 from `--write-probe`.** The index does not exist or the token cannot write to it.
+- **O11y shows traces but no logs.** Log ingest is a separate entitlement. Run again with `--no-logs-export`.
+
+## Next
+
+- [Redact before export](/docs/how-to/observability/redact-before-export)
+- [Dashboards](/docs/reference/observability/dashboards#splunk): the Splunk app and Observability dashboards.

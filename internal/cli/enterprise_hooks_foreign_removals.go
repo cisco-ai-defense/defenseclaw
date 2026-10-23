@@ -4,11 +4,13 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,8 +22,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// enterpriseForeignHookRemovalsMu serializes ledger updates: the Unix
-// per-user workers report their removals concurrently.
+// enterpriseForeignHookRemovalsMu serializes ledger updates of this process:
+// the Unix per-user workers report their removals concurrently. Commits of
+// different guardian processes for one account are serialized by the
+// account's removal lock.
 var enterpriseForeignHookRemovalsMu sync.Mutex
 
 // enterpriseForeignHookAccountID names an account the way the gateway names
@@ -36,72 +40,383 @@ func enterpriseForeignHookAccountID(sid string, uid int) string {
 	return ""
 }
 
-// recordEnterpriseForeignHookRemovals adds the hook files the guardian just
-// cleaned for one account (home) and connector to the removal ledger the
-// gateway reads (enterprisepolicy.ForeignHookRemovalsFile), so that
-// account's agent processes of that connector, and of any other that loads
-// the same file, that started before now stay denied: they may still run a
-// hook they loaded. It runs after the files were cleaned, so every process
-// that could have loaded one started before the recorded time. Failures are
-// logged; the per-call check still applies.
-func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connectorName string, paths []string) {
+// enterpriseForeignHookRemovalMarkAhead is how far ahead the first record of
+// a removal (made before the file changes) denies agent processes: past
+// the longest a cleanup worker can still change files after its guardian
+// ended (enterpriseHookWorkerTimeout plus its kill), so a guardian that
+// ends between the change and the second record leaves every process that
+// may have loaded the file denied until it restarts.
+const enterpriseForeignHookRemovalMarkAhead = 5 * time.Minute
+
+// enterpriseForeignHookRemovalTx is one removal commit of one account: the
+// account's removal lock held exclusively, the account's record key
+// rotated, and the removal recorded once before the change.
+type enterpriseForeignHookRemovalTx struct {
+	stderr    io.Writer
+	identity  string
+	home      string
+	connector string
+	paths     []string
+	release   func()
+	// first is the first record (with ForeignHookRemovalInProgressSuffix),
+	// which the commit drops.
+	first []enterprisepolicy.ForeignHookRemoval
+}
+
+// beginEnterpriseForeignHookRemoval opens the commit of one removal of
+// account's (home's) hook files paths for connector, before any of them
+// changes (GAP-0348, GAP-0381, GAP-0414, GAP-0457, and the 1.0.4 guard
+// consolidation). In this order, and stopping at the first failure:
+//
+//  1. It takes the account's removal lock exclusively
+//     (enterprisepolicy.LockForeignHookAccountRemoval): no new online
+//     answer of the account starts, and those inside finish within their
+//     bound or are cut. Other accounts never wait.
+//  2. It rotates the account's protected session record key
+//     (enterprisepolicy.RotatePublishedSessionKey, one atomic rename): from
+//     then on no outage allow of the account written before proves
+//     anything. A rotation that could not end the key refuses the removal.
+//  3. It records the removal in the ledger with a mark
+//     enterpriseForeignHookRemovalMarkAhead ahead.
+//
+// On an error nothing may change: the hook stays in place, so the scan
+// keeps blocking, and the next pass tries again. The caller changes the
+// files and then commits (enterpriseForeignHookRemovalTx.commit).
+func beginEnterpriseForeignHookRemoval(ctx context.Context, stderr io.Writer, account, home, connectorName string, paths []string) (*enterpriseForeignHookRemovalTx, error) {
+	return beginEnterpriseForeignHookRemovalMarked(ctx, stderr, account, home, connectorName, paths, "")
+}
+
+// beginEnterpriseForeignHookRemovalMarked is beginEnterpriseForeignHookRemoval
+// whose first record has firstMark ("" for the mark ahead): a record of a
+// change already made (recordEnterpriseForeignHookRemovalsAt) takes the
+// mark of when that change was known to be done.
+func beginEnterpriseForeignHookRemovalMarked(ctx context.Context, stderr io.Writer, account, home, connectorName string, paths []string, firstMark string) (*enterpriseForeignHookRemovalTx, error) {
 	identity, ok := connector.CanonicalUserScopedIdentity(account)
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
-	if !ok || connectorName == "" || len(paths) == 0 || cfg == nil || !cfg.StandaloneEnterprise() {
-		return
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil, errors.New("foreign-hook removal outside a standalone enterprise host")
+	}
+	if !ok || connectorName == "" || len(paths) == 0 {
+		return nil, errors.New("cannot bind the hook removal to an account, a connector and its files")
+	}
+	if !filepath.IsAbs(cfg.DataDir) {
+		return nil, errors.New("the data directory is not an absolute path")
+	}
+	release, drained, err := enterpriseForeignHookLockAccount(ctx, cfg.DataDir, identity)
+	if err != nil {
+		return nil, fmt.Errorf("take the account's foreign-hook removal lock: %w", err)
+	}
+	if !drained {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: an online answer for %s did not finish within %s; going on, it is cut and its record proves nothing\n",
+			foreignGuardLogField(account, 256), enterprisepolicy.ForeignHookRemovalDrainWait)
+	}
+	tx := &enterpriseForeignHookRemovalTx{stderr: stderr, identity: identity, home: home, connector: connectorName, paths: limitEnterpriseForeignHookPaths(paths), release: release}
+	if err := tx.rotate(); err != nil {
+		release()
+		return nil, err
+	}
+	mark := firstMark
+	if mark == "" {
+		mark = agentprocess.NowAfter(enterpriseForeignHookRemovalMarkAhead)
+	}
+	first, err := tx.record(mark, enterprisepolicy.ForeignHookRemovalInProgressSuffix, nil)
+	if err != nil {
+		release()
+		return nil, fmt.Errorf("record the removal before it is made: %w", err)
+	}
+	tx.first = first
+	return tx, nil
+}
+
+// limitEnterpriseForeignHookPaths keeps at most 32 paths of a removal, each
+// at most 512 bytes, as the worker reports them.
+func limitEnterpriseForeignHookPaths(paths []string) []string {
+	out := make([]string, 0, min(len(paths), 32))
+	for _, path := range paths {
+		if len(out) == 32 {
+			break
+		}
+		out = append(out, foreignGuardLogField(path, 512))
+	}
+	return out
+}
+
+// rotate ends the account's outage allows (the kill switch). A record
+// folder that cannot be located, or a key that could not be ended, refuses
+// the removal; a rotation that ended the key but could not make a new one
+// only warns (the account's guarded calls block during an outage until a
+// later pass makes one). While a lifecycle run holds the key lock, or when
+// it cannot be taken, the key is only revoked: no key the guardian makes
+// while a run changes the deployment outlives the run (the run makes new
+// ones at its end).
+func (tx *enterpriseForeignHookRemovalTx) rotate() error {
+	root, err := enterpriseForeignHookSessionRoot()
+	if err != nil {
+		return fmt.Errorf("rotate the protected session record key before the removal: %w", err)
+	}
+	ran, err := enterpriseForeignHookWithKeyCreation(func() error {
+		return enterpriseForeignHookRotateSessionKey(root, tx.identity, enterpriseForeignHookSessionKeyTrust())
+	})
+	if !ran {
+		if err != nil {
+			fmt.Fprintf(tx.stderr, "defenseclaw: enterprise foreign-hook guard: the protected session record key lock (%v); the key of %s is revoked without a new one\n",
+				err, foreignGuardLogField(tx.identity, 256))
+		}
+		err = enterpriseForeignHookRevokeSessionKey(root, tx.identity)
+	}
+	if errors.Is(err, enterprisepolicy.ErrPublishedSessionKeyAlive) {
+		return fmt.Errorf("rotate the protected session record key before the removal: %w", err)
+	}
+	if err != nil {
+		fmt.Fprintf(tx.stderr, "defenseclaw: enterprise foreign-hook guard: make a new protected session record key for %s (guarded calls block during a gateway outage until a later pass makes one): %v\n",
+			foreignGuardLogField(tx.identity, 256), err)
+	}
+	return nil
+}
+
+// record writes the transaction's files to the ledger with mark. The time
+// of each entry has nanoseconds: the ledger keeps, per account, connector
+// and file, the entry recorded last, and records of one account are made
+// in commit order under its removal lock, so the second record of a commit
+// always replaces its first, and a later commit an earlier one.
+func (tx *enterpriseForeignHookRemovalTx) record(mark, suffix string, dropped []enterprisepolicy.ForeignHookRemoval) ([]enterprisepolicy.ForeignHookRemoval, error) {
+	if mark == "" {
+		return nil, errors.New("the process clock is unavailable")
+	}
+	now := time.Now().UTC()
+	connectors := enterprisepolicy.StandaloneConnectors(cfg)
+	var added []enterprisepolicy.ForeignHookRemoval
+	for _, path := range tx.paths {
+		for _, name := range enterprisepolicy.ForeignHookRemovalConnectors(tx.home, path, tx.connector, connectors) {
+			added = append(added, enterprisepolicy.ForeignHookRemoval{
+				Identity: tx.identity, Connector: name, Path: foreignGuardLogField(path, 512) + suffix,
+				At: now.Format(time.RFC3339Nano), Mark: mark,
+			})
+		}
 	}
 	enterpriseForeignHookRemovalsMu.Lock()
 	defer enterpriseForeignHookRemovalsMu.Unlock()
-	err := func() error {
-		dataDir := cfg.DataDir
-		if !filepath.IsAbs(managed.HookGuardianAuthorizationDir(dataDir)) {
-			return errors.New("the data directory is not an absolute path")
-		}
-		mark := agentprocess.Now()
-		if mark == "" {
-			return errors.New("the process clock is unavailable")
-		}
-		now := time.Now().UTC()
-		connectors := enterprisepolicy.StandaloneConnectors(cfg)
-		added := make([]enterprisepolicy.ForeignHookRemoval, 0, len(paths))
-		for _, path := range paths {
-			for _, name := range enterprisepolicy.ForeignHookRemovalConnectors(home, path, connectorName, connectors) {
-				added = append(added, enterprisepolicy.ForeignHookRemoval{
-					Identity: identity, Connector: name, Path: foreignGuardLogField(path, 512),
-					At: now.Format(time.RFC3339), Mark: mark,
-				})
-			}
-		}
-		path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFile)
-		existing, loadErr := loadEnterpriseForeignHookRemovals(path)
-		if loadErr != nil {
-			// The gateway cannot use this ledger either; replacing it keeps
-			// the new removals.
-			fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: replacing the removal ledger: %v\n", loadErr)
-		}
-		data, err := enterprisepolicy.EncodeForeignHookRemovals(existing, added, now)
-		if err != nil {
-			return err
-		}
-		if _, err := prepareEnterpriseHookAuthorizationDir(dataDir); err != nil {
-			return err
-		}
-		if err := writeEnterpriseHookProtectedFile(path, data); err != nil {
-			return err
-		}
-		if err := os.Chmod(path, 0o640); err != nil {
-			return err
-		}
-		if err := enterpriseHookAuthorizationOwnershipSetter(path); err != nil {
-			return err
-		}
-		return enterpriseHookAuthorizationFileTrustCheck(path)
-	}()
+	return added, writeEnterpriseForeignHookRemovalLedger(added, dropped, now)
+}
+
+// commit records the transaction's files again with the mark of now, which
+// replaces the mark ahead (the change is done, so only processes that
+// started before now may have loaded a file it removed), and lets go of the
+// account's lock. It runs whether or not the change worked. A record that
+// fails leaves the first one, which denies longer.
+func (tx *enterpriseForeignHookRemovalTx) commit(removed []string) error {
+	return tx.commitAt(agentprocess.Now(), removed)
+}
+
+// commitAt is commit with the mark of when the change was known to be done:
+// taken before any wait, so a lock this process waits for never makes an
+// agent process that started after the change count as one that started
+// before it.
+func (tx *enterpriseForeignHookRemovalTx) commitAt(mark string, removed []string) error {
+	defer tx.release()
+	_, err := tx.record(mark, "", tx.first)
+	if err != nil {
+		fmt.Fprintf(tx.stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s after it was made (the record made before it still denies): %v\n",
+			tx.connector, foreignGuardLogField(tx.identity, 256), err)
+	}
+	_ = removed
+	return err
+}
+
+// recordEnterpriseForeignHookRemovals records removals a cleanup made that
+// no commit recorded (a worker that changed a file and ended before its
+// commit): a full commit (beginEnterpriseForeignHookRemoval) with nothing
+// left to change, so the key is rotated first as for every removal.
+// Failures are logged; the per-call check still applies.
+func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connectorName string, paths []string) {
+	recordEnterpriseForeignHookRemovalsAt(stderr, agentprocess.Now(), account, home, connectorName, paths)
+}
+
+// recordEnterpriseForeignHookRemovalsAt is recordEnterpriseForeignHookRemovals
+// with the mark of when the cleanup that made the removals ended (taken
+// before any lock wait): every agent process that may have loaded a removed
+// file started before it.
+func recordEnterpriseForeignHookRemovalsAt(stderr io.Writer, mark, account, home, connectorName string, paths []string) {
+	if len(paths) == 0 || cfg == nil || !cfg.StandaloneEnterprise() {
+		return
+	}
+	if mark == "" {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s: the process clock is unavailable\n",
+			connectorName, foreignGuardLogField(account, 256))
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), enterpriseForeignHookInProcessQueueWait)
+	defer cancel()
+	tx, err := beginEnterpriseForeignHookRemovalMarked(ctx, stderr, account, home, connectorName, paths, mark)
+	if err == nil {
+		err = tx.commitAt(mark, paths)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s: %v\n",
 			connectorName, foreignGuardLogField(account, 256), err)
 	}
 }
+
+// ensureEnterpriseForeignHookSessionKey gives every account under the
+// protected session records exactly one key at every guardian pass
+// (enterprisepolicy.EnsurePublishedSessionKeys), unless a lifecycle run
+// holds the key lock: the gateway removes an account's key before every
+// block, and a lifecycle run removes all of them. A new key never makes an
+// earlier record count. Only root or SYSTEM can make a key the hook
+// accepts, so any other account does nothing.
+func ensureEnterpriseForeignHookSessionKey(stderr io.Writer) {
+	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() || !enterpriseForeignHookCanCreateSessionKey() {
+		return
+	}
+	root, err := enterpriseForeignHookSessionRoot()
+	ran := false
+	if err == nil {
+		// Never while a lifecycle run holds the key lock: the run removed
+		// every key and makes new ones at its end.
+		ran, err = enterpriseForeignHookWithKeyCreation(func() error {
+			return enterpriseForeignHookEnsureSessionKeys(root, enterpriseForeignHookSessionKeyTrust())
+		})
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: make the protected session record keys (guarded calls of an account without one block during a gateway outage): %v\n", err)
+	} else if !ran {
+		fmt.Fprintln(stderr, "defenseclaw: enterprise foreign-hook guard: a lifecycle run holds the protected session record key lock; its end makes the keys")
+	}
+}
+
+// writeEnterpriseForeignHookRemovalLedger adds added to the removal ledger
+// in the guardian's authorization directory. A ledger that cannot be read
+// is never replaced: the gateway denies every call while it cannot read it,
+// and a new ledger would drop the removals it holds. A ledger too full to
+// keep the denial of every account and connector
+// (enterprisepolicy.ErrForeignHookRemovalLedgerFull) is not written either.
+// The new file has its final mode and owner before it is renamed into
+// place (writeEnterpriseHookGatewayRecord). The caller holds
+// enterpriseForeignHookRemovalsMu.
+func writeEnterpriseForeignHookRemovalLedger(added, dropped []enterprisepolicy.ForeignHookRemoval, now time.Time) error {
+	dataDir := cfg.DataDir
+	if !filepath.IsAbs(managed.HookGuardianAuthorizationDir(dataDir)) {
+		return errors.New("the data directory is not an absolute path")
+	}
+	dir := managed.HookGuardianAuthorizationDir(dataDir)
+	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
+	if _, err := prepareEnterpriseHookAuthorizationDir(dataDir); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), enterpriseForeignHookLedgerLockWait)
+	release, err := enterpriseForeignHookLockLedger(ctx, dir)
+	cancel()
+	if err != nil {
+		return err
+	}
+	defer release()
+	existing, err := loadEnterpriseForeignHookRemovals(path)
+	if err != nil {
+		return fmt.Errorf("the removal ledger cannot be read and is kept until it can be read again or an administrator removes %s: %w", path, err)
+	}
+	data, err := enterprisepolicy.EncodeForeignHookRemovalsDropping(existing, added, dropped, now)
+	if err != nil {
+		return err
+	}
+	return writeEnterpriseHookGatewayRecord(path, data)
+}
+
+// enterpriseForeignHookLedgerLockWait bounds the wait for the ledger lock,
+// which another guardian process holds only for one ledger write; past it
+// the removal is refused (the hook stays and the scan keeps blocking).
+const enterpriseForeignHookLedgerLockWait = 30 * time.Second
+
+// enterpriseForeignHookSessionRoot is the folder of the protected session
+// records (managed.StandaloneLayout.HookSessionDir): from the standalone
+// layout, or else the folder the layout named last in this process (the
+// Windows guardian is a service, so a lookup that fails for a moment does
+// not refuse a removal), or else from the guardian's data directory
+// (managed.StandaloneHookSessionDirForDataDir), which names the same folder
+// on a standalone host. Only when none names it is it an error: the
+// guardian then cannot rotate the account's key, so it removes nothing
+// (replaceable in tests).
+var enterpriseForeignHookSessionRoot = func() (string, error) {
+	root, err := enterpriseForeignHookSessionLayoutRoot()
+	enterpriseForeignHookSessionRootSeen.Lock()
+	defer enterpriseForeignHookSessionRootSeen.Unlock()
+	if err == nil {
+		enterpriseForeignHookSessionRootSeen.root = root
+		return root, nil
+	}
+	if seen := enterpriseForeignHookSessionRootSeen.root; seen != "" {
+		return seen, nil
+	}
+	if cfg != nil {
+		if fallback, ok := enterpriseForeignHookSessionRootForDataDir(cfg.DataDir); ok {
+			return fallback, nil
+		}
+	}
+	return "", err
+}
+
+// enterpriseForeignHookSessionRootSeen is the record folder the standalone
+// layout named last in this process (enterpriseForeignHookSessionRoot).
+var enterpriseForeignHookSessionRootSeen struct {
+	sync.Mutex
+	root string
+}
+
+// enterpriseForeignHookSessionLayoutRoot is the record folder of the
+// standalone layout. A layout that cannot be resolved (on Windows, a failed
+// ProgramData lookup) is an error (replaceable in tests).
+var enterpriseForeignHookSessionLayoutRoot = func() (string, error) {
+	layout, _, _, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return "", fmt.Errorf("locate the protected session record folder: %w", err)
+	}
+	if strings.TrimSpace(layout.HookSessionDir) == "" {
+		return "", errors.New("the standalone layout names no protected session record folder")
+	}
+	return layout.HookSessionDir, nil
+}
+
+// enterpriseForeignHookWithKeyCreation runs create, which makes or rotates
+// keys, holding the key lock of the standalone lifecycle folder shared,
+// only when no lifecycle run holds it
+// (enterprisepolicy.WithPublishedSessionKeyCreation). A layout that cannot
+// be resolved is an error, and create does not run (replaceable in tests).
+var enterpriseForeignHookWithKeyCreation = func(create func() error) (bool, error) {
+	layout, _, _, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return false, fmt.Errorf("locate the lifecycle folder: %w", err)
+	}
+	if !filepath.IsAbs(layout.LifecycleDir) {
+		return false, fmt.Errorf("the lifecycle folder %q is not an absolute path", layout.LifecycleDir)
+	}
+	return enterprisepolicy.WithPublishedSessionKeyCreation(enterprisepolicy.PublishedSessionKeysLockPath(layout.LifecycleDir), create)
+}
+
+// enterpriseForeignHookSessionRootForDataDir is the record folder of the
+// standalone layout whose data directory is dataDir (replaceable in tests).
+var enterpriseForeignHookSessionRootForDataDir = func(dataDir string) (string, bool) {
+	return managed.StandaloneHookSessionDirForDataDir(runtime.GOOS, dataDir)
+}
+
+// enterpriseForeignHookLockAccount takes an account's removal lock,
+// enterpriseForeignHookRotateSessionKey rotates its record key before a
+// removal (enterpriseForeignHookRevokeSessionKey only revokes it while a
+// lifecycle run holds the key lock, enterpriseForeignHookWithKeyCreation),
+// enterpriseForeignHookEnsureSessionKeys makes the keys of the
+// accounts that have none at every pass,
+// enterpriseForeignHookSessionKeyTrust names the gateway service a Windows
+// key file lets remove it, and enterpriseForeignHookCanCreateSessionKey
+// reports a guardian that runs as root or SYSTEM (replaceable in tests).
+var (
+	enterpriseForeignHookLockAccount       = enterprisepolicy.LockForeignHookAccountRemoval
+	enterpriseForeignHookLockLedger        = enterprisepolicy.LockForeignHookRemovalLedger
+	enterpriseForeignHookRotateSessionKey  = enterprisepolicy.RotatePublishedSessionKey
+	enterpriseForeignHookRevokeSessionKey  = enterprisepolicy.RevokePublishedSessionKey
+	enterpriseForeignHookEnsureSessionKeys = enterprisepolicy.EnsurePublishedSessionKeys
+	enterpriseForeignHookSessionKeyTrust   = func() enterprisepolicy.PublishedSessionTrust {
+		return enterprisepolicy.PublishedSessionTrust{ServiceAccount: `NT SERVICE\` + managed.StandaloneWindowsGatewaySvc}
+	}
+	enterpriseForeignHookCanCreateSessionKey = enterpriseForeignHookRunsAsAdministrator
+)
 
 func loadEnterpriseForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {
 	info, err := os.Lstat(path)

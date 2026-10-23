@@ -6,10 +6,10 @@ were removed):
 
 | Guide | Published page |
 | --- | --- |
-| Prepare the tenant: licences, enrollment, groups, identity | <https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune-tenant/> |
-| Windows: Win32 app and Remediations | <https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune-windows/> |
-| macOS: shell script, or PKG app | <https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune-macos/> |
-| Linux: platform script | <https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune-linux/> |
+| Prepare the tenant: licences, enrollment, groups, identity | <https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune/tenant/> |
+| Windows: Win32 app and Remediations | <https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune/windows/> |
+| macOS: shell script, or PKG app | <https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune/macos/> |
+| Linux: platform script | <https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune/linux/> |
 
 | Folder | Content |
 | --- | --- |

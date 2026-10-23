@@ -74,9 +74,9 @@ def test_docs_say_gateway_start_runs_the_codex_check_on_windows():
     from pathlib import Path
 
     docs = Path(__file__).resolve().parents[2] / "docs-site" / "content" / "docs"
-    cli = " ".join((docs / "reference" / "cli.mdx").read_text(encoding="utf-8").split())
+    cli = " ".join((docs / "reference" / "commands" / "cli.mdx").read_text(encoding="utf-8").split())
     assert "so `defenseclaw-gateway start` and `restart`, Codex setup, and the installers" in cli
-    codex = " ".join((docs / "connectors" / "codex.mdx").read_text(encoding="utf-8").split())
+    codex = " ".join((docs / "reference" / "connectors" / "codex.mdx").read_text(encoding="utf-8").split())
     assert "Each gateway start or restart with the Codex connector enabled runs Codex's app-server once" in codex
 
 

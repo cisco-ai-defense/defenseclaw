@@ -65,7 +65,7 @@ def test_package_in_a_backslash_path_matches_checksums(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for tool, body in {
-        "gh": 'case "$2" in list) echo 1.0.0 ;; download) while [ $# -gt 0 ]; do '
+        "gh": 'case "$2" in list) echo 1.0.0 ;; view) ls "$FAKE_ASSETS" ;; download) while [ $# -gt 0 ]; do '
               '[ "$1" = --dir ] && d=$2; shift; done; cp "$FAKE_ASSETS"/* "$d"/ ;; esac\n',
         "cosign": "exit 0\n",
     }.items():
@@ -84,3 +84,65 @@ def test_package_in_a_backslash_path_matches_checksums(tmp_path: Path) -> None:
     result = subprocess.run(command, env=env, capture_output=True, text=True, check=False, timeout=60)
     assert result.returncode != 0
     assert "does not match checksums.txt" in result.stderr
+
+
+def _fake_gh(tmp_path: Path, assets: list[str], download: str) -> dict[str, str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    listed = "\\n".join(assets)
+    body = f'case "$2" in list) echo 1.0.3 ;; view) printf "{listed}\\n" ;; download) {download} ;; esac\n'
+    (bin_dir / "gh").write_bytes(b"#!/bin/sh\n" + body.encode())
+    (bin_dir / "gh").chmod(0o755)
+    return {**os.environ, "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")]),
+            "GITHUB_REPOSITORY": "example/repo"}
+
+
+def _fetch(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    output = tmp_path / "github-output"
+    return subprocess.run(
+        [BASH, str(ROOT / "scripts/fetch-previous-enterprise-package.sh"), "--asset", "linux-amd64.deb",
+         "--dir", str(tmp_path / "packages"), "--github-output", str(output)],
+        env=env, capture_output=True, text=True, check=False, timeout=60,
+    )
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash (the Git for Windows bash on Windows)")
+def test_failed_download_of_a_published_package_fails_the_pr_upgrade_lane(tmp_path: Path) -> None:
+    # The PR upgrade lanes run without --require. A download that fails for a
+    # release that publishes the package used to skip with success and an
+    # empty version, so the upgrade step never ran and the job passed.
+    name = "defenseclaw-enterprise-1.0.3-linux-amd64.deb"
+    env = _fake_gh(tmp_path, [name, "checksums.txt", "checksums.txt.bundle"], "exit 1")
+    result = _fetch(tmp_path, env)
+    assert result.returncode != 0, result.stdout
+    assert f"could not download {name} of release 1.0.3" in result.stderr
+    assert not (tmp_path / "github-output").exists()
+
+
+@pytest.mark.parametrize("missing", ["defenseclaw-enterprise-1.0.3-linux-amd64.deb", "checksums.txt", "checksums.txt.bundle"])
+@pytest.mark.skipif(BASH is None, reason="needs bash (the Git for Windows bash on Windows)")
+def test_release_missing_a_required_asset_fails_the_pr_upgrade_lane(tmp_path: Path, missing: str) -> None:
+    # A published release without the package or its signed checksums used to
+    # skip with success and an empty version, so the PR upgrade lane passed
+    # without upgrading anything.
+    listed = ["defenseclaw-enterprise-1.0.3-linux-amd64.deb", "checksums.txt", "checksums.txt.bundle"]
+    env = _fake_gh(tmp_path, [a for a in listed if a != missing], "exit 1")
+    result = _fetch(tmp_path, env)
+    assert result.returncode != 0, result.stdout
+    assert f"release 1.0.3 has no {missing}" in result.stderr
+    assert "skipped" not in result.stdout
+    assert not (tmp_path / "github-output").exists()
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash (the Git for Windows bash on Windows)")
+def test_no_published_release_is_the_only_skip(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_bytes(b"#!/bin/sh\nexit 0\n")
+    (bin_dir / "gh").chmod(0o755)
+    env = {**os.environ, "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")]),
+           "GITHUB_REPOSITORY": "example/repo"}
+    result = _fetch(tmp_path, env)
+    assert result.returncode == 0, result.stderr
+    assert "no published release to upgrade from" in result.stdout
+    assert (tmp_path / "github-output").read_text() == "version=\npackage=\n"

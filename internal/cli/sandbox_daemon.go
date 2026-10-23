@@ -100,8 +100,90 @@ var sandboxDaemonStopCmd = &cobra.Command{
 	},
 }
 
+// sandboxDaemonDrainCmd is what the managed lifecycle runs as the account
+// right before it stops the account's sandbox daemon and OpenShell gateway
+// for a waiting change (a switch of its OpenShell setup, a stop, a
+// LaunchAgent reload): the lifecycle's status check came earlier, and a
+// sandbox started and ended since would be stopped with the gateway, its
+// MicroVM with no flush. It takes the account's lifecycle lock
+// (openshell.LockGatewayLifecycle), which keeps the account's DefenseClaw
+// from creating or starting a sandbox, checks under it
+// (openshell.CheckAccountGateways), prints openshell.LifecycleDrained, and
+// holds the lock until its standard input ends: the lifecycle closes it
+// once the units are stopped. It exits non-zero, holding nothing, when the
+// check refuses.
+var sandboxDaemonDrainCmd = &cobra.Command{
+	Use:          "drain",
+	Short:        "Hold this account's OpenShell gateway for the managed lifecycle's stop",
+	Hidden:       true,
+	Args:         cobra.NoArgs,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		if os.Getuid() == 0 {
+			return errors.New("the drain runs as the account whose gateway stops, not root")
+		}
+		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, os.Interrupt)
+		defer stop()
+		return drainAccountGateway(ctx, cmd.InOrStdin(), cmd.OutOrStdout(), sandboxDrain{
+			lock:  func(ctx context.Context) (func(), error) { return openshell.LockGatewayLifecycle(ctx, "") },
+			check: func(ctx context.Context) error { return openshell.CheckAccountGateways(ctx, sandboxDrainMicroVMs) },
+			hold:  sandboxDrainHold,
+		})
+	},
+}
+
+// sandboxDrainMicroVMs counts the MicroVMs that run as this account; a seam
+// for tests.
+var sandboxDrainMicroVMs openshell.VMCount = func(ctx context.Context) (int, error) {
+	return openshell.CountMicroVMs(ctx, openshell.ExecRunner{})
+}
+
+// sandboxDrainHold bounds how long a drain holds the lock when the
+// lifecycle never closes its input: longer than the unit stops it covers.
+var sandboxDrainHold = 15 * time.Minute
+
+// sandboxDrain is what a drain needs.
+type sandboxDrain struct {
+	lock  func(context.Context) (unlock func(), err error)
+	check func(context.Context) error
+	hold  time.Duration
+}
+
+// drainAccountGateway takes the lock, checks under it and, when nothing
+// would be lost, prints openshell.LifecycleDrained and holds the lock until
+// in ends, ctx ends or d.hold passes.
+func drainAccountGateway(ctx context.Context, in io.Reader, out io.Writer, d sandboxDrain) error {
+	unlock, err := d.lock(ctx)
+	if err != nil {
+		return fmt.Errorf("hold this account's OpenShell gateway: %w", err)
+	}
+	defer unlock()
+	if err := d.check(ctx); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(out, openshell.LifecycleDrained); err != nil {
+		return err
+	}
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, in)
+		close(done)
+	}()
+	t := time.NewTimer(d.hold)
+	defer t.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return fmt.Errorf("let the OpenShell gateway lifecycle go after %s: the managed lifecycle never said its stop was done", d.hold)
+	}
+}
+
 func init() {
 	sandboxDaemonCmd.AddCommand(sandboxDaemonStopCmd)
+	sandboxDaemonCmd.AddCommand(sandboxDaemonDrainCmd)
 	rootCmd.AddCommand(sandboxDaemonCmd)
 }
 

@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-PAGE = ROOT / "docs-site/content/docs/enterprise/mdm/intune-tenant.mdx"
+PAGE = ROOT / "docs-site/content/docs/enterprise/mdm/intune/tenant.mdx"
 
 
 def test_macos_identity_row_stays_inside_the_table() -> None:

@@ -332,15 +332,16 @@ try {
             if (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) {
                 $failures.Add('a SYSTEM and Administrators only vendor directory reads as checkable by users')
             }
-            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
-            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            $scope = [string](Get-DefenseClawProfileRoots -EnterpriseProfile Standalone).StateRoot
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $scope
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $scope
             $usersRules = @(Get-TestUsersRules $vendor)
             if ($usersRules.Count -ne 1 -or [int]$usersRules[0].FileSystemRights -ne 0x1200a0 -or
                 $usersRules[0].InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or
                 -not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor)) {
                 $failures.Add('install did not give an existing vendor directory exactly one this-folder Users read entry')
             }
-            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor -Scope $scope
             if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before) {
                 $failures.Add('uninstall did not give the vendor directory its DACL back')
             }

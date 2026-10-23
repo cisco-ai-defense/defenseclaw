@@ -295,8 +295,6 @@ _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
     "COPILOT_HOME",
     "DEFENSECLAW_CURSOR_CONFIG_HOME",
     "OPENCODE_CONFIG_DIR",
-    "OMNIGENT_CONFIG",
-    "OMNIGENT_CONFIG_HOME",
     "HERMES_HOME",
     # Connector setup may require an operator-approved user-owned runtime
     # prefix. Preserve that explicit trust decision across the A/B lifecycle.
@@ -568,7 +566,7 @@ def setup(
     \b
     Multi-connector:
       One gateway enforces several agent-native connectors (codex, claudecode,
-      hermes, antigravity, omnigent and others), listed under
+      hermes, antigravity and others), listed under
       guardrail.connectors.
         Add one:       defenseclaw setup <connector>  (choose Add when asked)
         Remove one:    defenseclaw setup remove <name>
@@ -755,7 +753,7 @@ from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (  # noqa: E40
 # notifiers). Distinct from `setup observability add webhook` (generic
 # HTTP JSONL audit-log forwarder) — see the published webhook guide for the
 # disambiguation:
-# https://cisco-ai-defense.github.io/defenseclaw/docs/setup/webhooks/
+# https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/set-up-webhook-alerts/
 from defenseclaw.commands.cmd_setup_webhook import webhook  # noqa: E402
 
 setup.add_command(webhook)
@@ -3084,7 +3082,6 @@ def _interactive_mcp_setup(mc, cfg) -> None:
 
     click.echo()
     ux.section("MCP Scanner Configuration")
-    click.echo(f"  {ux.dim('Binary:')} {mc.binary}")
     click.echo()
 
     while True:
@@ -5031,11 +5028,9 @@ _CONNECTOR_NAMES_FALLBACK = [
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
     "kiro",
 ]
 
@@ -5119,12 +5114,6 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
-    "openhands": {
-        "label": "OpenHands",
-        "description": "~/.openhands/hooks.json command hooks by default; optional repo-local override",
-        "tool_mode": "both",
-        "subprocess_policy": "none",
-    },
     "antigravity": {
         "label": "Antigravity",
         "description": (
@@ -5146,12 +5135,6 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     "amp": {
         "label": "Amp",
         "description": "system TypeScript policy plugin with synchronous tool.call allow/confirm/block verdicts",
-        "tool_mode": "both",
-        "subprocess_policy": "none",
-    },
-    "omnigent": {
-        "label": "OmniGent",
-        "description": "custom Python policy bridge with ALLOW/ASK/DENY and optional native OTLP",
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
@@ -5200,9 +5183,9 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
     ),
     "codex": (
         "~/.codex/config.toml hooks / features.hooks / hook trust state",
-        "~/.codex/config.toml otel / notify",
+        "~/.codex/config.toml otel",
         "Optional CodeGuard native skill only when explicitly installed",
-        "~/.defenseclaw/hooks/ (including owner-only scoped OTLP credential) and notify bridge files",
+        "~/.defenseclaw/hooks/ (including owner-only scoped OTLP credential)",
     ),
     "hermes": (
         (
@@ -5245,17 +5228,6 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.copilot/skills and ~/.copilot/agents install surfaces; optional workspace surfaces with --workspace",
         "Native OTLP env vars are documented for the process env; shell rc files are not mutated",
         "~/.defenseclaw/hooks/copilot-hook.sh",
-    ),
-    "openhands": (
-        "~/.openhands/hooks.json hooks by default",
-        "<workspace>/.openhands/hooks.json hooks only when --workspace is provided",
-        "~/.openhands/mcp.json MCP entries when configured explicitly",
-        (
-            "~/.agents/skills install surface and ~/.openhands/cache/skills/"
-            "public-skills/skills discovery by default; workspace .agents/skills "
-            "only when --workspace is provided"
-        ),
-        "~/.defenseclaw/hooks/openhands-hook.sh",
     ),
     "antigravity": (
         (
@@ -5301,12 +5273,6 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
             "discovered read-only; DefenseClaw does not rewrite them"
         ),
         "Amp MCP registrations are discovered read-only; manage them with `amp mcp add`",
-    ),
-    "omnigent": (
-        "OmniGent's effective config.yaml policy_modules and server-wide policies",
-        "~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py",
-        "OmniGent Python environment defenseclaw_omnigent.pth import-path file",
-        "Optional native OTLP uses documented process environment variables; shell startup files are not modified",
     ),
     "kiro": (
         "~/.kiro/settings/cli.json and ~/.kiro/settings/mcp.json are discovery-only",
@@ -5617,9 +5583,9 @@ def _check_connector_version_supported_for_setup(
     """Verify the selected connector's installed version before setup.
 
     Runtime enforcement happens in the Go gateway too, but setup should tell
-    the operator before it writes config and restarts services. Unknown hook
-    contracts are fatal in action mode unless the explicit exploratory
-    override used by the gateway is set.
+    the operator before it writes config and restarts services. A version with
+    no hook contract is fatal in observe and action mode unless the explicit
+    exploratory override used by the gateway is set.
 
     ``_allow_prompt`` gates the interactive "trust this directory" remediation.
     It defaults to ``True`` so direct CLI use is unchanged, but callers that
@@ -5637,7 +5603,7 @@ def _check_connector_version_supported_for_setup(
             use_cache=False,
             refresh=True,
             data_dir=data_dir,
-            # Native Windows OmniGent/OpenCode/Amp setup immediately records a protected,
+            # Native Windows OpenCode/Amp setup immediately records a protected,
             # connector-scoped executable selection below.  Its admission scan
             # therefore does not need to republish the process-wide discovery
             # cache.  Leaving that cache untouched prevents an unrelated
@@ -5645,7 +5611,7 @@ def _check_connector_version_supported_for_setup(
             # already-sealed version and contract status when the gateway
             # restarts every active connector.
             persist_cache=connector != "codex" and not (
-                connector in {"omnigent", "opencode", "amp"}
+                connector in {"opencode", "amp"}
                 and platform_support.host_os() == "windows"
             ),
         )
@@ -5836,25 +5802,29 @@ def _check_connector_version_supported_for_setup(
         label,
         compatibility.normalized_version,
     )
-    strict_unknown = connector == "opencode"
-    if compatibility.status == STATUS_UNKNOWN and not allow_drift and (action_mode or strict_unknown):
+    # Refused in observe mode too: the gateway does not start a connector
+    # whose version has no contract (Claude Code and Codex render their hooks
+    # from it), so "continuing in observe mode" left the gateway down for
+    # every connector after the restart (GAP-0554).
+    if compatibility.status == STATUS_UNKNOWN and not allow_drift:
         if emit:
             ux.err(detail)
             ux.subhead(upgrade_guidance)
-            if strict_unknown:
+            if connector == "opencode":
                 ux.subhead(
                     "OpenCode requires a bounded validated plugin contract in both observe and action mode; "
                     "refusing setup before activation."
                 )
             else:
-                ux.subhead("Refusing action-mode connector setup before activation.")
+                mode_name = "action" if action_mode else "observe"
+                ux.subhead(
+                    f"Refusing {mode_name}-mode connector setup before activation: the gateway installs no "
+                    "hooks for a version without a hook contract. Nothing was changed."
+                )
             ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
         return False
     if emit:
-        if allow_drift:
-            ux.warn(detail + " Continuing because the explicit drift override is set.")
-        else:
-            ux.warn(detail + " Continuing in observe mode under the connector's established warning policy.")
+        ux.warn(detail + " Continuing because the explicit drift override is set.")
         ux.subhead(upgrade_guidance)
     return True
 
@@ -5913,7 +5883,7 @@ def _protected_selection_targets(connectors: list[str] | tuple[str, ...]) -> tup
 
     selected = setup_agent_selection_connectors(connectors)
     if host_os == "darwin":
-        selected = tuple(name for name in selected if name == "openhands")
+        return ()
     return selected
 
 
@@ -5974,8 +5944,7 @@ def _record_windows_setup_agent_selections(
     if selection_errors:
         # A peer's executable custody is not a prerequisite for the connector
         # being configured. This roster is the whole additive set, so on macOS
-        # -- where the protected subset narrows to OpenHands -- a slow or
-        # failing `openhands --version` probe aborted every
+        # a slow or failing version probe aborted every
         # `defenseclaw setup <other connector>` run before a single hook file
         # was written. Fail only for the connector this run is for, and report
         # the peers that were skipped.
@@ -6103,9 +6072,6 @@ def _check_guardrail_setup_connector_versions(
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
-            if (mode or "").strip().lower() == "action":
-                _downgrade_guardrail_setup_action_connector(gc, connector)
-                continue
             _restore_setup_config_snapshot(app, setup_snapshot)
             return False
     if exact_windows_opencode:
@@ -6136,34 +6102,9 @@ def _check_guardrail_setup_connector_versions(
             tuple(targets),
             _prior_snapshot=setup_snapshot,
         )
-    # Version validation can refuse a requested action mode and persist an
-    # observe fallback. Reconcile the hook-lane judge gate after every target
-    # has reached its final mode so a refused connector cannot remain judged
-    # when execute_guardrail_setup() saves the configuration below.
+    # Reconcile the judge gate only after every requested mode is admitted.
     _prune_judge_gate_to_action_scope(gc, targets)
     return True
-
-
-def _downgrade_guardrail_setup_action_connector(gc, connector: str) -> None:
-    """Persist an observe fallback when guardrail setup refuses action mode."""
-    label = _CONNECTOR_META.get(connector, {}).get("label", connector or "connector")
-    ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
-
-    connectors = getattr(gc, "connectors", None)
-    if connectors:
-        key = connector
-        if key not in connectors:
-            wanted = normalize_connector(connector)
-            for existing_key in connectors:
-                if normalize_connector(str(existing_key)) == wanted:
-                    key = existing_key
-                    break
-        if key not in connectors:
-            connectors[key] = PerConnectorGuardrailConfig()
-        connectors[key].mode = "observe"
-        return
-
-    gc.mode = "observe"
 
 
 def _hilt_support_note(connector: str) -> str:
@@ -6185,12 +6126,7 @@ def _hilt_support_note(connector: str) -> str:
         )
     if connector == "antigravity":
         return "Antigravity documents native ask only for PreToolUse."
-    if connector == "omnigent":
-        return (
-            "OmniGent parks request, tool_call, and llm_request policy phases for native ASK approval; "
-            "post-phase confirm findings are audited and continue without an approval pause."
-        )
-    if connector in {"hermes", "devin", "openhands", "opencode"}:
+    if connector in {"hermes", "devin",  "opencode"}:
         return (
             "This connector can block supported hook events but has no native human approval surface; "
             "confirm falls back explicitly."
@@ -7252,7 +7188,10 @@ def setup_guardrail(
         rollback_status = restore_guardrail_secret_publication()
         if not rollback_status.complete:
             raise _GuardrailSecretFailure("validation-refused-rollback-incomplete") from None
-        return
+        raise click.ClickException(
+            "guardrail setup did not pass connector preflight; prior settings were restored. "
+            "Resolve the error above, then rerun: defenseclaw setup guardrail"
+        )
     if non_interactive and judge_on_before_versions and not gc.judge.enabled and not judge_gate_was_all:
         # GAP-2175: the judge was requested, but every connector in scope is
         # in observe mode, so the gate prune turned it back off. Say so.
@@ -7473,7 +7412,6 @@ def setup_guardrail(
 #   defenseclaw setup cursor         → observe by default for Cursor
 #   defenseclaw setup devin          → observe by default for Devin
 #   defenseclaw setup copilot        → observe by default for GitHub Copilot CLI
-#   defenseclaw setup openhands      → observe by default for OpenHands
 #   defenseclaw setup antigravity    → observe by default for Antigravity (agy)
 #
 # Both commands also flip ``claw.mode`` so the rest of the CLI/TUI
@@ -8291,6 +8229,41 @@ def _setup_applied_runtime_difference(
     return "unknown"
 
 
+def _capture_setup_agent_discovery_file(data_dir) -> tuple[bool, bytes, tuple[int, int, int, int] | None]:
+    # The cache is rewritten private by every discovery run; a copy left
+    # group/other-readable by an older release's umask is tightened in place.
+    return _capture_protected_setup_file(
+        os.path.join(os.path.abspath(os.fspath(data_dir)), _AGENT_DISCOVERY_FILENAME),
+        _AGENT_DISCOVERY_MAX_BYTES,
+        "agent_discovery.json",
+        repair_owned_read_bits=True,
+    )
+
+
+def _capture_setup_prior_agent_discovery(data_dir) -> tuple[bool, bytes, tuple[int, int, int, int] | None] | None:
+    """Return the discovery cache from before the version check, or None.
+
+    The version check republishes the cache as a private user-owned file, so
+    a copy this user cannot take (root-owned, foreign-owned, or writable by
+    others) does not refuse setup: the rollback point taken after the check
+    holds the cache instead (GAP-0547).
+    """
+    path = os.path.join(os.path.abspath(os.fspath(data_dir)), _AGENT_DISCOVERY_FILENAME)
+    try:
+        return _capture_setup_agent_discovery_file(data_dir)
+    except OSError as exc:
+        try:
+            root_owned = hasattr(os, "geteuid") and os.geteuid() != 0 and os.lstat(path).st_uid == 0
+        except OSError:
+            root_owned = False
+        if root_owned:
+            next_step = f'To keep it on a failed setup, run: sudo chown "$(id -un)" {shlex.quote(path)}'
+        else:
+            next_step = "It is replaced by the version check; a failed setup restores that copy."
+        ux.warn(f"agent_discovery.json from before setup cannot be kept: {exc}. {next_step}")
+        return None
+
+
 def _capture_setup_desired_snapshot_once(cfg) -> _SetupConfigSnapshot:
     data_dir = getattr(cfg, "data_dir", None)
     config_existed = False
@@ -8328,11 +8301,7 @@ def _capture_setup_desired_snapshot_once(cfg) -> _SetupConfigSnapshot:
             _AGENT_SELECTION_MAX_BYTES,
             "agent_selection.json",
         )
-        discovery_existed, discovery_body, discovery_generation = _capture_protected_setup_file(
-            os.path.join(os.path.abspath(os.fspath(data_dir)), _AGENT_DISCOVERY_FILENAME),
-            _AGENT_DISCOVERY_MAX_BYTES,
-            "agent_discovery.json",
-        )
+        discovery_existed, discovery_body, discovery_generation = _capture_setup_agent_discovery_file(data_dir)
         lock_existed, lock_body, lock_generation = _capture_protected_setup_file(
             os.path.join(os.path.abspath(os.fspath(data_dir)), _HOOK_CONTRACT_LOCK_FILENAME),
             _HOOK_CONTRACT_LOCK_MAX_BYTES,
@@ -8930,7 +8899,6 @@ def _restored_inactive_connector_bindings(
         "devin",
         "hermes",
         "kiro",
-        "omnigent",
         "opencode",
     }
     bindings: list[tuple[str, str, str]] = []
@@ -9893,7 +9861,6 @@ def _apply_hook_connector_setup(
     judge_hook_connectors: str | None = None,
     allow_trusted_path_prompt: bool = True,
     trusted_prompt_cache: dict[str, bool] | None = None,
-    _downgrade_refused_action: bool = False,
     _version_preflighted: bool = False,
     _protected_selection: _VerifiedSetupAgentSelections | None = None,
     _selection_transaction_snapshot: _SetupConfigSnapshot | None = None,
@@ -9959,7 +9926,15 @@ def _apply_hook_connector_setup(
     # generic version admission still precedes rule-pack validation and the
     # setup snapshot. Only native-Windows OpenCode takes the exact-selection
     # branch below.
+    prior_discovery = None
     if not _version_preflighted and not exact_windows_opencode:
+        # The version check republishes agent_discovery.json, the peer
+        # versions the gateway reads when it restarts. A failed setup must
+        # put back the cache the running gateway started with, not the one
+        # this check wrote (GAP-0547), so it is captured first.
+        data_dir = getattr(app.cfg, "data_dir", None)
+        if data_dir:
+            prior_discovery = _capture_setup_prior_agent_discovery(data_dir)
         version_check_kwargs = {
             "mode": desired_mode,
             "data_dir": getattr(app.cfg, "data_dir", None),
@@ -9968,18 +9943,7 @@ def _apply_hook_connector_setup(
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
-            # Every non-OpenCode hook contract deliberately permits observe
-            # when action admission is refused (missing, unversioned, or
-            # outside the validated range).  Reusing that decision avoids a
-            # second discovery/probe whose answer can drift within the same
-            # setup transaction.  OpenCode is the strict exception: unknown
-            # versions are refused in both modes and never reach this fallback.
-            if desired_mode == "action" and _downgrade_refused_action and connector not in {"opencode", "codex"}:
-                label = _CONNECTOR_META.get(connector, {}).get("label", connector)
-                ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
-                desired_mode = "observe"
-            else:
-                return False
+            return False
 
     cfg = app.cfg
     gc = cfg.guardrail
@@ -10000,6 +9964,13 @@ def _apply_hook_connector_setup(
             err=True,
         )
         return False
+    if prior_discovery is not None:
+        setup_snapshot = replace(
+            setup_snapshot,
+            agent_discovery_existed=prior_discovery[0],
+            agent_discovery_bytes=prior_discovery[1],
+            agent_discovery_generation=prior_discovery[2],
+        )
 
     verified = _protected_selection
     selection_roster = (connector,)
@@ -10329,13 +10300,6 @@ def _apply_hook_connector_setup(
                     "Hermes callbacks are not live-verified: reload or restart every running "
                     "Hermes CLI, TUI, gateway, desktop, and service host before relying on registration changes."
                 )
-        elif connector == "omnigent":
-            ux.echo("  ✓ OmniGent on-disk policy registration staged")
-            ux.warn(
-                "OmniGent does not expose a loaded policy generation/module/config identity. "
-                "Reload or restart every running OmniGent server; action/fail-closed enforcement "
-                "remains unverified until then."
-            )
         else:
             ux.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
     elif _batch_summary is None:
@@ -10391,14 +10355,6 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
             click.echo("  verdicts before the requested tool can execute.")
         else:
             click.echo("  tool activity is recorded but never blocked.")
-    elif connector == "omnigent":
-        click.echo("  This wires OmniGent into DefenseClaw through its custom")
-        click.echo("  Python policy API. No proxy is inserted in the LLM data")
-        if mode == "action":
-            click.echo("  path; supported policy phases return ALLOW, ASK, or DENY")
-            click.echo("  directly through OmniGent's native approval flow.")
-        else:
-            click.echo("  path; policy activity is recorded but never blocked.")
     else:
         click.echo(f"  This wires {label} into DefenseClaw via the agent's")
         click.echo("  native hook bus. No proxy is inserted in the LLM data")
@@ -10428,8 +10384,6 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
             "    • Agent360 / Galileo — correlated session, turn, tool, outcome, "
             "decision, audit, log, metric, and trace views"
         )
-    elif connector == "omnigent":
-        ux.echo("    • Policy API — six request/tool/model phases → /api/v1/omnigent/hook")
     elif connector == "hermes":
         ux.echo("    • Hooks      — 23 classified v0.19 events → /api/v1/hermes/hook")
     elif connector == "antigravity":
@@ -10437,18 +10391,12 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
         click.echo("                   only PreToolUse carries documented ask/deny output")
     else:
         ux.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → {_hook_api_path(connector)}")
-    native_otel_connectors = {"codex", "claudecode", "omnigent"}
+    native_otel_connectors = {"codex", "claudecode"}
     if connector in native_otel_connectors:
-        if connector == "omnigent":
-            ux.echo(
-                "    • Native OTel — optional; inactive until OTEL_* variables are exported for the OmniGent process"
-            )
-        elif connector == "codex":
+        if connector == "codex":
             ux.echo("    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>")
         else:
             ux.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
-    if connector == "codex":
-        ux.echo("    • Notify     — agent-turn-complete events → /api/v1/codex/notify")
     if connector == "amp":
         ux.echo("    • Headless   — use `amp -x ... --plugin-ready-timeout 30` for complete lifecycle telemetry")
     click.echo()
@@ -10491,11 +10439,6 @@ def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -
             "    • Reload/restart every running Hermes CLI, TUI, gateway, desktop, and service host; "
             "DefenseClaw does not manage Hermes PortableGit terminal behavior"
         )
-    elif connector == "omnigent":
-        ux.echo(
-            "    • Reload/restart every running OmniGent server; OmniGent does not expose "
-            "loaded policy generation/module/config identity for live verification"
-        )
     if connector == "codex":
         from defenseclaw.commands.cmd_doctor import codex_telemetry_proxy_status
 
@@ -10526,12 +10469,6 @@ def _print_observability_summary(
             "enabled (synchronous policy plugin)"
             if mode == "action"
             else "disabled (observe-only)"
-        )
-    elif connector == "omnigent":
-        enforcement_label = (
-            "configured (custom policy API; live policy generation unverified)"
-            if mode == "action"
-            else "configured (observe-only; live policy generation unverified)"
         )
     elif connector == "hermes":
         enforcement_label = (
@@ -10593,18 +10530,7 @@ def _print_observability_summary(
     ]
     if unguarded:
         rows.insert(2, ("not guarded now", f"{', '.join(unguarded)} (configured; the gateway did not activate it)"))
-    if connector == "omnigent":
-        rows.extend(
-            [
-                ("native OTel", "optional; inactive until OTEL_* is exported for OmniGent"),
-                ("running OmniGent hosts", "unverified; reload/restart required"),
-                (
-                    "validation evidence",
-                    "on-disk registration only; loaded policy identity unavailable from OmniGent",
-                ),
-            ]
-        )
-    elif connector == "hermes":
+    if connector == "hermes":
         rows.extend(
             [
                 (
@@ -10659,8 +10585,8 @@ def _print_observability_summary(
         click.echo("  Or keep it configured but stop enforcing it:")
         click.echo(f"    defenseclaw guardrail disable --connector {connector}")
     else:
-        click.echo("  To revert and restore direct LLM access:")
-        click.echo("    defenseclaw setup guardrail --disable")
+        click.echo("  To disable the DefenseClaw integration:")
+        click.echo("    defenseclaw guardrail disable --yes")
     click.echo()
 
 
@@ -11003,10 +10929,12 @@ def _setup_observability_alias(
         judge_hook_connectors=judge_hook_connectors,
         allow_trusted_path_prompt=interactive,
         trusted_prompt_cache=trusted_prompt_cache,
-        _downgrade_refused_action=True,
     )
     if not ok:
-        raise click.ClickException(f"failed to configure {connector} (mode={normalized_mode}) — see errors above")
+        raise click.ClickException(
+            f"failed to configure {connector} (mode={normalized_mode}); resolve the error above, then rerun: "
+            f"defenseclaw setup {connector} --yes --mode {normalized_mode}"
+        )
     normalized_mode = app.cfg.guardrail.effective_mode(connector)
 
     if interactive:
@@ -11571,14 +11499,11 @@ def _apply_setup_batch(
         if trusted_prompt_cache is not None:
             preflight_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         if not _check_connector_version_supported_for_setup(connector_name, **preflight_kwargs):
-            if (connector_mode or "").strip().lower() == "action" and connector_name not in {"opencode", "codex"}:
-                label = _CONNECTOR_META.get(connector_name, {}).get("label", connector_name)
-                ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
-                resolved_connector_modes[connector_name] = "observe"
-                continue
             _restore_setup_config_snapshot(app, setup_snapshot)
             raise click.ClickException(
-                f"connector {connector_name!r} did not pass setup preflight; prior roster was not changed"
+                f"connector {connector_name!r} did not pass setup preflight; prior roster was not changed. "
+                "Resolve the error above, then rerun: "
+                f"defenseclaw setup {connector_name} --yes --mode {connector_mode}"
             )
 
     if batch_discovery is not None and not agent_discovery._write_cache(
@@ -11665,7 +11590,6 @@ def _apply_setup_batch(
                 judge_hook_connectors=None,
                 allow_trusted_path_prompt=allow_trusted_path_prompt,
                 trusted_prompt_cache=trusted_prompt_cache,
-                _downgrade_refused_action=True,
                 _version_preflighted=True,
                 _protected_selection=protected_selection,
                 _selection_transaction_snapshot=setup_snapshot,
@@ -11945,8 +11869,8 @@ def _hook_guardrail_options(fn):
             default=None,
             help=(
                 "Per-connector hook fail mode: how the hook behaves when the "
-                "gateway answers with an error. 'open' allows + logs "
-                "(recommended); 'closed' blocks."
+                "gateway is unavailable or gives an unusable answer. "
+                "'closed' blocks (default and recommended); 'open' allows uninspected calls."
             ),
         ),
     ]
@@ -12338,7 +12262,7 @@ def _remove_connector(
 
     configured = _configured_connector_set(gc)
     # Match against canonical aliases so operators can type `Codex`,
-    # `claude-code`, or `open-hands` interchangeably.
+    # `claude-code` interchangeably.
     match = next((c for c in configured if normalize_connector(c) == requested_norm), None)
     if match is None:
         if requested_norm in _CONNECTOR_META:
@@ -12405,6 +12329,47 @@ def _remove_connector(
     elif not yes and not click.confirm(f"Remove connector {match!r}?", default=True):
         click.echo("  Aborted; no changes made.")
         return True
+
+    if match in {"opencode", "amp"}:
+        from defenseclaw.commands.cmd_doctor import _managed_plugin_drift, managed_backup_target_after_home_move
+        from defenseclaw.connector_paths import managed_plugin_path
+
+        try:
+            # The receipt binds only the DefenseClaw plugin. The agent's own
+            # settings (Amp's settings.json and friends) are not DefenseClaw
+            # artifacts and never prove or disprove the teardown.
+            candidates = [managed_plugin_path(match)]
+            receipt = os.path.join(cfg.data_dir, "connector_backups", match, "config.json")
+            existed, body, _generation = _capture_protected_setup_file(
+                receipt, _SETUP_CONFIG_MAX_BYTES, "plugin backup", trust_windows_administrators=True,
+            )
+            if existed:
+                record = _json.loads(body)
+                if (
+                    not isinstance(record, dict) or type(record.get("version")) is not int or record["version"] != 1
+                    or record.get("connector") != match or record.get("logical_name") != "config"
+                    or type(record.get("existed")) is not bool
+                    or not isinstance(record.get("path"), str) or not os.path.isabs(record["path"])
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("post_sha256") or ""))
+                ):
+                    raise ValueError("invalid plugin backup identity")
+                # After a supported home move the receipt still names the
+                # old home; it then proves this home's copy, digest included.
+                candidates.append(managed_backup_target_after_home_move(receipt, record["path"]) or record["path"])
+            for path in set(candidates):
+                try:
+                    os.lstat(path)
+                except FileNotFoundError:
+                    continue
+                if problem := _managed_plugin_drift(cfg, path, match):
+                    raise ValueError(problem)
+        except (OSError, ValueError) as exc:
+            ux.echo(
+                f"  ✗ Cannot remove {match}: its plugin teardown is unverified ({exc}). "
+                f"Preserve your edits, then run `defenseclaw setup {match} --yes --restart` "
+                "and retry removal. No configuration was saved.", err=True,
+            )
+            return False
 
     setup_snapshot: _SetupConfigSnapshot | None = None
     runtime_rollback = _windows_runtime_rollback(restart)
@@ -12573,7 +12538,7 @@ def _make_observability_setup_command(connector: str) -> click.Command:
     surface_name = (
         "synchronous policy plugin"
         if connector == "amp"
-        else ("custom policy API" if connector == "omnigent" else "agent lifecycle hooks")
+        else "agent lifecycle hooks"
     )
     platform = platform_support.connector_platform_support(connector)
     platform_note = (
@@ -12734,11 +12699,9 @@ for _observability_connector in (
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
     "kiro",
 ):
     setup.add_command(_make_observability_setup_command(_observability_connector))
@@ -12773,11 +12736,9 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "cursor",
         "devin",
         "copilot",
-        "openhands",
         "antigravity",
         "opencode",
         "amp",
-        "omnigent",
         "kiro",
     }
 )
@@ -14588,14 +14549,13 @@ def _restart_services(
     if not gateway_restarted:
         failed.append("defenseclaw-gateway")
 
-    connector_registration_verified = False
     connector_runtime_pending_reload = False
     # Peers the restarted gateway refused: setup skipped them, so they are
     # not guarded now and the closing roster line leaves them out (GAP-2013).
     runtime_skipped: frozenset[str] = frozenset()
     registration_checked = bool(wait_for_connector_ready and wait_targets and gateway_restarted)
     if registration_checked:
-        readiness_label = "DefenseClaw gateway registration" if "omnigent" in wait_targets else "connector runtime"
+        readiness_label = "connector runtime"
         click.echo(f"  {readiness_label}: waiting for verified setup...", nl=False)
         readiness_kwargs: dict[str, Any] = {}
         # The connector this run is for must converge or fail; only its
@@ -14648,7 +14608,6 @@ def _restart_services(
             click.echo(f" ! ({_pending_reload_hint(getattr(readiness, 'connector', ''))})")
         elif readiness:
             ux.echo(" ✓")
-            connector_registration_verified = True
         else:
             ux.echo(f" ✗{f' ({diagnostic})' if diagnostic else ''}")
             if "registration-launcher-digest-missing" in diagnostic:
@@ -14678,28 +14637,6 @@ def _restart_services(
                 f"{roster}: guardrail hooks removed; DefenseClaw no longer enforces policy for them."
                 if shown
                 else "No hook connectors were left to tear down."
-            )
-        elif "omnigent" in hook_multi and not registration_checked:
-            # No readiness wait ran (for example `agent discovery enable`):
-            # don't label the whole roster "not verified" after a good
-            # restart; name the one unchecked connector and how to check it
-            # (GAP-2630).
-            ux.subhead(
-                f"{roster}: enforcement via native lifecycle surfaces on the sidecar API port. "
-                "No proxy listener — each talks directly to its native upstream."
-            )
-            ux.subhead("OmniGent: this restart does not check its registration; run 'defenseclaw doctor' to confirm.")
-        elif "omnigent" in hook_multi:
-            registration_state = (
-                "DefenseClaw gateway registration is ready"
-                if connector_registration_verified
-                else "DefenseClaw gateway registration is not verified"
-            )
-            ux.subhead(
-                f"{len(shown)} hook/policy connectors ({names}): {registration_state} "
-                "on the sidecar API port; OmniGent loaded policy generation "
-                "remains unverified pending reload/restart. No proxy listener — each talks directly "
-                "to its native upstream."
             )
         elif connector_runtime_pending_reload == "opencode":
             ux.subhead(
@@ -14741,17 +14678,6 @@ def _restart_services(
         # observes/enforces via the hook bus on the sidecar API port.
         if teardown:
             ux.subhead(f"{connector} connector: guardrail hooks removed; DefenseClaw no longer enforces policy for it.")
-        elif connector == "omnigent":
-            registration_state = (
-                "DefenseClaw gateway registration is ready"
-                if connector_registration_verified
-                else "DefenseClaw gateway registration is not verified"
-            )
-            ux.subhead(
-                f"omnigent connector: {registration_state} on the sidecar API port; loaded policy "
-                "generation remains unverified pending OmniGent reload/restart. "
-                "No proxy listener — omnigent talks directly to its native upstream."
-            )
         elif connector == "opencode" and connector_runtime_pending_reload:
             ux.subhead(
                 "opencode connector: the managed plugin is current on the sidecar API port; OpenCode "
@@ -16516,10 +16442,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
     data_dir = app.cfg.data_dir
     if batch_targets:
         click.echo("")
-        if "omnigent" in batch_targets:
-            ux.echo("  Starting/restarting defenseclaw-gateway and verifying connector registration…")
-        else:
-            ux.echo("  Starting/restarting defenseclaw-gateway and verifying connector readiness…")
+        ux.echo("  Starting/restarting defenseclaw-gateway and verifying connector readiness…")
         required_raw = ctx.meta.get(_SETUP_BATCH_REQUIRED_KEY)
         focus = [
             name
@@ -16557,19 +16480,9 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
             if isinstance(snapshot, _SetupConfigSnapshot):
                 _rollback_failed_connector_application(app, snapshot, exc)
             raise
-        if "omnigent" in batch_targets:
-            ux.echo(
-                f"  ✓ Configured {len(focus)} connector(s); DefenseClaw gateway roster and "
-                "hook-contract evidence are ready"
-            )
-            ux.warn(
-                "OmniGent loaded policy generation remains unverified; reload/restart every running "
-                "OmniGent server before relying on action/fail-closed enforcement."
-            )
-        else:
-            ux.echo(
-                f"  ✓ Configured {len(focus)} connector(s); runtime roster and hook-contract evidence are ready"
-            )
+        ux.echo(
+            f"  ✓ Configured {len(focus)} connector(s); runtime roster and hook-contract evidence are ready"
+        )
         return
 
     pid_file = os.path.join(data_dir, "gateway.pid")
@@ -17456,9 +17369,7 @@ def _interactive_logs(app: AppContext) -> bool:
         return False
 
     if not _native_windows_local_splunk():
-        ok, _reason = _preflight_docker()
-        if not ok:
-            return False
+        _require_local_splunk_docker()
 
     index = click.prompt("  Index name", default="defenseclaw_local")
     source = click.prompt("  Source", default="defenseclaw")
@@ -17556,27 +17467,8 @@ def _setup_logs(
     ):
         return False
 
-    ok, reason = (True, "") if _native_windows_local_splunk() else _preflight_docker()
-    if not ok:
-        if non_interactive:
-            # Map the pre-flight reason code to a one-line, accurate
-            # error so the operator does not have to re-read the
-            # checklist above. Historically this branch always said
-            # "Docker is required for --logs", which was misleading
-            # when the actual failure was a busy port.
-            detail = {
-                "docker_not_installed": "Docker is not installed",
-                "docker_daemon_not_running": "Docker daemon is not running",
-            }.get(reason)
-            if detail is None and reason.startswith("port_") and reason.endswith("_in_use"):
-                # reason looks like "port_8000_in_use"
-                port = reason.split("_", 2)[1]
-                detail = f"port {port} is already in use — free it (or stop the existing Splunk instance) and re-run"
-            if detail is None:
-                detail = "pre-flight checks failed (see messages above)"
-            click.echo(f"  error: {detail}", err=True)
-            raise SystemExit(1)
-        return False
+    if not _native_windows_local_splunk():
+        _require_local_splunk_docker()
 
     if s3_export and not (s3_bucket or os.environ.get("S3_BUCKET")):
         click.echo("  error: --s3-bucket is required with --s3-export (or set S3_BUCKET)", err=True)
@@ -18466,6 +18358,7 @@ def _preflight_docker() -> tuple[bool, str]:
     Returns ``(ok, reason)``. ``reason`` is an empty string on success
     and a short, machine-readable failure code on failure
     (``"docker_not_installed"``, ``"docker_daemon_not_running"``,
+    ``"docker_socket_permission_denied"``, ``"docker_daemon_no_answer"``,
     ``"port_<n>_in_use"``). Callers surface ``reason`` verbatim in
     non-interactive error output so operators can tell *which* check
     failed without having to re-read the human-readable lines printed
@@ -18486,12 +18379,26 @@ def _preflight_docker() -> tuple[bool, str]:
             text=True,
             timeout=10,
         )
-        if result.returncode != 0:
-            click.echo("    Docker daemon running... NOT RUNNING")
-            click.echo("    Start Docker and try again.")
-            return False, "docker_daemon_not_running"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
+        click.echo("    Docker installed... NOT FOUND")
+        click.echo("    Install Docker: https://docs.docker.com/get-docker/")
+        return False, "docker_not_installed"
+    except subprocess.TimeoutExpired:
+        click.echo("    Docker daemon running... NO ANSWER (docker info did not return within 10 s)")
+        return False, "docker_daemon_no_answer"
+    if result.returncode != 0:
+        # docker info also fails when the daemon runs but this account may
+        # not use its socket; say which, as local-observability does (GAP-0529).
+        from defenseclaw.observability.local_stack import docker_daemon_unreachable_message
+
+        detail = (result.stderr or result.stdout or "").strip()
+        message = docker_daemon_unreachable_message(detail, platform_support.host_os())
+        if "permission denied" in message:
+            click.echo("    Docker daemon access... PERMISSION DENIED")
+            click.echo(f"    {message}.")
+            return False, "docker_socket_permission_denied"
         click.echo("    Docker daemon running... NOT RUNNING")
+        click.echo(f"    {message}.")
         return False, "docker_daemon_not_running"
     click.echo("    Docker daemon running... ok")
 
@@ -18511,6 +18418,25 @@ def _preflight_docker() -> tuple[bool, str]:
         click.echo(f"    Port {port} ({label})... available")
 
     return True, ""
+
+
+def _require_local_splunk_docker() -> None:
+    """Refuse setup on a failed prerequisite in both CLI and wizard flows."""
+    ok, reason = _preflight_docker()
+    if ok:
+        return
+    detail = {
+        "docker_not_installed": "Docker is not installed",
+        "docker_daemon_not_running": "Docker daemon is not running",
+        "docker_socket_permission_denied": "this account cannot use the Docker daemon socket (permission denied)",
+        "docker_daemon_no_answer": "Docker daemon did not answer docker info within 10 s",
+    }.get(reason)
+    if detail is None and reason.startswith("port_") and reason.endswith("_in_use"):
+        port = reason.split("_", 2)[1]
+        detail = f"port {port} is already in use — free it (or stop the existing Splunk instance) and re-run"
+    if detail is None:
+        detail = "pre-flight checks failed (see messages above)"
+    raise click.ClickException(f"Local Splunk preflight failed: {detail}")
 
 
 def _port_in_use(port: int) -> bool:

@@ -27,15 +27,15 @@ def test_shared_stack_docs_keep_the_dashboard_destination_name() -> None:
     preset = resolve_preset("local-otlp")
     assert destination_name(preset, None, {"endpoint": "stack.example.test:4317"}) == "local-observability"
 
-    local = _flat(DOCS / "observability/local-observability.mdx")
+    local = _flat(DOCS / "how-to/observability/run-grafana-locally.mdx") + " " + _flat(DOCS / "reference/observability/index.mdx")
     assert "defenseclaw setup observability add local-otlp --endpoint <stack-host>:4317" in local
     assert "selects the `local-observability-v1` metric projection" in local
     assert "if you renamed the destination" not in local
-    assert "named `local-observability`" in _flat(DOCS / "observability/grafana-dashboards.mdx")
+    assert "named `local-observability`" in _flat(DOCS / "reference/observability/dashboards.mdx")
     # GAP-0679: the board reads the exported IDE gauge labels, so a plain
     # `otlp` destination fills it too.
     assert "The board queries the exported label names directly, including for a plain `otlp` destination" in _flat(
-        DOCS / "ai-discovery.mdx"
+        DOCS / "reference/scanning/ai-discovery.mdx"
     )
 
 
@@ -53,7 +53,7 @@ def test_galileo_docs_list_the_profile_families_and_exclude_discovery() -> None:
     }
     assert not any("discovery" in family["family_id"] for family in profile["families"])
 
-    galileo = _flat(DOCS / "observability/galileo.mdx")
-    assert "The profile has six span families" in galileo
+    galileo = _flat(DOCS / "reference/observability/index.mdx")
+    assert "It has six span families" in galileo
     assert "AI discovery, scanner, audit and other operational records are not in the profile" in galileo
-    assert "discovery results never reach Galileo" in _flat(DOCS / "ai-discovery.mdx")
+    assert "discovery results never reach Galileo" in _flat(DOCS / "reference/scanning/ai-discovery.mdx")

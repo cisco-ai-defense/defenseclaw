@@ -26,13 +26,61 @@ gateway.
   agent session already running when a bundle enables or changes its
   connector is not enforced until it restarts (4.3, sessions that need a
   restart).
-- **No audit of trust anchor and credential changes.** DefenseClaw records
+- **Audit of trust anchor and credential changes.** DefenseClaw records
   bundle applies (receipts, the `config.bundle.receipt` audit event and
-  OTel). It does not audit trust anchor installs (by the MDM kit, by Windows
-  `ensure --trust-anchors` or by `bundle anchors install`) or
-  `secret set` / `remove`. The agent reports those changes itself: the
-  anchors install result carries `sha256`, `previous_sha256` and `key_ids`,
-  and `secret status --json` carries `sha256_prefix`.
+  OTel). From 1.0.4 it also records every trust anchor install (`bundle
+  anchors install`, Windows `ensure --trust-anchors`, and the MDM kit, which
+  runs one of them) and every `secret set` / `remove` that changed
+  something, was refused or failed. The command writes a change event to
+  `<etc>/bundles/change-events/` (readable by root, or SYSTEM and
+  Administrators, and the gateway service only), and the gateway reports
+  each one once as an audit and OTel event: `config.trust_anchors.changed`
+  (actor, `sha256`, `previous_sha256`, key ids added and removed),
+  `config.secret.changed` and `config.secret.change_failed` (actor,
+  credential name, action, outcome, reason code). A change made while the
+  gateway is stopped is reported when it starts. The spool is the durable
+  record of each change: the command writes and flushes room for its event
+  (file and folder) before it changes anything, and the gateway reports an
+  event only once it is on disk to stay (its command has flushed it). An
+  event's id is the hash of its content (its outcome, actor, time, hashes,
+  key ids and credential name): a file changed after it was written does
+  not validate and is never reported, so no destination gets another
+  record under an event's id. One sender in the gateway reads the spool
+  and delivers each event to the audit store and to every OTel destination,
+  each on its own: a destination does not wait for the audit row. An event
+  stays in the spool until every one has it: its audit row is flushed to
+  disk (it survives a power loss) and every OTel destination acknowledged
+  it. A destination that refuses it or cannot be reached gets it again,
+  under the same record id, at a later poll, also after a config reload;
+  after a gateway restart an unreported event goes to every destination
+  again, so a destination can receive it twice with the same id. Every
+  copy, the audit row included, is the same record: before any sink gets
+  an event, the gateway pins the run, sidecar, binary and config values of
+  that first offer (a file in its data directory, flushed), and builds
+  every later offer, after a restart or a config reload too, from the event
+  and its pin. An offer that would be another record (the pin or the row
+  was changed, or collection now admits another form) is not sent. A
+  destination still gets the event while the audit store cannot be read
+  or written; the event then stays in the spool until its row is on disk.
+  A command that cannot record
+  its change (the spool cannot be written, or holds 4096 events the gateway
+  has not reported) refuses it with `state_invalid` before anything is
+  changed. The command holds room for its event from that check until the
+  event is written, so concurrent commands cannot fill the spool in
+  between. A record that fails after the change is the warning
+  `change_unrecorded`; a command that ends after that check and before
+  its event (killed, or the device restarted) is reported as failed with
+  reason `interrupted` by the gateway's next poll (a restart is enough),
+  whether or not it had changed anything. A `BUNDLE=` `TRUSTANCHORS=` run whose bundle is not
+  confirmed records one refused anchor install. No event carries a credential value or a hash of
+  one. Byte-identical anchors, a `set` of the
+  stored value and a `remove` of an absent credential record nothing; the
+  room such a command held is removed durably before it exits, and when
+  that cannot be flushed it prints the warning `change_release_unflushed`
+  (a power loss could then report it as `interrupted`). The
+  results still carry what the agent needs for its own report: `sha256`,
+  `previous_sha256` and `key_ids` from anchors install, `sha256_prefix` from
+  `secret status --json`.
 
 | Schema (this folder) | `$id` | Validates |
 |---|---|---|
@@ -146,8 +194,8 @@ anchors between download and install. The check then fails closed
 | Exit | Linux / macOS | Windows | Class | Agent action |
 |---|---|---|---|---|
 | `0` | success or nothing to do | success | done | use the result |
-| `75` | another lifecycle run holds the lock (`lifecycle_busy`), or a `bundle apply` whose gateway stopped reporting the bundle's policy before the receipt was confirmed (`not_confirmed` with `bundle.state` `applied`, section 4.3) | — | **retry** | back off (30 s, doubling, at most 10 min) and resubmit the same input |
-| `1618` | — | `lifecycle_busy` (`bundle.lock` not free within `--lock-wait`, or the installer's `lifecycle.lock` not free within its fixed 30 s), or a verified bundle that did not finish applying (`bundle_apply_failed`, `bundle_policy_not_adopted`, `bundle_post_verify_failed`, `bundle_targets_refresh_failed`) | **retry** | as for 75 |
+| `75` | another lifecycle run holds the lock (`lifecycle_busy`), or a `bundle apply` whose gateway stopped reporting the bundle's policy before the receipt was confirmed (`not_confirmed` with `bundle.state` `applied`, section 4.3), or a `bundle apply --defer-restart` that deferred a restart (`restart_deferred`) | — | **retry** | back off (30 s, doubling, at most 10 min) and resubmit the same input; for `restart_deferred` see below |
+| `1618` | — | `lifecycle_busy` (`bundle.lock` not free within `--lock-wait`, or the installer's `lifecycle.lock` not free within its fixed 30 s), or a verified bundle that did not finish applying (`bundle_apply_failed`, `bundle_policy_not_adopted`, `bundle_post_verify_failed`, `bundle_targets_refresh_failed`), or `restart_deferred` | **retry** | as for 75 |
 | `1` | failure, already rolled back; or a refusal | builds without `management_contract` only: a flag error on `enterprise secret` (section 2.3) | **final** | read `errors[].code`; do not retry until the bundle, anchors, credential or device changes |
 | `1603` | — | failure, already rolled back; or a refusal | **final** | as for 1 |
 | `2` | invalid arguments | — | **final, caller bug** | fix the call |
@@ -156,10 +204,14 @@ anchors between download and install. The check then fails closed
 | `3010` | — | reserved (success, reboot required); not returned today | done | treat as 0 |
 | any other code, or killed by a signal | | | **unknown** | do not resubmit blindly; reconcile (section 5.1) |
 
+`restart_deferred` changed nothing, and the same call is deferred again
+until the change no longer restarts the gateway. Resubmit the bundle in the
+device's maintenance window without `--defer-restart` (section 4.3).
+
 A refusal is final even when the same bytes are resubmitted:
 `version_not_newer`, `signature_invalid`, `key_unknown`, `secret_ref_missing`,
-`digest_mismatch`, `capability_loss` and the rest repeat until the input
-changes.
+`secret_ref_mismatch`, `secret_ref_unbound`, `digest_mismatch`,
+`capability_loss` and the rest repeat until the input changes.
 
 One 1603 is not final: Windows `secret set` / `remove` with `errors[0].code`
 `restart_failed` changed the stored credential but did not restart the
@@ -183,15 +235,18 @@ stderr, and the exit code is the only signal.
 | Case | Exit |
 |---|---|
 | Unknown flag, malformed value or stray argument on a lifecycle verb | 2 / 1639 |
-| `bundle apply` without `--bundle`; with both `--bundle` and `--inbox` (Linux, macOS); with `--inbox` (Windows) | 2 / 1639 |
-| `--lock-wait` outside 0 to 15m: every Linux and macOS verb but `bundle anchors install` (which prints a JSON `invalid_arguments` document), and Windows `bundle apply` | 2 / 1639 |
-| `bundle apply --delivery-id` empty, over 128 bytes, or with a byte outside `A-Z a-z 0-9 . _ : -` (2.6) | 2 / 1639 |
+| `--lock-wait` outside 0 to 15m: every Linux and macOS verb but `bundle anchors install` and `bundle apply` | 2 / 1639 |
+| Builds before 1.0.4: every `bundle apply` argument error (below) | 2 / 1639 |
 | `--version --json` (the flag is `--version-json`) | 2 |
 | Windows `secret set` / `remove` / `status` on a build without `management_contract`: every failure (5, 1639, 1603), and `--lock-wait` on set or remove (an unknown flag there, exit 1) | 5 / 1639 / 1603 / 1 |
 
-`bundle verify` and `bundle anchors install` print JSON for their own
-argument errors (`errors[0].code` `invalid_arguments`, exit 2 / 1639);
-`bundle apply` does not (the rows above). With
+`bundle verify`, `bundle anchors install` and `bundle apply` print JSON for
+their own argument errors (`errors[0].code` `invalid_arguments`, exit 2 /
+1639). For `bundle apply` (from 1.0.4, with `--json`) that is one
+`bundle-refused.schema.json` document, for every argument error: an unknown
+flag, a malformed value, a stray argument, no `--bundle`, `--bundle` with
+`--inbox` (Linux, macOS), `--inbox` on Windows, a `--lock-wait` out of range
+and a bad `--delivery-id` (2.6). With
 `management_contract` 1, `secret set`, `remove` and `status` print a JSON
 document on every outcome on every OS (section 4.7): on Linux and macOS a
 flag, argument, privilege, value or stdin read error prints the schema-1
@@ -240,7 +295,14 @@ or exit 1 `not_root`, `change_failed` or `state_invalid`).
 Credentials go only through `enterprise secret set --name N --from-stdin`
 (section 4.7). Bundles carry no secrets: a bundle lists `secret_refs`, and
 apply refuses with `secret_ref_missing` until each named credential is
-stored. Send the value as one line without surrounding whitespace and close
+stored. From 1.0.4 each entry also signs a digest of the value
+(`value_sha256`, from `bundle sign --secret-file N=<file>`): apply refuses
+`secret_ref_mismatch` while the device stores another value, and
+`secret_ref_unbound` for an entry without a digest (every bundle signed
+before 1.0.4: sign it again with `--secret-file`). `secret set` stores a
+credential the confirmed bundle signs only with that value; to change it,
+sign a newer bundle for the new value and pass it to `secret set --bundle B`,
+then apply B. Send the value as one line without surrounding whitespace and close
 stdin, within 60 s of starting the command on Linux and macOS
 (`change_failed` after that). Linux and macOS strip one trailing `\n` or `\r\n` and keep other
 spaces; Windows trims all surrounding whitespace. On Linux and macOS a value
@@ -248,17 +310,21 @@ that ends without `\n` (`printf '%s'`) makes `secret set` wait up to 1 s to
 tell an agent that exited while it sent the value from one that is done. At most 16 KiB. Names match
 `^[a-z0-9][a-z0-9-]{0,62}$`.
 
-Send a credential **only when it changed**. Every Windows `set` restarts the
-gateway (managed hooks fail closed while it restarts), and there is no
-identical-value no-op. Compare first with `enterprise secret status --json`
-(no lock, read-only): `sha256_prefix` is the first 12 hex characters of the
-SHA-256 of the stored value. Hash the value the way the device stores it: on
-Windows with surrounding whitespace trimmed, on Linux and macOS without the
-one trailing newline. Equal prefix: skip the call, unless the agent's last
-call for that name did not end with exit 0. After a Windows `restart_failed`
-(2.2), or an unknown outcome (a killed child, a `secret set` still waiting
-when the agent stopped, 2.4), the value can be stored while the gateway runs
-with the old one: resubmit even when the prefix matches.
+Send a credential **only when it changed**. A Windows `set` of the exact
+stored bytes is not rewritten, but it still restarts a running gateway
+(managed hooks apply their fail mode while it restarts: closed by default,
+open only where the administrator set open): nothing proves which value the
+running gateway loaded. With no running gateway nothing restarts
+(`gateway_restarted: false`). The result keeps the contract v1 shape, with no
+`noop` member. Compare first with `enterprise secret status --json` (no lock,
+read-only): `sha256_prefix` is the first 12 hex characters of the SHA-256 of
+the stored value. Hash the value the way the device stores it: on Windows with
+surrounding whitespace trimmed, on Linux and macOS without the one trailing
+newline. Equal prefix: skip the call, unless the agent's last call for that
+name did not end with exit 0. After a Windows `restart_failed` (2.2), or an
+unknown outcome (a killed child, a `secret set` still waiting when the agent
+stopped, 2.4), the value can be stored while the gateway runs with the old
+one: resubmit even when the prefix matches, which restarts the gateway.
 
 ### 2.6 `--reason` and `--delivery-id`
 
@@ -319,10 +385,12 @@ member; use these fallbacks on it:
 |---|---|---|
 | `receipt_id` | apply and status results carry `bundle.receipt_id` | match the receipt by `bundle_id` and a `finished_at` after the apply started (section 4.9) |
 | `--delivery-id` | `bundle apply --delivery-id` records `delivery_id` (2.6) | an unknown flag: exit 2 / 1639 with no JSON; leave it out and match by `receipt_id` or as above |
+| `--defer-restart` (from 1.0.4) | `bundle apply --defer-restart` refuses a bundle that would restart the gateway (`restart_deferred`, 4.3) | an unknown flag: exit 2 / 1639 with no JSON; defer by not running the apply (4.2) |
 | Windows apply lock wait | Windows `bundle apply` waits up to `--lock-wait` for `bundle.lock` | the flag is accepted and ignored; a held `bundle.lock` returns 1618 at once, and the agent's backoff does the waiting |
 | Windows secret locks and JSON | Windows `secret set` / `remove` take `--lock-wait`, `bundle.lock` then `lifecycle.lock`, and print a JSON document on every outcome | do **not** pass `--lock-wait` (exit 1); the set takes no lock and can collide with an apply's confirm step or an installer run; failures print no JSON |
 | Linux and macOS secret failure JSON | `secret set` / `remove` / `status` print the schema-1 failure document for an argument, flag, privilege, value or stdin read error | those failures print one line on stderr and no JSON: classify them by the exit code (2 fix the call, 1 failed) |
 | Anchors command (Linux, macOS) | `enterprise bundle anchors install` | install the file as the MDM kit does (section 4.8) |
+| `secret_set_bundle` (from 1.0.4) | `secret set --bundle` stores a credential a newer signed bundle signs (4.7) | an unknown flag: leave it out; the build binds no credential value, so store the credential without it |
 | Optional status v2 members (from 1.0.3) | `bundle verify` `secret_refs_missing` and `restart_prediction` (4.2); `status` / `verify` `connectors`, `openshell` and `identity` (4.4.1); each only when present | absent: preflight by verifying and reading the refusal, and treat every apply as one that can restart the gateway |
 
 On Windows the anchors call is the same on every build:
@@ -353,10 +421,15 @@ $GW   = Join-Path $root 'bin\defenseclaw-gateway.exe'
 ```
 
 Every command below refuses on a Secure Client computer
-(`not_supported_secure_client`) and on a computer that is not a standalone
-managed device (`not_managed`; the device test is the descriptor
-`<etc>/managed-runtime.json`, and on Windows the trusted deployment record).
-Every command below also assumes the deployment is already installed (Linux
+(`not_supported_secure_client`). `bundle apply`, `bundle status` and
+`bundle anchors install` also refuse on a computer that is not a standalone
+managed device, as root and as a user (`not_managed`, exit 1; the device test
+is the descriptor `<etc>/managed-runtime.json`, and on Windows the trusted
+deployment record). The read-only commands answer there instead:
+`<os> status` reports `installed: false` (5.1 relies on it), `secret status`
+lists no credential, and `bundle verify` checks the bundle against the anchor
+file without the device checks (4.2). None of them writes, starts or stops
+anything. Every command below also assumes the deployment is already installed (Linux
 and macOS `bundle apply` refuse `not_installed` without a deployment record;
 Windows refuses `not_managed` unless the deployment was installed before the
 run). Section 5.0 sets up a device that has no MDM.
@@ -390,16 +463,23 @@ Exit 0.
   were not checked). The agent always runs verify as root or SYSTEM.
 - Preconditions: none; it is the dry run of apply.
 - Lock: none. Changes nothing (it stages into a private temporary folder
-  and reads the credential store listing and the installed config.yaml).
+  and reads the stored credentials and the installed config.yaml).
 - Idempotency: pure; repeat freely.
 - stdout: `bundle-verify.schema.json`. `result` is `verified`,
-  `already_applied` (the bytes are the confirmed bundle: apply would be a
-  success no-op) or `refused`.
+  `already_applied` (the bytes are the confirmed bundle: apply writes no
+  new receipt) or `refused`.
+- Config drift, `config_drift` (from 1.0.4, optional): for `already_applied`
+  as root or SYSTEM, `true` when the installed config.yaml is not the
+  confirmed bundle's config (changed or deleted outside the lifecycle). The
+  apply of the same bundle then installs it again; `restart_prediction` says
+  whether that restarts the gateway. `false`: the apply is a no-op. Absent
+  when the installed config or the bundle store could not be read.
 - Exit: 0 ok; 1 / 1603 refused (`errors[0].code`, for example
   `anchor_missing`, `key_unknown`, `key_revoked`, `key_expired`,
   `signature_invalid`, `tenant_mismatch`, `target_mismatch`,
   `version_not_newer`, `product_too_old`, `secret_ref_missing`,
-  `digest_mismatch`, `config_invalid`); 2 / 1639 `invalid_arguments`.
+  `secret_ref_mismatch`, `secret_ref_unbound`, `digest_mismatch`,
+  `config_invalid`); 2 / 1639 `invalid_arguments`.
 - `secret_refs_missing` and `restart_prediction` are optional: absent on
   builds before 1.0.3 and added without a `management_contract` bump, so the
   agent gates on `management_contract` 1 and on the member being present
@@ -407,22 +487,41 @@ Exit 0.
 - Missing credentials, `secret_refs_missing` (absent on builds before
   1.0.3): as root or SYSTEM on a device, the names of every `secret_refs`
   credential the device does not hold, required and optional, in manifest
-  order; `[]` when all are stored. A `secret_ref_missing` refusal lists all
-  of them, not only the first. Absent off a device, when the store could
+  order; `[]` when all are stored. A stored credential the gateway cannot
+  read (empty, more than one line, over 16 KiB, readable by other accounts,
+  or in a folder another account controls) counts as missing, on every OS,
+  in verify and in apply. A `secret_ref_missing` refusal lists all of them,
+  not only the first, and keeps the `secret_presence_unchecked` warning when
+  another credential could not be checked. Absent off a device, when the store could
   not be read (`secret_presence_unchecked`) and on a refusal before the
-  credential check. Names only, never a value.
+  credential check. Names only, never a value. A required credential the
+  device could not check is only a warning in verify; apply refuses it
+  `secret_ref_missing` (from 1.0.4) with the same warning. Store it again
+  (4.7).
+- Credentials not the signed value, `secret_refs_mismatch` (absent on builds
+  before 1.0.4): present exactly when `secret_refs_missing` is, the names of
+  every stored `secret_refs` credential whose value the bundle does not sign
+  (`value_sha256`), in manifest order; `[]` when every stored one is the
+  signed value. A `secret_ref_mismatch` refusal lists all of them. Names only,
+  never a value. Store the signed values (4.7: a value the confirmed bundle
+  does not sign needs `--bundle` with this bundle), or sign the bundle again
+  with `--secret-file` for the stored ones.
 - Restart prediction, `restart_prediction` (absent on builds before 1.0.3):
   on a device, for `verified` and `already_applied`, whether the apply
   restarts the gateway, from the installed config.yaml and the bundle
   config, with the classifier the apply uses on that OS:
-  - `required`: the apply restarts the gateway and managed hooks fail closed
-    while it restarts. `reason_codes` `restart_settings` (`settings` names the
+  - `required`: the apply restarts the gateway, and managed hooks apply
+    their fail mode while it restarts (closed unless the administrator set
+    open). `reason_codes` `restart_settings` (`settings` names the
     restart-required settings as patterns such as `guardrail.hook_self_heal`
     or `guardrail.connectors.*.enabled`, never a profile, group or connector
     name) or, on Windows, `codex_machine_policy` (Codex protection turns on or
     off: every DefenseClaw service restarts, 4.3).
   - `not_required`: no changed setting needs a restart, so the gateway keeps
-    running (`already_applied`: the apply changes nothing). The apply still
+    running (reason `already_applied`: the bundle is the confirmed one and
+    `config_drift` is `false`). A repeat over a drifted installed config is
+    classified like any change: `not_required` with no reason code for hot
+    settings, `required` for restart-required ones. The apply still
     restarts a gateway that is down or does not report the new policy in
     time. A bundle that omits `data_dir`, `gateway.api_bind` or
     `gateway.api_port` while the installed config spells out the value the
@@ -437,17 +536,34 @@ Exit 0.
   `restart` is what happened. The receipt carries `restart` only when the
   gateway restarted (always `true`); when it is absent the gateway kept
   running, never read an absent `restart` as unknown.
+- Effective-policy digests and product versions: `expected_digest` is the
+  digest the signer computed with its product version. It is compared with
+  this device's digest (`digest_verified`) only when the signer ran the same
+  product version; otherwise verify and the receipt warn
+  `digest_unverifiable` and the bundle file hashes still protect the content.
+  `effective_policy_digest` is the digest this build computes for the bundle
+  on this device. To know the digest a device will enforce, run verify on
+  that device (or on a computer with the same version and layout) and compare
+  its `effective_policy_digest` with `gateway_digest` of `bundle status` after
+  the apply. Do not compare digests computed by different product versions;
+  the digest algorithm is not part of the contract.
 - Preflight before an apply:
-  1. Run verify. `already_applied`: done.
-  2. `refused` with `secret_ref_missing`: store every name in
-     `secret_refs_missing` (4.7), then run verify again. The refusal is
+  1. Run verify. `already_applied` with `config_drift` `false`: done. With
+     `config_drift` `true`, the installed config drifted: apply the same
+     bundle again, scheduled as in step 3. With `config_drift` absent, run
+     verify again as root or SYSTEM.
+  2. `refused` with `secret_ref_missing` or `secret_ref_mismatch`: store
+     every name in `secret_refs_missing` and `secret_refs_mismatch` with the
+     value the bundle signs (4.7, with `--bundle` and this bundle), then run
+     verify again. `secret_ref_unbound`: sign the bundle again with
+     `--secret-file` for every credential. The refusal is
      final until the credentials change (2.2). A `verified` result can list
      optional names: the apply succeeds and what needs them stays off until
      they are stored.
   3. `verified` with `gateway_restart` `required` or `unknown`: apply only in
      the device's maintenance window. `not_required`: apply at any time.
-     There is no `--defer-restart` in this version: the agent defers a
-     restart by not running the apply.
+     Or apply with `--defer-restart` (4.3): the device then refuses the
+     bundle if it would restart the gateway.
 
 ```sh
 "$GW" enterprise bundle verify --bundle /var/lib/<vendor>/inbox/v13.dcbundle --json
@@ -459,11 +575,19 @@ Exit 0.
 ### 4.3 Apply a bundle: `enterprise bundle apply`
 
 - argv: `enterprise bundle apply --bundle <file> --reason management
-  --delivery-id <id> [--refuse-capability-loss] --lock-wait 10m --json`. Pass
+  --delivery-id <id> [--refuse-capability-loss] [--defer-restart]
+  --lock-wait 10m --json`. Pass
   `--refuse-capability-loss` on every apply after the first bundle: it refuses
   a bundle that turns off a capability the device enforces now
   (`capability_loss`). Pass a `--delivery-id` unique to this delivery (2.6);
   it is optional. Never use `--inbox`.
+- `--defer-restart` (from 1.0.4) refuses, before anything changes, a bundle
+  whose config change restarts the gateway: `restart_deferred`, exit 75 /
+  1618, receipt `failed`. It uses the `restart_prediction` of verify (4.2);
+  `unknown` is refused too. A repeat of the current bundle over an installed
+  config that drifted in such a setting is refused the same way. A gateway
+  that is down or does not take the change while running is still
+  restarted. Resubmit without the flag in the maintenance window.
 - Privilege: root on Linux and macOS (`not_root`); an elevated administrator
   or SYSTEM on Windows (`not_admin`).
 - Preconditions: a standalone managed device; trust anchors installed
@@ -507,7 +631,8 @@ Exit 0.
   on or off runs the full lifecycle transaction instead (a repair with the
   bundle config), because only that transaction installs and removes
   Codex's machine policy: every DefenseClaw service restarts, managed hooks
-  fail closed meanwhile (usually one to three minutes), and the receipt
+  apply their fail mode meanwhile (closed unless the administrator set open;
+  usually one to three minutes), and the receipt
   records `restart: true`.
 - Idempotency: the same bytes as the confirmed bundle are a success no-op;
   the repeated delivery's receipt is discarded and no new public receipt is
@@ -523,7 +648,8 @@ Exit 0.
   "ensure"`) with the `bundle` block (and `last_refusal` for a refusal before
   staging), or `bundle-refused.schema.json` (schema_version 1) when it refused
   before the lifecycle ran (Secure Client, not managed, Windows not
-  elevated). Tell them apart by `schema_version`.
+  elevated) or on an argument error (`invalid_arguments`). Tell them apart
+  by `schema_version`.
 - **Success test**: `exit == 0 && ok && bundle.bundle_id == <submitted id> &&
   bundle.state == "confirmed"`. The submitted id is `bundle.bundle_id` of the
   4.2 result. A repeated delivery of the current bundle writes no receipt:
@@ -606,9 +732,11 @@ Exit 0.
 - Exit: 0; 1 / 1603 refused or failed (final): the bundle codes above plus
   `capability_loss`, `not_confirmed`, `apply_failed`, `interrupted`,
   `state_invalid`, `not_managed`, `not_root` / `not_admin`; 75 / 1618
-  `lifecycle_busy` (Linux and macOS also `not_confirmed` with `bundle.state`
-  `applied`; Windows also `bundle_apply_failed` and the codes in
-  section 2.2: retry); 2 / 1639 invalid arguments (no JSON, section 2.3).
+  `lifecycle_busy` and `restart_deferred` (Linux and macOS also
+  `not_confirmed` with `bundle.state` `applied`; Windows also
+  `bundle_apply_failed` and the codes in section 2.2: retry); 2 / 1639
+  invalid arguments (one `invalid_arguments` document from 1.0.4, no JSON
+  before, section 2.3).
 
 ```sh
 "$GW" enterprise bundle apply --bundle /var/lib/<vendor>/inbox/v13.dcbundle \
@@ -744,14 +872,22 @@ off the device. The agent does not read `/health` itself (section 7); the
   Windows settles first, as in 4.4.
 - stdout: `bundle-status.schema.json`: `current`, `last_good`, `floor`,
   `last_receipt` (the root-only receipt, with `transitions` and
-  `error_message`), `last_refusal`, `bundle`, `gateway_digest`, `applied`.
+  `error_message`, and `rollback_of` for a rollback bundle, 4.9),
+  `last_refusal`, `bundle`, `gateway_digest`, `applied`.
   `current` and `last_good` carry the `delivery_id` of the apply that
-  confirmed them, when it had one (2.6).
+  confirmed them, when it had one (2.6). `anchors_summary` (from 1.0.4,
+  optional) describes the installed anchor file: `sha256` of its bytes,
+  `tenant_id`, `device_groups`, `min_version` and `keys` (`key_id`, `alg`,
+  `status`, validity; never the public key). Compare `sha256` with the file
+  the agent installed instead of reading the device file. It is absent when
+  the file is missing or fails its checks (see the warnings).
   `applied` is true when the running gateway enforces the current bundle's
   digest with no rejected reload. A refused status (`not_managed`,
   `not_root`, `state_invalid`) did not scan sessions and reports
   `sessions_restart_required` with state `unknown`. Warnings to act on:
-  `bundle_failed`, `bundle_pending`, `anchor_missing`, `key_unknown` /
+  `bundle_failed`, `bundle_pending`, `anchor_missing`, `anchor_insecure` /
+  `anchor_invalid` (from 1.0.4: the installed anchor file fails its checks,
+  so every bundle is refused; fix or reinstall it, 4.8), `key_unknown` /
   `key_revoked` (the confirmed bundle's signer, as the bundle state records
   it, is no longer trusted; checked also after its receipt was pruned),
   `policy_reload_rejected`, `gateway_unchecked`, `sessions_need_restart` /
@@ -808,8 +944,9 @@ off the device. The agent does not read `/health` itself (section 7); the
 
 ### 4.7 Credentials: `enterprise secret set` / `remove` / `status`
 
-- argv: `enterprise secret set --name <name> --from-stdin [--lock-wait 10m]
-  --json`; `enterprise secret remove --name <name> [--lock-wait 10m] --json`;
+- argv: `enterprise secret set --name <name> --from-stdin [--bundle <B>]
+  [--lock-wait 10m] --json`; `enterprise secret remove --name <name>
+  [--lock-wait 10m] --json`;
   `enterprise secret status --json`. On Windows pass `--lock-wait` only to a
   `management_contract` 1 build.
 - Privilege: root on Linux and macOS (checked first: `not_root`, exit 1); an elevated
@@ -826,6 +963,36 @@ off the device. The agent does not read `/health` itself (section 7); the
   with `state_invalid`, exit 1603 (`<folder> is not a real directory`):
   nothing is read, written or deleted, and the target of a junction is never
   touched. Replace it with a real folder.
+- Signed value (from 1.0.4): when the confirmed bundle lists the credential
+  in `secret_refs`, `set` stores only the value its `value_sha256` signs.
+  Another value is refused `secret_ref_mismatch` (an entry without a digest,
+  from a bundle signed before 1.0.4, `secret_ref_unbound`), nothing is
+  written and the exit is 1 / 1603. To change the value, pass the newer
+  bundle that signs it with `--bundle <B>`: `set` verifies B as an apply
+  would (anchors, signature, version floor, files and digest, apart from the
+  stored credentials) and stores the value when B signs it. Otherwise the
+  refusal is `secret_ref_mismatch`, also when B does not verify or does not
+  bind the value, and its message carries B's own refusal. Then apply B. An
+  identical value, a credential no confirmed bundle lists and a device with
+  no confirmed bundle are not checked. B is checked against the anchors
+  installed now: when a delivery also changes the signing key, install the
+  new anchors and apply a bundle the new key signs with the current value
+  first, then rotate the credential (5.2). Pass `--bundle` only to a build
+  whose `--version-json` reports `secret_set_bundle` (section 3). The MDM
+  shell kit and `Invoke-DefenseClawEnterprise.ps1` pass the bundle they
+  deliver to such a build (Windows: not with `-SetupPath`, which stores the
+  credential after Setup as before).
+- Upgrade from 1.0.2 or 1.0.3: a bundle signed before 1.0.4 has no
+  `value_sha256`, so on 1.0.4 `bundle verify`, `bundle apply` (also a repeat
+  delivery of the confirmed bundle, which an older build answered
+  `already_applied`) and `secret set` for its credentials refuse
+  `secret_ref_unbound`, exit 1 / 1603, until a re-signed bundle is applied.
+  The confirmed config keeps enforcing; `ensure` and repair do not verify
+  the bundle. 1.0.2 and 1.0.3 refuse a bundle signed by 1.0.4 with
+  `value_sha256` (`manifest_invalid`), so one bundle cannot serve both:
+  sign it again with `bundle sign --secret-file` and `--min-product-version
+  1.0.4` and deliver it with the 1.0.4 package, which installs before the
+  credential and the apply.
 - Lock: Linux and macOS write and apply under one `lifecycle.lock` and wait
   `--lock-wait` (default 5 s). Windows takes the two locks in the order a
   bundle apply takes them: `bundle.lock` (waiting up to `--lock-wait`,
@@ -836,13 +1003,16 @@ off the device. The agent does not read `/health` itself (section 7); the
   guardian repair. Either lock not free in time: `lifecycle_busy`, 1618,
   nothing written; retry.
 - Idempotency: on Linux and macOS an identical value is not rewritten and
-  ensure runs anyway (usually a no-op). On Windows every set writes and
-  restarts the running gateway (managed hooks fail closed while it restarts);
-  there is no identical-value no-op, so send a credential only when `status`
-  shows a different `sha256_prefix` (section 2.5). A Windows set or remove
-  that changed the store and then failed to restart is `restart_failed`,
-  exit 1603: resubmit it, which writes and restarts again, even though
-  `sha256_prefix` already shows the new value (2.2).
+  ensure runs anyway (usually a no-op). On Windows an identical value is not
+  rewritten, but every set restarts a running gateway (managed hooks apply
+  their fail mode while it restarts: closed unless the administrator set
+  open), so send a credential only when `status` shows a
+  different `sha256_prefix` (section 2.5); with no running gateway it reports
+  `gateway_restarted: false`. A gateway that is still starting counts as
+  running and is restarted once it runs. A Windows set or remove that changed the
+  store and then failed to restart is `restart_failed`, exit 1603: resubmit
+  it, which restarts again, even though `sha256_prefix` already shows the new
+  value (2.2).
 - stdout: `secret-result.schema.json`, exactly one document with `--json`.
   Linux and macOS print lifecycle result v2 (`action: "ensure"`) once the
   lifecycle ran, and `{schema_version: 1, ok: false, action, name,
@@ -871,8 +1041,9 @@ off the device. The agent does not read `/health` itself (section 7); the
   `invalid_arguments`); 75 busy; Windows 5 / 1603 / 1618 / 1639. Every one
   prints its JSON document.
 - The value never appears in output, logs or audit; `status` shows only
-  presence and a digest prefix. No audit event records a set or remove
-  (section 0): the agent reports it.
+  presence and a digest prefix. A set or remove is audited as
+  `config.secret.changed` or `config.secret.change_failed`, with the name
+  and never the value (section 0).
 - After pushing the Cisco AI Defense key, check that AI Defense accepts it.
   `sha256_prefix` proves only what is stored. Read `inspection.ai_defense`
   from `enterprise <os> status --json` (4.4); the Linux and macOS `set`
@@ -953,7 +1124,8 @@ is still the one owner.
   installed, an older one included, so the agent tracks which anchor file
   it last installed. The confirmed bundle version floor still applies.
 - stdout: `anchors-install.schema.json` (`sha256`, `previous_sha256` and
-  `key_ids` for the agent's own report; no audit event records the change).
+  `key_ids` for the agent's own report). The change is audited as
+  `config.trust_anchors.changed` (section 0).
   Exit: 0; 1; 2; 75.
 
 ```sh
@@ -1037,6 +1209,12 @@ enforcing.
   state.
 - Refuse a link, a file over 16 KiB and a state other than `confirmed` /
   `failed`, as the gateway's own reader does.
+- `receipt-events/` keeps the newest 100 events, the events of the receipts
+  `bundle status` lists and of the current and last good bundle, and every
+  event the gateway has not reported yet (up to 1000). An agent that falls
+  more than 100 deliveries behind can miss events: read `bundle status`
+  then. When unreported events had to be removed, the receipt that removed
+  them carries `receipt_events_dropped`. A receipt id is never used twice.
 - Deduplicate by `receipt_id`; every delivery has its own id (the first
   delivery of a bundle uses the bundle id, later deliveries `r-<ULID>`).
   Receipts whose id is not in the agent's own list (4.3) came from MDM or an
@@ -1045,10 +1223,19 @@ enforcing.
   was stopped is not counted as theirs. On a build without
   `management_contract`, match on `bundle_id` with `finished_at` after the
   apply started.
-- `delivery_id` is present when the apply had `--delivery-id` (2.6). The
-  `config.bundle.receipt` audit event and OTel do not carry it; only these
-  files, the command results and `bundle status` do.
-- Remember the last forwarded id; nothing is acknowledged back.
+- `delivery_id` is present when the apply had `--delivery-id` (2.6). From
+  1.0.4 the `config.bundle.receipt` audit event and its OTel log record carry
+  it too (`defenseclaw.policy.bundle.delivery_id`); older builds have it only
+  in these files, the command results and `bundle status`.
+- `rollback_of` is optional and present only on the receipt of a rollback
+  bundle: the id of the earlier bundle whose content that bundle publishes
+  again, copied from its signed manifest (`enterprise bundle sign
+  --rollback-of`). As with every member, the agent ignores it when it does
+  not know it and treats its absence as normal (section 0).
+- Receipt ids are not ordered in time. Keep the set of `receipt_id`s already
+  forwarded (prune ids whose file is gone) and order receipts by
+  `finished_at` when the order matters; do not keep only the last id.
+  Nothing is acknowledged back.
 
 ```sh
 ls -1 /etc/defenseclaw/bundles/receipt-events/        # macOS: /opt/cisco/defenseclaw/etc/bundles/receipt-events/
@@ -1144,12 +1331,17 @@ Later bundles go through 5.2.
 
 ### 5.2 Deliver a bundle
 
-1. Store every credential the bundle's `secret_refs` names (4.7), only when
-   `sha256_prefix` differs or the last call for that name did not end with
-   exit 0 (2.5).
+1. Store every credential the bundle's `secret_refs` names (4.7, with
+   `--bundle` and this bundle), only when `sha256_prefix` differs or the last
+   call for that name did not end with exit 0 (2.5).
 2. If the anchors must change and the agent owns them (4.8), install them
-   first.
-3. Run 4.2 verify. `already_applied`: done. `refused`: report
+   first. Step 1 checks a rotated credential against the anchors installed
+   then, so a delivery that changes both the signing key and a signed
+   credential runs twice: first the new anchors with a bundle the new key
+   signs for the current value, then the new credential with a newer bundle
+   that signs it.
+3. Run 4.2 verify. `already_applied`: done, unless `config_drift` is
+   `true` (4.2 preflight, step 1). `refused`: report
    `errors[0].code` and stop (final).
 4. Record the delivery (4.3, across an agent restart), then run 4.3 apply on
    a worker thread, with that new `--delivery-id` and
@@ -1192,7 +1384,8 @@ The gateway HTTP API (TCP and the hook socket), the token in `.env`,
 (2.6); editing any file under `<etc>` or the lifecycle folder, except the
 4.8 fallback recipe and the 5.0 step 6 anchor removal; `--config` in bundle
 mode; `enterprise bundle sign` (a control-plane tool, not a device call).
-Per-user installs and Secure Client computers refuse every command.
+Secure Client computers refuse every command; on a per-user install only
+the read-only commands answer (section 4).
 
 ## 8. Known limits
 
@@ -1208,11 +1401,22 @@ Per-user installs and Secure Client computers refuse every command.
   stays `unknown` (4.7).
 - Receipt files are written best effort (4.9); stdout and `bundle status` are
   authoritative.
+- The `config.bundle.receipt` audit and OTel record carries the bundle
+  principal as `defenseclaw.admin.principal_ref` only when it is a safe token
+  (letters, digits and `. _ : / -`). A principal with an e-mail address or a
+  `DOMAIN\user` account (`control-plane:acme/alice@example.com`,
+  `operator:CORP\admin`) is left out of that field; the receipt files (4.9),
+  the apply result and `bundle status` keep the full `principal`.
 - `delivery_id` is caller-supplied and not authenticated, and no receipt
   records the delivery channel (MDM, agent, administrator): the apply cannot
   tell them apart without trusting the caller (2.6).
-- Trust anchor and credential changes are not audited by DefenseClaw
-  (section 0).
+- Trust anchor and credential change events reach the audit log only
+  when the gateway runs; while it is stopped, or while an OTel destination
+  keeps refusing them, 4096 unreported events fill the spool and further
+  changes are refused (`state_invalid`). Builds
+  before 1.0.4 record none (section 0). A refusal before the command knows
+  it runs as root (or elevated), or that the device is managed, records
+  nothing.
 - Windows `bundle apply` and `secret set` / `remove` default to no wait for
   `bundle.lock`; Linux and macOS wait 5 s. Pass `--lock-wait` on every OS.
 - The `identity` block cannot see an SSSD or Open Directory that answers

@@ -30,13 +30,13 @@ func TestProcessOwnerUsesSessionSIDBeforeImageProfile(t *testing.T) {
 		{PID: 11, Comm: "codex.exe", Connector: "codex",
 			Image: filepath.Join(alice, "bin", "codex.exe")},
 	}
-	svc.attributeProcessOwners(procs)
+	svc.attributeProcessOwners(procs, processAccountsOnce())
 	if procs[0].OwnerID != "S-1-5-21-1002" || procs[1].OwnerID != "" {
 		t.Fatalf("process owners = %q/%q, want token owner SID and unknown",
 			procs[0].OwnerID, procs[1].OwnerID)
 	}
 	svc.opts.SecureClient = true
-	svc.attributeProcessOwners(procs[1:])
+	svc.attributeProcessOwners(procs[1:], processAccountsOnce())
 	if procs[1].OwnerID != "S-1-5-21-1001" {
 		t.Fatalf("Secure Client process owner = %q, want legacy image profile", procs[1].OwnerID)
 	}
@@ -147,7 +147,7 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 		// A machine-wide install is owned by its session account (GAP-2043).
 		{PID: 40, PPID: 1, Comm: "copilot-runtime.exe", Image: filepath.Join(root, "Program Files", "Microsoft VS Code", "copilot-runtime.exe"), Windows: true, SessionOwnerID: "s-1-5-21-1-2-3-1002"},
 	}
-	s.attributeProcessOwners(procs)
+	s.attributeProcessOwners(procs, processAccountsOnce())
 	for i, wantOwner := range []string{"alice", "alice", "bob", "", "bob"} {
 		if procs[i].OwnerName != wantOwner {
 			t.Fatalf("process %s owner = %q, want %q", procs[i].Comm, procs[i].OwnerName, wantOwner)
@@ -250,7 +250,7 @@ func TestBrokeredProcessAccountOwnsAMachineWideAgent(t *testing.T) {
 		}
 	})
 	defer clear()
-	s.attributeProcessOwners(procs)
+	s.attributeProcessOwners(procs, processAccountsOnce())
 	for i, want := range []string{"S-1-5-21-1-2-3-1002", "S-1-5-21-1-2-3-1001", "", ""} {
 		if procs[i].OwnerID != want {
 			t.Fatalf("process %d owner = %q, want %q", procs[i].PID, procs[i].OwnerID, want)
@@ -336,11 +336,11 @@ func TestExcludedBrokeredAccountDoesNotBecomeLocalOwner(t *testing.T) {
 		{PID: 42, Comm: "codex.exe", Connector: "codex", Windows: true},
 		{PID: 43, Comm: "codex.exe", Connector: "codex", Windows: true},
 	}
-	svc.attributeProcessOwners(procs)
+	svc.attributeProcessOwners(procs, processAccountsOnce())
 	if procs[0].OwnerID != "" || procs[1].OwnerID != local.UserID {
 		t.Fatalf("brokered owners = %+v, want only the local account attributed", procs)
 	}
-	procs = svc.withoutExcludedAccounts(procs)
+	procs = svc.withoutExcludedAccounts(procs, processAccountsOnce())
 	if len(procs) != 1 || procs[0].PID != 43 {
 		t.Fatalf("filtered processes = %+v, want only the local account", procs)
 	}

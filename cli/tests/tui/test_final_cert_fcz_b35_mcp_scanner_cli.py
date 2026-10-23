@@ -55,6 +55,25 @@ def test_analyzers_names_the_ones_the_mcp_scanner_has() -> None:
     assert result.exit_code == 0, result.output
 
 
+def test_interactive_wizard_runs_without_the_removed_binary_field() -> None:
+    # GAP-0137: the wizard printed scanners.mcp_scanner.binary, a field the
+    # config no longer has, and stopped with an AttributeError.
+    from defenseclaw.commands.cmd_setup import setup
+    from tests.helpers import cleanup_app, make_app_context
+
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        # analyzers, LLM analyzer?, API analyzer?, prompts?, resources?, instructions?
+        answers = "yara,behavioral\nn\nn\ny\nn\nn\n"
+        result = CliRunner().invoke(setup, ["mcp-scanner", "--no-verify"], obj=app, input=answers)
+        assert result.exit_code == 0, result.output
+        assert "Traceback" not in result.output and "binary" not in result.output.lower()
+        assert app.cfg.scanners.mcp_scanner.analyzers == "yara,behavioral"
+        assert app.cfg.scanners.mcp_scanner.scan_prompts is True
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
 def test_pasted_key_in_api_key_env_stays_redacted_in_the_tui() -> None:
     args = ("setup", "mcp-scanner", "--non-interactive", "--api-key-env", _PASTED_KEY)
     assert mask_argv(("defenseclaw", *args))[-1] == "<redacted>"

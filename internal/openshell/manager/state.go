@@ -211,6 +211,11 @@ type record struct {
 	// accept names the session it reviewed (Manager.Accept). A restarted
 	// daemon that finds the sandbox still ready counts nothing.
 	Sessions int `json:"sessions,omitempty"`
+	// SessionRelease is the OpenShell release of the gateway when the
+	// latest session began: the sandbox runs that release's supervisor
+	// until it stops (openshell.SupportedMin). Empty in records from before
+	// it was kept, whose sessions all began on an older release.
+	SessionRelease string `json:"session_release,omitempty"`
 	// HookCounts are the hook counters as the daemon last kept them
 	// (keepHookCounts): a restarted daemon goes on from them. Copies of a
 	// record share them, so they are replaced, never changed in place.

@@ -34,7 +34,11 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 	if note := entraShortNameNote(set, subject, runtime.GOOS); note != "" {
 		warnings = append(warnings, note)
 	}
-	if note := unnamedGroupsNote(subject); note != "" {
+	var sids *profileGroupSIDs
+	if set != nil {
+		sids = set.groupSIDs
+	}
+	if note := unnamedGroupsNote(subject, sids); note != "" {
 		warnings = append(warnings, note)
 	}
 	if subject != nil && subject.cachedFactsAge > 0 {
@@ -78,6 +82,17 @@ func (set *guardrailProfileSet) assignmentWarningsWithWait(checkGroups bool, wai
 func (set *guardrailProfileSet) healthProfileWarnings() []string {
 	warnings := set.assignmentWarningsWithWait(true, profileGroupCheckWait)
 	return append(warnings, set.inertHILTWarnings()...)
+}
+
+// standaloneProfileWarnings is what status and verify list on a standalone
+// deployment: the profile set's warnings, or, with no profiles, the inert
+// human-approval warnings of the config itself, which config validate and
+// profile-explain already gave (id.GAP-1264).
+func standaloneProfileWarnings(set *guardrailProfileSet, cfg *config.Config) []string {
+	if set != nil {
+		return set.healthProfileWarnings()
+	}
+	return ConfigHILTWarnings(cfg)
 }
 
 // inertHILTWarning uses the same resolved threshold as enforcement. Keep
@@ -286,8 +301,11 @@ func validSIDString(s string) bool {
 // only numbers. The Unix resolver keeps a group id as its number when no
 // group answers for it, which is what a directory that does not answer
 // leaves behind: the account then has too few groups for its assignments to
-// match, and nothing else in the answer shows it (GAP-0212).
-func unnamedGroupsNote(subject *profileSubject) string {
+// match, and nothing else in the answer shows it (GAP-0212). On standalone
+// Windows (sids, the SIDs of the assignment group names) an assignment
+// matches the SID of the group it names, so a group shown only by its SID
+// still matches it, and the note does not say otherwise (GAP-1141).
+func unnamedGroupsNote(subject *profileSubject, sids *profileGroupSIDs) string {
 	if subject == nil || subject.LookupFailed {
 		return ""
 	}
@@ -319,6 +337,10 @@ func unnamedGroupsNote(subject *profileSubject) string {
 	}
 	if unnamed == 0 {
 		return ""
+	}
+	if sidForm && sids != nil {
+		return fmt.Sprintf("%d of this account's %d group(s) have no name, only a SID (the guardian names at most 128 groups per account within 2 s, "+
+			"or the SID does not resolve); assignments match groups by SID, so this changes only how they are shown", unnamed, total)
 	}
 	if sidForm {
 		return fmt.Sprintf("%d of this account's %d group(s) have no name, only a SID (the guardian names at most 128 groups per account within 2 s, "+
@@ -915,6 +937,15 @@ var cachedDirectoryRefreshFailure = func(id string) (time.Time, string, bool) {
 	return peerDirectoryCache().refreshFailing(id)
 }
 
+// explainCacheOutcome is what live gives the account's requests, for an
+// explain warning: a refusal and its reason, or a profile and its match.
+func explainCacheOutcome(live profileDecision) string {
+	if live.Refused != "" {
+		return "are refused (" + live.Refused + ")"
+	}
+	return fmt.Sprintf("get profile %s (match %s)", firstNonEmpty(live.Name, "none"), live.Match)
+}
+
 // explainCacheView describes the cached facts of the explained account: how
 // old they are, and the profile requests currently get from them. warning is
 // non-empty when that profile differs from the explained one.
@@ -933,7 +964,7 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 		}
 		failed := profileSubject{UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, LookupFailed: identityLookupBlocking.Load()}
 		live := set.match(&failed, profileSubjectLookup, connectorName, agent)
-		differs := live.Name != decision.Name || live.Match != decision.Match
+		differs := live.Name != decision.Name || live.Match != decision.Match || live.Refused != decision.Refused
 		view = map[string]any{
 			"failing_since": since.UTC().Format(time.RFC3339),
 			"last_error":    reason,
@@ -941,10 +972,13 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 			"match":         live.Match,
 			"differs":       differs,
 		}
+		if live.Refused != "" {
+			view["refused_reason"] = live.Refused
+		}
 		if differs {
-			warning = fmt.Sprintf("requests of this account currently get profile %s (match %s): the gateway's directory lookup for it has failed since %s (%s) "+
+			warning = fmt.Sprintf("requests of this account currently %s: the gateway's directory lookup for it has failed since %s (%s) "+
 				"and is retried every %s; the profile above applies once a lookup succeeds",
-				firstNonEmpty(live.Name, "none"), live.Match, since.UTC().Format("15:04:05Z"), reason, identityDirectoryRetry)
+				explainCacheOutcome(live), since.UTC().Format("15:04:05Z"), reason, identityDirectoryRetry)
 		}
 		return view, warning
 	}
@@ -957,7 +991,8 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 		UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, Directory: facts,
 	}, identityLookupBlocking.Load())
 	live := set.match(&cached, profileSubjectLookup, connectorName, agent)
-	differs := live.Name != decision.Name || live.Match != decision.Match || live.MatchedGroup != decision.MatchedGroup
+	differs := live.Name != decision.Name || live.Match != decision.Match || live.MatchedGroup != decision.MatchedGroup ||
+		live.Refused != decision.Refused
 	view = map[string]any{
 		"age_seconds":           int(age.Seconds()),
 		"refresh_after_seconds": int(refresh.Seconds()),
@@ -965,10 +1000,13 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 		"match":                 live.Match,
 		"differs":               differs,
 	}
+	if live.Refused != "" {
+		view["refused_reason"] = live.Refused
+	}
 	if differs {
-		warning = fmt.Sprintf("requests of this account still use the directory facts the gateway fetched %s ago (profile %s, match %s); "+
+		warning = fmt.Sprintf("requests of this account still use the directory facts the gateway fetched %s ago, so they %s; "+
 			"the profile above applies from the next refresh, within %s. Restart the gateway to refresh now",
-			age, firstNonEmpty(live.Name, "none"), live.Match, refresh)
+			age, explainCacheOutcome(live), refresh)
 	}
 	// The lookup explain started failed: the answer above, like the
 	// account's requests, comes from the facts cached before (GAP-0361). An
@@ -1030,8 +1068,8 @@ func directoryHealthView(h identityCacheHealth, now time.Time) (view map[string]
 	if h.Failing == 0 {
 		return nil, ""
 	}
-	message = fmt.Sprintf("directory lookups are failing for %d account(s) since %s (last error: %s); accounts without cached facts "+
-		"use the default profile for directory-dependent assignments (default_lookup_failed)", h.Failing, h.Since.UTC().Format("15:04:05Z"), h.LastError)
+	message = fmt.Sprintf("directory lookups are failing for %d account(s) since %s (last error: %s); requests whose assignments need missing facts "+
+		"are refused (default_lookup_failed)", h.Failing, h.Since.UTC().Format("15:04:05Z"), h.LastError)
 	if h.Stale > 0 {
 		message += fmt.Sprintf(", and %d account(s) are served facts up to %s old, which are dropped at %s",
 			h.Stale, h.OldestAge.Round(time.Minute), identityDirectoryMaxAge)

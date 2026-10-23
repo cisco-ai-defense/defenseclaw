@@ -253,7 +253,7 @@ test('deterministic inventory: fixed chain and YARA IDs match runtime sources', 
     YARA_RULES.map((rule) => rule.id).sort(),
     sourceYaraIds,
   );
-  assert.equal(sourceYaraIds.length, 10);
+  assert.equal(sourceYaraIds.length, 11);
 });
 
 test('deterministic docs: profile totals and chain posture match canonical sources', () => {
@@ -291,15 +291,15 @@ test('deterministic docs: profile totals and chain posture match canonical sourc
   }
 
   const reference = readFileSync(
-    new URL('../content/docs/policies/deterministic-detection.mdx', import.meta.url),
+    new URL('../content/docs/reference/policy/detection.mdx', import.meta.url),
     'utf8',
   );
   const creator = readFileSync(
-    new URL('../content/docs/policies/creator.mdx', import.meta.url),
+    new URL('../content/docs/how-to/policies/build-a-policy-in-the-browser.mdx', import.meta.url),
     'utf8',
   );
   const index = readFileSync(
-    new URL('../content/docs/policies/index.mdx', import.meta.url),
+    new URL('../content/docs/features/policies.mdx', import.meta.url),
     'utf8',
   );
 
@@ -321,9 +321,10 @@ test('deterministic docs: profile totals and chain posture match canonical sourc
   assert.ok(index.includes(
     `The balanced/default enabled catalog currently contains ${balanced.enabled} local rules`,
   ));
-  assert.ok(creator.includes(
-    `Balanced/default exposes ${balanced.declared} declared rules (${balanced.enabled} enabled)`,
-  ));
+  // Counts live in the reference and policy overview. The creator guide
+  // defines the boundary of its browser replay, not a second rule catalog.
+  assert.ok(creator.includes('Live Test evaluates only the admission and guardrail Rego.'));
+  assert.ok(creator.includes('does not run ActionFacts parsing, CEL, regex, YARA or bounded chains.'));
 
   const enforcementCapable = BOUNDED_CHAINS.filter(
     (chain) => chain.mode === 'enforcement-capable',
@@ -332,8 +333,8 @@ test('deterministic docs: profile totals and chain posture match canonical sourc
   assert.equal(enforcementCapable, 4);
   for (const page of [
     reference,
-    readFileSync(new URL('../content/docs/policies/cel/engine.mdx', import.meta.url), 'utf8'),
-    readFileSync(new URL('../content/docs/policies/cel/tool-call-state.mdx', import.meta.url), 'utf8'),
+    readFileSync(new URL('../content/docs/reference/policy/cel/engine.mdx', import.meta.url), 'utf8'),
+    readFileSync(new URL('../content/docs/reference/policy/cel/tool-call-state.mdx', import.meta.url), 'utf8'),
   ]) {
     assert.ok(page.includes(`${BOUNDED_CHAINS.length} ordered chains`) ||
       page.includes(`${BOUNDED_CHAINS.length} ordered behaviors`));
@@ -984,7 +985,7 @@ test('policy export excludes inactive audit choices', () => {
 
 test('manual v9 rollback distinguishes 0.8.4 config v7 from later 0.8.x config v8', () => {
   const guide = readFileSync(
-    new URL('../content/docs/reference/migrate-v9.mdx', import.meta.url),
+    new URL('../content/docs/appendix/migrate-v9.mdx', import.meta.url),
     'utf8',
   );
   const rollback = guide.split('## Going back to 0.8.x')[1] ?? '';
@@ -1361,6 +1362,22 @@ test('validators: empty correlator pattern surfaces CORRELATOR_PATTERN_EMPTY', (
   const findings = validatePolicy(policy);
   const codes = findings.map((f) => f.code);
   assert.ok(codes.includes('CORRELATOR_PATTERN_EMPTY'), `expected CORRELATOR_PATTERN_EMPTY in ${codes.join(',')}`);
+});
+
+test('validators: blanket pre-judge strips warn like other blanket suppressions', () => {
+  const policy = makePolicy({
+    suppressions: {
+      pre_judge_strips: [{ id: 'STRIP-ALL', pattern: '.*', context: 'test', applies_to: ['pii'] }],
+      finding_suppressions: [],
+      tool_suppressions: [],
+    },
+  });
+  const broad = validatePolicy(policy).filter((f) => f.code === 'SUPP_OVER_BROAD');
+  assert.equal(broad.length, 1);
+  assert.equal(broad[0].level, 'warning');
+  assert.match(broad[0].location, /pre_judge/);
+  policy.suppressions.pre_judge_strips[0].pattern = '^sender: system$';
+  assert.equal(validatePolicy(policy).filter((f) => f.code === 'SUPP_OVER_BROAD').length, 0);
 });
 
 test('validators: window_events=0 surfaces CORRELATOR_WINDOW_INVALID as error', () => {

@@ -19,7 +19,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 )
 
 // emitScanV8 emits new or materially changed asset findings before the
@@ -324,7 +323,7 @@ func scanSummaryV8Event(
 		details += " judge=" + judge
 	}
 	event := Event{
-		ID: uuid.NewString(), Timestamp: observedAt, Action: string(ActionScan), Target: result.Target,
+		ID: observability.NewTimeOrderedID(), Timestamp: observedAt, Action: string(ActionScan), Target: result.Target,
 		Actor: "defenseclaw", Details: details,
 		Severity: string(result.MaxSeverity()), RunID: correlation.RunID, SpanID: correlation.SpanID,
 		RequestID: correlation.RequestID, SessionID: correlation.SessionID, TraceID: correlation.TraceID,
@@ -515,7 +514,7 @@ func buildScanRuntimeV8GeneratedMetric(
 	}
 	builder, err := observability.NewFamilyBuilder(
 		observability.ClockFunc(func() time.Time { return event.Timestamp.UTC() }),
-		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		observability.TimeOrderedOccurrenceIDs,
 	)
 	if err != nil {
 		return observability.Record{}, err

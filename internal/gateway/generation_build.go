@@ -190,14 +190,6 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		}
 	}
 
-	if managed.IsManagedEnterprise(cfg.DeploymentMode) && !in.offline && !cfg.SecureClientIntegration() {
-		loaded, err := loadSandboxRequiredPacks(cfg)
-		if err != nil {
-			return nil, fmt.Errorf("generation: %w", err)
-		}
-		g.sandboxPacks, g.sandboxPackDir = loaded, cfg.OpenShell.PackDir
-	}
-
 	g.Thresholds = buildThresholdTable(cfg, in.profiles)
 	record := readConfigGenerationRecord(cfg.ConfigFilePath, in.raw)
 	g.ConfigGen, g.ConfigGenRecorded = record.Generation, record.Recorded
@@ -234,6 +226,20 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 
 	scope := newDigestScope(cfg, in.goos, in.bundleRoot)
 	scope.vendorRoot, scope.vendorTarget = in.vendorRoot, in.vendorTarget
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) && !cfg.SecureClientIntegration() {
+		loaded, err := loadSandboxRequiredPacks(cfg, scope, in.offline)
+		if err != nil {
+			return nil, fmt.Errorf("generation: %w", err)
+		}
+		g.sandboxPacks, g.sandboxPackDir = loaded, cfg.OpenShell.PackDir
+		for ref, pack := range loaded {
+			if scope.bundleFile(pack.Source) {
+				// Attest the exact validated copy this generation publishes,
+				// including inherited content, whether or not a pin is set.
+				g.Components["sandbox_pack:"+scope.rewrite(ref)] = pack.Digest
+			}
+		}
+	}
 	configComponent, err := configDigest(cfg, scope)
 	if err != nil {
 		return nil, fmt.Errorf("generation: %w", err)
@@ -298,6 +304,9 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	return g, nil
 }
 
+// loadSandboxGenerationPack is replaced by content-only tests of attestation.
+var loadSandboxGenerationPack = packs.LoadGenerationPack
+
 // loadSandboxRequiredPacks loads every custom required sandbox pack that a
 // floor of cfg names (openshell.admin, alone and with each guardrail
 // profile's sandbox section) as the sandbox routes load it. A pack that
@@ -309,7 +318,7 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 // process may not read (a standard user's `policy digest`) is left to the
 // gateway, which can. A floor that does not resolve is refused by the
 // sandbox routes, as before.
-func loadSandboxRequiredPacks(cfg *config.Config) (map[string]*packs.Pack, error) {
+func loadSandboxRequiredPacks(cfg *config.Config, scope digestScope, offline bool) (map[string]*packs.Pack, error) {
 	// A profile without a required pack of its own runs the
 	// administrator's: only those with one name another pack.
 	names := []string{""}
@@ -330,10 +339,26 @@ func loadSandboxRequiredPacks(cfg *config.Config) (map[string]*packs.Pack, error
 		if ref == "" || packs.IsBuiltin(ref) {
 			continue
 		}
+		assetPath := ref
+		if !filepath.IsAbs(assetPath) {
+			assetPath = filepath.Join(cfg.OpenShell.PackDir, ref)
+		}
+		if offline && !scope.bundleFile(assetPath) {
+			// A signer cannot inspect assets outside the bundle. Runtime
+			// still validates and publishes them, as before.
+			continue
+		}
 		pack, done := loaded[ref]
 		if !done {
 			var packErr *packs.Error
-			pack, err = packs.LoadGenerationPack(subject, ref, cfg.OpenShell.PackDir)
+			if offline {
+				// A signer hashes staged bundle data before the installer
+				// promotes it to administrator ownership. This generation is
+				// never published; runtime still uses the trusted loader.
+				pack, err = packs.LoadRequired(subject, ref, cfg.OpenShell.PackDir, false)
+			} else {
+				pack, err = loadSandboxGenerationPack(subject, ref, cfg.OpenShell.PackDir)
+			}
 			switch {
 			case err == nil:
 				loaded[ref] = pack
@@ -516,8 +541,9 @@ func generationAssetDirs(cfg *config.Config, g *Generation) []string {
 		}
 	}
 	for _, entry := range cfg.AIDiscovery.SignaturePacks {
-		if _, watchDir := inventory.SignaturePackEntry(entry); watchDir != "" {
-			add(watchDir)
+		_, watchDirs := inventory.SignaturePackEntry(entry)
+		for _, dir := range watchDirs {
+			add(dir)
 		}
 	}
 	if dir := strings.TrimSpace(cfg.PolicyDir); dir != "" {

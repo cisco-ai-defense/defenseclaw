@@ -35,7 +35,7 @@ func TestProfileExplainCachedNamesBindToUID(t *testing.T) {
 		t.Fatalf("explicit uid selected %d, %q, %t", uid, name, ok)
 	}
 	local := unixidentity.Account{Name: "alex", UID: 2100}
-	twins := sameNameProfileAccounts(context.Background(), nil, "alex", local)
+	twins, _ := sameNameProfileAccounts(context.Background(), nil, "alex", local)
 	if len(twins) != 1 || twins[0].UID != 80001 {
 		t.Fatalf("cached accounts sharing a bare name = %+v", twins)
 	}

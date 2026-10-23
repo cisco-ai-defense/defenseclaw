@@ -44,9 +44,11 @@ func CombinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, erro
 
 // RunTree runs cmd with the streams the caller set and ties it to this
 // process: on Windows a kill-on-close Job Object ends the whole tree, on
-// Linux the child gets SIGKILL when this process dies. A killed gateway left
-// its skill-scanner running at full CPU, and a second one started for the
-// same skill after the restart (GAP-0418). Other platforms run cmd as is.
+// Linux the child gets SIGKILL when this process dies, also when it ends
+// with os.Exit. A killed gateway left its skill-scanner running at full CPU,
+// and a second one started for the same skill after the restart (GAP-0418);
+// a managed hook that exited once its answer was out left the tools it had
+// started running (G-small). Other platforms run cmd as is.
 func RunTree(cmd *exec.Cmd) error {
 	return runTree(cmd, false)
 }

@@ -39,7 +39,7 @@ func (r failingReconcileRunner) Run(ctx context.Context, name string, args ...st
 }
 
 // After an enrolled account was deleted, verify failed
-// ("openhands for user bob is not protected: target account ... does
+// ("hermes for user bob is not protected: target account ... does
 // not exist: no such account") until the enumerator revoked the target, so
 // MDM detection reported the host non-compliant. The account is gone; the
 // target is reported as a warning until it is revoked. Likewise an account
@@ -62,7 +62,7 @@ func TestOneAccountsTargetDoesNotFailTheHost(t *testing.T) {
 			if before := h.run(Options{Action: ActionStatus}); !before.SecurityComplete {
 				t.Fatalf("the test host must start security-complete: %+v %+v", before.Readiness, before.Warnings)
 			}
-			bob := map[string]any{"user": "bob", "connector": "openhands", "ok": false, "error": `enterprise hooks: target account "bob" does not exist: no such account`}
+			bob := map[string]any{"user": "bob", "connector": "hermes", "ok": false, "error": `enterprise hooks: target account "bob" does not exist: no such account`}
 			// The enumerator last saw bob in the local account database, so
 			// "no such account" is definitive for him.
 			writeEnumeratorState(t, h, map[string]string{"bob": "files"}, nil)
@@ -83,7 +83,7 @@ func TestOneAccountsTargetDoesNotFailTheHost(t *testing.T) {
 			if hasWarning(status, codeGuardianTargetFailed) {
 				t.Fatalf("one account's target is reported as a protection failure: %+v", status.Warnings)
 			}
-			if got := messagesOf(status.Warnings, codeGuardianTargetAccountRemoved); !strings.Contains(got, "openhands for user bob: the account does not resolve") || !strings.Contains(got, "after 3 consecutive definitive misses") {
+			if got := messagesOf(status.Warnings, codeGuardianTargetAccountRemoved); !strings.Contains(got, "hermes for user bob: the account does not resolve") || !strings.Contains(got, "after 3 consecutive definitive misses") {
 				t.Fatalf("status does not report the deleted account's target: %+v", status.Warnings)
 			}
 			if got := messagesOf(status.Warnings, codeGuardianTargetUserPath); !strings.Contains(got, "amp for user carol is not protected: hook config parent is not a directory: /home/carol/.config/amp/plugins") {
@@ -172,7 +172,9 @@ func TestAccountRemovedWarningNeedsAConfirmedMiss(t *testing.T) {
 		{"a user's file text for an existing account", "alice", quoted, false, true},
 		{"the exact error for an account that still exists", "alice", `enterprise hooks: target account "alice" does not exist: no such account`, false, true},
 		{"a missing local account", "gone1", `enterprise hooks: target account "gone1" does not exist: no such account`, true, false},
-		{"a missing directory account not confirmed", "gone2", `enterprise hooks: target account "gone2" does not exist: no such account`, false, false},
+		// GAP-1133: an unconfirmed miss is not reported as removed, and with
+		// no directory outage to explain it, its target is a failure.
+		{"a missing directory account not confirmed", "gone2", `enterprise hooks: target account "gone2" does not exist: no such account`, false, true},
 		{"a confirmed directory account whose home is gone", "gone3", "user home /home/gone3 is not available yet: no such file or directory", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

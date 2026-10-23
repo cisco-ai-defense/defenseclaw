@@ -18,6 +18,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -329,12 +330,116 @@ runtime_action := "allow"
 	}
 }
 
+// p0 GAP-0945: with registry_required on, the dry run refuses an MCP server
+// the catalog does not list, as the runtime does, and says an approved one
+// is registered; before, both read scan / awaiting scan.
+func TestPolicyEvaluateAppliesTheRegistryRequirement(t *testing.T) {
+	c := &config.Config{PolicyDir: t.TempDir(), AssetPolicy: config.DefaultAssetPolicy()}
+	c.AssetPolicy.Enabled = true
+	c.AssetPolicy.Mode = config.AssetPolicyModeAction
+	c.AssetPolicy.MCP.RegistryRequired = true
+	c.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "acme-notes"}}
+	setPolicyPathTestConfig(t, c)
+	setPolicyPathTestFlag(t, policyEvaluateCmd, "target-type", "mcp")
+	evaluate := func(name string) policy.AdmissionOutput {
+		t.Helper()
+		setPolicyPathTestFlag(t, policyEvaluateCmd, "target-name", name)
+		raw, err := capturePolicyPathTestOutput(t, func() error { return policyEvaluateCmd.RunE(policyEvaluateCmd, nil) })
+		if err != nil {
+			t.Fatalf("evaluate %s: %v", name, err)
+		}
+		var out policy.AdmissionOutput
+		if err := json.Unmarshal([]byte(raw), &out); err != nil {
+			t.Fatalf("evaluate %s output %q: %v", name, raw, err)
+		}
+		return out
+	}
+	if out := evaluate("wiki-rogue"); out.Verdict != "blocked" || !strings.Contains(out.Reason, "not in the approved registry") {
+		t.Fatalf("wiki-rogue = %+v, want refused as not in the approved registry", out)
+	}
+	if out := evaluate("acme-notes"); out.Verdict != "scan" || !strings.Contains(out.Reason, `"acme-notes" is registered`) {
+		t.Fatalf("acme-notes = %+v, want registered and awaiting scan", out)
+	}
+	c.AssetPolicy.Mode = config.AssetPolicyModeObserve
+	if out := evaluate("wiki-rogue"); out.Verdict != "scan" || !strings.Contains(out.Reason, "asset policy would block") {
+		t.Fatalf("observe wiki-rogue = %+v, want a would-block note", out)
+	}
+}
+
+// A registry entry pinned to the server's URL (as registry sync writes it)
+// is not refused on a dry run that gives the name only: the result is
+// undetermined. Given the URL, the dry run matches it as the runtime does.
+func TestPolicyEvaluateDoesNotRefuseAPinnedRegistryEntry(t *testing.T) {
+	c := &config.Config{PolicyDir: t.TempDir(), AssetPolicy: config.DefaultAssetPolicy()}
+	c.AssetPolicy.Enabled = true
+	c.AssetPolicy.Mode = config.AssetPolicyModeAction
+	c.AssetPolicy.MCP.RegistryRequired = true
+	c.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "acme-notes", URL: "https://notes.example/mcp", Transport: "http"}}
+	setPolicyPathTestConfig(t, c)
+	setPolicyPathTestFlag(t, policyEvaluateCmd, "target-type", "mcp")
+	setPolicyPathTestFlag(t, policyEvaluateCmd, "target-name", "acme-notes")
+	evaluate := func() policy.AdmissionOutput {
+		t.Helper()
+		raw, err := capturePolicyPathTestOutput(t, func() error { return policyEvaluateCmd.RunE(policyEvaluateCmd, nil) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out policy.AdmissionOutput
+		if err := json.Unmarshal([]byte(raw), &out); err != nil {
+			t.Fatalf("output %q: %v", raw, err)
+		}
+		return out
+	}
+	if out := evaluate(); out.Verdict == "blocked" || !strings.Contains(out.Reason, "asset policy undetermined") ||
+		!strings.Contains(out.Reason, "--url --transport") {
+		t.Fatalf("name only = %+v, want an undetermined result that names --url and --transport", out)
+	}
+	setPolicyPathTestFlag(t, policyEvaluateCmd, "url", "https://notes.example/mcp")
+	if out := evaluate(); out.Verdict != "scan" || !strings.Contains(out.Reason, `"acme-notes" is registered`) {
+		t.Fatalf("with the URL = %+v, want registered", out)
+	}
+	setPolicyPathTestFlag(t, policyEvaluateCmd, "url", "https://evil.example/mcp")
+	if out := evaluate(); out.Verdict != "blocked" || !strings.Contains(out.Reason, "not in the approved registry") {
+		t.Fatalf("another URL = %+v, want refused", out)
+	}
+}
+
 func TestPolicyValidateRejectsDeletedConfiguredDirectory(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "deleted-policies")
 	setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
 	_, err := capturePolicyPathTestOutput(t, func() error { return policyValidateCmd.RunE(policyValidateCmd, nil) })
 	if err == nil || !strings.Contains(err.Error(), "read rego directory") {
 		t.Fatalf("validate missing directory error = %v", err)
+	}
+}
+
+func TestPolicyTestWithoutRegoDistinguishesAnExistingRootFromAMissingRoot(t *testing.T) {
+	for _, layout := range []string{"no rego directory", "empty rego directory", "missing policy root"} {
+		t.Run(layout, func(t *testing.T) {
+			root := t.TempDir()
+			if layout == "empty rego directory" {
+				if err := os.Mkdir(filepath.Join(root, "rego"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if layout == "missing policy root" {
+				root = filepath.Join(root, "missing")
+			}
+			setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
+			setPolicyPathTestFlags(t)
+			var output strings.Builder
+			previous := policyTestCmd.OutOrStdout()
+			policyTestCmd.SetOut(&output)
+			t.Cleanup(func() { policyTestCmd.SetOut(previous) })
+			err := policyTestCmd.RunE(policyTestCmd, nil)
+			if layout == "missing policy root" {
+				if err == nil {
+					t.Fatal("missing policy root accepted")
+				}
+			} else if err != nil || !strings.Contains(output.String(), "nothing to run") {
+				t.Fatalf("output=%q, error=%v", output.String(), err)
+			}
+		})
 	}
 }
 

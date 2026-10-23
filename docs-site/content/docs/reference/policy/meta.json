@@ -1,0 +1,13 @@
+{
+  "title": "Guardrail and policy",
+  "pages": [
+    "defaults",
+    "thresholds",
+    "guardrail-profiles",
+    "rules",
+    "detection",
+    "rule-recipes",
+    "regex-cookbook",
+    "cel"
+  ]
+}

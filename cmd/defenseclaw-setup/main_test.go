@@ -307,7 +307,7 @@ func TestParseArgsDeferredCleanupQuietRestartContract(t *testing.T) {
 }
 
 func TestParseArgsQuietPropertyMatrix(t *testing.T) {
-	for _, connector := range []string{"none", "amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "omnigent", "opencode"} {
+	for _, connector := range []string{"none", "amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "opencode"} {
 		for _, mode := range []string{"observe", "action"} {
 			for _, start := range []string{"0", "1"} {
 				t.Run(connector+"/"+mode+"/start-"+start, func(t *testing.T) {
@@ -392,7 +392,7 @@ func TestNoRestartStillRestartsPreviouslyRunningOwnedServices(t *testing.T) {
 }
 
 func TestConfiguredConnectorRequiresPersistentGateway(t *testing.T) {
-	for _, connectorName := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "omnigent", "opencode"} {
+	for _, connectorName := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "opencode"} {
 		wanted := requestedServices(options{Connector: connectorName}, serviceState{})
 		if !wanted.Gateway {
 			t.Fatalf("connector %s did not require gateway startup", connectorName)
@@ -911,6 +911,7 @@ func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
 		filepath.Join("connector_backups", "cursor", "hooks.json.json"),
 		filepath.Join("connector_backups", "devin", "config.json"),
 		filepath.Join("connector_backups", "opencode", "config.json"),
+		// until 1.1: a removed connector a 1.0.x install left behind.
 		filepath.Join("connector_backups", "omnigent", "config.json"),
 		filepath.Join("connector_backups", "hermes", "config.yaml.json"),
 	}

@@ -122,10 +122,13 @@ type openshellSettings struct {
 	// docker, none, or "" where none applies (macOS, the docker driver).
 	Fallback string
 	// Version is enterprise.openshell.version: an exact version, a range or
-	// "" (any release the DefenseClaw build supports).
-	Version      string
-	GatewayPort  int
-	E2fsprogsDir string
+	// "" (any release the DefenseClaw build supports). In setup mode an
+	// exact pin older than openshell.SupportedMin is raised to the release
+	// this build installs, and RaisedFrom keeps the pin
+	// (openshell.ManagedSetupPin).
+	Version, RaisedFrom string
+	GatewayPort         int
+	E2fsprogsDir        string
 	// TelemetryAllowed is openshell.admin.allow_upstream_telemetry.
 	TelemetryAllowed bool
 }
@@ -146,6 +149,9 @@ func openshellSettingsOf(goos string, cfg *config.Config) openshellSettings {
 	s.Driver = o.SandboxDriver(goos)
 	s.Fallback = o.SandboxDriverFallback(goos, cfg.OpenShell.Admin)
 	s.Version = strings.TrimSpace(o.Version)
+	if v, raised := openshell.ManagedSetupPin(s.Install == config.EnterpriseOpenShellInstallSetup, s.Version); raised {
+		s.Version, s.RaisedFrom = v, s.Version
+	}
 	s.GatewayPort = o.GatewayPort
 	if s.GatewayPort == 0 {
 		s.GatewayPort = config.DefaultEnterpriseOpenShellGatewayPort

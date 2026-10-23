@@ -406,7 +406,7 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 	}
 	add("Other sandboxes", "sandboxes outside DefenseClaw are "+foreign, "foreign_sandboxes")
 
-	if len(m.MCPIncluded) > 0 || len(m.MCPBlocked) > 0 {
+	if len(m.MCPIncluded) > 0 || len(m.MCPBlocked) > 0 || m.MCPProjectCount > 0 {
 		var org, asset int
 		for _, b := range m.MCPBlocked {
 			if b.Reason == "asset_policy" {
@@ -421,6 +421,16 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 		}
 		if asset > 0 {
 			text += fmt.Sprintf("; %d left out by your organization's asset policy", asset)
+		}
+		if n := m.MCPProjectCount; n > 0 {
+			verb, why := "don't start", "the pack blocks project servers"
+			if !m.MCPProjectBlocked {
+				verb, why = "start", "the pack allows project servers"
+			}
+			if n == 1 {
+				verb = map[string]string{"don't start": "doesn't start", "start": "starts"}[verb]
+			}
+			text += "; the project's " + plural(int64(n), "server", "servers") + " " + verb + " (" + why + ")"
 		}
 		add("MCP", text, "mcp_included", "mcp_blocked")
 	}
@@ -968,6 +978,11 @@ func managedDriverCheck(m *sandboxapi.ManagedStatus) *openshell.Check {
 	if text == "" {
 		return nil
 	}
+	if m.PendingRestart || m.Unavailable == sandboxrelay.UnavailableSetupChanging {
+		return &openshell.Check{ID: "managed-driver", Title: "Sandbox driver", Status: openshell.StatusWarn,
+			Detail: text + "; the authorized sandbox setup update is waiting to finish",
+			Fix:    &openshell.Fix{Summary: "stop your sandboxes (" + CommandName + " stop NAME), then retry; the next command applies the update"}}
+	}
 	c := openshell.Check{ID: "managed-driver", Title: "Sandbox driver", Status: openshell.StatusPass, Detail: text}
 	if openshell.IsFallbackReason(m.DriverReason) {
 		c.Status = openshell.StatusWarn
@@ -1007,6 +1022,9 @@ var managedVMDriverGoarch = runtime.GOARCH
 // and the administrator's pinned-digest install. c is nil when the daemon
 // named no driver.
 func (a *App) withAdminVMDriver(c *openshell.Check, m *sandboxapi.ManagedStatus) *openshell.Check {
+	if m.PendingRestart || m.Unavailable == sandboxrelay.UnavailableSetupChanging {
+		return c
+	}
 	goos := a.GOOS
 	if goos == "" {
 		goos = runtime.GOOS
@@ -1054,6 +1072,9 @@ func (a *App) withAdminVMDriver(c *openshell.Check, m *sandboxapi.ManagedStatus)
 // driver_dir has gone stale; the gateway cannot use that later driver until
 // enterprise ensure refreshes the render (GAP-0573).
 func (a *App) withRenderedVMDriver(c *openshell.Check, m *sandboxapi.ManagedStatus, paths *openshell.RenderedPaths) *openshell.Check {
+	if m.PendingRestart || m.Unavailable == sandboxrelay.UnavailableSetupChanging {
+		return c
+	}
 	if c == nil || c.Status != openshell.StatusPass || m.InstallMode != config.EnterpriseOpenShellInstallPrerequisite ||
 		(m.Driver != config.EnterpriseOpenShellDriverVM && m.Driver != config.EnterpriseOpenShellDriverAuto) || openshell.IsFallbackReason(m.DriverReason) {
 		return c

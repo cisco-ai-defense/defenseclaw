@@ -189,7 +189,7 @@ func (e *Env) renderDropins(in renderInputs) []renderedDropin {
 	}
 	// enterprise.tetragon reaches the sensor helper only through this
 	// drop-in; the helper never reads config.yaml. None is rendered while the
-	// helper's defaults (consume) already say the same.
+	// helper's defaults (consume) already say the same (tetragonIntent.dropin).
 	if in.Config != nil {
 		if data := in.Config.Tetragon.dropin(); data != nil {
 			out = append(out, renderedDropin{Path: dropinPath(unitSensorHelper, dropinTetragon), Data: data})

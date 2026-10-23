@@ -422,7 +422,7 @@ def _mcp_source_hint(app: AppContext, connector: str) -> str:
     if not app.cfg.connector_workspace_dir():
         # Only say we inferred project scope when the inferred location
         # set actually gained a path. Global-only connectors (hermes,
-        # openhands) ignore cwd inference; claiming otherwise is a lie.
+        # some agents ignore cwd inference; claiming otherwise is a lie.
         pinned = app.cfg.mcp_source_locations(
             connector, infer_workspace_from_cwd=False,
         )

@@ -22,7 +22,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -100,6 +100,22 @@ func TestRulePackValidateNamesCustomerToolCallRegexRule(t *testing.T) {
 	if !strings.Contains(warnings.String(), "CUSTOMER-MARKER") || !strings.Contains(warnings.String(), "detection-only and cannot block") ||
 		strings.Contains(warnings.String(), "12 enabled") {
 		t.Fatalf("customer rule warning = %q", warnings.String())
+	}
+
+	// GAP-0942: the JSON result carries the same warning, so the
+	// defenseclaw guardrail validate-pack wrapper prints it too.
+	rulePackValidateJSON = true
+	output.Reset()
+	if err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	var response rulePackWireResponse
+	if err := json.Unmarshal([]byte(output.String()), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Warnings) != 1 || !strings.Contains(response.Warnings[0], "CUSTOMER-MARKER") ||
+		!strings.Contains(response.Warnings[0], "detection-only and cannot block") {
+		t.Fatalf("JSON warnings = %q", response.Warnings)
 	}
 }
 
@@ -197,11 +213,7 @@ func TestRulePackDiagnosticRejectsUnsafeExportedErrorFields(t *testing.T) {
 
 func shippedRulePackForCLITest(t *testing.T, profile string) string {
 	t.Helper()
-	_, source, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot resolve rulepack test source path")
-	}
-	return filepath.Join(filepath.Dir(source), "..", "..", "policies", "guardrail", profile)
+	return filepath.Join(cliTestRepoRoot(t), "policies", "guardrail", profile)
 }
 
 // The validator is the rule-pack check enterprise hosts have (they ship no
@@ -246,6 +258,10 @@ func TestRulePackValidateFailsWhenTheGatewayCannotLoadThePack(t *testing.T) {
 	}
 	if strings.Contains(output.String(), "valid rule pack:") || !strings.Contains(output.String(), "syntax is valid") {
 		t.Fatalf("text mode output = %q", output.String())
+	}
+	// GAP-0757: the pin is printed even though the check fails.
+	if !strings.Contains(output.String(), "custom_packs pin: sha256:") {
+		t.Fatalf("text mode output has no custom_packs pin: %q", output.String())
 	}
 
 	rulePackValidateJSON = true
@@ -292,5 +308,53 @@ func TestRulePackValidateSecureClientTextMatchesMain(t *testing.T) {
 	want := "valid rule pack: 2 files, 3 rules, digest " + strings.Repeat("a", 64) + "\n"
 	if output.String() != want {
 		t.Fatalf("Secure Client validation = %q, want %q", output.String(), want)
+	}
+}
+
+// A valid pack with more detection-only rules than the validate-pack bridge
+// accepts warnings for keeps its JSON result within that limit: the last
+// warning counts the rules it does not name.
+func TestRulePackValidateJSONBoundsItsWarnings(t *testing.T) {
+	previousDir, previousJSON := rulePackValidateDir, rulePackValidateJSON
+	previousOutput, previousErr := rulePackValidateCmd.OutOrStdout(), rulePackValidateCmd.ErrOrStderr()
+	previousProblem := rulePackServiceReadProblemFn
+	t.Cleanup(func() {
+		rulePackValidateDir, rulePackValidateJSON = previousDir, previousJSON
+		rulePackValidateCmd.SetOut(previousOutput)
+		rulePackValidateCmd.SetErr(previousErr)
+		rulePackServiceReadProblemFn = previousProblem
+	})
+	rulePackServiceReadProblemFn = func(context.Context, string) string { return "" }
+	directory := t.TempDir()
+	if err := os.Mkdir(filepath.Join(directory, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const count = maxRulePackWireWarnings + 44
+	var rules strings.Builder
+	rules.WriteString("version: 1\ncategory: command\nrules:\n")
+	for i := range count {
+		rules.WriteString("  - id: CUSTOMER-MARKER-" + strconv.Itoa(1000+i) + "\n    tool_call_only: true\n    pattern: marker" +
+			strconv.Itoa(i) + "\n    title: Marker\n    severity: HIGH\n    confidence: 0.9\n    tags: [test]\n")
+	}
+	if err := os.WriteFile(filepath.Join(directory, "rules", "customer.yaml"), []byte(rules.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rulePackValidateDir, rulePackValidateJSON = directory, true
+	output := &strings.Builder{}
+	rulePackValidateCmd.SetOut(output)
+	rulePackValidateCmd.SetErr(&strings.Builder{})
+	if err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	var response rulePackWireResponse
+	if err := json.Unmarshal([]byte(output.String()), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Valid || len(response.Warnings) != maxRulePackWireWarnings {
+		t.Fatalf("valid %t with %d warnings, want valid with %d", response.Valid, len(response.Warnings), maxRulePackWireWarnings)
+	}
+	if last := response.Warnings[len(response.Warnings)-1]; !strings.HasPrefix(last, "45 more customer rules") ||
+		!strings.Contains(last, "detection-only") {
+		t.Fatalf("last warning = %q, want the count of the rules not named", last)
 	}
 }

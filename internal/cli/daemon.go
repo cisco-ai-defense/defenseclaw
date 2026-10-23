@@ -2154,6 +2154,26 @@ func verifyRotationConnectorHookAuthentication(
 	}
 	registry := connector.NewDefaultRegistry()
 	for _, name := range names {
+		if connector.IsRemovedConnector(name) {
+			// until 1.1: an upgraded host keeps the hook token of a connector
+			// 1.0.4 removed (OpenHands; connector/removed.go keepHookToken),
+			// and rotation replaces it like every persisted sidecar. Its file
+			// was checked against the fingerprint above. Nothing in 1.0.4
+			// accepts it, so the inspect route must refuse it: a 405 would mean
+			// the retained token authenticates again. The connector has no
+			// hook or notify route to probe; the retired route blocks every
+			// call whatever the token.
+			status, probeErr := rotationConnectorHookProbeStatus(
+				&requestClient, base, name, "inspect route", "/api/v1/inspect/tool", tokens[name],
+			)
+			if probeErr != nil {
+				return probeErr
+			}
+			if status != http.StatusUnauthorized && status != http.StatusForbidden {
+				return fmt.Errorf("connector %s was removed in 1.0.4, but the inspect route answered its retained hook credential with HTTP %d instead of refusing it", name, status)
+			}
+			continue
+		}
 		// Every setup-owned scoped token authenticates the generic connector
 		// inspection bridge, including proxy and managed-runtime connectors that
 		// do not expose a native HookEndpoint. The running gateway's result is
@@ -2198,6 +2218,29 @@ func probeRotationConnectorHookAuthentication(
 	path string,
 	token string,
 ) error {
+	status, err := rotationConnectorHookProbeStatus(client, base, connectorName, probeName, path, token)
+	if err != nil {
+		return err
+	}
+	// Authentication runs before the hook handler's POST-only method check. A
+	// valid connector-scoped bearer therefore returns 405 without submitting a
+	// synthetic hook or notify event.
+	if status != http.StatusMethodNotAllowed {
+		return fmt.Errorf("connector %s scoped hook authentication probe for %s returned HTTP %d", connectorName, probeName, status)
+	}
+	return nil
+}
+
+// rotationConnectorHookProbeStatus sends one no-op GET with the scoped
+// credential and returns the gateway's status code.
+func rotationConnectorHookProbeStatus(
+	client *http.Client,
+	base *url.URL,
+	connectorName string,
+	probeName string,
+	path string,
+	token string,
+) (int, error) {
 	probeURL := *base
 	probeURL.Path = path
 	probeURL.RawPath = ""
@@ -2205,7 +2248,7 @@ func probeRotationConnectorHookAuthentication(
 	probeURL.Fragment = ""
 	req, err := http.NewRequest(http.MethodGet, probeURL.String(), nil)
 	if err != nil {
-		return fmt.Errorf("connector %s scoped hook authentication probe for %s could not be created", connectorName, probeName)
+		return 0, fmt.Errorf("connector %s scoped hook authentication probe for %s could not be created", connectorName, probeName)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-DefenseClaw-Client", "daemon-rotation-convergence")
@@ -2214,17 +2257,11 @@ func probeRotationConnectorHookAuthentication(
 	if err != nil {
 		// Do not wrap the transport error. A custom transport could include the
 		// authorization header in its error text.
-		return fmt.Errorf("connector %s scoped hook authentication probe for %s failed", connectorName, probeName)
+		return 0, fmt.Errorf("connector %s scoped hook authentication probe for %s failed", connectorName, probeName)
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gracefulShutdownResponseMax))
 	_ = resp.Body.Close()
-	// Authentication runs before the hook handler's POST-only method check. A
-	// valid connector-scoped bearer therefore returns 405 without submitting a
-	// synthetic hook or notify event.
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		return fmt.Errorf("connector %s scoped hook authentication probe for %s returned HTTP %d", connectorName, probeName, resp.StatusCode)
-	}
-	return nil
+	return resp.StatusCode, nil
 }
 
 func verifyRotationConnectorOTLPAuthentication(
@@ -2289,12 +2326,6 @@ func verifyRotationConnectorOTLPAuthentication(
 			return fmt.Errorf("connector %s scoped OTLP credential is unavailable: %w", name, loadErr)
 		}
 		token = strings.TrimSpace(token)
-		if token == "" && scope == connector.OTLPScopeOpenHands {
-			// GAP-1513: OpenHands exports native OTLP only on macOS. Elsewhere
-			// setup mints no scoped OTLP credential, so there is nothing for
-			// the rotated gateway to converge on.
-			continue
-		}
 		if token == "" {
 			return fmt.Errorf("connector %s scoped OTLP credential is unavailable", name)
 		}
@@ -2304,7 +2335,7 @@ func verifyRotationConnectorOTLPAuthentication(
 		probeURL.RawQuery = ""
 		probeURL.Fragment = ""
 		switch scope {
-		case connector.OTLPScopeCodex, connector.OTLPScopeClaude, connector.OTLPScopeOpenHands:
+		case connector.OTLPScopeCodex, connector.OTLPScopeClaude:
 			probeURL.Path = "/v1/logs"
 		default:
 			return fmt.Errorf("connector %s has no rotation OTLP authentication contract", name)
@@ -2315,8 +2346,7 @@ func verifyRotationConnectorOTLPAuthentication(
 			return fmt.Errorf("connector %s scoped OTLP authentication probe could not be created", name)
 		}
 		req.Header.Set("X-DefenseClaw-Client", "daemon-rotation-convergence")
-		if scope == connector.OTLPScopeCodex || scope == connector.OTLPScopeClaude ||
-			scope == connector.OTLPScopeOpenHands {
+		if scope == connector.OTLPScopeCodex || scope == connector.OTLPScopeClaude {
 			req.Header.Set("Authorization", "Bearer "+token)
 			req.Header.Set("X-DefenseClaw-Source", name)
 		}

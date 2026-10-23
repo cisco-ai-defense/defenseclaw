@@ -122,13 +122,6 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 				"permissionDecisionReason": reason,
 			}
 		}
-	case "openhands":
-		if in.Action == "block" {
-			output = map[string]interface{}{"decision": "deny", "reason": reason}
-		} else if canonicalHookEvent(in.Req.HookEventName) == "userpromptsubmit" &&
-			(in.Action == "alert" || in.RawAction == "confirm") && in.AdditionalContext != "" {
-			output = map[string]interface{}{"additionalContext": in.AdditionalContext}
-		}
 	case "opencode":
 		// The DefenseClaw bridge plugin reads .decision and throws on
 		// "deny"/"block" to abort the tool. OpenCode v1.18.10-v1.18.19 publishes
@@ -153,17 +146,6 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		if in.Action == "block" {
 			output = map[string]interface{}{"decision": "block", "reason": reason}
 		}
-	case "omnigent":
-		// The installed Python policy reads the unified top-level action
-		// and translates allow/block/confirm to ALLOW/DENY/ASK. No nested
-		// hook_output body is required by OmniGent's policy API.
-		return HookRespondOutput{}
-	}
-	if output == nil && in.Req.ConnectorName != "hermes" &&
-		in.Req.ConnectorName != "openhands" &&
-		in.Req.ConnectorName != "devin" &&
-		in.RawAction == "confirm" && in.AdditionalContext != "" && !in.Caps.CanAskNative {
-		output = map[string]interface{}{"systemMessage": in.AdditionalContext}
 	}
 	return HookRespondOutput{FieldName: "hook_output", Output: output}
 }
@@ -244,6 +226,11 @@ func cursorPermissionOutput(action, reason string, supportsAsk, supportsUserMess
 // https://antigravity.google/docs/hooks. PreToolUse is the sole hard policy
 // boundary: synchronous stdout {"decision":"deny"} blocks the tool. No
 // enforcement claim relies on the hook process exit code.
+//
+// A confirmation is "force_ask", never "ask": Antigravity's "ask" honors a
+// cached "Always Allow" grant, so a call the user once allowed always would
+// run with no fresh prompt, while "force_ask" always prompts and ignores
+// cached permissions (rel-1-0-4 GAP-0405).
 func antigravityHookOutputForProfile(event, action, _ string, reason, additional string) map[string]interface{} {
 	switch canonicalHookEvent(event) {
 	case "pretooluse":
@@ -251,7 +238,7 @@ func antigravityHookOutputForProfile(event, action, _ string, reason, additional
 		case "block":
 			return map[string]interface{}{"decision": "deny", "reason": reason}
 		case "confirm":
-			return map[string]interface{}{"decision": "ask", "reason": reason}
+			return map[string]interface{}{"decision": "force_ask", "reason": reason}
 		default:
 			return map[string]interface{}{"decision": "allow"}
 		}

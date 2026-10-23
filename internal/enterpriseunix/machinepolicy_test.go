@@ -471,6 +471,38 @@ func TestLifecycleWarnsWhenSkillDefaultDenyHasNoEnforcementPoint(t *testing.T) {
 	}
 }
 
+// p0 GAP-0940: a required MCP registry left empty refuses every MCP server;
+// ensure and status say so, and a filled registry clears the warning.
+func TestLifecycleWarnsWhenRequiredRegistryIsEmpty(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			writeFreshLedger(t, h)
+			config := func(registry string) string {
+				body := string(DefaultConfig(h.env.Layout)) + "  connectors:\n    claudecode: {}\n" +
+					"asset_policy:\n  enabled: true\n  mode: action\n  mcp:\n    registry_required: true\n" + registry
+				file := filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return file
+			}
+			r := h.run(Options{Action: ActionEnsure, ConfigFile: config("")})
+			if got := messagesOf(r.Warnings, "asset_policy_registry_empty"); !strings.Contains(got, "every mcp is refused") {
+				t.Fatalf("ensure does not warn that the empty MCP registry refuses every server: %+v", r.Warnings)
+			}
+			if r := h.run(Options{Action: ActionStatus}); !hasWarning(r, "asset_policy_registry_empty") {
+				t.Fatalf("status does not warn about the empty MCP registry: %+v", r.Warnings)
+			}
+			requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: config("    registry:\n      - name: acme-notes\n")}))
+			if r := h.run(Options{Action: ActionStatus}); hasWarning(r, "asset_policy_registry_empty") {
+				t.Fatalf("the warning stays with a filled registry: %+v", r.Warnings)
+			}
+		})
+	}
+}
+
 // With the documented standalone config (no guardrail.connectors block) the
 // enumerator found eligible users but published no target, and status and
 // verify still reported coverage and security complete with 0 targets. verify

@@ -13,6 +13,7 @@
 package delivery
 
 import (
+	"sync"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -40,6 +41,8 @@ type RoutingIdentity struct {
 type Payload struct {
 	encoded  []byte
 	identity RoutingIdentity
+	// done, when set, is called once with the payload's terminal outcome.
+	done func(delivered bool)
 }
 
 // NewPayload validates bounded routing identity and snapshots projected bytes.
@@ -74,6 +77,27 @@ func validRecordID(value string) bool {
 		}
 	}
 	return true
+}
+
+// WithCompletion returns payload with done attached: the dispatcher calls
+// it once, with true when the destination acknowledged the payload and false
+// when the payload was refused at intake, dropped, rejected by the
+// destination, delivered only in part or abandoned at shutdown.
+func (payload Payload) WithCompletion(done func(delivered bool)) Payload {
+	if done == nil {
+		payload.done = nil
+		return payload
+	}
+	var once sync.Once
+	payload.done = func(delivered bool) { once.Do(func() { done(delivered) }) }
+	return payload
+}
+
+// complete reports the payload's terminal outcome to its completion, if any.
+func (payload Payload) complete(delivered bool) {
+	if payload.done != nil {
+		payload.done(delivered)
+	}
 }
 
 // Bytes returns an independent copy of the exact projected encoding.

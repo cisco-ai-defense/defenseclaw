@@ -13,7 +13,6 @@
 package enterpriseunix
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,16 +57,12 @@ func TestManagedConfigPatternNamesAllowedFormat(t *testing.T) {
 	}
 }
 
-func TestManagedConfigModeAndProfileNameOnlyInstalledChoices(t *testing.T) {
+func TestManagedConfigModeNamesOnlyInstalledChoices(t *testing.T) {
 	h := newTestHost(t, "linux")
 	mode := &config.V8SchemaError{Path: "$.deployment_mode", Keyword: "enum", Expected: `one of ["","managed_enterprise","saas"]`, Value: "standalone"}
 	got, ok := h.env.plainConfigProblem(mode, "/tmp/admin.yaml", nil)
 	if !ok || !strings.Contains(got, "allowed values: managed_enterprise") || strings.Contains(got, "saas") {
 		t.Fatalf("deployment mode = %q", got)
-	}
-	got, ok = h.env.plainConfigProblem(errors.New(`config: enterprise.profile="secure_client" conflicts with immutable DEFENSECLAW_ENTERPRISE_PROFILE="standalone"`), "/tmp/admin.yaml", nil)
-	if !ok || !strings.Contains(got, "fixed to standalone") || strings.Contains(got, "DEFENSECLAW_ENTERPRISE_PROFILE") {
-		t.Fatalf("enterprise profile = %q", got)
 	}
 }
 

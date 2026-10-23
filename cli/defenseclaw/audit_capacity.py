@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 
@@ -58,9 +59,26 @@ def audit_disk_full_notice(db_path: str) -> str:
     )
 
 
+def _audit_access_denied(db_path: str, directory: str, exc: BaseException) -> bool:
+    """Whether opening the audit store failed for lack of access (GAP-1172)."""
+    if isinstance(exc, PermissionError) or getattr(exc, "errno", None) in (errno.EACCES, errno.EPERM):
+        return True
+    if "unable to open database file" not in str(exc).lower() or os.name == "nt":
+        return False
+    if os.path.exists(db_path) and not os.access(db_path, os.R_OK | os.W_OK):
+        return True
+    return os.path.isdir(directory) and not os.access(directory, os.W_OK | os.X_OK)
+
+
 def audit_open_failure_notice(db_path: str, exc: BaseException) -> str:
     directory = os.path.dirname(os.path.abspath(db_path)) or os.curdir
     cause = str(exc)
+    if _audit_access_denied(db_path, directory, exc):
+        # A permission cause wins over low free space.
+        return (
+            f"cannot open audit store {db_path}: permission denied; this account needs read and write "
+            f"access to it and to {directory}"
+        )
     if "unable to open database file" in cause.lower() or isinstance(exc, OSError):
         try:
             free_bytes = shutil.disk_usage(directory).free

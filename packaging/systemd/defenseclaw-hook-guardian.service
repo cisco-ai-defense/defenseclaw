@@ -9,7 +9,7 @@
 
 [Unit]
 Description=DefenseClaw hook guardian (managed enterprise)
-Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/install/linux/
 After=defenseclaw-gateway.service
 StartLimitIntervalSec=0
 
@@ -39,7 +39,10 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectProc=invisible
 ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
-ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian
+# /run/defenseclaw-hook: the guardian removes the key of the protected
+# session records in sessions/ before it records a removal, and makes a new
+# one after it and at every pass when there is none (GAP-0352).
+ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian -/run/defenseclaw-hook
 # sss_cache -E, which the guardian runs once SSSD is online again after an
 # outage, rewrites SSSD's cache databases and invalidates its memory cache.
 # Only those two directories, and only where SSSD is installed (GAP-0208).

@@ -175,6 +175,14 @@ type SetupOpts struct {
 	// an unconditional force-closed override in generated hooks.
 	HookFailMode string
 
+	// ConfiguredHookFailMode is the hook fail mode the config sets
+	// explicitly for the connector (cfg.ConfiguredHookFailModeForConnector:
+	// "open", "closed", or "" when it sets none). A per-user Cursor
+	// HookFailMode follows its guardrail mode, which is no outage choice:
+	// its hooks fail open while the gateway is down only when this is open
+	// (OutageHookFailMode).
+	ConfiguredHookFailMode string
+
 	// SecureClientHookDelivery selects the Secure Client delivery contract
 	// (#1163): an unset HookFailMode renders open and an explicit value wins
 	// for every connector, Cursor included. Callers set it from
@@ -388,7 +396,7 @@ type SurfaceCapability struct {
 
 // SurfaceLocations is the resolved, on-this-machine path manifest for a
 // connector surface. It is derived from SurfaceCapability and SetupOpts so
-// diagnostics can distinguish static capability ("OpenHands supports skills")
+// diagnostics can distinguish static capability ("Cursor supports skills")
 // from the concrete path being watched in this workspace.
 type SurfaceLocations struct {
 	Supported      bool     `json:"supported"`

@@ -32,8 +32,8 @@ func TestWithDriver(t *testing.T) {
 		driver openshell.ComputeDriver
 		want   types.ComputeDriverInfo
 	}{
-		{openshell.DriverDocker, types.ComputeDriverInfo{Name: "docker", DriverName: "docker", DriverVersion: openshell.SupportedMin}},
-		{openshell.DriverVM, types.ComputeDriverInfo{Name: "vm", DriverName: "openshell-driver-vm", DriverVersion: openshell.SupportedMin}},
+		{openshell.DriverDocker, types.ComputeDriverInfo{Name: "docker", DriverName: "docker", DriverVersion: openshell.LegacyMin}},
+		{openshell.DriverVM, types.ComputeDriverInfo{Name: "vm", DriverName: "openshell-driver-vm", DriverVersion: openshell.LegacyMin}},
 	} {
 		info, err := openshelltest.New(openshelltest.WithDriver(tc.driver)).Client(openshell.ClientOptions{}).GatewayInfo(t.Context())
 		if err != nil || len(info.ComputeDrivers) != 1 || info.ComputeDrivers[0] != tc.want {

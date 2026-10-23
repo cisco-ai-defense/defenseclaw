@@ -154,6 +154,47 @@ func TestSessionEnd(t *testing.T) {
 	})
 }
 
+type attachAtCopyQuestion struct {
+	read    io.Reader
+	attach  func()
+	started bool
+}
+
+func holdTestSession(t *testing.T, ta *testApp, name string) func() {
+	t.Helper()
+	release, err := ta.holdSession(bg, name, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return release
+}
+
+func (r *attachAtCopyQuestion) Read(p []byte) (int, error) {
+	if !r.started {
+		r.started = true
+		r.attach()
+	}
+	return r.read.Read(p)
+}
+
+// Terminal 2 can reconnect while terminal 1 is deciding where to put its
+// copy's changes. Applying those changes must not stop terminal 2's harness.
+func TestW4B2CopyApplyKeepsNewlyAttachedSession(t *testing.T) {
+	ta := newTestApp(t, "")
+	var release func()
+	ta.IO.In = &attachAtCopyQuestion{read: strings.NewReader("a\n"), attach: func() {
+		release = holdTestSession(t, ta, "fix-tests")
+	}}
+	t.Cleanup(func() {
+		if release != nil {
+			release()
+		}
+	})
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "codex", Copy: true, Name: "fix-tests"}))
+	has(t, ta.output(), "Bring the changes back?", "keeps running: 1 other session is attached")
+	ta.wantCalls(t, 0, "POST", "fix-tests/stop")
+}
+
 // A headless run in the foreground (--prompt, or the harness's print flag
 // the shell wrapper's `claude -p` passes) deletes the sandbox it created
 // when it ends and nothing is left in it to bring back or undo, by the rules
@@ -780,421 +821,6 @@ func TestSessionEndNamesRuntimeAndOtherGateway(t *testing.T) {
 	}
 }
 
-func TestSessionSummary(t *testing.T) {
-	claude := RunOptions{Harness: "claude"}
-	elsewhere := func(undone bool) func(*testApp) {
-		return func(ta *testApp) {
-			noChanges(ta)
-			ta.term.code = 255
-			ta.term.during = func() {
-				ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) {
-					sb.Phase = "stopped"
-					if undone {
-						sb.Snapshot = &sandboxapi.SnapshotInfo{Kind: "git", UndoneAt: ta.Now().Add(time.Minute)}
-					}
-				})
-			}
-		}
-	}
-	noStop := func(t *testing.T, ta *testApp) { ta.wantCalls(t, 0, "POST", sbName+"/stop") }
-	continueHint := func(env string, wrapped bool) func(*testApp) {
-		return func(ta *testApp) {
-			noChanges(ta)
-			ta.env["OPENAI_API_KEY"] = env
-			ta.daemon.toolCalls = 1
-			if wrapped {
-				ta.Cfg.OpenShell.Wrappers = []string{"claudecode"}
-			}
-		}
-	}
-	// A session without a turn: the harness printed no resume line of its
-	// own (Copilot CLI prints one only after a prompt; retest RT-C2-1).
-	noTurn := func(env string, wrapped bool) func(*testApp) {
-		return func(ta *testApp) {
-			continueHint(env, wrapped)(ta)
-			ta.daemon.toolCalls = 0
-		}
-	}
-	const cont = "continue this conversation: defenseclaw sandbox connect " + sbName
-	evil := "notes\x1b[2J\x1b]0;DCMARKER\x07\rx\u202etxt.sh"
-	runCases(t, []runCase{
-		{name: "late denials count", opts: claude, want: []string{"0 new sites contacted · 2 sites blocked"}, setup: func(ta *testApp) {
-			noChanges(ta)
-			var armed atomic.Bool
-			var late atomic.Int32
-			late.Store(2)
-			ta.daemon.onGet = func(sb *sandboxapi.Sandbox) {
-				if armed.Load() && late.Add(-1) >= 0 {
-					sb.Egress.Blocked++
-				}
-			}
-			ta.term.during = func() { armed.Store(true) }
-		}},
-		{name: "after a daemon restart", do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "box"}) }, setup: func(ta *testApp) {
-			noChanges(ta)
-			ta.term.hooks = nil
-			sb := sampleSandbox("box")
-			sb.Hooks = sandboxapi.HookCoverage{HookRequests: 107, ToolCalls: 13, LastHookAt: time.Now().Add(-time.Hour)}
-			sb.Egress = sandboxapi.EgressStats{Destinations: 20, Blocked: 3}
-			ta.daemon.add(sb)
-			ta.term.during = func() {
-				ta.daemon.edit("box", func(sb *sandboxapi.Sandbox) {
-					sb.Hooks = sandboxapi.HookCoverage{HookRequests: 15, ToolCalls: 1, LastHookAt: time.Now()}
-					sb.Egress = sandboxapi.EgressStats{Destinations: 2}
-				})
-			}
-		}, want: []string{"Session ended · 1 tool call since the daemon restarted · 2 new sites contacted since then"}, not: []string{"hooks are not reaching"}},
-		// The daemon keeps its hook counts across a restart (GAP-0156): one
-		// that left no counter lower kept them, so the session counts what
-		// it moved them by and names no restart (PR 1022 live retest N1,
-		// before any daemon kept them, read "0 tool calls" after 7).
-		{name: "a daemon restart that left no counter lower", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
-			ta.daemon.mu.Lock()
-			ta.daemon.status.StartedAt = ta.Now().Add(5 * time.Minute)
-			ta.daemon.mu.Unlock()
-			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Hooks.HookRequests += 9; sb.Hooks.ToolCalls += 7 })
-		}, want: []string{"Session ended · 7 tool calls · 0 new sites contacted"}, not: []string{"restarted"}},
-		// GAP-0354: OpenShell refuses a conversation that holds a credential
-		// placeholder, so the end offers a new one, not --continue.
-		{name: "a conversation that holds a credential placeholder", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
-			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Hooks.PlaceholderRefusedAt = ta.Now() })
-		}, want: []string{"start a new conversation: defenseclaw sandbox connect " + sbName + " (this one holds a sandbox credential placeholder"},
-			not: []string{cont}},
-		{name: "a daemon started before the session", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
-			ta.daemon.mu.Lock()
-			ta.daemon.status.StartedAt = ta.Now().Add(-time.Hour)
-			ta.daemon.mu.Unlock()
-		}, want: []string{"Session ended · 0 tool calls · 0 new sites contacted"}, not: []string{"restarted"}},
-		{name: "the harness failed before its hooks", opts: claude, exit: 1, setup: func(ta *testApp) {
-			noChanges(ta)
-			ta.term.hooks, ta.term.code = nil, 1
-		}, want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)"},
-			not: []string{"hooks are not reaching", "continue this conversation"}},
-		{name: "the OpenCode launcher refused the run", opts: RunOptions{Harness: "opencode"}, exit: harness.LauncherRefusedExitCode,
-			setup: func(ta *testApp) { noChanges(ta); ta.term.hooks, ta.term.code = nil, harness.LauncherRefusedExitCode },
-			want:  []string{"DefenseClaw refused to start OpenCode; see the launcher message above"},
-			not:   []string{"the harness itself failed", "hooks are not reaching"}},
-		// AG-MAC-F3: a harness that failed at start because localhost does
-		// not resolve is told apart, with what to do; the pull of a copy
-		// still runs, without its progress line.
-		{name: "localhost does not resolve in the sandbox", opts: claude, exit: 1, setup: failsAtStart("", "unresolved unlisted"),
-			want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: localhost does not resolve in " + sbName +
-				": its /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and its image was built before DefenseClaw's images answered localhost themselves",
-				"→ a new sandbox boots a rebuilt image: delete this one (`defenseclaw sandbox delete " + sbName + "`) and run it again (`defenseclaw sandbox run claudecode`)"},
-			not: []string{"the harness itself failed"}},
-		{name: "a headless harness that looks localhost up itself", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, exit: 1,
-			setup: failsAtStart(agyFailure, "resolves unlisted"),
-			want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: it could not resolve localhost (\"" + agyFailure +
-				"\"). This sandbox's /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and Claude Code does not use the system resolver, which answers localhost here",
-				"→ Claude Code cannot start in an OpenShell MicroVM until OpenShell writes /etc/hosts; a gateway on the docker driver (Linux) runs it"}},
-		{name: "a headless harness whose sandbox resolves localhost", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, exit: 1,
-			setup: failsAtStart("Error: invalid API key", "resolves listed"),
-			want:  []string{"before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)"}, not: []string{"localhost", "a new sandbox"}},
-		{name: "a copy whose harness failed at start", input: "s\n", opts: RunOptions{Harness: "claude", Copy: true, Name: "copybox"}, exit: 1,
-			setup: failsAtStart("", "unresolved unlisted"), want: []string{"localhost does not resolve in copybox", "run it again", "Bring the changes back?"},
-			not: []string{"Pulling copybox's work"}, check: func(t *testing.T, ta *testApp) {
-				// What the harness wrote before it failed still comes back.
-				if !slices.Contains(ta.copy.steps, "pull copybox") {
-					t.Fatalf("copy steps = %v", ta.copy.steps)
-				}
-			}},
-		{name: "a copy whose harness ran", input: "s\n", opts: RunOptions{Harness: "claude", Copy: true, Name: "copybox"},
-			want: []string{"Pulling copybox's work"}, not: []string{"localhost"}},
-		{name: "stopped from elsewhere", opts: claude, exit: 255, setup: elsewhere(false), check: noStop,
-			want: []string{sbName + " was stopped from outside this session (`defenseclaw sandbox stop` or the TUI), which ended Claude Code", "Sandbox kept (stopped)"},
-			not:  []string{"the harness itself failed"}},
-		// GAP-0486: on a managed computer the organization stopped it, its
-		// profile no longer allowing sandboxes: not a stop from elsewhere.
-		{name: "the organization revoked sandboxes", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
-			elsewhere(false)(ta)
-			ta.daemon.status.Managed = managedStatusFixture()
-			ta.daemon.explain.Managed = managedExplainFixture()
-			during := ta.term.during
-			ta.term.during = func() {
-				during()
-				ta.daemon.mu.Lock()
-				ta.daemon.explain.Managed.Allowed = false
-				ta.daemon.mu.Unlock()
-			}
-		}, want: []string{"This sandbox was stopped: your profile no longer allows sandboxes. Request access: it-security@example.com.",
-			"Sandbox kept (stopped) → delete: defenseclaw sandbox delete " + sbName},
-			not: []string{"was stopped from outside this session", "Start it again", "→ resume:", "continue this conversation"}},
-		// #1199 (GAP-0560): a re-match stopped it for a create-time grant
-		// the profile no longer allows (host ports): the session ends with
-		// the organization's words, which the sandbox's view carries.
-		{name: "a re-match stopped it for its host ports", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
-			elsewhere(false)(ta)
-			ta.daemon.status.Managed = managedStatusFixture()
-			ta.daemon.explain.Managed = managedExplainFixture()
-			during := ta.term.during
-			ta.term.during = func() {
-				during()
-				ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) {
-					sb.StopReason = sandboxapi.ProfileStop("host ports", "claudecode", "it-security@example.com")
-				})
-			}
-		}, want: []string{"This sandbox was stopped: your profile no longer allows host ports. Start it again without --host-port: defenseclaw sandbox run claude",
-			"Sandbox kept (stopped) → delete: defenseclaw sandbox delete " + sbName},
-			not: []string{"was stopped from outside this session", "→ resume:"}},
-		// GAP-0202: the gateway was stopped (handed to another account)
-		// under the session: not a stop from another terminal.
-		{name: "the gateway went away", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
-			elsewhere(false)(ta)
-			during := ta.term.during
-			ta.term.during = func() {
-				during()
-				ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "unknown" })
-				ta.daemon.mu.Lock()
-				ta.daemon.status.Available, ta.daemon.status.Reason = false, "the OpenShell gateway is not available"
-				ta.daemon.mu.Unlock()
-			}
-		}, want: []string{"the OpenShell gateway is not available (it was stopped, or another account's gateway took its port; `defenseclaw sandbox doctor` says which), which ended Claude Code"},
-			not: []string{"was stopped from outside this session"}},
-		// GAP-0278: Docker restarted under the session: the harness ended
-		// while the sandbox still read ready, and a moment later OpenShell
-		// held it in its error state.
-		{name: "the container stopped", opts: claude, exit: 1, check: noStop, setup: func(ta *testApp) {
-			noChanges(ta)
-			ta.term.code = 1
-			ta.Sleep = func(_ context.Context, d time.Duration) error {
-				if d == settlePhaseInterval {
-					ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "error" })
-				}
-				return nil
-			}
-		}, want: []string{sbName + "'s container stopped under the session (Docker restarted, or its workload failed), which ended Claude Code",
-			"is in OpenShell's error state → `defenseclaw sandbox delete " + sbName + " --keep-snapshot`"},
-			not: []string{"keeps running", "was stopped from outside this session"}},
-		// GAP-0333, GAP-0337: Docker restarted under a session that connected
-		// to a running sandbox, and OpenShell read it ready for longer than
-		// the first look while it ran no command: the end waits for the
-		// phase, and one that never comes says the sandbox does not answer.
-		{name: "the container stopped and OpenShell said so late", exit: 1, do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "box"}) },
-			setup: lateContainerStop(4), want: []string{"box's container stopped under the session (Docker restarted, or its workload failed), which ended Claude Code"},
-			not: []string{"keeps running", "is still running"}},
-		{name: "a container that does not answer", input: "y\n", exit: 1, do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "box"}) },
-			setup: lateContainerStop(0), want: []string{"box does not answer, though OpenShell still reads it as running",
-				"the undo point stays, since box does not answer", "Sandbox box does not answer → `defenseclaw sandbox status box` shows its state"},
-			not: []string{"keeps running", "is still running"}},
-		// GAP-0077: the OpenShell gateway restarted under the session (an
-		// upgrade), which closed the harness's exec relay: the sandbox read
-		// as unknown for a moment, then ready, and the session said it was
-		// stopped from outside and kept stopped.
-		{name: "the connection was lost", opts: claude, exit: 1, setup: func(ta *testApp) {
-			noChanges(ta)
-			ta.term.code = 1
-			ta.term.during = func() { ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "unknown" }) }
-			ta.Sleep = func(_ context.Context, d time.Duration) error {
-				if d == settlePhaseInterval {
-					ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "ready" })
-				}
-				return nil
-			}
-			// The CLI's relay error came first, raw (GAP-0279): DefenseClaw's
-			// line says what happened.
-			ta.term.stderr = "Error:   × code: The service is currently unavailable, message: exec relay closed before the command reported an exit status\n"
-		}, check: noStop,
-			want: []string{"the connection to " + sbName + " was lost (the OpenShell gateway restarted, for one), which ended Claude Code; " + sbName +
-				" is still running → reattach: defenseclaw sandbox connect " + sbName, "Sandbox " + sbName + " keeps running → reattach"},
-			not: []string{"stopped from outside", "Sandbox kept (stopped)", "exec relay closed"}, notLive: []string{"exec relay closed"}},
-		// What else the CLI says on its own standard error comes after the
-		// session, not into the harness's screen (GAP-0279).
-		{name: "the CLI's own messages come after the session", opts: claude, setup: func(ta *testApp) {
-			noChanges(ta)
-			ta.term.stderr = "warning: dccert-cli-note\n"
-		}, live: []string{"warning: dccert-cli-note"}},
-		// GAP-0096: DefenseClaw's own stop for silent hooks is no stop from
-		// outside.
-		{name: "stopped by DefenseClaw for silent hooks", opts: claude, exit: 255, setup: func(ta *testApp) {
-			noChanges(ta)
-			ta.term.code = 255
-			ta.term.during = func() {
-				ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) {
-					sb.Phase = "stopped"
-					sb.Hooks.Silent, sb.Hooks.OnSilence, sb.Hooks.SilenceAfter = true, "stop", "1m"
-				})
-			}
-		}, check: noStop,
-			want: []string{"DefenseClaw stopped " + sbName + ": Claude Code worked for 1m without a hook reaching DefenseClaw (hooks.on_silence: stop)"},
-			not:  []string{"stopped from outside"}},
-		// GAP-0170: a delete from another terminal read as a stop, then the
-		// review failed and the keep/undo question came for a sandbox that
-		// was gone.
-		{name: "deleted from elsewhere", opts: claude, exit: 255, setup: func(ta *testApp) {
-			noChanges(ta)
-			ta.term.code = 255
-			ta.term.during = func() { ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "deleting" }) }
-			ta.Sleep = func(_ context.Context, d time.Duration) error {
-				if d == settlePhaseInterval {
-					ta.daemon.mu.Lock()
-					delete(ta.daemon.sandboxes, sbName)
-					ta.daemon.mu.Unlock()
-				}
-				return nil
-			}
-		}, check: noStop,
-			want: []string{sbName + " was deleted from outside this session, which ended Claude Code; there is nothing left to review, and its undo point went with it"},
-			not:  []string{"stopped from outside", "could not review", "Keep changes?"}},
-		{name: "undone from elsewhere", opts: claude, exit: 255, setup: elsewhere(true), check: noStop,
-			want: []string{sbName + " was undone from outside this session (`defenseclaw sandbox undo` or the TUI): the folder is back at its undo point, " +
-				"and that stopped Claude Code", "Sandbox kept (stopped)"}, not: []string{"the harness itself failed"}},
-		{name: "continue claude", opts: claude, setup: continueHint("", false), want: []string{"→ " + cont +
-			" -- --continue (the `claude --resume …` Claude Code printed above works only inside the sandbox)"}},
-		{name: "continue claude with the wrapper", opts: claude, setup: continueHint("", true), want: []string{cont +
-			" -- --continue (the `claude --resume …` Claude Code printed resumes it in this sandbox too: the shell wrapper is on)"}},
-		{name: "continue codex", opts: RunOptions{Harness: "codex"}, setup: continueHint("sk-mock", false),
-			want: []string{"-- resume --last (the `codex resume …` Codex printed above works only inside the sandbox)"}},
-		// Every harness that can continue gets the line, after its own
-		// host-useless hint (cert copilot:F7, kiro:KR-F4, hermes:HERMES-4,
-		// openhands:MAC-OSH-OH-7).
-		// OpenCode's exit screen shows "Continue  opencode -s ses_<id>"
-		// (OC-7, FIN-B-3).
-		{name: "continue opencode", opts: RunOptions{Harness: "opencode"}, setup: continueHint("sk-mock", false),
-			want: []string{"→ " + cont + " -- --continue (the `opencode -s …` OpenCode printed above works only inside the sandbox)"}},
-		{name: "continue copilot", opts: RunOptions{Harness: "copilot"}, setup: continueHint("sk-mock", false),
-			want: []string{"-- --continue (the `copilot --resume …` GitHub Copilot CLI printed above works only inside the sandbox)"}},
-		{name: "continue copilot without a turn", opts: RunOptions{Harness: "copilot"}, setup: noTurn("sk-mock", false),
-			want: []string{"-- --continue (a `copilot --resume …` line of GitHub Copilot CLI works only inside the sandbox)"},
-			not:  []string{"printed above"}},
-		{name: "continue claude with the wrapper without a turn", opts: claude, setup: noTurn("", true), want: []string{cont +
-			" -- --continue (a `claude --resume …` line of Claude Code resumes it in this sandbox too: the shell wrapper is on)"},
-			not: []string{"printed"}},
-		{name: "continue kiro", opts: RunOptions{Harness: "kiro"}, setup: continueHint("sk-mock", false),
-			want: []string{"-- --resume (the `kiro-cli --resume-id …` Kiro CLI printed above works only inside the sandbox)"}},
-		{name: "continue hermes", opts: RunOptions{Harness: "hermes"}, setup: continueHint("sk-mock", false),
-			want: []string{"-- --continue (the `hermes --resume …` Hermes Agent printed above works only inside the sandbox)"}},
-		{name: "continue openhands", opts: RunOptions{Harness: "openhands"}, setup: continueHint("sk-mock", false),
-			want: []string{"-- --resume --last (the `openhands --resume …` OpenHands printed above works only inside the sandbox)"}},
-		// OmniGent prints `Resume: omnigent run <agent> --model <m> --resume
-		// <id>` at /quit, and a plain connect started a new conversation
-		// (OG-U2).
-		{name: "continue omnigent", opts: RunOptions{Harness: "omnigent", Args: []string{"--model", "gpt-5-mini"}}, setup: continueHint("sk-mock", false),
-			want: []string{cont + " -- --continue (the `omnigent run …` OmniGent printed above works only inside the sandbox)"}},
-		// agy prints "Resume with -c (or command below): agy
-		// --conversation=<id>" at /quit, and nothing named the sandbox's
-		// continue (AG-RT-1).
-		{name: "continue antigravity", opts: RunOptions{Harness: "antigravity"}, setup: continueHint("", false),
-			want: []string{"→ " + cont + " -- -c (the `agy --conversation …` Antigravity printed above works only inside the sandbox)"}},
-		{name: "no continue after one prompt", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, setup: func(ta *testApp) {
-			ta.IO.TTY = false
-			noChanges(ta)
-		}, not: []string{"continue this conversation"}},
-		{name: "commits", input: "y\n", opts: claude, setup: func(ta *testApp) {
-			ta.daemon.review = sandboxapi.ReviewResponse{Summary: "0 files changed (+0 −0)", Report: &workspace.ReviewReport{
-				HeadBefore: strings.Repeat("a", 40), HeadAfter: strings.Repeat("b", 40), BranchBefore: "main", BranchAfter: "main"}}
-		}, want: []string{"0 files changed (+0 −0) · HEAD moved on main (aaaaaaa → bbbbbbb)", "Keep changes?"}},
-		{name: "the harness's exit status", opts: claude, exit: 3, setup: func(ta *testApp) {
-			noChanges(ta)
-			ta.term.code = 3
-		}},
-		{name: "the review cannot drive the terminal", input: "d\ny\n", opts: claude, setup: func(ta *testApp) {
-			ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{FilesChanged: 1, Insertions: 1, BranchBefore: "main", BranchAfter: "main",
-				Flags: []workspace.Flag{{Path: evil, Label: evil, Kind: workspace.RiskExecutable, Severity: workspace.SeverityHigh, Detail: "new executable"}}}}
-			ta.term.during = func() {
-				ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) {
-					sb.Hooks = sandboxapi.HookCoverage{ToolCalls: 2, ToolBlocked: 1, LastBlocked: "rm\x1b[1A marker"}
-				})
-			}
-		}, want: []string{`notes\x1b[2J\x1b]0;DCMARKER\a\rx` + "\ufffdtxt.sh", "+changed"}, not: []string{"\x1b", "\x07", "\r", "\u202e"}},
-		{name: "keeping is confirmed and the diff paged", input: "d\ny\n", opts: claude, setup: func(ta *testApp) {
-			ta.pager = func(text string) bool {
-				ta.err.WriteString(text)
-				return true
-			}
-		}, want: []string{"✓ kept: the changes stay in the folder, and the next session takes a new undo point"}, not: []string{"+changed"},
-			check: func(t *testing.T, ta *testApp) { has(t, ta.err.String(), "+changed") }},
-		// The daemon could not record the acceptance: the undo point stays,
-		// and the line after the warning does not say otherwise.
-		{name: "keeping is not recorded", input: "y\n", opts: claude, setup: func(ta *testApp) {
-			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/accept"] = &sandboxapi.Error{Code: sandboxapi.CodeConflict,
-				Message: "sandbox " + sbName + " has another undo point by now"}
-		}, during: func(_ *testing.T, ta *testApp) {
-			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
-		}, want: []string{"could not record that you kept the changes", "✓ kept: the changes stay in the folder"},
-			not: []string{"the next session takes a new undo point"}},
-		// GAP-0389: another terminal started the sandbox again while the
-		// question was open, so the daemon refused the acceptance: the last
-		// line says it runs, not that it was kept stopped.
-		{name: "keeping while another terminal starts it again", input: "y\n", opts: claude, setup: func(ta *testApp) {
-			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/accept"] = &sandboxapi.Error{Code: sandboxapi.CodeConflict,
-				Message: "sandbox " + sbName + " is running; stop it before accepting its changes"}
-			ta.daemon.onGet = func(sb *sandboxapi.Sandbox) {
-				for _, c := range ta.daemon.calls { // the fake holds its lock here
-					if c.Method == "POST" && strings.HasSuffix(c.Path, "/"+sbName+"/accept") {
-						sb.Phase = "ready"
-					}
-				}
-			}
-		}, during: func(_ *testing.T, ta *testApp) {
-			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
-		}, want: []string{"could not record that you kept the changes", "Sandbox " + sbName + " is running again (started from outside this session) → reattach"},
-			not: []string{"Sandbox kept (stopped)"}},
-		// GAP-0336: the daemon stopped before the session ended: what did not
-		// run, and the way to it, without the HTTP client's error.
-		{name: "the daemon is down at the end", opts: claude, exit: 1, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
-			ta.daemon.mu.Lock()
-			ta.daemon.errors["GET "+sandboxapi.PathSandboxes+"/"+sbName] = &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
-				Message: "the DefenseClaw daemon is not reachable", Detail: "dial tcp 127.0.0.1:18970: connect: connection refused"}
-			ta.daemon.mu.Unlock()
-		}, want: []string{"the DefenseClaw daemon is not running, so this session's review and its question about the changes did not run",
-			"review " + sbName + "` shows its changes"}, not: []string{"connection refused"}},
-		// GAP-0337: Docker stopped the container as the session ended, so the
-		// session's stop failed in gRPC's words: the first line says what
-		// happened instead.
-		{name: "the container stopped as the session stopped it", opts: claude, setup: func(ta *testApp) {
-			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeUpstream,
-				Message: "OpenShell: stop sandbox " + sbName + " failed", Detail: "Cancelled: grpc: the client connection is closing"}
-			ta.daemon.onGet = func(sb *sandboxapi.Sandbox) {
-				for _, c := range ta.daemon.calls { // the fake holds its lock here
-					if c.Method == "POST" && strings.HasSuffix(c.Path, "/"+sbName+"/stop") {
-						sb.Phase = "error"
-					}
-				}
-			}
-		}, want: []string{sbName + "'s container stopped under the session (Docker restarted, or its workload failed)"},
-			not: []string{"client connection is closing", "could not stop"}},
-		// GAP-0601: a stop that failed because the connection to the OpenShell
-		// gateway closed leaves a sandbox that may still run: the way to find
-		// out and stop it, and an exit status that is not success.
-		{name: "the stop failed on a closed connection", opts: claude, exit: 1, setup: func(ta *testApp) {
-			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
-				Message: "the connection to the OpenShell gateway closed while " + sbName + " was stopping"}
-		}, want: []string{"could not stop " + sbName, "it may still be running", "defenseclaw sandbox stop " + sbName}},
-		// GAP-0333: a sandbox the session could not stop (OpenShell's error
-		// state after a Docker restart) does not keep running.
-		{name: "keeping when the stop failed", input: "y\n", opts: claude, setup: func(ta *testApp) {
-			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeConflict,
-				Message: sbName + " is in OpenShell's error state"}
-		}, want: []string{"✓ kept: the changes stay in the folder", "the undo point stays, since " + sbName + " could not be stopped"},
-			not: []string{"keeps running: `"}},
-		// The accept names the snapshot and the session it reviewed: the
-		// daemon refuses it once another start came in between.
-		{name: "keeping names the reviewed session", input: "y\n", opts: claude, during: func(_ *testing.T, ta *testApp) {
-			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
-		}, want: []string{"✓ kept: the changes stay in the folder, and the next session takes a new undo point"},
-			check: func(t *testing.T, ta *testApp) {
-				var req sandboxapi.AcceptRequest
-				calls := ta.daemon.callsTo("POST", sandboxapi.PathSandboxes+"/"+sbName+"/accept")
-				if len(calls) != 1 || json.Unmarshal(calls[0].Body, &req) != nil || req.Session != 1 || req.Snapshot.IsZero() {
-					t.Fatalf("accept = %+v, want the reviewed snapshot and session 1", req)
-				}
-			}},
-		{name: "connect --shell", input: "y\n", do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "r2c1-cp", Shell: true}) },
-			setup: func(ta *testApp) {
-				ta.term.hooks = nil
-				sb := sampleSandbox("r2c1-cp")
-				sb.Phase, sb.Snapshot = "stopped", &sandboxapi.SnapshotInfo{Kind: "git"}
-				ta.daemon.add(sb)
-			}, want: []string{"Sandbox r2c1-cp · Claude Code", "Session ended ·", "Keep changes?"},
-			not: []string{"hooks are not reaching", "continue this conversation"}, check: func(t *testing.T, ta *testApp) {
-				if len(ta.term.runs) != 1 {
-					t.Fatalf("terminal runs = %q", ta.term.runs)
-				}
-				has(t, strings.Join(ta.term.runs[0], " "), "--workdir /work/proj", "exec bash -l")
-			}},
-	})
-}
-
 // Hooks that never reach DefenseClaw (the hooks fail closed) are warned
 // about live and in the summary, with ExitHooksUnreachable unless the
 // harness failed itself; the daemon's verdict wins. Idle harnesses whose
@@ -1423,14 +1049,51 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 		t.Fatalf("healthy: %+v", c)
 	}
 	// GAP-0278: a sandbox a Docker restart left in OpenShell's error state,
-	// which can be neither stopped nor started, is named with the way on.
+	// is named with the way on.
 	lost := sampleSandbox("hic")
 	lost.Phase = "error"
 	ta.daemon.add(lost)
-	if c := check(ta); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "hic is in OpenShell's error state") || c.Fix == nil ||
-		!strings.Contains(c.Fix.Summary, "--keep-snapshot") {
+	// Before openshell.SupportedMin the gateway can neither stop nor start it:
+	// OpenShell is upgraded first.
+	if c := check(ta); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "hic is in OpenShell's error state") ||
+		!strings.Contains(c.Detail, "neither stop nor start") || c.Fix == nil || !strings.Contains(c.Fix.Summary, "upgrade OpenShell to "+openshell.InstallerVersion) {
 		t.Fatalf("errored: %+v", c)
 	}
+	// From it the gateway stops a sandbox in its error state, and starts it
+	// again after (NVIDIA/OpenShell#4231): the way on keeps it.
+	ta.daemon.status.Gateway.Version = openshell.SupportedMin
+	if c := check(ta); c.Status != openshell.StatusWarn || strings.Contains(c.Detail, "neither stop nor start") || c.Fix == nil ||
+		!strings.Contains(c.Fix.Summary, "`defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`") ||
+		strings.Contains(c.Fix.Summary, "delete") {
+		t.Fatalf("errored on %s: %+v", openshell.SupportedMin, c)
+	}
+	// One whose provisioning timed out starts again with no stop, which
+	// OpenShell refuses for it.
+	slow := sampleSandbox("slow")
+	slow.Phase, slow.PhaseReason = "error", "ProvisioningTimedOut: Provisioning repair window expired after 300 seconds"
+	ta.daemon.add(slow)
+	if c := check(ta); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "hic is in OpenShell's error state (the container stopped") ||
+		!strings.Contains(c.Detail, "slow is in OpenShell's error state because its provisioning timed out") || c.Fix == nil ||
+		!strings.Contains(c.Fix.Summary, "for slow, wait a minute for OpenShell's cleanup, then `defenseclaw sandbox start NAME` with no stop") {
+		t.Fatalf("timed out on %s: %+v", openshell.SupportedMin, c)
+	}
+	// On an older gateway, a prerelease of SupportedMin included, both are
+	// upgraded first; after it, the one whose provisioning timed out still
+	// starts with no stop, which the upgraded gateway refuses for it.
+	for _, old := range []string{"0.1.3", "0.1.5-pre.2"} {
+		ta.daemon.status.Gateway.Version = old
+		c := check(ta)
+		if c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "where this OpenShell can neither stop nor start them") || c.Fix == nil ||
+			c.Fix.Summary != "upgrade OpenShell to "+openshell.InstallerVersion+" (see Gateway), then `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME` for hic, "+
+				"which keep the sandbox and its work; for slow wait a minute for OpenShell's cleanup, then `defenseclaw sandbox start NAME` with no stop: OpenShell "+
+				openshell.SupportedMin+" refuses to stop a sandbox whose provisioning timed out" {
+			t.Fatalf("errored and timed out on %s: %+v", old, c)
+		}
+	}
+	ta.daemon.mu.Lock()
+	delete(ta.daemon.sandboxes, "slow")
+	ta.daemon.mu.Unlock()
+	ta.daemon.status.Gateway.Version = "0.1.1"
 	bad := sampleSandbox("bad")
 	bad.Hooks.Unreachable, bad.Hooks.UnreachableReason = true, "OpenShell refused the hooks' connections"
 	ta.daemon.add(bad)
@@ -1508,7 +1171,7 @@ func TestConnectLeavesARunningSandboxRunning(t *testing.T) {
 func TestStopAndDeleteNameAnAttachedSession(t *testing.T) {
 	ta := newTestApp(t, "n\nn\n", sampleSandbox("box"))
 	runAnswers(ta, "run=none\n", "")
-	defer ta.holdSession("box")()
+	defer holdTestSession(t, ta, "box")()
 	ta.ok(t, ta.Stop(bg, StopOptions{Name: "box"}))
 	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"box"}}))
 	if ta.calls("POST", "box/stop") != 0 || ta.calls("DELETE", "box") != 0 {
@@ -1763,6 +1426,46 @@ func TestStartTakesAFreshSnapshotWhenNothingIsOnTop(t *testing.T) {
 		has(t, ta.output(), c.want...)
 		lacks(t, ta.output(), c.not)
 	}
+}
+
+// TestAnOldSupervisorRunsNothing (GAP-0415): a ready sandbox the daemon
+// names as running the supervisor of an OpenShell older than SupportedMin
+// gets no exec, and a connect stops it and starts it again (on the
+// gateway's own supervisor) before it attaches; one it cannot stop is
+// refused with the way on.
+func TestAnOldSupervisorRunsNothing(t *testing.T) {
+	ta := newTestApp(t, "y\n")
+	sb := sampleSandbox("m1-b")
+	sb.Phase, sb.OldSupervisor = "ready", true
+	ta.daemon.add(sb)
+	err := ta.Exec(bg, ExecOptions{Name: "m1-b", Command: []string{"ls"}})
+	if err == nil || !strings.Contains(err.Error(), "m1-b runs the supervisor of an OpenShell release older than "+openshell.SupportedMin) ||
+		!strings.Contains(err.Error(), "`defenseclaw sandbox connect m1-b` stops and starts it") {
+		t.Fatalf("exec = %v", err)
+	}
+	if len(ta.stream.runs) != 0 {
+		t.Fatalf("exec ran in the sandbox: %v", ta.stream.runs)
+	}
+
+	ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/m1-b/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "OpenShell: stop failed"}
+	err = ta.Connect(bg, ConnectOptions{Name: "m1-b"})
+	if err == nil || !strings.Contains(err.Error(), "DefenseClaw runs nothing in it, and it could not stop it") || ta.calls("POST", "m1-b/start") != 0 || len(ta.stream.runs) != 0 {
+		t.Fatalf("connect with a failing stop = %v (starts %d, runs %d)", err, ta.calls("POST", "m1-b/start"), len(ta.stream.runs))
+	}
+
+	delete(ta.daemon.errors, "POST "+sandboxapi.PathSandboxes+"/m1-b/stop")
+	runAnswers(ta, "", "")
+	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "m1-b"}))
+	var order []string
+	for _, c := range ta.daemon.calls {
+		if c.Method == "POST" && (strings.HasSuffix(c.Path, "/m1-b/stop") || strings.HasSuffix(c.Path, "/m1-b/start")) {
+			order = append(order, c.Path[strings.LastIndex(c.Path, "/")+1:])
+		}
+	}
+	if len(order) < 3 || order[1] != "stop" || order[2] != "start" {
+		t.Fatalf("connect: stop and start calls %v, want the stop before the start", order)
+	}
+	has(t, ta.output(), "m1-b still runs the supervisor of an OpenShell release older than "+openshell.SupportedMin)
 }
 
 // A headless session in an existing sandbox runs without a terminal:
@@ -2119,21 +1822,15 @@ func TestWarnUnkeptOptionValueNotesATrailingPrompt(t *testing.T) {
 
 // Certification OG-M1: a first word that is not an option is a prompt or a
 // one-off subcommand for most harnesses, but launch configuration for
-// some, and the options after it were lost with it (OmniGent's documented
 // `-- <agent path> --model <m>` kept nothing). Every harness that takes
 // such a word is here.
 func TestLaunchOptionsKeepALeadingLaunchOperand(t *testing.T) {
-	agent := "/usr/local/lib/defenseclaw/omnigent/agent"
 	for _, c := range []struct {
 		harness string
 		args    []string
 		want    []string
 	}{
-		// OmniGent's run takes the agent as its one operand, options on
 		// either side, and no prompt word: everything is kept, in order.
-		{"omnigent", []string{agent, "--model", "mock-model"}, []string{agent, "--model", "mock-model"}},
-		{"omnigent", []string{"--model", "mock-model", agent, "--system-prompt", "be terse"}, []string{"--model", "mock-model", agent, "--system-prompt", "be terse"}},
-		{"omnigent", []string{agent, "-p", "fix it"}, nil},
 		// OpenCode's project directory, when it reads as a path.
 		{"opencode", []string{"./web", "-m", "anthropic/claude-sonnet-5"}, []string{"./web", "-m", "anthropic/claude-sonnet-5"}},
 		{"opencode", []string{"-m", "anthropic/claude-sonnet-5", "."}, []string{"-m", "anthropic/claude-sonnet-5", "."}},
@@ -2148,37 +1845,10 @@ func TestLaunchOptionsKeepALeadingLaunchOperand(t *testing.T) {
 		{"kiro", []string{"fix it", "--model", "claude-sonnet-4"}, nil},
 		{"codex", []string{"fix it", "-m", "mock-model"}, nil},
 		{"amp", []string{"threads", "continue", "T-1"}, nil},
-		{"openhands", []string{"mcp", "list"}, nil},
 		{"devin", []string{"src", "--model", "swe-1"}, nil},
 	} {
 		if got := launchOptions(harnessSpec(t, c.harness), c.args); !slices.Equal(got, c.want) {
 			t.Errorf("%s: launchOptions(%q) = %q, want %q", c.harness, c.args, got, c.want)
-		}
-	}
-}
-
-// Certification OG-M1 end to end: `connect` after an OmniGent run with the
-// agent path first starts OmniGent with the agent and model again, in the
-// run's order, before the arguments given now.
-func TestConnectKeepsOmniGentsAgentAndModel(t *testing.T) {
-	ta := newTestApp(t, "")
-	ta.env["OPENAI_API_KEY"] = "sk-mock"
-	noChanges(ta)
-	agent := "/usr/local/lib/defenseclaw/omnigent/agent"
-	ta.ok(t, ta.Run(bg, RunOptions{Harness: "omnigent", Name: "og", LLM: "none", Credentials: []string{"OPENAI_API_KEY=host.openshell.internal:38937"},
-		Env: []string{"OPENAI_BASE_URL=http://host.openshell.internal:38937/v1"}, Args: []string{agent, "--model", "mock-model"}}))
-	if len(ta.term.runs) != 1 || !strings.HasSuffix(strings.Join(ta.term.runs[0], " "), " run "+agent+" --model mock-model") {
-		t.Fatalf("run argv = %q", ta.term.runs)
-	}
-	ta.term.runs = nil
-	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "og"}))
-	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "og", Args: []string{"--resume", "conv_abc123"}}))
-	if len(ta.term.runs) != 2 {
-		t.Fatalf("terminal runs = %q", ta.term.runs)
-	}
-	for i, want := range []string{" run " + agent + " --model mock-model", " run " + agent + " --model mock-model --resume conv_abc123"} {
-		if got := strings.Join(ta.term.runs[i], " "); !strings.HasSuffix(got, want) {
-			t.Errorf("connect %d argv = %q, want it to end %q", i, got, want)
 		}
 	}
 }
@@ -2300,7 +1970,6 @@ func TestRunLaunchIsTiedToTheSandbox(t *testing.T) {
 // nothing new it asks nothing and says so, and `delete` of the sandbox it
 // stopped does not warn about unpulled work; the same after an apply at
 // the session's end (cert hermes:HERMES-5, hermes:HERMES-6,
-// openhands:MAC-OSH-OH-2).
 func TestCopySessionAfterAnApply(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.env["ANTHROPIC_API_KEY"] = "sk-mock"
@@ -2324,7 +1993,6 @@ func TestCopySessionAfterAnApply(t *testing.T) {
 
 // `sandbox pull` and a session's end ask the same question before bringing
 // back changes that can run code on this machine (cert
-// openhands:MAC-OSH-OH-2: pull asked "…or hold a secret"). A no says what
 // it leaves and exits 1.
 func TestPullAsksLikeTheSessionEnd(t *testing.T) {
 	ta := newTestApp(t, "n\n")
@@ -2450,7 +2118,7 @@ func TestDeleteSaysWhereTheWorkWent(t *testing.T) {
 	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyBranch, Applied: true, Branch: "dc/fix-tests"}
 	ta.ok(t, ta.Pull(bg, PullOptions{Name: "fix-tests", Branch: true}))
 	ta.copy.pending = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkNone}
-	release := ta.holdSession("fix-tests")
+	release := holdTestSession(t, ta, "fix-tests")
 	ta.ok(t, ta.Stop(bg, StopOptions{Name: "fix-tests", Yes: true}))
 	release()
 	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"fix-tests"}, Yes: true}))
@@ -2511,4 +2179,412 @@ func TestAskDestination(t *testing.T) {
 			t.Errorf("askDestination(%+v) = %q, want %q", tc.ev, got, tc.want)
 		}
 	}
+}
+
+func TestSessionSummary(t *testing.T) {
+	claude := RunOptions{Harness: "claude"}
+	elsewhere := func(undone bool) func(*testApp) {
+		return func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 255
+			ta.term.during = func() {
+				ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) {
+					sb.Phase = "stopped"
+					if undone {
+						sb.Snapshot = &sandboxapi.SnapshotInfo{Kind: "git", UndoneAt: ta.Now().Add(time.Minute)}
+					}
+				})
+			}
+		}
+	}
+	noStop := func(t *testing.T, ta *testApp) { ta.wantCalls(t, 0, "POST", sbName+"/stop") }
+	continueHint := func(env string, wrapped bool) func(*testApp) {
+		return func(ta *testApp) {
+			noChanges(ta)
+			ta.env["OPENAI_API_KEY"] = env
+			ta.daemon.toolCalls = 1
+			if wrapped {
+				ta.Cfg.OpenShell.Wrappers = []string{"claudecode"}
+			}
+		}
+	}
+	// A session without a turn: the harness printed no resume line of its
+	// own (Copilot CLI prints one only after a prompt; retest RT-C2-1).
+	noTurn := func(env string, wrapped bool) func(*testApp) {
+		return func(ta *testApp) {
+			continueHint(env, wrapped)(ta)
+			ta.daemon.toolCalls = 0
+		}
+	}
+	const cont = "continue this conversation: defenseclaw sandbox connect " + sbName
+	evil := "notes\x1b[2J\x1b]0;DCMARKER\x07\rx\u202etxt.sh"
+	runCases(t, []runCase{
+		{name: "late denials count", opts: claude, want: []string{"0 new sites contacted · 2 sites blocked"}, setup: func(ta *testApp) {
+			noChanges(ta)
+			var armed atomic.Bool
+			var late atomic.Int32
+			late.Store(2)
+			ta.daemon.onGet = func(sb *sandboxapi.Sandbox) {
+				if armed.Load() && late.Add(-1) >= 0 {
+					sb.Egress.Blocked++
+				}
+			}
+			ta.term.during = func() { armed.Store(true) }
+		}},
+		{name: "after a daemon restart", do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "box"}) }, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.hooks = nil
+			sb := sampleSandbox("box")
+			sb.Hooks = sandboxapi.HookCoverage{HookRequests: 107, ToolCalls: 13, LastHookAt: time.Now().Add(-time.Hour)}
+			sb.Egress = sandboxapi.EgressStats{Destinations: 20, Blocked: 3}
+			ta.daemon.add(sb)
+			ta.term.during = func() {
+				ta.daemon.edit("box", func(sb *sandboxapi.Sandbox) {
+					sb.Hooks = sandboxapi.HookCoverage{HookRequests: 15, ToolCalls: 1, LastHookAt: time.Now()}
+					sb.Egress = sandboxapi.EgressStats{Destinations: 2}
+				})
+			}
+		}, want: []string{"Session ended · 1 tool call since the daemon restarted · 2 new sites contacted since then"}, not: []string{"hooks are not reaching"}},
+		// The daemon keeps its hook counts across a restart (GAP-0156): one
+		// that left no counter lower kept them, so the session counts what
+		// it moved them by and names no restart (PR 1022 live retest N1,
+		// before any daemon kept them, read "0 tool calls" after 7).
+		{name: "a daemon restart that left no counter lower", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.mu.Lock()
+			ta.daemon.status.StartedAt = ta.Now().Add(5 * time.Minute)
+			ta.daemon.mu.Unlock()
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Hooks.HookRequests += 9; sb.Hooks.ToolCalls += 7 })
+		}, want: []string{"Session ended · 7 tool calls · 0 new sites contacted"}, not: []string{"restarted"}},
+		// GAP-0354: OpenShell refuses a conversation that holds a credential
+		// placeholder, so the end offers a new one, not --continue.
+		{name: "a conversation that holds a credential placeholder", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Hooks.PlaceholderRefusedAt = ta.Now() })
+		}, want: []string{"start a new conversation: defenseclaw sandbox connect " + sbName + " (this one holds a sandbox credential placeholder"},
+			not: []string{cont}},
+		{name: "a daemon started before the session", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.mu.Lock()
+			ta.daemon.status.StartedAt = ta.Now().Add(-time.Hour)
+			ta.daemon.mu.Unlock()
+		}, want: []string{"Session ended · 0 tool calls · 0 new sites contacted"}, not: []string{"restarted"}},
+		{name: "the harness failed before its hooks", opts: claude, exit: 1, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.hooks, ta.term.code = nil, 1
+		}, want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)"},
+			not: []string{"hooks are not reaching", "continue this conversation"}},
+		{name: "the OpenCode launcher refused the run", opts: RunOptions{Harness: "opencode"}, exit: harness.LauncherRefusedExitCode,
+			setup: func(ta *testApp) { noChanges(ta); ta.term.hooks, ta.term.code = nil, harness.LauncherRefusedExitCode },
+			want:  []string{"DefenseClaw refused to start OpenCode; see the launcher message above"},
+			not:   []string{"the harness itself failed", "hooks are not reaching"}},
+		// AG-MAC-F3: a harness that failed at start because localhost does
+		// not resolve is told apart, with what to do; the pull of a copy
+		// still runs, without its progress line.
+		{name: "localhost does not resolve in the sandbox", opts: claude, exit: 1, setup: failsAtStart("", "unresolved unlisted"),
+			want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: localhost does not resolve in " + sbName +
+				": its /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and its image was built before DefenseClaw's images answered localhost themselves",
+				"→ a new sandbox boots a rebuilt image: delete this one (`defenseclaw sandbox delete " + sbName + "`) and run it again (`defenseclaw sandbox run claudecode`)"},
+			not: []string{"the harness itself failed"}},
+		{name: "a headless harness that looks localhost up itself", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, exit: 1,
+			setup: failsAtStart(agyFailure, "resolves unlisted"),
+			want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: it could not resolve localhost (\"" + agyFailure +
+				"\"). This sandbox's /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and Claude Code does not use the system resolver, which answers localhost here",
+				"→ Claude Code cannot start in an OpenShell MicroVM until OpenShell writes /etc/hosts; a gateway on the docker driver (Linux) runs it"}},
+		{name: "a headless harness whose sandbox resolves localhost", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, exit: 1,
+			setup: failsAtStart("Error: invalid API key", "resolves listed"),
+			want:  []string{"before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)"}, not: []string{"localhost", "a new sandbox"}},
+		{name: "a copy whose harness failed at start", input: "s\n", opts: RunOptions{Harness: "claude", Copy: true, Name: "copybox"}, exit: 1,
+			setup: failsAtStart("", "unresolved unlisted"), want: []string{"localhost does not resolve in copybox", "run it again", "Bring the changes back?"},
+			not: []string{"Pulling copybox's work"}, check: func(t *testing.T, ta *testApp) {
+				// What the harness wrote before it failed still comes back.
+				if !slices.Contains(ta.copy.steps, "pull copybox") {
+					t.Fatalf("copy steps = %v", ta.copy.steps)
+				}
+			}},
+		{name: "a copy whose harness ran", input: "s\n", opts: RunOptions{Harness: "claude", Copy: true, Name: "copybox"},
+			want: []string{"Pulling copybox's work"}, not: []string{"localhost"}},
+		{name: "stopped from elsewhere", opts: claude, exit: 255, setup: elsewhere(false), check: noStop,
+			want: []string{sbName + " was stopped from outside this session (`defenseclaw sandbox stop` or the TUI), which ended Claude Code", "Sandbox kept (stopped)"},
+			not:  []string{"the harness itself failed"}},
+		// GAP-0486: on a managed computer the organization stopped it, its
+		// profile no longer allowing sandboxes: not a stop from elsewhere.
+		{name: "the organization revoked sandboxes", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
+			elsewhere(false)(ta)
+			ta.daemon.status.Managed = managedStatusFixture()
+			ta.daemon.explain.Managed = managedExplainFixture()
+			during := ta.term.during
+			ta.term.during = func() {
+				during()
+				ta.daemon.mu.Lock()
+				ta.daemon.explain.Managed.Allowed = false
+				ta.daemon.mu.Unlock()
+			}
+		}, want: []string{"This sandbox was stopped: your profile no longer allows sandboxes. Request access: it-security@example.com.",
+			"Sandbox kept (stopped) → delete: defenseclaw sandbox delete " + sbName},
+			not: []string{"was stopped from outside this session", "Start it again", "→ resume:", "continue this conversation"}},
+		// #1199 (GAP-0560): a re-match stopped it for a create-time grant
+		// the profile no longer allows (host ports): the session ends with
+		// the organization's words, which the sandbox's view carries.
+		{name: "a re-match stopped it for its host ports", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
+			elsewhere(false)(ta)
+			ta.daemon.status.Managed = managedStatusFixture()
+			ta.daemon.explain.Managed = managedExplainFixture()
+			during := ta.term.during
+			ta.term.during = func() {
+				during()
+				ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) {
+					sb.StopReason = sandboxapi.ProfileStop("host ports", "claudecode", "it-security@example.com")
+				})
+			}
+		}, want: []string{"This sandbox was stopped: your profile no longer allows host ports. Start it again without --host-port: defenseclaw sandbox run claude",
+			"Sandbox kept (stopped) → delete: defenseclaw sandbox delete " + sbName},
+			not: []string{"was stopped from outside this session", "→ resume:"}},
+		// GAP-0202: the gateway was stopped (handed to another account)
+		// under the session: not a stop from another terminal.
+		{name: "the gateway went away", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
+			elsewhere(false)(ta)
+			during := ta.term.during
+			ta.term.during = func() {
+				during()
+				ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "unknown" })
+				ta.daemon.mu.Lock()
+				ta.daemon.status.Available, ta.daemon.status.Reason = false, "the OpenShell gateway is not available"
+				ta.daemon.mu.Unlock()
+			}
+		}, want: []string{"the OpenShell gateway is not available (it was stopped, or another account's gateway took its port; `defenseclaw sandbox doctor` says which), which ended Claude Code"},
+			not: []string{"was stopped from outside this session"}},
+		// GAP-0278: Docker restarted under the session: the harness ended
+		// while the sandbox still read ready, and a moment later OpenShell
+		// held it in its error state.
+		{name: "the container stopped", opts: claude, exit: 1, check: noStop, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 1
+			ta.Sleep = func(_ context.Context, d time.Duration) error {
+				if d == settlePhaseInterval {
+					ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "error" })
+				}
+				return nil
+			}
+		}, want: []string{sbName + "'s container stopped under the session (Docker restarted, or its workload failed), which ended Claude Code",
+			"is in OpenShell's error state → fix what stopped it, then `defenseclaw sandbox stop " + sbName +
+				"` and `defenseclaw sandbox start " + sbName + "`, which keep the sandbox and its work"},
+			not: []string{"keeps running", "was stopped from outside this session"}},
+		// GAP-0333, GAP-0337: Docker restarted under a session that connected
+		// to a running sandbox, and OpenShell read it ready for longer than
+		// the first look while it ran no command: the end waits for the
+		// phase, and one that never comes says the sandbox does not answer.
+		{name: "the container stopped and OpenShell said so late", exit: 1, do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "box"}) },
+			setup: lateContainerStop(4), want: []string{"box's container stopped under the session (Docker restarted, or its workload failed), which ended Claude Code"},
+			not: []string{"keeps running", "is still running"}},
+		{name: "a container that does not answer", input: "y\n", exit: 1, do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "box"}) },
+			setup: lateContainerStop(0), want: []string{"box does not answer, though OpenShell still reads it as running",
+				"the undo point stays, since box does not answer", "Sandbox box does not answer → `defenseclaw sandbox status box` shows its state"},
+			not: []string{"keeps running", "is still running"}},
+		// GAP-0077: the OpenShell gateway restarted under the session (an
+		// upgrade), which closed the harness's exec relay: the sandbox read
+		// as unknown for a moment, then ready, and the session said it was
+		// stopped from outside and kept stopped.
+		{name: "the connection was lost", opts: claude, exit: 1, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 1
+			ta.term.during = func() { ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "unknown" }) }
+			ta.Sleep = func(_ context.Context, d time.Duration) error {
+				if d == settlePhaseInterval {
+					ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "ready" })
+				}
+				return nil
+			}
+			// The CLI's relay error came first, raw (GAP-0279): DefenseClaw's
+			// line says what happened.
+			ta.term.stderr = "Error:   × code: The service is currently unavailable, message: exec relay closed before the command reported an exit status\n"
+		}, check: noStop,
+			want: []string{"the connection to " + sbName + " was lost (the OpenShell gateway restarted, for one), which ended Claude Code; " + sbName +
+				" is still running → reattach: defenseclaw sandbox connect " + sbName, "Sandbox " + sbName + " keeps running → reattach"},
+			not: []string{"stopped from outside", "Sandbox kept (stopped)", "exec relay closed"}, notLive: []string{"exec relay closed"}},
+		// What else the CLI says on its own standard error comes after the
+		// session, not into the harness's screen (GAP-0279).
+		{name: "the CLI's own messages come after the session", opts: claude, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.stderr = "warning: dccert-cli-note\n"
+		}, live: []string{"warning: dccert-cli-note"}},
+		// GAP-0096: DefenseClaw's own stop for silent hooks is no stop from
+		// outside.
+		{name: "stopped by DefenseClaw for silent hooks", opts: claude, exit: 255, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 255
+			ta.term.during = func() {
+				ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) {
+					sb.Phase = "stopped"
+					sb.Hooks.Silent, sb.Hooks.OnSilence, sb.Hooks.SilenceAfter = true, "stop", "1m"
+				})
+			}
+		}, check: noStop,
+			want: []string{"DefenseClaw stopped " + sbName + ": Claude Code worked for 1m without a hook reaching DefenseClaw (hooks.on_silence: stop)"},
+			not:  []string{"stopped from outside"}},
+		// GAP-0170: a delete from another terminal read as a stop, then the
+		// review failed and the keep/undo question came for a sandbox that
+		// was gone.
+		{name: "deleted from elsewhere", opts: claude, exit: 255, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 255
+			ta.term.during = func() { ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "deleting" }) }
+			ta.Sleep = func(_ context.Context, d time.Duration) error {
+				if d == settlePhaseInterval {
+					ta.daemon.mu.Lock()
+					delete(ta.daemon.sandboxes, sbName)
+					ta.daemon.mu.Unlock()
+				}
+				return nil
+			}
+		}, check: noStop,
+			want: []string{sbName + " was deleted from outside this session, which ended Claude Code; there is nothing left to review, and its undo point went with it"},
+			not:  []string{"stopped from outside", "could not review", "Keep changes?"}},
+		{name: "undone from elsewhere", opts: claude, exit: 255, setup: elsewhere(true), check: noStop,
+			want: []string{sbName + " was undone from outside this session (`defenseclaw sandbox undo` or the TUI): the folder is back at its undo point, " +
+				"and that stopped Claude Code", "Sandbox kept (stopped)"}, not: []string{"the harness itself failed"}},
+		{name: "continue claude", opts: claude, setup: continueHint("", false), want: []string{"→ " + cont +
+			" -- --continue (the `claude --resume …` Claude Code printed above works only inside the sandbox)"}},
+		{name: "continue claude with the wrapper", opts: claude, setup: continueHint("", true), want: []string{cont +
+			" -- --continue (the `claude --resume …` Claude Code printed resumes it in this sandbox too: the shell wrapper is on)"}},
+		{name: "continue codex", opts: RunOptions{Harness: "codex"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- resume --last (the `codex resume …` Codex printed above works only inside the sandbox)"}},
+		// Every harness that can continue gets the line, after its own
+		// host-useless hint (cert copilot:F7, kiro:KR-F4, hermes:HERMES-4).
+		// OpenCode's exit screen shows "Continue  opencode -s ses_<id>"
+		// (OC-7, FIN-B-3).
+		{name: "continue opencode", opts: RunOptions{Harness: "opencode"}, setup: continueHint("sk-mock", false),
+			want: []string{"→ " + cont + " -- --continue (the `opencode -s …` OpenCode printed above works only inside the sandbox)"}},
+		{name: "continue copilot", opts: RunOptions{Harness: "copilot"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --continue (the `copilot --resume …` GitHub Copilot CLI printed above works only inside the sandbox)"}},
+		{name: "continue copilot without a turn", opts: RunOptions{Harness: "copilot"}, setup: noTurn("sk-mock", false),
+			want: []string{"-- --continue (a `copilot --resume …` line of GitHub Copilot CLI works only inside the sandbox)"},
+			not:  []string{"printed above"}},
+		{name: "continue claude with the wrapper without a turn", opts: claude, setup: noTurn("", true), want: []string{cont +
+			" -- --continue (a `claude --resume …` line of Claude Code resumes it in this sandbox too: the shell wrapper is on)"},
+			not: []string{"printed"}},
+		{name: "continue kiro", opts: RunOptions{Harness: "kiro"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --resume (the `kiro-cli --resume-id …` Kiro CLI printed above works only inside the sandbox)"}},
+		{name: "continue hermes", opts: RunOptions{Harness: "hermes"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --continue (the `hermes --resume …` Hermes Agent printed above works only inside the sandbox)"}},
+		// agy prints "Resume with -c (or command below): agy
+		// --conversation=<id>" at /quit, and nothing named the sandbox's
+		// continue (AG-RT-1).
+		{name: "continue antigravity", opts: RunOptions{Harness: "antigravity"}, setup: continueHint("", false),
+			want: []string{"→ " + cont + " -- -c (the `agy --conversation …` Antigravity printed above works only inside the sandbox)"}},
+		{name: "no continue after one prompt", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, setup: func(ta *testApp) {
+			ta.IO.TTY = false
+			noChanges(ta)
+		}, not: []string{"continue this conversation"}},
+		{name: "commits", input: "y\n", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.review = sandboxapi.ReviewResponse{Summary: "0 files changed (+0 −0)", Report: &workspace.ReviewReport{
+				HeadBefore: strings.Repeat("a", 40), HeadAfter: strings.Repeat("b", 40), BranchBefore: "main", BranchAfter: "main"}}
+		}, want: []string{"0 files changed (+0 −0) · HEAD moved on main (aaaaaaa → bbbbbbb)", "Keep changes?"}},
+		{name: "the harness's exit status", opts: claude, exit: 3, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 3
+		}},
+		{name: "the review cannot drive the terminal", input: "d\ny\n", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{FilesChanged: 1, Insertions: 1, BranchBefore: "main", BranchAfter: "main",
+				Flags: []workspace.Flag{{Path: evil, Label: evil, Kind: workspace.RiskExecutable, Severity: workspace.SeverityHigh, Detail: "new executable"}}}}
+			ta.term.during = func() {
+				ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) {
+					sb.Hooks = sandboxapi.HookCoverage{ToolCalls: 2, ToolBlocked: 1, LastBlocked: "rm\x1b[1A marker"}
+				})
+			}
+		}, want: []string{`notes\x1b[2J\x1b]0;DCMARKER\a\rx` + "\ufffdtxt.sh", "+changed"}, not: []string{"\x1b", "\x07", "\r", "\u202e"}},
+		{name: "keeping is confirmed and the diff paged", input: "d\ny\n", opts: claude, setup: func(ta *testApp) {
+			ta.pager = func(text string) bool {
+				ta.err.WriteString(text)
+				return true
+			}
+		}, want: []string{"✓ kept: the changes stay in the folder, and the next session takes a new undo point"}, not: []string{"+changed"},
+			check: func(t *testing.T, ta *testApp) { has(t, ta.err.String(), "+changed") }},
+		// The daemon could not record the acceptance: the undo point stays,
+		// and the line after the warning does not say otherwise.
+		{name: "keeping is not recorded", input: "y\n", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/accept"] = &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+				Message: "sandbox " + sbName + " has another undo point by now"}
+		}, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
+		}, want: []string{"could not record that you kept the changes", "✓ kept: the changes stay in the folder"},
+			not: []string{"the next session takes a new undo point"}},
+		// GAP-0389: another terminal started the sandbox again while the
+		// question was open, so the daemon refused the acceptance: the last
+		// line says it runs, not that it was kept stopped.
+		{name: "keeping while another terminal starts it again", input: "y\n", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/accept"] = &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+				Message: "sandbox " + sbName + " is running; stop it before accepting its changes"}
+			ta.daemon.onGet = func(sb *sandboxapi.Sandbox) {
+				for _, c := range ta.daemon.calls { // the fake holds its lock here
+					if c.Method == "POST" && strings.HasSuffix(c.Path, "/"+sbName+"/accept") {
+						sb.Phase = "ready"
+					}
+				}
+			}
+		}, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
+		}, want: []string{"could not record that you kept the changes", "Sandbox " + sbName + " is running again (started from outside this session) → reattach"},
+			not: []string{"Sandbox kept (stopped)"}},
+		// GAP-0336: the daemon stopped before the session ended: what did not
+		// run, and the way to it, without the HTTP client's error.
+		{name: "the daemon is down at the end", opts: claude, exit: 1, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.mu.Lock()
+			ta.daemon.errors["GET "+sandboxapi.PathSandboxes+"/"+sbName] = &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+				Message: "the DefenseClaw daemon is not reachable", Detail: "dial tcp 127.0.0.1:18970: connect: connection refused"}
+			ta.daemon.mu.Unlock()
+		}, want: []string{"the DefenseClaw daemon is not running, so this session's review and its question about the changes did not run",
+			"review " + sbName + "` shows its changes"}, not: []string{"connection refused"}},
+		// GAP-0337: Docker stopped the container as the session ended, so the
+		// session's stop failed in gRPC's words: the first line says what
+		// happened instead.
+		{name: "the container stopped as the session stopped it", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeUpstream,
+				Message: "OpenShell: stop sandbox " + sbName + " failed", Detail: "Cancelled: grpc: the client connection is closing"}
+			ta.daemon.onGet = func(sb *sandboxapi.Sandbox) {
+				for _, c := range ta.daemon.calls { // the fake holds its lock here
+					if c.Method == "POST" && strings.HasSuffix(c.Path, "/"+sbName+"/stop") {
+						sb.Phase = "error"
+					}
+				}
+			}
+		}, want: []string{sbName + "'s container stopped under the session (Docker restarted, or its workload failed)"},
+			not: []string{"client connection is closing", "could not stop"}},
+		// GAP-0601: a stop that failed because the connection to the OpenShell
+		// gateway closed leaves a sandbox that may still run: the way to find
+		// out and stop it, and an exit status that is not success.
+		{name: "the stop failed on a closed connection", opts: claude, exit: 1, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+				Message: "the connection to the OpenShell gateway closed while " + sbName + " was stopping"}
+		}, want: []string{"could not stop " + sbName, "it may still be running", "defenseclaw sandbox stop " + sbName}},
+		// GAP-0333: a sandbox the session could not stop (OpenShell's error
+		// state after a Docker restart) does not keep running.
+		{name: "keeping when the stop failed", input: "y\n", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+				Message: sbName + " is in OpenShell's error state"}
+		}, want: []string{"✓ kept: the changes stay in the folder", "the undo point stays, since " + sbName + " could not be stopped"},
+			not: []string{"keeps running: `"}},
+		// The accept names the snapshot and the session it reviewed: the
+		// daemon refuses it once another start came in between.
+		{name: "keeping names the reviewed session", input: "y\n", opts: claude, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
+		}, want: []string{"✓ kept: the changes stay in the folder, and the next session takes a new undo point"},
+			check: func(t *testing.T, ta *testApp) {
+				var req sandboxapi.AcceptRequest
+				calls := ta.daemon.callsTo("POST", sandboxapi.PathSandboxes+"/"+sbName+"/accept")
+				if len(calls) != 1 || json.Unmarshal(calls[0].Body, &req) != nil || req.Session != 1 || req.Snapshot.IsZero() {
+					t.Fatalf("accept = %+v, want the reviewed snapshot and session 1", req)
+				}
+			}},
+		{name: "connect --shell", input: "y\n", do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "r2c1-cp", Shell: true}) },
+			setup: func(ta *testApp) {
+				ta.term.hooks = nil
+				sb := sampleSandbox("r2c1-cp")
+				sb.Phase, sb.Snapshot = "stopped", &sandboxapi.SnapshotInfo{Kind: "git"}
+				ta.daemon.add(sb)
+			}, want: []string{"Sandbox r2c1-cp · Claude Code", "Session ended ·", "Keep changes?"},
+			not: []string{"hooks are not reaching", "continue this conversation"}, check: func(t *testing.T, ta *testApp) {
+				if len(ta.term.runs) != 1 {
+					t.Fatalf("terminal runs = %q", ta.term.runs)
+				}
+				has(t, strings.Join(ta.term.runs[0], " "), "--workdir /work/proj", "exec bash -l")
+			}},
+	})
 }

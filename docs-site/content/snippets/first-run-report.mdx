@@ -1,15 +1,15 @@
 ```text title="First-run report"
   DefenseClaw First-Run
   status=ready connector=claudecode profile=observe
-  ────────────────────────────────────────────────────────
+  --------------------------------------------------------
 
   Setup
   ✓ Config  created defaults
   ✓ Bootstrap  ~/.defenseclaw
   ✓ Skill scanner  ~/.local/bin/skill-scanner
   ✓ MCP scanner  ~/.local/bin/mcp-scanner
-  ✓ Guardrail  claudecode, mode=observe, fail mode=open
-  ✓ Sidecar  started
+  ✓ Guardrail  claudecode, mode=observe, fail mode=closed
+  - Sidecar  not started (--skip-gateway)
 
   Readiness
   ✓ Config file  ~/.defenseclaw/config.yaml
@@ -17,16 +17,19 @@
   ✓ Device key  ~/.defenseclaw/device.key
   ✓ Skill scanner  ~/.local/bin/skill-scanner
   ✓ MCP scanner  ~/.local/bin/mcp-scanner
-  ✓ Connector  Claude Code settings found
-  ✓ Sidecar  running
+  - Connector  Claude Code settings not found yet - written when the gateway starts
+  ✓ Agent installation  claudecode is installed
   - LLM API  not configured
   - Cisco AI Defense  scanner_mode is local
   ✓ Gateway binary  found on PATH
 
   Next
+  defenseclaw-gateway start
   defenseclaw doctor
   defenseclaw keys list
   Adding another agent later: defenseclaw setup <connector>
   After a reboot, agent hooks start the gateway on their next call; after defenseclaw-gateway stop, run: defenseclaw-gateway start
   Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup
 ```
+
+{/* Captured from a 1.0.x source build in an isolated HOME with `defenseclaw quickstart --connector claudecode --skip-gateway`; home paths shortened. With the gateway started, the Sidecar row reads "started" and Connector reads "Claude Code settings found". */}

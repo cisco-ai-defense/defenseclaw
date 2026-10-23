@@ -66,6 +66,47 @@ func (b *bootStubConnector) SetCredentials(string, string) { b.credsSet = true }
 
 type hookBootStubConnector struct{ bootStubConnector }
 
+type failingClaudeRefresh struct {
+	*connector.ClaudeCodeConnector
+	afterWrite  bool
+	unchanged   bool
+	verifyFails bool
+	locked      bool
+	setups      int
+	teardowns   int
+}
+
+func (c *failingClaudeRefresh) Setup(ctx context.Context, opts connector.SetupOpts) error {
+	c.setups++
+	if c.unchanged {
+		return fmt.Errorf("settings refused before modification: %w", connector.ErrSetupRefusedUnchanged)
+	}
+	if c.verifyFails {
+		return c.ClaudeCodeConnector.Setup(ctx, opts)
+	}
+	if c.setups == 1 || c.locked {
+		if c.afterWrite {
+			if err := c.ClaudeCodeConnector.Setup(ctx, opts); err != nil {
+				return err
+			}
+		}
+		return errors.New("settings sharing conflict")
+	}
+	return c.ClaudeCodeConnector.Setup(ctx, opts)
+}
+
+func (c *failingClaudeRefresh) HookRuntimeArtifacts(opts connector.SetupOpts) []string {
+	if c.verifyFails && c.setups == 1 {
+		return []string{filepath.Join(opts.DataDir, "missing-runtime-artifact")}
+	}
+	return c.HookScripts(opts)
+}
+
+func (c *failingClaudeRefresh) Teardown(ctx context.Context, opts connector.SetupOpts) error {
+	c.teardowns++
+	return c.ClaudeCodeConnector.Teardown(ctx, opts)
+}
+
 func (*hookBootStubConnector) HookScriptNames(connector.SetupOpts) []string {
 	return []string{"codex-hook.sh"}
 }
@@ -631,55 +672,160 @@ func TestSetupConnectorsIsolated_FailurePreservesPriorRoster(t *testing.T) {
 	}
 }
 
-func TestSetupConnectorsIsolated_OpenCodeFailureRestoresPluginAndLock(t *testing.T) {
-	s := multiBootSidecar(t)
-	s.cfg.DataDir = testenv.PrivateTempDir(t)
-	configDir := testenv.PrivateTempDir(t)
-	t.Setenv("OPENCODE_CONFIG_DIR", configDir)
-	pluginPath := filepath.Join(configDir, "plugins", "defenseclaw.js")
-	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
-		t.Fatal(err)
+// A refresh must restore the active hooks, never the hookless uninstall
+// preimage, and must fail startup even when another connector is ready.
+func TestSetupConnectorsIsolated_FailedRefreshPreservesGuardsAndFails(t *testing.T) {
+	for _, mode := range []string{"multi", "single"} {
+		for _, failure := range []string{"before settings write", "after settings write", "verification failure", "unchanged refusal", "persistent lock"} {
+			t.Run(mode+"/"+failure, func(t *testing.T) {
+				s := multiBootSidecar(t)
+				s.cfg.DataDir = testenv.PrivateTempDir(t)
+				s.cfg.Guardrail.Enabled = true
+				s.cfg.Guardrail.Mode = "action"
+				if runtime.GOOS == "windows" {
+					launcher := filepath.Join(testenv.PrivateTempDir(t), "defenseclaw-hook.exe")
+					if err := os.WriteFile(launcher, []byte("native hook fixture"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(connector.PinNativeHookExecutableForTest(launcher))
+				}
+				settings := filepath.Join(testenv.PrivateTempDir(t), "settings.json")
+				previousOverride := connector.ClaudeCodeSettingsPathOverride
+				connector.ClaudeCodeSettingsPathOverride = settings
+				t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = previousOverride })
+				if err := os.WriteFile(settings, []byte(`{"env":{"EDITOR":"operator-editor"}}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				claude := connector.NewClaudeCodeConnector()
+				opts := mustConnectorSetupOpts(t, s, claude, "tok", "127.0.0.1:0", "127.0.0.1:0")
+				opts.AgentVersion = "2.1.292 (Claude Code)"
+				if err := claude.Setup(context.Background(), opts); err != nil {
+					t.Fatal(err)
+				}
+				if err := publishFreshHookRegistrationEvidence(opts, claude); err != nil {
+					t.Fatal(err)
+				}
+				if err := connector.SaveActiveConnectors(s.cfg.DataDir, []string{"claudecode"}); err != nil {
+					t.Fatal(err)
+				}
+				lockPath := filepath.Join(s.cfg.DataDir, "hook_contract_lock.json")
+				beforeLock, err := os.ReadFile(lockPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(s.cfg.DataDir, "agent_discovery.json"),
+					[]byte(`{"agents":{"claudecode":{"version":"2.1.307 (Claude Code)"},"codex":{"version":"codex-cli 0.142.4"}}}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				failed := &failingClaudeRefresh{ClaudeCodeConnector: claude,
+					afterWrite: failure == "after settings write", locked: failure == "persistent lock", verifyFails: failure == "verification failure", unchanged: failure == "unchanged refusal"}
+				peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
+				var transaction multiConnectorSetupTransaction
+				var setupErr error
+				if mode == "multi" {
+					transaction, setupErr = s.setupConnectorsIsolatedTransaction(context.Background(),
+						[]connector.Connector{peer, failed}, "tok", "127.0.0.1:0", "127.0.0.1:0", "master",
+						guardrail.NewRulePackCache())
+				} else {
+					authority, err := captureSingleConnectorRollbackAuthority(opts, failed)
+					if err != nil {
+						t.Fatal(err)
+					}
+					setupErr = connector.SetupRecordingCreatedDirs(context.Background(), failed, opts)
+					if setupErr == nil {
+						setupErr = verifyHookScriptsOrRetry(context.Background(), opts, failed)
+					}
+					setupErr = s.failGuardrailWithRollback(context.Background(), opts, failed, "setup", setupErr, authority)
+					setupErr = restoreSingleConnectorSetupPoint(context.Background(), authority, setupErr)
+				}
+				if setupErr == nil || len(transaction.succeeded) != 0 {
+					t.Errorf("refresh error=%v survivors=%v; want a failed startup", setupErr, transaction.succeeded)
+				}
+				if failed.teardowns != 0 {
+					t.Errorf("refresh called uninstall teardown %d times", failed.teardowns)
+				}
+				if err := verifyEffectiveHookRegistration(opts, claude); err != nil {
+					t.Errorf("previous native guards were lost: %v", err)
+				}
+				if active := connector.LoadActiveConnectors(s.cfg.DataDir); !reflect.DeepEqual(active, []string{"claudecode"}) {
+					t.Errorf("active roster=%v, want the previous registration", active)
+				}
+				if after, err := os.ReadFile(lockPath); err != nil || !bytes.Equal(after, beforeLock) {
+					t.Errorf("previous hook lock was not restored: %v", err)
+				}
+				if mode == "multi" && peer.teardownCalls != 1 {
+					t.Errorf("peer teardown=%d, want the new registration rolled back", peer.teardownCalls)
+				}
+			})
+		}
 	}
-	priorPlugin := []byte("// prior managed OpenCode plugin\n")
-	if err := os.WriteFile(pluginPath, priorPlugin, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	priorOpts := prepareOpenCodeSetupAuthorityFixture(t, s.cfg.DataDir)
-	priorLock := connector.NewHookContractLockEntry(
-		priorOpts,
-		connector.NewOpenCodeConnector(),
-		"prior-test-build",
-	)
-	if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, priorLock); err != nil {
-		t.Fatal(err)
-	}
-	failed := &failingOpenCodeConnector{
-		bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "opencode"}},
-		pluginPath:        pluginPath,
-	}
+}
 
-	got, err := s.setupConnectorsIsolated(
-		context.Background(), []connector.Connector{failed}, "tok", "a", "b", "master",
-		guardrail.NewRulePackCache(),
-	)
-	if err != nil {
-		t.Fatalf("setupConnectorsIsolated: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("succeeded = %v, want failed OpenCode skipped", got)
-	}
-	plugin, err := os.ReadFile(pluginPath)
-	if err != nil {
-		t.Fatalf("read restored plugin: %v", err)
-	}
-	if !reflect.DeepEqual(plugin, priorPlugin) {
-		t.Fatalf("restored plugin = %q, want exact prior bytes %q", plugin, priorPlugin)
-	}
-	if lock := connector.LoadHookContractLockEntry(s.cfg.DataDir, "opencode"); lock.ContractID != priorLock.ContractID || lock.RawAgentVersion != priorLock.RawAgentVersion {
-		t.Fatalf("restored lock = %+v, want prior contract/version", lock)
-	}
-	if active := connector.LoadActiveConnector(s.cfg.DataDir); active != "" {
-		t.Fatalf("active connector = %q, want failed OpenCode absent", active)
+func TestSetupConnectorsIsolated_OpenCodeFailureRestoresPluginAndLock(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		t.Run(fmt.Sprintf("previously active=%t", active), func(t *testing.T) {
+			s := multiBootSidecar(t)
+			s.cfg.DataDir = testenv.PrivateTempDir(t)
+			configDir := testenv.PrivateTempDir(t)
+			t.Setenv("OPENCODE_CONFIG_DIR", configDir)
+			pluginPath := filepath.Join(configDir, "plugins", "defenseclaw.js")
+			if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			priorPlugin := []byte("// prior managed OpenCode plugin\n")
+			if err := os.WriteFile(pluginPath, priorPlugin, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			priorOpts := prepareOpenCodeSetupAuthorityFixture(t, s.cfg.DataDir)
+			priorLock := connector.NewHookContractLockEntry(
+				priorOpts,
+				connector.NewOpenCodeConnector(),
+				"prior-test-build",
+			)
+			if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, priorLock); err != nil {
+				t.Fatal(err)
+			}
+			if active {
+				if err := connector.SaveActiveConnectors(s.cfg.DataDir, []string{"opencode"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			failed := &failingOpenCodeConnector{
+				bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "opencode"}},
+				pluginPath:        pluginPath,
+			}
+
+			got, err := s.setupConnectorsIsolated(
+				context.Background(), []connector.Connector{failed}, "tok", "a", "b", "master",
+				guardrail.NewRulePackCache(),
+			)
+			if (err != nil) != active {
+				t.Fatalf("previously active=%t: error=%v, want only a new connector failure isolated", active, err)
+			}
+			if active && failed.teardownCalls != 0 {
+				t.Fatalf("active plugin was unregistered %d times before restoration", failed.teardownCalls)
+			}
+			if len(got) != 0 {
+				t.Fatalf("succeeded = %v, want failed OpenCode skipped", got)
+			}
+			plugin, err := os.ReadFile(pluginPath)
+			if err != nil {
+				t.Fatalf("read restored plugin: %v", err)
+			}
+			if !reflect.DeepEqual(plugin, priorPlugin) {
+				t.Fatalf("restored plugin = %q, want exact prior bytes %q", plugin, priorPlugin)
+			}
+			if lock := connector.LoadHookContractLockEntry(s.cfg.DataDir, "opencode"); lock.ContractID != priorLock.ContractID || lock.RawAgentVersion != priorLock.RawAgentVersion {
+				t.Fatalf("restored lock = %+v, want prior contract/version", lock)
+			}
+			wantActive := ""
+			if active {
+				wantActive = "opencode"
+			}
+			if gotActive := connector.LoadActiveConnector(s.cfg.DataDir); gotActive != wantActive {
+				t.Fatalf("active connector = %q, want %q", gotActive, wantActive)
+			}
+		})
 	}
 }
 
@@ -1215,7 +1361,7 @@ func TestReconcileOrphanedConnectorRegistrationCleansRetiredDesktopBeforeRequest
 			if err := connector.SaveFreshHookContractLockEntry(dataDir, entry); err != nil {
 				t.Fatalf("stage retired lock: %v", err)
 			}
-			priorRoster := []string{"claudecode", "codex", "cursor", "omnigent"}
+			priorRoster := []string{"claudecode", "codex", "cursor"}
 			if err := connector.SaveActiveConnectors(dataDir, priorRoster); err != nil {
 				t.Fatalf("stage prior active roster: %v", err)
 			}
@@ -1298,7 +1444,7 @@ func TestReconcileOrphanedConnectorRegistrationFailureRestoresExactActiveState(t
 			); err != nil {
 				t.Fatal(err)
 			}
-			priorRoster := []string{"claudecode", "codex", "cursor", "omnigent"}
+			priorRoster := []string{"claudecode", "codex", "cursor"}
 			if err := connector.SaveActiveConnectors(dataDir, priorRoster); err != nil {
 				t.Fatal(err)
 			}
@@ -1405,7 +1551,7 @@ func TestReconcileOrphanedConnectorRegistrationRequiresProtectedActiveAuthority(
 				context.Background(),
 				registry,
 				dataDir,
-				[]string{"claudecode", "codex", "copilot", "cursor", "omnigent"},
+				[]string{"claudecode", "codex", "copilot", "cursor"},
 				orphanConnectorReconcileOps{
 					resolveOpts: func(connector.Connector) (connector.SetupOpts, error) { return opts, nil },
 					clearLock: func(dataDir, name string) error {
@@ -2311,16 +2457,6 @@ func TestConnectorSetupTokensProxyKeepsMasterOutOfScopedSidecar(t *testing.T) {
 	}
 	if !tokens.hookTokenScoped || tokens.hookToken == "" || tokens.hookToken == "gateway-master" {
 		t.Fatalf("proxy hook token = %+v, want distinct connector-scoped credential", tokens)
-	}
-}
-
-func TestConnectorSetupTokensOmnigentGetsScopedToken(t *testing.T) {
-	tokens, err := connectorSetupTokensFor(testenv.PrivateTempDir(t), connector.NewOmnigentConnector(), "gateway-master", false)
-	if err != nil {
-		t.Fatalf("connectorSetupTokensFor omnigent: %v", err)
-	}
-	if !tokens.hookTokenScoped || tokens.connectorToken == "" || tokens.connectorToken == "gateway-master" {
-		t.Fatalf("OmniGent tokens = %+v, want connector-scoped policy credential", tokens)
 	}
 }
 

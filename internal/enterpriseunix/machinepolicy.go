@@ -686,6 +686,10 @@ func (l *lifecycle) warnNoConnectorsEnabled(validated *validatedConfig) {
 // registry_required that nothing on the host applies.
 const codeAssetPolicyNotEnforced = "asset_policy_not_enforced"
 
+// codeAssetPolicyRegistryEmpty names a registry_required whose empty
+// registry refuses every asset of the type (p0 GAP-0940).
+const codeAssetPolicyRegistryEmpty = "asset_policy_registry_empty"
+
 // warnUnenforcedAssetPolicy reports an asset_policy default deny or
 // registry_required that blocks nothing: a managed Linux or macOS host runs
 // no install watcher for the users' skills, plugins and MCP servers, unless
@@ -709,6 +713,9 @@ func (l *lifecycle) warnUnenforcedAssetPolicy(validated *validatedConfig) {
 	}
 	for _, message := range validated.Loaded.UnenforcedAssetPolicyRules(watched) {
 		l.result.AddWarning(codeAssetPolicyNotEnforced, message)
+	}
+	for _, message := range validated.Loaded.EmptyRequiredAssetRegistries(watched) {
+		l.result.AddWarning(codeAssetPolicyRegistryEmpty, message)
 	}
 }
 

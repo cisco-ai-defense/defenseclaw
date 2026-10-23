@@ -103,10 +103,22 @@ func (e *Env) gatewayProcesses(ctx context.Context) []gatewayProcess {
 	if err != nil {
 		resolvedManaged = managedGateway
 	}
+	// The macOS LaunchAgents run each account's sandbox daemon from the
+	// package's content-addressed copy of the managed gateway
+	// (launchAgentProgram): the managed sandbox service, not a per-user
+	// gateway (GAP-0007).
+	launchAgents := filepath.Join(e.Layout.BinDir, "launch-agents")
+	resolvedAgents, err := filepath.EvalSymlinks(launchAgents)
+	if err != nil {
+		resolvedAgents = launchAgents
+	}
 	var out []gatewayProcess
 	for _, process := range all {
 		path := filepath.Clean(process.Path)
 		if filepath.Base(path) != "defenseclaw-gateway" || path == managedGateway || path == resolvedManaged || process.PID == os.Getpid() {
+			continue
+		}
+		if agents := filepath.Dir(filepath.Dir(path)); agents == launchAgents || agents == resolvedAgents {
 			continue
 		}
 		out = append(out, process)

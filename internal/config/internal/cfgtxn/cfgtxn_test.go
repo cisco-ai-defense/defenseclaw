@@ -136,3 +136,89 @@ func TestCommitRejectsHandEditAfterCandidateRead(t *testing.T) {
 		t.Fatalf("generation advanced after conflict: %v", err)
 	}
 }
+
+// WriteFileDurablePublished runs publish on the written temp file before
+// the rename: the target is never there with the temp file's access, and a
+// publish error leaves the old target and no temp file.
+func TestWriteFileDurablePublishedPublishesTheTempFileBeforeTheRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "event.json")
+	var seen []string
+	publish := func(tmp string) error {
+		if filepath.Dir(tmp) != dir || tmp == path {
+			t.Fatalf("publish got %s, want a temp file in %s", tmp, dir)
+		}
+		if raw, err := os.ReadFile(tmp); err != nil || string(raw) != "new" {
+			t.Fatalf("temp file = %q (%v), want the written bytes", raw, err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the target exists before publish: %v", err)
+		}
+		seen = append(seen, tmp)
+		return nil
+	}
+	if err := WriteFileDurablePublished(path, []byte("new"), 0o640, publish); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("publish ran %d times", len(seen))
+	}
+	refused := errors.New("chown refused")
+	err := WriteFileDurablePublished(path, []byte("newer"), 0o640, func(string) error { return refused })
+	if !errors.Is(err, refused) {
+		t.Fatalf("err = %v, want the publish error", err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != "new" {
+		t.Fatalf("target = %q after a refused publish, want the old bytes", raw)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("files left: %v", entries)
+	}
+}
+
+// The temp file is flushed again after publish changed its owner and
+// access, before the rename, so a power loss cannot leave the target with
+// the access it was written with. A failed flush leaves the old target and
+// no temp file. Before, the temp file was flushed only before publish.
+func TestWriteFileDurablePublishedFlushesTheTempFileAfterPublish(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "event.json")
+	saved := syncPublished
+	t.Cleanup(func() { syncPublished = saved })
+	var published, flushed []string
+	publish := func(tmp string) error {
+		published = append(published, tmp)
+		return nil
+	}
+	syncPublished = func(tmp string) error {
+		if len(published) != len(flushed)+1 || published[len(published)-1] != tmp {
+			t.Fatalf("flushed %s, want the temp file publish just ran on (%v)", tmp, published)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the target exists before the flush: %v", err)
+		}
+		flushed = append(flushed, tmp)
+		return saved(tmp)
+	}
+	if err := WriteFileDurablePublished(path, []byte("new"), 0o640, publish); err != nil {
+		t.Fatal(err)
+	}
+	if len(flushed) != 1 {
+		t.Fatalf("the temp file was flushed %d times after publish, want 1", len(flushed))
+	}
+	if err := WriteFileDurable(filepath.Join(dir, "plain.json"), []byte("plain"), 0o640); err != nil || len(flushed) != 1 {
+		t.Fatalf("a write with no publish flushed again: %v (%d)", err, len(flushed))
+	}
+	flushErr := errors.New("flush failed")
+	syncPublished = func(string) error { return flushErr }
+	if err := WriteFileDurablePublished(path, []byte("newer"), 0o640, publish); !errors.Is(err, flushErr) {
+		t.Fatalf("err = %v, want the flush error", err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != "new" {
+		t.Fatalf("target = %q after a failed flush, want the old bytes", raw)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 2 {
+		t.Fatalf("files left: %v", entries)
+	}
+}

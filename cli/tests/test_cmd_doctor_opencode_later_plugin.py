@@ -47,7 +47,7 @@ def _plugins(tmp_path: Path, *others: str) -> Path:
 def _hook_rows(monkeypatch: pytest.MonkeyPatch, own: Path, mode: str) -> list[dict]:
     monkeypatch.setattr(cmd_doctor, "_hook_health_paths_from_lock", lambda _cfg, _name: [str(own)])
     monkeypatch.setattr(cmd_doctor, "_edited_hook_problem", lambda *_args: None)
-    monkeypatch.setattr(cmd_doctor, "_opencode_managed_plugin_drift", lambda *_args: "")
+    monkeypatch.setattr(cmd_doctor, "_managed_plugin_drift", lambda *_args: "")
     monkeypatch.setattr(cmd_doctor, "_opencode_load_heartbeat_status", lambda _cfg: ("pass", "loaded"))
     result = cmd_doctor._DoctorResult(passive=True, quiet=True)
     cmd_doctor._check_hook_health(_cfg(mode), "opencode", result)

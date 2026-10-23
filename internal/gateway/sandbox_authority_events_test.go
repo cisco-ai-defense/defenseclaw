@@ -19,10 +19,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // A person who only runs raw OpenShell sandboxes or plain containers has
@@ -122,5 +124,33 @@ func TestSandboxForeignRecordsCarryTheCallersProfile(t *testing.T) {
 	bob := sandboxreg.Registration{UID: sbxBob.UID, UserName: sbxBob.Name, SubjectKey: key}
 	if got := f.api.sandboxForeignIdentity(context.Background(), bob, "c1", "plain", "claudecode", ""); got.Managed.GuardrailProfile != "engineering" {
 		t.Fatalf("bob's foreign container profile %q", got.Managed.GuardrailProfile)
+	}
+}
+
+// A foreign record of a caller whose groups are unknown, when an assignment
+// needs them, is refused: its stamp carries no candidate profile, digest or
+// matched group, which may be another account's (decision 4 of the 1.0.4
+// identity design).
+func TestSandboxForeignRecordOfARefusedDecisionNamesNoCandidateProfile(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	f.cfg.Guardrail.Profiles["bob-only"] = config.GuardrailProfile{Description: "Bob private profile"}
+	f.cfg.Guardrail.ProfileAssignments = append([]config.ProfileAssignment{
+		{Profile: "bob-only", Match: config.ProfileMatch{Groups: []string{"dc-sbx-bob-team"}}},
+	}, f.cfg.Guardrail.ProfileAssignments...)
+	f.publishFirstGeneration()
+	f.mu.Lock()
+	f.facts[sbxAlice.UID] = useridentity.DirectoryFacts{
+		Principal: sbxAlice.Name + "@DCLAB.TEST", Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
+		Source: "sssd", GroupsPartial: true, ResolvedAt: time.Now(),
+	}
+	f.mu.Unlock()
+	reg := sandboxreg.Registration{UID: sbxAlice.UID, UserName: sbxAlice.Name, SubjectKey: "hmac-sha256:" + strings.Repeat("a", 64)}
+	d := f.api.sandboxMatchPeer(context.Background(), managedHookPeer{UID: reg.UID, Name: reg.UserName}, "claudecode", 0).decision
+	if d.Refused == "" || d.Name == "" {
+		t.Fatalf("decision %+v; want a refusal that names a candidate profile", d)
+	}
+	m := f.api.sandboxForeignIdentity(context.Background(), reg, "c1", "plain", "claudecode", "").Managed
+	if m.GuardrailProfile != "" || m.ProfileDigest != "" || m.MatchedGroup != "" || m.SubjectKey != reg.SubjectKey {
+		t.Fatalf("foreign record of a refused decision: %+v; want no candidate profile, digest or matched group", m)
 	}
 }

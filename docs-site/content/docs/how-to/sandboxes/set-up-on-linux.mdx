@@ -1,0 +1,115 @@
+---
+title: Set up sandboxes on Linux
+description: Run sandbox setup on Linux and check the machine with sandbox doctor.
+keywords:
+  - sandbox setup Linux
+  - sandbox doctor
+  - openshell-gateway
+  - Landlock
+  - KVM MicroVM
+---
+
+Install and configure OpenShell sandboxes on Linux with `defenseclaw sandbox setup`, then check the machine with `defenseclaw sandbox doctor`. By default each sandbox is a Docker container with your project folder mounted live.
+
+## Before you start
+
+| You need | Details |
+| --- | --- |
+| DefenseClaw | Installed, with the daemon running ([quickstart](/docs/get-started/quickstart)). Run as your own user, not root. |
+| Linux | amd64 or arm64 with systemd user sessions. WSL2 is not supported. |
+| Kernel | Landlock ABI 3 or newer in `cat /sys/kernel/security/lsm`. |
+| Docker | Rootful Docker Engine 28 or newer with buildx, and your user in the `docker` group. Rootless Docker is not supported. |
+| Disk | 5 GiB free for Docker (10 GiB recommended). The first image build downloads about 3 GB. |
+| OpenShell | 0.1.5 or newer. Setup installs it, or upgrades an older one, after asking. |
+
+Turn on linger so the gateway keeps running after you log out: `sudo loginctl enable-linger $USER`.
+
+## Steps
+
+<Steps>
+
+<Step>
+
+### Run setup
+
+```bash
+defenseclaw sandbox setup
+```
+
+Setup checks the machine and asks before each change: installing OpenShell (NVIDIA's installer, sha256 verified, `sudo`), turning on project-folder mounts and turning off OpenShell's usage telemetry on your local gateway, adding the `claude` and `codex` shell wrappers, and building the harness images.
+
+```text
+DefenseClaw sandbox setup
+  Checking this machine…  ✓ linux/arm64  ✓ Landlock  ✓ Docker 29.4.0  ✗ OpenShell not installed
+Install OpenShell … with NVIDIA's installer? (sudo; sha256 verified) [y/N] y
+  ✓ gateway configured and restarted
+  ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml
+  ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972)
+
+  ✓ Done →  cd <project> && defenseclaw sandbox run claude
+```
+
+Setup is safe to run again. Say no to mounts, or pass `--no-mounts`, and no Claude Code or Codex sandbox can start. Flags and the full list of steps are in the [sandbox CLI reference](/docs/reference/sandboxes/cli#sandbox-setup). The TUI runs the same setup: `defenseclaw tui`, `0`, **Sandboxes (OpenShell)**.
+
+</Step>
+
+<Step>
+
+### Check the machine
+
+```bash
+defenseclaw sandbox doctor
+```
+
+```text
+  ✓ Landlock                   ABI 6
+  ✓ Docker                     Docker 29.4.0 (Ubuntu 24.04 LTS)
+  ✓ Gateway service            openshell-gateway active (running)
+  ✓ Gateway compute driver     docker
+  ✓ Project bind mounts        enabled for the docker driver
+  ✓ Sandbox ingress port       127.0.0.1:18971 is served by the DefenseClaw daemon
+  ✓ Harness images             hook-verified: claudecode 2.1.156, codex 0.146.0
+  …
+
+  ✓ ready for sandboxes
+```
+
+Every warning or failure names its fix on the next line. `defenseclaw sandbox doctor --fix` applies the fixes that need only your user. The command exits 1 when a check fails.
+
+</Step>
+
+<Step>
+
+### Run your first agent
+
+```bash
+cd ~/code/myapp
+defenseclaw sandbox run claude
+```
+
+Continue with [run an agent](/docs/how-to/sandboxes/run-an-agent).
+
+</Step>
+
+</Steps>
+
+## Run sandboxes in MicroVMs with KVM
+
+On a host with KVM, the `vm` driver runs each sandbox as a small virtual machine with its own kernel. It is the way on when the host kernel has no Landlock. Setup offers it when `/dev/kvm` exists and stops with the way on if something is missing: access to `/dev/kvm`, `e2fsprogs` 1.43 or newer, and the `openshell-driver-vm` download. Every MicroVM run works on a copy, so [pull](/docs/how-to/sandboxes/review-undo-or-pull#pull-on-macos) brings the work back.
+
+## One OpenShell gateway per machine
+
+OpenShell's gateway listens on `127.0.0.1:17670` for the account that started it, so only that account can run sandboxes. To hand sandboxes to another account, run `systemctl --user disable --now openshell-gateway` in the first, then `defenseclaw sandbox setup` in the second. Every sandbox on the gateway stops. Members of the `docker` group can see every sandbox container, so give the group only to accounts that trust each other.
+
+## Check it worked
+
+`defenseclaw sandbox doctor` ends with `ready for sandboxes`.
+
+## Undo
+
+`defenseclaw sandbox teardown --dry-run` prints every step. `defenseclaw sandbox teardown` removes this install's sandboxes, images and gateway changes. OpenShell stays installed.
+
+## Next
+
+- [Run an agent in a sandbox](/docs/how-to/sandboxes/run-an-agent)
+- [Troubleshooting](/docs/troubleshooting/sandboxes)

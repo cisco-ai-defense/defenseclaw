@@ -248,7 +248,7 @@ func TestApplicationProtectionValidateRejectsBadValues(t *testing.T) {
 	}
 
 	cfg = DefaultApplicationProtectionConfig()
-	cfg.IncludeConnectors = []string{"open-hands", "openhands"}
+	cfg.IncludeConnectors = []string{"codex", "CoDeX"}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "same connector") {
 		t.Fatalf("Validate duplicate include = %v, want duplicate connector error", err)
 	}

@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 
 	"golang.org/x/sys/unix"
 )
@@ -19,16 +18,11 @@ type systemReader struct{}
 
 var System Reader = systemReader{}
 
-func (systemReader) Read(path string, mode os.FileMode) (View, error) {
-	output, err := exec.Command("getfacl", "-cpn", "--", path).Output()
-	if err == nil {
-		return ParseGetfacl(string(output))
-	}
-	if !errors.Is(err, exec.ErrNotFound) {
-		return View{}, fmt.Errorf("getfacl %s: %w", path, err)
-	}
-	// Minimal Linux installations need not have the acl command. The kernel's
-	// access ACL xattr carries the same entries, so retain the check there.
+// Read reads the access ACL from the kernel. It used to start getfacl,
+// found through the caller's PATH, and trust its output; privileged checks
+// run it, so the ACL comes from the file's xattr instead (p0 GAP-1382). A
+// file without an access ACL reads as View{} and its mode bits decide.
+func (systemReader) Read(path string, _ os.FileMode) (View, error) {
 	return ReadAccessXattr(path)
 }
 

@@ -1650,6 +1650,77 @@ def windows_acl_confidentiality_error(path: str | os.PathLike[str]) -> str | Non
     return None
 
 
+def guard_private_dacl_error(
+    owner_sid: str,
+    null_dacl: bool,
+    entries: list[tuple[int, int, int, str]],
+    current_sid: str,
+) -> str | None:
+    """Apply the Go guard's private-file DACL rule to one ACL snapshot.
+
+    This is ``privateSecurityDescriptorIsSafeForSubject`` in
+    internal/safefile/protect_windows.go for a non-impersonated caller: the
+    current user owns the object; no allow entry with a non-empty mask names
+    anyone but the current user, OWNER RIGHTS or LocalSystem (read-only and
+    inherit-only grants included); no deny entry with a non-empty mask names
+    one of those three; and both the owner and LocalSystem hold a grant.
+    *entries* are ``(mask, access_mode, ace_flags, sid)`` as returned by
+    ``_windows_acl_snapshot`` (access mode 1 allows, 3 denies).
+    """
+    system, owner_rights = "S-1-5-18", "S-1-3-4"
+    if not current_sid:
+        return "current user SID could not be resolved"
+    if null_dacl:
+        return "ACL is a null DACL"
+    if owner_sid != current_sid:
+        return f"owner SID {owner_sid or '<unknown>'} is not the current user"
+    found_owner, found_system = False, current_sid == system
+    for mask, access_mode, _flags, sid in entries:
+        if not mask:
+            continue
+        if access_mode == 3:
+            if sid in {current_sid, system, owner_rights}:
+                return f"ACL denies access to {sid}"
+            continue
+        if access_mode not in (1, 2):
+            return f"ACL has an entry the guard cannot read for {sid or '<unknown>'}"
+        if sid in {current_sid, owner_rights}:
+            found_owner = True
+        elif sid == system:
+            found_system = True
+        else:
+            return f"ACL grants access to untrusted SID {sid or '<unknown>'}"
+    if not (found_owner and found_system):
+        return "owner/SYSTEM access missing"
+    return None
+
+
+def windows_guard_private_file_error(path: str | os.PathLike[str]) -> str | None:
+    """Return why the Go guard would refuse *path* as a private file, or ``None``.
+
+    Mirrors ``safefile.ValidatePrivateFile`` on Windows: no reparse point on
+    the path or any ancestor, a regular file, owned by the current user, and
+    a DACL that passes :func:`guard_private_dacl_error`. Non-Windows callers
+    get ``None``; POSIX callers check the mode bits themselves.
+    """
+    if os.name != "nt":
+        return None
+    target = os.path.abspath(os.fspath(path))
+    try:
+        reject_reparse_path(target)
+        info = os.lstat(target)
+    except OSError as exc:
+        return f"cannot inspect {target} ({exc})"
+    if not stat.S_ISREG(info.st_mode):
+        return "not a regular file"
+    try:
+        owner_sid, null_dacl, entries = _windows_acl_snapshot(target)
+        current_sid = _windows_current_user_sid()
+    except OSError as exc:
+        return f"cannot read Windows ACL ({exc})"
+    return guard_private_dacl_error(owner_sid, null_dacl, entries, current_sid)
+
+
 def windows_acl_custody_confidentiality_error(
     path: str | os.PathLike[str], *, allow_inheritable: bool = False
 ) -> str | None:

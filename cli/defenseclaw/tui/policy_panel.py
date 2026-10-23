@@ -41,6 +41,7 @@ from typing import Any
 
 from rich.console import RenderableType
 
+from defenseclaw.connector_contracts import has_native_approval_prompt
 from defenseclaw.platform_support import openshell_sandboxes_supported
 from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.screens.consequence import (
@@ -370,7 +371,9 @@ class PolicyPanelMixin:
         model = self.policy_model
         if not self._policy_detail_always() and not model.detail_open:
             return None
-        title, lines = model.aside()
+        size = getattr(self, "size", None)
+        height = int(getattr(size, "height", 0) or 0)
+        title, lines = model.aside(compact=not self._policy_aside_shown() and 0 < height < _TALL_ROWS)
         if not title:
             return None
         return Aside(title, "\n".join(rich_escape(line) for line in lines))
@@ -664,8 +667,11 @@ class PolicyPanelMixin:
         if not chosen or chosen == (current if current == "off" else current.upper()):
             self._set_status("Approval unchanged.")  # type: ignore[attr-defined]
             return
+        from defenseclaw.enforce import asset_lists
+
+        secure_client = asset_lists.is_secure_client(getattr(self, "config", None))
         confirmed = await self.push_screen_wait(  # type: ignore[attr-defined]
-            PolicyConsequenceScreen(hilt_change_modal(model, row, chosen))
+            PolicyConsequenceScreen(hilt_change_modal(model, row, chosen, secure_client=secure_client))
         )
         if confirmed is None:
             self._set_status("Approval unchanged.")  # type: ignore[attr-defined]
@@ -1004,27 +1010,60 @@ def level_change_modal(model: PoliciesPanelModel, row: Any, kind: str, choice: s
     return _modal(title, f"{what} level: {old} → {new}", details, consequence, _confirm("level", "s", label, weaker))
 
 
-def hilt_change_modal(model: PoliciesPanelModel, row: Any, level: str) -> ConsequenceModalModel:
+def hilt_change_modal(
+    model: PoliciesPanelModel, row: Any, level: str, *, secure_client: bool = False
+) -> ConsequenceModalModel:
     """Human approval for one scope; red when it asks for fewer severities."""
     old = str(getattr(row, "hilt", "") or "off")
-    weaker = hilt_weakens(old, level)
     scope = str(getattr(row, "scope", "") or "global")
     mode = str(getattr(row, "mode", "") or "observe")
     block, alert = model.scope_levels(row)
     connector = model.connector_of(row)
     intent = hilt_intent(level, model.command_connector(row))
-    details = [posture_summary(scope, "action", block, alert, level)]
-    if mode != "action":
+    all_connectors = not connector and model.multi_connector
+    affected = [r for r in model.postures if model.connector_of(r)] if all_connectors else [row]
+    weaker = any(hilt_weakens(str(getattr(r, "hilt", "") or "off"), level) for r in affected)
+    details = [] if all_connectors else [posture_summary(scope, "action", block, alert, level)]
+    # The connectors this reaches, and how each answers a confirm verdict.
+    reached = affected if connector or all_connectors else [r for r in model.postures if model.connector_of(r)]
+    observing = [str(getattr(r, "scope", "")) for r in affected if str(getattr(r, "mode", "") or "observe") != "action"]
+    alerting = [model.connector_of(r) for r in reached if not has_native_approval_prompt(model.connector_of(r))]
+    prompting = [model.connector_of(r) for r in reached if has_native_approval_prompt(model.connector_of(r))]
+    if mode != "action" and not all_connectors:
         details.append(f"{scope} is in observe mode, so nothing waits for approval until it runs in action mode.")
+    elif observing:
+        verb = ("is", "it runs") if len(observing) == 1 else ("are", "they run")
+        details.append(
+            f"{', '.join(observing)} {verb[0]} in observe mode, so nothing waits for approval there "
+            f"until {verb[1]} in action mode."
+        )
+    if level != "off" and alerting:
+        has, its = ("has", "its") if len(alerting) == 1 else ("have", "their")
+        details.append(
+            f"{', '.join(alerting)} {has} no native approval prompt: {its} confirm verdicts raise alerts instead."
+        )
+        if prompting:
+            details.append("Asks in the agent's own approval prompt: " + ", ".join(prompting) + ".")
     if connector and not model.multi_connector:
         details.append("This install has one connector, so this sets approval for every connector.")
-    elif not connector and model.multi_connector:
+    elif all_connectors:
         others = [str(getattr(r, "scope", "")) for r in model.postures if model.connector_of(r)]
         if others:
             details.append("Sets approval on every active connector: " + ", ".join(others) + ".")
-    details.append(_run_line(intent, "; the gateway restarts to apply it."))
+        details.append(f"The global default stays {old}; this command sets connector overrides.")
+    # What `guardrail hilt` does: a Secure Client gateway reads approval at
+    # start, so the command restarts it; elsewhere the running gateway
+    # applies the new config generation with no restart.
+    if secure_client:
+        details.append(_run_line(intent, "; on Secure Client the gateway restarts to apply it."))
+    else:
+        details.append(_run_line(intent, "; a running gateway applies it now."))
     consequence = ""
-    if weaker:
+    if weaker and all_connectors:
+        names = [str(getattr(r, "scope", "")) for r in affected
+                 if hilt_weakens(str(getattr(r, "hilt", "") or "off"), level)]
+        consequence = f"This weakens protection: {', '.join(names)} ask a person for fewer findings."
+    elif weaker:
         lost = actions_weaken(severity_actions(block, alert, old), severity_actions(block, alert, level))
         if lost:
             consequence = (
@@ -1032,10 +1071,14 @@ def hilt_change_modal(model: PoliciesPanelModel, row: Any, level: str) -> Conseq
             )
         else:
             consequence = f"This weakens protection: {scope} asks a person for fewer findings."
-    title = "Turn off human approval" if level == "off" else f"Ask a human for {level}"
+    asks_everywhere = not observing and not alerting
+    if level == "off":
+        title = "Turn off human approval"
+    else:
+        title = f"Ask a human for {level}" if asks_everywhere else f"Set human approval to {level}"
     return _modal(
-        f"{title} on {_scope_words(model, row)}?",
-        f"{old} → {level}",
+        f"{title} on {'every active connector' if all_connectors else _scope_words(model, row)}?",
+        f"{'Connector overrides' if all_connectors else old} → {level}",
         details,
         consequence,
         _confirm("hilt", "s", "Turn approval off" if level == "off" else f"Ask for {level}", weaker),

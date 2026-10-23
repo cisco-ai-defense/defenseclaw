@@ -70,11 +70,9 @@ ACTIVE_SCAN_CONNECTORS = (
     "hermes",
     "cursor",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
 )
 
 

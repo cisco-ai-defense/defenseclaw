@@ -446,7 +446,7 @@ func (s *MCPScanner) workDirNote() string {
 }
 
 // runMCPScannerCommand owns the runtime process and its Python descendants.
-var runMCPScannerCommand = processutil.RunTree
+var runMCPScannerCommand = processutil.RunTreeIsolated
 
 func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	// URLs and server names are scanner inputs, not filesystem paths. The
@@ -556,7 +556,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := runMCPScannerCommand(cmd)
+	err := runMCPScannerCommand(ctx, cmd)
 	duration := time.Since(start)
 	stderrStr := stderr.String()
 

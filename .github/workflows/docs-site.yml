@@ -7,12 +7,16 @@ on:
       - 'docs-site/**'
       - 'docs/**'
       - 'policies/**'
+      # test:docs-claims reads the Intune packager.
+      - 'packaging/mdm/**'
       - '.github/workflows/docs-site.yml'
   pull_request:
     paths:
       - 'docs-site/**'
       - 'docs/**'
       - 'policies/**'
+      # test:docs-claims reads the Intune packager.
+      - 'packaging/mdm/**'
       - '.github/workflows/docs-site.yml'
   workflow_dispatch:
 
@@ -85,13 +89,26 @@ jobs:
       - name: Unit tests (policy creator)
         # Gate the deploy on the share/highlighter/cmdk-filter tests so
         # silent regressions in the policy creator can't ship to Pages.
-        run: npm run test:policy-creator
+        run: |
+          npm run test:policy-creator
+          npm run test:docs-w4
 
       - name: Unit tests (feature demos)
         run: npm run test:feature-demos
 
+      - name: Unit tests (search initialization and index size)
+        run: npm run test:search
+
       - name: Unit tests (diagram zones)
         run: npm run test:diagram-zones
+
+      - name: Unit tests (support matrix)
+        run: npm run test:support-matrix
+
+      - name: Unit tests (docs claims)
+        # Page text that must match the product (the Intune packager's
+        # compared blocks, hook fail modes).
+        run: npm run test:docs-claims
 
       - name: Lint docs site
         # Next.js 16 no longer runs lint from `next build`, so keep the

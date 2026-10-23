@@ -2970,3 +2970,17 @@ class WindowsHookResolutionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_codex_session_end_hash_uses_codex_capped_timeout() -> None:
+    """Codex hashes SessionEnd with its timeout capped at three seconds."""
+    command = r"C:\\Users\\dc\\.defenseclaw\\hooks\\codex-hook.ps1"
+    at_cap = _codex_command_hook_hash("session_end", None, {"type": "command", "command": command, "timeout": 3})
+    above = _codex_command_hook_hash("session_end", None, {"type": "command", "command": command, "timeout": 60})
+    absent = _codex_command_hook_hash("session_end", None, {"type": "command", "command": command})
+    one = _codex_command_hook_hash("session_end", None, {"type": "command", "command": command, "timeout": 1})
+    assert above == at_cap
+    assert absent == one
+    uncapped_30 = _codex_command_hook_hash("pre_tool_use", "*", {"type": "command", "command": command, "timeout": 30})
+    uncapped_60 = _codex_command_hook_hash("pre_tool_use", "*", {"type": "command", "command": command, "timeout": 60})
+    assert uncapped_30 != uncapped_60

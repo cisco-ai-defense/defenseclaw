@@ -27,7 +27,6 @@ import (
 )
 
 // The mock's OpenAI Chat Completions and Gemini generateContent routes serve
-// the harnesses that speak those APIs (Hermes, OpenHands through LiteLLM,
 // Antigravity through the Gemini SDK). Their shell tools differ in name and
 // schema, so the scripted call targets whichever advertised tool is a known
 // shell tool and fills its arguments from the tool's JSON schema.

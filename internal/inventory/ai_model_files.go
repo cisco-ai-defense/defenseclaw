@@ -2018,7 +2018,7 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(
 		Quality:       discoveryConfidence,
 		MatchKind:     modelArtifactMatchKind(format),
 	}
-	if s.opts.StoreRawLocalPaths {
+	if s.keepEvidencePath() {
 		evidence.RawPath = path
 	}
 	sizeBytes := info.Size()
@@ -2059,7 +2059,7 @@ func (s *ContinuousDiscoveryService) ollamaBlobCacheAggregate(path string, root 
 		ValueHash: hashValue(blobs[0]), WorkspaceHash: hashPath(root.path),
 		Quality: 0.8, MatchKind: MatchKindHeuristic,
 	}
-	if s.opts.StoreRawLocalPaths {
+	if s.keepEvidencePath() {
 		evidence.RawPath = path
 	}
 	return modelFileAggregate{

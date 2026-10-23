@@ -14,7 +14,6 @@ package enterpriseunix
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -88,6 +87,9 @@ type validatedConfig struct {
 	// Raw is then the migrated config_version 9 document, and the apply
 	// keeps the v8 bytes and the migration record next to config.yaml.
 	Migration *configMigration
+	// Source is the file the administrator supplied (--config), or "" for
+	// the installed config.yaml; refusals name it.
+	Source string
 	// FailModeRepair is set when Raw is the installed config with a Cursor
 	// hook_fail_mode the 1.0.0-1.0.2 migration rewrote to open restored to
 	// closed; the apply stores it as migration-v9.json.
@@ -148,18 +150,26 @@ func (e *Env) migrateConfigV9(ctx context.Context, raw []byte, v8 *validatedConf
 // repairMigratedCursorFailMode is config.RepairMigratedCursorFailMode on
 // the installed config: the repaired config, validated, with the migration
 // record the apply stores next to it, or nil when the record proves no
-// rewrite (no record means no change).
+// rewrite (no record means no change). A record that is there but cannot be
+// read (not a regular file, too large) or decoded (G-small loop 4), or that
+// decodes without the fields every migration writes (G-small loop round 2,
+// config.DecodeMigrationRecord), is an error: the run never reports a Cursor
+// fail mode the record proves rewritten as settled.
 func (e *Env) repairMigratedCursorFailMode(installed *validatedConfig) (*validatedConfig, error) {
 	if fromBundle, err := e.installedConfigFromBundle(); err != nil || fromBundle {
 		return nil, err
 	}
-	raw, err := readBounded(e.P(config.MigrationRecordPath(e.Layout.ConfigPath)), maxInputBytes)
-	if err != nil {
+	recordPath := config.MigrationRecordPath(e.Layout.ConfigPath)
+	raw, err := readBounded(e.P(recordPath), maxInputBytes)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
-	var record config.MigrationRecord
-	if json.Unmarshal(raw, &record) != nil {
-		return nil, nil
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", recordPath, err)
+	}
+	record, err := config.DecodeMigrationRecord(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode %s: %w", recordPath, err)
 	}
 	repaired, updated, ok := config.RepairMigratedCursorFailMode(installed.Raw, record)
 	if !ok {
@@ -239,6 +249,7 @@ func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig,
 			return nil, e.explainConfigError(err, source)
 		}
 	}
+	validated.Source = source
 	return validated, nil
 }
 
@@ -253,24 +264,11 @@ func (e *plainConfigError) Error() string { return e.msg }
 func (e *plainConfigError) Unwrap() error { return e.err }
 
 // explainConfigError rewrites a config error for the managed host: it names
-// the administrator's file, and a config_version problem says how to fix the
-// file instead of pointing at `defenseclaw migrate`, a per-user command the
-// enterprise packages do not ship.
+// the administrator's file, and points at setting `config_version: 9`
+// instead of `defenseclaw migrate`, a per-user command the enterprise
+// packages do not ship. plainConfigProblem words every YAML error itself.
 func (e *Env) explainConfigError(err error, source string) error {
 	message := err.Error()
-	var yamlErr *config.V8YAMLError
-	if errors.As(err, &yamlErr) {
-		fixed := *yamlErr
-		switch yamlErr.Code {
-		case config.V8YAMLErrorVersionRequired, config.V8YAMLErrorVersionInvalid:
-			fixed.Action = "add `config_version: 9` as the first line of the file"
-		case config.V8YAMLErrorVersionUpgrade:
-			fixed.Action = "write the file in the current (v9) format and set `config_version: 9`"
-		case config.V8YAMLErrorVersionUnsupported:
-			fixed.Action = "install the DefenseClaw enterprise package that matches this config, or set `config_version: 9`"
-		}
-		message = strings.Replace(message, yamlErr.Error(), fixed.Error(), 1)
-	}
 	if strings.Contains(message, "defenseclaw migrate") {
 		message = strings.ReplaceAll(message, "run `defenseclaw migrate` to create a current source", "set `config_version: 9`")
 		message = strings.ReplaceAll(message, "run `defenseclaw migrate`", "write the file in the current (v9) format and set `config_version: 9`")
@@ -475,6 +473,11 @@ func (e *Env) jsonlParentTraversalProblem(path string) string {
 		if !allowed {
 			return fmt.Sprintf("is below %s (mode %04o, owner uid %d), which the %s gateway service account cannot pass through", dir, info.Mode().Perm(), uid, e.Layout.ServiceUser)
 		}
+		if _, entry, err := e.darwinServiceACLDenial(context.Background(), []string{e.P(dir)}, map[string][]string{e.P(dir): {"search"}}); err != nil {
+			return fmt.Sprintf("is below %s, whose macOS ACL cannot be inspected: %v", dir, err)
+		} else if entry != "" {
+			return fmt.Sprintf("is below %s, whose macOS ACL entry %q keeps the %s gateway service account from passing through", dir, entry, e.Layout.ServiceUser)
+		}
 	}
 	return ""
 }
@@ -521,6 +524,17 @@ func (e *Env) jsonlMissingParentProblem(path string) string {
 		}
 		if !allowed {
 			return fmt.Sprintf("cannot create its missing directory below %s as the %s gateway service account", dir, e.Layout.ServiceUser)
+		}
+		// The gateway creates the file in an existing parent, and a missing
+		// directory below an existing ancestor.
+		need, what := []string{"add_file", "search"}, "cannot create the file in"
+		if dir != parent {
+			need, what = []string{"add_subdirectory", "search"}, "cannot create its missing directory below"
+		}
+		if _, entry, err := e.darwinServiceACLDenial(context.Background(), []string{e.P(dir)}, map[string][]string{e.P(dir): need}); err != nil {
+			return fmt.Sprintf("cannot inspect the macOS ACL of %s: %v", dir, err)
+		} else if entry != "" {
+			return fmt.Sprintf("%s %s as the %s gateway service account: the macOS ACL entry %q denies it", what, dir, e.Layout.ServiceUser, entry)
 		}
 		return ""
 	}
@@ -579,6 +593,11 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 // registered by the gateway package; a build without it skips this.
 func (e *Env) checkCandidateAssets(v *validatedConfig) error {
 	if err := config.CheckCandidateAssets(v.Loaded); err != nil {
+		// A pack reference or digest the gateway refuses, in the same plain
+		// words as the other config refusals (GAP-0547).
+		if plain, ok := e.plainConfigProblem(err, v.Source, v.Raw); ok {
+			return &plainConfigError{msg: plain, err: err}
+		}
 		return fmt.Errorf("config does not build: %w", err)
 	}
 	return nil
@@ -637,6 +656,9 @@ func (e *Env) RulePackServiceReadProblem(ctx context.Context, dir string) string
 }
 
 func (e *Env) rulePackReadable(dir string, account Account) error {
+	// The macOS ACL rights the service account needs on each path.
+	needs := map[string][]string{}
+	var paths []string
 	for parent := filepath.Dir(dir); parent != "/" && parent != "."; parent = filepath.Dir(parent) {
 		_, _, mode, err := statOwnerMode(e.P(parent))
 		uid, gid, ownerErr := e.OwnerOf(e.P(parent))
@@ -646,8 +668,38 @@ func (e *Env) rulePackReadable(dir string, account Account) error {
 		if err == nil && mode.IsDir() && !accountMayAccess(uid, gid, mode, account, 0o1) {
 			return fmt.Errorf("%s is %04o, so the %s service account cannot reach the rule pack below it; %s", parent, mode.Perm(), e.Layout.ServiceUser, e.serviceGroupTraverseFix(parent))
 		}
+		if err == nil && mode.IsDir() {
+			paths, needs[e.P(parent)] = append(paths, e.P(parent)), []string{"search"}
+		}
 	}
 	root := e.P(dir)
+	err := e.rulePackModesReadable(dir, root, account, func(full string, isDir bool) {
+		paths, needs[full] = append(paths, full), []string{"read"}
+		if isDir {
+			needs[full] = []string{"list", "read", "search"}
+		}
+	})
+	if err != nil {
+		return err
+	}
+	// A macOS ACL entry can deny the service account what the mode bits
+	// give it (GAP-1442).
+	denied, entry, err := e.darwinServiceACLDenial(context.Background(), paths, needs)
+	if err != nil {
+		return fmt.Errorf("cannot inspect the macOS ACLs of the rule pack: %w", err)
+	}
+	if entry != "" {
+		shown := e.canonical(denied)
+		return fmt.Errorf("%s has the macOS ACL entry %q, so the %s service account cannot read the rule pack; remove that entry (`chmod -N %s` removes every entry of it) and retry",
+			shown, entry, e.Layout.ServiceUser, shown)
+	}
+	return nil
+}
+
+// rulePackModesReadable walks the rule pack at root (dir, as shown) and
+// refuses the first entry the owner and mode bits keep from the service
+// account; visit sees every folder and file it passed.
+func (e *Env) rulePackModesReadable(dir, root string, account Account, visit func(full string, isDir bool)) error {
 	return filepath.WalkDir(root, func(full string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -668,6 +720,7 @@ func (e *Env) rulePackReadable(dir string, account Account) error {
 			return nil
 		}
 		if accountMayAccess(uid, gid, mode, account, need) {
+			visit(full, mode.IsDir())
 			return nil
 		}
 		shown := dir

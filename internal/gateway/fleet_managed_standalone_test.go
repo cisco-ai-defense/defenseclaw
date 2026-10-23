@@ -41,7 +41,7 @@ func managedStandaloneFleetConfig(host string, port int, fleetMode string) *conf
 			Enabled: true,
 			Connectors: map[string]config.PerConnectorGuardrailConfig{
 				"claudecode": {}, "codex": {}, "copilot": {},
-				"opencode": {}, "hermes": {}, "openhands": {},
+				"opencode": {}, "hermes": {},
 			},
 		},
 		Gateway: config.GatewayConfig{Host: host, Port: port, FleetMode: fleetMode},

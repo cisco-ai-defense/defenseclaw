@@ -153,7 +153,7 @@ func TestEnterpriseWindowsManifestCyclePublishesCurrentUsersGroupFacts(t *testin
 	}
 	enterpriseWindowsEnumerateGroupCacheWriter = func(string, *enterprisehooks.WindowsEnrollmentGroupCache) (bool, error) { return true, nil }
 	var published *enterprisehooks.WindowsEnrollmentGroupCache
-	enterpriseWindowsIdentitySpoolWriter = func(_ string, cache *enterprisehooks.WindowsEnrollmentGroupCache, _ map[string]map[string]string, _ func(string) error, _ func(string, ...any)) error {
+	enterpriseWindowsIdentitySpoolWriter = func(_ context.Context, _ string, cache *enterprisehooks.WindowsEnrollmentGroupCache, _ []string, _ map[string]map[string]string, _ func(string) error, _ func(string, ...any)) error {
 		published = cache
 		return nil
 	}
@@ -179,6 +179,7 @@ func TestEnterpriseWindowsEnumerateAppliesGroupFiltersAndPublishesUnprotectedAge
 	previousCacheLoader := enterpriseWindowsEnumerateGroupCacheLoader
 	previousCacheWriter := enterpriseWindowsEnumerateGroupCacheWriter
 	previousRecordWriter := enterpriseWindowsEnumerateUnprotectedWriter
+	previousSpoolWriter := enterpriseWindowsIdentitySpoolWriter
 	t.Cleanup(func() {
 		enterpriseWindowsEnumerateConfigLoader = previousConfig
 		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
@@ -186,7 +187,17 @@ func TestEnterpriseWindowsEnumerateAppliesGroupFiltersAndPublishesUnprotectedAge
 		enterpriseWindowsEnumerateGroupCacheLoader = previousCacheLoader
 		enterpriseWindowsEnumerateGroupCacheWriter = previousCacheWriter
 		enterpriseWindowsEnumerateUnprotectedWriter = previousRecordWriter
+		enterpriseWindowsIdentitySpoolWriter = previousSpoolWriter
 	})
+	// The identity pass gets the cycle and the accounts the enrollment
+	// excluded (GAP-1049, GAP-1264).
+	var spoolExcluded []string
+	var spoolDeadline bool
+	enterpriseWindowsIdentitySpoolWriter = func(ctx context.Context, _ string, _ *enterprisehooks.WindowsEnrollmentGroupCache, excluded []string, _ map[string]map[string]string, _ func(string) error, _ func(string, ...any)) error {
+		spoolExcluded = excluded
+		_, spoolDeadline = ctx.Deadline()
+		return nil
+	}
 	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
 	cached := enterprisehooks.NewWindowsEnrollmentGroupCache()
 	cached.Names["developers"] = "S-1-5-32-545"
@@ -202,6 +213,9 @@ func TestEnterpriseWindowsEnumerateAppliesGroupFiltersAndPublishesUnprotectedAge
 		seen = opts
 		if opts.ReportUnprotected != nil {
 			opts.ReportUnprotected(enterprisehooks.UnprotectedAgent{User: "alice", SID: "S-1-5-21-1-2-3-1001", Connector: "cursor", Version: "4.1.0", Reason: "version 4.1.0 is not verified against a known hook contract"})
+		}
+		if opts.ReportExcluded != nil {
+			opts.ReportExcluded(enterprisehooks.ManifestTarget{SID: "S-1-5-21-1-2-3-1002", UserHome: `C:\Users\bob`})
 		}
 		return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{}}, nil
 	}
@@ -231,6 +245,9 @@ func TestEnterpriseWindowsEnumerateAppliesGroupFiltersAndPublishesUnprotectedAge
 	}
 	if len(published) != 1 || published[0].Connector != "cursor" {
 		t.Fatalf("published = %+v", published)
+	}
+	if strings.Join(spoolExcluded, ",") != "S-1-5-21-1-2-3-1002" || !spoolDeadline {
+		t.Fatalf("identity pass excluded = %v, cycle deadline = %v; want the excluded account and the cycle", spoolExcluded, spoolDeadline)
 	}
 	if log := stderr.String(); strings.Contains(log, "are not applied on Windows") || !strings.Contains(log, "cursor 4.1.0 for user alice") {
 		t.Fatalf("log:\n%s", log)

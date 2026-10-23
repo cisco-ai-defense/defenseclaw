@@ -292,6 +292,9 @@ func managedErrorText(e *sandboxapi.Error, m *sandboxapi.ManagedStatus) (string,
 		return sandboxapi.ManagedRefusal(adminKeyNote.ReplaceAllString(why, ""), profile, quote, access), true
 	}
 	sentence, code := managedSentence(e)
+	if sentence != "" && (code == sandboxrelay.ReasonDaemonOutdated || code == sandboxrelay.DetailSetupChanging) {
+		return sentence, true
+	}
 	switch e.Code {
 	case sandboxapi.CodeAdminViolation:
 		quote := ""
@@ -361,6 +364,11 @@ var gatewayTransportErrors = []string{
 	"error reading from server", "grpc: ",
 }
 
+// gatewayUnreachableErrors are the words of the OpenShell CLI's failure to
+// reach a gateway that does not listen ("× transport error ├─▶ tcp connect
+// error ... Connection refused").
+var gatewayUnreachableErrors = []string{"tcp connect error", "transport error", "connection refused"}
+
 // gatewayTransportText is why with a raw gRPC transport failure of the
 // OpenShell gateway ("Cancelled: grpc: the client connection is closing")
 // put in words: such text named nothing the user could act on, and the
@@ -368,6 +376,11 @@ var gatewayTransportErrors = []string{
 // returned unchanged.
 func gatewayTransportText(why string) string {
 	lower := strings.ToLower(why)
+	for _, raw := range gatewayUnreachableErrors {
+		if strings.Contains(lower, raw) {
+			return "the OpenShell gateway does not answer"
+		}
+	}
 	for _, raw := range gatewayTransportErrors {
 		if strings.Contains(lower, raw) {
 			return "the connection to the OpenShell gateway closed"

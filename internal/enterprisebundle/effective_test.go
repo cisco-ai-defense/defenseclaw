@@ -96,7 +96,7 @@ func testBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T,
 			return nil
 		})
 	})
-	driver := &enterprisebundle.Driver{Store: store, AnchorsPath: anchorsPath, Platform: platform, ProductVersion: "1.0.2", Digester: digester, Now: func() time.Time { return verifyAt }}
+	driver := &enterprisebundle.Driver{Store: store, ConfigPath: filepath.Join(root, "config.yaml"), AnchorsPath: anchorsPath, Platform: platform, ProductVersion: "1.0.2", Digester: digester, Now: func() time.Time { return verifyAt }}
 	prepared, err := driver.Prepare(context.Background(), f.bundle, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +121,9 @@ func testBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T,
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := driver.Finish(prepared, prepared.ConfigSHA256, nil, enterprisebundle.GatewayPolicy{EffectiveDigest: deviceDigest, Digest: deviceDigest, Applied: true}, false, nil); err != nil {
+	policy := installPreparedBundle(t, driver, prepared)
+	policy.EffectiveDigest, policy.Digest = deviceDigest, deviceDigest
+	if _, err := driver.Finish(prepared, prepared.ConfigSHA256, nil, policy, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if rc := prepared.Receipt; rc.State != enterprisebundle.StateConfirmed || rc.ExpectedDigest != deviceDigest || rc.EffectivePolicyDigest != deviceDigest {

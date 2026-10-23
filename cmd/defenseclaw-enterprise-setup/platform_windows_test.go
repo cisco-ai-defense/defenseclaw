@@ -7,6 +7,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -17,6 +19,64 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+func TestTimedOutStandaloneSetupRecoveryUsesBoundedJournalReplay(t *testing.T) {
+	stage := `C:\ProgramData\DefenseClaw-Enterprise-Setup-0123456789abcdef0123456789abcdef`
+	opts := enterpriseSetupOptions{Action: "uninstall", Standalone: true, JSON: true,
+		Force: true, Purge: true, LifecycleTimeout: time.Minute}
+	previous := enterpriseSetupRecoveryRunner
+	t.Cleanup(func() { enterpriseSetupRecoveryRunner = previous })
+	called := 0
+	enterpriseSetupRecoveryRunner = func(ctx context.Context, path string, args []string, dir string, env []string) ([]byte, error) {
+		called++
+		if _, deadline := ctx.Deadline(); !deadline || ctx.Err() != nil {
+			t.Fatal("recovery must have a fresh bounded context after the install timeout")
+		}
+		if path != filepath.Join(stage, "defenseclaw.exe") || dir != stage ||
+			!reflect.DeepEqual(args, enterpriseLifecycleArguments(stage, enterpriseSetupOptions{
+				Action: "recover", Standalone: true, JSON: true,
+			})) || !reflect.DeepEqual(env, []string{"trusted=test"}) {
+			t.Fatalf("recovery child path=%q args=%q dir=%q env=%q", path, args, dir, env)
+		}
+		return []byte(`{"schema_version":2,"action":"recover","profile":"standalone","platform":"windows","ok":true,"installed":true,"transaction_pending":false,"services":[{"name":"DefenseClawGateway","kind":"gateway","state":"running","required":true}]}`), nil
+	}
+	parent, cancel := context.WithCancel(context.Background())
+	cancel() // The timed-out lifecycle context cannot bound its recovery.
+	recoverChild := func(env []string) func(context.Context) ([]byte, error) {
+		return func(ctx context.Context) ([]byte, error) {
+			return enterpriseSetupRecoveryRunner(ctx, filepath.Join(stage, "defenseclaw.exe"),
+				enterpriseLifecycleArguments(stage, standaloneRecoveryOptions(opts)), stage, env)
+		}
+	}
+	recovered, err := recoverTimedOutStandaloneLifecycle(parent, recoverChild([]string{"trusted=test"}))
+	if err != nil || called != 1 || recovered == nil {
+		t.Fatalf("recovery call=%d error=%v", called, err)
+	}
+	var output bytes.Buffer
+	writeEnterpriseSetupFailureFor(&output, &bytes.Buffer{}, true, standaloneSetupArtifactName, opts,
+		standaloneEnterpriseSetupTimeoutWithRecovery(opts, context.DeadlineExceeded, recovered), enterpriseFailureExitCode)
+	var result struct {
+		Action             string `json:"action"`
+		OK                 bool   `json:"ok"`
+		Installed          bool   `json:"installed"`
+		TransactionPending bool   `json:"transaction_pending"`
+		Services           []struct {
+			Name  string `json:"name"`
+			State string `json:"state"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil || result.Action != "uninstall" ||
+		result.OK || !result.Installed || result.TransactionPending || len(result.Services) != 1 ||
+		result.Services[0].Name != "DefenseClawGateway" || result.Services[0].State != "running" {
+		t.Fatalf("Setup did not retain the recovered deployment proof: %s (%v)", output.String(), err)
+	}
+	enterpriseSetupRecoveryRunner = func(context.Context, string, []string, string, []string) ([]byte, error) {
+		return []byte(`{"schema_version":2,"action":"recover","profile":"standalone","platform":"windows","ok":true,"transaction_pending":true}`), nil
+	}
+	if _, err := recoverTimedOutStandaloneLifecycle(parent, recoverChild(nil)); err == nil {
+		t.Fatal("a pending transaction was reported as restored")
+	}
+}
 
 func TestSignedStandaloneTrustRejectsUnsignedOuterSetup(t *testing.T) {
 	path, err := os.Executable()

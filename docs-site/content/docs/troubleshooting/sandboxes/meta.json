@@ -1,0 +1,11 @@
+{
+  "title": "Sandboxes",
+  "pages": [
+    "setup-and-gateway",
+    "linux",
+    "macos",
+    "runs-and-sessions",
+    "network",
+    "disk-and-telemetry"
+  ]
+}

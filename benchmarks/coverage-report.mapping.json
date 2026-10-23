@@ -576,22 +576,6 @@
         "No compatible aggregate result is currently available; this entry remains in the public source inventory."
       ]
     },
-    "swe-rebench-openhands-trajectories": {
-      "intended_use": [
-        "action",
-        "stateful",
-        "benign-candidate",
-        "hard-negative",
-        "coding-agent",
-        "execution-backed",
-        "real-tool-arguments",
-        "real-tool-results"
-      ],
-      "status": "missing",
-      "limitations": [
-        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
-      ]
-    },
     "Agent-Ark/Toucan-1.5M": {
       "intended_use": [
         "action",

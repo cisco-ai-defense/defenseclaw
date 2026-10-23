@@ -250,10 +250,10 @@ def test_standalone_setup_uninstall_docs_say_it_removes_the_machine_state() -> N
     # The Secure Client page keeps its own wording (state kept unless
     # PURGE=1) and says how the standalone profile differs.
     standalone = {
-        "windows": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "windows.mdx",
-        "cli": ROOT / "docs-site" / "content" / "docs" / "reference" / "cli.mdx",
+        "windows": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "install" / "windows.mdx",
+        "cli": ROOT / "docs-site" / "content" / "docs" / "reference" / "commands" / "cli.mdx",
         "setup-design": ROOT / "docs" / "WINDOWS-ENTERPRISE-SETUP.md",
-        "intune": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "mdm" / "intune-windows.mdx",
+        "intune": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "mdm" / "intune" / "windows.mdx",
     }
     for name, page in standalone.items():
         text = " ".join(_text(page).split())
@@ -261,11 +261,11 @@ def test_standalone_setup_uninstall_docs_say_it_removes_the_machine_state() -> N
         assert "`/uninstall`, also remove managed state." not in text, name
         assert "remove state on uninstall" not in text, name
     # The Secure Client page moved from setup/enterprise-deployment.mdx to
-    # enterprise/secure-client.mdx in the 1.0 docs-site layout.
+    # enterprise/install/secure-client.mdx in the 1.0 docs-site layout.
     docs = ROOT / "docs-site" / "content" / "docs"
     secure_client_page = next(
         page
-        for page in (docs / "enterprise" / "secure-client.mdx", docs / "setup" / "enterprise-deployment.mdx")
+        for page in (docs / "enterprise" / "install" / "secure-client.mdx", docs / "setup" / "enterprise-deployment.mdx")
         if page.exists()
     )
     secure_client = " ".join(_text(secure_client_page).split())
@@ -285,7 +285,9 @@ def test_standalone_uninstall_retry_binds_the_receipt_to_the_retrying_cli() -> N
     rebind = recovery.index("$receipt = Set-DefenseClawSelfUninstallReceiptCaller")
     guard = recovery.rindex("if ($SelfUninstallCallerPID -gt 0 -and", 0, rebind)
     assert "(Test-DefenseClawStandaloneProfile)" in recovery[guard:rebind]
-    move = recovery.index("[IO.Directory]::Move($Layout.InstallRoot, $retiredRoot)")
+    move = recovery.index(
+        "Move-DefenseClawInstallRootForRetirement -Source $Layout.InstallRoot -Destination $retiredRoot"
+    )
     cleanup = recovery.index("$result = Invoke-DefenseClawCommittedUninstallCleanup")
     assert rebind < move < cleanup
     assert recovery.rindex("if ($reboundCaller) {", 0, cleanup) > move
@@ -431,12 +433,14 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-recovery-gateway-smoke.ps1",
     "enterprise-standalone-rollback-sensor-helper-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",
+    "enterprise-standalone-w2b-lifecycle-smoke.ps1",
     "enterprise-standalone-secrets-acl-smoke.ps1",
     "enterprise-standalone-service-logged-error-smoke.ps1",
     "enterprise-standalone-stale-lifecycle-journal-smoke.ps1",
     "enterprise-standalone-state-files-in-use-smoke.ps1",
     "enterprise-standalone-uninstall-cleanup-trust-smoke.ps1",
     "enterprise-standalone-user-cleanup-report-smoke.ps1",
+    "enterprise-standalone-w2b-lifecycle-smoke.ps1",
 )
 
 
@@ -659,6 +663,69 @@ def _portable_pwsh() -> str | None:
     return os.environ.get("DEFENSECLAW_TEST_PWSH") or shutil.which("pwsh") or shutil.which("pwsh.exe")
 
 
+def test_installed_verifier_refuses_untrusted_redaction_key_before_compliance(tmp_path: Path) -> None:
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    harness = tmp_path / "verify-redaction-key.ps1"
+    harness.write_text(
+        r"""
+param([string]$ModulePath)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$null, [ref]$errors)
+if ($errors.Count -gt 0) { throw $errors[0].Message }
+$definition = $ast.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Assert-DefenseClawEnterpriseDeployment'
+}, $true)
+. ([ScriptBlock]::Create($definition.Extent.Text))
+$script:Standalone = $true
+$script:KeyChecks = 0
+function Test-DefenseClawStandaloneProfile { return $script:Standalone }
+function Get-DefenseClawAcceptedGatewayServiceAccounts { return @('gateway') }
+function Get-DefenseClawServiceSID { return 'service sid from OS' }
+function Get-DefenseClawDeploymentMetadata { return [pscustomobject]@{} }
+function Test-DefenseClawMetadataInstalled { return $true }
+function Assert-DefenseClawMetadataIdentity {}
+# Native capture/classification has a separate Windows ACL smoke. Model its
+# refusal here and require the installed-host verifier to propagate it.
+function Get-DefenseClawRedactionKeySecuritySnapshot {
+    $script:KeyChecks++
+    throw 'untrusted_key_reader'
+}
+try {
+    Assert-DefenseClawEnterpriseDeployment -Layout @{} -GatewayServiceName gateway -GuardianServiceName guardian
+    throw 'verifier accepted the untrusted key'
+}
+catch {
+    if ($_.Exception.Message -cne 'untrusted_key_reader') { throw }
+}
+$script:Standalone = $false
+try {
+    Assert-DefenseClawEnterpriseDeployment -Layout @{} -GatewayServiceName gateway -GuardianServiceName guardian
+}
+catch {
+    # The empty fixture has no activation metadata. Secure Client must reach
+    # its existing validation without adding the standalone key check.
+    if ($_.Exception.Message -ceq 'untrusted_key_reader') { throw }
+}
+if ($script:KeyChecks -ne 1) { throw 'standalone-only key validation was skipped or reached Secure Client' }
+""",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness), "-ModulePath", str(MODULE)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 @pytest.mark.parametrize("case", ["full", "compiler-residue", "unexpected"])
 def test_standalone_retired_tree_cleanup_removes_empty_compiler_directories(
     tmp_path: Path, case: str
@@ -741,3 +808,453 @@ def test_signed_out_untrusted_folder_is_classified_alike() -> None:
     assert "enterpriseHookSignedOutUntrustedFolder(row, target.DataDir)" in lifecycle
     standalone = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
     assert 'json:"signed_out_untrusted_folders"' in standalone
+
+
+def _run_lifecycle_functions(tmp_path, names, body, replacements=()) -> None:
+    import shutil
+
+    shell = shutil.which("pwsh") or shutil.which("pwsh.exe")
+    if not shell:
+        pytest.skip("PowerShell is unavailable")
+    functions = "\n".join(_function_body(_text(MODULE), name) for name in names)
+    for old, new in replacements:
+        functions = functions.replace(old, new)
+    script = tmp_path / "lifecycle.ps1"
+    script.write_text("$ErrorActionPreference = 'Stop'\n" + functions + "\n" + body, encoding="utf-8")
+    result = subprocess.run([shell, "-NoProfile", "-File", str(script)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+
+_TIMEOUT_RECOVERY_HARNESS = r"""
+class FakeTimeoutNative {
+    static [object] GetRegularFileSecuritySnapshotNoFollowIfExists([string]$Path) {
+        if ([IO.File]::Exists($Path)) { return 'file' }
+        return $null
+    }
+    static [object] GetDirectorySecuritySnapshotNoFollowIfExists([string]$Path) {
+        if ([IO.Directory]::Exists($Path)) { return 'directory' }
+        return $null
+    }
+}
+function Initialize-DefenseClawNativeSecurity { return [FakeTimeoutNative] }
+$script:DefenseClawUnfinishedTransactionDirectory = 'unfinished transaction directory'
+$root = '__ROOT__'
+$layout = @{
+    PendingPath = [IO.Path]::Combine($root, 'install', 'pending.json')
+    ManagedHooksLifecycleJournalPath = [IO.Path]::Combine($root, 'install', 'managed-hooks-lifecycle-journal.json')
+    ManagedHooksTeardownJournalPath = [IO.Path]::Combine($root, 'install', 'managed-hooks-teardown-journal.json')
+    PurgeIntentPath = [IO.Path]::Combine($root, 'lock', 'purge-scope.json')
+    SelfUninstallReceiptPath = [IO.Path]::Combine($root, 'lock', 'self-uninstall.json')
+    InstallRollbackIntentPath = [IO.Path]::Combine($root, 'lock', 'install-rollback-scope.json')
+    ManagedHookContractCleanupReceiptPath = [IO.Path]::Combine($root, 'lock', 'managed-hook-contract-cleanup-scope.json')
+    TransactionsDirectory = [IO.Path]::Combine($root, 'install', 'transactions')
+}
+function Recover-DefenseClawPendingTransaction {
+    param($Layout, $GatewayServiceName, $GuardianServiceName, [switch]$AllowDeferredActivation)
+    if ($AllowDeferredActivation) { throw 'timeout recovery must reactivate the restored release' }
+    $global:Replays++
+    if ($global:ReplayClears) { [IO.File]::Delete($Layout.PendingPath) }
+}
+function Get-DefenseClawLifecycleStatus {
+    param($Action, $Layout, $GatewayServiceName, $GuardianServiceName)
+    [pscustomobject]@{ action = $Action.ToLowerInvariant(); ok = $true; transaction_pending = [IO.File]::Exists($Layout.PendingPath) }
+}
+function Invoke-DefenseClawExactScopeRecoveryPurge { return 'purged' }
+function Invoke-Case([string]$Name, [string[]]$Records, [bool]$Transaction, [bool]$ReplayClears) {
+    if ([IO.Directory]::Exists($root)) { [IO.Directory]::Delete($root, $true) }
+    foreach ($folder in 'install', 'lock') { [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($root, $folder)) }
+    foreach ($record in $Records) { [IO.File]::WriteAllText($layout[$record], '{}') }
+    if ($Transaction) { [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($layout.TransactionsDirectory, 'txn-1')) }
+    $global:Replays = 0
+    $global:ReplayClears = $ReplayClears
+    $outcome = 'settled'
+    try {
+        $status = Invoke-DefenseClawTimeoutRecovery -Layout $layout -GatewayServiceName gateway -GuardianServiceName guardian
+        if ($status.action -cne 'recover' -or [bool]$status.transaction_pending) { $outcome = 'wrong status' }
+    }
+    catch { $outcome = $_.Exception.Message }
+    $purge = 'purged'
+    try {
+        [void](Invoke-DefenseClawUntrustedMetadataRecoveryPurge -Layout $layout -Sources @{} -GatewayServiceName gateway -GuardianServiceName guardian -Reason test)
+    }
+    catch { $purge = $_.Exception.Message }
+    $kept = @($Records | Where-Object { [IO.File]::Exists($layout[$_]) })
+    [pscustomobject]@{ name = $Name; outcome = $outcome; replays = $global:Replays; kept = $kept; purge = $purge } |
+        ConvertTo-Json -Compress
+}
+Invoke-Case 'replayed' @('PendingPath') $false $true
+Invoke-Case 'replay kept pending' @('PendingPath') $false $false
+Invoke-Case 'nothing left' @() $false $false
+Invoke-Case 'purge intent' @('PurgeIntentPath') $false $false
+Invoke-Case 'pending and rollback intent' @('PendingPath', 'InstallRollbackIntentPath') $false $true
+Invoke-Case 'journals' @('ManagedHooksTeardownJournalPath', 'SelfUninstallReceiptPath') $false $false
+Invoke-Case 'transaction directory' @() $true $false
+"""
+
+
+def test_timeout_recovery_reports_settled_only_when_no_lifecycle_record_remains(tmp_path: Path) -> None:
+    """Finding 4 of the r104 Windows re-fix review, executed: Setup's timeout
+    recovery replays only pending.json, so it reports a settled deployment only
+    when neither that journal nor any other lifecycle record remains, keeps
+    every record it cannot replay and names it. The untrusted-metadata purge
+    refuses on the same records, from the same list."""
+    import json
+
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    module = _text(MODULE)
+    functions = "\n".join(
+        _function_body(module, name)
+        for name in (
+            "Get-DefenseClawUnfinishedLifecycleEvidence",
+            "Invoke-DefenseClawTimeoutRecovery",
+            "Invoke-DefenseClawUntrustedMetadataRecoveryPurge",
+        )
+    )
+    harness = tmp_path / "timeout-recovery.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n"
+        + functions
+        + "\n"
+        + _TIMEOUT_RECOVERY_HARNESS.replace("__ROOT__", str(tmp_path / "state")),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    cases = {case["name"]: case for case in map(json.loads, completed.stdout.strip().splitlines())}
+
+    def kept(name: str) -> list[str]:
+        value = cases[name]["kept"]
+        return [value] if isinstance(value, str) else list(value or [])
+
+    assert cases["replayed"]["outcome"] == "settled" and cases["replayed"]["replays"] == 1
+    assert cases["nothing left"]["outcome"] == "settled" and cases["nothing left"]["replays"] == 0
+    assert "still pending" in cases["replay kept pending"]["outcome"]
+    assert kept("replay kept pending") == ["PendingPath"]
+    assert cases["purge intent"]["outcome"].endswith("as LocalSystem: state-purge intent")
+    assert cases["purge intent"]["replays"] == 0 and kept("purge intent") == ["PurgeIntentPath"]
+    rollback = cases["pending and rollback intent"]
+    assert rollback["replays"] == 1 and rollback["outcome"].endswith(": install-rollback intent")
+    assert kept("pending and rollback intent") == ["InstallRollbackIntentPath"]
+    assert cases["journals"]["outcome"].endswith(": managed-hook teardown journal, self-uninstall receipt")
+    assert cases["transaction directory"]["outcome"].endswith(": unfinished transaction directory")
+    for name in ("purge intent", "pending and rollback intent", "journals", "transaction directory"):
+        assert "is not reported settled" in cases[name]["outcome"], name
+    for name in ("nothing left", "replayed"):
+        assert cases[name]["purge"] == "purged", cases[name]
+    assert "requires authenticated recovery of the existing state-purge intent" in cases["purge intent"]["purge"]
+    assert "unfinished transaction directory; exact-scope fallback" in cases["transaction directory"]["purge"]
+    assert "existing pending transaction" in cases["replay kept pending"]["purge"]
+
+
+_FAKE_RENAME_NATIVE = r"""
+class FakeNative {
+    static [object[]] GetFileHolders([string[]]$Paths) {
+        if ($global:RmThrows) { throw 'Restart Manager session start failed' }
+        return $global:RmHolders
+    }
+    static [int] GetDirectoryOpenError([string]$Path, [uint32]$Access) {
+        if ($global:OpenThrows) { throw 'CreateFileW is unavailable' }
+        $code = $global:OpenErrors[[int]$Access]
+        if ($null -eq $code) { return 0 }
+        return [int]$code
+    }
+}
+$global:OpenErrors = @{}
+$global:OpenThrows = $false
+"""
+
+
+def test_a_committed_retirement_defers_only_to_a_holder_it_finds(tmp_path) -> None:
+    # W4 review, loop round 1: access denied is what both a program holding
+    # a file in InstallRoot and an access list (a deny on InstallRoot or its
+    # parent) answer to the rename. Every such refusal was deferred to the
+    # finalizer, so a self-uninstall reported ok with InstallRoot in place
+    # and a finalizer that could never finish. Only a holder found after the
+    # refusal (an image run from InstallRoot or a Restart Manager holder,
+    # other than this lifecycle and the calling CLI) defers now; any other
+    # refusal fails the committed uninstall, and other errors are unchanged.
+    source = tmp_path / "DefenseClaw"
+    _run_lifecycle_functions(
+        tmp_path,
+        [
+            "Test-DefenseClawInstallRootInUseException",
+            "Format-DefenseClawProcessInUse",
+            "Get-DefenseClawInstallRootHolders",
+            "Get-DefenseClawInstallRootRenameDenial",
+            "Invoke-DefenseClawCommittedInstallRootRetirement",
+        ],
+        _FAKE_RENAME_NATIVE
+        + r"""
+function Initialize-DefenseClawNativeSecurity { return [FakeNative] }
+$script:StateFileInUseCheckLimit = 16384
+$source = '""" + str(source) + r"""'
+$destination = $source + '.retired'
+function Get-DefenseClawProcessImages { return $global:Images }
+function Move-DefenseClawInstallRootForRetirement([string]$Source, [string]$Destination) {
+    switch ($global:Failure) {
+        'denied' { throw [UnauthorizedAccessException]::new("Access to the path '$Source' is denied.") }
+        'sharing' { throw [IO.IOException]::new('The process cannot access the file because it is being used by another process.', -2147024864) }
+        'missing' { throw [IO.DirectoryNotFoundException]::new('Could not find a part of the path.') }
+        default { [IO.Directory]::Move($Source, $Destination) }
+    }
+}
+function Invoke-Case([string]$Name, [string]$Failure, $Images, $RmHolders, [bool]$RmThrows, [string]$Expect, [string]$Text,
+    [hashtable]$OpenErrors = @{}, [bool]$OpenThrows = $false) {
+    $global:OpenErrors = $OpenErrors
+    $global:OpenThrows = $OpenThrows
+    if ([IO.Directory]::Exists($destination)) { [IO.Directory]::Delete($destination, $true) }
+    if ([IO.Directory]::Exists($source)) { [IO.Directory]::Delete($source, $true) }
+    [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($source, 'bin'))
+    [IO.File]::WriteAllText([IO.Path]::Combine($source, 'bin', 'defenseclaw-hook.exe'), 'stand-in')
+    $global:Failure = $Failure
+    $global:Images = @($Images)
+    $global:RmHolders = [object[]]@($RmHolders)
+    $global:RmThrows = $RmThrows
+    $outcome = 'retired'
+    $message = ''
+    try {
+        $message = Invoke-DefenseClawCommittedInstallRootRetirement -Source $source -Destination $destination -SelfUninstallCallerPID 777
+        if (-not [string]::IsNullOrEmpty($message)) { $outcome = 'deferred' }
+    }
+    catch {
+        $outcome = 'failed'
+        $message = $_.Exception.Message
+    }
+    if ($outcome -ne $Expect -or ($Text -and $message -notlike "*$Text*")) {
+        throw "${Name}: $outcome, '$message' (want $Expect, *$Text*)"
+    }
+    if ($outcome -ne 'retired' -and (-not [IO.Directory]::Exists($source) -or [IO.Directory]::Exists($destination))) {
+        throw "${Name}: InstallRoot was not left in place"
+    }
+    Write-Host "${Name}: $outcome"
+}
+$hook = [pscustomobject]@{ Id = 4242; Path = ($source + '\bin\defenseclaw-hook.exe'); UserName = 'CORP\alice'; Parent = 'claude' }
+$self = [pscustomobject]@{ Id = $PID; Path = ($source + '\bin\pwsh.exe'); UserName = ''; Parent = '' }
+$caller = [pscustomobject]@{ Id = 777; Path = ($source + '\bin\defenseclaw.exe'); UserName = ''; Parent = '' }
+$elsewhere = [pscustomobject]@{ Id = 31; Path = 'C:\Windows\explorer.exe'; UserName = ''; Parent = '' }
+$scanner = [pscustomobject]@{ ProcessId = 5151; AppName = 'Scanner'; ServiceName = '' }
+$callerHolder = [pscustomobject]@{ ProcessId = 777; AppName = 'defenseclaw'; ServiceName = '' }
+$selfHolder = [pscustomobject]@{ ProcessId = $PID; AppName = 'pwsh'; ServiceName = '' }
+Invoke-Case 'denied with no holder' 'denied' @($elsewhere) @() $false 'failed' 'no program holds a file in it'
+Invoke-Case 'sharing with no holder' 'sharing' @() @() $false 'failed' 'no program holds a file in it'
+Invoke-Case 'only this lifecycle and the caller' 'denied' @($self, $caller) @($callerHolder, $selfHolder) $false 'failed' 'run the uninstall again'
+Invoke-Case 'Restart Manager failed' 'denied' @() @() $true 'failed' 'is denied'
+Invoke-Case 'an image from InstallRoot' 'denied' @($hook, $caller) @() $false 'deferred' 'defenseclaw-hook.exe (pid 4242, account CORP\alice, started by claude)'
+Invoke-Case 'a Restart Manager holder' 'sharing' @($elsewhere) @($scanner, $callerHolder) $false 'deferred' 'Scanner (pid 5151)'
+Invoke-Case 'another error' 'missing' @($hook) @() $false 'failed' 'Could not find a part of the path'
+Invoke-Case 'a free InstallRoot' 'none' @() @() $false 'retired' ''
+# W4 review, loop round 2: a holder defers only a rename this account has
+# the rights for. DELETE is 0x10000 on InstallRoot, add-subfolder 0x4 on
+# its parent; 5 is access denied, 19 a read-only volume, 32 a sharing
+# violation (a window on InstallRoot, which ends when it closes).
+Invoke-Case 'a deny on InstallRoot with a holder' 'denied' @($hook) @() $false 'failed' 'may not rename' @{ 65536 = 5 }
+Invoke-Case 'a deny in the parent with a holder' 'denied' @($hook) @($scanner) $false 'failed' 'may not create a folder in' @{ 4 = 5 }
+Invoke-Case 'a deny in the parent with a sharing holder' 'sharing' @($elsewhere) @($scanner) $false 'failed' 'does not end when a program exits' @{ 4 = 5 }
+Invoke-Case 'a read-only volume with a holder' 'denied' @($hook) @() $false 'failed' 'may not rename' @{ 65536 = 19 }
+Invoke-Case 'the rights check fails with a holder' 'denied' @($hook) @() $false 'failed' 'could not be checked' @{} $true
+Invoke-Case 'a window on InstallRoot with a holder' 'denied' @($hook) @() $false 'deferred' 'defenseclaw-hook.exe (pid 4242' @{ 65536 = 32 }
+""",
+    )
+    module = _text(MODULE)
+    uninstall = _function_body(module, "Invoke-DefenseClawUninstallLifecycle")
+    call = uninstall.index("$retirementDeferred = Invoke-DefenseClawCommittedInstallRootRetirement `")
+    assert "-SelfUninstallCallerPID $SelfUninstallCallerPID" in uninstall[call : call + 300]
+
+
+def test_the_deferred_retirement_stops_at_once_on_a_rename_this_account_may_not_do(tmp_path) -> None:
+    # W4 review, loop round 2: the finalizer waited out its deadline on any
+    # access denied, though a deny entry set after the deferral does not end
+    # when the holder exits. It stops at once on a missing right; a holder
+    # alone is still waited for, and a free InstallRoot is retired.
+    install_root = tmp_path / "DefenseClaw"
+    _run_lifecycle_functions(
+        tmp_path,
+        [
+            "Test-DefenseClawInstallRootInUseException",
+            "Get-DefenseClawInstallRootRenameDenial",
+            "Complete-DefenseClawDeferredSelfUninstallRetirement",
+        ],
+        _FAKE_RENAME_NATIVE
+        + r"""
+function Initialize-DefenseClawNativeSecurity { return [FakeNative] }
+function Enter-DefenseClawLifecycleLock($Layout) { return 'lock' }
+function Exit-DefenseClawLifecycleLock($Lock) {}
+function Test-DefenseClawSelfUninstallCallerRunning($Layout, $Receipt) { return $false }
+function Assert-DefenseClawDeferredRetirementState($Layout, $Receipt) {}
+function Complete-DefenseClawCommittedManagedHooksFinalization($Layout, $GatewayServiceName, $GuardianServiceName, [switch]$Purge) {}
+function Assert-DefenseClawInstallRootNameReserved($InstallRoot) {}
+function Complete-DefenseClawRetiredSelfUninstallCommit($Layout, $Receipt) {}
+$installRoot = '""" + str(install_root) + r"""'
+$retired = $installRoot + '.retired'
+$layout = @{ InstallRoot = $installRoot }
+$receipt = [pscustomobject]@{ phase = 'prepared_install_retirement'; retired_install_root = $retired; purge_requested = $false; gateway_service = 'g'; guardian_service = 'h' }
+function Get-DefenseClawSelfUninstallReceipt($Layout, $GatewayServiceName, $GuardianServiceName) { return $receipt }
+function Invoke-TestRename([string]$From, [string]$To) {
+    $global:Renames++
+    if ($global:Renames -le $global:Refusals) { throw [UnauthorizedAccessException]::new("Access to the path '$From' is denied.") }
+    [IO.Directory]::Move($From, $To)
+}
+function Invoke-Case([string]$Name, [int]$Refusals, [hashtable]$OpenErrors, [int]$Seconds, [string]$Expect, [string]$Text) {
+    if ([IO.Directory]::Exists($retired)) { [IO.Directory]::Delete($retired, $true) }
+    [void][IO.Directory]::CreateDirectory($installRoot)
+    $global:Renames = 0
+    $global:Refusals = $Refusals
+    $global:OpenErrors = $OpenErrors
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $outcome = Complete-DefenseClawDeferredSelfUninstallRetirement -Layout $layout -Receipt $receipt `
+            -Deadline ([DateTime]::UtcNow.AddSeconds($Seconds)) -RetryIntervalMilliseconds 50
+        $message = ''
+    }
+    catch {
+        $outcome = 'failed'
+        $message = $_.Exception.Message
+    }
+    if ($outcome -ne $Expect -or ($Text -and $message -notlike "*$Text*")) {
+        throw "${Name}: $outcome, '$message' (want $Expect, *$Text*)"
+    }
+    if ($Name -like 'a deny*' -and ($global:Renames -ne 1 -or $clock.Elapsed.TotalSeconds -ge 5)) {
+        throw "${Name}: waited ($global:Renames renames, $($clock.Elapsed.TotalSeconds) s)"
+    }
+    Write-Host "${Name}: $outcome"
+}
+Invoke-Case 'a deny in the parent' 99 @{ 4 = 5 } 20 'failed' 'may not create a folder in'
+Invoke-Case 'a deny on InstallRoot' 99 @{ 65536 = 5 } 20 'failed' 'may not rename'
+Invoke-Case 'a holder past the deadline' 99 @{} 1 'failed' 'a program still holds a file in InstallRoot'
+Invoke-Case 'a holder that lets go' 3 @{} 20 'retired' ''
+""",
+        replacements=[("[IO.Directory]::Move($Layout.InstallRoot, $retiredRoot)", "Invoke-TestRename $Layout.InstallRoot $retiredRoot")],
+    )
+
+
+def test_install_preparation_keeps_existing_service_read_access(tmp_path) -> None:
+    _run_lifecycle_functions(tmp_path, ["Initialize-DefenseClawTransactionManagedRoot"], r"""
+function Test-DefenseClawStandaloneProfile { return $true }
+function Get-DefenseClawInstallRollbackIntent { return @{ install_root_marker_sid = '' } }
+function Set-DefenseClawInstallPreparationRootIdentity {}
+function Initialize-DefenseClawManagedRoot {
+    param($Path, $Label, $RequiredBase, [switch]$AllowUsersRead, [switch]$PassThruCreationResult,
+        $StagingMarkerSID, [switch]$DeferFinalAcl, [switch]$KeepProtectedAcl)
+    if (-not $KeepProtectedAcl) { throw 'preparation removed the existing gateway read ACE' }
+    return @{ created = $false }
+}
+Initialize-DefenseClawTransactionManagedRoot -Layout @{} -GatewayServiceName Gateway `
+    -GuardianServiceName Guardian -Root install_root -Path existing -Label InstallRoot -RequiredBase base
+""")
+
+
+
+def test_standalone_replacement_retries_transient_hook_readers(tmp_path) -> None:
+    # Holders come and go under registered hook traffic. Retry the atomic
+    # operation while keeping the launcher present on every attempt.
+    _run_lifecycle_functions(tmp_path, ["Install-DefenseClawFileAtomic"], r"""
+function Test-DefenseClawStandaloneProfile { return $true }
+function Assert-DefenseClawNoReparsePath {}
+function New-DefenseClawDirectory { param($Path) [void][IO.Directory]::CreateDirectory($Path) }
+function Remove-DefenseClawStaleReplacementBackups {}
+function Remove-DefenseClawReplacementBackup { param($Path) [IO.File]::Delete($Path); return $true }
+function ConvertTo-DefenseClawBoundedDiagnostic { param($Value, $MaxLength) return $Value }
+$script:attempts = 0
+function Invoke-TestMappedImageReplace {
+    $script:attempts++
+    if (-not [IO.File]::Exists($Destination)) { throw 'launcher missing during replacement' }
+    if ($script:attempts -lt 3) { throw [IO.IOException]::new('transient hook reader', -2147024864) }
+    [IO.File]::Replace($temporary, $Destination, $backup, $true)
+}
+$root = Split-Path -Parent $PSCommandPath
+$source = Join-Path $root 'new.exe'
+$destination = Join-Path $root 'hook.exe'
+[IO.File]::WriteAllText($source, 'new verified executable')
+[IO.File]::WriteAllText($destination, 'old mapped executable')
+Install-DefenseClawFileAtomic -Source $source -Destination $destination
+if ($script:attempts -ne 3) { throw 'hook reader was not retried' }
+if ([IO.File]::ReadAllText($destination) -cne 'new verified executable') { throw 'replacement failed' }
+if (@(Get-ChildItem $root -Filter 'hook.exe.backup.*').Count) { throw 'replacement left a backup' }
+""", replacements=[("[IO.File]::Replace($temporary, $Destination, $backup, $true)", "Invoke-TestMappedImageReplace")])
+
+
+
+def test_service_start_mode_refusal_names_the_modes(tmp_path) -> None:
+    import shutil
+
+    shell = shutil.which("pwsh") or shutil.which("pwsh.exe")
+    if not shell:
+        pytest.skip("PowerShell is unavailable")
+    module = _text(MODULE)
+    body = _function_body(module, "Assert-DefenseClawServiceConfiguration")
+    # Stub registry reads only; run the real configuration checker.
+    body = body.replace("Microsoft.PowerShell.Management\\Get-ItemProperty", "Get-TestServiceProperties")
+    helpers = _function_body(module, "ConvertTo-DefenseClawServiceStartModeName")
+    script = tmp_path / "service-modes.ps1"
+    script.write_text(helpers + "\n" + body + r"""
+$ErrorActionPreference = 'Stop'
+$script:ServiceDescription = 'test service'
+function Test-DefenseClawServiceExists { return $true }
+function Test-DefenseClawStandaloneProfile { return $true }
+function Get-TestServiceProperties {
+    return [pscustomobject]@{ ImagePath='image'; ObjectName='account'; DisplayName='test';
+        Description='test service'; Type=16; Start=4 }
+}
+try {
+    Assert-DefenseClawServiceConfiguration -Name test -ExpectedImage image -ExpectedAccount account `
+        -ExpectedDisplayName test -ExpectedSidType 1 -ExpectedPrivileges @('priv') -ExpectedEnvironment @()
+    throw 'disabled service passed verification'
+} catch {
+    if ($_.Exception.Message -notmatch 'startup mode drift: disabled, expected auto') { throw }
+}
+""", encoding="utf-8")
+    result = subprocess.run([shell, "-NoProfile", "-File", str(script)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_a_snapshot_directory_left_after_the_commit_never_rolls_the_deployment_back(tmp_path) -> None:
+    # fix/r104-windows: Complete-DefenseClawTransaction removed pending.json
+    # (the commit) and then the snapshot directory; a removal that failed
+    # part-way (a scanner holding one copy) threw into the lifecycle's catch,
+    # which restored the proven deployment from the half-deleted snapshot
+    # with no pending record left to recover it. Now the commit stands and
+    # the directory left behind is named in a warning.
+    state = tmp_path / "state"
+    _run_lifecycle_functions(
+        tmp_path,
+        ["Complete-DefenseClawTransaction"],
+        r"""
+$state = '""" + str(state) + r"""'
+$transaction = Join-Path (Join-Path $state 'transactions') 'abc'
+[void][IO.Directory]::CreateDirectory($transaction)
+$snapshot = Join-Path $transaction 'transaction.json'
+[IO.File]::WriteAllText($snapshot, '{"gateway_service":"g","guardian_service":"h"}')
+[IO.File]::WriteAllText((Join-Path $transaction 'copy.bin'), 'held')
+$pending = Join-Path $state 'pending.json'
+$Layout = @{ PendingPath = $pending; StateRoot = $state }
+function Assert-DefenseClawNoReparsePath([string]$Path) {}
+function Assert-DefenseClawDescendant { param($Path, $Root, $Label) return $Path }
+function Set-DefenseClawInstallRollbackIntentCommitted { return $null }
+function Publish-DefenseClawInstallRollbackIntent { return $null }
+function Remove-Item {
+    param([string]$LiteralPath, [switch]$Recurse, [switch]$Force, $ErrorAction)
+    if ($Recurse) { throw 'The process cannot access the file copy.bin because it is being used by another process.' }
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $LiteralPath -Force
+}
+foreach ($rollback in @($false, $true)) {
+    [IO.File]::WriteAllText($pending, '{}')
+    $warnings = @()
+    Complete-DefenseClawTransaction -SnapshotPath $snapshot -Layout $Layout -Rollback:$rollback -WarningVariable warnings -WarningAction SilentlyContinue
+    if (Test-Path -LiteralPath $pending) { throw "rollback=${rollback}: the commit did not remove pending.json" }
+    if (-not (Test-Path -LiteralPath $transaction)) { throw "rollback=${rollback}: the stub did not hold the directory" }
+    if (-not ($warnings -join ' ').Contains($transaction)) { throw "rollback=${rollback}: the warning does not name the directory: $warnings" }
+}
+""",
+        replacements=[
+            ("Microsoft.PowerShell.Management\\Remove-Item -LiteralPath $directory", "Remove-Item -LiteralPath $directory"),
+        ],
+    )

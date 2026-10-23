@@ -44,10 +44,7 @@ func TestVerifyPublishedFileChecksEffectiveLinuxACL(t *testing.T) {
 	if err != nil || record == nil {
 		t.Fatalf("published record: %v %v", record, err)
 	}
-	acl, err := posixacl.ParseGetfacl("user::rw-\nuser:54321:---\ngroup::---\nmask::r--\nother::r--\n")
-	if err != nil {
-		t.Fatal(err)
-	}
+	acl := posixacl.View{Present: true, Owner: 6, Users: []posixacl.Entry{{Kind: "user", ID: 54321}}, Mask: 4, Other: 4}
 	previous := publishedACLReader
 	t.Cleanup(func() { publishedACLReader = previous })
 	publishedACLReader = fakePublishedACLReader(func(path string, mode os.FileMode) (posixacl.View, error) {

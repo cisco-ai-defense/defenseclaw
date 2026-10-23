@@ -385,9 +385,11 @@ func TestSettleEndsInterruptedRunsAndFinishesAConfirmCut(t *testing.T) {
 	}
 
 	// A run that wrote bundle-state.json and stopped before the receipt:
-	// the next settle confirms the receipt from the state.
+	// the next settle confirms the receipt from the state, which carries the
+	// proof fields Confirm copied from that receipt.
 	st, _ := s.LoadState()
 	ref := &Ref{BundleID: applied.BundleID, Version: applied.Version, ManifestSHA256: applied.ManifestSHA256, Dir: applied.Dir,
+		SignerKeyID: applied.SignerKeyID, EffectivePolicyDigest: applied.EffectivePolicyDigest, ConfigGeneration: applied.ConfigGeneration,
 		ConfirmedAt: "2026-10-12T11:00:00.000Z"}
 	if err := s.saveState(State{Current: ref, LastGood: st.Current, Floor: 6}); err != nil {
 		t.Fatal(err)

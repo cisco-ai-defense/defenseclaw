@@ -39,8 +39,11 @@ type bundleStatusResult struct {
 	Command       string `json:"command"`
 	OK            bool   `json:"ok"`
 	// BundleMode is true when the MDM installed the trust anchors.
-	BundleMode              bool                                  `json:"bundle_mode"`
-	Anchors                 string                                `json:"anchors,omitempty"`
+	BundleMode bool   `json:"bundle_mode"`
+	Anchors    string `json:"anchors,omitempty"`
+	// AnchorsSummary describes the installed trust anchors; absent when
+	// they are missing or fail their checks (see the warnings).
+	AnchorsSummary          *enterprisebundle.AnchorsSummary      `json:"anchors_summary,omitempty"`
 	Current                 *enterprisebundle.Ref                 `json:"current"`
 	LastGood                *enterprisebundle.Ref                 `json:"last_good"`
 	Floor                   uint64                                `json:"floor"`
@@ -70,6 +73,8 @@ rollback, the version floor, the last enforcing receipt, the last refusal
 and whether the running gateway enforces the current bundle digest.
 On Windows, status confirms an applied receipt left by an interrupted run
 only after the installed config and running gateway pass the confirm gate.
+Status warns gateway_unchecked when the running gateway cannot be asked. The
+receipt history keeps the last 20 receipts.
 Run it as root or an administrator.`,
 		Args:         bundleNoArgs,
 		SilenceUsage: true,
@@ -115,10 +120,15 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		return &enterprisebundle.Error{Code: enterprisebundle.CodeNotManaged,
 			Detail: "this computer is not a standalone managed device; bundle status reports a device"}
 	}
+	var anchors *enterprisebundle.Anchors
+	var anchorsErr error
 	if path, err := bundleDefaultAnchors(); err == nil {
 		res.Anchors = path
 		_, statErr := os.Lstat(path)
 		res.BundleMode = statErr == nil
+		var raw []byte
+		anchors, raw, anchorsErr = enterprisebundle.ReadAnchorsFile(path, bundleAnchorTrust)
+		res.AnchorsSummary = enterprisebundle.SummarizeAnchors(anchors, raw)
 	}
 	store, err := bundleStore()
 	if err != nil {
@@ -234,7 +244,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	} else if st.Current != nil {
 		signer = st.Current.SignerKeyID
 	}
-	if warning := bundleCurrentSignerWarning(res.Anchors, signer); warning != nil {
+	if warning := bundleAnchorsSignerWarning(res.Anchors, anchors, anchorsErr, signer); warning != nil {
 		res.Warnings = append(res.Warnings, *warning)
 	}
 	if currentReceipt != nil {
@@ -247,6 +257,8 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	if !res.BundleMode {
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "anchor_missing",
 			Message: "no trust anchor file is installed, so this device does not take bundles"})
+	} else if warning := bundleAnchorsFileWarning(anchorsErr); warning != nil {
+		res.Warnings = append(res.Warnings, *warning)
 	}
 	policy := bundleGatewayPolicy(ctx)
 	if policy == nil {
@@ -295,10 +307,35 @@ func bundleCurrentSignerWarning(anchorsPath, signerKeyID string) *enterprisebund
 		return nil
 	}
 	anchors, err := enterprisebundle.LoadAnchors(anchorsPath, bundleAnchorTrust)
-	if err != nil {
+	return bundleAnchorsSignerWarning(anchorsPath, anchors, err, signerKeyID)
+}
+
+// bundleAnchorsSignerWarning is bundleCurrentSignerWarning for anchors the
+// caller already read from anchorsPath (loadErr: the read failed).
+func bundleAnchorsSignerWarning(anchorsPath string, anchors *enterprisebundle.Anchors, loadErr error, signerKeyID string) *enterprisebundle.Warning {
+	if anchorsPath == "" || signerKeyID == "" {
+		return nil
+	}
+	if loadErr != nil {
 		return &enterprisebundle.Warning{Code: "anchor_unreadable", Message: "the installed trust anchors could not be checked for the confirmed bundle signer"}
 	}
 	return bundleSignerWarning(anchors, signerKeyID)
+}
+
+// bundleAnchorsFileWarning explains an installed anchor file that fails its
+// checks (anchor_insecure, anchor_invalid), with or without a confirmed
+// bundle: anchors_summary is then absent and every bundle is refused until
+// the file is fixed. nil when the read succeeded.
+func bundleAnchorsFileWarning(loadErr error) *enterprisebundle.Warning {
+	if loadErr == nil {
+		return nil
+	}
+	code := enterprisebundle.CodeOf(loadErr)
+	if code != enterprisebundle.CodeAnchorInsecure {
+		code = enterprisebundle.CodeAnchorInvalid
+	}
+	return &enterprisebundle.Warning{Code: string(code),
+		Message: "the installed trust anchor file fails its checks, so this device refuses every bundle until the file is fixed: " + loadErr.Error()}
 }
 
 // bundleSignerWarning is key_unknown or key_revoked when anchors no longer
@@ -338,6 +375,9 @@ func printStatusText(w io.Writer, res *bundleStatusResult) {
 		mode = "on"
 	}
 	fmt.Fprintf(w, "Bundle mode: %s\n", mode)
+	if a := res.AnchorsSummary; a != nil {
+		fmt.Fprintf(w, "Trust anchors: tenant %s, %d keys, minimum version %d, sha256 %s\n", a.TenantID, len(a.Keys), a.MinVersion, a.SHA256[:12])
+	}
 	describe := func(label string, ref *enterprisebundle.Ref) {
 		if ref == nil {
 			fmt.Fprintf(w, "%s: none\n", label)

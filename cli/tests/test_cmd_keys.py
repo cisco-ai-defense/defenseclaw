@@ -359,3 +359,14 @@ class BoundEndpointHintTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_keys_set_refuses_an_invalid_name_without_a_traceback(tmp_path) -> None:
+    # GAP-0078: a usage error, not a DotenvValueError traceback; the value
+    # is never printed.
+    app = _make_app_context(str(tmp_path))
+    result = CliRunner().invoke(keys_cmd, ["set", "123INVALID", "--value", "test-only-value"], obj=app)
+    assert result.exit_code == 2, result.output
+    assert "not a valid environment variable name" in result.output
+    assert "test-only-value" not in result.output and "Traceback" not in result.output
+    assert not (tmp_path / ".env").exists()

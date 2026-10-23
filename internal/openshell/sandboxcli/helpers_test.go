@@ -445,7 +445,11 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 				log.Name, log.KeptAt = name, time.Now()
 				d.runLogs[name] = &log
 			}
-			sb.Phase = "stopped"
+			// OpenShell returns the stop of a MicroVM whose main process
+			// completed or failed as it is.
+			if sb.Driver != "vm" || sb.Phase != "completed" && (sb.Phase != "error" || !strings.Contains(sb.PhaseReason, "MainProcessFailed")) {
+				sb.Phase = "stopped"
+			}
 			reply(sb)
 		case verb == "start":
 			var req sandboxapi.StartRequest
@@ -453,7 +457,8 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			if sb.Phase != "ready" {
 				sb.Session++
 			}
-			sb.Phase = "ready"
+			// The session runs the gateway's own supervisor.
+			sb.Phase, sb.OldSupervisor = "ready", false
 			if sb.WorkdirMode == "mount" && sb.Snapshot != nil {
 				// Like the manager: a start takes a new snapshot unless
 				// changes nobody undid or accepted sit on the undo point, and
@@ -806,6 +811,8 @@ type fakeCopy struct {
 	pulled    []workspace.PullOptions
 	// refreshErr is what Refresh fails with.
 	refreshErr error
+	// onPull runs as a Pull (not a reuse) reads the copy.
+	onPull func()
 	// diff is what Diff answers.
 	diff string
 }
@@ -900,6 +907,9 @@ func (f *fakeCopy) Pull(_ context.Context, o workspace.PullOptions) (*workspace.
 		return &r, nil
 	}
 	f.step("pull " + o.Name)
+	if f.onPull != nil {
+		f.onPull()
+	}
 	if f.pull != nil {
 		return f.pull, nil
 	}
@@ -1040,7 +1050,7 @@ func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *te
 	cfg.Gateway.APIPort = 18970
 	cfg.OpenShell.Enabled = true
 	ta.App = &App{
-		Cfg: cfg, ConfigPath: filepath.Join(root, "data", "config.yaml"), API: ta.daemon.client(),
+		Cfg: cfg, ConfigPath: filepath.Join(root, "data", "config.yaml"), API: ta.daemon.client(), LifecycleDir: filepath.Join(root, "openshell"),
 		IO:       IO{In: ta.in, Out: ta.out, Err: ta.err, TTY: true},
 		Terminal: ta.term, Streamer: ta.stream, Images: ta.images, Workspace: ta.copy, Gateway: ta.gateway,
 		ExecProcess: func(path string, argv, _ []string) error {

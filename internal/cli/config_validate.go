@@ -12,6 +12,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -63,8 +64,19 @@ var configValidateCmd = &cobra.Command{
 					configV8SettingRule(derivationErr.Error()), "", "")
 				failure.ConfigVersion = loaded.runtime.ConfigVersion
 			}
+			refusal := err
+			if derivationErr != nil {
+				refusal = derivationErr
+			}
+			plain, managedHost := configValidatePlainRefusal(refusal, failure, configValidateShownPath(path), path)
+			if managedHost {
+				failure.Message = plain
+			}
 			if configValidateJSON {
 				_ = json.NewEncoder(out).Encode(failure)
+			}
+			if managedHost {
+				return errors.New(plain)
 			}
 			return fmt.Errorf("%s is not valid at %s: %s", configValidateShownPath(path), failure.Path, failure.Reason)
 		}

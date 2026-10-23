@@ -1,0 +1,12 @@
+{
+  "title": "How-to",
+  "pages": [
+    "guardrail",
+    "agents",
+    "policies",
+    "scanning",
+    "sandboxes",
+    "observability",
+    "install-the-edge-connector"
+  ]
+}

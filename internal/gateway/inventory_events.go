@@ -519,6 +519,32 @@ func inventoryIdentity(userID string) *llmEventIdentity {
 	if userID == "" || !identityFactsEnabled.Load() {
 		return nil
 	}
+	return inventoryIdentityFacts(userID)
+}
+
+// inventoryIdentityFor is inventoryIdentity for a record that names the
+// account it was found under. A POSIX uid can be handed to another account
+// once the first is removed, so a removal record for the earlier account
+// must not carry the new holder's verified directory facts (GAP-1233). The
+// facts are attached only while the account database still gives the uid
+// the full name the record was found under: the same uid and the same
+// qualified name (alice@old.example is not alice@new.example). A record
+// that names no account cannot prove it, so it gets no facts. A Windows SID
+// is never reused, so it is not checked.
+func inventoryIdentityFor(userID, userName string) *llmEventIdentity {
+	if userID == "" || !identityFactsEnabled.Load() {
+		return nil
+	}
+	if useridentity.KindForID(userID) == useridentity.KindPOSIXUID {
+		recorded, current := strings.TrimSpace(userName), strings.TrimSpace(userScopedIdentityName(userID))
+		if recorded == "" || current == "" || !useridentity.EqualFold(current, recorded) {
+			return nil
+		}
+	}
+	return inventoryIdentityFacts(userID)
+}
+
+func inventoryIdentityFacts(userID string) *llmEventIdentity {
 	facts, _ := verifiedIdentityDirectory(userID, true)
 	if facts.Empty() {
 		return nil
@@ -562,7 +588,6 @@ func hasNativeMCPReader(connectorName string) bool {
 		"kiro",
 		"devin",
 		"copilot",
-		"openhands",
 		"opencode",
 		"amp",
 		"antigravity":
@@ -635,8 +660,6 @@ func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.M
 		}
 	case "copilot":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".copilot/mcp-config.json")
-	case "openhands":
-		tryFile(config.ReadMCPFromDotMCPJSON, ".openhands/mcp.json")
 	case "zeptoclaw":
 		// zeptoclaw's own config is JSON with mcpServers at top level;
 		// mcp.json is a legacy fallback location some installs use.
@@ -1160,7 +1183,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawAgentDiscoveryScannedAt:              aiDiscoveryV8OptionalText(component.agentScannedAt),
 			DefenseClawAgentIdentityID:                      agentIdentityV8(inventoryAgentIdentityID(component.agentConnector, component.userID, component.userName)),
 		}
-		inventoryIdentity(component.userID).applyTo(&input)
+		inventoryIdentityFor(component.userID, component.userName).applyTo(&input)
 		return builder.BuildLogAIComponentObserved(input)
 	})
 }

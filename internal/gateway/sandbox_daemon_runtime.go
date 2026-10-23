@@ -142,6 +142,9 @@ type SandboxDaemonOptions struct {
 	// sandboxes; tests replace them.
 	newRuntime   func(*SandboxDaemon) (*sandboxRuntime, error)
 	countRunning func(context.Context) (int, error)
+	// countMicroVMs counts the MicroVMs that run as this account
+	// (openshell.CountMicroVMs); tests replace it.
+	countMicroVMs func(context.Context) (int, error)
 	// sweepForeign replaces the foreign-sandbox sweep before an idle
 	// gateway stops (SandboxDaemon.sweepForeign); tests only.
 	sweepForeign func(context.Context) (bool, error)
@@ -942,7 +945,10 @@ func (d *SandboxDaemon) checkUpgrade() {
 	}
 }
 
-// runningSandboxes counts the user's sandboxes that may be running.
+// runningSandboxes counts the user's sandboxes that may be running or hold
+// compute (manager.HoldsCompute): while one does, the daemon neither
+// stops the account's OpenShell gateway nor exits for a pending restart,
+// which would take the gateway with it.
 func (d *SandboxDaemon) runningSandboxes(ctx context.Context) (int, error) {
 	if d.opts.countRunning != nil {
 		return d.opts.countRunning(ctx)
@@ -951,13 +957,32 @@ func (d *SandboxDaemon) runningSandboxes(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	return sandboxesHoldingCompute(list), nil
+}
+
+// microVMs counts the MicroVMs that run as this account
+// (openshell.CountMicroVMs): what the daemon trusts before it stops the
+// account's gateway when it cannot read the gateway's own account of its
+// sandboxes, which a stop would end with no flush.
+func (d *SandboxDaemon) microVMs(ctx context.Context) (int, error) {
+	if d.opts.countMicroVMs != nil {
+		return d.opts.countMicroVMs(ctx)
+	}
+	return openshell.CountMicroVMs(ctx, openshell.ExecRunner{})
+}
+
+// sandboxesHoldingCompute counts the sandboxes of list that may run or
+// hold compute (manager.HoldsCompute): a MicroVM counts until OpenShell
+// reports it stopped, deleting or gone, completed and error states
+// included (but for one whose VM is gone).
+func sandboxesHoldingCompute(list []sandboxapi.Sandbox) int {
 	n := 0
 	for _, sb := range list {
-		if sandboxMayRun(sb.Phase) {
+		if manager.HoldsCompute(sb) {
 			n++
 		}
 	}
-	return n, nil
+	return n
 }
 
 // sandboxMayRun reports a phase in which a sandbox may be running.
@@ -1680,6 +1705,7 @@ func (d *SandboxDaemon) managedStatus(ctx context.Context) *sandboxapi.ManagedSt
 		GatewayPort:      s.Enterprise.GatewayPort,
 		PendingRestart:   d.pendingRestart.Load(),
 		DriverFallback:   s.Enterprise.DriverFallback,
+		NextDriver:       s.SelectedDriver,
 	}
 	if d.openShell != nil {
 		out.OtherGateways = d.openShell.OtherGateways(ctx, s)
@@ -2135,6 +2161,8 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 	// refuses the create otherwise); the record keeps the reason.
 	createCtx := withManagedMCPJudge(manager.WithCreateConfig(manager.WithDriverChoice(ctx, choice), d.configWithFloor(floor)),
 		fixedMCPJudge(resolveMCPDecision(resolveReq.Harness, mcp, resp)))
+	// The sandbox this create reserves resolves under createCtx's floor
+	// until its registration is kept (manager.EndCreate, GAP-0016).
 	sb, err := c.Manager.Create(createCtx, req)
 	if err != nil {
 		undo()
@@ -2153,13 +2181,21 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 		})
 	}
 	if err != nil {
+		// A sandbox the delete leaves behind has no registration: the
+		// closed floor, not the create's.
+		c.EndCreate(sb.Name, sb.ID)
 		if _, delErr := c.Manager.Delete(context.WithoutCancel(ctx), sb.Name, sandboxapi.DeleteRequest{}); delErr != nil {
 			d.logf("delete %s after its registration failed: %v", sb.Name, delErr)
 		}
 		undo()
 		return nil, managedRelayError(err)
 	}
-	d.rt.manager.RefreshPolicies()
+	c.EndCreate(sb.Name, sb.ID)
+	if fresh, err := c.Manager.Get(ctx, sb.Name); err == nil && fresh != nil {
+		// The view under the registration just kept, not one a refresh
+		// during the create judged against the closed floor (GAP-0016).
+		sb = fresh
+	}
 	return sb, nil
 }
 
@@ -2338,6 +2374,23 @@ func (c *managedSandboxController) Explain(ctx context.Context, req sandboxapi.E
 	}
 	applyManagedPosture(out, me.Posture)
 	me.Posture = nil
+	if req.Sandbox == "" && req.Project != "" {
+		// The project's own MCP servers, which only this process can read
+		// as the caller: the MCP row counts them (#1200).
+		project := req.Project
+		if real, err := filepath.EvalSymlinks(project); err == nil {
+			project = real
+		}
+		if spec, ok := harness.Get(connectorName); ok {
+			me.MCPProjectCount = manager.ProjectMCPServerCount(spec.Name, project)
+		}
+		me.MCPProjectBlocked = true
+		for _, s := range out.Settings {
+			if s.Key == "mcp.project_servers" {
+				me.MCPProjectBlocked = s.Value != packs.MCPProjectServersAllow
+			}
+		}
+	}
 	if me.Workspace != nil {
 		// A new run's copy policy is the managed gateway's: the explain floor
 		// leaves out the organization's pack, which the gateway resolves

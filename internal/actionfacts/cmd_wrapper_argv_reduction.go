@@ -178,8 +178,19 @@ func callOperatorCMD(command string, facts Facts) bool {
 		return false
 	}
 	trimmed := strings.TrimLeftFunc(command, unicode.IsSpace)
-	if !strings.HasPrefix(trimmed, "&") || len(trimmed) < 2 || !unicode.IsSpace(rune(trimmed[1])) {
+	if !strings.HasPrefix(trimmed, "&") || len(trimmed) < 2 {
 		return false
 	}
-	return true
+	if unicode.IsSpace(rune(trimmed[1])) {
+		return true
+	}
+	// PowerShell also accepts the call operator adjacent to a fixed cmd
+	// executable. Only that exact executable is eligible for this argv view;
+	// a computed program word still has no monotone projection.
+	space := strings.IndexFunc(trimmed[1:], unicode.IsSpace)
+	if space <= 0 {
+		return false
+	}
+	name := trimmed[1 : space+1]
+	return strings.EqualFold(name, "cmd") || strings.EqualFold(name, "cmd.exe")
 }

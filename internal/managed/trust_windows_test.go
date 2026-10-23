@@ -811,3 +811,122 @@ func TestWindowsTokenRunsAsService(t *testing.T) {
 		t.Fatal("nil service SID was accepted")
 	}
 }
+
+// Review P1 (GAP-0352): the strict record walk never downgrades a verdict.
+// The folders DefenseClaw protects (namedDirs) get the leaf mask, and every
+// folder above them, the installer-owned Cisco folder included, keeps its
+// verdicts fatal.
+func TestWindowsStrictAncestorScopeIsNeverAdvisory(t *testing.T) {
+	for level := 0; level < 6; level++ {
+		scope := windowsStrictServiceAncestorScope(level, 2)
+		if scope.advisory {
+			t.Fatalf("level %d is advisory", level)
+		}
+		if want := level >= 2; scope.narrowMask != want {
+			t.Fatalf("level %d narrow mask = %v, want %v", level, scope.narrowMask, want)
+		}
+	}
+}
+
+// Review P1 (GAP-0352), on real folders: a record whose root, or whose
+// installer-owned Cisco folder, another account can change is refused, so
+// that account cannot move a record folder away and bring it back after a
+// revocation. The walk stops at the drifted folder.
+func TestValidateStrictServiceRuntimeFilePathRefusesADriftedFolderAboveTheRecord(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := user.User.Sid
+	for name, tc := range map[string]struct {
+		drifted func(cisco, root string) string
+		ace     string
+	}{
+		// FILE_ADD_FILE passes the narrow mask but not the leaf rule.
+		"record root adds files":    {func(_, root string) string { return root }, "(A;;0x2;;;WD)"},
+		"cisco folder deletes kids": {func(cisco, _ string) string { return cisco }, "(A;;0x40;;;WD)"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			t.Setenv("ProgramData", base)
+			cisco := filepath.Join(base, "Cisco")
+			root := filepath.Join(cisco, "DefenseClaw-HookSessions")
+			account := filepath.Join(root, "digest")
+			if err := os.MkdirAll(account, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			record := filepath.Join(account, "copilot-p-x.json")
+			if err := os.WriteFile(record, []byte("{}"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if !PlatformInstallerOwnedPath(cisco) {
+				t.Fatalf("%s must be installer-owned for this test", cisco)
+			}
+			// The walk goes on above the Cisco folder, through the temp
+			// folder chain, which must pass for the drift to be what refuses.
+			if err := validateStrictServiceRuntimeFilePath(record, "record", self, 2); err != nil {
+				t.Skipf("the temp folder chain is not trusted on this host: %v", err)
+			}
+			drifted := tc.drifted(cisco, root)
+			sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + self.String() + ")" + tc.ace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dacl, _, err := sd.DACL()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := windows.SetNamedSecurityInfo(drifted, windows.SE_FILE_OBJECT,
+				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+				t.Fatal(err)
+			}
+			err = validateStrictServiceRuntimeFilePath(record, "record", self, 2)
+			var untrusted *UntrustedPrincipalError
+			if !errors.As(err, &untrusted) || !strings.EqualFold(untrusted.Path, drifted) {
+				t.Fatalf("the drifted folder %s must refuse the record: %v", drifted, err)
+			}
+		})
+	}
+}
+
+// Review P2 (GAP-0352, loop round 3), on real folders: the folder form of
+// the strict walk, which status and verify use for the record root,
+// refuses a root whose installer-owned Cisco folder lets another account
+// delete its children, where the trusted runtime folder check only warns.
+func TestValidateStrictServiceRuntimeDirPathRefusesADriftedCiscoFolder(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := user.User.Sid
+	base := t.TempDir()
+	t.Setenv("ProgramData", base)
+	cisco := filepath.Join(base, "Cisco")
+	root := filepath.Join(cisco, "DefenseClaw-HookSessions")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !PlatformInstallerOwnedPath(cisco) {
+		t.Fatalf("%s must be installer-owned for this test", cisco)
+	}
+	if err := validateStrictServiceRuntimePath(root, true, "folder", self, 0); err != nil {
+		t.Skipf("the temp folder chain is not trusted on this host: %v", err)
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + self.String() + ")(A;;0x40;;;WD)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(cisco, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	err = validateStrictServiceRuntimePath(root, true, "folder", self, 0)
+	var untrusted *UntrustedPrincipalError
+	if !errors.As(err, &untrusted) || !strings.EqualFold(untrusted.Path, cisco) {
+		t.Fatalf("the drifted Cisco folder must refuse the record root: %v", err)
+	}
+}

@@ -167,6 +167,11 @@ func RequestRefresh(conn io.ReadWriter, gatewayService string) error {
 		if reason == "" {
 			reason = "the hook enumerator did not publish the MCP servers"
 		}
+		if answer.Refresh != nil {
+			incomplete := answer.Refresh.bounded()
+			incomplete.Detail = reason
+			return incomplete
+		}
 		return &RefusedError{Reason: reason}
 	}
 	return nil
@@ -375,7 +380,14 @@ func serveRefresh(ctx context.Context, conn Conn, payload []byte, refresh Refres
 	refreshCtx, cancel := context.WithTimeout(ctx, refreshLimit)
 	defer cancel()
 	if err := refresh(refreshCtx); err != nil {
-		_ = writeJSONFrame(conn, FrameAnswer, Answer{Error: truncate(err.Error(), maxAnswerError)})
+		answer := Answer{Error: truncate(err.Error(), maxAnswerError)}
+		var incomplete *RefreshIncomplete
+		if errors.As(err, &incomplete) && incomplete != nil {
+			// The rest is published: the gateway reads it and refuses only
+			// the calls of what is named here.
+			answer.Refresh = incomplete.bounded()
+		}
+		_ = writeJSONFrame(conn, FrameAnswer, answer)
 		return fmt.Errorf("refresh: %w", err)
 	}
 	return writeJSONFrame(conn, FrameAnswer, Answer{OK: true})

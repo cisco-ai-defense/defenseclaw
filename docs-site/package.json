@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
-    "postbuild": "tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts && npm run validate-seo",
+    "postbuild": "tsx ./scripts/check-search-index-size.ts && tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts && npm run validate-seo",
     "start": "next start",
     "lint": "eslint .",
     "validate-links": "tsx ./scripts/validate-links.ts",
@@ -19,6 +19,11 @@
     "test:policy-creator": "tsx --test ./scripts/test-policy-creator.ts",
     "test:feature-demos": "tsx --test ./scripts/test-feature-demos.ts",
     "test:diagram-zones": "tsx --test ./scripts/test-diagram-zones.tsx",
+    "test:support-matrix": "tsx --test ./scripts/test-support-matrix.ts",
+    "test:docs-claims": "tsx --test ./scripts/test-docs-claims.ts",
+    "test:search": "tsx --test ./scripts/test-search.tsx",
+    "check-search-index-size": "tsx ./scripts/check-search-index-size.ts",
+    "test:docs-w4": "tsx --test ./scripts/test-docs-w4.ts",
     "postinstall": "fumadocs-mdx && tsx ./scripts/build-policy-assets.ts && tsx ./scripts/sync-connector-icons.ts"
   },
   "dependencies": {

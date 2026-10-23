@@ -598,18 +598,19 @@ func TestBundleManagedConfigRefusals(t *testing.T) {
 // (secret_ref_missing); an unreadable store only warns.
 func TestVerifySecretPresence(t *testing.T) {
 	cfg := strings.Replace(bundleConfig(t), "  profile: standalone\n", "  profile: standalone\n  inspection:\n    ai_defense:\n      credential: ai-defense-api-key\n", 1)
-	f := newFixture(t, cfg, nil)
+	f := newFixture(t, cfg, bindValues("ai-defense-api-key"))
 	m, _ := enterprisebundle.DecodeManifest(f.raw)
-	if len(m.SecretRefs) != 1 || m.SecretRefs[0].Ref != "secret://ai-defense-api-key" || !m.SecretRefs[0].Required {
-		t.Fatalf("sign did not record the reference: %+v", m.SecretRefs)
+	if len(m.SecretRefs) != 1 || m.SecretRefs[0].Ref != "secret://ai-defense-api-key" || !m.SecretRefs[0].Required ||
+		m.SecretRefs[0].ValueSHA256 != enterprisebundle.CredentialValueSHA256("acme", "ai-defense-api-key", testSecretValue("ai-defense-api-key")) {
+		t.Fatalf("sign did not record the bound reference: %+v", m.SecretRefs)
 	}
 	a := anchors(t, "acme", nil, 0, activeKey("k1", f.key.Public()))
 	in := f.input(t, f.bundle, a)
-	in.SecretPresent = func(string) (bool, error) { return false, nil }
+	in.SecretValue = func(string) ([]byte, error) { return nil, nil }
 	if _, err := enterprisebundle.Verify(context.Background(), in); enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefMissing {
 		t.Fatalf("missing credential: %v", err)
 	}
-	in.SecretPresent = func(string) (bool, error) { return false, os.ErrPermission }
+	in.SecretValue = func(string) ([]byte, error) { return nil, os.ErrPermission }
 	res, err := enterprisebundle.Verify(context.Background(), in)
 	if err != nil || res.Warnings[0].Code != enterprisebundle.WarnSecretPresenceUnchecked {
 		t.Fatalf("unreadable store: %+v %v", res, err)

@@ -1,0 +1,62 @@
+{
+  "antigravity-hook.sh/closed": [
+    "_DC_BOOT_FAIL_MODE=\"closed\"",
+    "case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_BOOT_FAIL_MODE=\"closed\" ;; esac",
+    "FAIL_MODE=\"closed\""
+  ],
+  "antigravity-hook.sh/open": [
+    "_DC_BOOT_FAIL_MODE=\"open\"",
+    "case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_BOOT_FAIL_MODE=\"closed\" ;; esac",
+    "FAIL_MODE=\"open\""
+  ],
+  "claude-code-hook.sh/closed": [
+    "  _DC_HOME_FAIL_MODE=\"closed\"",
+    "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
+    "FAIL_MODE=\"closed\""
+  ],
+  "claude-code-hook.sh/open": [
+    "  _DC_HOME_FAIL_MODE=\"open\"",
+    "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
+    "FAIL_MODE=\"open\""
+  ],
+  "codex-hook.sh/closed": [
+    "  _DC_HOME_FAIL_MODE=\"closed\"",
+    "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
+    "FAIL_MODE=\"closed\"",
+    "# explicitly set FAIL_MODE=closed is told about a real problem."
+  ],
+  "codex-hook.sh/open": [
+    "  _DC_HOME_FAIL_MODE=\"open\"",
+    "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
+    "FAIL_MODE=\"open\"",
+    "# explicitly set FAIL_MODE=closed is told about a real problem."
+  ],
+  "copilot-hook.sh/closed": [
+    "FAIL_MODE=\"closed\"",
+    "case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) FAIL_MODE=\"closed\" ;; esac"
+  ],
+  "copilot-hook.sh/open": [
+    "FAIL_MODE=\"open\"",
+    "case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) FAIL_MODE=\"closed\" ;; esac"
+  ],
+  "devin-hook.sh/closed": [
+    "  _DC_HOME_FAIL_MODE=\"closed\"",
+    "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
+    "FAIL_MODE=\"closed\""
+  ],
+  "devin-hook.sh/open": [
+    "  _DC_HOME_FAIL_MODE=\"open\"",
+    "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
+    "FAIL_MODE=\"open\""
+  ],
+  "hermes-hook.sh/closed": [
+    "  _DC_HOME_FAIL_MODE=\"closed\"",
+    "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
+    "FAIL_MODE=\"closed\""
+  ],
+  "hermes-hook.sh/open": [
+    "  _DC_HOME_FAIL_MODE=\"open\"",
+    "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
+    "FAIL_MODE=\"open\""
+  ]
+}

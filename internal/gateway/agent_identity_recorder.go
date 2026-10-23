@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,6 +51,9 @@ type agentIdentityRecorder struct {
 	subSessionOrder []string
 	// exclusions are late child links awaiting the next inventory write.
 	// They must survive a failed write and are removed only after commit.
+	// Each one is a sub-session still in subSessions: one dropped past that
+	// bound loses its exclusion too, so a write that keeps failing cannot
+	// grow them past agentIdentityRecorderMaxPending (GAP-1128).
 	exclusions map[string]inventory.AgentIdentitySession
 
 	// persistErr is why the last write to inventory.db failed, "" after
@@ -101,6 +105,12 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	if facts.UserName != "" {
 		rec.UserName = facts.UserName
 	}
+	if facts.UserDomain != "" {
+		rec.UserDomain = facts.UserDomain
+	}
+	if facts.UserIncarnation != "" {
+		rec.UserIncarnation = facts.UserIncarnation
+	}
 	sessionID = strings.TrimSpace(sessionID)
 	if _, sub := r.subSessions[subSessionKey(facts.ID, sessionID)]; sub {
 		sessionID = ""
@@ -136,6 +146,7 @@ func (r *agentIdentityRecorder) markSubagentSession(agentID, sessionID string) {
 		}
 		for len(r.subSessionOrder) >= agentIdentityRecorderMaxPending {
 			delete(r.subSessions, r.subSessionOrder[0])
+			delete(r.exclusions, r.subSessionOrder[0])
 			r.subSessionOrder = r.subSessionOrder[1:]
 		}
 		r.subSessions[key] = struct{}{}
@@ -176,7 +187,12 @@ func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord, e
 		r.exclusions = make(map[string]inventory.AgentIdentitySession)
 	}
 	for _, child := range excluded {
-		r.exclusions[subSessionKey(child.AgentID, child.SessionID)] = child
+		// A child dropped from subSessions while the write was in flight
+		// counts as a session again, as one past the bound does.
+		key := subSessionKey(child.AgentID, child.SessionID)
+		if _, sub := r.subSessions[key]; sub {
+			r.exclusions[key] = child
+		}
 	}
 	for i := range batch {
 		old := batch[i]
@@ -486,11 +502,16 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 		offset = min(n, 1<<30)
 	}
 	user := strings.TrimSpace(q.Get("user"))
+	ids := adminViewAccountIDs(user)
+	incarnation, holderChanged := adminViewAccountProvenance(ids)
 	filter := inventory.AgentIdentityFilter{
-		User:           user,
-		UserIDs:        adminViewAccountIDs(user),
-		RemovedAccount: adminViewRemovedAccount(user),
-		Connector:      strings.ToLower(strings.TrimSpace(q.Get("connector"))),
+		User:            user,
+		UserIDs:         ids,
+		UserDomains:     adminViewAccountDomains(ids),
+		UserIncarnation: incarnation,
+		HolderChanged:   holderChanged,
+		RemovedAccount:  adminViewRemovedAccount(user),
+		Connector:       strings.ToLower(strings.TrimSpace(q.Get("connector"))),
 	}
 	// Write the buffered rows first, so one count of sessions serves the
 	// listing. A failed write leaves them buffered and merged below.
@@ -630,6 +651,12 @@ func mergeAgentIdentityRows(
 		if buffered.UserName != "" {
 			rec.UserName = buffered.UserName
 		}
+		if buffered.UserDomain != "" {
+			rec.UserDomain = buffered.UserDomain
+		}
+		if buffered.UserIncarnation != "" {
+			rec.UserIncarnation = buffered.UserIncarnation
+		}
 	}
 	rows := make([]agentIdentityRow, 0, len(order))
 	for _, id := range order {
@@ -650,7 +677,8 @@ func mergeAgentIdentityRows(
 // like the rest (GAP-0103). A row whose account no longer resolves keeps its
 // name, and is retired when the account was removed (GAP-1222); so does a row
 // of an account whose uid another account holds now, which is retired instead
-// of being listed under that account (GAP-0947).
+// of being listed under that account (GAP-0947), also when that account has
+// the same bare name in another domain (agentIdentityRecordedInAnotherDomain).
 func nameAgentIdentityRows(rows []agentIdentityRow) {
 	name := hostAccountNamer()
 	for i := range rows {
@@ -658,7 +686,8 @@ func nameAgentIdentityRows(rows []agentIdentityRow) {
 		switch {
 		case holder == "":
 			rows[i].Retired = agentIdentityAccountRemoved(rows[i].UserID)
-		case agentIdentityHeldByAnother(rows[i].AgentIdentityRecord, holder):
+		case agentIdentityHeldByAnother(rows[i].AgentIdentityRecord, holder),
+			agentIdentityRecordedInAnotherDomain(rows[i].AgentIdentityRecord):
 			rows[i].Retired = true
 		default:
 			rows[i].UserName = holder
@@ -685,15 +714,48 @@ func agentIdentityAccountRemoved(id string) bool {
 
 // agentIdentityHeldByAnother reports whether rec was derived for another
 // account than holder, the account that holds its uid now: holder's account
-// does not derive its ID, and the name it was recorded with is another
-// account's or missing. A SID is never handed on.
+// (its name and incarnation) does not derive its ID, and the name it was
+// recorded with is another account's or missing, or the ID is the one the
+// first account the gateway saw hold the uid derived, while another account
+// of the same name holds it now. A SID is never handed on.
 func agentIdentityHeldByAnother(rec inventory.AgentIdentityRecord, holder string) bool {
-	if agentidentity.IsSID(agentidentity.NormalizeUserID(rec.UserID)) || agentidentity.AgentID(agentidentity.Inputs{
-		MachineHash: rec.MachineHash, UserID: rec.UserID, Account: holder, Connector: rec.Connector, InstallFP: rec.InstallFP,
-	}) == rec.AgentID {
+	if agentidentity.IsSID(agentidentity.NormalizeUserID(rec.UserID)) {
 		return false
 	}
+	inputs := agentidentity.Inputs{MachineHash: rec.MachineHash, UserID: rec.UserID, Account: holder, Connector: rec.Connector,
+		InstallFP: rec.InstallFP, Incarnation: agentIdentityIncarnation(rec.UserID)}
+	if agentidentity.AgentID(inputs) == rec.AgentID {
+		return false
+	}
+	if inputs.Incarnation != "" {
+		inputs.Incarnation = ""
+		if agentidentity.AgentID(inputs) == rec.AgentID {
+			return true
+		}
+	}
 	return rec.UserName == "" || agentidentity.UIDReassigned(rec.UserID, rec.UserName, holder)
+}
+
+// agentIdentityRecordedInAnotherDomain reports whether rec was recorded for
+// another account than the one that holds its uid now: one of another
+// account token, or, where a side names none, of other domains than the
+// account whose facts the gateway holds for the uid. One bare name in two
+// domains derives one agent ID, so the row CORP\alice's agent left read as
+// OTHER\alice's once OTHER\alice held the uid (review of GAP-1263). Domains
+// alone may overlap (UPNs under one suffix), so the token decides where both
+// sides name one. A side that names neither proves nothing.
+func agentIdentityRecordedInAnotherDomain(rec inventory.AgentIdentityRecord) bool {
+	if recorded := strings.TrimSpace(rec.UserIncarnation); recorded != "" {
+		if current := agentIdentityAccountToken(rec.UserID); current != "" {
+			return current != recorded
+		}
+	}
+	recorded := strings.Fields(rec.UserDomain)
+	current := strings.Fields(agentIdentityAccountDomains(rec.UserID))
+	if len(recorded) == 0 || len(current) == 0 {
+		return false
+	}
+	return !slices.ContainsFunc(recorded, func(domain string) bool { return slices.Contains(current, domain) })
 }
 
 // hostAccountNamer names accounts by uid or SID as the host's account
@@ -733,6 +795,42 @@ var adminViewAccountIDs = func(user string) []string {
 	return []string{id}
 }
 
+// adminViewAccountProvenance is the account token of the account ids name
+// (the uid a qualified filter resolves to) and whether another account is
+// known to have held that uid (agentIdentityHolderHistory), for
+// AgentIdentityFilter.UserIncarnation and HolderChanged.
+func adminViewAccountProvenance(ids []string) (string, bool) {
+	if len(ids) != 1 {
+		return "", false
+	}
+	// The first inventory request after a uid handoff may precede any new
+	// agent hook. Refresh the holder before reading its history; rowToken
+	// alone resolves the new token without recording the handoff.
+	_ = agentIdentityIncarnation(ids[0])
+	current := agentIdentityVerifiedAccountToken(ids[0])
+	last, changed := agentIdentityHolderHistory(ids[0])
+	if useridentity.KindForID(ids[0]) == useridentity.KindPOSIXUID && (current == "" || last != current) {
+		// A qualified filter cannot prove ownership of any row of an
+		// unresolved uid, or of a holder change that did not persist in
+		// history (for example, when its bounded cache is full).
+		return "", true
+	}
+	return current, changed
+}
+
+// adminViewAccountDomains is the useridentity.AccountDomains of the
+// accounts ids name (adminViewAccountIDs), from the facts the gateway
+// cached for them.
+func adminViewAccountDomains(ids []string) string {
+	var domains []string
+	for _, id := range ids {
+		if own := agentIdentityAccountDomains(id); own != "" {
+			domains = append(domains, own)
+		}
+	}
+	return strings.Join(domains, " ")
+}
+
 // adminViewRemovedAccount is the RemovedAccount of an agent identity
 // listing for user: a deleted account's rows keep its last name and its uid
 // or SID, so its qualified name still lists the ones recorded with the bare
@@ -749,8 +847,49 @@ func adminViewRemovedAccount(user string) func(id string) bool {
 	}
 }
 
+// adminViewKnownDomain reports whether the gateway knows id, an account no
+// account holds now, as an account of domain, the domain of a qualified
+// --user filter: the facts its hooks cached for it name that domain (its
+// DNS domain, NetBIOS domain, realm, or the suffix of its UPN or principal),
+// or a domain it was otherwise seen in does (extra: the domain of the name a
+// uid last resolved to, the domain the LSA names for a SID). Two deleted accounts of one bare name
+// in two domains are then told apart by their own domain; one the gateway
+// knows no domain for is not listed by a qualified name, only by its bare
+// name or its id (GAP-1183, GAP-1263).
+func adminViewKnownDomain(domain, id string, extra ...string) bool {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return false
+	}
+	matches := func(candidate string) bool {
+		candidate = strings.TrimSpace(candidate)
+		return candidate != "" && useridentity.EqualFold(candidate, domain)
+	}
+	for _, candidate := range extra {
+		if matches(candidate) {
+			return true
+		}
+	}
+	key := strings.TrimSpace(id)
+	if useridentity.KindForID(key) == useridentity.KindWindowsSID {
+		key = strings.ToUpper(key)
+	}
+	facts, _, ok := peerDirectoryCache().peek(key)
+	if !ok {
+		return false
+	}
+	_, upnDomain := useridentity.SplitQualifiedName(facts.UPN)
+	_, principalDomain := useridentity.SplitQualifiedName(facts.Principal)
+	for _, candidate := range []string{facts.Domain, facts.AccountDomain, facts.Realm, upnDomain, principalDomain} {
+		if matches(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
 func agentIdentityMatches(rec inventory.AgentIdentityRecord, filter inventory.AgentIdentityFilter) bool {
-	if filter.User != "" && !filter.Account().Matches(rec.UserID, rec.UserName) {
+	if filter.User != "" && !filter.Account().MatchesIn(rec.UserID, rec.UserName, rec.UserDomain, rec.UserIncarnation) {
 		return false
 	}
 	return filter.Connector == "" || rec.Connector == filter.Connector

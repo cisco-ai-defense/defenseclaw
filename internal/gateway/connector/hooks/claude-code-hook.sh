@@ -46,6 +46,11 @@ _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
+# A per-user render is never a managed or Secure Client hook: those markers
+# come only from a managed render (the branch above), never from the
+# agent's environment, where they would change how the per-user hook answers
+# a missing token.
+unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 {{if not .Sandbox}}
 # A personal hook left on a managed computer must not fall back to its
@@ -59,7 +64,11 @@ fi
 {{end}}
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
-  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
+  # The installed mode decides; strict availability tightens this exit as it
+  # tightens every later outage.
+  _DC_HOME_FAIL_MODE="{{.FailMode}}"
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
+  if [ "$_DC_HOME_FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     exit 2
   fi
@@ -93,7 +102,9 @@ defenseclaw_harden_env
 FAIL_MODE="closed"
 readonly FAIL_MODE{{else if .Managed}}# Managed hooks use the installer-owned delivery policy; an inherited
 # DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed hook.
-FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
+FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="{{.FailMode}}"
+# The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
+# environment is not read, so status and doctor report what runs (GAP-0315).{{end}}
 
 # Bail early on missing token: see codex-hook.sh +
 # defenseclaw_handle_missing_token in _hardening.sh for rationale.
@@ -103,7 +114,7 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: claudecode hook refusing oversized payload" >&2
-  if [ "$FAIL_MODE" = "closed" ]; then
+  if [ "$FAIL_MODE" != "open" ]; then
     printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
     exit 2
   fi
@@ -127,7 +138,13 @@ PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome re
 # native bridge that will handle the matching invocation. The script-marker
 # check matters because teardown intentionally leaves a v0 no-op tombstone (and
 # may leave the scoped token) for already-running host processes.
-CURSOR_ORIGIN_VERSION="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.cursor_version // empty' 2>/dev/null || true)"
+# Only a payload that names the field can carry it, so a Claude Code call
+# runs no jq for this check (issue #1130).
+CURSOR_ORIGIN_VERSION=""
+case "$PAYLOAD" in
+  *cursor_version*)
+    CURSOR_ORIGIN_VERSION="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.cursor_version // empty' 2>/dev/null || true)" ;;
+esac
 if [ -n "$CURSOR_ORIGIN_VERSION" ] && [ -f "${HOOK_DIR}/.hook-cursor.token" ]; then
   CURSOR_HOOK_MARKER=""
   if [ -r "${HOOK_DIR}/cursor-hook.sh" ]; then
@@ -302,10 +319,14 @@ fi
 # restarting or not running (after a reboot, for example): send the call
 # again for up to 3 seconds, starting the gateway after a refusal. See
 # defenseclaw_await_gateway in _hardening.sh.
-# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
+# A tool call's request is bounded like the native hook's answer budget, by
+# the payload's top-level event (defenseclaw_payload_tool_gate_max_time).
+HOOK_MAX_TIME=10
+{{if not .SecureClient}}defenseclaw_payload_tool_gate_max_time "$PAYLOAD" 10
+{{end}}# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
 # payload on descriptors, never on its command line.
 defenseclaw_hook_post() {
-  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" 10 "$PAYLOAD" \
+  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" "$HOOK_MAX_TIME" "$PAYLOAD" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
 {{if and .Managed (not .SecureClient)}}    "${RESOLVED_HEADER_ARGS[@]+"${RESOLVED_HEADER_ARGS[@]}"}" \
@@ -319,8 +340,7 @@ RESPONSE=$(defenseclaw_hook_post) || {
 }
 defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
 
-HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-RESULT=$(echo "$RESPONSE" | sed '$d')
+defenseclaw_split_response
 
 if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
@@ -330,7 +350,29 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
-OUTPUT=$(echo "$RESULT" | _dc_jq -c '.claude_code_output // empty' 2>/dev/null) || {
+{{if and (not .Managed) (not .Sandbox)}}# Decode the action and its structured output together. Successful personal
+# hooks need one parser process rather than two (#1130). The fallback keeps
+# working on supported hosts without jq; managed/Secure Client renders retain
+# their delivery contract.
+if command -v jq >/dev/null 2>&1; then
+  unset RESPONSE_FIELDS
+  RESPONSE_FIELDS=$(printf '%s' "$RESULT" | jq -ers '
+    if length != 1 or (.[0] | type) != "object" then error("invalid response") else .[0] end
+    | if (.action == "allow" or .action == "alert" or .action == "block" or .action == "confirm")
+         and (.claude_code_output == null or (.claude_code_output | type) == "object")
+      then .action, (.claude_code_output // empty | tojson)
+      else error("invalid response fields") end' 2>/dev/null) || fail_response "invalid JSON response"
+  ACTION="${RESPONSE_FIELDS%%$'\n'*}"
+  OUTPUT=""
+  if [ "$ACTION" != "$RESPONSE_FIELDS" ]; then
+    OUTPUT="${RESPONSE_FIELDS#*$'\n'}"
+  fi
+  unset RESPONSE_FIELDS
+  if [ -n "$OUTPUT" ]; then
+    printf '%s\n' "$OUTPUT"
+  fi
+else
+{{end}}OUTPUT=$(echo "$RESULT" | _dc_jq -c '.claude_code_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
@@ -340,7 +382,8 @@ fi
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
-# alert is advisory (would_block=false): the notice printed above is all
+{{if and (not .Managed) (not .Sandbox)}}fi
+{{end}}# alert is advisory (would_block=false): the notice printed above is all
 # Claude Code gets, and the tool runs, as with allow.
 case "$ACTION" in
   allow|alert|block|confirm) ;;

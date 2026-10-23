@@ -1605,11 +1605,27 @@ dc_secret_json_error() {
     '
 }
 
+# dc_secret_set_bundle <gateway>: succeed when the gateway's `enterprise
+# secret set` takes --bundle: --version-json reports secret_set_bundle (from
+# 1.0.4). An older build binds no credential value and refuses the flag.
+dc_secret_set_bundle() {
+    probe=$("$1" --version-json </dev/null 2>/dev/null) || return 1
+    printf '%s\n' "$probe" | grep -q '"secret_set_bundle":[[:space:]]*true'
+}
+
 dc_store_secret() {
     gateway=$1
+    # A credential delivered with a bundle goes with it: a value the
+    # confirmed bundle does not sign is stored only when this bundle signs it
+    # (secret set --bundle). A gateway before 1.0.4 takes no --bundle and
+    # stores the credential as before.
+    set --
+    if [ -n "${bundle:-}" ] && dc_secret_set_bundle "$gateway"; then
+        set -- --bundle "$bundle"
+    fi
     set +e
     printf '%s' "$secret_data" |
-        "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err" &
+        "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json "$@" >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err" &
     DC_CHILD=$!
     wait "$DC_CHILD"
     secret_status=$?

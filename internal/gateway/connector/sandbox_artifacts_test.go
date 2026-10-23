@@ -59,8 +59,6 @@ var sandboxGoldenTargets = []struct {
 	{"opencode", NewOpenCodeConnector(), "1.18.31"},
 	{"antigravity", NewAntigravityConnector(), "1.2.12"},
 	{"hermes", NewHermesConnector(), "0.19.0"},
-	{"openhands", NewOpenHandsConnector(), "1.16.0"},
-	{"omnigent", NewOmnigentConnector(), "0.13.0"},
 }
 
 type sandboxGoldenManifest struct {
@@ -275,7 +273,7 @@ func TestSandboxHookScriptsCarryNoHostInputs(t *testing.T) {
 	}
 }
 
-func TestSandboxHardeningBakesOnlyThePath(t *testing.T) {
+func TestSandboxHardeningBakesPathAndWorkloadLogDir(t *testing.T) {
 	host, err := hookFS.ReadFile("hooks/_hardening.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -285,8 +283,10 @@ func TestSandboxHardeningBakesOnlyThePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := strings.Replace(string(host), `DEFENSECLAW_BAKED_HOOK_PATH=""`, `DEFENSECLAW_BAKED_HOOK_PATH="`+SandboxHookPATH+`"`, 1)
+	want = strings.Replace(want, `  local log_dir="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/logs"`,
+		`  local log_dir="`+SandboxHookLogDir+`"`, 1)
 	if string(sandbox) != want {
-		t.Fatal("sandbox _hardening.sh differs from the host helper by more than the baked PATH")
+		t.Fatal("sandbox _hardening.sh differs from the host helper beyond PATH and the workload log directory")
 	}
 }
 

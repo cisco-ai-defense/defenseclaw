@@ -1,0 +1,15 @@
+---
+title: "Identity"
+description: "How DefenseClaw finds the signed-in user, and how to connect Active Directory, Okta or Entra ID."
+---
+
+Start with Identity and authentication, then follow the page for your directory. Active Directory is the certified stack in 1.0.4; the Okta and Entra pages describe the last verified behaviour.
+
+<Cards>
+  <Card title="Identity and authentication" href="/docs/enterprise/identity/authentication" description="Which directory identities DefenseClaw attributes agent activity to on Linux, Windows and macOS, how agents get their own stable identity, how to assign a profile to a group, and how to check what DefenseClaw knows about a user." />
+  <Card title="How DefenseClaw knows who a user is" href="/docs/enterprise/identity/sources" description="DefenseClaw learns who ran an agent from the operating system alone, with no Active Directory, Okta or Entra integration. What it reads on Linux, Windows and macOS, what is verified and what is only claimed, how Okta and Entra users appear, and the limits." />
+  <Card title="Join a Linux host to AD" href="/docs/enterprise/identity/ad-linux" description="Join a RHEL 9 or Ubuntu 24.04 host to Active Directory with SSSD, turn on InfoPipe, sign in with a Kerberos ticket, and see what DefenseClaw records about the user." />
+  <Card title="Okta on Linux" href="/docs/enterprise/identity/okta" description="Read Okta users and groups on a Linux host through the Okta LDAP Interface and SSSD, choose DefenseClaw guardrail profiles by Okta group, and check the result." />
+  <Card title="Deploy with Microsoft Entra ID" href="/docs/enterprise/identity/entra-id" description="Use Microsoft Entra ID users and groups with DefenseClaw on Entra-joined Windows, on Linux (Entra SSH sign-in, Himmelblau, or Entra Domain Services with SSSD) and on macOS with Platform SSO, and check what DefenseClaw records." />
+  <Card title="Identity detail" href="/docs/enterprise/identity/reference" description="Identity types per OS, agent-identity rules, and the Okta and Entra setup steps." />
+</Cards>

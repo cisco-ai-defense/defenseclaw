@@ -233,6 +233,11 @@ func flapConflict(state *State, connector, path string, count int) {
 	}
 }
 
+// errPublishedDirExposes is the error of a directory above a published file
+// that restorePublishedDirs (Unix) leaves as it is: the access users need to reach
+// DefenseClaw's file would also reach an administrator's other files there.
+var errPublishedDirExposes = errors.New("cannot restore user access to machine policy")
+
 // publishWithRecord writes rendered when it differs from current and keeps
 // the ownership record in sync. It returns whether the file changed.
 // alsoCreated names directories the caller created for this file (a
@@ -295,6 +300,12 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 	dirsRestored := false
 	if problem := publishedDirProblem(opts, path); problem != "" {
 		restored, err := restorePublishedDirs(opts, path)
+		if errors.Is(err, errPublishedDirExposes) {
+			// The administrator restricts or moves those files; the
+			// connector is not covered until then.
+			state.conflict("%v", err)
+			err = nil
+		}
 		if err != nil {
 			return changed, err
 		}
@@ -366,8 +377,8 @@ func verifyPublishedFiles(opts Options, connector string, state *State) {
 }
 
 // RestorePublishedPolicyDirs gives the directories above every policy file
-// DefenseClaw publishes (ownership: merge) back the mode 0755 users need to
-// read it. The hook guardian runs it on each pass, so an administrator's
+// DefenseClaw publishes (ownership: merge) back the access users need to
+// read it (restorePublishedDirs). The hook guardian runs it on each pass, so an administrator's
 // chmod 0700 of /etc/claude-code/managed-settings.d does not leave Claude
 // Code without managed settings until the next repair (GAP-0913). It returns
 // the directories it changed.

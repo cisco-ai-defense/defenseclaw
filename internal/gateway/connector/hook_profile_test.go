@@ -17,7 +17,6 @@
 package connector
 
 import (
-	"runtime"
 	"testing"
 )
 
@@ -34,10 +33,6 @@ import (
 // before opening a config file.
 func TestHookProfileMatrix(t *testing.T) {
 	t.Parallel()
-	openHandsNativeOTLPKind := NativeOTLPKind("")
-	if runtime.GOOS == "darwin" {
-		openHandsNativeOTLPKind = NativeOTLPEnvBlock
-	}
 
 	cases := []struct {
 		name               string
@@ -56,7 +51,6 @@ func TestHookProfileMatrix(t *testing.T) {
 		{"codex", true, NativeOTLPTOMLBlock, true, false, true, true},
 		{"claudecode", true, NativeOTLPEnvBlock, true, true, true, true},
 		{"copilot", true, "", true, true, false, true},
-		{"openhands", true, openHandsNativeOTLPKind, true, false, true, true},
 		// Cursor's native beforeShellExecution and preToolUse events can deny
 		// synchronously. The client has no native ask/HITL response, but action
 		// mode can block and fail closed on the reviewed event contract.
@@ -69,9 +63,7 @@ func TestHookProfileMatrix(t *testing.T) {
 		// Amp's plugin API has no traceparent transport. tool.call supports
 		// native confirm/reject and DefenseClaw can fail closed after load.
 		{"amp", false, "", true, true, true, true},
-		// OmniGent's in-process policy bridge injects the active OTel context;
 		// its runtime also accepts standard OTLP process environment variables.
-		{"omnigent", true, NativeOTLPEnvBlock, true, true, true, true},
 		{"kiro", true, "", true, false, true, true},
 	}
 

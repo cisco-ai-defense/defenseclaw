@@ -1,7 +1,7 @@
 # Gateway API
 
 The
-[published gateway API reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/gateway-api/)
+[published gateway API reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/gateway-api/)
 is the canonical consumer-facing endpoint guide.
 
 For implementation review, route registration is in

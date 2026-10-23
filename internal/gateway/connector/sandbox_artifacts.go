@@ -42,6 +42,8 @@ const (
 	SandboxHookPATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 	// SandboxHomeDir is the workload HOME in the OpenShell community base.
 	SandboxHomeDir = "/sandbox"
+	// SandboxHookLogDir persists hook failures outside the read-only runtime.
+	SandboxHookLogDir = SandboxHomeDir + "/.defenseclaw/logs"
 	// SandboxFailMode is the only fail mode a sandbox hook set renders with.
 	SandboxFailMode = "closed"
 	// SandboxTokenEnv carries the per-sandbox binding token. OpenShell
@@ -170,7 +172,7 @@ type SandboxArtifactProvider interface {
 // with sandbox-only contracts resolves against those instead: one whose host
 // hooks are not version-gated (Kiro), as an overlay image always pins a
 // reviewed harness build, and one whose sandbox needs a narrower range than
-// its host (OmniGent). A version the host contract accepts and the sandbox
+// its host. A version the host contract accepts and the sandbox
 // refuses gets the sandbox's reason. Overlay images pin reviewed builds, so
 // sandbox resolution keeps exact-range matching.
 func ResolveSandboxHookContract(connectorName, agentVersion string) HookContractResolution {
@@ -191,15 +193,12 @@ func ResolveSandboxHookContract(connectorName, agentVersion string) HookContract
 // host hooks are not version-gated or whose sandbox needs a narrower range.
 // Each connector keeps its contracts in its own <connector>_sandbox.go file.
 var sandboxOnlyHookContractsByConnector = map[string]func() []HookContract{
-	"kiro":     kiroSandboxHookContracts,
-	"omnigent": omnigentSandboxHookContracts,
+	"kiro": kiroSandboxHookContracts,
 }
 
 // sandboxOnlyRefusals say why a sandbox refuses a version its connector's
 // host contract accepts.
-var sandboxOnlyRefusals = map[string]string{
-	"omnigent": omnigentSandboxRefusal,
-}
+var sandboxOnlyRefusals = map[string]string{}
 
 // sandboxOnlyHookContracts returns fresh copies of connector's sandbox-only
 // hook contracts (none for most connectors).
@@ -232,7 +231,6 @@ var sandboxHookScriptsByConnector = map[string][]string{
 	"devin":       {"devin-hook.sh"},
 	"hermes":      {"hermes-hook.sh"},
 	"kiro":        {"kiro-hook.sh"},
-	"openhands":   {"openhands-hook.sh"},
 }
 
 // sandboxHookHostOnlyMarkers must never survive into a rendered sandbox
@@ -388,9 +386,9 @@ func sandboxHookShebang(name string, body []byte) ([]byte, error) {
 	return append([]byte("#!/bin/bash -p\n"), body[len(host):]...), nil
 }
 
-// renderSandboxHardening bakes SandboxHookPATH into _hardening.sh through its
-// reserved DEFENSECLAW_BAKED_HOOK_PATH sentinel; the host helper keeps the
-// empty sentinel and its default PATH.
+// renderSandboxHardening bakes the runtime PATH and the writable workload
+// log directory into the helper. Host and Secure Client helpers keep their
+// original PATH and log destination.
 func renderSandboxHardening() ([]byte, error) {
 	content, err := hookFS.ReadFile("hooks/_hardening.sh")
 	if err != nil {
@@ -401,7 +399,17 @@ func renderSandboxHardening() ([]byte, error) {
 		return nil, fmt.Errorf("_hardening.sh must carry exactly one baked-PATH sentinel")
 	}
 	baked := `DEFENSECLAW_BAKED_HOOK_PATH="` + SandboxHookPATH + `"` + "\n"
-	return bytes.Replace(content, []byte(sentinel), []byte(baked), 1), nil
+	content = bytes.Replace(content, []byte(sentinel), []byte(baked), 1)
+	// DEFENSECLAW_HOME names the root-owned runtime in a sandbox, and the
+	// hardening helper replaces HOME with a temporary directory. Neither is
+	// a persistent writable log destination. Bake the workload path rather
+	// than accepting a destination from the agent's environment.
+	const logSentinel = `  local log_dir="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/logs"`
+	if bytes.Count(content, []byte(logSentinel)) != 1 {
+		return nil, fmt.Errorf("_hardening.sh must carry exactly one hook-failure log directory")
+	}
+	logDir := `  local log_dir="` + SandboxHookLogDir + `"`
+	return bytes.Replace(content, []byte(logSentinel), []byte(logDir), 1), nil
 }
 
 // finalizeSandboxArtifacts validates paths, rejects duplicates and sorts the

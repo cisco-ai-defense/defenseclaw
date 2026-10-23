@@ -18,7 +18,10 @@
 
 package processutil
 
-import "os/exec"
+import (
+	"os/exec"
+	"runtime"
+)
 
 func configureCapturedCommand(_ *exec.Cmd) {}
 
@@ -26,7 +29,17 @@ func combinedOutputTree(cmd *exec.Cmd, _ bool) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
+// runTree runs cmd on a thread locked to this goroutine until it is reaped:
+// Linux sends the parent-death signal when the thread that started the child
+// ends, not the process, so the runtime must not end that thread while the
+// child still runs (G-small).
 func runTree(cmd *exec.Cmd, _ bool) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	exitWithParent(cmd)
-	return cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	killDescendantsAtExit(cmd)
+	return cmd.Wait()
 }

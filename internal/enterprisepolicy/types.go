@@ -333,11 +333,6 @@ func RouteFor(connector, goos string) string {
 		return RoutePerUser
 	case "openclaw", "zeptoclaw":
 		return RouteUnsupported
-	case "openhands", "omnigent":
-		if goos == "windows" {
-			return RouteUnsupported
-		}
-		return RoutePerUser
 	case "devin", "antigravity", "hermes", "opencode", "amp":
 		return RoutePerUser
 	default:

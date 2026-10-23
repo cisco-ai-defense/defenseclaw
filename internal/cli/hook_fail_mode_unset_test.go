@@ -27,7 +27,7 @@ func TestNativeHookFailModeWithoutAnExplicitOpenIsClosed(t *testing.T) {
 		{name: "legacy sidecar without a mode", sidecar: "DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:12345\n", want: "closed"},
 		{name: "legacy empty value", sidecar: "DEFENSECLAW_FAIL_MODE=\n", want: "closed"},
 		{name: "unknown value", sidecar: `{"version":2,"fail_modes":{"claudecode":"opne"}}`, want: "closed"},
-		{name: "explicit open in the sidecar", sidecar: `{"version":2,"fail_modes":{"claudecode":"open"}}`, want: "open"},
+		{name: "explicit open in the sidecar", sidecar: `{"version":2,"fail_modes":{"claudecode":"open"},"fail_mode_sources":{"claudecode":"config"}}`, want: "open"},
 		{name: "explicit open flag", flag: "open", want: "open"},
 		{name: "explicit closed flag over an open sidecar", sidecar: `{"version":2,"fail_modes":{"claudecode":"open"}}`, flag: "closed", want: "closed"},
 	} {

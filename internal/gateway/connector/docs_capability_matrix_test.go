@@ -20,12 +20,13 @@ type documentedCapabilityMatrix struct {
 		ToolInspection   string `json:"toolInspection"`
 		SubprocessPolicy string `json:"subprocessPolicy"`
 		Hooks            struct {
-			CanBlock           bool     `json:"canBlock"`
-			CanAskNative       bool     `json:"canAskNative"`
-			AskEvents          []string `json:"askEvents"`
-			BlockEvents        []string `json:"blockEvents"`
-			SupportsFailClosed bool     `json:"supportsFailClosed"`
-			Scope              string   `json:"scope"`
+			CanBlock               bool     `json:"canBlock"`
+			CanAskNative           bool     `json:"canAskNative"`
+			AskEvents              []string `json:"askEvents"`
+			BlockEvents            []string `json:"blockEvents"`
+			SupportsFailClosed     bool     `json:"supportsFailClosed"`
+			BlocksDeliveryFailures bool     `json:"blocksDeliveryFailures"`
+			Scope                  string   `json:"scope"`
 		} `json:"hooks"`
 		Sandbox struct {
 			Status string `json:"status"`
@@ -58,6 +59,15 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 		scope, sandboxStatus                     string
 	}, len(documented.Connectors))
 	for _, row := range documented.Connectors {
+		for _, conn := range newBuiltinConnectors() {
+			if conn.Name() != row.ID {
+				continue
+			}
+			wantDelivery := !row.Hooks.SupportsFailClosed && CapableHookFailMode(SetupOpts{}, conn, "closed") == "closed"
+			if row.Hooks.BlocksDeliveryFailures != wantDelivery {
+				t.Errorf("%s delivery failure support=%v, want %v from its rendered closed mode", row.ID, row.Hooks.BlocksDeliveryFailures, wantDelivery)
+			}
+		}
 		if _, exists := rows[row.ID]; exists {
 			t.Fatalf("duplicate connector %q in capability matrix", row.ID)
 		}

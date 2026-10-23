@@ -719,8 +719,11 @@ func (h *hostPlane) noteLifecycle(event plane.Event, at time.Time) {
 	if h.lifecycle.ByPID == nil {
 		h.lifecycle.ByPID = map[int][]pidEvent{}
 	}
-	h.lifecycle.ByPID[event.PID] = append(h.lifecycle.ByPID[event.PID],
-		pidEvent{At: at, Exit: event.Kind == plane.KindExit, Instance: instance})
+	noted := pidEvent{At: at, Exit: event.Kind == plane.KindExit, Instance: instance}
+	if !noted.Exit {
+		noted.User, noted.SID = event.User, event.UserSID
+	}
+	h.lifecycle.ByPID[event.PID] = append(h.lifecycle.ByPID[event.PID], noted)
 	h.lifecycleCount++
 }
 
@@ -847,6 +850,7 @@ func sessionOwnerEvidence(root procRef, observations []agentchain.Observation) (
 				processes = append(processes, procRef{
 					PID: observation.PID, Start: observation.Start, Name: observation.Name, At: observation.At,
 					Born: observation.Born, Instance: observation.Instance, User: observation.User, SID: observation.SID,
+					Descendant: observation.PID != root.PID,
 				})
 			} else if observation.At.After(processes[index].At) {
 				processes[index].At = observation.At

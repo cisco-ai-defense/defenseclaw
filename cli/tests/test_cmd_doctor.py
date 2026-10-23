@@ -44,7 +44,6 @@ from defenseclaw.commands.cmd_doctor import (
     _check_hilt_support,
     _check_hook_health,
     _check_llm_api_key,
-    _check_openhands_hooks,
     _check_proxy_interception,
     _check_scanners,
     _check_security_overrides,
@@ -1079,69 +1078,6 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("mode=action via PreToolUse deny", detail)
         self.assertIn("proxy port intentionally closed", detail)
 
-    @patch("defenseclaw.commands.cmd_doctor._http_probe")
-    def test_omnigent_action_reports_configured_unverified_policy_without_proxy_probe(self, mock_probe):
-        from defenseclaw.commands.cmd_doctor import _check_guardrail_proxy
-
-        cfg = Config(
-            data_dir="/tmp/defenseclaw",
-            audit_db="/tmp/defenseclaw/audit.db",
-            quarantine_dir="/tmp/defenseclaw/quarantine",
-            plugin_dir="/tmp/defenseclaw/plugins",
-            policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(
-                enabled=True,
-                mode="action",
-                port=4000,
-                connector="omnigent",
-            ),
-            gateway=GatewayConfig(),
-            openshell=OpenShellConfig(),
-        )
-        cfg.claw.mode = "omnigent"
-        result = _DoctorResult()
-
-        _check_guardrail_proxy(cfg, result)
-
-        mock_probe.assert_not_called()
-        self.assertEqual(len(result.checks), 1, result.checks)
-        self.assertEqual(result.checks[0]["status"], "pass")
-        self.assertEqual(result.failed, 0, result.checks)
-        self.assertEqual(result.warned, 0, result.checks)
-        self.assertEqual(result.passed, 1, result.checks)
-        detail = result.checks[0]["detail"]
-        self.assertIn("policy path configured for omnigent", detail)
-        self.assertIn("mode=action via ALLOW/ASK/DENY", detail)
-        self.assertIn("live policy generation unverified", detail)
-
-    def test_omnigent_without_judge_skips_llm_key_requirement(self):
-        from defenseclaw.commands.cmd_doctor import _check_llm_api_key
-
-        cfg = Config(
-            data_dir="/tmp/defenseclaw",
-            audit_db="/tmp/defenseclaw/audit.db",
-            quarantine_dir="/tmp/defenseclaw/quarantine",
-            plugin_dir="/tmp/defenseclaw/plugins",
-            policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(
-                enabled=True,
-                mode="action",
-                connector="omnigent",
-            ),
-            gateway=GatewayConfig(),
-            openshell=OpenShellConfig(),
-        )
-        cfg.claw.mode = "omnigent"
-        result = _DoctorResult()
-
-        _check_llm_api_key(cfg, result)
-
-        self.assertEqual(len(result.checks), 1, result.checks)
-        self.assertEqual(result.failed, 0, result.checks)
-        self.assertEqual(result.warned, 0, result.checks)
-        self.assertEqual(result.checks[0]["status"], "skip")
-        self.assertIn("not required by hook/policy enforcement", result.checks[0]["detail"])
-
     def test_hilt_uses_resolved_identity_profile_for_connector(self):
         from defenseclaw.config import GuardrailProfile
 
@@ -1260,11 +1196,11 @@ class DoctorGuardrailTests(unittest.TestCase):
             quarantine_dir="/tmp/defenseclaw/quarantine",
             plugin_dir="/tmp/defenseclaw/plugins",
             policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(enabled=True, mode="action", connector="omnigent"),
+            guardrail=GuardrailConfig(enabled=True, mode="action", connector="amp"),
             gateway=GatewayConfig(),
             openshell=OpenShellConfig(),
         )
-        cfg.claw.mode = "omnigent"
+        cfg.claw.mode = "amp"
         cfg.llm.model = "ollama/qwen2.5:0.5b"
         result = _DoctorResult()
         with patch("defenseclaw.llm.ping", side_effect=AssertionError("probed an unused LLM")):
@@ -1299,10 +1235,6 @@ class DoctorGuardrailTests(unittest.TestCase):
             result.checks[0]["detail"],
         )
 
-        result = _DoctorResult()
-        _check_hilt_support(cfg, "openhands", result)
-        self.assertEqual(result.warned, 1)
-        self.assertIn("no native human approval surface", result.checks[0]["detail"])
 
         result = _DoctorResult()
         _check_hilt_support(cfg, "opencode", result)
@@ -1319,26 +1251,6 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("PreToolUse ask", result.checks[0]["detail"])
         self.assertIn("no override", result.checks[0]["detail"])
 
-    def test_hilt_omnigent_preserves_native_degraded_pre_action_ask_scope(self):
-        cfg = Config(
-            data_dir="/tmp/defenseclaw",
-            audit_db="/tmp/defenseclaw/audit.db",
-            quarantine_dir="/tmp/defenseclaw/quarantine",
-            plugin_dir="/tmp/defenseclaw/plugins",
-            policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(enabled=True, mode="action", connector="omnigent"),
-            gateway=GatewayConfig(),
-            openshell=OpenShellConfig(),
-        )
-        cfg.guardrail.hilt.enabled = True
-
-        result = _DoctorResult()
-        _check_hilt_support(cfg, "omnigent", result)
-
-        self.assertEqual(result.passed, 1, result.checks)
-        self.assertEqual(result.warned, 0, result.checks)
-        self.assertIn("native-degraded support", result.checks[0]["detail"])
-        self.assertIn("request, tool_call, and llm_request", result.checks[0]["detail"])
 
 
 class DoctorHookReachabilityTests(unittest.TestCase):
@@ -1354,38 +1266,6 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             openshell=OpenShellConfig(),
         )
 
-    def test_openhands_hooks_accept_sdk_home_fallback(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = os.path.join(tmp, "home")
-            workspace = os.path.join(tmp, "repo")
-            hook_path = os.path.join(home, ".openhands", "hooks.json")
-            os.makedirs(os.path.dirname(hook_path), exist_ok=True)
-            os.makedirs(workspace, exist_ok=True)
-            with open(hook_path, "w", encoding="utf-8") as fh:
-                json.dump(
-                    {
-                        "pre_tool_use": [
-                            {
-                                "matcher": "*",
-                                "hooks": [
-                                    {
-                                        "type": "command",
-                                        "command": os.path.join(tmp, ".defenseclaw", "hooks", "openhands-hook.sh"),
-                                    }
-                                ],
-                            }
-                        ]
-                    },
-                    fh,
-                )
-            cfg = self._cfg(tmp, "openhands")
-            cfg.claw.workspace_dir = workspace
-            with patch.dict(os.environ, isolated_home_env(home), clear=False):
-                result = _DoctorResult()
-                _check_openhands_hooks(cfg, result)
-            self.assertEqual(result.failed, 0, result.checks)
-            self.assertEqual(result.passed, 1)
-            self.assertIn("reachable", result.checks[0]["detail"])
 
     # ------------------------------------------------------------------
     # Antigravity (`agy`) hook reachability
@@ -1410,7 +1290,9 @@ class DoctorHookReachabilityTests(unittest.TestCase):
         ]
         cfg: dict = {}
         for event in events:
-            handler = {"type": "command", "command": hook_script_path, "timeout": 30}
+            # Setup binds each event as the hook's argument (Antigravity's
+            # input names no event).
+            handler = {"type": "command", "command": f"{hook_script_path} {event}", "timeout": 30}
             entries = (
                 [{"matcher": "*", "hooks": [handler]}]
                 if event in {"PreToolUse", "PostToolUse"}
@@ -1585,12 +1467,15 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                     {
                         "version": 1,
                         "hooks": {
-                            "PreToolUse": [
+                            event: [
                                 {
                                     "type": "command",
-                                    "bash": os.path.join(tmp, ".defenseclaw", "hooks", "copilot-hook.sh"),
+                                    "bash": os.path.join(tmp, ".defenseclaw", "hooks", "copilot-hook.sh")
+                                    + f" --event {event}",
+                                    "timeoutSec": 30,
                                 }
                             ]
+                            for event in ("preToolUse", "permissionRequest")
                         },
                     },
                     fh,
@@ -2441,6 +2326,9 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
     def test_codex_hook_check_warns_when_notify_is_not_defenseclaw(self):
         # GAP-1248: a renamed notify program left Codex launching a missing
         # program on every turn while doctor said the hooks were healthy.
+        # Secure Client is the one profile that registers the notifier.
+        from unittest import mock
+
         from defenseclaw.commands import cmd_doctor
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -2465,12 +2353,51 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
                 cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix", config_path=config_toml)
                 return [c for c in result.checks if c["label"] == "Codex notify"]
 
-            renamed = notify_rows(f'notify = ["bash", "{bridge[:-3]}-TAMPERED.sh"]\n')
-            healthy = notify_rows(f'notify = ["bash", "{bridge}"]\n')
+            with mock.patch.object(cmd_doctor, "_doctor_secure_client", return_value=True):
+                renamed = notify_rows(f'notify = ["bash", "{bridge[:-3]}-TAMPERED.sh"]\n')
+                healthy = notify_rows(f'notify = ["bash", "{bridge}"]\n')
 
         self.assertEqual([c["status"] for c in renamed], ["warn"], renamed)
         self.assertIn("-TAMPERED.sh", renamed[0]["detail"])
         self.assertEqual(healthy, [])
+
+    @unittest.skipIf(os.name == "nt", "POSIX hook paths in a TOML basic string")
+    def test_codex_hook_check_warns_when_an_old_defenseclaw_notifier_is_left(self):
+        # Outside Secure Client setup registers no Codex notifier: Codex puts
+        # the turn record on the notifier's command line. One left by an older
+        # setup is reported; the account's own notifier, or none, is fine.
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, ".defenseclaw")
+            cfg = self._make_cfg(home)
+            self._write_hook(home, "codex-hook.sh", "#!/bin/sh\n# defenseclaw-managed-hook v6\n")
+            bridge = os.path.join(home, "notify-bridge.sh")
+            own = os.path.join(home, "hooks", "codex-hook.sh")
+            config_toml = os.path.join(tmp, "codex", "config.toml")
+            os.makedirs(os.path.dirname(config_toml))
+            hooks = (
+                "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\n"
+                f'type = "command"\ncommand = "{own} --event PreToolUse"\n'
+            )
+
+            def notify_rows(notify: str) -> list[dict]:
+                with open(config_toml, "w", encoding="utf-8") as fh:
+                    fh.write(notify + hooks)
+                result = _DoctorResult()
+                cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix", config_path=config_toml)
+                return [c for c in result.checks if c["label"] == "Codex notify"]
+
+            stale = notify_rows(f'notify = ["bash", "{bridge}"]\n')
+            native = notify_rows('notify = ["/opt/defenseclaw/bin/defenseclaw-hook", "notify"]\n')
+            users = notify_rows('notify = ["/usr/local/bin/my-notifier"]\n')
+            none = notify_rows("")
+
+        self.assertEqual([c["status"] for c in stale], ["warn"], stale)
+        self.assertIn("still runs the DefenseClaw notifier", stale[0]["detail"])
+        self.assertEqual([c["status"] for c in native], ["warn"], native)
+        self.assertEqual(users, [])
+        self.assertEqual(none, [])
 
     def test_unreadable_foreign_codex_hook_script_counts_as_broken(self):
         # GAP-1854: another account's unreadable home raised PermissionError
@@ -2671,6 +2598,33 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
         rows = [c for c in result.checks if c["label"] == "Gateway home"]
         self.assertEqual(len(rows), 1, result.checks)
         self.assertEqual(rows[0]["status"], "pass")
+
+    def test_listener_second_owner_fails_at_once_and_names_the_owners(self):
+        # GAP-0535: the brief second holder was the gateway's own fork, which
+        # the listener evidence now recognizes. A second owner that remains
+        # is reported at once, with its PIDs, without a settle wait.
+        from defenseclaw.commands import cmd_doctor
+
+        process = cmd_doctor._GatewayTrust("trusted", "verified", 4321, home_bound=True)
+        ambiguous = cmd_doctor.ListenerEvidence(
+            "ambiguous", reason="multiple processes own listeners for the configured API endpoint: PIDs 4321, 9001"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            result = _DoctorResult()
+            with (
+                patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
+                patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=process),
+                patch.object(cmd_doctor, "_managed_gateway_listener_evidence", return_value=ambiguous) as listener,
+                patch.object(cmd_doctor.time, "sleep") as sleep,
+            ):
+                cmd_doctor._check_gateway_home_mismatch(cfg, result)
+
+        rows = [c for c in result.checks if c["label"] == "Gateway home"]
+        self.assertEqual([row["status"] for row in rows], ["fail"], result.checks)
+        self.assertIn("PIDs 4321, 9001", rows[0]["detail"])
+        listener.assert_called_once()
+        sleep.assert_not_called()
 
     def test_silent_when_api_not_reachable(self):
         from defenseclaw.commands import cmd_doctor
@@ -3349,35 +3303,7 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
         self.assertIn("mode=action via PreToolUse deny", detail)
         self.assertIn("proxy port intentionally closed", detail)
 
-    def test_multi_hook_action_mode_preserves_omnigent_policy_semantics(self):
-        from defenseclaw.commands.cmd_doctor import (
-            _guardrail_proxy_intentionally_closed,
-        )
 
-        detail = _guardrail_proxy_intentionally_closed(self._cfg(["codex", "omnigent"], mode="action"))
-
-        self.assertTrue(detail.startswith("configured for"), detail)
-        self.assertIn("codex (mode=action via PreToolUse deny)", detail)
-        self.assertIn(
-            "omnigent (native-degraded; mode=action via ALLOW/ASK/DENY; live policy generation unverified)",
-            detail,
-        )
-        self.assertIn("proxy port intentionally closed", detail)
-
-    def test_single_omnigent_status_preserves_native_degraded_posture(self):
-        from defenseclaw.commands.cmd_doctor import (
-            _guardrail_proxy_intentionally_closed,
-        )
-
-        detail = _guardrail_proxy_intentionally_closed(
-            self._cfg(["omnigent"], mode="action")
-        )
-
-        self.assertIn("native-degraded", detail)
-        self.assertIn("mode=action via ALLOW/ASK/DENY", detail)
-        self.assertIn("live policy generation unverified", detail)
-        self.assertNotIn("policy-enforced", detail)
-        self.assertIn("proxy port intentionally closed", detail)
 
     def test_proxy_peer_forces_real_probe(self):
         """hermes (hook) + openclaw (proxy): openclaw needs port 4000, so the
@@ -3719,3 +3645,60 @@ def test_policy_digest_probe_unavailable_does_not_pass():
     row = result.checks[-1]
     assert row["status"] == "warn"
     assert "comparison" in row["detail"]
+
+
+def _hilt_profile_cfg(profile):
+    from defenseclaw.config import GuardrailProfile
+
+    cfg = Config(
+        data_dir="/tmp/defenseclaw",
+        audit_db="/tmp/defenseclaw/audit.db",
+        quarantine_dir="/tmp/defenseclaw/quarantine",
+        plugin_dir="/tmp/defenseclaw/plugins",
+        policy_dir="/tmp/defenseclaw/policies",
+        guardrail=GuardrailConfig(enabled=True, mode="action", connector="codex"),
+        gateway=GatewayConfig(),
+        openshell=OpenShellConfig(),
+    )
+    cfg.guardrail.hilt.enabled = True
+    cfg.guardrail.profiles = {"read_only": profile or GuardrailProfile()}
+    cfg.guardrail.default_profile = "read_only"
+    return cfg
+
+
+def test_hilt_observe_under_a_profile_names_the_profile_setting():
+    # GAP-1269: 'guardrail mode' does not change the mode a profile sets.
+    from defenseclaw.commands.cmd_doctor import _check_hilt_support, _emit_hilt_observe_summary
+    from defenseclaw.config import GuardrailProfile
+
+    resolved = {
+        "profile": "read_only",
+        "effective": {"mode": "observe", "hilt": {"enabled": True, "min_severity": "HIGH"}},
+    }
+    for profile, pinned in ((GuardrailProfile(mode="observe"), True), (GuardrailProfile(), False)):
+        cfg = _hilt_profile_cfg(profile)
+        result = _DoctorResult()
+        observe_only: list = []
+        with patch("defenseclaw.gateway.current_user_guardrail_profile", return_value=resolved):
+            for connector in ("codex", "claudecode"):
+                _check_hilt_support(cfg, connector, result, observe_only=observe_only)
+        _emit_hilt_observe_summary(observe_only, result, tagged=True)
+        remediation = result.checks[-1]["remediation"]
+        if pinned:
+            assert "guardrail.profiles.read_only.mode" in remediation
+            assert "guardrail mode action" not in remediation
+        else:
+            # A profile that inherits the mode: the base command does change it.
+            assert "guardrail mode action --connector <name>" in remediation
+
+
+def test_scanner_settings_names_the_skill_scanner_judge():
+    # GAP-0981: the guardrail judge can be on while the skill scanner's is off.
+    from defenseclaw.config import default_config
+    from defenseclaw.scanner import settings as scanner_settings
+
+    cfg = default_config()
+    cfg.guardrail.judge.enabled = True
+    cfg.scanners.skill_scanner.use_llm = False
+    issue = scanner_settings.recommended_settings_issue(cfg)
+    assert issue.startswith("the skill-scanner LLM judge is off")

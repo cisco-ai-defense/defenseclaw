@@ -104,8 +104,142 @@ func ValidateTrustedFilePath(path, label string) error {
 	)
 }
 
+// ValidateTrustedFilePathStrictAncestors is ValidateTrustedFilePath with no
+// advisory verdict: every folder above the file, the installer-owned Cisco
+// folders included, gets the narrow ancestor mask with fatal verdicts. It is
+// for an image an elevated process runs. A standard user who can delete the
+// children of a folder above it, or rename or re-ACL that folder, can swap
+// the image between the check and the launch, so drift on the Cisco tree
+// must refuse here, not warn.
+func ValidateTrustedFilePathStrictAncestors(path, label string) error {
+	if label == "" {
+		label = "managed file"
+	}
+	if path == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
+		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
+	}
+	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, nil, windowsTrustLeaf); err != nil {
+		return err
+	}
+	for dir := filepath.Dir(clean); ; dir = filepath.Dir(dir) {
+		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, windowsTrustForeignAncestor); err != nil {
+			return err
+		}
+		if dir == filepath.Dir(dir) {
+			return nil
+		}
+	}
+}
+
 func ValidateTrustedRuntimeDir(path, label string) error {
 	return validateTrustedWindowsRuntimeDir(path, label, nil)
+}
+
+// ValidateTrustedInstallMarkerDir requires a SYSTEM-owned marker whose only
+// writers are SYSTEM and Administrators. Every verdict is fatal on ancestors;
+// their stock create-child grants keep the narrow replacement mask.
+func ValidateTrustedInstallMarkerDir(path, label string) error {
+	if err := validateTrustedWindowsRuntimeDirWithAncestors(path, label, nil, windowsStrictAncestorScope); err != nil {
+		return err
+	}
+	return validateTrustedWindowsPathElementWithWriter(path, true, label, nil, windowsTrustSystemOwned)
+}
+
+// ValidateTrustedRuntimeImage checks an executable that an elevated process
+// or a service runs from a protected runtime folder (the scanner runtime and
+// the Python under it): root and image keep every verdict fatal, and every
+// folder above root, the installer-owned Cisco folders included, gets the
+// narrow ancestor mask with fatal verdicts. Folders within root get the full
+// write mask: an added module there can run as the service. Under the
+// advisory walk a standard user who could delete the children of
+// C:\ProgramData\Cisco, or rename or re-ACL it, or add a file to the runtime
+// folder, got a warning, and could swap the runtime between the check and
+// the launch (review loop round 4). image must be below root.
+func ValidateTrustedRuntimeImage(root, image, label string) error {
+	if label == "" {
+		label = "managed runtime image"
+	}
+	if root == "" || image == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	cleanRoot, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	cleanImage, err := filepath.Abs(image)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	if rel, err := filepath.Rel(cleanRoot, cleanImage); err != nil || rel == "." || filepath.IsAbs(rel) ||
+		rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%s %s is not inside its runtime folder %s", label, cleanImage, cleanRoot)
+	}
+	if err := validateTrustedWindowsRuntimeDirWithAncestors(cleanRoot, label, nil, windowsStrictAncestorScope); err != nil {
+		return err
+	}
+	if err := validateTrustedWindowsPathElementWithWriter(cleanRoot, true, label, nil, windowsTrustSystemAdminOnly); err != nil {
+		return err
+	}
+	if err := ValidateTrustedFilePathStrictAncestors(cleanImage, label); err != nil {
+		return err
+	}
+	if err := validateTrustedWindowsPathElementWithWriter(cleanImage, false, label, nil, windowsTrustSystemAdminOnly); err != nil {
+		return err
+	}
+	for dir := filepath.Dir(cleanImage); !strings.EqualFold(dir, cleanRoot); dir = filepath.Dir(dir) {
+		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, windowsTrustSystemAdminOnly); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateTrustedRuntimeCodeTree checks every file and folder beneath the
+// scanner runtime root before a SYSTEM or service launch. The embedded
+// interpreter lives at <root>/<digest>/python, and its ._pth includes both
+// that directory and site-packages. A writable .pth, module, or folder can
+// execute code even if python.exe itself is protected. Unknown entries and
+// unreadable ACLs refuse the run.
+func ValidateTrustedRuntimeCodeTree(root, label string) error {
+	if root == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	cleanRoot, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	root = cleanRoot
+	if err := validateTrustedWindowsRuntimeDirWithAncestors(root, label, nil, windowsStrictAncestorScope); err != nil {
+		return err
+	}
+	const maxEntries = 200000
+	entries := 0
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		// Failed removals are moved aside under these names and never used
+		// as code. A locked stale folder must not prevent the newly unpacked
+		// runtime from passing repair (GAP-0262).
+		if filepath.Dir(path) == root && entry.IsDir() {
+			for _, prefix := range []string{".stale-", ".prune-", ".unpack-"} {
+				if strings.HasPrefix(entry.Name(), prefix) {
+					return filepath.SkipDir
+				}
+			}
+		}
+		if entries++; entries > maxEntries {
+			return fmt.Errorf("%s has more than %d entries", root, maxEntries)
+		}
+		return validateTrustedWindowsPathElementWithWriter(path, entry.IsDir(), label, nil, windowsTrustSystemAdminOnly)
+	})
 }
 
 // ValidateTrustedDirectoryAncestor validates an existing directory that will
@@ -201,6 +335,81 @@ func ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount string) e
 	)
 }
 
+// ValidateStrictServiceRuntimeFilePath is ValidateTrustedServiceRuntimeFilePath
+// without an advisory verdict: the file and the namedDirs folders nearest
+// to it, which DefenseClaw creates with a protected DACL, get the strict
+// leaf check, and every folder above them the narrow ancestor mask with
+// fatal verdicts, inside the platform installer's roots too. It is for a
+// record whose loss only blocks (the protected foreign-hook session record,
+// GAP-0352), where a drifted Cisco folder must refuse the record rather
+// than warn: whoever can replace a folder above it can bring back a record
+// that was revoked.
+func ValidateStrictServiceRuntimeFilePath(path, label, serviceAccount string, namedDirs int) error {
+	if label == "" {
+		label = "managed runtime file"
+	}
+	serviceSID, err := windowsVirtualServiceSID(serviceAccount)
+	if err != nil {
+		return err
+	}
+	return validateStrictServiceRuntimeFilePath(path, label, serviceSID, namedDirs)
+}
+
+// ValidateStrictServiceRuntimeDirPath is ValidateStrictServiceRuntimeFilePath
+// for a folder: the folder and the namedDirs folders nearest above it get
+// the strict leaf check, every folder above them the narrow ancestor mask,
+// all fatal. The Windows lifecycle and status use it to tell whether the
+// protected foreign-hook session record folder is one the hook trusts
+// (GAP-0352 review).
+func ValidateStrictServiceRuntimeDirPath(path, label, serviceAccount string, namedDirs int) error {
+	if label == "" {
+		label = "managed runtime folder"
+	}
+	serviceSID, err := windowsVirtualServiceSID(serviceAccount)
+	if err != nil {
+		return err
+	}
+	return validateStrictServiceRuntimePath(path, true, label, serviceSID, namedDirs)
+}
+
+func validateStrictServiceRuntimeFilePath(path, label string, serviceSID *windows.SID, namedDirs int) error {
+	return validateStrictServiceRuntimePath(path, false, label, serviceSID, namedDirs)
+}
+
+func validateStrictServiceRuntimePath(path string, isDir bool, label string, serviceSID *windows.SID, namedDirs int) error {
+	if path == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
+		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
+	}
+	if err := validateTrustedWindowsPathElementWithWriter(clean, isDir, label, serviceSID, windowsTrustLeaf); err != nil {
+		return err
+	}
+	for level, dir := 0, filepath.Dir(clean); ; level, dir = level+1, filepath.Dir(dir) {
+		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, serviceSID, windowsStrictServiceAncestorScope(level, namedDirs)); err != nil {
+			return err
+		}
+		if dir == filepath.Dir(dir) {
+			return nil
+		}
+	}
+}
+
+// windowsStrictServiceAncestorScope is the scope of the folder level steps above
+// the file in ValidateStrictServiceRuntimeFilePath: the leaf rule for the
+// namedDirs nearest, else the narrow mask, never advisory.
+func windowsStrictServiceAncestorScope(level, namedDirs int) windowsTrustScope {
+	if level < namedDirs {
+		return windowsTrustLeaf
+	}
+	return windowsTrustForeignAncestor
+}
+
 // windowsRulePackTreeMaxEntries bounds the walk of an administrator rule pack.
 const windowsRulePackTreeMaxEntries = 20000
 
@@ -267,6 +476,16 @@ func walkWindowsRulePackTree(root string, check func(path string, isDir bool) er
 }
 
 func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows.SID) error {
+	return validateTrustedWindowsRuntimeDirWithAncestors(path, label, allowedWriter, windowsAncestorScope)
+}
+
+// windowsStrictAncestorScope gives every ancestor the narrow mask with fatal
+// verdicts, the installer-owned Cisco folders included.
+func windowsStrictAncestorScope(string) windowsTrustScope { return windowsTrustForeignAncestor }
+
+// validateTrustedWindowsRuntimeDirWithAncestors checks the named folder with
+// the leaf rule and each folder above it with the scope ancestors picks.
+func validateTrustedWindowsRuntimeDirWithAncestors(path, label string, allowedWriter *windows.SID, ancestors func(string) windowsTrustScope) error {
 	if label == "" {
 		label = "managed runtime dir"
 	}
@@ -281,7 +500,7 @@ func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows
 		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
 	}
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		scope := windowsAncestorScope(cur)
+		scope := ancestors(cur)
 		if cur == clean {
 			scope = windowsTrustLeaf
 		}
@@ -295,10 +514,10 @@ func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows
 	return nil
 }
 
-// windowsTrustScope carries the two INDEPENDENT relaxations that apply when a
-// managed path is walked. They used to be one `ancestor bool`, which silently
-// coupled them: any element that needed the narrower mask also lost the ability
-// to fail. Keep them separate so each call site states exactly what it wants.
+// windowsTrustScope carries two independent ancestor relaxations and the
+// stricter code/marker owner rule. The relaxations used to be one `ancestor
+// bool`, which silently coupled the narrower mask to advisory verdicts.
+// Keep them separate so each call site states exactly what it wants.
 //
 //   - narrowMask evaluates allow ACEs with WindowsAncestorReplaceAccess instead
 //     of the full write-like mask. Required for stock Windows known-folder
@@ -307,15 +526,25 @@ func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows
 //   - advisory downgrades owner/DACL *verdicts* to a TrustAdvisoryMarker warning
 //     and continues the walk (AIFW-34262). Structural and API failures are never
 //     downgraded, and TrustStrictAncestorsEnv restores fatality.
+//   - systemAdminOnly allows only LocalSystem and Administrators to own or
+//     change a code path, never TrustedInstaller.
+//   - ownerSystemOnly requires LocalSystem to own a Secure Client marker.
 type windowsTrustScope struct {
-	narrowMask bool
-	advisory   bool
+	narrowMask      bool
+	advisory        bool
+	systemAdminOnly bool
+	ownerSystemOnly bool
 }
 
 var (
 	// windowsTrustLeaf is the named artifact a caller asked about: strictest
 	// mask, every verdict fatal.
 	windowsTrustLeaf = windowsTrustScope{}
+	// Code run as SYSTEM accepts only SYSTEM and Administrators as owners
+	// and write-capable principals.
+	windowsTrustSystemAdminOnly = windowsTrustScope{systemAdminOnly: true}
+	// The install marker alone must be SYSTEM-owned; Administrators may write.
+	windowsTrustSystemOwned = windowsTrustScope{systemAdminOnly: true, ownerSystemOnly: true}
 	// windowsTrustNamedDir is a named directory that legitimately carries stock
 	// create-child grants but is still DefenseClaw-owned, so its verdicts stay
 	// fatal. Used for the directory ValidateTrustedDirectoryAncestor was asked
@@ -388,8 +617,21 @@ func validateTrustedWindowsPathElementWithWriter(
 	if err != nil {
 		return fmt.Errorf("%s: inspect Windows owner: %w", path, err)
 	}
-	if !windowsTrustedPathOwner(owner, allowedWriter) {
+	trustedOwner := windowsTrustedPathOwner(owner, allowedWriter)
+	if scope.systemAdminOnly {
+		trustedOwner = windowsSystemOrAdmin(owner)
+	}
+	if scope.ownerSystemOnly {
+		trustedOwner = owner != nil && owner.IsWellKnown(windows.WinLocalSystemSid)
+	}
+	if !trustedOwner {
 		expected := "Administrators, LocalSystem, or TrustedInstaller"
+		if scope.systemAdminOnly {
+			expected = "Administrators or LocalSystem"
+		}
+		if scope.ownerSystemOnly {
+			expected = "LocalSystem"
+		}
 		if allowedWriter != nil {
 			expected = fmt.Sprintf("%s, or the pinned service SID %s", expected, sidString(allowedWriter))
 		}
@@ -461,7 +703,11 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 		if !writeLike {
 			continue
 		}
-		if !windowsTrustedOwner(sid) && !sameWindowsSID(sid, allowedWriter) {
+		trustedWriter := windowsTrustedOwner(sid) || sameWindowsSID(sid, allowedWriter)
+		if scope.systemAdminOnly {
+			trustedWriter = windowsSystemOrAdmin(sid)
+		}
+		if !trustedWriter {
 			if err := relaxAncestorTrustVerdict(scope.advisory, path, label, &UntrustedPrincipalError{
 				Path: path,
 				SID:  sidString(sid),
@@ -731,6 +977,10 @@ func windowsWorldSID(sid *windows.SID) bool {
 
 func windowsTrustedOwner(sid *windows.SID) bool {
 	return IsWindowsTrustedAdminOwner(sid)
+}
+
+func windowsSystemOrAdmin(sid *windows.SID) bool {
+	return sid != nil && (sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) || sid.IsWellKnown(windows.WinLocalSystemSid))
 }
 
 // IsWindowsTrustedAdminOwner reports whether the given SID identifies a

@@ -1,9 +1,9 @@
 # Guardrail implementation map
 
 Operator setup and behavior are documented on the published
-[guardrail guide](https://cisco-ai-defense.github.io/defenseclaw/docs/guardrail/).
+[guardrail guide](https://cisco-ai-defense.github.io/defenseclaw/docs/features/guardrail/).
 Policy authoring and tuning live under the published
-[policies section](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/).
+[policies section](https://cisco-ai-defense.github.io/defenseclaw/docs/features/policies/).
 
 This file is intentionally limited to repository implementation ownership.
 
@@ -35,7 +35,7 @@ proxy topology:
   [`../internal/gateway/application_protection.go`](../internal/gateway/application_protection.go).
 
 The exact supported behavior for each connector is published in the
-[connector compatibility matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/).
+[connector compatibility matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/hook-contracts/).
 
 ## Configuration and policy ownership
 

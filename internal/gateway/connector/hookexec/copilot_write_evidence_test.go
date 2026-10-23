@@ -37,11 +37,18 @@ func TestManagedHookWriteEvidenceReadsTheConnectorsCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	permission, err := json.Marshal(map[string]any{"cwd": cwd, "hookName": "permissionRequest", "toolName": "edit",
+		"toolInput": map[string]any{"file_path": target, "diff": "\ndiff --git a" + target + " b" + target +
+			"\nindex 1234567..abcdef0 100644\n--- a" + target + "\n+++ b" + target + "\n@@ -1 +1 @@\n-a\n+b\n"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, call := range map[string]struct {
 		opts    Options
 		payload []byte
 	}{
 		"cli":          {Options{Connector: "copilot", Event: "preToolUse", ManagedEnterprise: true}, payload},
+		"permission":   {Options{Connector: "copilot", Event: "permissionRequest", ManagedEnterprise: true}, permission},
 		"vscode-local": {Options{Connector: "copilot", Event: "PreToolUse", HookSurface: copilotVSCodeLocalSurface, ManagedEnterprise: true}, local},
 	} {
 		t.Run(name, func(t *testing.T) {

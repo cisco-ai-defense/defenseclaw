@@ -22,12 +22,10 @@ import (
 // create an agent's hooks file for a user who never had one. The JSON and
 // YAML readers read a missing file as an empty document, and teardown
 // wrote that document back, so an uninstall left "{}" in ~/.cursor/hooks.json,
-// ~/.openhands/hooks.json and ~/.copilot/hooks/defenseclaw.json for every
 // user.
 func TestHookTeardownDoesNotCreateAMissingAgentConfig(t *testing.T) {
 	overrides := map[string]*string{
 		"cursor":      &CursorHooksPathOverride,
-		"openhands":   &OpenHandsHooksPathOverride,
 		"antigravity": &AntigravityHooksPathOverride,
 		"devin":       &DevinHooksPathOverride,
 		"copilot":     &CopilotHooksPathOverride,
@@ -44,7 +42,6 @@ func TestHookTeardownDoesNotCreateAMissingAgentConfig(t *testing.T) {
 	}
 	for _, conn := range []*hookOnlyConnector{
 		NewCursorConnector(),
-		NewOpenHandsConnector(),
 		NewAntigravityConnector(),
 		NewDevinConnector(),
 		NewCopilotConnector(),

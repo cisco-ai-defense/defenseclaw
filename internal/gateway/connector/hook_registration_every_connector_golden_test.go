@@ -20,7 +20,8 @@ import (
 
 // testdata/hook_registration_every_connector.json holds the agent hook files
 // per-user Setup writes for every built-in hook connector, at user and at
-// workspace scope, and the Windows render of the Antigravity hooks.json.
+// workspace scope, and the Windows renders of the Antigravity, Cursor, Devin
+// and Kiro hook files and the Amp and OpenCode plugins (os "windows").
 // cli/tests/test_hook_registration_every_connector.py reads it: status,
 // quickstart and doctor must all call each of these files registered. Status
 // read only a top-level hooks key, so the Antigravity hooks.json (one
@@ -50,9 +51,8 @@ type hookRegistrationGoldenFile struct {
 	Cases []hookRegistrationCase `json:"cases"`
 }
 
-// Connectors with no 1.0.2 support (OmniGent and OpenHands are deprecated) or
 // no agent hook file (the OpenClaw and ZeptoClaw proxies).
-var hookRegistrationGoldenSkipped = map[string]bool{"omnigent": true, "openhands": true}
+var hookRegistrationGoldenSkipped = map[string]bool{}
 
 func TestEveryHookConnectorSetupMatchesTheSharedGolden(t *testing.T) {
 	if runtime.GOOS != "linux" {
@@ -79,6 +79,7 @@ func TestEveryHookConnectorSetupMatchesTheSharedGolden(t *testing.T) {
 		}
 	}
 	golden.Cases = append(golden.Cases, antigravityWindowsRegistrationCase(t))
+	golden.Cases = append(golden.Cases, windowsRegistrationCases(t)...)
 	sort.SliceStable(golden.Cases, func(i, j int) bool {
 		a, b := golden.Cases[i], golden.Cases[j]
 		if a.Connector != b.Connector {
@@ -116,6 +117,15 @@ func TestEveryHookConnectorSetupMatchesTheSharedGolden(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("the golden has no %s case", name)
+		}
+	}
+	for _, name := range []string{"amp", "antigravity", "cursor", "devin", "kiro", "opencode"} {
+		found := false
+		for _, c := range golden.Cases {
+			found = found || (c.Connector == name && c.OS == "windows")
+		}
+		if !found {
+			t.Errorf("the golden has no Windows %s case", name)
 		}
 	}
 }
@@ -169,7 +179,7 @@ func hookRegistrationSetupCase(t *testing.T, conn Connector, scope string) (hook
 // -EncodedCommand.
 func antigravityWindowsRegistrationCase(t *testing.T) hookRegistrationCase {
 	t.Helper()
-	setHookBinaryOverride(t, `C:\Users\dcuser\.local\bin\defenseclaw-hook.exe`)
+	setHookBinaryOverride(t, windowsHookBinary)
 	t.Setenv("SystemRoot", `C:\Windows`)
 	path := filepath.Join(t.TempDir(), "hooks.json")
 	if err := patchAntigravityHooksForOS(path, "", "windows"); err != nil {
@@ -185,6 +195,99 @@ func antigravityWindowsRegistrationCase(t *testing.T) hookRegistrationCase {
 		OS:        "windows",
 		Files:     []hookRegistrationFile{{Path: "{home}/.gemini/config/hooks.json", Content: string(data)}},
 	}
+}
+
+// windowsHookBinary is the per-user Windows launcher the Windows cases name.
+const windowsHookBinary = `C:\Users\dcuser\.local\bin\defenseclaw-hook.exe`
+
+// windowsRegistrationCases renders the hook files and plugins per-user
+// Windows Setup writes for Amp, Cursor, Devin, Kiro and OpenCode with the
+// Windows command each connector registers (hookCommandForOS and
+// kiroHookInvocationCommandFor with goos "windows"), so status, quickstart
+// and doctor are checked on the Windows render, not on a hand-made one. The
+// data directory stays {data_dir}; the plugins name the Windows token path.
+func windowsRegistrationCases(t *testing.T) []hookRegistrationCase {
+	t.Helper()
+	setHookBinaryOverride(t, windowsHookBinary)
+	t.Setenv("SystemRoot", `C:\Windows`)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "golden-token"}
+	connectors := map[string]Connector{}
+	for _, conn := range newBuiltinConnectors() {
+		connectors[conn.Name()] = conn
+	}
+	hookOnly := func(name string) *hookOnlyConnector {
+		c, ok := connectors[name].(*hookOnlyConnector)
+		if amp, isAmp := connectors[name].(*AMPConnector); isAmp {
+			c, ok = amp.hookOnlyConnector, true
+		}
+		if !ok {
+			t.Fatalf("%s is not a hook-only connector", name)
+		}
+		return c
+	}
+	render := func(name, golden string, patch func(path string) error) hookRegistrationCase {
+		path := filepath.Join(t.TempDir(), filepath.Base(golden))
+		if err := patch(path); err != nil {
+			t.Fatalf("%s Windows render: %v", name, err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hookRegistrationCase{Connector: name, Scope: "user", OS: "windows", Files: []hookRegistrationFile{
+			{Path: golden, Content: hookRegistrationTemplate(string(data), home, dataDir)},
+		}}
+	}
+	cursor := hookOnly("cursor")
+	devin := hookOnly("devin")
+	kiroScript := filepath.Join(dataDir, "hooks", kiroHookScriptName)
+	cases := []hookRegistrationCase{
+		render("cursor", "{home}/.cursor/hooks.json", func(path string) error {
+			return patchCursorHooks(path, cursor.hookCommandForOS("windows", opts),
+				filepath.Join(dataDir, "hooks", cursor.scriptName), cursor.effectiveFailClosed(opts))
+		}),
+		render("devin", "{home}/AppData/Roaming/devin/config.json", func(path string) error {
+			command := devin.hookCommandForOS("windows", opts)
+			return patchDevinHooks(path, command, devinOwnedHookCommandsForOS("windows", opts, command)...)
+		}),
+		render("kiro", "{home}/.kiro/hooks/defenseclaw.json", func(path string) error {
+			return patchKiroV3Hooks(path, kiroHookInvocationCommandFor("windows", kiroScript, KiroHookSurfaceV3, false))
+		}),
+	}
+	for name, golden := range map[string]string{
+		"amp":      "{home}/.config/amp/plugins/defenseclaw.ts",
+		"opencode": "{home}/.config/opencode/plugins/defenseclaw.js",
+	} {
+		c := hookOnly(name)
+		plugin, err := c.renderPluginArtifact(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tokenPath, err := HookAPITokenFilePath(dataDir, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The plugin names the token by its absolute path, which on Windows
+		// is the profile's data directory with backslashes.
+		windowsToken := `C:\Users\dcuser\.defenseclaw\hooks\` + filepath.Base(tokenPath)
+		posixToken := javaScriptStringContent(tokenPath)
+		if !strings.Contains(string(plugin), posixToken) {
+			t.Fatalf("the %s plugin does not name its token path %s", name, tokenPath)
+		}
+		content := strings.ReplaceAll(string(plugin), posixToken, javaScriptStringContent(windowsToken))
+		cases = append(cases, hookRegistrationCase{Connector: name, Scope: "user", OS: "windows", Files: []hookRegistrationFile{
+			{Path: golden, Content: hookRegistrationTemplate(content, home, dataDir)},
+		}})
+	}
+	return cases
 }
 
 // The OTLP bearer token and the Codex trusted hashes (which hash the absolute

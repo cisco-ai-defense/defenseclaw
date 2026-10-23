@@ -97,7 +97,7 @@ type setupTransaction struct {
 	PreviousHermesHome             string                   `json:"previous_hermes_home,omitempty"`
 	PreviousAntigravityConfigDir   string                   `json:"previous_antigravity_config_dir,omitempty"`
 	PreviousOpenCodeConfigDir      string                   `json:"previous_opencode_config_dir,omitempty"`
-	PreviousOmnigentConfigHome     string                   `json:"previous_omnigent_config_home,omitempty"`
+	PreviousOmnigentConfigHome     string                   `json:"previous_omnigent_config_home,omitempty"` // until 1.1: binds teardown of a 1.0.x OmniGent install
 	CodexHome                      string                   `json:"codex_home,omitempty"`
 	ClaudeConfigDir                string                   `json:"claude_config_dir,omitempty"`
 	CopilotHome                    string                   `json:"copilot_home,omitempty"`
@@ -106,7 +106,7 @@ type setupTransaction struct {
 	DevinExecutable                string                   `json:"devin_executable,omitempty"`
 	AntigravityConfigDir           string                   `json:"antigravity_config_dir,omitempty"`
 	OpenCodeConfigDir              string                   `json:"opencode_config_dir,omitempty"`
-	OmnigentConfigHome             string                   `json:"omnigent_config_home,omitempty"`
+	OmnigentConfigHome             string                   `json:"omnigent_config_home,omitempty"` // until 1.1: teardown only
 	HermesHome                     string                   `json:"hermes_home,omitempty"`
 	MaintenanceSHA256              string                   `json:"maintenance_sha256,omitempty"`
 	DeleteUserData                 bool                     `json:"delete_user_data,omitempty"`
@@ -321,6 +321,7 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	if err != nil {
 		return setupTransaction{}, err
 	}
+	// until 1.1: OmniGent homes bind only the teardown of a 1.0.x install.
 	defaultOmnigentConfigHome, err := defaultConnectorConfigHome(".omnigent")
 	if err != nil {
 		return setupTransaction{}, err
@@ -433,6 +434,7 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	if err != nil {
 		return setupTransaction{}, err
 	}
+	// until 1.1
 	previousOmnigentConfigHome, err := resolvePreviousConnectorHome(
 		previousOmnigentState, previousConnectors, dataRoot, "omnigent", "config", omnigentConfigHome,
 	)
@@ -598,6 +600,7 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 	if err != nil {
 		return setupTransaction{}, err
 	}
+	// until 1.1: OmniGent homes bind only the teardown of a 1.0.x install.
 	defaultOmnigentConfigHome, err := defaultConnectorConfigHome(".omnigent")
 	if err != nil {
 		return setupTransaction{}, err
@@ -731,6 +734,7 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 	if err != nil {
 		return setupTransaction{}, err
 	}
+	// until 1.1
 	previousOmnigentConfigHome, err := resolvePreviousConnectorHome(
 		configuredOmnigentHome,
 		previousConnectors,
@@ -1108,7 +1112,7 @@ func transactionChildEnvForConnectorHomes(
 	if openCodeConfigDir != "" {
 		filtered = append(filtered, "OPENCODE_CONFIG_DIR="+openCodeConfigDir)
 	}
-	if omnigentConfigHome != "" {
+	if omnigentConfigHome != "" { // until 1.1
 		filtered = append(filtered, "OMNIGENT_CONFIG_HOME="+omnigentConfigHome)
 	}
 	if hermesHome != "" {
@@ -1395,7 +1399,7 @@ func validateSetupTransaction(transaction setupTransaction, expected setupTransa
 	}
 	seenConnectors := map[string]bool{}
 	for _, connectorName := range transaction.PreviousConnectors {
-		if connectorName == "none" || !validConnector(connectorName) {
+		if connectorName == "none" || !validPreviousConnector(connectorName) {
 			return fmt.Errorf("setup transaction has an invalid previous connector %q", connectorName)
 		}
 		if seenConnectors[connectorName] {
@@ -1426,7 +1430,7 @@ func validateInstallStateForRoots(state *installState, installRoot, dataRoot, ma
 	}
 	if state.SchemaVersion != 1 || state.InstallKind != "native-windows-exe" ||
 		state.InstallScope != "user" || !validPayloadVersion(state.Version) ||
-		!validConnector(state.Connector) || !validMode(state.Mode) {
+		!validPreviousConnector(state.Connector) || !validMode(state.Mode) {
 		return errors.New("installer state is not a supported native Windows install")
 	}
 	if state.TransactionID != "" && !validSetupTransactionID(state.TransactionID) {
@@ -3417,7 +3421,7 @@ func connectorHomeChanged(transaction setupTransaction, connectorName string) bo
 		return !samePath(transaction.PreviousAntigravityConfigDir, transaction.AntigravityConfigDir)
 	case "opencode":
 		return !samePath(transaction.PreviousOpenCodeConfigDir, transaction.OpenCodeConfigDir)
-	case "omnigent":
+	case "omnigent": // until 1.1
 		return !samePath(transaction.PreviousOmnigentConfigHome, transaction.OmnigentConfigHome)
 	case "hermes":
 		return !samePath(transaction.PreviousHermesHome, transaction.HermesHome)

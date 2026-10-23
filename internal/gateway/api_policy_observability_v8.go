@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityrouter "github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -78,7 +76,7 @@ func (a *APIServer) startAPIPolicyEvaluationV8(
 	}
 	operation := &apiPolicyEvaluationV8Operation{
 		runtime: runtime, signalCtx: ctx, domain: domain, guardrail: "opa-" + domain,
-		targetType: targetType, targetRef: target, evaluationID: uuid.NewString(), connector: connector,
+		targetType: targetType, targetRef: target, evaluationID: observability.NewTimeOrderedID(), connector: connector,
 		startedAt: time.Now().UTC(), meta: a.inspectTraceV8Meta(ctx, connector),
 		identity: AgentIdentityFromContext(ctx),
 	}
@@ -569,7 +567,7 @@ func (a *APIServer) emitAPIPolicyReloadRejectedV8(ctx context.Context, reason st
 		if admission == observabilityrouter.AdmissionFloor {
 			builder, buildErr := observability.NewRecordBuilder(
 				observability.ClockFunc(func() time.Time { return observedAt }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if buildErr != nil {
 				return observability.Record{}, buildErr

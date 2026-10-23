@@ -49,10 +49,19 @@ _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
+# A per-user render is never a managed or Secure Client hook: those markers
+# come only from a managed render (the branch above), never from the
+# agent's environment, where they would change how the per-user hook answers
+# a missing token.
+unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
-  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
+  # The installed mode decides; strict availability tightens this exit as it
+  # tightens every later outage.
+  _DC_HOME_FAIL_MODE="{{.FailMode}}"
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
+  if [ "$_DC_HOME_FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     exit 2
   fi
@@ -87,7 +96,9 @@ defenseclaw_harden_env
 FAIL_MODE="closed"
 readonly FAIL_MODE{{else if .Managed}}# Managed hooks use the installer-owned delivery policy; an inherited
 # DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed hook.
-FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
+FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="{{.FailMode}}"
+# The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
+# environment is not read, so status and doctor report what runs (GAP-0315).{{end}}
 
 # Setup binds each handler to one finite vendor event and hook contract. Keep
 # those values out of environment variables so the registered command remains
@@ -143,10 +154,10 @@ DEFENSECLAW_HOOK_NAME="codex-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
-  [ "$FAIL_MODE" != "closed" ] ||
+  [ "$FAIL_MODE" = "open" ] ||
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "stdin body exceeded cap" transport
   echo "defenseclaw: codex hook refusing oversized payload" >&2
-  if [ "$FAIL_MODE" = "closed" ]; then
+  if [ "$FAIL_MODE" != "open" ]; then
     printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
     exit 2
   fi
@@ -294,7 +305,8 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/codex/hook" "$PAYLOAD" \
 API_TOKEN=
 PAYLOAD=
 unset API_TOKEN PAYLOAD{{else}}HOOK_MAX_TIME=10
-if [ "$BOUND_EVENT" = "SessionEnd" ]; then
+{{if not .SecureClient}}defenseclaw_tool_gate_max_time "$BOUND_EVENT" 10
+{{end}}if [ "$BOUND_EVENT" = "SessionEnd" ]; then
   # Codex's host maximum is three seconds. Leave one second for response
   # parsing and process teardown, matching the native launcher budget.
   HOOK_MAX_TIME=2

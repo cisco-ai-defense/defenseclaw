@@ -127,7 +127,6 @@ const (
 	// enforces on stageRoot itself. Removed recursively before the outer
 	// stage cleanup runs.
 	enterpriseSetupScratchDirName = "scratch"
-	maximumLifecycleOutput        = 2 << 20
 	enterpriseBusyExitCode        = 1618 // ERROR_INSTALL_ALREADY_RUNNING
 	// enterpriseSetupStageStaleAge is the age after which a staging folder
 	// belongs to no Setup still staging: unpacking the payload takes
@@ -232,15 +231,14 @@ func executeEnterpriseSetup(
 	if err != nil {
 		return 0, err
 	}
-	ctx, cancel := context.WithTimeout(parent, opts.LifecycleTimeout)
-	defer cancel()
 	cliPath := filepath.Join(stageRoot, "defenseclaw.exe")
-	child := processutil.CommandContext(ctx, cliPath, arguments...)
-	child.Dir = stageRoot
-	child.Env = childEnvironment
-	var output []byte
-	var runErr error
-	if opts.Standalone {
+	lifecycle := runEnterpriseLifecycleChild(parent, opts, func(ctx context.Context) ([]byte, error) {
+		child := processutil.CommandContext(ctx, cliPath, arguments...)
+		child.Dir = stageRoot
+		child.Env = childEnvironment
+		if !opts.Standalone {
+			return processutil.CombinedOutputTree(child, false)
+		}
 		// Pass the lifecycle's stderr (diagnostics of a failing run) on at
 		// once. Its scanner runtime progress goes to stdout for a person and
 		// to the lifecycle log in a JSON run, never to stderr, which an MDM
@@ -248,13 +246,22 @@ func executeEnterpriseSetup(
 		var captured bytes.Buffer
 		child.Stdout = &captured
 		child.Stderr = lifecycleProgress{stderr}
-		runErr = processutil.RunTree(child)
-		output = captured.Bytes()
-	} else {
-		output, runErr = processutil.CombinedOutputTree(child, false)
-	}
+		err := processutil.RunTree(child)
+		return captured.Bytes(), err
+	}, func(ctx context.Context) ([]byte, error) {
+		// The trusted staged CLI and module stay until this recovery ends:
+		// cleanup runs below. It only replays the protected pending journal.
+		return enterpriseSetupRecoveryRunner(ctx, cliPath,
+			enterpriseLifecycleArguments(stageRoot, standaloneRecoveryOptions(opts)), stageRoot, childEnvironment)
+	})
+	output, runErr, timedOut := lifecycle.output, lifecycle.runErr, lifecycle.timedOut
 	if len(output) > maximumLifecycleOutput {
-		return 0, fmt.Errorf("enterprise lifecycle output exceeded %d bytes", maximumLifecycleOutput)
+		if !timedOut {
+			return 0, fmt.Errorf("enterprise lifecycle output exceeded %d bytes", maximumLifecycleOutput)
+		}
+		// The timeout result is authoritative; a killed child did not finish
+		// a result and its oversized partial diagnostics are discarded.
+		output = nil
 	}
 	cleanupErr := cleanup()
 	cleaned = true
@@ -268,7 +275,6 @@ func executeEnterpriseSetup(
 		}
 		return 0, cleanupErr
 	}
-	timedOut := ctx.Err() != nil
 	if len(output) != 0 {
 		destination := stdout
 		if runErr != nil && !opts.JSON {
@@ -294,10 +300,7 @@ func executeEnterpriseSetup(
 		}
 	}
 	if timedOut {
-		if opts.Standalone {
-			return 0, standaloneEnterpriseSetupTimeout(opts, ctx.Err())
-		}
-		return 0, fmt.Errorf("enterprise %s exceeded the bounded %s timeout: %w", opts.Action, opts.LifecycleTimeout, ctx.Err())
+		return 0, timedOutEnterpriseLifecycleError(opts, lifecycle)
 	}
 	if runErr == nil {
 		return 0, nil
@@ -319,6 +322,14 @@ func executeEnterpriseSetup(
 	// unexpected child status to the same fatal-install code so AVC never
 	// mistakes a partial transaction for reboot-required success.
 	return enterpriseFailureExitCode, nil
+}
+
+// Recovery uses this seam so the timeout contract can be exercised without
+// installing services in the Setup unit test.
+var enterpriseSetupRecoveryRunner = func(ctx context.Context, path string, args []string, dir string, env []string) ([]byte, error) {
+	child := processutil.CommandContext(ctx, path, args...)
+	child.Dir, child.Env = dir, env
+	return processutil.CombinedOutputTree(child, false)
 }
 
 // enterpriseSetupPathError is a CONFIG=/MANIFEST= value that is not an

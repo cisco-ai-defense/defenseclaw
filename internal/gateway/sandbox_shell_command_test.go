@@ -167,18 +167,6 @@ func workdirShellCalls() []workdirShellCall {
 				`"description":"write marker","mode":"sync","initial_wait":30}}`,
 			dirs: []string{""},
 		},
-		{
-			name: "openhands-terminal", connector: "openhands", version: "1.16.0", contract: "openhands-hooks-v1", path: "/api/v1/openhands/hook",
-			body: `{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"` + c + `","is_input":false,"timeout":null,"reset":false,"kind":"TerminalAction"},` +
-				`"session_id":"c1c2b756-f8e9-4e9d-97d0-2c27ecb6c3d1","working_dir":"/work/app","metadata":{}}`,
-			dirs: []string{""},
-		},
-		{
-			name: "omnigent-sys-os-shell", connector: "omnigent", version: "0.13.0", contract: "omnigent-custom-policy-v1", path: "/api/v1/omnigent/hook",
-			body: `{"hook_event_name":"PreToolUse","omnigent_event_type":"tool_call","agent_name":"OmniGent","agent_type":"omnigent",` +
-				`"tool_name":"sys_os_shell","tool_input":{"command":"` + c + `"}}`,
-			dirs: []string{""},
-		},
 	}
 }
 
@@ -420,6 +408,73 @@ func connectorProfileForHostTest(t *testing.T, registry *connector.Registry, nam
 	return provider.HookProfile(connector.SetupOpts{})
 }
 
+// TestSandboxHookOnlyShellCallsAreJudged pins that the shell tool calls and
+// running-process input the hook-only harnesses send, in their exact payload
+// shapes, reach the command rules through the sandbox ingress: the E2E
+// marker rule must block them with its plain reason, rendered in the
+// harness's own block shape. TestSandboxShellCallsAreJudged covers the
+// other shell shapes.
+func TestSandboxHookOnlyShellCallsAreJudged(t *testing.T) {
+	installSandboxMarkerRules(t)
+	var obs sandboxObserver
+	// Mount mode, as the E2E runs: the request working directory /work/app
+	// maps to a host directory.
+	f := newSandboxIngressFixture(t, obs.observe)
+	const command = "echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt"
+	for i, tc := range []struct {
+		connector, version, contract, path, body, tool string
+		headers                                        []string
+		// decision is the harness's own rendering of the block, if checked;
+		// reason says whether that rendering carries the plain reason too.
+		decision string
+		reason   bool
+	}{
+		{
+			connector: "hermes", version: "0.19.0", contract: "hermes-hooks-v1", path: "/api/v1/hermes/hook", tool: "terminal",
+			body: `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"` + command + `"},` +
+				`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_1","task_id":"t1"}}`,
+			decision: "block", reason: true,
+		},
+		{
+			connector: "antigravity", version: "1.2.12", contract: "antigravity-hooks-v2", path: "/api/v1/antigravity/hook", tool: "run_command",
+			headers: []string{"X-DefenseClaw-Antigravity-Event", "PreToolUse"},
+			// agy 1.2's run_command schema requires WaitMsBeforeAsync,
+			// toolSummary and toolAction next to CommandLine and Cwd.
+			body: `{"conversationId":"c1","workspacePaths":["/work/app"],"stepIdx":3,"toolCall":{"name":"run_command","args":{` +
+				`"CommandLine":"` + command + `","Cwd":"/tmp","WaitMsBeforeAsync":500,` +
+				`"toolSummary":"write marker","toolAction":"Writing marker"}}}`,
+			decision: "deny",
+		},
+		// Text sent to a running process is judged as shell input.
+		{
+			connector: "antigravity", version: "1.2.12", contract: "antigravity-hooks-v2", path: "/api/v1/antigravity/hook", tool: "send_command_input",
+			headers: []string{"X-DefenseClaw-Antigravity-Event", "PreToolUse"},
+			body: `{"conversationId":"c1","workspacePaths":["/work/app"],"stepIdx":4,"toolCall":{"name":"send_command_input","args":{` +
+				`"CommandId":"cmd-1","Input":"` + command + `","WaitMs":500,"toolSummary":"type","toolAction":"Typing"}}}`,
+		},
+		{
+			connector: "hermes", version: "0.19.0", contract: "hermes-hooks-v1", path: "/api/v1/hermes/hook", tool: "process",
+			body: `{"hook_event_name":"pre_tool_call","tool_name":"process","tool_input":{"action":"submit","session_id":"proc_1","data":"` + command + `"},` +
+				`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_2","task_id":"t1"}}`,
+		},
+	} {
+		t.Run(tc.connector+"-"+tc.tool, func(t *testing.T) {
+			name := "dc-" + tc.connector + "-" + strings.ReplaceAll(tc.tool, "_", "-") + "-" + strconv.Itoa(i)
+			_, token := f.mint(t, name, tc.connector, tc.version, tc.contract, t.TempDir())
+			obs.take()
+			resp := f.hook(t, tc.path, token, tc.body, tc.headers...)
+			out, _ := resp["hook_output"].(map[string]interface{})
+			if resp["action"] != "block" || resp["reason"] != sandboxMarkerBlockReason ||
+				(tc.decision != "" && out["decision"] != tc.decision) || (tc.reason && out["reason"] != sandboxMarkerBlockReason) {
+				t.Fatalf("%s verdict = %v", tc.connector, resp)
+			}
+			if decisions, _ := obs.take(); len(decisions) != 1 || decisions[0].Action != "block" || decisions[0].Tool != tc.tool {
+				t.Fatalf("decisions = %+v", decisions)
+			}
+		})
+	}
+}
+
 // TestAgentHookTrustedActionShellShapes pins the mapping of shell shapes
 // that did not parse completely, so command rules could not prove a trusted
 // action and a CRITICAL finding stayed an allowed candidate. The shapes of
@@ -465,10 +520,6 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 	if got, cwd := agentHookTrustedActionArgs("hermes", "terminal", args); string(got) != string(args) || cwd != "" {
 		t.Errorf("hermes terminal args = %s (cwd %q), want passthrough", got, cwd)
 	}
-	// Input to a running process is judged as shell input.
-	if got, _ := agentHookTrustedActionArgs("openhands", "terminal", json.RawMessage(`{"command":"ls","is_input":true}`)); string(got) != `{"command":"ls"}` {
-		t.Errorf("input to a running process was not projected: %s", got)
-	}
 	// The tool call's directory replaces the session's, mapped the same way
 	// (on the host: an existing absolute directory, symlinks resolved).
 	if got := agentHookTrustedActionCWD(context.Background(), "/work/app", ""); got != "/work/app" {
@@ -497,84 +548,5 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 		if got := agentHookTrustedActionCWD(context.Background(), tc.request, tc.tool); got != "" {
 			t.Errorf("tool cwd %q in %q = %q, want none", tc.tool, tc.request, got)
 		}
-	}
-}
-
-// TestSandboxHookOnlyShellCallsAreJudged pins that the shell tool calls and
-// running-process input the hook-only harnesses send, in their exact payload
-// shapes, reach the command rules through the sandbox ingress: the E2E
-// marker rule must block them with its plain reason, rendered in the
-// harness's own block shape. TestSandboxShellCallsAreJudged covers the
-// other shell shapes.
-func TestSandboxHookOnlyShellCallsAreJudged(t *testing.T) {
-	installSandboxMarkerRules(t)
-	var obs sandboxObserver
-	// Mount mode, as the E2E runs: the request working directory /work/app
-	// maps to a host directory.
-	f := newSandboxIngressFixture(t, obs.observe)
-	const command = "echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt"
-	for i, tc := range []struct {
-		connector, version, contract, path, body, tool string
-		headers                                        []string
-		// decision is the harness's own rendering of the block, if checked;
-		// reason says whether that rendering carries the plain reason too.
-		decision string
-		reason   bool
-	}{
-		{
-			connector: "hermes", version: "0.19.0", contract: "hermes-hooks-v1", path: "/api/v1/hermes/hook", tool: "terminal",
-			body: `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"` + command + `"},` +
-				`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_1","task_id":"t1"}}`,
-			decision: "block", reason: true,
-		},
-		{
-			connector: "openhands", version: "1.16.0", contract: "openhands-hooks-v1", path: "/api/v1/openhands/hook", tool: "terminal",
-			body: `{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"` + command + `","is_input":false,` +
-				`"timeout":null,"reset":false,"kind":"TerminalAction"},"tool_response":null,"message":null,` +
-				`"session_id":"c1c2b756-f8e9-4e9d-97d0-2c27ecb6c3d1","working_dir":"/work/app","metadata":{}}`,
-			decision: "deny", reason: true,
-		},
-		{
-			connector: "antigravity", version: "1.2.12", contract: "antigravity-hooks-v2", path: "/api/v1/antigravity/hook", tool: "run_command",
-			headers: []string{"X-DefenseClaw-Antigravity-Event", "PreToolUse"},
-			// agy 1.2's run_command schema requires WaitMsBeforeAsync,
-			// toolSummary and toolAction next to CommandLine and Cwd.
-			body: `{"conversationId":"c1","workspacePaths":["/work/app"],"stepIdx":3,"toolCall":{"name":"run_command","args":{` +
-				`"CommandLine":"` + command + `","Cwd":"/tmp","WaitMsBeforeAsync":500,` +
-				`"toolSummary":"write marker","toolAction":"Writing marker"}}}`,
-			decision: "deny",
-		},
-		// Text sent to a running process is judged as shell input.
-		{
-			connector: "openhands", version: "1.16.0", contract: "openhands-hooks-v1", path: "/api/v1/openhands/hook", tool: "terminal",
-			body: `{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"` + command + `","is_input":true,` +
-				`"timeout":null,"reset":false,"kind":"TerminalAction"},"session_id":"c1c2b756-f8e9-4e9d-97d0-2c27ecb6c3d1","working_dir":"/work/app"}`,
-		},
-		{
-			connector: "antigravity", version: "1.2.12", contract: "antigravity-hooks-v2", path: "/api/v1/antigravity/hook", tool: "send_command_input",
-			headers: []string{"X-DefenseClaw-Antigravity-Event", "PreToolUse"},
-			body: `{"conversationId":"c1","workspacePaths":["/work/app"],"stepIdx":4,"toolCall":{"name":"send_command_input","args":{` +
-				`"CommandId":"cmd-1","Input":"` + command + `","WaitMs":500,"toolSummary":"type","toolAction":"Typing"}}}`,
-		},
-		{
-			connector: "hermes", version: "0.19.0", contract: "hermes-hooks-v1", path: "/api/v1/hermes/hook", tool: "process",
-			body: `{"hook_event_name":"pre_tool_call","tool_name":"process","tool_input":{"action":"submit","session_id":"proc_1","data":"` + command + `"},` +
-				`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_2","task_id":"t1"}}`,
-		},
-	} {
-		t.Run(tc.connector+"-"+tc.tool, func(t *testing.T) {
-			name := "dc-" + tc.connector + "-" + strings.ReplaceAll(tc.tool, "_", "-") + "-" + strconv.Itoa(i)
-			_, token := f.mint(t, name, tc.connector, tc.version, tc.contract, t.TempDir())
-			obs.take()
-			resp := f.hook(t, tc.path, token, tc.body, tc.headers...)
-			out, _ := resp["hook_output"].(map[string]interface{})
-			if resp["action"] != "block" || resp["reason"] != sandboxMarkerBlockReason ||
-				(tc.decision != "" && out["decision"] != tc.decision) || (tc.reason && out["reason"] != sandboxMarkerBlockReason) {
-				t.Fatalf("%s verdict = %v", tc.connector, resp)
-			}
-			if decisions, _ := obs.take(); len(decisions) != 1 || decisions[0].Action != "block" || decisions[0].Tool != tc.tool {
-				t.Fatalf("decisions = %+v", decisions)
-			}
-		})
 	}
 }

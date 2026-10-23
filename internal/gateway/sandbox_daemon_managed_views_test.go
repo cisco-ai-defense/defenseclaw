@@ -241,3 +241,29 @@ func TestManagedStatusRereadsStaleSettings(t *testing.T) {
 		t.Fatalf("a failed read dropped the settings: %+v, %v", st.Managed, err)
 	}
 }
+
+// #1200: the MCP row of a new run's explain counted only the caller's own
+// servers; a project's .mcp.json server, which the pack keeps from
+// starting, was in no view. The daemon counts the project's servers.
+func TestManagedExplainCountsTheProjectsMCPServers(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	var seen []sandboxrelay.ExplainRequest
+	f.relay.explain = contractorsExplain(&seen)
+	f.run(t)
+	client := sandboxapi.NewUnixClient(f.socket)
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, ".mcp.json"), []byte(`{"mcpServers":{"site-docs":{"type":"http","url":"https://example.invalid/mcp"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ex, err := client.Explain(context.Background(), sandboxapi.ExplainRequest{Harness: "claudecode", Project: project})
+	if err != nil || ex.Managed == nil {
+		t.Fatalf("explain: %+v, %v", ex, err)
+	}
+	if ex.Managed.MCPProjectCount != 1 || !ex.Managed.MCPProjectBlocked {
+		t.Fatalf("project MCP = %d blocked %t, want 1 blocked", ex.Managed.MCPProjectCount, ex.Managed.MCPProjectBlocked)
+	}
+	// An explain of a sandbox already made is its registration's: no project read.
+	if ex, err := client.Explain(context.Background(), sandboxapi.ExplainRequest{Harness: "claudecode"}); err != nil || ex.Managed.MCPProjectCount != 0 {
+		t.Fatalf("explain without a project: %+v, %v", ex, err)
+	}
+}

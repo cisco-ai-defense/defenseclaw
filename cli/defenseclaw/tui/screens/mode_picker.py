@@ -66,11 +66,9 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
         "Devin CLI + Devin Desktop (Devin Local) hooks; MCP, skills, and rules discovery",
     ),
     ModeChoice("copilot", "Copilot", "p", False, "workspace hooks + native pre-tool approval"),
-    ModeChoice("openhands", "OpenHands", "n", False, "command hooks via ~/.openhands/hooks.json"),
     ModeChoice("antigravity", "Antigravity", "a", False, "PreToolUse hooks via ~/.gemini/config/hooks.json"),
     ModeChoice("opencode", "OpenCode", "e", False, "auto-loaded JS bridge plugin; tool.execute.before blocking"),
     ModeChoice("amp", "Amp", "i", False, "synchronous TypeScript policy plugin; native confirm/block"),
-    ModeChoice("omnigent", "OmniGent", "m", False, "custom policy ALLOW/ASK/DENY + optional native OTLP"),
     ModeChoice("kiro", "Kiro", "r", False, "Kiro IDE or CLI; shared hooks, optional ACP"),
 )
 
@@ -271,11 +269,6 @@ def preview_for_switch(current_wire: str, dest_wire: str) -> str:
     current = normalize_connector(current_wire)
     dest = normalize_connector(dest_wire)
     label = choice_for_wire(dest).label
-    if current == dest and dest == "omnigent":
-        return (
-            "OmniGent: setup will re-run to refresh the custom Python policy runtime, "
-            "config, and runtime files."
-        )
     if current == dest and dest == "amp":
         return (
             "Amp: setup will re-run to refresh the synchronous TypeScript policy plugin, "
@@ -287,11 +280,6 @@ def preview_for_switch(current_wire: str, dest_wire: str) -> str:
         return (
             f"{label}: runs proxy-backed connector setup and pins claw.mode plus guardrail.connector; "
             "preserves the existing guardrail.mode."
-        )
-    if dest == "omnigent":
-        return (
-            "OmniGent: installs the custom Python policy runtime, maps all six phases "
-            "to ALLOW/ASK/DENY, and honors per-connector policy mode."
         )
     if dest == "amp":
         return (
@@ -310,7 +298,7 @@ def _choice_action(choice: ModeChoice, *, current_wire: str) -> MenuAction:
     guardrail = (
         "guardrail"
         if choice.guardrail_ok
-        else ("policy" if choice.wire in {"omnigent", "amp"} else "hooks")
+        else ("policy" if choice.wire == "amp" else "hooks")
     )
     return MenuAction(
         action_id=choice.wire,

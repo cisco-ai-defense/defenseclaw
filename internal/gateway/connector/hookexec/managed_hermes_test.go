@@ -85,6 +85,7 @@ func TestManagedHermesToolCallBlocksWhenDefenseClawCannotCheck(t *testing.T) {
 					tc.mutate(o)
 				}
 				home = o.Home
+				o.FailureLogHome = userLogHome(o.Home)
 			})
 			message := hermesBlockMessage(t, result.stdout)
 			if result.code != 0 || !strings.HasPrefix(message, "DefenseClaw blocked this tool call: ") ||
@@ -153,6 +154,7 @@ func TestHermesNeutralResultOutsideManagedToolCalls(t *testing.T) {
 				o.StrictAvailability = true
 				mutate(o)
 				home = o.Home
+				o.FailureLogHome = userLogHome(o.Home)
 			})
 			if result.code != 0 || strings.Contains(result.stdout, `"block"`) {
 				t.Fatalf("code %d, stdout %q, want the neutral result", result.code, result.stdout)
@@ -250,6 +252,7 @@ func TestManagedHermesUnboundEventBlocksRefusedInput(t *testing.T) {
 						o.MaxBody = tc.maxBody
 					}
 					home = o.Home
+					o.FailureLogHome = userLogHome(o.Home)
 				})
 				if result.code != 0 {
 					t.Fatalf("code %d, want 0 (stderr %q)", result.code, result.stderr)
@@ -309,6 +312,7 @@ func TestManagedHermesDisagreeingEventFieldsBlock(t *testing.T) {
 				o.SecureClient = tc.secureClient
 				o.Stdin = strings.NewReader(tc.stdin)
 				home = o.Home
+				o.FailureLogHome = userLogHome(o.Home)
 			})
 			if result.code != 0 {
 				t.Fatalf("code %d, want 0 (stderr %q)", result.code, result.stderr)

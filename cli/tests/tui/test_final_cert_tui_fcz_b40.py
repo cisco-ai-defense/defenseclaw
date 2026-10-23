@@ -27,7 +27,7 @@ async def test_alerts_detail_box_fits_above_hint_at_80x24(tmp_path) -> None:
     # pushed the box's bottom border off the panel.
     from textual.containers import VerticalScroll
 
-    connectors = ["claudecode", "codex", "hermes", "opencode", "openhands"]
+    connectors = ["claudecode", "codex", "hermes", "opencode", ]
     app = snapshot_app(tmp_path)
     app.alerts_model.set_events(
         [

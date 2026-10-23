@@ -69,8 +69,89 @@ package_version="@DC_PKG_VERSION@"
 state=/var/lib/defenseclaw-enterprise
 record="$state/deployment.json"
 marker="$state/allow-downgrade"
+# owner_mode PATH: the owner's uid and the permission bits (octal) of PATH
+# itself, not of a symlink's target.
+owner_mode() { stat -c '%u %a' "$1" 2>/dev/null; }
 root_owned() {
-    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1" 2>/dev/null)" = 0 ]
+    [ -f "$1" ] && [ ! -L "$1" ] && ro_info=$(owner_mode "$1") && [ "${ro_info%% *}" = 0 ]
+}
+# root_only PATH: PATH itself, not a symlink's target, belongs to root, and
+# no group or other account can write it (an ACL that lets another account
+# write shows in the group bits, which are then its mask). An owner or mode
+# that cannot be read is not root's.
+root_only() {
+    t_info=$(owner_mode "$1") || return 1
+    case $t_info in
+        "0 "[0-7]*) t_mode=${t_info#0 } ;;
+        *) return 1 ;;
+    esac
+    case $t_mode in *[!0-7]*) return 1 ;; esac
+    [ $((0$t_mode & 022)) -eq 0 ]
+}
+# trusted PATH: PATH is a regular file, not a symlink, and only root can
+# change what it names. PATH is looked up one entry at a time, as the kernel
+# looks it up, following every symlink on the way (its target from / or from
+# the folder that holds it): every folder an entry is found in, and the
+# file, are root_only, and every symlink belongs to root. A check
+# of only the folders the path ends in missed the folder that holds a
+# symlink and the folders a symlink's target passes through: an account
+# that could write one could swap the symlink between the check and the
+# run. t_real is then the file PATH names, reached through folders only, and
+# the caller runs that file. A symlink that cannot be read, or more than 32
+# of them, is not trusted.
+trusted() {
+    t_real=
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    case $1 in /*) ;; *) return 1 ;; esac
+    root_only / || return 1
+    t_dir=/
+    t_rest=$1
+    t_hops=0
+    while :; do
+        case $t_rest in
+            /*) t_rest=${t_rest#/}; continue ;;
+            "") return 1 ;;
+            */*)
+                t_name=${t_rest%%/*}
+                t_rest=${t_rest#*/}
+                t_more=/
+                ;;
+            *)
+                t_name=$t_rest
+                t_rest=
+                t_more=
+                ;;
+        esac
+        case $t_name in
+            .) continue ;;
+            ..)
+                t_dir=${t_dir%/*}
+                t_dir=${t_dir:-/}
+                continue
+                ;;
+        esac
+        t_path=${t_dir%/}/$t_name
+        if [ -L "$t_path" ]; then
+            t_hops=$((t_hops + 1))
+            [ "$t_hops" -le 32 ] || return 1
+            t_info=$(owner_mode "$t_path") || return 1
+            [ "${t_info%% *}" = 0 ] || return 1
+            t_link=$(readlink "$t_path") || return 1
+            case $t_link in
+                "") return 1 ;;
+                /*) t_dir=/ ;;
+            esac
+            t_rest=$t_link$t_more$t_rest
+            continue
+        fi
+        root_only "$t_path" || return 1
+        if [ -z "$t_more" ] && [ -f "$t_path" ]; then
+            t_real=$t_path
+            return 0
+        fi
+        [ -d "$t_path" ] || return 1
+        t_dir=$t_path
+    done
 }
 # not_older A B: A is not older than B, by the lifecycle's version order
 # (enterpriseunix compareProductVersions: dotted numbers, a release above its
@@ -99,6 +180,69 @@ not_older() {
             exit 0
         }'
 }
+# A device that takes signed policy bundles must not run a release below the
+# one its confirmed bundle requires (min_product_version), even for a
+# deliberate rollback: a bundle signed with a lower floor lifts it. A gateway
+# from 1.0.4 on reads the floor, and its binary carries floor_check_marker:
+# looking for it, without running the gateway, tells a gateway that cannot
+# run from one before 1.0.4, which has no check and is not asked. When the
+# installed gateway is gone or older (uninstall --keep-state and then the
+# package removal, or an uninstall that failed after removing the binaries),
+# the root-only copy that uninstall kept in the lifecycle folder answers.
+# Only a gateway that was read and has no marker is an older one: a gateway
+# that cannot be read, and a gateway with the marker or a kept copy that is
+# not a root-owned file only root can change (trusted: another account
+# cannot change it, a folder above it, or a symlink on the way to it), or
+# whose owner or mode cannot be read, leave the floor unchecked unless the
+# other one answers, and the install is refused. A trusted checker is run
+# by the path it resolves to.
+# Only exit 0 lets the install go on: exit 3 is the refusal, and any other
+# result (application control denied the execution, the checker was killed
+# or crashed) leaves the floor unchecked, so the install is refused too.
+gateway=/opt/defenseclaw/bin/defenseclaw-gateway
+floor_check_marker=defenseclaw-package-floor-check/1
+kept="$state/floor-check"
+checker=
+unchecked=
+if [ -e "$gateway" ] || [ -L "$gateway" ]; then
+    grep -qaF "$floor_check_marker" "$gateway" 2>/dev/null
+    case $? in
+    0)
+        if trusted "$gateway"; then
+            checker=$t_real
+        else
+            unchecked="$gateway has the floor check, but it is not a root-owned file that only root can change (another account can change it, a folder above it, or a symlink on the way to it), or its owner or mode could not be read"
+        fi
+        ;;
+    1) ;; # a gateway before 1.0.4: it has no floor check
+    *) unchecked="$gateway could not be read to tell whether it has the floor check" ;;
+    esac
+fi
+if [ -z "$checker" ]; then
+    if [ ! -L "$kept" ] && trusted "$kept/defenseclaw-gateway"; then
+        checker=$t_real
+        unchecked=
+    elif [ -L "$kept" ] || [ -e "$kept/defenseclaw-gateway" ] || [ -L "$kept/defenseclaw-gateway" ]; then
+        unchecked="$kept/defenseclaw-gateway, the gateway an uninstall kept for the floor check, is not a root-owned file that only root can change, in a folder that is not a symlink (another account can change it, a folder above it, or a symlink on the way to it), or its owner or mode could not be read"
+    fi
+fi
+case "$package_version" in
+    @*@) ;;
+    *)
+        if [ -n "$checker" ]; then
+            floor_msg=$("$checker" enterprise bundle floor-check --product-version "$package_version" 2>&1 >/dev/null)
+            floor_rc=$?
+            if [ "$floor_rc" -ne 0 ]; then
+                [ "$floor_rc" -eq 3 ] || floor_msg="the release floor of the confirmed signed policy bundle could not be checked: $checker exited $floor_rc${floor_msg:+ ($floor_msg)}. Let it run (for example, trust it in the application control policy) and install again."
+                echo "defenseclaw-enterprise: refusing to install $package_version: ${floor_msg#Error: } Nothing was changed." >&2
+                exit 1
+            fi
+        elif [ -n "$unchecked" ]; then
+            echo "defenseclaw-enterprise: refusing to install $package_version: the release floor of the confirmed signed policy bundle could not be checked: $unchecked. Restore it as a readable, root-owned file that only root can write, in folders only root can write, and install again. Nothing was changed." >&2
+            exit 1
+        fi
+        ;;
+esac
 case "$package_version" in
     @*@) ;;
     *)

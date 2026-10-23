@@ -1001,19 +1001,37 @@ func InspectWindowsPublicDir(dir string) (WindowsPublicDirDrift, error) {
 			if ace == nil || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
 				continue
 			}
+			switch ace.Header.AceType {
+			case windows.ACCESS_ALLOWED_ACE_TYPE, windows.ACCESS_DENIED_ACE_TYPE,
+				accessAllowedCallbackACEType, accessDeniedCallbackACEType:
+			default:
+				// An object ACE keeps its SID at another offset. One that
+				// grants more than read and execute is drift under its type.
+				if uint32(ace.Mask)&^readExecute != 0 {
+					drift.Extra[fmt.Sprintf("ace-type-%#x", ace.Header.AceType)] |= uint32(ace.Mask)
+				}
+				continue
+			}
 			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-			if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
+			if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE || ace.Header.AceType == accessDeniedCallbackACEType {
 				// An applicable deny can defeat the Users allow entry (including
 				// for a user who belongs to another denied group), so any deny
 				// entry is drift.
 				drift.Denied[sid.String()] |= uint32(ace.Mask)
 				continue
 			}
-			if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			if ace.Header.AceType == accessAllowedCallbackACEType {
+				// A conditional allow can make the folder writable for the
+				// tokens its condition matches, so write access in one is
+				// drift for every principal but the trusted ones. It never
+				// counts toward the Users read the hooks need (GAP-1327).
+				if !trustedWindowsPublicDirPrincipal(sid) && uint32(ace.Mask)&^readExecute != 0 {
+					drift.Extra[sid.String()] |= uint32(ace.Mask)
+				}
 				continue
 			}
 			switch {
-			case sid.IsWellKnown(windows.WinLocalSystemSid), sid.IsWellKnown(windows.WinBuiltinAdministratorsSid), sid.String() == trustedInstallerSIDStr:
+			case trustedWindowsPublicDirPrincipal(sid):
 			case sid.IsWellKnown(windows.WinBuiltinUsersSid):
 				users |= uint32(ace.Mask)
 			default:
@@ -1037,4 +1055,15 @@ func RepairWindowsPublicDir(dir string) error { return reclaimDir(dir) }
 const (
 	trustedInstallerSIDStr = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 	usersSIDStr            = "S-1-5-32-545"
+
+	// Conditional (callback) ACE types; x/sys/windows names only the plain ones.
+	accessAllowedCallbackACEType = 0x9
+	accessDeniedCallbackACEType  = 0xA
 )
+
+// trustedWindowsPublicDirPrincipal is LocalSystem, Administrators or
+// TrustedInstaller.
+func trustedWindowsPublicDirPrincipal(sid *windows.SID) bool {
+	return sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) ||
+		sid.String() == trustedInstallerSIDStr
+}

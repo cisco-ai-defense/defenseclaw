@@ -289,8 +289,6 @@ func hookArgvConnectorCase(t *testing.T, connector string) hookArgvCase {
 		return hookArgvCase{script: "devin-hook.sh", stdin: `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"/work/proj","tool_name":"exec","tool_input":{"command":"echo ` + m + `"}}`, route: "/api/v1/devin/hook"}
 	case "hermes":
 		return hookArgvCase{script: "hermes-hook.sh", stdin: `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"echo ` + m + `"},"session_id":"s1","cwd":"/work/p","extra":{}}`, route: "/api/v1/hermes/hook"}
-	case "openhands":
-		return hookArgvCase{script: "openhands-hook.sh", stdin: `{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"echo ` + m + `"},"session_id":"s1","working_dir":"/work/p","metadata":{}}`, route: "/api/v1/openhands/hook"}
 	case "antigravity":
 		return hookArgvCase{script: "antigravity-hook.sh", args: []string{"PreToolUse"}, stdin: `{"toolName":"run_command","toolInput":{"CommandLine":"echo ` + m + `"}}`, route: "/api/v1/antigravity/hook"}
 	}
@@ -316,7 +314,7 @@ func hookArgvInspectCases() []hookArgvCase {
 // hookArgvShellConnectors are the connectors with a host shell hook.
 var hookArgvShellConnectors = []Connector{
 	NewClaudeCodeConnector(), NewCodexConnector(), NewCopilotConnector(), NewCursorConnector(), NewKiroConnector(),
-	NewDevinConnector(), NewHermesConnector(), NewOpenHandsConnector(), NewAntigravityConnector(),
+	NewDevinConnector(), NewHermesConnector(), NewAntigravityConnector(),
 }
 
 // TestHookArgvCasesCoverEveryShellHook keeps the runtime tests in this file

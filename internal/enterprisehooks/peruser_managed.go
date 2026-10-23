@@ -74,8 +74,6 @@ func windowsStandaloneRuntimeOnlyConnector(name string) bool {
 // enterprise management refuses outright, with the reason shown to the
 // administrator.
 var windowsEnterpriseRefusedConnectors = map[string]string{
-	"openhands": "OpenHands CLI requires WSL on Windows; DefenseClaw has no WSL connector path",
-	"omnigent":  "OmniGent enforces through an in-process policy API with no hook boundary a standard user cannot remove; it is not managed on Windows",
 	"openclaw":  "OpenClaw requires the guardrail proxy, which the Windows enterprise profile does not host",
 	"zeptoclaw": "ZeptoClaw requires the guardrail proxy, which the Windows enterprise profile does not host",
 }

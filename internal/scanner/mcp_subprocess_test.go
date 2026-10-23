@@ -50,7 +50,7 @@ func TestMCPScannerUsesTreeRunner(t *testing.T) {
 	t.Cleanup(func() { runMCPScannerCommand = prior })
 	marker := errors.New("tree runner called")
 	called := false
-	runMCPScannerCommand = func(_ *exec.Cmd) error {
+	runMCPScannerCommand = func(_ context.Context, _ *exec.Cmd) error {
 		called = true
 		return marker
 	}

@@ -286,55 +286,6 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         self.selection_mock.assert_called_once_with(self.tmp_dir, ("claudecode",))
 
-    def test_windows_omnigent_init_records_required_executable_receipt(self):
-        self.selection_patcher.stop()
-        trusted = Path(self.tmp_dir) / "trusted"
-        trusted.mkdir()
-        executable = trusted / "omnigent.exe"
-        executable.write_bytes(b"native omnigent fixture")
-
-        with (
-            patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"),
-            patch(
-                "defenseclaw.agent_selection._builtin_setup_trusted_prefixes",
-                return_value=(str(trusted),),
-            ),
-            patch(
-                "defenseclaw.agent_selection.agent_discovery._binary_candidates_for_agent",
-                return_value=(),
-            ),
-            patch("defenseclaw.agent_selection.is_setup_trusted_binary", return_value=True),
-            patch(
-                "defenseclaw.agent_selection.agent_discovery._version_for_agent_binary",
-                return_value=("omnigent 0.7.0", ""),
-            ),
-        ):
-            result = self._invoke([
-                "--non-interactive",
-                "--yes",
-                "--connector",
-                "omnigent",
-                "--profile",
-                "observe",
-                "--skip-install",
-                "--no-start-gateway",
-                "--no-verify",
-                "--json-summary",
-            ])
-
-        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-        with open(os.path.join(self.tmp_dir, "agent_selection.json"), encoding="utf-8") as fh:
-            receipt = json.load(fh)
-        selection = receipt["selections"]["omnigent"]
-        self.assertEqual(selection["connector"], "omnigent")
-        self.assertEqual(selection["source"], "setup-selected")
-        self.assertEqual(selection["executable"], str(executable.resolve()))
-        self.assertEqual(selection["raw_version"], "omnigent 0.7.0")
-        self.assertEqual(selection["normalized_version"], "0.7.0")
-        self.assertEqual(
-            selection["sha256"],
-            hashlib.sha256(executable.read_bytes()).hexdigest(),
-        )
 
     def test_windows_copilot_is_available_through_ordinary_init(self):
         with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
@@ -3163,7 +3114,7 @@ class TestInitFailModeFlag(unittest.TestCase):
         self.runner = CliRunner()
         self.selection_patcher = patch(
             "defenseclaw.agent_selection.record_setup_agent_selections",
-            return_value=({"codex": object(), "hermes": object(), "omnigent": object()}, {}),
+            return_value=({"codex": object(), "hermes": object(), }, {}),
         )
         self.selection_patcher.start()
         self.addCleanup(self.selection_patcher.stop)
@@ -3314,7 +3265,7 @@ class TestInitHITLFlags(unittest.TestCase):
         self.runner = CliRunner()
         self.selection_patcher = patch(
             "defenseclaw.agent_selection.record_setup_agent_selections",
-            return_value=({"codex": object(), "hermes": object(), "omnigent": object()}, {}),
+            return_value=({"codex": object(), "hermes": object(), }, {}),
         )
         self.selection_patcher.start()
         self.addCleanup(self.selection_patcher.stop)
@@ -3585,32 +3536,6 @@ class TestMultiConnectorInit(unittest.TestCase):
             # The mode is the answer given in this init run, not the old override.
             self.assertEqual(gc.connectors["claudecode"].mode, "")
 
-    def test_activate_additional_connectors_leaves_out_unverified_macos_openhands(self):
-        from defenseclaw import config as cfg_mod
-        from defenseclaw.commands.cmd_init import _activate_additional_connectors
-
-        with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}), patch(
-            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
-            return_value=True,
-        ), patch("defenseclaw.platform_support.host_os", return_value="darwin"), patch(
-            "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
-            return_value=None,
-        ) as record:
-            cfg = cfg_mod.default_config()
-            cfg.guardrail.connector = "codex"
-            cfg.save()
-            extra = {"profile": "action", "fail_mode": None, "human_approval": None, "hilt_min_severity": None}
-            active, _sidecar = _activate_additional_connectors(
-                {"connector": "codex", "profile": "action", "fail_mode": None,
-                 "human_approval": None, "hilt_min_severity": None},
-                [{"connector": "openhands", **extra}, {"connector": "claudecode", **extra}],
-                start_gateway=False,
-            )
-        # The gateway needs the setup-selected OpenHands executable; without
-        # it OpenHands must not be reported or persisted as configured.
-        self.assertEqual(record.call_args.kwargs["required"], {"codex"})
-        self.assertEqual(active, ["claudecode", "codex"])
-        self.assertNotIn("openhands", cfg_mod.load().guardrail.connectors)
 
     def test_activate_additional_connectors_downgrades_unverified_action(self):
         """An extra connector requested in action mode whose installed version
@@ -3881,27 +3806,6 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertTrue(all(s["profile"] == "observe" for s in settings))
         self.assertEqual({s["connector"] for s in settings}, {"codex", "claudecode"})
 
-    def test_prompt_trust_protected_executables_offers_uv_tool_openhands(self):
-        """GAP-1058: macOS init offers to trust a uv-tool OpenHands instead of skipping it."""
-        from defenseclaw.commands import cmd_init
-
-        real = "/Users/u/.local/share/uv/tools/openhands/bin/openhands"
-        parent = os.path.dirname(real)
-        cache: dict[str, bool] = {}
-        with patch.object(cmd_init.platform_support, "host_os", return_value="darwin"), \
-                patch("defenseclaw.agent_selection.untrusted_setup_executable", return_value=real), \
-                patch.object(cmd_init.agent_discovery, "validate_trusted_prefix", return_value=(parent, "")), \
-                patch("defenseclaw.commands.cmd_setup._add_trusted_bin_prefix", return_value=True) as add, \
-                patch.object(cmd_init.click, "confirm", return_value=True) as confirm:
-            cmd_init._prompt_trust_protected_executables(
-                ["codex", "openhands"], data_dir=self.tmp_dir, trusted_prompt_cache=cache
-            )
-            # Already answered: no second prompt in the same run.
-            cmd_init._prompt_trust_protected_executables(
-                ["openhands"], data_dir=self.tmp_dir, trusted_prompt_cache=cache
-            )
-        add.assert_called_once_with(parent, self.tmp_dir)
-        confirm.assert_called_once()
 
     def test_prompt_first_run_start_gateway_flag_and_default(self):
         """GAP-1089/GAP-1097: --no-start-gateway answers the question; with no
@@ -4391,7 +4295,7 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         self.selection_patcher = patch(
             "defenseclaw.agent_selection.record_setup_agent_selections",
             return_value=(
-                {name: object() for name in ("amp", "claudecode", "codex", "hermes", "omnigent", "opencode")},
+                {name: object() for name in ("amp", "claudecode", "codex", "hermes",  "opencode")},
                 {},
             ),
         )
@@ -4519,6 +4423,48 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         result = self._invoke([*args, "--fail-mode", "open"])
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         self.assertNotIn("defenseclaw guardrail fail-mode open", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_unknown_action_connector_is_a_usage_error_and_changes_nothing(self, mock_discover, _gate):
+        # GAP-0044: the unknown entry was skipped with a warning after the run
+        # had replaced the enforcing roster with an observe-only connector.
+        mock_discover.return_value = self._disc({"codex", "claudecode"})
+        flags = ["--non-interactive", "--yes", "--scanner-mode", "local", "--skip-install",
+                 "--no-start-gateway", "--no-verify", "--json-summary"]
+        first = self._invoke(["--action-connectors", "claudecode", *flags])
+        self.assertEqual(first.exit_code, 0, first.output + (first.stderr or ""))
+        config = Path(self.tmp_dir, "config.yaml")
+        before = config.read_bytes()
+
+        result = self._invoke(["--action-connectors", "w0invalid", *flags])
+
+        out = result.output + (result.stderr or "")
+        self.assertEqual(result.exit_code, 2, out)
+        self.assertIn("w0invalid is not a hook connector; nothing was changed", out)
+        self.assertIn("claudecode", out.split("Choose from:", 1)[1])
+        self.assertEqual(config.read_bytes(), before)
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_action_connectors_that_name_no_connector_change_nothing(self, mock_discover, _gate):
+        # W2B review: a separator-only value parsed to no names, read as the
+        # option left out, and first run replaced the enforcing roster with
+        # one observe connector.
+        mock_discover.return_value = self._disc({"codex", "claudecode"})
+        flags = ["--non-interactive", "--yes", "--scanner-mode", "local", "--skip-install",
+                 "--no-start-gateway", "--no-verify", "--json-summary"]
+        first = self._invoke(["--action-connectors", "claudecode", *flags])
+        self.assertEqual(first.exit_code, 0, first.output + (first.stderr or ""))
+        config = Path(self.tmp_dir, "config.yaml")
+        before = config.read_bytes()
+
+        for value in (",", " , ", ""):
+            result = self._invoke([f"--action-connectors={value}", *flags])
+            out = result.output + (result.stderr or "")
+            self.assertEqual(result.exit_code, 2, f"{value!r}: {out}")
+            self.assertIn("--action-connectors names no connector; nothing was changed", out)
+            self.assertEqual(config.read_bytes(), before, value)
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")

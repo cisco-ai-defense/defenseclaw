@@ -63,12 +63,13 @@ type coldStartHookRun struct {
 	stdout  string
 	stderr  string
 	err     error
+	elapsed time.Duration
 }
 
 func runHookForColdStart(t *testing.T, c Connector, script string, args []string, prepare func(dataDir string), extraEnv ...string) coldStartHookRun {
 	t.Helper()
 	hooksDir := t.TempDir()
-	if err := WriteHookScriptsForConnectorObject(hooksDir, freeAPIAddr(t), "cold-start-scoped-token", c); err != nil {
+	if err := writePerUserHooksForTestFailMode(hooksDir, freeAPIAddr(t), "cold-start-scoped-token", c, extraEnv); err != nil {
 		t.Fatalf("write hooks: %v", err)
 	}
 	stubDir := t.TempDir()
@@ -114,8 +115,11 @@ func runHookForColdStart(t *testing.T, c Connector, script string, args []string
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// The hook's registered timeout starts with the process, after fixture
+	// directories and script snapshots have been written.
+	started := time.Now()
 	err := cmd.Run()
-	return coldStartHookRun{capDir: capDir, dataDir: dataDir, home: home, stdout: stdout.String(), stderr: stderr.String(), err: err}
+	return coldStartHookRun{capDir: capDir, dataDir: dataDir, home: home, stdout: stdout.String(), stderr: stderr.String(), err: err, elapsed: time.Since(started)}
 }
 
 // waitColdStartCapture waits for the background start to write name.
@@ -231,7 +235,6 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 			_ = os.Remove(filepath.Join(dataDir, "config.yaml"))
 		}, hint: waited, retried: true},
 		"autostart off": {env: []string{"DEFENSECLAW_GATEWAY_AUTOSTART=0"}, hint: waited, retried: true},
-		"managed hook":  {env: []string{"DEFENSECLAW_MANAGED_HOOK=1"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -255,6 +258,15 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 			}
 			if tc.hint != "" && !strings.Contains(run.stderr, tc.hint) {
 				t.Errorf("stderr = %q, want the next step %q", run.stderr, tc.hint)
+			}
+			// GAP-0090, GAP-0093: the next step names the status command
+			// and no Windows one.
+			if tc.hint != "" && (!strings.Contains(run.stderr, "`defenseclaw-gateway status`") ||
+				strings.Contains(run.stderr, ".exe") || strings.Contains(run.stderr, "PowerShell")) {
+				t.Errorf("stderr = %q, want `defenseclaw-gateway status` named and no Windows command", run.stderr)
+			}
+			if tc.notice != "" && !strings.Contains(run.stdout, "`defenseclaw-gateway status`") {
+				t.Errorf("stdout = %q, want `defenseclaw-gateway status` named", run.stdout)
 			}
 			if tc.hint == "" && strings.Contains(run.stderr, "defenseclaw-gateway start") {
 				t.Errorf("stderr = %q, want no start advice", run.stderr)
@@ -339,10 +351,13 @@ func TestClaudeShellHookFailClosedDenyIsOnePlainSentence(t *testing.T) {
 		t.Fatalf("deny reason = %q\nwant %q", reason, want)
 	}
 
-	managed := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, stopped,
+	// A per-user hook is never a managed one: a DEFENSECLAW_MANAGED_HOOK
+	// inherited from the agent's environment does not switch it to the
+	// managed answer (1.0.4 review, GAP-0315).
+	inherited := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, stopped,
 		"DEFENSECLAW_FAIL_MODE=closed", "DEFENSECLAW_MANAGED_HOOK=1")
-	if code := exitCodeOf(managed.err); code != 2 || strings.TrimSpace(managed.stdout) != "" {
-		t.Fatalf("managed hook: exit %d stdout %q, want its exit-2 contract unchanged", code, managed.stdout)
+	if got := failClosedDenyReason(t, inherited); got != want {
+		t.Fatalf("inherited managed marker: deny reason = %q\nwant %q", got, want)
 	}
 }
 
@@ -415,8 +430,9 @@ func assertGatewayDownNotice(t *testing.T, stdout string, want bool) {
 		t.Fatalf("stdout = %q, want one JSON hook result: %v", stdout, err)
 	}
 	if !strings.HasPrefix(out.SystemMessage, "DefenseClaw is not checking this session") ||
-		!strings.Contains(out.SystemMessage, "Run `defenseclaw-gateway start` to resume protection.") {
-		t.Errorf("systemMessage = %q, want the gateway-down notice with the start step", out.SystemMessage)
+		!strings.Contains(out.SystemMessage, "Run `defenseclaw-gateway start` to resume protection.") ||
+		!strings.Contains(out.SystemMessage, "`defenseclaw-gateway status`") || strings.Contains(out.SystemMessage, ".exe") {
+		t.Errorf("systemMessage = %q, want the gateway-down notice with the start and status steps", out.SystemMessage)
 	}
 }
 
@@ -446,11 +462,10 @@ func TestShellHookIsAnsweredByTheGatewayThatRestarts(t *testing.T) {
 				if hook.script == "codex-hook.sh" {
 					args = codexBoundShellHookArgsForTest(t, hook.script, "PreToolUse")[1:]
 				}
-				started := time.Now()
 				run := runHookForColdStart(t, hook.c, hook.script, args, nil,
 					"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=3", "DC_COLD_FIRST_RC="+tc.rc)
-				if elapsed := time.Since(started); elapsed > 3*time.Second {
-					t.Fatalf("the call took %s", elapsed)
+				if run.elapsed > 3*time.Second {
+					t.Fatalf("the call took %s", run.elapsed)
 				}
 				if run.err != nil || strings.Contains(run.stdout, "deny") || strings.Contains(run.stderr, "unreachable") {
 					t.Fatalf("err=%v stdout=%q stderr=%q, want the restarted gateway's allow", run.err, run.stdout, run.stderr)
@@ -479,10 +494,9 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 	for _, rc := range []string{"7", "56"} {
 		t.Run("claude-code/"+rc, func(t *testing.T) {
 			t.Parallel()
-			started := time.Now()
 			run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, nil,
 				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC="+rc)
-			assertBlockedWithinTheRestartBudget(t, started)
+			assertBlockedWithinTheRestartBudget(t, run.elapsed)
 			if rc == "7" && waitColdStartCapture(t, run.capDir, "gateway.log") == "" {
 				t.Fatal("a refused call did not start the gateway")
 			}
@@ -492,11 +506,10 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 		})
 		t.Run("codex/"+rc, func(t *testing.T) {
 			t.Parallel()
-			started := time.Now()
 			run := runHookForColdStart(t, NewCodexConnector(), "codex-hook.sh",
 				codexBoundShellHookArgsForTest(t, "codex-hook.sh", "PreToolUse")[1:], nil,
 				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC="+rc)
-			assertBlockedWithinTheRestartBudget(t, started)
+			assertBlockedWithinTheRestartBudget(t, run.elapsed)
 			if rc == "7" && waitColdStartCapture(t, run.capDir, "gateway.log") == "" {
 				t.Fatal("a refused call did not start the gateway")
 			}
@@ -508,11 +521,11 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 	}
 }
 
-func assertBlockedWithinTheRestartBudget(t *testing.T, started time.Time) {
+func assertBlockedWithinTheRestartBudget(t *testing.T, elapsed time.Duration) {
 	t.Helper()
 	// bash 3.2 (macOS) counts whole seconds, so the end can come up to a
 	// second early there.
-	if elapsed := time.Since(started); elapsed < 1500*time.Millisecond || elapsed > 4500*time.Millisecond {
+	if elapsed < 1500*time.Millisecond || elapsed > 4500*time.Millisecond {
 		t.Fatalf("the call was blocked after %s, want about 3 s", elapsed)
 	}
 }

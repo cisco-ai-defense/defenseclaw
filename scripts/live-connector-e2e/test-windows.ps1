@@ -2775,7 +2775,7 @@ threading.Event().wait()
         'cursor', 'devin', 'hermes', 'opencode'
     )
     $excludedContractConnectors = @(
-        'openhands', 'openclaw', 'zeptoclaw'
+        'openclaw', 'zeptoclaw'
     )
     $genericContractConnectors = if ($connectorMatrix.Success) {
         @($connectorMatrix.Groups[1].Value -split '\s*,\s*')
@@ -3074,8 +3074,7 @@ threading.Event().wait()
         'cursor = 6',
         'hermes = 7',
         'devin = 8',
-        'omnigent = 9',
-        'opencode = 10'
+        'opencode = 9'
     )) {
         Assert-True ($wizardHarnessText.Contains($wizardChoice)) `
             "wizard driver preserves the integrated selection contract: $wizardChoice"
@@ -4628,7 +4627,7 @@ threading.Event().wait()
         $interactiveEvidence -match 'lacks an authentic record identity' -and
         $interactiveEvidence -match 'CMD-SOCAT-EXEC' -and
         $interactiveEvidence -match 'CMD-ENV-DUMP' -and
-        $interactiveEvidence -match "native_decision = 'ask'" -and
+        $interactiveEvidence -match "native_decision = 'force_ask'" -and
         $interactiveEvidence -match "native_interaction = 'approved'" -and
         $interactiveEvidence -match "native_interaction = 'declined'" -and
         $interactiveEvidence -notmatch '(?s)PostToolUse.*?step_idx\s+-ceq' -and
@@ -4731,7 +4730,7 @@ threading.Event().wait()
         '(?s)wizardConnectorChoices = \[\]wizardChoice\{.*?\n\s*\}'
     ).Value
     Assert-True ($wizardConnectorChoices -match 'Google Antigravity.*?antigravity' -and
-        $setupMainSourceText -match 'CONNECTOR=amp\|antigravity\|codex\|claudecode\|copilot\|cursor\|devin\|hermes\|omnigent\|opencode\|none' -and
+        $setupMainSourceText -match 'CONNECTOR=amp\|antigravity\|codex\|claudecode\|copilot\|cursor\|devin\|hermes\|opencode\|none' -and
         $setupMainSourceText -notmatch 'Antigravity is not_certified and cannot be selected by public Setup' -and
         $setupMainTestsText -match 'TestParseArgsAllowsPublicAntigravitySetupSelection' -and
         $setupMainTestsText -match 'TestParseArgsAllowsRecordedAntigravityMaintenanceWithoutOverride' -and

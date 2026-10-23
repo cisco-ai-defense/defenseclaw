@@ -29,6 +29,9 @@ const (
 func (e *Env) bundleStore() *enterprisebundle.Store {
 	s := enterprisebundle.NewStore(e.P(filepath.Join(e.Layout.ConfigDir, enterprisebundle.BundlesDirName)), e.P(e.Layout.LifecycleDir))
 	s.Now = e.Now
+	s.ReceiptEventReported = func(id string) bool {
+		return enterprisestatus.ReceiptEventReported(e.P(e.Layout.DataDir), id)
+	}
 	s.PublishReceipt = func(path string) error {
 		if filepath.Dir(path) == s.PublicReceiptEventsDir() {
 			if err := e.ensureDir(s.PublicReceiptEventsDir(), 0o755, rootOwner()); err != nil {

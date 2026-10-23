@@ -77,7 +77,6 @@ func TestHandleAgentHook_AIDAppliesAcrossHookProfiles(t *testing.T) {
 		{"hermes", "/api/v1/hermes/hook", "pre_tool_call", "block", false},
 		{"devin", "/api/v1/devin/hook", "PreToolUse", "block", false},
 		{"copilot", "/api/v1/copilot/hook", "preToolUse", "block", false},
-		{"openhands", "/api/v1/openhands/hook", "pre_tool_use", "block", false},
 	}
 
 	for _, tc := range cases {

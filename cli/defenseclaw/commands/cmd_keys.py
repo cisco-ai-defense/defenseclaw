@@ -244,6 +244,14 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
     env_name = env_name.strip()
     if not env_name:
         raise click.UsageError("env_name must be non-empty")
+    from defenseclaw.file_permissions import dotenv_key_is_valid
+
+    if not dotenv_key_is_valid(env_name):
+        # Refused before any prompt or write; the value is never shown (GAP-0078).
+        raise click.UsageError(
+            f"{env_name!r} is not a valid environment variable name: use ASCII letters, digits "
+            "and underscores, starting with a letter or an underscore"
+        )
 
     gateway_name = _gateway_token_name(app.cfg, env_name)
     if gateway_name:

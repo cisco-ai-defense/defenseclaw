@@ -307,6 +307,18 @@ def test_install_moved_with_the_home_names_the_old_folder(tmp_path, monkeypatch)
     assert "not guarding" in problem
 
 
+def test_dangling_script_link_is_reported_as_unguarded(tmp_path, monkeypatch):
+    # p0 GAP-1384: a sealed hook script replaced by a link to a missing
+    # target is a hook the agent cannot run, so status and guardrail status
+    # show the not-guarded posture warning.
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    cfg, script = _install(tmp_path)
+    script.unlink()
+    script.symlink_to(tmp_path / "gone.sh")
+    problem = unrunnable_hook_problem(cfg, "codex")
+    assert str(script) in problem and "cannot run it" in problem and "not guarding" in problem
+
+
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads mode 000 files")
 def test_unreadable_script_is_reported_as_unguarded_not_edited(tmp_path, monkeypatch):
     # GAP-0403: chmod 000 makes every hook a non-blocking error, so the

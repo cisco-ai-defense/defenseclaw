@@ -163,6 +163,9 @@ func TestStandaloneHookRuntimeUsesDescriptor(t *testing.T) {
 	if opts.Home != layout.ConfigDir {
 		t.Fatalf("home = %q, want the administrator-owned %q", opts.Home, layout.ConfigDir)
 	}
+	if want := filepath.Join(accountDatabaseHomeForTest(t), ".defenseclaw"); opts.FailureLogHome == nil || opts.FailureLogHome() != want {
+		t.Fatalf("failure log home does not resolve to the invoking user's %q", want)
+	}
 }
 
 // A standalone runtime that fails its checks (an untrusted descriptor, or one

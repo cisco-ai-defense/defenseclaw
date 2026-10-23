@@ -1252,12 +1252,52 @@ func (m *Manager) PolicyTest(_ context.Context, req sandboxapi.PolicyTestRequest
 			continue
 		}
 		chk := eff.CheckEgress(pol.Decider, pol.Principal, c.Host, c.Port)
+		if m.managedMode() {
+			chk = m.savedDecisionProvenance(b, eff, pol.Principal, c.Host, c.Port, chk)
+		}
 		out.Decisions = append(out.Decisions, sandboxapi.PolicyDecision{
 			PolicyCheck: c, Allowed: chk.Allowed, Rule: string(chk.Rule), Match: chk.Match, Source: chk.Source,
 			Reason: chk.Reason, Unblockable: chk.Unblockable, Direct: directProvider(rec.ProviderEndpoints, c.Host, c.Port),
 		})
 	}
 	return out, nil
+}
+
+// savedDecisionProvenance changes only the explanation of a verdict. The
+// actual sandbox decider above remains authoritative, including the guard,
+// organization lists, repository constraints and the current approval floor.
+func (m *Manager) savedDecisionProvenance(b *box, eff *packs.Effective, principal egress.Principal, host string, port int, chk packs.EgressCheck) packs.EgressCheck {
+	if chk.Rule != packs.RuleBlock && chk.Rule != packs.RuleUnblock {
+		return chk
+	}
+	if chk.Rule == packs.RuleBlock {
+		// A configured or repository block precedes appended user blocks.
+		if base := eff.CheckEgress(nil, principal, host, port); base.Rule == packs.RuleBlock {
+			return chk
+		}
+	} else if _, live := m.unblocks.Unblocked(principal, host); live {
+		return chk
+	}
+	for _, d := range m.savedDecisions(m.registrationOf(b), m.floor(eff)) {
+		if triage.NormalizeHost(d.Host) != triage.NormalizeHost(host) || d.Scope != sandboxrelay.DecisionScopeAlways {
+			continue
+		}
+		kind, action := "", ""
+		switch {
+		case chk.Rule == packs.RuleBlock && d.Kind == sandboxrelay.DecisionEgressBlock:
+			kind, action = "block", "blocked"
+		case chk.Rule == packs.RuleUnblock && d.Kind == sandboxrelay.DecisionEgressAllow:
+			kind, action = "allow", "allowed"
+		case chk.Rule == packs.RuleUnblock && d.Kind == sandboxrelay.DecisionUnblock:
+			kind, action = "unblock", "unblocked"
+		}
+		if kind != "" {
+			chk.Source = "your saved " + kind + " decision (managed gateway)"
+			chk.Reason = "You " + action + " this destination through your organization's DefenseClaw gateway."
+			return chk
+		}
+	}
+	return chk
 }
 
 // hostPortTest is what a policy test says of a --host-port the sandbox was

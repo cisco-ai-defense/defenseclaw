@@ -133,7 +133,7 @@ func applyEnterprisePolicyReport(result *enterprisestatus.Result, out []byte, ch
 		LastReloadError:       reload,
 		// A hand edit the hook guardian recorded advances the generation but
 		// is still a config change outside the lifecycle (GAP-0617).
-		ConfigUnrecorded: report.ConfigGeneration > 0 && (!report.ConfigGenerationRecorded || report.ConfigRecordedAsHandEdit),
+		ConfigUnrecorded: (report.ConfigGeneration > 0 || result.Platform == "windows") && (!report.ConfigGenerationRecorded || report.ConfigRecordedAsHandEdit),
 	}
 	handEdit := report.ConfigGenerationRecorded && report.ConfigRecordedAsHandEdit
 	result.Policy = state

@@ -82,6 +82,44 @@ func (u ClaudeStateUnreadable) Account() string {
 	return u.Home
 }
 
+// MCPSpoolRecordError is the failure to publish the record of one enrolled
+// account and connector; the other records of the folder were published.
+type MCPSpoolRecordError struct {
+	Connector, SID, Home string
+	Err                  error
+}
+
+func (e *MCPSpoolRecordError) Error() string { return e.Err.Error() }
+
+func (e *MCPSpoolRecordError) Unwrap() error { return e.Err }
+
+// MCPSpoolRecordFailures splits the error of an MCP spool publication into
+// the records it could not publish. whole reports a failure that is not one
+// record's (the folder itself could not be written): none of the
+// connector's records can then be taken as current, and neither can they
+// when an error names no record.
+func MCPSpoolRecordFailures(err error) (records []*MCPSpoolRecordError, whole bool) {
+	var walk func(error)
+	walk = func(err error) {
+		switch typed := err.(type) {
+		case nil:
+		case *MCPSpoolRecordError:
+			records = append(records, typed)
+		case interface{ Unwrap() []error }:
+			for _, inner := range typed.Unwrap() {
+				walk(inner)
+			}
+		default:
+			whole = true
+		}
+	}
+	walk(err)
+	if err != nil && len(records) == 0 {
+		whole = true
+	}
+	return records, whole
+}
+
 // ClaudeMCPSpoolDir is the spool folder below the hook guardian
 // authorization folder.
 func ClaudeMCPSpoolDir(authorizationDir string) string {

@@ -485,7 +485,7 @@ func (runtime *Runtime) emitWithLeaseControls(
 			if inbound {
 				return pipeline.LocalLogOutcome{}, processErr
 			}
-			runtime.dispatchOptional(lease, graph, outcome)
+			runtime.dispatchOptional(ctx, lease, graph, outcome)
 		}
 		return outcome, processErr
 	}
@@ -508,13 +508,14 @@ func (runtime *Runtime) emitWithLeaseControls(
 	if localOnly || suppressAll {
 		return outcome, nil
 	}
-	runtime.dispatchOptional(lease, graph, outcome)
+	runtime.dispatchOptional(ctx, lease, graph, outcome)
 	return outcome, nil
 }
 
 // leaseRecordBuilder builds one occurrence's record on the pinned generation:
 // it stamps the runtime correlation and checks the record names that
-// generation. Emit and EmitAtomicBatch share it.
+// generation, or the config a spooled occurrence's record was pinned on
+// (observability.WithPinnedProvenance). Emit and EmitAtomicBatch share it.
 func leaseRecordBuilder(
 	ctx context.Context,
 	lease *runtimegraph.Lease,
@@ -553,9 +554,16 @@ func leaseRecordBuilder(
 		if err != nil {
 			return observability.Record{}, &emitBuilderError{}
 		}
+		generation, digest := snapshot.Generation(), snapshot.Digest()
+		if pinned, ok := observability.PinnedProvenanceFrom(ctx); ok && !inbound {
+			// A spooled occurrence's record is pinned on its first offer and
+			// keeps that config on every offer (audit.ConfigChangePin), so a
+			// reload never makes another record under its id.
+			generation, digest = pinned.ConfigGeneration, pinned.ConfigDigest
+		}
 		provenance := record.Provenance()
-		if provenance.ConfigDigest != snapshot.Digest() || provenance.ConfigGeneration < 0 ||
-			uint64(provenance.ConfigGeneration) != snapshot.Generation() {
+		if provenance.ConfigDigest != digest || provenance.ConfigGeneration < 0 ||
+			uint64(provenance.ConfigGeneration) != generation {
 			return observability.Record{}, &emitBuilderError{}
 		}
 		return record, nil
@@ -577,7 +585,10 @@ func (runtime *Runtime) EmitAtomicBatch(
 		return nil, &Error{code: ErrorInvalidDependency}
 	}
 	for index := range items {
-		if items[index].Context == nil || items[index].Builder == nil {
+		// An occurrence marked observability.WithSkipLocalWrite goes through Emit,
+		// which skips its local write; a batch always writes every item.
+		if items[index].Context == nil || items[index].Builder == nil ||
+			observability.SkipLocalWrite(items[index].Context) {
 			return nil, &Error{code: ErrorInvalidDependency}
 		}
 	}
@@ -618,19 +629,24 @@ func (runtime *Runtime) EmitAtomicBatch(
 		outcome := outcomes[index]
 		if outcome.LocalPersisted() || outcome.ManagedOnly() ||
 			(processErr != nil && len(outcome.OptionalWork()) > 0) {
-			runtime.dispatchOptional(lease, graph, outcome)
+			runtime.dispatchOptional(items[index].Context, lease, graph, outcome)
 		}
 	}
 	return outcomes, processErr
 }
 
 // dispatchOptional enqueues a log outcome's optional-destination work and
-// records its projection failures.
+// records its projection failures. The observability.RemoteDelivery of ctx,
+// if any, gets every outcome; a destination that acknowledged an earlier
+// offer of the occurrence, or still has one in flight, is not sent it
+// again.
 func (runtime *Runtime) dispatchOptional(
+	ctx context.Context,
 	lease *runtimegraph.Lease,
 	graph *runtimegraph.Graph,
 	outcome pipeline.LocalLogOutcome,
 ) {
+	tracker := observability.RemoteDeliveryFrom(ctx)
 	dispatchValue, dispatchOK := lease.Component(DestinationDispatchComponentName)
 	dispatch, typedDispatch := dispatchValue.(*destinationDispatchComponent)
 	if !dispatchOK || !typedDispatch || dispatch == nil || dispatch.digest != graph.Digest() {
@@ -640,17 +656,23 @@ func (runtime *Runtime) dispatchOptional(
 			observeBoundedDestinationFailure(
 				runtime.destinationObserver, work.Delivery().DestinationName,
 			)
+			tracker.Fail(work.Delivery().DestinationName)
 		}
 		for _, failure := range outcome.OptionalFailures() {
 			observeBoundedDestinationFailure(runtime.destinationObserver, failure.DestinationName())
+			tracker.Fail(failure.DestinationName())
 		}
 		return
 	}
 	for _, failure := range outcome.OptionalFailures() {
 		dispatch.ObserveProjectionFailure(failure)
+		tracker.Fail(failure.DestinationName())
 	}
 	for _, work := range outcome.OptionalWork() {
-		dispatch.Enqueue(work)
+		if !tracker.Pending(work.Delivery().DestinationName) {
+			continue
+		}
+		dispatch.Enqueue(work, tracker)
 	}
 }
 

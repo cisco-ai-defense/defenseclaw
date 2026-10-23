@@ -38,8 +38,9 @@ import (
 // directories the gateway process creates, and with the 0077 of NVIDIA's
 // deb unit they are 0700 and owned by the host uid: the sandbox's own uid
 // then cannot traverse /newroot, and every MicroVM dies with "read
-// /proc/self/status: Permission denied" (OpenShell 0.1.2 and 0.1.3,
-// NVIDIA/OpenShell#4014).
+// /proc/self/status: Permission denied" (OpenShell 0.1.2 to 0.1.5,
+// NVIDIA/OpenShell#4014, still open: the drop-in stays until a release
+// that fixes it is SupportedMin).
 const (
 	kvmDevice = "/dev/kvm"
 	// ServiceUMask is the umask DefenseClaw gives the gateway service of a

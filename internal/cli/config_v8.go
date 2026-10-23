@@ -60,6 +60,9 @@ type configV8WireFailure struct {
 	ConfigVersion int    `json:"config_version"`
 	Path          string `json:"path"`
 	Reason        string `json:"reason"`
+	// Message is the refusal in plain words on a standalone managed host,
+	// as `config validate` prints it there.
+	Message string `json:"message,omitempty"`
 }
 
 // config-v8 is a machine-facing bridge for the Python operator CLI. Keeping
@@ -113,7 +116,7 @@ var configV8ValidateCmd = &cobra.Command{
 // references load as the gateway's reload needs, and every jsonl destination
 // is a file the gateway may write (GAP-0890). It changes nothing.
 func checkConfigV8Candidate(path, dataDir string) (*loadedConfigV8File, error) {
-	loaded, err := loadConfigV8File(path, dataDir)
+	loaded, err := loadConfigV8FileWithCredentials(path, dataDir, configValidateCredentialsDir(path))
 	if err != nil {
 		return nil, err
 	}
@@ -221,6 +224,9 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 			)
 		}
 	case errors.As(err, &yamlError):
+		if sourceError == nil && yamlError.ConfigVersion >= config.ObservabilityV8ConfigVersion {
+			result.ConfigVersion = yamlError.ConfigVersion
+		}
 		result.Path = configV8DiagnosticPath(yamlError.Path)
 		result.Reason = configV8DiagnosticReason(string(yamlError.Code), yamlError.Summary, "", yamlError.Action)
 	case errors.As(err, &schemaError):
@@ -629,6 +635,13 @@ func validateRuntimeV8ConnectorRoster(document *config.V8YAMLDocument, candidate
 	}
 	names := make([]string, 0, len(configured))
 	for name := range configured {
+		// until 1.1: the runtime loader drops a connector 1.0.4 removed
+		// (OpenHands, OmniGent) so the gateway can start and tear it down;
+		// expecting it to survive refused every published config that set it
+		// up before cleanup could run (GAP-0290).
+		if config.IsRetiredConnector(name) {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)

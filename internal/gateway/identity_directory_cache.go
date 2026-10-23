@@ -134,6 +134,9 @@ type identityCacheEntry[T any] struct {
 	// trustedUntil is when the inputs of the served facts stop being
 	// trusted (identityCache.trustedUntil); zero for no bound.
 	trustedUntil time.Time
+	// staleBefore makes the facts due for a refresh that a blocking request
+	// waits for, when they were fetched before it (refreshSoon).
+	staleBefore time.Time
 }
 
 func newIdentityDirectoryCache(resolve func(string) (useridentity.DirectoryFacts, error)) *identityDirectoryCache {
@@ -188,7 +191,7 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	}
 	c.dropAgedLocked(key, entry, now)
 	age := now.Sub(entry.fetchedAt)
-	invalidated := entry.ok && entry.fetchedAt.Before(c.staleBefore)
+	invalidated := entry.ok && (entry.fetchedAt.Before(c.staleBefore) || entry.fetchedAt.Before(entry.staleBefore))
 	expired := age >= c.lifetime(entry.facts) || invalidated
 	if (!entry.ok || expired) && entry.inflight == nil && !now.Before(entry.nextAttempt) {
 		c.refreshLocked(key, entry)
@@ -491,6 +494,26 @@ func (c *identityCache[T]) invalidate() {
 		if entry.ok {
 			entry.nextAttempt = time.Time{}
 		}
+	}
+}
+
+// refreshSoon makes key's cached answer due for a refresh that a blocking
+// request waits for within the budget, as invalidate does for every key.
+// Unlike forget it keeps the answer: when the refresh fails or does not
+// finish in time, the facts are served as before. News that only adds to
+// the facts (a guardian record that names the account's UPN, or one written
+// after the facts were resolved without one) never costs a request the
+// facts it had, so a slow directory cannot send it to a weaker
+// default_lookup_failed profile (loop round 3).
+func (c *identityCache[T]) refreshSoon(key string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry := c.entries[key]; entry != nil && entry.ok {
+		entry.staleBefore = c.now()
+		entry.nextAttempt = time.Time{}
 	}
 }
 

@@ -369,6 +369,54 @@ func TestAnEarlyStageSightingDoesNotHoldBackALaterChain(t *testing.T) {
 		"agent_kill_chain because an earlier packaging sighting came first: %+v", signals)
 }
 
+// TestExpiringTheFirstSightingKeepsAMiddleOneThatCompletesAChain is GAP-1427:
+// a credential read seen at minutes 0, 3 and 11, a principal minted at 4 and
+// data packaged at 5. Expiring minute 0 must keep the minute-3 read, which
+// with 4 and 5 is an in-order chain inside the ten-minute window.
+func TestExpiringTheFirstSightingKeepsAMiddleOneThatCompletesAChain(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	session := NewSession(1, "claude", base)
+	read := Observation{Tactic: tactics.CredentialAccess, SignalID: "agent_credential_access",
+		Detail: "/.aws/credentials", Confidence: 1}
+	for _, minute := range []int{0, 3, 11} {
+		read.At = base.Add(time.Duration(minute) * time.Minute)
+		session.Record(read)
+	}
+	session.Record(Observation{Tactic: tactics.IdentityCreation, SignalID: "agent_identity_creation",
+		Detail: "AWS IAM principal created", Confidence: 1, At: base.Add(4 * time.Minute)})
+	session.Record(Observation{Tactic: tactics.Exfiltration, SignalID: "agent_encoded_payload",
+		Detail: "base64 encoding", Confidence: 1, At: base.Add(5 * time.Minute)})
+	session.Expire(base.Add(2 * time.Minute))
+	if !session.Progressed(scoring.KillChainMinStages) {
+		t.Fatalf("the minute-3 credential read was dropped with minute 0: observations %+v", session.Observations())
+	}
+	for _, observation := range session.Observations() {
+		if observation.SignalID == "agent_credential_access" &&
+			(!observation.At.Equal(base.Add(3*time.Minute)) || !observation.LastAt.Equal(base.Add(11*time.Minute))) {
+			t.Fatalf("credential read sightings at %v..%v, want minutes 3..11", observation.At, observation.LastAt)
+		}
+	}
+}
+
+// TestSightingsPerKeyAreBounded pins that a repeated read keeps a bounded set
+// of sightings, its first and its latest among them.
+func TestSightingsPerKeyAreBounded(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	session := NewSession(1, "claude", base)
+	read := Observation{Tactic: tactics.CredentialAccess, SignalID: "agent_credential_access", Detail: "a", Confidence: 1}
+	for second := range 1000 {
+		read.At = base.Add(time.Duration(second) * time.Second)
+		session.Record(read)
+	}
+	observation := session.Observations()[0]
+	if times := observation.sightings(); len(times) != maxSightingsPerKey ||
+		!times[0].Equal(base) || !times[len(times)-1].Equal(base.Add(999*time.Second)) {
+		t.Fatalf("kept %d sightings %v..%v", len(times), times[0], times[len(times)-1])
+	}
+}
+
 // TestExpireBoundsTheChainToItsWindow pins that a chain is a chain within a
 // window rather than over the lifetime of a long-running agent.
 func TestExpireBoundsTheChainToItsWindow(t *testing.T) {

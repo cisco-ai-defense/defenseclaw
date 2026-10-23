@@ -764,3 +764,49 @@ func managedBackupTargetInside(home, path string) bool {
 	return err == nil && rel != "." && !filepath.IsAbs(rel) &&
 		rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
+
+// keepPristineEmptyHooks puts back the empty "hooks" object (or list) the
+// operator's file had before Setup, after a surgical teardown of path left
+// none. Removing DefenseClaw's entries empties the object, which the cleanup
+// then drops; only the copy Setup captured tells that the key was the
+// operator's (GAP-1140). With no such copy, a copy whose "hooks" is not
+// empty, or a file that still has the key or is gone, nothing changes.
+func keepPristineEmptyHooks(dataDir, connectorName, logicalName, path string) error {
+	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, connectorName, logicalName))
+	if err != nil || !b.Existed {
+		return nil
+	}
+	var pristine map[string]interface{}
+	if json.Unmarshal(b.PristineBytes, &pristine) != nil {
+		return nil
+	}
+	var empty interface{}
+	switch hooks := pristine["hooks"].(type) {
+	case map[string]interface{}:
+		if len(hooks) == 0 {
+			empty = map[string]interface{}{}
+		}
+	case []interface{}:
+		if len(hooks) == 0 {
+			empty = []interface{}{}
+		}
+	}
+	if empty == nil {
+		return nil
+	}
+	if _, err := os.Lstat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return err
+	}
+	if _, present := cfg["hooks"]; present {
+		return nil
+	}
+	cfg["hooks"] = empty
+	return writeJSONObject(path, cfg)
+}

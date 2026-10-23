@@ -442,8 +442,6 @@ func TestPreflightReturnsWhatBuildRefusesBeforeDocker(t *testing.T) {
 	}{
 		"not an exact release": {spec: func(s *BuildSpec) { s.Harness, s.HarnessVersion = harness.Hermes, "0.0.0-nonexistent" }, noBuildx: true,
 			want: `harness hermes: version "0.0.0-nonexistent" is not an exact release`},
-		"below the sandbox contract": {spec: func(s *BuildSpec) { s.Harness, s.HarnessVersion = harness.OmniGent, "0.12.0" }, noBuildx: true,
-			want: "harness version has no reviewed hook contract for sandboxes: omnigent 0.12.0"},
 		"no BuildKit":             {noBuildx: true, want: "docker build " + c.Tag + ": docker's buildx plugin is not available", docker: true},
 		"a cached image":          {noBuildx: true, cached: true, docker: true},
 		"a forced build":          {noBuildx: true, cached: true, force: true, want: "docker's buildx plugin is not available", docker: true},

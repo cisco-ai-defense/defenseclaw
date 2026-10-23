@@ -51,7 +51,6 @@ func TestUnifiedHookDispatch_SingleEntryPoint(t *testing.T) {
 		"cursor":     "hook event name is required",
 		"devin":      "hook event name is required",
 		"copilot":    "Copilot hook event registration is required",
-		"openhands":  "hook event name is required",
 		"made-up":    "hook event name is required",
 	}
 	for name, wantError := range connectors {
@@ -97,9 +96,7 @@ func TestHookProfileForConnector(t *testing.T) {
 		{"hermes", "hermes", "hermes", false, true, true},
 		{"cursor", "cursor", "cursor", true, true, true},
 		{"devin", "devin", "devin", true, true, true},
-		// openhands' Decode maps the CLI's PascalCase SDK event_type onto
 		// the contract's snake_case event names.
-		{"openhands", "openhands", "openhands", true, true, true},
 		{"unknown_returns_zero", "made-up", "made-up", false, false, false},
 	}
 	for _, tc := range cases {
@@ -157,7 +154,6 @@ func TestUnifiedDispatch_PreservesConnectorWireShape(t *testing.T) {
 		{"cursor", "hook_output"},
 		{"devin", "hook_output"},
 		{"copilot", "hook_output"},
-		{"openhands", "hook_output"},
 		{"made-up", "hook_output"},
 	}
 	for _, tc := range cases {

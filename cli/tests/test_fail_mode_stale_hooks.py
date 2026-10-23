@@ -59,8 +59,10 @@ def test_fail_mode_change_with_gateway_stopped_re_renders_hooks(tmp_path: Path, 
     assert "re-rendered the hooks now (codex fail-closed)" in result.output
 
 
-def test_upstream_fail_open_connectors_are_not_re_rendered(tmp_path: Path, monkeypatch) -> None:
-    # GAP-0027: their hooks fail open upstream whatever the config says.
+def test_native_deny_connectors_are_re_rendered_outside_secure_client(tmp_path: Path, monkeypatch) -> None:
+    # Per-user Antigravity, Copilot and Hermes hooks follow the fail mode, so
+    # a fail-mode write re-renders them too (only Secure Client keeps them
+    # upstream fail-open, GAP-0027).
     reconcile = MagicMock()
     config = _CONFIG + "".join(f"    {name}: {{mode: action}}\n" for name in ("antigravity", "copilot", "hermes"))
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
@@ -73,7 +75,7 @@ def test_upstream_fail_open_connectors_are_not_re_rendered(tmp_path: Path, monke
     ):
         result = CliRunner().invoke(cmd_config.config_cmd, ["unset", "guardrail.hook_fail_mode"])
     assert result.exit_code == 0, result.output
-    assert [call.args[1] for call in reconcile.call_args_list] == ["codex"]
+    assert sorted(call.args[1] for call in reconcile.call_args_list) == ["antigravity", "codex", "copilot", "hermes"]
     assert "could not be re-rendered" not in result.output
     assert "keep their previous fail mode" not in result.output
 

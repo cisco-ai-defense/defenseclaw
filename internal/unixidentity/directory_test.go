@@ -32,7 +32,7 @@ func TestSameNameAccountsFindsTheDirectoryTwin(t *testing.T) {
 		"passwd dcad-o4ud@dclab.test": {stdout: []byte("dcad-o4ud@dclab.test:*:94403993:94400513::/home/dcad-o4ud@dclab.test:/bin/bash\n")},
 	}})
 	local := Account{Name: "dcad-o4ud", UID: 1008}
-	twins := SameNameAccounts(context.Background(), r, local)
+	twins, _ := SameNameAccounts(context.Background(), r, local)
 	if len(twins) != 1 || twins[0].UID != 94403993 {
 		t.Fatalf("twins of the local account = %+v", twins)
 	}
@@ -273,23 +273,40 @@ func TestGroupNameLookupDefinitive(t *testing.T) {
 }
 
 // A local passwd entry must remain resolvable while a directory backend is unavailable.
-func TestDirectoryFactsLocalAccountSkipsDirectoryProbe(t *testing.T) {
+// A local account that leads the passwd line is answered without a
+// directory lookup of its own, but whether the directory after it holds an
+// account of the same uid is asked: an SSSD that does not answer leaves
+// that unknown, and the facts lookup fails (review of GAP-0551, loop 4).
+// Once SSSD answers that it holds none, the local facts are served.
+func TestDirectoryFactsLocalAccountNeedsTheDirectoryAfterItToAnswer(t *testing.T) {
 	dir := t.TempDir()
-	oldPasswd, oldNSS := localPasswdPath, nsswitchPath
-	t.Cleanup(func() { localPasswdPath, nsswitchPath = oldPasswd, oldNSS })
+	oldPasswd, oldNSS, oldSSSD, oldSocket := localPasswdPath, nsswitchPath, sssdConfPath, sssdNSSSocket
+	t.Cleanup(func() {
+		localPasswdPath, nsswitchPath, sssdConfPath, sssdNSSSocket = oldPasswd, oldNSS, oldSSSD, oldSocket
+	})
 	localPasswdPath, nsswitchPath = filepath.Join(dir, "passwd"), filepath.Join(dir, "nsswitch.conf")
-	if err := os.WriteFile(localPasswdPath, []byte("opsadmin:x:1001:1001::/home/opsadmin:/bin/bash\n"), 0o644); err != nil {
-		t.Fatal(err)
+	sssdConfPath, sssdNSSSocket = filepath.Join(dir, "sssd.conf"), filepath.Join(dir, "no-sssd", "nss")
+	for path, data := range map[string]string{localPasswdPath: "opsadmin:x:1001:1001::/home/opsadmin:/bin/bash\n",
+		nsswitchPath: "passwd: files sss\n", sssdConfPath: "[sssd]\ndomains = corp.example.com\n"} {
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := os.WriteFile(nsswitchPath, []byte("passwd: files sss\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	f := &fakeRun{errs: map[string]error{"-s sss passwd 1001": errors.New("getent timed out")}, results: map[string]commandResult{
+	results := map[string]commandResult{
 		"passwd 1001":         {stdout: []byte("opsadmin:x:1001:1001::/home/opsadmin:/bin/bash\n")},
 		"initgroups opsadmin": {stdout: []byte("opsadmin 1001\n")},
 		"group 1001":          {stdout: []byte("opsadmin:x:1001:\n")},
-	}}
-	facts, err := newFakeNSS(f).DirectoryFactsForUID(1001, time.Now())
+	}
+	f := &fakeRun{errs: map[string]error{"-s sss passwd 1001": errors.New("getent timed out")}, results: results}
+	if facts, err := newFakeNSS(f).DirectoryFactsForUID(1001, time.Now()); err == nil {
+		t.Fatalf("local facts = %+v while SSSD did not answer for the uid; want the lookup to fail", facts)
+	}
+	// SSSD stopped: its "no such account" is not definitive either.
+	if facts, err := newFakeNSS(&fakeRun{results: results}).DirectoryFactsForUID(1001, time.Now()); err == nil {
+		t.Fatalf("local facts = %+v while SSSD was stopped; want the lookup to fail", facts)
+	}
+	startFakeSSSD(t, nil)
+	facts, err := newFakeNSS(&fakeRun{results: results}).DirectoryFactsForUID(1001, time.Now())
 	if err != nil || facts.Directory != useridentity.DirectoryLocal || len(facts.Groups) != 1 {
 		t.Fatalf("local facts = %+v, %v", facts, err)
 	}

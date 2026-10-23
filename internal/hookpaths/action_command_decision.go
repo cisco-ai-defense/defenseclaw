@@ -22,6 +22,21 @@ func ActionCommandDecision(command, cwd, home string) string {
 	return actionCommandDecision(command, cwd, home, 0)
 }
 
+// "[" is a literal shell test builtin in program position. StaticWord
+// rejects it as an unmatched glob opener, which is right for path operands
+// but would mistake an ordinary guarded command for a computed executable.
+func staticProgramWord(word *syntax.Word, home string) (string, bool) {
+	if program, fixed := StaticWord(word, home); fixed {
+		return program, true
+	}
+	if word != nil && len(word.Parts) == 1 {
+		if literal, ok := word.Parts[0].(*syntax.Lit); ok && literal.Value == "[" {
+			return "[", true
+		}
+	}
+	return "", false
+}
+
 func actionCommandDecision(command, cwd, home string, depth int) string {
 	if actionWindowsHome(home) {
 		return actionWindowsCommandDecision(command, cwd, home, depth)
@@ -35,6 +50,20 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 	if reason := UnprovenProtectedWrite(command, cwd, home); reason != "" {
 		return reason
 	}
+	// apply_patch receives its writes from an envelope, often through a
+	// heredoc. Check every envelope in the same action decision as shell
+	// operands, including conditional branches and computed patch paths.
+	patchTargets, patchKnown := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
+	if !patchKnown {
+		return "dynamic-argument"
+	}
+	patchProtected := newProtectedFiles(home)
+	patchSSH := filepath.Join(home, ".ssh")
+	for _, target := range patchTargets {
+		if protectedReachPath(target, patchProtected, patchSSH) {
+			return "dynamic-argument"
+		}
+	}
 	file, ok := parseShell(command)
 	if !ok {
 		if actionTextMayWrite(command) {
@@ -44,6 +73,7 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 	}
 	called := calledFunctions(file, home)
 	functionArgs := actionLiteralFunctionArgs(file, home)
+	boundPrograms := actionBoundProgramWords(file, home)
 	straightLine := make(map[*syntax.Stmt]bool, len(file.Stmts))
 	for _, stmt := range file.Stmts {
 		straightLine[stmt] = true
@@ -112,10 +142,13 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
-		program, fixed := StaticWord(call.Args[0], home)
+		program, fixed := staticProgramWord(call.Args[0], home)
 		if !fixed {
-			reason = "dynamic-command"
-			return false
+			program, fixed = boundPrograms[call]
+			if !fixed {
+				reason = "dynamic-command"
+				return false
+			}
 		}
 		words := make([]string, len(call.Args))
 		words[0] = program
@@ -273,7 +306,7 @@ func actionStmtMayWrite(stmt *syntax.Stmt, home string) bool {
 	if !ok || len(call.Args) == 0 {
 		return false
 	}
-	program, known := StaticWord(call.Args[0], home)
+	program, known := staticProgramWord(call.Args[0], home)
 	if known && programBase(program) == "sort" {
 		for _, arg := range call.Args[1:] {
 			var rendered strings.Builder
@@ -384,6 +417,31 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 		return ""
 	}
 	program := programBase(words[0])
+	// A directly executable script is an interpreter launch too. Route it
+	// through the same cwd, argument and body proof as an explicit launcher.
+	interpreter := ""
+	switch filepath.Ext(program) {
+	case ".sh", ".bash", ".dash":
+		interpreter = "sh"
+	case ".zsh":
+		interpreter = "zsh"
+	case ".ksh":
+		interpreter = "ksh"
+	case ".py":
+		interpreter = "python3"
+	case ".js", ".mjs", ".cjs":
+		interpreter = "node"
+	case ".rb":
+		interpreter = "ruby"
+	case ".pl":
+		interpreter = "perl"
+	case ".ps1", ".cmd", ".bat":
+		return "nested-shell"
+	}
+	if interpreter != "" {
+		child := append([]string{interpreter}, words...)
+		return actionChildDecision(child, stmt, cwd, home, depth+1)
+	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
 	for i, word := range words[1:] {
@@ -487,7 +545,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 		}
 		if words[1] == "-" {
 			if code, known := actionLiteralHereDocument(stmt); known {
-				if class, _ := unprovenInterpreterCode(code, program, cwd, home); class != "" {
+				if class, _ := unprovenInterpreterCode(code, program, cwd, home, true); class != "" {
 					return class
 				}
 				for _, target := range literalInterpreterWrites(code, program) {
@@ -503,7 +561,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			if len(words) < 3 || words[2] == "" {
 				return "interpreter-path"
 			}
-			if class, _ := unprovenInterpreterCode(words[2], program, cwd, home); class != "" {
+			if class, _ := unprovenInterpreterCode(words[2], program, cwd, home, true); class != "" {
 				return class
 			}
 			return ""
@@ -518,12 +576,21 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 		if !read {
 			return "interpreter-path"
 		}
-		if class, _ := unprovenInterpreterCode(content, program, cwd, home); class != "" {
+		if class, _ := unprovenInterpreterCode(content, program, cwd, home, true); class != "" {
 			return class
 		}
 		return ""
 	}
 	switch program {
+	case "source", ".":
+		if len(words) != 2 || words[1] == "" || !actionScriptInsideCWD(words[1], cwd) {
+			return "eval-source"
+		}
+		content, read := readIndirectSource(words[1], cwd)
+		if !read {
+			return "eval-source"
+		}
+		return actionCommandDecision(content, cwd, home, depth+1)
 	case "git":
 		return actionGitDecision(words, cwd, home, depth+1)
 	case "command", "exec", "busybox", "time", "nohup":

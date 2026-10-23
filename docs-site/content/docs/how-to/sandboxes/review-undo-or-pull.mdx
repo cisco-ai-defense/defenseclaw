@@ -1,0 +1,113 @@
+---
+title: Review, undo or pull changes
+description: Review what a sandbox session changed, undo it on Linux, pull it back on macOS, then resume or delete the sandbox.
+keywords:
+  - sandbox review
+  - sandbox undo
+  - sandbox pull
+  - sandbox delete
+  - copy mode
+---
+
+Decide what to keep after a sandbox session: review the changes, undo them on a mounted folder, or pull a copy's work back into your project.
+
+`defenseclaw sandbox list` shows `mount` or `copy` in its MODE column. A Linux sandbox mounts your folder live by default. A Mac sandbox, a MicroVM sandbox and any `--copy` run work on a copy.
+
+## Review the changes
+
+```bash
+defenseclaw sandbox review myapp-7f3a --diff
+```
+
+```text
+  myapp-7f3a: 8 files changed (+212 −37)
+  ⚠ Changed files that can run code on your machine: package.json, .envrc  → review before running
+    HIGH     package.json — scripts.postinstall: npm lifecycle script changed (runs automatically on install): node scripts/setup.js
+```
+
+The review flags, most severe first, changes that can run code the next time you open, build, install, commit or push: git hooks and control files, npm scripts, build and editor config, new executables. It then lists findings from the secret and code scanners. For a copy, `review` previews what `pull` would bring back and applies nothing. The severity rules are in the [`sandbox review` reference](/docs/reference/sandboxes/cli#sandbox-review).
+
+## Keep or undo on Linux
+
+When a session on a mounted folder ends, DefenseClaw asks:
+
+```text
+Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
+```
+
+`y` keeps them. `u` restores the folder to its pre-session snapshot. `d` shows the diff, then asks again. `--yes` keeps without asking, and `openshell.workdir.on_exit` (`ask`, `keep` or `undo`) sets the default.
+
+Undo works later too:
+
+```bash
+defenseclaw sandbox undo myapp-7f3a
+```
+
+```text
+  Undo will restore ~/code/myapp (2 paths):
+    remove  scripts/setup.sh
+    revert  package.json
+Restore ~/code/myapp to the snapshot? (the sandbox is stopped first) [y/N]
+```
+
+In a git project undo restores the working tree, HEAD, branch and staging area, and it saves the session's state in a commit first, so an undo can be undone. `--preview` only shows the changes. Files git ignores, such as `node_modules/`, are not in the snapshot: undo names them so you can reinstall, or you can turn on `openshell.workdir.undo_ignored`. Flags and edge cases: [`sandbox undo`](/docs/reference/sandboxes/cli#sandbox-undo).
+
+## Pull on macOS
+
+On a copy, nothing reaches your folder until you choose it.
+
+{/* Checked against internal/openshell/workspace/copy.go (shallow clone with secrets held back) and internal/openshell/sandboxcli/session.go (review, then the "Bring the changes back?" question). */}
+
+<Flow direction="TB" compact caption="How your project gets into a sandbox copy and back. Skip leaves the work in the sandbox for a later pull.">
+  <Node id="in" kind="operator">{`Copy in\nsecrets held back`}</Node>
+  <Node id="edit" kind="agent">{`Agent edits the copy`}</Node>
+  <Node id="out" kind="generic">{`Pull the work out`}</Node>
+  <Node id="review" kind="decision">{`Review\nsecrets and unsafe code`}</Node>
+  <Node id="back" kind="operator">{`Apply, branch,\npatch file or skip`}</Node>
+  <Edge from="in" to="edit" />
+  <Edge from="edit" to="out" />
+  <Edge from="out" to="review" />
+  <Edge from="review" to="back" />
+</Flow>
+
+At the end of the session DefenseClaw pulls the work, scans the changed files and asks:
+
+```text
+Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip  [d] show diff (then Enter)
+```
+
+| Answer | What happens |
+| --- | --- |
+| `A` apply | A three-way merge into your working tree. Your previous working tree is kept, so `sandbox undo` reverts the apply. |
+| `b` branch | The work goes on branch `dc/myapp-1c2d`. Your working tree is not touched. |
+| `p` patch file | The work is written to a patch file. |
+| `s` skip | Nothing changes; the work stays in the sandbox. |
+
+Changes that can run code, or that look like a secret, are applied only after a second yes. Pull later from any terminal:
+
+```bash
+defenseclaw sandbox pull myapp-1c2d --apply
+```
+
+`--branch` and `--patch-out FILE` pick the other answers. Without a mode, `pull` shows the review only. On a merge conflict, nothing is touched: the changes land on a branch and in `<name>.patch`, and `pull` exits `4`. All flags and edge cases are in [`sandbox pull`](/docs/reference/sandboxes/cli#sandbox-pull).
+
+On a copy, `defenseclaw sandbox undo NAME` reverts the last `pull --apply`.
+
+## Resume, stop or delete
+
+`defenseclaw sandbox list` shows every sandbox and its phase.
+
+| Command | What it does |
+| --- | --- |
+| `sandbox connect NAME` | Resume: start it if stopped and attach the harness. `--shell` opens a shell. |
+| `sandbox stop NAME` | Stop it; it is kept. |
+| `sandbox delete NAME` | Delete the sandbox, its credentials and its undo snapshot. |
+
+## Check it worked
+
+After a keep or an apply, `git -C ~/code/myapp status` shows the changes. After an undo, it shows the folder as it was before the session.
+
+## Next
+
+- [More ways to run](/docs/how-to/sandboxes/more-ways-to-run)
+- [Troubleshooting](/docs/troubleshooting/sandboxes)

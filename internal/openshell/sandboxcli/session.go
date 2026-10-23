@@ -252,7 +252,10 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 	}
 	// While the harness runs, other sessions' ends leave the sandbox alone,
 	// and what its copy held as it last stopped is no longer known.
-	release := s.app.holdSession(s.sb.Name)
+	release, err := s.app.holdSession(ctx, s.sb.Name, s.stillRunning)
+	if err != nil {
+		return -1, err
+	}
 	defer release()
 	s.app.forgetStoppedCopy(s.sb.Name)
 	stop := s.beginSession(ctx)
@@ -361,7 +364,10 @@ var loginShell = []string{"sh", "-c", "if command -v bash >/dev/null 2>&1; then 
 func (s *session) attachShell(ctx context.Context) (int, error) {
 	// While the shell runs, other sessions' ends leave the sandbox alone,
 	// and what its copy held as it last stopped is no longer known.
-	release := s.app.holdSession(s.sb.Name)
+	release, err := s.app.holdSession(ctx, s.sb.Name, s.stillRunning)
+	if err != nil {
+		return -1, err
+	}
 	defer release()
 	s.app.forgetStoppedCopy(s.sb.Name)
 	stop := s.beginSession(ctx)
@@ -372,6 +378,25 @@ func (s *session) attachShell(ctx context.Context) (int, error) {
 		return -1, err
 	}
 	return s.app.Terminal.Run(ctx, inv)
+}
+
+// stillRunning is the check an attach makes under the sandbox's gate once
+// its lease is recorded (holdSession): from then on no stop or delete
+// DefenseClaw decides ends the sandbox under the session, but one decided
+// before it (another terminal's session end that counted no session, a
+// `sandbox stop`) may have ended it since the session read it ready. Only
+// a sandbox OpenShell reports ready now takes the session.
+func (s *session) stillRunning(ctx context.Context) error {
+	name := s.sb.Name
+	now, err := s.api.Get(ctx, name)
+	if err != nil {
+		return fmt.Errorf("cannot confirm that %s still runs: %w; run `%s status %s`, then retry the connect", name, apiError(err), CommandName, name)
+	}
+	if now.Phase != "ready" {
+		return fmt.Errorf("%s is %s now: it was stopped while this session attached (another terminal's session ended, or a stop ran) → start it again: %s connect %s",
+			name, firstNonEmpty(now.Phase, "not ready"), CommandName, name)
+	}
+	return nil
 }
 
 // beginSession reads the sandbox as the session starts (for the
@@ -391,7 +416,7 @@ func (s *session) beginSession(ctx context.Context) func() {
 // is not overdue. (The Codex TUI too, but its OTLP export from the start
 // proves the path; see telemetryReached.)
 var promptFirst = map[string]bool{
-	"kiro": true, "hermes": true, "antigravity": true, "openhands": true, "omnigent": true, "copilot": true,
+	"kiro": true, "hermes": true, "antigravity": true, "copilot": true,
 }
 
 // watchNotices follows the sandbox during the session and announces what
@@ -1013,8 +1038,20 @@ func (s *session) end(ctx context.Context) error {
 		}
 	}
 	// Another session's harness or shell still running in the sandbox keeps
-	// it running (this session's lease went with its harness).
-	s.others = a.attachedSessions(s.sb.Name)
+	// it running (this session's lease went with its harness). A mounted
+	// sandbox this session would stop before its review is counted and
+	// stopped under the sandbox's exclusive gate (lockForStop), so a session
+	// that attaches after the count waits for the stop and then finds the
+	// sandbox stopped, rather than being stopped under its harness.
+	release := func() {}
+	if after.WorkdirMode != config.OpenShellWorkdirCopy && after.Phase == "ready" && !s.lost && s.started && !s.liveRun {
+		s.others, release, err = a.lockForStop(ctx, s.sb.Name)
+	} else {
+		s.others, err = a.attachedSessions(s.sb.Name)
+	}
+	if err != nil {
+		return attachedUnknown(s.sb.Name, err)
+	}
 	if after.WorkdirMode == config.OpenShellWorkdirCopy {
 		return s.endCopy(ctx, after, elsewhere != "")
 	}
@@ -1058,6 +1095,7 @@ func (s *session) end(ctx context.Context) error {
 	case !s.liveRun:
 		a.note(s.sb.Name + " is still running (it was running when you connected); changes it makes after this point are not in this review")
 	}
+	release()
 	rev, err := s.api.Review(ctx, s.sb.Name, sandboxapi.ReviewRequest{})
 	if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
 		return deleted()
@@ -1210,7 +1248,7 @@ func (s *session) endedElsewhere(after *sandboxapi.Sandbox) string {
 		s.errored = true
 		runtime, why := s.runtimeStopCause(after)
 		text := name + "'s " + runtime + " stopped under the session (" + why + "), which ended " + s.harnessName() +
-			"; OpenShell now holds it in its error state, where it can be neither stopped nor started"
+			"; OpenShell now holds it in its error state"
 		if runtime == "MicroVM" && len(s.otherGateways) > 0 {
 			text += ". " + otherGatewaysText(s.otherGateways) + ". Stop that process (`kill PID` with the number above) once your sandboxes are saved"
 		}
@@ -1455,6 +1493,16 @@ func (e *sessionDeleteError) Unwrap() error { return e.err }
 func (s *session) finish(ctx context.Context, stopped bool) error {
 	a := s.app
 	name := s.sb.Name
+	// A reconnect may have recorded its lease while the copy's final
+	// apply/branch/patch question was open: count again, under the
+	// sandbox's exclusive gate, held through the Stop or the Delete below,
+	// so no session attaches between this count and that call.
+	others, unlock, err := a.lockForStop(ctx, name)
+	if err != nil {
+		return attachedUnknown(name, err)
+	}
+	defer unlock()
+	s.others = others
 	switch {
 	case s.rm && s.liveRun:
 		s.notDeleted("its detached run is still going", "the run ends")
@@ -1508,7 +1556,7 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 			return nil
 		case s.unanswered:
 			a.note("Sandbox " + name + " does not answer → `" + CommandName + " status " + name + "` shows its state; in OpenShell's error state `" +
-				CommandName + " delete " + name + " --keep-snapshot` keeps the undo point, then run again")
+				CommandName + " stop " + name + "` and `" + CommandName + " start " + name + "` bring it back with its work")
 			return nil
 		case !s.started:
 			if now, err := s.api.Get(ctx, name); err == nil && now.Phase != "ready" {
@@ -1536,13 +1584,10 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		s.markStopped()
 	}
 	if s.errored {
-		if s.sb.WorkdirMode == config.OpenShellWorkdirCopy {
-			a.note("Sandbox " + name + " is in OpenShell's error state, and its copy's work that was not pulled cannot be read any more → `" +
-				CommandName + " delete " + name + "`, then run again")
-			return nil
-		}
-		a.note("Sandbox " + name + " is in OpenShell's error state → `" + CommandName + " delete " + name +
-			" --keep-snapshot` keeps the undo point and the folder's changes, then run again")
+		// Every gateway DefenseClaw starts a session on stops a sandbox in
+		// that state and starts it again (openshell.SupportedMin).
+		a.note("Sandbox " + name + " is in OpenShell's error state → fix what stopped it, then `" + CommandName + " stop " + name +
+			"` and `" + CommandName + " start " + name + "`, which keep the sandbox and its work")
 		return nil
 	}
 	if s.policyStop != "" {
@@ -1617,10 +1662,6 @@ var continueArgs = map[string]string{
 	"copilot":    "--continue",
 	"kiro":       "--resume",
 	"hermes":     "--continue",
-	"openhands":  "--resume --last",
-	// OmniGent's run --continue picks the sandbox agent's latest
-	// conversation.
-	"omnigent": "--continue",
 	// agy's -c (a Go flag) reopens the folder's latest conversation, as
 	// its own "Resume with -c" says.
 	"antigravity": "-c",
@@ -1636,12 +1677,10 @@ var ownResumeHint = map[string]string{
 	"claudecode": "claude --resume",
 	"codex":      "codex resume",
 	// OpenCode's exit screen: "Continue  opencode -s ses_<id>".
-	"opencode":  "opencode -s",
-	"copilot":   "copilot --resume",
-	"kiro":      "kiro-cli --resume-id",
-	"hermes":    "hermes --resume",
-	"openhands": "openhands --resume",
-	"omnigent":  "omnigent run",
+	"opencode": "opencode -s",
+	"copilot":  "copilot --resume",
+	"kiro":     "kiro-cli --resume-id",
+	"hermes":   "hermes --resume",
 	// agy: "Resume with -c (or command below): agy --conversation=<id>".
 	"antigravity": "agy --conversation",
 }

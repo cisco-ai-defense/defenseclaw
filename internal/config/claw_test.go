@@ -1107,18 +1107,6 @@ func TestConnectorHomeDir_OpenCodeHonorsConfigDir(t *testing.T) {
 	}
 }
 
-func TestConnectorHomeDir_OmnigentConfigHome(t *testing.T) {
-	home := t.TempDir()
-	configHome := filepath.Join(home, "isolated-omnigent")
-	testenv.SetHome(t, home)
-	t.Setenv("OMNIGENT_CONFIG_HOME", configHome)
-	cfg := &Config{}
-
-	if got := cfg.ConnectorHomeDir("omnigent"); got != configHome {
-		t.Fatalf("ConnectorHomeDir(omnigent) = %q, want %q", got, configHome)
-	}
-}
-
 func TestAMPReadsJSONCSettingsAndSkillBundledMCPWithPrecedence(t *testing.T) {
 	home := t.TempDir()
 	testenv.SetHome(t, home)

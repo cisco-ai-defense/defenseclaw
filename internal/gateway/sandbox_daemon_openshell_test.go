@@ -332,13 +332,26 @@ func TestAccountOpenShellDrift(t *testing.T) {
 	// it off is no drift; the defaults match.
 	want.TelemetryEnabled = true
 	write(openshell.GatewayEnvFile, "OPENSHELL_TELEMETRY_ENABLED=false\n")
+	// An own docker gateway in OpenShell's shared default namespace drifts
+	// from the render (r102 GAP-0621); the managed namespace matches.
+	if drift, err := r.o.Drift(s); err != nil || driftFields(drift) != "Docker sandbox namespace" {
+		t.Fatalf("default namespace: %v %v", drift, err)
+	}
+	// So does one in the account's own namespace: a managed sandbox made
+	// there is lost to the rendered gateway after its next start.
+	write(openshell.GatewayTOMLFile, "[openshell]\nversion = 2\n[openshell.drivers.docker]\nsandbox_label = \""+openshell.AccountDockerNamespace(5001)+"\"\n")
+	if drift, err := r.o.Drift(s); err != nil || driftFields(drift) != "Docker sandbox namespace" {
+		t.Fatalf("own namespace: %v %v", drift, err)
+	}
+	managedNS := "[openshell.drivers.docker]\nsandbox_label = \"" + openshell.ManagedDockerNamespace + "\"\n"
+	write(openshell.GatewayTOMLFile, "[openshell]\nversion = 2\n"+managedNS)
 	if drift, err := r.o.Drift(s); err != nil || len(drift) != 0 {
 		t.Fatalf("matching settings: %v %v", drift, err)
 	}
 	// It does not: telemetry on is drift. So is another listener.
 	want.TelemetryEnabled = false
 	write(openshell.GatewayEnvFile, "")
-	write(openshell.GatewayTOMLFile, "[openshell]\nversion = 2\n[openshell.gateway]\nbind_address = \"0.0.0.0:17999\"\n")
+	write(openshell.GatewayTOMLFile, "[openshell]\nversion = 2\n[openshell.gateway]\nbind_address = \"0.0.0.0:17999\"\n"+managedNS)
 	drift, err := r.o.Drift(s)
 	if err != nil || driftFields(drift) != "gateway listener, OpenShell telemetry" {
 		t.Fatalf("drift = %v, %v", drift, err)

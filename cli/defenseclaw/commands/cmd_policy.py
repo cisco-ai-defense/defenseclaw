@@ -297,9 +297,11 @@ def create(
         if action is not None:
             actions[sev] = _action_for_level(action)
 
+    # A severity the preset and the flags leave out warns, as it always did:
+    # the fill-in predates the distinct allow (p0 GAP-0998).
     for sev in SEVERITIES:
         if sev not in actions:
-            actions[sev] = _action_for_level("allow")
+            actions[sev] = _action_for_level("warn")
 
     _save_policy(dest, data)
 
@@ -883,17 +885,28 @@ def _reload_gateway_policy(app: AppContext) -> tuple[str, str]:
     return "reloaded", ""
 
 
-def _admission_triple(raw: dict) -> dict:
-    """A policy action in config ``admission`` triple form. Policy YAML uses
-    either runtime vocabulary (enable/disable or allow/block, F-0241)."""
+def _admission_triple(raw: dict) -> dict | str:
+    """A policy action in config ``admission`` form: the install/file/runtime
+    triple, or the ``allow`` shorthand for an action with ``verdict:
+    allowed`` (a triple cannot carry the allowed verdict, p0 GAP-0998).
+    Policy YAML uses either runtime vocabulary (enable/disable or
+    allow/block, F-0241)."""
     runtime = str(raw.get("runtime", "enable")).strip().lower()
     if runtime not in {"enable", "disable", "allow", "block"}:
         raise ValueError(f"invalid runtime action {runtime!r}; expected enable, disable, allow or block")
-    return {
+    triple = {
         "install": str(raw.get("install") or "none"),
         "file": str(raw.get("file") or "none"),
         "runtime": "disable" if runtime in ("disable", "block") else "enable",
     }
+    verdict = raw.get("verdict")
+    if verdict is None:
+        return triple
+    if verdict != "allowed" or triple != {"install": "none", "file": "none", "runtime": "enable"}:
+        raise ValueError(
+            f"invalid verdict {verdict!r}; only verdict: allowed is valid, with install none, file none, runtime enable"
+        )
+    return "allow"
 
 
 def _policy_bool(value: object, key: str) -> bool:
@@ -1728,13 +1741,18 @@ def _default_policy_data() -> dict:
 
 
 def _action_for_level(level: str) -> dict:
-    """Convert a simple action level (block/warn/allow) to a full action dict."""
+    """Convert a simple action level (block/warn/allow) to a full action dict.
+
+    warn and allow take the same actions and differ in the verdict
+    (warning vs allowed), so allow carries ``verdict: allowed``, which
+    activation turns into the ``allow`` admission shorthand (p0 GAP-0998).
+    """
     if level == "block":
         return {"file": "quarantine", "runtime": "disable", "install": "block"}
-    elif level == "warn":
-        return {"file": "none", "runtime": "enable", "install": "none"}
-    else:
-        return {"file": "none", "runtime": "enable", "install": "none"}
+    action = {"file": "none", "runtime": "enable", "install": "none"}
+    if level == "allow":
+        action["verdict"] = "allowed"
+    return action
 
 
 def _is_bundled_path(path: str) -> bool:
