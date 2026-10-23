@@ -53,9 +53,12 @@ describe('recovery and repair advice', () => {
     assert.ok(!managed.includes('the user stops and starts a MicroVM that was in the error state'),
       'managed upgrade advice promises a failed VM can always stop and start');
     const upgrade = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
-    assert.ok(upgrade.includes('It does not stop that legacy guest for you'), 'legacy guest recovery must leave the stop to its user');
-    assert.ok(!upgrade.includes('DefenseClaw stops it as soon as it sees it'), 'legacy guest recovery promises an automatic stop');
-    assert.ok(upgrade.includes('`openshell sandbox stop` does not sync its guest disk'), 'raw OpenShell stops need their own disk warning');
+    assert.ok(upgrade.includes('On OpenShell 0.1.5 or later, `openshell sandbox stop` requests a guest flush'),
+      'raw OpenShell stops must name the release that flushes the guest');
+    assert.ok(upgrade.includes('gateway older than OpenShell 0.1.5, save its work'),
+      'raw OpenShell stops on older gateways need a save-first warning');
+    assert.ok(!upgrade.includes('`openshell sandbox stop` does not sync its guest disk'),
+      'raw OpenShell stop must not be described as never syncing');
     for (const [name, claim] of [
       ['troubleshooting/sandboxes/setup-and-gateway.mdx', 'last successful disk sync'],
       ['troubleshooting/sandboxes/disk-and-telemetry.mdx', 'last successful disk sync'],
@@ -64,6 +67,20 @@ describe('recovery and repair advice', () => {
     ]) {
       assert.ok(page(name).includes(claim), `${name} must qualify what a failed sync preserves`);
     }
+  });
+
+  it('keeps legacy guest stop advice aligned with the manager', () => {
+    const manager = readFileSync(join(repo, 'internal/openshell/manager/box.go'), 'utf8');
+    const autoStops = manager.includes('func (m *Manager) stopOldSupervisor(');
+    const userStops = manager.includes('func (m *Manager) reconcileOldSupervisor(');
+    assert.notEqual(autoStops, userStops, 'the legacy guest stop mechanism needs an explicit docs check');
+    const upgrade = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
+    assert.equal(upgrade.includes('It does not stop that legacy guest for you'), userStops,
+      'manual legacy-guest stop advice requires the no-auto-stop manager');
+    assert.equal(upgrade.includes('run `defenseclaw sandbox stop <name>` yourself'), userStops,
+      'manual stop instructions require the no-auto-stop manager');
+    assert.equal(upgrade.includes('`connect` refuses until you stop it'), userStops,
+      'legacy connect advice must follow the manager behavior');
   });
 
   it('keeps the saved guardrail mode', () => {
