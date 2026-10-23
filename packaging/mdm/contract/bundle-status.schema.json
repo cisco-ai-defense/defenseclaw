@@ -446,6 +446,15 @@
           "description": "SHA-256 of the config the run that staged this bundle started from, or none when there was no config; settle uses it to tell an interrupted run from one whose transaction installed the bundle config.",
           "type": "string",
           "pattern": "^([0-9a-f]{64}|none)$"
+        },
+        "base_config_generation": {
+          "description": "Config generation observed before this delivery's transaction; a later generation is required to prove a repeated bundle's own commit when config bytes are unchanged.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "base_config_generation_known": {
+          "description": "Whether the pre-transaction generation was read, including a missing generation file represented as zero.",
+          "type": "boolean"
         }
       },
       "allOf": [

@@ -10,7 +10,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"slices"
 	"strings"
 	"time"
@@ -275,6 +277,15 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 	if d.EnforcedConfig != nil {
 		receipt.BaseConfigSHA256 = sha256Hex(d.EnforcedConfig)
 	}
+	if d.ConfigPath != "" {
+		base, err := configwrite.ReadGenerationState(d.ConfigPath)
+		if err == nil {
+			receipt.BaseConfigGeneration = base.Generation
+			receipt.BaseConfigGenerationKnown = true
+		} else if errors.Is(err, fs.ErrNotExist) {
+			receipt.BaseConfigGenerationKnown = true
+		}
+	}
 	if err := d.Store.writeReceipt(receipt); err != nil {
 		return refuse(StateWriteError("cannot write the policy bundle receipt", err))
 	}
@@ -495,6 +506,14 @@ func (d *Driver) committedGeneration(rc *Receipt, installed string) (configwrite
 		return configwrite.GenerationState{}, false
 	}
 	generation, err := configwrite.ReadGenerationState(d.ConfigPath)
+	// Matching bytes and bundle identity may belong to an earlier delivery.
+	// The generation must advance after this receipt was staged to prove a
+	// repeat's own transaction. Legacy receipts without the snapshot are
+	// conservative when their starting config had the same bytes.
+	if rc.State == StateStaged && rc.BaseConfigSHA256 == installed &&
+		(!rc.BaseConfigGenerationKnown || generation.Generation <= rc.BaseConfigGeneration) {
+		return configwrite.GenerationState{}, false
+	}
 	return generation, err == nil && generation.Generation > 0 && generation.ConfigSHA256 == installed &&
 		generation.BundleID == rc.BundleID && generation.BundleVersion == rc.Version &&
 		generation.SignerKeyID == rc.SignerKeyID && generation.Actor == rc.Principal

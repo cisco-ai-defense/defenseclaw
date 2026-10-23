@@ -56,10 +56,8 @@ const (
 	windowsBundleConfigName   = "bundle-config.yaml"
 	windowsBundleRollbackName = "bundle-rollback-config.yaml"
 	windowsBundleLockName     = "bundle.lock"
-	// windowsBundleStagedAnchorsName is the private stage, under the
-	// lifecycle directory, of the TRUSTANCHORS= of a BUNDLE= run: the bundle
-	// is verified against it, and finish commits it over the installed
-	// anchor file only once the bundle is confirmed (GAP-0106).
+	// windowsBundleStagedAnchorsName is the private verification stage.
+	// Before the config is installed, it moves to a receipt-specific path.
 	windowsBundleStagedAnchorsName = "bundle-staged-anchors.json"
 	windowsBundleMaxConfig         = 4 << 20
 	windowsBundleMaxAnchors        = 256 << 10
@@ -324,19 +322,48 @@ func windowsStagedAnchorsRefusalCode(result *enterprisestatus.Result, p *enterpr
 }
 
 func (run *windowsBundleRun) release() {
-	// A run that returned after prepare without finish installed none of
-	// the anchors it staged.
-	_ = run.refuseStagedAnchors(string(enterprisebundle.CodeInterrupted))
+	// A transaction can commit its config before Finish advances the receipt
+	// from staged to applied. Preserve its anchors until settle classifies
+	// the committed receipt, even when this run exits before Finish.
+	pending := run.anchorReceiptPending()
+	if !pending {
+		_ = run.refuseStagedAnchors(string(enterprisebundle.CodeInterrupted))
+	}
 	warnChangeReleaseUnflushed(run.stderr, run.anchorReservation.Release())
 	run.anchorReservation = nil
-	if run.anchorStage != "" {
+	if run.anchorStage != "" && !pending {
 		_ = os.Remove(run.anchorStage)
 		run.anchorStage = ""
+		if run.prepared != nil && run.prepared.Receipt != nil {
+			_ = cleanupWindowsReceiptAnchors(run.layout, run.prepared.Receipt)
+		}
 	}
 	if run.unlock != nil {
 		run.unlock()
 		run.unlock = nil
 	}
+}
+
+func (run *windowsBundleRun) anchorReceiptPending() bool {
+	if run.prepared == nil || run.prepared.Receipt == nil || run.anchorStage == "" {
+		return false
+	}
+	rc := run.prepared.Receipt
+	if rc.State == enterprisebundle.StateApplied {
+		return true
+	}
+	if rc.State != enterprisebundle.StateStaged {
+		return false
+	}
+	installed, err := safefile.ReadRegularFileBounded(run.layout.ConfigPath, windowsBundleMaxConfig)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err != nil || run.driver == nil {
+		return true
+	}
+	committed, err := run.driver.CommittedPendingConfig(installed)
+	return err != nil || committed != nil && committed.ReceiptID == rc.ReceiptID
 }
 
 func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.Driver {
@@ -351,6 +378,13 @@ func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.D
 	store.EnsurePrivateDirectory = windowsBundleEnsurePrivateDirectory
 	store.PublishPrivateFile = windowsBundlePublishPrivateFile
 	store.ReceiptEventReported = func(id string) bool { return enterprisestatus.ReceiptEventReported(layout.DataDir, id) }
+	store.BeforeConfirm = func(rc *enterprisebundle.Receipt) error {
+		_, err := commitWindowsReceiptAnchors(layout, rc, nil)
+		return err
+	}
+	store.AfterConfirm = func(rc *enterprisebundle.Receipt) error { return cleanupWindowsReceiptAnchors(layout, rc) }
+	store.BeforeFail = func(rc *enterprisebundle.Receipt) error { return restoreFailedWindowsReceiptAnchors(layout, rc) }
+	store.AfterFail = func(rc *enterprisebundle.Receipt) error { return cleanupWindowsReceiptAnchors(layout, rc) }
 	return &enterprisebundle.Driver{
 		Store:      store,
 		ConfigPath: layout.ConfigPath,
@@ -934,6 +968,24 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	if err != nil {
 		return refuseAnchors(string(enterprisebundle.FailureCode(err)), windowsBundleNotApplied(prepared, err.Error(), windowsBundleHasCurrent(driver.Store)))
 	}
+	if prepared.Receipt != nil && run.anchorStage != "" {
+		if err := run.bindReceiptAnchors(); err != nil {
+			_ = driver.Store.Fail(prepared.Receipt, enterprisebundle.CodeStateInvalid, "cannot retain the verified trust anchors for this receipt")
+			return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot retain the verified trust anchors for this receipt: "+err.Error())
+		}
+		id := prepared.Receipt.ReceiptID
+		driver.Store.BeforeConfirm = func(rc *enterprisebundle.Receipt) error {
+			reservation := (*enterprisestatus.ChangeReservation)(nil)
+			if rc.ReceiptID == id {
+				reservation = run.anchorReservation
+			}
+			change, err := commitWindowsReceiptAnchors(layout, rc, reservation)
+			if err == nil && rc.ReceiptID == id {
+				run.anchorCommit = change
+			}
+			return err
+		}
+	}
 	path := filepath.Join(layout.LifecycleDir, windowsBundleConfigName)
 	if err := writeWindowsBundleAdminFile(path, prepared.Config); err != nil {
 		failure := enterprisebundle.StateWriteError("cannot write the rendered bundle config", err)
@@ -1103,7 +1155,12 @@ func refuseWindowsBundleRequired(cmd *cobra.Command, action string, opts *window
 	if strings.TrimSpace(opts.configPath) == "" {
 		return false, nil
 	}
-	if _, err := os.Lstat(driver.AnchorsPath); err != nil {
+	bundleMode, modeErr := windowsBundleMode(driver)
+	if modeErr != nil {
+		return true, writeWindowsBundleRefusal(cmd, action, opts, string(enterprisebundle.CodeStateInvalid),
+			"cannot read policy bundle state before applying CONFIG=: "+modeErr.Error(), "")
+	}
+	if !bundleMode {
 		return false, nil
 	}
 	current, _, err := driver.CurrentConfig()
@@ -1112,8 +1169,25 @@ func refuseWindowsBundleRequired(cmd *cobra.Command, action string, opts *window
 		return false, nil
 	}
 	return true, writeWindowsBundleRefusal(cmd, action, opts, string(enterprisebundle.CodeBundleRequired), fmt.Sprintf(
-		"this device takes its policy from signed bundles (a trust anchor file is installed at %s), so CONFIG= is not applied; deliver a signed bundle with /ensure BUNDLE=<file>",
+		"this device takes its policy from signed bundles (trust anchors are held at %s), so CONFIG= is not applied; deliver a signed bundle with /ensure BUNDLE=<file>",
 		driver.AnchorsPath), "")
+}
+
+func windowsBundleMode(driver *enterprisebundle.Driver) (bool, error) {
+	if _, err := os.Lstat(driver.AnchorsPath); err == nil {
+		return true, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	state, err := driver.Store.LoadState()
+	if err != nil {
+		return false, err
+	}
+	if state.Current != nil {
+		return true, nil
+	}
+	unsettled, err := driver.Store.Unsettled()
+	return len(unsettled) != 0, err
 }
 
 // writeWindowsBundleRefusal answers a bundle run that ended before the
@@ -1235,12 +1309,10 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 			result.AddWarning(enterprisebundle.WarnBundlePending,
 				"the signed bundle config is installed but its receipt is not confirmed yet; retry ensure to finish confirmation")
 		}
-		// The delivered anchors are committed only once the bundle they
-		// verified is confirmed, so a run killed while Finish waits for the
-		// gateway leaves the previous anchors installed (GAP-0106). Finish
-		// verifies from the private stage, never from the installed file.
-		if p.Receipt.State == enterprisebundle.StateConfirmed && run.anchorStage != "" {
-			run.commitAnchors(result)
+		// An applied receipt retains its private anchors for the next settle.
+		// The store commits them before writing a confirmed state.
+		if p.Receipt.State == enterprisebundle.StateApplied || p.Receipt.State == enterprisebundle.StateConfirmed {
+			run.anchorStaged = false
 		}
 	}
 	if p != nil && p.AlreadyApplied && len(result.Errors) == 0 && run.anchorStage != "" {
