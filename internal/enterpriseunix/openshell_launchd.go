@@ -133,11 +133,6 @@ func (e *Env) loadedMacOSAgents(ctx context.Context, a SandboxAccount) ([]loaded
 	return out, nil
 }
 
-func (e *Env) macOSAgentDomainExists(ctx context.Context, domain string) (bool, error) {
-	_, exists, err := e.macOSAgentDomain(ctx, domain)
-	return exists, err
-}
-
 // macOSAgentDomain returns launchctl's listing of a domain and whether the
 // domain exists; loadedMacOSAgents reads earlier LaunchAgent labels from
 // the listing (GAP-0206).
