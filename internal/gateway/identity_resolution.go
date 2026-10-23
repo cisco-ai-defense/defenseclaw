@@ -385,7 +385,7 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		}
 		proven, _ = set.meetOf(compactProfiles(matched), connectorName)
 	}
-	connectors := profileCoverConnectors(connectorName)
+	connectors := set.profileCoverConnectors(connectorName)
 	var needed []string
 	for i, name := range maybe {
 		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && set.provenProfileCovers(proven, name, connectors) {
@@ -566,7 +566,7 @@ func (set *guardrailProfileSet) strictestOf(candidates []string, connectorName s
 	if len(candidates) == 0 {
 		return set.defaultProfile, true
 	}
-	connectors := profileCoverConnectors(connectorName)
+	connectors := set.profileCoverConnectors(connectorName)
 	for _, candidate := range candidates {
 		if !slices.ContainsFunc(candidates, func(other string) bool { return !set.profileCovers(candidate, other, connectors) }) {
 			return candidate, true
@@ -678,12 +678,11 @@ func (s *provenProfileStore) forgetLocked(key string) {
 	s.order = slices.DeleteFunc(s.order, func(k string) bool { return k == key })
 }
 
-// profileCoverConnectors are the connectors the decisions of a request of
-// connectorName read: its own, and the global settings for a decision
-// taken without one.
-func profileCoverConnectors(connectorName string) []string {
+// profileCoverConnectors includes the gateway connector for an unscoped
+// inspect request: its profile is selected before the scan uses that scope.
+func (set *guardrailProfileSet) profileCoverConnectors(connectorName string) []string {
 	if connectorName == "" {
-		return []string{""}
+		return []string{"", config.NormalizeConnectorName(connectorNameForConfig(set.base))}
 	}
 	return []string{connectorName, ""}
 }

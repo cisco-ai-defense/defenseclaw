@@ -40,6 +40,22 @@ func meetSemanticGeneration(t *testing.T, prefix string, count int) *compiledRul
 	return compiled
 }
 
+func meetRulePackDir(t *testing.T, root, name string) string {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	writeRulePackFixtureFile(t, dir, "rules/marker.yaml", fmt.Sprintf(`version: 1
+category: secret
+rules:
+  - id: %s-FIXTURE
+    pattern: "%s_fixture_marker"
+    title: %s fixture
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`, name, name, name))
+	return dir
+}
+
 // Every member pack is valid alone, but their union exceeds the semantic
 // generation limit. The first member's blocking rule must never disappear
 // just because the second member has more rules.
@@ -119,28 +135,13 @@ rules:
 	}
 }
 
-// An unscoped inspect credential resolves the decision at the global scope,
-// then the scan uses the gateway's Codex connector. Every connector-specific
-// merge must compile before that decision can authorize any scan.
+// An unscoped tool inspect scans the gateway's Codex connector, even when
+// the credential itself names no connector. Its Codex merge must compile.
 func TestOverLimitConnectorMeetRefusesUnscopedInspect(t *testing.T) {
 	stubProfileSources(t)
 	root := t.TempDir()
-	packDir := func(name string) string {
-		dir := filepath.Join(root, name)
-		writeRulePackFixtureFile(t, dir, "rules/marker.yaml", fmt.Sprintf(`version: 1
-category: secret
-rules:
-  - id: %s-FIXTURE
-    pattern: "%s_fixture_marker"
-    title: %s fixture
-    severity: HIGH
-    confidence: 0.99
-    tags: [test]
-`, name, name, name))
-		return dir
-	}
-	globalA, globalB := packDir("GLOBAL-A"), packDir("GLOBAL-B")
-	codexA, codexB := packDir("CODEX-A"), packDir("CODEX-B")
+	globalA, globalB := meetRulePackDir(t, root, "GLOBAL-A"), meetRulePackDir(t, root, "GLOBAL-B")
+	codexA, codexB := meetRulePackDir(t, root, "CODEX-A"), meetRulePackDir(t, root, "CODEX-B")
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "codex"
@@ -192,6 +193,150 @@ rules:
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"action":"block"`) ||
 		!strings.Contains(rec.Body.String(), "rule packs") {
 		t.Fatalf("unscoped inspect did not block: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUnscopedInspectSelectsCodexMeetWhenGlobalProfilesDisagree(t *testing.T) {
+	stubProfileSources(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"a": {BlockAt: "LOW", Connectors: map[string]config.PerConnectorGuardrailConfig{"codex": {BlockAt: "CRITICAL"}}},
+		"b": {BlockAt: "HIGH"},
+	}
+	p := identityTestPlatforms[0]
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "b", Match: config.ProfileMatch{Users: []string{p.id}}},
+		{Profile: "a", Match: config.ProfileMatch{Groups: []string{p.group}}},
+	}
+	set, err := newGuardrailProfileSet(cfg, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, identityTestSubject(p, p.providers[0], stateProven, true))
+	decision := resolvedGuardrailProfileFrom(withGuardrailProfile(ctx, set, "")).decision
+	if decision.Refused != "" || decision.Name != config.ProfileMeetName([]string{"a", "b"}) {
+		t.Fatalf("unscoped decision = %+v; want the proven meet", decision)
+	}
+	derived := set.profileConfig(decision.Name)
+	if got := resolveThresholds(derived, "codex").Block; got != "HIGH" {
+		t.Fatalf("Codex block threshold = %q, want HIGH from b", got)
+	}
+	if got := resolveThresholds(derived, "").Block; got != "LOW" {
+		t.Fatalf("global block threshold = %q, want LOW from a", got)
+	}
+}
+
+func TestCodexMeetIgnoresUnscannableClaudeMerge(t *testing.T) {
+	stubProfileSources(t)
+	root := t.TempDir()
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"a": {RulePackDir: meetRulePackDir(t, root, "GLOBAL-A"), Connectors: map[string]config.PerConnectorGuardrailConfig{
+			"codex":      {RulePackDir: meetRulePackDir(t, root, "CODEX-A")},
+			"claudecode": {RulePackDir: meetRulePackDir(t, root, "CLAUDE-A")},
+		}},
+		"b": {RulePackDir: meetRulePackDir(t, root, "GLOBAL-B"), Connectors: map[string]config.PerConnectorGuardrailConfig{
+			"codex":      {RulePackDir: meetRulePackDir(t, root, "CODEX-B")},
+			"claudecode": {RulePackDir: meetRulePackDir(t, root, "CLAUDE-B")},
+		}},
+	}
+	p := identityTestPlatforms[0]
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "a", Match: config.ProfileMatch{Users: []string{p.id}}},
+		{Profile: "b", Match: config.ProfileMatch{Groups: []string{p.group}}},
+	}
+	set, err := newGuardrailProfileSet(cfg, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set.rules[effectiveRulePackKey(set.profiles["a"].Config, "claudecode")] = meetSemanticGeneration(t, "CLAUDE-A", 2)
+	set.rules[effectiveRulePackKey(set.profiles["b"].Config, "claudecode")] = meetSemanticGeneration(t, "CLAUDE-B", maxGenerationSemanticRules-1)
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, identityTestSubject(p, p.providers[0], stateProven, true))
+	for _, scope := range []string{"codex", ""} {
+		resolved := resolvedGuardrailProfileFrom(withGuardrailProfile(ctx, set, scope))
+		if resolved.decision.Name != config.ProfileMeetName([]string{"a", "b"}) || resolved.decision.Refused != "" {
+			t.Fatalf("scope %q decision = %+v; Codex merge is valid", scope, resolved.decision)
+		}
+		if _, err := set.meet(resolved.decision.Name).ruleGeneration(ctx, set, "codex"); err != nil {
+			t.Fatalf("scope %q Codex merge: %v", scope, err)
+		}
+	}
+	meet := set.meet(config.ProfileMeetName([]string{"a", "b"}))
+	if _, err := meet.ruleGeneration(ctx, set, "claudecode"); err == nil {
+		t.Fatal("Claude Code fixture unexpectedly compiled")
+	}
+	// A global merge failure is irrelevant to a Codex tool scan, but must
+	// refuse an unscoped prompt scan, which reads the global generation.
+	set.rules[effectiveRulePackKey(set.profiles["a"].Config, "")] = meetSemanticGeneration(t, "GLOBAL-A", 2)
+	set.rules[effectiveRulePackKey(set.profiles["b"].Config, "")] = meetSemanticGeneration(t, "GLOBAL-B", maxGenerationSemanticRules-1)
+	api := &APIServer{scannerCfg: cfg}
+	api.guardrailProfiles.set.Store(set)
+	for _, tc := range []struct {
+		path        string
+		wantRefused bool
+	}{
+		{path: "/api/v1/inspect/tool"},
+		{path: "/api/v1/inspect/request", wantRefused: true},
+	} {
+		req := httptest.NewRequest(http.MethodPost, tc.path, nil).WithContext(ctx)
+		handler := api.guardrailProfileInspectMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			got := resolvedGuardrailProfileFrom(r.Context()).decision
+			if (got.Refused != "") != tc.wantRefused {
+				t.Errorf("%s decision = %+v; want refused %v", tc.path, got, tc.wantRefused)
+			}
+		}))
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+}
+
+func TestProfileMeetKeepsHookActionAndInspectObserveSeparate(t *testing.T) {
+	stubProfileSources(t)
+	root := t.TempDir()
+	profiles := map[string]config.GuardrailProfile{
+		"a": {RulePackDir: meetRulePackDir(t, root, "MODE-A")},
+		"b": {RulePackDir: meetRulePackDir(t, root, "MODE-B")},
+	}
+	for _, tc := range []struct {
+		name, guardrailMode, hookMode, wantAction string
+		wantWouldBlock                            bool
+	}{
+		{name: "hook action", guardrailMode: "observe", hookMode: "action", wantAction: "allow", wantWouldBlock: true},
+		{name: "inspect action", guardrailMode: "action", hookMode: "observe", wantAction: "block"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = tc.guardrailMode
+			cfg.Guardrail.Connector = "codex"
+			cfg.Codex.Mode = tc.hookMode
+			cfg.Guardrail.Profiles = profiles
+			set, err := newGuardrailProfileSet(cfg, nil, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			name, single := set.meetOf([]string{"a", "b"}, "codex")
+			if single || !config.IsProfileMeet(name) {
+				t.Fatalf("selection = %q, single %v; want a meet", name, single)
+			}
+			derived, ok := set.derivedProfile(name)
+			if !ok {
+				t.Fatal("meet did not derive")
+			}
+			if got := hookModeForConfig(derived.Config, "codex"); got != tc.hookMode {
+				t.Errorf("Codex hook mode = %q, want %q", got, tc.hookMode)
+			}
+			if got := inspectMode(derived.Config, "codex"); got != tc.guardrailMode {
+				t.Errorf("Codex inspect mode = %q, want %q", got, tc.guardrailMode)
+			}
+			verdict := &ToolInspectVerdict{Action: "block", Severity: "HIGH"}
+			verdict.applyMode(inspectMode(derived.Config, "codex"))
+			if verdict.Action != tc.wantAction || verdict.WouldBlock != tc.wantWouldBlock {
+				t.Errorf("inspect finding under the meet = %+v; want action %s, would block %v", verdict, tc.wantAction, tc.wantWouldBlock)
+			}
+		})
 	}
 }
 
