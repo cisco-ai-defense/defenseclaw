@@ -249,6 +249,16 @@ run_compose() {
   )
 }
 
+verify_splunk_image() {
+  [[ -n "${SPLUNK_IMAGE:-}" ]] || fail "SPLUNK_IMAGE is missing from ${ENV_FILE}"
+  if run_with_time_limit 10 docker image inspect "${SPLUNK_IMAGE}" >/dev/null 2>&1; then
+    return
+  fi
+  if ! run_with_time_limit 30 docker manifest inspect "${SPLUNK_IMAGE}" >/dev/null 2>&1; then
+    fail "cannot resolve Splunk image ${SPLUNK_IMAGE} from the registry; check registry connectivity, access, and the image tag with 'docker manifest inspect ${SPLUNK_IMAGE}'"
+  fi
+}
+
 cleanup_stopped_service_containers() {
   local project_name
   project_name="$(compose_project_name)"
@@ -563,6 +573,7 @@ emit_product_telemetry() {
 
 cmd_up() {
   local package_path
+  verify_splunk_image
   package_path="$(package_app)"
   cleanup_stopped_service_containers
   run_compose up -d --remove-orphans

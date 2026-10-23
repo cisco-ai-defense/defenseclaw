@@ -59,7 +59,7 @@ All tests passing means the local engine works. Nothing is installed as a servic
      --profile standard --broker-url mqtts://broker.example.com:8883
    ```
 
-   Add `--target DEVICE --user USER` to build on a remote device over SSH. The install copies the source, builds it, writes `/etc/defenseclaw/edge-connector.env`, installs the `edge-connector` systemd unit and starts it.
+   Add `--target DEVICE --user USER` to build on a remote device over SSH. The install copies the source, builds it, writes `/etc/defenseclaw/edge-connector.env`, creates the `defenseclaw` system service account if needed, installs the `edge-connector` systemd unit and starts it. The install needs `sudo` rights for account and service setup.
 
 3. Register the device and provision the key it returns.
 

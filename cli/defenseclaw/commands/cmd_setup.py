@@ -18457,6 +18457,7 @@ def _bootstrap_bridge(
             child_env=env,
             gateway_token_env=gateway_token_env,
         )
+    _migrate_retired_splunk_image(env_file)
 
     bridge = _resolve_bridge_bin(data_dir)
     if not bridge:
@@ -18577,6 +18578,21 @@ def _ensure_private_splunk_bridge_env(data_dir: str) -> str:
     )
     _write_dotenv(env_file, entries)
     return env_file
+
+
+def _migrate_retired_splunk_image(env_file: str) -> None:
+    """Replace only the unavailable shipped image; keep operator overrides."""
+    from defenseclaw.observability.local_splunk import RETIRED_SPLUNK_IMAGE
+
+    entries = _load_dotenv(env_file)
+    if entries.get("SPLUNK_IMAGE") != RETIRED_SPLUNK_IMAGE:
+        return
+    current_template = _load_dotenv(str(bundled_splunk_bridge_dir() / "env" / ".env.example"))
+    image = current_template.get("SPLUNK_IMAGE", "")
+    if not image or image == RETIRED_SPLUNK_IMAGE:
+        raise click.ClickException("Bundled Splunk image reference is unavailable")
+    entries["SPLUNK_IMAGE"] = image
+    _write_dotenv(env_file, entries)
 
 
 def _load_splunk_bridge_example_env(data_dir: str) -> dict[str, str]:

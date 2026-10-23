@@ -23,7 +23,7 @@ A local destination from DefenseClaw 1.0.3 or earlier has no record, so it count
 
 ## Before you start
 
-- For `--logs`: Docker running, and ports 8000 and 8088 free. On Windows, Docker Desktop with Linux containers.
+- For `--logs`: Docker running on a Linux x86-64 engine, and ports 8000 and 8088 free. On Windows, use Docker Desktop with Linux containers. The bundled `splunk/splunk:10.2.0` image is published for `linux/amd64`; use `--enterprise` with an existing Splunk server from another architecture.
 - For `--enterprise`: a HEC URL, a HEC token, and an index created ahead of time.
 - For `--o11y`: your realm (for example `us1`) and an access token.
 
@@ -37,7 +37,7 @@ A local destination from DefenseClaw 1.0.3 or earlier has no record, so it count
 
    {/* needs-live-capture: output of `setup splunk --logs` (Docker not run on the shared dev host) */}
 
-   Setup exits nonzero if Docker is missing, its daemon is stopped, or a required port is busy. Fix the reported prerequisite and run the command again.
+   Setup exits nonzero if Docker is missing, its daemon is stopped, a required port is busy, or the image registry cannot resolve the pinned tag. Fix the reported prerequisite and run the command again.
 
    Setup starts Splunk in Free mode, installs the **DefenseClaw Local Mode** app, and adds a `splunk_hec` destination for index `defenseclaw_local`. Open [http://localhost:8000](http://localhost:8000). The HEC token stays hidden unless you pass `--show-credentials`.
 
