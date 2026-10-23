@@ -38,6 +38,9 @@ type independentHost struct {
 	jobLimits func() (uint32, error)
 	// inJob reports whether process pid (0: this process) is in any job.
 	inJob func(pid int) (bool, error)
+	// probe creates path suspended with flags, reports whether that process
+	// is in any job and ends it. The probe runs none of its code.
+	probe func(path string, flags uint32) (bool, error)
 	start func(*exec.Cmd) error
 	stop  func(*exec.Cmd)
 }
@@ -45,6 +48,7 @@ type independentHost struct {
 var windowsIndependentHost = independentHost{
 	jobLimits: currentJobLimits,
 	inJob:     processInAnyJob,
+	probe:     probeIndependentJob,
 	start:     (*exec.Cmd).Start,
 	stop: func(cmd *exec.Cmd) {
 		_ = cmd.Process.Kill()
@@ -65,10 +69,14 @@ var windowsIndependentHost = independentHost{
 //   - When the job query fails otherwise (Access is denied for the
 //     LocalSystem process of a one-shot scheduled task, GAP-0960; natively
 //     that process is in no job), IsProcessInJob, which needs no access to
-//     a job, decides. In no job nothing more is needed. In a job the child
-//     is started with CREATE_BREAKAWAY_FROM_JOB and must then be in no job
-//     at all. A job that refuses the breakaway starts nothing; a child
-//     still in a job is stopped. Both are ErrChildBoundToJob.
+//     a job, decides. In no job nothing more is needed. In a job, suspended
+//     probes of cmd's program, which run none of its code, find how a child
+//     leaves it before cmd starts: first without CREATE_BREAKAWAY_FROM_JOB
+//     (a job that lets its children go silently refuses that flag when it
+//     does not also allow breakaway), then with it. A job neither probe
+//     leaves starts nothing, and a started child that is still in a job is
+//     stopped. Both are ErrChildBoundToJob, returned before the caller
+//     changes anything.
 func StartIndependent(cmd *exec.Cmd) error {
 	return startIndependent(cmd, windowsIndependentHost)
 }
@@ -93,7 +101,9 @@ func startIndependent(cmd *exec.Cmd, host independentHost) error {
 			return fmt.Errorf("inspect the enclosing process job: %w", errors.Join(queryErr, err))
 		}
 		if member {
-			flags |= windows.CREATE_BREAKAWAY_FROM_JOB
+			if flags, err = independentFlagsByProbe(cmd, host, flags, queryErr); err != nil {
+				return err
+			}
 			prove = true
 		}
 	}
@@ -121,6 +131,56 @@ func startIndependent(cmd *exec.Cmd, host independentHost) error {
 	return fmt.Errorf("%w: the started child is still in a job that cannot be inspected (%v)", ErrChildBoundToJob, queryErr)
 }
 
+// independentFlagsByProbe returns the creation flags with which a child of
+// cmd's program is in no job, base first and then with
+// CREATE_BREAKAWAY_FROM_JOB, or ErrChildBoundToJob when neither leaves the
+// job. Nothing of cmd starts here.
+func independentFlagsByProbe(cmd *exec.Cmd, host independentHost, base uint32, queryErr error) (uint32, error) {
+	if cmd.Err != nil {
+		return 0, cmd.Err
+	}
+	for _, flags := range []uint32{base, base | windows.CREATE_BREAKAWAY_FROM_JOB} {
+		member, err := host.probe(cmd.Path, flags)
+		switch {
+		case err == nil && !member:
+			return flags, nil
+		case err == nil:
+			// The child would stay in the job: try the next flags.
+		case flags&windows.CREATE_BREAKAWAY_FROM_JOB != 0 && errors.Is(err, windows.ERROR_ACCESS_DENIED):
+			// The job refuses the breakaway.
+		default:
+			return 0, fmt.Errorf("probe the enclosing process job: %w", err)
+		}
+	}
+	return 0, fmt.Errorf("%w: the job cannot be inspected (%v), keeps its children and refuses breakaway", ErrChildBoundToJob, queryErr)
+}
+
+// probeIndependentJob creates path suspended with flags, reports whether
+// that process is in any job and ends it before it runs any code.
+func probeIndependentJob(path string, flags uint32) (bool, error) {
+	application, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return false, err
+	}
+	commandLine, err := windows.UTF16PtrFromString(windows.EscapeArg(path))
+	if err != nil {
+		return false, err
+	}
+	startup := windows.StartupInfo{Cb: uint32(unsafe.Sizeof(windows.StartupInfo{}))}
+	var info windows.ProcessInformation
+	if err := windows.CreateProcess(application, commandLine, nil, nil, false,
+		flags|windows.CREATE_SUSPENDED, nil, nil, &startup, &info); err != nil {
+		return false, err
+	}
+	defer func() {
+		_ = windows.TerminateProcess(info.Process, 1)
+		_, _ = windows.WaitForSingleObject(info.Process, 5000)
+		_ = windows.CloseHandle(info.Thread)
+		_ = windows.CloseHandle(info.Process)
+	}()
+	return isProcessInAnyJob(info.Process)
+}
+
 func currentJobLimits() (uint32, error) {
 	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 	err := windows.QueryInformationJobObject(0, windows.JobObjectExtendedLimitInformation,
@@ -140,6 +200,10 @@ func processInAnyJob(pid int) (bool, error) {
 		defer windows.CloseHandle(opened)
 		process = opened
 	}
+	return isProcessInAnyJob(process)
+}
+
+func isProcessInAnyJob(process windows.Handle) (bool, error) {
 	var member int32
 	ok, _, callErr := procIsProcessInJob.Call(uintptr(process), 0, uintptr(unsafe.Pointer(&member)))
 	if ok == 0 {
