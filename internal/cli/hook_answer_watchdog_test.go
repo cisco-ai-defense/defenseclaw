@@ -112,7 +112,8 @@ func TestManagedHookArmsTheWatchdogThenPrefetchesTheProfileLookup(t *testing.T) 
 // (a stalled runtime resolution) allowed the tool call during an install or
 // upgrade. The hook command arms the watchdog with this account's data
 // directory (DEFENSECLAW_HOME included), and its install lock closes the
-// early answer; without the lock the account's open choice stands.
+// early answer. Without the lock the call blocks too: since
+// fix/r104-sa-hook-pause no answer closes every hook outside Secure Client.
 func TestPerUserHookEarlyAnswerIsClosedWhileTheInstallerHoldsTheDataDirectory(t *testing.T) {
 	savedSecureClient := secureClientHost
 	secureClientHost = func() bool { return false }
@@ -159,8 +160,8 @@ func TestPerUserHookEarlyAnswerIsClosedWhileTheInstallerHoldsTheDataDirectory(t 
 		out, _ := os.ReadFile(answer.Name())
 		// Claude Code blocks with exit 2 or a structured deny.
 		blocked := code == 2 || strings.Contains(string(out), `"permissionDecision":"deny"`)
-		if blocked != installing {
-			t.Fatalf("installing=%v: exit %d output %q, want blocked=%v", installing, code, out, installing)
+		if !blocked {
+			t.Fatalf("installing=%v: exit %d output %q, want blocked", installing, code, out)
 		}
 	}
 }
