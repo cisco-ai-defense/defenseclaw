@@ -2148,6 +2148,8 @@ class TestSetupSplunkCommand(unittest.TestCase):
         destinations[0]["name"] = "local-splunk"
         self._write_v8_destinations(destinations)
         with (
+            # The train records the local sink; this one was recorded by local setup.
+            patch("defenseclaw.commands.cmd_setup._recorded_local_splunk_names", return_value={"local-splunk"}),
             patch("defenseclaw.commands.cmd_setup._native_windows_local_splunk", return_value=True),
             patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
             patch(

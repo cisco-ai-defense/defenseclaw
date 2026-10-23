@@ -1267,7 +1267,8 @@ class TestUnconvergeablePeersAreSkipped:
         )
         output = capsys.readouterr().out
         assert keep == {"codex"} and tolerated == frozenset({"omnigent"})
-        assert "removed in DefenseClaw 1.0.4" in output
+        # The train words it "was removed in 1.0.4" (w25-retired).
+        assert "removed in 1.0.4" in output
         assert "guardrail disable --connector omnigent" not in output
         assert "Re-run setup for omnigent" not in output
 

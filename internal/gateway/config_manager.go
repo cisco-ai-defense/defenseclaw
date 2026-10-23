@@ -1296,7 +1296,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		(assets || m.rejected || !bytes.Equal(m.appliedRaw, source.raw) || len(diff.Changed) > 0) {
 		err := fmt.Errorf("config reload refused: this managed computer takes config and policy from a signed policy bundle; apply a new signed bundle")
 		m.rejected = true
-		m.recordLoadError(ctx, "managed_unbundled_reload")
+		m.recordLoadError(ctx, "managed_unbundled_reload", err)
 		if m.health != nil {
 			m.setConfigHealth(StateError, err.Error(), map[string]interface{}{
 				"path": m.path, "generation": m.gen.Load(), "reason": reason,

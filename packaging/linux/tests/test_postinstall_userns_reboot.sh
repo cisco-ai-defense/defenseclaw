@@ -65,4 +65,4 @@ if grep -q 'until this host reboots' "$work/stderr"; then
     echo 'postinstall ignored a failed rollback' >&2
     exit 1
 fi
-grep -q 'no deployment is active' "$work/stderr"
+grep -q 'deployment state could not be confirmed' "$work/stderr"
