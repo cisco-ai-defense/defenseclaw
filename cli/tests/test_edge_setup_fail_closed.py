@@ -241,7 +241,7 @@ def test_edge_install_source_dir_supplies_systemd_unit_without_checkout_fallback
     (source / "CMakeLists.txt").write_text("project(edge)\n", encoding="utf-8")
     (source / "src/main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
     unit = source / "packaging/edge-connector.service"
-    unit.write_text("[Unit]\nDescription=Edge Connector\n", encoding="utf-8")
+    unit.write_text("[Service]\nUser=defenseclaw\nGroup=defenseclaw\n", encoding="utf-8")
 
     # A wheel cannot fall back to an adjacent source checkout.
     find_source = cmd_edge_install._find_edge_connector_source
@@ -250,6 +250,7 @@ def test_edge_install_source_dir_supplies_systemd_unit_without_checkout_fallback
         lambda source_dir=None: find_source(source_dir) if source_dir is not None else None,
     )
     copied = []
+    commands = []
     if remote:
         monkeypatch.setattr(cmd_edge_install, "_check_remote_prereqs", lambda *_args: True)
         monkeypatch.setattr(cmd_edge_install, "_copy_source", lambda *_args: "/tmp/edge-source")
@@ -259,6 +260,7 @@ def test_edge_install_source_dir_supplies_systemd_unit_without_checkout_fallback
         monkeypatch.setattr(cmd_edge_install, "_verify_remote_daemon", lambda *_args: True)
 
         def fake_run(argv, **_kwargs):
+            commands.append(argv)
             if argv[0] == "scp":
                 copied.append(argv[3])
             return subprocess.CompletedProcess(argv, 0, stderr="")
@@ -271,8 +273,20 @@ def test_edge_install_source_dir_supplies_systemd_unit_without_checkout_fallback
         monkeypatch.setattr(cmd_edge_install, "_provision_local_service_env", lambda *_args: True)
         monkeypatch.setattr(cmd_edge_install, "_verify_local_service", lambda: True)
         monkeypatch.setattr(
+            cmd_edge_install.subprocess,
+            "run",
+            lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 1),
+        )
+
+        def fake_local_run(argv):
+            commands.append(argv)
+            if argv[:2] == ["sudo", "cp"]:
+                copied.append(argv[2])
+            return subprocess.CompletedProcess(argv, 0)
+
+        monkeypatch.setattr(
             cmd_edge_install, "_run",
-            lambda argv: copied.append(argv[2]) if argv[:2] == ["sudo", "cp"] else None,
+            fake_local_run,
         )
         monkeypatch.setattr("platform.system", lambda: "Linux")
         args = []
@@ -284,6 +298,15 @@ def test_edge_install_source_dir_supplies_systemd_unit_without_checkout_fallback
     )
     assert result.exit_code == 0, result.output
     assert copied == [str(unit)]
+    if remote:
+        account = next(i for i, argv in enumerate(commands) if "useradd" in argv[-1])
+        enabled = next(i for i, argv in enumerate(commands) if "systemctl enable" in argv[-1])
+        assert "groupadd" in commands[account][-1]
+    else:
+        account = next(i for i, argv in enumerate(commands) if "useradd" in argv)
+        enabled = next(i for i, argv in enumerate(commands) if "enable" in argv)
+        assert any("groupadd" in argv for argv in commands[:account])
+    assert account < enabled
 
 
 def test_wheel_setup_without_fleet_assets_leaves_fleet_off(tmp_path, monkeypatch) -> None:

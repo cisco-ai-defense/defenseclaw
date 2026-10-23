@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -17,9 +18,83 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from defenseclaw.observability.local_splunk import (
+    RETIRED_SPLUNK_IMAGE,
+    NativeLocalSplunkController,
+    _credential_values,
+)
+from defenseclaw.observability.local_stack import CommandResult, LocalStackError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = REPO_ROOT / "bundles" / "splunk_local_bridge"
+
+
+def test_local_splunk_image_resolves_or_reports_registry_outage(tmp_path: Path, monkeypatch) -> None:
+    stack = tmp_path / "stack"
+    shutil.copytree(BUNDLE, stack)
+    template = (stack / "env" / ".env.example").read_text(encoding="utf-8")
+    image = re.search(r"^SPLUNK_IMAGE=(.+)$", template, re.MULTILINE)
+    assert image is not None
+    assert image.group(1) == "splunk/splunk:10.2.0"
+    upgraded = _credential_values(
+        {"SPLUNK_IMAGE": image.group(1)}, {"SPLUNK_IMAGE": RETIRED_SPLUNK_IMAGE},
+        index="defenseclaw_local", source="defenseclaw", sourcetype="defenseclaw:json",
+    )
+    assert upgraded["SPLUNK_IMAGE"] == image.group(1)
+    from defenseclaw.commands import cmd_setup
+
+    monkeypatch.setattr(cmd_setup, "bundled_splunk_bridge_dir", lambda: BUNDLE)
+
+    env_file = stack / "env" / ".env"
+    env_file.write_text(template.replace(image.group(1), RETIRED_SPLUNK_IMAGE), encoding="utf-8")
+    env_file.chmod(0o600)
+    if os.name != "nt":
+        cmd_setup._migrate_retired_splunk_image(str(env_file))
+        assert f"SPLUNK_IMAGE={image.group(1)}" in env_file.read_text(encoding="utf-8")
+    else:
+        env_file.write_text(template, encoding="utf-8")
+
+    if os.name != "nt":
+        calls = tmp_path / "docker-calls"
+        docker = tmp_path / "docker"
+        docker.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$*" >> "$DOCKER_CALLS"\n'
+            'case "$1 $2" in\n'
+            '  "image inspect") exit 1 ;;\n'
+            '  "manifest inspect") echo "network unreachable" >&2; exit 1 ;;\n'
+            '  *) echo "unexpected Docker call" >&2; exit 1 ;;\n'
+            'esac\n',
+            encoding="utf-8",
+        )
+        docker.chmod(0o755)
+        shell = subprocess.run(
+            ["bash", str(stack / "bin" / "splunk-claw-bridge"), "up", "--env-file", str(env_file)],
+            env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "DOCKER_CALLS": str(calls)},
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert shell.returncode != 0
+        assert "registry" in shell.stderr.lower() and image.group(1) in shell.stderr
+        assert "compose" not in calls.read_text(encoding="utf-8")
+
+    class OfflineDocker:
+        def run(self, argv, *, timeout, capture=True, env=None):
+            command = tuple(argv)
+            if command[1:3] == ("image", "inspect"):
+                return CommandResult(command, 1)
+            if command[1:3] == ("manifest", "inspect"):
+                return CommandResult(command, 1, stderr="network unreachable")
+            if command[1] == "ps":
+                return CommandResult(command, 0, stdout="")
+            raise AssertionError(f"unexpected Docker call: {command[1]}")
+
+    native_docker = tmp_path / "docker.exe"
+    native_docker.write_bytes(b"mock")
+    controller = NativeLocalSplunkController(
+        stack, docker_path=native_docker, runner=OfflineDocker(), os_name="windows"
+    )
+    with pytest.raises(LocalStackError, match=r"registry.*splunk/splunk:10\.2\.0"):
+        controller.up()
 
 
 def _readiness_probe(path: Path, stubs: str, seconds: int) -> Path:

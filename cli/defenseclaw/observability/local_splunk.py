@@ -49,6 +49,7 @@ from defenseclaw.file_permissions import (
 from defenseclaw.observability.local_stack import (
     CommandResult,
     CommandRunner,
+    CommandTimeoutError,
     LocalStackError,
     docker_cli_missing_message,
     resolve_native_docker_executable,
@@ -68,6 +69,7 @@ DEFAULTS_REL = Path("splunk") / "default.yml"
 LOCAL_TOKEN_ENV = "DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN"
 WEB_URL = "http://127.0.0.1:8000"
 DEFAULT_HEC_URL = "https://127.0.0.1:8088/services/collector/event"
+RETIRED_SPLUNK_IMAGE = "splunk/splunk-claw-bridge:10.2.0"
 SERVICE_NAMES = frozenset({"splunk", "splunk-s3-exporter"})
 MANAGED_VOLUME_NAMES = frozenset(
     {
@@ -345,6 +347,8 @@ def _credential_values(
 ) -> dict[str, str]:
     values = dict(template)
     values.update(previous)
+    if values.get("SPLUNK_IMAGE") == RETIRED_SPLUNK_IMAGE:
+        values["SPLUNK_IMAGE"] = template.get("SPLUNK_IMAGE", "")
     previous_token = previous.get("SPLUNK_HEC_TOKEN", "")
     hec_token = (
         previous_token
@@ -617,6 +621,28 @@ class NativeLocalSplunkController:
         suffix = f": {detail}" if detail else ""
         raise LocalStackError(f"{description} failed with exit code {result.returncode}{suffix}")
 
+    def verify_splunk_image(self) -> None:
+        """Check a fresh host can resolve the selected image before Compose starts."""
+        environment = self._compose_environment()
+        image = environment.get("SPLUNK_IMAGE", "")
+        if not image:
+            raise LocalStackError("Local Splunk credential contract is missing SPLUNK_IMAGE")
+        if self.runner.run(
+            [self.docker_path, "image", "inspect", image], timeout=10, env=environment,
+        ).returncode == 0:
+            return
+        try:
+            manifest = self.runner.run(
+                [self.docker_path, "manifest", "inspect", image], timeout=30, env=environment,
+            )
+        except CommandTimeoutError as exc:
+            raise LocalStackError(f"Local Splunk image registry timed out while resolving {image}") from exc
+        if manifest.returncode != 0:
+            raise LocalStackError(
+                f"cannot resolve Local Splunk image {image} from the registry; "
+                f"check registry connectivity, access, and the image tag with 'docker manifest inspect {image}'"
+            )
+
     def _project_container_ids(self, *, running_only: bool = False) -> set[str]:
         argv = [
             self.docker_path,
@@ -816,6 +842,7 @@ class NativeLocalSplunkController:
         overrides: Mapping[str, str] | None = None,
         emit_startup_telemetry: bool = True,
     ) -> tuple[NativeSplunkContract, set[str]]:
+        self.verify_splunk_image()
         before = self._project_container_ids()
         try:
             self._checked(
