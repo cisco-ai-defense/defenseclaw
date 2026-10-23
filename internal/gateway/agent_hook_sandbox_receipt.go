@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/google/uuid"
 )
@@ -81,13 +83,25 @@ func (a *APIServer) markSandboxHookReceiptSettled(ctx context.Context, p *pendin
 		return
 	}
 	p.Settled = true
-	encoded, err := json.Marshal(p)
-	if err == nil {
-		err = a.store.UpdateHookDelivery(ctx, p.ID, encoded)
-	}
+	err := a.recordSandboxHookReceiptState(ctx, p)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] sandbox hook receipt journal settlement failed id=%s: %v\n", p.ID, err)
 	}
+}
+
+func (a *APIServer) recordSandboxHookReceiptState(ctx context.Context, p *pendingHookOccurrence) error {
+	encoded, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	stored, err := a.store.RecordHookDeliveryVerdict(ctx, p.ID, encoded)
+	if err != nil {
+		return err
+	}
+	if !stored {
+		return errors.New("sandbox hook receipt journal row disappeared")
+	}
+	return nil
 }
 
 func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Request, connectorName, id string) {
@@ -162,6 +176,9 @@ func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Requ
 	ctx = ContextWithAgentIdentity(ctx, p.Identity)
 	ctx = enrichAgentHookContext(ctx, req)
 	ctx = withRedactionDecision(ctx, resp.RedactionEnabled)
+	// A sandbox receipt has no already-delivered answer to replay. Remote
+	// destinations see its verdict only after the local audit row commits.
+	ctx = observability.WithRemoteExport(ctx, observability.RemoteExportAfterLocalWrite)
 
 	// Before attempting the allow audit, journal the 503 fallback. If the
 	// audit cannot be committed or the process dies, recovery audits the
@@ -169,8 +186,7 @@ func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Requ
 	closed := failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
 	fallback := pendingResponse(closed)
 	p.Final = &fallback
-	encoded, err := json.Marshal(&p)
-	if err != nil || a.store.UpdateHookDelivery(ctx, p.ID, encoded) != nil {
+	if err := a.recordSandboxHookReceiptState(ctx, &p); err != nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hook audit is unavailable"})
 		return
 	}

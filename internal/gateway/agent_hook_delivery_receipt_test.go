@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
@@ -54,16 +55,33 @@ func newManagedHookAuditFixtureCollectingNo(
 	t *testing.T, wrap func(http.ResponseWriter) http.ResponseWriter, off ...observability.Bucket,
 ) managedHookAuditFixture {
 	t.Helper()
-	return newManagedHookAuditFixtureForCollectingNo(t, "claudecode", wrap, off...)
+	return newManagedHookAuditFixtureForExportingTo(t, "claudecode", wrap, nil, off...)
+}
+
+// newManagedHookAuditFixtureExportingTo adds a remote destination to the
+// ordinary Claude fixture.
+func newManagedHookAuditFixtureExportingTo(
+	t *testing.T, wrap func(http.ResponseWriter) http.ResponseWriter, remote delivery.Adapter, off ...observability.Bucket,
+) managedHookAuditFixture {
+	t.Helper()
+	return newManagedHookAuditFixtureForExportingTo(t, "claudecode", wrap, remote, off...)
 }
 
 func newManagedHookAuditFixtureForCollectingNo(
 	t *testing.T, connectorName string, wrap func(http.ResponseWriter) http.ResponseWriter, off ...observability.Bucket,
 ) managedHookAuditFixture {
 	t.Helper()
+	return newManagedHookAuditFixtureForExportingTo(t, connectorName, wrap, nil, off...)
+}
+
+func newManagedHookAuditFixtureForExportingTo(
+	t *testing.T, connectorName string, wrap func(http.ResponseWriter) http.ResponseWriter,
+	remote delivery.Adapter, off ...observability.Bucket,
+) managedHookAuditFixture {
+	t.Helper()
 	installCorrelationHMACForTest()
 	installDefaultProfileConnector(t, connectorName)
-	fixture := newSidecarRuntimeFixtureCollectingNo(t, nil, off...)
+	fixture := newSidecarRuntimeFixtureExportingTo(t, nil, remote, off...)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {
 		t.Fatal(err)
@@ -147,9 +165,9 @@ func TestManagedHookConfirmedAnswerSurvivesGatewayExitBeforeFinalization(t *test
 	if got := f.audited(t, session)[session]; got != "" {
 		t.Fatalf("audit before recovery = %q, want no finalized row", got)
 	}
-	entries, err := f.store.UnauditedHookDeliveries(t.Context(), "the next process")
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("journal rows before recovery = %v (%v), want one", entries, err)
+	entries := journalEntries(t, f)
+	if len(entries) != 1 {
+		t.Fatalf("journal rows before recovery = %v, want one", entries)
 	}
 	// The sandbox ingress can start before the main API, and recovers too.
 	restarted := f.restartedAPI(t, true)
@@ -188,7 +206,7 @@ func TestManagedHookConfirmedAnswerSurvivesGatewayExitBeforeFinalization(t *test
 	// A crash after the records but before the journal row was deleted
 	// must not produce a second record of this occurrence on the next
 	// start of the main API.
-	if err := f.store.JournalHookDelivery(t.Context(), entries[0].ID, "the restarted process", entries[0].Occurrence); err != nil {
+	if err := f.store.JournalHookDelivery(t.Context(), entries[0].ID, "the restarted process", entries[0].Occurrence, 1); err != nil {
 		t.Fatal(err)
 	}
 	runAPIUntil(t, f.restartedAPI(t, true), func() bool { return len(pendingEntries(t, f)) == 0 })
@@ -253,7 +271,7 @@ func TestManagedOpenCodeAuditsItsFinalLocalRefusal(t *testing.T) {
 // audited returns the audited action of each session's hook call.
 func (f managedHookAuditFixture) audited(t *testing.T, sessions ...string) map[string]string {
 	t.Helper()
-	events, err := f.store.ListEvents(200)
+	events, err := f.store.ListEvents(1000)
 	if err != nil {
 		t.Fatal(err)
 	}

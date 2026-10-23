@@ -464,6 +464,11 @@ func (runtime *Runtime) emitWithLeaseControls(
 		plan: graph.Plan(), digest: graph.Digest(), generation: graph.Generation(),
 	}
 	processBuilder := leaseRecordBuilder(ctx, lease, baseSnapshot, builder, inbound)
+	export := observability.RemoteExportDefault
+	if !inbound {
+		export = observability.RemoteExportFrom(ctx)
+		localOnly = localOnly || export == observability.RemoteExportNone
+	}
 	var outcome pipeline.LocalLogOutcome
 	var processErr error
 	switch {
@@ -480,12 +485,15 @@ func (runtime *Runtime) emitWithLeaseControls(
 		// A failed SQLite write (disk full) still hands back the remote
 		// projections: export this gateway's own records so the decision and
 		// the outage stay visible remotely while the local store is down
-		// (GAP-1536). Imported records stay SQLite-first.
+		// (GAP-1536). Imported records stay SQLite-first, and so does a
+		// record whose producer writes it again (RemoteExportAfterLocalWrite).
 		if len(outcome.OptionalWork()) > 0 {
 			if inbound {
 				return pipeline.LocalLogOutcome{}, processErr
 			}
-			runtime.dispatchOptional(ctx, lease, graph, outcome)
+			if export == observability.RemoteExportDefault {
+				runtime.dispatchOptional(ctx, lease, graph, outcome)
+			}
 		}
 		return outcome, processErr
 	}
@@ -575,7 +583,8 @@ func leaseRecordBuilder(
 // hands each persisted record's optional work to that generation's
 // dispatchers, as Emit does for one. A dropped item takes Emit's
 // managed-destination fallback. When the commit fails nothing is persisted and
-// the remote projections are dispatched, as Emit does on a failed write.
+// the remote projections are dispatched, as Emit does on a failed write. Each
+// item follows the observability.RemoteExport of its context, as in Emit.
 func (runtime *Runtime) EmitAtomicBatch(
 	ctx context.Context,
 	items []LogBatchItem,
@@ -617,6 +626,10 @@ func (runtime *Runtime) EmitAtomicBatch(
 	}
 	outcomes, processErr := local.ProcessAtomicBatch(ctx, batch)
 	for index := range outcomes {
+		export := observability.RemoteExportFrom(items[index].Context)
+		if export == observability.RemoteExportNone {
+			continue
+		}
 		if outcomes[index].Admission() == router.AdmissionDrop {
 			fallback, fallbackErr := local.ProcessManagedLogFallback(
 				items[index].Context, items[index].Metadata, builders[index],
@@ -628,7 +641,7 @@ func (runtime *Runtime) EmitAtomicBatch(
 		}
 		outcome := outcomes[index]
 		if outcome.LocalPersisted() || outcome.ManagedOnly() ||
-			(processErr != nil && len(outcome.OptionalWork()) > 0) {
+			(processErr != nil && export == observability.RemoteExportDefault && len(outcome.OptionalWork()) > 0) {
 			runtime.dispatchOptional(items[index].Context, lease, graph, outcome)
 		}
 	}
