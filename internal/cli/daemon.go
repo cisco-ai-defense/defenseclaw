@@ -1866,7 +1866,9 @@ func configuredGuardrailExpectedRunning(cfg *config.Config) bool {
 	return false
 }
 
-func rotationRequiredConnectorNames(cfg *config.Config) []string {
+// guardedConnectorNames lists, sorted, the connectors cfg guards: the
+// configured roster with the guardrail on and each connector not turned off.
+func guardedConnectorNames(cfg *config.Config) []string {
 	if cfg == nil || !cfg.Guardrail.Enabled {
 		return nil
 	}

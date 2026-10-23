@@ -3128,6 +3128,43 @@ function Complete-RetiredConnectorCleanup {
     return $clean
 }
 
+# A gateway that was not running before an upgrade or repair is not started,
+# so nothing rendered this release's hooks: a connector kept the hook an
+# earlier release wrote (a 1.0.3 Hermes hook cannot answer this release's
+# execution probe) and the install exited 0 with it unprotected. The new
+# gateway puts every connector the config guards on its current hook and
+# reads each back; one it cannot is named with the cause, and the install
+# exits 3. Without a config nothing was set up. An older gateway (a
+# downgrade) has no --every-connector and renders its hooks when it starts.
+function Complete-StoppedConnectorReconcile {
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -and -not $env:DEFENSECLAW_CONFIG) { return $true }
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) {
+        Write-Err "DefenseClaw $Ver could not put the connectors on their current hooks: $gateway is missing"
+        return $false
+    }
+    if ((Invoke-Native $gateway @("connector", "reconcile", "--every-connector", "--help") -Quiet) -ne 0) { return $true }
+    $ErrorActionPreference = "Continue"
+    $setConfig = -not $env:DEFENSECLAW_CONFIG
+    if ($setConfig) { $env:DEFENSECLAW_CONFIG = Join-Path $DataDir "config.yaml" }
+    # "$_" keeps only the text of a stderr line; Windows PowerShell 5.1
+    # formats the record with its script position otherwise.
+    $global:LASTEXITCODE = -1
+    try {
+        $lines = @(& $gateway @("connector", "reconcile", "--every-connector", "--data-dir", $DataDir) 2>&1 |
+            ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    } catch { $lines = @() } finally {
+        if ($setConfig) { Remove-Item Env:DEFENSECLAW_CONFIG -ErrorAction SilentlyContinue }
+    }
+    $rc = $LASTEXITCODE
+    if ($rc -eq 0) { return $true }
+    $why = @($lines | Where-Object { $_ -like "Error: *" } | Select-Object -Last 1) -join ""
+    $why = $why -replace '^Error: ', ''
+    if (-not $why) { $why = "exit $rc; run 'defenseclaw-gateway connector reconcile --every-connector' for the cause" }
+    Write-Err "DefenseClaw $Ver could not put every connector on its current hook while the gateway is stopped: $why"
+    return $false
+}
+
 function Complete-Swap {
     # The new install is live: a run killed from here on must not restore the old one.
     Remove-Item -LiteralPath (Join-Path $Snap "COMPLETE") -Force
@@ -4050,6 +4087,7 @@ function Invoke-Install {
     # until 1.1: an upgrade or repair never ends with a removed connector's
     # hook left unsealed, whether or not its gateway was running before it.
     if ($PrevVersion -and -not (Complete-RetiredConnectorCleanup)) { $startRc = 3 }
+    if ($PrevVersion -and -not $startNew -and -not (Complete-StoppedConnectorReconcile)) { $startRc = 3 }
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }
     $configured = (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG

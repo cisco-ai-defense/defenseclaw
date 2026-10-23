@@ -2624,3 +2624,104 @@ def test_a_restored_gateway_that_needs_attention_is_not_reported_down(tmp_path: 
     assert out.returncode == 0, out.stderr
     assert "its gateway runs, but a connector needs attention" in out.stdout
     assert "did not start again" not in out.stdout
+
+
+# ── 1.0.4 (T8 smoke review loop round 3 of the Hermes/upgrade class) ────────
+
+
+@pytest.mark.parametrize("was_running", ["true", "false"])
+def test_a_stopped_upgrade_puts_every_connector_on_its_current_hook(tmp_path: Path, was_running: str) -> None:
+    # An upgrade of a stopped 1.0.3 install with Hermes registered skipped the
+    # gateway start, so nothing rendered this release's Hermes hook (the 1.0.3
+    # one cannot answer the execution probe) and it exited 0. A gateway that
+    # was not running is now reconciled after the swap, and a failure is the
+    # install's exit 3; a running one was proven by its start.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("finish_swap\n# until 1.1")
+    main = text[start : text.index("trap - HUP PIPE\n", start)]
+    script = tmp_path / "main.sh"
+    script.write_text(
+        "set -euo pipefail\nfinish_swap() { :; }\nfinish_retired_connector_cleanup() { :; }\n"
+        "report_retired_connector_leftovers() { :; }\n"
+        'reconcile_stopped_connectors() { echo "reconciled" >&2; return 1; }\n'
+        f"PREV_VERSION=1.0.3 WAS_RUNNING={was_running} START_RC=0\n" + main + 'echo "START_RC=${START_RC}"\n',
+        encoding="utf-8",
+    )
+
+    result = _run([str(script)], tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    if was_running == "false":
+        assert "reconciled" in result.stderr and "START_RC=3" in result.stdout, result.stdout + result.stderr
+    else:
+        assert "reconciled" not in result.stderr and "START_RC=0" in result.stdout, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("configured", "binary", "help_rc", "reconcile_rc", "want_rc", "want_calls"),
+    [
+        (False, True, 0, 0, 0, []),
+        (True, False, 0, 0, 1, []),
+        (True, True, 1, 0, 0, ["help"]),
+        (True, True, 0, 0, 0, ["help", "reconcile"]),
+        (True, True, 0, 3, 1, ["help", "reconcile"]),
+    ],
+)
+def test_the_stopped_upgrade_reconcile_names_the_cause(
+    tmp_path: Path,
+    configured: bool,
+    binary: bool,
+    help_rc: int,
+    reconcile_rc: int,
+    want_rc: int,
+    want_calls: list[str],
+) -> None:
+    home = tmp_path / "dc"
+    home.mkdir()
+    if configured:
+        (home / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls"
+    if binary:
+        gateway = bin_dir / "defenseclaw-gateway"
+        gateway.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            f'  "connector reconcile --every-connector --help") echo help >> "{calls}"; exit {help_rc} ;;\n'
+            f'  "connector reconcile --every-connector --data-dir {home}")\n'
+            f'    echo reconcile >> "{calls}"\n'
+            f'    [ "$DEFENSECLAW_CONFIG" = "{home}/config.yaml" ] || exit 9\n'
+            '    echo "  OK claudecode is on its current hook"\n'
+            f"    [ {reconcile_rc} -eq 0 ] && exit 0\n"
+            '    echo "Error: not every connector is on its current hook: hermes: its current hook is not in place; start the gateway (defenseclaw-gateway start), then check: defenseclaw doctor" >&2\n'
+            f"    exit {reconcile_rc} ;;\n"
+            "  *) exit 8 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+    log = tmp_path / "log"
+    script = tmp_path / "reconcile.sh"
+    script.write_text(
+        'set -euo pipefail\nerr() { echo "err: $*" >&2; }\n'
+        + _install_sh_functions("reconcile_stopped_connectors")
+        + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" LOG="{log}" VERSION=1.0.4\n'
+        + 'rc=0; reconcile_stopped_connectors || rc=$?; echo "rc=$rc"\n',
+        encoding="utf-8",
+    )
+
+    result = _run([str(script)], tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert f"rc={want_rc}" in result.stdout, result.stdout + result.stderr
+    assert (calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []) == want_calls
+    if want_calls == ["help", "reconcile"]:
+        assert "claudecode is on its current hook" in log.read_text(encoding="utf-8")
+    if reconcile_rc:
+        assert (
+            "err: DefenseClaw 1.0.4 could not put every connector on its current hook while the gateway is stopped: "
+            "not every connector is on its current hook: hermes: its current hook is not in place" in result.stderr
+        ), result.stderr
+    if not binary:
+        assert f"{bin_dir}/defenseclaw-gateway is missing" in result.stderr, result.stderr

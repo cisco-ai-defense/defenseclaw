@@ -4165,3 +4165,94 @@ def test_the_windows_removed_connector_check_seals_or_names_the_cause(
             "could not check that the removed OpenHands and OmniGent connectors are blocked" in text
             and "is missing" in text
         )
+
+
+# ── 1.0.4 (T8 smoke review loop round 3 of the Hermes/upgrade class) ────────
+
+
+def test_a_stopped_windows_upgrade_puts_every_connector_on_its_current_hook() -> None:
+    # An upgrade of a stopped per-user install does not start the gateway, so
+    # nothing rendered this release's hooks (a 1.0.3 Hermes hook cannot answer
+    # the execution probe) and it exited 0. Once the swap is done, a gateway
+    # that was not started is reconciled, and a failure is the exit 3.
+    body = _ps1_function("Invoke-Install")
+    call = "if ($PrevVersion -and -not $startNew -and -not (Complete-StoppedConnectorReconcile)) { $startRc = 3 }"
+    assert body.count(call) == 1
+    assert (
+        body.index("Complete-Swap\n")
+        < body.index("if ($PrevVersion -and -not (Complete-RetiredConnectorCleanup))")
+        < body.index(call)
+        < body.index("if ($startRc -eq 3) { Write-Warn")
+    )
+
+
+@pytest.mark.skipif(POWERSHELL is None or os.name == "nt", reason="needs pwsh running a shebang fake gateway")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("configured", "binary", "help_rc", "reconcile_rc", "want", "want_calls"),
+    [
+        (False, True, 0, 0, "True", []),
+        (True, False, 0, 0, "False", []),
+        (True, True, 1, 0, "True", ["help"]),
+        (True, True, 0, 0, "True", ["help", "reconcile"]),
+        (True, True, 0, 3, "False", ["help", "reconcile"]),
+    ],
+)
+def test_the_windows_stopped_upgrade_reconcile_names_the_cause(
+    tmp_path: Path,
+    configured: bool,
+    binary: bool,
+    help_rc: int,
+    reconcile_rc: int,
+    want: str,
+    want_calls: list[str],
+) -> None:
+    data_dir, bin_dir, calls = tmp_path / "dc", tmp_path / "bin", tmp_path / "calls"
+    data_dir.mkdir()
+    bin_dir.mkdir()
+    if configured:
+        (data_dir / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    if binary:
+        gateway = bin_dir / "defenseclaw-gateway.exe"
+        gateway.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            f'  "connector reconcile --every-connector --help") echo help >> "{calls}"; exit {help_rc} ;;\n'
+            f'  "connector reconcile --every-connector --data-dir {data_dir}")\n'
+            f'    echo reconcile >> "{calls}"\n'
+            f'    [ "$DEFENSECLAW_CONFIG" = "{data_dir}/config.yaml" ] || exit 9\n'
+            '    echo "  OK claudecode is on its current hook"\n'
+            f"    [ {reconcile_rc} -eq 0 ] && exit 0\n"
+            '    echo "Error: not every connector is on its current hook: hermes: its current hook is not in place" >&2\n'
+            f"    exit {reconcile_rc} ;;\n"
+            "  *) exit 8 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data_dir}'\n$BinDir = '{bin_dir}'\n$Ver = '1.0.4'\n"
+        "Remove-Item Env:DEFENSECLAW_CONFIG -ErrorAction SilentlyContinue\n"
+        'function Write-Err([string]$m) { Write-Host "err: $m" }\n'
+        + _ps1_function("Invoke-Native")
+        + _ps1_function("Complete-StoppedConnectorReconcile")
+        + "$ok = @(Complete-StoppedConnectorReconcile)\n"
+        + "Write-Host \"ok=$($ok -join ',')\"\n"
+        + 'Write-Host "config-after=[$env:DEFENSECLAW_CONFIG]"\n'
+    )
+
+    out = _run_powershell(script)
+    text = out.stdout + out.stderr
+
+    assert out.returncode == 0, text
+    assert f"ok={want}" in out.stdout, text
+    assert "config-after=[]" in out.stdout, text
+    assert (calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []) == want_calls
+    if reconcile_rc:
+        assert (
+            "err: DefenseClaw 1.0.4 could not put every connector on its current hook while the gateway is stopped: "
+            "not every connector is on its current hook: hermes: its current hook is not in place" in text
+        ), text
+    if not binary:
+        assert "defenseclaw-gateway.exe is missing" in text, text

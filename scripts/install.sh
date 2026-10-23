@@ -1089,6 +1089,9 @@ if [[ -n "${PREV_VERSION}" ]] && ! finish_retired_connector_cleanup; then
     START_RC=3
 fi
 report_retired_connector_leftovers
+if [[ -n "${PREV_VERSION}" && "${WAS_RUNNING}" != true ]] && ! reconcile_stopped_connectors; then
+    START_RC=3
+fi
 trap - HUP PIPE
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
@@ -1970,6 +1973,31 @@ finish_retired_connector_cleanup() {
         failed=1
     done
     return "${failed}"
+}
+
+# A gateway that was not running before an upgrade or repair is not started,
+# so nothing rendered this release's hooks: a connector kept the hook an
+# earlier release wrote (a 1.0.3 Hermes hook cannot answer this release's
+# execution probe) and the install exited 0 with it unprotected. The new
+# gateway puts every connector the config guards on its current hook and
+# reads each back; one it cannot is named with the cause, and the install
+# exits 3. Without a config nothing was set up. An older gateway (a
+# downgrade) has no --every-connector and renders its hooks when it starts.
+reconcile_stopped_connectors() {
+    local gateway="${BIN_DIR}/defenseclaw-gateway" out rc=0 why
+    [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]] || return 0
+    if [[ ! -x "${gateway}" ]]; then
+        err "DefenseClaw ${VERSION} could not put the connectors on their current hooks: ${gateway} is missing"
+        return 1
+    fi
+    "${gateway}" connector reconcile --every-connector --help >/dev/null 2>&1 || return 0
+    out="$(DEFENSECLAW_CONFIG="${DEFENSECLAW_CONFIG:-${DEFENSECLAW_HOME}/config.yaml}" \
+        "${gateway}" connector reconcile --every-connector --data-dir "${DEFENSECLAW_HOME}" 2>&1)" || rc=$?
+    printf '%s\n' "${out}" >>"${LOG}"
+    [[ ${rc} -ne 0 ]] || return 0
+    why="$(printf '%s\n' "${out}" | sed -n 's/^Error: //p' | tail -n 1)"
+    err "DefenseClaw ${VERSION} could not put every connector on its current hook while the gateway is stopped: ${why:-exit ${rc}, see ${LOG}}"
+    return 1
 }
 
 # until 1.1: the removed connectors' teardown deliberately keeps vendor
