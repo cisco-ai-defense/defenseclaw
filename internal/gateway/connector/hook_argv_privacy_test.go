@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -464,16 +465,63 @@ func TestLegacySharedTokenHooksKeepTokenOffEveryCommandLine(t *testing.T) {
 }
 
 // hookArgvStatusGateway answers every request with status.
-func hookArgvStatusGateway(t *testing.T, status int) string {
+func hookArgvStatusGateway(t *testing.T, status int) (string, *atomic.Int32) {
 	t.Helper()
+	var answered atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		answered.Add(1)
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = io.WriteString(w, `{"error":"unauthorized"}`)
 	}))
 	t.Cleanup(srv.Close)
-	return strings.TrimPrefix(srv.URL, "http://")
+	return strings.TrimPrefix(srv.URL, "http://"), &answered
+}
+
+// runHookArgvReference runs a reference call until the gateway it is sent to
+// has answered it (answered grows), at most eight times in two minutes, and
+// returns the last run. On a heavily loaded build box a hook can give up on
+// a gateway that is listening, within its own per-call budget, and report it
+// unreachable; that run is no reference for the gateway's answer (GAP-0961).
+// The wait is on the gateway's answer, never a fixed sleep.
+func runHookArgvReference(t *testing.T, answered *atomic.Int32, run func() (int, string, string)) (int, string, string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	for attempt := 1; ; attempt++ {
+		before := answered.Load()
+		code, stdout, stderr := run()
+		if answered.Load() > before || attempt >= 8 || time.Now().After(deadline) {
+			return code, stdout, stderr
+		}
+		t.Logf("reference run %d did not reach its gateway (%s); running it again", attempt, strings.TrimSpace(stderr))
+	}
+}
+
+// GAP-0961: a reference run the gateway never answered is run again, and
+// only an answered run is the reference.
+func TestHookArgvReferenceWaitsForTheGatewaysAnswer(t *testing.T) {
+	var answered atomic.Int32
+	runs := 0
+	code, _, stderr := runHookArgvReference(t, &answered, func() (int, string, string) {
+		runs++
+		if runs < 3 {
+			return 2, "", "defenseclaw: gateway unreachable, blocking codex tool (fail mode closed)"
+		}
+		answered.Add(1)
+		return 2, "", "defenseclaw: gateway rejected the token (HTTP 401)"
+	})
+	if runs != 3 || code != 2 || !strings.Contains(stderr, "401") {
+		t.Fatalf("runs = %d, stderr = %q; want the third, answered run", runs, stderr)
+	}
+	runs = 0
+	_, _, stderr = runHookArgvReference(t, &answered, func() (int, string, string) {
+		runs++
+		return 2, "", "defenseclaw: gateway unreachable"
+	})
+	if runs != 8 || !strings.Contains(stderr, "unreachable") {
+		t.Fatalf("an unanswered reference ran %d times, want the bounded 8 and its last result", runs)
+	}
 }
 
 // TestShellHooksRefuseAMalformedToken: a bearer with CR or LF would end the
@@ -485,7 +533,7 @@ func hookArgvStatusGateway(t *testing.T, status int) string {
 func TestShellHooksRefuseAMalformedToken(t *testing.T) {
 	const malformed = "dccert-fake\rtoken"
 	gateway, addr := newHookArgvGateway(t)
-	rejectAddr := hookArgvStatusGateway(t, http.StatusUnauthorized)
+	rejectAddr, rejectAnswered := hookArgvStatusGateway(t, http.StatusUnauthorized)
 	type layout struct {
 		name  string
 		cases []hookArgvCase
@@ -566,7 +614,9 @@ func TestShellHooksRefuseAMalformedToken(t *testing.T) {
 					if !strings.Contains(stderr, "invalid gateway token") {
 						t.Fatalf("%s (%s): stderr = %q, want the invalid gateway token refusal", tc.script, mode, stderr)
 					}
-					wantCode, wantStdout, wantStderr := runHookArgvCase(t, rejectDir, tc, env)
+					wantCode, wantStdout, wantStderr := runHookArgvReference(t, rejectAnswered, func() (int, string, string) {
+						return runHookArgvCase(t, rejectDir, tc, env)
+					})
 					if !strings.Contains(wantStderr, "401") {
 						t.Fatalf("%s (%s): the reference run was not refused with HTTP 401: %s", tc.script, mode, wantStderr)
 					}
