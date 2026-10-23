@@ -133,11 +133,22 @@ func TestSandboxForeignRecordsCarryTheCallersProfile(t *testing.T) {
 // identity design).
 func TestSandboxForeignRecordOfARefusedDecisionNamesNoCandidateProfile(t *testing.T) {
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
-	f.cfg.Guardrail.Profiles["bob-only"] = config.GuardrailProfile{Description: "Bob private profile"}
+	// bob-only and contractors block, so a decision that may give them is
+	// refused; one among profiles that only observe is observed and records
+	// no candidate either (TestSandboxAuthorityColdCacheAmongObserveProfilesIsProvisional).
+	f.cfg.Guardrail.Profiles["bob-only"] = config.GuardrailProfile{Description: "Bob private profile", Mode: "action"}
+	f.cfg.Guardrail.Profiles["contractors"] = config.GuardrailProfile{Description: "Contractors", Mode: "action"}
 	f.cfg.Guardrail.ProfileAssignments = append([]config.ProfileAssignment{
 		{Profile: "bob-only", Match: config.ProfileMatch{Groups: []string{"dc-sbx-bob-team"}}},
 	}, f.cfg.Guardrail.ProfileAssignments...)
 	f.publishFirstGeneration()
+	// sandboxMatchPeer and sandboxForeignIdentity below run without a
+	// pinned generation: they read the server's own profile set.
+	set, err := newGuardrailProfileSet(f.cfg, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.api.guardrailProfiles.set.Store(set)
 	f.mu.Lock()
 	f.facts[sbxAlice.UID] = useridentity.DirectoryFacts{
 		Principal: sbxAlice.Name + "@DCLAB.TEST", Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,

@@ -130,8 +130,9 @@ other spool files and never changes afterwards.
 
 An account the map does not record (a later account given the UID, a namesake
 from another domain, an account created again) does not get the entry as a
-match. The request is refused until ownership of the entry is proven; its
-profile is listed as a candidate for diagnosis. Windows needs nothing: the 1.0.x agent
+match. The request is refused until ownership of the entry is proven, unless
+every profile that may apply only observes; its profile is listed as a
+candidate for diagnosis. Windows needs nothing: the 1.0.x agent
 IDs of a SID are unchanged. A per-user (non-managed) gateway keeps its own
 account's entries.
 
@@ -168,7 +169,11 @@ How the keys combine:
   than one account holds, or a pre-1.0.4 `agents` entry the upgrade did not
   bind), the request is refused with the missing fact named. `profile explain`
   shows `refused`, `refused_reason`, `unproven_facts` and the candidate profiles
-  (`default_lookup_failed`). A fact no assignment needs does not make the
+  (`default_lookup_failed`). When every profile that may apply only observes
+  (observe mode for the hooks and for inspect and the proxy) and they have the
+  same `sandbox` section, no answer could block the request: it is observed
+  under their strictest combination, and `explain` shows `unproven_facts` and
+  `unproven_reason` instead of a refusal. A fact no assignment needs does not make the
   decision uncertain. An account is recognized by its SID (SSSD or
   Windows) or by its macOS local record; for an account that has neither (a
   local or LDAP Linux account, a macOS directory account with no local record)
@@ -285,7 +290,7 @@ than one key, the reason names the most specific key, in the order
 | `connector` | Only a `connectors` entry matched. |
 | `default` | The user is verified, but no assignment matched, so `default_profile` applied. |
 | `default_unverified` | No verified user reached the gateway, so only assignments that match on `connectors` alone could apply. |
-| `default_lookup_failed` | An identity fact was not proven in this pass (a failed or slow directory lookup, a group name no provider confirms, a UPN the guardian has not written yet, a Windows group name whose SID lookup is pending, a uid more than one account holds, a pre-1.0.4 `agents` entry the upgrade did not bind). A request whose assignment needs the fact is refused and names it; otherwise the proven or default profile applies. On refusal, `explain` lists `refused_reason`, `unproven_facts` and `candidate_profiles`; the candidate profile is diagnostic and does not authorize the request. |
+| `default_lookup_failed` | An identity fact was not proven in this pass (a failed or slow directory lookup, a group name no provider confirms, a UPN the guardian has not written yet, a Windows group name whose SID lookup is pending, a uid more than one account holds, a pre-1.0.4 `agents` entry the upgrade did not bind). A request whose assignment needs the fact is refused and names it, unless every profile that may apply only observes (then it is observed and `explain` lists `unproven_reason`); otherwise the proven or default profile applies. On refusal, `explain` lists `refused_reason`, `unproven_facts` and `candidate_profiles`; the candidate profile is diagnostic and does not authorize the request. |
 
 ## Only verified facts select a profile
 

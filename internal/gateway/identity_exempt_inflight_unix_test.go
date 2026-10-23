@@ -39,13 +39,13 @@ func TestInvalidationDuringALookupIsNotCurrent(t *testing.T) {
 				invalidateDuringLookup(cache, clock, how)
 				release()
 				waitIdentityCacheIdle(t, cache, "k")
-				if got, current, ok := cache.getCached("k"); !ok || current {
+				if got, current, _, ok := cache.getCached("k"); !ok || current {
 					t.Fatalf("facts of the lookup the invalidation landed in: %q current=%t ok=%t; want served and not current", got, current, ok)
 				}
 				if got, ok := read(cache); !ok || got != "answer 3" {
 					t.Fatalf("%s = %q, %t after %d lookups; want the lookup started after the invalidation (answer 3)", name, got, ok, lookups.Load())
 				}
-				if _, current, ok := cache.getCached("k"); !ok || !current {
+				if _, current, _, ok := cache.getCached("k"); !ok || !current {
 					t.Fatalf("answer 3: current=%t ok=%t; want current", current, ok)
 				}
 			})

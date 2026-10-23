@@ -143,7 +143,7 @@ func TestInvalidatedFactsAreNotCurrent(t *testing.T) {
 			if got, ok := cache.getCurrent("k", identityDirectoryBudget); !ok || got != "answer 1" {
 				t.Fatalf("cold getCurrent = %q, %t", got, ok)
 			}
-			if _, current, ok := cache.getCached("k"); !ok || !current {
+			if _, current, _, ok := cache.getCached("k"); !ok || !current {
 				t.Fatalf("fresh facts: current=%t ok=%t", current, ok)
 			}
 			clock.Add(int64(time.Millisecond)) // inside the fresh-read coalesce window
@@ -156,7 +156,7 @@ func TestInvalidatedFactsAreNotCurrent(t *testing.T) {
 			if got, ok := cache.getFresh("k", identityDirectoryBudget); ok {
 				t.Fatalf("a fresh read gave %q; want the refresh, which failed, and no facts from before the invalidation", got)
 			}
-			if _, current, ok := cache.getCached("k"); !ok || current {
+			if _, current, _, ok := cache.getCached("k"); !ok || current {
 				t.Fatalf("invalidated facts: current=%t ok=%t; want served and not current", current, ok)
 			}
 			if got, ok := cache.getCurrent("k", identityDirectoryBudget); ok {
@@ -166,7 +166,7 @@ func TestInvalidatedFactsAreNotCurrent(t *testing.T) {
 			if got, ok := cache.getCurrent("k", identityDirectoryBudget); !ok || got != "answer 3" {
 				t.Fatalf("getCurrent once the directory answers = %q, %t; want answer 3", got, ok)
 			}
-			if _, current, ok := cache.getCached("k"); !ok || !current {
+			if _, current, _, ok := cache.getCached("k"); !ok || !current {
 				t.Fatalf("refreshed facts: current=%t ok=%t", current, ok)
 			}
 		})

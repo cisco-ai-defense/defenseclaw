@@ -31,10 +31,15 @@ import (
 //     than the last macOS account listing).
 //   - A maybe whose profile the proven facts already give (a yes
 //     assignment's, or with no yes the default) changes nothing. Otherwise
-//     the request is refused, naming the facts those maybes need
-//     (profileDecision.Refused); Name is then the strictest combination of
-//     default_profile and every profile that matches or could match, for
-//     the administrator's explain, and authorizes nothing.
+//     Name is the strictest combination of default_profile and every
+//     profile that matches or could match, and the decision names the facts
+//     those maybes need (profileDecision.Unproven). When any of those
+//     profiles may block the request (candidatesMayBlock) it is refused
+//     (profileDecision.Refused), and Name, for the administrator's explain,
+//     authorizes nothing. When every one of them only observes it with the
+//     same sandbox section, no answer of the missing facts could block it:
+//     it is observed as each of them would observe it, and the missing facts
+//     stay named (profileDecision.Uncertain), never refused in action mode.
 //   - Else the profiles of the yes assignments apply, or default_profile
 //     when none matches: the one that enforces at least what each of the
 //     others does (profileCovers), otherwise their meet, the strictest
@@ -443,8 +448,45 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	}
 	decision.Unproven = orderedFacts(needed)
 	decision.Candidates = candidates
-	decision.Refused = set.identityUncertaintyReason(subject, decision.Unproven, connectorName)
+	why := set.identityUncertainty(subject, decision.Unproven, connectorName)
+	if set.candidatesMayBlock(candidates, connectorName) {
+		decision.Refused = "DefenseClaw refused this request: " + why
+	} else {
+		// Every profile the missing facts could give only observes: a
+		// refusal would block a request no answer of them blocks, which an
+		// observe-mode 1.0.3 upgrade allowed (review of r104 Q-identity,
+		// continuation 3, loop round 3).
+		decision.Uncertain = "DefenseClaw observed this request under every profile that may apply: " + why
+	}
 	return decision
+}
+
+// candidatesMayBlock reports whether a profile among candidates may block a
+// request of connectorName, so a decision that cannot tell which of them
+// applies must refuse it: one blocks (action) by its hook mode or by its
+// inspect and proxy mode for the connector or the global settings
+// (profileCoverConnectors), its configuration is unknown, or the
+// candidates' sandbox sections differ (one may require a sandbox or limit
+// it where another does not). Where every candidate only observes with the
+// same sandbox section, none blocks anything (profileCovers), and their
+// other settings (rule packs, block_at, HILT) change only what is observed.
+func (set *guardrailProfileSet) candidatesMayBlock(candidates []string, connectorName string) bool {
+	connectors := profileCoverConnectors(connectorName)
+	for _, candidate := range candidates {
+		if !reflect.DeepEqual(set.profileSandbox(candidate), set.profileSandbox(candidates[0])) {
+			return true
+		}
+		cfg := set.profileConfig(candidate)
+		if cfg == nil {
+			return true
+		}
+		for _, name := range connectors {
+			if hookModeForConfig(cfg, name) == "action" || inspectMode(cfg, name) == "action" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // orderedFacts is facts in a fixed order: account, upn, groups, the
@@ -463,10 +505,12 @@ func orderedFacts(facts []string) []string {
 	return out
 }
 
-// identityUncertaintyReason names each missing fact without naming a group,
-// another account or a candidate profile. The same text is used by hooks,
-// inspect, ACP, proxy, sandbox and the administrator's explain response.
-func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubject, facts []string, connectorName string) string {
+// identityUncertainty names each missing fact without naming a group,
+// another account or a candidate profile, and the explain command. The same
+// text follows the refusal of hooks, inspect, ACP, proxy, sandbox and the
+// administrator's explain response, and an observed decision's
+// profileDecision.Uncertain.
+func (set *guardrailProfileSet) identityUncertainty(subject *profileSubject, facts []string, connectorName string) string {
 	why := make([]string, 0, len(facts))
 	for _, fact := range facts {
 		switch fact {
@@ -491,7 +535,7 @@ func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubjec
 	if subject != nil && subject.tokenGroupsCause != "" {
 		why = append(why, subject.tokenGroupsCause)
 	}
-	return "DefenseClaw refused this request: " + strings.Join(why, "; ") +
+	return strings.Join(why, "; ") +
 		"; run `" + set.profileExplainCommand(subject, connectorName) + "` to inspect the identity decision"
 }
 

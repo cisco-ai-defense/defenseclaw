@@ -476,6 +476,10 @@ func TestSandboxAuthorityPendingExpires(t *testing.T) {
 // proven group's profile (GAP-0022).
 func TestSandboxAuthorityColdCacheRefusesUntilIdentityConfirmed(t *testing.T) {
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	// contractors blocks: a create that may get it is refused until the
+	// groups are proven.
+	f.cfg.Guardrail.Profiles["contractors"] = config.GuardrailProfile{Description: "Contractors", Mode: "action"}
+	f.publishFirstGeneration()
 	f.coldCache(sbxAlice)
 	start := time.Now()
 	rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathPolicyResolve, claudeResolve(),
@@ -507,12 +511,64 @@ func TestSandboxAuthorityColdCacheRefusesUntilIdentityConfirmed(t *testing.T) {
 	}
 }
 
+// Review of r104 Q-identity (continuation 3, loop round 3): where every
+// profile a cold create may get only observes with the same sandbox
+// section, no answer of the groups could change what the sandbox enforces,
+// and the create is not refused: it gets a provisional registration under
+// default_profile, and its stamp records no candidate profile. A profile
+// with its own sandbox section among them refuses the create.
+func TestSandboxAuthorityColdCacheAmongObserveProfilesIsProvisional(t *testing.T) {
+	for _, sandboxed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "observe only", true: "a sandbox section"}[sandboxed], func(t *testing.T) {
+			f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+			if sandboxed {
+				f.cfg.Guardrail.Profiles["contractors"] = config.GuardrailProfile{Description: "Contractors",
+					Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"claudecode"}}}
+				f.publishFirstGeneration()
+			}
+			f.coldCache(sbxAlice)
+			rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathPolicyResolve, claudeResolve(),
+				map[string]string{sandboxrelay.ConnectorHeader: "claudecode"})
+			if sandboxed {
+				if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "group membership is unconfirmed") {
+					t.Fatalf("cold create with a sandboxed candidate: %d %s; want refused naming the group fact", rec.Code, rec.Body.String())
+				}
+				return
+			}
+			var resp sandboxrelay.ResolveResponse
+			if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &resp) != nil {
+				t.Fatalf("cold create among observe profiles: %d %s; want a provisional registration", rec.Code, rec.Body.String())
+			}
+			if !resp.Registration.Provisional || resp.Banner.Profile != "offline-floor" {
+				t.Fatalf("cold create among observe profiles: %+v %+v; want provisional under default_profile", resp.Registration, resp.Banner)
+			}
+			reg := sandboxreg.Registration{UID: sbxAlice.UID, UserName: sbxAlice.Name, SubjectKey: "hmac-sha256:" + strings.Repeat("b", 64)}
+			if m := f.api.sandboxForeignIdentity(context.Background(), reg, "c1", "plain", "claudecode", "").Managed; m.GuardrailProfile != "" || m.ProfileDigest != "" {
+				t.Fatalf("stamp of an observed uncertain decision: %+v; want no candidate profile", m)
+			}
+		})
+	}
+}
+
 // A new run during a hard directory outage (GAP-0507): the account database
 // names no account for the uid. A remembered name is not proof of the
 // account holder, so both a named and a nameless request refuse. Once the
 // directory answers, the run can bind to the proven account.
+//
+// The named run is refused when a profile it may get blocks (contractors in
+// action mode). Where every one only observes with the same sandbox section,
+// it gets a provisional offline-floor registration, as 1.0.3 gave (review of
+// r104 Q-identity, continuation 3, loop round 3).
 func TestSandboxAuthorityResolveDuringDirectoryOutage(t *testing.T) {
+	for _, contractorsMode := range []string{"action", "observe"} {
+		t.Run(contractorsMode, func(t *testing.T) { sandboxResolveDuringDirectoryOutage(t, contractorsMode) })
+	}
+}
+
+func sandboxResolveDuringDirectoryOutage(t *testing.T, contractorsMode string) {
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	f.cfg.Guardrail.Profiles["contractors"] = config.GuardrailProfile{Description: "Contractors", Mode: contractorsMode}
+	f.publishFirstGeneration()
 	f.coldCache(sbxAlice)
 	nameless := managedHookPeer{UID: sbxAlice.UID}
 	prev := managedHookPeerLastName
@@ -530,7 +586,13 @@ func TestSandboxAuthorityResolveDuringDirectoryOutage(t *testing.T) {
 	}
 	rec = f.do(nameless, http.MethodPost, sandboxrelay.PathPolicyResolve, claudeResolve(),
 		map[string]string{sandboxrelay.ConnectorHeader: "claudecode"})
-	if rec.Code != http.StatusServiceUnavailable || errorReason(t, rec) != sandboxrelay.ReasonUnavailable ||
+	if contractorsMode == "observe" {
+		var resp sandboxrelay.ResolveResponse
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &resp) != nil ||
+			!resp.Registration.Provisional || resp.Banner.Profile != "offline-floor" {
+			t.Fatalf("run during an outage among observe profiles: %d %s; want provisional offline-floor", rec.Code, rec.Body.String())
+		}
+	} else if rec.Code != http.StatusServiceUnavailable || errorReason(t, rec) != sandboxrelay.ReasonUnavailable ||
 		!strings.Contains(rec.Body.String(), "group membership is unconfirmed") {
 		t.Fatalf("run during an outage: %d %s; want a refusal naming the group fact its assignments need", rec.Code, rec.Body.String())
 	}

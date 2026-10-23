@@ -277,10 +277,13 @@ func (z *managedHookAuthorizer) exempt(peer managedHookPeer) bool {
 	// caller is not held on every expiry. Every other case waits for the
 	// current answer, within identityDirectoryBudget (exemptIdentityDirectory):
 	// missing facts, unsettled ones (a UPN or domain not given yet, which may
-	// also still give one the directory has since dropped), and expired or
-	// invalidated facts that match an entry, since the directory may have
-	// removed that name since; a refresh that fails or does not finish in
-	// time exempts no one (loop round 3). A name the facts gave
+	// also still give one the directory has since dropped), invalidated facts
+	// whatever they match (a profile reload or a guardian record with news
+	// may stand for a UPN the directory now gives, listed in exempt_users;
+	// rejecting on the old facts denied the exemption the release waited for,
+	// continuation 3, loop round 3), and expired facts that match an entry,
+	// since the directory may have removed that name since; a refresh that
+	// fails or does not finish in time exempts no one (loop round 3). A name the facts gave
 	// before therefore never exempts a caller after the directory dropped it
 	// (review of r104 Q-identity, continuation 2, loop round 2), and waiting
 	// on every hook, which held every caller or denied a named exemption on a
@@ -302,13 +305,14 @@ func (z *managedHookAuthorizer) exempt(peer managedHookPeer) bool {
 type exemptFactsState int
 
 const (
-	// exemptFactsNone: no facts, or unsettled ones that may lack a name a
-	// current answer gives; a current answer decides.
+	// exemptFactsNone: no facts, unsettled ones that may lack a name a
+	// current answer gives, or ones fetched before an invalidation (a
+	// profile assignment change, a guardian record with news), which may
+	// lack a name the change gave; a current answer decides.
 	exemptFactsNone exemptFactsState = iota
-	// exemptFactsExpired: settled facts past their lifetime, or fetched
-	// before an invalidation (a profile assignment change, a guardian record
-	// with news). A name they give may be one the directory has since
-	// dropped, so a match waits for a current answer; a nonmatch rejects.
+	// exemptFactsExpired: settled facts past their lifetime. A name they
+	// give may be one the directory has since dropped, so a match waits for
+	// a current answer; a nonmatch rejects.
 	exemptFactsExpired
 	// exemptFactsCurrent: facts within their lifetime, fetched after the
 	// last invalidation and settled, or a current answer; they decide.

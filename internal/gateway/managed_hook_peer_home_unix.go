@@ -600,19 +600,22 @@ func (c *managedHookPeerHomeCache) currentDirectory(uid int) (useridentity.Direc
 // cold, expired or invalidated entry starts one background lookup), and how
 // far they decide an exemption (exemptFactsState): an incomplete or settling
 // answer (a UPN or a group not given yet) may miss a name that a current
-// answer has, and an answer past its lifetime or fetched before an
-// invalidation may give a name the directory no longer does.
+// answer has, and so may one fetched before an invalidation (a profile
+// reload, a guardian record with news: the change may be a new UPN); an
+// answer past its lifetime may give a name the directory no longer does.
 func (c *managedHookPeerHomeCache) cachedDirectory(uid int) (useridentity.DirectoryFacts, exemptFactsState) {
 	cache, key, ok := c.directoryOf(uid)
 	if !ok {
 		return useridentity.DirectoryFacts{}, exemptFactsNone
 	}
-	facts, current, ok := cache.getCached(key)
+	facts, current, invalidated, ok := cache.getCached(key)
 	switch {
 	case !ok || facts.ResolvedAt.IsZero():
 		return useridentity.DirectoryFacts{}, exemptFactsNone
 	case current:
 		return facts, exemptFactsCurrent
+	case invalidated:
+		return useridentity.DirectoryFacts{}, exemptFactsNone
 	case !cache.unsettled(facts):
 		return facts, exemptFactsExpired
 	default:

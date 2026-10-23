@@ -93,9 +93,10 @@ func (a *APIServer) sandboxRematchIfDue(ctx context.Context, auth *sandboxAuthor
 	cfg := a.liveBaseConfig(ctx)
 	key := a.sandboxPolicyKey(ctx, cfg)
 	match := a.sandboxMatchPeer(ctx, peer, reg.Connector, 0)
-	if match.decision.Refused != "" {
+	if len(match.decision.Unproven) > 0 {
 		// No candidate profile is proven to be this caller's policy. Keep
-		// the registration's last bound profile while relay calls refuse.
+		// the registration's last bound profile while relay calls refuse,
+		// or, where every candidate only observes, observe.
 		match.resolved = false
 	}
 	factsDigest := sandboxFactsDigest(auth.key, match.facts, match.resolved)

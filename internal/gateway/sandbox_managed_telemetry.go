@@ -325,9 +325,10 @@ func (a *APIServer) sandboxForeignIdentity(ctx context.Context, reg sandboxreg.R
 	if !profileTelemetryGroupFits(d.MatchedGroup) {
 		d.MatchedGroup = ""
 	}
-	if d.Refused != "" {
+	if len(d.Unproven) > 0 {
 		// A candidate profile, possibly another account's, is not the
-		// caller's policy (guardrailProfileTelemetryFromDecision).
+		// caller's proven policy, refused or observed
+		// (guardrailProfileTelemetryFromDecision).
 		d.Name, d.Digest, d.MatchedGroup = "", "", ""
 	}
 	return audit.SandboxIdentity{ID: id, Name: name, Connector: connectorName, Runtime: runtime,

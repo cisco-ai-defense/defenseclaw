@@ -24,21 +24,26 @@ func (c *identityCache[T]) getNonblocking(key string) (T, bool) {
 // until their lifetime ended, and a profile assignment change let an exempt
 // name they gave exempt the caller before the refresh, which the release
 // waited for (review of r104 Q-identity, continuation 2, loop round 3).
-func (c *identityCache[T]) getCached(key string) (facts T, current, ok bool) {
+// invalidated reports facts fetched before an invalidation
+// (invalidatedLocked): unlike facts that only outlived their TTL, they stand
+// for a change that may have given the account a name they lack, so a
+// decision their names do not support waits for the refresh too
+// (continuation 3, loop round 3).
+func (c *identityCache[T]) getCached(key string) (facts T, current, invalidated, ok bool) {
 	if _, ok = c.getNonblocking(key); !ok {
-		return facts, false, false
+		return facts, false, false, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry := c.entries[key]
 	if entry == nil {
-		return facts, false, false
+		return facts, false, false, false
 	}
 	_, current = c.currentLocked(key, entry)
 	if !entry.ok {
-		return facts, false, false
+		return facts, false, false, false
 	}
-	return entry.facts, current && !c.unsettled(entry.facts), true
+	return entry.facts, current && !c.unsettled(entry.facts), c.invalidatedLocked(entry), true
 }
 
 // getCurrent returns key's facts only when they are current: within their
