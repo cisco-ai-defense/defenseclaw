@@ -357,6 +357,25 @@ func (m *Manager) containOldSupervisorNetworkLocked(ctx context.Context, b *box)
 	}
 }
 
+// proveOldSupervisorNetworkClosed closes a ready legacy MicroVM's proxy
+// route and withdraws its direct OpenShell rules once more, confirmed
+// loaded, under the operation lock its caller holds (a containment queued
+// behind the caller has not run yet, and an earlier one may be stale). It
+// returns nil only when both are closed now, else why not.
+func (m *Manager) proveOldSupervisorNetworkClosed(ctx context.Context, b *box) error {
+	m.suspendOldSupervisorEgress(b)
+	m.containOldSupervisorNetworkLocked(ctx, b)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	switch {
+	case b.oldSupervisorNetworkErr != "":
+		return errors.New(b.oldSupervisorNetworkErr)
+	case !b.rec.OldSupervisorNetworkClosed:
+		return errors.New("DefenseClaw could not confirm that its direct OpenShell network rules are withdrawn")
+	}
+	return nil
+}
+
 func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error {
 	m.mu.Lock()
 	rec := b.rec
@@ -384,23 +403,31 @@ func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error 
 	// effective policy. Removing their generated rule names from the base
 	// policy cannot close those routes: detach first, and remember exactly
 	// what this containment detached for the next safe supervisor.
+	// Before the first change, the record says the next session must get
+	// the create-time network back (OldSupervisorNetworkRestore), whatever
+	// stops this containment later; a record that can't say so changes
+	// nothing.
 	active := slices.Clone(sb.Spec.Providers)
 	rec.OldSupervisorProviders = slices.Clone(rec.OldSupervisorProviders)
-	var added bool
+	changed := !rec.OldSupervisorNetworkRestore
 	for _, provider := range active {
 		if slices.Contains(rec.Providers, provider) && !slices.Contains(rec.DetachedProviders, provider) &&
 			!slices.Contains(rec.OldSupervisorProviders, provider) {
 			rec.OldSupervisorProviders = append(rec.OldSupervisorProviders, provider)
-			added = true
+			changed = true
 		}
 	}
-	if added {
+	if changed {
 		slices.Sort(rec.OldSupervisorProviders)
 		m.mu.Lock()
-		b.rec.OldSupervisorProviders = rec.OldSupervisorProviders
+		restore, providers := b.rec.OldSupervisorNetworkRestore, b.rec.OldSupervisorProviders
+		b.rec.OldSupervisorNetworkRestore, b.rec.OldSupervisorProviders = true, rec.OldSupervisorProviders
 		m.mu.Unlock()
 		if err := m.saveRecord(b); err != nil {
-			return fmt.Errorf("save the providers to restore: %w", err)
+			m.mu.Lock()
+			b.rec.OldSupervisorNetworkRestore, b.rec.OldSupervisorProviders = restore, providers
+			m.mu.Unlock()
+			return fmt.Errorf("save the network to restore: %w", err)
 		}
 	}
 	for _, provider := range active {
@@ -528,12 +555,14 @@ func (m *Manager) restoreOldSupervisorNetwork(ctx context.Context, gw *Gateway, 
 	m.mu.Lock()
 	b.rec.OldSupervisorNetworkClosed = false
 	b.rec.OldSupervisorProviders = nil
+	b.rec.OldSupervisorNetworkRestore = false
 	b.oldSupervisorNetworkErr = ""
 	m.mu.Unlock()
 	if err := m.saveRecord(b); err != nil {
 		m.mu.Lock()
-		b.rec.OldSupervisorNetworkClosed = true
+		b.rec.OldSupervisorNetworkClosed = rec.OldSupervisorNetworkClosed
 		b.rec.OldSupervisorProviders = rec.OldSupervisorProviders
+		b.rec.OldSupervisorNetworkRestore = rec.OldSupervisorNetworkRestore
 		m.mu.Unlock()
 		return err
 	}

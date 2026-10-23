@@ -225,6 +225,12 @@ type record struct {
 	// closing that legacy VM's direct network routes. They are restored only
 	// after a new supervisor is ready, and only if current policy allows them.
 	OldSupervisorProviders []string `json:"old_supervisor_providers,omitempty"`
+	// OldSupervisorNetworkRestore says the next session must get its
+	// create-time network back. DefenseClaw records it before it changes
+	// any provider or rule of a legacy MicroVM, so a containment cut short
+	// after a change (a policy OpenShell did not load, a record that could
+	// not be saved) still has the next start restore it.
+	OldSupervisorNetworkRestore bool `json:"old_supervisor_network_restore,omitempty"`
 	// HookCounts are the hook counters as the daemon last kept them
 	// (keepHookCounts): a restarted daemon goes on from them. Copies of a
 	// record share them, so they are replaced, never changed in place.

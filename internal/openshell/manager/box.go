@@ -132,6 +132,10 @@ type box struct {
 	// oldSupervisorStop is set while a stop of a session on an old
 	// supervisor is scheduled (scheduleOldSupervisorStop).
 	oldSupervisorStop bool
+	// oldSupervisorStopSaid is the session and the feed line of the last
+	// failed automatic stop of it (stopOldSupervisor), which a reconcile
+	// retry does not publish again until it changes.
+	oldSupervisorStopSaid string
 	// oldSupervisorNetworkErr is the last failure to withdraw the direct
 	// network rules of a completed or failed MicroVM on an old supervisor.
 	oldSupervisorNetworkErr string
@@ -461,6 +465,8 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		// silent.
 		b.silentSince, b.silenceSent = time.Time{}, false
 		b.portLines, b.opens = nil, nil
+		// A new session hears again why its automatic stop failed.
+		b.oldSupervisorStopSaid = ""
 		// The new session's hooks name its session.
 		m.tel.forgetSandbox(b.rec.Name)
 		if previous != audit.SandboxPhaseReady {
@@ -757,7 +763,7 @@ func (m *Manager) sandboxReleaseRefusal(gw *Gateway) error {
 // stop that has not happened yet, or failed.
 const oldSupervisorWarning = "this session may run the supervisor of an OpenShell older than " + openshell.SupportedMin +
 	", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494): " +
-	"DefenseClaw closes a legacy MicroVM's network and stops it only after its disk flush is confirmed; if sync fails, an explicit stop may lose unsynced writes. `defenseclaw sandbox exec` runs nothing in it, and `defenseclaw sandbox connect` may start it again after it stops " +
+	"DefenseClaw closes a legacy MicroVM's network and stops it only after its disk flush is confirmed, or without the flush if its network cannot be closed; if sync fails, an explicit stop may lose unsynced writes. `defenseclaw sandbox exec` runs nothing in it, and `defenseclaw sandbox connect` may start it again after it stops " +
 	"on OpenShell " + openshell.SupportedMin + " or later"
 
 const oldSupervisorLingeringWarning = "this MicroVM may still run background work on an OpenShell supervisor older than " + openshell.SupportedMin +
@@ -818,8 +824,11 @@ func oldSupervisorMessage(name, release, upgrade string) string {
 // supervisor's network broker can let the sandbox's connections bypass its
 // policy (NVIDIA/OpenShell#4494) for as long as the session runs, whatever
 // the gateway runs now. It contains a ready MicroVM's network before trying
-// to stop, and stops it only after a confirmed disk flush. A failed flush
-// keeps the isolated VM and is retried; the next start after a stop runs the
+// to stop, and stops it only after a confirmed disk flush with the VM's
+// processes paused through the stop (stopWithFlush). A failed flush
+// keeps the VM while its network is proven closed, and is retried; one whose
+// network could not be closed is stopped without the flush (stopWithFlush,
+// fail closed). The next start after a stop runs the
 // gateway's own supervisor, and a gateway older than
 // SupportedMin starts none (sandboxReleaseRefusal). Once a stop is
 // scheduled, another sight of the session waits for it.
@@ -884,25 +893,53 @@ func (m *Manager) stopOldSupervisor(name, bindingID string) {
 	if !current {
 		return
 	}
-	if err := m.stopWithFlush(ctx, b, true); err != nil {
+	err = m.stopWithFlush(ctx, b, true)
+	said := ""
+	if err != nil {
+		said = bindingID + "\x00" + oldSupervisorStopFailed(name, release, err)
+	}
+	m.mu.Lock()
+	repeat := said != "" && b.oldSupervisorStopSaid == said
+	b.oldSupervisorStopSaid = said
+	m.mu.Unlock()
+	switch {
+	case repeat:
+		// Each reconcile retries the stop: the feed and the log said this
+		// one already.
+	case err != nil:
 		m.logf("old supervisor: stop %s: %v", name, err)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
 			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorStopFailed(name, release, err)})
-		return
+	default:
+		m.logf("old supervisor: stopped %s", name)
 	}
-	m.logf("old supervisor: stopped %s", name)
+}
+
+// oldSupervisorRelease names the supervisor of OpenShell release ("" when
+// its record names none) in the feed's lines.
+func oldSupervisorRelease(release string) string {
+	if release == "" {
+		return "an OpenShell release older than " + openshell.SupportedMin + ", as far as DefenseClaw knows"
+	}
+	return "OpenShell " + release
+}
+
+// oldSupervisorUnflushedStop is the feed's line for the legacy MicroVM name
+// that DefenseClaw stopped without a confirmed flush because its network
+// could not be closed (why).
+func oldSupervisorUnflushedStop(name, release string, why error) string {
+	return "⚠ DefenseClaw stopped " + name + "'s legacy MicroVM without a confirmed disk flush, because its network could not be closed (" +
+		why.Error() + "): files it wrote since its last flush may be missing or end in zero bytes, so check them before you bring the work back. " +
+		"Its session ran the supervisor of " + oldSupervisorRelease(release) + " (NVIDIA/OpenShell#4494), which must not run with open egress"
 }
 
 // oldSupervisorStopFailed is the feed's line for the sandbox name whose
 // session runs the supervisor of OpenShell release ("" when its record
 // names none) and which DefenseClaw could not stop (err).
 func oldSupervisorStopFailed(name, release string, err error) string {
-	which := "OpenShell " + release
-	if release == "" {
-		which = "an OpenShell release older than " + openshell.SupportedMin + ", as far as DefenseClaw knows"
-	}
+	which := oldSupervisorRelease(release)
 	if errors.Is(err, errLegacyFlushUnconfirmed) {
-		return "⚠ DefenseClaw kept " + name + "'s legacy MicroVM because its disk flush could not be confirmed. Its network is being closed while its compute and disk are kept. " +
+		return "⚠ DefenseClaw kept " + name + "'s legacy MicroVM because its disk flush could not be confirmed with the VM's processes paused. Its network is closed (DefenseClaw's proxy and its direct OpenShell rules) while its compute and disk are kept. " +
 			"Repair guest sync to let the automatic stop retry; if you accept possible loss of unsynced writes, explicitly run `defenseclaw sandbox stop " + name + "`. " +
 			"Its session still runs the supervisor of " + which + " (NVIDIA/OpenShell#4494)"
 	}
