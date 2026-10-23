@@ -124,6 +124,32 @@ func TestSimpleCommandsActionBoundVariableProofBoundary(t *testing.T) {
 	}
 }
 
+func TestSimpleCommandsZshHistoryKeepsInterpreterContext(t *testing.T) {
+	for _, tt := range []struct {
+		name, command, child string
+		zshHistory           bool
+	}{
+		{"zsh", `zsh -c 'history -c'`, `history -c`, true},
+		{"full path zsh", `/bin/zsh -c 'history -c'`, `history -c`, true},
+		{"wrapped zsh", `env zsh -c 'history -c'`, `history -c`, true},
+		{"zsh list", `zsh -c 'echo ok; history -c'`, `history -c`, true},
+		{"bash", `bash -c 'history -c'`, `history -c`, false},
+		{"zsh unset", `zsh -c 'unset HISTFILE'`, `unset HISTFILE`, false},
+		{"bash within zsh", `zsh -c "bash -c 'history -c'"`, `history -c`, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			input := Input{Tool: "shell", Command: tt.command, CWD: "/repo",
+				ActiveHome: "/home/alice", DialectHint: DialectPOSIX}
+			children := SimpleCommands(input, Analyze(input))
+			if !slices.ContainsFunc(children, func(child SimpleCommand) bool {
+				return child.Text == tt.child && child.ZshHistoryBuiltin == tt.zshHistory
+			}) {
+				t.Errorf("children=%#v; want %q zshHistory=%v", children, tt.child, tt.zshHistory)
+			}
+		})
+	}
+}
+
 func TestSimpleCommandsWindowsStandaloneExpressionNeedsNoReduction(t *testing.T) {
 	input := Input{Tool: "shell", Command: "Write-Output (Get-Date)",
 		CWD: `C:\repo`, DialectHint: DialectPowerShell}

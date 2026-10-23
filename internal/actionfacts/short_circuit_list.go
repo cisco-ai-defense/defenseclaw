@@ -498,7 +498,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 					bodies = append(bodies, body)
 				}
 				program, _ := simpleStaticWord(call.Args[0], nil)
-				_, _, trapAction, _ := simpleNestedScript(call, nil, nil)
+				_, _, trapAction, _ := simpleNestedScript(call, nil, nil, nil)
 				if (program == "eval" || program == "trap" && trapAction) && len(functions) != 0 {
 					called, ok := simpleEvalFunctionNames(call)
 					if !ok {
@@ -552,7 +552,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 // eval parses its static script in the caller's shell. Function definitions
 // from the enclosing action remain visible to calls inside that script.
 func simpleEvalFunctionNames(call *syntax.CallExpr) ([]string, bool) {
-	script, _, nested, static := simpleNestedScript(call, nil, nil)
+	script, _, nested, static := simpleNestedScript(call, nil, nil, nil)
 	if !nested || !static {
 		return nil, false
 	}

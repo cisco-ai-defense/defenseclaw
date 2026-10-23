@@ -126,3 +126,31 @@ func TestTrustedActionW24StartupDirectoryAndBoundVariableLimits(t *testing.T) {
 		})
 	}
 }
+
+func TestTrustedActionW24ZshHistoryDoesNotInheritBashClearGrammar(t *testing.T) {
+	const connector = "w24-zsh-history-test"
+	installDefaultProfileConnector(t, connector)
+	for _, tt := range []struct {
+		name, command string
+		wantFinding   bool
+	}{
+		{"zsh", `zsh -c 'history -c'`, false},
+		{"full path zsh", `/bin/zsh -c 'history -c'`, false},
+		{"wrapped zsh", `env zsh -c 'history -c'`, false},
+		{"bash", `bash -c 'history -c'`, true},
+		{"zsh unset HISTFILE", `zsh -c 'unset HISTFILE'`, true},
+		{"nested bash in zsh", `zsh -c "bash -c 'history -c'"`, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			input := actionfacts.Input{Tool: "shell", Command: tt.command,
+				CWD: "/repo", ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX}
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: tt.command, Connector: connector, EnforcementCapable: true,
+			})
+			got := findingWithID(findings, "integrity.history_tamper") != nil
+			if got != tt.wantFinding {
+				t.Errorf("history finding=%v, want %v: %v", got, tt.wantFinding, FindingStrings(findings))
+			}
+		})
+	}
+}

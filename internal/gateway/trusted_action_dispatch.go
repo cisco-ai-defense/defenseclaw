@@ -210,6 +210,13 @@ func dispatchTrustedAction(
 				child.record, child.recordTelemetry = nil, nil
 				child.simpleCommandPass = true
 				childFindings := dispatchTrustedAction(parent, child)
+				if simple.ZshHistoryBuiltin {
+					// Zsh's history builtin lists events (fc -l). The Bash-only
+					// history -c clear rule does not apply inside that shell.
+					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+						return f.RuleID == "integrity.history_tamper"
+					})
+				}
 				if simple.UnresolvedBoundVariable {
 					if !checkedWholeWrite {
 						checkedWholeWrite = true

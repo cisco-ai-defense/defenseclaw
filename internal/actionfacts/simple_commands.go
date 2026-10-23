@@ -20,6 +20,10 @@ import (
 type SimpleCommand struct {
 	Text string
 	CWD  string
+	// ZshHistoryBuiltin marks a history command in an explicitly invoked zsh
+	// body. Zsh history is fc -l, so Bash's history -c clear grammar does not
+	// apply to this child.
+	ZshHistoryBuiltin bool
 	// UnresolvedBoundVariable means a parameter in Text is bound elsewhere
 	// in the action but this walk could not carry its value into Text. The
 	// original action decides the protected-write class for that value.
@@ -56,10 +60,10 @@ func (s simpleShellState) clone() simpleShellState {
 // pass. Ordinary assignments and known home or local variable expansions
 // are resolved; a subshell or pipeline stage has its own shell state.
 func SimpleCommands(input Input, facts Facts) []SimpleCommand {
-	return simpleCommands(input, facts, 0)
+	return simpleCommands(input, facts, 0, "")
 }
 
-func simpleCommands(input Input, facts Facts, depth int) []SimpleCommand {
+func simpleCommands(input Input, facts Facts, depth int, interpreter string) []SimpleCommand {
 	if facts.Parse.Dialect == DialectPowerShell || facts.Parse.Dialect == DialectCMD {
 		return windowsSimpleCommands(input, facts)
 	}
@@ -111,7 +115,7 @@ func simpleCommands(input Input, facts Facts, depth int) []SimpleCommand {
 		duplication := slices.ContainsFunc(stmt.Redirs, func(redirect *syntax.Redirect) bool {
 			return redirect.Op == syntax.DplIn || redirect.Op == syntax.DplOut
 		})
-		_, _, nested, _ := simpleNestedScript(call, nil, nil)
+		_, _, nested, _ := simpleNestedScript(call, nil, nil, nil)
 		if !prefix && !duplication && !nested {
 			return nil
 		}
@@ -210,7 +214,9 @@ func simpleCommands(input Input, facts Facts, depth int) []SimpleCommand {
 			if state.cwdUnknown && simpleRelativePathOperand(text) {
 				unproven = true
 			}
+			call, _ := stmt.Cmd.(*syntax.CallExpr)
 			command := SimpleCommand{Text: text, CWD: state.cwd,
+				ZshHistoryBuiltin:       simpleZshHistoryCall(call, effective, interpreter),
 				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound)}
 			if !emitted[command] {
 				result = append(result, command)
@@ -219,9 +225,10 @@ func simpleCommands(input Input, facts Facts, depth int) []SimpleCommand {
 					return []SimpleCommand{{EvaluationFailure: "limit"}}
 				}
 			}
-			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
+			if call != nil {
 				var innerCWDUnknown bool
-				script, shared, nested, static := simpleNestedScript(call, effective, &innerCWDUnknown)
+				var innerInterpreter string
+				script, shared, nested, static := simpleNestedScript(call, effective, &innerCWDUnknown, &innerInterpreter)
 				if nested {
 					if !static || len(script) > maxCommandBytes {
 						return []SimpleCommand{{EvaluationFailure: "parse"}}
@@ -241,9 +248,15 @@ func simpleCommands(input Input, facts Facts, depth int) []SimpleCommand {
 						return []SimpleCommand{{EvaluationFailure: "parse"}}
 					}
 					innerFacts := Analyze(innerInput)
-					inner := simpleCommands(innerInput, innerFacts, depth+1)
+					if innerInterpreter == "" {
+						innerInterpreter = interpreter
+					}
+					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter)
 					if len(inner) == 0 && strings.TrimSpace(innerInput.Command) != "" {
-						inner = []SimpleCommand{{Text: innerInput.Command, CWD: innerInput.CWD}}
+						zshHistory := innerInterpreter == "zsh" && len(innerFacts.Commands) == 1 &&
+							innerFacts.Commands[0].Executable == "history"
+						inner = []SimpleCommand{{Text: innerInput.Command, CWD: innerInput.CWD,
+							ZshHistoryBuiltin: zshHistory}}
 					}
 					changed = changed || len(inner) != 0
 					for _, child := range inner {
@@ -753,6 +766,14 @@ func simpleStaticProgramWord(word *syntax.Word, vars map[string]string) (string,
 	return simpleStaticWord(word, vars)
 }
 
+func simpleZshHistoryCall(call *syntax.CallExpr, vars map[string]string, interpreter string) bool {
+	if interpreter != "zsh" || call == nil || len(call.Args) == 0 {
+		return false
+	}
+	program, known := simpleStaticProgramWord(call.Args[0], vars)
+	return known && program == "history"
+}
+
 // A quoted -c or trap action can contain physical lines. Other shell words
 // still require one line so they cannot silently become a different command.
 func simpleStaticScriptWord(word *syntax.Word, vars map[string]string) (string, bool) {
@@ -864,14 +885,14 @@ func simpleResolvedVariables(source string, vars map[string]string) (string, boo
 
 // simpleNestedScript returns a static shell -c or eval body. eval shares the
 // caller's variables and directory; a -c shell starts a child shell.
-func simpleNestedScript(call *syntax.CallExpr, vars map[string]string, cwdUnknown *bool) (script string, shared, nested, static bool) {
+func simpleNestedScript(call *syntax.CallExpr, vars map[string]string, cwdUnknown *bool, interpreter *string) (script string, shared, nested, static bool) {
 	if call == nil || len(call.Args) == 0 {
 		return "", false, false, false
 	}
-	return simpleNestedScriptArgs(call.Args, vars, 0, cwdUnknown)
+	return simpleNestedScriptArgs(call.Args, vars, 0, cwdUnknown, interpreter)
 }
 
-func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth int, cwdUnknown *bool) (script string, shared, nested, static bool) {
+func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth int, cwdUnknown *bool, interpreter *string) (script string, shared, nested, static bool) {
 	if depth >= 8 || len(args) == 0 {
 		return "", false, true, false
 	}
@@ -955,7 +976,7 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		if childIndex <= 0 || childIndex >= len(args) {
 			return "", false, true, false
 		}
-		return simpleNestedScriptArgs(args[childIndex:], vars, depth+1, cwdUnknown)
+		return simpleNestedScriptArgs(args[childIndex:], vars, depth+1, cwdUnknown, interpreter)
 	}
 	shellProgram := filepath.Base(program)
 	switch shellProgram {
@@ -1000,6 +1021,9 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 				return "", false, true, false
 			}
 			value, known := simpleStaticScriptWord(args[index+1], vars)
+			if known && interpreter != nil {
+				*interpreter = shellProgram
+			}
 			return value, false, true, known
 		}
 	}
