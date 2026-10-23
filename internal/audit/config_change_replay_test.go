@@ -166,8 +166,11 @@ func TestLogConfigChangeEveryOfferIsTheSameRecord(t *testing.T) {
 		t.Fatalf("the record has the time %s, want the change's %s", sent[0].Timestamp(), at)
 	}
 	row, found, err := store.storedChangeRow(t.Context(), recordID)
-	if err != nil || !found || !row.holds(sent[0]) {
+	if err != nil || !found || !row.holds(sent[0], recordBytes(t, sent[0])) {
 		t.Fatalf("the stored row (found %t, %v) does not hold the record: %s", found, err, row.envelope)
+	}
+	if row.digest != recordSHA256(want) {
+		t.Fatalf("the stored row keeps the record digest %q, want the record's %s", row.digest, recordSHA256(want))
 	}
 	var rows int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE id = ?`, recordID).Scan(&rows); err != nil || rows != 1 {
@@ -366,5 +369,119 @@ func TestLogConfigChangePinsTheRecordBeforeAnySinkGetsIt(t *testing.T) {
 	}
 	if writes != 1 || sinksAtWrite != 0 {
 		t.Fatalf("pin writes = %d with %d records out, want one write before any record", writes, sinksAtWrite)
+	}
+}
+
+// A change whose pin file is lost is rebuilt from its stored row only as
+// the record that row was written from: the row keeps the digest of that
+// record, and an offer whose record has another body (a later binary that
+// builds the body of the same event differently, under the same id, run,
+// sidecar, binary and config) is refused, as is an offer for a row that
+// keeps no digest. A row whose digest is not the pinned record's refuses
+// the offer too. No sink gets the record, and no pin is written. Before,
+// the row's projection was compared without its body, so another body was
+// pinned and sent under the change's id.
+func TestLogConfigChangeRebuildsALostPinOnlyAsTheStoredRecord(t *testing.T) {
+	recordID := stableOccurrenceID("config.change", testConfigChangeID)
+	stored := func(t *testing.T) (*Store, *ConfigChangePins, string) {
+		t.Helper()
+		setTestProcess(t, "run-a", "sidecar-a", "1.0.4-dev.1")
+		store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
+		pins := testConfigChangePins(t)
+		logger := NewLogger(store)
+		emitter := newTestRuntimeV8Emitter(t, store, router.AdmissionOrdinary)
+		logger.SetRuntimeV8Emitter(emitter)
+		if err := logger.LogConfigChange(testAnchorChange(), nil, pins); err != nil {
+			t.Fatal(err)
+		}
+		built := builtRecords(emitter)
+		if len(built) != 1 {
+			t.Fatalf("built %d records, want 1", len(built))
+		}
+		row, found, err := store.storedChangeRow(t.Context(), recordID)
+		if err != nil || !found || row.digest != recordSHA256(recordBytes(t, built[0])) {
+			t.Fatalf("the stored row (found %t, %v) keeps the digest %q, want its record's", found, err, row.digest)
+		}
+		return store, pins, filepath.Join(pins.dir, testConfigChangeID+".json")
+	}
+	refused := func(t *testing.T, store *Store, pins *ConfigChangePins, change ConfigChange, pinFile string, pinWanted bool) {
+		t.Helper()
+		emitter := newTestRuntimeV8Emitter(t, store, router.AdmissionOrdinary)
+		logger := NewLogger(store)
+		logger.SetRuntimeV8Emitter(emitter)
+		if err := logger.LogConfigChange(change, nil, pins); err == nil {
+			t.Fatal("the offer succeeded")
+		} else {
+			t.Logf("refused: %v", err)
+		}
+		if built := builtRecords(emitter); len(built) != 0 {
+			t.Fatalf("the offer built %d records for the sinks, want none", len(built))
+		}
+		if _, err := os.Lstat(pinFile); (err == nil) != pinWanted {
+			t.Fatalf("pin file present = %t, want %t", err == nil, pinWanted)
+		}
+	}
+	otherBody := testAnchorChange()
+	otherBody.KeyIDsAdded = []string{"fleet-2026-12"}
+
+	t.Run("lost pin, the rebuild has another body", func(t *testing.T) {
+		store, pins, pinFile := stored(t)
+		if err := os.Remove(pinFile); err != nil {
+			t.Fatal(err)
+		}
+		refused(t, store, pins, otherBody, pinFile, false)
+	})
+	t.Run("lost pin, the row keeps no digest", func(t *testing.T) {
+		store, pins, pinFile := stored(t)
+		if _, err := store.db.Exec(`UPDATE audit_events SET record_sha256 = NULL WHERE id = ?`, recordID); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(pinFile); err != nil {
+			t.Fatal(err)
+		}
+		refused(t, store, pins, testAnchorChange(), pinFile, false)
+	})
+	t.Run("the row keeps another record's digest", func(t *testing.T) {
+		store, pins, pinFile := stored(t)
+		if _, err := store.db.Exec(`UPDATE audit_events SET record_sha256 = ? WHERE id = ?`,
+			strings.Repeat("e", 64), recordID); err != nil {
+			t.Fatal(err)
+		}
+		refused(t, store, pins, testAnchorChange(), pinFile, true)
+	})
+	t.Run("lost pin, the same record", func(t *testing.T) {
+		store, pins, pinFile := stored(t)
+		pinned, err := os.ReadFile(pinFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(pinFile); err != nil {
+			t.Fatal(err)
+		}
+		setTestProcess(t, "run-b", "sidecar-b", "1.0.4-dev.2")
+		logger := NewLogger(store)
+		logger.SetRuntimeV8Emitter(newTestRuntimeV8Emitter(t, store, router.AdmissionOrdinary))
+		if err := logger.LogConfigChange(testAnchorChange(), nil, pins); err != nil {
+			t.Fatal(err)
+		}
+		if again, err := os.ReadFile(pinFile); err != nil || !bytes.Equal(again, pinned) {
+			t.Fatalf("the pin made from the stored row is %s (%v), want the first pin %s", again, err, pinned)
+		}
+	})
+}
+
+// The record digest column is added to an audit store an earlier release
+// created, and adding it again is a no-op.
+func TestAuditEventRecordDigestMigrationIsAdditive(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
+	exists, err := store.hasColumn("audit_events", "record_sha256")
+	if err != nil || !exists {
+		t.Fatalf("audit_events.record_sha256 exists=%t err=%v", exists, err)
+	}
+	if err := migrateAuditEventRecordDigest(store.db); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if got := migrations[len(migrations)-1].description; got != configChangeRecordDigestMigrationDescription {
+		t.Fatalf("last migration = %q, want the record digest one", got)
 	}
 }
