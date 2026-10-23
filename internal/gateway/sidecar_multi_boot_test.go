@@ -150,6 +150,19 @@ type registrationPostureConnector struct {
 	setupPostures []string
 }
 
+// Models a per-user hook connector whose verified teardown revokes its scoped
+// credential, while Setup restores only the vendor registration.
+type revokingRegistrationPostureConnector struct{ *registrationPostureConnector }
+
+func (*revokingRegistrationPostureConnector) HookAPIPath() string { return "/api/v1/cursor/hook" }
+
+func (c *revokingRegistrationPostureConnector) Teardown(ctx context.Context, opts connector.SetupOpts) error {
+	if err := c.registrationPostureConnector.Teardown(ctx, opts); err != nil {
+		return err
+	}
+	return connector.RemoveHookAPIToken(opts.DataDir, c.Name())
+}
+
 type orphanReconcileFailureConnector struct {
 	bootStubConnector
 	hookPath             string
@@ -1593,10 +1606,10 @@ func TestMultiConnectorPublicationFailureRestoresSuccessfullyRemovedConnector(t 
 	}
 	s.health = NewSidecarHealth()
 	removedArtifact := filepath.Join(testenv.PrivateTempDir(t), "removed-cursor-posture")
-	removed := &registrationPostureConnector{bootStubConnector: bootStubConnector{
+	removed := &revokingRegistrationPostureConnector{registrationPostureConnector: &registrationPostureConnector{bootStubConnector: bootStubConnector{
 		stubConnector: stubConnector{name: "cursor"},
 		artifactPath:  removedArtifact,
-	}}
+	}}}
 	survivor := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
 	registry := connector.NewRegistry()
 	registry.RegisterBuiltin(removed)
@@ -1619,6 +1632,23 @@ func TestMultiConnectorPublicationFailureRestoresSuccessfullyRemovedConnector(t 
 	}
 	if err := os.WriteFile(removedArtifact, []byte("action|hilt=true\n"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	priorToken, err := connector.EnsureHookAPIToken(s.cfg.DataDir, "cursor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenPath, err := connector.HookAPITokenFilePath(s.cfg.DataDir, "cursor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorTokenBytes, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{scannerCfg: &config.Config{DataDir: s.cfg.DataDir}}
+	api.SetHookAPITokens(map[string]string{"cursor": priorToken})
+	if !api.hookAPITokenMatches("cursor", priorToken) {
+		t.Fatal("prior Cursor hook credential did not authenticate")
 	}
 	priorLockBytes, err := os.ReadFile(filepath.Join(s.cfg.DataDir, "hook_contract_lock.json"))
 	if err != nil {
@@ -1652,6 +1682,9 @@ func TestMultiConnectorPublicationFailureRestoresSuccessfullyRemovedConnector(t 
 	if _, err := os.Stat(removedArtifact); !os.IsNotExist(err) {
 		t.Fatalf("successful removal left Cursor runtime artifact: %v", err)
 	}
+	if api.hookAPITokenMatches("cursor", priorToken) {
+		t.Fatal("removed Cursor hook credential still authenticates")
+	}
 	if lock := connector.LoadHookContractLockEntry(s.cfg.DataDir, "cursor"); lock.Connector != "" {
 		t.Fatalf("successful removal left Cursor lock: %+v", lock)
 	}
@@ -1677,6 +1710,12 @@ func TestMultiConnectorPublicationFailureRestoresSuccessfullyRemovedConnector(t 
 	}
 	if body, readErr := os.ReadFile(removedArtifact); readErr != nil || string(body) != "action|hilt=true\n" {
 		t.Fatalf("restored Cursor artifact = %q, %v", body, readErr)
+	}
+	if body, readErr := os.ReadFile(tokenPath); readErr != nil || !reflect.DeepEqual(body, priorTokenBytes) {
+		t.Fatalf("restored Cursor token file does not match original credential bytes: %v", readErr)
+	}
+	if !api.hookAPITokenMatches("cursor", priorToken) {
+		t.Fatal("restored Cursor hook credential does not authenticate")
 	}
 	if body, readErr := os.ReadFile(filepath.Join(s.cfg.DataDir, "hook_contract_lock.json")); readErr != nil || !reflect.DeepEqual(body, priorLockBytes) {
 		t.Fatalf("restored lock = %q, %v; want exact prior bytes %q", body, readErr, priorLockBytes)

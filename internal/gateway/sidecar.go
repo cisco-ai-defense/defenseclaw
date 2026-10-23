@@ -6420,6 +6420,14 @@ func rollbackMultiConnectorPublication(ctx context.Context, transaction multiCon
 		if removed.conn != nil {
 			name = removed.conn.Name()
 		}
+		// Teardown revokes per-user scoped credentials after removing the
+		// registration. Restore the same credential before reviving either a
+		// hook registration or a byte-exact plugin snapshot.
+		if removed.conn != nil && removed.opts.HookAPITokenScoped {
+			if err := connector.PublishHookAPIToken(removed.opts.DataDir, name, removed.opts.HookAPIToken); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore removed connector %s hook credential: %w", name, err))
+			}
+		}
 		if removed.pluginSnapshot != nil {
 			if err := removed.pluginSnapshot.Restore(); err != nil {
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore removed %s plugin registration: %w", name, err))
@@ -6517,6 +6525,15 @@ func verifyPreviouslyActiveConnectorRollback(applied multiConnectorSetupRollback
 	prior, err := priorConnectorSetupOpts(applied)
 	if err != nil {
 		return err
+	}
+	if prior.HookAPITokenScoped {
+		currentToken, err := connector.LoadHookAPIToken(prior.DataDir, applied.conn.Name())
+		if err != nil {
+			return fmt.Errorf("read restored hook credential: %w", err)
+		}
+		if currentToken != prior.HookAPIToken {
+			return errors.New("restored hook credential does not match the prior connector credential")
+		}
 	}
 	if err := verifyEffectiveHookRegistration(prior, applied.conn); err != nil {
 		return err

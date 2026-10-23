@@ -131,6 +131,7 @@ from defenseclaw.platform_support import (
     LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
     local_shell_stacks_supported,
 )
+from defenseclaw.removed_connectors import KEPT_HOOK_TOKEN_NAMES
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
 from defenseclaw.sandbox_images import verified_harness_contract
 from defenseclaw.scanner import settings as scanner_settings
@@ -4363,10 +4364,12 @@ def _rotate_token_transaction(
             raise click.ClickException(
                 "Connector hook credential scope changed before rotation; no credentials were modified."
             )
-        # A leftover sidecar still authenticates against a gateway hook route.
-        # Revoke it without presenting it as a configured runtime owner.
+        # An unconfigured sidecar can still authenticate against a gateway
+        # hook route. Revoke it without presenting it as a runtime owner.
         persisted_scopes = set(_rotate_token_persisted_hook_scopes(data_dir))
-        orphan_scopes = sorted(persisted_scopes - configured_scopes)
+        # Removed hooks that fail open without their credential still need the
+        # kept sidecar to reach the gateway's blocking retired route.
+        orphan_scopes = sorted(persisted_scopes - configured_scopes - KEPT_HOOK_TOKEN_NAMES)
         tracked_scopes = sorted(configured_scopes | persisted_scopes)
         for connector in tracked_scopes:
             hook_locks.enter_context(locked_file_update(_rotate_token_hook_path(data_dir, connector)))

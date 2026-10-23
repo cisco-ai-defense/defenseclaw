@@ -53,6 +53,8 @@ class _Removed:
     default_dir: str
     config_what: str
     config_step: str
+    # Mirrors removed.go keepHookToken until the removed connectors expire.
+    keep_hook_token: bool = False
 
 
 _CONNECTORS: tuple[_Removed, ...] = (
@@ -68,6 +70,7 @@ _CONNECTORS: tuple[_Removed, ...] = (
             "remove every hook whose command runs openhands-hook.sh (or defenseclaw-hook --connector openhands) "
             "from this file, then restart OpenHands"
         ),
+        keep_hook_token=True,
     ),
     _Removed(
         name="omnigent",
@@ -85,6 +88,7 @@ _CONNECTORS: tuple[_Removed, ...] = (
 )
 
 NAMES: tuple[str, ...] = tuple(c.name for c in _CONNECTORS)
+KEPT_HOOK_TOKEN_NAMES: frozenset[str] = frozenset(c.name for c in _CONNECTORS if c.keep_hook_token)
 
 
 def is_removed(name: str | None) -> bool:
@@ -476,7 +480,7 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
                     )
                 )
     hook_token = os.path.join(hooks, f".hook-{c.name}.token")
-    if c.name == "openhands" and os.path.lexists(hook_token):
+    if c.keep_hook_token and os.path.lexists(hook_token):
         items.append(_kept_token(c, hook_token))
         hook_token = ""
     for token in (hook_token, os.path.join(hooks, f".otlp-{c.name}.token")):
