@@ -32,7 +32,7 @@ The rendered outage mode resolves, in observe and action mode alike, from:
 3. The global `guardrail.hook_fail_mode`.
 4. `closed` outside Secure Client; `open` under it.
 
-Any value other than `open` (in any case) is `closed`. Per-user Cursor action mode always closes hook outages even if the config selects `open`. In observe mode its running hook uses the configured outage mode, which is `closed` by default. Outside Secure Client, Cursor writes `failClosed: true` in action and observe mode, so a hook process that never answers blocks; an explicit `open` applies to gateway outages the running hook sees, not to a stopped or killed hook process. On a managed computer the running hook follows the administrator's resolved fail mode.
+Any value other than `open` (in any case) is `closed`. Per-user Cursor action mode always closes hook outages. In observe mode its running hook uses the configured outage mode, which is `closed` by default. Outside Secure Client, Cursor writes `failClosed: true` in action and observe mode, so a hook process that never answers blocks; the configured mode decides only what the running hook does. On a managed computer the running hook follows the administrator's resolved fail mode.
 
 ### Refusals that ignore the fail mode
 

@@ -114,7 +114,7 @@ describe('Observe mode policy findings and gateway outages', () => {
     for (const connector of ['claudecode', 'antigravity']) {
       const section = page(`connectors/${connector}.mdx`).split('## What it can block or ask')[1]?.split('## Files it changes')[0] ?? '';
       assert.match(section, /Observe mode.{0,120}policy findings without blocking/i, connector);
-      assert.match(section, /default fail mode `closed`.{0,140}gateway is unreachable/i, connector);
+      assert.match(section, /By default the running hook (?:blocks|denies)[^.]{0,80}gateway is unreachable/i, connector);
     }
   });
 

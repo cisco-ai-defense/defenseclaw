@@ -580,13 +580,16 @@ FACTS = [
 ]
 
 
-def test_runtracked_comment_names_the_linux_custodian_escape_limit():
+def test_runtracked_comment_names_the_linux_containment():
+    # w25-misc (0b503331ab) runs a Linux scanner tree as PID 1 of a private PID
+    # and user namespace, which closes the custodian SIGKILL escape the comment
+    # used to name; the comment names the namespace and the refusal instead.
     source = (ROOT / "internal/processutil/command.go").read_text(encoding="utf-8")
     match = re.search(r"// RunTracked runs.*?\nfunc RunTracked\(", source, re.DOTALL)
     assert match is not None
     comment = " ".join(line.removeprefix("//").strip() for line in match.group().splitlines())
-    assert "scanner SIGKILLs the custodian" in comment
-    assert "a detached child can keep running" in comment
+    assert "PID 1 of a new PID and user namespace" in comment
+    assert "RunTracked returns ErrNotContained" in comment
 
 
 @pytest.mark.parametrize("fact", [f[0] for f in FACTS])

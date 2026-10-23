@@ -120,6 +120,8 @@ def _write_current_runtime(cfg: SimpleNamespace, home: Path, modes: dict[str, st
     for script_name in _SHARED_HOOK_SCRIPTS:
         script_body = f"canonical shared hook: {script_name}\n".encode()
         (hook_dir / script_name).write_bytes(script_body)
+        # Setup installs hook scripts 0700; a script the agent cannot run is drift (w20).
+        (hook_dir / script_name).chmod(0o700)
         shared_digests[script_name] = "sha256:" + hashlib.sha256(script_body).hexdigest()
     entries = {}
     for name, mode in modes.items():
@@ -127,6 +129,7 @@ def _write_current_runtime(cfg: SimpleNamespace, home: Path, modes: dict[str, st
         script_path = hook_dir / script_name
         script_body = ("\n".join(_HOOK_FAIL_MODE_LINES[f"{script_name}/{mode}"]) + "\n").encode()
         script_path.write_bytes(script_body)
+        script_path.chmod(0o700)
         config_path = home / (".claude/settings.json" if name == "claudecode" else ".codex/managed_config.toml")
         entries[name] = {
             "connector": name,
@@ -477,7 +480,11 @@ def test_native_deny_connector_reports_the_mode_its_hook_renders(
     assert report["desired"] == "closed"
     assert report["current"] is False
     assert report["drift"] == (
-        ["registration-digest-stale", "hook-script-open"] if connector == "hermes" else ["hook-script-open"]
+        # Hermes seals its script in the contract lock: the open rewrite is
+        # also an edit of the sealed hook (registration_integrity_drift).
+        ["registration-digest-stale", "hook-runtime-stale", "hook-script-open"]
+        if connector == "hermes"
+        else ["hook-script-open"]
     )
     assert report["note"] == ""
 

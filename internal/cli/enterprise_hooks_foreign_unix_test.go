@@ -688,7 +688,6 @@ func TestStandaloneCopilotVSCodeWritesOnlyToEnrolledAccounts(t *testing.T) {
 			cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"copilot": {}}
 			cfg.Enterprise.Enrollment.UnenrolledUsers = tc.unenrolled
 			cfg.Enterprise.Enrollment.ExcludeUsers = []string{"4202"}
-			useStandaloneForeignHookFenceFixture(t)
 			enterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
 			accounts := []enterprisehooks.UnixEligibleAccount{
 				{User: "alice", UID: 4201, GID: 4201, Home: "/home/alice", HomeInode: 7},

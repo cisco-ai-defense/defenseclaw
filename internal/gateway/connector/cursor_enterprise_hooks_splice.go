@@ -54,7 +54,7 @@ func spliceCursorEnterpriseHooks(data []byte, adapterPath, failMode string) ([]b
 		legacyCommand: true,
 		previousWindowsCursorEnterpriseHookCommand(adapterPath): true,
 	}
-	entry, err := json.Marshal(windowsCursorEnterpriseHookEntry(command, failMode))
+	entry, err := json.Marshal(windowsCursorEnterpriseHookEntry(command))
 	if err != nil {
 		return nil, false
 	}

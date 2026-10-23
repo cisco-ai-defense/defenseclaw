@@ -841,8 +841,6 @@ type fakeCopy struct {
 	pulled    []workspace.PullOptions
 	// refreshErr is what Refresh fails with.
 	refreshErr error
-	// onPull runs as a Pull (not a reuse) reads the copy.
-	onPull func()
 	// onApply runs while an applied pull owns the command.
 	onApply func()
 	// diff is what Diff answers.

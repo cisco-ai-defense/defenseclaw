@@ -1051,7 +1051,7 @@ func (c *hookOnlyConnector) checkAgentSettings(opts SetupOpts) error {
 	if c.name != "copilot" {
 		return nil
 	}
-	if err := validateCopilotHookPolicy(opts, c.configPath(opts)); err != nil {
+	if err := validateCopilotOperatorSettings(opts); err != nil {
 		return refuseForAgentConfig(fmt.Errorf("%w; fix that setting, then run: defenseclaw-gateway restart", err))
 	}
 	return nil
