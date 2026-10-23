@@ -514,7 +514,8 @@ func TestOldGatewayErrorMicroVMHoldsTheUpgradeUntilOpenShellReportsItGone(t *tes
 	endIn(t, e, "box", openshell.PhaseProvisioning)
 	endIn(t, e, "box", openshell.PhaseError, vmExited)
 	if line := feedLine(); !strings.Contains(line, "this OpenShell can neither stop nor start a sandbox in its error state: "+upgrade+
-		", then `defenseclaw sandbox stop box` and `defenseclaw sandbox start box`") {
+		", then fix why its MicroVM exited; then `defenseclaw sandbox stop box` and `defenseclaw sandbox start box`") ||
+		!strings.Contains(line, "last successful disk sync") || strings.Contains(line, "which keep the sandbox and its work") {
 		t.Fatalf("the feed's line for a MicroVM whose VM is gone: %q", line)
 	}
 	if got := busy(t, e); got != 0 {

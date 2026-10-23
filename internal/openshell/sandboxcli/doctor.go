@@ -359,7 +359,7 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Status, c.Detail = openshell.StatusWarn, "could not list the sandboxes: "+apiError(err).Error()
 		return c
 	}
-	var bad, stopped, stoppedSilent, errored, timedOut, lingeringVMs, lingeringWayOn []string
+	var bad, stopped, stoppedSilent, errored, erroredVMs, timedOut, lingeringVMs, lingeringWayOn []string
 	running := 0
 	// A sandbox of the compute driver the gateway ran before a switch is in
 	// OpenShell's error state because the gateway cannot run it, not because a
@@ -389,9 +389,15 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		case sb.Phase != "error" || otherDriverNames[sb.Name]:
 		case openshell.ProvisioningTimedOut(sb.PhaseReason):
 			timedOut = append(timedOut, sb.Name)
-		case sb.Driver == "vm" && openshell.LingeringVM(openshell.PhaseError, sb.PhaseReason, false) && openshell.MainProcessFailed(sb.PhaseReason):
+		case sb.Driver == "vm" && openshell.LingeringVM(openshell.PhaseError, sb.PhaseReason, false):
 			lingeringVMs = append(lingeringVMs, sb.Name)
-			lingeringWayOn = append(lingeringWayOn, sb.Name+": "+openshell.StopWayOn(sb.Name, openshell.PhaseError, sb.PhaseReason, true))
+			way := openshell.StopWayOn(sb.Name, openshell.PhaseError, sb.PhaseReason, true)
+			if !openshell.MainProcessFailed(sb.PhaseReason) {
+				way += "; its MicroVM work is kept only through the last successful disk sync"
+			}
+			lingeringWayOn = append(lingeringWayOn, sb.Name+": "+way)
+		case sb.Driver == "vm":
+			erroredVMs = append(erroredVMs, sb.Name)
 		default:
 			errored = append(errored, sb.Name)
 		}
@@ -418,10 +424,11 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Status = openshell.StatusFail
 		c.Detail = "hooks do not reach the ingress " + firstNonEmpty(ingress, "(unknown)") + ", so every tool call fails closed: " + strings.Join(bad, "; ")
 		c.Fix = &openshell.Fix{Summary: "fix the cause above, then start the session again"}
-	case len(errored) > 0 || len(timedOut) > 0 || len(lingeringVMs) > 0:
+	case len(errored) > 0 || len(erroredVMs) > 0 || len(timedOut) > 0 || len(lingeringVMs) > 0:
 		// A Docker sandbox whose container stopped can stop and start
-		// again. A MicroVM whose main process failed needs a lossy end or delete;
-		// one whose provisioning timed out starts again without a stop,
+		// again. A MicroVM still held after its main process failed needs a
+		// lossy end or delete; another held VM gets its phase-specific stop
+		// advice, and one whose provisioning timed out starts without a stop,
 		// which OpenShell refuses for it (NVIDIA/OpenShell#4231, GAP-0278).
 		c.Status = openshell.StatusWarn
 		var details, fixes []string
@@ -429,6 +436,11 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 			details = append(details, strings.Join(errored, ", ")+isAre(errored)+" in OpenShell's error state (the container stopped: Docker restarted, or the workload failed)")
 			fixes = append(fixes, "fix what stopped "+itThem(errored)+", then `"+CommandName+" stop NAME` and `"+CommandName+
 				" start NAME`, which keep the sandbox and its work")
+		}
+		if len(erroredVMs) > 0 {
+			details = append(details, strings.Join(erroredVMs, ", ")+isAre(erroredVMs)+" in OpenShell's error state (the MicroVM failed or exited)")
+			fixes = append(fixes, "fix what stopped "+itThem(erroredVMs)+", then `"+CommandName+" stop NAME` and `"+CommandName+
+				" start NAME`; the sandbox remains, but its MicroVM work is kept only through the last successful disk sync")
 		}
 		if len(lingeringVMs) > 0 {
 			details = append(details, strings.Join(lingeringVMs, ", ")+isAre(lingeringVMs)+" in OpenShell's error state; "+itThem(lingeringVMs)+" may still have a running MicroVM")
@@ -450,7 +462,8 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 			// while OpenShell does not report a MicroVM in the error state
 			// stopped (heldVMs), which this OpenShell neither stops nor
 			// starts: only its delete lets the upgrade go ahead.
-			allErrored := append(slices.Clone(errored), lingeringVMs...)
+			allErrored := append(slices.Clone(errored), erroredVMs...)
+			allErrored = append(allErrored, lingeringVMs...)
 			allErrored = append(allErrored, timedOut...)
 			c.Detail += ", where this OpenShell can neither stop nor start " + itThem(allErrored)
 			upgrade, move, waits := "upgrade OpenShell to "+openshell.InstallerVersion, "the upgrade", []string{"see Gateway"}
@@ -467,11 +480,16 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 			}
 			// What survives the upgrade: not the MicroVMs deleted for it.
 			deleted := func(name string) bool { return slices.Contains(heldVMs, name) }
-			errored, timedOut = slices.DeleteFunc(errored, deleted), slices.DeleteFunc(timedOut, deleted)
+			errored, erroredVMs = slices.DeleteFunc(errored, deleted), slices.DeleteFunc(erroredVMs, deleted)
+			timedOut = slices.DeleteFunc(timedOut, deleted)
 			var after []string
 			if len(errored) > 0 {
 				after = append(after, "`"+CommandName+" stop NAME` and `"+CommandName+" start NAME` for "+strings.Join(errored, ", ")+
 					", which keep the sandbox and its work")
+			}
+			if len(erroredVMs) > 0 {
+				after = append(after, "`"+CommandName+" stop NAME` and `"+CommandName+" start NAME` for "+strings.Join(erroredVMs, ", ")+
+					"; the sandbox remains, but its MicroVM work is kept only through the last successful disk sync")
 			}
 			if len(timedOut) > 0 {
 				after = append(after, "for "+strings.Join(timedOut, ", ")+" wait a minute for OpenShell's cleanup, then `"+CommandName+

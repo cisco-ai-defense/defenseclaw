@@ -1617,10 +1617,18 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		// A failed MicroVM's main process can leave its VM running. Its
 		// stop is refused; only an explicit end with the loss explained by
 		// StopWayOn, or deletion, lets OpenShell release it.
-		if runtime, _ := s.runtimeStopCause(s.sb); runtime == "MicroVM" &&
-			openshell.LingeringVM(openshell.PhaseError, s.errorPhaseReason, false) && openshell.MainProcessFailed(s.errorPhaseReason) {
-			a.note("Sandbox " + name + " is in OpenShell's error state → " +
-				openshell.StopWayOn(name, openshell.PhaseError, s.errorPhaseReason, true))
+		if runtime, _ := s.runtimeStopCause(s.sb); runtime == "MicroVM" {
+			if openshell.LingeringVM(openshell.PhaseError, s.errorPhaseReason, false) {
+				way := openshell.StopWayOn(name, openshell.PhaseError, s.errorPhaseReason, true)
+				if !openshell.MainProcessFailed(s.errorPhaseReason) {
+					way += "; its MicroVM work is kept only through the last successful disk sync"
+				}
+				a.note("Sandbox " + name + " is in OpenShell's error state → " +
+					way)
+				return nil
+			}
+			a.note("Sandbox " + name + " is in OpenShell's error state → fix why its MicroVM failed, then `" + CommandName + " stop " + name +
+				"` and `" + CommandName + " start " + name + "`; the sandbox remains, but its MicroVM work is kept only through the last successful disk sync")
 			return nil
 		}
 		a.note("Sandbox " + name + " is in OpenShell's error state → fix what stopped it, then `" + CommandName + " stop " + name +

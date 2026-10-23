@@ -608,9 +608,10 @@ func stopLosesWrites(driver string) bool {
 // its container stopped (a Docker restart stops every one), its workload
 // failed, or OpenShell gave up provisioning it. A gateway that runs
 // sandboxes (openshell.SupportedMin and later) stops a sandbox in that phase
-// and starts it again after (NVIDIA/OpenShell#4231), which keeps the
-// sandbox and its work, except after a provisioning timeout: OpenShell
-// refuses that stop while its own cleanup reclaims what the attempt started,
+// and starts it again after (NVIDIA/OpenShell#4231). A failed MicroVM
+// keeps only work that reached its last successful disk sync. After a
+// provisioning timeout OpenShell refuses that stop while its own cleanup
+// reclaims what the attempt started,
 // and a start after the cleanup provisions the sandbox again. An older
 // gateway can neither stop nor start it: upgrade (upgradeWayOn, "" on a
 // gateway that runs sandboxes) is how OpenShell is upgraded first, and the
@@ -631,19 +632,32 @@ func errorPhaseWayOn(name, reason, upgrade string, microVM bool) string {
 		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then wait a minute for OpenShell's cleanup of " +
 			"the provisioning that timed out and `defenseclaw sandbox start " + name + "` (no stop: OpenShell " + openshell.SupportedMin +
 			" refuses to stop a sandbox whose provisioning timed out), which provisions it again"
+	case upgrade != "" && microVM:
+		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then " + exitedMicroVMWayOn(name)
 	case upgrade != "":
 		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then `defenseclaw sandbox stop " + name +
 			"` and `defenseclaw sandbox start " + name + "`, which keep the sandbox and its work"
 	case microVM && openshell.LingeringVM(openshell.PhaseError, reason, false):
-		// Its stop is returned as it is, and its start ends the VM with
-		// no flush: neither keeps all of its work.
-		return openshell.StopWayOn(name, openshell.PhaseError, reason, true)
+		// OpenShell may still hold its VM. The main-process failure has an
+		// explicit lossy end path; other reasons get the phase's stop advice.
+		way := openshell.StopWayOn(name, openshell.PhaseError, reason, true)
+		if !openshell.MainProcessFailed(reason) {
+			way += "; its MicroVM work is kept only through the last successful disk sync"
+		}
+		return way
 	case openshell.ProvisioningTimedOut(reason):
 		return "OpenShell gave up provisioning it and refuses to stop it while its own cleanup reclaims what it started: wait a minute, then `defenseclaw sandbox start " +
 			name + "` (no stop), which provisions it again; a start that says the cleanup is still pending is tried again a little later"
+	case microVM:
+		return exitedMicroVMWayOn(name)
 	}
 	return "fix what stopped it (start Docker again, for one), then `defenseclaw sandbox stop " + name +
 		"` and `defenseclaw sandbox start " + name + "`, which keep the sandbox and its work"
+}
+
+func exitedMicroVMWayOn(name string) string {
+	return "fix why its MicroVM exited; then `defenseclaw sandbox stop " + name + "` and `defenseclaw sandbox start " + name +
+		"`; the sandbox remains, but its MicroVM work is kept only through the last successful disk sync"
 }
 
 // upgradeWayOn is how this host's OpenShell is upgraded when the gateway
@@ -887,7 +901,8 @@ func (m *Manager) legacyRunRefusal(except string) error {
 func unflushedStopMessage(name string) string {
 	return "⚠ " + name + "'s MicroVM went down without DefenseClaw stopping it (the OpenShell gateway restarted, for one), so what it wrote " +
 		"in its last seconds may be missing or end in zero bytes: check those files before you bring the work back (its review flags the ones " +
-		"that end in zero bytes). `defenseclaw sandbox stop` flushes first, and so do DefenseClaw's own gateway restarts"
+		"that end in zero bytes). `defenseclaw sandbox stop` requests a disk sync before stopping a running MicroVM; changes after the last successful disk sync may be lost. " +
+		"DefenseClaw restarts its own gateway only after OpenShell reports every MicroVM stopped"
 }
 
 // errorPhaseReason is why a sandbox is in OpenShell's error phase, in
