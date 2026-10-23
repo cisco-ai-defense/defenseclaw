@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
-    "postbuild": "tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts && npm run validate-seo",
+    "postbuild": "tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts && npm run validate-seo && npm run test:upgrade-guide",
     "start": "next start",
     "lint": "eslint .",
     "validate-links": "tsx ./scripts/validate-links.ts",
@@ -19,6 +19,7 @@
     "test:policy-creator": "tsx --test ./scripts/test-policy-creator.ts",
     "test:feature-demos": "tsx --test ./scripts/test-feature-demos.ts",
     "test:diagram-zones": "tsx --test ./scripts/test-diagram-zones.tsx",
+    "test:upgrade-guide": "node --test ./scripts/test-upgrade-guide.mjs",
     "postinstall": "fumadocs-mdx && tsx ./scripts/build-policy-assets.ts && tsx ./scripts/sync-connector-icons.ts"
   },
   "dependencies": {

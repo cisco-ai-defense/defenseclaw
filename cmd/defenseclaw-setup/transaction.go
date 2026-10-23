@@ -3090,24 +3090,13 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		// embedded in the executing Setup binary. The installed/trash copy is
 		// retained above only as the process-ownership identity used to stop a
 		// previously running service; it is never trusted to edit agent config.
-		// Retired connectors were completed before runtime quiescence. Repeating
-		// them after the gateway stops could strand an old fail-open module if
-		// a later refusal occurs, so only supported connectors remain here.
-		remaining := transaction
-		remaining.PreviousConnectors = nil
-		for _, name := range transaction.PreviousConnectors {
-			if !isRetiredNativeConnector(name) {
-				remaining.PreviousConnectors = append(remaining.PreviousConnectors, name)
-			}
-		}
-		reconciliation := reconcileRemovedConnectorsWithMaintenance(
-			remaining,
-			transactionPreviousChildEnv(transaction),
+		if err := convergeCommittedUninstallConnectors(
+			transaction,
 			prepareConnectorMaintenanceGateway,
 			runConnectorLifecycleWithEnv,
-		)
-		if err := reconciliation.persist(); err != nil {
-			return fmt.Errorf("persist connector reconciliation residue: %w", err)
+			func(recorder connectorReconciliationRecorder) error { return recorder.persist() },
+		); err != nil {
+			return err
 		}
 		if _, _, err := configureGatewayAutoStart(publishedGateway, false); err != nil {
 			return err
@@ -3294,6 +3283,32 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		transaction.TargetServices,
 		nativeInstallRuntimeConvergenceOps(),
 	)
+}
+
+func convergeCommittedUninstallConnectors(
+	transaction setupTransaction,
+	provide connectorMaintenanceGatewayProvider,
+	run connectorLifecycleRunner,
+	persist func(connectorReconciliationRecorder) error,
+) error {
+	// A current uninstall preflights retired teardown before stopping the
+	// gateway. Committed journals from older Setup releases did not do so,
+	// and the same teardown is idempotent when the preflight did run.
+	reconciliation := reconcileRemovedConnectorsWithMaintenance(
+		transaction,
+		transactionPreviousChildEnv(transaction),
+		provide,
+		run,
+	)
+	if err := persist(reconciliation); err != nil {
+		return fmt.Errorf("persist connector reconciliation residue: %w", err)
+	}
+	for _, failure := range reconciliation.failures {
+		if isRetiredNativeConnector(failure.Connector) {
+			return fmt.Errorf("%s %s refused at %s: %s", failure.Connector, failure.Operation, failure.ConfigHome, failure.Message)
+		}
+	}
+	return nil
 }
 
 func initializeCanonicalReleaseState(

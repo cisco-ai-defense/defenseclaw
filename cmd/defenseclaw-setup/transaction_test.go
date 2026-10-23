@@ -3136,6 +3136,87 @@ func TestRetiredUninstallPreflightKeepsGatewayUntilVerified(t *testing.T) {
 	t.Run("verified teardown required", checkRetiredUninstallVerifiedTeardown)
 }
 
+func TestCommittedUninstallRecoveryReconcilesRetiredConnectorFromOlderJournal(t *testing.T) {
+	for _, refuse := range []bool{false, true} {
+		name := "verified teardown"
+		if refuse {
+			name = "refused teardown"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			transaction := setupTransaction{
+				ID:                         strings.Repeat("a", 32),
+				Action:                     "uninstall",
+				DataRoot:                   filepath.Join(root, ".defenseclaw"),
+				PreviousConnectors:         []string{"omnigent"},
+				PreviousOmnigentConfigHome: filepath.Join(root, ".omnigent"),
+			}
+			journal := setupJournal{
+				SchemaVersion: setupJournalSchemaVersion,
+				Phase:         setupPhaseCommitted,
+				Transaction:   transaction,
+			}
+			statePath := filepath.Join(root, "private", connectorReconciliationFileName)
+			phase := setupPhaseCommitted
+			cleaned := false
+			var actions []string
+			err := recoverSetupJournalPhase(journal, setupRecoveryOps{
+				Converge: func(got setupTransaction) error {
+					return convergeCommittedUninstallConnectors(
+						got,
+						func() (connectorMaintenanceGateway, error) {
+							return connectorMaintenanceGateway{path: filepath.Join(root, "verified-gateway.exe")}, nil
+						},
+						func(_, _, connector, action string, env []string) error {
+							if connector != "omnigent" || envValue(env, "OMNIGENT_CONFIG_HOME") != transaction.PreviousOmnigentConfigHome {
+								t.Fatalf("recovery targeted %q with env %v", connector, env)
+							}
+							actions = append(actions, action)
+							if refuse && action == "teardown" {
+								return errors.New("hard-linked module requires manual recovery")
+							}
+							return nil
+						},
+						func(recorder connectorReconciliationRecorder) error {
+							return updateConnectorReconciliationAt(statePath, recorder.attempts, recorder.failures)
+						},
+					)
+				},
+				Cleanup: func(setupTransaction) error { cleaned = true; return nil },
+				Transition: func(_ setupTransaction, from, to string) error {
+					if from != phase {
+						t.Fatalf("journal phase = %s, transition from %s", phase, from)
+					}
+					phase = to
+					return nil
+				},
+			})
+			state, readErr := readConnectorReconciliationAt(statePath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if refuse {
+				if err == nil || !strings.Contains(err.Error(), "hard-linked module") ||
+					phase != setupPhaseCommitted || cleaned ||
+					state == nil || len(state.Failures) != 1 || state.Failures[0].Connector != "omnigent" ||
+					state.Failures[0].TransactionID != transaction.ID {
+					t.Fatalf("refused recovery = %v, phase=%s, cleaned=%t, residue=%+v", err, phase, cleaned, state)
+				}
+				if !reflect.DeepEqual(actions, []string{"teardown"}) {
+					t.Fatalf("refused recovery actions = %v", actions)
+				}
+			} else {
+				if err != nil || phase != setupPhaseComplete || !cleaned || state != nil {
+					t.Fatalf("verified recovery = %v, phase=%s, cleaned=%t, residue=%+v", err, phase, cleaned, state)
+				}
+				if !reflect.DeepEqual(actions, []string{"teardown", "verify"}) {
+					t.Fatalf("verified recovery actions = %v", actions)
+				}
+			}
+		})
+	}
+}
+
 func checkRetiredUninstallRefusalBeforeRuntimeRelease(t *testing.T) {
 	t.Helper()
 	transaction := setupTransaction{
