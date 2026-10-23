@@ -15,3 +15,8 @@ package cli
 // enterpriseExplainCallerFacts resolves nothing here: the macOS and Windows
 // gateways resolve the account through Open Directory and the LSA themselves.
 var enterpriseExplainCallerFacts = func(string) string { return "" }
+
+// enterpriseIdentityViewHolderProof proves no home here: a macOS account's
+// listed record and a Windows SID already tell an account created again from
+// the one before it.
+var enterpriseIdentityViewHolderProof = func(string) string { return "" }

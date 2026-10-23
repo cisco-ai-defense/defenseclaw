@@ -502,12 +502,20 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 		offset = min(n, 1<<30)
 	}
 	user := strings.TrimSpace(q.Get("user"))
+	proof := q.Get("holder_proof")
 	ids := adminViewAccountIDs(user)
-	incarnation, holderChanged := adminViewAccountProvenance(ids)
+	domains := adminViewAccountDomains(ids)
+	incarnation, holderChanged := adminViewAccountProvenance(ids, proof)
+	if len(ids) == 0 {
+		if holders := adminViewBareAccountIDs(user); len(holders) > 0 {
+			ids = holders
+			incarnation, holderChanged = adminViewBareHolderProvenance(holders, proof)
+		}
+	}
 	filter := inventory.AgentIdentityFilter{
 		User:            user,
 		UserIDs:         ids,
-		UserDomains:     adminViewAccountDomains(ids),
+		UserDomains:     domains,
 		UserIncarnation: incarnation,
 		HolderChanged:   holderChanged,
 		RemovedAccount:  adminViewRemovedAccount(user),
@@ -795,11 +803,74 @@ var adminViewAccountIDs = func(user string) []string {
 	return []string{id}
 }
 
+// adminViewBareAccountIDs is the uid a bare --user name of the agent
+// identity view names now, as profile-explain resolves it, or none (a
+// qualified name, an id, a name no account or more than one account holds,
+// a SID). A bare name still selects the rows recorded with that name for
+// every account of it; the uid only keeps the rows another holder of that
+// uid left from being listed as the account's own
+// (useridentity.AccountFilter.MatchesIn): a local account deleted and
+// created again under the same name, uid and home showed the agent
+// identities of the account before it (T8r, GAP-0422). Tests replace it.
+var adminViewBareAccountIDs = func(user string) []string {
+	user = strings.TrimSpace(user)
+	if user == "" || useridentity.QualifiedAccountName(user) || useridentity.KindForID(user) != "" {
+		return nil
+	}
+	id, _, err := profileExplainAccount(user)
+	if err != nil || useridentity.KindForID(id) != useridentity.KindPOSIXUID {
+		return nil
+	}
+	return []string{id}
+}
+
+// adminViewProvenHolder is the account token of the uid id as proof, the
+// view's holder_proof (<uid>:<home proof>, from the administrator's root
+// CLI), shows it, and whether the hooks recorded another one last
+// (agentIdentityAdminHolderToken). false when proof names another uid or
+// tells nothing.
+func adminViewProvenHolder(id, proof string) (string, bool) {
+	uid, token, ok := strings.Cut(strings.TrimSpace(proof), ":")
+	if !ok || uid != id || useridentity.KindForID(id) != useridentity.KindPOSIXUID {
+		return "", false
+	}
+	return agentIdentityAdminHolderToken(id, token)
+}
+
+// adminViewBareHolderProvenance is adminViewAccountProvenance for the uid a
+// bare name names now (adminViewBareAccountIDs). A bare name selects rows by
+// the name they were recorded with, so it hides only the rows of the uid
+// that are shown to be another holder's: another token, or none after
+// another account is known to have held the uid. While the token cannot be
+// told (a directory outage), the last one stands, so an outage hides none
+// of the account's own rows.
+func adminViewBareHolderProvenance(ids []string, proof string) (string, bool) {
+	if len(ids) != 1 {
+		return "", false
+	}
+	_ = agentIdentityIncarnation(ids[0])
+	if token, differs := adminViewProvenHolder(ids[0], proof); differs {
+		return token, true
+	}
+	current := agentIdentityVerifiedAccountToken(ids[0])
+	last, changed := agentIdentityHolderHistory(ids[0])
+	switch {
+	case current == "":
+		return last, changed
+	case last != "" && last != current:
+		return current, true
+	}
+	return current, changed
+}
+
 // adminViewAccountProvenance is the account token of the account ids name
 // (the uid a qualified filter resolves to) and whether another account is
 // known to have held that uid (agentIdentityHolderHistory), for
-// AgentIdentityFilter.UserIncarnation and HolderChanged.
-func adminViewAccountProvenance(ids []string) (string, bool) {
+// AgentIdentityFilter.UserIncarnation and HolderChanged. proof is the
+// view's holder_proof (adminViewProvenHolder): an account deleted and
+// created again since the hooks last saw it is told from the one before it
+// at once.
+func adminViewAccountProvenance(ids []string, proof string) (string, bool) {
 	if len(ids) != 1 {
 		return "", false
 	}
@@ -807,6 +878,9 @@ func adminViewAccountProvenance(ids []string) (string, bool) {
 	// agent hook. Refresh the holder before reading its history; rowToken
 	// alone resolves the new token without recording the handoff.
 	_ = agentIdentityIncarnation(ids[0])
+	if token, differs := adminViewProvenHolder(ids[0], proof); differs {
+		return token, true
+	}
 	current := agentIdentityVerifiedAccountToken(ids[0])
 	last, changed := agentIdentityHolderHistory(ids[0])
 	if useridentity.KindForID(ids[0]) == useridentity.KindPOSIXUID && (current == "" || last != current) {

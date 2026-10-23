@@ -212,6 +212,14 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 					query.Set("caller_facts", facts)
 				}
 			}
+			if view.use == "agent-identities" && query.Get("user") != "" {
+				// root's proof of the account's home tells an account deleted
+				// and created again under the same name and uid from the one
+				// before it, also before the guardian's next pass (GAP-0422).
+				if proof := enterpriseIdentityViewHolderProof(query.Get("user")); proof != "" {
+					query.Set("holder_proof", proof)
+				}
+			}
 			if aiOnly {
 				query.Set("ai_only", "true")
 			}

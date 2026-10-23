@@ -189,3 +189,45 @@ func TestEnterpriseProfileExplainFailsForUnresolvedAccount(t *testing.T) {
 		t.Fatalf("resolved account with no profile = %v:\n%s", err, out.String())
 	}
 }
+
+// GAP-0422 (T8r): the agent identity view sends root's proof of the named
+// account's home (holder_proof), so the gateway tells an account deleted and
+// created again under the same name and uid from the one before it in the
+// first view. A listing without --user asks for none.
+func TestEnterpriseAgentIdentitiesSendsTheRootHomeProof(t *testing.T) {
+	previous, previousProof := enterpriseIdentityViewGet, enterpriseIdentityViewHolderProof
+	t.Cleanup(func() { enterpriseIdentityViewGet, enterpriseIdentityViewHolderProof = previous, previousProof })
+	var asked []string
+	enterpriseIdentityViewGet = func(path string, out any) (string, error) {
+		asked = append(asked, path)
+		return "", json.Unmarshal([]byte(`{"identities":[{"agent_id":"agt-0123456789abcdef","user_name":"alice"}],"total":1}`), out)
+	}
+	proved := 0
+	enterpriseIdentityViewHolderProof = func(user string) string {
+		proved++
+		if user == "alice" {
+			return "41450:home:2049:2000:222"
+		}
+		return ""
+	}
+	platform := runtime.GOOS
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	for _, args := range [][]string{{"--user", "alice", "--connector", "codex"}, {"--user", "bob"}, {}} {
+		cmd := newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[1])
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("agent identities %v: %v", args, err)
+		}
+	}
+	want := []string{
+		"/api/v1/agents/identities?connector=codex&holder_proof=41450%3Ahome%3A2049%3A2000%3A222&user=alice",
+		"/api/v1/agents/identities?user=bob",
+		"/api/v1/agents/identities",
+	}
+	if fmt.Sprint(asked) != fmt.Sprint(want) || proved != 2 {
+		t.Fatalf("asked %q (proofs %d); want %q", asked, proved, want)
+	}
+}
