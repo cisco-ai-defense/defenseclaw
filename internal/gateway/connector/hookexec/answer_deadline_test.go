@@ -74,9 +74,6 @@ func TestManagedToolCallFailsClosedWhenTheGatewayDoesNotAnswerInTime(t *testing.
 	shortAnswerFloor(t)
 	for _, event := range []string{"PreToolUse", "PermissionRequest", "PostToolUse", "UserPromptSubmit"} {
 		for _, open := range []bool{false, true} {
-			if open && toolGateEvent("codex", event) {
-				continue // Existing tool-gate outage policy is tested separately.
-			}
 			t.Run(event+"/open="+strconv.FormatBool(open), func(t *testing.T) {
 				home := t.TempDir()
 				result, elapsed := runAgainstGateway(t, "codex", hungGateway(t), func(opts *Options) {

@@ -51,13 +51,9 @@ var hookProgressCeiling = 4 * time.Second
 
 // hookGatewayAnswerFloor is the least time a standalone managed hook's
 // gateway contact (the foreign-hook session exchange, or the hook request)
-// must have before the call's answer deadline for a missing answer to count
-// as the gateway's: an outage that the administrator's open fail mode lets
-// through. The deadline counts from the invocation, so a slow local step
-// before the contact (a foreign-hook scan that runs close to its own budget)
-// could otherwise leave a healthy gateway a few milliseconds and turn the
-// expired budget into an allowance (final review, P2). Less than this left
-// fails closed (errAnswerBudgetSpentLocally).
+// must have before the call's answer deadline to distinguish a missing
+// gateway answer from a budget spent by local hook work. Both fail closed on
+// a managed host; the latter carries errAnswerBudgetSpentLocally for diagnosis.
 var hookGatewayAnswerFloor = time.Second
 
 // errAnswerBudgetSpentLocally marks a missing answer of a gateway contact
@@ -225,15 +221,11 @@ func gatewayNoAnswer(ctx context.Context) bool {
 	return errors.Is(context.Cause(ctx), errGatewayNoAnswer)
 }
 
-// noAnswerFailMode keeps managed non-tool events, locally spent budgets and a
-// call the gateway answered 429 first (Options.gatewayBusy,
-// ManagedOutageFailsOpen) closed. Only a proven tool-gate outage uses the
-// administrator's fail mode (owner decision 2026-10-20) or, per-user, the
-// installed fail mode. failNoAnswer and renderNoAnswer both use it, so the
-// rendered decision and its failure row agree.
+// noAnswerFailMode keeps every managed call closed when the gateway does not
+// answer. Per-user hooks keep their installed fail mode. failNoAnswer and
+// renderNoAnswer both use it, so the rendered decision and failure row agree.
 func noAnswerFailMode(opts Options, failMode string) string {
-	if opts.answerSpentLocally || opts.gatewayBusy || (opts.ManagedEnterprise &&
-		(!managedNativeDecision(opts) || !toolGateEvent(opts.Connector, opts.Event))) {
+	if opts.answerSpentLocally || opts.gatewayBusy || opts.ManagedEnterprise {
 		return "closed"
 	}
 	return failMode

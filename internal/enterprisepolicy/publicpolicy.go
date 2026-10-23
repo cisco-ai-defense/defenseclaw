@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -84,6 +85,13 @@ func GuardApplies(connector, goos string, policy config.ResolvedConnectorPolicy)
 		return goos != "windows"
 	}
 	return lockConnectors[connector] && policy.ManagedHooksOnly != config.ManagedHooksOnlyEnforce
+}
+
+// ForeignHookSessionLocal reports when the guard keeps the agent session
+// record in the account's home rather than exchanging it with the gateway.
+// The Windows Amp plugin keeps its session.load decision for the process.
+func ForeignHookSessionLocal(connector, goos string) bool {
+	return goos == "windows" && strings.EqualFold(strings.TrimSpace(connector), "amp")
 }
 
 // BuildPublicPolicy renders the summary for connectors.

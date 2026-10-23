@@ -63,7 +63,7 @@ Human approval is off by default. Its default minimum severity is HIGH. Change t
 
 ## Fail mode
 
-The hook fail mode controls delivery failures. The default is `closed`, including in observe mode, except under Secure Client. A closed hook blocks where the event can carry a block response. An administrator's `open` can allow an unguarded managed tool call when the gateway is stopped, still restarting or gives no answer in time. Authentication failure and complete but unusable answers still block. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for each OS, installed route and event.
+The hook fail mode controls delivery failures. The default is `closed`, including in observe mode, except under Secure Client. A closed hook blocks where the event can carry a block response. An administrator's `open` applies only when the gateway is proven not running; a restarting or unanswered gateway blocks even under `open`. Authentication failure and complete but unusable answers still block. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for each OS, installed route and event.
 
 ## Which agents can ask
 

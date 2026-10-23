@@ -30,6 +30,8 @@ import (
 // Hook for tests; production uses the kernel.
 var standalonePeerCredentials = peercred.FromConn
 
+var errStandaloneSocketMissing = errors.New("verified standalone hook socket is missing")
+
 // managedStandaloneHTTPClient is the unix standalone-profile transport. The
 // hook reaches the gateway only through its peer-authorized unix hook
 // socket, and trusts it only after the kernel says who is listening: the
@@ -59,7 +61,7 @@ func managedStandaloneHTTPClient(
 		timeout = defaultHookRequestTimeout
 	}
 	if err := validateStandaloneHookSocketPath(socketPath, serviceUID); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, errStandaloneSocketMissing) {
 			// No socket: the gateway service and its socket unit are stopped.
 			return nil, standaloneGatewayStoppedError(err)
 		}
@@ -78,7 +80,9 @@ func managedStandaloneHTTPClient(
 				conn, err := dialer.DialContext(ctx, "unix", socketPath)
 				if err != nil {
 					if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) {
-						return nil, standaloneGatewayStoppedError(err)
+						// A refused listener or a race that removed the socket
+						// after verification cannot prove a stopped service.
+						return nil, standalonePeerError("hook socket stopped answering after verification: %v", err)
 					}
 					if errors.Is(err, syscall.EACCES) && selinuxActive() {
 						return nil, standaloneSELinuxDeniedError(err)
@@ -118,13 +122,6 @@ func validateStandaloneHookSocketPath(path string, serviceUID int) error {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return fmt.Errorf("hook socket path %q is not absolute and clean", path)
 	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("hook socket: %w", err)
-	}
-	if info.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("hook socket %s is not a socket", path)
-	}
 	dir, err := filepath.EvalSymlinks(filepath.Dir(path))
 	if err != nil {
 		return fmt.Errorf("hook socket directory: %w", err)
@@ -140,14 +137,21 @@ func validateStandaloneHookSocketPath(path string, serviceUID int) error {
 	if !ok || !standaloneTrustedGatewayUID(int(stat.Uid), serviceUID) {
 		return fmt.Errorf("hook socket directory %s is not owned by root or the gateway service account", dir)
 	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("hook socket: %w: %w", errStandaloneSocketMissing, err)
+	}
+	if err != nil {
+		return fmt.Errorf("hook socket: %w", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("hook socket %s is not a socket", path)
+	}
 	return nil
 }
 
-// standaloneGatewayStoppedError is a hook socket that is missing or that
-// nothing accepts on: the gateway is not running. It stays a peer failure, so
-// the hook fails closed in every fail mode, and carries
-// errManagedGatewayNotRunning, so the user is told the service is stopped
-// instead of being sent to socket ownership checks (GAP-0581).
+// standaloneGatewayStoppedError is a socket proven missing in a trusted
+// directory. Only this state may follow the configured outage mode.
 func standaloneGatewayStoppedError(err error) error {
 	return fmt.Errorf("%w: %w: %v", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning, err)
 }

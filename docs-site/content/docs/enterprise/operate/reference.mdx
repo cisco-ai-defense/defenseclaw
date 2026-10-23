@@ -214,21 +214,19 @@ conflicts add a `config_migration_conflicts` warning.
 A managed hook that meets a restarting gateway (a refused or dropped connection, a stopped
 service) sends its call again for up to about 3 seconds from the start of the hook, so a quick
 restart is not visible to the agent. A retry that ends with
-`enterprise_managed_gateway_restarting` can follow administrator `open` for an unguarded
-tool call; guarded calls and calls with `closed` still block.
+`enterprise_managed_gateway_restarting` blocks, even under administrator `open`.
 
 A hook for a tool call (`PreToolUse` and the like) waits at most about 3.5 seconds from its
 start for the gateway's decision, whatever holds it up (a restart, an upgrade, a repair, a
 configuration change or a gateway too busy to answer). A call with no verdict reports
-`enterprise_managed_gateway_no_answer`; an unguarded tool call can follow administrator
-`open` unless local hook work spent the answer budget or the gateway first returned HTTP 429.
-Guarded tool calls and calls with fail mode `closed` block. A decision that waits on Cisco AI Defense or the LLM judge gets up
+`enterprise_managed_gateway_no_answer` and blocks even under administrator `open`.
+A decision that waits on Cisco AI Defense or the LLM judge gets up
 to about 4 seconds, then follows the same rule. Prompts and session, stop and other events
 keep their whole budget. Lifecycle runs run at a lower CPU priority than the hooks on every OS,
 so a repair does not take the CPU the hooks need to answer in time.
 
-An administrator's `open` can allow an unguarded managed tool call when the gateway is stopped, still restarting or gives no answer in time.
-On Linux and macOS, a missing hook socket or an existing one that refuses a connection can report a stopped gateway. On Windows, a stopped service with no listener or a running service with no listener can report it too. Integrity, peer-verification,
+An administrator's `open` applies only when the gateway is proven not running; a restarting or unanswered gateway blocks even under `open`.
+On Linux and macOS, a missing hook socket in a trusted directory proves the gateway is stopped; an existing socket that refuses a connection blocks. On Windows, a stopped service with no listener proves it is stopped; a running service with no listener blocks. Integrity, peer-verification,
 credential and rate-limit refusals still block. Connectors
 whose foreign-hook guard checks the session with the gateway (`foreign_hooks: remove`,
 the default) block outages too

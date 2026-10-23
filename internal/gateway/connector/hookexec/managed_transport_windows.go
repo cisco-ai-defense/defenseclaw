@@ -99,8 +99,10 @@ func managedEnterpriseHTTPClient(
 				// retries, so one try could take most of a restart budget:
 				// read the listen table instead, and try again shortly.
 				if listening, known := managedEnterpriseListening(canonicalAddr); known && !listening {
-					return nil, fmt.Errorf("%w: %w: nothing listens on %s yet",
-						errManagedGatewayPeerUnverified, errManagedGatewayNotRunning, canonicalAddr)
+					// The service has a PID, so its absence is not proven. The
+					// restart loop may retry, but open must not allow this call.
+					return nil, fmt.Errorf("%w: %w: running service has no listener on %s yet",
+						errManagedGatewayPeerUnverified, errGatewayNotConnected, canonicalAddr)
 				}
 				conn, err := managedEnterpriseDialContext(ctx, "tcp4", canonicalAddr)
 				if err != nil {

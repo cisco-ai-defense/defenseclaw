@@ -94,8 +94,8 @@ func TestWatchdogKeepsAKnownRefusalClosedWhileItsRowWaits(t *testing.T) {
 			}
 		})
 	}
-	// The outage itself still follows the administrator's open: the call
-	// whose gateway does not answer is let through at the deadline.
+	// No answer is not proof of a stopped service, so the deadline keeps the
+	// managed call closed even when the administrator chose open.
 	shortAnswerBudget(t, 400*time.Millisecond)
 	shortAnswerFloor(t)
 	hung := make(chan struct{})
@@ -118,8 +118,8 @@ func TestWatchdogKeepsAKnownRefusalClosedWhileItsRowWaits(t *testing.T) {
 	t.Cleanup(func() { close(hung); <-returned })
 	select {
 	case code := <-exited:
-		if out, _ := stdout.read(); blocked(runResult{code: code, stdout: out}) {
-			t.Fatalf("no answer in fail mode open: exit %d stdout %q, want the administrator's open", code, out)
+		if out, _ := stdout.read(); !blocked(runResult{code: code, stdout: out}) {
+			t.Fatalf("no answer in fail mode open: exit %d stdout %q, want a closed answer", code, out)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the watchdog did not answer a gateway that gave no answer")

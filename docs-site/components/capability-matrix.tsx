@@ -240,7 +240,7 @@ export function OutageMatrix() {
             <Th>Connector</Th>
             <Th>Per-user, fail mode closed</Th>
             <Th>Per-user, fail mode open</Th>
-            <Th>Managed standalone, administrator open, gateway outage</Th>
+            <Th>Managed standalone, administrator open, proven stopped gateway</Th>
             <Th>Secure Client, fail mode closed</Th>
             <Th>DEFENSECLAW_STRICT_AVAILABILITY</Th>
             <Th>DEFENSECLAW_FAIL_MODE</Th>

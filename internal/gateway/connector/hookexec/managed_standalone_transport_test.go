@@ -240,6 +240,49 @@ func TestStandaloneHookSocketMissingSaysGatewayStopped(t *testing.T) {
 	}
 }
 
+func TestStandaloneOpenRequiresMissingSocketInTrustedDirectory(t *testing.T) {
+	dir := shortSocketDir(t)
+	socket := filepath.Join(dir, "hook.sock")
+	assertClass := func(wantStopped bool) {
+		t.Helper()
+		_, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid())
+		if err == nil || errors.Is(err, errManagedGatewayNotRunning) != wantStopped {
+			t.Fatalf("socket error = %v, want stopped=%t", err, wantStopped)
+		}
+		wantMode := "closed"
+		if wantStopped {
+			wantMode = "open"
+		}
+		if got := managedPeerFailMode(Options{ManagedEnterprise: true, ManagedStandalone: true}, "open", err); got != wantMode {
+			t.Fatalf("socket error %v selected %s, want %s", err, got, wantMode)
+		}
+	}
+	assertClass(true)
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	assertClass(false)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.(*net.UnixListener).SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	client, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Get("http://unix/api/v1/claude-code/hook")
+	if err == nil || errors.Is(err, errManagedGatewayNotRunning) {
+		t.Fatalf("stale socket error = %v, want unverified peer", err)
+	}
+}
+
 func TestValidateStandaloneHookSocketPath(t *testing.T) {
 	dir := shortSocketDir(t)
 	regular := filepath.Join(dir, "file")

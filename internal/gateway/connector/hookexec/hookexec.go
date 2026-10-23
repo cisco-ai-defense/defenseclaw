@@ -253,7 +253,7 @@ type Options struct {
 	gatewayBusy bool
 	// managedOutageOpen is set on a standalone hook outside Secure Client
 	// for a failure that ManagedOutageFailsOpen lets through (the gateway is
-	// not running, was still restarting, or gave no answer). Only such a
+	// proven not running). Only such a
 	// failure takes the administrator's open; every other failure is closed
 	// (managedNonOutageMode, bounded review P1).
 	managedOutageOpen bool
@@ -945,13 +945,8 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		case errors.Is(cause, errGatewayStartFailing):
 			reason = errGatewayStartFailing.Error()
 		case errors.Is(cause, errGatewayRestarting):
-			// Closed, except for a standalone hook whose administrator chose
-			// open (owner decision 2026-10-20). Secure Client keeps closed.
-			restartMode := "closed"
-			if managedNativeDecision(opts) {
-				restartMode = failMode
-			}
-			return failUnreachable(withManagedOutage(opts, errGatewayRestarting), sp, restartMode, managedGatewayRestartingReason)
+			// A restart does not prove that the gateway service is stopped.
+			return failUnreachable(opts, sp, "closed", managedGatewayRestartingReason)
 		}
 		if errors.Is(err, errManagedGatewayPeerUnverified) {
 			// Managed peer-verification failure fails closed on the transport
@@ -2685,9 +2680,8 @@ func managedPeerFailMode(opts Options, failMode string, err error) string {
 // through (GAP-0346). It holds only for a standalone hook outside Secure
 // Client (managedNativeDecision) whose administrator chose open for the
 // connector (opts.FailMode, which the managed runtime sets), without strict
-// availability or a runtime failure, and only when err says the gateway
-// service is not running, was still restarting at the end of the restart
-// budget, or gave no answer in time. The hook request that follows then
+// availability or a runtime failure, and only when err proves the gateway
+// service is not running. The hook request that follows then
 // meets the same outage and gives the open result, with its notice and its
 // failure log line, as for every other connector. Every other error (a peer
 // DefenseClaw cannot verify, another program on the gateway port, an
@@ -2702,15 +2696,13 @@ func ManagedOutageFailsOpen(opts Options, err error) bool {
 	if errors.Is(err, errManagedGatewayPortHeld) || errors.Is(err, errAnswerBudgetSpentLocally) {
 		return false
 	}
-	return errors.Is(err, errManagedGatewayNotRunning) || errors.Is(err, errGatewayRestarting) ||
-		errors.Is(err, errGatewayNoAnswer)
+	return errors.Is(err, errManagedGatewayNotRunning)
 }
 
 // managedCopilotOpen reports a managed GitHub Copilot hook whose delivery
 // mode is open: an authenticated Secure Client hook (#1163), or a standalone
-// hook whose administrator chose open (owner decision 2026-10-20). A gateway
-// it cannot reach and a response it cannot read allow the call, as they do
-// for every other connector in fail mode open, instead of the managed deny.
+// hook whose administrator chose open. Only a proven stopped gateway can
+// allow a standalone call; an unanswered or unverified gateway stays closed.
 // A closed mode (configured, strict availability, or another program on the
 // gateway port) and the enrollment and policy refusals still deny.
 func managedCopilotOpen(opts Options, sp spec, failMode string) bool {

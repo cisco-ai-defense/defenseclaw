@@ -85,11 +85,11 @@ func codeOutage(conn connector.Connector) documentedOutage {
 	}
 	// Under the default foreign_hooks: remove, a guarded tool call needs a
 	// gateway answer for its session even when the native hook's installed
-	// mode is open. Windows Amp alone keeps that session locally.
+	// mode is open. A locally kept session does not need that answer.
 	policy := config.EnterpriseMachinePolicyConfig{}.PolicyFor(conn.Name())
 	guardLinux := GuardApplies(conn.Name(), "linux", policy)
 	guardDarwin := GuardApplies(conn.Name(), "darwin", policy)
-	guardWindows := GuardApplies(conn.Name(), "windows", policy) && conn.Name() != "amp"
+	guardWindows := GuardApplies(conn.Name(), "windows", policy) && !ForeignHookSessionLocal(conn.Name(), "windows")
 	switch {
 	case guardLinux && guardDarwin && guardWindows:
 		managedOpen = connector.OutageBlocks
@@ -146,13 +146,15 @@ func TestDefaultForeignHookGuardOutageCoversEveryManagedConnector(t *testing.T) 
 				t.Errorf("%s: default foreign-hook guard absent on %s", name, goos)
 			}
 		}
-		want := connector.OutageBlocks
-		if name == "amp" {
-			// The Windows Amp plugin keeps its foreign session locally.
-			want = managedOpenBlocksLinuxMacOS
-		}
-		if got := rows[name].ManagedOpen; got != want {
-			t.Errorf("%s: managed open outage = %q, want %q under the default guard", name, got, want)
+		got := rows[name].ManagedOpen
+		if ForeignHookSessionLocal(name, "windows") {
+			// Both representations block Linux and macOS. Windows depends on
+			// the plugin's own installed fail mode, which differs on the T8 train.
+			if got != connector.OutageBlocks && got != managedOpenBlocksLinuxMacOS {
+				t.Errorf("%s: managed open outage = %q, want Linux and macOS blocked", name, got)
+			}
+		} else if got != connector.OutageBlocks {
+			t.Errorf("%s: managed open outage = %q, want %q under the default guard", name, got, connector.OutageBlocks)
 		}
 	}
 	policy := config.EnterpriseMachinePolicyConfig{}.PolicyFor(ConnectorHermes)

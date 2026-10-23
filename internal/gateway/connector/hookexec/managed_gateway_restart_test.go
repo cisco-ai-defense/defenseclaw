@@ -138,21 +138,25 @@ func TestQueuedStandaloneCallFailsClosedWhenTheGatewayStaysDown(t *testing.T) {
 		<-req.Context().Done()
 		return nil, req.Context().Err()
 	}}
-	started := time.Now()
-	result := run(t, "claudecode", queued, func(opts *Options) {
-		opts.ManagedEnterprise = true
-		opts.ManagedStandalone = true
-		opts.ManagedUnixSocket = "/run/defenseclaw-hook/hook.sock"
-		opts.ManagedServiceUID = 990
-		opts.FailMode = "closed"
-		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 200*time.Millisecond)
-	})
-	if elapsed := time.Since(started); elapsed > 2*time.Second {
-		t.Fatalf("the queued call waited %s", elapsed)
-	}
-	if !strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
-		!strings.Contains(result.stdout, "restarting") || !strings.Contains(result.stdout, managedGatewayRestartingReason) {
-		t.Fatalf("stdout = %q, stderr = %q, want a deny that names the restart", result.stdout, result.stderr)
+	for _, mode := range []string{"closed", "open"} {
+		t.Run(mode, func(t *testing.T) {
+			started := time.Now()
+			result := run(t, "claudecode", queued, func(opts *Options) {
+				opts.ManagedEnterprise = true
+				opts.ManagedStandalone = true
+				opts.ManagedUnixSocket = "/run/defenseclaw-hook/hook.sock"
+				opts.ManagedServiceUID = 990
+				opts.FailMode = mode
+				opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 200*time.Millisecond)
+			})
+			if elapsed := time.Since(started); elapsed > 2*time.Second {
+				t.Fatalf("the queued call waited %s", elapsed)
+			}
+			if !strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
+				!strings.Contains(result.stdout, "restarting") || !strings.Contains(result.stdout, managedGatewayRestartingReason) {
+				t.Fatalf("stdout = %q, stderr = %q, want a deny that names the restart", result.stdout, result.stderr)
+			}
+		})
 	}
 }
 

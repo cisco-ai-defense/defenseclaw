@@ -56,8 +56,8 @@ A sandboxed agent's hooks run inside the sandbox and reach the gateway through a
 Hooks fail closed by default everywhere except Secure Client. On a managed
 standalone computer, the administrator may choose `hook_fail_mode: open` as an
 outage-only exception.
-An administrator's `open` can allow an unguarded managed tool call when the gateway is stopped, still restarting or gives no answer in time.
-On Linux and macOS, a missing hook socket or an existing one that refuses a connection can report a stopped gateway; on Windows, either a stopped service with no listener or a running service with no listener can do so.
+An administrator's `open` applies only when the gateway is proven not running; a restarting or unanswered gateway blocks even under `open`.
+On Linux and macOS, a missing hook socket in a trusted directory proves the gateway is stopped; an existing one that refuses a connection blocks. On Windows, a stopped service with no listener proves it is stopped; a running service with no listener blocks.
 The [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)
 lists the installed routes and foreign-hook guard limits.
 A missing or invalid administrator-owned runtime, an unverified gateway peer,
