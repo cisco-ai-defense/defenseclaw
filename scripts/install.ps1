@@ -1230,7 +1230,7 @@ function Get-EffectiveConfigConnectors {
     # external DEFENSECLAW_CONFIG, before this run records its rollback point.
     # Every release defaults guardrail.enabled to false and a disabled
     # guardrail tears every connector down, so such a config guards none.
-    # Get-LifecycleState still keeps any connector the running gateway reports.
+    # Get-HeldConnectors still keeps any connector the running gateway reports.
     $path = if ($env:DEFENSECLAW_CONFIG) { $env:DEFENSECLAW_CONFIG } else { Join-Path $DataDir "config.yaml" }
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return @() }
     $python = Join-Path $Staging "venv\Scripts\python.exe"
@@ -1690,6 +1690,32 @@ function Get-GuardedConnectors($Report) {
     return $names
 }
 
+function Get-HeldConnectors($Report) {
+    # The connectors a lifecycle proof holds a gateway to, from its status
+    # --json ($Report, $null when it gave none): every connector it reports
+    # running, and every connector the effective config enables unless an
+    # answering gateway explicitly reports that one unhealthy. An older
+    # gateway's JSON can be absent or omit an enabled connector, so neither
+    # silence nor an empty roster drops one. A connector that already needed
+    # attention was not guarded before the change, and requiring it would
+    # make upgrade and rollback impossible; one still starting is held. The
+    # effective config is authoritative over a stale active_connector.json,
+    # including with an external DEFENSECLAW_CONFIG. Every lifecycle record
+    # (Get-LifecycleState, Save-AcceptedConnectors) takes its roster here.
+    $reported = @(); $unhealthy = @()
+    if ($Report) {
+        $reported = @(Get-GuardedConnectors $Report)
+        if (Get-Field $Report "running") {
+            $unhealthy = @(@(Get-Field (Get-Field $Report "health") "connectors") |
+                Where-Object { $_ -and @("running", "starting") -notcontains [string](Get-Field $_ "state") } |
+                ForEach-Object { [string](Get-Field $_ "name") })
+        }
+    }
+    $enabled = @(Get-EffectiveConfigConnectors)
+    return @(@($reported) + @($enabled | Where-Object { $unhealthy -notcontains $_ }) |
+        Where-Object { $_ -and $_ -ne "none" } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+}
+
 function Get-GatewayDigestProblem([string]$Gateway) {
     # "" when the running gateway reports the effective policy digest of the
     # live config (policy digest --json --check-gateway: the digest is read
@@ -1734,24 +1760,7 @@ function Get-LifecycleState {
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
     $running = [bool](Get-GatewayProcess)
     $connectors = @()
-    if ($running) {
-        $report = Get-GatewayHealthReport $gateway
-        # The old gateway's JSON can be absent or omit an enabled hook.
-        # A connector it explicitly reports as not running was already
-        # unhealthy, so requiring it here would make upgrade and rollback
-        # impossible. The effective config is authoritative over a stale
-        # active_connector.json, including with external DEFENSECLAW_CONFIG.
-        if ($report) { $reported = @(Get-GuardedConnectors $report) } else { $reported = @() }
-        $notRunning = @()
-        if ($report) {
-            $notRunning = @(@(Get-Field (Get-Field $report "health") "connectors") |
-                Where-Object { $_ -and [string](Get-Field $_ "state") -ne "running" } |
-                ForEach-Object { [string](Get-Field $_ "name") })
-        }
-        $enabled = @(Get-EffectiveConfigConnectors)
-        $connectors = @($reported + @($enabled | Where-Object { $notRunning -notcontains $_ }) |
-            Where-Object { $_ -and $_ -ne "none" } | Sort-Object -Unique)
-    }
+    if ($running) { $connectors = @(Get-HeldConnectors (Get-GatewayHealthReport $gateway)) }
     $external = Get-ExternalConfig
     return [ordered]@{
         Bins = Get-BinariesState $BinDir
@@ -2348,21 +2357,22 @@ function Save-AcceptedConnectors([string]$Closer, $Running) {
     # restore (the journal, Restore-AcceptedReplacement) must show each one
     # guarded again before the record goes. Asked of the running gateway
     # with the checked closer, so the accepted programs do not run before
-    # their stop. A gateway that does not report them is held to every
-    # connector the config names; so is one an earlier run stopped without
-    # recording them. Merged with what an earlier run recorded, and kept in
-    # the record before the stop, so a run interrupted after it still
-    # proves them.
+    # their stop, and held to the same roster as any record
+    # (Get-HeldConnectors): what it reports running and every connector the
+    # effective config enables that it does not explicitly report
+    # unhealthy, so a connector its health omits is still proven. One an
+    # earlier run stopped without recording them is held to every connector
+    # the effective config enables. Merged with what an earlier run
+    # recorded, and kept in the record before the stop, so a run interrupted
+    # after it still proves them.
     $names = @(if ($Run.ContainsKey("UnprovenConnectors")) { $Run.UnprovenConnectors })
     $record = Read-LifecycleManifest
     $recorded = $record -and $record.PSObject.Properties["ReplacementConnectors"]
     if ($recorded) { $names += @($record.ReplacementConnectors) }
     if ($Running) {
-        $report = Get-GatewayHealthReport $Closer
-        if ($report -and (Get-Field $report "running")) { $names += @(Get-GuardedConnectors $report) }
-        else { $names += @(Get-ConfiguredConnectors) }
+        $names += @(Get-HeldConnectors (Get-GatewayHealthReport $Closer))
     } elseif ($Run.ContainsKey("UnprovenGatewayWasRunning") -and $Run.UnprovenGatewayWasRunning -and -not $recorded) {
-        $names += @(Get-ConfiguredConnectors)
+        $names += @(Get-HeldConnectors $null)
     }
     $Run.UnprovenConnectors = @($names | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
     if ($record) {

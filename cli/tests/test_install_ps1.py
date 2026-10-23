@@ -109,6 +109,7 @@ function Get-BinariesState {{ return @{{}} }}
 function Get-OptionalSha256 {{ return '' }}
 function Test-BinDirProtected {{ return $true }}
 {_ps1_function('Get-Field')}
+{_ps1_function('Get-HeldConnectors')}
 {_ps1_function('Get-LifecycleState')}
 $state = Get-LifecycleState
 if (@($state.Connectors).Count -ne 1 -or $state.Connectors[0] -ne 'codex') {{
@@ -143,6 +144,7 @@ function Test-BinDirProtected {{ return $true }}
 function Get-GatewayDigestProblem {{ return '' }}
 {_ps1_function('Get-Field')}
 {_ps1_function('Get-GuardedConnectors')}
+{_ps1_function('Get-HeldConnectors')}
 {_ps1_function('ConvertTo-Map')}
 {_ps1_function('Get-LifecycleState')}
 {_ps1_function('Test-LifecycleProof')}
@@ -240,6 +242,7 @@ function Test-BinDirProtected {{ return $true }}
 function Get-GatewayDigestProblem {{ return '' }}
 {_ps1_function('Get-Field')}
 {_ps1_function('Get-GuardedConnectors')}
+{_ps1_function('Get-HeldConnectors')}
 {_ps1_function('ConvertTo-Map')}
 {_ps1_function('Get-LifecycleState')}
 {_ps1_function('Test-LifecycleProof')}
@@ -2562,7 +2565,8 @@ if ('{where}' -eq 'accepted-retry') {{
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 @pytest.mark.parametrize("case", ["running", "stopped", "start-fails", "keep-stopped", "changed",
-                                  "connector-down", "connector-unreported", "early-connector-down"])
+                                  "connector-down", "connector-unreported", "early-connector-down",
+                                  "connector-omitted", "early-connector-omitted"])
 def test_a_failed_accepted_retry_restores_and_proves_the_install_it_accepted(tmp_path: Path, case: str) -> None:
     # An interrupted first install left Bins={}; an older installer then put
     # a working install in its place. An accepted retry (-AcceptCurrentInstall)
@@ -2573,10 +2577,11 @@ def test_a_failed_accepted_retry_restores_and_proves_the_install_it_accepted(tmp
     # restored gateway stopped with every hook closed (GAP-0407); a gateway
     # that cannot start keeps the record. Programs changed after acceptance
     # are never recorded or started. Every connector the accepted gateway
-    # guarded before its stop (or, when it did not report them, every
-    # connector the config names) must be guarded again, on the journal path
-    # and before the journal: otherwise the restore fails, the record stays,
-    # and the printed next step finishes it.
+    # guarded before its stop, and every connector the effective config
+    # enables that it did not report unhealthy (one its health omits, or
+    # every one when it does not answer), must be guarded again, on the
+    # journal path and before the journal: otherwise the restore fails, the
+    # record stays, and the printed next step finishes it.
     result = _txn_harness(tmp_path, _resume_functions(
         "Read-Text", "Prepare-UnprovenReplacement", "Restart-Old", "Start-AcceptedReplacement",
         "Restore-AcceptedReplacement", "Test-RecoveryPending", "Close-InstallLock", "Finish-InstallLock",
@@ -2623,7 +2628,12 @@ if (@('running', 'connector-down', 'early-connector-down') -contains '{case}') {
 if ('{case}' -eq 'connector-unreported') {{
     # A gateway that does not report its connectors: the config's are held.
     $script:health = ''
-    [IO.File]::WriteAllText((Join-Path $DataDir 'active_connector.json'), '{{"name": "claudecode"}}')
+    $script:enabled = @('claudecode')
+}}
+if (@('connector-omitted', 'early-connector-omitted') -contains '{case}') {{
+    # An older gateway that answers but leaves an enabled connector out of
+    # its health, before its stop and again after its restore.
+    $script:enabled = @('claudecode')
 }}
 $Run.Lock = $true; $Run.Log = 'install.log'
 $Run.UnprovenReplacement = $null; $Run.UnprovenReplacementUnchanged = $false; $Run.UnprovenGatewayWasRunning = $false
@@ -2652,7 +2662,7 @@ if (@('connector-down', 'connector-unreported', 'early-connector-down') -contain
 $WasRunning = [bool](Get-GatewayProcess)
 if ($WasRunning) {{ throw 'the accepted gateway still ran after its stop' }}
 $Snap = Join-Path $DataDir 'previous.new'
-if ('{case}' -eq 'early-connector-down') {{
+if (@('early-connector-down', 'early-connector-omitted') -contains '{case}') {{
     # A failure before the journal (Prepare-UnprovenReplacement or the
     # journal write): the record is still the empty first-install one.
     "NOTE=$(Restore-AcceptedReplacement)"
@@ -2690,24 +2700,23 @@ if ('{case}' -eq 'connector-down') {{
 """)
     out = result.stdout + result.stderr
     assert result.returncode == 0, out
-    if case in ("running", "connector-down", "early-connector-down"):
-        assert "SAVED=claudecode" in out, out
+    if case in ("running", "connector-down", "early-connector-down", "connector-unreported",
+                "connector-omitted", "early-connector-omitted"):
+        assert "SAVED=claudecode\n" in out, out
     if case == "running":
         assert "RESTORE=ok" in out and "STARTS=1 RUNNING=True RECORD=False LOCK=False CLOSES=1" in out, out
-    elif case in ("connector-down", "connector-unreported"):
+    elif case in ("connector-down", "connector-unreported", "connector-omitted"):
         # The journal holds the connector, so the restore is not proven and
         # the record stays. The gateway runs and renders its own hooks, so the
         # lock goes (Finish-InstallLock).
         assert "RESTORE=failed" in out and "connector claudecode is not guarded again" in out, out
         assert "STARTS=1 RUNNING=True RECORD=True LOCK=False" in out, out
-        if case == "connector-unreported":
-            assert "SAVED=claudecode" in out, out
-        else:
+        if case == "connector-down":
             # Without the switch the record stays and names the switch; with
             # it, the install as it is now is accepted and the record goes.
             assert "NEXT=refused" in out and "-AcceptCurrentInstall" in out.split("NEXT=refused", 1)[1], out
             assert "ACCEPTED=RECORD=False" in out, out
-    elif case == "early-connector-down":
+    elif case in ("early-connector-down", "early-connector-omitted"):
         assert "not proven running" in out and "connector claudecode is not guarded again" in out, out
         assert "STARTS=1 RUNNING=True RECORD=True" in out, out
     elif case == "stopped":
@@ -2729,20 +2738,25 @@ if ('{case}' -eq 'connector-down') {{
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-@pytest.mark.parametrize("case", ["reported", "not-answering", "interrupted", "interrupted-unrecorded", "merged"])
+@pytest.mark.parametrize("case", ["reported", "not-answering", "interrupted", "interrupted-unrecorded", "merged",
+                                  "omitted", "empty-roster", "starting", "no-json"])
 def test_the_connectors_the_accepted_gateway_guarded_are_recorded_before_its_stop(tmp_path: Path, case: str) -> None:
     # Save-AcceptedConnectors asks the running accepted gateway for its
     # guarded connectors with the checked closer (never the accepted
-    # programs), falls back to the connectors the config names when the
-    # gateway does not report them, keeps them in the record before the
-    # stop, and a later run (the gateway down by then) still proves them:
-    # the journal it writes names them.
+    # programs) and adds every connector the effective config enables that
+    # the gateway does not explicitly report unhealthy: one its health
+    # omits, an empty roster, one still starting, or all of them when it
+    # does not answer. A stale active_connector.json adds nothing. It keeps
+    # them in the record before the stop, and a later run (the gateway down
+    # by then) still proves them: the journal it writes names them.
     result = _txn_harness(tmp_path, f"""
 $closer = Join-Path $LifecycleCloser 'defenseclaw-gateway.exe'
 [void][IO.Directory]::CreateDirectory($LifecycleCloser)
 [IO.File]::WriteAllText($closer, 'checked 1.0.4 gateway')
 [IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-gateway.exe'), 'older gateway')
-[IO.File]::WriteAllText((Join-Path $DataDir 'active_connector.json'), '{{"names": ["codex"]}}')
+# A stale active_connector.json; the effective config enables codex.
+[IO.File]::WriteAllText((Join-Path $DataDir 'active_connector.json'), '{{"names": ["cursor"]}}')
+$script:enabled = @('codex')
 $probe = ${{function:Get-NativeProbe}}
 function Get-NativeProbe {{ param($FilePath, $Arguments)
     if ($FilePath -ne $closer) {{ throw "the accepted program $FilePath was run before its stop" }}
@@ -2759,6 +2773,10 @@ switch ('{case}') {{
     'reported' {{ $script:health = '{{"running": true, "health": {{"connectors": [{{"name": "claudecode", "state": "running"}}, {{"name": "codex", "state": "error"}}]}}}}' }}
     'not-answering' {{ $script:health = '{{"running": false}}' }}
     'merged' {{ $script:health = '{{"running": true, "health": {{"connectors": [{{"name": "claudecode", "state": "running"}}]}}}}' }}
+    'omitted' {{ $script:health = '{{"running": true, "health": {{"connectors": [{{"name": "claudecode", "state": "running"}}]}}}}' }}
+    'empty-roster' {{ $script:health = '{{"running": true, "health": {{"connectors": []}}}}' }}
+    'starting' {{ $script:health = '{{"running": true, "health": {{"connectors": [{{"name": "codex", "state": "starting"}}]}}}}' }}
+    'no-json' {{ $script:health = '' }}
     default {{ $running = $null }}
 }}
 if ('{case}' -eq 'merged') {{
@@ -2786,6 +2804,10 @@ $journal = Write-LifecycleManifest 'upgrade' '1.0.3' '1.0.4' (Join-Path $DataDir
         "interrupted": "claudecode",
         "interrupted-unrecorded": "codex",
         "merged": "claudecode,codex",
+        "omitted": "claudecode,codex",
+        "empty-roster": "codex",
+        "starting": "codex",
+        "no-json": "codex",
     }[case]
     assert f"SAVED={want}\n" in out and f"JOURNAL={want}\n" in out, out
 
@@ -4827,7 +4849,7 @@ _TXN_FUNCTIONS = (
     "Read-LifecycleManifest", "Complete-LifecycleManifest", "Remove-LifecycleManifest", "Test-LifecycleProof",
     "Set-RecoveryPending", "Wait-LifecycleProof", "Get-LifecycleNextStep", "Assert-LifecycleRestored", "Get-Field", "Get-Sha256", "New-RecoveryManifest",
     "Close-AllHooks", "Save-LifecycleCloser", "Test-SameBinaries",
-    "Set-RecoverySetupRoot", "Start-RecoveredGateway", "Read-Json", "Get-ConfiguredConnectors", "Save-AcceptedConnectors",
+    "Set-RecoverySetupRoot", "Start-RecoveredGateway", "Read-Json", "Get-HeldConnectors", "Save-AcceptedConnectors",
 )
 
 
@@ -4836,8 +4858,9 @@ def _txn_harness(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
 
     $script:gateway (a process-like object or $null), $script:health (status
     --json text or ""), $script:digest (policy digest JSON or ""),
-    $script:digestHelp (whether policy digest has --check-gateway) and
-    $script:protected drive the stubs.
+    $script:digestHelp (whether policy digest has --check-gateway),
+    $script:protected and $script:enabled (the effective config's connector
+    roster) drive the stubs.
     """
     data, bin_dir = tmp_path / "data", tmp_path / "bin"
     (data / "hooks").mkdir(parents=True)
@@ -4855,7 +4878,8 @@ def _txn_harness(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
         "function Get-GatewayProcess { return $script:gateway }\n"
         "function Get-ExternalConfig { return '' }\n"
         "function Get-ConfiguredConnectors { return @() }\n"
-        "function Get-EffectiveConfigConnectors { return @() }\n"
+        "$script:enabled = @()\n"
+        "function Get-EffectiveConfigConnectors { return @($script:enabled) }\n"
         "function Test-BinDirProtected { return $script:protected }\n"
         "$script:closes = 0\n"
         "function Invoke-Native { param($FilePath, $Arguments, [switch]$Quiet) if (($Arguments -join ' ') -like 'connector refresh-fail-modes --closed*') { $script:closes++; return 0 }; if ($script:health) { return 0 } return 1 }\n"
