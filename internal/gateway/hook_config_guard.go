@@ -692,7 +692,7 @@ func (g *HookConfigGuard) repairCurrent(
 	policyDrift := policyResolver != nil &&
 		((installedFailMode != "" && installedFailMode != opts.HookFailMode) ||
 			strings.ToLower(strings.TrimSpace(renderedOpts.ConfiguredHookFailMode)) != opts.ConfiguredHookFailMode ||
-			strings.ToLower(strings.TrimSpace(renderedOpts.GuardrailMode)) != strings.ToLower(strings.TrimSpace(opts.GuardrailMode)) ||
+			!strings.EqualFold(strings.TrimSpace(renderedOpts.GuardrailMode), strings.TrimSpace(opts.GuardrailMode)) ||
 			renderedOpts.HILTEnabled != opts.HILTEnabled ||
 			installedOutage != connector.OutageHookFailMode(opts, conn))
 	checkOpts := opts

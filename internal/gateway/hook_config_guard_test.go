@@ -457,10 +457,10 @@ func TestHookGuardPolicyRefreshOnModeOrHILTChange(t *testing.T) {
 				t.Fatal("mode/HILT-only config reload did not refresh the hook")
 			}
 			guard.repairMu.Lock()
-			guard.repairMu.Unlock()
 			conn.mu.Lock()
 			last := conn.lastOpts
 			conn.mu.Unlock()
+			guard.repairMu.Unlock()
 			if last.HookFailMode != "closed" || last.GuardrailMode != tc.mode || last.HILTEnabled != tc.hilt {
 				t.Fatalf("refreshed policy = mode:%q fail:%q hilt:%t, want %s/closed/%t", last.GuardrailMode, last.HookFailMode, last.HILTEnabled, tc.mode, tc.hilt)
 			}
