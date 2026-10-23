@@ -1680,11 +1680,20 @@ type hookCheckFailure struct {
 // could not complete. Sandbox ingress has its own mandatory closed verdict and
 // is rendered once.
 //
-// A failed check produced no usable policy verdict. A recovered panic under
-// closed fail mode always answers block, including advisory and lifecycle
-// events. On a standalone managed host, an administrator's open applies to
-// eligible gateway outages, not a recovered panic. Other failed checks retain
-// the native event-capability mapping and neutral stop handling. Per-user
+// A failed check produced no usable policy verdict. One rule covers every
+// connector:
+//   - On an enforcement event (any event that is not a lifecycle event,
+//     hookexec.LifecycleEvent), a recovered panic answers the fail-mode
+//     verdict: closed blocks, in observe mode too, advisory events included.
+//     On a standalone managed host an administrator's open applies to
+//     eligible gateway outages, not to a recovered panic.
+//   - On a stop, session-end or idle event a block keeps the agent running
+//     and repeats the failing hook, so no failed check blocks it. It gets the
+//     connector's neutral allow without follow-up context, or its terminal
+//     answer where the connector documents one (Claude Code's continue:false
+//     ends the turn). The audit row still records the evaluator failure.
+//
+// Other failed checks retain the native event-capability mapping. Per-user
 // explicit open and Secure Client's unset-open default retain their open
 // failure verdict.
 func (a *APIServer) hookFailedCheckResponse(
@@ -1704,6 +1713,7 @@ func (a *APIServer) hookFailedCheckResponse(
 	base := failure.base
 	profile := a.hookProfileForRequest(ctx, connectorName)
 	mode := a.agentHookMode(ctx, connectorName)
+	lifecycle := hookexec.LifecycleEvent(connectorName, req.HookEventName)
 	// A panic is not a policy verdict. In particular, MapVerdict can itself
 	// be the panicking evaluator, and an advisory event's policy mapping may
 	// turn a closed failure into allow. Avoid that mapping during recovery.
@@ -1711,12 +1721,11 @@ func (a *APIServer) hookFailedCheckResponse(
 	if !failure.recoveredPanic {
 		action, wouldBlock = mapHookActionForProfile("block", "action", req.HookEventName, profile.Capabilities, profile, req.Payload)
 	}
-	if sandboxHookForConnector(ctx, connectorName) && action == "block" {
+	if sandboxHookForConnector(ctx, connectorName) && action == "block" && (!failure.recoveredPanic || !lifecycle) {
 		resp := agentHookResponse{Action: action, RawAction: "block", Severity: base.Severity, Mode: "action", WouldBlock: wouldBlock, Reason: base.Reason, AdditionalContext: base.AdditionalContext}
 		return a.failSandboxHookClosed(ctx, profile, connectorName, req, rawBody, payload, resp)
 	}
 	cfg := a.decisionConfig(ctx)
-	lifecycle := hookexec.NeutralLifecycleEvent(connectorName, req.HookEventName)
 	// A failed check follows the connector's resolved fail mode, the
 	// administrator's on a managed computer (owner decision 2026-10-20): an
 	// explicit closed wins everywhere, Secure Client included, whose unset
@@ -1724,7 +1733,7 @@ func (a *APIServer) hookFailedCheckResponse(
 	// outage-only; an evaluator panic is an internal failure, not an outage.
 	failOpen := cfg != nil && cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open" &&
 		(!failure.recoveredPanic || !cfg.StandaloneEnterprise())
-	if !failOpen && action == "block" && (!lifecycle || failure.recoveredPanic) {
+	if !failOpen && action == "block" && !lifecycle {
 		// Observe mode applies to policy verdicts, not failed checks.
 		mode = "action"
 	}
@@ -1732,44 +1741,58 @@ func (a *APIServer) hookFailedCheckResponse(
 		action, wouldBlock = mapHookActionForProfile("block", mode, req.HookEventName, profile.Capabilities, profile, req.Payload)
 	}
 	plain := "DefenseClaw could not complete its hook check " + failure.cause + ". "
+	terminal, neutral := false, false
 	switch {
 	case failOpen:
 		action, wouldBlock = "allow", true
 		plain += "The call was allowed because the hook fails open. Ask your administrator to review the hook and audit log."
-	case failure.recoveredPanic && claudePanicStopsTurn(connectorName, req.HookEventName):
+	case failure.recoveredPanic && lifecycle && terminalLifecycleEvent(connectorName, req.HookEventName):
+		action, wouldBlock, mode, terminal = "block", false, "action", true
 		plain += "The agent turn was stopped because the hook fails closed. Contact your administrator before continuing."
+	case lifecycle:
+		// A denied stop, session-end or idle event keeps the agent running
+		// instead of stopping a tool call, and the failing hook runs again.
+		action, wouldBlock, neutral = "allow", true, true
+		plain += "The event was allowed because a denial would keep the agent running instead of stopping a tool call. Ask your administrator to review the hook and audit log."
 	case failure.recoveredPanic:
 		plain += "The call was blocked because the hook fails closed. Retry the call; if this continues, contact your administrator."
-	case lifecycle:
-		// A denied stop or session-end event keeps the session running
-		// instead of stopping a tool call. Standalone managed hooks answer
-		// it neutrally, with the exact event set the native hook runner
-		// uses for foreign-hook failures and invalid gateway actions.
-		action, wouldBlock = "allow", true
-		plain += "The event was allowed because it ends the session, and a denial would keep the session running. Ask your administrator to review the hook and audit log."
 	case action != "block":
 		plain += "The call could not be blocked on this hook event. Ask your administrator to review the hook and audit log."
 	default:
 		plain += "The call was blocked because the hook fails closed. Retry the call; if this continues, contact your administrator."
 	}
+	// A fail-open allow of a lifecycle event is neutral too: a would-block
+	// follow-up there starts another turn as well.
+	neutral = neutral || (lifecycle && action == "allow")
 	resp := agentHookResponse{Action: action, RawAction: "block", Severity: base.Severity, Mode: mode, WouldBlock: wouldBlock, Reason: plain, SourceReason: base.Reason, AdditionalContext: base.AdditionalContext}
+	// A lifecycle answer is fixed by the event, not by the verdict text: a
+	// rendered follow-up or veto would start another turn.
+	lifecycleOutput := func(out agentHookResponse) agentHookResponse {
+		switch {
+		case terminal:
+			out.HookOutput = map[string]interface{}{"continue": false, "stopReason": out.Reason}
+		case neutral:
+			out.HookOutput = neutralLifecycleHookOutput(ctx, profile, req, rawBody, payload, out)
+		}
+		return out
+	}
 	// A connector-owned response renderer can be the source of the original
 	// evaluation error. Keep the configured verdict if it fails again.
 	defer func() {
 		if recover() != nil {
 			out = resp
 			out.HookOutput = hookOutputFor(req, resp.Action, resp.RawAction, plain, resp.AdditionalContext, profile.Capabilities)
-			out = panicNativeClosedOutcome(req, failure.recoveredPanic, out)
+			out = lifecycleOutput(out)
 		}
 	}()
-	return panicNativeClosedOutcome(req, failure.recoveredPanic,
-		a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain))
+	return lifecycleOutput(a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain))
 }
 
-// A Claude Code stop denial starts another agent turn. Its universal
-// continue:false response instead ends processing with a visible failure,
-// so a persistent evaluator panic cannot make Stop retry indefinitely.
-func claudePanicStopsTurn(connectorName, event string) bool {
+// terminalLifecycleEvent names the lifecycle events whose connector documents
+// a closed answer that ends processing without another hook call. Claude
+// Code's universal continue:false takes precedence over the event's retrying
+// decision:block, so a persistent failure cannot repeat Stop.
+func terminalLifecycleEvent(connectorName, event string) bool {
 	if connectorName != "claudecode" {
 		return false
 	}
@@ -1780,20 +1803,25 @@ func claudePanicStopsTurn(connectorName, event string) bool {
 	return false
 }
 
-// Keep a closed panic's native outcome in sync with the block and audit row.
-// Antigravity has a Stop veto distinct from its PreToolUse deny; an ordinary
-// block rendered through the generic profile would answer decision=allow.
-func panicNativeClosedOutcome(req agentHookRequest, recoveredPanic bool, resp agentHookResponse) agentHookResponse {
-	if !recoveredPanic || resp.Action != "block" {
-		return resp
-	}
-	switch {
-	case claudePanicStopsTurn(req.ConnectorName, req.HookEventName):
-		resp.HookOutput = map[string]interface{}{"continue": false, "stopReason": resp.Reason}
-	case req.ConnectorName == "antigravity" && req.HookEventName == "Stop":
-		resp.HookOutput = map[string]interface{}{"decision": "continue", "reason": resp.Reason}
-	}
-	return resp
+// neutralLifecycleHookOutput renders the connector's plain allow for a
+// lifecycle event, without the would-block context: Cursor submits any stop
+// message as the next prompt. It cannot panic: the callback-free renderer
+// answers when the connector's responder fails again.
+func neutralLifecycleHookOutput(
+	ctx context.Context,
+	profile connector.HookProfile,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	resp agentHookResponse,
+) (output map[string]interface{}) {
+	resp.Action, resp.RawAction, resp.AdditionalContext = "allow", "allow", ""
+	defer func() {
+		if recover() != nil {
+			output = hookOutputFor(req, "allow", "allow", resp.Reason, "", profile.Capabilities)
+		}
+	}()
+	return sandboxHookOutput(ctx, profile, req, rawBody, payload, nil, resp)
 }
 
 // handleHookPanic centralises the side-effects of a recovered hook panic. The
@@ -3420,9 +3448,6 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 	case "antigravity":
 		if action == "block" && canonicalEvent(req.HookEventName) == "pretooluse" {
 			return map[string]interface{}{"decision": "deny", "reason": reason}
-		}
-		if action == "block" && req.HookEventName == "Stop" {
-			return map[string]interface{}{"decision": "continue", "reason": reason}
 		}
 	case "kiro":
 		if action == "block" {

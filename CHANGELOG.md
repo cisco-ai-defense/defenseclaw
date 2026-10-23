@@ -54,7 +54,7 @@ for current behavior.
 
 ### Fixed
 
-- **Recovered hook evaluator errors follow the closed panic posture on standalone managed hosts.** An administrator's `hook_fail_mode: open` applies to eligible gateway outages, not an evaluator panic. Recovered panics block advisory and lifecycle events too; the fail-mode reference now describes that behavior and the possible Stop retry loop.
+- **Recovered hook evaluator errors follow the closed panic posture on standalone managed hosts.** An administrator's `hook_fail_mode: open` applies to eligible gateway outages, not an evaluator panic. Recovered panics block advisory events too. On stop, session-end and idle events a recovered panic never makes the agent repeat the hook: Claude Code ends the turn with a visible reason, every other connector (Codex, Cursor, Copilot, Devin, Kiro, OpenCode, Antigravity) gets its neutral allow, and the audit row records the panic. A Claude Code `TeammateIdle` policy block keeps its exit-2 feedback.
 
 - An interrupted Windows upgrade refuses to continue when gateway recovery fails, including on another retry. Restoring a snapshot now checkpoints and verifies required data and environment moves, retains recovery state on failure, and verifies an external config before reporting recovery (GAP-0444, GAP-0450).
 

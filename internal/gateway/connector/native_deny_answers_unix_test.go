@@ -175,19 +175,22 @@ func TestPerUserHookDeniesAConfirmationWithoutTheNativeAsk(t *testing.T) {
 	}
 }
 
-func TestAntigravityStopBlockCannotBecomeShellAllow(t *testing.T) {
+// The Antigravity shell hook never synthesizes the Stop veto: "continue"
+// re-enters the agent loop and would repeat a failing Stop hook.
+func TestAntigravityShellStopNeverSynthesizesLoopingVeto(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available")
 	}
 	for _, reply := range []string{
 		`200|{"action":"block","reason":"internal evaluator error","hook_output":{"decision":"allow"}}`,
 		`200|{"action":"block","reason":"internal evaluator error"}`,
+		`200|{"action":"allow","raw_action":"block","would_block":true,"hook_output":{"decision":"allow"}}`,
 	} {
 		run := runPerUserHookForStop(t, NewAntigravityConnector(), "antigravity-hook.sh",
 			[]string{"Stop"}, `{"conversationId":"panic-stop","terminationReason":"error","fullyIdle":true}`,
 			reply, "DEFENSECLAW_FAIL_MODE=closed")
-		if run.code != 0 || !strings.Contains(run.stdout, `"decision":"continue"`) || strings.Count(run.stdout, "\n") != 1 {
-			t.Fatalf("gateway response %s yielded exit %d stdout %q stderr %q, want one native Stop veto", reply, run.code, run.stdout, run.stderr)
+		if run.code != 0 || strings.Contains(run.stdout, "continue") {
+			t.Fatalf("gateway response %s yielded exit %d stdout %q stderr %q, want no Stop veto", reply, run.code, run.stdout, run.stderr)
 		}
 	}
 }
@@ -199,12 +202,29 @@ func TestClaudeStopBlockCannotBecomeShellAllow(t *testing.T) {
 	for _, reply := range []string{
 		`200|{"action":"block","reason":"internal evaluator error","claude_code_output":{"decision":"allow"}}`,
 		`200|{"action":"block","reason":"internal evaluator error","claude_code_output":{"continue":null,"stopReason":"claimed terminal"}}`,
-		`200|{"action":"block","reason":"internal evaluator error"}`,
+		`200|{"action":"block","reason":"internal evaluator error","claude_code_output":{"continue":true,"decision":"allow"}}`,
 	} {
 		run := runPerUserHookForStop(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil,
 			`{"hook_event_name":"Stop","session_id":"panic-stop"}`, reply, "DEFENSECLAW_FAIL_MODE=closed")
 		if run.code != 0 || !strings.Contains(run.stdout, `"continue":false`) || strings.Count(run.stdout, "\n") != 1 {
 			t.Fatalf("gateway response %s yielded exit %d stdout %q stderr %q, want one terminal closed Stop", reply, run.code, run.stdout, run.stderr)
+		}
+	}
+}
+
+// A Claude Code policy block on Stop, SubagentStop or TeammateIdle without a
+// directive keeps its exit-2 feedback in the shell hook; it never becomes
+// the terminal continue:false that only a recovered gateway panic sends.
+func TestClaudeShellLifecyclePolicyBlockKeepsExitTwoFeedback(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	for _, event := range []string{"Stop", "SubagentStop", "TeammateIdle"} {
+		run := runPerUserHookForStop(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil,
+			`{"hook_event_name":"`+event+`","session_id":"policy-stop"}`,
+			`200|{"action":"block","reason":"policy: finish the open task first"}`, "DEFENSECLAW_FAIL_MODE=closed")
+		if run.code != 2 || strings.Contains(run.stdout, "continue") || !strings.Contains(run.stderr, "policy: finish the open task first") {
+			t.Fatalf("%s policy block yielded exit %d stdout %q stderr %q, want exit-2 feedback", event, run.code, run.stdout, run.stderr)
 		}
 	}
 }

@@ -1492,26 +1492,15 @@ func (sp spec) decide(opts Options, body []byte) int {
 		output = compactField(fields, "hook_output")
 	}
 	if sp.connector == "claudecode" && action == "block" && claudeTerminalStopEvent(opts.Event) &&
-		(output == "" || !nativeOutputAgrees(sp, opts.Event, action, output)) {
-		// A malformed or missing Stop directive cannot turn a gateway block
-		// into a neutral allow or an exit-2 retry loop.
-		logHookFailure(opts, sp, "gateway block without a terminal Claude Stop answer", "response", "closed", true)
+		output != "" && !nativeOutputAgrees(sp, opts.Event, action, output) {
+		// A contradictory Stop directive cannot turn a gateway block into a
+		// neutral allow or a retrying decision. A block without a directive
+		// is a policy denial: exit 2 gives Claude Code its feedback below.
+		logHookFailure(opts, sp, "gateway block without a matching Claude Stop answer", "response", "closed", true)
 		if reason == "" {
 			reason = "DefenseClaw hook failed closed."
 		}
 		fmt.Fprintln(opts.Stdout, `{"continue":false,"stopReason":`+mustJSONString(reason)+`}`)
-		return 0
-	}
-	if sp.connector == "antigravity" && opts.Event == "Stop" && action == "block" &&
-		(output == "" || !nativeOutputAgrees(sp, opts.Event, action, output)) {
-		// Stop has a different veto from PreToolUse. A missing or
-		// allow-shaped native field must not undo the gateway's closed
-		// response and its enforced audit row.
-		logHookFailure(opts, sp, "gateway block without an Antigravity Stop veto", "response", "closed", true)
-		if reason == "" {
-			reason = "DefenseClaw hook failed closed."
-		}
-		fmt.Fprintln(opts.Stdout, `{"decision":"continue","reason":`+mustJSONString(reason)+`}`)
 		return 0
 	}
 	if managedNativeDecision(opts) && managedNativeBlockableEvent(sp.connector, opts.Event) && output == "" &&
@@ -1749,9 +1738,6 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 	if sp.style == styleClaudeCode {
 		blockable = true
 	}
-	if sp.connector == "antigravity" && event == "Stop" && action == "block" {
-		blockable = true
-	}
 	if sp.style == styleCodex {
 		blockable = codexEventCanControl("codex-hooks-v4", event)
 	}
@@ -1840,9 +1826,6 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 		}
 		return rawStringOr(fields, "permissionDecision", "") == want
 	case "antigravity":
-		if event == "Stop" && action == "block" {
-			return rawStringOr(fields, "decision", "") == "continue"
-		}
 		// Antigravity reads only its documented decision values. A
 		// confirmation must be force_ask: its plain ask honors a cached
 		// Always Allow grant and can run the call unasked (GAP-0405).
