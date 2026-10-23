@@ -1048,9 +1048,14 @@ function Disable-SetupHooks {
     if (Test-Path -LiteralPath $SetupHookState) { Move-Path $SetupHookState (Join-Path $Staging "hook-runtime-state.json") }
 }
 
-function Restore-SetupInstall {
+function Enable-SetupHooks {
+    # Undo Disable-SetupHooks: Setup's hook launcher answers again.
     $state = Join-Path $Staging "hook-runtime-state.json"
     if (Test-Path -LiteralPath $state) { Move-Path $state $SetupHookState }
+}
+
+function Restore-SetupInstall {
+    Enable-SetupHooks
     if ($WasRunning) { Start-SetupGateway $Setup.Root }
 }
 
@@ -1644,6 +1649,49 @@ function Stop-HookFailModeHold {
         }
     } catch { }
     $hold.Process.Dispose()
+}
+
+function Stop-GatewayForSwap([string]$StagedGateway) {
+    # Set the hooks' fail modes from the config and stop the running gateway
+    # for the swap. True when a gateway was running. DefenseClaw Setup's hook
+    # launcher stays at the path the agents cached, and with its state moved
+    # aside (Disable-SetupHooks) it answers every call with exit 0 and no
+    # decision. So it is disabled only once the replacement is ready: it
+    # answers through Setup's gateway while the staged gateway refreshes the
+    # modes and takes the hold (up to a minute), and it goes quiet right
+    # before the stop, which an enabled launcher would undo by starting
+    # Setup's gateway again. With no gateway running it stays enabled through
+    # the refresh too; a gateway it started before it was disabled is held and
+    # stopped like one that ran.
+    $gatewayProcess = Get-GatewayProcess
+    if (-not $gatewayProcess) {
+        if (-not (Update-HookFailModes $StagedGateway)) {
+            Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
+        }
+        if (-not $Setup) { return $false }
+        Disable-SetupHooks
+        $gatewayProcess = Get-GatewayProcess
+        if (-not $gatewayProcess) { return $false }
+        Enable-SetupHooks
+    }
+    $WasRunning = $true
+    if (-not (Start-HookFailModeHold $StagedGateway $gatewayProcess.Id)) {
+        Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
+    }
+    if ($Setup) { Disable-SetupHooks }
+    Write-Info "Stopping the gateway [$(Get-UtcClock)]"
+    if (-not (Stop-Gateway)) {
+        Stop-HookFailModeHold
+        if ($Setup) { Restore-SetupInstall }
+        Die "The running gateway did not stop; nothing was changed"
+    }
+    # The hold refreshes again once the gateway has exited.
+    if (-not (Complete-HookFailModeHold)) {
+        Clear-StagedRelease
+        Restart-Old
+        Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down. $(Get-RestoredNote)"
+    }
+    return $true
 }
 
 function Install-HookFirst([string]$Slot) {
@@ -2842,33 +2890,10 @@ function Invoke-Install {
     Assert-InstallRoom $FinalEnvRoom "the final Python environment"
     Wait-VenvFree
     if ($Setup) {
-        Disable-SetupHooks
         if ($Setup.CodexHome -and -not $env:CODEX_HOME) { $env:CODEX_HOME = $Setup.CodexHome }
         if ($Setup.ClaudeConfigDir -and -not $env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR = $Setup.ClaudeConfigDir }
     }
-    $gatewayProcess = Get-GatewayProcess
-    $WasRunning = [bool]$gatewayProcess
-    if ($WasRunning) {
-        if (-not (Start-HookFailModeHold $stagedGateway $gatewayProcess.Id)) {
-            if ($Setup) { Restore-SetupInstall }
-            Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
-        }
-        Write-Info "Stopping the gateway [$(Get-UtcClock)]"
-        if (-not (Stop-Gateway)) {
-            Stop-HookFailModeHold
-            if ($Setup) { Restore-SetupInstall }
-            Die "The running gateway did not stop; nothing was changed"
-        }
-        # The hold refreshes again once the gateway has exited.
-        if (-not (Complete-HookFailModeHold)) {
-            Clear-StagedRelease
-            Restart-Old
-            Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down. $(Get-RestoredNote)"
-        }
-    } elseif (-not (Update-HookFailModes $stagedGateway)) {
-        if ($Setup) { Restore-SetupInstall }
-        Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
-    }
+    $WasRunning = Stop-GatewayForSwap $stagedGateway
     Stop-Watchdog
     if ($versionChange) {
         try {
