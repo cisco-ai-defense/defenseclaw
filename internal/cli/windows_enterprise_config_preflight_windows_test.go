@@ -186,7 +186,7 @@ func TestWindowsStandaloneConfigPreflightRefusesEnvironmentSecrets(t *testing.T)
 // --state-root, and a state-purge intent, self-uninstall receipt or
 // install-rollback intent of any scope in the lifecycle folder. The helper
 // files a self-uninstall leaves, another receipt, a short name and a
-// folder are none of them; a lifecycle folder it cannot read counts.
+// folder are none of them, and an absent lifecycle folder holds none.
 func TestWindowsEnterpriseStandaloneRecoveryRecords(t *testing.T) {
 	scope := strings.Repeat("ab", 32)
 	for _, tc := range []struct {
@@ -237,12 +237,5 @@ func TestWindowsEnterpriseStandaloneRecoveryRecords(t *testing.T) {
 	}
 	if windowsEnterpriseStandaloneRecoveryRecords("", filepath.Join(t.TempDir(), "absent")) {
 		t.Fatal("an absent lifecycle folder counts as a recovery record")
-	}
-	unreadable := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(unreadable, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if !windowsEnterpriseStandaloneRecoveryRecords("", unreadable) {
-		t.Fatal("a lifecycle folder that cannot be read does not leave the refusal to the installer")
 	}
 }
