@@ -760,7 +760,7 @@ func TestPackageUpgradeRefusesStaleSensorHelperMode(t *testing.T) {
 	if !strings.Contains(r.Errors[0].Message, "did not publish enterprise.tetragon mode off") {
 		t.Fatalf("activation did not name the unverified helper mode: %+v", r.Errors)
 	}
-	if !strings.Contains(r.Errors[0].Message, "journalctl -u "+unitSensorHelper) ||
+	if !strings.Contains(r.Errors[0].Message, "sudo journalctl -u "+unitSensorHelper+" --no-pager") ||
 		!strings.Contains(r.Errors[0].Message, "retry the package command") {
 		t.Fatalf("activation did not name the helper diagnosis and upgrade retry: %+v", r.Errors)
 	}
