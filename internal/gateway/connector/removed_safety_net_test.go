@@ -108,7 +108,8 @@ func TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				skip := append(append([]string{h.script(c)}, links...), h.tokens(c)...)
+				// The lock changes only to seal the stub (requireSealed).
+				skip := append(append([]string{h.script(c), filepath.Join(h.dataDir, hookContractLockFile)}, links...), h.tokens(c)...)
 				if c.name == removedOpenHandsID {
 					skip = append(skip, c.editedCopyPath(h.dataDir, []byte(old.body)))
 				}
@@ -128,6 +129,7 @@ func TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript(t *testing.T) {
 					t.Fatalf("Teardown: %v", err)
 				}
 				h.requireStub(t, c)
+				h.requireSealed(t, c, removedStubDigest(c))
 				h.requireRevoked(t, c)
 				if err := c.VerifyClean(h.opts); err != nil {
 					t.Fatalf("VerifyClean: %v", err)

@@ -316,7 +316,11 @@ func TestRemovedTeardownChangesOnlyTheScriptTokensAndSavedHook(t *testing.T) {
 						plant(t, filepath.Join(h.dataDir, "hooks", hookConfigSidecarName+".openhands"))
 					}
 					h.opts.ManagedEnterprise = managed
-					skip := append([]string{h.script(c)}, h.tokens(c)...)
+					// The lock changes only to seal the stub (requireSealed). A
+					// managed Windows lock keeps its owner-stamped .lock file
+					// (filelock_windows.go), as every managed writer of it does.
+					lock := filepath.Join(h.dataDir, hookContractLockFile)
+					skip := append([]string{h.script(c), lock, lock + ".lock"}, h.tokens(c)...)
 					if c.name == removedOpenHandsID {
 						skip = append(skip, c.editedCopyPath(h.dataDir, []byte(removedOpenHands103Script)))
 					}
@@ -328,6 +332,7 @@ func TestRemovedTeardownChangesOnlyTheScriptTokensAndSavedHook(t *testing.T) {
 						}
 						requireRemovedSame(t, "teardown", h.snapshot(t, skip...), before)
 						h.requireStub(t, c)
+						h.requireSealed(t, c, removedStubDigest(c))
 						h.requireRevoked(t, c)
 						if c.name == removedOpenHandsID {
 							h.requireEditedSaved(t, c, removedOpenHands103Script)

@@ -194,6 +194,37 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	}
 }
 
+// requireProtectedTargets fails an install, upgrade, repair or ensure that
+// leaves an enrolled target unprotected: each guardian_target_failed warning
+// describe reported becomes an error with the same cause, as verify and
+// reconcile already fail on it. The change itself stays committed. An
+// ensure on a managed host whose enrolled Hermes the guardian could not
+// verify returned ok and exit 0 next to security_complete false (GAP-0846).
+// A target refused for a path in its own account's home, the target of an
+// account that is gone and an agent version with no verified hook contract
+// stay warnings here, as in verify. It returns code.
+func (l *lifecycle) requireProtectedTargets(code int) int {
+	r := l.result
+	failed := map[string]bool{}
+	for _, message := range r.Errors {
+		if message.Code == codeGuardianTargetFailed {
+			failed[message.Message] = true
+		}
+	}
+	for _, warning := range r.Warnings {
+		if warning.Code != codeGuardianTargetFailed || failed[warning.Message] {
+			continue
+		}
+		failed[warning.Message] = true
+		r.AddError(codeGuardianTargetFailed, warning.Message+"; the change was applied, but DefenseClaw does not protect that agent: fix the cause, then run `"+
+			l.env.lifecycleCommand(ActionReconcile)+"` (the guardian also retries every minute) and `"+l.env.lifecycleCommand(ActionVerify)+"`")
+	}
+	if len(failed) > 0 {
+		r.SecurityComplete = false
+	}
+	return code
+}
+
 // codeAgentSettingsNotRestored names an account whose agent config the
 // guardian had to recreate or put back from a copy (GAP-0564): the hooks are
 // in place, but the account's own settings are missing or older.

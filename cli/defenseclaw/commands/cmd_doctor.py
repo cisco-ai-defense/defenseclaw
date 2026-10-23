@@ -16160,9 +16160,10 @@ def _check_removed_connector_cleanup(cfg, r: _DoctorResult) -> None:
     Each thing left is listed with the step to remove it; a host with none
     prints no row.
     """
-    from defenseclaw.removed_connectors import leftovers
+    from defenseclaw.removed_connectors import SCRIPT_GONE_WHAT, STUB_UNUSABLE_WHAT, leftovers
 
-    for left in leftovers(str(getattr(cfg, "data_dir", "") or "")):
+    workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
+    for left in leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace):
         steps = "; ".join(f"{item.path}: {item.what} (to remove: {item.step})" for item in left.items)
         pending_publication = any("interrupted publication" in item.what for item in left.items)
         remediation = f"do each step above; until then {left.label} is blocked by DefenseClaw's stub"
@@ -16171,8 +16172,14 @@ def _check_removed_connector_cleanup(cfg, r: _DoctorResult) -> None:
                 "rerun connector teardown to recover the interrupted publication; "
                 "preserve its receipt and saved copies if recovery fails"
             )
+        # A registration whose script is gone, or a stub the agent may not
+        # run or load, does not block: an upgrade that left one is not
+        # finished (GAP-0833 class).
+        unblocked = any(item.what in (SCRIPT_GONE_WHAT, STUB_UNUSABLE_WHAT) for item in left.items)
+        if not pending_publication and unblocked:
+            remediation = f"run defenseclaw-gateway connector teardown --connector {left.connector}, then do each step above"
         _emit(
-            "warn",
+            "fail" if unblocked else "warn",
             f"Removed connector [{left.label}]",
             f"removed in DefenseClaw 1.0.4; left for you to remove by hand: {steps}",
             r=r,
