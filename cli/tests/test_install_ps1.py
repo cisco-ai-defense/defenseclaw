@@ -4068,3 +4068,100 @@ def test_start_gateway_passes_the_every_connector_flag_only_to_a_gateway_that_ha
 
     assert f"rc={want_rc}" in out.stdout, out.stdout + out.stderr
     assert calls.read_text(encoding="utf-8").splitlines()[-1] == want_last
+
+
+# ── 1.0.4 (T8 smoke review loop round 2 of the Hermes/upgrade class) ────────
+
+
+def test_every_windows_upgrade_checks_the_removed_connectors_whatever_the_gateway_state() -> None:
+    # The Windows installer never checked the removed connectors (OpenHands,
+    # OmniGent) itself, and an upgrade of a stopped gateway does not start it,
+    # so a 1.0.3 registration could stay unsealed with exit 0. The check runs
+    # on every upgrade or repair once the swap is done, outside the gateway
+    # start, and its failure is the install's exit 3.
+    body = _ps1_function("Invoke-Install")
+    call = "if ($PrevVersion -and -not (Complete-RetiredConnectorCleanup)) { $startRc = 3 }"
+    assert body.count(call) == 1
+    assert body.index("Complete-Swap\n") < body.index(call) < body.index("if ($startRc -eq 3) { Write-Warn")
+    assert body.index("    if ($startNew) {\n") < body.index("    if ($startNew) { Remove-Item") < body.index(call)
+
+
+@pytest.mark.skipif(POWERSHELL is None or os.name == "nt", reason="needs pwsh running a shebang fake gateway")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("dirty", "configured", "binary", "want", "want_calls"),
+    [
+        ({}, True, True, "True", ["verify openhands", "verify omnigent"]),
+        (
+            {"omnigent": "once"},
+            True,
+            True,
+            "True",
+            ["verify openhands", "verify omnigent", "teardown omnigent", "verify omnigent"],
+        ),
+        (
+            {"openhands": "always"},
+            True,
+            True,
+            "False",
+            ["verify openhands", "teardown openhands", "verify openhands", "verify omnigent"],
+        ),
+        ({}, True, False, "False", []),
+        ({"openhands": "always"}, False, True, "True", []),
+    ],
+)
+def test_the_windows_removed_connector_check_seals_or_names_the_cause(
+    tmp_path: Path, dirty: dict[str, str], configured: bool, binary: bool, want: str, want_calls: list[str]
+) -> None:
+    data_dir, bin_dir, state, calls = tmp_path / "dc", tmp_path / "bin", tmp_path / "state", tmp_path / "calls"
+    for folder in (data_dir, bin_dir, state):
+        folder.mkdir()
+    if configured:
+        (data_dir / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    for name, how in dirty.items():
+        (state / name).write_text(how, encoding="utf-8")
+    if binary:
+        gateway = bin_dir / "defenseclaw-gateway.exe"
+        gateway.write_text(
+            "#!/bin/sh\n"
+            f'[ "$5" = --data-dir ] && [ "$6" = "{data_dir}" ] || exit 9\n'
+            f'echo "$2 $4" >> "{calls}"\n'
+            f'state="{state}/$4"\n'
+            '[ -f "$state" ] || exit 0\n'
+            'if [ "$2" = teardown ]; then [ "$(cat "$state")" = once ] && rm -f "$state"; exit 1; fi\n'
+            'echo "  X $4: $4 cleanup incomplete: C:/h/hook.ps1 is gone, but C:/w/.openhands/hooks.json still runs it. To finish: run defenseclaw-gateway connector teardown --connector $4" >&2\n'
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data_dir}'\n$BinDir = '{bin_dir}'\n$Ver = '1.0.4'\n"
+        "Remove-Item Env:DEFENSECLAW_CONFIG -ErrorAction SilentlyContinue\n"
+        'function Write-Err([string]$m) { Write-Host "err: $m" }\n'
+        + _ps1_function("Invoke-Native")
+        + _ps1_function("Complete-RetiredConnectorCleanup")
+        + "$clean = @(Complete-RetiredConnectorCleanup)\nWrite-Host \"clean=$($clean -join ',')\"\n"
+    )
+
+    out = _run_powershell(script)
+    text = out.stdout + out.stderr
+
+    assert out.returncode == 0, text
+    assert f"clean={want}" in out.stdout, text
+    assert (calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []) == want_calls
+    if dirty.get("openhands") == "always" and configured:
+        assert (
+            "could not finish removing the openhands connector, so its agent may not be blocked: openhands: openhands cleanup incomplete"
+            in text
+        )
+        assert (
+            "C:/w/.openhands/hooks.json still runs it. To finish: run defenseclaw-gateway connector teardown --connector openhands"
+            in text
+        )
+        assert "omnigent connector" not in text
+    if not binary:
+        assert (
+            "could not check that the removed OpenHands and OmniGent connectors are blocked" in text
+            and "is missing" in text
+        )

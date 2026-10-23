@@ -3094,6 +3094,40 @@ function Save-Installer {
     Remove-Item -LiteralPath $next -Force -ErrorAction SilentlyContinue
 }
 
+# until 1.1: the gateway tears the removed connectors (OpenHands, OmniGent)
+# down when it starts, but a start that brings the other connectors up only
+# logs one it could not finish, and an upgrade of a stopped gateway does not
+# start it. Check each here: one not done is torn down again, and one still
+# not done (an agent config that runs a hook DefenseClaw could not put the
+# sealed stub under) is named with its cause and step, and the install exits
+# 3, not 0. Without a config nothing was set up and the gateway cannot read
+# one, so there is nothing to check.
+function Complete-RetiredConnectorCleanup {
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -and -not $env:DEFENSECLAW_CONFIG) { return $true }
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) {
+        Write-Err "DefenseClaw $Ver could not check that the removed OpenHands and OmniGent connectors are blocked: $gateway is missing"
+        return $false
+    }
+    $ErrorActionPreference = "Continue"
+    $clean = $true
+    foreach ($name in @("openhands", "omnigent")) {
+        $verify = @("connector", "verify", "--connector", $name, "--data-dir", $DataDir)
+        if ((Invoke-Native $gateway $verify -Quiet) -eq 0) { continue }
+        [void](Invoke-Native $gateway @("connector", "teardown", "--connector", $name, "--data-dir", $DataDir) -Quiet)
+        # "$_" keeps only the text of a stderr line; Windows PowerShell 5.1
+        # formats the record with its script position otherwise.
+        $global:LASTEXITCODE = -1
+        try { $why = @(& $gateway @verify 2>&1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) -join " " } catch { $why = "" }
+        if ($LASTEXITCODE -eq 0) { continue }
+        $why = $why -replace ("^(" + [char]0x2717 + "|X)\s+"), ""
+        if (-not $why) { $why = "run 'defenseclaw-gateway connector verify --connector $name' for the cause" }
+        Write-Err "DefenseClaw $Ver could not finish removing the $name connector, so its agent may not be blocked: $why"
+        $clean = $false
+    }
+    return $clean
+}
+
 function Complete-Swap {
     # The new install is live: a run killed from here on must not restore the old one.
     Remove-Item -LiteralPath (Join-Path $Snap "COMPLETE") -Force
@@ -4013,6 +4047,9 @@ function Invoke-Install {
     Remove-LifecycleManifest
     Remove-DeveloperFiles
     try { [Console]::TreatControlCAsInput = $false } catch { }
+    # until 1.1: an upgrade or repair never ends with a removed connector's
+    # hook left unsealed, whether or not its gateway was running before it.
+    if ($PrevVersion -and -not (Complete-RetiredConnectorCleanup)) { $startRc = 3 }
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }
     $configured = (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG

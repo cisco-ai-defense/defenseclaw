@@ -2370,6 +2370,8 @@ def test_an_upgrade_finishes_the_removed_connector_cleanup_or_fails(tmp_path: Pa
     # done is torn down again, and one still not done is named with its cause
     # and the install exits 3.
     home = tmp_path / "dc"
+    home.mkdir()
+    (home / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls = tmp_path / "calls"
@@ -2431,12 +2433,62 @@ def test_an_upgrade_finishes_the_removed_connector_cleanup_or_fails(tmp_path: Pa
     assert "To finish: run defenseclaw-gateway connector teardown --connector openhands" in stuck.stderr
     assert "omnigent" not in stuck.stderr
 
-    # The upgrade runs it once the gateway it started is up, and exits 3.
+
+
+# ── 1.0.4 (T8 smoke review loop round 2 of the Hermes/upgrade class) ────────
+
+
+@pytest.mark.parametrize("was_running", ["true", "false"])
+def test_every_upgrade_checks_the_removed_connectors_whatever_the_gateway_state(
+    tmp_path: Path, was_running: str
+) -> None:
+    # An upgrade of a stopped gateway skipped the removed-connector check
+    # (it ran only when WAS_RUNNING), so a 1.0.3 OpenHands or OmniGent hook
+    # could stay registered unsealed and the upgrade exited 0.
     text = INSTALL_SH.read_text(encoding="utf-8")
-    main = text[text.index("finish_swap\n# until 1.1") : text.index("exit ${START_RC}")]
-    assert main.index(
-        'if [[ -n "${PREV_VERSION}" && "${WAS_RUNNING}" == true ]] && ! finish_retired_connector_cleanup; then\n    START_RC=3\nfi'
-    ) < main.index("report_retired_connector_leftovers")
+    start = text.index("finish_swap\n# until 1.1")
+    main = text[start : text.index("report_retired_connector_leftovers\n", start)]
+    script = tmp_path / "main.sh"
+    script.write_text(
+        "set -euo pipefail\nfinish_swap() { :; }\n"
+        'finish_retired_connector_cleanup() { echo "checked" >&2; return 1; }\n'
+        f"PREV_VERSION=1.0.3 WAS_RUNNING={was_running} START_RC=0\n" + main + 'echo "START_RC=${START_RC}"\n',
+        encoding="utf-8",
+    )
+
+    result = _run([str(script)], tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "checked" in result.stderr and "START_RC=3" in result.stdout, result.stdout + result.stderr
+
+
+def test_the_removed_connector_check_fails_loudly_without_the_gateway_and_skips_an_unconfigured_install(
+    tmp_path: Path,
+) -> None:
+    # The check returned 0 when the gateway binary was not there, so nothing
+    # proved the removed connectors' hooks were sealed. With no config there
+    # was never a connector, and the gateway cannot read one.
+    home = tmp_path / "dc"
+    home.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = tmp_path / "finish.sh"
+    script.write_text(
+        'set -euo pipefail\nerr() { echo "err: $*" >&2; }\n'
+        + _install_sh_functions("finish_retired_connector_cleanup")
+        + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" LOG="{tmp_path / "log"}" VERSION=1.0.4\n'
+        + "finish_retired_connector_cleanup\n",
+        encoding="utf-8",
+    )
+
+    unconfigured = _run([str(script)], tmp_path)
+    assert unconfigured.returncode == 0 and not unconfigured.stderr, unconfigured.stderr
+
+    (home / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    missing = _run([str(script)], tmp_path)
+    assert missing.returncode == 1
+    assert "could not check that the removed OpenHands and OmniGent connectors are blocked" in missing.stderr
+    assert f"{bin_dir}/defenseclaw-gateway is missing" in missing.stderr
 
 
 # ── 1.0.4 (T8 smoke review loop round 4: GAP-0878, GAP-0899) ────────────────

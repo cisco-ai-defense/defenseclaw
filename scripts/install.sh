@@ -1083,8 +1083,9 @@ if [[ "${WAS_RUNNING}" == true ]]; then
     rm -f "${SNAP}/GATEWAY_RESTART_UNPROVEN"
 fi
 finish_swap
-# until 1.1: an upgrade never ends with a removed connector's hook left unsealed.
-if [[ -n "${PREV_VERSION}" && "${WAS_RUNNING}" == true ]] && ! finish_retired_connector_cleanup; then
+# until 1.1: an upgrade or repair never ends with a removed connector's hook
+# left unsealed, whether or not its gateway was running before it.
+if [[ -n "${PREV_VERSION}" ]] && ! finish_retired_connector_cleanup; then
     START_RC=3
 fi
 report_retired_connector_leftovers
@@ -1946,13 +1947,19 @@ finish_swap() {
 
 # until 1.1: the gateway tears the removed connectors (OpenHands, OmniGent)
 # down when it starts, but a start that brings the other connectors up only
-# logs one it could not finish. Check each here: one not done is torn down
-# again, and one still not done (an agent config that runs a hook DefenseClaw
-# could not put the sealed stub under) is named with its cause and step, and
-# the install exits 3, not 0.
+# logs one it could not finish, and an upgrade of a stopped gateway does not
+# start it. Check each here: one not done is torn down again, and one still
+# not done (an agent config that runs a hook DefenseClaw could not put the
+# sealed stub under) is named with its cause and step, and the install exits
+# 3, not 0. Without a config nothing was set up and the gateway cannot read
+# one, so there is nothing to check.
 finish_retired_connector_cleanup() {
     local gateway="${BIN_DIR}/defenseclaw-gateway" name why failed=0
-    [[ -x "${gateway}" ]] || return 0
+    [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]] || return 0
+    if [[ ! -x "${gateway}" ]]; then
+        err "DefenseClaw ${VERSION} could not check that the removed OpenHands and OmniGent connectors are blocked: ${gateway} is missing"
+        return 1
+    fi
     for name in openhands omnigent; do
         "${gateway}" connector verify --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" >>"${LOG}" 2>&1 && continue
         "${gateway}" connector teardown --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" >>"${LOG}" 2>&1 || true
