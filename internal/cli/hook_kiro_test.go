@@ -112,13 +112,16 @@ func TestKiroHookCommandRunsAndForwardsItsSurface(t *testing.T) {
 // going ahead, when its policy is to fail closed: an administrator-managed
 // hook, or any hook whose --fail-mode, hook sidecar or DEFENSECLAW_FAIL_MODE
 // does not say open (unset is closed). An explicitly fail-open Kiro hook and
-// every other connector keep cobra's status 1.
+// every other connector keep cobra's status 1, except while the account's
+// installer holds the data directory: every hook then fails closed
+// (GAP-0862).
 func TestHookPreRunFailureUsesTheConnectorsBlockingExit(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		args    []string
-		sidecar string
-		want    int
+		name       string
+		args       []string
+		sidecar    string
+		installing bool
+		want       int
 	}{
 		{name: "kiro fail closed, unknown flag", args: []string{"--connector", "kiro", "--not-a-hook-flag", "--fail-mode", "closed"}, want: 2},
 		{name: "kiro managed, connector spelled with =", args: []string{"--connector=kiro", "--not-a-hook-flag", "--enterprise-managed"}, want: 2},
@@ -128,11 +131,18 @@ func TestHookPreRunFailureUsesTheConnectorsBlockingExit(t *testing.T) {
 		{name: "kiro unset fails closed", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, want: 2},
 		{name: "kiro sidecar without kiro fails closed", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"codex":"open"}}`, want: 2},
 		{name: "codex unknown flag", args: []string{"--connector", "codex", "--not-a-hook-flag", "--fail-mode", "closed"}, want: 1},
+		{name: "kiro fail open during an install", args: []string{"--connector", "kiro", "--not-a-hook-flag", "--fail-mode", "open"}, installing: true, want: 2},
+		{name: "kiro open in the hook sidecar during an install", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"kiro":"open"},"fail_mode_sources":{"kiro":"config"}}`, installing: true, want: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("DEFENSECLAW_HOME", home)
 			t.Setenv("DEFENSECLAW_FAIL_MODE", "")
+			if tc.installing {
+				if err := os.Mkdir(filepath.Join(home, ".install.lock"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tc.sidecar != "" {
 				if err := os.MkdirAll(filepath.Join(home, "hooks"), 0o700); err != nil {
 					t.Fatal(err)

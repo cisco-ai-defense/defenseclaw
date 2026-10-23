@@ -1538,43 +1538,43 @@
   "plugin/amp-plugin.ts/managed=0/fail=closed": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 34667,
-      "sha256": "b0eee977504d2a5eb5be1b6d8ac5109561fe043d262c8067931e813bda6ac1f6"
+      "size": 37142,
+      "sha256": "d68295cfb4230ce6b78abf80dd0dddd8f2b75295ecc4fa1e8fad4db5d1ce90ad"
     }
   },
   "plugin/amp-plugin.ts/managed=0/fail=open": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 34665,
-      "sha256": "4740ab43f7d862bab769a2bc445b3916e70a58202c4456e075eb1f0726fc2897"
+      "size": 37140,
+      "sha256": "7f743f15998368c7e6c6e2496917d5edb786fba41c5be07be8f8f79c1ad9a59c"
     }
   },
   "plugin/amp-plugin.ts/managed=1/fail=closed": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 34460,
-      "sha256": "1954b9ee04522c9fba1569e442c0a2129d7c83ed06148e3732722ed3097fb6a0"
+      "size": 34471,
+      "sha256": "43f5039d7fb671d6407f78aa17ad90a08154c3fe3f4f97ee1ef557e89a8ef726"
     }
   },
   "plugin/amp-plugin.ts/managed=1/fail=open": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 34460,
-      "sha256": "1954b9ee04522c9fba1569e442c0a2129d7c83ed06148e3732722ed3097fb6a0"
+      "size": 34471,
+      "sha256": "43f5039d7fb671d6407f78aa17ad90a08154c3fe3f4f97ee1ef557e89a8ef726"
     }
   },
   "plugin/opencode-plugin.js/managed=0/fail=closed": {
     "opencode-plugin.js": {
       "mode": "-rw-------",
-      "size": 38209,
-      "sha256": "40d9ef7a4291d9d071de6bf509d7ae06183ee05f8f9f5e4c2a33ba7c5d92ee19"
+      "size": 40587,
+      "sha256": "45ae5783b57bd9553297da7d2443078c2d2123ad78a2ca193d7674b090381a07"
     }
   },
   "plugin/opencode-plugin.js/managed=0/fail=open": {
     "opencode-plugin.js": {
       "mode": "-rw-------",
-      "size": 38207,
-      "sha256": "c3c98e1d20f38a305425ed30eb561140f748ef9a8e1fe1bb19dd4676ee54bdb3"
+      "size": 40585,
+      "sha256": "32200dc288193463a2cd99912270be5e11243d202d4ada6fd7aa75dfcd746e7f"
     }
   },
   "plugin/opencode-plugin.js/managed=1/fail=closed": {

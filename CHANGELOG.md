@@ -24,6 +24,8 @@ for current behavior.
 
 ### Fixed
 
+- **Every native hook answers closed during a per-user install or upgrade, its early answer too (GAP-0862).** The hook command arms its answer watchdog before it resolves its runtime, and a hook registered with `--fail-mode open` prepared the fail-open answer there. When that resolution stalled past the 3.5-second answer deadline while `install.sh` or `install.ps1` held `.install.lock`, the watchdog allowed the tool call before the hook read the lock. The watchdog now reads the lock (in `DEFENSECLAW_HOME` when set) when it is armed and again at the deadline, and answers closed when the lock is held or cannot be read within 100 ms; the hook's own install check also treats a lock it cannot read as held. A Kiro hook that fails before it runs (an unknown flag) exits 2 during an install.
+- **Per-user OpenCode and Amp name the gateway when they block during an outage (GAP-0850).** A closed per-user plugin whose gateway was stopped showed only the runtime's network error (`DefenseClaw hook failed closed (fetch failed)`, or Bun's `Unable to connect`). It now says why the gateway did not answer: an install or upgrade, a `defenseclaw-gateway stop`, a gateway that is not running, not answering in time, or answering HTTP 5xx. It also gives the command that brings the gateway back and ends with the runtime's error.
 - **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.
 
 ### Removed
