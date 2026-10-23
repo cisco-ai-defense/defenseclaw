@@ -102,7 +102,7 @@ host, input over the size limit and an answer DefenseClaw cannot use. See
 
 ### Which connectors can ask me inside the agent?
 
-Claude Code (`PreToolUse`, in Manual mode only; other permission modes block), Copilot CLI (`preToolUse`), Antigravity (`PreToolUse` only), Amp (`tool.call` and model-bound `tool.result` in the active foreground thread) and OpenClaw. Cursor is not counted: DefenseClaw does not turn on its native ask. Every other confirm verdict takes a connector-specific fallback, and there is no TUI approval queue.
+Claude Code (`PreToolUse`, in Manual mode only; other permission modes block), Antigravity (`PreToolUse` only), Amp (`tool.call` and model-bound `tool.result` in the active foreground thread) and OpenClaw. Copilot CLI is not counted: its hook does not prove that an approval prompt is available, so DefenseClaw blocks action-mode confirmations. The separate VS Code Local harness retains native ask. Cursor is not counted: DefenseClaw does not turn on its native ask. Every other confirm verdict takes a connector-specific fallback, and there is no TUI approval queue.
 
 ### Which connectors fail closed?
 

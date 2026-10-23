@@ -1245,8 +1245,18 @@ class DoctorGuardrailTests(unittest.TestCase):
 
         result = _DoctorResult()
         _check_hilt_support(cfg, "copilot", result)
+        self.assertEqual(result.warned, 1)
+        self.assertIn("confirmations block", result.checks[0]["detail"])
+        self.assertIn("VS Code Local", result.checks[0]["detail"])
+        from defenseclaw.commands.cmd_setup import _hilt_support_note
+
+        self.assertIn("confirmations block", _hilt_support_note("copilot"))
+
+        result = _DoctorResult()
+        with patch("defenseclaw.commands.cmd_doctor._doctor_secure_client", return_value=True):
+            _check_hilt_support(cfg, "copilot", result)
         self.assertEqual(result.passed, 1)
-        self.assertIn("preToolUse ask supported", result.checks[0]["detail"])
+        self.assertIn("Secure Client preToolUse ask", result.checks[0]["detail"])
 
         result = _DoctorResult()
         _check_hilt_support(cfg, "cursor", result)

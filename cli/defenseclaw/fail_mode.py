@@ -508,6 +508,7 @@ def _resolve_native_deny_fail_mode(cfg: Any, name: str, configured: str, desired
         drift.append("registration-stale")
     if lock_drift:
         drift.append(lock_drift)
+    drift.extend(registration_integrity_drift(cfg, name))
     try:
         registration = _native_deny_registration_freshness(cfg, name)
     except Exception:  # noqa: BLE001 - an unreadable registration is not current, never a crash.

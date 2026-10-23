@@ -3409,6 +3409,10 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 	if agent := confirmWithoutAskAgent(req.ConnectorName, rawAction, mode, req.HookEventName); action == "block" && agent != "" {
 		safeReason = agentConfirmUnavailableReason(agent, reason, agentDisplayReason(reason, notificationSinkPolicy(policy)), notificationSinkPolicy(policy))
 	}
+	if profile.Name == "copilot" && profile.ContractID != connector.CopilotVSCodeLocalContractID &&
+		action == "block" && rawAction == "confirm" && canonicalEvent(req.HookEventName) == "pretooluse" {
+		safeReason += " DefenseClaw cannot verify that Copilot CLI can show an approval prompt; this call was denied."
+	}
 	resp := agentHookResponse{
 		Action:            action,
 		RawAction:         rawAction,

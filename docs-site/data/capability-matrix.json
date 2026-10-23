@@ -265,16 +265,14 @@
       "label": "GitHub Copilot CLI",
       "windowsSupport": "supported",
       "windowsNote": "Native Windows x64 uses Copilot CLI's PowerShell hook field.",
-      "summary": "Global or workspace hooks with native approval on pre-tool-use.",
+      "summary": "Global or workspace hooks that block before a tool runs.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
       "subprocessPolicy": "none",
       "hooks": {
         "canBlock": true,
-        "canAskNative": true,
-        "askEvents": [
-          "preToolUse"
-        ],
+        "canAskNative": false,
+        "askEvents": [],
         "blockEvents": [
           "preToolUse",
           "permissionRequest",
@@ -296,7 +294,7 @@
         ]
       },
       "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "managedOpenNoGuard": "per-user-route-blocks-linux-macos", "heldUntilRestart": false, "secureClientClosed": "runs", "strictAvailability": "yes" },
-      "hilt": "Copilot CLI supports native ask on documented preToolUse hooks.",
+      "hilt": "Copilot CLI confirmations block because its hook does not prove an approval prompt is available; VS Code Local uses its separate native ask.",
       "notes": "Native Windows setup is supported. Provider authentication remains required; HITL and official-client live evidence are unverified and unclaimed, validation metadata remains empty, and live=false. Global hooks live under ~/.copilot/hooks by default with optional workspace hooks under <workspace>/.github/hooks."
     },
     {

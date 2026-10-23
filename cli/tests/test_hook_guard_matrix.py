@@ -168,7 +168,7 @@ def _windows(monkeypatch, case: dict[str, Any]) -> None:
         monkeypatch.setattr(hook_integrity, "hook_launcher_problems", lambda cfg, connector: [])
 
 
-def _doctor_rows(cfg, connector: str, monkeypatch) -> list[dict[str, Any]]:
+def _doctor_rows(cfg, connector: str, monkeypatch=None) -> list[dict[str, Any]]:
     r = cmd_doctor._DoctorResult(passive=True, quiet=True)
     cmd_doctor._check_connector_hooks(cfg, connector, r)
     return list(r.checks)
@@ -235,13 +235,13 @@ def test_doctor_fails_an_unguarded_hook_edit(tmp_path, monkeypatch, case, event,
     connector = case["connector"]
     label = cmd_doctor._SETUP_READINESS_PRIMARY_LABELS[connector]
     cfg, _paths = _install(tmp_path, monkeypatch, case)
-    pristine = [row for row in _doctor_rows(cfg, connector, monkeypatch) if row["label"] == label]
+    pristine = [row for row in _doctor_rows(cfg, connector) if row["label"] == label]
     assert not any(
         "can run unchecked" in str(row.get("detail")) or "not inspected" in str(row.get("detail")) for row in pristine
     ), pristine
 
     cfg, paths = _install(tmp_path / "edited", monkeypatch, _edited_case(case, event, edit))
-    rows = [row for row in _doctor_rows(cfg, connector, monkeypatch) if row["label"] == label]
+    rows = [row for row in _doctor_rows(cfg, connector) if row["label"] == label]
     failed = [row for row in rows if row["status"] == "fail" and event in str(row.get("detail"))]
     assert failed, rows
     assert not any(row["status"] == "pass" for row in rows), rows
@@ -268,7 +268,7 @@ def test_a_managed_install_fails_an_unguarded_hook_edit(tmp_path, monkeypatch, c
     label = cmd_doctor._SETUP_READINESS_PRIMARY_LABELS[connector]
     cfg, _paths = _install(tmp_path, monkeypatch, _edited_case(case, event, edit))
     cfg.deployment_mode = "managed_enterprise"
-    rows = [row for row in _doctor_rows(cfg, connector, monkeypatch) if row["label"] == label]
+    rows = [row for row in _doctor_rows(cfg, connector) if row["label"] == label]
     assert any(row["status"] == "fail" and event in str(row.get("detail")) for row in rows), rows
     assert not any(row["status"] == "pass" for row in rows), rows
     assert fail_mode.REGISTRATION_UNGUARDED in _fail_mode_drift(cfg, connector)

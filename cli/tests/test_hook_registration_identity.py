@@ -69,8 +69,7 @@ def _registered(cfg) -> str:
     return str(Path(cfg.data_dir) / "hooks")
 
 
-def _doctor_failures(cfg, connector: str, monkeypatch) -> list[str]:
-    monkeypatch.setattr(cmd_doctor, "_opencode_managed_plugin_drift", lambda *_a, **_k: "")
+def _doctor_failures(cfg, connector: str) -> list[str]:
     r = cmd_doctor._DoctorResult(passive=True, quiet=True)
     cmd_doctor._check_connector_hooks(cfg, connector, r)
     cmd_doctor._check_hook_runtime_integrity(cfg, connector, r)
@@ -89,7 +88,7 @@ def _assert_every_check_fails(cfg, connector: str, monkeypatch, drift: str, *, r
     step = bootstrap._connector_runtime_readiness(cfg, connector)
     assert step is not None and step.status == ("warn" if restart_repairs else "fail"), step
     assert "is not guarded" in step.detail
-    assert _doctor_failures(cfg, connector, monkeypatch)
+    assert _doctor_failures(cfg, connector)
     assert drift in _fail_mode_drift(cfg, connector)
 
 
@@ -368,7 +367,7 @@ def test_edited_copilot_handler_on_an_unexpected_event_is_repaired(tmp_path, mon
     else:
         document["hooks"]["unexpectedEvent"] = [operator]
     config.write_text(json.dumps(document), encoding="utf-8")
-    assert not _doctor_failures(cfg, "copilot", monkeypatch)
+    assert not _doctor_failures(cfg, "copilot")
     assert cmd_status._hook_runtime_degraded_suffix(cfg, "copilot") == ""
     assert bootstrap._connector_runtime_readiness(cfg, "copilot") is None
     assert "registration-foreign" not in _fail_mode_drift(cfg, "copilot")

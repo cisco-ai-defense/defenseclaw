@@ -338,6 +338,11 @@ func copilotEditorPolicy(opts Options, state *State, write bool) error {
 	if err := copilotManagedSettings(opts, state, write); err != nil {
 		return err
 	}
+	if write {
+		// The guardian removes old per-user files after policy publication.
+		// Verify and status report them until that pass completes.
+		opts.CopilotOutOfScopeHomes = nil
+	}
 	copilotVSCodeStatus(opts, state)
 	return nil
 }

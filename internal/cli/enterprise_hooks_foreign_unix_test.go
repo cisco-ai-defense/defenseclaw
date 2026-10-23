@@ -654,6 +654,103 @@ func TestStandaloneForeignCleanupRemovesVSCodeHooksOfAccountsNoLongerEligible(t 
 	}
 }
 
+func TestStandaloneCopilotVSCodeWritesOnlyToEnrolledAccounts(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		unenrolled  string
+		disabledRow bool
+		want        map[string]bool
+	}{
+		{name: "inspect without machine policy rows", unenrolled: config.EnterpriseUnenrolledInspect,
+			want: map[string]bool{"alice": true, "bob": false, "carol": true}},
+		{name: "deny requires a Copilot row", unenrolled: config.EnterpriseUnenrolledDeny,
+			want: map[string]bool{"alice": true, "bob": false, "carol": false}},
+		{name: "deny ignores a disabled Copilot row", unenrolled: config.EnterpriseUnenrolledDeny, disabledRow: true,
+			want: map[string]bool{"alice": true, "bob": false, "carol": false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previousCfg, previousManifest := cfg, enterpriseHookManifest
+			previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
+			previousLoadVSCode, previousWriteVSCode := enterpriseHookLoadCopilotVSCodeAccounts, enterpriseHookWriteCopilotVSCodeAccounts
+			t.Cleanup(func() {
+				cfg, enterpriseHookManifest = previousCfg, previousManifest
+				enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner = previousLoad, previousCheck, previousRunner
+				enterpriseHookLoadCopilotVSCodeAccounts, enterpriseHookWriteCopilotVSCodeAccounts = previousLoadVSCode, previousWriteVSCode
+				enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+				enterpriseHookForeignCleanupState.leftoversClean = false
+				enterpriseHookForeignCleanupState.unrepaired = nil
+			})
+			enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+			enterpriseHookForeignCleanupState.leftoversClean = false
+			enterpriseHookForeignCleanupState.unrepaired = nil
+			cfg = &config.Config{DataDir: useUserCleanupStateDir(t), DeploymentMode: managed.DeploymentModeManagedEnterprise}
+			cfg.Enterprise.Profile = managed.ProfileStandalone
+			cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"copilot": {}}
+			cfg.Enterprise.Enrollment.UnenrolledUsers = tc.unenrolled
+			cfg.Enterprise.Enrollment.ExcludeUsers = []string{"4202"}
+			useStandaloneForeignHookFenceFixture(t)
+			enterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
+			accounts := []enterprisehooks.UnixEligibleAccount{
+				{User: "alice", UID: 4201, GID: 4201, Home: "/home/alice", HomeInode: 7},
+				// The eligible record is stale after an administrator excludes bob.
+				{User: "bob", UID: 4202, GID: 4202, Home: "/home/bob", HomeInode: 7},
+				{User: "carol", UID: 4203, GID: 4203, Home: "/home/carol", HomeInode: 7},
+			}
+			enterpriseHookLoadEligibleAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) { return accounts, nil }
+			enterpriseHookLoadCopilotVSCodeAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) { return accounts, nil }
+			var written []enterprisehooks.UnixEligibleAccount
+			enterpriseHookWriteCopilotVSCodeAccounts = func(_ string, next []enterprisehooks.UnixEligibleAccount) error {
+				written = next
+				return nil
+			}
+			enterpriseHookCheckHome = func(string, int) enterprisehooks.HomeCheck {
+				return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable, Inode: 7}
+			}
+			var mu sync.Mutex
+			requests := map[string]*enterpriseHookWorkerCopilotVSCode{}
+			enterpriseHookWorkerRunner = func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+				mu.Lock()
+				requests[account.User] = request.CopilotVSCode
+				mu.Unlock()
+				report := &enterpriseHookWorkerCopilotVSCodeReport{}
+				if request.CopilotVSCode != nil && !request.CopilotVSCode.HookFile {
+					report.Removed = []string{account.Home + "/.copilot/hooks/defenseclaw-vscode.json"}
+				}
+				return enterpriseHookWorkerResponse{CopilotVSCode: report}, nil
+			}
+			aliceUID := 4201
+			manifest := enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{{User: "alice", UID: &aliceUID, Connector: "copilot"}}}
+			if tc.disabledRow {
+				carolUID, disabled := 4203, false
+				manifest.Targets = append(manifest.Targets, enterprisehooks.ManifestTarget{
+					User: "carol", UID: &carolUID, Connector: "copilot", Enabled: &disabled,
+				})
+			}
+			runEnterpriseHookStandaloneForeignCleanup(context.Background(), io.Discard, time.Now(), manifest, nil, "")
+			for user, want := range tc.want {
+				request := requests[user]
+				if request == nil || request.HookFile != want || request.Plugin && !want {
+					t.Errorf("%s VS Code request %+v, want hook file=%t", user, request, want)
+				}
+			}
+			wantCount := 0
+			for _, scoped := range tc.want {
+				if scoped {
+					wantCount++
+				}
+			}
+			for _, account := range written {
+				if !tc.want[account.User] {
+					t.Errorf("VS Code accounts record retained out-of-scope %s", account.User)
+				}
+			}
+			if len(written) != wantCount {
+				t.Errorf("VS Code accounts record %+v does not match scope %+v", written, tc.want)
+			}
+		})
+	}
+}
+
 func TestStandaloneForeignCleanupRemovesVSCodeHooksWhenCopilotIsRemoved(t *testing.T) {
 	previousCfg, previousManifest := cfg, enterpriseHookManifest
 	previousLoad, previousVSCodeLoad := enterpriseHookLoadEligibleAccounts, enterpriseHookLoadCopilotVSCodeAccounts

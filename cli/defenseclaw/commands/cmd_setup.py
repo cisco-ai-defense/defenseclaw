@@ -6150,7 +6150,11 @@ def _hilt_support_note(connector: str) -> str:
     if connector == "zeptoclaw":
         return "ZeptoClaw has no native ask surface; confirm verdicts are downgraded with raw_action preserved."
     if connector == "copilot":
-        return "Copilot CLI supports native ask on documented preToolUse hooks."
+        return (
+            "Ordinary Copilot CLI cannot prove an approval prompt is available; action-mode "
+            "confirmations block at preToolUse. VS Code Local retains native ask, and the "
+            "Secure Client profile keeps its approval path."
+        )
     if connector == "cursor":
         return (
             "Cursor setup does not enable native human approval; confirm verdicts "

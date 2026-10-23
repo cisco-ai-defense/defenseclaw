@@ -43,6 +43,11 @@ class ModePickerHarness(App[str | None]):
         self.result = result
 
 
+def test_copilot_mode_picker_names_its_delivered_confirmation():
+    copilot = next(choice for choice in MODE_PICKER_CHOICES if choice.wire == "copilot")
+    assert "confirmations block" in copilot.tagline
+
+
 
 
 def test_mode_picker_hint_is_built_from_visible_rows() -> None:

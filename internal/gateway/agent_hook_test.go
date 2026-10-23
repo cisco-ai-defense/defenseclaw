@@ -200,7 +200,8 @@ func TestHookOutputFor_AllConnectors_AllActions(t *testing.T) {
 		{connector: "cursor", event: "subagentStart", action: "block", rawAction: "block", expectedKey: "permission", expectedValue: "deny"},
 		{connector: "cursor", event: "beforeShellExecution", action: "confirm", rawAction: "confirm", expectedKey: "permission", expectedValue: "ask"},
 
-		// copilot PreToolUse -- ask + deny on permissionDecision.
+		// Copilot PreToolUse -- ask is for VS Code Local and Secure Client;
+		// the ordinary CLI profile maps an unavailable confirmation to deny.
 		{connector: "copilot", event: "PreToolUse", action: "block", rawAction: "block", expectedKey: "permissionDecision", expectedValue: "deny"},
 		{connector: "copilot", event: "PreToolUse", action: "confirm", rawAction: "confirm", expectedKey: "permissionDecision", expectedValue: "ask"},
 		// copilot permissionRequest -- different key ("behavior").
@@ -1229,10 +1230,10 @@ func TestAgentHookDispatch_WouldBlockFiresOnWouldBlock(t *testing.T) {
 }
 
 func TestMapHookAction_ConfirmRequiresNativeAskSurface(t *testing.T) {
-	copilot := connector.NewCopilotConnector().HookCapabilities(connector.SetupOpts{})
-	action, wouldBlock := mapHookAction("confirm", "action", "PreToolUse", copilot)
-	if action != "confirm" || wouldBlock {
-		t.Fatalf("copilot PreToolUse confirm = (%q,%v), want (confirm,false)", action, wouldBlock)
+	copilot := connector.NewCopilotConnector().HookProfile(connector.SetupOpts{})
+	action, wouldBlock := mapHookActionForProfile("confirm", "action", "PreToolUse", copilot.Capabilities, copilot, nil)
+	if action != "block" || wouldBlock {
+		t.Fatalf("Copilot CLI PreToolUse confirm = (%q,%v), want (block,false)", action, wouldBlock)
 	}
 
 	devin := connector.NewDevinConnector().HookCapabilities(connector.SetupOpts{})

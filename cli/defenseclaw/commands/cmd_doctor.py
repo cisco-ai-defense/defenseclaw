@@ -2140,7 +2140,17 @@ def _check_hilt_support(
     elif connector == "claudecode":
         _emit("pass", "Human approval", f"Claude Code PreToolUse ask supported at {min_sev}+", r=r)
     elif connector == "copilot":
-        _emit("pass", "Human approval", f"Copilot CLI preToolUse ask supported at {min_sev}+", r=r)
+        if _doctor_secure_client(cfg):
+            _emit("pass", "Human approval", f"Copilot Secure Client preToolUse ask supported at {min_sev}+", r=r)
+        else:
+            _emit(
+                "warn",
+                "Human approval",
+                "Copilot CLI cannot prove an approval prompt is available at preToolUse; "
+                "action-mode confirmations block and audit as block (raw_action=confirm). "
+                "VS Code Local has a separate native ask.",
+                r=r,
+            )
     elif connector == "cursor":
         _emit(
             "warn",
@@ -5567,6 +5577,9 @@ def _connector_hook_credential_problems(cfg, trust: _GatewayTrust | None) -> lis
             continue
         path = os.path.join(hooks_dir, f".hook-{scope}.token")
         if os.path.islink(path):
+            # The gateway refuses a redirected credential path. Do not read
+            # its target, but report the connector whose hooks will get 401.
+            problems.append(scope)
             continue
         if not os.path.isfile(path):
             # A gateway restart mints a missing credential as it replaces a

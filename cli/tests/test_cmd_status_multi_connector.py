@@ -197,6 +197,54 @@ def _render_live(cfg, health: dict) -> str:
     return buf.getvalue()
 
 
+def test_refused_scoped_hook_credential_degrades_only_its_connector(tmp_path):
+    # GAP-0821: the gateway rejects a well-formed Claude token at POSIX 0640
+    # (or untrusted Windows custody), even while /status says running.
+    from defenseclaw.commands import cmd_doctor
+
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    token = hooks / ".hook-claudecode.token"
+    token.write_text("a" * 64 + "\n", encoding="ascii")
+    cfg = _cfg(["claudecode", "codex"], modes={"claudecode": "action", "codex": "action"})
+    cfg.data_dir = str(tmp_path)
+    health = {"connectors": [
+        {"name": "claudecode", "state": "running", "source": "manual"},
+        {"name": "codex", "state": "running", "source": "manual"},
+    ]}
+    trust = type("Trust", (), {"trusted": True})()
+    fault = True
+
+    def gateway_verdict(*_args, **_kwargs):
+        if os.name != "nt":
+            assert token.stat().st_mode & 0o777 == (0o640 if fault else 0o600)
+        return (401 if fault else 405, "")
+
+    with (
+        patch.object(cmd_doctor, "_trusted_gateway_listener", return_value=trust),
+        patch.object(cmd_doctor, "_http_probe", side_effect=gateway_verdict) as probe,
+    ):
+        if os.name != "nt":
+            token.chmod(0o640)
+        out = _render_live(cfg, health)
+        rows = {row["name"]: row for row in cmd_status._connector_roster(cfg, health)}
+        claude = out.split("Claude Code (claudecode)", 1)[1].split("Codex (codex)", 1)[0]
+        assert "DEGRADED" in claude and "hook credential" in claude
+        assert "DEGRADED" not in out.split("Codex (codex)", 1)[1]
+        assert rows["claudecode"]["state"] == "degraded"
+        assert "hook credential" in rows["claudecode"]["runtime_detail"]
+        assert rows["codex"]["state"] == "running"
+        assert probe.call_count == 2
+
+        fault = False
+        if os.name != "nt":
+            token.chmod(0o600)
+        out = _render_live(cfg, health)
+        rows = {row["name"]: row for row in cmd_status._connector_roster(cfg, health)}
+        assert "DEGRADED" not in out
+        assert rows["claudecode"]["state"] == "running"
+
+
 @contextlib.contextmanager
 def _owned_status_endpoint(
     runtime_data_dir: str,

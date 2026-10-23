@@ -8,7 +8,7 @@ keywords:
   - confirm verdict
 ---
 
-Human approval (HITL) pauses a risky call and asks you instead of silently allowing or hard-blocking it. It works in action mode, on agents that can ask: Claude Code, GitHub Copilot CLI, Antigravity, Amp and OpenClaw ([the list](/docs/features/guardrail#which-agents-can-ask)). CRITICAL findings still block without asking, and alert-only rules never ask.
+Human approval (HITL) pauses a risky call and asks you instead of silently allowing or hard-blocking it. It works in action mode, on agents that can ask: Claude Code, Antigravity, Amp and OpenClaw ([the list](/docs/features/guardrail#which-agents-can-ask)). CRITICAL findings still block without asking, and alert-only rules never ask.
 
 <DefenseClawDemo scenario="hitl-native-approval" variant="approve" />
 
@@ -82,7 +82,7 @@ Alert #2
   …
 ```
 
-`Decision: confirm` means the gateway asked. Your approve or deny answer is handled inside Claude Code, so DefenseClaw records the finding and the verdict, not who approved. Outside Manual mode, the decision is `block`. Copilot CLI and Antigravity deny a confirm without asking in a non-interactive run (`-p`), and Copilot CLI does the same in Autopilot; their audit still shows `confirm`, because their hook input does not say which mode they run in.
+`Decision: confirm` means the gateway asked. Your approve or deny answer is handled inside Claude Code, so DefenseClaw records the finding and the verdict, not who approved. Outside Manual mode, the decision is `block`. Copilot CLI blocks an action-mode confirmation because its hook does not prove that an approval prompt is available; the audit records `block` with raw action `confirm`. Antigravity can deny a confirm without asking in a non-interactive run (`-p`); its audit still shows `confirm`.
 
 ## When the agent cannot ask
 

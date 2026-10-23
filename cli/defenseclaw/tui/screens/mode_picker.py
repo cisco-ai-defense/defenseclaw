@@ -65,7 +65,7 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
         False,
         "Devin CLI + Devin Desktop (Devin Local) hooks; MCP, skills, and rules discovery",
     ),
-    ModeChoice("copilot", "Copilot", "p", False, "workspace hooks + native pre-tool approval"),
+    ModeChoice("copilot", "Copilot", "p", False, "workspace hooks; action-mode confirmations block"),
     ModeChoice("antigravity", "Antigravity", "a", False, "PreToolUse hooks via ~/.gemini/config/hooks.json"),
     ModeChoice("opencode", "OpenCode", "e", False, "auto-loaded JS bridge plugin; tool.execute.before blocking"),
     ModeChoice("amp", "Amp", "i", False, "synchronous TypeScript policy plugin; native confirm/block"),

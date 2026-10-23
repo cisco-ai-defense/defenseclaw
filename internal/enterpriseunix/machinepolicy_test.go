@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -780,6 +781,60 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 		t.Fatalf("a removed home is reported pending: %+v", got.Warnings)
 	} else {
 		requireOK(t, got)
+	}
+}
+
+func TestCopilotAccountScopeIgnoresInvalidEligibleRecordWhenInactive(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	record := enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath)
+	writeHostFile(t, h, record, "state\n")
+	cfg := &config.Config{}
+	if _, _, err := (&policyManager{env: h.env}).copilotAccountHomes(cfg); err != nil {
+		t.Fatalf("inactive Copilot must not block lifecycle repair: %v", err)
+	}
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"copilot": {}}
+	if _, _, err := (&policyManager{env: h.env}).copilotAccountHomes(cfg); err == nil {
+		t.Fatal("managed Copilot accepted an unreadable enrollment record")
+	}
+}
+
+func TestCopilotLocalStatusUsesCurrentAccountScope(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath),
+				`{"version":1,"accounts":[{"user":"alice","uid":501,"home":"/home/alice"},{"user":"bob","uid":502,"home":"/home/bob"},{"user":"carol","uid":503,"home":"/home/carol"}]}`)
+			writeHostFile(t, h, h.env.Layout.ManifestPath,
+				"version: 1\ntargets:\n  - user: alice\n    uid: 501\n    user_home: /home/alice\n    connector: copilot\n  - user: bob\n    uid: 502\n    user_home: /home/bob\n    connector: copilot\n")
+			cfg := &config.Config{}
+			cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"copilot": {}}
+			cfg.Enterprise.Enrollment.Mode = config.EnterpriseEnrollmentManifest
+			cfg.Enterprise.Enrollment.ExcludeUsers = []string{"bob"}
+			scoped, out, err := (&policyManager{env: h.env}).copilotAccountHomes(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(scoped, []string{h.env.P("/home/alice")}) ||
+				!reflect.DeepEqual(out, []string{h.env.P("/home/bob"), h.env.P("/home/carol")}) {
+				t.Fatalf("scoped=%v out=%v", scoped, out)
+			}
+			// A selected Copilot connector is managed even without an explicit
+			// enterprise.machine_policy.connectors.copilot row.
+			cfg.Enterprise.MachinePolicy.Connectors = nil
+			cfg.Guardrail.Connector = "copilot"
+			scoped, out, err = (&policyManager{env: h.env}).copilotAccountHomes(cfg)
+			if err != nil || !reflect.DeepEqual(scoped, []string{h.env.P("/home/alice")}) ||
+				!reflect.DeepEqual(out, []string{h.env.P("/home/bob"), h.env.P("/home/carol")}) {
+				t.Fatalf("active connector without machine-policy row: scoped=%v out=%v err=%v", scoped, out, err)
+			}
+			if err := os.Remove(h.env.P(h.env.Layout.ManifestPath)); err != nil {
+				t.Fatal(err)
+			}
+			scoped, out, err = (&policyManager{env: h.env}).copilotAccountHomes(cfg)
+			if err != nil || len(scoped) != 0 || len(out) != 3 {
+				t.Fatalf("before the first manifest: scoped=%v out=%v err=%v", scoped, out, err)
+			}
+		})
 	}
 }
 

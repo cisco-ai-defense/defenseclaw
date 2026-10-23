@@ -48,7 +48,7 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 	}{
 		{NewHermesConnector(), true, false, false, "user", "config.yaml"},
 		{NewCursorConnector(), true, false, true, "user", "hooks.json"},
-		{NewCopilotConnector(), true, true, false, "user,workspace", "defenseclaw.json"},
+		{NewCopilotConnector(), true, false, false, "user,workspace", "defenseclaw.json"},
 		{NewAntigravityConnector(), true, true, false, "user", "hooks.json"},
 	}
 	for _, tc := range cases {
@@ -2876,13 +2876,13 @@ func TestCopilotSettingsCascadePreservesEffectiveOperatorPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := SetupOpts{WorkspaceDir: workspace}
-	if err := validateCopilotHookPolicy(opts, filepath.Join(repo, "missing-hooks.json")); err != nil {
+	if err := validateCopilotOperatorSettings(opts); err != nil {
 		t.Fatalf("higher-priority false did not override user true: %v", err)
 	}
 	if err := os.WriteFile(local, []byte(`{"disableAllHooks": true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := validateCopilotHookPolicy(opts, filepath.Join(repo, "missing-hooks.json"))
+	err := validateCopilotOperatorSettings(opts)
 	if err == nil || !strings.Contains(err.Error(), "refusing to overwrite operator policy") {
 		t.Fatalf("effective disableAllHooks did not block setup: %v", err)
 	}
@@ -2902,9 +2902,66 @@ func TestCopilotSettingsCascadeRejectsMalformedJSONC(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, "settings.json"), []byte(`{"disableAllHooks": "yes"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := validateCopilotHookPolicy(SetupOpts{}, filepath.Join(home, "hooks", "missing.json"))
+	err := validateCopilotOperatorSettings(SetupOpts{})
 	if err == nil || !strings.Contains(err.Error(), "must be boolean") {
 		t.Fatalf("malformed setting was not rejected: %v", err)
+	}
+}
+
+func TestCopilotOwnRegistrationSwitchIsRepairedOnEveryOS(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, value := range []interface{}{true, "invalid"} {
+			t.Run(fmt.Sprintf("%s/%v", goos, value), func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "defenseclaw.json")
+				body, err := json.Marshal(map[string]interface{}{
+					"version": 1, "disableAllHooks": value,
+					"hooks": map[string]interface{}{"preToolUse": []interface{}{map[string]interface{}{"type": "command", "bash": "old hook"}}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := patchCopilotHooksForOS(path, "/opt/defenseclaw/hooks/copilot-hook.sh", []string{"preToolUse"}, goos); err != nil {
+					t.Fatal(err)
+				}
+				got, err := readJSONObject(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, exists := got["disableAllHooks"]; exists {
+					t.Fatalf("Setup kept its own disabled registration: %+v", got)
+				}
+			})
+		}
+	}
+}
+
+func TestCopilotSetupRepairsDisabledOwnRegistrationButRespectsOperatorSettings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("COPILOT_HOME", home)
+	dataDir := t.TempDir()
+	registration := filepath.Join(home, "hooks", "defenseclaw.json")
+	if err := os.MkdirAll(filepath.Dir(registration), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registration, []byte(`{"version":1,"disableAllHooks":true,"hooks":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{DataDir: dataDir}
+	if err := NewCopilotConnector().patchConfig(opts, filepath.Join(dataDir, "hooks", "copilot-hook.sh")); err != nil {
+		t.Fatalf("Setup must repair its own hook file: %v", err)
+	}
+	if value, present, err := readCopilotDisableAllHooks(registration); err != nil || present || value {
+		t.Fatalf("own registration after Setup: value=%t present=%t err=%v", value, present, err)
+	}
+	settings := filepath.Join(home, "settings.json")
+	if err := os.WriteFile(settings, []byte(`{"disableAllHooks":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewCopilotConnector().patchConfig(opts, filepath.Join(dataDir, "hooks", "copilot-hook.sh")); err == nil || !strings.Contains(err.Error(), "operator setting") {
+		t.Fatalf("Setup must leave operator settings disabled: %v", err)
 	}
 }
 

@@ -92,12 +92,15 @@ func (a *APIServer) hookProfileForConnector(name string) connector.HookProfile {
 	if contractID == "" {
 		contractID = connector.ResolveHookContract(name, agentVersion).Contract.ContractID
 	}
+	live := a.liveConfig()
+	secureClient := live != nil && live.SecureClientIntegration()
 	return provider.HookProfile(connector.SetupOpts{
-		DataDir:        a.configDataDir(),
-		APIAddr:        a.apiAddrForCapabilities(),
-		WorkspaceDir:   a.connectorWorkspaceDir(),
-		AgentVersion:   agentVersion,
-		HookContractID: contractID,
+		DataDir:                  a.configDataDir(),
+		APIAddr:                  a.apiAddrForCapabilities(),
+		WorkspaceDir:             a.connectorWorkspaceDir(),
+		AgentVersion:             agentVersion,
+		HookContractID:           contractID,
+		SecureClientHookDelivery: secureClient,
 	})
 }
 
