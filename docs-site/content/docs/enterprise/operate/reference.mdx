@@ -602,14 +602,15 @@ line and the services, not the digest. Use `--json` and read the `policy` object
 
 What the lifecycle does with it:
 
-- **`status` and `verify` report; they do not fail.** `applied: false` means the
-  gateway runs another policy than the config on disk computes to, for example
-  because it rejected the change or has not reloaded yet. A rejected reload also adds
-  the warning `policy_reload_rejected` to every action. The gateway clears it when a
-  later reload succeeds. Alert on the field ([What to alert on](#what-to-alert-on)).
+- **`status` and `verify` check application.** `applied: false` means the
+  gateway runs another policy than the config on disk computes to, or rejected
+  its last reload. `status` reports the cause and sets `security_complete: false`.
+  `verify` reports `policy_not_applied` or `policy_reload_rejected` as an error
+  and exits nonzero until the intended policy applies. The gateway clears a
+  reload error when a later reload succeeds.
 - **Changing actions warn and record.** After `install`, `upgrade`, `repair` or
   `ensure`, when the gateway is ready, a different gateway digest adds the warning
-  `policy_not_applied`. When the digests match, the lifecycle writes
+  `policy_not_applied`. When the digests match without a reload error, the lifecycle writes
   `policy-state.json` (`effective_digest`, `config_generation`, `applied_at`,
   root-only) next to `deployment.json`: `/var/lib/defenseclaw-enterprise` on Linux,
   `/opt/cisco/defenseclaw/lifecycle` on macOS, and

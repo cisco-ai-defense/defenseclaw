@@ -31,7 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
-// codePolicyNotApplied warns that the running gateway reports a different
+// codePolicyNotApplied reports that the running gateway enforces a different
 // effective policy than the committed config computes to.
 const codePolicyNotApplied = "policy_not_applied"
 
@@ -216,19 +216,17 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 	}
 	state.Applied = state.EffectiveDigest == reported && reloadError == ""
 	r.Policy = state
-	if l.opts.Action == ActionStatus || l.opts.Action == ActionVerify || !computed || !r.Readiness.Gateway {
-		return
-	}
-	if !state.Applied {
-		if reported == state.EffectiveDigest {
-			// The digests agree; what is not applied is the reload the
-			// gateway rejected, which policy_reload_rejected names. The
-			// warning below said "reports X but computes to X" (GAP-0587).
-			return
+	if !state.Applied && computed && r.Readiness.Gateway && reloadError == "" {
+		message := fmt.Sprintf(
+			"the gateway reports effective policy %s but the installed config computes to %s; the gateway keeps enforcing the policy it last built",
+			shortDigest(reported), shortDigest(state.EffectiveDigest))
+		if l.opts.Action == ActionVerify {
+			r.AddError(codePolicyNotApplied, message)
+		} else {
+			r.AddWarning(codePolicyNotApplied, message)
 		}
-		r.AddWarning(codePolicyNotApplied, fmt.Sprintf(
-			"the gateway reports effective policy %s but the installed config computes to %s; it applies the config on its next reload",
-			shortDigest(reported), shortDigest(state.EffectiveDigest)))
+	}
+	if l.opts.Action == ActionStatus || l.opts.Action == ActionVerify || !computed || !r.Readiness.Gateway || !state.Applied {
 		return
 	}
 	if err := env.savePolicyState(env.withBundleFields(enterprisestatus.PolicyStateRecord{

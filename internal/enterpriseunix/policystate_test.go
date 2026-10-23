@@ -111,10 +111,10 @@ func TestEnsureReportsTheAppliedPolicy(t *testing.T) {
 	}
 }
 
-// A rejected reload leaves the previously built policy enforcing, even when
-// its digest happens to match the installed config. Status must not certify
-// security coverage and verify must refuse with the gateway's cause.
-func TestRejectedGatewayPolicyReloadCannotVerifyComplete(t *testing.T) {
+// An unapplied policy leaves the previously built policy enforcing. A rejected
+// reload does so even when its digest matches the installed config. Status
+// must not certify security coverage and verify must name the cause.
+func TestUnappliedGatewayPolicyCannotVerifyComplete(t *testing.T) {
 	const digest = "sha256:" + "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
@@ -131,14 +131,26 @@ func TestRejectedGatewayPolicyReloadCannotVerifyComplete(t *testing.T) {
 			if r := h.run(Options{Action: ActionVerify}); !r.SecurityComplete {
 				t.Fatalf("healthy verify incomplete: errors %+v warnings %+v", r.Errors, r.Warnings)
 			}
-
-			reloadError = "pack digest mismatch"
+			reported = "sha256:" + strings.Repeat("0", 64)
 			status := h.run(Options{Action: ActionStatus})
+			if status.SecurityComplete || status.Policy == nil || status.Policy.Applied ||
+				!strings.Contains(messagesOf(status.Warnings, codePolicyNotApplied), shortDigest(reported)) {
+				t.Fatalf("unapplied policy status: complete %v policy %+v warnings %+v", status.SecurityComplete, status.Policy, status.Warnings)
+			}
+			verify := h.run(Options{Action: ActionVerify})
+			if verify.OK || verify.SecurityComplete || verify.Policy == nil || verify.Policy.Applied ||
+				!strings.Contains(messagesOf(verify.Errors, codePolicyNotApplied), shortDigest(reported)) {
+				t.Fatalf("unapplied policy verify: exit %d complete %v policy %+v errors %+v", verify.ExitCode, verify.SecurityComplete, verify.Policy, verify.Errors)
+			}
+
+			reported = digest
+			reloadError = "pack digest mismatch"
+			status = h.run(Options{Action: ActionStatus})
 			if status.SecurityComplete || status.Policy == nil || status.Policy.Applied ||
 				!strings.Contains(messagesOf(status.Warnings, codePolicyReloadRejected), reloadError) {
 				t.Fatalf("rejected reload status: complete %v policy %+v warnings %+v", status.SecurityComplete, status.Policy, status.Warnings)
 			}
-			verify := h.run(Options{Action: ActionVerify})
+			verify = h.run(Options{Action: ActionVerify})
 			if verify.OK || verify.SecurityComplete || verify.Policy == nil || verify.Policy.Applied ||
 				!strings.Contains(messagesOf(verify.Errors, codePolicyReloadRejected), reloadError) {
 				t.Fatalf("rejected reload verify: exit %d complete %v policy %+v errors %+v", verify.ExitCode, verify.SecurityComplete, verify.Policy, verify.Errors)
