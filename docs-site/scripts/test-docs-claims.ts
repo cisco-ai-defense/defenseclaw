@@ -214,6 +214,30 @@ describe('managed-host enrollment protection', () => {
     assert.match(reference, /configured Claude Code, Codex and Cursor.{0,260}before the first (?:user )?enrollment.{0,260}after the last enrolled (?:user|SID) is removed/i);
   });
 
+  it('matches Claude Code missing-policy guidance to status and policy verify', () => {
+    const enumerator = readFileSync(join(repo, 'internal/enterprisehooks/enumerator_standalone_windows.go'), 'utf8');
+    const consequence = /func windowsUnenrolledConsequence\(connector string\) string \{([\s\S]*?)\n\}/.exec(enumerator)?.[1];
+    assert.ok(consequence, 'Windows unenrolled-user consequence not found');
+    assert.match(consequence, /case "cursor":\s*if !windowsCursorMachinePolicyPublished\(\)/);
+    assert.match(consequence, /case "codex":\s*if !windowsCodexMachinePolicyPublished\(\)/);
+    assert.doesNotMatch(consequence, /case "claudecode"|windowsClaudeMachinePolicyPublished/);
+    assert.match(consequence, /machine-policy hooks refuse this user's tool calls until it is enrolled/);
+
+    const verifier = readFileSync(join(repo, 'internal/enterprisepolicy/claude.go'), 'utf8');
+    const verify = /func \(t claudeTarget\) Verify\(opts Options\) \(State, error\) \{([\s\S]*?)\n\}/.exec(verifier)?.[1];
+    assert.ok(verify, 'Claude Code policy verification not found');
+    assert.match(verify, /if !exists \{\s*state\.conflict\(/);
+    assert.match(verify, /state\.finish\(\)/);
+
+    const reference = page('enterprise/configure/reference.mdx');
+    const claude = /On Windows, Claude Code's .*?(?= On Windows, the guardian keeps Cursor's)/.exec(reference)?.[0];
+    assert.ok(claude, 'Windows Claude Code policy paragraph not found');
+    assert.match(claude, /status.*does not name a missing Claude Code machine policy/i);
+    assert.match(claude, /enterprise policy verify.*fails.*missing machine hook/i);
+    assert.match(claude, /Stop Claude Code use.*repair.*verify.*passes/i);
+    assert.doesNotMatch(claude, /status.*names missing policy/i);
+  });
+
   it('describes the installed Windows policy as a product change', () => {
     const changelog = readFileSync(join(repo, 'CHANGELOG.md'), 'utf8');
     assert.match(
