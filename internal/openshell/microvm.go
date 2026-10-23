@@ -459,8 +459,10 @@ func executable(p string) bool {
 // /usr/libexec/openshell, /usr/local/libexec/openshell,
 // /usr/local/libexec), else the one next to the openshell-gateway on PATH
 // (in its directory or the libexec beside it, as OpenShell's release
-// archives lay them out). Without an explicit driver_dir, a gateway that
-// runs the driver from anywhere else names it through its running process.
+// archives lay them out). With driver_dir, the running gateway executable's
+// sibling is preferred over a different gateway on PATH. Without an explicit
+// driver_dir, a gateway that runs the driver from anywhere else names it
+// through its running process.
 // The second result is the earlier user directory when a PATH-adjacent
 // driver was selected and no driver_dir was configured.
 func (r *doctorRun) findVMDriver(ctx context.Context) (string, string) {
@@ -481,7 +483,16 @@ func (r *doctorRun) findVMDriver(ctx context.Context) (string, string) {
 		dirs = append(dirs, "/usr/libexec/openshell", "/usr/local/libexec/openshell", "/usr/local/libexec")
 	}
 	gatewayDirStart := len(dirs)
-	if gw, err := r.LookPath(GatewayBinary); err == nil && filepath.IsAbs(gw) {
+	gw := ""
+	if configuredDir {
+		if running := r.gatewayProcess(ctx); running != nil {
+			gw = running.path
+		}
+	}
+	if gw == "" {
+		gw, _ = r.LookPath(GatewayBinary)
+	}
+	if filepath.IsAbs(gw) {
 		if configuredDir {
 			// OpenShell's current_exe() follows a gateway symlink. Its only
 			// fallback with driver_dir set is beside that executable.
