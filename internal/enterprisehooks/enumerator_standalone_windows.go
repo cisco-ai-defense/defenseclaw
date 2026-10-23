@@ -178,7 +178,7 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 	}
 	if prev, known := previous[previousManifestKey(row.SID, row.Connector)]; !known || prev.IsEnabled() {
 		rowContext.reportKiroIDEBelowFloor(row)
-		rowContext.reportKiroCLIBelowFloorBesideIDE(row)
+		rowContext.reportKiroCLIBesideIDE(row)
 	}
 	if prev, known := previous[previousManifestKey(row.SID, row.Connector)]; known {
 		// A disabled row is an administrator decision the guardian never
@@ -236,19 +236,13 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		}
 		emit := applyPreviousRowState(row, previous, logf)
 		row.AgentVersion = version
-		// A pre-floor row stays installed for upgrade compatibility, but its
-		// headless V3 calls never load the hook. Report it even when the CLI
-		// version is unchanged or the user is signed out. A separately
-		// reported CLI beside a supported IDE, or a refused version change,
-		// already supplies this coverage warning.
+		// A pre-floor row, or one enrolled at a version its CLI never
+		// confirmed, stays installed for upgrade compatibility but does not
+		// cover the CLI. Report it even when the CLI version is unchanged or
+		// the user is signed out. A refused version change already supplies
+		// this coverage warning.
 		if emit && row.IsEnabled() && row.Connector == "kiro" && notFollowed == "" {
-			if reason := windowsKiroCLIBelowHookFloor(version); reason != "" {
-				ide, _ := discoverWindowsKiroIDEVersion(row.UserHome)
-				if ide == "" || kiroIDEBelowGlobalHooksFloor(ide) {
-					rowContext.reportAgent(row, version, reason,
-						"an earlier enrollment keeps its interactive hooks installed, but this CLI's non-interactive runs do not load them")
-				}
-			}
+			rowContext.reportKeptKiroCLIRow(row, version)
 		}
 		return emit
 	}
@@ -262,6 +256,14 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		path, _ := windowsStandalonePerUserManagedExecutable(row.UserHome, row.Connector)
 		if path == "" && strings.EqualFold(row.Connector, "kiro") {
 			path = windowsKiroInstalled(row.UserHome)
+		}
+		if strings.EqualFold(row.Connector, "kiro") {
+			// A kiro-cli no run copy names: its version is not assumed
+			// (GAP-0829).
+			if launcher := windowsKiroCLIVersionUnknown(row.UserHome); launcher != "" {
+				rowContext.unprotected(row, "", windowsKiroCLIVersionUnknownReason(launcher))
+				return false
+			}
 		}
 		if path == "" && strings.EqualFold(row.Connector, "claudecode") {
 			// A native claude.exe whose build is not recorded yet: say what

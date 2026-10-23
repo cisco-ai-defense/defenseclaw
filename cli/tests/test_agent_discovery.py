@@ -458,6 +458,37 @@ def test_restricted_setup_scan_probes_its_active_peer(monkeypatch, tmp_path):
     assert ad._read_cache(data_dir=tmp_path).agents["claudecode"].version == "2.1.286 (Claude Code)"
 
 
+@pytest.mark.parametrize(
+    "config_text",
+    (
+        # A 0.8.x single-connector config names its connector only in claw.mode.
+        "claw:\n  mode: claude-code\nguardrail:\n  enabled: true\n",
+        # A map entry written without a body is enabled.
+        "guardrail:\n  enabled: true\n  connectors:\n    claudecode:\n",
+    ),
+    ids=("legacy-claw-mode", "bare-map-entry"),
+)
+def test_restricted_setup_scan_probes_every_form_of_an_active_peer(monkeypatch, tmp_path, config_text):
+    if os.name == "nt":
+        set_known_windows_directory_acl(tmp_path)
+    (tmp_path / "config.yaml").write_text(config_text, encoding="utf-8")
+    probed = {}
+
+    def scan(name, **kwargs):
+        probed[name] = kwargs["probe"]
+        signal = _signal(name, installed=name in {"claudecode", "codex"})
+        if kwargs["probe"] and name == "claudecode":
+            signal.version = "2.1.286 (Claude Code)"
+        return signal
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_scan_agent", scan)
+    result = ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=tmp_path)
+
+    assert probed["claudecode"] is True
+    assert result.agents["claudecode"].version == "2.1.286 (Claude Code)"
+
+
 @pytest.mark.parametrize("old_schema", (3, 6))
 @pytest.mark.parametrize("windows_semantics", (False, True))
 def test_release_cache_keeps_unchanged_peer_version_during_schema_upgrade(

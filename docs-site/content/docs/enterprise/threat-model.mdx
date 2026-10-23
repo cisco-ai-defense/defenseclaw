@@ -558,7 +558,7 @@ Only Kiro IDE 1.0.182 and later and `kiro-cli --v3` read the global `~/.kiro/hoo
 
 #### Kiro on Windows before its first run
 
-Kiro on Windows is enrolled per user, and a kiro-cli that has never run has no version the guardian can read, so it is enrolled at 2.27.1 (the lowest reviewed contract) until its first run names the version. The Kiro hook returns a block as exit 2 whether Kiro starts it through `pwsh -Command`, `powershell -Command`, `cmd.exe` or directly.
+Kiro on Windows is enrolled per user, and a kiro-cli that has never run has no version the guardian can read. Its version is not assumed: until its first run names the version it has no row and status reports it as `hook_contract_unverified`, so its first session runs without DefenseClaw hooks and the deployment shows as not covered. The Kiro hook returns a block as exit 2 whether Kiro starts it through `pwsh -Command`, `powershell -Command`, `cmd.exe` or directly.
 
 **Where:** Kiro, Windows.
 

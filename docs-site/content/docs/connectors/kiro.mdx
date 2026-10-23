@@ -270,9 +270,13 @@ Windows discovery runs nothing. `kiro-cli.exe` records no version beside
 itself, but each run copies the build to
 `%LOCALAPPDATA%\Kiro-Cli\run\chat-cli-<version>.exe`; the guardian takes
 the copy whose size matches `kiro-cli.exe`. A kiro-cli that has never run has
-no copy; unless the Kiro IDE enrolls the user, it is enrolled at 2.27.1, the
-lowest reviewed contract, so its first chat already runs with the
-DefenseClaw agent, and the next pass after that run reads its real version. The IDE's version
+no copy, so its version is unknown. The guardian does not assume one: the
+user gets no kiro-cli row, and `enterprise windows status` reports the CLI as
+`hook_contract_unverified` (coverage incomplete) until its first run names the
+version; the next pass then enrolls or reports that version. A supported Kiro
+IDE still enrolls the user, and the CLI beside it is reported the same way. A
+row an earlier build enrolled at an assumed version is kept, so its hooks
+stay installed, and is reported until the CLI names its version. The IDE's version
 comes from the `product.json` folders in the hook scope callout above.
 
 Managed Windows pins each enrolled user to one of two reviewed hook

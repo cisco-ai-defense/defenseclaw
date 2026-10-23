@@ -29,8 +29,11 @@ import (
 // but each run copies the build to run\chat-cli-<version>.exe, so the
 // active version is the run copy whose size matches kiro-cli.exe (the
 // highest such version when several match), as for the native Claude
-// installer. A kiro-cli that has never run has no copy: it is enrolled at
-// the standalone floor until its first run names the version.
+// installer. A kiro-cli that has never run has no copy and so no version.
+// Its version is never assumed (a 2.24.1 install would then be enrolled as
+// a supported one although its headless runs load no hooks, rel-1-0-4
+// GAP-0829): it is reported as not protected, with no row of its own, until
+// its first run names the version.
 //
 // The Kiro IDE reads the global %USERPROFILE%\.kiro\hooks file from
 // KiroIDEGlobalHooksFloor. Its version is the resources\app\product.json of
@@ -52,17 +55,29 @@ func discoverWindowsKiroAgentVersion(profileHome string) string {
 	if ide != "" && !kiroIDEBelowGlobalHooksFloor(ide) {
 		return ide + KiroIDEVersionSuffix
 	}
-	if cli != "" {
-		return cli // report the unsupported CLI when no IDE can be enrolled
+	// The unsupported CLI is reported when no IDE can be enrolled; a CLI
+	// with no version is reported by windowsKiroCLIVersionUnknown.
+	return cli
+}
+
+// windowsKiroCLIVersionUnknown returns profileHome's kiro-cli.exe when it is
+// installed but no run copy names its version (it has not run since it was
+// installed or updated), else "".
+func windowsKiroCLIVersionUnknown(profileHome string) string {
+	if !filepath.IsAbs(profileHome) || !windowsKiroCLILauncherPresent(profileHome) ||
+		discoverWindowsKiroCLIVersion(profileHome) != "" {
+		return ""
 	}
-	// A kiro-cli that has never run names no version yet. Enroll it at the
-	// standalone floor so its first chat already runs with the DefenseClaw
-	// agent and hooks; the run copy names the real version on the next
-	// cycle, which then re-admits or reports it.
-	if windowsKiroCLILauncherPresent(profileHome) {
-		return standaloneNotGatedAgentFloor("kiro")
-	}
-	return ""
+	return filepath.Join(filepath.Clean(profileHome), "AppData", "Local", "Kiro-Cli", "kiro-cli.exe")
+}
+
+// windowsKiroCLIVersionUnknownReason is the unprotected reason of that
+// kiro-cli. It names no hook contract (hook_contract_unverified), so status
+// reports the deployment's coverage as incomplete.
+func windowsKiroCLIVersionUnknownReason(launcher string) string {
+	return fmt.Sprintf("%s has no run copy that matches it, so its version is unknown and not verified against a known hook contract; "+
+		"kiro-cli records its build in %s when the user starts it, and the next enumeration enrolls or reports that version",
+		launcher, filepath.Join(filepath.Dir(launcher), "run"))
 }
 
 // windowsKiroCLILauncherPresent reports a regular kiro-cli.exe under a plain
@@ -151,23 +166,56 @@ func windowsKiroCLIBelowHookFloor(version string) string {
 	return connector.KiroCLIBelowHookFloorReason(normalized)
 }
 
-// reportKiroCLIBelowFloorBesideIDE records the CLI surface that cannot send
-// hooks even though the same row can protect a supported IDE.
-func (c windowsStandaloneRowContext) reportKiroCLIBelowFloorBesideIDE(row *ManifestTarget) {
+// reportKiroCLIBesideIDE records the CLI surface that is not covered even
+// though the same row can protect a supported IDE: a kiro-cli below the floor
+// sends no hooks from its headless runs, and one whose version is unknown is
+// not assumed to be at the floor.
+func (c windowsStandaloneRowContext) reportKiroCLIBesideIDE(row *ManifestTarget) {
 	if c.report == nil || !strings.EqualFold(strings.TrimSpace(row.Connector), "kiro") || !filepath.IsAbs(row.UserHome) {
 		return
 	}
 	home := filepath.Clean(row.UserHome)
 	cli := discoverWindowsKiroCLIVersion(home)
 	reason := windowsKiroCLIBelowHookFloor(cli)
+	consequence := "this kiro-cli's non-interactive runs load no hooks"
 	if reason == "" {
-		return
+		launcher := windowsKiroCLIVersionUnknown(home)
+		if launcher == "" {
+			return
+		}
+		reason = windowsKiroCLIVersionUnknownReason(launcher)
+		consequence = "this kiro-cli is not counted as protected until its version is read"
 	}
 	ide, _ := discoverWindowsKiroIDEVersion(home)
 	if ide == "" || kiroIDEBelowGlobalHooksFloor(ide) {
-		return // the row's own refusal already reports the CLI
+		return // the row's own refusal or kept-row report covers the CLI
 	}
-	c.reportAgent(row, cli, reason, "Kiro IDE "+ide+" is separately eligible for global hooks, but this kiro-cli's non-interactive runs load no hooks")
+	c.reportAgent(row, cli, reason, "Kiro IDE "+ide+" is separately eligible for global hooks, but "+consequence)
+}
+
+// reportKeptKiroCLIRow reports a kept kiro-cli row whose installed hooks do
+// not cover the CLI: one an earlier release enrolled below the floor (its
+// headless runs load no hooks), and one enrolled at a version the CLI has not
+// confirmed because no run copy names it (an earlier build assumed it,
+// GAP-0829). The row stays, so its interactive hooks keep being repaired. A
+// row of a supported IDE is covered by reportKiroCLIBesideIDE.
+func (c windowsStandaloneRowContext) reportKeptKiroCLIRow(row *ManifestTarget, version string) {
+	if strings.HasSuffix(strings.TrimSpace(version), KiroIDEVersionSuffix) || !filepath.IsAbs(row.UserHome) {
+		return
+	}
+	home := filepath.Clean(row.UserHome)
+	if ide, _ := discoverWindowsKiroIDEVersion(home); ide != "" && !kiroIDEBelowGlobalHooksFloor(ide) {
+		return
+	}
+	if launcher := windowsKiroCLIVersionUnknown(home); launcher != "" {
+		c.reportAgent(row, version, windowsKiroCLIVersionUnknownReason(launcher), fmt.Sprintf(
+			"the row stays enrolled at %s, which this kiro-cli has not confirmed, so its hooks stay installed but it is not counted as protected", version))
+		return
+	}
+	if reason := windowsKiroCLIBelowHookFloor(version); reason != "" {
+		c.reportAgent(row, version, reason,
+			"an earlier enrollment keeps its interactive hooks installed, but this CLI's non-interactive runs do not load them")
+	}
 }
 
 // reportKiroIDEBelowFloor reports a Kiro IDE too old to read the global

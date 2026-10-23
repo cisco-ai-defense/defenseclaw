@@ -964,11 +964,18 @@ def _configured_probe_names(data_dir: str | os.PathLike[str] | None) -> frozense
         connectors = guardrail.get("connectors", {})
         names = {
             _normalize_connector(str(name)) for name, entry in connectors.items()
-            if isinstance(entry, dict) and entry.get("enabled") is not False
+            if not (isinstance(entry, dict) and entry.get("enabled") is False)
         } if isinstance(connectors, dict) else set()
-        primary = guardrail.get("connector")
-        if guardrail.get("enabled") and isinstance(primary, str) and primary:
-            names.add(_normalize_connector(primary))
+        if guardrail.get("enabled"):
+            # Config.active_connector precedence: guardrail.connector, then
+            # claw.mode. A 0.8.x single-connector config names its connector
+            # only in claw.mode, and a targeted setup scan must still probe
+            # it before it replaces that peer's cached version.
+            claw = document.get("claw", {})
+            for primary in (guardrail.get("connector"), claw.get("mode") if isinstance(claw, dict) else None):
+                if isinstance(primary, str) and primary.strip():
+                    names.add(_normalize_connector(primary.strip()))
+                    break
         return frozenset(names)
     except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
         return frozenset()

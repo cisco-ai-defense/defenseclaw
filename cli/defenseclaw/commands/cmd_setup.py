@@ -5618,6 +5618,7 @@ def _check_connector_version_supported_for_setup(
     _allow_prompt: bool = True,
     _trusted_prompt_cache: dict[str, bool] | None = None,
     _discovery: Any = None,
+    _refusal_scope: dict[str, Any] | None = None,
 ) -> bool:
     """Verify the selected connector's installed version before setup.
 
@@ -5632,6 +5633,9 @@ def _check_connector_version_supported_for_setup(
     trusting a prefix — pass ``False`` to force the non-interactive path.
     ``_trusted_prompt_cache`` is a flow-local map keyed by trusted directory so
     batch setup can avoid asking the same yes/no question repeatedly.
+    ``_refusal_scope`` receives ``observe_admitted=False`` and the reason when
+    the refusal holds in every mode, so an action refusal is not turned into
+    an observe setup (:func:`_observe_fallback_admitted`, GAP-0828).
     """
     connector = normalize_connector(connector)
     label = _CONNECTOR_META.get(connector, {}).get("label", connector or "connector")
@@ -5680,14 +5684,26 @@ def _check_connector_version_supported_for_setup(
         if problem := codex_setup_version_problem(raw_version):
             if emit:
                 ux.err(problem)
+            _refuse_in_every_mode(_refusal_scope, problem)
             return False
         if _discovery is None and platform_support.host_os() != "windows":
             if not agent_discovery._write_cache(disc, data_dir=data_dir):
                 if emit:
                     ux.err("Codex version evidence could not be saved for gateway restart; no setup change was made.")
+                _refuse_in_every_mode(_refusal_scope, "Codex version evidence could not be saved for gateway restart")
                 return False
 
     compatibility = resolve_connector_contract(connector, raw_version)
+    if (
+        connector == "kiro"
+        and installed
+        and compatibility.status == STATUS_NOT_GATED
+        and not compatibility.normalized_version
+    ):
+        # GAP-0829: an installed Kiro whose version was not read is not assumed
+        # to be at the kiro-cli hook floor. Action refuses it like any
+        # unverified version; observe warns that it is not counted as protected.
+        compatibility = replace(compatibility, status=STATUS_UNVERSIONED)
     if connector == "kiro" and signal is not None and emit:
         cli = getattr(signal, "kiro_cli_version", "") or ""
         if cli != raw_version and (below := kiro_cli_below_hook_floor(cli)):
@@ -5748,7 +5764,13 @@ def _check_connector_version_supported_for_setup(
         detail = f"{label}: version not available"
         if probe_error:
             detail += f" ({probe_error})"
-        detail += f"; using default hook contract {contract}."
+        if connector == "kiro":
+            detail += (
+                f"; Kiro CLI is supported from {KIRO_CLI_HOOK_FLOOR}, so this install is not "
+                "counted as protected until its version is read."
+            )
+        else:
+            detail += f"; using default hook contract {contract}."
         # SU-08: the untrusted-binary-prefix remediation prompt used to be
         # nested inside the action-mode branch, so an OBSERVE-mode setup with an
         # untrusted binary path only got a bare warning and no way to fix it.
@@ -5801,6 +5823,7 @@ def _check_connector_version_supported_for_setup(
                     data_dir=data_dir,
                     _allow_prompt=False,
                     _trusted_prompt_cache=_trusted_prompt_cache,
+                    _refusal_scope=_refusal_scope,
                 )
             if _trusted_prompt_cache is not None:
                 _trusted_prompt_cache[parent] = False
@@ -5863,6 +5886,8 @@ def _check_connector_version_supported_for_setup(
             else:
                 ux.subhead("Refusing action-mode connector setup before activation.")
             ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
+        if strict_unknown:
+            _refuse_in_every_mode(_refusal_scope, f"{detail} {upgrade_guidance}")
         return False
     if emit:
         if allow_drift:
@@ -5871,6 +5896,41 @@ def _check_connector_version_supported_for_setup(
             ux.warn(detail + " Continuing in observe mode under the connector's established warning policy.")
         ux.subhead(upgrade_guidance)
     return True
+
+
+def _refuse_in_every_mode(scope: dict[str, Any] | None, reason: str) -> None:
+    """Record that a setup refusal does not depend on the requested mode."""
+    if scope is not None:
+        scope["observe_admitted"] = False
+        scope["reason"] = reason
+
+
+def _observe_fallback_admitted(scope: dict[str, Any] | None) -> bool:
+    """Whether a refused action request may be configured in observe mode.
+
+    Only a refusal that depends on action mode falls back (no local install,
+    an unreadable version, a version outside the action contract). A refusal
+    that holds in every mode stays a refusal: a kiro-cli below its hook floor
+    runs headless sessions that load no hooks, so an observe fallback would
+    stage an agent DefenseClaw never sees (GAP-0828); the same holds for an
+    OpenCode version outside its plugin contract and for an old Codex.
+    """
+    return (scope or {}).get("observe_admitted", True) is not False
+
+
+def _kiro_setup_refusal(*, data_dir: str | os.PathLike[str] | None, _discovery: Any = None) -> str:
+    """The reason no setup mode can protect the installed Kiro, else "".
+
+    First-run and init extras configure connectors without the setup command;
+    they ask this before they write a Kiro connector in any mode (GAP-0828).
+    """
+    scope: dict[str, Any] = {}
+    if _check_connector_version_supported_for_setup(
+        "kiro", mode="observe", emit=False, data_dir=data_dir, _allow_prompt=False,
+        _discovery=_discovery, _refusal_scope=scope,
+    ):
+        return ""
+    return str(scope.get("reason") or "Kiro cannot be protected in observe or action mode")
 
 
 def _windows_opencode_requires_exact_selection(connector: str) -> bool:
@@ -6116,8 +6176,11 @@ def _check_guardrail_setup_connector_versions(
         }
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
-        if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
-            if (mode or "").strip().lower() == "action":
+        refusal_scope: dict[str, Any] = {}
+        if not _check_connector_version_supported_for_setup(
+            connector, _refusal_scope=refusal_scope, **version_check_kwargs
+        ):
+            if (mode or "").strip().lower() == "action" and _observe_fallback_admitted(refusal_scope):
                 _downgrade_guardrail_setup_action_connector(gc, connector)
                 continue
             _restore_setup_config_snapshot(app, setup_snapshot)
@@ -10026,14 +10089,24 @@ def _apply_hook_connector_setup(
         }
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
-        if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
-            # Every non-OpenCode hook contract deliberately permits observe
-            # when action admission is refused (missing, unversioned, or
-            # outside the validated range).  Reusing that decision avoids a
-            # second discovery/probe whose answer can drift within the same
-            # setup transaction.  OpenCode is the strict exception: unknown
-            # versions are refused in both modes and never reach this fallback.
-            if desired_mode == "action" and _downgrade_refused_action and connector not in {"opencode", "codex"}:
+        refusal_scope: dict[str, Any] = {}
+        if not _check_connector_version_supported_for_setup(
+            connector, _refusal_scope=refusal_scope, **version_check_kwargs
+        ):
+            # A non-OpenCode hook contract permits observe when action
+            # admission is refused (missing, unversioned, or outside the
+            # validated range).  Reusing that decision avoids a second
+            # discovery/probe whose answer can drift within the same setup
+            # transaction.  A refusal that holds in every mode (a kiro-cli
+            # below its hook floor, GAP-0828) never reaches this fallback;
+            # neither does OpenCode, whose unknown versions are refused in
+            # both modes.
+            if (
+                desired_mode == "action"
+                and _downgrade_refused_action
+                and connector not in {"opencode", "codex"}
+                and _observe_fallback_admitted(refusal_scope)
+            ):
                 label = _CONNECTOR_META.get(connector, {}).get("label", connector)
                 ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
                 desired_mode = "observe"
@@ -11639,8 +11712,15 @@ def _apply_setup_batch(
             preflight_kwargs["_discovery"] = batch_discovery
         if trusted_prompt_cache is not None:
             preflight_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
-        if not _check_connector_version_supported_for_setup(connector_name, **preflight_kwargs):
-            if (connector_mode or "").strip().lower() == "action" and connector_name not in {"opencode", "codex"}:
+        refusal_scope: dict[str, Any] = {}
+        if not _check_connector_version_supported_for_setup(
+            connector_name, _refusal_scope=refusal_scope, **preflight_kwargs
+        ):
+            if (
+                (connector_mode or "").strip().lower() == "action"
+                and connector_name not in {"opencode", "codex"}
+                and _observe_fallback_admitted(refusal_scope)
+            ):
                 label = _CONNECTOR_META.get(connector_name, {}).get("label", connector_name)
                 ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
                 resolved_connector_modes[connector_name] = "observe"

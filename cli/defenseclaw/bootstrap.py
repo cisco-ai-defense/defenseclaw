@@ -828,6 +828,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         )
 
 
+    kiro_refusal = ""
     try:
         if protected_selection is not None:
             from defenseclaw.commands.cmd_setup import _revalidate_setup_agent_selections
@@ -866,8 +867,18 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             if mode_warning:
                 connector_mode_warnings.append(mode_warning)
                 profile = "observe"
+        if connector == "kiro" and profile == "observe":
+            # GAP-0828: a kiro-cli below its hook floor is refused in every
+            # mode, so neither an observe profile nor the observe fallback of
+            # a refused action request may configure it. An admitted action
+            # check already proved the version, so only observe asks.
+            from defenseclaw.commands.cmd_setup import _kiro_setup_refusal
 
-        if connector != "none":
+            kiro_refusal = _kiro_setup_refusal(data_dir=getattr(cfg, "data_dir", ""))
+
+        if kiro_refusal:
+            pass
+        elif connector != "none":
             _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
         else:
             if new_config:
@@ -889,6 +900,22 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 f"first-run choice application failed ({exc}); rollback was incomplete: {rollback_error}"
             ) from exc
         raise
+
+    if kiro_refusal:
+        setup.append(StepResult("Connector version", "fail", kiro_refusal, "defenseclaw init"))
+        rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
+        if rollback_error:
+            setup.append(StepResult("First-run rollback", "fail", rollback_error, "defenseclaw init"))
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            next_commands=["defenseclaw init"],
+            connector_mode_warnings=connector_mode_warnings,
+        )
 
     try:
         cfg.save()
