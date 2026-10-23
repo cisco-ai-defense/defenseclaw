@@ -1703,8 +1703,9 @@ function Invoke-Native {{
     if (($Arguments -join ' ') -like 'connector refresh-fail-modes --closed*') {{ $script:closes++; return 0 }}
     return 1
 }}
-{_resume_functions("Read-Text", "Stop-UnprovenRecoveryGateway", "Test-RecoveryPending", "Close-InstallLock",
-                   "Finish-InstallLock", "Close-UnfinishedInstallHooks", "Resume-InterruptedRun")}
+{_resume_functions("Read-Text", "Get-InstallGatewayState", "Stop-UnprovenRecoveryGateway", "Test-RecoveryPending",
+                   "Close-InstallLock", "Finish-InstallLock", "Close-UnfinishedInstallHooks", "Resume-InterruptedRun")}
+function Get-ProcessesUnder {{ return @() }}
 {_txn_real_functions()}
 {_TXN_PRELUDE}
 function Get-GatewayProcess {{
@@ -1779,7 +1780,7 @@ $script:warnings = @()
 $script:cleanupCloses = 0
 function Write-Warn {{ param($Message) $script:warnings += [string]$Message }}
 function Invoke-Quietly {{ param([scriptblock]$Action) & $Action }}
-function Close-UnfinishedInstallHooks {{ $script:cleanupCloses++ }}
+function Close-UnfinishedInstallHooks {{ $script:cleanupCloses++; return $true }}
 function Clear-StagedRelease {{ }}
 function Test-RecoveryPending {{ return [bool]($Run.UndoPending -or $Run.RestorePending) }}
 function Remove-Tree {{ param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }}
@@ -1796,6 +1797,95 @@ Finish-InstallLock 1
         assert "LOCK=False" in out, out
         warning = out.split("LAST_WARNING=")[1]
         assert "the install lock is released" in warning and "-AcceptCurrentInstall" in warning, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    "case",
+    ["down", "stale-pid", "image-without-pid", "renamed-aside", "setup-image", "started-after-close",
+     "pid-unreadable", "process-list-fails", "pid-image-unreadable", "close-fails", "nothing-unfinished"],
+)
+def test_a_failed_run_keeps_the_lock_only_on_proof_its_gateway_is_down_and_hooks_closed(
+    tmp_path: Path, case: str
+) -> None:
+    # r104 Windows loop round 3: a failed stop or recovery can leave this
+    # install's gateway (or its watchdog) running with gateway.pid gone or
+    # unreadable. The lock used to stay then, and once that gateway exited
+    # the hooks followed their outage mode (open, if the config says so)
+    # instead of cold-starting it. The lock now stays only when the run
+    # closed every hook and, afterwards, no process of this install's
+    # gateway image runs; an unknown state releases it, like a running one.
+    result = _txn_harness(tmp_path, _resume_functions("Get-InstallGatewayState", "Test-RecoveryPending", "Close-InstallLock",
+                                                      "Finish-InstallLock", "Close-UnfinishedInstallHooks") + f"""
+$Previous = Join-Path $DataDir 'previous'
+$Staging = Join-Path $DataDir '.staging'
+$Run.Lock = $true
+$Run.RestorePending = $true
+$Run.UnprovenReplacement = $null
+$Run.UnprovenReplacementUnchanged = $false
+$LockDir = Join-Path $DataDir '.install.lock'
+[void][IO.Directory]::CreateDirectory($LockDir)
+if ('{case}' -ne 'nothing-unfinished') {{
+    [void][IO.Directory]::CreateDirectory((Join-Path $DataDir 'previous.new'))
+    [IO.File]::WriteAllText($LifecycleManifest, '{{"Schema":1,"Bins":{{}}}}')
+}}
+$gatewayImage = Join-Path $BinDir 'defenseclaw-gateway.exe'
+[IO.File]::WriteAllText($gatewayImage, 'new gateway')
+$Ver = '1.0.4'
+$script:warnings = @()
+function Write-Warn {{ param($Message) $script:warnings += [string]$Message }}
+function Write-Err {{ param($Message) $script:warnings += "ERR $Message" }}
+function Invoke-Quietly {{ param([scriptblock]$Action) try {{ & $Action }} catch {{ Write-Warn $_.Exception.Message }} }}
+function Clear-StagedRelease {{ }}
+function Remove-Tree {{ param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }}
+$pidFile = Join-Path $DataDir 'gateway.pid'
+switch ('{case}') {{
+    'stale-pid' {{ [IO.File]::WriteAllText($pidFile, 'not a pid') }}
+    'image-without-pid' {{ $script:images = @([pscustomobject]@{{ ProcessId = 77; Name = 'defenseclaw-gateway.exe'; ExecutablePath = $gatewayImage }}) }}
+    'renamed-aside' {{ $script:images = @([pscustomobject]@{{ ProcessId = 78; Name = 'defenseclaw-gateway.exe.old-20261023T000000000'; ExecutablePath = "$gatewayImage.old-20261023T000000000" }}) }}
+    'setup-image' {{
+        $Setup = [pscustomobject]@{{ Root = (Join-Path $DataDir 'Setup') }}
+        $script:images = @([pscustomobject]@{{ ProcessId = 79; ExecutablePath = (Join-Path $Setup.Root 'bin\defenseclaw-gateway.exe') }})
+    }}
+    'started-after-close' {{
+        # The watchdog starts the gateway again once the hooks are closed.
+        function Invoke-Native {{ param($FilePath, $Arguments, [switch]$Quiet)
+            $script:closes++
+            $script:images = @([pscustomobject]@{{ ProcessId = 80; ExecutablePath = $gatewayImage }})
+            return 0
+        }}
+    }}
+    'pid-unreadable' {{ function Get-GatewayProcess {{ throw 'gateway.pid is in use by another process' }} }}
+    'process-list-fails' {{ function Get-ProcessesUnder {{ throw 'Access denied' }} }}
+    'pid-image-unreadable' {{
+        [IO.File]::WriteAllText($pidFile, '{{"pid": 4242, "executable": "elsewhere"}}')
+        function Get-Process {{ return [pscustomobject]@{{ Id = 4242; ProcessName = 'defenseclaw-gateway'; Path = $null }} }}
+    }}
+    'close-fails' {{ function Invoke-Native {{ param($FilePath, $Arguments, [switch]$Quiet) $script:closes++; return 1 }} }}
+}}
+Finish-InstallLock 1
+"LOCK=$(Test-Path -LiteralPath $LockDir) PENDING=$([bool]$Run.RestorePending) CLOSES=$script:closes"
+"LAST_WARNING=$(if ($script:warnings.Count) {{ $script:warnings[-1] }})"
+""")
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    warning = out.split("LAST_WARNING=")[1]
+    if case in ("down", "stale-pid"):
+        assert "LOCK=True PENDING=True CLOSES=1" in out, out
+        assert "The install stays locked" in warning, out
+        return
+    assert "LOCK=False PENDING=False" in out, out
+    assert "the install lock is released" in warning, out
+    if case in ("image-without-pid", "renamed-aside", "setup-image", "started-after-close"):
+        assert "its gateway is still running" in warning, out
+    elif case in ("pid-unreadable", "process-list-fails", "pid-image-unreadable"):
+        assert "cannot tell whether its gateway is still running" in warning, out
+    else:
+        assert "could not prove every agent hook closed" in warning, out
+    if case in ("image-without-pid", "renamed-aside", "setup-image", "pid-unreadable", "process-list-fails",
+                "pid-image-unreadable", "nothing-unfinished"):
+        # No hook is closed under a gateway that may still render them.
+        assert "CLOSES=0" in out, out
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -1892,7 +1982,7 @@ if (Test-Path -LiteralPath $LifecycleManifest) {{ throw 'proven replacement kept
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 @pytest.mark.parametrize(
-    "failure", ["staged-changed", "closer-cannot-close", "hold-failed", "stop-failed", "hold-incomplete"]
+    "failure", ["staged-changed", "closer-cannot-close", "hold-failed", "stop-failed", "stop-failed-pid-gone", "hold-incomplete"]
 )
 def test_unproven_replacement_keeps_the_lock_only_with_its_gateway_down_and_hooks_closed(
     tmp_path: Path, failure: str
@@ -1924,7 +2014,7 @@ $script:warnings = @()
 $script:cleanupCloses = 0; $script:holds = 0; $script:released = 0; $script:stops = 0
 function Write-Warn {{ param($Message) $script:warnings += [string]$Message }}
 function Invoke-Quietly {{ param([scriptblock]$Action) & $Action }}
-function Close-UnfinishedInstallHooks {{ $script:cleanupCloses++ }}
+function Close-UnfinishedInstallHooks {{ $script:cleanupCloses++; return $true }}
 function Clear-StagedRelease {{ }}
 function Test-RecoveryPending {{ return $Run.RestorePending }}
 function Remove-Tree {{ param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }}
@@ -1936,7 +2026,11 @@ function Start-HookFailModeHold {{ param($Gateway, $GatewayId, [switch]$Closed)
 function Stop-HookFailModeHold {{ $script:released++ }}
 function Complete-HookFailModeHold {{ return ('{failure}' -ne 'hold-incomplete') }}
 function Stop-UnprovenGateway {{
-    if ('{failure}' -eq 'stop-failed') {{ throw 'The unproven gateway or watchdog is still running' }}
+    if ('{failure}' -eq 'stop-failed-pid-gone') {{
+        $script:images = @([pscustomobject]@{{ ProcessId = 123; ExecutablePath = $script:gateway.Path }})
+        $script:gateway = $null
+    }}
+    if ('{failure}' -like 'stop-failed*') {{ throw 'The unproven gateway or watchdog is still running' }}
     $script:stops++; $script:gateway = $null
 }}
 if ('{failure}' -eq 'staged-changed') {{ [IO.File]::WriteAllText($stagedGateway, 'changed after checking') }}
@@ -1951,14 +2045,14 @@ try {{ Prepare-UnprovenReplacement $stagedGateway $expected; throw 'failure was 
         $_.Exception.Message -notlike '*Could not keep the older install*') {{ throw }}
 }}
 Finish-InstallLock 1
-"LOCK=$(Test-Path -LiteralPath $LockDir) PENDING=$([bool]$Run.RestorePending) RECORD=$(Test-Path -LiteralPath $LifecycleManifest) RUNNING=$([bool]$script:gateway)"
+"LOCK=$(Test-Path -LiteralPath $LockDir) PENDING=$([bool]$Run.RestorePending) RECORD=$(Test-Path -LiteralPath $LifecycleManifest) RUNNING=$([bool]$script:gateway -or [bool]@($script:images).Count)"
 "CLOSES=$script:closes CLEANUP=$script:cleanupCloses HOLDS=$script:holds RELEASED=$script:released STOPS=$script:stops"
 "LAST_WARNING=$(if ($script:warnings.Count) {{ $script:warnings[-1] }})"
 """)
     out = result.stdout + result.stderr
     assert result.returncode == 0, out
     assert "RECORD=True" in out, out
-    closed = failure in ("hold-failed", "stop-failed", "hold-incomplete")
+    closed = failure in ("hold-failed", "stop-failed", "stop-failed-pid-gone", "hold-incomplete")
     if not closed:
         # Nothing changed before the checked closure point: the gateway
         # keeps running, no hook was closed and the lock goes.
@@ -1973,14 +2067,14 @@ Finish-InstallLock 1
         # The older gateway still runs and can reopen its hooks: no lock.
         assert "LOCK=False PENDING=False" in out and "RUNNING=True" in out, out
         assert "CLOSES=1 CLEANUP=1" in out and "STOPS=0" in out, out
-        if failure == "stop-failed":
+        if failure.startswith("stop-failed"):
             assert "HOLDS=1 RELEASED=1" in out, out
         warning = out.split("LAST_WARNING=")[1]
         assert "the install lock is released" in warning and "-AcceptCurrentInstall" in warning, out
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-@pytest.mark.parametrize("failure", ["hold-failed", "stop-failed", "hold-incomplete"])
+@pytest.mark.parametrize("failure", ["hold-failed", "stop-failed", "stop-failed-pid-gone", "hold-incomplete"])
 def test_interrupted_replacement_recovery_keeps_the_lock_only_with_its_gateway_down(
     tmp_path: Path, failure: str
 ) -> None:
@@ -2007,7 +2101,7 @@ $script:warnings = @()
 $script:cleanupCloses = 0; $script:holds = 0; $script:released = 0; $script:stops = 0
 function Write-Warn {{ param($Message) $script:warnings += [string]$Message }}
 function Invoke-Quietly {{ param([scriptblock]$Action) & $Action }}
-function Close-UnfinishedInstallHooks {{ $script:cleanupCloses++ }}
+function Close-UnfinishedInstallHooks {{ $script:cleanupCloses++; return $true }}
 function Clear-StagedRelease {{ }}
 function Test-RecoveryPending {{ return $Run.RestorePending }}
 function Remove-Tree {{ param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }}
@@ -2019,7 +2113,11 @@ function Start-HookFailModeHold {{ param($Gateway, $GatewayId, [switch]$Closed)
 function Stop-HookFailModeHold {{ $script:released++ }}
 function Complete-HookFailModeHold {{ return ('{failure}' -ne 'hold-incomplete') }}
 function Stop-UnprovenGateway {{
-    if ('{failure}' -eq 'stop-failed') {{ throw 'The unproven gateway or watchdog is still running' }}
+    if ('{failure}' -eq 'stop-failed-pid-gone') {{
+        $script:images = @([pscustomobject]@{{ ProcessId = 123; ExecutablePath = $script:gateway.Path }})
+        $script:gateway = $null
+    }}
+    if ('{failure}' -like 'stop-failed*') {{ throw 'The unproven gateway or watchdog is still running' }}
     $script:stops++; $script:gateway = $null
 }}
 try {{ Stop-UnprovenRecoveryGateway $manifest (Join-Path $DataDir 'previous.new'); throw 'failure was accepted' }} catch {{
@@ -2030,7 +2128,7 @@ try {{ Stop-UnprovenRecoveryGateway $manifest (Join-Path $DataDir 'previous.new'
 # Invoke-Install's catch around Resume-InterruptedRun.
 Set-RecoveryPending
 Finish-InstallLock 1
-"LOCK=$(Test-Path -LiteralPath $LockDir) PENDING=$([bool]$Run.RestorePending) RECORD=$(Test-Path -LiteralPath $LifecycleManifest) RUNNING=$([bool]$script:gateway)"
+"LOCK=$(Test-Path -LiteralPath $LockDir) PENDING=$([bool]$Run.RestorePending) RECORD=$(Test-Path -LiteralPath $LifecycleManifest) RUNNING=$([bool]$script:gateway -or [bool]@($script:images).Count)"
 "CLOSES=$script:closes HOLDS=$script:holds RELEASED=$script:released STOPS=$script:stops"
 "LAST_WARNING=$(if ($script:warnings.Count) {{ $script:warnings[-1] }})"
 """)
@@ -2041,7 +2139,7 @@ Finish-InstallLock 1
         assert "LOCK=True PENDING=True RECORD=True RUNNING=False" in out and "STOPS=1" in out, out
     else:
         assert "LOCK=False PENDING=False RECORD=True RUNNING=True" in out and "STOPS=0" in out, out
-        if failure == "stop-failed":
+        if failure.startswith("stop-failed"):
             assert "HOLDS=1 RELEASED=1" in out, out
         warning = out.split("LAST_WARNING=")[1]
         assert "the install lock is released" in warning and "-AcceptCurrentInstall" in warning, out
@@ -3870,12 +3968,14 @@ def _close_mocks(capable: str = "new ", close_rc: int = 0, running: bool = False
         "$Previous = Join-Path $DataDir 'previous'\n"
         "function Write-Err([string]$m) { Write-Host \"err: $m\" }\n"
         f"function Get-GatewayProcess {{ if (${str(running).lower()}) {{ return 'pid' }}; return $null }}\n"
+        "function Get-ProcessesUnder { return @() }\n"
         "function Get-NativeProbe([string]$FilePath, [string[]]$Arguments = @()) {\n"
         f"    $help = if ([IO.File]::ReadAllText($FilePath).StartsWith('{capable}')) {{ '--closed  close every installed hook' }} else {{ '--hold-until-exit int' }}\n"
         "    return [pscustomobject]@{ Exit = 0; Output = $help }\n}\n"
         "function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Quiet) {\n"
         "    Write-Host \"RAN: $FilePath $($Arguments -join ' ')\"\n"
         f"    return {close_rc}\n}}\n"
+        + _resume_functions("Get-InstallGatewayState")
         + _ps1_function("Close-UnfinishedInstallHooks")
         + _ps1_function("Close-AllHooks")
     )
@@ -4314,6 +4414,12 @@ def _txn_harness(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
         "    throw \"unexpected probe $line\"\n"
         "}\n"
         + "\n".join(_ps1_function(name) for name in _TXN_FUNCTIONS)
+        + "\n$script:images = @()\n"
+        "function Get-ProcessesUnder([string[]]$Prefixes) {\n"
+        "    return @($script:images | Where-Object { $image = $_.ExecutablePath\n"
+        "        @($Prefixes | Where-Object { $image.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count })\n"
+        "}\n"
+        + _resume_functions("Get-InstallGatewayState")
         + "\n"
         + body,
         encoding="utf-8",

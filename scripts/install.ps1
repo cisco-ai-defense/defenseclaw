@@ -817,6 +817,35 @@ function Get-GatewayProcess {
     return $process
 }
 
+function Get-InstallGatewayState {
+    # "running", "down" or "unknown": whether this install's gateway, or its
+    # watchdog that can start it again, still runs. gateway.pid alone proves
+    # nothing down: a gateway removes the file before it exits, and a failed
+    # stop or recovery can leave one running with the file gone or unreadable.
+    # So every process whose image is this install's gateway counts too (a
+    # prefix: a binary renamed aside, .old-*, as well), and so does DefenseClaw
+    # Setup's. A pid file or a process list that cannot be read, or a recorded
+    # gateway whose image cannot be read, is "unknown": nothing proves it down.
+    $images = @(Join-Path $BinDir "defenseclaw-gateway")
+    $setupInstall = Get-Variable -Name Setup -ValueOnly -ErrorAction SilentlyContinue
+    if ($setupInstall -and (Get-Field $setupInstall "Root")) { $images += Join-Path $setupInstall.Root "bin\defenseclaw-gateway" }
+    try { if (Get-GatewayProcess) { return "running" } } catch { return "unknown" }
+    try { if (@(Get-ProcessesUnder $images).Count) { return "running" } } catch { return "unknown" }
+    $file = Join-Path $DataDir "gateway.pid"
+    if (-not (Test-Path -LiteralPath $file)) { return "down" }
+    try {
+        $text = [IO.File]::ReadAllText($file).Trim()
+        $record = $null
+        try { $record = $text | ConvertFrom-Json } catch { }
+        $id = Get-Field $record "pid"
+        if (-not $id -and $text -match '^\d+$') { $id = $text }
+        if (-not $id) { return "down" }
+        $process = Get-Process -Id ([int]$id) -ErrorAction SilentlyContinue
+        if ($process -and $process.ProcessName -eq "defenseclaw-gateway" -and -not $process.Path) { return "unknown" }
+    } catch { return "unknown" }
+    return "down"
+}
+
 function Stop-Gateway {
     # Stop the running gateway with its own (the old) binary; kill it as a last
     # resort. Wait for the process itself, not its pid file: a gateway removes
@@ -2547,7 +2576,8 @@ function Close-InstallLock {
     # An undo or a restore that did not finish keeps .install.lock, so hooks
     # wait for the install instead of starting a gateway for a mixed install.
     # The next run takes the lock over and finishes the restore. A failed run
-    # never keeps it over a gateway that still runs (Finish-InstallLock).
+    # keeps it only with every hook closed and no gateway of this install
+    # running (Finish-InstallLock).
     Invoke-Quietly { Clear-StagedRelease }
     if (Test-RecoveryPending) {
         if ($Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement) {
@@ -2566,26 +2596,32 @@ function Finish-InstallLock([int]$ExitCode) {
     # installer added or replaced), or a failure before the checked closer
     # closed its hooks, did not change the older install. Leave its record
     # for the next retry but let its own hooks cold-start the gateway.
+    $closed = $false
     if ($ExitCode -ne 0 -and -not $Run.UnprovenReplacementUnchanged) {
-        Invoke-Quietly { Close-UnfinishedInstallHooks }
+        $result = @(Invoke-Quietly { Close-UnfinishedInstallHooks })
+        $closed = $result.Count -gt 0 -and $result[-1] -is [bool] -and $result[-1]
         if (Test-Path -LiteralPath $LifecycleManifest -PathType Leaf) { Set-RecoveryPending }
     }
-    if ($ExitCode -ne 0 -and (Test-RecoveryPending)) {
+    if (Test-RecoveryPending) {
         # While the lock is held, hooks do not cold-start a gateway and follow
-        # their outage mode, which the config may set open. That is safe only
-        # with the gateway down and its hooks closed (Close-UnfinishedInstallHooks).
-        # A gateway still running here was left alone by a refusal, survived a
-        # stop that failed, or was started by a recovery whose proof failed.
-        # It renders its own hooks, so a closure this run wrote does not last
-        # once the closed hold is gone: release the lock, so a crash or reboot
-        # cold-starts that gateway; the record stays for the next run.
-        $running = $null
-        try { $running = Get-GatewayProcess } catch { }
-        if ($running) {
+        # their outage mode, which the config may set open. So the lock stays
+        # only on proof: this run closed every hook (Close-UnfinishedInstallHooks)
+        # and afterwards no gateway or watchdog of this install runs, by
+        # gateway.pid and by image (Get-InstallGatewayState). A gateway still
+        # running was left alone by a refusal, survived a stop that failed, or
+        # was started by a recovery whose proof failed; it renders its own
+        # hooks, and once it exits a kept lock would leave them on their outage
+        # mode. Without that proof the lock goes, so hooks cold-start the
+        # gateway as before 1.0.4, and the record stays for the next run.
+        $state = Get-InstallGatewayState
+        if ($state -ne "down" -or -not $closed) {
             $accept = $Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement
             $retry = if ($accept) { Get-LifecycleNextStep -Accept } else { Get-LifecycleNextStep }
-            Write-Warn ("The earlier install is not finished, but its gateway is still running and can rewrite its hooks, so the install lock is released " +
-                "and the hooks keep using that gateway. Finish it with: $retry")
+            $why = if ($state -eq "running") { "its gateway is still running and can rewrite its hooks" }
+                elseif ($state -eq "unknown") { "this run cannot tell whether its gateway is still running" }
+                else { "this run could not prove every agent hook closed" }
+            Write-Warn ("The earlier install is not finished, but $why, so the install lock is released " +
+                "and the hooks start or keep using that gateway. Finish it with: $retry")
             $Run.UndoPending = $false
             $Run.RestorePending = $false
         }
@@ -2830,13 +2866,17 @@ function Close-UnfinishedInstallHooks {
     # place, or a saved one, that has 'refresh-fail-modes --closed' does it.
     # A lifecycle record still pending (a restore not proven yet, whose
     # snapshot may already be consumed) is an unfinished install too.
+    # True only when the hooks are closed (or there are none) with no
+    # gateway of this install running: Finish-InstallLock keeps the lock
+    # on nothing less.
     $record = Get-Variable -Name LifecycleManifest -ValueOnly -ErrorAction SilentlyContinue
     $closer = Get-Variable -Name LifecycleCloser -ValueOnly -ErrorAction SilentlyContinue
     $unfinished = @(@((Join-Path $DataDir "previous.new"), (Join-Path $DataDir ".repair"), (Join-Path $DataDir ".rollback-hold")) |
         Where-Object { Test-Path -LiteralPath $_ })
     $pending = $record -and (Test-Path -LiteralPath $record -PathType Leaf)
-    if ((-not $unfinished.Count -and -not $pending) -or (Get-GatewayProcess)) { return }
-    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container)) { return }
+    if (-not $unfinished.Count -and -not $pending) { return $false }
+    if ((Get-InstallGatewayState) -ne "down") { return $false }
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container)) { return $true }
     $gateways = @()
     if ($closer) { $gateways += Join-Path $closer "defenseclaw-gateway.exe" }
     $gateways += @((Join-Path $BinDir "defenseclaw-gateway.exe")) +
@@ -2844,10 +2884,10 @@ function Close-UnfinishedInstallHooks {
         @(Join-Path $Previous "bin\defenseclaw-gateway.exe")
     if (Close-AllHooks $gateways) {
         Write-Warn "The install is not finished, so every agent hook blocks tool calls until the gateway runs again. Run the installer again to finish it"
-        return
+        return $true
     }
-    Write-Err ("The install is not finished and the agent hooks could not be closed: until the gateway runs, they follow the outage fail mode " +
-        "in your config. Run the installer again to finish it")
+    Write-Err "The install is not finished and the agent hooks could not be closed. Run the installer again to finish it"
+    return $false
 }
 
 function Clear-SetupDataDir([string]$Failed) {
