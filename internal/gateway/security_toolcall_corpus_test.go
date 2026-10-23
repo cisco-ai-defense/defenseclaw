@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 type toolCallCorpusCase struct {
@@ -185,6 +186,24 @@ func runToolCallCorpusProfile(t *testing.T, connector, profile string, cases []t
 				Connector:          connector,
 				EnforcementCapable: true,
 			})
+			// This corpus measures each fixture's original semantic owner. The
+			// action-mode protected-write class is an independent enforcement
+			// decision, so omit only that justified finding from noise counts.
+			noiseFindings := findings
+			if expectedRuleID != "persistence.ssh_authorized_keys_command" {
+				command := input.Command
+				if command == "" {
+					command, _ = trustedBashCommandInput(input)
+				}
+				if hookpaths.ActionCommandDecision(command, input.CWD, input.ActiveHome) != "" {
+					noiseFindings = make([]RuleFinding, 0, len(findings))
+					for _, finding := range findings {
+						if finding.RuleID != "persistence.ssh_authorized_keys_command" {
+							noiseFindings = append(noiseFindings, finding)
+						}
+					}
+				}
+			}
 
 			owner := semanticOwnerForRule(expectedRuleID)
 			count := 0
@@ -230,8 +249,8 @@ func runToolCallCorpusProfile(t *testing.T, connector, profile string, cases []t
 						profile, count, FindingStrings(findings), actionfacts.Analyze(input),
 					)
 				}
-				if (test.NoOtherFinding || strictOnlySuppressed) && len(findings) != 0 {
-					t.Fatalf("profile=%s unexpected finding noise: %v", profile, FindingStrings(findings))
+				if (test.NoOtherFinding || strictOnlySuppressed) && len(noiseFindings) != 0 {
+					t.Fatalf("profile=%s unexpected finding noise: %v", profile, FindingStrings(noiseFindings))
 				}
 				return
 			}
@@ -257,8 +276,8 @@ func runToolCallCorpusProfile(t *testing.T, connector, profile string, cases []t
 					profile, gotRoute, expectRoute, *canonical, actionfacts.Analyze(input),
 				)
 			}
-			if test.NoOtherFinding && len(findings) != 1 {
-				t.Fatalf("profile=%s finding noise count=%d: %v", profile, len(findings), FindingStrings(findings))
+			if test.NoOtherFinding && len(noiseFindings) != 1 {
+				t.Fatalf("profile=%s finding noise count=%d: %v", profile, len(noiseFindings), FindingStrings(noiseFindings))
 			}
 		})
 	}

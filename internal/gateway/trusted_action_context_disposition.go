@@ -180,8 +180,9 @@ func trustedActionActiveSSHPrivateKeyContentRead(facts actionfacts.Facts) bool {
 				continue
 			}
 			return true
-		// sed reads and prints the file as cat does (GAP-0701).
-		case "cat", "base64", "cp", "copy", "copy-item", "cpi", "sed", "gsed",
+		// These readers return file content, including SSH private key data.
+		case "sed", "gsed", "awk", "gawk", "mawk", "nawk",
+			"cat", "base64", "cp", "copy", "copy-item", "cpi",
 			"get-content", "gc", "type", "read", "readfile", "read_file", "read-file",
 			"fsread", "fs_read", "fs-read", "fs.read", "fs.read_file",
 			"fileread", "file_read", "file-read", "catfile", "cat_file", "cat-file",

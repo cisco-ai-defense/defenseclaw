@@ -57,9 +57,15 @@ func TestCodexWindowsActionBlocksCompleteArgvMarker(t *testing.T) {
 		{"cmd caret redirect", `cmd.exe /c echo dccert-block-marker ^> codex-blocked2.txt`, true},
 		{"cmd quoted wrapper", `cmd.exe /c "echo dccert-block-marker > codex-blocked2.txt"`, true},
 		{"cmd with AutoRun disabled", `cmd.exe /d /c "echo dccert-block-marker > codex-blocked2.txt"`, true},
+		{"quoted cmd body in list", `cmd.exe /c "echo dccert-block-marker > x.txt" && type x.txt`, true},
+		{"doubled quoted cmd body in list", `cmd.exe /c ""echo dccert-block-marker > x.txt"" && type x.txt`, true},
+		{"quoted cmd r body in list", `cmd.exe /r "echo dccert-block-marker > x.txt" && type x.txt`, true},
+		{"quoted cmd joined switches in list", `cmd.exe /d/c "echo dccert-block-marker > x.txt" && type x.txt`, true},
+		{"quoted cmd body contains a list", `cmd.exe /c "echo dccert-block-marker > x.txt && type x.txt"`, true},
+		{"benign quoted cmd body in list", `cmd.exe /c "echo hello > x.txt" && type x.txt`, false},
 		{"benign", `Set-Content -Path codex-action-allowed.txt -Value hi`, false},
 		{"benign cmd.exe /d /c", `cmd.exe /d /c echo hello > codex-allowed.txt`, false},
-		{"benign & cmd.exe /c", `& cmd.exe /c echo hello > codex-allowed.txt`, false},
+		{"PowerShell call operator without Windows home", `& cmd.exe /c echo hello > codex-allowed.txt`, true},
 		{"cmd.exe /k stays partial", `cmd.exe /k echo dccert-block-marker > codex-allowed.txt`, false},
 		{"cmd.exe /x stays partial", `cmd.exe /x /c echo dccert-block-marker > codex-allowed.txt`, false},
 		{"cmd.exe /e:maybe stays partial", `cmd.exe /e:maybe /c echo dccert-block-marker > codex-allowed.txt`, false},
@@ -69,6 +75,13 @@ func TestCodexWindowsActionBlocksCompleteArgvMarker(t *testing.T) {
 				HookEventName: "PreToolUse", ToolName: "Bash", CWD: t.TempDir(),
 				ToolInput: map[string]interface{}{"command": tc.command},
 			})
+			if tc.name == "PowerShell call operator without Windows home" {
+				if resp.Action != "block" || resp.RawAction != "block" ||
+					!strings.Contains(resp.Reason, "persistence.ssh_authorized_keys_command") {
+					t.Fatalf("unresolved call operator: action=%s raw=%s reason=%s", resp.Action, resp.RawAction, resp.Reason)
+				}
+				return
+			}
 			if tc.blocked {
 				if resp.Action != "block" || resp.RawAction != "block" || !strings.Contains(resp.Reason, ruleID) ||
 					!strings.Contains(strings.ToLower(string(mustJSONMarshal(resp.CodexOutput))), "deny") {

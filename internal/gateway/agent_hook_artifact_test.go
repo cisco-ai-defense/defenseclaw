@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -118,8 +120,10 @@ func TestPromotedArtifactFindingsBlocksOnlyAuthoritativeFinalBytes(t *testing.T)
 // GAP-1513: a migrated 0.8.x literal rule blocks a script the call runs only
 // when an executed command of the script carries the literal; the literal in
 // a comment of the script does not block it.
-func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
-	requireNativePOSIXArtifactHost(t)
+// installMigratedLiteralConnector gives connectorName a rule pack with one
+// migrated 0.8.x literal rule, ACME-OWN-MARKER (acme.own-7f3c).
+func installMigratedLiteralConnector(t *testing.T, connectorName string) {
+	t.Helper()
 	old := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(old, "rules"), 0o755); err != nil {
 		t.Fatal(err)
@@ -147,11 +151,16 @@ func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const connectorName = "artifact-migrated-literal"
 	if err := ApplyConnectorRulePackOverrides(connectorName, pack); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { RemoveConnectorRulePackOverrides(connectorName) })
+}
+
+func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	const connectorName = "artifact-migrated-literal"
+	installMigratedLiteralConnector(t, connectorName)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("notes\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -170,16 +179,19 @@ func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
 		{"#!/bin/sh\ncat - > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ntee /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ncat -n -- - > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
-		// A command that never reads stdin does not act on its heredoc.
-		{"#!/bin/sh\ntrue <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\nprintf '%s\\n' done\n", false},
-		{"#!/bin/sh\nmkdir -p /tmp/acme <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
-		{"#!/bin/sh\ncat /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
-		// A reader with a file operand ignores stdin; one that names stdin reads it.
-		{"#!/bin/sh\ngrep acme /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
-		{"#!/bin/sh\ngrep -n -e acme /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
-		{"#!/bin/sh\nhead -n 1 /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
-		// A "-" pattern or option value is not a stdin operand; a "-" file is.
-		{"#!/bin/sh\ngrep -e - /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
+		// The command a heredoc is fed to may read it whatever its name: the
+		// shell that runs the script may bind true, mkdir, cat or /bin/cat to a
+		// function that reads stdin (TestInheritedShellFunctionReadsAHeredoc).
+		// So the literal counts beside any command, file operands or not.
+		{"#!/bin/sh\ntrue <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\nprintf '%s\\n' done\n", true},
+		{"#!/bin/sh\nmkdir -p /tmp/acme <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		{"#!/bin/sh\ncat /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		{"#!/bin/sh\ngrep acme /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		{"#!/bin/sh\ngrep -n -e acme /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		{"#!/bin/sh\nhead -n 1 /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		{"#!/bin/sh\ngrep -e - /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		// A program the parse does not model (cut) leaves the script
+		// detection-only, heredoc or not.
 		{"#!/bin/sh\ncut -d - -f 1 /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
 		{"#!/bin/sh\ngrep -f - /dev/null > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ngrep -e - /dev/null - > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
@@ -187,15 +199,14 @@ func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
 		{"#!/bin/sh\ngrep acme /dev/stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ncat /dev/stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\nhead -n 1 > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
-		// Any other spelling of stdin, a link to it, a name that does not
-		// exist yet, or a file another command of the script may replace
-		// first (cp, ln, mv) reads it too; a regular file does not.
 		{"#!/bin/sh\ncat /dev/./stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ncat /dev//stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ngrep acme stdin-alias > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ncp notes.txt copy.txt\ncat notes.txt > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ncat missing.txt > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
-		{"#!/bin/sh\ngrep acme notes.txt <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
+		{"#!/bin/sh\ngrep acme notes.txt <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		{"#!/bin/sh\n/bin/cat /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		{"#!/bin/sh\necho done <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
 		// A ':' heredoc comment block leaves the parse partial: never enforced.
 		{"#!/bin/sh\n: <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\nprintf '%s\\n' done\n", false},
 	} {
@@ -214,6 +225,94 @@ func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
 		}
 		if enforced != want {
 			t.Errorf("%q: enforced=%t, want %t (%v)", body, enforced, want, FindingStrings(findings))
+		}
+	}
+}
+
+// Bash binds a command name to a function before it looks for a builtin or a
+// file, for any name, an absolute path included: a function the shell
+// inherits (export -f) or one BASH_ENV defines. That function reads the
+// heredoc a script feeds true, grep with a file operand or /bin/cat
+// /dev/null, so the migrated literal in it counts: the gateway does not see
+// the shell that will run the script.
+func TestInheritedShellFunctionReadsAHeredoc(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	const connectorName = "artifact-inherited-function"
+	installMigratedLiteralConnector(t, connectorName)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	consumed := filepath.Join(dir, "consumed.txt")
+	bashEnv := filepath.Join(dir, "bash_env")
+	if err := os.WriteFile(bashEnv, []byte("function /bin/cat { command cat > '"+consumed+"'; }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bash, bashErr := exec.LookPath("bash")
+	for i, tc := range []struct {
+		name, body string
+		run        []string // how bash runs the script (SCRIPT is its path)
+	}{
+		{"exported true", "#!/bin/sh\ntrue <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n",
+			[]string{"-c", "true() { command cat > '" + consumed + "'; }; export -f true; exec bash \"$1\"", "_", "SCRIPT"}},
+		{"exported grep", "#!/bin/sh\ngrep acme notes.txt <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n",
+			[]string{"-c", "grep() { command cat > '" + consumed + "'; }; export -f grep; exec bash \"$1\"", "_", "SCRIPT"}},
+		{"BASH_ENV absolute path", "#!/bin/sh\n/bin/cat /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n",
+			[]string{"-c", `BASH_ENV="$1" exec bash "$2"`, "_", bashEnv, "SCRIPT"}},
+	} {
+		path := filepath.Join(dir, fmt.Sprintf("inherited-%d.sh", i))
+		if err := os.WriteFile(path, []byte(tc.body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if bashErr == nil {
+			_ = os.Remove(consumed)
+			args := slices.Clone(tc.run)
+			args[len(args)-1] = path
+			cmd := exec.Command(bash, args...)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			data, _ := os.ReadFile(consumed)
+			if err != nil || !strings.Contains(string(data), "acme.own-7f3c") {
+				// The premise: the function read the heredoc. Linux CI runs bash 5.
+				if runtime.GOOS == "linux" {
+					t.Errorf("%s: bash did not feed the heredoc to the function: %v %s (read %q)", tc.name, err, out, data)
+				} else {
+					t.Logf("%s: bash here did not run the function: %v %s", tc.name, err, out)
+				}
+			}
+		}
+		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: dir})
+		findings := promotedArtifactFindings(t.Context(), agentHookRequest{ConnectorName: connectorName}, facts, true, nil)
+		enforced := false
+		for _, finding := range findings {
+			if finding.RuleID == "ACME-OWN-MARKER" && finding.contributesToEnforcement() {
+				enforced = true
+			}
+		}
+		if !enforced {
+			t.Errorf("%s: the heredoc literal did not enforce (%v)", tc.name, FindingStrings(findings))
+		}
+	}
+}
+
+func TestR104GAP0463HeredocDecisionDoesNotDependOnLaterCommand(t *testing.T) {
+	const connectorName = "r104-heredoc-migrated-literal"
+	installMigratedLiteralConnector(t, connectorName)
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "notes.txt"), []byte("ordinary notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := "cat notes.txt <<'EOF'\nacme.own-7f3c\nEOF\n"
+	for _, command := range []string{base, base + "date\n"} {
+		input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,
+			ActiveHome: t.TempDir(), DialectHint: actionfacts.DialectPOSIX}
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: input, Connector: connectorName, EnforcementCapable: true,
+		})
+		finding := findingWithID(findings, "ACME-OWN-MARKER")
+		if finding == nil || !finding.contributesToEnforcement() {
+			t.Fatalf("heredoc with later command %v was not conservatively blocked: %v",
+				command != base, FindingStrings(findings))
 		}
 	}
 }

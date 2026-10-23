@@ -100,19 +100,19 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 		"tar -xzf pkg.tgz --strip-components=1 -C build; echo hi > report.txt", // FP-0001
 		"tar -xzf pkg.tgz --exclude=docs -C build; echo hi > report.txt",       // FP-0002
 		"tar -a -xf pkg.tar -C build; echo hi > report.txt",                    // FP-0003
-		`for f in *.txt; do cp "$f" build/; done; echo ok > report.txt`,        // FP-0004
-		`cp "$F" out.txt && echo done > report.txt`,                            // FP-0005
-		"cp -c notes.txt r2.txt",                                               // FP-0006
-		"cp -X notes.txt r2.txt",                                               // FP-0007
-		"cp -N notes.txt r2.txt",                                               // FP-0008
-		"cp -Z notes.txt r2.txt",                                               // FP-0009
-		"> out/build.log",                                                      // PAN-0001
-		"> out/build.log && echo done",                                         // PAN-0002
-		"true && > out/build.log",                                              // PAN-0005
-		"  >> out/build.log",                                                   // PAN-0006
+		"cp -c notes.txt r2.txt",       // FP-0006
+		"cp -X notes.txt r2.txt",       // FP-0007
+		"cp -N notes.txt r2.txt",       // FP-0008
+		"cp -Z notes.txt r2.txt",       // FP-0009
+		"> out/build.log",              // PAN-0001
+		"> out/build.log && echo done", // PAN-0002
+		"true && > out/build.log",      // PAN-0005
+		"  >> out/build.log",           // PAN-0006
 		"tar -C unpack -xf keys.tar; echo hi > report.txt",
 	}
 	blocked := []string{
+		`for f in *.txt; do cp "$f" build/; done; echo ok > report.txt`, // FP-0004: unknown source
+		`cp "$F" out.txt && echo done > report.txt`,                     // FP-0005: unknown source
 		"tar -C unpack -xf keys.tar && echo k >> unpack/n1.txt",
 		"tar xzf pkg.tgz && ./configure > build.log",
 		"tar -C unpack -xf keys.tar && echo k >> outlink",

@@ -414,7 +414,8 @@ func TestTrustedActionRedirectReductionDecidesNegationOnCompleteFacts(t *testing
 // TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget is the
 // corpus differential for built-in rules (#925): a POSIX corpus action that
 // blocks with an absolute redirect target also blocks with a target the
-// shell expands at run time, and one that does not block never starts to.
+// shell expands at run time. A glob in a write target is unresolvable and
+// must block even when the corresponding absolute target is ordinary.
 // It also pins the review of every built-in code prerequisite: one that
 // holds on a redirect-target view and its static-target twin holds on the
 // action with a concrete target too. A rule whose prerequisite needs a
@@ -437,7 +438,10 @@ func TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget(t *testing.T
 			continue
 		}
 		if strings.ContainsAny(command[len(command)-1:], `&|\`) ||
-			strings.Contains(command, "<<") || strings.Contains(command, "\n") {
+			strings.Contains(command, "<<") || strings.Contains(command, "\n") ||
+			strings.Contains(command, "#{") {
+			// The corpus uses #{name} as a comment placeholder; a
+			// redirect appended to that line would not execute.
 			continue
 		}
 		posix = append(posix, test)
@@ -492,9 +496,13 @@ func TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget(t *testing.T
 				for _, home := range []string{"/home/alice", ""} {
 					want := blocks(test, base+" > /home/alice/out.txt", home)
 					for _, target := range []string{"~/out.txt", `"$HOME/out.txt"`, "out-*.txt"} {
-						if got := blocks(test, base+" > "+target, home); got != want {
-							t.Errorf("%s home=%q target %s: block = %t, absolute target block = %t",
-								test.ID, home, target, got, want)
+						wantTarget := want
+						if target == "out-*.txt" && home != "" {
+							wantTarget = true
+						}
+						if got := blocks(test, base+" > "+target, home); got != wantTarget {
+							t.Errorf("%s home=%q target %s: block = %t, want %t",
+								test.ID, home, target, got, wantTarget)
 						}
 					}
 				}

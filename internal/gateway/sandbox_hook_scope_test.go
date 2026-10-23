@@ -1061,16 +1061,14 @@ func TestSandboxDefaultPackFlagsHomeCredentialReads(t *testing.T) {
 	}
 }
 
-// TestClaudeCodeCredentialReadAlertsWithoutBlocking pins GAP-1516: a plain
-// local read of a credential path is MEDIUM advisory evidence ("alert, do not
-// block"). It used to be detection-only, which also kept it out of
-// 'defenseclaw alerts', so the default pack's SSH key rule left no trace.
-func TestClaudeCodeCredentialReadAlertsWithoutBlocking(t *testing.T) {
+// An inactive home's credential path remains an advisory. A resolved read of
+// the active home's private key is protected by the action-mode path rule.
+func TestClaudeCodeCredentialReadOutsideActiveHomeAlerts(t *testing.T) {
 	installDefaultProfileConnector(t, "claudecode")
 	p := newSandboxProject(t)
 	api := activeClaudeCodeTestAPI()
 	ctx := withAuthenticatedHookConnector(context.Background(), "claudecode")
-	for _, command := range []string{"head -c 0 ~/.ssh/id_ed25519", "cat /home/u/.ssh/id_rsa"} {
+	for _, command := range []string{"cat /home/u/.ssh/id_rsa"} {
 		resp := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
 			HookEventName: "PreToolUse", SessionID: "credential-read", CWD: p.root, ToolName: "Bash",
 			ToolInput: map[string]interface{}{"command": command},
@@ -1081,6 +1079,14 @@ func TestClaudeCodeCredentialReadAlertsWithoutBlocking(t *testing.T) {
 			t.Errorf("%q: action=%s severity=%s would_block=%t findings=%v, want a MEDIUM PATH-SSH-KEY alert",
 				command, resp.Action, resp.Severity, resp.WouldBlock, resp.Findings)
 		}
+	}
+	resp := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+		HookEventName: "PreToolUse", SessionID: "credential-read", CWD: p.root, ToolName: "Bash",
+		ToolInput: map[string]interface{}{"command": "head -c 0 ~/.ssh/id_ed25519"},
+		Payload:   map[string]interface{}{"tool_name": "Bash"},
+	})
+	if resp.Action != "block" || !strings.Contains(strings.Join(resp.Findings, ","), "PATH-SSH-KEY:") {
+		t.Errorf("active private-key read: action=%s findings=%v, want a PATH-SSH-KEY block", resp.Action, resp.Findings)
 	}
 }
 

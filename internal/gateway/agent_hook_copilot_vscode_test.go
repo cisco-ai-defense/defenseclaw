@@ -132,11 +132,9 @@ func TestCopilotCLIHookFileRunByVSCodeLocalHarness(t *testing.T) {
 	}
 }
 
-// GAP-1903: the VS Code Local harness also runs the per-user Copilot CLI
-// hook file (bound to the CLI event preToolUse, no dialect header) and sends
-// it the Local payload, as VS Code 1.140 did on dc-win2. A marker command in
-// run_in_terminal is denied with the Local decision shape, a benign one runs,
-// and a body naming another event keeps the CLI handling.
+// The VS Code Local harness can run a per-user Copilot CLI hook file, but
+// that file remains bound to the CLI route. Its Local-shaped body is denied
+// even when the command text itself would be benign.
 func TestCopilotCLIHookFileLocalPayloadFromVSCode(t *testing.T) {
 	installSandboxMarkerRules(t)
 	store, logger := testStoreAndLogger(t)
@@ -171,10 +169,29 @@ func TestCopilotCLIHookFileLocalPayloadFromVSCode(t *testing.T) {
 		specific["permissionDecisionReason"] == "" {
 		t.Fatalf("marker command not denied: %v", out)
 	}
-	if out := post("PreToolUse", "echo hello"); len(out) != 0 {
-		t.Fatalf("benign call rendered a decision: %v", out)
+	if out := post("PreToolUse", "echo hello"); out["permissionDecision"] != "deny" {
+		t.Fatalf("mismatched schema was accepted: %v", out)
 	}
-	if out := post("PostToolUse", "echo DCE2E-BLOCK-MARKER"); out["hookSpecificOutput"] != nil {
+	if out := post("PostToolUse", "echo DCE2E-BLOCK-MARKER"); out["permissionDecision"] != "deny" {
 		t.Fatalf("a body naming another event switched dialect: %v", out)
+	}
+}
+
+func TestGAP0481MappedLocalEventRejectsCLIFields(t *testing.T) {
+	installSandboxMarkerRules(t)
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "copilot"
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+	body := `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"run_in_terminal",
+		"tool_input":{"command":"echo DCE2E-BLOCK-MARKER"},"toolName":"view","toolArgs":{"path":"README.md"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DefenseClaw-Copilot-Event", "preToolUse")
+	w := httptest.NewRecorder()
+	api.handleAgentHook("copilot")(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"permissionDecision":"deny"`) {
+		t.Fatalf("mapped Local call changed route: status=%d body=%s", w.Code, w.Body.String())
 	}
 }

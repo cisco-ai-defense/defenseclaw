@@ -776,7 +776,12 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 							t.Errorf("%s: panicked=%v response=%+v", name, panicked, resp)
 							continue
 						}
-						capable, _ := mapHookActionForProfile("block", "action", event, profile.Capabilities, profile, nil)
+						// Each fixture uses its own data directory. Its cached agent
+						// contract may differ from the host profile that supplied the
+						// candidate event list (notably Claude PostToolBatch).
+						effectiveProfile := api.hookProfileForRequest(t.Context(), connectorName)
+						capable, _ := mapHookActionForProfile("block", "action", event,
+							effectiveProfile.Capabilities, effectiveProfile, nil)
 						wantAction, wantMode := "allow", mode
 						if !open {
 							wantAction, wantMode = "block", "action"

@@ -112,6 +112,7 @@ func hermesSandboxGuestDirRequest(ctx context.Context, base trustedActionRequest
 	request := base
 	request.Input.Tool, request.Input.Args, request.Input.CWD = view.Tool, args, hostDir
 	request.SandboxGuestCWD = dir
+	request.patchHostView = true
 	// The client's resolved targets name the call's own spelling and
 	// working directory, not this one.
 	request.ResolvedWriteTargets = nil

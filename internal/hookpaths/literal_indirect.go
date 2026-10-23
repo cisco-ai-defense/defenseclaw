@@ -15,7 +15,7 @@ import (
 const maxIndirectSourceBytes = 16 << 10
 
 // readIndirectSource reads only one regular file under the caller's cwd.
-// These reads occur only for an explicit source or make command.
+// These reads occur only for an explicit source, make, or AWK -f command.
 func readIndirectSource(name, cwd string) (string, bool) {
 	if !filepath.IsAbs(cwd) || name == "" || strings.ContainsAny(name, "\x00\r\n") {
 		return "", false
