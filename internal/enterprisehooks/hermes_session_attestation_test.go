@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-// A Windows account can start Hermes with HERMES_HOME set only for one shell.
+// An account can start Hermes with HERMES_HOME set only for one shell.
 // No persistent setting or hook record names that unhooked home, so a live
 // managed Verify must refuse attestation even if the default home is hooked.
-func TestManagedHermesWindowsSessionHomeCannotBeAttested(t *testing.T) {
+func TestManagedHermesSessionHomeCannotBeAttested(t *testing.T) {
 	for _, tc := range []struct {
 		name, goos, connector   string
 		managed, secure, refuse bool
@@ -20,10 +20,12 @@ func TestManagedHermesWindowsSessionHomeCannotBeAttested(t *testing.T) {
 		{"Secure Client Hermes", "windows", "hermes", true, true, false},
 		{"per-user Hermes", "windows", "hermes", false, false, false},
 		{"standalone Kiro", "windows", "kiro", true, false, false},
-		{"Unix Hermes", "linux", "hermes", true, false, false},
+		{"Linux standalone Hermes", "linux", "hermes", true, false, true},
+		{"macOS standalone Hermes", "darwin", "hermes", true, false, true},
+		{"Linux per-user Hermes", "linux", "hermes", false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := managedHermesSessionHomeAttestation(tc.goos, tc.connector, tc.managed, tc.secure)
+			err := ManagedHermesSessionHomeAttestation(tc.goos, tc.connector, tc.managed, tc.secure)
 			if tc.refuse {
 				if err == nil || !strings.Contains(err.Error(), "session-only HERMES_HOME") {
 					t.Fatalf("attestation = %v, want the unobservable home named", err)

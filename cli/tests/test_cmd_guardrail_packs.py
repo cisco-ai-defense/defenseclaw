@@ -820,7 +820,7 @@ def test_clear_connector_pack_drops_stale_rule_overrides(env, monkeypatch):
     assert result.exit_code == 0, result.output
     assert writes[-1] == [
         config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True),
-        config_writer.Change("guardrail.connectors.codex.rules.disable", unset=True),
+        config_writer.Change("guardrail.connectors.codex.rules.disable", unset=True, prune_empty_to="guardrail.connectors.codex"),
     ]
     assert json.loads(result.output)["dropped_rule_references"] == [
         "guardrail.connectors.codex.rules.disable: SEC-ENV-DUMP-REQUEST"
