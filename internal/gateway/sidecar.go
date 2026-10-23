@@ -1958,6 +1958,39 @@ func generationUnchanged(live, next *Generation) bool {
 		live.BundleVersion == next.BundleVersion
 }
 
+func managedGenerationDifference(live, next *Generation) string {
+	if live == nil || next == nil {
+		return "the published generation is unavailable"
+	}
+	if live.BundleID != next.BundleID || live.BundleVersion != next.BundleVersion {
+		return "signed bundle identity or version changed"
+	}
+	if live.opaError != next.opaError {
+		return "Rego load state changed"
+	}
+	if live.scannerPinError != next.scannerPinError {
+		return "scanner pin state changed"
+	}
+	keys := make([]string, 0, len(live.Components)+len(next.Components))
+	seen := make(map[string]struct{}, cap(keys))
+	for key := range live.Components {
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	for key := range next.Components {
+		if _, ok := seen[key]; !ok {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if live.Components[key] != next.Components[key] {
+			return "changed component " + key
+		}
+	}
+	return "effective policy digest changed"
+}
+
 func (s *Sidecar) applyConfigReloadSnapshot(
 	ctx context.Context,
 	oldCfg, newCfg *config.Config,
@@ -1990,6 +2023,19 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		return fmt.Errorf("config reload observability v8 managed destination: %w", err)
 	}
 	v8PlanChanged = candidateChanged
+	if source.proveUnchanged {
+		for _, changed := range diff.Changed {
+			if changed != configDiffAssets {
+				return fmt.Errorf("config reload refused: managed config field %s differs from the applied generation; apply a new signed policy bundle", changed)
+			}
+		}
+		if len(diff.RestartRequired) > 0 {
+			return fmt.Errorf("config reload refused: managed config field %s requires a restart; apply a new signed policy bundle", diff.RestartRequired[0])
+		}
+		if candidateChanged {
+			return fmt.Errorf("config reload refused: managed observability plan differs from the applied generation; apply a new signed policy bundle")
+		}
+	}
 	// Rule packs are part of the same candidate transaction as configuration
 	// and the owned observability graph. Use a new cache for every candidate so
 	// an earlier failed or successful generation cannot mask on-disk state.
@@ -2097,11 +2143,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		recordGenerationBuildError(err)
 		return fmt.Errorf("config reload generation: %w", err)
 	}
-	if source.recoveryOnly {
+	if source.proveUnchanged {
 		if generationUnchanged(previousGen, nextGen) {
 			return errGenerationUnchanged
 		}
-		return fmt.Errorf("config reload refused: restored managed config or referenced assets differ from the applied generation; apply a new signed policy bundle")
+		return fmt.Errorf("config reload refused: managed config or referenced assets differ from the applied generation (%s); apply a new signed policy bundle",
+			managedGenerationDifference(previousGen, nextGen))
 	}
 	if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets && generationUnchanged(previousGen, nextGen) {
 		return errGenerationUnchanged
