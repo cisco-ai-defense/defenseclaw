@@ -103,6 +103,19 @@ func TestSimpleCommandsInertDefinitionsRunNothing(t *testing.T) {
 		{"scriptblock through an inert stage to a consumer", `{ Remove-Item -Recurse -Force C:\ } | Write-Output | ForEach-Object Invoke`, DialectPowerShell, destructivePS, true},
 		{"scriptblock to a consumer alias", `{ Remove-Item -Recurse -Force C:\ } | % Invoke`, DialectPowerShell, destructivePS, true},
 		{"scriptblock to a variable stage", `{ Remove-Item -Recurse -Force C:\ } | Out-Null $x`, DialectPowerShell, destructivePS, true},
+		// Loop round 1 of continuation 3 (balanced defaults): more spellings
+		// in which a function name or a scriptblock is only data.
+		{"exported name in echo data", "f() { rm -rf /; }; export -f f; echo bash f", DialectPOSIX, destructivePOSIX, false},
+		{"exported name in git data", "f() { rm -rf /; }; export -f f; git log --grep f", DialectPOSIX, destructivePOSIX, false},
+		{"exported function and a build tool", "f() { rm -rf /; }; export -f f; make test", DialectPOSIX, destructivePOSIX, false},
+		{"lookup builtins", "f() { rm -rf /; }; hash f; type -a f; declare -f f", DialectPOSIX, destructivePOSIX, false},
+		{"lookup through command and builtin", "f() { rm -rf /; }; command -p -v f; builtin type f", DialectPOSIX, destructivePOSIX, false},
+		{"alias of the name", "f() { rm -rf /; }; alias f=ls; echo f", DialectPOSIX, destructivePOSIX, false},
+		{"assigned name as data", "f() { rm -rf /; }; x=f; echo $x", DialectPOSIX, destructivePOSIX, false},
+		{"subshell export before the definition", "( export -f f 2>/dev/null; f() { rm -rf /; } ); f", DialectPOSIX, destructivePOSIX, false},
+		{"scriptblock assigned to a variable", `$sb = { Remove-Item -Recurse -Force C:\ }; Write-Output done`, DialectPowerShell, destructivePS, false},
+		{"scriptblock assigned to null", `$null = { Remove-Item -Recurse -Force C:\ }`, DialectPowerShell, destructivePS, false},
+		{"scriptblock cast to void", `[void]{ Remove-Item -Recurse -Force C:\ }`, DialectPowerShell, destructivePS, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cwd, home := "/repo", "/home/alice"
