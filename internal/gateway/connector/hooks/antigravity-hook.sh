@@ -95,6 +95,7 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
   # A registered closed hook cannot treat missing local state as retirement.
   # The installed mode decides; strict availability tightens this exit as it
   # tightens every later outage (_DC_BOOT_FAIL_MODE).
+  [ ! -e "${DEFENSECLAW_HOME}/.install.lock" ] && [ ! -L "${DEFENSECLAW_HOME}/.install.lock" ] || _DC_BOOT_FAIL_MODE="closed"
   if [ "$_DC_BOOT_FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     if [ "$HOOK_EVENT" = "PreToolUse" ]; then
@@ -201,7 +202,8 @@ fi
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
 # fail mode: the administrator's open covers a gateway outage only.
 {{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
 {{end}}  echo "defenseclaw: antigravity hook refusing oversized payload" >&2
   if [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" != "open" ]; then
     antigravity_emit_fallback 1{{if .Sandbox}} "DefenseClaw hook payload is too large, so the tool call is blocked."{{end}}
@@ -228,7 +230,8 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 fail_unreachable() {
-  defenseclaw_log_hook_delivery_failure antigravity antigravity-hook "$1" transport "$FAIL_MODE"
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_log_hook_delivery_failure antigravity antigravity-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "antigravity tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
     antigravity_emit_fallback 1
@@ -239,7 +242,8 @@ fail_unreachable() {
 }
 
 fail_response() {
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
   # outage only (the service not running, restarting or giving no answer
   # in time). A refusal, an error status or an unusable answer blocks.
   FAIL_MODE="closed"

@@ -119,7 +119,8 @@ API_ADDR="{{.APIAddr}}"
 # Transport and response failures respect FAIL_MODE;
 # DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
 fail_unreachable() {
-  defenseclaw_log_hook_delivery_failure inspect inspect-tool "$1" transport "$FAIL_MODE"
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_log_hook_delivery_failure inspect inspect-tool "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
@@ -128,7 +129,8 @@ fail_unreachable() {
 }
 
 fail_response() {
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
   # outage only (no answer through fail_unreachable). Every answered error
   # and unusable verdict blocks, including 5xx.
   FAIL_MODE="closed"

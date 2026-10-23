@@ -432,10 +432,7 @@ func runHook(ctx context.Context, opts Options) int {
 	}
 	opts = withDefaults(opts)
 	opts.StartedAt = startedAt
-	if perUserInstallInProgress(opts) {
-		opts.FailMode = "closed"
-		opts.StrictAvailability = true
-	}
+	closeDuringInstall(&opts, "")
 
 	sp, ok := specFor(opts.Connector)
 	if ok && copilotVSCodeLocal(opts) {
@@ -533,6 +530,9 @@ func runHook(ctx context.Context, opts Options) int {
 	}
 
 	payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody)
+	// The agent may take its time writing the payload: an install that
+	// started meanwhile closes this call.
+	failMode = closeDuringInstall(&opts, failMode)
 	if err != nil {
 		// stdin read error is treated like an oversized/unusable payload.
 		overflow = true
@@ -977,6 +977,10 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		_ = resp.Body.Close()
 		return failResponse(opts, sp, "closed", "gateway delivery confirmation unavailable")
 	}
+	// Every check of the answer below, and every failure answer, uses the
+	// install state of now: an install that started while the gateway had
+	// not answered closes this call.
+	failMode = closeDuringInstall(&opts, failMode)
 	if err != nil {
 		if managedNativeDecision(opts) && opts.answeredErrorStatus != 0 {
 			return failAfterErrorStatus(opts, sp, "closed", opts.answeredErrorStatus)
@@ -1969,6 +1973,7 @@ func exactJSONKeys(fields map[string]json.RawMessage, keys ...string) bool {
 // No connector-specific JSON body is emitted on this path.
 func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 	reason := "missing gateway token: " + tokenFile + " not found"
+	failMode = closeDuringInstall(&opts, failMode)
 	closes := opts.ManagedEnterprise || (!sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed"))
 	if opts.ManagedEnterprise {
 		// A managed hook's token is installer state: a missing one is a
@@ -2034,6 +2039,7 @@ func handleUnavailableHome(opts Options, sp spec, failMode, reason string) int {
 // handleOversized mirrors the per-connector oversized-payload branch. prefix
 // is the start of the payload the hook read before it stopped at its cap.
 func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int {
+	failMode = closeDuringInstall(&opts, failMode)
 	// An input the hook cannot fully read is a local parse failure, never
 	// an outage. Outside Secure Client it closes even if a per-user hook
 	// had an explicit open outage preference.
@@ -2091,9 +2097,7 @@ func emitFailOpenAllow(opts Options, sp spec, reason string) int {
 }
 
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
-	if perUserInstallInProgress(opts) {
-		failMode = "closed"
-	}
+	failMode = closeDuringInstall(&opts, failMode)
 	failMode = managedNonOutageMode(&opts, failMode)
 	if failMode == "closed" {
 		// A refusal passed in closed (a peer DefenseClaw cannot verify, an
@@ -2466,9 +2470,7 @@ func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
 func failResponse(opts Options, sp spec, failMode, reason string) int {
-	if perUserInstallInProgress(opts) {
-		failMode = "closed"
-	}
+	failMode = closeDuringInstall(&opts, failMode)
 	// The gateway answered, or a local check failed: never an outage.
 	failMode = managedNonOutageMode(&opts, failMode)
 	if failMode == "closed" {
@@ -2506,6 +2508,22 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 		return emitPerUserGatewayDown(opts, sp, opts.gatewayRefusal)
 	}
 	return emitHookResult(opts, sp, sp.responseClosed)
+}
+
+// closeDuringInstall is the one install check of a native hook call: Run
+// reads it when the call starts, after the agent's payload is in, when the
+// gateway has answered (or failed to), and every failure answer reads it
+// again when it answers. While the installer holds the per-user data
+// directory (perUserInstallInProgress) the call is closed, with strict
+// availability, so an install or upgrade that starts during a call closes
+// it as well (GAP-0893, GAP-0894). It returns the fail mode to answer with.
+func closeDuringInstall(opts *Options, failMode string) string {
+	if !perUserInstallInProgress(*opts) {
+		return failMode
+	}
+	opts.FailMode = "closed"
+	opts.StrictAvailability = true
+	return "closed"
 }
 
 // perUserInstallInProgress forces closed while the account's installer owns

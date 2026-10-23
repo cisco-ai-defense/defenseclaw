@@ -1189,7 +1189,7 @@ defenseclaw_log_hook_delivery_failure() {
 
 defenseclaw_hook_delivery_outcome() {
   local outcome=fail_closed
-  if [ "${2:-${FAIL_MODE:-closed}}" = "open" ]; then
+  if [ "${2:-${FAIL_MODE:-closed}}" = "open" ] && ! defenseclaw_install_in_progress; then
     outcome=fail_open
     if [ "${1:-response}" = "transport" ] && defenseclaw_should_fail_closed_on_unreachable; then
       outcome=fail_closed
@@ -1198,18 +1198,32 @@ defenseclaw_hook_delivery_outcome() {
   printf '%s' "$outcome"
 }
 
-# While this account is being installed or upgraded, no failure may approve
-# a hook call. Call after the installed mode is selected so both transport
-# and response failures see the closed mode. Managed and Secure Client hooks
-# use administrator-owned delivery policy instead of this per-user marker.
-defenseclaw_close_during_install() {
+# defenseclaw_install_in_progress returns 0 (true) while this account is
+# being installed or upgraded: its installer holds .install.lock (any file
+# type) in the data directory. Managed and Secure Client hooks use
+# administrator-owned delivery policy instead of this per-user marker, and
+# return 1.
+defenseclaw_install_in_progress() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
-    1|true|TRUE|yes|YES) return 0 ;;
+    1|true|TRUE|yes|YES) return 1 ;;
   esac
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+  [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]
+}
+
+# While this account is being installed or upgraded, no failure may approve
+# a hook call: defenseclaw_close_during_install closes FAIL_MODE then. A hook
+# calls it after it selects its installed mode, and every failure answer
+# calls it again when it answers (fail_unreachable, fail_response, an
+# oversized payload, defenseclaw_should_fail_closed_on_unreachable): an
+# install that starts while the call waits for the gateway closes that call
+# too (GAP-0894).
+defenseclaw_close_during_install() {
+  [ "${FAIL_MODE:-}" != "closed" ] || return 0
+  if defenseclaw_install_in_progress; then
     FAIL_MODE=closed
   fi
+  return 0
 }
 
 # defenseclaw_gateway_binary DATA_DIR HOME prints the per-user gateway binary
@@ -1571,6 +1585,8 @@ defenseclaw_response_failure_reason() {
 # Managed standalone hooks still close malformed and error responses; the
 # administrator's open choice applies only to an outage.
 defenseclaw_should_fail_closed_on_unreachable() {
+  # An install that started since the hook selected its mode closes it.
+  defenseclaw_close_during_install
   # Only an explicit open opens: an unset, empty or unknown FAIL_MODE closes.
   case "${FAIL_MODE:-}" in
     open) ;;

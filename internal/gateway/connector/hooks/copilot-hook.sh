@@ -37,6 +37,7 @@ case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) FAIL_MODE="c
 # instead; Copilot's other events cannot block. Fail mode open lets the call
 # run.
 copilot_hook_failure() {
+  ! declare -F defenseclaw_close_during_install >/dev/null 2>&1 || defenseclaw_close_during_install
   [ "$FAIL_MODE" != "open" ] || exit 0
   local text="DefenseClaw blocked this tool call (fail mode closed). Run \`defenseclaw doctor\` to see why."
   if [ -n "${1:-}" ] && declare -F defenseclaw_json_escape >/dev/null 2>&1; then
@@ -92,6 +93,7 @@ unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
+  [ ! -e "${DEFENSECLAW_HOME}/.install.lock" ] && [ ! -L "${DEFENSECLAW_HOME}/.install.lock" ] || FAIL_MODE="closed"
   if [ "$FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     copilot_hook_failure
@@ -187,7 +189,8 @@ esac
 {{if .Sandbox}}defenseclaw_sandbox_require_token copilot copilot-hook "copilot tool"
 
 PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
-  echo "defenseclaw: copilot hook refusing oversized payload, blocking copilot tool (sandbox hooks fail closed)" >&2
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  echo "defenseclaw: copilot hook refusing oversized payload, blocking copilot tool (sandbox hooks fail closed)" >&2
   exit 2
 }
 # The per-sandbox binding token is an OpenShell provider placeholder; the
@@ -196,14 +199,16 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
 fail_unreachable() {
-  defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" transport
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" transport
   defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" fail_closed
   echo "defenseclaw: sandbox ingress unreachable, blocking copilot tool (sandbox hooks fail closed): $1" >&2
   exit 2
 }
 
 fail_response() {
-  defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" response
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" response
   defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE" fail_closed
   echo "defenseclaw: copilot hook error, blocking copilot tool (sandbox hooks fail closed): $1" >&2
   exit 2
@@ -215,7 +220,8 @@ fail_response() {
 fi
 
 PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
-  echo "defenseclaw: copilot hook refusing oversized payload" >&2
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  echo "defenseclaw: copilot hook refusing oversized payload" >&2
   {{if .Managed}}{{$failure}}{{else}}copilot_hook_failure "it is too large for DefenseClaw to inspect. Make it smaller and try again."{{end}}
 }
 API_ADDR="{{.APIAddr}}"
@@ -234,7 +240,8 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN
 
 fail_unreachable() {
-  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
   defenseclaw_emit_unreachable_stderr "copilot tool" "$1"
 {{if .Managed}}  {{$failure}}
 {{else}}  local next=""
@@ -243,7 +250,8 @@ fail_unreachable() {
 {{end}}}
 
 fail_response() {
-  defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
   echo "defenseclaw: copilot hook error: $1" >&2
   {{if .Managed}}{{$failure}}{{else}}copilot_hook_failure "the DefenseClaw gateway returned an answer DefenseClaw could not use. Run \`defenseclaw doctor\` to see why."{{end}}
 }
@@ -377,7 +385,10 @@ if [ "$ACTION" = "confirm" ]; then
   esac
   [ "$NATIVE_ASK" = "true" ] || fail_response "missing native confirmation in gateway response"
 fi
-{{else if not .Managed}}if [ "$FAIL_MODE" != "open" ]; then
+{{else if not .Managed}}# Fail mode open skips these checks, except while an install that started
+# during the call holds the data directory.
+defenseclaw_close_during_install
+if [ "$FAIL_MODE" != "open" ]; then
   # Every verdict names its action, and on a tool boundary a block carries
   # Copilot's native deny and a confirmation its native ask, as the Windows
   # hook checks: anything else is no verdict, and would let the call run.
