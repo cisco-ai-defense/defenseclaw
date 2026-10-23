@@ -64,6 +64,10 @@ It is the only file setup writes. It holds a connector-scoped token and is limit
 - A project plugin that loads after DefenseClaw's can change the arguments. In action mode the bridge then refuses to allow the call.
 - Running OpenCode with `--pure` turns external plugins off, and DefenseClaw sees nothing.
 
+## On a managed computer
+
+The per-user `setup`, `status` and `guardrail` commands on this page refuse on a standalone enterprise Linux or macOS host. An administrator adds `guardrail.connectors.opencode: {}` to the managed `config.yaml`, applies it through the [enterprise lifecycle](/docs/enterprise/operate/lifecycle#change-the-config), and runs `enterprise policy verify`. DefenseClaw registers its plugin in OpenCode's managed config (`/etc/opencode/opencode.json` on Linux). Set `guardrail.connectors.opencode.enabled: false` in the managed config to turn it off. [Machine policy](/docs/enterprise/configure/machine-policy#managed-opencode-plugin) describes the route.
+
 ## Turn it off
 
 For a per-user, single-connector install:

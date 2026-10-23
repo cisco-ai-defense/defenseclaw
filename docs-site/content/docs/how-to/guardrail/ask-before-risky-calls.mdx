@@ -17,6 +17,8 @@ Human approval (HITL) pauses a risky call and asks you instead of silently allow
 - The agent is in action mode ([Turn on blocking](/docs/how-to/guardrail/turn-on-blocking)).
 - This page uses Claude Code. Other agents differ only in where the prompt appears.
 
+On a managed computer, these per-user `guardrail` and `alerts` commands refuse. The administrator sets `guardrail.connectors.<id>.hilt` in the managed config, applies it through the [enterprise lifecycle](/docs/enterprise/operate/lifecycle#change-the-config), and checks the result through the managed policy and audit tools. The steps below are for a per-user install.
+
 ## Steps
 
 1. Turn on approval at HIGH. The command shows the change and asks `Proceed?`; press Enter or type `y`.

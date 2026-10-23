@@ -88,7 +88,7 @@ Run the first command on Linux and the second on macOS. The apply service then r
 
 ### Check a candidate config before you apply it
 
-A profile with a contradiction never reaches your people: the gateway refuses the whole file and keeps the previous one. Validate first with `defenseclaw-gateway config validate ./config.yaml` (it exits 1 where the gateway would refuse and names the setting and the profile), then apply with `enterprise <os> ensure --config ./config.yaml`, then look at one person with `enterprise <os> profile-explain --user alice --connector claudecode`.
+A profile with a contradiction never reaches your people: the gateway refuses the whole file and keeps the previous one. Run `defenseclaw-gateway config validate ./config.yaml` to check its schema and profile contradictions. Then apply with `enterprise <os> ensure --config ./config.yaml` and look at one person with `enterprise <os> profile-explain --user alice --connector claudecode`. `ensure` also checks install prerequisites, including the exact OpenShell version pin required by `install: setup`; `config validate` does not check that pin.
 
 `ensure` refusing a profile whose `allowed: false` would leave a required agent nowhere to run:
 

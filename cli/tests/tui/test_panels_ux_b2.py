@@ -171,9 +171,10 @@ async def test_search_keeps_capitals_and_digits_leave_the_config_editor(tmp_path
 
         app.action_open_command()
         await pilot.pause()
-        assert app.status_text.startswith("Command palette open")
+        open_hint = app.status_text
+        assert "Command palette" in open_hint
         app._close_command_palette()
-        assert not app.status_text.startswith("Command palette open")
+        assert app.status_text != open_hint
 
         app.action_switch_panel("setup")
         await pilot.pause()

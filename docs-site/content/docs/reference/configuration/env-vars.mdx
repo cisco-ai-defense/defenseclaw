@@ -525,9 +525,17 @@ of the caller's `~/.defenseclaw/config.yaml`:
 sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
 ```
 
-On macOS use `/opt/cisco/defenseclaw/etc/config.yaml`. On Windows, set
-`$env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'`
-in an elevated PowerShell first. See
+On macOS use `/opt/cisco/defenseclaw/etc/config.yaml`. On managed Windows with
+the standalone profile, use an elevated PowerShell prompt to run
+`enterprise policy show --json` without setting `DEFENSECLAW_CONFIG`:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --json
+```
+
+The CLI pins the installed config, data directory and service identity together.
+Setting only `DEFENSECLAW_CONFIG` skips that automatic pinning and can make the
+command read the caller's runtime directory. See
 [Machine policy status](/docs/enterprise/operate/operations#machine-policy-status).
 
 ## Check what is active

@@ -117,7 +117,7 @@ Codex, Claude Code and Cursor policy is written with Windows-specific code. A no
 
 ## Claude Code version floor
 
-DefenseClaw sets Claude Code's `requiredMinimumVersion` to 2.1.154 in `00-defenseclaw-version-floor.json`. Claude Code reads that setting only from 2.1.163, so today the floor stops no build; use application control to keep older builds off a host. Set `version_floor: enforce | report | "off"` under `connectors.claudecode`. [Detail](/docs/enterprise/configure/reference#claude-code-version-floor).
+DefenseClaw normally sets Claude Code's `requiredMinimumVersion` to 2.1.154 in `00-defenseclaw-version-floor.json`; builds below 2.1.163 do not read that setting. On standalone Windows, when every enrolled account runs 2.1.219 or later, the machine hook contract raises the floor to 2.1.219. Claude Code builds from 2.1.163 through 2.1.218 then refuse to start. Use application control for older builds. Set `version_floor: enforce | report | "off"` under `connectors.claudecode`. [Detail](/docs/enterprise/configure/reference#claude-code-version-floor).
 
 ## Higher-precedence sources
 

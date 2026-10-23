@@ -338,7 +338,8 @@ ai_discovery:
 ```
 
 Each entry is a DNS domain of at least two labels, compared without regard to
-case and a trailing dot. `defenseclaw config validate` refuses a wildcard
+case and a trailing dot. On a managed Linux host, the administrator runs
+`sudo /opt/defenseclaw/bin/defenseclaw-gateway config validate ./config.yaml`; per-user installs use `defenseclaw config validate`. Validation refuses a wildcard
 (`*.corp.example.com`), a NetBIOS name (`EMEA`), an account (`alice@...` or
 `EMEA\alice`) and an entry listed twice. The gateway applies a changed list
 at reload and looks every account up again; the guardian uses it at its next
@@ -346,16 +347,21 @@ pass. List only domains of your forest that the domain controllers of the
 joined domain trust: a listed domain is trusted for every account SSSD holds
 in it.
 
-To see whether an account was trusted, run
-`defenseclaw guardrail profile explain --user gail@emea.corp.example.com --json`.
+On a managed Linux host, check an account as root:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user gail@emea.corp.example.com --json
+```
+
+The per-user `defenseclaw guardrail profile explain` and `defenseclaw config get` commands refuse there. The configured `ai_discovery.trusted_ad_child_domains` list is in the administrator's `/etc/defenseclaw/config.yaml`.
+
 For an account of a child domain that is not listed, `subject.domain`,
 `subject.directory` and `subject.principal` are empty, and the text output
-shows the account name with no realm. `defenseclaw config get
-ai_discovery.trusted_ad_child_domains` shows the configured list.
+shows the account name with no realm.
 
 A users assignment that names only a principal (`alice@CORP.EXAMPLE.COM`)
-matches an account only while it has that principal. Check it with
-`defenseclaw guardrail profile explain --user alice --json`: `subject.principal`
+matches an account only while it has that principal. Check it with the managed
+`enterprise linux profile-explain --user alice --json`: `subject.principal`
 is the principal the gateway attributed, and is empty when no joined domain
 confirms the account's SID. Add the uid to the assignment when the account must
 match while SSSD does not answer; a short account name also matches a local or
@@ -582,7 +588,7 @@ attribute list and how to join records.
 | `principal.assurance` is `claimed` | The gateway resolved no directory facts, so the record carries what the hook reported and profiles ignore it. On Linux check `getent passwd alice@corp.example.com`; on macOS, `id alice`. |
 | `defenseclaw.session.kind` is missing or the SSH session is not verified | A verified SSH session needs the login to have a logind session: `loginctl show-session "$XDG_SESSION_ID"` must show `Remote=yes` and the user. `sudo -iu alice` and `su` create no logind session. The kind is also dropped when its assurance differs from the directory facts' (any Windows or macOS record: their session is claimed). |
 | Every decision shows `default_unverified` | No verified user reached the gateway. Check that the hook runs as the signed-in user and that the gateway accepts its credential (`defenseclaw doctor`). |
-| A group assignment never matches | Run `defenseclaw guardrail profile explain --user alice@corp.example.com --json` and compare `subject.groups` with your spelling. If the group was renamed or deleted in the directory, `explain`, `profile list`, `status` and `doctor` warn `group "..." is not known to this host`, and so does the gateway log at start and reload. Use the SID to avoid name ambiguity. On managed Windows, group assignments need token groups recorded at a desktop sign-in. When those groups are unknown, requests whose assignments need them are refused with the missing token-group fact named, including for SSH and scheduled-task agents; the group profile applies after the next recorded desktop sign-in. On a per-user Windows install the subject has no groups, so only `users`, `connectors` and `agents` assignments can match: Windows groups come from the SYSTEM enumerator on the standalone enterprise profile only. |
+| A group assignment never matches | On a per-user install, run `defenseclaw guardrail profile explain --user alice@corp.example.com --json`. On managed Linux, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice@corp.example.com --json`; on managed macOS, run `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user alice@corp.example.com --json`. On managed Windows, run `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user 'CORP\alice' --json` from an elevated PowerShell prompt. Compare `subject.groups` with your spelling. If the group was renamed or deleted in the directory, `explain`, `profile list`, `status` and `doctor` warn `group "..." is not known to this host`, and so does the gateway log at start and reload. Use the SID to avoid name ambiguity. On managed Windows, group assignments need token groups recorded at a desktop sign-in. When those groups are unknown, requests whose assignments need them are refused with the missing token-group fact named, including for SSH and scheduled-task agents; the group profile applies after the next recorded desktop sign-in. On a per-user Windows install the subject has no groups, so only `users`, `connectors` and `agents` assignments can match: Windows groups come from the SYSTEM enumerator on the standalone enterprise profile only. |
 | A user's new group has no effect, or `explain` shows it and the audit rows do not yet | SSSD caches the account (`entry_cache_timeout`, 90 minutes by default); `sudo sss_cache -u alice@corp.example.com` drops it, and `id alice@corp.example.com` shows when the new group is visible. On Linux and per-user macOS the gateway keeps directory facts for up to 15 minutes from the last successful lookup. `guardrail profile explain`, or managed `enterprise linux profile-explain` / `enterprise macos profile-explain`, asks the operating system directly. A successful account lookup refreshes that account's cached facts, so its hooks use the explained profile from their next call; no gateway restart is needed. On Linux and per-user macOS, other accounts' hooks can use the previous profile for up to 15 minutes unless you explain those accounts too. Managed macOS hooks check Open Directory on each call and refuse a group-dependent decision if it does not answer. Open Directory also caches group membership: flush its caches, then run explain again as below. On Windows a user's groups come from their sign-in token, so a user who is signed in keeps the old groups, in `explain` and in requests, until they sign out and sign in again; requests then use the new groups within seconds of the enumerator recording that sign-in, without the 15-minute wait. |
 | A new session ID after a restart | Expected only for a new chat. A resumed chat keeps its `ais-` ID and the agent ID (`agt-`) stays the same; if the agent ID changed, the connector's config root moved. |
 | `profile explain --user alice` answers `default_lookup_failed` | With SSSD fully qualified names the short name `alice` is not an account on the host. A request whose assignment needs that unconfirmed fact is refused and names it; otherwise the proven or default profile applies. Pass the name `getent passwd` shows (`alice@corp.example.com`, in any case, so the upper-case realm form Kerberos reports works too) or the uid. |

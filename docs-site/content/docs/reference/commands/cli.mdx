@@ -1348,6 +1348,19 @@ settings, so `enterprise hooks status` and `verify` refuse and name
 or `verify` instead: each runs the hooks command with the service's settings
 and includes its result.
 
+On managed Windows, use an elevated PowerShell prompt and the lifecycle views,
+which include the guardian's health:
+
+```powershell
+$DefenseClaw = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
+& $DefenseClaw enterprise windows status --json
+& $DefenseClaw enterprise windows verify --json
+```
+
+`DEFENSECLAW_CONFIG` alone does not provide the guardian's managed service
+pins and runtime identity to a direct `enterprise hooks` command. Windows hook
+mutations run only in the LocalSystem guardian.
+
 ### ACP
 
 In enterprise managed mode an administrator enrolls ACP (Agent Client Protocol) editors with `defenseclaw-gateway enterprise acp enroll` (preview, not yet verified live).
