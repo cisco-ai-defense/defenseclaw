@@ -1786,7 +1786,16 @@ restart_old() {
         return 0
     fi
     if [[ "${WAS_RUNNING}" == true ]]; then
-        start_gateway >/dev/null 2>&1 && return 0
+        local rc=0
+        start_gateway >/dev/null 2>&1 || rc=$?
+        [[ ${rc} -ne 0 ]] || return 0
+        if [[ ${rc} -eq 3 ]]; then
+            # It runs, but does not guard every connector (GAP-0878).
+            RESTORED_NOTE="Your previous install is back and its gateway runs, but a connector needs attention before it is guarded again."
+            warn "${RESTORED_NOTE}"
+            info "See which with: defenseclaw doctor"
+            return 0
+        fi
         # Say plainly that the gateway that ran before is down now (GAP-1349).
         RESTORED_NOTE="Your previous install is back, but its gateway is not running (see above)."
         warn "The gateway that was running before did not start again, so agent hooks are not guarded until it runs (connectors in fail-closed mode block tool calls)"
@@ -1807,7 +1816,7 @@ reset_audit_journal_mode() {
 }
 
 start_gateway() {
-    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 deadline up=0 version delegate=""
+    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 deadline up=0 version delegate="" every=""
     # Each start explains only itself: the explanation of a failed new
     # gateway skipped the wait for the restored one, which was then
     # reported as not running while it came up (GAP-1241).
@@ -1821,10 +1830,16 @@ start_gateway() {
     if [[ -n "${version}" ]] && version_lt "${version}" 1.0.0; then delegate=1; fi
     if [[ -n "${version}" ]] && version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi
     [[ -f "${log}" ]] && from="$(wc -c < "${log}" | tr -d ' ')"
+    # GAP-0878: a gateway that has --require-every-connector exits 3, not 0,
+    # when its boot left a configured connector unguarded. An older one (a
+    # restored or rolled-back install) refuses the flag, so ask it first.
+    if [[ -z "${delegate}" ]] && "${BIN_DIR}/defenseclaw-gateway" start --require-every-connector --help >/dev/null 2>&1; then
+        every=--require-every-connector
+    fi
     if [[ -n "${delegate}" ]]; then
         PATH="${BIN_DIR}:${PATH}" DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
     else
-        PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
+        PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start ${every:+"${every}"} || rc=$?
     fi
     if [[ -n "${delegate}" && ${rc} -eq 0 ]]; then
         # Launched, not yet ready: it is up only once the loop below says so.
@@ -1846,7 +1861,12 @@ start_gateway() {
         if [[ -z "${START_EXPLAINED:-}" ]] && "${BIN_DIR}/defenseclaw-gateway" status >/dev/null 2>&1; then
             # Answering twice in a row, without a refusal in between: it is up.
             up=$((up + 1))
-            [[ ${up} -lt 2 ]] || { ok "The gateway finished starting"; return 0; }
+            if [[ ${up} -ge 2 ]]; then
+                ok "The gateway finished starting"
+                # Its start gave up before it could check the connectors.
+                [[ -z "${every}" ]] || PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start "${every}" >/dev/null || return 3
+                return 0
+            fi
         else
             up=0
         fi

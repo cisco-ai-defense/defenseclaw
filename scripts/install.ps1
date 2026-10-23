@@ -975,7 +975,8 @@ function Move-DamagedAuditStore([string]$BackTo) {
 
 function Start-Gateway {
     # Its readiness wait is the health check. Exit code 3: running, but a
-    # connector refused admission (upgrading again would not change that).
+    # connector refused admission (upgrading again would not change that) or,
+    # with --require-every-connector, a configured connector is not guarded.
     Write-Info "Starting the gateway [$(Get-UtcClock)]"
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
     if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) {
@@ -985,7 +986,12 @@ function Start-Gateway {
     }
     $version = Get-InstalledVersion
     if ((Test-Version $version) -and [version]$version -lt [version]"1.0.1") { Reset-AuditJournalMode }
-    $rc = Invoke-Native $gateway @("start")
+    # GAP-0878: a gateway that has --require-every-connector exits 3, not 0,
+    # when its boot left a configured connector unguarded. An older one (a
+    # restored or rolled-back install) refuses the flag, so ask it first.
+    $startArgs = @("start")
+    if ((Invoke-Native $gateway @("start", "--require-every-connector", "--help") -Quiet) -eq 0) { $startArgs += "--require-every-connector" }
+    $rc = Invoke-Native $gateway $startArgs
     if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }
     # A first start over a large audit database can outlast start's own
     # 60-second readiness wait while the gateway keeps starting (GAP-1348).
@@ -997,7 +1003,12 @@ function Start-Gateway {
         Start-Sleep -Seconds 3
         if ((Invoke-Native $gateway @("status") -Quiet) -eq 0) {
             $up++
-            if ($up -ge 2) { Write-Ok "The gateway finished starting"; return 0 }
+            if ($up -ge 2) {
+                Write-Ok "The gateway finished starting"
+                # Its start gave up before it could check the connectors.
+                if ($startArgs.Count -gt 1 -and (Invoke-Native $gateway $startArgs) -ne 0) { return 3 }
+                return 0
+            }
         } else {
             $up = 0
         }

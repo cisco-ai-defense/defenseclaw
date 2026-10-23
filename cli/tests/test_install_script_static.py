@@ -2435,3 +2435,138 @@ def test_an_upgrade_finishes_the_removed_connector_cleanup_or_fails(tmp_path: Pa
     assert main.index(
         'if [[ -n "${PREV_VERSION}" && "${WAS_RUNNING}" == true ]] && ! finish_retired_connector_cleanup; then\n    START_RC=3\nfi'
     ) < main.index("report_retired_connector_leftovers")
+
+
+# ── 1.0.4 (T8 smoke review loop round 4: GAP-0878, GAP-0899) ────────────────
+
+
+def _start_gateway_script(tmp_path: Path, bin_dir: Path, *, pid_file: Path | None = None) -> Path:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("start_gateway() {")
+    funcs = text[start : text.index("\n}\n", text.index("explain_start_failure() {")) + 3]
+    helpers = text[text.index("version_key() {") : text.index("is_version() {")]
+    pid = f"gateway_pid() {{ kill -0 \"$(cat '{pid_file}')\" 2>/dev/null && cat '{pid_file}'; }}\n" if pid_file else ""
+    script = tmp_path / "start.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\nok() { echo "ok: $*"; }\n'
+        + helpers
+        + funcs
+        + pid
+        + f'DEFENSECLAW_HOME="{tmp_path}" BIN_DIR="{bin_dir}"\nrc=0; start_gateway || rc=$?; echo "rc=$rc"\n',
+        encoding="utf-8",
+    )
+    return script
+
+
+def test_an_install_whose_gateway_skips_a_connector_exits_3(tmp_path: Path) -> None:
+    # GAP-0878, GAP-0899: a boot that skipped Hermes (probe timeout, unreadable
+    # roster) printed OK, start exited 0 and so did the upgrade, with Hermes
+    # unprotected. A gateway that has --require-every-connector is asked for
+    # it and exits 3 naming the connector; the install keeps it and exits 3.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls"
+    gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{calls}"\n'
+        'case "$*" in\n'
+        '  --version) echo "defenseclaw-gateway version 1.0.4" ;;\n'
+        '  "start --require-every-connector --help") exit 0 ;;\n'
+        '  "start --require-every-connector") echo "Error: gateway is running, but it does not guard hermes;'
+        ' hermes: its setup failed (see gateway.log), then run: defenseclaw setup hermes" >&2; exit 3 ;;\n'
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+
+    out = _run([str(_start_gateway_script(tmp_path, bin_dir))], tmp_path)
+
+    assert "rc=3" in out.stdout, out.stdout + out.stderr
+    assert "does not guard hermes" in out.stderr
+    assert "start --require-every-connector" in calls.read_text(encoding="utf-8").splitlines()
+
+    # The main flow keeps the install for 3 and exits 3, never 0.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    assert "if [[ ${START_RC} -ne 0 && ${START_RC} -ne 3 ]]; then" in text
+    assert text.count("\nexit ${START_RC}\n") == 1
+
+
+def test_an_older_gateway_is_started_without_the_every_connector_flag(tmp_path: Path) -> None:
+    # A restored or rolled-back gateway (1.0.3 and earlier) does not know the
+    # flag; passing it would fail the start that brings it back.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls"
+    gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{calls}"\n'
+        'case "$*" in\n'
+        '  --version) echo "defenseclaw-gateway version 1.0.3" ;;\n'
+        '  *--require-every-connector*) echo "Error: unknown flag: --require-every-connector" >&2; exit 1 ;;\n'
+        "  start) exit 0 ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+
+    out = _run([str(_start_gateway_script(tmp_path, bin_dir))], tmp_path)
+
+    assert "rc=0" in out.stdout, out.stdout + out.stderr
+    assert calls.read_text(encoding="utf-8").splitlines()[-1] == "start"
+
+
+def test_a_slow_first_start_still_proves_every_connector_is_guarded(tmp_path: Path) -> None:
+    # GAP-1348 path: start gave up while the gateway kept starting, and the
+    # installer took two good status answers as success. It now asks the
+    # running gateway (start --require-every-connector on a running gateway)
+    # whether every connector is guarded, and returns 3 when one is not.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    pid_file, calls = tmp_path / "gateway.pid", tmp_path / "calls"
+    gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{calls}"\n'
+        'case "$*" in\n'
+        '  --version) echo "defenseclaw-gateway version 1.0.4" ;;\n'
+        '  "start --require-every-connector --help") exit 0 ;;\n'
+        '  "start --require-every-connector")\n'
+        f"    if [ -f '{pid_file}' ]; then echo 'Error: gateway is running, but it does not guard hermes' >&2; exit 3; fi\n"
+        f"    (exec sleep 30) >/dev/null 2>&1 & echo $! > '{pid_file}'; exit 1 ;;\n"
+        "  status) exit 0 ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    script = _start_gateway_script(tmp_path, bin_dir, pid_file=pid_file)
+
+    out = _run([str(script)], tmp_path)
+    subprocess.run(["kill", pid_file.read_text(encoding="utf-8").strip()], check=False)
+
+    assert "ok: The gateway finished starting" in out.stdout, out.stdout + out.stderr
+    assert "rc=3" in out.stdout, out.stdout + out.stderr
+    assert "does not guard hermes" in out.stderr
+    assert calls.read_text(encoding="utf-8").splitlines().count("start --require-every-connector") == 2
+
+
+def test_a_restored_gateway_that_needs_attention_is_not_reported_down(tmp_path: Path) -> None:
+    # restart_old read exit 3 (running, a connector needs attention) as "did
+    # not start again".
+    script = tmp_path / "restart.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\n'
+        + _install_sh_functions("restart_old")
+        + f'start_gateway() {{ return 3; }}\nWAS_RUNNING=true DEFENSECLAW_HOME="{tmp_path}"\nrestart_old\necho "note=$RESTORED_NOTE"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path)
+
+    assert out.returncode == 0, out.stderr
+    assert "its gateway runs, but a connector needs attention" in out.stdout
+    assert "did not start again" not in out.stdout

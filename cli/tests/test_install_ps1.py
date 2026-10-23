@@ -574,7 +574,7 @@ def test_a_slow_first_start_is_waited_for_before_restoring() -> None:
     assert "if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }" in body
     assert "$deadline = (Get-Date).AddMinutes(3)" in body
     assert 'Invoke-Native $gateway @("status") -Quiet' in body
-    assert 'Write-Ok "The gateway finished starting"; return 0' in body
+    assert 'Write-Ok "The gateway finished starting"' in body
 
 
 def test_a_restore_that_leaves_the_old_gateway_down_says_so() -> None:
@@ -818,7 +818,7 @@ def test_an_interrupted_setup_upgrade_restarts_the_setup_gateway() -> None:
     # DefenseClaw Setup install never had ("is not recognized").
     start = _ps1_function("Start-Gateway")
     assert "if (-not (Test-Path -LiteralPath $gateway -PathType Leaf))" in start
-    assert start.index("Test-Path -LiteralPath $gateway") < start.index('Invoke-Native $gateway @("start")')
+    assert start.index("Test-Path -LiteralPath $gateway") < start.index("$rc = Invoke-Native $gateway $startArgs")
     resume = _ps1_function("Resume-InterruptedRun")
     assert 'Start-RecoveredGateway "restored"' in resume and "Start-Gateway)" not in resume
     assert "Start-SetupGateway $setupInstall.Root" in _ps1_function("Start-RecoveredGateway")
@@ -887,7 +887,7 @@ def test_a_rollback_to_1_0_0_starts_its_gateway_on_a_large_wal_audit_db(tmp_path
         assert not (tmp_path / "audit.db-wal").exists()
     start = _ps1_function("Start-Gateway")
     guard = 'if ((Test-Version $version) -and [version]$version -lt [version]"1.0.1") { Reset-AuditJournalMode }'
-    assert start.index(guard) < start.index('Invoke-Native $gateway @("start")')
+    assert start.index(guard) < start.index("$rc = Invoke-Native $gateway $startArgs")
     sh_start = sh_text[sh_text.index("\nstart_gateway() {") :]
     assert sh_start.index('version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi') < sh_start.index(
         '"${BIN_DIR}/defenseclaw-gateway" start'
@@ -4004,3 +4004,67 @@ def test_a_pending_lifecycle_record_closes_the_hooks_with_the_kept_closer(tmp_pa
     assert out.returncode == 0, text
     assert "RAN: " in text and ".lifecycle-closer" in text.split("RAN: ", 1)[1].splitlines()[0], text
     assert "every agent hook blocks tool calls" in text, text
+
+
+def test_the_windows_installer_asks_for_every_connector_to_be_guarded() -> None:
+    # GAP-0878: Start-Gateway took exit 0 from a gateway whose boot skipped a
+    # configured connector. A gateway that has --require-every-connector is
+    # asked for it (an older one refuses the flag), also after a slow first
+    # start, and its 3 keeps the install with "a connector needs attention".
+    body = _ps1_function("Start-Gateway")
+    probe = 'if ((Invoke-Native $gateway @("start", "--require-every-connector", "--help") -Quiet) -eq 0) { $startArgs += "--require-every-connector" }'
+    assert body.index('$startArgs = @("start")') < body.index(probe) < body.index("$rc = Invoke-Native $gateway $startArgs")
+    slow = body[body.index('Write-Ok "The gateway finished starting"') :]
+    assert slow.index("if ($startArgs.Count -gt 1 -and (Invoke-Native $gateway $startArgs) -ne 0) { return 3 }") < slow.index(
+        "return 0"
+    )
+    assert 'if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again' in _text()
+
+
+@pytest.mark.skipif(POWERSHELL is None or os.name == "nt", reason="needs pwsh running a shebang fake gateway")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("supports_flag", "every_rc", "want_rc", "want_last"),
+    [
+        (True, 3, 3, "start --require-every-connector"),
+        (True, 0, 0, "start --require-every-connector"),
+        (False, 0, 0, "start"),
+    ],
+)
+def test_start_gateway_passes_the_every_connector_flag_only_to_a_gateway_that_has_it(
+    tmp_path: Path, supports_flag: bool, every_rc: int, want_rc: int, want_last: str
+) -> None:
+    # GAP-0878: Start-Gateway's exit 0 from a gateway that skipped a
+    # configured connector ended the upgrade with it unprotected.
+    bin_dir, calls = tmp_path / "bin", tmp_path / "calls"
+    bin_dir.mkdir()
+    gateway = bin_dir / "defenseclaw-gateway.exe"
+    gateway.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{calls}"\n'
+        'case "$*" in\n'
+        f'  "start --require-every-connector --help") exit {0 if supports_flag else 1} ;;\n'
+        f'  "start --require-every-connector") exit {every_rc} ;;\n'
+        f"  start) exit {0 if not supports_flag else 9} ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$BinDir = '{bin_dir}'\n"
+        'function Write-Info([string]$m) { Write-Host "info: $m" }\n'
+        'function Write-Warn([string]$m) { Write-Host "warn: $m" }\n'
+        'function Write-Ok([string]$m) { Write-Host "ok: $m" }\n'
+        'function Get-UtcClock { "now" }\nfunction Get-InstalledVersion { "1.0.4" }\n'
+        "function Test-Version($v) { $true }\nfunction Reset-AuditJournalMode { }\nfunction Get-GatewayProcess { $null }\n"
+        + _ps1_function("Invoke-Native")
+        + _ps1_function("Start-Gateway")
+        + '$rc = Start-Gateway\nWrite-Host "rc=$rc"\n'
+    )
+
+    out = _run_powershell(script)
+
+    assert f"rc={want_rc}" in out.stdout, out.stdout + out.stderr
+    assert calls.read_text(encoding="utf-8").splitlines()[-1] == want_last
