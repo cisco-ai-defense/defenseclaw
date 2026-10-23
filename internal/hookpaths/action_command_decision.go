@@ -17,8 +17,14 @@ import (
 // gateway routes. A nonempty reason means that an executed write can reach a
 // protected file, or that a write-capable command has an unresolved program or
 // target. The caller must enforce the same result with and without client
-// resolved-write evidence.
+// resolved-write evidence. A call without a command (a native Write, Edit or
+// patch call) runs no shell, so there is nothing to decide, on Windows as on
+// POSIX (GAP-0997); an empty body that a shell wrapper runs is still judged
+// where the wrapper is unwrapped.
 func ActionCommandDecision(command, cwd, home string) string {
+	if command == "" {
+		return ""
+	}
 	return actionCommandDecision(command, cwd, home, 0)
 }
 

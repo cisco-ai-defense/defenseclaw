@@ -133,6 +133,7 @@ func TestInstructionProtectionOrdinaryHardLinks(t *testing.T) {
 	writeActiveAgentTestFile(t, project, "CLAUDE.md")
 	stored := writeActiveAgentTestFile(t, filepath.Join(root, "store", "v10"), "00ab")
 	installed := instructionIdentityTestLink(t, stored, filepath.Join(project, "node_modules", ".pnpm", "pkg", "index.js"))
+	single := writeActiveAgentTestFile(t, filepath.Join(project, "src"), "main.go")
 	type call struct {
 		tool  string
 		input map[string]interface{}
@@ -140,6 +141,8 @@ func TestInstructionProtectionOrdinaryHardLinks(t *testing.T) {
 	calls := []call{
 		{"Write", map[string]interface{}{"file_path": installed, "content": "changed"}},
 		{"Edit", map[string]interface{}{"file_path": installed, "old_string": "test", "new_string": "changed"}},
+		{"Write", map[string]interface{}{"file_path": single, "content": "changed"}},
+		{"Write", map[string]interface{}{"file_path": filepath.Join(project, "src", "new.go"), "content": "new"}},
 	}
 	if runtime.GOOS != "windows" {
 		calls = append(calls,
@@ -155,8 +158,8 @@ func TestInstructionProtectionOrdinaryHardLinks(t *testing.T) {
 					HookEventName: "PreToolUse", SessionID: "pnpm", CWD: project,
 					ToolName: c.tool, ToolInput: c.input,
 				})
-			// Windows too (GAP-0997): an unreadable administrators key file
-			// is matched by the file's link names, not its link count.
+			// Windows too (GAP-0997): a native call has no shell command
+			// for the action proof to call dynamic.
 			if response.Action == guardrailActionBlock {
 				t.Fatalf("%s %v of an ordinary hard-linked file (%s) was blocked: %v", c.tool, c.input, source, response.Findings)
 			}

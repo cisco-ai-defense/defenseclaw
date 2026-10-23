@@ -258,6 +258,24 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 	}
 }
 
+// A native Write or Edit call has no shell command. The Windows action proof
+// called it a dynamic command, which refused a native write to an ordinary
+// file on Windows (GAP-0997). A Windows command keeps its own decision.
+func TestR104ActionNoCommandIsNoDecision(t *testing.T) {
+	for _, tc := range []struct{ cwd, home string }{
+		{`C:\Users\alice\project`, `C:\Users\alice`},
+		{`/home/alice/project`, `/home/alice`},
+	} {
+		if reason := ActionCommandDecision("", tc.cwd, tc.home); reason != "" {
+			t.Errorf("no command in %s = %q, want no decision", tc.cwd, reason)
+		}
+	}
+	const dynamic = `$output = Join-Path $unknown 'report.txt'; Add-Content -LiteralPath $output -Value 'dummy-key'`
+	if reason := ActionCommandDecision(dynamic, `C:\Users\alice\project`, `C:\Users\alice`); reason == "" {
+		t.Errorf("%q has no decision, want a dynamic-path reason", dynamic)
+	}
+}
+
 func TestR104ActionWindowsUninspectedScripts(t *testing.T) {
 	const cwd = `C:\Users\alice\project`
 	const home = `C:\Users\alice`
