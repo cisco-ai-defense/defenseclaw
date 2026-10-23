@@ -30,6 +30,42 @@ CHECKER = SCRIPTS / "check_enterprise_lifecycle_result.py"
 UNIX_LANE = SCRIPTS / "test-enterprise-unix-install.sh"
 
 
+def test_hook_process_warning_keeps_install_lanes_honest(tmp_path: Path) -> None:
+    """Enabled Claude/Codex coverage is complete while prevention is not."""
+    result = _result(
+        action="verify", security_complete=False,
+        warnings=[{"code": "hook_process_fail_open", "message": "codex hook can fail open"}],
+    )
+    accepted = _check(tmp_path, result, "--coverage-complete", "--security-incomplete",
+                      "--allow-warning", "hook_process_fail_open")
+    assert accepted.returncode == 0, accepted.stderr
+
+    unix = UNIX_LANE.read_text(encoding="utf-8")
+    lines = unix.splitlines()
+    for step in ("04-verify", "05-status"):
+        matches = [i for i, line in enumerate(lines) if f'check "$results/{step}.json"' in line]
+        assert len(matches) == 1, step
+        i = matches[0]
+        args = lines[i]
+        while lines[i].rstrip().endswith("\\"):
+            i += 1
+            args += " " + lines[i]
+        assert "--coverage-complete" in args and "--security-incomplete" in args
+        assert "--allow-warning hook_process_fail_open" in args
+        assert "--complete" not in args
+
+    windows = (SCRIPTS / "test-enterprise-windows-install.ps1").read_text(encoding="utf-8")
+    checks = windows[windows.index("$installedChecks = @("):windows.index("\n)", windows.index("$installedChecks = @("))]
+    assert "'--coverage-complete'" in checks and "'--security-incomplete'" in checks
+    assert "'hook_process_fail_open'" in checks
+
+    docs = ROOT / "docs-site/content/docs/enterprise"
+    for page in ("get-started.mdx", "install/linux.mdx", "install/macos.mdx",
+                 "install/reference/windows.mdx"):
+        text = (docs / page).read_text(encoding="utf-8")
+        assert "hook_process_fail_open" in text and "security_complete" in text, page
+
+
 def _result(**overrides: Any) -> dict[str, Any]:
     document: dict[str, Any] = {
         "schema_version": 2,

@@ -255,6 +255,9 @@ claude_fail_closed_decision() {
 }
 
 fail_response() {
+{{if and (not .SecureClient) (not .Sandbox)}}  # A gateway answer or local parse failure cannot use outage-open mode.
+  FAIL_MODE="closed"
+{{end}}
   local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
   [ "$FAIL_MODE" = "open" ] ||

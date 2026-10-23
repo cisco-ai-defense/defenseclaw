@@ -124,7 +124,7 @@ func TestStrictAvailabilityClosesAnOpenPerUserHookAnswer(t *testing.T) {
 					opts.FailMode = "open"
 					opts.StrictAvailability = strict
 				})
-				if !strict {
+				if !strict && !strings.Contains(tc.name, "invalid action") && !strings.Contains(tc.name, "not json") {
 					// Fail mode open without strict availability lets it run.
 					if strings.Contains(result.stdout, "deny") {
 						t.Fatalf("open: stdout=%q, want no deny", result.stdout)

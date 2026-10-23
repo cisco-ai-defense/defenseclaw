@@ -99,7 +99,8 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
   "installed": true,
   "readiness": { "gateway": true, "guardian": true, "enumerator": true, "sensor_helper": true },
   "coverage_complete": true,
-  "security_complete": true,
+  "security_complete": false,
+  "warnings": [{ "code": "hook_process_fail_open", "message": "Codex can run a tool after its PreToolUse hook is killed or times out" }],
   "errors": []
 }
 ```
@@ -108,6 +109,9 @@ On macOS use `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos st
 On Windows, from an elevated prompt:
 `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone --json`.
 Read `coverage_complete` and `security_complete` ([Health fields](/docs/enterprise/operate/operations#health-fields)).
+With Codex or Claude Code enabled, installed hooks can provide complete coverage
+while `security_complete` remains `false`: the agent can continue after a stopped
+or timed-out hook. `hook_process_fail_open` names that residual risk.
 
 ## 6. Pilot in observe mode, then expand in rings
 

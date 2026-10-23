@@ -25,8 +25,7 @@ var answerWatchdogLogWait = 100 * time.Millisecond
 // simply no CPU. The deny of such a call came a second or more after the
 // budget.
 //
-// The watchdog renders the call's fail-closed answer (failNoAnswer: closed
-// for a managed hook, the account's fail mode for a per-user hook) when the
+// The watchdog renders the call's fail-closed answer (failNoAnswer) when the
 // call starts, and at the answer deadline writes it and ends the process
 // (Options.Exit), unless the call's own result is out or the gateway's
 // decision is in. A 102 report that the gateway waits on a remote scanner
@@ -89,8 +88,8 @@ type AnswerWatchdog = answerWatchdog
 // when the command does not. That lookup starts before the watchdog can
 // fire, so a deadline that passes before Run adopts the watchdog still
 // leaves the call its hook-failures row.
-// Until Run adopts it the prepared answer is closed for a managed hook and
-// for a per-user hook whose command line does not say open. It returns nil
+// Until Run adopts it the prepared answer is closed outside Secure Client.
+// It returns nil
 // when the call has no answer deadline (not a tool call, a Secure Client
 // hook, no start time).
 func ArmAnswerWatchdog(opts Options, payload []byte) *AnswerWatchdog {

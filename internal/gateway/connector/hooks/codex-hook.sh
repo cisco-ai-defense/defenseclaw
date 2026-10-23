@@ -235,11 +235,10 @@ fail_unreachable() {
 {{end}}  exit 0
 }
 
-# Response-layer failure: gateway answered but the answer was bad
-# (auth failure, malformed JSON, missing action). These usually
-# indicate misconfiguration — respect FAIL_MODE so an operator who
-# explicitly set FAIL_MODE=closed is told about a real problem.
+# A gateway response that cannot be used is a failed check, not an outage.
 fail_response() {
+{{if and (not .SecureClient) (not .Sandbox)}}  FAIL_MODE="closed"
+{{end}}
   local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
   [ "$FAIL_MODE" = "open" ] ||

@@ -150,7 +150,8 @@ and readiness check, and exits `1` when anything fails. A healthy `status`, trim
   "readiness": { "gateway": true, "guardian": true, "enumerator": true, "sensor_helper": true },
   "enrollment": { "targets": 16, "pending": 0, "failed": 0, "exempt": 0 },
   "coverage_complete": true,
-  "security_complete": true,
+  "security_complete": false,
+  "warnings": [{ "code": "hook_process_fail_open", "message": "Codex can run a tool after its PreToolUse hook is killed or times out" }],
   "errors": []
 }
 ```

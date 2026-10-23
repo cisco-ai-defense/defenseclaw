@@ -284,9 +284,9 @@ func TestManagedHookDeliveryOutsideSecureClientFailsClosed(t *testing.T) {
 				out, err := cmd.CombinedOutput()
 				blocked := err != nil || strings.Contains(string(out), `"decision":"block"`)
 				// The baked mode is the administrator's (owner decision
-				// 2026-10-20): open lets an outage and an unusable answer
-				// through; a missing token is a broken install and blocks.
-				wantBlocked := scenario == "missing-token" || scenario == "binding-error" || wantBaked == "closed"
+				// 2026-10-20): open permits a classified outage only.
+				// An unusable answer and a broken install must block.
+				wantBlocked := scenario == "missing-token" || scenario == "binding-error" || scenario == "malformed" || wantBaked == "closed"
 				if blocked != wantBlocked {
 					t.Fatalf("blocked=%t want=%t err=%v output=%s", blocked, wantBlocked, err, out)
 				}

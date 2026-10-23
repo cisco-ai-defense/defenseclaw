@@ -47,7 +47,7 @@ func TestKiroNativeHookAnswersLikeKiroHookScript(t *testing.T) {
 		{name: "DefenseClaw's own reason", rt: ok(`{"action":"block","hook_output":{"decision":"block","reason":"Blocked by DefenseClaw rule R1: marker"}}`),
 			wantCode: 2, wantStderr: "Blocked by DefenseClaw rule R1: marker", unprefixed: true},
 		{name: "block without a hook_output is not a veto", rt: ok(`{"action":"block"}`), wantCode: 0},
-		{name: "invalid response, fail open", rt: ok(`not json`), failMode: "open", wantCode: 0, wantStderr: "kiro hook error"},
+		{name: "invalid response, fail open", rt: ok(`not json`), failMode: "open", wantCode: 2, wantStderr: "kiro hook error"},
 		{name: "invalid response, fail closed", rt: ok(`not json`), failMode: "closed", wantCode: 2, wantStderr: "kiro hook error"},
 		{name: "server error, fail open", rt: &stubRT{status: 503, body: "{}"}, failMode: "open", wantCode: 0},
 		{name: "server error, fail closed", rt: &stubRT{status: 503, body: "{}"}, failMode: "closed", wantCode: 2},

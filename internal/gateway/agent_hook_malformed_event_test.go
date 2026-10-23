@@ -14,6 +14,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
+func TestValidatedGenericEventIsNormalized(t *testing.T) {
+	payload := map[string]interface{}{"event": "PostToolUse", "session_id": "s", "tool_use_id": "t"}
+	if reason := malformedHookPayloadReason("claudecode", []byte(`{"event":"PostToolUse","session_id":"s","tool_use_id":"t"}`), payload, ""); reason != "" {
+		t.Fatalf("validated event refused: %s", reason)
+	}
+	if got := normalizeAgentHookRequest("claudecode", payload).HookEventName; got != "PostToolUse" {
+		t.Fatalf("normalized event = %q, want PostToolUse", got)
+	}
+}
+
 // A malformed event must not enter the ordinary policy path as an unknown,
 // observe-only event. The registered native hook treats a gateway error as a
 // closed failure, while this rejection row names the parser failure.

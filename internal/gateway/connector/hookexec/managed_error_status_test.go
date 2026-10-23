@@ -175,9 +175,9 @@ func TestStandaloneOpenBlocksAGatewayThatAnsweredAnErrorStatus(t *testing.T) {
 			})
 		}
 	}
-	// Per-user hooks are unchanged: open allows a gateway error, closed blocks it.
+	// A gateway that answered and then cut off its body cannot use open mode.
 	shortAnswerBudget(t, 400*time.Millisecond)
-	for mode, want := range map[string]bool{"open": false, "closed": true} {
+	for mode, want := range map[string]bool{"open": true, "closed": true} {
 		result, _ := runAgainstGateway(t, "claudecode", cutOffStatusGateway(t, http.StatusServiceUnavailable, false), func(o *Options) {
 			o.FailMode = mode
 		})
