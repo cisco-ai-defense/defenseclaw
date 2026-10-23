@@ -4,8 +4,9 @@ import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-// Docs claims and release security requirements. Each check reads the
-// page as words, so a reflowed paragraph still matches.
+// Docs claims and release security requirements. Page checks read the page
+// as words, so a reflowed paragraph still matches; source checks tie the
+// wording to the CLI and Go paths that implement it.
 
 const site = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repo = join(site, '..');
@@ -41,6 +42,124 @@ function enterprisePages(path = join(site, 'content/docs/enterprise')): string[]
     return entry.isFile() && entry.name.endsWith('.mdx') ? [child] : [];
   });
 }
+
+function source(name: string): string {
+  return readFileSync(join(repo, name), 'utf8');
+}
+
+function docsPages(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return docsPages(path);
+    return entry.isFile() && /\.mdx?$/.test(entry.name) ? [path] : [];
+  });
+}
+
+describe('Cursor observe outage mode', () => {
+  it('keeps the rendered hook closed unless the config explicitly opens it', () => {
+    const hooks = source('internal/gateway/connector/subprocess.go');
+    const outage = hooks.split('func OutageHookFailMode(')[1]?.split('\n}')[0] ?? '';
+    assert.match(outage, /perUserCursorRender\(opts, conn\)/);
+    assert.match(outage, /!strings\.EqualFold\(strings\.TrimSpace\(opts\.ConfiguredHookFailMode\), "open"\)/);
+    assert.match(outage, /return "closed"/);
+    assert.match(hooks, /func renderedHookFailMode\([\s\S]*?OutageHookFailMode\(opts, conn\)/);
+    const failModes = page('reference/configuration/fail-modes.mdx').split('## Controls')[0] ?? '';
+    const cursor = page('reference/connectors/cursor.mdx').split('## Fail mode')[1]?.split('## Limits')[0] ?? '';
+    assert.match(failModes, /Per-user Cursor in observe mode.{0,100}blocks supported events during a gateway outage by default/i);
+    assert.match(cursor, /observe mode.{0,100}blocks supported events on a gateway outage by default/i);
+    const coverage = page('appendix/coverage-by-layer.mdx');
+    assert.match(coverage, /Per-user Cursor in observe mode.{0,130}running hook blocks supported events during a gateway outage/i);
+    assert.match(page('features/guardrail.mdx'), /Per-user Cursor in observe mode still blocks a supported event during a gateway outage/i);
+    assert.match(page('reference/commands/installer.mdx'), /Per-user Cursor observe also blocks supported events during a gateway outage/i);
+    const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
+    assert.match(managedRegistration, /"failClosed": mode == "closed"/);
+    assert.match(page('reference/connectors/cursor.mdx'), /failClosed` value follows the administrator's resolved fail mode/i);
+    assert.ok(!/per-user Cursor in observe mode fails open/i.test(failModes));
+
+    const overview = page('connectors/cursor.mdx').split('## What it can block or ask')[1]?.split('## Files it changes')[0] ?? '';
+    assert.match(overview, /Observe mode.{0,120}policy findings without blocking/i);
+    assert.match(overview, /gateway outage.{0,100}blocks supported events by default/i);
+    const mapping = page('reference/connectors/cursor.mdx').split('## Verdict mapping')[1]?.split('## Native ask')[0] ?? '';
+    assert.match(mapping, /\| Observe \| `failClosed: false` \|[^|]*policy findings[^|]*gateway outage/i);
+    assert.ok(!/observe cannot become blocking/i.test(mapping));
+  });
+});
+
+describe('Observe mode policy findings and gateway outages', () => {
+  it('qualifies Antigravity reference verdict mapping for a gateway outage', () => {
+    const hooks = source('internal/gateway/connector/subprocess.go');
+    assert.match(hooks, /const defaultHookFailMode = "closed"/);
+    const antigravity = source('internal/gateway/connector/hooks/antigravity-hook.sh');
+    assert.match(antigravity, /PreToolUse\)[\s\S]*?if \[ "\$closed" = "1" \]; then[\s\S]*?"decision":"deny"/);
+    const mapping = page('reference/connectors/antigravity.mdx').split('## Verdict mapping')[1]?.split('## Native ask')[0] ?? '';
+    assert.match(mapping, /`observe` records policy findings without blocking on those findings/i);
+    assert.match(mapping, /default fail mode `closed`.{0,120}gateway is unreachable.{0,80}denies `PreToolUse`/i);
+    assert.ok(!/always permits tool execution/i.test(mapping));
+  });
+
+  it('does not pair observe with blocks nothing on any content page', () => {
+    const content = join(site, 'content');
+    const offenders = docsPages(content).flatMap((path) => {
+      const paragraphs = readFileSync(path, 'utf8').split(/\n\s*\n/);
+      return paragraphs.some((paragraph) => /\bobserve\b[\s\S]*?\bblocks nothing\b/i.test(paragraph))
+        ? [path.slice(content.length + 1)] : [];
+    });
+    assert.deepEqual(offenders, []);
+  });
+
+  it('qualifies hook connector claims for Claude Code and Antigravity', () => {
+    const outage = source('internal/gateway/connector/subprocess.go').split('func OutageHookFailMode(')[1]?.split('\n}')[0] ?? '';
+    assert.match(outage, /return mode/);
+    for (const connector of ['claudecode', 'antigravity']) {
+      const section = page(`connectors/${connector}.mdx`).split('## What it can block or ask')[1]?.split('## Files it changes')[0] ?? '';
+      assert.match(section, /Observe mode.{0,120}policy findings without blocking/i, connector);
+      assert.match(section, /default fail mode `closed`.{0,140}gateway is unreachable/i, connector);
+    }
+  });
+
+  it('qualifies proxy connector claims for OpenClaw and ZeptoClaw', () => {
+    assert.match(source('internal/gateway/proxy.go'), /verdict.Action == "block" && mode == "action"/);
+    for (const connector of ['openclaw', 'zeptoclaw']) {
+      const setup = page(`connectors/${connector}.mdx`).split('## Set up')[1]?.split('## Check it')[0] ?? '';
+      assert.match(setup, /Observe records policy findings without blocking on those findings/i, connector);
+      assert.match(setup, /gateway outage still stops proxied requests/i, connector);
+      assert.match(page(`reference/connectors/${connector}.mdx`), /While the gateway is down, requests are blocked/i, connector);
+    }
+  });
+
+  it('scopes general guardrail observe guidance to policy findings', () => {
+    assert.match(page('features/guardrail.mdx'), /Observe mode does not enforce policy findings/i);
+    assert.match(page('features/guardrail.mdx'), /Hook fail mode and proxy availability still apply/i);
+    assert.ok(!/\*\*Observe\*\*[^.]*blocks nothing/i.test(page('features/guardrail.mdx')));
+    assert.match(page('reference/policy/thresholds.mdx'), /Observe mode does not enforce policy findings/i);
+    const commands = source('docs-site/content/docs/reference/commands/cli.mdx');
+    const modeRow = commands.split('\n').find((line) => line.startsWith('| `defenseclaw guardrail mode observe')) ?? '';
+    assert.match(modeRow, /observe \(logs policy findings without enforcing them\)/i);
+    assert.match(modeRow, /Hook fail mode and proxy availability still apply/i);
+  });
+
+  it('names the ACP observe failure exception', () => {
+    const proxy = source('internal/acp/proxy.go').split('func observeRefuses(')[1]?.split('\n}')[0] ?? '';
+    assert.match(proxy, /state\.profileFailsClosed\(\)/);
+    assert.match(proxy, /!opts\.Managed/);
+    assert.match(proxy, /!state\.sessionFailsOpen\(promptSessionID\(msg\)\)/);
+    const guide = page('features/acp-guard.mdx');
+    assert.match(guide, /observe mode.{0,100}policy findings without blocking/i);
+    assert.match(guide, /standalone managed guard.{0,100}refuses an unevaluated frame by default/i);
+  });
+});
+
+describe('ZeptoClaw removal', () => {
+  it('documents the last-connector gate and the forced removal command', () => {
+    const removal = source('cli/defenseclaw/commands/cmd_setup.py').split('# WU8 D2=A — last-connector gate.')[1]?.split('elif not yes')[0] ?? '';
+    assert.match(removal, /if not remaining:[\s\S]*?if not force and not unshipped:/);
+    assert.match(removal, /Pass --force to fully unconfigure enforcement/);
+    const turnOff = page('connectors/zeptoclaw.mdx').split('## Turn it off')[1]?.split('## Details')[0] ?? '';
+    assert.match(turnOff, /setup remove zeptoclaw --yes`/);
+    assert.match(turnOff, /last connector.{0,100}removal refuses/i);
+    assert.match(turnOff, /defenseclaw setup remove zeptoclaw --yes --force/);
+  });
+});
 
 describe('Intune base config versus the signed bundle', () => {
   it('names exactly the blocks the packager compares', () => {
@@ -100,6 +219,10 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
 
 describe('Hook connector setup and teardown', () => {
   it('limits the observe default to first setup in every CLI row and connector page', () => {
+    const setupCode = source('cli/defenseclaw/commands/cmd_setup.py');
+    const alias = setupCode.split('def _setup_observability_alias(')[1]?.split('def _')[0] ?? '';
+    assert.match(alias, /mode = gc\.effective_mode\(connector\) if connector in _configured_connector_set\(gc\) else "observe"/);
+    assert.match(alias, /if interactive and not mode_from_flag:\s+normalized_mode = _prompt_connector_mode\(connector, default_mode=normalized_mode\)/);
     const reference = readFileSync(join(site, 'content/docs/reference/commands/cli.mdx'), 'utf8');
     for (const { id, command } of hookConnectors) {
       const row = reference.split('\n').find((line) => line.startsWith(`| \`defenseclaw setup ${command}\` |`));
@@ -115,6 +238,23 @@ describe('Hook connector setup and teardown', () => {
   });
 
   it('says what teardown removes and what it preserves on every connector page', () => {
+    const guardrailCode = source('cli/defenseclaw/commands/cmd_guardrail.py');
+    const sharedTeardown = source('internal/gateway/connector/hook_only.go');
+    assert.match(guardrailCode, /def disable_cmd\([\s\S]*?if connector_flag:\s+_toggle_connector_guardrail\(/);
+    assert.match(guardrailCode, /gc\.enabled = False[\s\S]*?if restart:[\s\S]*?_restart_services\(/);
+    assert.match(sharedTeardown, /func \(c \*hookOnlyConnector\) Teardown\([\s\S]*?return c\.teardown\(ctx, opts, ""\)/);
+    assert.match(sharedTeardown, /case !restored:[\s\S]*?c\.removeConfigEntriesWithManagedBackup\(/);
+    assert.match(sharedTeardown, /if c\.pluginArtifact \{\s+return c\.teardownPluginArtifact\(opts\)/);
+    for (const connector of ['cursor', 'devin', 'copilot', 'hermes', 'antigravity', 'opencode', 'amp']) {
+      const factory = connector === 'devin' || connector === 'amp'
+        ? source(`internal/gateway/connector/${connector}.go`)
+        : sharedTeardown;
+      assert.match(factory, new RegExp(`name:\\s*"${connector}"`), `${connector} must use the shared teardown`);
+    }
+    for (const connector of ['claudecode', 'codex', 'kiro']) {
+      const implementation = source(`internal/gateway/connector/${connector}.go`);
+      assert.match(implementation, /func \(c \*\w+Connector\) Teardown\(/, `${connector} must own its documented teardown`);
+    }
     for (const { id, name } of hookConnectors) {
       const turnOff = page(`connectors/${id}.mdx`).split('## Turn it off')[1]?.split('## Details')[0];
       assert.ok(turnOff, `${id} turn-off section is missing`);
@@ -136,6 +276,13 @@ describe('Hook connector setup and teardown', () => {
   });
 
   it('distinguishes whole-guardrail --no-restart from connector hot reload', () => {
+    const guardrailCode = source('cli/defenseclaw/commands/cmd_guardrail.py');
+    const gatewayCode = source('internal/gateway/sidecar.go');
+    assert.match(guardrailCode, /def disable_cmd\([\s\S]*?if connector_flag:\s+_toggle_connector_guardrail\(/);
+    assert.match(guardrailCode, /def _toggle_connector_guardrail\([\s\S]*?entry\.enabled = bool\(enable\)/);
+    assert.match(guardrailCode, /gateway will continue running with the old policy[\s\S]*?until you restart it manually/);
+    assert.match(gatewayCode, /guardrailRestart := connectorSetChanged\(oldCfg, newCfg\)/);
+    assert.match(gatewayCode, /signalRestart\(s\.guardrailRestartCh\)/);
     const setup = page('connectors/claudecode.mdx').split('## Set up')[1]?.split('## Check it')[0];
     assert.match(setup ?? '', /re-run without `--mode` keeps the current mode/i);
     const turnOff = page('connectors/claudecode.mdx').split('## Turn it off')[1]?.split('## Details')[0];

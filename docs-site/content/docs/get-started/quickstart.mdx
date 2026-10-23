@@ -33,7 +33,7 @@ The installer asks which agent to guard: type `claudecode`. Requirements and opt
 defenseclaw init --connector claudecode
 ```
 
-Press Enter through the prompts. Claude Code starts in **observe** mode: DefenseClaw logs what the agent does and blocks nothing yet. At **Select connector(s) for action enforcement**, leave the box unchecked. `init` starts the gateway and prints a first-run report. This sample comes from `defenseclaw quickstart --skip-gateway`, which prints the same report, so its Sidecar row says not started where yours says started:
+Press Enter through the prompts. Claude Code starts in **observe** mode: DefenseClaw records policy findings without enforcing them. With the default fail mode `closed`, its hook denies supported events when the gateway is unreachable. At **Select connector(s) for action enforcement**, leave the box unchecked. `init` starts the gateway and prints a first-run report. This sample comes from `defenseclaw quickstart --skip-gateway`, which prints the same report, so its Sidecar row says not started where yours says started:
 
 <include>../../snippets/first-run-report.mdx</include>
 

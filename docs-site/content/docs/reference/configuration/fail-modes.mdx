@@ -9,7 +9,7 @@ keywords:
   - DEFENSECLAW_FAIL_MODE
 ---
 
-One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows (`open`) or blocks (`closed`) when the gateway cannot give a usable answer. Per-user and Secure Client hooks apply it to transport failures and invalid responses; managed standalone hooks allow only the specific outages described below. The mode is the one installed with the hooks: the environment does not set it, and one variable, `DEFENSECLAW_STRICT_AVAILABILITY`, can only make an outage stricter ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
+One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows (`open`) or blocks (`closed`) when the gateway cannot give a usable answer. Per-user and Secure Client hooks apply it to transport failures and invalid responses; managed standalone hooks allow only the specific outages described below. Per-user Cursor in observe mode registers `failClosed: false`, but its running DefenseClaw hook blocks supported events during a gateway outage by default. Only an explicit `open` in the config opens that outage. The mode is installed with the hooks: the environment does not set it, and one variable, `DEFENSECLAW_STRICT_AVAILABILITY`, can only make an outage stricter ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
 
 ## Controls
 
@@ -25,14 +25,14 @@ On a per-user install, `defenseclaw status --json` returns a `connectors` array:
 
 ### Which value applies
 
-Each connector resolves, in observe and action mode alike:
+The rendered outage mode resolves, in observe and action mode alike, from:
 
 1. On a managed computer, the automatic-protection value (`application_protection.connectors.<name>.guardrail.hook_fail_mode`, or `application_protection.guardrail.hook_fail_mode`) for a connector it protects.
 2. The connector's own value, set with `guardrail fail-mode open|closed --connector <name>`.
 3. The global `guardrail.hook_fail_mode`.
 4. `closed` outside Secure Client; `open` under it.
 
-Any value other than `open` (in any case) is `closed`. On a per-user install Cursor follows its guardrail mode: action writes `failClosed: true`, observe writes `failClosed: false`. On a managed computer Cursor follows the resolved fail mode.
+Any value other than `open` (in any case) is `closed`. Per-user Cursor action mode always closes hook outages even if the config selects `open`. In observe mode its running hook uses the configured outage mode, which is `closed` by default. Cursor still registers `failClosed: true` in action and `failClosed: false` in observe; the latter does not make a running hook allow a gateway outage. If Cursor cannot start or its hook times out, the host's registration limit applies. On a managed computer Cursor follows the administrator's resolved fail mode.
 
 ### Refusals that ignore the fail mode
 
