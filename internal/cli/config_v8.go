@@ -489,6 +489,7 @@ type loadedConfigV8File struct {
 	document       *config.V8YAMLDocument
 	runtime        *config.Config
 	source         string
+	sourceRaw      []byte
 	raw            []byte
 	gatewayAPIPort int
 }
@@ -530,6 +531,7 @@ func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate boo
 	if err != nil {
 		return nil, err
 	}
+	sourceRaw := append([]byte(nil), raw...)
 	legacyV8 := migrate && config.NeedsMigrationV9(raw)
 	if migrate {
 		if raw, err = config.MigrateV8InMemory(absPath, raw, guardrail.RulePackDigest); err != nil {
@@ -611,6 +613,7 @@ func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate boo
 		document:       document,
 		runtime:        runtimeCandidate,
 		source:         absPath,
+		sourceRaw:      sourceRaw,
 		raw:            append([]byte(nil), raw...),
 		gatewayAPIPort: gatewayAPIPort,
 	}, nil

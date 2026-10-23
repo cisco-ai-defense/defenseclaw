@@ -361,13 +361,21 @@ func (m *ConfigManager) getEnvConfigPath() string {
 // as `defenseclaw migrate` would write it: its data.json admission and
 // thresholds and, on a per-user install, its audit.db block/allow entries
 // keep applying. A file whose migration fails is refused.
-func loadRuntimeConfigCandidate(source string, raw []byte) (*config.Config, error) {
-	legacyV8 := config.NeedsMigrationV9(raw)
+func normalizeRuntimeConfigSource(source string, raw []byte) ([]byte, func(), error) {
 	migrated, exportKey, err := config.MigrateV8InMemoryCandidate(source, raw, guardrail.RulePackDigest)
 	if err != nil {
 		// Refused: the previous generation keeps running. As raw v8 the file
 		// would drop its data.json admission and audit.db block/allow policy.
-		return nil, config.InMemoryMigrationError(source, err)
+		return nil, nil, config.InMemoryMigrationError(source, err)
+	}
+	return migrated, exportKey, nil
+}
+
+func loadRuntimeConfigCandidate(source string, raw []byte) (*config.Config, error) {
+	legacyV8 := config.NeedsMigrationV9(raw)
+	migrated, exportKey, err := normalizeRuntimeConfigSource(source, raw)
+	if err != nil {
+		return nil, err
 	}
 	candidate, err := config.LoadRuntimeV8CandidateFromBytes(source, migrated)
 	if err != nil {

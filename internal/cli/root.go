@@ -435,7 +435,10 @@ func prepareCompiledObservabilityV8Startup(c *config.Config, loaded *loadedConfi
 	c.JudgeBodiesDB = snapshot.Local.JudgeBodiesPath
 	return &observabilityV8Startup{
 		sourceName: loaded.source,
-		raw:        append([]byte(nil), loaded.raw...),
+		// Reconciliation compares this with the exact file on disk. The
+		// runtime bootstrap normalizes a legacy v8 source in memory, using
+		// the same path as a later reload.
+		raw: append([]byte(nil), loaded.sourceRaw...),
 	}, nil
 }
 

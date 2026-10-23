@@ -859,7 +859,12 @@ checksum_ok() {
     [[ -n "${expected}" && "$(sha256_of "${file}")" == "${expected}" ]]
 }
 verify() {
-    checksum_ok "$@" || die "$(basename "$1") does not match checksums.txt; nothing was changed"
+    if ! checksum_ok "$@"; then
+        local asset
+        asset="$(basename "$1")"
+        rm -rf "${STAGING}" || die "${asset} does not match checksums.txt; could not remove staged assets at ${STAGING}; installed files were not changed"
+        die "${asset} does not match checksums.txt; staged assets were removed; nothing was changed"
+    fi
 }
 cosign_major="$(cosign version 2>/dev/null | awk '/GitVersion/{print $2}' | sed 's/^v//' | cut -d. -f1 || true)"
 if [[ "${cosign_major:-0}" =~ ^[0-9]+$ ]] && [[ "${cosign_major:-0}" -ge 2 ]]; then
