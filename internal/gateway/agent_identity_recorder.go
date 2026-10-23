@@ -60,6 +60,13 @@ type agentIdentityRecorder struct {
 	// parent's session, or one in a child session. Past
 	// agentIdentityRecorderMaxPending new ones wait for the next window.
 	subagents map[string]inventory.AgentIdentitySubagent
+	// upns is the newest UPN sighting applied per agent identity, by its
+	// read number (agentIdentityFacts.UPNRead). It outlives flushes, so a
+	// hook that read the UPN before another never writes its older UPN,
+	// before or after the newer one is written. Past
+	// agentIdentityRecorderMaxPending identities new ones are not tracked
+	// (none is evicted) and take their sightings as they arrive.
+	upns map[string]agentIdentityUPN
 
 	// persistErr is why the last write to inventory.db failed, "" after
 	// one succeeded: the ledger then runs from memory, and its counts and
@@ -116,8 +123,7 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	if facts.UserIncarnation != "" {
 		rec.UserIncarnation = facts.UserIncarnation
 	}
-	rec.UPN = facts.UserUPN
-	rec.UPNUnavailable = facts.UPNUnavailable
+	r.applyUPNLocked(rec, facts)
 	sessionID = strings.TrimSpace(sessionID)
 	if _, sub := r.subSessions[subSessionKey(facts.ID, sessionID)]; sub {
 		sessionID = ""
@@ -132,6 +138,28 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	if facts.InstallHint != "" && (len(r.hints) < agentIdentityRecorderMaxPending || r.hints[facts.ID] != "") {
 		r.hints[facts.ID] = facts.InstallHint
 	}
+}
+
+// agentIdentityUPN is one UPN sighting of an agent identity.
+type agentIdentityUPN struct {
+	read        uint64
+	upn         string
+	unavailable bool
+}
+
+// applyUPNLocked sets rec's UPN to the newest sighting: facts's, unless a
+// hook that read the UPN later was applied first.
+func (r *agentIdentityRecorder) applyUPNLocked(rec *inventory.AgentIdentityRecord, facts agentIdentityFacts) {
+	sighting := agentIdentityUPN{read: facts.UPNRead, upn: facts.UserUPN, unavailable: facts.UPNUnavailable}
+	if newest, tracked := r.upns[facts.ID]; tracked && newest.read > sighting.read {
+		sighting = newest
+	} else if tracked || len(r.upns) < agentIdentityRecorderMaxPending {
+		if r.upns == nil {
+			r.upns = make(map[string]agentIdentityUPN)
+		}
+		r.upns[facts.ID] = sighting
+	}
+	rec.UPN, rec.UPNUnavailable = sighting.upn, sighting.unavailable
 }
 
 func subSessionKey(agentID, sessionID string) string { return agentID + "\x00" + sessionID }

@@ -206,6 +206,14 @@ const (
 // adUPNCache resolves a SID and DOMAIN\account to a UPN with translate, one
 // lookup per identity at a time, in the background. A reused account name
 // must not inherit the previous SID's verified UPN.
+//
+// Translations are numbered as they start. An eviction (past 4096 cached
+// identities) lets a newer translation of an identity start while an older
+// one still runs, and they can finish in any order. The entry holds the
+// answer of the newest translation that answered: a newer answer replaces
+// an older one, and an older or evicted translation never puts its answer
+// back. Only the newest translation started confirms its answer
+// (unconfirmed).
 type adUPNCache struct {
 	translate func(samName string) string
 	now       func() time.Time
@@ -213,29 +221,28 @@ type adUPNCache struct {
 	mu      sync.Mutex
 	entries map[string]adUPNEntry
 	// started numbers translations in the order they start. inflight holds,
-	// per identity with a translation running, the newest one started and
-	// how many run. Evictions clear entries but not inflight, so a finishing
-	// translation always knows whether a newer one overtook it; the map only
-	// holds identities whose translations are still running. Only
-	// unconfirmed's metadata uses them.
+	// per identity with a translation running, the newest translation
+	// started, the newest one that answered, and how many run. Evictions
+	// clear entries but not inflight, so every completion knows whether a
+	// newer translation started or already answered; the last completion
+	// deletes the key, so the map only holds identities being translated.
 	started  uint64
 	inflight map[string]adUPNFlight
 }
 
 type adUPNFlight struct {
-	newest  uint64
-	running int
+	newest, answered uint64
+	running          int
 }
 
 type adUPNEntry struct {
 	upn string
-	// kept: upn is an earlier answer the latest completed translation did
-	// not confirm (it failed). superseded: upn is the answer of a
-	// translation that a newer one of the same identity, started after an
-	// eviction, overtook. Only unconfirmed reads them.
+	// kept: upn is an earlier answer that the newest translation, which
+	// failed, did not confirm. superseded: upn is the answer of a
+	// translation a newer one overtook. Only unconfirmed reads them.
 	kept, superseded bool
 	expires          time.Time
-	done             chan struct{} // open while a lookup runs
+	done             chan struct{} // open while the newest lookup runs
 }
 
 func newADUPNCache(translate func(string) string) *adUPNCache {
@@ -281,32 +288,53 @@ func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) string {
 	}
 }
 
+// run is translation seq of one identity; previous is the answer the entry
+// held when it started.
 func (c *adUPNCache) run(key, samName, previous string, done chan struct{}, seq uint64) {
-	upn, ttl, kept := c.translate(samName), adUPNTTL, false
-	if upn == "" {
-		upn, ttl, kept = previous, adUPNFailureTTL, previous != ""
-	}
+	answer := c.translate(samName)
 	c.mu.Lock()
-	// Eviction can start newer translations of the same identity while
-	// this one runs, and they may finish in any order. The answer is stored
-	// either way, so lookup gives what it always gave (GAP-0129), but the
-	// answer of a translation a newer one overtook is never reported
-	// confirmed, whatever an older completion wrote to the entry meanwhile:
-	// inflight, which evictions do not clear, knows the newest one started.
 	flight := c.inflight[key]
-	superseded := flight.newest > seq
+	overtaken, answeredLater := flight.newest > seq, flight.answered > seq
+	if answer != "" && !answeredLater {
+		flight.answered = seq
+	}
 	if flight.running--; flight.running > 0 {
 		c.inflight[key] = flight
 	} else {
 		delete(c.inflight, key)
 	}
-	c.entries[key] = adUPNEntry{upn: upn, kept: kept, superseded: superseded, expires: c.now().Add(ttl)}
+	entry, present := c.entries[key]
+	switch {
+	case overtaken && (answer == "" || answeredLater):
+		// A newer translation started. This one's failure keeps nothing,
+		// and its answer never replaces a newer one, also when an eviction
+		// has dropped that one meanwhile.
+	case overtaken:
+		// The newest answer so far, but a newer translation runs or failed:
+		// lookup gives it (GAP-0129), never confirmed. The entry keeps that
+		// translation's done channel and, after its failure, its retry time.
+		expires := c.now().Add(adUPNTTL)
+		if present {
+			expires = entry.expires
+		}
+		c.entries[key] = adUPNEntry{upn: answer, superseded: true, expires: expires, done: entry.done}
+	case answer != "":
+		c.entries[key] = adUPNEntry{upn: answer, expires: c.now().Add(adUPNTTL)}
+	default:
+		// The newest translation failed: the last good answer stays, the
+		// one the entry holds now (an overtaken translation may have
+		// answered meanwhile) or else the one it started from.
+		if present && entry.upn != "" {
+			previous = entry.upn
+		}
+		c.entries[key] = adUPNEntry{upn: previous, kept: previous != "", expires: c.now().Add(adUPNFailureTTL)}
+	}
 	c.mu.Unlock()
 	close(done)
 }
 
 // unconfirmed reports whether upn, an answer lookup gave for the identity,
-// is not what its latest translation verified: the last good UPN kept
+// is not what its newest translation verified: the last good UPN kept
 // through a failed lookup, the answer of a translation a newer one overtook,
 // or an answer the cache no longer holds. It changes no answer lookup
 // gives; agent identity rows use it to leave such a UPN out (GAP-0129 keeps
