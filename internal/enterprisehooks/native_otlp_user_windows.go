@@ -6,7 +6,10 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -24,17 +27,26 @@ import (
 
 // windowsManagedUserNativeOTLPAbsent fails while the account's configuration
 // keeps a DefenseClaw native exporter. The error names fields, never values.
-func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, target *windows.SID) error {
+// Verify is read-only and never impersonates, so it reads the account's files
+// only when no reparse point lies on their path; a linked config is checked by
+// the repair that runs as the target user.
+func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, _ *windows.SID) error {
+	for _, path := range windowsManagedUserNativeOTLPPaths(connectorName, home, dataDir) {
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err := rejectWindowsReparseChain(path); err != nil {
+			return nil
+		}
+	}
 	var residue []string
 	err := connector.WithUserHomeDir(home, func() error {
-		return windowsEnterpriseTargetImpersonation(target, home, func() error {
-			var err error
-			residue, err = connector.UserNativeOTLPResidue(connectorName, connector.SetupOpts{
-				DataDir:           dataDir,
-				ManagedEnterprise: true,
-			})
-			return err
+		var err error
+		residue, err = connector.UserNativeOTLPResidue(connectorName, connector.SetupOpts{
+			DataDir:           dataDir,
+			ManagedEnterprise: true,
 		})
+		return err
 	})
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: inspect %s native OTLP settings: %w", connectorName, err)
@@ -50,19 +62,33 @@ func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, tar
 	return nil
 }
 
-// removeWindowsManagedUserNativeOTLP removes that exporter and its credential
-// as the target user.
-func removeWindowsManagedUserNativeOTLP(connectorName, home, dataDir string, target *windows.SID) error {
-	err := connector.WithUserHomeDir(home, func() error {
-		return windowsEnterpriseTargetImpersonation(target, home, func() error {
-			_, err := connector.RemoveUserNativeOTLP(connectorName, connector.SetupOpts{
-				DataDir:           dataDir,
-				ManagedEnterprise: true,
-			})
-			return err
-		})
-	})
-	if err != nil {
+// windowsManagedUserNativeOTLPPaths are the files the residue check reads.
+func windowsManagedUserNativeOTLPPaths(connectorName, home, dataDir string) []string {
+	switch connectorName {
+	case "codex":
+		return []string{
+			filepath.Join(home, ".codex", "config.toml"),
+			filepath.Join(dataDir, "codex_config_backup.json"),
+		}
+	case "claudecode":
+		return []string{
+			filepath.Join(home, ".claude", "settings.json"),
+			filepath.Join(dataDir, "claudecode_backup.json"),
+		}
+	default:
+		return nil
+	}
+}
+
+// removeWindowsManagedUserNativeOTLPAsTarget removes that exporter and its
+// credential. The caller runs it as the target user with the account's home
+// bound (connector.WithUserHomeDir) and hardens the data directory afterwards:
+// the atomic edit protects its state directory there with the per-user DACL.
+func removeWindowsManagedUserNativeOTLPAsTarget(connectorName, dataDir string) error {
+	if _, err := connector.RemoveUserNativeOTLP(connectorName, connector.SetupOpts{
+		DataDir:           dataDir,
+		ManagedEnterprise: true,
+	}); err != nil {
 		return fmt.Errorf("enterprise hooks: remove %s native OTLP exporter from an earlier per-user install: %w", connectorName, err)
 	}
 	return nil

@@ -139,6 +139,49 @@ func postOTLP(t *testing.T, endpoint string, headers map[string]string) {
 	_ = response.Body.Close()
 }
 
+// seedEarlierCodexNativeExporter writes the [otel] block an earlier per-user
+// install rendered (released shape: /v1/<signal> URLs, paired product headers
+// and a bearer) after that install captured the operator's preimage.
+func seedEarlierCodexNativeExporter(t *testing.T, dir, configPath, apiAddr, goos string) {
+	t.Helper()
+	opts := SetupOpts{DataDir: dir, APIAddr: apiAddr, APIToken: "test-hook-token", GOOS: goos}
+	if err := NewCodexConnector().Setup(context.Background(), opts); err != nil {
+		t.Fatalf("earlier Codex setup: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]interface{}{}
+	if err := parseCodexTOML(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	token := strings.Repeat("c", 64)
+	legacy := map[string]interface{}{"log_user_prompt": true}
+	for key, signal := range map[string]string{"exporter": "logs", "trace_exporter": "traces", "metrics_exporter": "metrics"} {
+		legacy[key] = map[string]interface{}{"otlp-http": map[string]interface{}{
+			"endpoint": "http://" + apiAddr + "/v1/" + signal,
+			"protocol": "json",
+			"headers": map[string]interface{}{
+				"authorization":        "Bearer " + token,
+				"x-defenseclaw-source": "codex",
+				"x-defenseclaw-client": "codex-otel/1.0",
+			},
+		}}
+	}
+	cfg["otel"] = legacy
+	out, err := editCodexOwnedTOML(data, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "hooks", ".otlp-codex.token"), []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // seedEarlierClaudeCodeNativeExporter writes the env block an earlier per-user
 // install rendered, with its restore metadata and scoped credential.
 func seedEarlierClaudeCodeNativeExporter(t *testing.T, dir, settingsPath, apiAddr, goos string) {
@@ -223,10 +266,7 @@ func TestUserNativeOTLPCleanupStopsDeliveryToAPeerOnTheStalePort(t *testing.T) {
 			useClaudeSettings(t, claudePath)
 
 			// The earlier per-user install: native exporters on its own port.
-			earlier := SetupOpts{DataDir: dir, APIAddr: stale, APIToken: "test-hook-token", GOOS: goos, ManagedEnterprise: true}
-			if err := NewCodexConnector().Setup(context.Background(), earlier); err != nil {
-				t.Fatalf("earlier Codex setup: %v", err)
-			}
+			seedEarlierCodexNativeExporter(t, dir, codexPath, stale, goos)
 			seedEarlierClaudeCodeNativeExporter(t, dir, claudePath, stale, goos)
 			exportLikeCodex(t, codexPath)
 			exportLikeClaudeCode(t, claudePath)

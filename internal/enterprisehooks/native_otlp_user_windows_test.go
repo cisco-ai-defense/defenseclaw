@@ -6,6 +6,8 @@
 package enterprisehooks
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +24,9 @@ import (
 // credentials from the account's profile.
 func TestWindowsManagedRowRefusesAndRemovesStalePerUserNativeOTLP(t *testing.T) {
 	previous := windowsEnterpriseTargetImpersonation
-	windowsEnterpriseTargetImpersonation = func(_ *windows.SID, _ string, fn func() error) error { return fn() }
+	windowsEnterpriseTargetImpersonation = func(*windows.SID, string, func() error) error {
+		return errors.New("read-only verification attempted target impersonation")
+	}
 	t.Cleanup(func() { windowsEnterpriseTargetImpersonation = previous })
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
@@ -48,6 +52,9 @@ func TestWindowsManagedRowRefusesAndRemovesStalePerUserNativeOTLP(t *testing.T) 
 	files := map[string]string{
 		filepath.Join(home, ".codex", "config.toml"):    codex,
 		filepath.Join(home, ".claude", "settings.json"): claude,
+		// The per-user install also left its ordinary connector lock files.
+		filepath.Join(home, ".codex", "config.toml.lock"):    "",
+		filepath.Join(home, ".claude", "settings.json.lock"): "",
 	}
 	for _, scope := range []connector.OTLPPathTokenScope{connector.OTLPScopeCodex, connector.OTLPScopeClaude} {
 		path, err := connector.OTLPPathTokenFilePath(dataDir, scope)
@@ -73,7 +80,9 @@ func TestWindowsManagedRowRefusesAndRemovesStalePerUserNativeOTLP(t *testing.T) 
 		if strings.Contains(err.Error(), bearer) || strings.Contains(err.Error(), "19010") {
 			t.Fatalf("%s: verify error carries a value: %v", name, err)
 		}
-		if err := removeWindowsManagedUserNativeOTLP(name, home, dataDir, sid); err != nil {
+		if err := connector.WithUserHomeDir(home, func() error {
+			return removeWindowsManagedUserNativeOTLPAsTarget(name, dataDir)
+		}); err != nil {
 			t.Fatalf("%s: remove: %v", name, err)
 		}
 		if err := windowsManagedUserNativeOTLPAbsent(name, home, dataDir, sid); err != nil {
@@ -97,5 +106,47 @@ func TestWindowsManagedRowRefusesAndRemovesStalePerUserNativeOTLP(t *testing.T) 
 	}
 	if data, _ := os.ReadFile(filepath.Join(home, ".codex", "config.toml")); !strings.Contains(string(data), "model = \"gpt-5\"") {
 		t.Fatalf("unrelated Codex setting changed:\n%s", data)
+	}
+}
+
+// The same row through the real Claude Code managed Install and Verify.
+func TestWindowsClaudeManagedVerifyAndRepairStalePerUserNativeOTLP(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	opts := windowsManagedInstallOptions(fixture)
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(fixture.home, ".claude", "settings.json")
+	if connector.ClaudeCodeSettingsPathOverride != "" {
+		settingsPath = connector.ClaudeCodeSettingsPathOverride
+	}
+	bearer := strings.Repeat("f3", 32)
+	headers := "authorization=Bearer " + bearer + ",x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode"
+	stale := `{"env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1","OTEL_LOGS_EXPORTER":"otlp",` +
+		`"OTEL_EXPORTER_OTLP_ENDPOINT":"http://127.0.0.1:19010","OTEL_EXPORTER_OTLP_HEADERS":"` + headers + `"},"model":"opus"}`
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath+".lock", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "native OTLP exporter") {
+		t.Fatalf("Verify accepted a stale per-user exporter: %v", err)
+	}
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "19010") || strings.Contains(string(data), bearer) || !strings.Contains(string(data), "opus") {
+		t.Fatalf("repair left the stale exporter or lost a setting:\n%s", data)
+	}
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify after repair: %v", err)
 	}
 }

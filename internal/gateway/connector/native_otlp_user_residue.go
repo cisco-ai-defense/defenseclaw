@@ -78,6 +78,20 @@ func userNativeOTLP(connectorName string, opts SetupOpts, apply bool) ([]string,
 	return removed, nil
 }
 
+// withUserAgentConfigLock serializes the edit with other DefenseClaw writers of
+// the account's agent configuration. A managed row has none: the guardian holds
+// the row's runtime transaction lock and the host refuses per-user gateways.
+// Its connector lock would also refuse the unprotected lock file an earlier
+// per-user install created beside the config, so it is not taken there. The
+// atomic transform never replaces bytes it did not read, which keeps an edit
+// by the agent or the user intact either way.
+func withUserAgentConfigLock(path string, opts SetupOpts, fn func() error) error {
+	if opts.ManagedEnterprise {
+		return fn()
+	}
+	return withFileLock(path, fn)
+}
+
 func codexUserNativeOTLP(opts SetupOpts, apply bool) ([]string, error) {
 	configPath := codexConfigPath()
 	backup, err := (&CodexConnector{}).loadConfigBackup(opts.DataDir)
@@ -95,7 +109,7 @@ func codexUserNativeOTLP(opts SetupOpts, apply bool) ([]string, error) {
 	if err != nil || !apply || len(removed) == 0 {
 		return removed, err
 	}
-	err = withFileLockMode(configPath, opts.ManagedEnterprise, func() error {
+	err = withUserAgentConfigLock(configPath, opts, func() error {
 		return atomicTransformFileWithStateDir(configPath, opts.DataDir, 0o600, func(current []byte, exists bool) (atomicTransformResult, error) {
 			if !exists {
 				removed = nil
@@ -196,7 +210,7 @@ func claudeCodeUserNativeOTLP(opts SetupOpts, apply bool) ([]string, error) {
 	if err != nil || !apply || len(removed) == 0 {
 		return removed, err
 	}
-	err = withFileLockMode(settingsPath, opts.ManagedEnterprise, func() error {
+	err = withUserAgentConfigLock(settingsPath, opts, func() error {
 		return atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(current []byte, exists bool) (atomicTransformResult, error) {
 			if !exists {
 				removed = nil

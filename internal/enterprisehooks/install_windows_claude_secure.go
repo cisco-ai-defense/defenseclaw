@@ -255,6 +255,14 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 				err,
 			))
 		}
+		// Take back the native exporter an earlier per-user install left in the
+		// account's own settings (GAP-0836) before hardening re-applies the
+		// managed data directory DACL the atomic edit replaced.
+		if err := connector.WithUserHomeDir(home, func() error {
+			return removeWindowsManagedUserNativeOTLPAsTarget(conn.Name(), setup.DataDir)
+		}); err != nil {
+			return fail(err)
+		}
 		if err := hardenWindowsUserRuntime(home, setup.DataDir, transaction.paths, targetSID); err != nil {
 			return fail(err)
 		}
@@ -373,11 +381,6 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		return nil
 	}); err != nil {
 		return InstallResult{}, rollbackAll(fmt.Errorf("enterprise hooks: clean repaired runtime obstructions: %w", err))
-	}
-	// The row is protected; now take back the native exporter an earlier
-	// per-user install left in the account's own settings (GAP-0836).
-	if err := removeWindowsManagedUserNativeOTLP(conn.Name(), home, setup.DataDir, targetSID); err != nil {
-		return InstallResult{}, err
 	}
 
 	_ = ctx
