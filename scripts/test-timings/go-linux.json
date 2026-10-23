@@ -872,7 +872,7 @@
    "TestCodexNotify_SecureClientKeepsTheSyntheticStopRow": 2.5,
    "TestCodexPromptForInspectionDropsOnlyTheTitleHelperInstruction": 4.4,
    "TestCodexSQLValueLineageGatewayLifecycleBindsMCPResult": 3.2,
-   "TestCodexTeardownRevokesCachedOTLPTokenAndReinstallRotates": 2.6,
+   "TestCodexHostSetupAndTeardownRevokeCachedOTLPToken": 2.6,
    "TestCodexWindowsActionBlocksCompleteArgvMarker": 2.2,
    "TestCommandLinkWriteFailsClosedInEveryMode": 129.6,
    "TestCommandRulesDoNotMatchAcrossCommandBoundaries": 7.4,

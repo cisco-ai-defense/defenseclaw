@@ -8323,24 +8323,6 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if _, helper := settings[claudeCodeOTLPHeadersHelperKey]; helper == staticBearer {
 		t.Errorf("otelHeadersHelper present = %v, want %v", helper, !staticBearer)
 	}
-	probes, err := LoadClaudeCodeNativeOTLPProbes()
-	if err != nil {
-		t.Fatalf("LoadClaudeCodeNativeOTLPProbes: %v", err)
-	}
-	if len(probes) != 2 {
-		t.Fatalf("Claude native OTLP probes = %d, want logs and metrics", len(probes))
-	}
-	for _, probe := range probes {
-		if probe.Headers.Get("Authorization") != "Bearer "+scoped {
-			t.Fatalf("Claude %s probe did not preserve the literal scoped bearer", probe.Signal)
-		}
-		if probe.Headers.Get("X-DefenseClaw-Source") != "claudecode" {
-			t.Fatalf("Claude %s probe source = %q", probe.Signal, probe.Headers.Get("X-DefenseClaw-Source"))
-		}
-		if !strings.HasSuffix(probe.Endpoint, "/v1/"+string(probe.Signal)) {
-			t.Fatalf("Claude %s probe endpoint does not select its signal", probe.Signal)
-		}
-	}
 	if env["OTEL_SERVICE_NAME"] != "claudecode" {
 		t.Errorf("OTEL_SERVICE_NAME = %v, want \"claudecode\"", env["OTEL_SERVICE_NAME"])
 	}
@@ -8408,9 +8390,6 @@ func TestApplyClaudeCodeManagedOtelEnvMigratesPercentEncodedNativeOTLPBearer(t *
 		if strings.Contains(value, "Bearer%20") || !strings.Contains(value, "authorization=Bearer "+scopedToken) {
 			t.Errorf("%s was not migrated to Claude's literal Authorization contract", key)
 		}
-	}
-	if _, err := LoadClaudeCodeNativeOTLPProbes(); err != nil {
-		t.Fatalf("migrated Claude native OTLP contract is not probeable: %v", err)
 	}
 }
 

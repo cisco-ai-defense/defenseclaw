@@ -5937,17 +5937,14 @@ func TestTokenAuth_OTLPScopedTokensCannotCrossConnectorNamespaces(t *testing.T) 
 
 func TestTokenAuth_AcceptsClaudeRenderedOTLPAuthorization(t *testing.T) {
 	const scopedToken = "claude-scoped-token"
-	profile := connector.NewClaudeCodeConnector().HookProfile(connector.SetupOpts{
-		APIAddr:           "127.0.0.1:18970",
-		OTLPPathToken:     scopedToken,
-		ManagedEnterprise: true,
-	})
-	if profile.NativeOTLP == nil {
-		t.Fatal("Claude profile has no native OTLP configuration")
-	}
-	env, err := profile.NativeOTLP.EnvBlock()
-	if err != nil {
-		t.Fatalf("render Claude OTLP environment: %v", err)
+	// Host setup no longer renders a native exporter (it cannot verify the
+	// loopback listener), but a Claude Code process started under 0.8.10 to
+	// 1.0.3 keeps exporting with its persisted literal header block until it
+	// restarts. That released shape must still authenticate while its scoped
+	// credential exists.
+	env := map[string]string{
+		"OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer " + scopedToken +
+			",x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
 	}
 
 	// Claude Code consumes its persisted OTEL_EXPORTER_OTLP_HEADERS value as
