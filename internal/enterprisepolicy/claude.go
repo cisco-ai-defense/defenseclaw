@@ -239,11 +239,9 @@ func readClaudeFileSources(opts Options) ([]claudeSource, error) {
 	}
 	names := []string{}
 	for _, entry := range entries {
-		name := entry.Name()
-		if strings.HasPrefix(name, ".") || !strings.HasSuffix(strings.ToLower(name), ".json") || entry.IsDir() {
-			continue
+		if effectivePolicyDropIn(entry) {
+			names = append(names, entry.Name())
 		}
-		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {

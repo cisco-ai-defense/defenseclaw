@@ -127,17 +127,6 @@ func linuxManagedHookContextReason(readlink func(string) (string, error), readFi
 // overflow uid), so the report carries only the connector and the reason;
 // it is best effort and bounded.
 var reportStandaloneHookRefusal = func(socket, connectorName, reason string) {
-	postStandaloneHookDiagnostic(socket, connectorName, hookexec.ClientRefusalHeader, reason)
-}
-
-// reportStandaloneHookAlert raises the gateway's policy-view alert for a call
-// this hook still sends for inspection (GAP-0922, GAP-0923). It is best
-// effort and bounded, like the refusal report.
-var reportStandaloneHookAlert = func(socket, connectorName, reason string) {
-	postStandaloneHookDiagnostic(socket, connectorName, hookexec.ClientAlertHeader, reason)
-}
-
-func postStandaloneHookDiagnostic(socket, connectorName, header, reason string) {
 	if strings.TrimSpace(socket) == "" {
 		return
 	}
@@ -153,7 +142,7 @@ func postStandaloneHookDiagnostic(socket, connectorName, header, reason string) 
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-DefenseClaw-Connector", connectorName)
-	request.Header.Set(header, reason)
+	request.Header.Set(hookexec.ClientRefusalHeader, reason)
 	response, err := client.Do(request)
 	if err != nil {
 		return
@@ -377,9 +366,10 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	if !matches || descriptor == nil {
 		return
 	}
-	if alert != "" {
-		reportStandaloneHookAlert(descriptor.HookSocket, connectorName, alert)
-	}
+	// The policy-view alert rides on the inspected call
+	// (hookexec.ClientAlertHeader): no separate request runs before it
+	// and spends its answer budget.
+	opts.ManagedPolicyViewAlert = alert == hookexec.ManagedPolicyViewReason
 	opts.ManagedStandalone = true
 	opts.ManagedServiceUID = descriptor.ServiceUID
 	opts.ManagedUnixSocket = descriptor.HookSocket

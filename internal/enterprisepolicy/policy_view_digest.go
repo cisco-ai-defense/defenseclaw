@@ -42,21 +42,35 @@ func PolicyViewDigest(opts Options, connector string) (string, error) {
 	}
 	for _, path := range paths {
 		add(path)
-		// Claude and Copilot merge policy drop-ins in these folders.
+	}
+	// skipIfUntrusted holds the Copilot drop-ins other than DefenseClaw's
+	// own: Copilot, and the Copilot reader, skip one it does not trust.
+	skipIfUntrusted := make(map[string]bool)
+	for _, path := range paths {
+		// Claude and Copilot merge policy drop-ins in these folders. Only
+		// the entries their vendor readers load are policy: a hidden or
+		// non-JSON entry (an editor's or MDM agent's draft, a backup) is
+		// neither hashed nor counted (review loop round 2, P2).
 		dir := filepath.Dir(path)
 		switch filepath.Base(dir) {
 		case "managed-settings.d", "policy.d":
-			entries, err := os.ReadDir(dir)
+			entries, err := os.ReadDir(platformPath(opts, dir))
 			if err != nil && !os.IsNotExist(err) {
 				return "", err
 			}
-			if len(entries) > 128 {
-				return "", fmt.Errorf("%s policy drop-in directory has too many entries", connector)
-			}
+			dropIns := 0
 			for _, entry := range entries {
-				if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
-					add(filepath.Join(dir, entry.Name()))
+				if !effectivePolicyDropIn(entry) {
+					continue
 				}
+				if dropIns++; dropIns > 128 {
+					return "", fmt.Errorf("%s policy drop-in directory has too many policy files", connector)
+				}
+				child := filepath.Join(dir, entry.Name())
+				if connector == ConnectorCopilot && !seen[child] {
+					skipIfUntrusted[child] = true
+				}
+				add(child)
 			}
 		}
 	}
@@ -90,6 +104,13 @@ func PolicyViewDigest(opts Options, connector string) (string, error) {
 			return "", fmt.Errorf("invalid machine-policy path %q", path)
 		}
 		data, exists, err := readPolicyFile(opts, path)
+		if err != nil && skipIfUntrusted[path] {
+			// Copilot does not load it; record only that it is there, so
+			// it becoming trusted still changes the digest.
+			digestField(digest, []byte(path))
+			digestField(digest, []byte{2})
+			continue
+		}
 		if err != nil {
 			return "", fmt.Errorf("read %s policy view: %w", connector, err)
 		}
@@ -102,6 +123,16 @@ func PolicyViewDigest(opts Options, connector string) (string, error) {
 		}
 	}
 	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+// effectivePolicyDropIn reports whether a vendor loads entry from a merged
+// policy drop-in folder (Claude Code's managed-settings.d, Copilot's
+// policy.d): a visible, non-directory .json entry. The vendor policy
+// readers, the guard and cleanup scans and the policy-view digest all use
+// it, so none of them treats an ignored entry as policy.
+func effectivePolicyDropIn(entry os.DirEntry) bool {
+	name := entry.Name()
+	return !entry.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(strings.ToLower(name), ".json")
 }
 
 func digestField(h hash.Hash, data []byte) {

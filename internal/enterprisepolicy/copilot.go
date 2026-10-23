@@ -154,7 +154,7 @@ func inspectCopilot(opts Options, state *State) error {
 	}
 	names := []string{}
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".json") && !strings.HasPrefix(entry.Name(), ".") {
+		if effectivePolicyDropIn(entry) {
 			names = append(names, entry.Name())
 		}
 	}

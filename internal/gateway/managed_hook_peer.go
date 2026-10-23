@@ -538,11 +538,10 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 		}
 		if r.Header.Get(hookexec.ClientAlertHeader) == hookexec.ManagedPolicyViewReason {
 			// The hook could not prove the agent sees the pinned vendor
-			// policy. Its calls still come here and are inspected under the
-			// managed policy; this records the alert (GAP-0922, GAP-0923).
+			// policy. The alert rides on the call itself, which is still
+			// served and inspected under the managed policy below; this
+			// records the alert (GAP-0922, GAP-0923).
 			a.recordManagedPolicyViewAlert(r, peer, route)
-			w.WriteHeader(http.StatusNoContent)
-			return
 		}
 		if reason := r.Header.Get(hookexec.ClientRefusalHeader); hookexec.IsManagedProcessContextReason(reason) {
 			// A hook refused an unsafe or unverified process context before it

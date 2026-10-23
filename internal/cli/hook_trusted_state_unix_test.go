@@ -34,10 +34,9 @@ func withStandaloneHookRuntime(
 	oldGOOS, oldLoad, oldPolicy, oldSC := standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir
 	oldDigest := standalonePolicyViewDigest
 	oldAccount, oldUserView := standaloneHookAccount, standalonePolicyViewUser
-	oldContext, oldReport, oldAlert := standaloneLinuxHookContext, reportStandaloneHookRefusal, reportStandaloneHookAlert
+	oldContext, oldReport := standaloneLinuxHookContext, reportStandaloneHookRefusal
 	standaloneLinuxHookContext = func() string { return "" }
 	reportStandaloneHookRefusal = func(string, string, string) {}
-	reportStandaloneHookAlert = func(string, string, string) {}
 	standaloneHookGOOS = goos
 	standaloneRuntimeDescriptorLoad = load
 	standaloneMachinePolicyOptions = policy
@@ -49,7 +48,7 @@ func withStandaloneHookRuntime(
 		standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir = oldGOOS, oldLoad, oldPolicy, oldSC
 		standalonePolicyViewDigest = oldDigest
 		standaloneHookAccount, standalonePolicyViewUser = oldAccount, oldUserView
-		standaloneLinuxHookContext, reportStandaloneHookRefusal, reportStandaloneHookAlert = oldContext, oldReport, oldAlert
+		standaloneLinuxHookContext, reportStandaloneHookRefusal = oldContext, oldReport
 		standaloneHookRuntime.Lock()
 		standaloneHookRuntime.prepared = false
 		standaloneHookRuntime.descriptor = nil
@@ -208,7 +207,8 @@ func TestStandaloneHookRefusesPrivateAgentContextWithValidDescriptor(t *testing.
 // administrator's or MDM agent's edit not yet pinned, a hidden or unreadable
 // file, a descriptor from before pins) never refuses the call: the hook keeps
 // the descriptor's transport and fail mode, so the gateway still inspects the
-// call under the managed policy, and it raises the policy-view alert.
+// call under the managed policy, and it raises the policy-view alert on that
+// call (Options.ManagedPolicyViewAlert), never as a separate request.
 func TestStandaloneHookAlertsOnUnprovenPolicyViewAndKeepsEnforcing(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		for _, tc := range []struct {
@@ -236,10 +236,6 @@ func TestStandaloneHookAlertsOnUnprovenPolicyViewAndKeepsEnforcing(t *testing.T)
 					func(string) (*managed.RuntimeDescriptor, error) { return descriptor, nil },
 					noMarkers, "/nonexistent-secure-client")
 				standalonePolicyViewDigest = func(_, _ string) (string, error) { return tc.observed, tc.readErr }
-				var alerts []string
-				reportStandaloneHookAlert = func(socket, connectorName, reason string) {
-					alerts = append(alerts, socket+" "+connectorName+" "+reason)
-				}
 				prepareEnterpriseManagedHookRuntime("codex")
 				opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
 				if opts.ManagedRuntimeFailure != "" || enterpriseManagedHookRuntimeForceClosed() {
@@ -251,12 +247,8 @@ func TestStandaloneHookAlertsOnUnprovenPolicyViewAndKeepsEnforcing(t *testing.T)
 				if want := descriptor.HookFailMode("codex"); opts.FailMode != want {
 					t.Fatalf("fail mode = %q, want the descriptor's %q", opts.FailMode, want)
 				}
-				want := []string(nil)
-				if tc.alert {
-					want = []string{descriptor.HookSocket + " codex " + hookexec.ManagedPolicyViewReason}
-				}
-				if strings.Join(alerts, "|") != strings.Join(want, "|") {
-					t.Fatalf("alerts = %q, want %q", alerts, want)
+				if opts.ManagedPolicyViewAlert != tc.alert {
+					t.Fatalf("policy-view alert on the call = %v, want %v", opts.ManagedPolicyViewAlert, tc.alert)
 				}
 			})
 		}
@@ -269,13 +261,11 @@ func TestStandaloneHookWithoutDescriptorRefusesWithoutAlert(t *testing.T) {
 	withStandaloneHookRuntime(t, "linux",
 		func(string) (*managed.RuntimeDescriptor, error) { return nil, managed.ErrNoRuntimeDescriptor },
 		noMarkers, "/nonexistent-secure-client")
-	alerted := false
-	reportStandaloneHookAlert = func(string, string, string) { alerted = true }
 	standalonePolicyViewDigest = func(_, _ string) (string, error) { return "", os.ErrPermission }
 	prepareEnterpriseManagedHookRuntime("codex")
 	opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
-	if opts.ManagedRuntimeFailure != standaloneRuntimeReasonDescriptorMissing || opts.FailMode != "closed" || alerted {
-		t.Fatalf("missing descriptor: failure %q mode %q alerted %v", opts.ManagedRuntimeFailure, opts.FailMode, alerted)
+	if opts.ManagedRuntimeFailure != standaloneRuntimeReasonDescriptorMissing || opts.FailMode != "closed" || opts.ManagedPolicyViewAlert {
+		t.Fatalf("missing descriptor: failure %q mode %q alerted %v", opts.ManagedRuntimeFailure, opts.FailMode, opts.ManagedPolicyViewAlert)
 	}
 }
 
@@ -287,8 +277,6 @@ func TestStandaloneMacHookChecksOnlyInvokingAccountPreference(t *testing.T) {
 	withStandaloneHookRuntime(t, "darwin",
 		func(string) (*managed.RuntimeDescriptor, error) { return descriptor, nil },
 		noMarkers, "/nonexistent-secure-client")
-	alerts := 0
-	reportStandaloneHookAlert = func(string, string, string) { alerts++ }
 	account := "alice"
 	standaloneHookAccount = func() (string, error) { return account, nil }
 	standalonePolicyViewUser = func(_, connector, name, pin string) error {
@@ -297,23 +285,79 @@ func TestStandaloneMacHookChecksOnlyInvokingAccountPreference(t *testing.T) {
 		}
 		return nil
 	}
-	check := func(what string, wantAlerts int) {
+	check := func(what string, wantAlert bool) {
 		t.Helper()
 		prepareEnterpriseManagedHookRuntime("codex")
 		opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
 		if opts.ManagedRuntimeFailure != "" || opts.ManagedUnixSocket == "" {
 			t.Fatalf("%s: refused instead of enforcing: failure %q", what, opts.ManagedRuntimeFailure)
 		}
-		if alerts != wantAlerts {
-			t.Fatalf("%s: alerts = %d, want %d", what, alerts, wantAlerts)
+		if opts.ManagedPolicyViewAlert != wantAlert {
+			t.Fatalf("%s: policy-view alert = %v, want %v", what, opts.ManagedPolicyViewAlert, wantAlert)
 		}
 	}
-	check("alice with bob's source present", 0)
+	check("alice with bob's source present", false)
 	account = "bob"
 	standalonePolicyViewUser = func(string, string, string, string) error { return os.ErrPermission }
-	check("bob's unreadable preference", 1)
+	check("bob's unreadable preference", true)
 	standaloneHookAccount = func() (string, error) { return "", os.ErrPermission }
-	check("unresolved account", 2)
+	check("unresolved account", true)
+}
+
+// Review loop round 2 (P1): an unproven policy view must not delay the
+// call. Before, the hook posted the alert as its own request and waited up
+// to 2s for the answer before it sent the tool call, spending the answer
+// budget of a valid call. The hook socket here accepts and never answers:
+// building the call's options must neither contact it nor wait, and the
+// alert must ride on the call itself.
+func TestStandalonePolicyViewAlertAddsNoRequestBeforeTheCall(t *testing.T) {
+	dir, err := os.MkdirTemp("", "dc-alert")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "hook.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	accepted := make(chan struct{}, 1)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			select {
+			case accepted <- struct{}{}:
+			default:
+			}
+			// Hold the connection open, unanswered, like a stalled gateway.
+			defer conn.Close()
+		}
+	}()
+	descriptor := testDescriptor()
+	descriptor.HookSocket = socket
+	withStandaloneHookRuntime(t, "linux",
+		func(string) (*managed.RuntimeDescriptor, error) { return descriptor, nil },
+		noMarkers, "/nonexistent-secure-client")
+	standalonePolicyViewDigest = func(_, _ string) (string, error) { return strings.Repeat("b", 64), nil }
+	prepareEnterpriseManagedHookRuntime("codex")
+	started := time.Now()
+	opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("an unproven policy view delayed the call by %s before it was sent", elapsed)
+	}
+	if !opts.ManagedPolicyViewAlert || opts.ManagedUnixSocket != socket || opts.ManagedRuntimeFailure != "" {
+		t.Fatalf("the call does not carry the alert: alert=%v socket=%q failure=%q",
+			opts.ManagedPolicyViewAlert, opts.ManagedUnixSocket, opts.ManagedRuntimeFailure)
+	}
+	select {
+	case <-accepted:
+		t.Fatal("the hook contacted the gateway before sending the call")
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func TestLinuxManagedHookContextReason(t *testing.T) {

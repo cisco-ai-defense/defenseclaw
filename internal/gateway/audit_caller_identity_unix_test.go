@@ -137,15 +137,42 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 	}
 
 	// A hook that could not prove its policy view still sends its calls for
-	// inspection; its alert report is answered and recorded, never refused.
-	alert, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/inspect/tool", strings.NewReader("{}"))
+	// inspection, and the alert rides on the call (review loop round 2, P1):
+	// the call is inspected and answered as any other, never refused, and
+	// the alert is recorded with it.
+	inspectRows := func() int {
+		events, err := store.ListEvents(500)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, event := range events {
+			if strings.HasPrefix(event.Action, "inspect-tool-") && hasCaller(event) {
+				n++
+			}
+		}
+		return n
+	}
+	inspectedBefore := inspectRows()
+	alertBody, _ := json.Marshal(map[string]any{"tool": "Bash", "args": map[string]any{"command": "echo policy-view-alert"}})
+	alert, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/inspect/tool", strings.NewReader(string(alertBody)))
 	alert.Header.Set("Content-Type", "application/json")
+	alert.Header.Set("X-DefenseClaw-Client", "claude-code-hook/1.0")
 	alert.Header.Set("X-DefenseClaw-Connector", "claudecode")
 	alert.Header.Set(hookexec.ClientAlertHeader, hookexec.ManagedPolicyViewReason)
-	if response, err := client.Do(alert); err != nil || response.StatusCode != http.StatusNoContent {
-		t.Fatalf("policy-view alert = %v %v", response, err)
+	if response, err := client.Do(alert); err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("inspected call with the policy-view alert = %v %v", response, err)
 	} else {
+		verdict, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		_ = response.Body.Close()
+		if !strings.Contains(string(verdict), `"action"`) {
+			t.Fatalf("the alerting call got no verdict: %s", verdict)
+		}
+	}
+	for deadline := time.Now().Add(5 * time.Second); inspectRows() < inspectedBefore+1; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the alerting call was not inspected: %d inspect-tool rows, want %d", inspectRows(), inspectedBefore+1)
+		}
 	}
 	alertRow := waitForAuditRow(t, store, "policy-view alert", func(event audit.Event) bool {
 		return event.Action == string(audit.ActionAlert)

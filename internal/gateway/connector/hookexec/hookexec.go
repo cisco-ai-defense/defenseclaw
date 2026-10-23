@@ -146,9 +146,10 @@ const AgentSurfaceHeader = "X-DefenseClaw-Agent-Surface"
 const ClientRefusalHeader = "X-DefenseClaw-Client-Refusal"
 
 // ClientAlertHeader carries, on the standalone hook socket, an alert from a
-// managed hook that still sends its call for inspection: today only
+// managed hook on the call it sends for inspection: today only
 // ManagedPolicyViewReason, a view of vendor machine policy that differs from
-// the trusted descriptor's pin.
+// the trusted descriptor's pin. It rides on the inspected request itself, so
+// raising the alert never adds a round trip before the decision.
 const ClientAlertHeader = "X-DefenseClaw-Client-Alert"
 
 // ManagedUserNamespaceReason is the refusal of a hook that runs in a private
@@ -384,6 +385,11 @@ type Options struct {
 	// ManagedStandalone; an empty value fails closed rather than selecting
 	// loopback TCP.
 	ManagedUnixSocket string
+	// ManagedPolicyViewAlert marks a standalone managed call whose hook could
+	// not prove the agent sees the pinned vendor policy. The call is still
+	// sent and inspected under the managed policy; it carries
+	// ClientAlertHeader so the gateway records the alert with it.
+	ManagedPolicyViewAlert bool
 	// ManagedServiceUID is the gateway service account uid from the
 	// root-owned runtime descriptor.
 	ManagedServiceUID int
@@ -1279,6 +1285,9 @@ func sendHookRequest(
 	}
 	if surface := AgentSurfaceHeaderValue(opts.AgentSurface); surface != "" {
 		req.Header.Set(AgentSurfaceHeader, surface)
+	}
+	if opts.ManagedEnterprise && opts.ManagedStandalone && opts.ManagedPolicyViewAlert {
+		req.Header.Set(ClientAlertHeader, ManagedPolicyViewReason)
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
