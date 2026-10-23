@@ -41,9 +41,22 @@ func TestHookDeliveryJournal(t *testing.T) {
 			t.Fatalf("journaled an incomplete row %+v", bad)
 		}
 	}
+	if entry, found, err := store.HookDelivery(ctx, "missing"); err != nil || found {
+		t.Fatalf("missing journal row = %+v, %t, %v", entry, found, err)
+	}
+	if err := store.UpdateHookDelivery(ctx, "b", []byte(`{"ID":"b","Final":"block"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateHookDelivery(ctx, "missing", []byte(`{}`)); err == nil {
+		t.Fatal("updated a journal row that does not exist")
+	}
 
 	_ = store.Close()
 	store = openTestStore(t, path)
+	if entry, found, err := store.HookDelivery(ctx, "b"); err != nil || !found ||
+		string(entry.Occurrence) != `{"ID":"b","Final":"block"}` {
+		t.Fatalf("updated journal row after reopen = %+v, %t, %v", entry, found, err)
+	}
 	entries, err := store.UnauditedHookDeliveries(ctx, "live")
 	if err != nil {
 		t.Fatal(err)

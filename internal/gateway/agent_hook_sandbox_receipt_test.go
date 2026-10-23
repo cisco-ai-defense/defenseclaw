@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -121,6 +122,29 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			if got := post(binding, string(ack)).Code; got != http.StatusOK {
 				t.Fatalf("replayed acknowledgement status = %d, want the same accepted receipt", got)
 			}
+			trailer, ok = decisionSink.trailer()
+			decision = sandboxrelay.ParseHookDecision(trailer)
+			if !ok || decision == nil || decision.Action != "allow" || decision.CallRef != callRef {
+				t.Fatalf("replayed relay decision trailer = %q, want the original verdict", trailer)
+			}
+			entry, present, err = f.store.HookDelivery(t.Context(), proposal.DeliveryReceipt)
+			if err != nil || !present || json.Unmarshal(entry.Occurrence, &pending) != nil || !pending.Settled {
+				t.Fatalf("acknowledged journal = %+v: %v, want settled retry window", pending, err)
+			}
+			pending.SandboxReceipt.OfferedAt = time.Now().Add(-time.Minute)
+			entry.Occurrence, err = json.Marshal(&pending)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.UpdateHookDelivery(t.Context(), pending.ID, entry.Occurrence); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.api.recoverPendingHook(t.Context(), entry); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.hookRows(t, session); got != 1 {
+				t.Fatalf("rows after retry-window cleanup = %d, want one", got)
+			}
 
 			// An older sandbox image never sends the new acknowledgement.
 			// Once its bounded window ends, recovery records uncertainty
@@ -153,6 +177,55 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			}
 			if got := f.audited(t, missing)[missing]; got != "unconfirmed/no_answer" {
 				t.Fatalf("unacknowledged verdict = %q, want unconfirmed/no_answer", got)
+			}
+
+			// The answer is still only a proposal when its ACK audit fails.
+			// The hook receives 503 and recovery audits the closed block,
+			// rather than the unconfirmed no-receipt fallback or a false allow.
+			const faultSession = "relayed-audit-fault"
+			faultProposal := post(binding, managedHookBody(faultSession, "PreToolUse"))
+			var fault struct {
+				DeliveryReceipt string `json:"delivery_receipt"`
+			}
+			if err := json.Unmarshal(faultProposal.Body.Bytes(), &fault); err != nil || fault.DeliveryReceipt == "" {
+				t.Fatalf("fault proposal = %q: %v", faultProposal.Body.String(), err)
+			}
+			database, err := sql.Open("sqlite", f.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			if _, err := database.Exec(`CREATE TRIGGER zz_sandbox_audit_fault BEFORE INSERT ON audit_events
+				WHEN NEW.action = 'connector-hook' BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`); err != nil {
+				t.Fatal(err)
+			}
+			faultAck, _ := json.Marshal(map[string]string{"delivery_receipt": fault.DeliveryReceipt, "result": "ack"})
+			if got := post(binding, string(faultAck)).Code; got != http.StatusServiceUnavailable {
+				t.Fatalf("audit-fault ACK status = %d, want closed 503", got)
+			}
+			if _, err := database.Exec(`DROP TRIGGER zz_sandbox_audit_fault`); err != nil {
+				t.Fatal(err)
+			}
+			entry, present, err = f.store.HookDelivery(t.Context(), fault.DeliveryReceipt)
+			if err != nil || !present {
+				t.Fatalf("closed fallback journal = %+v: %v", entry, err)
+			}
+			if err := json.Unmarshal(entry.Occurrence, &pending); err != nil || pending.Final == nil || pending.Final.Action != "block" {
+				t.Fatalf("closed fallback = %+v: %v", pending.Final, err)
+			}
+			pending.SandboxReceipt.OfferedAt = time.Now().Add(-time.Minute)
+			entry.Occurrence, err = json.Marshal(&pending)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.UpdateHookDelivery(t.Context(), pending.ID, entry.Occurrence); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.api.recoverPendingHook(t.Context(), entry); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.audited(t, faultSession)[faultSession]; got != "block" {
+				t.Fatalf("failed ACK final audit = %q, want block", got)
 			}
 		})
 	}

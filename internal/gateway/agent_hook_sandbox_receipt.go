@@ -6,7 +6,9 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -74,6 +76,20 @@ func (a *APIServer) scheduleSandboxHookReceiptRecovery(id string) {
 	})
 }
 
+func (a *APIServer) markSandboxHookReceiptSettled(ctx context.Context, p *pendingHookOccurrence, result hookFinalizationResult) {
+	if !result.AuditPersisted || !result.DecisionSettled {
+		return
+	}
+	p.Settled = true
+	encoded, err := json.Marshal(p)
+	if err == nil {
+		err = a.store.UpdateHookDelivery(ctx, p.ID, encoded)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] sandbox hook receipt journal settlement failed id=%s: %v\n", p.ID, err)
+	}
+}
+
 func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Request, connectorName, id string) {
 	binding, ok := sandboxauth.FromContext(r.Context())
 	if !ok || a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() ||
@@ -117,6 +133,14 @@ func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Requ
 	}
 	if recorded {
 		if action == p.Proposed.Action {
+			// Re-send the original verdict trailer when the relay lost the
+			// first acknowledgement's response. No audit or metric is
+			// emitted a second time.
+			if sandboxRelayDecisionSinkFrom(r.Context()) != nil {
+				req := p.Request.request(p.ID, p.BodyBytes)
+				req.pendingSandboxCallRef = p.SandboxReceipt.CallRef
+				a.observeSandboxHookDecision(r.Context(), req, p.SandboxReceipt.response(p.Proposed))
+			}
 			a.writeJSON(w, http.StatusOK, map[string]bool{"received": true})
 		} else {
 			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "sandbox hook was closed"})
@@ -157,10 +181,19 @@ func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Requ
 		// action before telling the hook to use the proposed answer.
 		action, recorded, err = a.store.StoredHookDecisionAction(ctx, p.ID)
 		if err != nil || !recorded || action != resp.Action {
+			if err == nil && !recorded {
+				closedResult := a.finalizeAgentHook(ctx, connectorName, req, closed, p.RawEventIDs,
+					nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra)
+				a.markSandboxHookReceiptSettled(ctx, &p, closedResult)
+				if closedResult.AuditPersisted {
+					a.dispatchFinalizedAgentHookNotification(ctx, req, closed, closedResult)
+				}
+			}
 			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hook audit outcome is uncertain"})
 			return
 		}
 	}
+	a.markSandboxHookReceiptSettled(ctx, &p, result)
 	a.dispatchFinalizedAgentHookNotification(ctx, req, resp, result)
 	a.writeJSON(w, http.StatusOK, map[string]bool{"received": true})
 }
