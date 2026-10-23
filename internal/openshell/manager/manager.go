@@ -276,8 +276,8 @@ type Manager struct {
 	toolCalls *hookTamperTracker
 	// signatures is the AI signature catalog of the sandbox discoveries.
 	signatures discoveryCatalog
-	// tamperStops tracks the stops DefenseClaw starts on its own: for a hook
-	// alarm, and of a session on an old supervisor.
+	// tamperStops tracks background hook-alarm stops and legacy network
+	// withdrawal workers; it never stops a legacy guest on its own.
 	tamperStops sync.WaitGroup
 
 	runMu  sync.Mutex

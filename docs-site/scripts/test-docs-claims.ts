@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -34,6 +35,17 @@ const blanketOutageClaims = [
 ];
 
 describe('1.0.4 managed outage and upgrade claims', () => {
+  it('runs the guarded outage decision with fresh gateway records', () => {
+    const text = page('enterprise/configure/foreign-hook-guard.mdx');
+    assert.match(text, /guarded tool calls are blocked whatever the fail mode, `open` included/i);
+    const guard = readFileSync(join(repo, 'internal/cli/hook_foreign_guard.go'), 'utf8');
+    assert.doesNotMatch(guard, /CheckPublishedForeignHookSession|protectedForeignHookSession|foreignHookSessionOutageOpen/);
+    const result = execFileSync('go', ['test', './internal/cli', '-run',
+      '^(TestForeignHookGuardProtectedRecordsDoNotOpenAGatewayOutage|TestForeignHookCheckBlocksOpenOutageWithFreshRecords)$',
+      '-count=1'], { cwd: repo, encoding: 'utf8' });
+    assert.match(result, /^ok\s/m);
+  });
+
   it('keeps the managed guarded outage limit across operator and threat-model pages', () => {
     const outagePages: [string, RegExp][] = [
       ['appendix/coverage-by-layer.mdx', /foreign_hooks: remove.{0,120}guarded calls block during an outage/i],
@@ -102,6 +114,11 @@ describe('1.0.4 managed outage and upgrade claims', () => {
     assert.equal((changelog.match(/\*\*Sandboxes run only on OpenShell 0\.1\.5 or later\.\*\*/g) ?? []).length, 1);
     assert.match(changelog, /DefenseClaw never stops such a sandbox on its own.*Your own `sandbox stop` ends it/);
     assert.doesNotMatch(changelog, /DefenseClaw stops it as soon as it sees it|A stop that fails is a second finding/);
+    const guide = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
+    assert.match(guide, /DefenseClaw closes its egress proxy and withdraws the network rules it added.*does not contain the old broker/i);
+    assert.match(guide, /Save its work, then run `defenseclaw sandbox stop <name>` yourself.*reconciliation never retries the stop for you/i);
+    assert.match(guide, /`defenseclaw sandbox exec` and `connect` run nothing in it/i);
+    assert.doesNotMatch(guide, /DefenseClaw stops it as soon as it sees it|`connect` stops it and starts it again/i);
   });
 });
 

@@ -212,7 +212,12 @@ func (m *Manager) RefreshPolicies() { m.refreshEgress() }
 func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 	m.mu.Lock()
 	cred, rec, d := b.cred, b.rec, b.decider
+	legacy := oldSupervisorLive(b.phase, rec) || rec.OldSupervisorNetworkClosed
 	m.mu.Unlock()
+	if legacy {
+		m.suspendOldSupervisorEgress(b)
+		return
+	}
 	if cred.Username == "" || rec.BindingID == "" || eff == nil {
 		return
 	}

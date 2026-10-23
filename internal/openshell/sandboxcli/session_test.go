@@ -1430,30 +1430,30 @@ func TestStartTakesAFreshSnapshotWhenNothingIsOnTop(t *testing.T) {
 
 // TestAnOldSupervisorRunsNothing (GAP-0415): a ready sandbox the daemon
 // names as running the supervisor of an OpenShell older than SupportedMin
-// gets no exec, and a connect stops it and starts it again (on the
-// gateway's own supervisor) before it attaches; one it cannot stop is
-// refused with the way on.
+// gets no exec or connect. Only the user's explicit stop ends it, after
+// which connect can start it on the gateway's own supervisor.
 func TestAnOldSupervisorRunsNothing(t *testing.T) {
 	ta := newTestApp(t, "y\n")
 	sb := sampleSandbox("m1-b")
 	sb.Phase, sb.OldSupervisor = "ready", true
 	ta.daemon.add(sb)
 	err := ta.Exec(bg, ExecOptions{Name: "m1-b", Command: []string{"ls"}})
-	if err == nil || !strings.Contains(err.Error(), "m1-b runs the supervisor of an OpenShell release older than "+openshell.SupportedMin) ||
-		!strings.Contains(err.Error(), "`defenseclaw sandbox connect m1-b` stops and starts it") {
+	if err == nil || !strings.Contains(err.Error(), "legacy sandbox running, not protected by the 1.0.4 egress policy") ||
+		!strings.Contains(err.Error(), "`defenseclaw sandbox stop m1-b`") {
 		t.Fatalf("exec = %v", err)
 	}
 	if len(ta.stream.runs) != 0 {
 		t.Fatalf("exec ran in the sandbox: %v", ta.stream.runs)
 	}
 
-	ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/m1-b/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "OpenShell: stop failed"}
 	err = ta.Connect(bg, ConnectOptions{Name: "m1-b"})
-	if err == nil || !strings.Contains(err.Error(), "DefenseClaw runs nothing in it, and it could not stop it") || ta.calls("POST", "m1-b/start") != 0 || len(ta.stream.runs) != 0 {
-		t.Fatalf("connect with a failing stop = %v (starts %d, runs %d)", err, ta.calls("POST", "m1-b/start"), len(ta.stream.runs))
+	if err == nil || !strings.Contains(err.Error(), "does not stop it for you") || ta.calls("POST", "m1-b/stop") != 0 ||
+		ta.calls("POST", "m1-b/start") != 0 || len(ta.stream.runs) != 0 {
+		t.Fatalf("connect changed the legacy guest = %v (stops %d, starts %d, runs %d)", err,
+			ta.calls("POST", "m1-b/stop"), ta.calls("POST", "m1-b/start"), len(ta.stream.runs))
 	}
 
-	delete(ta.daemon.errors, "POST "+sandboxapi.PathSandboxes+"/m1-b/stop")
+	ta.ok(t, ta.Stop(bg, StopOptions{Name: "m1-b"}))
 	runAnswers(ta, "", "")
 	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "m1-b"}))
 	var order []string
@@ -1462,10 +1462,9 @@ func TestAnOldSupervisorRunsNothing(t *testing.T) {
 			order = append(order, c.Path[strings.LastIndex(c.Path, "/")+1:])
 		}
 	}
-	if len(order) < 3 || order[1] != "stop" || order[2] != "start" {
-		t.Fatalf("connect: stop and start calls %v, want the stop before the start", order)
+	if len(order) < 2 || order[0] != "stop" || order[1] != "start" {
+		t.Fatalf("manual stop and later connect calls %v", order)
 	}
-	has(t, ta.output(), "m1-b still runs the supervisor of an OpenShell release older than "+openshell.SupportedMin)
 }
 
 // A headless session in an existing sandbox runs without a terminal:
