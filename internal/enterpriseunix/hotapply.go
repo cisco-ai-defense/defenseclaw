@@ -140,11 +140,21 @@ func (l *lifecycle) settleHotGateway(ctx context.Context, gateway Unit) error {
 	}
 	want, ok := l.bundlePolicyWant(ctx, receipt)
 	if !ok {
+		if receipt != nil {
+			if err := restartUnit(ctx, env.Services, gateway); err != nil {
+				return fmt.Errorf("restart %s: %w", gateway.Name, err)
+			}
+			return l.waitGatewayReady(ctx, gateway)
+		}
 		return errors.New("the installed config's effective policy digest could not be computed, so the running gateway cannot confirm the change")
 	}
-	state, err := configwrite.ReadGenerationState(env.P(env.Layout.ConfigPath))
-	if err != nil {
-		return fmt.Errorf("read the installed config generation before confirming the gateway: %w", err)
+	var state configwrite.GenerationState
+	if receipt == nil {
+		var err error
+		state, err = configwrite.ReadGenerationState(env.P(env.Layout.ConfigPath))
+		if err != nil {
+			return fmt.Errorf("read the installed config generation before confirming the gateway: %w", err)
+		}
 	}
 	probe := func() (bool, string) {
 		body, err := l.gatewayHealth(ctx, gateway, l.serviceUID)
@@ -152,6 +162,14 @@ func (l *lifecycle) settleHotGateway(ctx context.Context, gateway Unit) error {
 			return false, "read gateway health: " + err.Error()
 		}
 		health := parseBundleHealth(body)
+		// Signed bundles have their own confirmation step, which assigns the
+		// bundle-specific refusal code and rolls back if a reload was rejected.
+		if receipt != nil {
+			if health.digest == want {
+				return true, ""
+			}
+			return false, fmt.Sprintf("gateway reports effective policy %s, not %s of the bundle", shortDigest(health.digest), shortDigest(want))
+		}
 		switch {
 		case health.reloadError != "":
 			return false, "gateway rejected the config reload: " + health.reloadError
@@ -210,6 +228,9 @@ func (l *lifecycle) settleHotGateway(ctx context.Context, gateway Unit) error {
 	}
 	if err := l.waitGatewayReady(ctx, gateway); err != nil {
 		return err
+	}
+	if receipt != nil {
+		return nil
 	}
 	applied, cause, err = wait()
 	if err != nil {
