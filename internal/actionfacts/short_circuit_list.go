@@ -454,7 +454,9 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			return false
 		}
 		if allSimple {
-			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok && decl.Variant.Value == "export" && len(functions) != 0 {
+			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok && len(functions) != 0 &&
+				(decl.Variant.Value == "export" || decl.Variant.Value == "declare" ||
+					decl.Variant.Value == "typeset") {
 				exported, known := simpleExportedFunctionNames(decl)
 				if !known {
 					return false
@@ -496,7 +498,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 					bodies = append(bodies, body)
 				}
 				program, _ := simpleStaticWord(call.Args[0], nil)
-				_, _, trapAction, _ := simpleNestedScript(call, nil)
+				_, _, trapAction, _ := simpleNestedScript(call, nil, nil)
 				if (program == "eval" || program == "trap" && trapAction) && len(functions) != 0 {
 					called, ok := simpleEvalFunctionNames(call)
 					if !ok {
@@ -550,7 +552,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 // eval parses its static script in the caller's shell. Function definitions
 // from the enclosing action remain visible to calls inside that script.
 func simpleEvalFunctionNames(call *syntax.CallExpr) ([]string, bool) {
-	script, _, nested, static := simpleNestedScript(call, nil)
+	script, _, nested, static := simpleNestedScript(call, nil, nil)
 	if !nested || !static {
 		return nil, false
 	}
@@ -606,6 +608,7 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 	}
 	index := 0
 	exportFunctions := false
+	exportAttribute := decl.Variant.Value == "export"
 	unexport := false
 	for index < len(values) {
 		option := values[index]
@@ -619,15 +622,17 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 		for _, flag := range option[1:] {
 			if flag == 'f' {
 				exportFunctions = true
+			} else if flag == 'x' {
+				exportAttribute = true
 			} else if flag == 'n' {
 				unexport = true
-			} else if !strings.ContainsRune("npx", flag) {
+			} else if !strings.ContainsRune("np", flag) {
 				return nil, false
 			}
 		}
 		index++
 	}
-	if !exportFunctions || unexport {
+	if !exportFunctions || !exportAttribute || unexport {
 		return nil, true
 	}
 	var names []string

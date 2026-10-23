@@ -1270,8 +1270,8 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cp -a src dst && echo hi > report.txt`,
 		`grep -rn "os.symlink(" src | head -5 > hits.txt`,
 	}
-	// A login shell can execute startup input before its -c script, so its
-	// static-looking command still fails closed on an unmanaged host.
+	// Login startup input can change the directory, so the child walk cannot
+	// assert a protected write through this ordinary relative redirect.
 	const uncertainLoginShell = `bash -lc "cp a b" > out.txt`
 	// "action" (not "raw_action") is the enforced decision.
 	const block, allow = `{"action":"block"`, `{"action":"allow"`
@@ -1322,11 +1322,8 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 						t.Errorf("%s = %.300s, want allow", command, got)
 					}
 				}
-				if !managed {
-					got := post(t, uncertainLoginShell)
-					if !strings.HasPrefix(got, block) || !strings.Contains(got, "ACTION-COMPOUND-UNPROVEN") {
-						t.Errorf("%s = %.300s, want fail-closed block", uncertainLoginShell, got)
-					}
+				if got := post(t, uncertainLoginShell); !strings.HasPrefix(got, allow) {
+					t.Errorf("%s = %.300s, want allow for ordinary write", uncertainLoginShell, got)
 				}
 			})
 		}

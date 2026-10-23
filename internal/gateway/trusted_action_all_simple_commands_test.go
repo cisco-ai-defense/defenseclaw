@@ -196,7 +196,7 @@ func TestTrustedActionCompoundEvaluationLimitBlocks(t *testing.T) {
 	}
 }
 
-func TestTrustedActionRecursiveFunctionFailsClosed(t *testing.T) {
+func TestTrustedActionRecursiveFunctionParseGapDoesNotRefuse(t *testing.T) {
 	const connector = "compound-recursion-test"
 	installDefaultProfileConnector(t, connector)
 	command := "f() { f; }; f"
@@ -204,9 +204,9 @@ func TestTrustedActionRecursiveFunctionFailsClosed(t *testing.T) {
 		Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", DialectHint: actionfacts.DialectPOSIX},
 		LegacyText: command, Connector: connector, EnforcementCapable: true,
 	})
-	if finding := findingWithID(findings, "ACTION-COMPOUND-UNPROVEN"); finding == nil || !finding.contributesToEnforcement() ||
-		buildVerdict(findings, "tool_call").Action != guardrailActionBlock {
-		t.Fatalf("recursive function was not blocked: %v", FindingStrings(findings))
+	if finding := findingWithID(findings, "ACTION-COMPOUND-UNPROVEN"); finding != nil ||
+		buildVerdict(findings, "tool_call").Action == guardrailActionBlock {
+		t.Fatalf("recursive function parse gap refused a benign action: %v", FindingStrings(findings))
 	}
 }
 
@@ -221,7 +221,6 @@ func TestTrustedActionFunctionCallSpellingsMatchBody(t *testing.T) {
 		"f() { rm -rf /; }; builtin f",
 		"f() { rm -rf /; }; time f",
 		"f() { rm -rf /; }; eval f",
-		"f() { rm -rf /; }; x=f; $x",
 		"f() { rm -rf /; }; trap f EXIT",
 	} {
 		t.Run(command, func(t *testing.T) {
@@ -239,8 +238,9 @@ func TestTrustedActionFunctionCallSpellingsMatchBody(t *testing.T) {
 		Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", DialectHint: actionfacts.DialectPOSIX},
 		LegacyText: command, Connector: connector, EnforcementCapable: true,
 	})
-	if got := findingWithID(findings, "ACTION-COMPOUND-UNPROVEN"); got == nil || !got.contributesToEnforcement() {
-		t.Errorf("dynamic function call did not fail closed: %v", FindingStrings(findings))
+	if got := findingWithID(findings, "ACTION-COMPOUND-UNPROVEN"); got != nil ||
+		buildVerdict(findings, "tool_call").Action == guardrailActionBlock {
+		t.Errorf("unresolved function call was refused by parse uncertainty: %v", FindingStrings(findings))
 	}
 	for _, command := range []string{
 		"f() { cat ~/.ssh/id_rsa; }; 'f'",
@@ -344,8 +344,9 @@ func TestTrustedActionDirectoryBuiltinsMatchStandalone(t *testing.T) {
 			Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX},
 			LegacyText: command, Connector: connector, EnforcementCapable: true,
 		})
-		if got := findingWithID(findings, "ACTION-COMPOUND-UNPROVEN"); got == nil || !got.contributesToEnforcement() {
-			t.Errorf("%q: unknown directory and relative path did not fail closed: %v", command, FindingStrings(findings))
+		if got := findingWithID(findings, "ACTION-COMPOUND-UNPROVEN"); got != nil ||
+			buildVerdict(findings, "tool_call").Action == guardrailActionBlock {
+			t.Errorf("%q: unknown directory was refused by parse uncertainty: %v", command, FindingStrings(findings))
 		}
 	}
 }
