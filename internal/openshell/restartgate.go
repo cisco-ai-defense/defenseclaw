@@ -90,7 +90,7 @@ func HoldsGateway(p SandboxPhase, said string, stopFlushes bool) bool {
 // StopWayOn is what the user runs to bring the sandbox name, which holds
 // its gateway in phase p (HoldsGateway; said: as for VMGone), to a phase in
 // which OpenShell reports it stopped, on a gateway that runs DefenseClaw
-// sandboxes (runs: SupportedMin or later) or an older one, whose stop of a
+// sandboxes (runs: SupportedMin or later) or an older or unknown one, whose stop of a
 // sandbox in its error state OpenShell refuses and on which DefenseClaw
 // starts none. OpenShell refuses the stop of a sandbox whose provisioning
 // timed out, which never ran its workload: a start after OpenShell's
@@ -107,7 +107,11 @@ func HoldsGateway(p SandboxPhase, said string, stopFlushes bool) bool {
 // also names OpenShell's own.
 func StopWayOn(name string, p SandboxPhase, said string, runs bool) string {
 	dcStop := "`defenseclaw sandbox stop " + name + "`"
-	stop := dcStop + " (DefenseClaw sandbox), or `openshell sandbox stop " + name + "` (raw OpenShell sandbox)"
+	rawStop := "`openshell sandbox stop " + name + "` (raw OpenShell sandbox)"
+	if !runs {
+		rawStop = "save its work before " + rawStop + " on an older or unknown gateway release; raw stop may not flush the guest"
+	}
+	stop := dcStop + " (DefenseClaw sandbox), or " + rawStop
 	del := "`defenseclaw sandbox delete " + name + "` (DefenseClaw sandbox) or `openshell sandbox delete " + name +
 		"` (raw OpenShell sandbox), which deletes it and its work"
 	switch {

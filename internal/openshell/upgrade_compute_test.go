@@ -107,6 +107,7 @@ func TestHoldsGateway(t *testing.T) {
 func TestStopWayOn(t *testing.T) {
 	const (
 		stop      = "`defenseclaw sandbox stop dc-x` (DefenseClaw sandbox), or `openshell sandbox stop dc-x` (raw OpenShell sandbox)"
+		oldStop   = "`defenseclaw sandbox stop dc-x` (DefenseClaw sandbox), or save its work before `openshell sandbox stop dc-x` (raw OpenShell sandbox) on an older or unknown gateway release; raw stop may not flush the guest"
 		startStop = "`defenseclaw sandbox start dc-x`, then `defenseclaw sandbox stop dc-x` once it is ready"
 		del       = "`defenseclaw sandbox delete dc-x` (DefenseClaw sandbox) or `openshell sandbox delete dc-x` (raw OpenShell sandbox), which deletes it and its work"
 		ended     = "nothing in OpenShell writes this MicroVM's disk back or stops it: its VM still runs what its workload left running, " +
@@ -120,9 +121,9 @@ func TestStopWayOn(t *testing.T) {
 		want  string
 	}{
 		{openshell.PhaseReady, "", true, stop},
-		{openshell.PhaseReady, "", false, stop},
+		{openshell.PhaseReady, "", false, oldStop},
 		{openshell.PhaseStarting, "", true, "wait until `openshell sandbox list` shows it ready or stopped, then " + stop + " if it is ready"},
-		{openshell.PhaseUnknown, "", false, "wait until `openshell sandbox list` shows it ready or stopped, then " + stop + " if it is ready"},
+		{openshell.PhaseUnknown, "", false, "wait until `openshell sandbox list` shows it ready or stopped, then " + oldStop + " if it is ready"},
 		{openshell.PhaseCompleted, "", true, ended},
 		{openshell.PhaseError, "MainProcessFailed: exited 1", true, ended},
 		{openshell.PhaseError, "ProvisioningTimedOut: window expired", true, "wait a minute for OpenShell's cleanup of the provisioning that timed out, then " + startStop +
@@ -157,6 +158,18 @@ func TestRawMicroVMRestartAdviceNamesItsControlSurface(t *testing.T) {
 					t.Errorf("raw MicroVM (%s, %q, runs %v) cannot follow the printed advice: %s", p, said, runs, got)
 				}
 			}
+		}
+	}
+}
+
+// OpenShell before 0.1.5 does not flush a raw MicroVM on stop. An unknown
+// gateway release receives the same conservative advice as an older one.
+func TestRawMicroVMRestartAdviceSavesWorkBeforeLegacyStop(t *testing.T) {
+	for _, phase := range []openshell.SandboxPhase{openshell.PhaseReady, openshell.PhaseStarting, openshell.PhaseProvisioning, openshell.PhaseUnknown} {
+		got := openshell.StopWayOn("raw-box", phase, "", false)
+		if !strings.Contains(got, "`openshell sandbox stop raw-box`") ||
+			!strings.Contains(got, "save its work before") || !strings.Contains(got, "older or unknown") {
+			t.Errorf("legacy or unknown gateway, %s: unsafe raw stop advice: %s", phase, got)
 		}
 	}
 }

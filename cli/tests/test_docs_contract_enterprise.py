@@ -539,7 +539,9 @@ FACTS = [
         (("enterprise/runtime/sandbox-reference.mdx",),
          "Without `--purge`, uninstall stops running sandboxes through the sandbox daemon"),
         (("enterprise/runtime/sandbox-reference.mdx",),
-         "Every sandbox stays with its records, disks and any copy-mode work not pulled yet."),
+         "Sandbox records and disks stay"),
+        (("enterprise/runtime/sandbox-reference.mdx",),
+         "unpulled copy-mode work remains only through the last successful disk sync if the guest sync fails"),
     ]),
     ("per_user_uninstall_stops_on_a_running_sandbox", [
         (("get-started/uninstall.mdx",),

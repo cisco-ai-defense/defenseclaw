@@ -83,6 +83,19 @@ describe('recovery and repair advice', () => {
       'legacy connect advice must follow the manager behavior');
   });
 
+  it('separates raw MicroVM errors by gateway release and phase reason', () => {
+    const body = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
+    const section = body.split('## A raw `openshell` sandbox stops a restart or rollback')[1]?.split('## ')[0];
+    assert.ok(section, 'raw sandbox restart section is missing');
+    for (const text of ['OpenShell 0.1.5', 'ProcessPollFailed', 'openshell sandbox stop NAME',
+      'MainProcessFailed', 'ProvisioningTimedOut', 'ProcessExited', 'openshell sandbox delete NAME',
+      'older or unknown', 'save its work']) {
+      assert.ok(section.includes(text), `raw restart advice must explain ${text}`);
+    }
+    assert.ok(!section.includes('one that is completed or in its error state: `openshell sandbox delete NAME`'),
+      'a stoppable raw error state must not be sent directly to deletion');
+  });
+
   it('keeps the saved guardrail mode', () => {
     const remediation = /recover|repair|restore|troubleshoot|turn it (?:off|back on)/i;
     const modeCommand = /defenseclaw\s+(?:setup\b[^\n`]*--mode(?:\s|=)|guardrail\s+mode\s+(?:observe|action)\b)/i;

@@ -31,6 +31,7 @@ import (
 
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
 
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 )
@@ -289,6 +290,15 @@ func (f *doctorFixture) onBrew() {
 func (f *doctorFixture) run() *openshell.DoctorReport {
 	f.t.Helper()
 	return f.doctor.Run(context.Background())
+}
+
+func (f *doctorFixture) contactedGatewayPID(pid int) {
+	f.doctor.PortHolder = func(host string, port int) (daemon.PortHolder, error) {
+		if host != "127.0.0.1" || port != 17670 {
+			f.t.Fatalf("looked up an unrelated listener at %s:%d", host, port)
+		}
+		return daemon.PortHolder{PID: pid, UID: f.doctor.Geteuid(), Command: openshell.GatewayBinary}, nil
+	}
 }
 
 func expectCheck(t *testing.T, r *openshell.DoctorReport, id string, status openshell.CheckStatus, detail string) *openshell.Check {
