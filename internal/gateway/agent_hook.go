@@ -1802,7 +1802,7 @@ func (a *APIServer) hookFailedCheckResponse(
 	defer func() {
 		if recover() != nil {
 			out = resp
-			out.HookOutput = hookOutputFor(req, resp.Action, resp.RawAction, plain, resp.AdditionalContext, profile.Capabilities)
+			out.HookOutput = failedCheckFallbackOutput(profile, req, resp.Action, resp.RawAction, plain, resp.AdditionalContext)
 			out = lifecycleOutput(out)
 		}
 	}()
@@ -1875,10 +1875,32 @@ func neutralLifecycleHookOutput(
 	resp.Action, resp.RawAction, resp.AdditionalContext = "allow", "allow", ""
 	defer func() {
 		if recover() != nil {
-			output = hookOutputFor(req, "allow", "allow", resp.Reason, "", profile.Capabilities)
+			output = failedCheckFallbackOutput(profile, req, "allow", "allow", resp.Reason, "")
 		}
 	}()
 	return sandboxHookOutput(ctx, profile, req, rawBody, payload, nil, resp)
+}
+
+// failedCheckFallbackOutput is the native output of a failed check when the
+// connector's response renderer failed as well. It calls no profile callback,
+// and it renders the control the healthy answer carries for the event and the
+// hook surface: Claude Code's and Codex's event-specific denials (a
+// PermissionRequest denies through hookSpecificOutput.decision), the VS Code
+// Local harness's own dialect (hookSpecificOutput.permissionDecision, and
+// continue:false for a prompt), and the Copilot CLI hook file answering a VS
+// Code Local tool. A block the agent would not read as a denial would let the
+// call run while the audit records it enforced.
+func failedCheckFallbackOutput(profile connector.HookProfile, req agentHookRequest, action, rawAction, reason, additional string) map[string]interface{} {
+	switch {
+	case req.ConnectorName == "claudecode":
+		return claudeCodeOutput(claudeCodeHookRequest{HookEventName: req.HookEventName}, action, rawAction, reason, additional)
+	case req.ConnectorName == "codex":
+		return codexOutput(req.HookEventName, action, rawAction, reason, additional)
+	case req.ConnectorName == "copilot" && profile.ContractID == connector.CopilotVSCodeLocalContractID:
+		return connector.CopilotVSCodeLocalHookOutput(req.HookEventName, action,
+			connectorReason(req.ConnectorName, action, req.ToolName, reason), additional)
+	}
+	return hookOutputFor(req, action, rawAction, reason, additional, profile.Capabilities)
 }
 
 // handleHookPanic centralises the side-effects of a recovered hook panic. The
@@ -3479,6 +3501,10 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 		if action == "block" {
 			return map[string]interface{}{"decision": "block", "reason": reason}
 		}
+		if action == "continue" && canonicalEvent(req.HookEventName) == "preverify" {
+			// Hermes' bounded verification control, as the profile renders it.
+			return map[string]interface{}{"action": "continue", "message": reason}
+		}
 		if req.HookEventName == "pre_llm_call" && additional != "" {
 			return map[string]interface{}{"context": additional}
 		}
@@ -3497,7 +3523,17 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 			}
 		}
 	case "copilot":
-		return copilotHookOutput(req.HookEventName, action, rawAction, reason, additional)
+		output := copilotHookOutput(req.HookEventName, action, rawAction, reason, additional)
+		if decision, ok := output["permissionDecision"]; ok && copilotargs.LocalTool(req.ToolName) {
+			// The VS Code Local harness running the CLI hook file reads its
+			// own decision shape (GAP-1903), as the profile renders it.
+			output["hookSpecificOutput"] = map[string]interface{}{
+				"hookEventName":            "PreToolUse",
+				"permissionDecision":       decision,
+				"permissionDecisionReason": reason,
+			}
+		}
+		return output
 	case "opencode":
 		if action == "block" {
 			return map[string]interface{}{"decision": "deny", "reason": reason}

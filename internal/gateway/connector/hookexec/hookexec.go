@@ -1508,7 +1508,10 @@ func (sp spec) decide(opts Options, body []byte) int {
 		(sp.style == styleHookEcho || sp.style == styleHookEchoDecision || sp.style == styleHookDecisionStderr || sp.style == stylePluginBridge) {
 		return failResponse(opts, sp, "closed", "missing native output in gateway response")
 	}
-	if !opts.SecureClient && normalizeFailMode(opts.FailMode) != "open" &&
+	// A standalone administrator's open applies to gateway outages. A gateway
+	// that answered with a block its native output does not carry is not an
+	// outage, so the managed hook checks it whatever the outage fail mode.
+	if !opts.SecureClient && (normalizeFailMode(opts.FailMode) != "open" || managedNativeDecision(opts)) &&
 		(action == "block" || action == "confirm") &&
 		(sp.style == styleHookEcho || sp.style == styleHookEchoDecision || sp.style == styleHookDecisionStderr || sp.style == stylePluginBridge) &&
 		!nativeOutputAgrees(sp, opts.Event, action, output) {
@@ -1683,7 +1686,9 @@ func managedNonOutageMode(opts *Options, failMode string) string {
 }
 
 func failNativeDecision(opts Options, sp spec, reason string) int {
-	if sp.connector == "copilot" && normalizeFailMode(opts.FailMode) != "open" && !opts.SecureClient {
+	// An unusable answer is not an outage: closed on a standalone hook.
+	failMode := managedNonOutageMode(&opts, normalizeFailMode(opts.FailMode))
+	if sp.connector == "copilot" && failMode != "open" && !opts.SecureClient {
 		// Copilot CLI ignores a failed hook process, but honors its native
 		// structured deny. An unusable 2xx verdict is a failed check.
 		if body := copilotVSCodeLocalOutput(opts.Event, "block", reason); sp.dialect == copilotVSCodeLocalSurface && body != "" {
@@ -1700,7 +1705,7 @@ func failNativeDecision(opts Options, sp spec, reason string) int {
 			return 0
 		}
 	}
-	return failResponse(opts, sp, normalizeFailMode(opts.FailMode), reason)
+	return failResponse(opts, sp, failMode, reason)
 }
 
 func managedNativeBlockableEvent(connector, event string) bool {
