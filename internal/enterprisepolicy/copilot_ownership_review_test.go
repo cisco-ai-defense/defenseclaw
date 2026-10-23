@@ -106,10 +106,23 @@ func TestCopilotPolicyRemovalStripsTamperedOwnCommand(t *testing.T) {
 			} else {
 				prior = strings.TrimPrefix(prior, connector.CopilotRemovedDeploymentGuardPOSIX(binary))
 			}
-			if !copilotHandlerIsRemovable(opts, map[string]any{
+			if !copilotHandlerIsRemovable(opts, "preToolUse", map[string]any{
 				"type": "command", field: prior, "timeoutSec": 30,
 			}) {
 				t.Fatal("prior release handler must remain removable during upgrade")
+			}
+			priorWithCWD := map[string]any{"type": "command", field: prior, "timeoutSec": 30, "cwd": "/tmp"}
+			priorDocument, err := json.Marshal(map[string]any{"version": 1, "hooks": map[string]any{"preToolUse": []any{priorWithCWD}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			merged, err := mergeCopilotDropIn(opts, priorDocument)
+			if err != nil {
+				t.Fatalf("upgrade did not repair prior command with extra data: %v", err)
+			}
+			rendered, err := renderCopilotDropIn(opts)
+			if err != nil || string(merged) != string(rendered) {
+				t.Fatalf("upgrade did not publish the current render: %s, %v", merged, err)
 			}
 			operator := published + "; "
 			if goos == "windows" {
@@ -155,7 +168,7 @@ func TestCopilotManagedReconcileRepairsOwnCommandAndRefusesCombinedHandler(t *te
 				field, other = "powershell", "bash"
 			}
 			opts := Options{GOOS: goos, HookBinary: binary}
-			for _, variant := range []string{"suffix", "extra field", "second executable"} {
+			for _, variant := range []string{"suffix", "suffix with cwd", "suffix with env", "extra field", "second executable", "suffix with second executable"} {
 				t.Run(variant, func(t *testing.T) {
 					document, err := renderCopilotDropIn(opts)
 					if err != nil {
@@ -169,9 +182,18 @@ func TestCopilotManagedReconcileRepairsOwnCommandAndRefusesCombinedHandler(t *te
 					switch variant {
 					case "suffix":
 						handler[field] = handler[field].(string) + "; Write-Output operator"
+					case "suffix with cwd":
+						handler[field] = handler[field].(string) + "; Write-Output operator"
+						handler["cwd"] = "/tmp"
+					case "suffix with env":
+						handler[field] = handler[field].(string) + "; Write-Output operator"
+						handler["env"] = map[string]any{}
 					case "extra field":
 						handler["operator"] = map[string]any{"command": "operator-tool"}
 					case "second executable":
+						handler[other] = "operator-tool"
+					case "suffix with second executable":
+						handler[field] = handler[field].(string) + "; Write-Output operator"
 						handler[other] = "operator-tool"
 					}
 					current, err := json.Marshal(doc)
@@ -179,7 +201,7 @@ func TestCopilotManagedReconcileRepairsOwnCommandAndRefusesCombinedHandler(t *te
 						t.Fatal(err)
 					}
 					merged, err := mergeCopilotDropIn(opts, current)
-					if variant == "suffix" {
+					if variant == "suffix" || variant == "suffix with cwd" || variant == "suffix with env" {
 						if err != nil || string(merged) != string(document) {
 							t.Fatalf("reconcile did not restore its %s handler: returned_document=%s, err=%v", variant, merged, err)
 						}
@@ -190,6 +212,128 @@ func TestCopilotManagedReconcileRepairsOwnCommandAndRefusesCombinedHandler(t *te
 				})
 			}
 		})
+	}
+}
+
+func TestCopilotManagedCorruptDropInSelfHeals(t *testing.T) {
+	cases := []struct {
+		name    string
+		current string
+	}{
+		{"truncated", `{`},
+		{"non-object hooks", `{"hooks":false,"operator":{"enabled":true}}`},
+		{"array hooks", `{"hooks":[],"operator":{"enabled":true}}`},
+		{"non-list event", `{"hooks":{"preToolUse":"x"},"operator":{"enabled":true}}`},
+	}
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			opts := Options{GOOS: goos, HookBinary: "/opt/defenseclaw/bin/defenseclaw-hook"}
+			if goos == "windows" {
+				opts.HookBinary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					merged, err := mergeCopilotDropIn(opts, []byte(tc.current))
+					if err != nil {
+						t.Fatalf("repair corrupt drop-in: %v", err)
+					}
+					var doc map[string]any
+					if err := json.Unmarshal(merged, &doc); err != nil {
+						t.Fatalf("repair did not publish JSON: %s: %v", merged, err)
+					}
+					hooks, ok := doc["hooks"].(map[string]any)
+					if !ok {
+						t.Fatalf("repair did not publish hooks: %s", merged)
+					}
+					if _, ok := hooks["preToolUse"].([]any); !ok {
+						t.Fatalf("repair did not publish managed hooks: %s", merged)
+					}
+					if strings.Contains(tc.current, "operator") && doc["operator"] == nil {
+						t.Fatalf("repair lost independent top-level content: %s", merged)
+					}
+				})
+			}
+		})
+	}
+
+	opts := testOptions(t)
+	opts.CopilotCLIPolicyOnly = true
+	path, err := copilotDropInPath(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cases {
+		t.Run("record "+tc.name, func(t *testing.T) {
+			writeFile(t, path, tc.current)
+			target := copilotTarget{}
+			state, err := target.Reconcile(opts)
+			if err != nil || !state.Covered {
+				t.Fatalf("reconcile did not restore coverage: %+v, %v", state, err)
+			}
+			if verified, err := target.Verify(opts); err != nil || !verified.Covered {
+				t.Fatalf("verify did not see restored coverage: %+v, %v", verified, err)
+			}
+			if _, err := target.RemoveOwned(opts); err != nil || readFile(t, path) != tc.current {
+				t.Fatalf("uninstall did not restore preimage: %s, %v", readFile(t, path), err)
+			}
+		})
+		t.Run("published "+tc.name, func(t *testing.T) {
+			opts := testOptions(t)
+			opts.CopilotCLIPolicyOnly = true
+			path, err := copilotDropInPath(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := copilotTarget{}
+			if _, err := target.Reconcile(opts); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, path, tc.current)
+			if verified, err := target.Verify(opts); err != nil || verified.Covered {
+				t.Fatalf("verify claimed the corrupt drop-in: %+v, %v", verified, err)
+			}
+			if state, err := target.Reconcile(opts); err != nil || !state.Covered {
+				t.Fatalf("reconcile did not restore the published drop-in: %+v, %v", state, err)
+			}
+		})
+	}
+
+	// A valid independent hook is recognizable content, even when a second
+	// event is malformed. Reconcile must not discard that hook to repair ours.
+	foreign := `{"hooks":{"preToolUse":"x","operatorEvent":[{"type":"command","bash":"/opt/operator/audit.sh"}]}}`
+	if merged, err := mergeCopilotDropIn(opts, []byte(foreign)); err == nil || merged != nil {
+		t.Fatalf("reconcile discarded a recognizable independent handler: %s, %v", merged, err)
+	}
+}
+
+func TestCopilotMalformedEventDoesNotClaimCoverage(t *testing.T) {
+	opts := testOptions(t)
+	opts.CopilotCLIPolicyOnly = true
+	path, err := copilotDropInPath(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := copilotTarget{}
+	if _, err := target.Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(readFile(t, path)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["hooks"].(map[string]any)["operatorEvent"] = "x"
+	edited, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, string(edited))
+	verified, err := target.Verify(opts)
+	if err != nil || verified.Covered || !hasConflict(verified, "operatorEvent is not a handler list") {
+		t.Fatalf("verify claimed malformed policy is active: %+v, %v", verified, err)
+	}
+	state, err := target.Reconcile(opts)
+	if err != nil || !state.Covered {
+		t.Fatalf("reconcile did not repair malformed policy: %+v, %v", state, err)
 	}
 }
 
@@ -252,11 +396,6 @@ func TestCopilotManagedNullHooksAreInert(t *testing.T) {
 				}
 				if doc["hooks"] == nil || (strings.Contains(current, "operator") && doc["operator"] == nil) {
 					t.Fatalf("publish lost the current hooks or independent top-level content: %s", merged)
-				}
-			}
-			for _, current := range []string{`{"hooks":false}`, `{"hooks":[]}`} {
-				if merged, err := mergeCopilotDropIn(opts, []byte(current)); err == nil || merged != nil {
-					t.Fatalf("non-object hooks %s were accepted: %s, %v", current, merged, err)
 				}
 			}
 		})

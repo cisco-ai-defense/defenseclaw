@@ -366,6 +366,41 @@ func TestTamperedCopilotDropInFailsVerifyAndIsPutBack(t *testing.T) {
 	}
 }
 
+func TestTamperedCopilotDropInWithCWDIsPutBackByEnsure(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "copilot")}))
+	writeFreshLedger(t, h)
+	dropIn := "/etc/github-copilot/policy.d/" + enterprisepolicy.DefenseClawDropInName
+	want := h.read(dropIn)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(want), &doc); err != nil {
+		t.Fatal(err)
+	}
+	pre := doc["hooks"].(map[string]any)["preToolUse"].([]any)[0].(map[string]any)
+	pre["bash"] = pre["bash"].(string) + " >/dev/null 2>&1 || true"
+	pre["cwd"] = "/tmp"
+	edited, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(dropIn), edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	verify := h.run(Options{Action: ActionVerify})
+	requireError(t, verify, codeVerify)
+	if !strings.Contains(messagesOf(verify.Errors, codeVerify), "not the command DefenseClaw publishes") {
+		t.Fatalf("verify did not report the fail-open command: %+v", verify.Errors)
+	}
+	if got := h.env.TamperedFiles(); !reflect.DeepEqual(got, []string{dropIn}) {
+		t.Fatalf("the guardian check found %v", got)
+	}
+	ensure := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	requireOK(t, ensure)
+	if h.read(dropIn) != want || len(h.env.TamperedFiles()) != 0 {
+		t.Fatalf("ensure did not restore the Copilot drop-in: changes=%v", ensure.Changes)
+	}
+}
+
 func TestCombinedCopilotDropInEnsureRefusesIndependentContent(t *testing.T) {
 	for _, field := range []string{"command", "operator"} {
 		t.Run(field, func(t *testing.T) {

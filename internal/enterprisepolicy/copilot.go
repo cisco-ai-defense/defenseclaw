@@ -103,9 +103,9 @@ func copilotHandlerIsOwned(opts Options, raw any) bool {
 	return copilotHandlerReferencesManagedHook(opts, raw)
 }
 
-// copilotHandlerReferencesManagedHook also recognizes a combined handler.
-// Such an entry is never removed as ours, but reconcile must not claim it
-// repaired the drop-in by appending a second copy beside it.
+// copilotHandlerReferencesManagedHook also recognizes a managed command
+// paired with a second executable field. Reconcile refuses that combined
+// entry instead of appending another copy beside it.
 func copilotHandlerReferencesManagedHook(opts Options, raw any) bool {
 	field := "bash"
 	if opts.goos() == "windows" {
@@ -122,16 +122,20 @@ func copilotHandlerReferencesManagedHook(opts Options, raw any) bool {
 	return strings.HasPrefix(command, shellQuote(opts.HookBinary)+" hook --connector copilot --enterprise-managed --event ")
 }
 
-// DefenseClaw owns a recognizable command in its drop-in when the handler
-// contains only its contract fields. A modified executable field is drift to
-// repair; extra fields may contain independent content and stay untouched.
-func copilotHandlerIsRemovable(opts Options, raw any) bool {
+// A recognizable DefenseClaw command with only contract fields is removable.
+// A changed command is drift to repair, including when non-executable fields
+// were added to the same entry. An intact command with extra fields can
+// contain independent content and stays.
+func copilotHandlerIsRemovable(opts Options, event string, raw any) bool {
 	if !copilotHandlerIsOwned(opts, raw) {
 		return false
 	}
 	field := "bash"
 	if opts.goos() == "windows" {
 		field = "powershell"
+	}
+	if stringField(raw, field) != stringField(copilotHandler(opts, event, 0), field) {
+		return true
 	}
 	var keys []string
 	switch value := raw.(type) {
@@ -246,13 +250,17 @@ func inspectCopilot(opts Options, state *State) error {
 		}
 		for _, event := range hooks.keys {
 			value, _ := hooks.get(event)
-			list, _ := value.([]any)
+			list, ok := value.([]any)
+			if !ok {
+				state.entryConflict("%s: Copilot event %s is not a handler list", file, event)
+				continue
+			}
 			for _, handler := range list {
 				if copilotHandlerIsOwned(opts, handler) {
 					state.OwnedEntries++
 					ownedPerEvent[event]++
 					repair := "the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites it"
-					if !copilotHandlerIsRemovable(opts, handler) {
+					if !copilotHandlerIsRemovable(opts, event, handler) {
 						repair = "move independent content to a separate handler, then run repair; DefenseClaw leaves this combined handler in place"
 						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s contains independent fields; %s", file, event, repair)
 					}
@@ -423,7 +431,9 @@ func copilotStrip(opts Options) stripFunc {
 		}
 		doc, err := decodeOrderedObject(current)
 		if err != nil {
-			return nil, false, err
+			// No handler can be recognized in malformed JSON. Preserve its
+			// bytes as the preimage when reconcile repairs this drop-in.
+			return current, false, nil
 		}
 		hooksValue, _ := doc.get("hooks")
 		hooks, _ := hooksValue.(*object)
@@ -439,7 +449,7 @@ func copilotStrip(opts Options) stripFunc {
 			}
 			remaining := make([]any, 0, len(list))
 			for _, handler := range list {
-				if copilotHandlerIsRemovable(opts, handler) {
+				if copilotHandlerIsRemovable(opts, event, handler) {
 					owned = true
 					continue
 				}
@@ -472,7 +482,9 @@ func mergeCopilotDropIn(opts Options, current []byte) ([]byte, error) {
 	}
 	currentDoc, err := decodeOrderedObject(current)
 	if err != nil {
-		return nil, err
+		// This is DefenseClaw's own drop-in, with no parseable handler to
+		// retain. publishWithRecord keeps the corrupt bytes as preimage.
+		return rendered, nil
 	}
 	if value, _ := currentDoc.get("hooks"); value != nil {
 		if hooks, ok := value.(*object); ok {
@@ -480,7 +492,7 @@ func mergeCopilotDropIn(opts Options, current []byte) ([]byte, error) {
 				value, _ := hooks.get(event)
 				list, _ := value.([]any)
 				for _, handler := range list {
-					if copilotHandlerReferencesManagedHook(opts, handler) && !copilotHandlerIsRemovable(opts, handler) {
+					if copilotHandlerReferencesManagedHook(opts, handler) && !copilotHandlerIsRemovable(opts, event, handler) {
 						return nil, fmt.Errorf("event %s combines DefenseClaw's command with independent content; move independent content to a separate handler", event)
 					}
 				}
@@ -503,17 +515,39 @@ func mergeCopilotDropIn(opts Options, current []byte) ([]byte, error) {
 		return nil, err
 	}
 	doc.set("version", json.Number("1"))
+	wantValue, _ := want.get("hooks")
+	wantHooks := wantValue.(*object)
 	value, present := doc.get("hooks")
 	hooks, ok := value.(*object)
 	if present && value != nil && !ok {
-		return nil, errors.New("hooks is not an object")
+		// A non-object cannot hold any handler. Keep independent keys at
+		// the document root while restoring the rendered hooks.
+		doc.set("hooks", wantHooks)
+		return encodeOrdered(doc)
 	}
 	if !present || value == nil {
 		hooks = newObject()
 		doc.set("hooks", hooks)
 	}
-	wantValue, _ := want.get("hooks")
-	wantHooks := wantValue.(*object)
+	invalidEvent := ""
+	hasHandlerEntries := false
+	for _, event := range hooks.keys {
+		value, _ := hooks.get(event)
+		list, ok := value.([]any)
+		if !ok && invalidEvent == "" {
+			invalidEvent = event
+		}
+		if ok && len(list) > 0 {
+			hasHandlerEntries = true
+		}
+	}
+	if invalidEvent != "" {
+		if hasHandlerEntries {
+			return nil, fmt.Errorf("event %s is not a handler list", invalidEvent)
+		}
+		doc.set("hooks", wantHooks)
+		return encodeOrdered(doc)
+	}
 	for _, event := range wantHooks.keys {
 		value, _ := wantHooks.get(event)
 		currentValue, present := hooks.get(event)
@@ -521,10 +555,7 @@ func mergeCopilotDropIn(opts Options, current []byte) ([]byte, error) {
 			hooks.set(event, value)
 			continue
 		}
-		list, ok := currentValue.([]any)
-		if !ok {
-			return nil, fmt.Errorf("event %s is not a handler list", event)
-		}
+		list := currentValue.([]any)
 		hooks.set(event, append(list, value.([]any)...))
 	}
 	return encodeOrdered(doc)
