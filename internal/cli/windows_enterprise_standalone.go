@@ -2405,7 +2405,7 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 	}
 	for _, message := range result.Errors {
 		switch message.Code {
-		case "lifecycle_busy", string(enterprisebundle.CodeRestartDeferred):
+		case "lifecycle_busy", string(enterprisebundle.CodeRestartDeferred), string(enterprisebundle.CodeNotConfirmed):
 			return enterprisestatus.WindowsExitBusy
 		case "bundle_apply_failed", "bundle_policy_not_adopted", "bundle_post_verify_failed", "bundle_targets_refresh_failed":
 			return enterprisestatus.WindowsExitBusy
@@ -2436,6 +2436,10 @@ func finishWindowsEnterpriseStandalone(
 	addWindowsEnterprisePipeWaitWarning(result, opts)
 	deliveredBundle := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
 	finishWindowsEnterpriseBundle(cmd, opts, result)
+	if result.Bundle != nil && result.Bundle.State == enterprisebundle.StateApplied &&
+		windowsBundleHasCode(result.Errors, string(enterprisebundle.CodeNotConfirmed)) {
+		failureCode = enterprisestatus.WindowsExitBusy
+	}
 	addWindowsBundleEnforcementError(result, opts, deliveredBundle)
 	if result.Noop && windowsBundleHasCode(result.Warnings, "bundle_config_restored") {
 		// The plan after the restore found nothing to do, but the run put the

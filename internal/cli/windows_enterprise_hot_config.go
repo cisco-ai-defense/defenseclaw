@@ -537,6 +537,27 @@ func windowsEnterpriseHotConfigApply(
 		adoptionWait = windowsEnterpriseHotConfigRestartTimeout
 	}
 	if !windowsEnterpriseHotConfigAdopted(ctx, adoptionWait, adoptedBundle) {
+		// A new delivery cannot be left applied when the gateway never
+		// reported its policy. A repeat repairs the already confirmed signed
+		// config without a new receipt; if the gateway is down, keep those
+		// signed bytes and require a retry after it returns.
+		if bundleChange && opts.bundle.prepared.AlreadyApplied && windowsBundlePolicy(ctx).Unavailable() {
+			if refreshTargets {
+				targetsRefreshed = true
+				if err := windowsEnterpriseHotConfigRefreshTargets(ctx, layout); err != nil {
+					undo()
+					failBundle("bundle_targets_refresh_failed", "the bundle's enrolled targets could not be refreshed")
+					return false, nil
+				}
+			}
+			result.Readiness.Gateway = false
+			result.SecurityComplete = false
+			result.Policy = nil
+			result.Changes = append(result.Changes, "restored the current signed bundle config; gateway adoption is unconfirmed")
+			result.AddError(string(enterprisebundle.CodeNotConfirmed),
+				"the repeated signed bundle config is installed, but the gateway is unavailable; retry the same bundle once the gateway runs")
+			return true, nil
+		}
 		undo()
 		failBundle("bundle_policy_not_adopted", "the gateway did not report the bundle policy, generation and identity before the apply deadline")
 		return false, nil

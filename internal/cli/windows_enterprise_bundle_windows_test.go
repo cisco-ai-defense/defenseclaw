@@ -1175,6 +1175,59 @@ func TestWindowsBundleGatewayRestartReachesEveryReceiptSurface(t *testing.T) {
 	}
 }
 
+func TestWindowsCommittedBundleGatewayOutageReportsPendingReceipt(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "outage.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	layout := stubWindowsBundleHost(t)
+	cmd, _ := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts); done || err != nil {
+		t.Fatalf("prepare: done=%t err=%v", done, err)
+	}
+	cleanupPreparedWindowsBundle(t, opts)
+	run := opts.bundle
+	id := run.prepared.Receipt.ReceiptID
+	_ = recordWindowsBundleTestCommit(t, layout, run.prepared.Receipt, run.prepared.Config)
+	confirmedPolicy := windowsBundlePolicy(t.Context())
+	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return nil }
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	cmd.SetOut(io.Discard)
+	finishErr := finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
+	if rc := windowsBundleReceiptState(t, layout, id); rc.State != enterprisebundle.StateApplied || rc.ErrorCode != "" ||
+		result.Bundle == nil || result.Bundle.State != enterprisebundle.StateApplied ||
+		!windowsBundleHasCode(result.Errors, string(enterprisebundle.CodeNotConfirmed)) ||
+		!windowsBundleHasCode(result.Warnings, enterprisebundle.WarnBundlePending) ||
+		commandExitCode(finishErr) != enterprisestatus.WindowsExitBusy {
+		t.Fatalf("gateway outage: receipt=%+v bundle=%+v errors=%+v warnings=%+v exit=%d",
+			rc, result.Bundle, result.Errors, result.Warnings, commandExitCode(finishErr))
+	}
+	if _, err := os.Stat(run.driver.Store.PublicReceiptPath()); !os.IsNotExist(err) {
+		t.Fatalf("pending receipt published as terminal: %v", err)
+	}
+	state, err := run.driver.Store.LoadState()
+	if err != nil || state.Current != nil {
+		t.Fatalf("outage confirmed an unproven bundle: state=%+v error=%v", state, err)
+	}
+	report, rollback, err := run.driver.SettleRun(run.prepared.Config, nil)
+	if err != nil || len(report.Pending) != 1 || len(rollback) != 0 {
+		t.Fatalf("outage settle: report=%+v rollback=%+v error=%v", report, rollback, err)
+	}
+	report, rollback, err = run.driver.SettleRun(run.prepared.Config, confirmedPolicy)
+	if err != nil || len(report.Completed) != 1 || len(rollback) != 0 ||
+		windowsBundleReceiptState(t, layout, id).State != enterprisebundle.StateConfirmed {
+		t.Fatalf("recovered settle: report=%+v rollback=%+v error=%v", report, rollback, err)
+	}
+	public, err := enterprisestatus.ReadPublicReceipt(run.driver.Store.PublicReceiptPath())
+	if err != nil || public.State != enterprisebundle.StateConfirmed || public.ErrorCode != "" {
+		t.Fatalf("public confirmed receipt=%+v error=%v", public, err)
+	}
+}
+
 func TestWindowsBundleWarningOnlyVerifyIsNoopEligible(t *testing.T) {
 	report := &windowsEnterpriseInstallerReport{Installed: true, GatewayReady: true}
 	if !windowsEnterpriseVerifyAcceptable(report) {
@@ -1556,6 +1609,9 @@ func windowsKilledApplyReceipt(t *testing.T, driver *enterprisebundle.Driver, bu
 	if until == enterprisebundle.StateVerified {
 		return rc
 	}
+	// Prepare records the rendered config hash before promoting a receipt,
+	// so a killed run can leave a staged receipt with a committed config.
+	rc.ConfigSHA256 = configwrite.SHA256Hex(config)
 	if _, err := driver.Store.Promote(rc); err != nil {
 		t.Fatal(err)
 	}
@@ -1676,9 +1732,9 @@ func TestWindowsPlainEnsureSettlesKilledApplyReceipt(t *testing.T) {
 // Every receipt state a killed bundle run can leave is settled by a plain
 // ensure (GAP-1302), as `ensure --bundle` settles them before its own bundle:
 // received, verified and staged fail as interrupted; an applied one whose
-// config is installed and enforced is confirmed; one the gateway does not
-// confirm fails, and the run's bundle restore re-installs the last good
-// bundle over it. A pending install transaction defers the settle until the
+// config is installed and enforced is confirmed; an applied one whose
+// gateway is unavailable stays pending until a later run can confirm it.
+// A pending install transaction defers the settle until the
 // ensure recovered it, and a live bundle run's lock leaves its receipt alone.
 func TestWindowsPlainEnsureSettlesEveryKilledApplyState(t *testing.T) {
 	const lastGood, killedID = "b-01JA00000000000000000000C1", "b-01JA00000000000000000000C2"
@@ -1704,7 +1760,7 @@ func TestWindowsPlainEnsureSettlesEveryKilledApplyState(t *testing.T) {
 		{name: "applied and enforced", until: enterprisebundle.StateApplied, installed: killedConfig, gateway: true,
 			wantState: enterprisebundle.StateConfirmed, wantWarn: enterprisebundle.WarnConfirmedAfterInterrupt},
 		{name: "applied, gateway silent", until: enterprisebundle.StateApplied, installed: killedConfig,
-			wantState: enterprisebundle.StateFailed, wantCode: enterprisebundle.CodeNotConfirmed, wantWarn: windowsBundleUnconfirmedWarning, replacing: true},
+			wantState: enterprisebundle.StateApplied, wantWarn: enterprisebundle.WarnBundlePending},
 		{name: "pending transaction recovered", until: enterprisebundle.StateStaged, installed: goodConfig, gateway: true, pending: "recovered",
 			wantState: enterprisebundle.StateFailed, wantCode: enterprisebundle.CodeInterrupted, wantWarn: windowsBundleInterruptedWarning},
 		{name: "pending transaction stuck", until: enterprisebundle.StateStaged, installed: goodConfig, gateway: true, pending: "stuck",

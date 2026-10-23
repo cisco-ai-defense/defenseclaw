@@ -257,6 +257,7 @@ func TestDriverConfirmationChecksSignedDigestOnAllPlatforms(t *testing.T) {
 	for _, platform := range []string{enterprisebundle.PlatformLinux, enterprisebundle.PlatformDarwin, enterprisebundle.PlatformWindows} {
 		for _, tc := range []struct {
 			name            string
+			sourceVersion   string
 			comparable      bool
 			mismatch        bool
 			gatewayMismatch bool
@@ -267,15 +268,23 @@ func TestDriverConfirmationChecksSignedDigestOnAllPlatforms(t *testing.T) {
 			{name: "gateway differs from receipt effective", comparable: true, gatewayMismatch: true, wantCode: enterprisebundle.CodeDigestMismatch},
 			{name: "non-comparable", mismatch: true},
 			{name: "non-comparable equal digest"},
+			{name: "upgrade from 0.8.10", sourceVersion: "0.8.10", mismatch: true},
+			{name: "upgrade from 1.0.0", sourceVersion: "1.0.0", mismatch: true},
+			{name: "upgrade from 1.0.1", sourceVersion: "1.0.1", mismatch: true},
+			{name: "upgrade from 1.0.2", sourceVersion: "1.0.2", mismatch: true},
+			{name: "upgrade from 1.0.3", sourceVersion: "1.0.3", mismatch: true},
 		} {
 			t.Run(platform+"/"+tc.name, func(t *testing.T) {
 				f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) {
 					in.HostPlatform = platform
+					if tc.sourceVersion != "" {
+						in.ProductVersion = tc.sourceVersion
+					}
 				})
 				d := driverFor(t, f)
 				d.Platform = platform
 				if !tc.comparable {
-					d.ProductVersion = "1.0.3"
+					d.ProductVersion = "1.0.4"
 				}
 				p, err := d.Prepare(context.Background(), f.bundle, nil)
 				if err != nil {
@@ -611,6 +620,40 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 				t.Fatalf("an uncommitted identical-config receipt was not settled as interrupted: report %+v, receipt %+v", report, receipts[0])
 			}
 		})
+	}
+}
+
+// The config writer committed the signed candidate, but the gateway was
+// stopped before it could answer. The receipt is applied and pending, with
+// no current-bundle swap until a later run proves the live policy.
+func TestDriverFinishKeepsGatewayOutagePending(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	p, err := d.Prepare(ctx, f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmedPolicy := installPreparedBundle(t, d, p)
+	rolledBack := false
+	_, err = d.Finish(p, p.ConfigSHA256, nil, enterprisebundle.GatewayPolicy{}, false,
+		func() (string, bool) { rolledBack = true; return "", true })
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeNotConfirmed || rolledBack ||
+		p.Receipt.State != enterprisebundle.StateApplied || p.Receipt.EffectivePolicyDigest == "" {
+		t.Fatalf("outage: receipt=%+v rollback=%t error=%v", p.Receipt, rolledBack, err)
+	}
+	if state, err := d.Store.LoadState(); err != nil || state.Current != nil {
+		t.Fatalf("outage moved current: state=%+v error=%v", state, err)
+	}
+	report, rollback, err := d.SettleRun(p.Config, nil)
+	if err != nil || len(report.Pending) != 1 || len(rollback) != 0 {
+		t.Fatalf("gateway still down: report=%+v rollback=%+v error=%v", report, rollback, err)
+	}
+	report, rollback, err = d.SettleRun(p.Config, &confirmedPolicy)
+	state, stateErr := d.Store.LoadState()
+	if err != nil || len(report.Completed) != 1 || len(rollback) != 0 || stateErr != nil ||
+		state.Current == nil || state.Current.BundleID != p.Receipt.BundleID {
+		t.Fatalf("gateway recovered: report=%+v rollback=%+v state=%+v errors=%v/%v", report, rollback, state, err, stateErr)
 	}
 }
 

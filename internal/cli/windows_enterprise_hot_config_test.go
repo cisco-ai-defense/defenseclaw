@@ -704,6 +704,77 @@ func TestWindowsBundleConfigApplyUsesSharedRestartClassification(t *testing.T) {
 	}
 }
 
+// A signed config that never reached a responding gateway cannot be kept as
+// an applied receipt. If the gateway remains unavailable through adoption,
+// restore the previous bytes and stop it when the restored policy cannot be
+// proven either. A later outage after adoption is covered by Finish tests.
+func TestWindowsHotBundleNeverAdoptedDuringOutageRestoresPreviousConfig(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 500\n"
+	const candidate = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n"
+	const enrolled = "config_version: 9\nenterprise:\n  enrollment:\n    exclude_users: [dcw-eo1]\n"
+	for _, tc := range []struct {
+		name, previous, candidate string
+	}{
+		{name: "restart setting", previous: previous, candidate: candidate},
+		{name: "enrollment", previous: enrolled, candidate: strings.Replace(enrolled, "[dcw-eo1]", "[dcw-eo1, dcw-eo5]", 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, tc.previous, tc.candidate)
+			opts.bundle = host.bundleRun()
+			savedRestart, savedDigest := windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest = savedRestart, savedDigest })
+			windowsEnterpriseHotConfigRestart = func() (bool, error) { return true, nil }
+			windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, errors.New("gateway stopped") }
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+				&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+			installed, err := os.ReadFile(host.configPath)
+			if applied || err != nil || string(installed) != tc.previous ||
+				!windowsBundleHasCode(result.Errors, "bundle_policy_not_adopted") ||
+				!opts.hotConfigRestoreFailed || host.stops != 1 || host.refreshes != 0 {
+				t.Fatalf("unadopted bundle: applied=%t config=%q stops=%d refreshes=%d errors=%+v read=%v",
+					applied, installed, host.stops, host.refreshes, result.Errors, err)
+			}
+		})
+	}
+}
+
+// A repeated delivery has no new receipt. Its previous confirmed receipt
+// remains true, but a repair during an outage cannot claim this run adopted
+// the policy. The administrator gets the retry exit after the signed config
+// is restored.
+func TestWindowsRepeatedBundleGatewayOutageRequiresRetry(t *testing.T) {
+	const drifted = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 700\n"
+	const confirmed = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n"
+	host, opts := newHotConfigHost(t, drifted, confirmed)
+	opts.bundle = host.bundleRun()
+	prepared := opts.bundle.prepared
+	prepared.Receipt, prepared.AlreadyApplied, prepared.Config = nil, true, []byte(confirmed)
+	savedConfirmed, savedRestart, savedDigest := windowsHotConfirmedBundle, windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest
+	t.Cleanup(func() {
+		windowsHotConfirmedBundle, windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest = savedConfirmed, savedRestart, savedDigest
+	})
+	windowsHotConfirmedBundle = func(_ *enterprisebundle.Driver, _ []byte) (configwrite.Options, []byte, *enterprisebundle.Ref, error) {
+		opt, _ := enterprisebundle.GenerationOptions(&enterprisebundle.Receipt{BundleID: host.bundleID, Version: host.bundleVersion,
+			Principal: "control-plane:acme/alice", SignerKeyID: "k1"})
+		return opt, []byte(confirmed), &enterprisebundle.Ref{BundleID: host.bundleID, Version: host.bundleVersion, SignerKeyID: "k1"}, nil
+	}
+	windowsEnterpriseHotConfigRestart = func() (bool, error) { return true, nil }
+	windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, errors.New("gateway stopped") }
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+	installed, err := os.ReadFile(host.configPath)
+	if !applied || err != nil || string(installed) != confirmed || len(host.writes) != 1 ||
+		!windowsBundleHasCode(result.Errors, string(enterprisebundle.CodeNotConfirmed)) || result.Readiness.Gateway || result.Policy != nil {
+		t.Fatalf("repeat outage: applied=%t config=%q writes=%q readiness=%+v policy=%+v errors=%+v read=%v",
+			applied, installed, host.writes, result.Readiness, result.Policy, result.Errors, err)
+	}
+	if code := windowsEnterpriseFailureCodeFor(result); code != enterprisestatus.WindowsExitBusy {
+		t.Fatalf("repeat outage exit=%d, want retry", code)
+	}
+}
+
 // GAP-0008: the rollback of a bundle that `enterprise bundle apply` (the
 // installed CLI, no payload) could not confirm puts the last good config
 // back on the running deployment, restarting only the gateway for a key it
