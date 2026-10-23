@@ -46,23 +46,32 @@ $stdinClosed = $false
 $responseWritten = $false
 $deadline = [System.Diagnostics.Stopwatch]::StartNew()
 
-{{if not .Managed}}function Test-CopilotInstallWindow {
+{{if not .Managed}}function Test-DefenseClawInstallLockHeld {
+    # The one install check of the Windows adapters: true while this
+    # account's installer holds its data directory, the folder above this
+    # adapter's hooks folder: its .install.lock exists as any type, or its
+    # state cannot be read. Only "not found" is free, as for the native hook
+    # (installLockHeld), the shell hooks and the in-agent plugins (GAP-0915).
     try {
-        $lock = Join-Path (Split-Path -Parent $PSScriptRoot) '.install.lock'
-        $null = Get-Item -LiteralPath $lock -Force -ErrorAction Stop
+        $dataDir = Split-Path -Parent $PSScriptRoot
+        if ([string]::IsNullOrEmpty($dataDir)) { return $true }
+        [void][System.IO.File]::GetAttributes((Join-Path $dataDir '.install.lock'))
         return $true
     }
-    catch [System.Management.Automation.ItemNotFoundException] {
-        return $false
-    }
     catch {
-        # An unreadable lock must not make an install call look safe.
+        $cause = $_.Exception
+        while ($null -ne $cause) {
+            if ($cause -is [System.IO.FileNotFoundException] -or $cause -is [System.IO.DirectoryNotFoundException]) {
+                return $false
+            }
+            $cause = $cause.InnerException
+        }
         return $true
     }
 }
 $installGuard = $false
 {{end}}try {
-{{if not .Managed}}    if (Test-CopilotInstallWindow) {
+{{if not .Managed}}    if (Test-DefenseClawInstallLockHeld) {
         $installGuard = $true
         throw 'DefenseClaw install or upgrade in progress'
     }
@@ -138,7 +147,7 @@ $installGuard = $false
         }
         throw "DefenseClaw hook launcher exited $($process.ExitCode) without an answer"
     }
-{{if not .Managed}}    if (Test-CopilotInstallWindow) {
+{{if not .Managed}}    if (Test-DefenseClawInstallLockHeld) {
         $installGuard = $true
         throw 'DefenseClaw install or upgrade in progress'
     }
@@ -155,7 +164,7 @@ catch {
     # This adapter is the first Windows hook process Copilot starts. If
     # its launcher is missing or times out during an upgrade, the native hook
     # cannot answer, so the adapter must supply Copilot's own denial.
-    if (-not $responseWritten -and ($installGuard -or (Test-CopilotInstallWindow))) {
+    if (-not $responseWritten -and ($installGuard -or (Test-DefenseClawInstallLockHeld))) {
         [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed while DefenseClaw is being installed or upgraded: ' + $failure)
         $message = 'DefenseClaw is being installed or upgraded for this account; try again in a moment, or run the installer again if it has stopped.'
         switch ($Event) {

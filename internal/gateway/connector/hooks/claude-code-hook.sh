@@ -9,7 +9,40 @@
 # the hook span links back to the agent's parent span. See
 # codex-hook.sh for the validation contract.
 set -euo pipefail
-
+{{if and (not .Managed) (not .Sandbox)}}# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
+# installer holds its data directory DATA: DATA/.install.lock exists as any
+# file type, or DATA exists but cannot be searched, so the lock cannot be
+# shown absent; no DATA to look in counts as held too. It is the one install
+# check of every shell hook. The native hook (installLockHeld), the in-agent
+# plugins and the Windows adapters apply the same rule (GAP-0914).
+defenseclaw_install_lock_held() {
+  local data="${1:-}"
+  [ -n "$data" ] || return 0
+  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    return 0
+  fi
+  if [ -e "$data" ] || [ -L "$data" ]; then
+    if [ -d "$data" ] && [ -x "$data" ]; then
+      return 1
+    fi
+    return 0
+  fi
+  return 1
+}
+# A failure before the helpers load (a hook path that does not resolve, a
+# missing or broken _hardening.sh, a set -e error) blocks with exit 2
+# in fail mode closed, under strict availability and while this account's
+# installer holds its data directory; fail mode open keeps the exit status.
+# The installed mode decides (GAP-0315).
+# defenseclaw_harden_env replaces this trap with the hook's own.
+_DC_BOOT_FAIL_MODE="{{.FailMode}}"
+defenseclaw_boot_fails_closed() {
+  [ "$_DC_BOOT_FAIL_MODE" = "open" ] || return 0
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) return 0 ;; esac
+  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}"
+}
+trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_closed; then exit 2; fi' EXIT
+{{end}}
 # Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
@@ -67,7 +100,7 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
   # The installed mode decides; strict availability tightens this exit as it
   # tightens every later outage.
   _DC_HOME_FAIL_MODE="{{.FailMode}}"
-  [ ! -e "${DEFENSECLAW_HOME}/.install.lock" ] && [ ! -L "${DEFENSECLAW_HOME}/.install.lock" ] || _DC_HOME_FAIL_MODE="closed"
+  ! defenseclaw_install_lock_held "${DEFENSECLAW_HOME}" || _DC_HOME_FAIL_MODE="closed"
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
   if [ "$_DC_HOME_FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
@@ -206,7 +239,7 @@ claude_fail_closed_decision() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
-  if [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/.install.lock" ] && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
+  if defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}" && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
     reason="DefenseClaw blocked this: ${next//\`/}."
   elif [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.stopped" ]; then
     reason="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection."

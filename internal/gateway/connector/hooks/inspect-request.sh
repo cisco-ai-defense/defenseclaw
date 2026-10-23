@@ -3,7 +3,41 @@
 # DefenseClaw PreRequest hook — inspects user query before it is sent to the LLM.
 # Reads the user message content from stdin (JSON with "content" field).
 set -euo pipefail
-# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
+{{if and (not .Managed) (not .Sandbox)}}# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
+# installer holds its data directory DATA: DATA/.install.lock exists as any
+# file type, or DATA exists but cannot be searched, so the lock cannot be
+# shown absent; no DATA to look in counts as held too. It is the one install
+# check of every shell hook. The native hook (installLockHeld), the in-agent
+# plugins and the Windows adapters apply the same rule (GAP-0914).
+defenseclaw_install_lock_held() {
+  local data="${1:-}"
+  [ -n "$data" ] || return 0
+  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    return 0
+  fi
+  if [ -e "$data" ] || [ -L "$data" ]; then
+    if [ -d "$data" ] && [ -x "$data" ]; then
+      return 1
+    fi
+    return 0
+  fi
+  return 1
+}
+# A failure before the helpers load (a hook path that does not resolve, a
+# missing or broken _hardening.sh, a set -e error) blocks with exit 2
+# in fail mode closed, under strict availability and while this account's
+# installer holds its data directory; this one script serves every
+# connector, and its installed mode is the sidecar the helpers read, so it
+# is closed here.
+# defenseclaw_harden_env replaces this trap with the hook's own.
+_DC_BOOT_FAIL_MODE="closed"
+defenseclaw_boot_fails_closed() {
+  [ "$_DC_BOOT_FAIL_MODE" = "open" ] || return 0
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) return 0 ;; esac
+  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}"
+}
+trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_closed; then exit 2; fi' EXIT
+{{end}}# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
 
