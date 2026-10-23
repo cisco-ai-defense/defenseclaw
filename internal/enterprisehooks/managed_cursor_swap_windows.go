@@ -6,6 +6,7 @@
 package enterprisehooks
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -34,6 +35,10 @@ type windowsCursorManagedSwap struct {
 	// file is published with. Otherwise it gets DefenseClaw's protection, as
 	// windowsManagedPolicyWriter writes it.
 	metadata *windowsCursorManagedFileMetadata
+	// usersRead: the file is a hooks.json that carries the guard, so every
+	// ordinary user must be able to read it. Kept metadata that does not
+	// allow it gets the read added (safefile.ProtectReadableByUsers).
+	usersRead bool
 }
 
 type windowsCursorManagedSwapResult struct {
@@ -82,14 +87,15 @@ func swapWindowsCursorManagedFile(request windowsCursorManagedSwap) (windowsCurs
 		return result, err
 	}
 	userReadable := !strings.EqualFold(filepath.Base(path), windowsCursorManagedReceiptFile)
+	protect := func(temp string) error {
+		return setWindowsManagedPolicyProtection(temp, false, userReadable)
+	}
 	publish := safefile.SharedPublish{
 		Base:        safefile.SharedFile{Path: path, Exists: request.expect.existed, Data: request.expect.data},
 		Data:        request.data,
 		Limit:       request.limit,
 		TempPattern: ".defenseclaw-policy-*.tmp",
-		Protect: func(temp string) error {
-			return setWindowsManagedPolicyProtection(temp, false, userReadable)
-		},
+		Protect:     protect,
 	}
 	if request.expectMetadata != nil {
 		publish.CompareMetadata = true
@@ -104,7 +110,11 @@ func swapWindowsCursorManagedFile(request windowsCursorManagedSwap) (windowsCurs
 	}
 	if request.metadata != nil {
 		metadata := request.metadata.shared()
-		publish.Metadata = &metadata
+		if request.usersRead {
+			publish.Protect = func(temp string) error { return safefile.ProtectReadableByUsers(temp, &metadata, protect) }
+		} else {
+			publish.Metadata = &metadata
+		}
 	}
 	published, swapped, err := safefile.PublishSharedFile(publish)
 	if !swapped {
@@ -172,12 +182,48 @@ func windowsCursorSharedHooks(
 // keeps that file's metadata unless it restores metadata DefenseClaw
 // recorded. A newer save is kept and the edit is made again on it, up to
 // windowsCursorManagedGuardRebuildAttempts times.
+//
+// Cursor reads hooks.json with each user's own token, so a hooks.json that
+// carries the guard is never left where ordinary users cannot read it: the
+// read is added to the metadata it keeps, also when an edit leaves its bytes
+// as they are (windowsCursorHooksUnreadable).
 func windowsCursorHooksWriter() safefile.SharedFileWriter {
 	return safefile.SharedFileWriter{
 		Attempts: windowsCursorManagedGuardRebuildAttempts,
 		Read:     readWindowsCursorSharedHooks,
 		Write:    writeWindowsCursorSharedHooks,
+		Stale:    windowsCursorHooksUnreadable,
 	}
+}
+
+// windowsCursorHooksCarryGuard reports a hooks.json, data at path, that
+// registers the DefenseClaw adapter beside it (current, legacy or previous
+// encoding). A file that is not a Cursor hooks document carries none.
+func windowsCursorHooksCarryGuard(path string, data []byte) bool {
+	adapter := filepath.Join(filepath.Dir(path), windowsCursorManagedAdapterFile)
+	cleaned, err := connector.RemoveWindowsCursorEnterpriseHooks(data, adapter)
+	return err == nil && !bytes.Equal(cleaned, data)
+}
+
+// windowsCursorHooksUnreadable reports a hooks.json that carries the guard and
+// that ordinary users cannot read (safefile.UsersCanRead).
+func windowsCursorHooksUnreadable(file safefile.SharedFile) bool {
+	return file.Exists && windowsCursorHooksCarryGuard(file.Path, file.Data) && safefile.UsersCanRead(file.Metadata) != nil
+}
+
+// verifyWindowsCursorManagedHooksUsersCanRead refuses an active guard whose
+// hooks.json ordinary users cannot read. Verification reads the file elevated,
+// which proves nothing for them: Cursor reads it with each user's own token,
+// and a user who cannot read it runs Cursor without the machine hook.
+func verifyWindowsCursorManagedHooksUsersCanRead(artifacts windowsCursorManagedArtifacts) error {
+	if !artifacts.active || !artifacts.hooks.existed {
+		return nil
+	}
+	if err := safefile.UsersCanRead(artifacts.hooksMetadata.shared()); err != nil {
+		return fmt.Errorf("enterprise hooks: ordinary users cannot read the Cursor machine hooks %s: %w",
+			artifacts.hooks.path, err)
+	}
+	return nil
 }
 
 func readWindowsCursorSharedHooks(path string) (safefile.SharedFile, error) {
@@ -199,10 +245,11 @@ func writeWindowsCursorSharedHooks(base safefile.SharedFile, edit safefile.Share
 		return safefile.SharedWriteResult{Published: err == nil, Left: safefile.SharedFile{Path: base.Path}}, err
 	}
 	request := windowsCursorManagedSwap{
-		path:   base.Path,
-		expect: windowsManagedFileSnapshot{path: base.Path, existed: base.Exists, data: base.Data},
-		data:   edit.Data,
-		limit:  windowsCursorManagedHooksLimit,
+		path:      base.Path,
+		expect:    windowsManagedFileSnapshot{path: base.Path, existed: base.Exists, data: base.Data},
+		data:      edit.Data,
+		limit:     windowsCursorManagedHooksLimit,
+		usersRead: windowsCursorHooksCarryGuard(base.Path, edit.Data),
 	}
 	if base.Exists {
 		request.expectMetadata = &metadata
@@ -213,12 +260,58 @@ func writeWindowsCursorSharedHooks(base safefile.SharedFile, edit safefile.Share
 		request.metadata = &final
 	}
 	result, err := windowsCursorManagedFileSwap(request)
-	return safefile.SharedWriteResult{
+	written := safefile.SharedWriteResult{
 		Published: result.swapped,
 		Left: safefile.SharedFile{
 			Path: base.Path, Exists: true, Data: edit.Data, Metadata: result.publishedMetadata.shared(),
 		},
-	}, err
+	}
+	if !result.swapped || err != nil || !request.usersRead {
+		return written, err
+	}
+	return keepWindowsCursorHooksReadable(written)
+}
+
+// keepWindowsCursorHooksReadable makes sure ordinary users can read the
+// hooks.json a write just published with the guard in it. An access list
+// change that lands with the swap or just after it is newer, and the swap
+// keeps it. When it takes the read away, the same bytes are published again
+// over that file, with the read added and the change's other entries kept, so
+// the name holds the guard throughout. A save of other bytes is newer still
+// and is left to the caller's validation.
+func keepWindowsCursorHooksReadable(written safefile.SharedWriteResult) (safefile.SharedWriteResult, error) {
+	path, data := written.Left.Path, written.Left.Data
+	for attempt := 1; ; attempt++ {
+		current, err := readWindowsCursorSharedHooks(path)
+		if err != nil {
+			return written, err
+		}
+		if !current.Exists || !bytes.Equal(current.Data, data) {
+			return written, nil
+		}
+		readErr := safefile.UsersCanRead(current.Metadata)
+		if readErr == nil {
+			written.Left = current
+			return written, nil
+		}
+		if attempt > windowsCursorManagedGuardRebuildAttempts {
+			return written, fmt.Errorf("%w: ordinary users still cannot read it: %v",
+				windowsCursorManagedConcurrentChange(path), readErr)
+		}
+		metadata := windowsCursorManagedFileMetadataOf(current.Metadata)
+		_, err = windowsCursorManagedFileSwap(windowsCursorManagedSwap{
+			path:           path,
+			expect:         windowsManagedFileSnapshot{path: path, existed: true, data: current.Data},
+			expectMetadata: &metadata,
+			metadata:       &metadata,
+			data:           data,
+			limit:          windowsCursorManagedHooksLimit,
+			usersRead:      true,
+		})
+		if err != nil && !errors.Is(err, errWindowsCursorManagedConcurrentChange) {
+			return written, err
+		}
+	}
 }
 
 // publishWindowsCursorManagedHooks publishes render's edit of hooks.json, read
