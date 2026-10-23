@@ -237,12 +237,39 @@ func (l *lifecycle) useCurrentBundleConfig() bool {
 	return true
 }
 
+// usePendingBundleConfig keeps the committed config while its signed bundle
+// receipt cannot be confirmed or disproved. The last confirmed bundle can
+// differ from these bytes, so selecting it here would replace the pending
+// policy during repair or upgrade.
+func (l *lifecycle) usePendingBundleConfig(record *Deployment) error {
+	env := l.env
+	raw := env.committedDeploymentConfig(record)
+	if raw == nil {
+		return errors.New("the committed config of the pending policy bundle is unavailable")
+	}
+	if l.opts.ConfigFile != "" {
+		given, err := readBounded(l.opts.ConfigFile, maxInputBytes)
+		if err != nil || !bytes.Equal(given, raw) {
+			return &codedError{code: codeBundleRequired, err: errors.New("the pending signed bundle keeps its committed config; deliver a signed bundle to change policy")}
+		}
+	}
+	l.currentBundleGeneration = nil
+	if state, err := configwrite.ReadGenerationState(env.P(env.Layout.ConfigPath)); err == nil {
+		opt := configwrite.RestoreOptions(state, record.ConfigSHA256, configwrite.Options{})
+		if opt.Bundle.ID != "" {
+			opt.GenerationFloor = state.Generation
+			l.currentBundleGeneration = &opt
+		}
+	}
+	return l.useBundleConfig(raw)
+}
+
 // prepareBundleMode runs before a changing action. It picks the inbox bundle
 // for --inbox and for the apply trigger, refuses a bundle apply on a host
-// that is not installed, and in bundle mode refuses a --config that is not
-// the current bundle config (bundle_required) or makes the run apply the
-// current bundle config. done is set when the run ends here.
-func (l *lifecycle) prepareBundleMode(ctx context.Context, record *Deployment) (code int, done bool) {
+// that is not installed, and in bundle mode selects the signed config. A
+// pending applied receipt keeps the committed config instead of reselecting
+// the last confirmed bundle. done is set when the run ends here.
+func (l *lifecycle) prepareBundleMode(ctx context.Context, record *Deployment, settlePending bool) (code int, done bool) {
 	env, r := l.env, l.result
 	switch l.opts.Action {
 	case ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure:
@@ -272,6 +299,13 @@ func (l *lifecycle) prepareBundleMode(ctx context.Context, record *Deployment) (
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed; install it before you apply a policy bundle")
 			return 0, true
+		}
+		return 0, false
+	}
+	if settlePending && record != nil {
+		if err := l.usePendingBundleConfig(record); err != nil {
+			r.AddError(errorCode(err, codeBundleStateUnreadable), err.Error())
+			return stop()
 		}
 		return 0, false
 	}
@@ -1188,6 +1222,9 @@ func (l *lifecycle) settleUnconfirmedBundle(ctx context.Context, store *enterpri
 		generation.ConfigSHA256 != rc.ConfigSHA256 || generation.BundleID != rc.BundleID ||
 		generation.BundleVersion != rc.Version || generation.SignerKeyID != rc.SignerKeyID || generation.Actor != rc.Principal {
 		return pending("the committed signed bundle generation cannot be verified")
+	}
+	if !l.env.bundleMode() {
+		return pending("the installed trust anchors are unavailable")
 	}
 	digest, comparable, err := enterprisebundle.VerifiedReceiptDigest(ctx, store, rc, l.env.GOOS,
 		enterprisebundle.DeviceLayoutFromManaged(l.env.Layout), l.env.ProductVersion,

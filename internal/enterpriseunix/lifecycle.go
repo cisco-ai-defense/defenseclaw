@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -535,13 +536,27 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			l.recoverInterruptedRotation(ctx, record)
 		}
 	}
-	if settlePending && l.opts.Bundle == "" {
-		// A plain ensure, repair or package upgrade would select the last
-		// confirmed bundle below. Do not replace an applied bundle while its
-		// receipt cannot be confirmed or disproved.
-		r.AddError(codeBundleNotConfirmed, "an applied policy bundle is still pending confirmation; restore the gateway or missing verification evidence and retry this command")
-		l.describe(ctx, record, false)
-		return enterprisestatus.BusyExitCode(env.GOOS)
+	if settlePending {
+		// A repair or upgrade can make the gateway available or move it to
+		// this build's digest. Recheck after the action, while still holding
+		// the lifecycle lock, so its result reports the settled receipt.
+		defer func() {
+			if l.opts.Bundle != "" || len(r.Errors) != 0 {
+				return
+			}
+			latest, err := env.loadDeployment()
+			if err != nil {
+				r.AddWarning(codeBundleStateUnreadable, "could not recheck the pending policy bundle: "+err.Error())
+				return
+			}
+			stillPending := l.settleBundles(ctx, latest)
+			l.describeBundle()
+			if !stillPending {
+				r.Warnings = slices.DeleteFunc(r.Warnings, func(w enterprisestatus.Message) bool {
+					return w.Code == enterprisebundle.WarnBundlePending
+				})
+			}
+		}()
 	}
 	if l.supersededApplyRun(record) {
 		// A transaction leaves a queued apply run alone. When that
@@ -592,7 +607,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		}
 	}
 
-	if code, done := l.prepareBundleMode(ctx, record); done {
+	if code, done := l.prepareBundleMode(ctx, record, settlePending); done {
 		return code
 	}
 
