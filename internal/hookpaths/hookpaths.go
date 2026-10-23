@@ -716,7 +716,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				}
 				// A hard link the command creates is another name for its
 				// source; one to an instruction file is refused (GAP-0869).
-				noteIdentity(InstructionLinkCreation(tool, command, cwd, home))
+				noteIdentity(InstructionLinkCreation(tool, command, cwd, home, nil))
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)
@@ -803,7 +803,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		if resolved != "" {
 			// Protection follows the file: a hard link, case or short-name
 			// variant of an instruction file writes it (GAP-0869).
-			noteIdentity(InstructionAlias(resolved, cwd, home))
+			noteIdentity(InstructionAlias(resolved, cwd, home, nil), false)
 		}
 	}
 	// Exact shell operands take precedence over a duplicate PathFact. Their

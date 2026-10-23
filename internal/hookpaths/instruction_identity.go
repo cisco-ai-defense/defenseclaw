@@ -28,14 +28,14 @@ var InstructionFileNames = [...]string{
 // InstructionIdentityKey carries the hook client's file-identity check of a
 // call's write targets and hard-link sources. The value is the path of the
 // protected instruction file that one of them names under another name, or
-// InstructionIdentityUnknown for a file with more than one hard link whose
-// other names cannot be listed. A gateway that cannot read the user's files
-// (ProtectHome) judges the call from it.
+// InstructionIdentityUnknown for a new hard link whose source cannot be
+// read. A gateway that cannot read the user's files (ProtectHome) judges the
+// call from it.
 const InstructionIdentityKey = "\x00instruction-identity"
 
-// InstructionIdentityUnknown is a write target or hard-link source with more
-// than one hard link whose names this platform cannot list. POSIX has no call
-// that lists a file's names, so such a file may be an instruction file.
+// InstructionIdentityUnknown is a hard link a command creates whose source
+// cannot be read: its operands are not static, it is an interpreter or
+// Windows hard-link call, or the source does not resolve.
 const InstructionIdentityUnknown = "?"
 
 // InstructionFileName returns the protected name that base spells: exactly,
@@ -54,14 +54,17 @@ func instructionNameFold() bool { return runtime.GOOS == "windows" }
 // InstructionAlias reports the protected instruction file that an existing
 // write target names under another name: through a symlink, as a case,
 // short-name or stream variant of a file in its directory, or as a hard link.
-// unknown reports a target with more than one hard link whose names cannot
-// all be checked; it may be another name of an instruction file anywhere on
-// its volume. A missing file, one that is not regular, one the caller cannot
-// read and one already spelled as an instruction name are neither: the name
-// rules judge the last.
-func InstructionAlias(path, cwd, home string) (instruction string, unknown bool) {
+// A hard link is compared with the file identities of the instruction files
+// in the places agents load them from (instructionDirectories) and of the
+// files the session loaded (loaded, the gateway's load provenance); Windows
+// also lists every name of the file. POSIX cannot list a file's names, so a
+// multiply linked file that matches none of those identities is an ordinary
+// file, like the hard-linked files of a pnpm or uv store. A missing file, one
+// that is not regular, one the caller cannot read and one already spelled as
+// an instruction name report nothing: the name rules judge the last.
+func InstructionAlias(path, cwd, home string, loaded []string) string {
 	if !filepath.IsAbs(path) {
-		return "", false
+		return ""
 	}
 	path = filepath.Clean(path)
 	real := path
@@ -70,13 +73,13 @@ func InstructionAlias(path, cwd, home string) (instruction string, unknown bool)
 	}
 	info, err := os.Stat(real)
 	if err != nil || !info.Mode().IsRegular() {
-		return "", false
+		return ""
 	}
 	if _, named := InstructionFileName(filepath.Base(real), instructionNameFold()); named {
 		if real == path {
-			return "", false
+			return ""
 		}
-		return real, false
+		return real
 	}
 	same := func(candidate string) bool {
 		other, err := os.Stat(candidate)
@@ -87,35 +90,50 @@ func InstructionAlias(path, cwd, home string) (instruction string, unknown bool)
 	dir := filepath.Dir(real)
 	for _, name := range InstructionFileNames {
 		if candidate := filepath.Join(dir, name); same(candidate) {
-			return candidate, false
+			return candidate
 		}
 	}
 	if linkCount(real, info) <= 1 {
-		return "", false
+		return ""
 	}
 	if names, complete, listed := fileLinkNames(real); listed {
 		for _, name := range names {
 			if _, named := InstructionFileName(filepath.Base(name), true); named {
-				return name, false
+				return name
 			}
 		}
 		if complete {
-			return "", false
+			return ""
+		}
+	}
+	for _, candidate := range loaded {
+		if _, named := InstructionFileName(filepath.Base(candidate), instructionNameFold()); named &&
+			filepath.IsAbs(candidate) && same(candidate) {
+			return candidate
 		}
 	}
 	for _, directory := range instructionDirectories(dir, cwd, home) {
 		for _, name := range InstructionFileNames {
 			if candidate := filepath.Join(directory, name); same(candidate) {
-				return candidate, false
+				return candidate
 			}
 		}
 	}
-	return "", true
+	return ""
+}
+
+// instructionHomeFolders are the home-relative folders agents load global
+// instruction files from.
+var instructionHomeFolders = []string{
+	"", ".claude", ".codex", ".openclaw", filepath.Join(".openclaw", "workspace"),
+	".config", filepath.Join(".config", "amp"), filepath.Join(".config", "opencode"),
 }
 
 // instructionDirectories are the places agents load instruction files from,
 // checked to name the file a hard link reaches: the target's directory, the
-// working directory and its parents, and the home and agent folders.
+// working directory and its parents with their .claude folders, the home and
+// agent folders, and the agents' configured homes (CLAUDE_CONFIG_DIR,
+// CODEX_HOME) of the calling process.
 func instructionDirectories(dir, cwd, home string) []string {
 	directories := []string{dir}
 	add := func(directory string) {
@@ -126,6 +144,7 @@ func instructionDirectories(dir, cwd, home string) []string {
 	if filepath.IsAbs(cwd) {
 		for current, steps := filepath.Clean(cwd), 0; steps < 64; steps++ {
 			add(current)
+			add(filepath.Join(current, ".claude"))
 			parent := filepath.Dir(current)
 			if parent == current {
 				break
@@ -134,8 +153,13 @@ func instructionDirectories(dir, cwd, home string) []string {
 		}
 	}
 	if filepath.IsAbs(home) {
-		for _, sub := range []string{"", ".claude", ".codex", ".openclaw", filepath.Join(".openclaw", "workspace")} {
+		for _, sub := range instructionHomeFolders {
 			add(filepath.Join(home, sub))
+		}
+	}
+	for _, variable := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME"} {
+		if value := os.Getenv(variable); value != "" {
+			add(filepath.Clean(value))
 		}
 	}
 	return directories
@@ -154,12 +178,13 @@ var (
 // InstructionLinkCreation reports a hard link that a shell command creates to
 // a protected instruction file: its path, the instruction name the command
 // text gives such a link when its operands cannot be read, or unknown for a
-// hard link whose source cannot be listed or whose names cannot be checked.
-// A new hard link is another name for the file, so creating one is refused
-// like a write (GAP-0869). Symbolic links are left to write resolution,
-// which follows them. The command of an apply_patch tool is a patch
-// envelope, not shell.
-func InstructionLinkCreation(tool, command, cwd, home string) (instruction string, unknown bool) {
+// hard link whose source cannot be read. A source is checked by name and by
+// file identity (InstructionAlias, with the session's loaded files); an
+// ordinary multiply linked source is not an instruction file. A new hard link
+// is another name for the file, so creating one is refused like a write
+// (GAP-0869). Symbolic links are left to write resolution, which follows
+// them. The command of an apply_patch tool is a patch envelope, not shell.
+func InstructionLinkCreation(tool, command, cwd, home string, loaded []string) (instruction string, unknown bool) {
 	if command == "" || isApplyPatchToolName(tool) || !filepath.IsAbs(cwd) {
 		return "", false
 	}
@@ -177,11 +202,9 @@ func InstructionLinkCreation(tool, command, cwd, home string) (instruction strin
 		if name, named := InstructionFileName(filepath.Base(resolved), instructionNameFold()); named {
 			return filepath.Join(filepath.Dir(resolved), name), false
 		}
-		alias, aliasUnknown := InstructionAlias(resolved, cwd, home)
-		if alias != "" {
+		if alias := InstructionAlias(resolved, cwd, home, loaded); alias != "" {
 			return alias, false
 		}
-		unknown = unknown || aliasUnknown
 	}
 	if opaque || wrapped {
 		if match := instructionNameText.FindStringSubmatch(command); match != nil {

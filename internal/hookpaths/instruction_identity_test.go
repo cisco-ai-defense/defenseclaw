@@ -54,8 +54,9 @@ func instructionIdentityRoot(t *testing.T) string {
 }
 
 // GAP-0869: a hard link is the instruction file under another name, wherever
-// the link lives. Windows lists a file's names; POSIX cannot, so a hard link
-// whose other names are outside the agent folders is reported unknown.
+// the link lives. Windows lists a file's names. POSIX cannot, so there a hard
+// link is matched with the instruction files of the agent folders and the
+// files the session loaded; any other multiply linked file is ordinary.
 func TestInstructionAliasFollowsFileIdentity(t *testing.T) {
 	root := instructionIdentityRoot(t)
 	project := filepath.Join(root, "project")
@@ -71,37 +72,62 @@ func TestInstructionAliasFollowsFileIdentity(t *testing.T) {
 	farAlias := instructionIdentityLink(t, elsewhere, filepath.Join(root, "tmp", "far"))
 	pairA := instructionIdentityFile(t, filepath.Join(root, "pair"), "a.txt")
 	pairB := instructionIdentityLink(t, pairA, filepath.Join(root, "pair", "b.txt"))
+	dotClaude := instructionIdentityFile(t, filepath.Join(project, ".claude"), "CLAUDE.md")
+	dotClaudeAlias := instructionIdentityLink(t, dotClaude, filepath.Join(root, "tmp", "project-rules"))
+	ampGlobal := instructionIdentityFile(t, filepath.Join(home, ".config", "amp"), "AGENTS.md")
+	ampAlias := instructionIdentityLink(t, ampGlobal, filepath.Join(root, "tmp", "amp-rules"))
+	subdir := filepath.Join(project, "src", "pkg")
+	if err := os.MkdirAll(subdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, tc := range []struct {
-		name, path, want string
-		unknown          bool
+		name, path, cwd, want string
+		loaded                []string
 	}{
-		{"same directory", sameDir, instruction, false},
-		{"other directory", otherDir, instruction, false},
-		{"agent home folder", homeAlias, homeInstruction, false},
-		{"single ordinary file", ordinary, "", false},
-		{"missing file", filepath.Join(root, "tmp", "missing"), "", false},
-		{"instruction itself", instruction, "", false},
+		{"same directory", sameDir, project, instruction, nil},
+		{"other directory", otherDir, project, instruction, nil},
+		{"agent home folder", homeAlias, project, homeInstruction, nil},
+		{"parent of the working directory", otherDir, subdir, instruction, nil},
+		{"project .claude folder", dotClaudeAlias, subdir, dotClaude, nil},
+		{"amp global folder", ampAlias, project, ampGlobal, nil},
+		{"loaded by the session", farAlias, project, elsewhere, []string{ordinary, elsewhere}},
+		{"single ordinary file", ordinary, project, "", nil},
+		{"missing file", filepath.Join(root, "tmp", "missing"), project, "", nil},
+		{"instruction itself", instruction, project, "", nil},
+		// The release allows these; POSIX cannot prove more without a
+		// listing of the file's names (pnpm and uv stores link files).
+		{"ordinary hard-link pair", pairB, project, "", nil},
+		{"ordinary pair with a loaded file", pairA, project, "", []string{instruction, elsewhere}},
+		{"loaded name that is not an instruction file", pairB, project, "", []string{pairA}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, unknown := InstructionAlias(tc.path, project, home)
-			if !sameInstructionPath(got, tc.want) || unknown != tc.unknown {
-				t.Fatalf("InstructionAlias(%q) = %q, unknown=%t; want %q, unknown=%t", tc.path, got, unknown, tc.want, tc.unknown)
+			if got := InstructionAlias(tc.path, tc.cwd, home, tc.loaded); !sameInstructionPath(got, tc.want) {
+				t.Fatalf("InstructionAlias(%q) = %q; want %q", tc.path, got, tc.want)
 			}
 		})
 	}
-	// Outside the agent folders only Windows can name the other link.
-	got, unknown := InstructionAlias(farAlias, project, home)
+	// An instruction file in no agent folder and not loaded: only Windows
+	// can name the other link.
+	got := InstructionAlias(farAlias, project, home, nil)
 	if runtime.GOOS == "windows" {
-		if !sameInstructionPath(got, elsewhere) || unknown {
-			t.Fatalf("Windows far alias = %q, unknown=%t; want %q", got, unknown, elsewhere)
+		if !sameInstructionPath(got, elsewhere) {
+			t.Fatalf("Windows far alias = %q; want %q", got, elsewhere)
 		}
-	} else if got != "" || !unknown {
-		t.Fatalf("POSIX far alias = %q, unknown=%t; want unknown", got, unknown)
+	} else if got != "" {
+		t.Fatalf("POSIX far alias = %q; want none", got)
 	}
-	got, unknown = InstructionAlias(pairB, project, home)
-	if got != "" || unknown != (runtime.GOOS != "windows") {
-		t.Fatalf("ordinary hard-link pair = %q, unknown=%t", got, unknown)
+}
+
+// An agent's configured home holds its global instruction file.
+func TestInstructionAliasConfiguredAgentHome(t *testing.T) {
+	root := instructionIdentityRoot(t)
+	config := filepath.Join(root, "claude-config")
+	t.Setenv("CLAUDE_CONFIG_DIR", config)
+	instruction := instructionIdentityFile(t, config, "CLAUDE.md")
+	alias := instructionIdentityLink(t, instruction, filepath.Join(root, "tmp", "notes.txt"))
+	if got := InstructionAlias(alias, filepath.Join(root, "project"), filepath.Join(root, "home"), nil); !sameInstructionPath(got, instruction) {
+		t.Fatalf("alias of CLAUDE_CONFIG_DIR/CLAUDE.md = %q; want %q", got, instruction)
 	}
 }
 
@@ -122,9 +148,9 @@ func TestInstructionAliasThroughSymlinkElsewhere(t *testing.T) {
 	if err := os.Symlink(instruction, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	got, unknown := InstructionAlias(link, filepath.Join(root, "cwd"), filepath.Join(root, "home"))
-	if !sameInstructionPath(got, instruction) || unknown {
-		t.Fatalf("symlink alias = %q, unknown=%t; want %q", got, unknown, instruction)
+	got := InstructionAlias(link, filepath.Join(root, "cwd"), filepath.Join(root, "home"), nil)
+	if !sameInstructionPath(got, instruction) {
+		t.Fatalf("symlink alias = %q; want %q", got, instruction)
 	}
 }
 
@@ -168,7 +194,7 @@ func TestResolveReportsInstructionIdentity(t *testing.T) {
 		{"tee", "Bash", map[string]any{"command": "echo x | tee -a " + alias}, instruction},
 		{"hard link creation", "Bash", map[string]any{"command": "ln " + filepath.Join(project, "CLAUDE.md") + " " + filepath.Join(root, "tmp", "new")}, filepath.Join(project, "CLAUDE.md")},
 		{"link of an alias", "Bash", map[string]any{"command": "ln " + alias + " " + filepath.Join(root, "tmp", "again")}, instruction},
-		{"unlisted names", "Bash", map[string]any{"command": "printf x >> " + far}, InstructionIdentityUnknown},
+		{"instruction file in no agent folder", "Bash", map[string]any{"command": "printf x >> " + far}, ""},
 		{"cp into the link", "Bash", map[string]any{"command": "cp " + ordinary + " " + alias}, instruction},
 		{"python open", "Bash", map[string]any{"command": "python3 -c \"open('" + alias + "', 'a').write('x')\""}, instruction},
 		{"multi edit", "MultiEdit", map[string]any{"file_path": alias, "edits": []map[string]any{{"old_string": "instructions", "new_string": "x"}}}, instruction},
@@ -179,6 +205,39 @@ func TestResolveReportsInstructionIdentity(t *testing.T) {
 			targets := instructionResolve(t, project, tc.tool, tc.input)
 			if got := targets[InstructionIdentityKey]; got != tc.want {
 				t.Fatalf("identity = %q, want %q (targets %v)", got, tc.want, targets)
+			}
+		})
+	}
+}
+
+// A file with several hard links is not an instruction file because of its
+// link count: pnpm and uv stores hard-link package files into node_modules
+// and .venv. Writing, editing or linking one again carries no identity fact,
+// so the gateway does not block it as a protected file.
+func TestResolveLeavesOrdinaryHardLinks(t *testing.T) {
+	root := instructionIdentityRoot(t)
+	project := filepath.Join(root, "project")
+	instructionIdentityFile(t, project, "CLAUDE.md")
+	stored := instructionIdentityFile(t, filepath.Join(root, "store", "v10", "files"), "00ab")
+	installed := instructionIdentityLink(t, stored, filepath.Join(project, "node_modules", ".pnpm", "pkg@1.0.0", "index.js"))
+	venv := instructionIdentityLink(t, stored, filepath.Join(project, ".venv", "lib", "site.py"))
+	for _, tc := range []struct {
+		name, tool string
+		input      map[string]any
+	}{
+		{"native write", "Write", map[string]any{"file_path": installed, "content": "x"}},
+		{"native edit", "Edit", map[string]any{"file_path": installed, "old_string": "instructions", "new_string": "x"}},
+		{"multi edit", "MultiEdit", map[string]any{"file_path": venv, "edits": []map[string]any{{"old_string": "instructions", "new_string": "x"}}}},
+		{"shell append", "Bash", map[string]any{"command": "printf x >> '" + installed + "'"}},
+		{"shell relative", "Bash", map[string]any{"command": "printf x > .venv/lib/site.py"}},
+		{"tee", "Bash", map[string]any{"command": "echo x | tee -a '" + venv + "'"}},
+		{"hard link of it", "Bash", map[string]any{"command": "ln '" + installed + "' '" + filepath.Join(root, "tmp-copy") + "'"}},
+		{"cp link of it", "Bash", map[string]any{"command": "cp -al '" + venv + "' '" + filepath.Join(root, "tmp-copy2") + "'"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			targets := instructionResolve(t, project, tc.tool, tc.input)
+			if got, present := targets[InstructionIdentityKey]; present {
+				t.Fatalf("identity = %q for an ordinary hard-linked file, want none (targets %v)", got, targets)
 			}
 		})
 	}
@@ -213,6 +272,10 @@ func TestInstructionLinkCreation(t *testing.T) {
 	instruction := instructionIdentityFile(t, project, "CLAUDE.md")
 	alias := instructionIdentityLink(t, instruction, filepath.Join(root, "tmp", "notes.txt"))
 	instructionIdentityFile(t, project, "plain.txt")
+	shared := instructionIdentityFile(t, project, "shared.txt")
+	instructionIdentityLink(t, shared, filepath.Join(root, "store", "shared.txt"))
+	far := instructionIdentityFile(t, filepath.Join(root, "persona"), "SOUL.md")
+	farAlias := instructionIdentityLink(t, far, filepath.Join(root, "tmp", "draft.txt"))
 	home := filepath.Join(root, "home")
 	for _, tc := range []struct {
 		name, command, want string
@@ -245,6 +308,8 @@ func TestInstructionLinkCreation(t *testing.T) {
 		{"cp symbolic", "cp -s CLAUDE.md x", "", false},
 		{"copy", "cp CLAUDE.md backup.md", "", false},
 		{"ordinary hard link", "ln plain.txt plain2.txt", "", false},
+		{"ordinary multiply linked source", "ln shared.txt shared2.txt", "", false},
+		{"cp link of a multiply linked source", "cp -al shared.txt shared3.txt", "", false},
 		{"data only", `echo "os.link(CLAUDE.md)"`, "", false},
 		{"read", "cat CLAUDE.md", "", false},
 		{"wrapped symbolic", "sudo ln -s /opt/x /usr/local/bin/x", "", false},
@@ -252,14 +317,26 @@ func TestInstructionLinkCreation(t *testing.T) {
 		{"wrapped dynamic", `xargs ln < list`, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, unknown := InstructionLinkCreation("Bash", tc.command, project, home)
+			got, unknown := InstructionLinkCreation("Bash", tc.command, project, home, nil)
 			if !sameInstructionPath(got, tc.want) || unknown != tc.unknown {
 				t.Fatalf("InstructionLinkCreation(%q) = %q, unknown=%t; want %q, unknown=%t", tc.command, got, unknown, tc.want, tc.unknown)
 			}
 		})
 	}
-	if got, unknown := InstructionLinkCreation("apply_patch", "ln CLAUDE.md x", project, home); got != "" || unknown {
+	if got, unknown := InstructionLinkCreation("apply_patch", "ln CLAUDE.md x", project, home, nil); got != "" || unknown {
 		t.Fatalf("a patch envelope is not shell: %q, %t", got, unknown)
+	}
+	// The session's loaded files name a source that no agent folder holds.
+	command := "ln '" + farAlias + "' again.txt"
+	want := ""
+	if runtime.GOOS == "windows" {
+		want = far
+	}
+	if got, unknown := InstructionLinkCreation("Bash", command, project, home, nil); !sameInstructionPath(got, want) || unknown {
+		t.Fatalf("link of an unloaded far alias = %q, unknown=%t; want %q", got, unknown, want)
+	}
+	if got, unknown := InstructionLinkCreation("Bash", command, project, home, []string{far}); !sameInstructionPath(got, far) || unknown {
+		t.Fatalf("link of a loaded file's alias = %q, unknown=%t; want %q", got, unknown, far)
 	}
 }
 
@@ -276,7 +353,7 @@ func TestInstructionLinkCreationThroughRunners(t *testing.T) {
 		"env ln AGENTS.md x",
 		"eval 'ln AGENTS.md x'",
 	} {
-		if got, _ := InstructionLinkCreation("Bash", command, project, root); got != "AGENTS.md" {
+		if got, _ := InstructionLinkCreation("Bash", command, project, root, nil); got != "AGENTS.md" {
 			t.Errorf("InstructionLinkCreation(%q) = %q, want AGENTS.md", command, got)
 		}
 	}

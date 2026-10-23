@@ -91,13 +91,14 @@ func TestInstructionProtectionHardLinkAliasAnywhere(t *testing.T) {
 }
 
 // The gateway behind ProtectHome reads no file: the hook client's identity
-// evidence alone decides, for a named file and for one it cannot name.
+// evidence alone decides, for a named file and for a new hard link whose
+// source the client could not read.
 func TestInstructionProtectionClientIdentityEvidence(t *testing.T) {
 	for _, tc := range []struct {
 		name, identity, rule string
 	}{
 		{"named file", "/home/alice/project/CLAUDE.md", "COG-CLAUDE-MD"},
-		{"unlisted names", hookpaths.InstructionIdentityUnknown, "COG-AGENTS-MD"},
+		{"uncheckable new hard link", hookpaths.InstructionIdentityUnknown, "COG-AGENTS-MD"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			targets := map[string]string{
@@ -123,10 +124,54 @@ func TestInstructionProtectionClientIdentityEvidence(t *testing.T) {
 	}
 }
 
-// POSIX cannot list a file's names: a write to a file with several hard links
-// none of which is in the agent folders may write any instruction file, so it
-// is judged as the most severe one. Windows names the file exactly.
-func TestInstructionProtectionUnlistedHardLink(t *testing.T) {
+// A file with several hard links is not protected for its link count: pnpm
+// and uv stores hard-link package files into node_modules and .venv. A write,
+// an edit or another hard link to one is judged as the release judges it.
+func TestInstructionProtectionOrdinaryHardLinks(t *testing.T) {
+	root := instructionIdentityTestRoot(t)
+	project := filepath.Join(root, "project")
+	writeActiveAgentTestFile(t, project, "CLAUDE.md")
+	stored := writeActiveAgentTestFile(t, filepath.Join(root, "store", "v10"), "00ab")
+	installed := instructionIdentityTestLink(t, stored, filepath.Join(project, "node_modules", ".pnpm", "pkg", "index.js"))
+	type call struct {
+		tool  string
+		input map[string]interface{}
+	}
+	calls := []call{
+		{"Write", map[string]interface{}{"file_path": installed, "content": "changed"}},
+		{"Edit", map[string]interface{}{"file_path": installed, "old_string": "test", "new_string": "changed"}},
+	}
+	if runtime.GOOS != "windows" {
+		calls = append(calls,
+			call{"Bash", map[string]interface{}{"command": "printf changed >> '" + installed + "'"}},
+			call{"Bash", map[string]interface{}{"command": "ln '" + installed + "' '" + filepath.Join(root, "copy.js") + "'"}},
+		)
+	}
+	for _, c := range calls {
+		for source, ctx := range instructionIdentityContexts(t, project, c.tool, c.input) {
+			// block_at HIGH: the instruction rules are HIGH or CRITICAL.
+			response := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH").evaluateClaudeCodeHook(
+				ctx, claudeCodeHookRequest{
+					HookEventName: "PreToolUse", SessionID: "pnpm", CWD: project,
+					ToolName: c.tool, ToolInput: c.input,
+				})
+			if response.Action == guardrailActionBlock {
+				t.Fatalf("%s %v of an ordinary hard-linked file (%s) was blocked: %v", c.tool, c.input, source, response.Findings)
+			}
+			for rule := range instructionRuleFiles {
+				if findingStringHasRuleID(response.Findings, rule) {
+					t.Fatalf("%s %v of an ordinary hard-linked file (%s) got %s: %v", c.tool, c.input, source, rule, response.Findings)
+				}
+			}
+		}
+	}
+}
+
+// An instruction file the session loaded is protected under any name,
+// wherever it lives (load provenance), at its own rule's severity. One in no
+// agent folder that the session did not load is named only on Windows, which
+// lists a file's names; POSIX writes it as the release does.
+func TestInstructionProtectionLoadedFileHardLink(t *testing.T) {
 	root := instructionIdentityTestRoot(t)
 	soul := writeActiveAgentTestFile(t, filepath.Join(root, "persona"), "SOUL.md")
 	project := filepath.Join(root, "project")
@@ -135,20 +180,25 @@ func TestInstructionProtectionUnlistedHardLink(t *testing.T) {
 	}
 	alias := instructionIdentityTestLink(t, soul, filepath.Join(root, "scratch", "draft.txt"))
 	input := map[string]interface{}{"file_path": alias, "content": "changed"}
-	wantRule := "COG-SOUL"
-	if runtime.GOOS != "windows" {
-		wantRule = "COG-AGENTS-MD"
-	}
 	for source, ctx := range instructionIdentityContexts(t, project, "Write", input) {
+		api := instructionProtectionTestAPI(t, "claudecode", "action", "CRITICAL")
+		api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+			HookEventName: "InstructionsLoaded", SessionID: "loaded", CWD: project, FilePath: soul,
+		})
 		// CRITICAL-only blocking still stops it: SOUL.md is CRITICAL.
-		response := instructionProtectionTestAPI(t, "claudecode", "action", "CRITICAL").evaluateClaudeCodeHook(
-			ctx, claudeCodeHookRequest{
-				HookEventName: "PreToolUse", SessionID: "unlisted", CWD: project,
-				ToolName: "Write", ToolInput: input,
-			})
-		if response.Action != guardrailActionBlock || !findingStringHasRuleID(response.Findings, wantRule) ||
+		response := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+			HookEventName: "PreToolUse", SessionID: "loaded", CWD: project, ToolName: "Write", ToolInput: input,
+		})
+		if response.Action != guardrailActionBlock || !findingStringHasRuleID(response.Findings, "COG-SOUL") ||
 			response.Severity != "CRITICAL" {
-			t.Fatalf("unlisted hard link (%s): action=%q severity=%q findings=%v", source, response.Action, response.Severity, response.Findings)
+			t.Fatalf("hard link to a loaded file (%s): action=%q severity=%q findings=%v", source, response.Action, response.Severity, response.Findings)
+		}
+		unloaded := instructionProtectionTestAPI(t, "claudecode", "action", "CRITICAL").evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+			HookEventName: "PreToolUse", SessionID: "not-loaded", CWD: project, ToolName: "Write", ToolInput: input,
+		})
+		named := findingStringHasRuleID(unloaded.Findings, "COG-SOUL")
+		if blocked := unloaded.Action == guardrailActionBlock; blocked != (runtime.GOOS == "windows") || named != blocked {
+			t.Fatalf("hard link to an unloaded file in no agent folder (%s): action=%q findings=%v", source, unloaded.Action, unloaded.Findings)
 		}
 	}
 	if runtime.GOOS == "windows" {
@@ -157,11 +207,13 @@ func TestInstructionProtectionUnlistedHardLink(t *testing.T) {
 	// Removing one name leaves the file intact.
 	remove := map[string]interface{}{"command": "rm -f '" + alias + "'"}
 	for source, ctx := range instructionIdentityContexts(t, project, "Bash", remove) {
-		response := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH").evaluateClaudeCodeHook(
-			ctx, claudeCodeHookRequest{
-				HookEventName: "PreToolUse", SessionID: "unlisted", CWD: project,
-				ToolName: "Bash", ToolInput: remove,
-			})
+		api := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH")
+		api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+			HookEventName: "InstructionsLoaded", SessionID: "loaded", CWD: project, FilePath: soul,
+		})
+		response := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+			HookEventName: "PreToolUse", SessionID: "loaded", CWD: project, ToolName: "Bash", ToolInput: remove,
+		})
 		if response.Action == guardrailActionBlock {
 			t.Fatalf("removing a hard-link name (%s) was blocked: %v", source, response.Findings)
 		}

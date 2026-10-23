@@ -31,10 +31,9 @@ var instructionRuleFiles = map[string]string{
 }
 
 const (
-	instructionAliasTitle       = " (written through another name of the file)"
-	instructionHardLinkTitle    = " (a new hard link to the file)"
-	instructionUnknownLinkTitle = "Write to a file with several hard links: its other names cannot be checked against the protected instruction files"
-	instructionUnknownNewLink   = "Hard link whose source cannot be checked against the protected instruction files"
+	instructionAliasTitle     = " (written through another name of the file)"
+	instructionHardLinkTitle  = " (a new hard link to the file)"
+	instructionUnknownNewLink = "Hard link whose source cannot be checked against the protected instruction files"
 )
 
 // provedHighWriteFindings joins a native action's resolved write target to a
@@ -46,9 +45,11 @@ const (
 // An instruction file is protected by file identity, not by the spelling of
 // its name (GAP-0869): a write through a symlink, a hard link or a case,
 // short-name or stream variant is a write to the file, and a new hard link
-// to it is refused. A file with several hard links whose names cannot be
-// listed (POSIX) may be any instruction file, so it is judged as the most
-// severe of them.
+// to it is refused. Another name is matched by file identity against the
+// instruction files agents load and the files the session loaded
+// (hookpaths.InstructionAlias); an ordinary multiply linked file is not one.
+// A new hard link whose source cannot be read may name any instruction
+// file, so it is judged as the most severe of them.
 func provedHighWriteFindings(
 	ctx context.Context,
 	request trustedActionRequest,
@@ -140,14 +141,6 @@ func provedHighWriteFindings(
 			proof: proof,
 		})
 	}
-	addIdentity := func(instruction string, unknown bool, flavor actionfacts.PathFlavor, note, unknownTitle, evidence string) {
-		switch {
-		case instruction != "":
-			addTarget(instruction, flavor, exactProof, note)
-		case unknown:
-			addUnknown(unknownTitle, evidence)
-		}
-	}
 	// gatewayIdentity checks a write target on this host's file system. A
 	// managed gateway that cannot read the user's home sees no file and
 	// relies on the hook client's InstructionIdentityKey below.
@@ -157,9 +150,12 @@ func provedHighWriteFindings(
 		if flavor != hostFlavor || isSandboxHookRequest(ctx) {
 			return
 		}
-		native := filepath.FromSlash(resolved)
-		instruction, unknown := hookpaths.InstructionAlias(native, request.Input.CWD, request.Input.ActiveHome)
-		addIdentity(instruction, unknown, flavor, instructionAliasTitle, instructionUnknownLinkTitle, filepath.Base(native))
+		instruction := hookpaths.InstructionAlias(
+			filepath.FromSlash(resolved), request.Input.CWD, request.Input.ActiveHome, request.Input.ActiveAgentFiles,
+		)
+		if instruction != "" {
+			addTarget(instruction, flavor, exactProof, instructionAliasTitle)
+		}
 	}
 	addClientTarget := func(resolved, note string) {
 		if _, ok := activeAgentInstructionPath(resolved, hostFlavor); !ok {
@@ -208,7 +204,7 @@ func provedHighWriteFindings(
 	// command's hard-link sources (hookpaths.InstructionIdentityKey).
 	switch identity := request.ResolvedWriteTargets[hookpaths.InstructionIdentityKey]; {
 	case identity == hookpaths.InstructionIdentityUnknown:
-		addUnknown(instructionUnknownLinkTitle, "hard link")
+		addUnknown(instructionUnknownNewLink, "hard link")
 	case filepath.IsAbs(identity):
 		addClientTarget(identity, instructionAliasTitle)
 	}
@@ -216,9 +212,14 @@ func provedHighWriteFindings(
 	// it a name the name rules do not know.
 	if command := highWriteShellCommand(request.Input); command != "" {
 		instruction, unknown := hookpaths.InstructionLinkCreation(
-			request.Input.Tool, command, request.Input.CWD, request.Input.ActiveHome,
+			request.Input.Tool, command, request.Input.CWD, request.Input.ActiveHome, request.Input.ActiveAgentFiles,
 		)
-		addIdentity(instruction, unknown, hostFlavor, instructionHardLinkTitle, instructionUnknownNewLink, "hard link")
+		switch {
+		case instruction != "":
+			addTarget(instruction, hostFlavor, exactProof, instructionHardLinkTitle)
+		case unknown:
+			addUnknown(instructionUnknownNewLink, "hard link")
+		}
 	}
 	// A native apply_patch call or a shell invocation of apply_patch carries
 	// targets in its patch envelope. ActionFacts does not project those
