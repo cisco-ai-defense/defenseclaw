@@ -8,9 +8,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 )
 
@@ -22,9 +20,6 @@ func TestRemovedTeardownKeepsAReplacementInstalledDuringTeardown(t *testing.T) {
 		for _, phase := range []string{"before second read", "before publication"} {
 			for _, replacementKind := range []string{"foreign", "marked"} {
 				t.Run(c.name+"/"+phase+"/"+replacementKind, func(t *testing.T) {
-					if phase == "before second read" && (runtime.GOOS == "windows" || c.name == removedOmnigentID) {
-						t.Skip("this phase applies only to the Unix OpenHands in-place writer")
-					}
 					h := newRemovedHost(t)
 					h.stage(t, c)
 					old := removedOmnigentEditedModule
@@ -49,10 +44,16 @@ func TestRemovedTeardownKeepsAReplacementInstalledDuringTeardown(t *testing.T) {
 						installed = true
 					}
 					if phase == "before second read" {
-						removedInPlaceSeams(t, func(_ *os.File, _ []byte, _ int64, _ int) (int, error) {
+						// The replacement lands while the first bytes are saved.
+						write := removedKeepEditedWrite
+						t.Cleanup(func() { removedKeepEditedWrite = write })
+						removedKeepEditedWrite = func(path string, data []byte, mode os.FileMode) error {
+							if err := write(path, data, mode); err != nil {
+								return err
+							}
 							install()
-							return 0, syscall.EIO
-						}, nil)
+							return nil
+						}
 					} else {
 						restore := setAtomicTransformBeforeCommitHookForTest(h.script(c), func(int) { install() })
 						t.Cleanup(restore)
@@ -81,21 +82,25 @@ func TestRemovedTeardownKeepsAReplacementInstalledDuringTeardown(t *testing.T) {
 	}
 }
 
-func TestRemovedTeardownKeepsAnAbsentPathAfterTheFailedWrite(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows refuses the in-place write before the test write seam")
-	}
+// The script goes away while its first bytes are saved: nothing is put at
+// the path and the tokens stay until a later run reads it afresh.
+func TestRemovedTeardownKeepsAnAbsentPathAfterTheFirstRead(t *testing.T) {
 	h := newRemovedHost(t)
 	c := removedOpenHands
 	h.stage(t, c)
 	old := removedOpenHands103Script + "# operator edit\n"
 	writeRemovedFile(t, h.script(c), old, c.mode)
-	removedInPlaceSeams(t, func(_ *os.File, _ []byte, _ int64, _ int) (int, error) {
-		if err := os.Remove(h.script(c)); err != nil {
+	write := removedKeepEditedWrite
+	t.Cleanup(func() { removedKeepEditedWrite = write })
+	removedKeepEditedWrite = func(path string, data []byte, mode os.FileMode) error {
+		if err := write(path, data, mode); err != nil {
+			return err
+		}
+		if err := os.Remove(h.script(c)); err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
-		return 0, syscall.EIO
-	}, nil)
+		return nil
+	}
 	err := c.Teardown(context.Background(), h.opts)
 	if err == nil || !strings.Contains(err.Error(), "its tokens were kept") {
 		t.Fatalf("Teardown = %v, want a refusal with tokens kept", err)
@@ -107,13 +112,10 @@ func TestRemovedTeardownKeepsAnAbsentPathAfterTheFailedWrite(t *testing.T) {
 	h.requireEditedSaved(t, c, old)
 }
 
-// Saving the first marked hook is the last step before opening it for an
-// in-place write. A second marked inode can arrive at that path meanwhile;
-// its other names must not be rewritten by this teardown.
+// Saving the first marked hook comes before the second read. A second
+// marked file can arrive at that path meanwhile; it and its other names must
+// not be replaced by this teardown.
 func TestRemovedTeardownRefusesAnEarlyMarkedReplacement(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows never writes the hook in place")
-	}
 	for _, linked := range []bool{false, true} {
 		name := "one name"
 		if linked {

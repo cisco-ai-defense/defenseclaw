@@ -165,9 +165,11 @@ func TestRemovedTeardownSavesAnEditedOmnigentModule(t *testing.T) {
 	})
 }
 
-// An edited OmniGent module with hard links gets a separate saved copy,
-// then a refusal with its original bytes intact. An OpenHands hook saves
-// both the first read and a later edit seen after an in-place write fails.
+// The edit is saved before the publication that replaces it, and so is a
+// change made after the first read. A hard-linked module is left whole
+// under every name, with its tokens, whatever the save did; once its other
+// names are gone the next run saves nothing again and publishes the stub
+// over it.
 func TestRemovedTeardownSavesTheEditBeforeEveryWrite(t *testing.T) {
 	c := removedOmnigent
 	t.Run("hard links", func(t *testing.T) {
@@ -175,78 +177,55 @@ func TestRemovedTeardownSavesTheEditBeforeEveryWrite(t *testing.T) {
 		h.stage(t, c)
 		writeRemovedFile(t, h.script(c), removedOmnigentEditedModule, 0o600)
 		links := h.removedHardLinks(t, c)
-		first, err := os.Stat(links[0])
+		first, err := os.Stat(h.script(c))
 		if err != nil {
 			t.Fatal(err)
 		}
 		err = c.Teardown(context.Background(), h.opts)
 		h.requireLeftStep(t, c, err, c.hardLinkStep(h.script(c)))
-		for _, name := range append([]string{h.script(c)}, links...) {
-			if body, readErr := os.ReadFile(name); readErr != nil || string(body) != removedOmnigentEditedModule {
-				t.Fatalf("linked module %s = %q, %v; want original bytes", name, body, readErr)
-			}
-			if info, statErr := os.Stat(name); statErr != nil || !os.SameFile(info, first) {
-				t.Fatalf("linked module %s changed identity: %v", name, statErr)
+		requireRemovedNamesWhole(t, first, removedOmnigentEditedModule, append([]string{h.script(c)}, links...))
+		h.requireTokensKept(t, c)
+		for _, link := range links {
+			if err := os.Remove(link); err != nil {
+				t.Fatal(err)
 			}
 		}
-		h.requireTokensKept(t, c)
+		if err := c.Teardown(context.Background(), h.opts); err != nil {
+			t.Fatal(err)
+		}
+		h.requireStub(t, c)
 		h.requireEditedSaved(t, c, removedOmnigentEditedModule)
 		if copies := h.editedCopies(t, c); len(copies) != 1 {
 			t.Fatalf("saved copies = %v, want one", copies)
 		}
 	})
-	t.Run("the rename after the write into the file failed", func(t *testing.T) {
-		c := removedOpenHands
+	t.Run("a change after the first read", func(t *testing.T) {
 		h := newRemovedHost(t)
 		h.stage(t, c)
-		old := removedOpenHands103Script + "# initial edit\n"
-		writeRemovedFile(t, h.script(c), old, c.mode)
-		later := old + "# a later change\n"
-		removedInPlaceSeams(t, func(file *os.File, data []byte, offset int64, call int) (int, error) {
-			// Another change lands, then the write fails before a byte.
-			if err := os.WriteFile(h.script(c), []byte(later), c.mode); err != nil {
-				t.Fatal(err)
+		writeRemovedFile(t, h.script(c), removedOmnigentEditedModule, 0o600)
+		later := removedOmnigentEditedModule + "# a later change\n"
+		saveWrite := removedKeepEditedWrite
+		t.Cleanup(func() { removedKeepEditedWrite = saveWrite })
+		changed := false
+		removedKeepEditedWrite = func(saved string, data []byte, perm os.FileMode) error {
+			if err := saveWrite(saved, data, perm); err != nil {
+				return err
 			}
-			return 0, syscall.EIO
-		}, nil)
+			if !changed {
+				// Another change lands while the first save is made.
+				changed = true
+				if err := os.WriteFile(h.script(c), []byte(later), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return nil
+		}
 		if err := c.Teardown(context.Background(), h.opts); err != nil {
 			t.Fatalf("Teardown: %v", err)
 		}
 		h.requireStub(t, c)
-		h.requireEditedSaved(t, c, old)
-		if runtime.GOOS != "windows" {
-			// Windows never writes into the file, so the later change never
-			// lands there.
-			h.requireEditedSaved(t, c, later)
-		}
-	})
-	t.Run("the write into the file saves what it reads", func(t *testing.T) {
-		c := removedOpenHands
-		h := newRemovedHost(t)
-		h.stage(t, c)
-		old := removedOpenHands103Script + "# initial edit\n"
-		writeRemovedFile(t, h.script(c), old, c.mode)
-		verified, statErr := os.Stat(h.script(c))
-		if statErr != nil {
-			t.Fatal(statErr)
-		}
-		var got []byte
-		_, err := c.writeStubInPlace(h.script(c), verified, func(old []byte, _ os.FileInfo) error {
-			got = append([]byte(nil), old...)
-			return errors.New("the disk is full")
-		})
-		if runtime.GOOS == "windows" {
-			if err == nil {
-				t.Fatal("Windows wrote into the file")
-			}
-			return
-		}
-		if err == nil || !strings.Contains(err.Error(), "the disk is full") || string(got) != old {
-			t.Fatalf("writeStubInPlace = %v, saved %q; want the save of the bytes it read to stop it", err, got)
-		}
-		if data, _ := os.ReadFile(h.script(c)); string(data) != old {
-			t.Fatalf("a failed save let the write change the module: %q", data)
-		}
+		h.requireEditedSaved(t, c, removedOmnigentEditedModule)
+		h.requireEditedSaved(t, c, later)
 	})
 }
 
@@ -562,12 +541,10 @@ func requireRemovedCopyOfItsOwn(t *testing.T, saved string, not os.FileInfo) {
 	}
 }
 
-// An OpenHands hook may have another name outside the hooks folder. Writing
-// the stub into its inode must not destroy edits at that other name.
-func TestRemovedOpenHandsHardLinkEditIsSavedBeforeInPlaceWrite(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows does not write the stub into a hard-linked script")
-	}
+// An OpenHands hook may have another name outside the hooks folder. The
+// teardown never writes into its file, so the edit at that other name stays
+// as it is, the hook keeps its tokens and the step names the other name.
+func TestRemovedOpenHandsHardLinkIsLeftWholeWithItsEdit(t *testing.T) {
 	c := removedOpenHands
 	for _, failSave := range []bool{false, true} {
 		t.Run(map[bool]string{false: "saved", true: "save fails"}[failSave], func(t *testing.T) {
@@ -599,11 +576,9 @@ func TestRemovedOpenHandsHardLinkEditIsSavedBeforeInPlaceWrite(t *testing.T) {
 				h.requireTokensKept(t, c)
 				return
 			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			h.requireStub(t, c)
-			h.requireStubUnderEveryName(t, c, oldInfo, []string{outside})
+			h.requireLeftStep(t, c, err, c.hardLinkStep(h.script(c)))
+			requireRemovedNamesWhole(t, oldInfo, body, []string{h.script(c), outside})
+			h.requireTokensKept(t, c)
 			h.requireEditedSaved(t, c, body)
 		})
 	}

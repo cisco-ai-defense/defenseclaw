@@ -3581,6 +3581,157 @@ def _rotate_token_scoped_connectors(cfg: Any, data_dir: str) -> list[str]:
     return sorted(result)
 
 
+_TOKEN_ROTATION_HOOK_PROOF_TIMEOUT_SECONDS = 120
+_TOKEN_ROTATION_RUNTIME_STATE_MAX_BYTES = 64 << 10
+
+
+def _rotate_token_true(value: Any) -> bool:
+    """Read a config boolean as the gateway does (strconv.ParseBool)."""
+
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "t", "true"}
+
+
+def _rotate_token_hook_enabled_scopes(config_bytes: bytes) -> set[str] | None:
+    """Return the connectors whose hook requests the gateway evaluates outside the roster.
+
+    ``connector_hooks.<name>.enabled`` (and the legacy top-level
+    ``claude_code.enabled`` / ``codex.enabled``) opts a connector's hook route
+    in even when ``guardrail.connectors`` does not name it (agentHookEnabled
+    in internal/gateway/agent_hook.go). ``None`` means the config could not be
+    read, so every hook is taken to be enabled.
+    """
+
+    import yaml
+
+    try:
+        raw = yaml.safe_load(config_bytes.decode("utf-8")) if config_bytes else {}
+    except (UnicodeDecodeError, yaml.YAMLError):
+        return None
+    if raw is None:
+        return set()
+    if not isinstance(raw, dict):
+        return None
+    scopes: set[str] = set()
+    hooks = raw.get("connector_hooks")
+    if isinstance(hooks, dict):
+        for name, hook in hooks.items():
+            if isinstance(name, str) and isinstance(hook, dict) and _rotate_token_true(hook.get("enabled")):
+                scopes.add(normalize_connector(name))
+    for key, name in (("claude_code", "claudecode"), ("codex", "codex")):
+        legacy = raw.get(key)
+        if isinstance(legacy, dict) and _rotate_token_true(legacy.get("enabled")):
+            scopes.add(name)
+    return scopes
+
+
+def _rotate_token_runtime_roster(data_dir: str) -> set[str] | None:
+    """Return the connectors the gateway's runtime state still owns.
+
+    The gateway keeps a connector in ``active_connector.json`` while it is
+    active and while its removal is still being retried, so its hooks may
+    still be registered. ``None`` means the state could not be read.
+    """
+
+    path = os.path.join(data_dir, "active_connector.json")
+    if not os.path.lexists(path):
+        return set()
+    try:
+        reject_symlink(path)
+        with open(path, "rb") as stream:
+            body = stream.read(_TOKEN_ROTATION_RUNTIME_STATE_MAX_BYTES + 1)
+        if len(body) > _TOKEN_ROTATION_RUNTIME_STATE_MAX_BYTES:
+            return None
+        state = _json.loads(body.decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    names = state.get("names")
+    raw_names = list(names) if isinstance(names, list) else []
+    raw_names.append(state.get("name"))
+    return {normalize_connector(name) for name in raw_names if isinstance(name, str) and name.strip()}
+
+
+def _rotate_token_hook_registration_clean(data_dir: str, config_file: str, connector: str) -> bool:
+    """Whether the gateway proves that no agent registers *connector*'s hooks any more.
+
+    Runs ``defenseclaw-gateway connector verify`` (VerifyClean), the proof
+    per-user teardown gives before it revokes a credential
+    (revokePerUserHookAPIToken). An unknown connector, which neither this
+    build nor a plugin ships, has no DefenseClaw hook and no gateway route
+    that accepts its sidecar. Anything else, including a proof that cannot
+    run, is not clean.
+    """
+
+    executable = _gateway_lifecycle_executable()
+    if not executable:
+        return False
+    env = _rotate_token_child_environment(data_dir, config_file, "")
+    env.pop(_GATEWAY_TOKEN_ENV, None)
+    command = [executable, "connector", "verify", "--connector", connector, "--data-dir", data_dir, "--json"]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            timeout=_TOKEN_ROTATION_HOOK_PROOF_TIMEOUT_SECONDS,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if result.returncode == 2:
+        return f'unknown connector "{connector}"' in (result.stderr or "")
+    if result.returncode != 0:
+        return False
+    lines = (result.stdout or "").strip().splitlines()
+    try:
+        payload = _json.loads(lines[-1]) if lines else None
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("connector") == connector and payload.get("clean") is True
+
+
+def _rotate_token_live_unconfigured_scopes(
+    cfg: Any,
+    config_bytes: bytes,
+    data_dir: str,
+    config_file: str,
+    connectors: list[str],
+) -> list[str]:
+    """Return the unconfigured sidecar owners whose hooks may still call the gateway.
+
+    A registered hook that finds no credential lets every call through in
+    fail mode open, so rotation revokes a sidecar only after proving its hook
+    can no longer run: the gateway's runtime state does not own the
+    connector, no config enables its hook route, application protection
+    cannot activate it, and VerifyClean proves no agent registers its hooks.
+    Every other sidecar is rotated like a configured one.
+    """
+
+    if not connectors:
+        return []
+    runtime = _rotate_token_runtime_roster(data_dir)
+    enabled_hooks = _rotate_token_hook_enabled_scopes(config_bytes)
+    application = getattr(cfg, "application_protection", None)
+    application_enabled = getattr(application, "effective_enabled", None)
+    live: list[str] = []
+    for connector in connectors:
+        if (
+            runtime is None
+            or connector in runtime
+            or enabled_hooks is None
+            or connector in enabled_hooks
+            or (callable(application_enabled) and bool(application_enabled(connector)))
+            or not _rotate_token_hook_registration_clean(data_dir, config_file, connector)
+        ):
+            live.append(connector)
+    return live
+
+
 def _rotate_token_hook_path(data_dir: str, connector: str) -> str:
     scope = _rotate_token_hook_scope(connector)
     return os.path.join(data_dir, "hooks", f".hook-{scope}.token")
@@ -3902,6 +4053,32 @@ def _rotate_token_verify_restored_hook_snapshots_locked(snapshots: list[_RotateT
         ) from first_error
 
 
+@dataclass(frozen=True)
+class _RotateTokenOutcome:
+    rotated_unconfigured: tuple[str, ...] = ()
+    revoked: tuple[str, ...] = ()
+
+
+def _rotate_token_verify_live_orphans_locked(data_dir: str, config_file: str, values: dict[str, str]) -> None:
+    """Prove each rotated unconfigured sidecar converged or its hook is gone.
+
+    Gateway B may finish removing such a connector while it starts, and that
+    teardown revokes the credential only after VerifyClean. A credential that
+    is gone while a hook still registers would let that hook allow every call
+    in fail mode open, so it fails the rotation and A is restored.
+    """
+
+    for connector, expected in sorted(values.items()):
+        snapshot = _rotate_token_hook_snapshot_locked(data_dir, connector)
+        if snapshot.existed:
+            if snapshot.fingerprint != _rotate_token_hook_fingerprint(expected):
+                raise click.ClickException("A connector hook credential did not converge during token rotation.")
+        elif not _rotate_token_hook_registration_clean(data_dir, config_file, connector):
+            raise click.ClickException(
+                f"The {connector} hook is still registered but lost its credential during token rotation."
+            )
+
+
 def _rotate_token_verify_hook_values_locked(data_dir: str, values: dict[str, str]) -> None:
     for connector, expected in sorted(values.items()):
         snapshot = _rotate_token_hook_snapshot_locked(data_dir, connector)
@@ -4140,8 +4317,14 @@ class _RotateTokenConnectorPolicy:
 def _rotate_token_connector_state(
     cfg: Any,
     hook_token_fingerprints: dict[str, str] | None = None,
+    orphan_hook_token_fingerprints: dict[str, str] | None = None,
 ) -> str:
-    """Serialize the complete configured connector posture for A/B verification."""
+    """Serialize the complete configured connector posture for A/B verification.
+
+    ``orphan_hook_token_fingerprints`` names the rotated credentials of
+    unconfigured connectors whose hooks may still run. Readiness proves the
+    gateway accepts each one, unless the gateway's own teardown revoked it.
+    """
 
     if hasattr(cfg, "active_connectors"):
         configured = cfg.active_connectors()
@@ -4187,9 +4370,12 @@ def _rotate_token_connector_state(
             for policy in sorted(policies.values(), key=lambda policy: policy.name)
         ],
     }
-    if hook_token_fingerprints:
-        configured_fingerprints: dict[str, str] = {}
-        for raw_name, fingerprint in hook_token_fingerprints.items():
+    for key, fingerprints, configured in (
+        ("hook_token_fingerprints", hook_token_fingerprints, True),
+        ("orphan_hook_token_fingerprints", orphan_hook_token_fingerprints, False),
+    ):
+        checked: dict[str, str] = {}
+        for raw_name, fingerprint in (fingerprints or {}).items():
             name = _rotate_token_hook_scope(raw_name)
             if name != raw_name:
                 raise click.ClickException(
@@ -4203,15 +4389,13 @@ def _rotate_token_connector_state(
                 raise click.ClickException(
                     "Connector hook credential fingerprint is invalid; refusing token rotation."
                 )
-            if name not in policies:
+            if (name in policies) != configured:
                 raise click.ClickException(
-                    "An unconfigured connector has a hook credential in the rotation state; refusing token rotation."
+                    "A connector hook credential is in the wrong rotation roster; refusing token rotation."
                 )
-            configured_fingerprints[name] = fingerprint
-        if configured_fingerprints:
-            payload["hook_token_fingerprints"] = {
-                name: configured_fingerprints[name] for name in sorted(configured_fingerprints)
-            }
+            checked[name] = fingerprint
+        if checked:
+            payload[key] = {name: checked[name] for name in sorted(checked)}
     return _json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
@@ -4331,7 +4515,7 @@ def _rotate_token_transaction(
     recover_previous_runtime: bool = True,
     scoped_connectors: tuple[str, ...] = (),
     require_complete_scoped_roster: bool = False,
-) -> None:
+) -> _RotateTokenOutcome:
     """Commit gateway and scoped token B only between stop(A) and start(B).
 
     Normal operator-initiated rotation restores ready gateway A if B cannot
@@ -4372,18 +4556,28 @@ def _rotate_token_transaction(
             raise click.ClickException(
                 "Connector hook credential scope changed before rotation; no credentials were modified."
             )
-        # An unconfigured sidecar can still authenticate against a gateway
-        # hook route. Revoke it without presenting it as a runtime owner.
         persisted_scopes = set(_rotate_token_persisted_hook_scopes(data_dir))
         # Removed hooks that fail open without their credential still need the
         # kept sidecar to reach the gateway's blocking retired route.
-        orphan_scopes = sorted(persisted_scopes - configured_scopes - KEPT_HOOK_TOKEN_NAMES)
+        unconfigured_scopes = sorted(persisted_scopes - configured_scopes - KEPT_HOOK_TOKEN_NAMES)
         tracked_scopes = sorted(configured_scopes | persisted_scopes)
         for connector in tracked_scopes:
             hook_locks.enter_context(locked_file_update(_rotate_token_hook_path(data_dir, connector)))
         _rotate_token_preflight_writable(
-            [_rotate_token_hook_path(data_dir, connector) for connector in orphan_scopes]
+            [_rotate_token_hook_path(data_dir, connector) for connector in unconfigured_scopes]
         )
+        # An unconfigured sidecar can still authenticate against a gateway
+        # hook route, so it is revoked once its hook can no longer run. One
+        # whose hook may still run is rotated: deleting it would let that hook
+        # allow every call in fail mode open.
+        live_orphan_scopes = _rotate_token_live_unconfigured_scopes(
+            authoritative_cfg,
+            config_snapshot,
+            data_dir,
+            config_file,
+            unconfigured_scopes,
+        )
+        orphan_scopes = [connector for connector in unconfigured_scopes if connector not in live_orphan_scopes]
         if require_complete_scoped_roster and set(requested_scopes) != set(
             _rotate_token_scoped_connectors(authoritative_cfg, data_dir)
         ):
@@ -4406,6 +4600,11 @@ def _rotate_token_transaction(
             hook_snapshot.connector: hook_snapshot.fingerprint
             for hook_snapshot in hook_snapshots
             if hook_snapshot.connector in requested_scopes and hook_snapshot.fingerprint is not None
+        }
+        old_orphan_fingerprints = {
+            hook_snapshot.connector: hook_snapshot.fingerprint
+            for hook_snapshot in hook_snapshots
+            if hook_snapshot.connector in live_orphan_scopes and hook_snapshot.fingerprint is not None
         }
         hook_windows_security = {
             hook_snapshot.connector: hook_snapshot.windows_security for hook_snapshot in hook_snapshots
@@ -4441,14 +4640,18 @@ def _rotate_token_transaction(
             old_stopped = True
 
             new_hook_values = _rotate_token_new_hook_values(
-                requested_scopes,
+                [*requested_scopes, *live_orphan_scopes],
                 new_token,
-                old_hook_fingerprints,
+                {**old_hook_fingerprints, **old_orphan_fingerprints},
             )
             new_hook_fingerprints = {
                 connector: _rotate_token_hook_fingerprint(value) for connector, value in new_hook_values.items()
             }
-            connector_state_b = _rotate_token_connector_state(authoritative_cfg, new_hook_fingerprints)
+            connector_state_b = _rotate_token_connector_state(
+                authoritative_cfg,
+                {name: value for name, value in new_hook_fingerprints.items() if name in requested_scopes},
+                {name: value for name, value in new_hook_fingerprints.items() if name in live_orphan_scopes},
+            )
             mutation_attempted = True
             atomic_write_private_bytes(dotenv_path, _rotate_token_render(snapshot, new_token))
             for connector, value in sorted(new_hook_values.items()):
@@ -4471,7 +4674,15 @@ def _rotate_token_transaction(
                 config_file=config_file,
                 connector_state=connector_state_b,
             )
-            _rotate_token_verify_hook_values_locked(data_dir, new_hook_values)
+            _rotate_token_verify_hook_values_locked(
+                data_dir,
+                {name: value for name, value in new_hook_values.items() if name in requested_scopes},
+            )
+            _rotate_token_verify_live_orphans_locked(
+                data_dir,
+                config_file,
+                {name: value for name, value in new_hook_values.items() if name in live_orphan_scopes},
+            )
             if any(os.path.lexists(_rotate_token_hook_path(data_dir, connector)) for connector in orphan_scopes):
                 raise click.ClickException("A removed connector hook credential was recreated during rotation.")
             current_config, current_mode = _snapshot_regular_file(config_file, what="gateway config")
@@ -4483,6 +4694,7 @@ def _rotate_token_transaction(
                 audit_details,
                 allow_offline=False,
             )
+            return _RotateTokenOutcome(rotated_unconfigured=tuple(live_orphan_scopes), revoked=tuple(orphan_scopes))
         except BaseException as primary_error:
             if not old_stopped:
                 raise
@@ -4588,7 +4800,8 @@ def _refuse_rotate_token_on_managed_host() -> None:
     "--connector",
     default=None,
     help=(
-        "Optional presentation hint (rotation covers configured scopes and revokes unconfigured sidecars)."
+        "Optional presentation hint (rotation covers configured scopes and every hook that may still run, "
+        "and revokes unconfigured sidecars whose hooks are gone)."
     ),
 )
 @click.option(
@@ -4608,10 +4821,11 @@ def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
     refreshes every affected hook/plugin and verifies gateway B. Any post-stop
     failure restores the exact credential snapshots and prior ready generation.
 
-    Rotation is global by design: configured scoped-hook credentials receive
-    distinct replacements, and safely discovered unconfigured sidecars are
-    revoked in the same transaction. ``--connector`` remains a presentation
-    hint and never narrows this security boundary.
+    Rotation is global by design: configured scoped-hook credentials, and
+    those of unconfigured connectors whose hooks may still run, receive
+    distinct replacements; an unconfigured sidecar is revoked in the same
+    transaction once the gateway proves its hook is gone. ``--connector``
+    remains a presentation hint and never narrows this security boundary.
 
     Plan B5 / S0.5.
     """
@@ -4655,7 +4869,8 @@ def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
         scope = f"{len(scoped_actives)} scoped-hook credential(s)" if scoped_actives else "no scoped-hook credential"
         click.confirm(
             f"This will rotate DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path},\n"
-            f"replace configured scoped-hook credentials and revoke unconfigured sidecars ({scope}),\n"
+            f"replace configured scoped-hook credentials ({scope}) and those of hooks that may still run,\n"
+            "revoke unconfigured sidecars whose hooks are gone,\n"
             "refresh their hooks/plugins, and restart the gateway. Continue?",
             abort=True,
         )
@@ -4668,10 +4883,11 @@ def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
     # The transaction lets this typed error escape only before mutation or
     # after generation A's exact snapshots and required ready runtime have
     # been restored. Unsafe rollback/recovery failures become fatal Click errors.
+    outcome = _RotateTokenOutcome()
     for attempt in range(2):
         new_token = secrets.token_hex(32)
         try:
-            _rotate_token_transaction(
+            outcome = _rotate_token_transaction(
                 app,
                 dotenv_path,
                 new_token,
@@ -4701,6 +4917,11 @@ def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
         ux.subhead("no connector-scoped hook credentials to rotate")
     else:
         ux.subhead("active connector roster: none")
+    for name in outcome.rotated_unconfigured:
+        ux.warn(
+            f"{name} is not configured, but its hook may still run, so its credential was rotated "
+            f"too. Remove its hook with: defenseclaw setup remove {name}"
+        )
     click.echo()
     ux.subhead("Next step: restart each agent so it picks up the new token in its")
     ux.subhead("inspect / hook subprocess invocations.")

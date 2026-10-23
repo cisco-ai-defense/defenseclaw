@@ -380,9 +380,9 @@ func TestRemovedConnectorLockEntryIsNeverCleared(t *testing.T) {
 }
 
 // A known token-path refusal is found before the stub changes anything. A
-// failed OpenHands publication keeps the in-place stub; a failed OmniGent
-// publication keeps the old complete module for a retry. VerifyClean fails
-// until cleanup finishes.
+// publication that fails leaves the old script whole for a retry, with its
+// tokens; nothing is ever written into it. VerifyClean fails until cleanup
+// finishes.
 func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 	for _, c := range removedConnectorsUnderTest() {
 		t.Run(c.name+"/a token cannot be revoked", func(t *testing.T) {
@@ -449,9 +449,11 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 				t.Fatal("VerifyClean passed with the old hook in place")
 			}
 		})
-		// A failed publication leaves OpenHands' in-place stub or OmniGent's
-		// complete old module, with tokens kept for a retry.
-		t.Run(c.name+"/the stub's copy cannot be published", func(t *testing.T) {
+		// The stub's copy cannot be renamed over the script: the old
+		// script is left whole, the same file with its bytes, and the
+		// tokens stay until the next start, which renames the stub and
+		// revokes them. Nothing is ever written into the old script.
+		t.Run(c.name+"/the stub's copy cannot be renamed", func(t *testing.T) {
 			if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 				t.Skip("directory modes do not stop writes here")
 			}
@@ -462,9 +464,13 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 				t.Fatal(readErr)
 			}
 			hooks := filepath.Join(h.dataDir, "hooks")
-			skip := append([]string{h.script(c)}, h.tokens(c)...)
+			var skip []string
 			if c.name == removedOpenHandsID {
 				skip = append(skip, c.editedCopyPath(h.dataDir, []byte(removedOpenHands103Script)))
+			}
+			first, err := os.Stat(h.script(c))
+			if err != nil {
+				t.Fatal(err)
 			}
 			before := h.snapshot(t, skip...)
 			if err := os.Chmod(hooks, 0o500); err != nil {
@@ -472,26 +478,17 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = os.Chmod(hooks, 0o700) })
 			conn, _ := RetiredConnector(c.name)
-			if err := conn.Teardown(context.Background(), h.opts); err == nil || !strings.Contains(err.Error(), "its tokens were kept") {
-				t.Fatalf("Teardown = %v, want the publication failure", err)
+			if err := conn.Teardown(context.Background(), h.opts); err == nil || !strings.Contains(err.Error(), "publish the stub that blocks every call over") ||
+				!strings.Contains(err.Error(), "its tokens were kept") {
+				t.Fatalf("Teardown = %v, want the publication failure and the tokens kept", err)
 			}
 			if err := os.Chmod(hooks, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			want := c.tombstone
-			if c.name == removedOmnigentID {
-				want = string(beforeBody)
-			}
-			if data, err := os.ReadFile(h.script(c)); err != nil || string(data) != want {
-				t.Fatalf("%s = %q, %v; want complete prior or stub bytes", h.script(c), data, err)
-			}
-			for _, token := range h.tokens(c) {
-				if _, err := os.Lstat(token); err != nil {
-					t.Fatalf("token %s was revoked before the teardown finished: %v", token, err)
-				}
-			}
+			requireRemovedNamesWhole(t, first, string(beforeBody), []string{h.script(c)})
+			h.requireTokensKept(t, c)
 			if err := conn.VerifyClean(h.opts); err == nil {
-				t.Fatal("VerifyClean passed with the tokens left")
+				t.Fatal("VerifyClean passed with the old script at the path")
 			}
 			requireRemovedSame(t, "a teardown whose publication failed", h.snapshot(t, skip...), before)
 			if err := conn.Teardown(context.Background(), h.opts); err != nil {
