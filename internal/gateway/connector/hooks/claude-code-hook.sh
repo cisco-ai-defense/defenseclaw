@@ -105,6 +105,8 @@ readonly FAIL_MODE{{else if .Managed}}# Managed hooks use the installer-owned de
 FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="{{.FailMode}}"
 # The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
 # environment is not read, so status and doctor report what runs (GAP-0315).{{end}}
+{{if and (not .Managed) (not .Sandbox)}}defenseclaw_close_during_install
+{{end}}
 
 # Bail early on missing token: see codex-hook.sh +
 # defenseclaw_handle_missing_token in _hardening.sh for rationale.
@@ -115,7 +117,8 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
 # fail mode: the agent chooses the size.
 {{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
-  echo "defenseclaw: claudecode hook refusing oversized payload" >&2
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{end}}  echo "defenseclaw: claudecode hook refusing oversized payload" >&2
   if [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" != "open" ]; then
     printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
     exit 2
@@ -201,7 +204,9 @@ claude_fail_closed_decision() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
-  if [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.stopped" ]; then
+  if [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/.install.lock" ] && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
+    reason="DefenseClaw blocked this: ${next//\`/}."
+  elif [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.stopped" ]; then
     reason="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection."
   elif [ "$1" = "gateway unreachable" ] && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
     reason="DefenseClaw blocked this: ${next//\`/}."
@@ -362,7 +367,9 @@ defenseclaw_split_response
 {{else}}if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  fail_response "gateway returned HTTP ${HTTP_CODE}"
+{{else}}  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{end}}
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi{{end}}

@@ -217,6 +217,13 @@ func (a *App) holdSession(ctx context.Context, name string, running func(context
 			_ = f.Close()
 		})
 	}
+	// After the lease is in place: a look at the copy that read the stamp
+	// and then counted no lease, so missed this attach, finds the stamp
+	// changed when it would record what it saw (attachStamp).
+	if err := a.bumpAttachStamp(name); err != nil {
+		release()
+		return nil, fmt.Errorf("cannot record the session with %s: %w; run `%s status %s` before retrying", name, err, CommandName, name)
+	}
 	if running != nil {
 		if err := running(ctx); err != nil {
 			release()
@@ -224,6 +231,65 @@ func (a *App) holdSession(ctx context.Context, name string, running func(context
 		}
 	}
 	return release, nil
+}
+
+// attachStampFile, next to the leases, changes with every attach
+// (holdSession) and every `sandbox exec`: a session that attached and
+// ended between two looks leaves no lease, but a new stamp.
+const attachStampFile = ".attach-stamp"
+
+// attachStamp reads sandbox name's attach stamp: "" when nothing attached
+// yet. ok is false when it cannot be read; such a stamp matches no other
+// (copyBase.unchanged).
+func (a *App) attachStamp(name string) (stamp string, ok bool) {
+	dir, err := a.sessionsDir(name)
+	if err != nil {
+		return "", false
+	}
+	f, err := os.OpenFile(filepath.Join(dir, attachStampFile), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", true
+	}
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	var b [64]byte
+	n, err := f.Read(b[:])
+	if err != nil || n == 0 {
+		return "", false
+	}
+	return string(b[:n]), true
+}
+
+// bumpAttachStamp gives sandbox name a new attach stamp, in one rename.
+func (a *App) bumpAttachStamp(name string) error {
+	dir, err := a.sessionsDir(name)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	var id [12]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, attachStampFile+".*.new")
+	if err != nil {
+		return err
+	}
+	_, err = tmp.WriteString(hex.EncodeToString(id[:]))
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), filepath.Join(dir, attachStampFile))
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+	}
+	return err
 }
 
 // afterLeaseCreate runs once an attach created its lease file, before it

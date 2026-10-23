@@ -1158,6 +1158,20 @@ defenseclaw_hook_delivery_outcome() {
   printf '%s' "$outcome"
 }
 
+# While this account is being installed or upgraded, no failure may approve
+# a hook call. Call after the installed mode is selected so both transport
+# and response failures see the closed mode. Managed and Secure Client hooks
+# use administrator-owned delivery policy instead of this per-user marker.
+defenseclaw_close_during_install() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+  esac
+  local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    FAIL_MODE=closed
+  fi
+}
+
 # defenseclaw_gateway_binary DATA_DIR HOME prints the per-user gateway binary
 # a cold start runs: the one that last ran this data directory, then the
 # installer's ~/.local/bin, then the hardened PATH.
@@ -1514,9 +1528,8 @@ defenseclaw_response_failure_reason() {
 # enabled. A guardian-installed managed hook's FAIL_MODE is the one the
 # administrator's config resolved, baked at render time (owner decision
 # 2026-10-20; under Secure Client #1163), and never DEFENSECLAW_FAIL_MODE.
-# Fail mode therefore has one consistent meaning across malformed responses,
-# auth failures, and transport failures instead of silently opening only the
-# latter class.
+# Managed standalone hooks still close malformed and error responses; the
+# administrator's open choice applies only to an outage.
 defenseclaw_should_fail_closed_on_unreachable() {
   # Only an explicit open opens: an unset, empty or unknown FAIL_MODE closes.
   case "${FAIL_MODE:-}" in

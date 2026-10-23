@@ -152,6 +152,8 @@ if ! defenseclaw_harden_env; then
   echo "defenseclaw: environment hardening failed{{if .SecureClient}}, allowing copilot tool{{end}}" >&2
   {{$failure}}
 fi
+{{if not .Managed}}defenseclaw_close_during_install
+{{end}}
 
 {{if .Managed}}# A standalone hook denies every call it cannot check. A Secure Client hook
 # keeps Copilot's upstream fail-open and ignores inherited strict or closed

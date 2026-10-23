@@ -431,6 +431,10 @@ func runHook(ctx context.Context, opts Options) int {
 	}
 	opts = withDefaults(opts)
 	opts.StartedAt = startedAt
+	if perUserInstallInProgress(opts) {
+		opts.FailMode = "closed"
+		opts.StrictAvailability = true
+	}
 
 	sp, ok := specFor(opts.Connector)
 	if ok && copilotVSCodeLocal(opts) {
@@ -2052,6 +2056,9 @@ func emitFailOpenAllow(opts Options, sp spec, reason string) int {
 }
 
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
+	if perUserInstallInProgress(opts) {
+		failMode = "closed"
+	}
 	failMode = managedNonOutageMode(&opts, failMode)
 	if failMode == "closed" {
 		// A refusal passed in closed (a peer DefenseClaw cannot verify, an
@@ -2424,6 +2431,9 @@ func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
 func failResponse(opts Options, sp spec, failMode, reason string) int {
+	if perUserInstallInProgress(opts) {
+		failMode = "closed"
+	}
 	// The gateway answered, or a local check failed: never an outage.
 	failMode = managedNonOutageMode(&opts, failMode)
 	if failMode == "closed" {
@@ -2461,6 +2471,17 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 		return emitPerUserGatewayDown(opts, sp, opts.gatewayRefusal)
 	}
 	return emitHookResult(opts, sp, sp.responseClosed)
+}
+
+// perUserInstallInProgress forces closed while the account's installer owns
+// its data directory. Treat a symlink marker as present too, so changing its
+// type cannot open a hook during install or upgrade.
+func perUserInstallInProgress(opts Options) bool {
+	if opts.ManagedEnterprise || opts.SecureClient || opts.Home == "" {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(opts.Home, ".install.lock"))
+	return err == nil
 }
 
 func responseFailureReason(reason string) string {

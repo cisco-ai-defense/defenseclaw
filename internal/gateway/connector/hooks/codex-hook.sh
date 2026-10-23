@@ -99,6 +99,8 @@ readonly FAIL_MODE{{else if .Managed}}# Managed hooks use the installer-owned de
 FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="{{.FailMode}}"
 # The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
 # environment is not read, so status and doctor report what runs (GAP-0315).{{end}}
+{{if and (not .Managed) (not .Sandbox)}}defenseclaw_close_during_install
+{{end}}
 
 # Setup binds each handler to one finite vendor event and hook contract. Keep
 # those values out of environment variables so the registered command remains
@@ -238,9 +240,8 @@ fail_unreachable() {
 }
 
 # Response-layer failure: gateway answered but the answer was bad
-# (auth failure, malformed JSON, missing action). These usually
-# indicate misconfiguration — respect FAIL_MODE so an operator who
-# explicitly set FAIL_MODE=closed is told about a real problem.
+# (auth failure, malformed JSON, missing action). A managed standalone
+# administrator's open choice covers an outage only.
 fail_response() {
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
   # outage only (the service not running, restarting or giving no answer
@@ -402,7 +403,9 @@ RESULT=$(echo "$RESPONSE" | sed '$d')
 if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  fail_response "gateway returned HTTP ${HTTP_CODE}"
+{{else}}  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{end}}
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi{{end}}

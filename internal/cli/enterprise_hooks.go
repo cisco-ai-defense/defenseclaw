@@ -2254,10 +2254,6 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	if cfg == nil {
 		return run, fmt.Errorf("enterprise hooks reconcile: config is not loaded")
 	}
-	// Every pass, after its removals: outage allows work again once the
-	// gateway or an earlier pass removed the protected session record key
-	// (GAP-0352).
-	defer ensureEnterpriseForeignHookSessionKey(os.Stderr)
 	if enterpriseHooksStandaloneUnixActive() {
 		started := time.Now()
 		run, err := runEnterpriseHookReconcileOnceStandaloneUnix(ctx)

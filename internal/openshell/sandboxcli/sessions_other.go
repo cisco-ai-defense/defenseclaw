@@ -33,3 +33,7 @@ func (a *App) lockForStop(context.Context, string) (others int, release func(), 
 }
 
 func (a *App) attachedSessions(string) (int, error) { return 0, nil }
+
+func (a *App) attachStamp(string) (stamp string, ok bool) { return "", true }
+
+func (a *App) bumpAttachStamp(string) error { return nil }

@@ -246,6 +246,38 @@ func (a *App) markStoppedCopy(sb *sandboxapi.Sandbox, clean bool, pulled string)
 	})
 }
 
+// copyBase is what a look at a copy-mode sandbox's copy (a pull, `sandbox
+// stop`'s look) was made after: the sandbox's attach stamp, read before a
+// count found no session attached (ok is false otherwise, or when it could
+// not be read), and its last hook request. What the look found is recorded
+// as the copy's state at the stop (markStoppedCopy) only when nothing could
+// have changed the copy since: no session attached, not even one that has
+// ended since, and no hook came (unchanged).
+type copyBase struct {
+	stamp  string
+	ok     bool
+	hookAt time.Time
+}
+
+// copyBaseOf reads sb's copy base before a look; the caller counts the
+// sessions attached after it, and a count that finds any clears ok.
+func (a *App) copyBaseOf(sb *sandboxapi.Sandbox) copyBase {
+	stamp, ok := a.attachStamp(sb.Name)
+	return copyBase{stamp: stamp, ok: ok, hookAt: sb.Hooks.LastHookAt}
+}
+
+// unchanged reports that nothing changed sandbox name's copy since b was
+// read: stopped is what OpenShell's stop returned (its last hook). The
+// caller holds the sandbox's exclusive gate (lockForStop), so no session
+// attaches between this check and the mark.
+func (b copyBase) unchanged(a *App, name string, stopped *sandboxapi.Sandbox) bool {
+	if !b.ok || stopped != nil && stopped.Hooks.LastHookAt.After(b.hookAt) {
+		return false
+	}
+	stamp, ok := a.attachStamp(name)
+	return ok && stamp == b.stamp
+}
+
 // stoppedCopyOf is what sb's copy held as it last stopped, when sb has not
 // run since: it is not running, and nothing dropped the mark (every start
 // goes through this CLI, which drops it, and so do a session and a `sandbox

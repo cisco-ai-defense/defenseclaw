@@ -5411,7 +5411,7 @@
     {
       "name": "DEFENSECLAW_STRICT_AVAILABILITY",
       "category": "security_opt_out",
-      "purpose": "Force transport and missing-token hook failures closed even when the effective fail mode is open, on the hooks that read it (the gateway outage table of the connectors capability matrix lists them). Invalid gateway responses still follow guardrail.hook_fail_mode.",
+      "purpose": "Force transport and missing-token hook failures closed even when the effective fail mode is open, on the hooks that read it (the gateway outage table of the connectors capability matrix lists them), and only when the process running the hook inherits this variable. A Codex TUI or app server may outlive the launching shell and not inherit it; use guardrail.hook_fail_mode: closed for a reliable policy. Invalid gateway responses still follow guardrail.hook_fail_mode; managed standalone hooks always close unusable gateway answers.",
       "default": "unset (no additional force-closed override)",
       "accepted_values": [
         "1",

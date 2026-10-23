@@ -398,15 +398,12 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	// ran: the upload, the probe, or starting the harness. An error from
 	// attach means the harness never started (its exit status, a signal's
 	// included, comes back as a code); one from detach, that the
-	// background start failed.
+	// background start failed. The sandbox exists from the create on, so
+	// another terminal may have connected to it meanwhile: it is deleted
+	// only under its exclusive gate with no session attached, and kept
+	// otherwise (deleteIfAlone).
 	fail := func(err error) error {
-		a.warn("removing sandbox " + sb.Name + " after the failure")
-		ctx := context.WithoutCancel(ctx)
-		if _, derr := api.Delete(ctx, sb.Name, sandboxapi.DeleteRequest{}); derr != nil {
-			a.warn("could not delete " + sb.Name + ": " + derr.Error())
-		} else {
-			a.forgetCLIState(sb.Name)
-		}
+		a.removeFailedSandbox(context.WithoutCancel(ctx), api, sb.Name)
 		return err
 	}
 	// Copy mode: create, upload, baseline, then the probe in the workdir the
@@ -1505,7 +1502,6 @@ func settingOf(settings []sandboxapi.Setting, key string) (sandboxapi.Setting, b
 	return sandboxapi.Setting{}, false
 }
 
-// createRequest turns the flags into the daemon's create request.
 // managedRefusal is a run on a managed computer that the preflight would
 // refuse. The managed gateway judges it: the create asks it before anything
 // is staged or created, and its refusal names the caller's profile and rule
@@ -1520,12 +1516,36 @@ func (a *App) managedRefusal(ctx context.Context, api API, spec *harness.Spec, p
 	if err != nil {
 		return apiError(err)
 	}
-	if _, err := api.Delete(context.WithoutCancel(ctx), sb.Name, sandboxapi.DeleteRequest{}); err != nil {
+	switch keep, err := a.deleteIfAlone(context.WithoutCancel(ctx), api, sb.Name); {
+	case keep != "":
+		a.warn("keeping sandbox " + sb.Name + ": " + keep)
+	case err != nil:
 		a.warn("could not delete " + sb.Name + ": " + err.Error())
+	default:
+		// The gate the delete took is CLI state too.
+		a.forgetCLIState(sb.Name)
 	}
 	return errors.New(strings.Join(fatal, "\n"))
 }
 
+// removeFailedSandbox deletes sandbox name, which a run that failed
+// created, unless another session attached to it meanwhile
+// (deleteIfAlone): then it is kept, with the way to delete it later.
+func (a *App) removeFailedSandbox(ctx context.Context, api API, name string) {
+	keep, err := a.deleteIfAlone(ctx, api, name)
+	switch {
+	case keep != "":
+		a.warn("keeping sandbox " + name + " after the failure: " + keep)
+	case err != nil:
+		a.warn("removing sandbox " + name + " after the failure")
+		a.warn("could not delete " + name + ": " + err.Error())
+	default:
+		a.warn("removing sandbox " + name + " after the failure")
+		a.forgetCLIState(name)
+	}
+}
+
+// createRequest turns the flags into the daemon's create request.
 func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, copyMode bool, env map[string]string) (sandboxapi.CreateRequest, llmChoice, error) {
 	req := sandboxapi.CreateRequest{
 		Name: strings.TrimSpace(o.Name), Harness: spec.Name, Project: project, Pack: o.Pack, Profile: o.Profile,

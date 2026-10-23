@@ -269,6 +269,10 @@ func foreignHookGuardianDirForTest(t *testing.T) string {
 // the account was inside when it went on.
 func lockForeignHookAccountRemovalForTest(t *testing.T, dataDir, identity string, timeout time.Duration) (release func(), drained bool, err error) {
 	t.Helper()
+	// The drain ignores the caller's context (it always waits its whole
+	// time for an exchange inside), so the probe shortens the drain itself.
+	restore := enterprisepolicy.OverrideForeignHookRemovalDrainWaitForTest(timeout)
+	defer restore()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return enterprisepolicy.LockForeignHookAccountRemoval(ctx, dataDir, identity)
@@ -788,5 +792,47 @@ func TestForeignHookSessionAllowPastItsHoldIsDenied(t *testing.T) {
 	api.handleForeignHookSession(deny, req.WithContext(reqCtx))
 	if deny.Code != http.StatusOK || !strings.Contains(deny.Body.String(), `"deny":true`) || !strings.Contains(deny.Body.String(), "project hook") {
 		t.Fatalf("denial: %d %s", deny.Code, deny.Body.String())
+	}
+}
+
+// A broken gate or lock is a verification failure, not a removal in
+// progress. The failed account must not change another account's decision.
+func TestForeignHookAccountLockUnavailableDeniesTheExchange(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pick func(gate, lock string) string
+	}{
+		{"gate is a directory", func(gate, _ string) string { return gate }},
+		{"lock is a directory", func(_, lock string) string { return lock }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			foreignHookGuardianDirForTest(t)
+			api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
+			identities := foreignHookTestIdentities(2)
+			gate, lock, ok := enterprisepolicy.ForeignHookAccountLockPaths(api.configDataDir(), identities[0])
+			if !ok {
+				t.Fatal("no account lock paths")
+			}
+			if err := os.MkdirAll(tc.pick(gate, lock), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			_, lockErr := foreignHookAccountExchangeLock(ctx, api.configDataDir(), identities[0])
+			cancel()
+			if lockErr == nil || errors.Is(lockErr, enterprisepolicy.ErrForeignHookRemovalPending) {
+				t.Fatalf("fixture lock error = %v; want a non-pending error", lockErr)
+			}
+			denied := newDeadlineRecorder()
+			api.handleForeignHookSession(denied, foreignHookAllowRequest(identities[0], "s-1"))
+			if body := denied.Body.String(); denied.Code != http.StatusOK || !strings.Contains(body, `"deny":true`) ||
+				!strings.Contains(body, "cannot verify this agent session") || strings.Contains(body, "is removing") {
+				t.Fatalf("account with broken lock: %d %s", denied.Code, body)
+			}
+			allowed := newDeadlineRecorder()
+			api.handleForeignHookSession(allowed, foreignHookAllowRequest(identities[1], "s-2"))
+			if allowed.Code != http.StatusOK || !strings.Contains(allowed.Body.String(), `"deny":false`) {
+				t.Fatalf("other account: %d %s", allowed.Code, allowed.Body.String())
+			}
+		})
 	}
 }
