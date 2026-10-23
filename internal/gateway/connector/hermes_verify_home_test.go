@@ -108,6 +108,9 @@ func TestHermesVerifyAndEnsureAcceptDeletedProfileMetadata(t *testing.T) {
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("OwnedHooksPresent after Setup = %v, %v; want present", present, err)
+	}
 	if err := os.MkdirAll(filepath.Join(filepath.Dir(configPath), "profiles", ".deleted", "coder"), 0o700); err != nil {
 		t.Fatal(err)
 	}
