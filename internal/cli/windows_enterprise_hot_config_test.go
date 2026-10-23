@@ -48,13 +48,16 @@ type hotConfigHost struct {
 	targetRestores   int
 	targetRecordErr  error
 	targetRestoreErr error
-	dropped          []string
-	stops            int
-	closes           int
-	closureHeld      bool
-	releases         int
-	bundleID         string
-	bundleVersion    uint64
+	dropped          []enterprisehooks.ManifestTarget
+	// GAP-0905: the live proof that the dropped targets' hooks are back.
+	hookProofs    [][]enterprisehooks.ManifestTarget
+	hookProofErr  error
+	stops         int
+	closes        int
+	closureHeld   bool
+	releases      int
+	bundleID      string
+	bundleVersion uint64
 }
 
 // digest is what the installed CLI's policy digest prints: the policy the
@@ -118,6 +121,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	sourceSeam, refreshSeam := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigRefreshTargets
 	runtimeCandidateSeam := windowsEnterpriseStandaloneRuntimeCandidateCheck
 	recordSeam := windowsEnterpriseHotConfigTargetsRecord
+	hookProofSeam := windowsEnterpriseHotConfigTargetHooksProven
 	reloadSeam, failClosedSeam := windowsEnterpriseHotBundleReload, windowsEnterpriseHotConfigFailClosed
 	closeHooksSeam, hooksHeldSeam, releaseHooksSeam := windowsEnterpriseHotConfigCloseHooks, windowsEnterpriseHotConfigHooksHeld, windowsEnterpriseHotConfigReleaseHooks
 	restartSeam, recoverSeam := windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover
@@ -127,6 +131,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		windowsEnterpriseHotConfigCloseHooks, windowsEnterpriseHotConfigHooksHeld, windowsEnterpriseHotConfigReleaseHooks = closeHooksSeam, hooksHeldSeam, releaseHooksSeam
 		windowsEnterpriseHotConfigRefreshTargets = refreshSeam
 		windowsEnterpriseHotConfigTargetsRecord = recordSeam
+		windowsEnterpriseHotConfigTargetHooksProven = hookProofSeam
 		windowsEnterpriseIsElevated = elevatedSeam
 		windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock = layoutSeam, lockSeam
 		windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite = validateSeam, writeSeam
@@ -157,8 +162,12 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 				host.targetRestores++
 				return host.targetRestoreErr
 			},
-			dropped: func() []string { return host.dropped },
+			dropped: func() []enterprisehooks.ManifestTarget { return host.dropped },
 		}, nil
+	}
+	windowsEnterpriseHotConfigTargetHooksProven = func(_ context.Context, _ managed.StandaloneLayout, targets []enterprisehooks.ManifestTarget, _ time.Duration) error {
+		host.hookProofs = append(host.hookProofs, append([]enterprisehooks.ManifestTarget(nil), targets...))
+		return host.hookProofErr
 	}
 	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error { return nil }
 	// No test stops or starts a real gateway service: an unproven undo and

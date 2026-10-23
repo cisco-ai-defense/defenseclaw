@@ -406,11 +406,18 @@ func windowsEnterpriseHotConfigApply(
 		}
 		var targetsErr, gatewayErr error
 		targetsRepublished := false
+		// The previously enrolled targets the candidate's targets no longer
+		// enroll: the guardian may already have removed their hooks, and
+		// republishing targets.yaml does not prove the hooks are back.
+		var lost []enterprisehooks.ManifestTarget
 		if restoreErr == nil {
 			if generationErr != nil {
 				_ = os.Remove(generationPath)
 			}
 			if targetsRefreshed {
+				if publishedBefore.dropped != nil {
+					lost = publishedBefore.dropped()
+				}
 				if targetsErr = windowsEnterpriseHotConfigRefreshTargets(restoreCtx, layout); targetsErr == nil {
 					targetsRepublished = true
 				} else if publishedBefore.restore != nil {
@@ -424,6 +431,15 @@ func windowsEnterpriseHotConfigApply(
 						targetsErr, targetsRepublished = nil, true
 					} else {
 						targetsErr = fmt.Errorf("%w; putting back the targets published before this attempt failed too: %v", targetsErr, putBackErr)
+					}
+				}
+				if targetsErr == nil && len(lost) > 0 {
+					// A published targets.yaml is not a hook: the undo is
+					// restored only once every previously enrolled target the
+					// candidate dropped has its verified hook again, or waits
+					// for its own Windows session (GAP-0905).
+					if err := windowsEnterpriseHotConfigTargetHooksProven(restoreCtx, layout, lost, windowsEnterpriseHotConfigRestartTimeout); err != nil {
+						targetsErr = fmt.Errorf("the previous targets were published again, but the hooks of the previously enrolled targets were not proven back: %w", err)
 					}
 				}
 			}
@@ -490,11 +506,9 @@ func windowsEnterpriseHotConfigApply(
 				". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify")+"; repair with the last good config before starting the gateway again")
 		case targetsErr != nil:
 			unprotected := ""
-			if publishedBefore.dropped != nil {
-				if dropped := publishedBefore.dropped(); len(dropped) > 0 {
-					// Closing hooks does not reach these: name them.
-					unprotected = "; these previously enrolled targets have no DefenseClaw hook now: " + windowsEnterpriseBoundedDiagnostic(strings.Join(dropped, ", "))
-				}
+			if len(lost) > 0 {
+				// Closing hooks does not reach these: name them.
+				unprotected = "; these previously enrolled targets have no DefenseClaw hook now: " + windowsEnterpriseBoundedDiagnostic(strings.Join(windowsHotConfigTargetLabels(lost), ", "))
 			}
 			result.AddError("targets_restore_failed", "the previous config is back, but the enrolled targets could not be published for it again: "+
 				windowsEnterpriseBoundedDiagnostic(targetsErr.Error())+"; "+installed+unprotected+"; "+gateway+". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("repair")+
@@ -567,6 +581,16 @@ func windowsEnterpriseHotConfigApply(
 		// signed bytes and require a retry after it returns.
 		if bundleChange && opts.bundle.prepared.AlreadyApplied && windowsBundlePolicy(ctx).Unavailable() {
 			if refreshTargets {
+				// As below: the targets it replaces are recorded first, so
+				// an undo can enroll a dropped user again (GAP-0847).
+				record, err := windowsEnterpriseHotConfigTargetsRecord(layout)
+				if err != nil {
+					undo()
+					failBundle("bundle_targets_refresh_failed", "the bundle's enrolled targets were not refreshed: the published targets could not be recorded first ("+
+						windowsEnterpriseBoundedDiagnostic(err.Error())+")")
+					return false, nil
+				}
+				publishedBefore = record
 				targetsRefreshed = true
 				if err := windowsEnterpriseHotConfigRefreshTargets(ctx, layout); err != nil {
 					undo()
@@ -683,11 +707,11 @@ var windowsEnterpriseHotConfigRefreshTargets = func(ctx context.Context, layout 
 
 // windowsHotConfigPublishedTargets is the hook guardian's targets.yaml as it
 // was published before a hot apply refreshed it: restore puts exactly those
-// targets back, and dropped names each of them the targets published now no
-// longer enroll (GAP-0847).
+// targets back, and dropped returns each of them the targets published now
+// no longer enroll (GAP-0847).
 type windowsHotConfigPublishedTargets struct {
 	restore func() error
-	dropped func() []string
+	dropped func() []enterprisehooks.ManifestTarget
 }
 
 // windowsEnterpriseHotConfigTargetsRecord records the published targets
@@ -696,7 +720,7 @@ type windowsHotConfigPublishedTargets struct {
 var windowsEnterpriseHotConfigTargetsRecord = func(layout managed.StandaloneLayout) (windowsHotConfigPublishedTargets, error) {
 	before, err := enterprisehooks.LoadManifest(layout.ManifestPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return windowsHotConfigPublishedTargets{restore: func() error { return nil }, dropped: func() []string { return nil }}, nil
+		return windowsHotConfigPublishedTargets{restore: func() error { return nil }, dropped: func() []enterprisehooks.ManifestTarget { return nil }}, nil
 	}
 	if err != nil {
 		return windowsHotConfigPublishedTargets{}, err
@@ -706,7 +730,7 @@ var windowsEnterpriseHotConfigTargetsRecord = func(layout managed.StandaloneLayo
 			_, err := enterprisehooks.WriteTargetsManifestAtomic(layout.ManifestPath, before)
 			return err
 		},
-		dropped: func() []string {
+		dropped: func() []enterprisehooks.ManifestTarget {
 			now, err := enterprisehooks.LoadManifest(layout.ManifestPath)
 			if err != nil {
 				now = enterprisehooks.Manifest{}
@@ -716,9 +740,9 @@ var windowsEnterpriseHotConfigTargetsRecord = func(layout managed.StandaloneLayo
 	}, nil
 }
 
-// windowsHotConfigDroppedTargets names each enabled target of before that
-// now does not enroll, as "user (SID) connector".
-func windowsHotConfigDroppedTargets(before, now enterprisehooks.Manifest) []string {
+// windowsHotConfigDroppedTargets returns each enabled target of before that
+// now does not enroll.
+func windowsHotConfigDroppedTargets(before, now enterprisehooks.Manifest) []enterprisehooks.ManifestTarget {
 	key := func(target enterprisehooks.ManifestTarget) string {
 		return strings.ToUpper(strings.TrimSpace(target.SID)) + "\x00" + strings.ToLower(strings.TrimSpace(target.Connector))
 	}
@@ -728,18 +752,96 @@ func windowsHotConfigDroppedTargets(before, now enterprisehooks.Manifest) []stri
 			enrolled[key(target)] = true
 		}
 	}
-	var dropped []string
+	var dropped []enterprisehooks.ManifestTarget
 	for _, target := range before.Targets {
 		if !target.IsEnabled() || enrolled[key(target)] {
 			continue
 		}
+		dropped = append(dropped, target)
+	}
+	return dropped
+}
+
+// windowsHotConfigTargetLabels names each target as "user (SID) connector".
+func windowsHotConfigTargetLabels(targets []enterprisehooks.ManifestTarget) []string {
+	labels := make([]string, 0, len(targets))
+	for _, target := range targets {
 		user := strings.TrimSpace(target.User)
 		if user == "" {
 			user = "an account"
 		}
-		dropped = append(dropped, fmt.Sprintf("%s (%s) %s", user, strings.TrimSpace(target.SID), strings.TrimSpace(target.Connector)))
+		labels = append(labels, fmt.Sprintf("%s (%s) %s", user, strings.TrimSpace(target.SID), strings.TrimSpace(target.Connector)))
 	}
-	return dropped
+	return labels
+}
+
+// windowsEnterpriseHotConfigTargetHooksProven waits, up to wait, until the
+// installed CLI's read-only live verification (enterprise hooks verify)
+// reports each of targets verified, or pending its own Windows session (its
+// hook is registered at that logon), under the service pins. It names the
+// targets still without a verified hook at the deadline. A seam for tests.
+var windowsEnterpriseHotConfigTargetHooksProven = func(ctx context.Context, layout managed.StandaloneLayout, targets []enterprisehooks.ManifestTarget, wait time.Duration) error {
+	installedCLI, err := windowsEnterpriseInstalledAdminCLI()
+	if err != nil {
+		return fmt.Errorf("resolve the installed CLI for the hook proof: %w", err)
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		unproven, err := windowsEnterpriseHotConfigUnprovenTargetHooks(ctx, installedCLI, layout, targets)
+		if err == nil && len(unproven) == 0 {
+			return nil
+		}
+		if !time.Now().Before(deadline) || ctx.Err() != nil {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("no verified DefenseClaw hook for %s", strings.Join(windowsHotConfigTargetLabels(unproven), ", "))
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(windowsEnterpriseHotConfigPoll):
+		}
+	}
+}
+
+// windowsEnterpriseHotConfigUnprovenTargetHooks runs enterprise hooks verify
+// --json once and returns the targets whose row is neither verified nor
+// pending. The command exits nonzero when any target fails, so its report is
+// read whatever its exit status.
+func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installedCLI string, layout managed.StandaloneLayout, targets []enterprisehooks.ManifestTarget) ([]enterprisehooks.ManifestTarget, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, installedCLI, "enterprise", "hooks", "verify", "--json")
+	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseServicePins(layout))
+	out, runErr := command.Output()
+	var report struct {
+		Results []enterpriseHookReconcileRow `json:"results"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		if runErr != nil {
+			return targets, fmt.Errorf("enterprise hooks verify: %w", runErr)
+		}
+		return targets, fmt.Errorf("read the enterprise hooks verify report: %w", err)
+	}
+	return windowsHotConfigUnprovenTargets(targets, report.Results), nil
+}
+
+// windowsHotConfigUnprovenTargets returns each of targets whose verify row is
+// missing, or neither verified nor pending.
+func windowsHotConfigUnprovenTargets(targets []enterprisehooks.ManifestTarget, rows []enterpriseHookReconcileRow) []enterprisehooks.ManifestTarget {
+	proven := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		if row.OK || row.Pending {
+			proven[strings.ToUpper(strings.TrimSpace(row.SID))+"\x00"+strings.ToLower(strings.TrimSpace(row.Connector))] = true
+		}
+	}
+	var unproven []enterprisehooks.ManifestTarget
+	for _, target := range targets {
+		if !proven[strings.ToUpper(strings.TrimSpace(target.SID))+"\x00"+strings.ToLower(strings.TrimSpace(target.Connector))] {
+			unproven = append(unproven, target)
+		}
+	}
+	return unproven
 }
 
 // windowsEnterpriseHotConfigAdopted waits for the gateway to report the

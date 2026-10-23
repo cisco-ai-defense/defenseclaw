@@ -58,7 +58,7 @@ func TestWindowsHotConfigDroppedTargetsNamesWhoLostAHook(t *testing.T) {
 		{User: "alice", SID: "s-1-5-21-1-2-3-1001", Connector: "ClaudeCode"},
 		{User: "bob", SID: "S-1-5-21-1-2-3-1002", Connector: "codex", Enabled: &off},
 	}}
-	got := strings.Join(windowsHotConfigDroppedTargets(before, now), ", ")
+	got := strings.Join(windowsHotConfigTargetLabels(windowsHotConfigDroppedTargets(before, now)), ", ")
 	want := "bob (S-1-5-21-1-2-3-1002) claudecode, bob (S-1-5-21-1-2-3-1002) codex, an account (S-1-5-21-1-2-3-1003) codex"
 	if got != want {
 		t.Fatalf("dropped = %q, want %q", got, want)
