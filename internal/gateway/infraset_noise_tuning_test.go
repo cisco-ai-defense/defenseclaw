@@ -495,14 +495,8 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 			continue
 		}
 		enforced := 0
-		uncertainProgram := test.name == "quoted program then write"
 		for _, finding := range findings {
 			if finding.contributesToEnforcement() {
-				if uncertainProgram && finding.RuleID == "ACTION-COMPOUND-UNPROVEN" {
-					// The preceding expanded program can name a shell builtin
-					// that changes the directory of this relative write.
-					continue
-				}
 				enforced++
 				if finding.RuleID != rule || finding.Severity != "CRITICAL" {
 					t.Errorf("%s: enforced finding %s (%s), want %s (CRITICAL)",
@@ -512,11 +506,6 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		}
 		if enforced != 1 {
 			t.Errorf("%s: findings %v, want one enforced %s", test.name, findingIDs(findings), rule)
-		}
-		if uncertainProgram {
-			if got := findingWithID(findings, "ACTION-COMPOUND-UNPROVEN"); got == nil || !got.contributesToEnforcement() {
-				t.Errorf("%s: missing fail-closed CWD finding: %v", test.name, findingIDs(findings))
-			}
 		}
 	}
 	t.Run("existing symlink", func(t *testing.T) {
