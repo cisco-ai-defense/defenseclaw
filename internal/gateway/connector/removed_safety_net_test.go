@@ -117,14 +117,24 @@ func TestRemovedTeardownRefusesHardLinkedScripts(t *testing.T) {
 		t.Run(c.name+"/a hard-linked stub", func(t *testing.T) {
 			h := newRemovedHost(t)
 			h.stage(t, c)
-			writeRemovedFile(t, h.script(c), c.tombstone, c.mode)
-			links := h.removedHardLinks(t, c)
-			if err := c.Teardown(context.Background(), h.opts); err != nil {
-				t.Fatalf("Teardown of a hard-linked stub: %v", err)
+			stub := c.tombstone
+			if c.name == removedOmnigentID {
+				stub = removedOmnigentEarlierStub
 			}
-			h.requireRevoked(t, c)
+			writeRemovedFile(t, h.script(c), stub, c.mode)
+			links := h.removedHardLinks(t, c)
+			err := c.Teardown(context.Background(), h.opts)
+			if c.name == removedOmnigentID {
+				h.requireLeftStep(t, c, err, c.hardLinkStep(h.script(c)))
+				h.requireTokensKept(t, c)
+			} else {
+				if err != nil {
+					t.Fatalf("Teardown of a hard-linked stub: %v", err)
+				}
+				h.requireRevoked(t, c)
+			}
 			for _, path := range append(links, h.script(c)) {
-				if data, err := os.ReadFile(path); err != nil || string(data) != c.tombstone {
+				if data, err := os.ReadFile(path); err != nil || string(data) != stub {
 					t.Fatalf("%s = %q, %v; want the stub", path, data, err)
 				}
 			}
@@ -185,25 +195,15 @@ func TestRemovedInPlaceWriteFailureWithOneNameRollsForward(t *testing.T) {
 	h.requireEditedSaved(t, c, old)
 }
 
-// A Python import can run a definition left beyond the deny stub when a
-// longer module is overwritten before its old suffix is truncated. Publishing
-// a complete staged file avoids that intermediate state; a stopped publish
-// keeps a recovery intent and the tokens for the next teardown.
-func TestRemovedOmnigentPublishesACompleteStub(t *testing.T) {
+// A stopped policy-file removal keeps a recovery intent and the tokens for
+// the next teardown, so the old module can still reach the deny route.
+func TestRemovedOmnigentRecoversInterruptedPolicyRemoval(t *testing.T) {
 	c := removedOmnigent
 	t.Run("interrupted publication", func(t *testing.T) {
 		h := newRemovedHost(t)
 		h.stage(t, c)
 		old := removedLongOld(c) + "\ndef defenseclaw_policy(event):\n    return {\"result\": \"ALLOW\"}\n"
 		writeRemovedFile(t, h.script(c), old, c.mode)
-		if len(old) <= len(c.tombstone) {
-			t.Fatal("the old module must be longer than the deny stub")
-		}
-		// Before the fix this was the interruption after the first WriteAt
-		// and before Truncate. A CAS publication never reaches this seam.
-		removedInPlaceSeams(t, nil, func(*os.File, int64) error {
-			panic("interrupted before cutting the old Python suffix")
-		})
 		var phase atomicTransformPhaseState
 		restore := setAtomicTransformPhaseHookForTest(h.script(c), func(at atomicTransformPhase, state atomicTransformPhaseState) error {
 			if at == atomicTransformPhaseDetached {
@@ -224,15 +224,27 @@ func TestRemovedOmnigentPublishesACompleteStub(t *testing.T) {
 				err, phase.IntentPath, strings.Contains(string(body), "return {\"result\": \"ALLOW\"}"))
 		}
 		h.requireTokensKept(t, c)
-		if err := c.VerifyClean(h.opts); err == nil {
-			t.Fatal("VerifyClean accepted an interrupted publication")
+		if err := c.VerifyClean(h.opts); err == nil || !strings.Contains(err.Error(), "interrupted policy removal") {
+			t.Fatalf("VerifyClean = %v, want pending policy removal", err)
+		}
+		var reported bool
+		for _, item := range c.leftovers(h.opts) {
+			if item.Path == phase.IntentPath {
+				reported = true
+				if !strings.Contains(item.What, "interrupted policy removal") || strings.Contains(item.What, "stub") {
+					t.Fatalf("pending policy removal described as %q", item.What)
+				}
+			}
+		}
+		if !reported {
+			t.Fatal("interrupted policy removal missing from leftovers")
 		}
 		restore()
 		if err := c.Teardown(context.Background(), h.opts); err != nil {
 			t.Fatalf("recover interrupted publication: %v", err)
 		}
-		if body, err := os.ReadFile(h.script(c)); err != nil || string(body) != c.tombstone {
-			t.Fatalf("published module = %q, %v; want only the complete deny stub", body, err)
+		if _, err := os.Lstat(h.script(c)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("retired policy survived recovered removal: %v", err)
 		}
 		h.requireRevoked(t, c)
 	})

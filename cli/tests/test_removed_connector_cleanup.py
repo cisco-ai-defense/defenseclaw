@@ -10,10 +10,9 @@
 
 """until 1.1: status, doctor and uninstall list what a removed connector left.
 
-The gateway's teardown (internal/gateway/connector/removed.go) only replaces
-DefenseClaw's hook script with a stub that blocks every call and revokes the
-tokens; ``defenseclaw.removed_connectors`` lists everything else, with the
-step to remove it by hand.
+The gateway's teardown (internal/gateway/connector/removed.go) replaces the
+OpenHands hook with a deny stub, removes the OmniGent policy, and revokes the
+safe-to-revoke tokens. ``defenseclaw.removed_connectors`` lists the rest.
 """
 
 from __future__ import annotations
@@ -107,10 +106,11 @@ class LeftoversTests(_Host):
                     intent = _write(os.path.join(folder, f".defenseclaw-cas-{digest}.intent{suffix}"), "pending\n")
                     items = self.items(connector.name)
                     self.assertIn(intent, items)
-                    self.assertIn("interrupted", items[intent].what)
+                    operation = "policy removal" if connector.name == "omnigent" else "stub publication"
+                    self.assertIn("interrupted " + operation, items[intent].what)
                     self.assertIn("connector teardown --connector " + connector.name, items[intent].step)
                     if folder == backups:
-                        self.assertIn("do not delete", items[backups].step)
+                        self.assertIn("recovered the interrupted " + operation, items[backups].step)
                     os.remove(intent)
 
     def test_lists_everything_the_openhands_teardown_left(self):
@@ -132,8 +132,8 @@ class LeftoversTests(_Host):
         self.assertEqual(items[os.path.join(self.hooks, ".hookcfg.openhands")].step, "delete it")
 
     # Review fix (G-deadcode loop round 3): the teardown saves an edited
-    # OmniGent policy module under connector_backups/omnigent before it writes
-    # the stub (removed.go keepEdited); the leftovers list each saved copy.
+    # OmniGent policy module under connector_backups/omnigent before removal;
+    # the leftovers list each saved copy.
     def test_a_saved_edited_omnigent_module_is_listed(self):
         backups = os.path.join(self.data, "connector_backups", "omnigent")
         saved = _write(os.path.join(backups, "defenseclaw_omnigent_policy.py.edited-0123456789abcdef"), "# mine\n")
@@ -144,8 +144,7 @@ class LeftoversTests(_Host):
         self.assertNotIn(os.path.join(backups, "module.json"), items)
         self.assertEqual(
             items[saved].what,
-            "your edited defenseclaw_omnigent_policy.py, as it was when the teardown replaced it with the stub "
-            "that blocks every call",
+            "your edited defenseclaw_omnigent_policy.py, as it was before the teardown removed the policy file",
         )
         self.assertEqual(
             items[saved].step, "copy back what you need (not into DefenseClaw's hooks folder), then delete it"
@@ -237,6 +236,7 @@ class LeftoversTests(_Host):
         step = self.items("omnigent")[module].step
         self.assertLess(step.index("copy back what you need"), step.index("delete every other name"))
         self.assertIn("fsutil hardlink list " if os.name == "nt" else "find / -xdev -samefile ", step)
+        self.assertIn("removes the retired policy file and revokes the tokens", step)
 
     def test_a_config_that_no_longer_names_defenseclaw_is_not_listed(self):
         config = self.openhands()
@@ -392,7 +392,7 @@ class PthTests(_Host):
 
 
 class GoParityTests(unittest.TestCase):
-    """The Go teardown writes the stubs these readers recognize, with the same steps."""
+    """The Go teardown and Python leftover readers give the same cleanup steps."""
 
     def test_go_stubs_and_steps_match(self):
         with open(os.path.join(_REPO, "internal", "gateway", "connector", "removed.go"), encoding="utf-8") as fh:
@@ -402,7 +402,7 @@ class GoParityTests(unittest.TestCase):
         # Both deny reasons, OpenHands' and OmniGent's, say it.
         self.assertGreaterEqual(source.count(removed_connectors.STUB_PHRASE), 2)
         self.assertRegex(source, re.escape('"# defenseclaw-managed-hook v0 (disabled tombstone)\\n"'))
-        self.assertRegex(source, re.escape('"# defenseclaw-managed-policy v0 (disabled tombstone)\\n"'))
+        self.assertNotIn('removedOmnigentTombstone =', source)
         for phrase in (
             "from this file, then restart OpenHands",
             "from this file, then restart OmniGent",
@@ -426,7 +426,19 @@ class GoParityTests(unittest.TestCase):
 
 
 class DoctorTests(_Host):
-    def test_interrupted_publication_does_not_claim_a_live_stub(self):
+    def test_omnigent_guidance_does_not_claim_a_remaining_stub(self):
+        _write(os.path.join(self.home, ".omnigent", "config.yaml"), "policy_modules: [defenseclaw_omnigent_policy]\n")
+        result = _DoctorResult()
+        with (
+            patch.object(cmd_doctor, "_json_mode", True),
+            patch.object(removed_connectors, "leftovers", lambda data_dir: _leftovers(data_dir, self.home)),
+        ):
+            _check_removed_connector_cleanup(SimpleNamespace(data_dir=self.data), result)
+        [check] = result.checks
+        self.assertIn("teardown", check["remediation"])
+        self.assertNotIn("DefenseClaw's stub", check["remediation"])
+
+    def test_interrupted_policy_removal_does_not_claim_cleanup(self):
         c = removed_connectors._CONNECTORS[1]
         script = os.path.abspath(os.path.join(self.hooks, c.script))
         digest = hashlib.sha256(os.fsencode(script)).hexdigest()[:24]
@@ -438,7 +450,7 @@ class DoctorTests(_Host):
         ):
             _check_removed_connector_cleanup(SimpleNamespace(data_dir=self.data), result)
         [check] = result.checks
-        self.assertIn("interrupted publication", check["detail"])
+        self.assertIn("interrupted policy removal", check["detail"])
         self.assertIn("teardown", check["remediation"])
         self.assertNotIn("blocked by DefenseClaw's stub", check["remediation"])
 

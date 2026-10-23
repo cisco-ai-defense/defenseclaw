@@ -88,7 +88,7 @@ func writeRetiredFile(t *testing.T, path, body string) {
 }
 
 // retiredSnapshot reads every file, link and folder under roots, except the
-// paths in skip and the token writers' shared lock.
+// paths in skip and the shared token and Windows contract-lock sentinels.
 func retiredSnapshot(t *testing.T, roots []string, skip ...string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
@@ -102,7 +102,8 @@ func retiredSnapshot(t *testing.T, roots []string, skip ...string) map[string]st
 					return nil
 				}
 			}
-			if entry.Name() == ".hook-api-token-publish.lock" {
+			if entry.Name() == ".hook-api-token-publish.lock" ||
+				(runtime.GOOS == "windows" && entry.Name() == "hook_contract_lock.json.lock") {
 				return nil
 			}
 			switch {
@@ -192,9 +193,8 @@ func (h retiredOmnigentHost) snapshot(t *testing.T) map[string]string {
 
 func (h retiredOmnigentHost) requireStub(t *testing.T) {
 	t.Helper()
-	data, err := os.ReadFile(h.modulePath)
-	if err != nil || !strings.Contains(string(data), "disabled tombstone") || !strings.Contains(string(data), `"DENY"`) {
-		t.Fatalf("policy module = %q, %v; want the stub that denies every request", data, err)
+	if _, err := os.Lstat(h.modulePath); !os.IsNotExist(err) {
+		t.Fatalf("retired policy module survived cleanup: %v", err)
 	}
 	if _, err := os.Lstat(h.token(t)); !os.IsNotExist(err) {
 		t.Fatalf("omnigent token survived: %v", err)

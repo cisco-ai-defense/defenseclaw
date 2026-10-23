@@ -11,10 +11,9 @@
 """until 1.1: what the removed OpenHands and OmniGent connectors leave on a host.
 
 DefenseClaw 1.0.4 removed both connectors (#1182). Their teardown
-(``internal/gateway/connector/removed.go``) does two things only: it replaces
-the hook script an older DefenseClaw wrote (OpenHands' ``openhands-hook.sh``,
-OmniGent's policy module), proven by its DefenseClaw marker, with a stub that
-blocks every call, and it revokes the connector's tokens, except the OpenHands
+(``internal/gateway/connector/removed.go``) replaces the marked OpenHands
+hook script with a deny stub, removes OmniGent's marked policy module, and
+revokes the connector's tokens, except the OpenHands
 hook token: an old OpenHands hook, or a copy of it in the hooks folder, that
 finds no token lets every call run in fail mode open. Everything else
 stays. :func:`leftovers` lists it, with the step to remove each item by hand,
@@ -77,7 +76,7 @@ _CONNECTORS: tuple[_Removed, ...] = (
         marker="# defenseclaw-managed-policy v",
         config_file="config.yaml",
         default_dir=".omnigent",
-        config_what="OmniGent still imports DefenseClaw's policy module from here; it denies every request",
+        config_what="OmniGent config still names DefenseClaw's retired policy module",
         config_step=(
             f"remove {_MODULE} from policy_modules and the {_POLICY_KEY} policy (handler "
             f"{_MODULE}.defenseclaw_policy) from this file, then restart OmniGent"
@@ -361,10 +360,14 @@ def _links(path: str) -> int:
 
 def _hard_link_step(c: _Removed, script: str) -> str:
     lister = f"fsutil hardlink list {script}" if os.name == "nt" else f"find / -xdev -samefile {script}"
+    operation = (
+        "removes the retired policy file and revokes the tokens"
+        if c.name == "omnigent" else "writes the stub and revokes the tokens"
+    )
     return (
         "copy back what you need from connector_backups before deleting any linked name there; "
         f"delete every other name of this file ({lister} lists them), then run "
-        f"defenseclaw-gateway connector teardown --connector {c.name}, which writes the stub and revokes the tokens"
+        f"defenseclaw-gateway connector teardown --connector {c.name}, which {operation}"
     )
 
 
@@ -390,7 +393,7 @@ def _kept_token(c: _Removed, token: str) -> Leftover:
 
 
 def _stub_publication_receipt(data_dir: str, c: _Removed) -> str:
-    """Find the read-only marker for an interrupted module CAS publication."""
+    """Find the read-only marker for interrupted retired file cleanup."""
     script = os.path.abspath(os.path.join(data_dir, "hooks", c.script))
     digest = hashlib.sha256(os.fsencode(script)).hexdigest()[:24]
     name = f".defenseclaw-cas-{digest}.intent"
@@ -442,6 +445,8 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
     # The teardown keeps the tokens while an old hook may still run at the
     # script path (removed.go hookLeft): they go once its step is done.
     token_step = teardown
+    file_kind = "policy module" if c.name == "omnigent" else "hook script"
+    operation = "policy removal" if c.name == "omnigent" else "stub publication"
     links = _links(script) if state == "owned" else 1
     if state == "stub":
         items.append(
@@ -449,13 +454,13 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
         )
     elif state == "owned" and links > 1:
         what = (
-            f"still the hook script an older DefenseClaw wrote, with {links} names (hard links); teardown leaves it "
+            f"still the {file_kind} an older DefenseClaw wrote, with {links} names (hard links); teardown leaves it "
             "and its tokens, so every name still reaches the gateway, which blocks every call"
         )
         items.append(Leftover(script, what, _hard_link_step(c, script)))
         token_step = f"follow the step for {script} first"
     elif state == "owned":
-        items.append(Leftover(script, "still the hook script an older DefenseClaw wrote", teardown))
+        items.append(Leftover(script, f"still the {file_kind} an older DefenseClaw wrote", teardown))
     elif state == "foreign":
         what = (
             "not changed: DefenseClaw cannot prove it wrote it (a link, no DefenseClaw marker in its first lines, "
@@ -470,7 +475,7 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
         items.append(
             Leftover(
                 publication_receipt,
-                "interrupted publication of the stub that blocks every call; cleanup is incomplete",
+                f"interrupted {operation}; cleanup is incomplete",
                 teardown + " before deleting saved copies or tokens; keep this receipt if teardown reports an error",
             )
         )
@@ -483,7 +488,7 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
     if os.path.lexists(backups):
         backup_step = "copy back what you need, then delete this folder"
         if publication_receipt:
-            backup_step = "do not delete this folder until " + teardown + " has recovered the interrupted publication"
+            backup_step = "do not delete this folder until " + teardown + " has recovered the interrupted " + operation
         items.append(
             Leftover(
                 backups,
@@ -492,15 +497,13 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
             )
         )
     if c.name == "omnigent" and os.path.isdir(backups):
-        # The teardown saves an edited policy module there before it writes
-        # the stub (removed.go keepEdited).
+        # The teardown saves an edited policy module there before removing it.
         for entry in sorted(os.listdir(backups)):
             if entry.startswith(c.script + ".edited-"):
                 items.append(
                     Leftover(
                         os.path.join(backups, entry),
-                        f"your edited {c.script}, as it was when the teardown replaced it with the stub that blocks "
-                        "every call",
+                        f"your edited {c.script}, as it was before the teardown removed the policy file",
                         "copy back what you need (not into DefenseClaw's hooks folder), then delete it",
                     )
                 )

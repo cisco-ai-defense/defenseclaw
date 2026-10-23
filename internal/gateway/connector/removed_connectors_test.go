@@ -77,6 +77,8 @@ const (
 		"exec \"$HOME/.defenseclaw/bin/defenseclaw-hook\" hook --connector openhands \"$@\"\n"
 	removedOmnigent103Module = "# defenseclaw-managed-policy v1\n\"\"\"OmniGent custom policy bridge installed by DefenseClaw.\"\"\"\n\n" +
 		"def defenseclaw_policy(event):\n    return {\"result\": \"ALLOW\"}\n"
+	removedOmnigentEarlierStub = "# defenseclaw-managed-policy v0 (disabled tombstone)\n" +
+		"def defenseclaw_policy(event):\n    return {\"result\": \"DENY\"}\n"
 	removedOpenHandsOperatorHooks = `{"pre_tool_use":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/local/bin/audit-hook"}]}]}`
 	removedOmnigentOperatorConfig = "policy_modules:\n  - corp_policy\n"
 )
@@ -245,6 +247,12 @@ func (h *removedHost) tokens(c removedOnlyConnector) []string { return c.tokenPa
 
 func (h *removedHost) requireStub(t *testing.T, c removedOnlyConnector) {
 	t.Helper()
+	if c.name == removedOmnigentID {
+		if _, err := os.Lstat(h.script(c)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("retired policy file %s survived cleanup: %v", h.script(c), err)
+		}
+		return
+	}
 	data, err := os.ReadFile(h.script(c))
 	if err != nil || string(data) != c.tombstone {
 		t.Fatalf("%s = %q, %v; want the stub that blocks every call", h.script(c), data, err)
@@ -343,7 +351,7 @@ func TestRemovedTeardownChangesOnlyTheScriptTokensAndSavedHook(t *testing.T) {
 	}
 }
 
-// A retired entry is removed only after its deny stub and token cleanup verify.
+// A retired entry is removed only after its hook or policy and token cleanup verify.
 // The shared hook runtime and surviving connector entries remain unchanged.
 func TestRemovedConnectorLockEntryClearsOnlyAfterVerifiedCleanup(t *testing.T) {
 	for _, c := range removedConnectorsUnderTest() {
@@ -825,9 +833,9 @@ func TestRemovedOpenHandsStubBlocksWithoutStartupFiles(t *testing.T) {
 	}
 }
 
-// The OmniGent stub is a policy module with no import that denies every
-// request with the removal reason, under the handler OmniGent's config names.
-func TestRemovedOmnigentStubDeniesEveryRequest(t *testing.T) {
+// The retired policy module must no longer be importable by a new OmniGent
+// process after teardown, including when an earlier 1.0.4 run left a stub.
+func TestRemovedOmnigentPolicyCannotBeImportedAfterTeardown(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 not found")
@@ -838,25 +846,30 @@ func TestRemovedOmnigentStubDeniesEveryRequest(t *testing.T) {
 	if err := conn.Teardown(context.Background(), h.opts); err != nil {
 		t.Fatal(err)
 	}
-	program := "import json, sys; sys.path.insert(0, sys.argv[1]); import " + removedOmnigentModuleName + " as m; " +
-		"print(json.dumps({'result': m.defenseclaw_policy({'phase': 'pre_tool'}), 'handler': m.POLICY_REGISTRY[0]['handler']}))"
+	program := "import sys; sys.path.insert(0, sys.argv[1]); import " + removedOmnigentModuleName
 	out, err := exec.Command(python, "-I", "-S", "-c", program, filepath.Join(h.dataDir, "hooks")).CombinedOutput()
-	if err != nil {
-		t.Fatalf("import the stub: %v: %s", err, out)
+	if err == nil || !bytes.Contains(out, []byte("ModuleNotFoundError")) {
+		t.Fatalf("retired policy import = %v: %s; want module absent", err, out)
 	}
-	var got struct {
-		Result  map[string]string
-		Handler string
-	}
-	if err := json.Unmarshal(bytes.TrimSpace(out), &got); err != nil {
-		t.Fatalf("output %q: %v", out, err)
-	}
-	if got.Result["result"] != "DENY" || !strings.Contains(got.Result["reason"], "OmniGent support was removed in DefenseClaw 1.0.4") ||
-		got.Handler != removedOmnigentModuleName+".defenseclaw_policy" {
-		t.Fatalf("stub gave %+v, want DENY with the removal reason under %s.defenseclaw_policy", got, removedOmnigentModuleName)
-	}
-	if strings.Contains(removedOmnigentTombstone, "import ") {
-		t.Fatal("the OmniGent stub imports something")
+}
+
+func TestRemovedOmnigentTeardownRemovesOwnedPolicyFile(t *testing.T) {
+	for _, oldPolicy := range []string{removedOmnigent103Module, removedOmnigentEarlierStub} {
+		t.Run(strings.SplitN(oldPolicy, "\n", 2)[0], func(t *testing.T) {
+			h := newRemovedHost(t)
+			h.stage(t, removedOmnigent)
+			writeRemovedFile(t, h.script(removedOmnigent), oldPolicy, 0o600)
+			conn, _ := RetiredConnector(removedOmnigentID)
+			if err := conn.Teardown(context.Background(), h.opts); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(h.script(removedOmnigent)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("retired OmniGent policy file survived teardown: %v", err)
+			}
+			if err := conn.VerifyClean(h.opts); err != nil {
+				t.Fatalf("removed policy was not verified clean: %v", err)
+			}
+		})
 	}
 }
 
@@ -882,10 +895,10 @@ func TestRemovedConnectorLeftoversListWhatIsLeft(t *testing.T) {
 			leftovers, _ := RemovedConnectorLeftovers(c.name, h.opts)
 			want := map[string]string{
 				h.agentConfig: c.configStep,
-				h.script(c):   "delete it once nothing above runs it",
 				filepath.Join(h.dataDir, "connector_backups", c.name): "copy back what you need",
 			}
 			if c.name == removedOpenHandsID {
+				want[h.script(c)] = "delete it once nothing above runs it"
 				want[filepath.Join(h.dataDir, "hooks", hookConfigSidecarName+".openhands")] = "delete it"
 				want[c.editedCopyPath(h.dataDir, []byte(removedOpenHands103Script))] = "copy back what you need"
 				// The hook token stays (keepHookToken), with when it may go.

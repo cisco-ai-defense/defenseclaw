@@ -1093,10 +1093,10 @@ def test_command_without_native_state_uses_existing_generic_path() -> None:
 # agent configs outside a data folder Setup deletes are read before it runs.
 _SETUP_NOTES = (
     "OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:\r\n"
-    "  - C:\\Users\\u\\corp\\omnigent.yaml: OmniGent still imports DefenseClaw's policy module from here; "
-    "it denies every request. To remove: remove defenseclaw_omnigent_policy from policy_modules.\r\n"
-    "  - {stub}: the stub that blocks every OmniGent call. "
-    "To remove: delete it once nothing above runs it.\r\n"
+    "  - C:\\Users\\u\\corp\\omnigent.yaml: OmniGent config still names DefenseClaw's retired policy module. "
+    "To remove: remove defenseclaw_omnigent_policy from policy_modules.\r\n"
+    "  - {backup}: the copies of your files DefenseClaw saved before setup. "
+    "To remove: copy back what you need, then delete this folder.\r\n"
 )
 
 
@@ -1117,7 +1117,7 @@ def test_native_setup_removed_connector_leftovers_are_shown(
         encoding="utf-8",
     )
     request = _request(tmp_path, wipe_data=wipe_data)
-    stub = str(data / "hooks" / "defenseclaw_omnigent_policy.py")
+    backup = str(backups)
 
     def run_setup(_request):
         if wipe_data:
@@ -1125,7 +1125,7 @@ def test_native_setup_removed_connector_leftovers_are_shown(
             import shutil
 
             shutil.rmtree(data)
-        return native.NativeWindowsUninstallOutcome(returncode, stdout=_SETUP_NOTES.replace("{stub}", stub))
+        return native.NativeWindowsUninstallOutcome(returncode, stdout=_SETUP_NOTES.replace("{backup}", backup))
 
     with (
         patch.object(native, "prepare_native_windows_uninstall", return_value=request),
@@ -1141,15 +1141,15 @@ def test_native_setup_removed_connector_leftovers_are_shown(
             assert raised.value.code == returncode
     out = capsys.readouterr().out
     assert out.count("OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:") == 1
-    assert "C:\\Users\\u\\corp\\omnigent.yaml: OmniGent still imports" in out
+    assert "C:\\Users\\u\\corp\\omnigent.yaml: OmniGent config still names" in out
     # The config the deleted backup record named, read before Setup ran.
-    assert f"  - {config}: OmniGent still imports" in out
-    stub_line = f"  - {stub}: the stub"
+    assert f"  - {config}: OmniGent config still names" in out
+    backup_line = f"  - {backup}: the copies"
     if wipe_data:
-        assert stub_line not in out
+        assert backup_line not in out
         assert "DefenseClaw's data folder is removed by this uninstall" in out
     else:
-        assert stub_line in out
+        assert backup_line in out
 
 
 def test_native_setup_without_leftovers_prints_none(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

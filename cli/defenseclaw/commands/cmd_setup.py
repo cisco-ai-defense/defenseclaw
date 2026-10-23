@@ -7844,7 +7844,11 @@ def _decode_setup_hook_contract_lock(body: bytes) -> tuple[dict[str, Any], dict[
         raise OSError("hook contract evidence has an unsupported schema")
     entries: dict[str, dict[str, Any]] = {}
     for raw_name, raw_entry in raw_entries.items():
-        if not isinstance(raw_name, str) or not raw_name.strip() or not isinstance(raw_entry, dict):
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise OSError("hook contract connector evidence is malformed")
+        if removed_connectors.is_removed(raw_name):
+            continue
+        if not isinstance(raw_entry, dict):
             raise OSError("hook contract connector evidence is malformed")
         name = normalize_connector(raw_name)
         if not name or name in entries:
@@ -7872,6 +7876,8 @@ def _capture_setup_lock_registration_locations_once(cfg) -> tuple[_SetupRegistra
     _document, entries = _decode_setup_hook_contract_lock(body)
     locations: list[_SetupRegistrationLocationEvidence] = []
     for name in sorted(entries):
+        if removed_connectors.is_removed(name):
+            continue
         captured = _capture_setup_registration_locations(
             name,
             entries[name],
@@ -8041,6 +8047,8 @@ def _capture_setup_applied_runtime_once(
         put(("runtime", "gateway", "lock-version"), version)
         put(("runtime", "gateway", "shared-lock-digests"), _setup_runtime_digest(shared_digests))
         for name, raw_entry in lock_entries.items():
+            if removed_connectors.is_removed(name):
+                continue
             subject = _setup_runtime_subject(name)
             stable_entry = _stable_lock_identity_entry(name, raw_entry)
             put(("connector", subject, "lock-identity"), _setup_runtime_digest(stable_entry))
@@ -8092,7 +8100,10 @@ def _capture_setup_applied_runtime_once(
                 health_modes[name] = raw_mode
 
     configured_names = {normalize_connector(name) for name in cfg.active_connectors() if name}
-    connector_names = configured_names | active | inactive | set(lock_entries) | set(health_records) | set(health_modes)
+    all_names = configured_names | active | inactive | set(lock_entries) | set(health_records) | set(health_modes)
+    connector_names = {
+        name for name in all_names if not removed_connectors.is_removed(name)
+    }
     registration_locations: list[_SetupRegistrationLocationEvidence] = []
     for name in sorted(connector_names):
         subject = _setup_runtime_subject(name)
@@ -14783,6 +14794,7 @@ def _hook_contract_lock_covers(
     A skipped peer keeps its lock entry -- setup must not silently delete one
     connector's recorded authority while configuring another -- so its entry
     would otherwise read as an unexpected peer and fail the whole gate.
+    Retired connector entries are ignored while their teardown catches up.
     """
     if not isinstance(lock, dict):
         return False
@@ -14794,7 +14806,7 @@ def _hook_contract_lock_covers(
         actual = {
             normalize_connector(name)
             for name in entries
-            if isinstance(name, str) and name.strip()
+            if isinstance(name, str) and name.strip() and not removed_connectors.is_removed(name)
         }
         if actual != expected:
             return False
@@ -14803,11 +14815,14 @@ def _hook_contract_lock_covers(
         for raw_name in entries:
             if not isinstance(raw_name, str) or not raw_name.strip():
                 return False
+            if removed_connectors.is_removed(raw_name):
+                continue
             name = normalize_connector(raw_name)
             if not name or name in actual:
                 return False
             actual.add(name)
-        if not expected.issubset(actual) or not (actual - expected).issubset(inactive | tolerated):
+        extra = actual - expected
+        if not expected.issubset(actual) or not extra.issubset(inactive | tolerated):
             return False
     for name in expected:
         if not _hook_contract_lock_entry_covers(name, entries.get(name)):
@@ -14838,6 +14853,8 @@ def _validated_hook_contract_lock_publications(lock: Any, expected: set[str]) ->
     for raw_name in entries:
         if not isinstance(raw_name, str) or not raw_name.strip():
             return {}
+        if removed_connectors.is_removed(raw_name):
+            continue
         normalized = normalize_connector(raw_name)
         if not normalized or normalized in normalized_names:
             return {}
@@ -15079,7 +15096,10 @@ def _connector_runtime_snapshot_failure(
             return _ConnectorRuntimeReadiness(
                 False, name, invariant, _lock_contract_failure_detail(name, entries.get(name), invariant)
             )
-    extra = {normalize_connector(name) for name in entries if isinstance(name, str)} - expected - tolerated
+    extra = {
+        normalize_connector(name) for name in entries
+        if isinstance(name, str) and not removed_connectors.is_removed(name)
+    } - expected - tolerated
     if inactive is None and extra:
         peer = next(iter(sorted(extra)))
         return _ConnectorRuntimeReadiness(False, peer, "roster", "contract lock contains an unexpected connector")
@@ -15194,6 +15214,8 @@ def _partition_unconvergeable_peers(
     # terms: only when it is the entry itself that cannot converge.
     for raw_name in entries:
         if not isinstance(raw_name, str) or not raw_name.strip():
+            continue
+        if removed_connectors.is_removed(raw_name):
             continue
         name = normalize_connector(raw_name)
         if not name or name in expected or name in must_keep or name in skipped:

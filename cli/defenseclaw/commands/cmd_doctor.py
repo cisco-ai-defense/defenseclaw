@@ -14923,8 +14923,8 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
 def _check_removed_connector_cleanup(cfg, r: _DoctorResult) -> None:
     """until 1.1: what the removed OpenHands or OmniGent teardown left for the user.
 
-    The teardown only replaces DefenseClaw's hook script with a stub that
-    blocks every call and revokes the tokens (``defenseclaw.removed_connectors``).
+    Teardown replaces OpenHands' hook with a deny stub, removes OmniGent's
+    policy module, and revokes the safe-to-revoke tokens.
     Each thing left is listed with the step to remove it; a host with none
     prints no row.
     """
@@ -14932,11 +14932,12 @@ def _check_removed_connector_cleanup(cfg, r: _DoctorResult) -> None:
 
     for left in leftovers(str(getattr(cfg, "data_dir", "") or "")):
         steps = "; ".join(f"{item.path}: {item.what} (to remove: {item.step})" for item in left.items)
-        pending_publication = any("interrupted publication" in item.what for item in left.items)
-        remediation = f"do each step above; until then {left.label} is blocked by DefenseClaw's stub"
-        if pending_publication:
+        operation = "policy removal" if left.connector == "omnigent" else "stub publication"
+        pending = any("interrupted " + operation in item.what for item in left.items)
+        remediation = "do each step above; rerun connector teardown if its file or tokens remain"
+        if pending:
             remediation = (
-                "rerun connector teardown to recover the interrupted publication; "
+                f"rerun connector teardown to recover the interrupted {operation}; "
                 "preserve its receipt and saved copies if recovery fails"
             )
         _emit(

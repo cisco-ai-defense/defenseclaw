@@ -425,27 +425,26 @@ or OmniGent before 1.0.4:
 - **OpenHands and OmniGent were removed in 1.0.4.** The first gateway start
   after the upgrade (and `defenseclaw uninstall`, and Windows Setup) performs
   the following cleanup for each of them:
-  - It replaces the hook script an older DefenseClaw wrote, OpenHands'
-    `~/.defenseclaw/hooks/openhands-hook.sh` or OmniGent's policy module
-    `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`, with a stub that
-    blocks every call. The stub says that support was removed in 1.0.4 and how
-    to remove the hook. Only a file with DefenseClaw's marker is replaced,
-    including a stub an older teardown left that allowed every call.
+  - It replaces the OpenHands hook script an older DefenseClaw wrote,
+    `~/.defenseclaw/hooks/openhands-hook.sh`, with a stub that blocks every
+    call. It removes OmniGent's retired policy module,
+    `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`. Only a file with
+    DefenseClaw's marker is changed, including an older stub.
     On every OS, a marked script or policy module with another name (a hard link)
     is left unchanged, with the old hook still reaching the gateway's deny route.
     On Windows, an OpenHands hook that runs `defenseclaw-hook` also blocks.
     If you edited OmniGent's policy module after setup, its bytes are saved first, to
     `~/.defenseclaw/connector_backups/omnigent/defenseclaw_omnigent_policy.py.edited-<hash>`,
-    and the stub replaces it only once they are saved.
-  - It revokes DefenseClaw's tokens for them, once only the stub is left at
-    that path. It keeps the OpenHands hook token: an old OpenHands hook, or a
-    copy of it under another name in `~/.defenseclaw/hooks`, that finds no
+    and the policy file is removed only once they are saved.
+  - It revokes DefenseClaw's tokens after the OpenHands stub is in place or
+    the OmniGent policy file is gone. It keeps the OpenHands hook token: an old
+    OpenHands hook, or a copy of it under another name in `~/.defenseclaw/hooks`, that finds no
     token lets every call run in fail mode open, and with it the hook reaches
     the gateway, which blocks the call. Nothing in 1.0.4 accepts that token.
     Delete `~/.defenseclaw/hooks/.hook-openhands.token` only once no
     `hooks.json` runs `openhands-hook.sh` or a copy of it.
-  - Once the stub and token cleanup verifies, it removes only that retired
-    connector's entry from `hook_contract_lock.json`. Other connectors' lock
+  - Once the hook or policy cleanup and token cleanup verify, it removes only
+    that retired connector's entry from `hook_contract_lock.json`. Other connectors' lock
     entries and the shared `.hookcfg` state stay as they are. A failed cleanup
     or lock update is reported for retry, with a step to finish it.
 
@@ -469,8 +468,8 @@ or OmniGent before 1.0.4:
   The gateway still answers the old hook routes (`/api/v1/openhands/hook`,
   `/api/v1/omnigent/hook`) on its API, its hook socket and its sandbox
   ingress, and they block every call, with or without a token. An OmniGent process
-  that loaded the old policy module before the upgrade is blocked until you
-  restart it.
+  that loaded the old policy module before the upgrade still calls the retired
+  deny route while the gateway runs. Restart OmniGent after cleanup.
 
   It doesn't change your agent's config files (`~/.openhands/hooks.json`, a
   workspace `.openhands/hooks.json`, `~/.omnigent/config.yaml`, the file
@@ -496,7 +495,7 @@ or OmniGent before 1.0.4:
     DefenseClaw's line (its hook folder, `~/.defenseclaw/hooks`) from
     `defenseclaw_omnigent.pth` and keep the other lines. Delete the file
     only if that was its only line. Restart OmniGent.
-  - Then delete the stub, `.hookcfg.openhands` and
+  - Then delete the OpenHands stub, `.hookcfg.openhands` and
     `~/.defenseclaw/connector_backups/<connector>`. The backups hold the
     files as they were before DefenseClaw's setup (`pristine_bytes`, base64),
     if you want them back. `defenseclaw uninstall --all` and Windows Setup
@@ -504,8 +503,9 @@ or OmniGent before 1.0.4:
     folder, they move that folder to
     `~/.defenseclaw-removed-connector-backups/<connector>` and list it there.
 
-  Until you do these steps, OpenHands and OmniGent are blocked. Your other
-  connectors start either way. The upgrade accepts a `config.yaml` that still
+  Until you do these steps, the OpenHands hook and any still-loaded OmniGent
+  policy call the retired gateway routes, which block. Your other connectors
+  start either way. The upgrade accepts a `config.yaml` that still
   lists them next to another connector: their settings are ignored with a
   warning, including a telemetry destination whose every route selected only
   these connectors; `defenseclaw migrate` saves that. If OpenHands or OmniGent

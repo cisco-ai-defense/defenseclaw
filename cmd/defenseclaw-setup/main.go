@@ -1098,17 +1098,25 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) ([]strin
 	if pathExists(filepath.Join(dataRoot, "connector_backups", "opencode", "config.json")) {
 		add("opencode")
 	}
-	// until 1.1: the managed backups a 1.0.x OmniGent install left.
-	for _, logicalName := range []string{"config", "module", "pth"} {
-		if pathExists(filepath.Join(dataRoot, "connector_backups", "omnigent", logicalName+".json")) {
-			add("omnigent")
-			break
-		}
+	if retiredOmnigentFilesPresent(dataRoot) {
+		add("omnigent")
 	}
 	if pathExists(filepath.Join(dataRoot, "connector_backups", "hermes", "config.yaml.json")) {
 		add("hermes")
 	}
 	return connectors, nil
+}
+
+func retiredOmnigentFilesPresent(dataRoot string) bool {
+	if pathExists(filepath.Join(dataRoot, "hooks", "defenseclaw_omnigent_policy.py")) {
+		return true
+	}
+	for _, logicalName := range []string{"config", "module", "pth"} {
+		if pathExists(filepath.Join(dataRoot, "connector_backups", "omnigent", logicalName+".json")) {
+			return true
+		}
+	}
+	return false
 }
 
 // readNativeActiveConnectors consumes the small, durable roster written by the

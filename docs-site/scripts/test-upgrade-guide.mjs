@@ -14,6 +14,7 @@ test('retired connector upgrade guide gives the hard-link refusal and uninstall 
   assert.ok(/on every OS[^.]*hard link/i.test(normalized), 'hard-linked marked scripts are refused on every OS');
   assert.ok(/delete (?:the |its )?other names/i.test(normalized), 'other hard-link names must be removed');
   assert.ok(/defenseclaw-gateway connector teardown --connector openhands/.test(normalized), 'rerun teardown');
+  assert.ok(/removes OmniGent's retired policy module/.test(normalized), 'OmniGent policy file is removed');
   assert.ok(/defenseclaw uninstall[^.]*before stopping the gateway/i.test(normalized), 'uninstall keeps the gateway running');
   assert.ok(/Windows Setup[^.]*retry-required[^.]*intent pending/i.test(normalized), 'Setup keeps a pending retry intent');
   assert.ok(!/every other name of\s+the file \(a hard link\) blocks too/i.test(removed), 'do not promise all names block');

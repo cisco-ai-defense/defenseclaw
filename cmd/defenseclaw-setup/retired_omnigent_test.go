@@ -95,6 +95,9 @@ func TestConnectorsForNativeUninstallFindsRetiredOmnigent(t *testing.T) {
 		{name: "configured roster", write: func(t *testing.T, dataRoot string) {
 			write(t, filepath.Join(dataRoot, "config.yaml"), "guardrail:\n  connectors:\n    omnigent:\n      mode: action\n")
 		}},
+		{name: "policy file", write: func(t *testing.T, dataRoot string) {
+			write(t, filepath.Join(dataRoot, "hooks", "defenseclaw_omnigent_policy.py"), "# defenseclaw-managed-policy v1\n")
+		}},
 	}
 	for _, logicalName := range []string{"config", "module", "pth"} {
 		logicalName := logicalName

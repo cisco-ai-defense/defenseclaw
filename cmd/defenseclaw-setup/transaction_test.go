@@ -3319,6 +3319,132 @@ func TestCommittedUninstallRecoveryKeepsRetiredDenyRouteUntilTeardownVerified(t 
 	}
 }
 
+func TestOlderCommittedUninstallFindsRetiredPolicyBeforeGatewayStop(t *testing.T) {
+	for _, source := range []string{"1.0.2 install state", "1.0.3 install state", "backup", "policy file"} {
+		t.Run(source, func(t *testing.T) {
+			root := t.TempDir()
+			previous := &installState{Connector: "codex", Version: "1.0.3"}
+			if source == "1.0.2 install state" {
+				previous.Version = "1.0.2"
+			}
+			if strings.HasSuffix(source, "install state") {
+				previous.Connector = "omnigent"
+			}
+			tx := setupTransaction{
+				ID: strings.Repeat("b", 32), Action: "uninstall",
+				InstallRoot: filepath.Join(root, "install"), TrashPath: filepath.Join(root, "trash"),
+				DataRoot: filepath.Join(root, "data"), PreviousState: previous,
+				PreviousServices: serviceState{Gateway: true},
+				// Older committed journals did not always record every retired connector.
+			}
+			policy := filepath.Join(tx.DataRoot, "hooks", "defenseclaw_omnigent_policy.py")
+			if source == "policy file" {
+				if err := os.MkdirAll(filepath.Dir(policy), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(policy, []byte("# defenseclaw-managed-policy v1\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if source == "backup" {
+				backup := filepath.Join(tx.DataRoot, "connector_backups", "omnigent", "module.json")
+				if err := os.MkdirAll(filepath.Dir(backup), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(backup, []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			trashGateway := filepath.Join(tx.TrashPath, "bin", "defenseclaw-gateway.exe")
+			var preflighted bool
+			err := convergeCommittedUninstallRecovery(tx, committedUninstallRecoveryOps{
+				exists:    func(path string) bool { return path == tx.TrashPath || path == trashGateway },
+				loadState: func(string, setupTransaction) (*installState, error) { return previous, nil },
+				preflight: func(got setupTransaction) error {
+					if !slices.Contains(got.PreviousConnectors, "omnigent") {
+						t.Fatalf("recovery preflight missed retired policy: %v", got.PreviousConnectors)
+					}
+					preflighted = true
+					if source == "policy file" {
+						return os.Remove(policy) // stand in for verified connector teardown
+					}
+					return nil
+				},
+				disable: func(string) error { return nil },
+				stop: func(string, string) (serviceState, error) {
+					if !preflighted {
+						t.Fatal("gateway stopped before retired policy cleanup")
+					}
+					if _, err := os.Lstat(policy); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("retired policy still present at gateway stop: %v", err)
+					}
+					return serviceState{Gateway: true}, nil
+				},
+				verifyStopped: func(string, string) error { return nil },
+				reconcile: func(got setupTransaction) error {
+					if !slices.Contains(got.PreviousConnectors, "omnigent") {
+						t.Fatal("reconciliation forgot retired connector")
+					}
+					return nil
+				},
+			})
+			if err != nil || !preflighted {
+				t.Fatalf("older committed recovery = %v, preflighted=%t", err, preflighted)
+			}
+		})
+	}
+}
+
+func TestOlderCommittedUninstallIgnoresMalformedUnrelatedRoster(t *testing.T) {
+	root := t.TempDir()
+	previous := &installState{Connector: "omnigent", Version: "1.0.3"}
+	tx := setupTransaction{
+		ID: strings.Repeat("b", 32), Action: "uninstall",
+		InstallRoot: filepath.Join(root, "install"), TrashPath: filepath.Join(root, "trash"),
+		DataRoot: filepath.Join(root, "data"), PreviousState: previous,
+		PreviousServices: serviceState{Gateway: true},
+	}
+	statePath := filepath.Join(tx.DataRoot, "active_connector.json")
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policy := filepath.Join(tx.DataRoot, "hooks", "defenseclaw_omnigent_policy.py")
+	if err := os.MkdirAll(filepath.Dir(policy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(policy, []byte("# defenseclaw-managed-policy v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trashGateway := filepath.Join(tx.TrashPath, "bin", "defenseclaw-gateway.exe")
+	preflighted := false
+	err := convergeCommittedUninstallRecovery(tx, committedUninstallRecoveryOps{
+		exists:    func(path string) bool { return path == tx.TrashPath || path == trashGateway },
+		loadState: func(string, setupTransaction) (*installState, error) { return previous, nil },
+		preflight: func(got setupTransaction) error {
+			if !slices.Contains(got.PreviousConnectors, "omnigent") {
+				t.Fatal("retired policy was skipped because a roster was malformed")
+			}
+			preflighted = true
+			return os.Remove(policy)
+		},
+		disable: func(string) error { return nil },
+		stop: func(string, string) (serviceState, error) {
+			if !preflighted {
+				t.Fatal("gateway stopped before retired cleanup")
+			}
+			return serviceState{Gateway: true}, nil
+		},
+		verifyStopped: func(string, string) error { return nil },
+		reconcile:     func(setupTransaction) error { return nil },
+	})
+	if err != nil || !preflighted {
+		t.Fatalf("retired cleanup = %v, preflighted=%t", err, preflighted)
+	}
+}
+
 func TestCommittedUninstallRecoveryAuthenticatesGatewayBeforeAcceptingRunningReplacement(t *testing.T) {
 	root := t.TempDir()
 	prior := &installState{}

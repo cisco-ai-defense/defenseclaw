@@ -19,6 +19,7 @@ from defenseclaw.connector_contracts import (
 )
 from defenseclaw.doctor_hooks import WindowsHookCheck
 from defenseclaw.fail_mode import connector_registration_lock_state
+from defenseclaw.file_permissions import protect_private_file
 
 TEN_CONNECTORS = (
     "codex",
@@ -895,6 +896,96 @@ def test_snapshot_accepts_exact_eleven_roster(tmp_path: Path) -> None:
         previous_state_marker=1,
         previous_lock_marker=1,
     )
+
+
+@pytest.mark.parametrize("removed", ["omnigent", "openhands"])
+@pytest.mark.parametrize("state_version", [2, 3])
+def test_single_connector_setup_ignores_retired_lock_peer(
+    removed: str, state_version: int, tmp_path: Path
+) -> None:
+    lock = {
+        "version": 2,
+        "connectors": {
+            "codex": _entry("codex", tmp_path),
+            removed: {"connector": removed, "hook_fail_mode": "open"},
+        },
+    }
+    state = {"version": state_version, "names": ["codex"]}
+    if state_version == 3:
+        state["inactive_names"] = []
+    assert cmd_setup._connector_runtime_snapshot_ready(
+        state, 2, lock, 2, expected={"codex"},
+        previous_state_marker=1, previous_lock_marker=1,
+    )
+    lock["connectors"]["cursor"] = _entry("cursor", tmp_path)
+    assert not cmd_setup._connector_runtime_snapshot_ready(
+        state, 2, lock, 2, expected={"codex"},
+        previous_state_marker=1, previous_lock_marker=1,
+    )
+
+
+def test_single_connector_setup_ignores_duplicate_retired_lock_aliases(tmp_path: Path) -> None:
+    lock = {
+        "version": 2,
+        "connectors": {
+            "codex": _entry("codex", tmp_path),
+            "openhands": {"hook_fail_mode": "open"},
+            "OpenHands": {"hook_fail_mode": "open"},
+        },
+    }
+    state = {"version": 3, "names": ["codex"], "inactive_names": []}
+    assert cmd_setup._connector_runtime_snapshot_ready(
+        state, 2, lock, 2, expected={"codex"},
+        previous_state_marker=1, previous_lock_marker=1,
+    )
+
+
+def test_lock_publication_ignores_retired_duplicate_aliases(tmp_path: Path) -> None:
+    live = _entry("codex", tmp_path)
+    live["updated_at"] = "2026-10-23T00:00:00Z"
+    lock = {
+        "version": 2,
+        "connectors": {"codex": live, "openhands": None, "OpenHands": None},
+    }
+    assert cmd_setup._validated_hook_contract_lock_publications(lock, {"codex"}) == {
+        "codex": live["updated_at"]
+    }
+
+
+def test_setup_peer_partition_ignores_retired_lock_entry(tmp_path: Path, capsys) -> None:
+    lock_path = tmp_path / "hook_contract_lock.json"
+    lock_path.write_text(json.dumps({
+        "version": 2,
+        "connectors": {"codex": _entry("codex", tmp_path), "omnigent": None},
+    }), encoding="utf-8")
+    protect_private_file(lock_path)
+    assert cmd_setup._partition_unconvergeable_peers(
+        str(lock_path), {"codex"}, required={"codex"}
+    ) == ({"codex"}, frozenset())
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("retired_entries", [
+    {"OpenHands": {}, "openhands": {}},
+    {"OpenHands": None},
+])
+def test_setup_snapshot_ignores_retired_lock_locations(tmp_path: Path, retired_entries: dict) -> None:
+    live_script = tmp_path / "codex-hook.sh"
+    live_script.write_text("# owned\n", encoding="utf-8")
+    protect_private_file(live_script)
+    lock = {
+        "version": 2,
+        "connectors": {
+            "codex": {"connector": "codex", "locations": {"hook_script_paths": [str(live_script)]}},
+            "omnigent": {"connector": "omnigent", "locations": {"hook_config_paths": ["relative-old-path"]}},
+            **retired_entries,
+        },
+    }
+    lock_path = tmp_path / "hook_contract_lock.json"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    protect_private_file(lock_path)
+    locations = cmd_setup._capture_setup_lock_registration_locations_once(_config(tmp_path))
+    assert locations and {item.connector for item in locations} == {"codex"}
 
 
 def test_runtime_state_accepts_omitted_empty_active_roster() -> None:

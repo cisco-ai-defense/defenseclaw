@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -3374,8 +3375,16 @@ func convergeCommittedUninstallRecovery(transaction setupTransaction, ops commit
 	if err := validateTrash(); err != nil {
 		return err
 	}
+	// Older committed journals can omit OmniGent even while its owned policy
+	// file or setup records survive. Use only those bounded identities here:
+	// malformed unrelated rosters must not prevent retired cleanup.
+	if !slices.Contains(transaction.PreviousConnectors, "omnigent") &&
+		((transaction.PreviousState != nil && isRetiredNativeConnector(transaction.PreviousState.Connector)) ||
+			retiredOmnigentFilesPresent(transaction.DataRoot)) {
+		transaction.PreviousConnectors = append(transaction.PreviousConnectors, "omnigent")
+	}
 	// A 1.0.3 OmniGent module can return ALLOW if the gateway is stopped.
-	// Verify its deny stub while the old gateway route is still available.
+	// Remove it while the old gateway route is still available.
 	// Older committed journals skipped this step and may already be stopped.
 	if err := ops.preflight(transaction); err != nil {
 		return restoreOnRefusal(fmt.Errorf("%w: %w", errRetiredUninstallPreflight, err), serviceState{})
