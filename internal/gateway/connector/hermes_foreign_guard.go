@@ -17,10 +17,10 @@ import (
 
 // shellHookForeignGuardBlock is inserted into the standalone Hermes shell
 // hook inside the socket transport block, after its trust functions and
-// before its socket checks (shellHookSocketTransport): a missing socket (the
-// gateway is stopped) or an untrusted one ends the hook in fail_unreachable,
-// which allows under fail mode open, so the guard placed after those checks
-// never ran during an outage and the guarded call was allowed (GAP-0354).
+// before its socket checks (shellHookSocketTransport): a missing socket in a
+// trusted directory can follow administrator open, so a guard placed after
+// that check never ran during an outage and allowed the guarded call
+// (GAP-0354). An untrusted socket or directory always blocks.
 // The check denies a guarded connector whose session the gateway cannot
 // answer for, in every fail mode, as the hook-time guard does.
 // Hermes runs every shell hook registered for an event in order and lets a

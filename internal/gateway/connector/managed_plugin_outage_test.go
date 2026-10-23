@@ -4,12 +4,18 @@
 package connector
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -84,6 +90,121 @@ func TestManagedAmpAndOpenCodeOutageFollowTheDocumentedFailMode(t *testing.T) {
 		}
 	}
 
+}
+
+// A Windows standalone Amp plugin may render administrator open for a proven
+// stopped service. A gateway that answered 429 is running and has not judged
+// the call; neither exhausted 429s nor a failed resend may approve it.
+func TestWindowsManagedAmpOpenBlocksAfterRateLimit(t *testing.T) {
+	nodeForTest(t)
+	for _, tc := range []struct {
+		name         string
+		retryResult  string
+		wantRequests int32
+	}{
+		{name: "429 until retries end", wantRequests: 4},
+		{name: "429 then transport failure", retryResult: "drop", wantRequests: 2},
+		{name: "429 then HTTP 500", retryResult: "http500", wantRequests: 2},
+		{name: "429 then invalid verdict", retryResult: "invalid", wantRequests: 2},
+		{name: "429 then truncated JSON", retryResult: "truncated", wantRequests: 2},
+		{name: "429 then usable verdict", retryResult: "allow", wantRequests: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const proofDomain = "defenseclaw.listener-proof.v1\x00amp\x00"
+			token := strings.Repeat("a", 64)
+			var posts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/hook-listener-proof":
+					mac := hmac.New(sha256.New, []byte(token))
+					_, _ = mac.Write([]byte(proofDomain + r.Header.Get("X-DefenseClaw-Listener-Nonce")))
+					w.Header().Set("X-DefenseClaw-Listener-Proof", hex.EncodeToString(mac.Sum(nil)))
+					w.WriteHeader(http.StatusNoContent)
+				case "/api/v1/amp/hook":
+					n := posts.Add(1)
+					if n == 2 {
+						switch tc.retryResult {
+						case "allow", "invalid", "truncated":
+							w.Header().Set("Content-Type", "application/json")
+							body := map[string]string{
+								"allow":     `{"action":"allow"}`,
+								"invalid":   `{"action":"unknown"}`,
+								"truncated": `{"action":`,
+							}[tc.retryResult]
+							_, _ = w.Write([]byte(body))
+							return
+						case "http500":
+							w.WriteHeader(http.StatusInternalServerError)
+							return
+						case "drop":
+							conn, _, err := w.(http.Hijacker).Hijack()
+							if err == nil {
+								_ = conn.Close()
+							}
+							return
+						}
+					}
+					w.Header().Set("Retry-After", "1")
+					w.WriteHeader(http.StatusTooManyRequests)
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(server.Close)
+			root := testenv.PrivateTempDir(t)
+			guard := filepath.Join(root, "defenseclaw-hook.exe")
+			opts := managedPluginOutageOpts(t, "amp", "windows", "open", guard, strings.TrimPrefix(server.URL, "http://"))
+			opts.ManagedListenerProof = true
+			plugin, err := NewAMPConnector().renderPluginArtifact(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := string(plugin)
+			if !strings.Contains(body, `const DC_FAIL_MODE: string = "open"`) ||
+				!strings.Contains(body, `const DC_LISTENER_PROOF: string = "1"`) ||
+				!strings.Contains(body, `const DC_HOOK_SOCKET: string = ""`) {
+				t.Fatal("plugin is not the Windows standalone open-mode TCP render")
+			}
+			// Isolate the HTTP delivery path from the foreign-hook executable;
+			// the installed render above must still contain its guard.
+			guardDecl := `const DC_FOREIGN_GUARD: string = "` + javaScriptStringContent(guard) + `"`
+			if strings.Count(body, guardDecl) != 1 {
+				t.Fatal("Windows standalone render omitted the foreign-hook guard")
+			}
+			body = strings.Replace(body, guardDecl, `const DC_FOREIGN_GUARD: string = ""`, 1)
+			pluginPath := filepath.Join(root, "defenseclaw.mts")
+			if err := os.WriteFile(pluginPath, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			lines := runNodeHarness(t, `
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+globalThis.Bun = { file: (path) => ({ slice: () => ({ text: async () => readFileSync(path, "utf8") }) }) };
+const handlers = {};
+(await import(pathToFileURL(process.argv[1]).href)).default({
+  system: { workspaceRoot: "", executor: { kind: "" }, user: {} },
+  helpers: { filePathFromURI: (uri) => uri, isPluginUINotAvailableError: () => true },
+  on: (event, handler) => { handlers[event] = handler; },
+  activeThread: { current: null },
+  ui: { notify: async () => {} },
+});
+const ctx = { thread: { id: "T", agent: async () => ({ definition: { kind: "builtin-agent", mode: "medium" } }) } };
+const result = await handlers["tool.call"]({ thread: { id: "T" }, toolUseID: "U1", tool: "Bash", input: { command: "echo marker" } }, ctx);
+console.log(result.action + ":" + (result.message || ""));
+`, pluginPath)
+			if tc.retryResult == "allow" {
+				if len(lines) != 1 || lines[0] != "allow:" {
+					t.Fatalf("Windows Amp usable verdict after 429 = %q, want allow", lines)
+				}
+			} else if len(lines) != 1 || !strings.HasPrefix(lines[0], "reject-and-continue:") || !strings.Contains(lines[0], "429") {
+				t.Fatalf("Windows Amp open without a verdict after 429 = %q, want a rate-limit block", lines)
+			}
+			if got := posts.Load(); got != tc.wantRequests {
+				t.Fatalf("gateway received %d tool calls, want %d", got, tc.wantRequests)
+			}
+		})
+	}
 }
 
 // managedPluginOutageOpts are the standalone Setup options of one layout:

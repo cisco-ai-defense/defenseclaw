@@ -32,9 +32,8 @@ DEFENSECLAW_HOOK_SOCKET_UID=@UID@
 defenseclaw_hook_socket_owner_trusted() {
   [ "$1" = "0" ] || { [ "$DEFENSECLAW_HOOK_SOCKET_UID" != "0" ] && [ "$1" = "$DEFENSECLAW_HOOK_SOCKET_UID" ]; }
 }
-defenseclaw_hook_socket_trusted() {
+defenseclaw_hook_socket_directory_trusted() {
   local socket_dir listing mode owner
-  { [ -S "$DEFENSECLAW_HOOK_SOCKET" ] && [ ! -L "$DEFENSECLAW_HOOK_SOCKET" ]; } || return 1
   socket_dir="${DEFENSECLAW_HOOK_SOCKET%/*}"
   [ -n "$socket_dir" ] || socket_dir=/
   socket_dir="$(cd -P -- "$socket_dir" 2>/dev/null && pwd -P)" || return 1
@@ -44,7 +43,12 @@ defenseclaw_hook_socket_trusted() {
     d????-??-*) ;;
     *) return 1 ;;
   esac
-  defenseclaw_hook_socket_owner_trusted "$owner" || return 1
+  defenseclaw_hook_socket_owner_trusted "$owner"
+}
+defenseclaw_hook_socket_trusted() {
+  local listing mode owner
+  { [ -S "$DEFENSECLAW_HOOK_SOCKET" ] && [ ! -L "$DEFENSECLAW_HOOK_SOCKET" ]; } || return 1
+  defenseclaw_hook_socket_directory_trusted || return 1
   listing="$(command ls -ln -- "$DEFENSECLAW_HOOK_SOCKET" 2>/dev/null)" || return 1
   read -r mode _ owner _ <<< "$listing" || return 1
   case "$mode" in
@@ -59,16 +63,25 @@ defenseclaw_hook_socket_trusted() {
 // immediately before it builds its bearer header, when the hook is a
 // standalone enterprise install with a unix hook socket (see
 // managedPluginHookSocket). fail_unreachable is already defined at that
-// point and follows the hook's fail mode. The rendered TCP hook contains
-// none of this. @GUARD@ is the standalone Hermes foreign-hook guard
+// point. The rendered TCP hook contains none of this. @GUARD@ is the
+// standalone Hermes foreign-hook guard
 // (shellHookForeignGuard), or nothing: it runs after the trust functions it
 // uses and before the socket checks, because a missing or untrusted socket
-// ends the hook through fail_unreachable, which allows under fail mode open.
+// ends the hook before a request is sent. Only a missing socket in a trusted
+// directory can follow administrator open; an untrusted or failed existing
+// socket blocks in every mode.
 // The guard's check denies a guarded connector whose session the gateway
 // cannot answer for, in every fail mode (GAP-0354).
-const shellHookSocketTransportBlock = shellHookSocketTrustFunctions + `@GUARD@if [ ! -e "$DEFENSECLAW_HOOK_SOCKET" ] && [ ! -L "$DEFENSECLAW_HOOK_SOCKET" ]; then
+const shellHookSocketTransportBlock = shellHookSocketTrustFunctions + `@GUARD@if ! defenseclaw_hook_socket_directory_trusted; then
+  FAIL_MODE=closed
+  fail_unreachable "the DefenseClaw hook socket directory is not owned by root or the gateway account (enterprise_managed_gateway_peer_unverified)"
+fi
+if [ ! -e "$DEFENSECLAW_HOOK_SOCKET" ] && [ ! -L "$DEFENSECLAW_HOOK_SOCKET" ]; then
   fail_unreachable "` + shellManagedGatewayStoppedText + `"
 fi
+# The path existed. From here, a refusal or a disappeared socket cannot
+# prove that the gateway service is stopped, so delivery failures close.
+FAIL_MODE=closed
 if ! defenseclaw_hook_socket_trusted; then
   fail_unreachable "the DefenseClaw hook socket or its directory is not owned by root or the gateway account (enterprise_managed_gateway_peer_unverified)"
 fi

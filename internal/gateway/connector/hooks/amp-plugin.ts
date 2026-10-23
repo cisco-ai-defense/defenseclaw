@@ -363,12 +363,30 @@ async function gatewayFetch(path: string, init: RequestInit, token: string): Pro
 // 3 s) at most 3 times; the caller's abort signal keeps the whole exchange
 // inside the plugin timeout. The native hook runner does the same
 // (GAP-0205); without it a short burst failed the tool call (GAP-0535).
-async function retryBusy(send: () => Promise<Response>, signal: AbortSignal): Promise<Response> {
+async function retryBusy(send: () => Promise<Response>, signal: AbortSignal{{if and .Managed (not .Sandbox)}}, onRateLimit: () => void{{end}}): Promise<Response> {
 	let response = await send()
-	for (let retry = 0; retry < 3 && response.status === 429; retry++) {
+{{if and .Managed (not .Sandbox)}}	if (response.status === 429) onRateLimit()
+{{end}}	for (let retry = 0; retry < 3 && response.status === 429; retry++) {
 		const asked = Number.parseInt(response.headers.get("retry-after") || "", 10)
 		const delay = Math.min(Math.max(Number.isFinite(asked) ? asked : 1, 1), 3) * 1000
-		await new Promise<void>((resolve, reject) => {
+{{if .Managed}}		try {
+			await new Promise<void>((resolve, reject) => {
+				if (signal.aborted) return reject(new Error("DefenseClaw gateway busy"))
+				const timer = setTimeout(resolve, delay)
+				signal.addEventListener("abort", () => {
+					clearTimeout(timer)
+					reject(new Error("DefenseClaw gateway busy"))
+				}, { once: true })
+			})
+			response = await send()
+{{if and .Managed (not .Sandbox)}}			if (response.status === 429) onRateLimit()
+{{end}}		} catch {
+			// The gateway already answered 429. Preserve that known refusal if
+			// the resend or its wait fails; a later transport error does not
+			// turn a busy gateway into a proven stopped one.
+			return response
+		}
+{{else}}		await new Promise<void>((resolve, reject) => {
 			if (signal.aborted) return reject(new Error("DefenseClaw gateway busy"))
 			const timer = setTimeout(resolve, delay)
 			signal.addEventListener("abort", () => {
@@ -377,7 +395,7 @@ async function retryBusy(send: () => Promise<Response>, signal: AbortSignal): Pr
 			}, { once: true })
 		})
 		response = await send()
-	}
+{{end}}	}
 	return response
 }
 
@@ -519,7 +537,12 @@ function failureResponse(reason: string): GatewayResponse {
 	return { action: "allow" }
 }
 
-function withheldToolResult(reason: string): ToolResultResult {
+{{if and .Managed (not .Sandbox)}}const DC_RATE_LIMIT_BLOCK: GatewayResponse = {
+	action: "block",
+	reason: "DefenseClaw hook failed closed (HTTP 429 without a usable verdict)",
+}
+
+{{end}}function withheldToolResult(reason: string): ToolResultResult {
 	return {
 		status: "error",
 		error: reason || "DefenseClaw blocked this Amp tool result.",
@@ -684,22 +707,29 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		}
 		if (token) headers.Authorization = `Bearer ${token}`
 
-		try {
+{{if and .Managed (not .Sandbox)}}		let rateLimited = false
+{{end}}		try {
 			const response = await {{if .Sandbox}}sandboxFetch(headers, body){{else}}retryBusy(() => gatewayFetch("/api/v1/amp/hook", {
 				method: "POST",
 				headers,
 				body,
 				signal: controller.signal,
-			}, token), controller.signal){{end}}
-			if (!response.ok) return failureResponse(`HTTP ${response.status}`)
+			}, token), controller.signal{{if and .Managed (not .Sandbox)}}, () => { rateLimited = true }{{end}}){{end}}
+{{if and .Managed (not .Sandbox)}}			if (!response.ok) {
+				if (rateLimited) return DC_RATE_LIMIT_BLOCK
+				return failureResponse(`HTTP ${response.status}`)
+			}
+{{else}}			if (!response.ok) return failureResponse(`HTTP ${response.status}`){{end}}
 
 			const data = await response.json() as GatewayResponse
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
-				return failureResponse("invalid gateway verdict")
+{{if and .Managed (not .Sandbox)}}				if (rateLimited) return DC_RATE_LIMIT_BLOCK
+{{end}}				return failureResponse("invalid gateway verdict")
 			}
 			return data
 		} catch (error) {
-			if (await deploymentRemoved()) return { action: "allow" }
+{{if and .Managed (not .Sandbox)}}			if (rateLimited) return DC_RATE_LIMIT_BLOCK
+{{end}}			if (await deploymentRemoved()) return { action: "allow" }
 			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
 				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
 			}
