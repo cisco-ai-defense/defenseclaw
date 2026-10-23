@@ -41,7 +41,7 @@ from typing import Any
 
 from rich.console import RenderableType
 
-from defenseclaw.connector_contracts import has_native_approval_prompt
+from defenseclaw.connector_contracts import has_native_approval_prompt, normalize_connector
 from defenseclaw.platform_support import openshell_sandboxes_supported
 from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.screens.consequence import (
@@ -1023,12 +1023,33 @@ def hilt_change_modal(
     all_connectors = not connector and model.multi_connector
     affected = [r for r in model.postures if model.connector_of(r)] if all_connectors else [row]
     weaker = any(hilt_weakens(str(getattr(r, "hilt", "") or "off"), level) for r in affected)
-    details = [] if all_connectors else [posture_summary(scope, "action", block, alert, level)]
+    copilot_cli = normalize_connector(connector) == "copilot" and not secure_client
+    details = [] if all_connectors else [
+        posture_summary(
+            scope, mode, block, alert, level,
+            confirm_action="deny" if copilot_cli else "ask",
+        )
+    ]
     # The connectors this reaches, and how each answers a confirm verdict.
     reached = affected if connector or all_connectors else [r for r in model.postures if model.connector_of(r)]
     observing = [str(getattr(r, "scope", "")) for r in affected if str(getattr(r, "mode", "") or "observe") != "action"]
-    alerting = [model.connector_of(r) for r in reached if not has_native_approval_prompt(model.connector_of(r))]
-    prompting = [model.connector_of(r) for r in reached if has_native_approval_prompt(model.connector_of(r))]
+    denying = [
+        model.connector_of(r) for r in reached
+        if normalize_connector(model.connector_of(r)) == "copilot"
+        and str(getattr(r, "mode", "") or "observe") == "action"
+        and not secure_client
+    ]
+    alerting = [
+        model.connector_of(r) for r in reached
+        if not has_native_approval_prompt(model.connector_of(r))
+        and model.connector_of(r) not in denying
+        and not (normalize_connector(model.connector_of(r)) == "copilot" and secure_client)
+    ]
+    prompting = [
+        model.connector_of(r) for r in reached
+        if has_native_approval_prompt(model.connector_of(r))
+        or (normalize_connector(model.connector_of(r)) == "copilot" and secure_client)
+    ]
     if mode != "action" and not all_connectors:
         details.append(f"{scope} is in observe mode, so nothing waits for approval until it runs in action mode.")
     elif observing:
@@ -1044,6 +1065,13 @@ def hilt_change_modal(
         )
         if prompting:
             details.append("Asks in the agent's own approval prompt: " + ", ".join(prompting) + ".")
+    if level != "off" and denying:
+        details.append(
+            f"{', '.join(denying)} cannot prove an approval prompt is available: "
+            "action-mode confirm verdicts are denied and audited as block (raw_action=confirm)."
+        )
+    if level != "off" and prompting and not alerting:
+        details.append("Asks in the agent's own approval prompt: " + ", ".join(prompting) + ".")
     if connector and not model.multi_connector:
         details.append("This install has one connector, so this sets approval for every connector.")
     elif all_connectors:
@@ -1071,7 +1099,7 @@ def hilt_change_modal(
             )
         else:
             consequence = f"This weakens protection: {scope} asks a person for fewer findings."
-    asks_everywhere = not observing and not alerting
+    asks_everywhere = not observing and not alerting and not denying
     if level == "off":
         title = "Turn off human approval"
     else:

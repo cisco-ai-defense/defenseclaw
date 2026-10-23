@@ -1492,6 +1492,33 @@ class PerConnectorFailModeTests(unittest.TestCase):
 class HILTCommandTests(unittest.TestCase):
     """`guardrail hilt [on|off] [--min-severity X] [--connector Y]`."""
 
+    def test_copilot_enable_notice_matches_effective_mode(self):
+        runner = CliRunner()
+        for global_mode, copilot_mode, secure_client, expected in (
+            ("observe", "action", False, "denied and audited as block (raw_action=confirm)"),
+            ("action", "observe", False, "observe mode"),
+            ("observe", "action", True, "Secure Client will prompt for approval"),
+        ):
+            with self.subTest(global_mode=global_mode, copilot_mode=copilot_mode, secure_client=secure_client):
+                app = make_multi_ctx({"copilot": None, "codex": None})
+                app.cfg.guardrail.mode = global_mode
+                app.cfg.guardrail.connectors["copilot"].mode = copilot_mode
+                with (
+                    patch.object(cmd_guardrail, "_report_hot_hilt"),
+                    patch.object(cmd_guardrail.asset_lists, "is_secure_client", return_value=secure_client),
+                    patch("defenseclaw.commands.cmd_setup._restart_services"),
+                ):
+                    result = runner.invoke(
+                        cmd_guardrail.hilt_cmd,
+                        ["on", "--min-severity", "HIGH", "--connector", "copilot", "--yes"],
+                        obj=app,
+                    )
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertIn(expected, result.output)
+                if copilot_mode == "action" and not secure_client:
+                    self.assertNotIn("produce alerts", result.output)
+                app.cfg.save.assert_called_once()
+
     def test_show_global_when_no_args(self):
         runner = CliRunner()
         app = make_multi_ctx({})  # single-connector / global path

@@ -2254,14 +2254,37 @@ def _warn_still_fail_open(gc, open_names: list[str]) -> None:
 _HILT_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 
 
-def _hilt_enable_notice(connector: str, severity: str) -> str:
+def _hilt_enable_notice(
+    connector: str, severity: str, *, mode: str = "action", secure_client: bool = False
+) -> str:
     label = _connector_label(connector)
+    observe_note = (
+        f"{label} is in observe mode; HILT at/above {severity} does not pause actions "
+        "until action mode is enabled. "
+        if mode.strip().lower() != "action"
+        else ""
+    )
+    if normalize_connector(connector) == "copilot":
+        if secure_client:
+            return (
+                observe_note +
+                f"{label} Secure Client will prompt for approval on supported confirmable "
+                f"actions at/above {severity} (CRITICAL findings still block outright)."
+            )
+        return (
+            observe_note +
+            f"{label} cannot prove an approval prompt is available; action-mode "
+            f"confirmations at/above {severity} are denied and audited as block "
+            "(raw_action=confirm). CRITICAL findings still block outright."
+        )
     if has_native_approval_prompt(connector):
         return (
+            observe_note +
             f"{label} will prompt for approval on supported confirmable actions at/above "
             f"{severity} (CRITICAL findings still block outright)."
         )
     return (
+        observe_note +
         f"{label} has no implemented native approval prompt; confirm verdicts at/above "
         f"{severity} produce alerts with raw_action=confirm preserved. CRITICAL findings still block outright."
     )
@@ -2354,7 +2377,12 @@ def _set_connector_hilt(
     )
     if new_enabled:
         ux.subhead(
-            _hilt_enable_notice(key, new_min),
+            _hilt_enable_notice(
+                key,
+                new_min,
+                mode=gc.effective_mode(key),
+                secure_client=asset_lists.is_secure_client(app.cfg),
+            ),
             indent="  ",
         )
     else:
