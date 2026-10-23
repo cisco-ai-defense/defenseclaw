@@ -238,7 +238,10 @@ func ReconcileWindowsCodexMachineRequirements(
 		if err != nil {
 			return err
 		}
-		requirementsChanged := !bytes.Equal(requirements.data, rendered)
+		// A file ordinary users cannot read leaves their Codex without the
+		// managed hooks: it is published again with the read restored.
+		requirementsChanged := !bytes.Equal(requirements.data, rendered) ||
+			windowsCodexRequirementsUnreadable(requirementsFile)
 		postHash := windowsCodexMachineHash(rendered)
 		report.PostimageSHA256 = postHash
 
@@ -1084,6 +1087,11 @@ func verifyWindowsCodexMachineRequirementsLocked(
 	if err := verifyWindowsCodexRequirementsBytes(requirements.data, opts); err != nil {
 		return err
 	}
+	// The elevated read above proves nothing for the users: Codex reads the
+	// requirements with each user's own token.
+	if err := windowsCodexRequirementsUsersCanRead(opts.RequirementsPath); err != nil {
+		return fmt.Errorf("ordinary users cannot read the Codex machine requirements: %w", err)
+	}
 	ownership, err := readWindowsCodexMachineFile(
 		opts.OwnershipPath,
 		windowsCodexMachineOwnershipLimit,
@@ -1687,12 +1695,66 @@ func windowsCodexRequirementsWriter() safefile.SharedFileWriter {
 
 // publishWindowsCodexRequirements publishes candidate, or removes the file,
 // only over base, the file the candidate was computed from. A newer file is
-// kept, and the error wraps errWindowsCodexMachineFileChanged.
+// kept, and the error wraps errWindowsCodexMachineFileChanged. A file that
+// ordinary users cannot read is published even when candidate is its
+// content, so that it gets the read back.
 func publishWindowsCodexRequirements(base safefile.SharedFile, candidate []byte, remove bool) error {
-	_, err := windowsCodexRequirementsWriter().Update(base, func(safefile.SharedFile) (safefile.SharedEdit, error) {
-		return safefile.SharedEdit{Data: candidate, Remove: remove}, nil
+	_, err := windowsCodexRequirementsWriter().Update(base, func(current safefile.SharedFile) (safefile.SharedEdit, error) {
+		return safefile.SharedEdit{
+			Data: candidate, Remove: remove,
+			Rewrite: !remove && windowsCodexRequirementsUnreadable(current),
+		}, nil
 	})
 	return err
+}
+
+// windowsCodexRequirementsUnreadable reports a requirements.toml that is
+// present and that ordinary users cannot read (safefile.UsersCanRead).
+func windowsCodexRequirementsUnreadable(file safefile.SharedFile) bool {
+	return file.Exists && safefile.UsersCanRead(file.Metadata) != nil
+}
+
+// windowsCodexRequirementsUsersCanRead reports, as an error, when ordinary
+// users cannot read the requirements.toml at path.
+func windowsCodexRequirementsUsersCanRead(path string) error {
+	metadata, err := safefile.ReadPathMetadata(path)
+	if err != nil {
+		return err
+	}
+	return safefile.UsersCanRead(metadata)
+}
+
+// protectWindowsCodexSharedRequirements gives a requirements.toml about to
+// be published its access, before it is published: keep, the metadata of the
+// file it replaces, or DefenseClaw's protection for a new file. Codex reads
+// the file with each user's own token, so the result must let every
+// ordinary user read it. A kept access list that does not gets the
+// BUILTIN\Users read entry added and keeps every other entry; one that still
+// refuses a user the read (a deny entry) gets DefenseClaw's protection.
+func protectWindowsCodexSharedRequirements(path string, keep *safefile.FileMetadata) error {
+	if keep == nil {
+		if err := setWindowsCodexMachineFileProtection(path, true); err != nil {
+			return err
+		}
+	} else if err := safefile.ApplyFileMetadata(path, *keep); err != nil {
+		return err
+	}
+	if windowsCodexRequirementsUsersCanRead(path) == nil {
+		return nil
+	}
+	if err := safefile.GrantUsersRead(path); err != nil {
+		return err
+	}
+	if windowsCodexRequirementsUsersCanRead(path) == nil {
+		return nil
+	}
+	if err := setWindowsCodexMachineFileProtection(path, true); err != nil {
+		return err
+	}
+	if err := windowsCodexRequirementsUsersCanRead(path); err != nil {
+		return fmt.Errorf("ordinary users cannot read the protected Codex machine requirements: %w", err)
+	}
+	return nil
 }
 
 func writeWindowsCodexSharedRequirements(base safefile.SharedFile, edit safefile.SharedEdit) (safefile.SharedWriteResult, error) {
@@ -1722,16 +1784,14 @@ func writeWindowsCodexSharedRequirements(base safefile.SharedFile, edit safefile
 		}
 		return safefile.SharedWriteResult{Published: true, Left: safefile.SharedFile{Path: path}}, nil
 	}
-	metadata := edit.Metadata
-	if metadata == nil && base.Exists {
-		metadata = &base.Metadata
+	keep := edit.Metadata
+	if keep == nil && base.Exists {
+		keep = &base.Metadata
 	}
 	published, swapped, err := safefile.PublishSharedFile(safefile.SharedPublish{
-		Base: base, CompareMetadata: true, Data: edit.Data, Metadata: metadata,
-		Protect: func(temp string) error {
-			return setWindowsCodexMachineFileProtection(temp, windowsCodexMachineFileUserReadable(path))
-		},
-		Limit: limit, Inspect: windowsCodexMachineSingleLinkCheck, TempPattern: ".defenseclaw-codex-*",
+		Base: base, CompareMetadata: true, Data: edit.Data, Limit: limit,
+		Inspect: windowsCodexMachineSingleLinkCheck, TempPattern: ".defenseclaw-codex-*",
+		Protect: func(temp string) error { return protectWindowsCodexSharedRequirements(temp, keep) },
 	})
 	if !swapped {
 		if errors.Is(err, safefile.ErrSwapRaced) {
@@ -1754,6 +1814,11 @@ func writeWindowsCodexSharedRequirements(base safefile.SharedFile, edit safefile
 		// Another writer saved right after the swap. Its file is newer and is
 		// kept; the caller computes its edit again from it.
 		return result, fmt.Errorf("%s %w after publication", label, errWindowsCodexMachineFileChanged)
+	}
+	if err := windowsCodexRequirementsUsersCanRead(path); err != nil {
+		// An access list change landed with the swap and took the read from
+		// ordinary users. The caller publishes again over it, with the read.
+		return result, fmt.Errorf("%s %w after publication: %v", label, errWindowsCodexMachineFileChanged, err)
 	}
 	return result, nil
 }
