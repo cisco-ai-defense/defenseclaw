@@ -21,6 +21,7 @@ package enterpriseunix
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -872,7 +873,7 @@ func (l *lifecycle) finishBundle(ctx context.Context) {
 // result fails with not_confirmed and the run exits with the retry code: the
 // next lifecycle run (the agent's resubmit of the same bundle, an MDM or
 // path-triggered ensure) confirms it once the gateway reports its policy, or
-// fails it and puts the last good bundle back (settleUnconfirmedBundle).
+// keeps it pending until live evidence disproves the apply.
 func (l *lifecycle) bundleStillEnforced(ctx context.Context, record *Deployment, rc *enterprisebundle.Receipt) bool {
 	r := l.result
 	digest, _, err := l.awaitBundlePolicy(ctx, record.ServiceUID, false, rc)
@@ -889,7 +890,7 @@ func (l *lifecycle) bundleStillEnforced(ctx context.Context, record *Deployment,
 	}
 	l.bundle.confirmPending = true
 	r.AddError(codeBundleNotConfirmed, fmt.Sprintf(
-		"policy bundle %s version %d is installed, but the gateway stopped reporting its policy before the bundle was confirmed (%v); the receipt stays applied and the last good bundle stays current: resubmit the same bundle, and the next lifecycle run confirms it once the gateway reports its policy, or puts the last good bundle back",
+		"policy bundle %s version %d is installed, but the gateway stopped reporting its policy before the bundle was confirmed (%v); the receipt stays applied and the last good bundle stays current: resubmit the same bundle, and the next lifecycle run confirms it once the gateway reports its policy or keeps it pending until live evidence disproves the apply",
 		displayID(rc), rc.Version, err))
 	return false
 }
@@ -899,7 +900,8 @@ func (l *lifecycle) bundleStillEnforced(ctx context.Context, record *Deployment,
 // failed. Then the bundle is confirmed as after a clean run, and a warning
 // says the errors of the run did not change the policy. Otherwise the
 // receipt stays applied, never failed while its config is the deployment:
-// the next changing run confirms it or applies the last good bundle again
+// the next changing run confirms it or keeps it pending until the gateway
+// proves another policy is enforced
 // (settleUnconfirmedBundle).
 func (l *lifecycle) committedBundleEnforced(ctx context.Context, record *Deployment, rc *enterprisebundle.Receipt) bool {
 	r := l.result
@@ -909,7 +911,7 @@ func (l *lifecycle) committedBundleEnforced(ctx context.Context, record *Deploym
 	}
 	if err != nil {
 		r.AddError(string(bundleConfirmationCode(err)), fmt.Sprintf(
-			"policy bundle %s version %d is installed, but after a later step of this run failed the gateway did not report its policy again: %v; the next lifecycle run confirms it or applies the last good bundle again",
+			"policy bundle %s version %d is installed, but after a later step of this run failed the gateway did not report its policy again: %v; the next lifecycle run confirms it or keeps it pending until the gateway proves another policy is enforced",
 			displayID(rc), rc.Version, err))
 		return false
 	}
@@ -1154,14 +1156,15 @@ func (l *lifecycle) awaitBundlePolicy(ctx context.Context, serviceUID int, requi
 	return "", 0, fmt.Errorf("the gateway reports config generation %d, not %d", last.configGeneration, state.Generation)
 }
 
-// settleUnconfirmedBundle finishes a bundle a previous run applied but did
-// not make current. When its transaction did not commit (recoverInterrupted
-// put the snapshot back), the receipt fails as interrupted. When the
-// deployment committed it, the gateway is asked again: reporting its policy
-// confirms it now; otherwise the receipt fails as not confirmed and this run
-// applies the current (last good) bundle again.
-func (l *lifecycle) settleUnconfirmedBundle(ctx context.Context, store *enterprisebundle.Store, record *Deployment, rc *enterprisebundle.Receipt) {
+// settleUnconfirmedBundle finishes an applied receipt only from proof about
+// its committed config and the gateway's live policy. Missing evidence keeps
+// it pending; a gateway that demonstrably enforces another policy fails it.
+func (l *lifecycle) settleUnconfirmedBundle(ctx context.Context, store *enterprisebundle.Store, record *Deployment, rc *enterprisebundle.Receipt) bool {
 	r := l.result
+	pending := func(reason string) bool {
+		r.AddWarning(enterprisebundle.WarnBundlePending, fmt.Sprintf("policy bundle %s version %d remains applied and pending: %s; retry ensure after the evidence is available", rc.BundleID, rc.Version, reason))
+		return true
+	}
 	committed := record != nil && rc.ConfigSHA256 != "" && record.ConfigSHA256 == rc.ConfigSHA256
 	if !committed {
 		rc.RolledBack = true
@@ -1170,16 +1173,57 @@ func (l *lifecycle) settleUnconfirmedBundle(ctx context.Context, store *enterpri
 		}
 		if err := store.Fail(rc, enterprisebundle.CodeInterrupted, "the run that applied this bundle ended before its transaction committed; the transaction was rolled back and the last good policy kept enforcing"); err != nil {
 			r.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), "could not settle the policy bundle store: "+err.Error()+stateWriteAction(err))
-			return
+			return true
 		}
 		r.AddWarning(codeBundleInterrupted, fmt.Sprintf("policy bundle %s version %d was rolled back after an interrupted apply; the last good policy enforces", rc.BundleID, rc.Version))
-		return
+		return false
 	}
-	digest, _, err := l.awaitBundlePolicy(ctx, record.ServiceUID, false, rc)
-	if err == nil {
-		err = enterprisebundle.ConfirmPolicyDigests(rc.ExpectedDigest, rc.EffectivePolicyDigest, digest, rc.DigestComparable)
+	configPath := l.env.P(l.env.Layout.ConfigPath)
+	installedSHA, err := sha256File(configPath)
+	if err != nil || installedSHA != rc.ConfigSHA256 {
+		return pending("the installed config cannot be matched to the receipt")
 	}
-	if err == nil && digest == rc.EffectivePolicyDigest {
+	generation, err := configwrite.ReadGenerationState(configPath)
+	if err != nil || generation.Generation == 0 || generation.Generation != rc.ConfigGeneration ||
+		generation.ConfigSHA256 != rc.ConfigSHA256 || generation.BundleID != rc.BundleID ||
+		generation.BundleVersion != rc.Version || generation.SignerKeyID != rc.SignerKeyID || generation.Actor != rc.Principal {
+		return pending("the committed signed bundle generation cannot be verified")
+	}
+	digest, comparable, err := enterprisebundle.VerifiedReceiptDigest(ctx, store, rc, l.env.GOOS,
+		enterprisebundle.DeviceLayoutFromManaged(l.env.Layout), l.env.ProductVersion,
+		l.env.bundleVersionDir(rc.Dir), l.env.BundleDigester)
+	if err != nil {
+		return pending("this build cannot verify the stored signed bundle's current policy digest")
+	}
+	gateway, ok := gatewayUnitOf(l.env.Services.Units())
+	if !ok {
+		return pending("the gateway service is unavailable")
+	}
+	body, err := l.gatewayHealth(ctx, gateway, record.ServiceUID)
+	if err != nil {
+		return pending("the gateway policy is unavailable")
+	}
+	health := parseBundleHealth(body)
+	if digest != rc.EffectivePolicyDigest && health.digest == rc.EffectivePolicyDigest &&
+		health.configGeneration == generation.Generation && health.bundleID == rc.BundleID &&
+		health.bundleVersion == rc.Version {
+		return pending("the gateway still reports this bundle's historical policy digest; retry after the gateway upgrade")
+	}
+	rejected := health.reloadError != "" || health.configState == "error"
+	if !rejected {
+		if len(health.digest) != 71 || !strings.HasPrefix(health.digest, "sha256:") || strings.ToLower(health.digest) != health.digest {
+			return pending("the gateway has not reported a valid policy digest")
+		}
+		if _, err := hex.DecodeString(health.digest[len("sha256:"):]); err != nil {
+			return pending("the gateway has not reported a valid policy digest")
+		}
+		if health.configGeneration == 0 || health.bundleID == "" || health.bundleVersion == 0 || health.configState == "" {
+			return pending("the gateway has not reported enough bundle attribution to confirm or disprove the apply")
+		}
+	}
+	digestErr := enterprisebundle.ConfirmPolicyDigests(rc.ExpectedDigest, digest, health.digest, comparable)
+	if digestErr == nil && health.digest == digest && health.configGeneration == generation.Generation &&
+		health.bundleID == rc.BundleID && health.bundleVersion == rc.Version && health.reloadError == "" && health.configState != "error" {
 		rc.SessionsRestartRequired = l.env.UnprotectedSessions(ctx).Count
 		// The receipt records the late confirm: a resubmit of the same bundle
 		// that finds it current (another run settled it first) reports it.
@@ -1188,25 +1232,26 @@ func (l *lifecycle) settleUnconfirmedBundle(ctx context.Context, store *enterpri
 		}
 		if _, err := store.Confirm(rc); err != nil {
 			r.AddWarning(codeBundleNotCurrent, "could not record the applied policy bundle as current: "+err.Error())
-			return
+			return true
 		}
 		if l.confirmedLate == nil {
 			l.confirmedLate = map[string]bool{}
 		}
 		l.confirmedLate[rc.ManifestSHA256] = true
 		r.AddWarning(codeBundleConfirmedLate, lateConfirmMessage(rc.BundleID, rc.Version))
-		return
+		return false
 	}
 	st, _ := store.LoadState()
 	rc.RolledBack = st.Current != nil
-	rc.EnforcingDigest, _ = l.gatewayPolicyNow(ctx, record.ServiceUID)
-	if err := store.Fail(rc, bundleConfirmationCode(err), "after an interrupted apply the gateway did not report the policy of this bundle"); err != nil {
+	rc.EnforcingDigest = health.digest
+	if err := store.Fail(rc, bundleConfirmationCode(digestErr), "after an interrupted apply the gateway did not report the policy of this bundle"); err != nil {
 		r.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), "could not settle the policy bundle store: "+err.Error()+stateWriteAction(err))
-		return
+		return true
 	}
 	next := "there is no last good bundle to return to, and the gateway keeps enforcing the policy it last built"
 	if st.Current != nil {
 		next = fmt.Sprintf("a changing run applies the last good bundle %s version %d again", st.Current.BundleID, st.Current.Version)
 	}
 	r.AddWarning(codeBundleUnconfirmed, fmt.Sprintf("policy bundle %s version %d was applied but the gateway did not confirm it (failed: not_confirmed); %s", rc.BundleID, rc.Version, next))
+	return false
 }

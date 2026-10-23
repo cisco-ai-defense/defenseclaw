@@ -34,10 +34,13 @@ const (
 	// KiroIDEVersionSuffix marks a discovered version as the Kiro IDE's
 	// rather than kiro-cli's.
 	KiroIDEVersionSuffix = "+kiro-ide"
-	// KiroWindowsManagedCLIFloor is the lowest kiro-cli build verified on
-	// Windows: `kiro-cli chat --help` lists --v3 and --agent-engine v3, the
-	// engine that reads ~/.kiro/hooks and vetoes UserPromptSubmit.
-	KiroWindowsManagedCLIFloor = "2.24.1"
+	// KiroWindowsManagedCLIContractFloor is the lowest kiro-cli the managed
+	// CLI contract covers: the build 1.0.3 and earlier enrolled from, whose
+	// hook files are the ones rendered today. The contract keeps covering it
+	// so a user an earlier release enrolled below KiroCLIHookFloor keeps
+	// being repaired at that version, as on Unix. The standalone profile
+	// enrolls, and follows a row to, only KiroCLIHookFloor and later.
+	KiroWindowsManagedCLIContractFloor = "2.24.1"
 	// KiroWindowsManagedIDEFloor is the first Kiro IDE that reads the global
 	// ~/.kiro/hooks file (kiro.dev/changelog/ide/1-0-182); older builds read
 	// only a project's .kiro/hooks, which the managed footprint never writes.
@@ -83,8 +86,8 @@ func kiroWindowsManagedHookContracts() []HookContract {
 		}
 	}
 	return []HookContract{
-		shared(KiroWindowsManagedCLIContractID, KiroWindowsManagedCLIFloor,
-			"kiro-cli reads the v3 file with --v3 (or --agent-engine v3) and the agent file otherwise; 2.24.1 is the lowest build verified on Windows."),
+		shared(KiroWindowsManagedCLIContractID, KiroWindowsManagedCLIContractFloor,
+			"kiro-cli reads the v3 file with --v3 (or --agent-engine v3) and the agent file otherwise; before 2.27.1 a non-interactive --v3 run loads no hooks (KiroCLIHookFloor), so only rows an earlier release enrolled stay below it."),
 		shared(KiroWindowsManagedIDEContractID, KiroWindowsManagedIDEFloor,
 			"The Kiro IDE reads the global ~/.kiro/hooks file from 1.0.182; the discovered IDE version carries the +kiro-ide suffix."),
 	}
@@ -112,6 +115,9 @@ func ResolveWindowsManagedKiroHookContract(rawVersion string) HookContractResolu
 	if resolution.Status == HookCompatibilityUnknown && resolution.NormalizedVersion != "" &&
 		compareVersion(resolution.NormalizedVersion, contract.MinAgentVersion) < 0 {
 		resolution.Reason = fmt.Sprintf("%s %s is below the certified minimum %s", product, resolution.NormalizedVersion, contract.MinAgentVersion)
+		if product == "kiro-cli" {
+			resolution.Reason = KiroCLIBelowHookFloorReason(resolution.NormalizedVersion)
+		}
 	}
 	return resolution
 }

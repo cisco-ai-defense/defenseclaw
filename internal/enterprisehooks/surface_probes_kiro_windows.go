@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -29,36 +28,64 @@ import (
 // but each run copies the build to run\chat-cli-<version>.exe, so the
 // active version is the run copy whose size matches kiro-cli.exe (the
 // highest such version when several match), as for the native Claude
-// installer. A kiro-cli that has never run has no copy: it is enrolled at
-// the standalone floor until its first run names the version.
+// installer. A kiro-cli that has never run has no copy and so no version.
+// Its version is never assumed (a 2.24.1 install would then be enrolled as
+// a supported one although its headless runs load no hooks, rel-1-0-4
+// GAP-0829): it is reported as not protected, with no row of its own, until
+// its first run names the version.
 //
 // The Kiro IDE reads the global %USERPROFILE%\.kiro\hooks file from
 // KiroIDEGlobalHooksFloor. Its version is the resources\app\product.json of
 // the per-user install (%LOCALAPPDATA%\Programs\Kiro) or the machine install
-// (%ProgramFiles%\Kiro). A user without a readable kiro-cli version is
+// (%ProgramFiles%\Kiro). A user without an admitted kiro-cli version is
 // enrolled at the IDE's version, marked with KiroIDEVersionSuffix; an IDE
 // below the floor is reported. The profile owner controls these files, so
 // each is only a version claim, bounded and validated like a package.json
 // probe.
 
-// discoverWindowsKiroAgentVersion returns the version a Kiro row is enrolled
-// at: kiro-cli's, else an IDE at or above the global-hooks floor.
-func discoverWindowsKiroAgentVersion(profileHome string) string {
+// windowsKiroForms lists profileHome's installed Kiro forms for AssessKiro:
+// the kiro-cli (its run copy's version, or unknown before its first run) and
+// every Kiro IDE install.
+func windowsKiroForms(profileHome string) []KiroForm {
+	var forms []KiroForm
 	if cli := discoverWindowsKiroCLIVersion(profileHome); cli != "" {
-		return cli
+		forms = append(forms, KiroForm{Kind: KiroFormCLI, Version: cli})
+	} else if launcher := windowsKiroCLIVersionUnknown(profileHome); launcher != "" {
+		forms = append(forms, KiroForm{Kind: KiroFormCLI, Unread: windowsKiroCLIVersionUnknownReason(launcher)})
 	}
-	ide, _ := discoverWindowsKiroIDEVersion(profileHome)
-	if ide != "" && !kiroIDEBelowGlobalHooksFloor(ide) {
-		return ide + KiroIDEVersionSuffix
+	return append(forms, windowsKiroIDEForms(profileHome)...)
+}
+
+// discoverWindowsKiroAgentVersion returns the version a Kiro row is enrolled
+// at: AssessKiro's protected form (a kiro-cli at or above its floor, else an
+// IDE at or above the global-hooks floor). Without one it returns the
+// kiro-cli's version, so the row's admission refuses and reports it; a CLI
+// with no version is reported by windowsKiroCLIVersionUnknown.
+func discoverWindowsKiroAgentVersion(profileHome string) string {
+	if enroll := AssessKiro(windowsKiroForms(profileHome)).Enroll; enroll != "" {
+		return enroll
 	}
-	// A kiro-cli that has never run names no version yet. Enroll it at the
-	// standalone floor so its first chat already runs with the DefenseClaw
-	// agent and hooks; the run copy names the real version on the next
-	// cycle, which then re-admits or reports it.
-	if windowsKiroCLILauncherPresent(profileHome) {
-		return standaloneNotGatedAgentFloor("kiro")
+	return discoverWindowsKiroCLIVersion(profileHome)
+}
+
+// windowsKiroCLIVersionUnknown returns profileHome's kiro-cli.exe when it is
+// installed but no run copy names its version (it has not run since it was
+// installed or updated), else "".
+func windowsKiroCLIVersionUnknown(profileHome string) string {
+	if !filepath.IsAbs(profileHome) || !windowsKiroCLILauncherPresent(profileHome) ||
+		discoverWindowsKiroCLIVersion(profileHome) != "" {
+		return ""
 	}
-	return ""
+	return filepath.Join(filepath.Clean(profileHome), "AppData", "Local", "Kiro-Cli", "kiro-cli.exe")
+}
+
+// windowsKiroCLIVersionUnknownReason is the unprotected reason of that
+// kiro-cli. It names no hook contract (hook_contract_unverified), so status
+// reports the deployment's coverage as incomplete.
+func windowsKiroCLIVersionUnknownReason(launcher string) string {
+	return fmt.Sprintf("%s has no run copy that matches it, so its version is unknown and not verified against a known hook contract; "+
+		"kiro-cli records its build in %s when the user starts it, and the next enumeration enrolls or reports that version",
+		launcher, filepath.Join(filepath.Dir(launcher), "run"))
 }
 
 // windowsKiroCLILauncherPresent reports a regular kiro-cli.exe under a plain
@@ -104,62 +131,134 @@ func discoverWindowsKiroCLIVersion(profileHome string) string {
 	return best
 }
 
-// discoverWindowsKiroIDEVersion returns the Kiro IDE version installed for
-// profileHome and where it was read, the user's own install first.
-func discoverWindowsKiroIDEVersion(profileHome string) (string, string) {
+// windowsKiroIDEForms returns profileHome's Kiro IDE installs, the user's
+// own install first: each product.json's version, or, when the file exists
+// but cannot be read or names no valid version, an install whose version is
+// unknown (JudgeKiroForm: not protected).
+func windowsKiroIDEForms(profileHome string) []KiroForm {
 	product := filepath.Join("Kiro", "resources", "app", "product.json")
-	candidates := []string{filepath.Join(profileHome, "AppData", "Local", "Programs", product)}
+	type candidate struct {
+		kind KiroFormKind
+		path string
+	}
+	candidates := []candidate{{KiroFormUserIDE, filepath.Join(profileHome, "AppData", "Local", "Programs", product)}}
 	if programFiles, err := winpath.TrustedProgramFiles(); err == nil && programFiles != "" {
-		candidates = append(candidates, filepath.Join(programFiles, product))
+		candidates = append(candidates, candidate{KiroFormMachineIDE, filepath.Join(programFiles, product)})
 	}
-	for _, candidate := range candidates {
-		data, err := readBoundedWindowsAgentPackageJSON(candidate)
-		if err != nil {
+	var forms []KiroForm
+	for _, c := range candidates {
+		if _, err := os.Lstat(c.path); err != nil {
 			continue
 		}
-		var parsed struct {
-			NameShort       string `json:"nameShort"`
-			ApplicationName string `json:"applicationName"`
-			Version         string `json:"version"`
+		form := KiroForm{Kind: c.kind, Version: readWindowsKiroIDEProductVersion(c.path)}
+		if form.Version == "" {
+			form.Unread = fmt.Sprintf("Kiro IDE at %s is installed, but its version could not be read", c.path)
 		}
-		if json.Unmarshal(data, &parsed) != nil || parsed.NameShort != "Kiro" || parsed.ApplicationName != "kiro" {
-			continue
-		}
-		if version := strings.TrimSpace(parsed.Version); isValidWindowsAgentVersion(version) {
-			return version, candidate
-		}
+		forms = append(forms, form)
 	}
-	return "", ""
+	return forms
 }
 
-func kiroIDEBelowGlobalHooksFloor(version string) bool {
-	return compareStandaloneFloorVersion(connector.NormalizeAgentVersion("kiro", version), KiroIDEGlobalHooksFloor) < 0
+// readWindowsKiroIDEProductVersion returns the version a bounded Kiro IDE
+// product.json names, or "".
+func readWindowsKiroIDEProductVersion(path string) string {
+	data, err := readBoundedWindowsAgentPackageJSON(path)
+	if err != nil {
+		return ""
+	}
+	var parsed struct {
+		NameShort       string `json:"nameShort"`
+		ApplicationName string `json:"applicationName"`
+		Version         string `json:"version"`
+	}
+	if json.Unmarshal(data, &parsed) != nil || parsed.NameShort != "Kiro" || parsed.ApplicationName != "kiro" {
+		return ""
+	}
+	if version := strings.TrimSpace(parsed.Version); isValidWindowsAgentVersion(version) {
+		return version
+	}
+	return ""
 }
 
-// reportKiroIDEBelowFloor reports a Kiro IDE too old to read the global
-// hooks file: its agent sessions run without DefenseClaw hooks whether or
-// not the user's kiro-cli is enrolled.
-func (c windowsStandaloneRowContext) reportKiroIDEBelowFloor(row *ManifestTarget) {
+func windowsKiroCLIBelowHookFloor(version string) string {
+	if verdict := JudgeKiroForm(kiroFormFromRowVersion(version)); !verdict.Form.IDE() && verdict.BelowFloor() {
+		return verdict.Reason
+	}
+	return ""
+}
+
+// reportKiroCLIBesideIDE records the CLI surface that is not covered even
+// though the same row protects a supported IDE (AssessKiro): a kiro-cli below
+// the floor sends no hooks from its headless runs, and one whose version is
+// unknown is not assumed to be at the floor.
+func (c windowsStandaloneRowContext) reportKiroCLIBesideIDE(row *ManifestTarget) {
 	if c.report == nil || !strings.EqualFold(strings.TrimSpace(row.Connector), "kiro") || !filepath.IsAbs(row.UserHome) {
 		return
 	}
-	ide, _ := discoverWindowsKiroIDEVersion(filepath.Clean(row.UserHome))
-	if ide == "" || !kiroIDEBelowGlobalHooksFloor(ide) {
+	assessment := AssessKiro(windowsKiroForms(filepath.Clean(row.UserHome)))
+	if assessment.Enrolled == nil || !assessment.Enrolled.Form.IDE() {
+		return // the row's own refusal or kept-row report covers the CLI
+	}
+	for _, verdict := range assessment.Forms {
+		switch {
+		case verdict.Form.IDE() || verdict.Protected:
+		case verdict.Unknown():
+			c.reportAgent(row, "", verdict.Form.Unread, "Kiro IDE "+assessment.Enrolled.Version+
+				" is separately eligible for global hooks, but this kiro-cli is not counted as protected until its version is read")
+		default:
+			c.reportAgent(row, verdict.Version, verdict.Reason, "Kiro IDE "+assessment.Enrolled.Version+
+				" is separately eligible for global hooks, but this kiro-cli's non-interactive runs load no hooks")
+		}
+	}
+}
+
+// reportKeptKiroCLIRow reports a kept kiro-cli row whose installed hooks do
+// not cover the CLI: one an earlier release enrolled below the floor (its
+// headless runs load no hooks), and one enrolled at a version the CLI has not
+// confirmed because no run copy names it (an earlier build assumed it,
+// GAP-0829). The row stays, so its interactive hooks keep being repaired. A
+// row next to a protected IDE is covered by reportKiroCLIBesideIDE.
+func (c windowsStandaloneRowContext) reportKeptKiroCLIRow(row *ManifestTarget, version string) {
+	if kiroFormFromRowVersion(version).IDE() || !filepath.IsAbs(row.UserHome) {
 		return
 	}
-	consequence := "its agent sessions run without DefenseClaw hooks"
-	if cli := discoverWindowsKiroCLIVersion(filepath.Clean(row.UserHome)); cli != "" {
-		consequence += "; kiro-cli " + cli + " stays enrolled"
+	home := filepath.Clean(row.UserHome)
+	assessment := AssessKiro(windowsKiroForms(home))
+	if assessment.Enrolled != nil && assessment.Enrolled.Form.IDE() {
+		return
 	}
-	c.report(UnprotectedAgent{
-		User:      c.user,
-		SID:       canonicalManifestTargetSID(row.SID),
-		Connector: "kiro",
-		Version:   ide,
-		Code:      UnprotectedCodeKiroIDEBelowGlobalHooksFloor,
-		Reason: fmt.Sprintf("Kiro IDE %s is below %s, the first build that reads the global %%USERPROFILE%%\\.kiro\\hooks file, so %s; update Kiro IDE",
-			ide, KiroIDEGlobalHooksFloor, consequence),
-	})
+	if launcher := windowsKiroCLIVersionUnknown(home); launcher != "" {
+		c.reportAgent(row, version, windowsKiroCLIVersionUnknownReason(launcher), fmt.Sprintf(
+			"the row stays enrolled at %s, which this kiro-cli has not confirmed, so its hooks stay installed but it is not counted as protected", version))
+		return
+	}
+	if reason := windowsKiroCLIBelowHookFloor(version); reason != "" {
+		c.reportAgent(row, version, reason,
+			"an earlier enrollment keeps its interactive hooks installed, but this CLI's non-interactive runs do not load them")
+	}
+}
+
+// reportKiroIDENotProtected reports every Kiro IDE install AssessKiro does
+// not protect: one too old to read the global hooks file, and one whose
+// version could not be read. Its agent sessions are not counted as protected
+// whether or not the user's kiro-cli is enrolled.
+func (c windowsStandaloneRowContext) reportKiroIDENotProtected(row *ManifestTarget) {
+	if c.report == nil || !strings.EqualFold(strings.TrimSpace(row.Connector), "kiro") || !filepath.IsAbs(row.UserHome) {
+		return
+	}
+	for _, verdict := range AssessKiro(windowsKiroForms(filepath.Clean(row.UserHome))).Unprotected() {
+		if !verdict.Form.IDE() {
+			continue
+		}
+		c.report(UnprotectedAgent{
+			User:      c.user,
+			SID:       canonicalManifestTargetSID(row.SID),
+			Connector: "kiro",
+			Version:   verdict.Version,
+			Code:      verdict.Code,
+			Reason:    verdict.Reason,
+		})
+	}
 }
 
 // windowsKiroInstalled returns the file that shows a Kiro install whose

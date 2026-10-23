@@ -2354,6 +2354,17 @@ def _activate_additional_connectors(
 
     for s in extras:
         key = connector_paths.normalize(s["connector"])
+        if key == "kiro":
+            # GAP-0828: a kiro-cli below its hook floor is refused in every
+            # mode; it is left out instead of being configured in observe.
+            from defenseclaw.commands.cmd_setup import _kiro_setup_refusal
+
+            if refusal := _kiro_setup_refusal(data_dir=getattr(cfg, "data_dir", None)):
+                if not quiet:
+                    ux.echo(f"  ✗ kiro: not configured: {refusal}", err=True)
+                if key in selected_keys:
+                    selected_keys.remove(key)
+                continue
         pc = gc.connectors.get(key) or _fresh_block(key)
         mode = (s["profile"] or "observe").lower()
         # Parity with single-connector setup: an extra connector may only be
