@@ -20,7 +20,7 @@ Only agents you select in the config are protected; see [Choose the agents to pr
 | Codex, Claude Code | Machine policy, with the vendor lock |
 | Cursor, GitHub Copilot CLI | Machine policy, with the foreign-hook guard |
 | OpenCode | Machine policy through the [managed OpenCode plugin](#managed-opencode-plugin), with the foreign-hook guard |
-| Amp, Devin, Hermes, Antigravity, Kiro | Per user. Amp, Devin and Hermes also get the foreign-hook guard. |
+| Amp, Devin, Hermes, Antigravity, Kiro | Per user. Amp and Devin get the foreign-hook guard on every OS; Hermes gets it on Linux and macOS. Windows Amp keeps its guard session record locally, and its plugin blocks gateway outages. |
 | OpenClaw, ZeptoClaw | Not managed: they need the guardrail proxy, which a managed host does not run (route `unsupported`) |
 
 The per-OS differences (Windows registrations, Kiro paths, Cascade) are in [Machine policy detail](/docs/enterprise/configure/reference#routes-by-connector-by-os).

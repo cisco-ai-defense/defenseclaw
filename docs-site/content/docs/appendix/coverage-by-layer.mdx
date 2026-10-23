@@ -58,7 +58,7 @@ standalone computer, the administrator may choose `hook_fail_mode: open`, an
 outage-only exception for a gateway service that is stopped, restarting or gives
 no answer in time. A connector whose foreign-hook guard checks the session with
 the gateway (`foreign_hooks: remove`, the default) blocks outages too; see
-[Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#session-records-and-gateway-outages).
+[Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#gateway-outages).
 A missing or invalid administrator-owned runtime, an unverified gateway peer,
 missing or refused credentials, rate limits (HTTP 429, also when the resends
 run out) and unusable responses still block. Secure Client keeps its separate open default and honors an explicit
@@ -200,8 +200,8 @@ The layers divide the work so that two of them never make the same decision:
 
 | Layer and failure | What happens |
 | --- | --- |
-| A hook cannot reach the gateway | The hook's fail mode decides, in observe and action mode alike: `closed` (the default everywhere except Secure Client) denies the call; `open` runs it and records the failure |
-| Managed hooks on a standalone computer, every connector | Closed by default. The administrator's `open` covers a gateway outage only, and not for a connector whose foreign-hook guard checks the session with the gateway. Rate limits, refusals and unusable answers always block |
+| A hook cannot reach the gateway | On a per-user install or under Secure Client, an invoked hook uses its effective fail mode and event mapping: `closed` (the default outside Secure Client) can deny a supported call; `open` can let it run. Connector limits and failure reporting vary; see [Fail modes](/docs/reference/configuration/fail-modes). Managed standalone behavior is in the next row |
+| Managed hooks on a standalone computer, every connector | Closed by default. The administrator's `open` covers a classified gateway outage only. With `foreign_hooks: remove`, guarded calls block during an outage: the guard needs the gateway's session record, except on Windows Amp, whose plugin blocks the outage independently. Rate limits, refusals and unusable answers block in every fail mode |
 | Secure Client hooks | Open by default; an explicit `closed` is kept |
 | Sandbox hooks | Always closed; silence is detected and can stop the sandbox |
 | The judge is unavailable | Falls back to the local verdict |
