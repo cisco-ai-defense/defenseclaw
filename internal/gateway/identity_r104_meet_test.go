@@ -21,31 +21,32 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+func meetSemanticGeneration(t *testing.T, prefix string, count int) *compiledRulePackCategories {
+	t.Helper()
+	category := ruleCategory{Name: "command"}
+	for i := range count {
+		marker := fmt.Sprintf("%s-marker-%03d", prefix, i)
+		category.Rules = append(category.Rules, PatternRule{
+			ID: prefix + fmt.Sprintf("-%03d", i), Title: marker,
+			Pattern:    regexp.MustCompile(regexp.QuoteMeta(marker)),
+			Expression: "f.commands.exists(c, c.program == 'echo')",
+			Severity:   "HIGH", Confidence: 0.99, ToolCallOnly: true,
+		})
+	}
+	compiled, err := compileRulePackGeneration([]ruleCategory{category})
+	if err != nil {
+		t.Fatalf("compile %s: %v", prefix, err)
+	}
+	return compiled
+}
+
 // Every member pack is valid alone, but their union exceeds the semantic
 // generation limit. The first member's blocking rule must never disappear
 // just because the second member has more rules.
 func TestOverLimitProfileMeetRefusesInsteadOfDroppingAMember(t *testing.T) {
 	stubProfileSources(t)
-	rules := func(prefix string, count int) *compiledRulePackCategories {
-		t.Helper()
-		category := ruleCategory{Name: "command"}
-		for i := range count {
-			marker := fmt.Sprintf("%s-marker-%03d", prefix, i)
-			category.Rules = append(category.Rules, PatternRule{
-				ID: prefix + fmt.Sprintf("-%03d", i), Title: marker,
-				Pattern:    regexp.MustCompile(regexp.QuoteMeta(marker)),
-				Expression: "f.commands.exists(c, c.program == 'echo')",
-				Severity:   "HIGH", Confidence: 0.99, ToolCallOnly: true,
-			})
-		}
-		compiled, err := compileRulePackGeneration([]ruleCategory{category})
-		if err != nil {
-			t.Fatalf("compile %s: %v", prefix, err)
-		}
-		return compiled
-	}
-	aRules := rules("MEET-A", 2)
-	bRules := rules("MEET-B", maxGenerationSemanticRules-1)
+	aRules := meetSemanticGeneration(t, "MEET-A", 2)
+	bRules := meetSemanticGeneration(t, "MEET-B", maxGenerationSemanticRules-1)
 	root := t.TempDir()
 	writeRulePackFixtureFile(t, filepath.Join(root, "a"), "rules/a.yaml", `version: 1
 category: secret
@@ -115,6 +116,82 @@ rules:
 	rec = httptest.NewRecorder()
 	if !refuseProfileProxy(rec, req) || rec.Code != http.StatusForbidden {
 		t.Fatalf("proxy did not refuse the uncompiled meet: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// An unscoped inspect credential resolves the decision at the global scope,
+// then the scan uses the gateway's Codex connector. Every connector-specific
+// merge must compile before that decision can authorize any scan.
+func TestOverLimitConnectorMeetRefusesUnscopedInspect(t *testing.T) {
+	stubProfileSources(t)
+	root := t.TempDir()
+	packDir := func(name string) string {
+		dir := filepath.Join(root, name)
+		writeRulePackFixtureFile(t, dir, "rules/marker.yaml", fmt.Sprintf(`version: 1
+category: secret
+rules:
+  - id: %s-FIXTURE
+    pattern: "%s_fixture_marker"
+    title: %s fixture
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`, name, name, name))
+		return dir
+	}
+	globalA, globalB := packDir("GLOBAL-A"), packDir("GLOBAL-B")
+	codexA, codexB := packDir("CODEX-A"), packDir("CODEX-B")
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"a": {Mode: "action", BlockAt: "HIGH", RulePackDir: globalA,
+			Connectors: map[string]config.PerConnectorGuardrailConfig{"codex": {RulePackDir: codexA}}},
+		"b": {Mode: "action", BlockAt: "HIGH", RulePackDir: globalB,
+			Connectors: map[string]config.PerConnectorGuardrailConfig{"codex": {RulePackDir: codexB}}},
+	}
+	p := identityTestPlatforms[0]
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "a", Match: config.ProfileMatch{Users: []string{p.id}}},
+		{Profile: "b", Match: config.ProfileMatch{Groups: []string{p.group}}},
+	}
+	set, err := newGuardrailProfileSet(cfg, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aRules := meetSemanticGeneration(t, "CODEX-A", 2)
+	bRules := meetSemanticGeneration(t, "CODEX-B", maxGenerationSemanticRules-1)
+	set.rules[effectiveRulePackKey(set.profiles["a"].Config, "codex")] = aRules
+	set.rules[effectiveRulePackKey(set.profiles["b"].Config, "codex")] = bRules
+	subject := identityTestSubject(p, p.providers[0], stateProven, true)
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, subject)
+	ctx = withGuardrailProfile(ctx, set, "")
+	decision := resolvedGuardrailProfileFrom(ctx).decision
+	if decision.Name != config.ProfileMeetName([]string{"a", "b"}) {
+		t.Fatalf("decision = %+v; want a proven meet", decision)
+	}
+	meet := set.meet(decision.Name)
+	if generation, err := meet.ruleGeneration(ctx, set, ""); err != nil || generation == nil {
+		t.Fatalf("global meet did not compile: generation %p, error %v", generation, err)
+	}
+	if generation, err := meet.ruleGeneration(ctx, set, "codex"); err == nil || generation != nil {
+		t.Fatalf("Codex meet unexpectedly compiled: generation %p, error %v", generation, err)
+	}
+	if decision.Refused == "" || !strings.Contains(decision.Refused, "rule packs") {
+		t.Fatalf("unscoped decision did not refuse failed Codex merge: %+v", decision)
+	}
+	api := &APIServer{scannerCfg: cfg}
+	api.guardrailProfiles.set.Store(set)
+	if got := api.connectorName(); got != "codex" || authenticatedInspectConnector(ctx) != "" {
+		t.Fatalf("inspect must resolve unscoped and scan Codex: gateway %q, authenticated %q", got, authenticatedInspectConnector(ctx))
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool",
+		strings.NewReader(`{"tool":"message","content":"CODEX-A-marker-000"}`)).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	api.guardrailProfileInspectMiddleware(http.HandlerFunc(api.handleInspectTool)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"action":"block"`) ||
+		!strings.Contains(rec.Body.String(), "rule packs") {
+		t.Fatalf("unscoped inspect did not block: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

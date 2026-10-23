@@ -299,8 +299,10 @@ func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileS
 	return result.generation, result.err
 }
 
-// refuseUncompiledMeet makes a proven meet's pack merge part of the
-// decision, before any blocking surface can scan with an incomplete pack.
+// refuseUncompiledMeet makes every pack merge a proven meet can scan part
+// of the decision. Inspect can resolve without an authenticated connector
+// and then scan the gateway's connector, so checking only the decision's
+// connector could silently substitute the base pack on that scan.
 // The member names and compiler error remain in the administrator's log.
 func (set *guardrailProfileSet) refuseUncompiledMeet(ctx context.Context, decision profileDecision, connectorName string) profileDecision {
 	if decision.Refused != "" {
@@ -310,8 +312,21 @@ func (set *guardrailProfileSet) refuseUncompiledMeet(ctx context.Context, decisi
 	if meet == nil {
 		return decision
 	}
-	if _, err := meet.ruleGeneration(ctx, set, connectorName); err != nil {
-		decision.Refused = "DefenseClaw refused this request: the strictest combination of rule packs could not be compiled; ask an administrator to check the profile rule packs"
+	connectorName = config.NormalizeConnectorName(connectorName)
+	connectors := []string{connectorName}
+	if connectorName != "" {
+		connectors = append(connectors, "")
+	}
+	for _, name := range set.meetConnectors() {
+		if name != connectorName {
+			connectors = append(connectors, name)
+		}
+	}
+	for _, name := range connectors {
+		if _, err := meet.ruleGeneration(ctx, set, name); err != nil {
+			decision.Refused = "DefenseClaw refused this request: the strictest combination of rule packs could not be compiled; ask an administrator to check the profile rule packs"
+			return decision
+		}
 	}
 	return decision
 }
