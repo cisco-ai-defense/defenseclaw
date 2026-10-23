@@ -450,10 +450,21 @@ func renameReplace(source, destination string, class uint32, flags uint32) error
 	return windows.SetFileInformationByHandle(handle, class, (*byte)(unsafe.Pointer(&buffer[0])), uint32(size))
 }
 
-// deleteLockedFile deletes the file behind file when the handle closes.
+// deleteLockedFile deletes the file behind file when the handle closes. A
+// read-only file is deleted too, as DeleteFile would refuse: the caller
+// already proved the file holds exactly the bytes it may remove.
 func deleteLockedFile(file *os.File) error {
+	handle := windows.Handle(file.Fd())
+	flags := uint32(windows.FILE_DISPOSITION_DELETE | windows.FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE)
+	if err := windows.SetFileInformationByHandle(
+		handle, windows.FileDispositionInfoEx, (*byte)(unsafe.Pointer(&flags)), uint32(unsafe.Sizeof(flags)),
+	); err == nil {
+		return nil
+	}
+	// Volumes without FileDispositionInfoEx: the classic request, which
+	// refuses a read-only file.
 	deleteFile := byte(1) // FILE_DISPOSITION_INFO.DeleteFile
-	return windows.SetFileInformationByHandle(windows.Handle(file.Fd()), windows.FileDispositionInfo, &deleteFile, 1)
+	return windows.SetFileInformationByHandle(handle, windows.FileDispositionInfo, &deleteFile, 1)
 }
 
 // moveFileNoReplace moves source to destination, which must not exist.

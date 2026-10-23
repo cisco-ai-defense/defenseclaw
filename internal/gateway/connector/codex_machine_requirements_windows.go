@@ -534,7 +534,10 @@ func VerifyWindowsCodexMachineRequirements(
 // RemoveWindowsCodexMachineRequirements restores an exact preimage when the
 // requirements still equal the protected postimage. If unrelated administrator
 // edits landed later, it removes only DefenseClaw-owned additions and preserves
-// those edits.
+// those edits. An administrator does not take the DefenseClaw lock, so the
+// requirements write or deletion is a compare-and-swap against the file the
+// removal was computed from: a save made in between is kept, and the removal
+// is computed again from it, up to windowsCodexMachineReconcileAttempts times.
 func RemoveWindowsCodexMachineRequirements(
 	opts WindowsCodexMachineRequirementsOptions,
 ) (WindowsCodexMachineRequirementsReport, error) {
@@ -561,7 +564,8 @@ func RemoveWindowsCodexMachineRequirements(
 		report.ManagedStateRemovedOrAbsent = true
 		return report, nil
 	}
-	err = withWindowsCodexMachineMutation(opts, func() error {
+	remove := func() error {
+		report = windowsCodexMachineReport("remove", opts)
 		requirements, err := readWindowsCodexMachineFile(
 			opts.RequirementsPath,
 			windowsCodexMachineRequirementsLimit,
@@ -685,26 +689,33 @@ func RemoveWindowsCodexMachineRequirements(
 		}
 
 		if report.Changed {
+			// Publish the candidate, or delete the file, only over the file
+			// the candidate was computed from. A newer save is kept and the
+			// removal is computed again from it.
 			if candidateExists {
-				if err := writeWindowsCodexMachineFile(
+				if err := writeWindowsCodexMachineFileIfUnchanged(
 					opts.RequirementsPath,
+					requirements,
 					candidate,
 					windowsCodexMachineRequirementsLimit,
 					"Codex machine requirements",
 				); err != nil {
 					return err
 				}
-			} else if err := deleteWindowsCodexMachineFile(
+			} else if err := deleteWindowsCodexMachineFileIfUnchanged(
 				opts.RequirementsPath,
+				requirements,
+				windowsCodexMachineRequirementsLimit,
 				"Codex machine requirements",
 			); err != nil {
 				return err
 			}
 		}
 
-		// Re-read before dropping rollback metadata. If an administrator raced
-		// our candidate publication, ownership remains available and the
-		// installer must not remove the binary.
+		// Re-read before dropping rollback metadata. A save made after the
+		// candidate was published keeps the ownership record, so the removal
+		// is computed again from the newer file and the installer does not
+		// remove the binary meanwhile.
 		remaining, err := readWindowsCodexMachineFile(
 			opts.RequirementsPath,
 			windowsCodexMachineRequirementsLimit,
@@ -716,7 +727,7 @@ func RemoveWindowsCodexMachineRequirements(
 		}
 		if remaining.existed != candidateExists ||
 			(candidateExists && !bytes.Equal(remaining.data, candidate)) {
-			return errors.New("Codex requirements changed before removal could commit")
+			return fmt.Errorf("%s %w before removal could commit", "Codex machine requirements", errWindowsCodexMachineFileChanged)
 		}
 		if managedState.existed {
 			if err := deleteWindowsCodexMachineFile(opts.ManagedStatePath, "Codex managed runtime state"); err != nil {
@@ -732,6 +743,14 @@ func RemoveWindowsCodexMachineRequirements(
 		report.SafeToRemoveBinary = true
 		report.ManagedStateRemovedOrAbsent = true
 		return nil
+	}
+	err = withWindowsCodexMachineMutation(opts, func() error {
+		for attempt := 1; ; attempt++ {
+			err := remove()
+			if !errors.Is(err, errWindowsCodexMachineFileChanged) || attempt == windowsCodexMachineReconcileAttempts {
+				return err
+			}
+		}
 	})
 	if err != nil {
 		report.Error = err.Error()
@@ -1628,8 +1647,9 @@ func readWindowsCodexMachineFile(
 	return result, nil
 }
 
-// windowsCodexMachineReconcileAttempts bounds how often a reconcile merges
-// again after an administrator changed the requirements under it.
+// windowsCodexMachineReconcileAttempts bounds how often a reconcile merges, or
+// a removal computes its candidate, again after an administrator changed the
+// requirements under it.
 const windowsCodexMachineReconcileAttempts = 4
 
 // errWindowsCodexMachineFileChanged reports that a file changed after the
@@ -1657,6 +1677,37 @@ func writeWindowsCodexMachineFileIfUnchanged(
 	label string,
 ) error {
 	return writeWindowsCodexMachineFileWith(path, &expected, data, limit, label)
+}
+
+// deleteWindowsCodexMachineFileIfUnchanged deletes path only while it still
+// holds expected, the file the caller computed the deletion from. The
+// comparison and the deletion happen under one handle no other process can
+// write through (safefile.RemoveFileIfUnchanged). A different file, or one
+// that appeared, is kept, and the error wraps errWindowsCodexMachineFileChanged.
+func deleteWindowsCodexMachineFileIfUnchanged(
+	path string,
+	expected windowsCodexStableFile,
+	limit int,
+	label string,
+) error {
+	existing, err := readWindowsCodexMachineFile(path, limit, true, label)
+	if err != nil {
+		return err
+	}
+	if existing.existed != expected.existed || !bytes.Equal(existing.data, expected.data) {
+		return fmt.Errorf("%s %w", label, errWindowsCodexMachineFileChanged)
+	}
+	if !existing.existed {
+		return nil
+	}
+	windowsCodexMachineBeforeConditionalSwap(path)
+	if _, err := safefile.RemoveFileIfUnchanged(path, expected.data, limit, windowsCodexMachineSingleLinkCheck); err != nil {
+		if errors.Is(err, safefile.ErrSwapRaced) {
+			return fmt.Errorf("%s %w", label, errWindowsCodexMachineFileChanged)
+		}
+		return fmt.Errorf("delete %s: %w", label, err)
+	}
+	return nil
 }
 
 func writeWindowsCodexMachineFileWith(
@@ -1734,6 +1785,11 @@ func writeWindowsCodexMachineFileWith(
 		return err
 	}
 	if !bytes.Equal(persisted.data, data) {
+		if expected != nil {
+			// Another writer saved right after the swap. Its file is newer
+			// and is kept; the caller computes its edit again from it.
+			return fmt.Errorf("%s %w after publication", label, errWindowsCodexMachineFileChanged)
+		}
 		return fmt.Errorf("%s changed during atomic publication", label)
 	}
 	return nil

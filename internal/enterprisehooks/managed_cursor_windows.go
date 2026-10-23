@@ -2391,11 +2391,12 @@ func restoreWindowsCursorManagedSnapshotUnlocked(
 		current         windowsManagedFileSnapshot
 		currentMetadata windowsCursorManagedFileMetadata
 	}
+	// adapter, receipt and state are DefenseClaw's own files, under the
+	// DefenseClaw lock. hooks.json is shared and is restored last, below.
 	items := []cursorRestoreItem{
 		{snapshot: windowsManagedFileSnapshot{path: adapterPath, existed: snapshot.AdapterExisted, data: snapshot.Adapter}, metadata: windowsCursorManagedFileMetadata{securityDescriptor: snapshot.AdapterSecurityDescriptor, attributes: snapshot.AdapterAttributes}, current: current.adapter, currentMetadata: current.adapterMetadata},
 		{snapshot: windowsManagedFileSnapshot{path: receiptPath, existed: snapshot.ReceiptExisted, data: snapshot.Receipt}, metadata: windowsCursorManagedFileMetadata{securityDescriptor: snapshot.ReceiptSecurityDescriptor, attributes: snapshot.ReceiptAttributes}, current: current.receipt, currentMetadata: current.receiptMetadata},
 		{snapshot: windowsManagedFileSnapshot{path: statePath, existed: snapshot.StateExisted, data: snapshot.State}, metadata: windowsCursorManagedFileMetadata{securityDescriptor: snapshot.StateSecurityDescriptor, attributes: snapshot.StateAttributes}, current: current.state, currentMetadata: current.stateMetadata},
-		{snapshot: windowsManagedFileSnapshot{path: hooksPath, existed: snapshot.HooksExisted, data: snapshot.Hooks}, metadata: windowsCursorManagedFileMetadata{securityDescriptor: snapshot.HooksSecurityDescriptor, attributes: snapshot.HooksAttributes}, current: current.hooks, currentMetadata: current.hooksMetadata},
 	}
 	// On standalone only a file the snapshot does not already match is
 	// written back, and only those are put back on a failed restore. A
@@ -2408,9 +2409,20 @@ func restoreWindowsCursorManagedSnapshotUnlocked(
 	// and puts every file back on failure (Secure Client is out of scope for
 	// this fix).
 	standalone := windowsEnterpriseStandaloneProcess()
+	validatedHooks := windowsManagedFileSnapshot{path: hooksPath, existed: current.hooks.existed, data: current.hooks.data}
+	renderHooks, err := windowsCursorRestoreHooksRender(snapshot, validatedHooks, current.hooksMetadata, adapterPath, standalone)
+	if err != nil {
+		return err
+	}
 	var written []cursorRestoreItem
+	var hooksWrite windowsCursorManagedHooksWrite
 	rollback := func(cause error) error {
 		var failures []string
+		// hooks.json is put back only over the restore's own bytes: a save an
+		// administrator made since is newer and is kept.
+		if restoreErr := hooksWrite.undo(); restoreErr != nil {
+			failures = append(failures, restoreErr.Error())
+		}
 		if standalone {
 			for index := len(written) - 1; index >= 0; index-- {
 				item := written[index]
@@ -2439,6 +2451,14 @@ func restoreWindowsCursorManagedSnapshotUnlocked(
 			return rollback(err)
 		}
 	}
+	// Administrators and Cursor save hooks.json without the DefenseClaw lock:
+	// the journaled file is published only over the file this restore
+	// validated, and a newer save is kept with DefenseClaw's journaled
+	// registration merged in (publishWindowsCursorManagedHooks).
+	if hooksWrite, err = publishWindowsCursorManagedHooks(validatedHooks, renderHooks); err != nil {
+		return rollback(err)
+	}
+	wantHooks, wantHooksMetadata := windowsCursorRestoredHooks(hooksWrite, validatedHooks, current.hooksMetadata)
 	restored, err := snapshotWindowsCursorManagedArtifacts()
 	if err != nil {
 		return rollback(err)
@@ -2455,14 +2475,13 @@ func restoreWindowsCursorManagedSnapshotUnlocked(
 			return rollback(err)
 		}
 	} else if restored.state.existed || restored.receipt.existed ||
-		restored.hooks.existed != snapshot.HooksExisted ||
+		restored.hooks.existed != wantHooks.existed ||
 		restored.adapter.existed != snapshot.AdapterExisted ||
 		restored.receipt.existed != snapshot.ReceiptExisted ||
-		!bytes.Equal(restored.hooks.data, snapshot.Hooks) ||
+		!bytes.Equal(restored.hooks.data, wantHooks.data) ||
 		!bytes.Equal(restored.adapter.data, snapshot.Adapter) ||
 		!bytes.Equal(restored.receipt.data, snapshot.Receipt) ||
-		restored.hooksMetadata.securityDescriptor != snapshot.HooksSecurityDescriptor ||
-		restored.hooksMetadata.attributes != snapshot.HooksAttributes ||
+		(wantHooksMetadata != nil && restored.hooksMetadata != *wantHooksMetadata) ||
 		restored.adapterMetadata.securityDescriptor != snapshot.AdapterSecurityDescriptor ||
 		restored.adapterMetadata.attributes != snapshot.AdapterAttributes ||
 		restored.receiptMetadata.securityDescriptor != snapshot.ReceiptSecurityDescriptor ||
@@ -2470,6 +2489,101 @@ func restoreWindowsCursorManagedSnapshotUnlocked(
 		return rollback(errors.New("inactive Cursor snapshot was not restored exactly"))
 	}
 	return nil
+}
+
+// windowsCursorRestoreHooksRender returns the restore's edit of the shared
+// hooks.json, as publishWindowsCursorManagedHooks renders it on the file it
+// reads. Over the file the restore validated (validated) the edit is the
+// journaled file with its journaled metadata; on standalone a file that
+// already is the journaled one is left alone. A newer file is an
+// administrator's or Cursor's save and is kept: an active snapshot merges its
+// registration, at the journaled fail mode, into it, and an inactive one
+// removes DefenseClaw's entries from it.
+func windowsCursorRestoreHooksRender(
+	snapshot WindowsCursorManagedPolicyTeardownSnapshot,
+	validated windowsManagedFileSnapshot,
+	validatedMetadata windowsCursorManagedFileMetadata,
+	adapterPath string,
+	standalone bool,
+) (func(windowsManagedFileSnapshot) (windowsCursorManagedHooksEdit, error), error) {
+	journaled := windowsManagedFileSnapshot{path: validated.path, existed: snapshot.HooksExisted, data: snapshot.Hooks}
+	journaledMetadata := windowsCursorManagedFileMetadata{
+		securityDescriptor: snapshot.HooksSecurityDescriptor,
+		attributes:         snapshot.HooksAttributes,
+	}
+	failMode := ""
+	if snapshot.PolicyActive {
+		var state windowsCursorManagedPolicyState
+		if err := json.Unmarshal(snapshot.State, &state); err != nil {
+			return nil, fmt.Errorf("enterprise hooks: parse Cursor snapshot ownership state: %w", err)
+		}
+		failMode = cursorManagedPolicyFailMode(state)
+	}
+	return func(base windowsManagedFileSnapshot) (windowsCursorManagedHooksEdit, error) {
+		if base.existed == validated.existed && bytes.Equal(base.data, validated.data) {
+			if standalone && windowsCursorManagedFileSnapshotEqual(validated, validatedMetadata, journaled, journaledMetadata) {
+				// Already the journaled file: an edit that changes nothing.
+				if !base.existed {
+					return windowsCursorManagedHooksEdit{remove: true}, nil
+				}
+				return windowsCursorManagedHooksEdit{data: base.data}, nil
+			}
+			if !journaled.existed {
+				return windowsCursorManagedHooksEdit{remove: true}, nil
+			}
+			metadata := journaledMetadata
+			return windowsCursorManagedHooksEdit{data: append([]byte(nil), journaled.data...), metadata: &metadata}, nil
+		}
+		if snapshot.PolicyActive {
+			hooks, err := mergeWindowsCursorManagedRebuildHooks(base, adapterPath, failMode, false)
+			if err != nil {
+				return windowsCursorManagedHooksEdit{}, err
+			}
+			return windowsCursorManagedHooksEdit{data: hooks}, nil
+		}
+		if !base.existed {
+			return windowsCursorManagedHooksEdit{remove: true}, nil
+		}
+		cleaned, err := connector.RemoveWindowsCursorEnterpriseHooks(base.data, adapterPath)
+		if err != nil {
+			return windowsCursorManagedHooksEdit{}, err
+		}
+		if !journaled.existed && connector.WindowsCursorEnterpriseHooksEmpty(cleaned) {
+			return windowsCursorManagedHooksEdit{remove: true}, nil
+		}
+		return windowsCursorManagedHooksEdit{data: cleaned}, nil
+	}, nil
+}
+
+// windowsCursorRestoredHooks is the hooks.json a restore left: what it
+// published, or the file it last read when the edit changed nothing. The
+// metadata is nil when the restore cannot know it: a new file gets
+// DefenseClaw's protection, and a newer save left alone keeps its own.
+func windowsCursorRestoredHooks(
+	write windowsCursorManagedHooksWrite,
+	validated windowsManagedFileSnapshot,
+	validatedMetadata windowsCursorManagedFileMetadata,
+) (windowsManagedFileSnapshot, *windowsCursorManagedFileMetadata) {
+	if !write.written {
+		if write.replaced.existed == validated.existed && bytes.Equal(write.replaced.data, validated.data) {
+			metadata := validatedMetadata
+			return validated, &metadata
+		}
+		return write.replaced, nil
+	}
+	hooks := windowsManagedFileSnapshot{path: validated.path, existed: !write.edit.remove, data: write.edit.data}
+	switch {
+	case write.edit.remove:
+		return hooks, nil
+	case write.edit.metadata != nil:
+		metadata := *write.edit.metadata
+		return hooks, &metadata
+	case write.replaced.existed:
+		metadata := write.replacedMetadata
+		return hooks, &metadata
+	default:
+		return hooks, nil
+	}
 }
 
 func windowsCursorRestoreHooksCompatible(
