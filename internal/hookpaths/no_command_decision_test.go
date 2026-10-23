@@ -14,7 +14,12 @@ import (
 // gateway blocked every such call on Windows as an SSH persistence write.
 // Protected writes and launchers with an empty child stay blocked.
 func TestGAP0958NoCommandTextHasNoActionDecision(t *testing.T) {
-	posixHome := t.TempDir()
+	// The home is a real path: on macOS the temporary directory is under the
+	// /var -> /private/var link, which the protected-file proof resolves.
+	posixHome, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	posixCWD := filepath.Join(posixHome, "project")
 	homes := []struct{ name, cwd, home string }{
 		{"POSIX", posixCWD, posixHome},
