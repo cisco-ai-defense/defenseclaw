@@ -762,7 +762,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			final := wireResp
 			answered = &final
 		}
-		if panicked || hookPanicRecovered(ctx) {
+		// The span carries the result of the call's row and export.
+		if finalization.Panicked {
 			enrichAgentHookSpanPanic(ctx)
 		}
 		if !panicked && resp.Action != hookActionUnconfirmed {
@@ -834,6 +835,9 @@ type hookFinalizationResult struct {
 	// (AuditFailedClosed).
 	Response          agentHookResponse
 	AuditFailedClosed bool
+	// Panicked says the call's audit row and export record result panic.
+	// The hook span reports the same result.
+	Panicked bool
 }
 
 func (result hookFinalizationResult) notificationReady() bool {
@@ -868,6 +872,7 @@ func (a *APIServer) finalizeAgentHookAnswer(
 					fmt.Sprintf("hook finalize %s panic: %v", section, recovered))
 			}
 		}()
+		hookStageForTest(ctx, "finalize_"+section)
 		fn()
 	}
 
@@ -895,12 +900,21 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		RuleIDs:      resp.RuleIDs,
 	}
 	env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
-	// Every recovered panic of this hook is an evaluator failure on its row
-	// and export, whatever verdict was kept: the evaluator's, a later
-	// additive check's, a renderer's or a finalization section's (GAP-0900).
-	// The row is written after the identity section and the export after the
-	// audit-failure answer, so both are checked again.
+	// Every panic recovered before the call's audit row is written is an
+	// evaluator failure on its row and export, whatever verdict was kept: the
+	// evaluator's, a later additive check's, a renderer's or the identity
+	// section's (GAP-0900). The row and the hook_decision export are one
+	// record of the decision and carry one result, so once the row is written
+	// its result is fixed for the export too. A panic in a section after the
+	// row (the status counters, the sandbox record, the managed hook join, the
+	// sensitive-result alert) changes no verdict: handleHookPanic counts it in
+	// defenseclaw.panics.total and logs its stack. A call without a row (the
+	// write failed or panicked, or no audit store is configured) is recorded
+	// by its export alone, which takes every panic recovered before it.
 	recordPanic := func() {
+		if result.AuditPersisted {
+			return
+		}
 		if panicked || hookPanicRecovered(ctx) {
 			env.Result = "panic"
 			env.Extra = mergeHookEnvelopeExtra(env.Extra, map[string]string{"panic": "true"})
@@ -994,6 +1008,7 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		})
 	}
 	if replay {
+		result.Panicked = env.Result == "panic"
 		return result
 	}
 	if !panicked {
@@ -1011,6 +1026,7 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			a.emitHookGuardrailOutcomeV8(ctx, req, resp, elapsed)
 		}
 	})
+	result.Panicked = env.Result == "panic"
 	return result
 }
 

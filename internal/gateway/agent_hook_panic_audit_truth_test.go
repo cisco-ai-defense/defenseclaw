@@ -6,6 +6,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -522,5 +523,79 @@ func TestFinalizeRecordsEveryRecoveredPanic(t *testing.T) {
 		if row.Structured["result"] != want || row.Structured["action"] != "allow" {
 			t.Fatalf("recovered=%t audit=%+v, want result=%s on the kept allow", recovered, row.Structured, want)
 		}
+	}
+}
+
+// Review of Port-0440 loop round 2 (P2, audit truth): a panic recovered in a
+// finalization section after the audit row was written (the sandbox record,
+// for example) left the row result=ok while the later hook_decision export
+// said result=panic. The row and the export carry one result: a panic before
+// the row is on both, a panic after it changes neither, and a call without a
+// row is recorded by its export alone, panic included. The span follows the
+// same result (hookFinalizationResult.Panicked).
+func TestFinalizationPanicKeepsOneResultOnRowAndExport(t *testing.T) {
+	for _, tc := range []struct {
+		section    string
+		auditFails bool
+		want       string // row result, or "" when no row is written
+		export     string
+	}{
+		{section: "", want: "ok", export: "allow/ok"},
+		{section: "finalize_identity", want: "panic", export: "allow/panic"},
+		{section: "finalize_health", want: "ok", export: "allow/ok"},
+		{section: "finalize_sandbox", want: "ok", export: "allow/ok"},
+		{section: "finalize_hook_join", want: "ok", export: "allow/ok"},
+		{section: "finalize_sensitive_result", want: "ok", export: "allow/ok"},
+		{section: "finalize_audit", export: "allow/panic"},
+		{section: "finalize_sandbox", auditFails: true, export: "allow/panic"},
+		{section: "finalize_health", auditFails: true, export: "allow/panic"},
+	} {
+		name := tc.section
+		if name == "" {
+			name = "no_panic"
+		}
+		if tc.auditFails {
+			name += "/audit_write_failed"
+		}
+		t.Run(name, func(t *testing.T) {
+			injectStagePanic(t, everyCallAt(tc.section))
+			f := newManagedHookAuditFixture(t, nil)
+			if tc.auditFails {
+				database, err := sql.Open("sqlite", f.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer database.Close()
+				if _, err := database.Exec(`CREATE TRIGGER zz_audit_disk_full BEFORE INSERT ON audit_events
+					WHEN NEW.action = 'connector-hook' BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			session := "late-finalize-" + strings.ReplaceAll(name, "/", "-")
+			ctx := ContextWithSessionID(withHookPanicCapture(t.Context()), session)
+			req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse", SessionID: session, ToolName: "Bash",
+				Payload: map[string]interface{}{"tool_name": "Bash"}}
+			allow := agentHookResponse{Action: "allow", RawAction: "allow", Severity: "NONE", Mode: "action", EvaluationID: "eval-" + session}
+			// Delivered, so a failed audit write keeps the allow and the
+			// export is the call's only record.
+			finalization := f.api.finalizeAgentHookAnswer(ctx, "claudecode", req, allow, nil, preToolUseBody(t, session+"-tool"), time.Millisecond, false, nil, true)
+			if tc.section != "" && !hookPanicRecovered(ctx) {
+				t.Fatalf("the %s panic was not recovered on the hook's panic capture", tc.section)
+			}
+			if tc.want == "" {
+				if finalization.AuditPersisted {
+					t.Fatal("audit row persisted, want no row")
+				}
+			} else {
+				row := soleHookDecisionForTest(t, f.store)
+				if got := row.Structured["result"]; got != tc.want || row.Structured["action"] != "allow" {
+					t.Fatalf("audit=%+v, want allow with result=%s", row.Structured, tc.want)
+				}
+			}
+			waitForHookDecisions(t, f, tc.export)
+			if wantPanic := strings.HasSuffix(tc.export, "/panic"); finalization.Panicked != wantPanic {
+				t.Fatalf("finalization.Panicked=%t, want %t: the span must carry the row and export result", finalization.Panicked, wantPanic)
+			}
+		})
 	}
 }
