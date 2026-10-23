@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -39,7 +40,7 @@ from unittest.mock import MagicMock
 import pytest
 from click.testing import CliRunner
 from defenseclaw import bootstrap, hook_integrity
-from defenseclaw.commands import cmd_doctor, cmd_guardrail, cmd_setup, cmd_status
+from defenseclaw.commands import cmd_doctor, cmd_guardrail, cmd_policy, cmd_setup, cmd_status
 from defenseclaw.context import AppContext
 
 from tests.test_hook_registration_every_connector import _CASES, _case_id, _install
@@ -124,6 +125,129 @@ def _mode_context(cfg, monkeypatch) -> AppContext:
 def _mode_action(app: AppContext, *args: str):
     result = CliRunner().invoke(cmd_guardrail.guardrail, ["mode", *args, "--json"], obj=app, catch_exceptions=False)
     return result, json.loads(result.stdout)
+
+
+def _activate_policy_with_mode(cfg, app: AppContext, mode: str | None = "action"):
+    policy_dir = Path(cfg.data_dir, "policies")
+    policy_dir.mkdir(parents=True, exist_ok=True)
+    cfg.policy_dir = str(policy_dir)
+    guardrail = f"  mode: {mode}\n" if mode is not None else "  block_threshold: 3\n"
+    (policy_dir / "hook-mode.yaml").write_text(f"guardrail:\n{guardrail}", encoding="utf-8")
+    return CliRunner().invoke(
+        cmd_policy.policy, ["activate", "hook-mode", "--no-reload"], obj=app, catch_exceptions=False
+    )
+
+
+@pytest.mark.parametrize("case, layer, platform", _SWITCH_CASES)
+def test_policy_activate_action_refuses_each_copilot_hooks_off_layer(tmp_path, monkeypatch, case, layer, platform):
+    cfg, _paths = _copilot(tmp_path, monkeypatch, case, platform)
+    settings = _write(tmp_path, layer, json.dumps({"disableAllHooks": True}))
+    app = _mode_context(cfg, monkeypatch)
+    before = deepcopy((cfg.guardrail, cfg.admission, cfg.watch))
+
+    result = _activate_policy_with_mode(cfg, app)
+
+    assert result.exit_code == 1, result.output
+    assert "activated" not in result.output
+    assert "disableAllHooks" in result.output and str(settings) in result.output
+    assert "Nothing was changed" in result.output
+    assert (cfg.guardrail, cfg.admission, cfg.watch) == before
+    cfg.save.assert_not_called()
+
+
+@pytest.mark.parametrize("value", [True, "yes"], ids=["true", "malformed"])
+@pytest.mark.parametrize("platform", ["posix", "windows"])
+@pytest.mark.parametrize("policy_mode", ["action", None], ids=["sets-action", "keeps-action"])
+def test_policy_activate_action_refuses_copilot_registration_switch(
+    tmp_path, monkeypatch, value, platform, policy_mode
+):
+    case = next(c for c in _COPILOT if c["scope"] == "user")
+    cfg, paths = _copilot(tmp_path, monkeypatch, case, platform)
+    registration = Path(paths[0])
+    # Render the golden with JSON-safe paths on native Windows too: the
+    # generic fixture substitutes backslashes into its JSON text verbatim.
+    document = json.loads(
+        case["files"][0]["content"]
+        .replace("{data_dir}", cfg.data_dir.replace("\\", "/"))
+        .replace("{home}", str(tmp_path / "home").replace("\\", "/"))
+    )
+    registration.write_text(json.dumps({"disableAllHooks": value, **document}), encoding="utf-8")
+    app = _mode_context(cfg, monkeypatch)
+    if policy_mode is None:
+        cfg.guardrail.mode = "action"
+    before = deepcopy((cfg.guardrail, cfg.admission, cfg.watch))
+
+    result = _activate_policy_with_mode(cfg, app, policy_mode)
+
+    assert result.exit_code == 1, result.output
+    assert "activated" not in result.output
+    assert "disableAllHooks" in result.output and str(registration) in result.output
+    assert (cfg.guardrail, cfg.admission, cfg.watch) == before
+    cfg.save.assert_not_called()
+
+
+@pytest.mark.parametrize("copilot_mode", ["observe", "disabled", "covered"])
+def test_policy_activate_action_checks_only_enabled_action_scope(tmp_path, monkeypatch, copilot_mode):
+    from defenseclaw.config import PerConnectorGuardrailConfig
+
+    case = next(c for c in _COPILOT if c["scope"] == "user")
+    cfg, _paths = _copilot(tmp_path, monkeypatch, case)
+    settings = _write(tmp_path, "{home}/.copilot/settings.json", '{"disableAllHooks": true}')
+    app = _mode_context(cfg, monkeypatch)
+    cfg.guardrail.connectors = {
+        "codex": PerConnectorGuardrailConfig(),
+        "copilot": PerConnectorGuardrailConfig(
+            mode="observe" if copilot_mode == "observe" else "",
+            enabled=False if copilot_mode == "disabled" else None,
+        ),
+    }
+
+    result = _activate_policy_with_mode(cfg, app)
+
+    if copilot_mode == "covered":
+        assert result.exit_code == 1, result.output
+        assert str(settings) in result.output
+        cfg.save.assert_not_called()
+    else:
+        assert result.exit_code == 0, result.output
+        assert cfg.guardrail.mode == "action"
+        cfg.save.assert_called_once()
+
+
+def test_policy_activate_observe_can_remove_action_when_copilot_hooks_are_off(tmp_path, monkeypatch):
+    case = next(c for c in _COPILOT if c["scope"] == "user")
+    cfg, _paths = _copilot(tmp_path, monkeypatch, case)
+    _write(tmp_path, "{home}/.copilot/settings.json", '{"disableAllHooks": true}')
+    app = _mode_context(cfg, monkeypatch)
+    cfg.guardrail.mode = "action"
+
+    result = _activate_policy_with_mode(cfg, app, "observe")
+
+    assert result.exit_code == 0, result.output
+    assert cfg.guardrail.mode == "observe"
+    cfg.save.assert_called_once()
+
+
+@pytest.mark.parametrize("policy_mode", ["observe", None], ids=["sets-observe", "keeps-observe"])
+def test_policy_activate_checks_copilot_action_override_even_when_global_observes(
+    tmp_path, monkeypatch, policy_mode
+):
+    from defenseclaw.config import PerConnectorGuardrailConfig
+
+    case = next(c for c in _COPILOT if c["scope"] == "user")
+    cfg, _paths = _copilot(tmp_path, monkeypatch, case)
+    settings = _write(tmp_path, "{home}/.copilot/settings.json", '{"disableAllHooks": true}')
+    app = _mode_context(cfg, monkeypatch)
+    cfg.guardrail.connectors = {"copilot": PerConnectorGuardrailConfig(mode="action")}
+    before = deepcopy((cfg.guardrail, cfg.admission, cfg.watch))
+
+    result = _activate_policy_with_mode(cfg, app, policy_mode)
+
+    assert result.exit_code == 1, result.output
+    assert "activated" not in result.output
+    assert "disableAllHooks" in result.output and str(settings) in result.output
+    assert (cfg.guardrail, cfg.admission, cfg.watch) == before
+    cfg.save.assert_not_called()
 
 
 @pytest.mark.parametrize("case, layer, platform", _SWITCH_CASES)
