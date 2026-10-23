@@ -204,17 +204,10 @@ func waitProcessGone(t *testing.T, pid int, limit time.Duration) {
 	}
 }
 
-// newUnreadableJob creates a job whose DACL lets its members be assigned and
-// ended but not queried, as a scheduled task's job is for the LocalSystem
-// process it runs: QueryInformationJobObject with no handle is denied.
-func newUnreadableJob(t *testing.T, limits uint32) windows.Handle {
+// newSupervisorJob creates a job with limits, as a deployment agent's job.
+func newSupervisorJob(t *testing.T, limits uint32) windows.Handle {
 	t.Helper()
-	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;0x0010000B;;;WD)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	attributes := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor}
-	job, err := windows.CreateJobObject(&attributes, nil)
+	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,10 +221,13 @@ func newUnreadableJob(t *testing.T, limits uint32) windows.Handle {
 	return job
 }
 
-// A recovery helper started from a job it cannot inspect (the deployment
-// context of GAP-0960 and loop round 2) breaks away and outlives the job
-// being closed; a job that refuses the breakaway starts nothing.
-func TestStartIndependentFromAJobThatCannotBeInspected(t *testing.T) {
+// A recovery helper started from a kill-on-close job that allows breakaway
+// outlives the job being closed; one that allows none starts nothing. (A
+// job a member cannot query cannot be made here: the query of the caller's
+// own job ignores the job's DACL. The scheduled-task test below is that
+// context, and TestStartIndependentDecidesFromTheEnclosingJob covers its
+// branches.)
+func TestStartIndependentFromAKillOnCloseJob(t *testing.T) {
 	outer, outerErr := currentJobLimits()
 	selfInJob, _ := processInAnyJob(0)
 	escapes := !selfInJob || (outerErr == nil && outer&(windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK|windows.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK) != 0)
@@ -248,7 +244,7 @@ func TestStartIndependentFromAJobThatCannotBeInspected(t *testing.T) {
 				t.Skip("the test process's own job keeps its children, so no child can leave it")
 			}
 			dir := t.TempDir()
-			job := newUnreadableJob(t, tc.limits)
+			job := newSupervisorJob(t, tc.limits)
 			jobOpen := true
 			defer func() {
 				if jobOpen {
@@ -296,8 +292,8 @@ func TestStartIndependentFromAJobThatCannotBeInspected(t *testing.T) {
 			if err := json.Unmarshal([]byte(line), &report); err != nil {
 				t.Fatalf("report %q: %v", line, err)
 			}
-			if !report.InJob || !report.QueryDenied {
-				t.Fatalf("the child did not run in an unreadable job: %+v", report)
+			if !report.InJob || report.QueryErr != "" {
+				t.Fatalf("the child did not run in a readable job: %+v", report)
 			}
 			if !tc.wantStart {
 				if !report.Bound || report.Grandchild != 0 {
@@ -306,7 +302,7 @@ func TestStartIndependentFromAJobThatCannotBeInspected(t *testing.T) {
 				return
 			}
 			if report.StartErr != "" || report.Grandchild == 0 || report.GrandchildInJob {
-				t.Fatalf("no independent recovery helper from an unreadable job: %+v", report)
+				t.Fatalf("no independent recovery helper from a kill-on-close job: %+v", report)
 			}
 			defer func() {
 				_ = os.WriteFile(filepath.Join(dir, "stop"), nil, 0o600)
@@ -324,8 +320,8 @@ func TestStartIndependentFromAJobThatCannotBeInspected(t *testing.T) {
 }
 
 // The deployment context itself: the documented one-shot LocalSystem
-// scheduled task (GAP-0960). Its process cannot inspect its job; the helper
-// it starts must outlive the task being ended.
+// scheduled task (GAP-0960). Its process is refused the job query (Access
+// is denied); the helper it starts must outlive the task being ended.
 func TestStartIndependentFromALocalSystemScheduledTask(t *testing.T) {
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("registering a LocalSystem scheduled task needs an elevated test run")
@@ -385,6 +381,9 @@ func TestStartIndependentFromALocalSystemScheduledTask(t *testing.T) {
 		}
 	}
 	t.Logf("scheduled task: %+v", report)
+	if !report.QueryDenied {
+		t.Logf("this host lets the scheduled task read its job; the refused query is covered by the decision test")
+	}
 	if report.StartErr != "" || report.Grandchild == 0 || report.GrandchildInJob {
 		t.Fatalf("the LocalSystem scheduled task could not start an independent recovery helper: %+v", report)
 	}

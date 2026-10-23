@@ -62,11 +62,13 @@ var windowsIndependentHost = independentHost{
 //     when the job allows it. A job that kills its members on close and
 //     lets none go silently is refused (ErrChildBoundToJob) before
 //     anything starts.
-//   - In a job this process cannot read (a one-shot scheduled task's job
-//     denies its own LocalSystem process JOB_OBJECT_QUERY, GAP-0960), the
-//     child is started with CREATE_BREAKAWAY_FROM_JOB and must then be in
-//     no job at all. A job that refuses the breakaway starts nothing; a
-//     child still in a job is stopped. Both are ErrChildBoundToJob.
+//   - When the job query fails otherwise (Access is denied for the
+//     LocalSystem process of a one-shot scheduled task, GAP-0960; natively
+//     that process is in no job), IsProcessInJob, which needs no access to
+//     a job, decides. In no job nothing more is needed. In a job the child
+//     is started with CREATE_BREAKAWAY_FROM_JOB and must then be in no job
+//     at all. A job that refuses the breakaway starts nothing; a child
+//     still in a job is stopped. Both are ErrChildBoundToJob.
 func StartIndependent(cmd *exec.Cmd) error {
 	return startIndependent(cmd, windowsIndependentHost)
 }
