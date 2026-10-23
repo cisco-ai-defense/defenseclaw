@@ -100,7 +100,7 @@ func TestRunContainedWhileTheCallerImpersonatesALowerIdentity(t *testing.T) {
 			return
 		}
 		defer func() { _ = child.Process.Kill(); _ = child.Wait() }()
-		var opened error = errors.New("no thread of the child was listed")
+		opened := errors.New("no thread of the child was listed")
 		snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
 		if err != nil {
 			t.Errorf("snapshot threads: %v", err)

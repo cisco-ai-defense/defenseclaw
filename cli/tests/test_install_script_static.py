@@ -795,7 +795,9 @@ def test_a_rollback_whose_gateway_does_not_start_is_undone_and_exits_1(tmp_path:
     for folder, version, start in ((bin_dir, "1.0.2", "exit 0"), (dc_home / "previous" / "bin", "1.0.1", "exit 1")):
         gateway = folder / "defenseclaw-gateway"
         gateway.write_text(
-            f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; start) {start} ;; esac\n',
+            # Like a real 1.0.1 or 0.8.10 gateway, start refuses a flag it
+            # does not know (the installer asks for --require-every-connector).
+            f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; start) [ "$#" -eq 1 ] || exit 1; {start} ;; esac\n',
             encoding="utf-8",
         )
         gateway.chmod(0o755)
@@ -1034,7 +1036,9 @@ def test_a_rollback_refused_on_hook_drift_prints_only_the_fix_that_works(tmp_pat
     for folder, version, start in ((bin_dir, "1.0.1", "exit 0"), (dc_home / "previous" / "bin", "0.8.10", drift)):
         gateway = folder / "defenseclaw-gateway"
         gateway.write_text(
-            f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; start) {start} ;; esac\n',
+            # Like a real 1.0.1 or 0.8.10 gateway, start refuses a flag it
+            # does not know (the installer asks for --require-every-connector).
+            f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; start) [ "$#" -eq 1 ] || exit 1; {start} ;; esac\n',
             encoding="utf-8",
         )
         gateway.chmod(0o755)
