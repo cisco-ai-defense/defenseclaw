@@ -144,7 +144,7 @@ if ($RunAsFile -and $PSVersionTable.PSEdition -ne "Core" -and $env:PSModulePath)
     $env:PSModulePath = $modulePath -join ";"
 }
 $RunByUpgrade = $RunAsFile -and (Split-Path -Leaf (Split-Path -Parent $PSCommandPath)) -match '^defenseclaw-(upgrade|rollback)-'
-$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false; UsageError = $false; UndoPending = $false; RestorePending = $false; UnprovenReplacement = $null; UnprovenGatewayWasRunning = $false; UnprovenCloserSha256 = "" }
+$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false; UsageError = $false; UndoPending = $false; RestorePending = $false; UnprovenReplacement = $null; UnprovenReplacementUnchanged = $false; UnprovenGatewayWasRunning = $false; UnprovenCloserSha256 = "" }
 
 function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundColor Blue }
 function Write-Ok([string]$Message) { Write-Host "  + $Message" -ForegroundColor Green }
@@ -2197,6 +2197,9 @@ function Prepare-UnprovenReplacement([string]$Gateway, $ExpectedBins) {
     if ((Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container) -and -not (Close-AllHooks @($closer))) {
         throw "Could not close the older install's hooks with the checked gateway"
     }
+    # From here a failed retry must keep the install lock: every installed
+    # hook was closed with the hash-checked gateway before a stop is possible.
+    $Run.UnprovenReplacementUnchanged = $false
     if ($running -and -not (Start-HookFailModeHold $closer $running.Id -Closed)) {
         throw "Could not hold the older install's hooks closed while its gateway exits"
     }
@@ -2429,13 +2432,26 @@ function Close-InstallLock {
     Invoke-Quietly { Clear-StagedRelease }
     if (Test-RecoveryPending) {
         if ($Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement) {
-            Write-Warn "The install stays locked ($LockDir) with the unproven older programs stopped; retry the checked release with: $(Get-LifecycleNextStep -Accept)"
+            Write-Warn "The install stays locked ($LockDir); retry the checked release with: $(Get-LifecycleNextStep -Accept)"
         } else {
             Write-Warn "The install stays locked ($LockDir) until the installer runs again and finishes restoring the previous install; until then hooks do not start the gateway"
         }
         return
     }
     Invoke-Quietly { Remove-Tree $LockDir }
+}
+
+function Finish-InstallLock([int]$ExitCode) {
+    if (-not $Run.Lock) { return }
+    # A refused empty-record retry, or a failure before the checked closer
+    # closed its hooks, did not change the older install. Leave its record
+    # for the next retry but let its own hooks cold-start the gateway.
+    if ($ExitCode -ne 0 -and -not $Run.UnprovenReplacementUnchanged) {
+        Invoke-Quietly { Close-UnfinishedInstallHooks }
+    }
+    if ($ExitCode -ne 0 -and (Test-Path -LiteralPath $LifecycleManifest -PathType Leaf) -and
+        -not $Run.UnprovenReplacementUnchanged) { Set-RecoveryPending }
+    Close-InstallLock
 }
 
 function Get-RestoredNote {
@@ -2808,6 +2824,11 @@ function Resume-InterruptedRun {
     # (Write-LifecycleManifest) says what that install was; it goes only once
     # the restore is proven against it (Assert-LifecycleRestored).
     $manifest = Read-LifecycleManifest
+    # A snapshot or rollback hold may be consumed during this recovery. A
+    # later empty-record refusal must not release a lock after such a change.
+    $hadRecoveryWork = (Test-Path -LiteralPath (Join-Path $DataDir "previous.new")) -or
+        (Test-Path -LiteralPath (Join-Path $DataDir ".repair")) -or
+        (Test-Path -LiteralPath (Join-Path $DataDir ".rollback-hold"))
     if ($manifest -and (Get-Field $manifest "Committed")) {
         # The new install was proven before the run stopped: finish moving
         # the previous one aside (Complete-Swap) instead of undoing it.
@@ -2989,11 +3010,11 @@ function Resume-InterruptedRun {
         # record. A legacy installer can populate the folder without reading
         # it. Those bytes are not a proven restore, even with the switch.
         $added = @(Test-LifecycleProof $recordedBins $false -RequireProtected $false)
+        $Run.UnprovenReplacementUnchanged = -not $hadRecoveryWork
         $override = [bool](Get-Variable -Name AcceptCurrentInstall -ValueOnly -ErrorAction SilentlyContinue)
         if (-not $override -or [bool](Get-Variable -Name Rollback -ValueOnly -ErrorAction SilentlyContinue)) {
-            Set-RecoveryPending
             throw ("The previous install is not proven back: $($added -join '; '). An older installer added programs after this first install recorded none; its running gateway was left alone. " +
-                "The record stays in $LifecycleManifest and the install stays locked. To install this release over them, run: $(Get-LifecycleNextStep -Accept)")
+                "The record stays in $LifecycleManifest. To install this release over them, run: $(Get-LifecycleNextStep -Accept)")
         }
         $wasRunningUnproven = [bool](Get-GatewayProcess) -or [bool](Get-Field $manifest "ReplacementGatewayWasRunning")
         if ($wasRunningUnproven -and -not (Get-Field $manifest "ReplacementGatewayWasRunning")) {
@@ -3689,7 +3710,10 @@ function Invoke-Install {
     if (Test-Path -LiteralPath "$Venv.busy") {
         if (Test-Path -LiteralPath $Venv) { Remove-Tree "$Venv.busy" } else { Move-Path "$Venv.busy" $Venv }
     }
-    try { Resume-InterruptedRun } catch { $Run.RestorePending = $true; throw }
+    try { Resume-InterruptedRun } catch {
+        if (-not $Run.UnprovenReplacementUnchanged) { Set-RecoveryPending }
+        throw
+    }
 
     if ($Rollback) { return Invoke-Rollback }
 
@@ -3822,7 +3846,7 @@ function Invoke-Install {
     Wait-VenvFree
     if ($Run.UnprovenReplacement) {
         try { Prepare-UnprovenReplacement $stagedGateway $stagedBinaries } catch {
-            Set-RecoveryPending
+            if (-not $Run.UnprovenReplacementUnchanged) { Set-RecoveryPending }
             Die "$($_.Exception.Message); the lifecycle record stays. Run: $(Get-LifecycleNextStep -Accept)"
         }
     }
@@ -3833,7 +3857,7 @@ function Invoke-Install {
     }
     if ($Run.UnprovenReplacement -and (Get-GatewayProcess)) {
         try { Prepare-UnprovenReplacement $stagedGateway $stagedBinaries } catch {
-            Set-RecoveryPending
+            if (-not $Run.UnprovenReplacementUnchanged) { Set-RecoveryPending }
             Die "$($_.Exception.Message); the lifecycle record stays. Run: $(Get-LifecycleNextStep -Accept)"
         }
     }
@@ -4088,15 +4112,7 @@ try {
     $code = if ($Run.UsageError) { 2 } else { 1 }
 } finally {
     try { [Console]::TreatControlCAsInput = $false } catch { }
-    # While this run still holds the install lock: a failed run never leaves
-    # an unfinished install's hooks on an outage open.
-    if ($Run.Lock -and $code -ne 0) { Invoke-Quietly { Close-UnfinishedInstallHooks } }
-    # A failed run with a lifecycle record still on disk has an unfinished
-    # transaction, even if recovery failed before it could classify that
-    # record. Keep the lock so hooks cannot cold-start a mixed install.
-    if ($Run.Lock -and $code -ne 0 -and
-        (Test-Path -LiteralPath $LifecycleManifest -PathType Leaf)) { $Run.RestorePending = $true }
-    if ($Run.Lock) { Close-InstallLock }
+    Finish-InstallLock $code
     if ($Run.Transcript) { try { Stop-Transcript | Out-Null } catch { } }
     if ($Run.Owner -ne [IntPtr]::Zero) { [void][DefenseClawInstall.Native]::SwapDefaultOwner($Run.Owner) }
     # A variable that was unset stays unset. PowerShell 7 passes $null to

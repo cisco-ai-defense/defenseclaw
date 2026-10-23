@@ -795,7 +795,8 @@ def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:
     failed = install[install.index("if (-not $saved) {") :][:500]
     assert failed.index("Clear-StagedRelease") < failed.index("Restart-Old")
     assert "it was not changed, but it is not proven back" in failed
-    assert "if ($Run.Lock) { Close-InstallLock }" in _text()
+    assert "Finish-InstallLock $code" in _text()
+    assert "Close-InstallLock" in _ps1_function("Finish-InstallLock")
     close = _ps1_function("Close-InstallLock")
     assert close.index("Invoke-Quietly { Clear-StagedRelease }") < close.index("Remove-Tree $LockDir")
 
@@ -1371,7 +1372,8 @@ def test_empty_first_install_record_requires_acceptance_without_stopping_a_worki
     # snapshot. A 1.0.3 installer then installed some or all managed binaries
     # without reading that record. Recovery must not start or silently adopt
     # them, and explicit acceptance must keep the record through staging.
-    result = _txn_harness(tmp_path, _ps1_function("Resume-InterruptedRun") + _ps1_function("Close-InstallLock") + f"""
+    result = _txn_harness(tmp_path, _ps1_function("Resume-InterruptedRun") + _ps1_function("Close-InstallLock")
+                          + _ps1_function("Finish-InstallLock") + f"""
 $Venv = Join-Path $DataDir '.venv'
 $InstallerDir = Join-Path $DataDir 'installer'
 $Staging = Join-Path $DataDir '.staging'
@@ -1386,11 +1388,14 @@ function Write-Warn {{ param($Message) $script:warnings += [string]$Message }}
 function Write-Info {{ param($Message) }}
 function Invoke-Quietly {{ param([scriptblock]$Block) & $Block }}
 function Clear-StagedRelease {{ }}
+function Close-UnfinishedInstallHooks {{ throw 'the unchanged install tried to close hooks' }}
 function Test-RecoveryPending {{ return $Run.RestorePending }}
 function Start-RecoveredGateway {{ $script:starts++ }}
 function Stop-UnprovenGateway {{ $script:stops++; $script:gateway = $null }}
 $script:starts = 0; $script:stops = 0; $script:warnings = @()
+$Run.Lock = $true
 $LockDir = Join-Path $DataDir '.install.lock'
+[void][IO.Directory]::CreateDirectory($LockDir)
 $original = @{{ Schema = 1; Operation = 'install'; From = ''; To = '1.0.4'; Slot = '';
     SetupRoot = ''; Bins = @{{}}; GatewayWasRunning = $false; Connectors = @(); Config = '';
     ExternalConfig = ''; ExternalConfigSha256 = ''; HookFailModes = ''; BinDirProtected = $false;
@@ -1403,9 +1408,12 @@ $AcceptCurrentInstall = $false; $Rollback = $false
 try {{ Resume-InterruptedRun; throw 'unproven binaries were accepted' }} catch {{
     if ($_.Exception.Message -notlike '*-AcceptCurrentInstall*') {{ throw }}
 }}
-if (-not (Test-Path -LiteralPath $LifecycleManifest) -or -not $Run.RestorePending) {{ throw 'refusal lost the record or lock' }}
-    if (${str(gateway_running).lower()} -and -not $script:gateway) {{ throw 'refusal stopped the working gateway' }}
-    if ($script:stops -ne 0) {{ throw 'refusal stopped the working gateway before acceptance' }}
+Finish-InstallLock 1
+if (-not (Test-Path -LiteralPath $LifecycleManifest) -or $Run.RestorePending -or (Test-Path -LiteralPath $LockDir)) {{
+    throw 'refusal did not keep the record and release the lock'
+}}
+if (${str(gateway_running).lower()} -and -not $script:gateway) {{ throw 'refusal stopped the working gateway' }}
+if ($script:stops -ne 0) {{ throw 'refusal stopped the working gateway before acceptance' }}
 $Run.RestorePending = $false; $AcceptCurrentInstall = $true; $Rollback = $true
 try {{ Resume-InterruptedRun; throw 'rollback of unproven binaries was accepted' }} catch {{
     if ($_.Exception.Message -notlike '*-AcceptCurrentInstall*') {{ throw }}
@@ -1415,10 +1423,10 @@ $Run.RestorePending = $false; $Rollback = $false
 Resume-InterruptedRun
 if (-not $Run.UnprovenReplacement -or -not (Test-Path -LiteralPath $LifecycleManifest)) {{ throw 'acceptance retired the record before staging' }}
 if ($script:stops -ne 0) {{ throw 'acceptance stopped the gateway before the release was staged and checked' }}
-# If staging now fails, the retained lock names the command that can finish it.
-$Run.RestorePending = $true
-Close-InstallLock
-if ($script:warnings[-1] -notlike '*-AcceptCurrentInstall*' -or -not (Test-Path -LiteralPath $LifecycleManifest)) {{ throw 'the lock has no usable recovery command' }}
+# A staging failure still leaves the earlier install and its record in place.
+[void][IO.Directory]::CreateDirectory($LockDir)
+Finish-InstallLock 1
+if ((Test-Path -LiteralPath $LockDir) -or -not (Test-Path -LiteralPath $LifecycleManifest)) {{ throw 'staging failure did not release the lock and keep the record' }}
 $Run.RestorePending = $false
 # A staging failure makes no new journal entry and cannot retire the record.
 if ((Read-LifecycleManifest).Committed) {{ throw 'staging alone committed the record' }}
@@ -1444,6 +1452,86 @@ if (Test-Path -LiteralPath $LifecycleManifest) {{ throw 'proven replacement kept
     out = result.stdout + result.stderr
     assert result.returncode == 0, out
     assert "STOPS=" in out and "STARTS=0" in out, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("failure", ["staged-changed", "closer-cannot-close", "hold-failed"])
+def test_unproven_replacement_keeps_the_lock_only_after_checked_hook_closure(tmp_path: Path, failure: str) -> None:
+    result = _txn_harness(tmp_path, _ps1_function("Prepare-UnprovenReplacement") + _ps1_function("Close-InstallLock")
+                          + _ps1_function("Finish-InstallLock") + f"""
+$Staging = Join-Path $DataDir '.staging'
+$stagedBin = Join-Path $Staging 'bin'
+[void][IO.Directory]::CreateDirectory($stagedBin)
+$stagedGateway = Join-Path $stagedBin 'defenseclaw-gateway.exe'
+[IO.File]::WriteAllText($stagedGateway, 'checked gateway')
+[IO.File]::WriteAllText((Join-Path $stagedBin 'defenseclaw-hook.exe'), 'checked hook')
+$expected = Get-BinariesState $stagedBin
+$script:gateway = [pscustomobject]@{{ Id = 123; Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }}
+$Run.UnprovenReplacement = $true
+$Run.UnprovenReplacementUnchanged = $true
+$Run.Lock = $true
+$LockDir = Join-Path $DataDir '.install.lock'
+[void][IO.Directory]::CreateDirectory($LockDir)
+[IO.File]::WriteAllText($LifecycleManifest, '{{"Schema":1,"Bins":{{}}}}')
+$script:warnings = @()
+$script:cleanupCloses = 0
+function Write-Warn {{ param($Message) $script:warnings += [string]$Message }}
+function Invoke-Quietly {{ param([scriptblock]$Action) & $Action }}
+function Close-UnfinishedInstallHooks {{ $script:cleanupCloses++ }}
+function Clear-StagedRelease {{ }}
+function Test-RecoveryPending {{ return $Run.RestorePending }}
+function Remove-Tree {{ param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }}
+function Start-HookFailModeHold {{ return $false }}
+function Stop-UnprovenGateway {{ throw 'working gateway was stopped' }}
+if ('{failure}' -eq 'staged-changed') {{ [IO.File]::WriteAllText($stagedGateway, 'changed after checking') }}
+if ('{failure}' -eq 'closer-cannot-close') {{
+    function Invoke-Native {{ param($FilePath, $Arguments, [switch]$Quiet) return 1 }}
+}}
+try {{ Prepare-UnprovenReplacement $stagedGateway $expected; throw 'failure was accepted' }} catch {{
+    if ($_.Exception.Message -notlike '*staged release changed*' -and
+        $_.Exception.Message -notlike '*Could not close the older install*' -and
+        $_.Exception.Message -notlike '*Could not hold the older install*') {{ throw }}
+}}
+Finish-InstallLock 1
+$closed = '{failure}' -eq 'hold-failed'
+if (-not (Test-Path -LiteralPath $LifecycleManifest) -or -not $script:gateway) {{ throw 'the record or working gateway was lost' }}
+if ([bool](Test-Path -LiteralPath $LockDir) -ne $closed -or [bool]$Run.RestorePending -ne $closed) {{
+    throw 'the lock did not follow the checked hook closure'
+}}
+if ($closed) {{
+    if ($script:closes -ne 1 -or $script:cleanupCloses -ne 1 -or $script:warnings[-1] -like '*programs stopped*') {{
+        throw 'the lock warning misstates a running gateway'
+    }}
+}} elseif ($script:closes -ne 0 -or $script:cleanupCloses -ne 0) {{ throw 'hooks were closed before the checked closure point' }}
+'OK'
+""")
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "OK" in out, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_unproven_lock_warning_does_not_claim_a_running_gateway_was_stopped(tmp_path: Path) -> None:
+    result = _txn_harness(tmp_path, _ps1_function("Close-InstallLock") + """
+$Run.UnprovenReplacement = $true
+$Run.RestorePending = $true
+$LockDir = Join-Path $DataDir '.install.lock'
+[void][IO.Directory]::CreateDirectory($LockDir)
+$script:gateway = [pscustomobject]@{ Id = 123 }
+$script:warnings = @()
+function Write-Warn { param($Message) $script:warnings += [string]$Message }
+function Invoke-Quietly { param([scriptblock]$Action) & $Action }
+function Clear-StagedRelease { }
+function Test-RecoveryPending { return $Run.RestorePending }
+function Get-LifecycleNextStep { return 'retry with -AcceptCurrentInstall' }
+Close-InstallLock
+if (-not (Test-Path -LiteralPath $LockDir) -or $script:warnings.Count -ne 1 -or
+    $script:warnings[0] -like '*programs stopped*' -or $script:warnings[0] -notlike '*-AcceptCurrentInstall*') {
+    throw 'the lock warning was inaccurate or omitted the retry command'
+}
+'OK'
+""")
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "OK" in out, out
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -3282,14 +3370,15 @@ def test_a_failure_before_the_new_gateway_is_published_still_closes_the_hooks(tm
 
 
 def test_a_failed_run_closes_unfinished_hooks_while_it_still_holds_the_lock() -> None:
-    # The close runs for every failed run that took the lock, before the
-    # transcript ends and before the lock is released.
+    # After a failed run changed the install, close its hooks while the
+    # lock is still held. An untouched empty-record refusal leaves them alone.
     text = _text()
     tail = text[text.index("$code = 1\ntry {") :]
     final = tail[tail.index("} finally {") :]
-    call = "if ($Run.Lock -and $code -ne 0) { Invoke-Quietly { Close-UnfinishedInstallHooks } }"
-    assert call in final
-    assert final.index(call) < final.index("if ($Run.Lock) { Close-InstallLock }") < final.index("Stop-Transcript")
+    assert final.index("Finish-InstallLock $code") < final.index("Stop-Transcript")
+    finish = _ps1_function("Finish-InstallLock")
+    assert finish.index("Close-UnfinishedInstallHooks") < finish.index("Close-InstallLock")
+    assert "-not $Run.UnprovenReplacementUnchanged" in finish
     assert "Remove-Tree $LockDir" in _ps1_function("Close-InstallLock")
     restore = _ps1_function("Restore-BinDir")
     assert "if ($name -eq $gatewayName -and $refused.Count) { continue }" in restore
