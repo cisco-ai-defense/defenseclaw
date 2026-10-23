@@ -77,10 +77,24 @@ func TestWatchdogManagedServiceKeepsItsManagedTransport(t *testing.T) {
 func TestWatchdogManagedLoopPollsThroughItsManagedTransport(t *testing.T) {
 	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 	previous := perUserGatewayClientFactory
-	t.Cleanup(func() { perUserGatewayClientFactory = previous })
+	previousManaged := managedGatewayClientFactory
+	t.Cleanup(func() {
+		perUserGatewayClientFactory = previous
+		managedGatewayClientFactory = previousManaged
+	})
 	perUserGatewayClientFactory = func(time.Duration, string) (*http.Client, error) {
 		t.Fatal("managed watchdog loop selected the per-user peer transport")
 		return nil, errors.New("unexpected per-user transport")
+	}
+	// Stand in for the service-bound transport so the loop can reach the
+	// test server; the real factory is exercised by the refusal test below.
+	selected := make(chan string, 16)
+	managedGatewayClientFactory = func(timeout time.Duration, _ string, service string) (*http.Client, error) {
+		select {
+		case selected <- service:
+		default:
+		}
+		return &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: nil}}, nil
 	}
 	requests := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -108,4 +122,44 @@ func TestWatchdogManagedLoopPollsThroughItsManagedTransport(t *testing.T) {
 		t.Fatal("managed watchdog did not poll its gateway")
 	}
 	<-done
+	select {
+	case service := <-selected:
+		if service == "" {
+			t.Fatal("managed watchdog selected a transport without a gateway service identity")
+		}
+	default:
+		t.Fatal("managed watchdog polled without its service-bound transport")
+	}
+}
+
+// A managed watchdog must not poll a listener that is not the managed
+// gateway service: another account can hold the port while it is down.
+func TestWatchdogManagedLoopSendsNothingToAnUnverifiedListener(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	previous := perUserGatewayClientFactory
+	t.Cleanup(func() { perUserGatewayClientFactory = previous })
+	perUserGatewayClientFactory = func(time.Duration, string) (*http.Client, error) {
+		t.Fatal("managed watchdog loop selected the per-user peer transport")
+		return nil, errors.New("unexpected per-user transport")
+	}
+	requests := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case requests <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	runWatchdogLoop(ctx, server.URL+"/health", 5*time.Millisecond, 100,
+		watchdogHealthRequirements{transportConfig: cfg}, nil, nil)
+	select {
+	case <-requests:
+		t.Fatal("managed watchdog sent a request to a listener that is not its gateway service")
+	default:
+	}
 }

@@ -2104,39 +2104,34 @@ class TestRestartDefenseGateway(unittest.TestCase):
 class TestWaitForDefenseGatewayAPI(unittest.TestCase):
     @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
     @patch("defenseclaw.commands.cmd_setup.load_config")
-    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
-    def test_accepts_only_running_api_health(self, connection_cls, mock_load, _mock_host):
+    @patch("defenseclaw.commands.cmd_doctor._gateway_health_probe")
+    def test_accepts_only_running_api_health(self, health_probe, mock_load, _mock_host):
         from defenseclaw.commands.cmd_setup import _wait_for_defense_gateway_api
 
         mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
-        connection = connection_cls.return_value
-        response = connection.getresponse.return_value
-        response.status = 200
-        response.read.return_value = b'{"api":{"state":"running"}}'
+        health_probe.return_value = (200, '{"api":{"state":"running"}}')
 
         self.assertTrue(_wait_for_defense_gateway_api("/tmp/defenseclaw", timeout=0.1))
-        connection_cls.assert_called_once()
-        args, kwargs = connection_cls.call_args
-        self.assertEqual(args, ("127.0.0.1", 19001))
+        # Health is read only through the probe bound to the verified
+        # gateway process, never with a raw connection to the port.
+        health_probe.assert_called_once()
+        args, kwargs = health_probe.call_args
+        self.assertIs(args[0], mock_load.return_value)
         self.assertGreater(kwargs["timeout"], 0)
         self.assertLessEqual(kwargs["timeout"], 0.1)
-        connection.request.assert_called_once_with("GET", "/health")
-        connection.close.assert_called_once()
+        self.assertIs(kwargs["bypass_proxy"], True)
 
     @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
     @patch("defenseclaw.commands.cmd_setup.load_config")
-    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
-    def test_rejects_health_while_api_is_still_starting(self, connection_cls, mock_load, _mock_host):
+    @patch("defenseclaw.commands.cmd_doctor._gateway_health_probe")
+    def test_rejects_health_while_api_is_still_starting(self, health_probe, mock_load, _mock_host):
         from defenseclaw.commands.cmd_setup import _wait_for_defense_gateway_api
 
         mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
-        connection = connection_cls.return_value
-        response = connection.getresponse.return_value
-        response.status = 200
-        response.read.return_value = b'{"api":{"state":"starting"}}'
+        health_probe.return_value = (200, '{"api":{"state":"starting"}}')
 
         self.assertFalse(_wait_for_defense_gateway_api("/tmp/defenseclaw", timeout=0.01))
-        self.assertGreaterEqual(connection.request.call_count, 1)
+        self.assertGreaterEqual(health_probe.call_count, 1)
 
     @patch("defenseclaw.commands.cmd_setup.time.sleep")
     @patch(
@@ -2149,10 +2144,10 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
     )
     @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
     @patch("defenseclaw.commands.cmd_setup.load_config")
-    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
+    @patch("defenseclaw.commands.cmd_doctor._gateway_health_probe")
     def test_rejects_retiring_api_after_replacement_markers_are_published(
         self,
-        connection_cls,
+        health_probe,
         mock_load,
         _mock_host,
         _mock_pid_marker,
@@ -2165,23 +2160,21 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
         )
 
         mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
-        retiring = MagicMock(status=200)
-        retiring.read.return_value = json.dumps(
+        retiring = json.dumps(
             {
                 "started_at": "2026-08-11T04:00:00Z",
                 "api": {"state": "running"},
                 "connectors": [{"name": "claudecode", "state": "running"}],
             }
-        ).encode()
-        replacement = MagicMock(status=200)
-        replacement.read.return_value = json.dumps(
+        )
+        replacement = json.dumps(
             {
                 "started_at": "2026-08-11T04:00:01Z",
                 "api": {"state": "running"},
                 "connectors": [{"name": "claudecode", "state": "running"}],
             }
-        ).encode()
-        connection_cls.return_value.getresponse.side_effect = [retiring, replacement]
+        )
+        health_probe.side_effect = [(200, retiring), (200, replacement)]
         previous = _GatewayRuntimeGeneration(
             b"retiring-pid-record",
             "2026-08-11T04:00:00Z",
@@ -2196,7 +2189,7 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
                 expected_connectors=["claudecode"],
             )
         )
-        self.assertEqual(connection_cls.return_value.getresponse.call_count, 2)
+        self.assertEqual(health_probe.call_count, 2)
 
     @patch("defenseclaw.commands.cmd_setup.time.sleep")
     @patch(
@@ -2209,10 +2202,10 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
     )
     @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
     @patch("defenseclaw.commands.cmd_setup.load_config")
-    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
+    @patch("defenseclaw.commands.cmd_doctor._gateway_health_probe")
     def test_rejects_health_started_before_the_replacement_boundary(
         self,
-        connection_cls,
+        health_probe,
         mock_load,
         _mock_host,
         _mock_pid_marker,
@@ -2225,14 +2218,15 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
         )
 
         mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
-        response = connection_cls.return_value.getresponse.return_value
-        response.status = 200
-        response.read.return_value = json.dumps(
-            {
-                "started_at": "2026-08-11T04:00:00Z",
-                "api": {"state": "running"},
-            }
-        ).encode()
+        health_probe.return_value = (
+            200,
+            json.dumps(
+                {
+                    "started_at": "2026-08-11T04:00:00Z",
+                    "api": {"state": "running"},
+                }
+            ),
+        )
         boundary = datetime.fromisoformat("2026-08-11T04:00:01+00:00").timestamp()
         previous = _GatewayRuntimeGeneration(b"retiring-pid-record", None, boundary)
 
@@ -2256,10 +2250,10 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
     )
     @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
     @patch("defenseclaw.commands.cmd_setup.load_config")
-    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
+    @patch("defenseclaw.commands.cmd_doctor._gateway_health_probe")
     def test_rejects_naive_started_at_for_the_replacement_boundary(
         self,
-        connection_cls,
+        health_probe,
         mock_load,
         _mock_host,
         _mock_pid_marker,
@@ -2272,14 +2266,15 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
         )
 
         mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
-        response = connection_cls.return_value.getresponse.return_value
-        response.status = 200
-        response.read.return_value = json.dumps(
-            {
-                "started_at": "2099-08-11T04:00:00",
-                "api": {"state": "running"},
-            }
-        ).encode()
+        health_probe.return_value = (
+            200,
+            json.dumps(
+                {
+                    "started_at": "2099-08-11T04:00:00",
+                    "api": {"state": "running"},
+                }
+            ),
+        )
         previous = _GatewayRuntimeGeneration(b"retiring-pid-record", None, 1.0)
 
         with tempfile.TemporaryDirectory() as tmpdir:
