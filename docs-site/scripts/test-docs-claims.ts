@@ -28,23 +28,27 @@ function docsText(): string {
     .join(' ').split(/\s+/).join(' ');
 }
 
+const blanketOutageClaims = [
+  /(?:gateway )?outages? always block (?:all|every) (?:managed )?(?:hook|connector|call)/i,
+  /Every call checked while the gateway is down is blocked/i,
+];
+
 describe('1.0.4 managed outage and upgrade claims', () => {
   it('keeps the managed guarded outage limit across operator and threat-model pages', () => {
-    const outagePages = [
-      'appendix/coverage-by-layer.mdx',
-      'reference/configuration/fail-modes.mdx',
-      'reference/connectors/devin.mdx',
-      'enterprise/configure/foreign-hook-guard.mdx',
-      'enterprise/configure/reference.mdx',
-      'enterprise/operate/reference.mdx',
-      'enterprise/operate/lifecycle.mdx',
-      'enterprise/plan/threat-model.mdx',
-      'troubleshooting/enterprise/index.mdx',
+    const outagePages: [string, RegExp][] = [
+      ['appendix/coverage-by-layer.mdx', /foreign_hooks: remove.{0,120}guarded calls block during an outage/i],
+      ['reference/configuration/fail-modes.mdx', /foreign_hooks: remove.{0,50}this blocks during an outage under `open`/i],
+      ['reference/connectors/devin.mdx', /foreign_hooks: remove.{0,130}guarded tool calls block during an outage.{0,50}`open`/i],
+      ['enterprise/configure/foreign-hook-guard.mdx', /foreign_hooks: remove.{0,250}guarded tool calls are blocked whatever the fail mode, `open` included/i],
+      ['enterprise/configure/reference.mdx', /foreign_hooks: remove.{0,60}guarded calls block during an outage even under `open`/i],
+      ['enterprise/operate/reference.mdx', /foreign_hooks: remove.{0,60}guarded calls block during an outage even under `open`/i],
+      ['enterprise/operate/lifecycle.mdx', /foreign_hooks: remove.{0,60}guarded calls block during an outage even under `open`/i],
+      ['enterprise/plan/threat-model.mdx', /foreign_hooks: remove.{0,60}guarded calls block during an outage.{0,50}`open`/i],
+      ['troubleshooting/enterprise/index.mdx', /foreign_hooks: remove.{0,70}guarded calls also block under `open`.{0,70}guards cannot check the session/i],
     ];
-    for (const name of outagePages) {
-      const guidance = page(name);
-      assert.match(guidance, /foreign_hooks: remove/i, name);
-      assert.match(guidance, /(?:guarded|guard|session).*(?:outage.*block|block.*outage)/i, name);
+    for (const [name, claim] of outagePages) {
+      assert.match(page(name), claim, name);
+      assert.doesNotMatch(`foreign_hooks: remove ${'unrelated '.repeat(80)} guarded calls block during an outage under \`open\``, claim, name);
     }
     assert.match(repoText('docs/ENTERPRISE-THREAT-MODEL.md'), /R31.*foreign_hooks: remove.*blocks outages/i);
     const changelog = repoText('CHANGELOG.md');
@@ -56,7 +60,21 @@ describe('1.0.4 managed outage and upgrade claims', () => {
     assert.doesNotMatch(all, /(?:lifts?|lifted) the 1\.0\.3 (?:outage )?limit/i);
     // An unconditional statement about every connector would hide the
     // administrator's outage-only open for connectors without this guard.
-    assert.doesNotMatch(all, /(?:gateway )?outages? always block (?:all|every) (?:managed )?(?:hook|connector|call)/i);
+    for (const pattern of blanketOutageClaims) assert.doesNotMatch(all, pattern);
+    assert.ok(blanketOutageClaims.some((pattern) => pattern.test('Every call checked while the gateway is down is blocked')));
+  });
+
+  it('documents the Hermes guard limit in each outage explanation', () => {
+    const hermes = page('reference/connectors/hermes.mdx');
+    const enterprise = hermes.split('### Enterprise standalone profile')[1]?.split('### OpenShell sandbox')[0] ?? '';
+    const failMode = hermes.split('## Fail mode')[1]?.split('## Limits')[0] ?? '';
+    const row = hermes.match(/\| Hook fail mode \|[^|]*\|/)?.[0] ?? '';
+    const managedRow = hermes.match(/\| Managed standalone \|[^|]*\|/)?.[0] ?? '';
+    for (const [name, section] of [['enterprise', enterprise], ['verdict row', row], ['fail mode', failMode]] as const) {
+      assert.match(section, /foreign_hooks: remove.{0,260}guard.{0,200}outage.{0,140}block.{0,100}open/i, name);
+    }
+    assert.match(managedRow, /outage-only `open`.*unguarded call run.*foreign_hooks: remove.*guarded outage calls block under `open`/i);
+    assert.doesNotMatch(row, /Only an explicit `open` lets it run/i);
   });
 
   it('distinguishes the Windows Amp local guard record from gateway-backed sessions', () => {
@@ -165,10 +183,19 @@ describe('1.0.4 operator routes and limits', () => {
     assert.match(agents, /setup openclaw --replace.*Linux and macOS.*native Windows.*(?:unsupported|no guardrail proxy)/i);
   });
 
-  it('identifies the TUI footer generation as the persisted config counter', () => {
+  it('aligns the TUI footer and status Policy line with the applied config counter', () => {
     const tui = page('reference/commands/tui.mdx');
+    const cli = page('reference/commands/cli.mdx').split('### Policy generation and digest')[1]?.split('### ')[0] ?? '';
     assert.match(tui, /`gen`.*config\.generation\.json.*(?:survives|persists).*gateway restart/i);
     assert.doesNotMatch(tui, /`gen` is the gateway's policy generation|restarts at 1 when the gateway starts/i);
+    assert.match(tui, /Policy line.*same.*policy\.config_generation.*config generation N/i);
+    assert.match(tui, /per-user.*applied hand edit.*(?:moves|increments).*counter/i);
+    assert.doesNotMatch(tui, /prints a different, gateway-local policy generation|hand edit can change the policy digest without moving/i);
+    assert.match(cli, /Policy:.*config generation 2/i);
+    assert.match(cli, /plain `defenseclaw status`.*policy\.config_generation.*TUI footer/i);
+    assert.match(cli, /separate `policy\.generation`.*restarts at 1/i);
+    assert.match(cli, /per-user.*hand edit.*(?:next|moves|increments).*config generation/i);
+    assert.doesNotMatch(cli, /The generation number is the gateway's own counter and restarts at 1/i);
   });
 
   it('does not promise enrollment for an extension without an engine version', () => {
