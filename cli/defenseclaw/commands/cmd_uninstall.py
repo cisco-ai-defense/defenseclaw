@@ -41,12 +41,14 @@ OpenClaw, never against the other adapters — calling
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import errno
 import glob
 import json
 import ntpath
 import os
+import posixpath
 import re
 import shutil
 import stat
@@ -2295,6 +2297,84 @@ _COPILOT_PLUGIN_MANIFEST = {
 }
 
 
+def _orphan_copilot_handler_owned(handler: object) -> bool:
+    """Recognize the published managed Local hook commands, including 1.0.0 Windows."""
+    if not isinstance(handler, dict) or handler.get("type") != "command":
+        return False
+    if handler.keys() - {"type", "command", "timeout", "timeoutSec"}:
+        return False
+    command = handler.get("command")
+    if not isinstance(command, str) or len(command) > 65536:
+        return False
+    windows = re.fullmatch(
+        r"(?i)[A-Z]:\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe "
+        r"-NoLogo -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)",
+        command,
+    )
+    if windows:
+        try:
+            script = base64.b64decode(windows.group(1), validate=True).decode("utf-16le")
+        except (ValueError, UnicodeError):
+            return False
+        bound = re.search(
+            r"& ('(?:[^']|'')+defenseclaw-hook\.exe') 'hook' '--connector' 'copilot' "
+            r"'--event' '([A-Za-z]+)' '--enterprise-managed' '--hook-surface' 'vscode-local' "
+            r"\| Microsoft\.PowerShell\.Core\\Out-Host",
+            script,
+            re.IGNORECASE,
+        )
+        if not bound:
+            return False
+        binary, event = bound.groups()
+        args = (
+            f"'hook' '--connector' 'copilot' '--event' '{event}' "
+            "'--enterprise-managed' '--hook-surface' 'vscode-local'"
+        )
+        argv = f"hook --connector copilot --event {event} --enterprise-managed --hook-surface vscode-local"
+        statements = [
+            "$ErrorActionPreference='Stop'",
+            "$env:NoDefaultCurrentDirectoryInExePath='1'",
+        ]
+        run = [
+            "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
+            f"$ErrorActionPreference='Continue'; & {binary} {args} | Microsoft.PowerShell.Core\\Out-Host; "
+            "exit $LASTEXITCODE }",
+            f"$hookStart=[System.Diagnostics.ProcessStartInfo]::new({binary},'{argv}')",
+            "$hookStart.UseShellExecute=$false",
+            "$hookStart.RedirectStandardError=$true",
+            "$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
+            "$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError())",
+            "$hookProcess.WaitForExit()",
+            "exit $hookProcess.ExitCode",
+        ]
+        if script == "; ".join([*statements, *run]):
+            return True  # 1.0.0 render, before the removed-deployment guard
+        unquoted = binary[1:-1].replace("''", "'")
+        gateway = "'" + ntpath.join(ntpath.dirname(unquoted), "defenseclaw-gateway.exe").replace("'", "''") + "'"
+        guard = (
+            "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
+            f"if (-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {binary}) -and "
+            f"-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {gateway})) {{ exit 0 }} }} "
+            f"elseif (-not [System.IO.File]::Exists({binary}) -and "
+            f"-not [System.IO.File]::Exists({gateway})) {{ exit 0 }}"
+        )
+        return script == "; ".join([*statements, guard, *run])
+
+    prefix, sep, tail = command.partition(" hook --connector copilot --enterprise-managed --event '")
+    if not sep:
+        return False
+    event = re.fullmatch(r"([A-Za-z]+)' --hook-surface vscode-local", tail)
+    binary = re.search(r"'([^']*/defenseclaw-hook)'$", prefix)
+    if not event or not binary:
+        return False
+    quoted = "'" + binary.group(1) + "'"
+    render = quoted + sep + tail
+    if command == render:
+        return True  # 1.0.0 render
+    marker = "'" + posixpath.join(posixpath.dirname(binary.group(1)), "defenseclaw-gateway") + "'"
+    return command == f"[ -e {quoted} ] || [ -e {marker} ] || exit 0; exec {render}"
+
+
 def _remove_mcp_writer_backups(data_dir: str) -> None:
     """Remove the agent-config backups the MCP writer left next to each config (GAP-1699).
 
@@ -2365,10 +2445,8 @@ def _remove_orphan_copilot_plugin() -> None:
 
     A managed deployment renders this plugin into each account and its own
     uninstall removes it. On a host with no managed deployment a leftover
-    copy only names a hook binary that may be gone, so the per-user
-    uninstall removes it. The plugin must hold exactly DefenseClaw's
-    rendered manifest and managed Copilot hook commands; anything else is
-    the user's and stays.
+    copy may name a hook binary that is gone. Remove only the commands
+    rendered by DefenseClaw and keep any independent plugin handlers.
     """
     from defenseclaw import upgrade_shim
 
@@ -2389,14 +2467,41 @@ def _remove_orphan_copilot_plugin() -> None:
             if json.load(handle) != _COPILOT_PLUGIN_MANIFEST:
                 return
         with open(hooks_file, encoding="utf-8") as handle:
-            events = json.load(handle).get("hooks")
-        handlers = [h for group in events.values() for h in group] if isinstance(events, dict) else []
-        if not handlers or not all(
-            isinstance(h, dict)
-            and "copilot" in str(h.get("command", ""))
-            and "enterprise-managed" in str(h.get("command", ""))
-            for h in handlers
-        ):
+            document = json.load(handle)
+        if not isinstance(document, dict):
+            return
+        events = document.get("hooks")
+        if not isinstance(events, dict) or not all(isinstance(group, list) for group in events.values()):
+            return
+        changed = False
+        for event, group in list(events.items()):
+            remaining = [handler for handler in group if not _orphan_copilot_handler_owned(handler)]
+            if len(remaining) == len(group):
+                continue
+            changed = True
+            if remaining:
+                events[event] = remaining
+            else:
+                del events[event]
+        if not changed:
+            return
+        if events or document.keys() - {"hooks", "version"}:
+            temp_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=hooks_dir, prefix=".hooks-", delete=False
+                ) as temp:
+                    temp_path = temp.name
+                    json.dump(document, temp, indent=2)
+                    temp.write("\n")
+                    temp.flush()
+                    os.fsync(temp.fileno())
+                os.replace(temp_path, hooks_file)
+            finally:
+                if temp_path:
+                    with contextlib.suppress(OSError):
+                        os.unlink(temp_path)
+            ux.ok(f"removed DefenseClaw handlers from orphaned Copilot plugin {plugin}")
             return
         os.unlink(hooks_file)
         os.unlink(manifest)

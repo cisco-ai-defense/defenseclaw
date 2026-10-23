@@ -534,15 +534,10 @@ func TestOwnedHooksPresentRejectsSingleEditedEntry(t *testing.T) {
 				if err := os.Remove(lane); err != nil {
 					t.Fatal(err)
 				}
-				// Without DefenseClaw's --event binding nothing marks a
-				// deleted copy as DefenseClaw's; a user's own hook of that
-				// name is kept.
+				// A deleted copy with DefenseClaw's --event binding is
+				// repairable. A live independent script of the same name stays.
 				if bytes.Contains(repointed, []byte(lane+" --")) || bytes.Contains(repointed, []byte(lane+"' --")) {
-					if name == "copilot" {
-						expectRefused(t, path, "repointed at a deleted copy", pristine, repointed)
-					} else {
-						expectRepaired(t, path, "repointed at a deleted copy", pristine, repointed)
-					}
+					expectRepaired(t, path, "repointed at a deleted copy", pristine, repointed)
 				}
 				// A shell wrapper in front of an old copy runs it too.
 				writeOldHookCopyForTest(t, lane)
