@@ -2512,11 +2512,9 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     self.app.cfg = copy.deepcopy(original_cfg)
                     gc = self.app.cfg.guardrail
                     gc.enabled = True
-                    # The picked case has no saved connector: a saved OpenClaw
-                    # must take precedence over the hint on an upgrade.
-                    gc.connector = {"configured": "opencode", "explicit": "codex"}.get(target_case, "")
-                    if target_case == "picked":
-                        self.app.cfg.claw.mode = ""
+                    # An older install may have saved OpenClaw before the
+                    # operator picked an installed OpenCode connector.
+                    gc.connector = {"configured": "opencode", "explicit": "codex"}.get(target_case, "openclaw")
                     if target_case == "explicit":
                         # Both connectors are registered; explicit selection
                         # still exercises the exact OpenCode admission path.

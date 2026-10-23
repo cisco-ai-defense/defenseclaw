@@ -125,6 +125,7 @@ from defenseclaw.logger import (
     keep_running_gateway_token,
 )
 from defenseclaw.notification_capabilities import desktop_notification_capability
+from defenseclaw.openclaw_presence import openclaw_fleet_link_configured
 from defenseclaw.paths import bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 from defenseclaw.platform_support import (
@@ -6824,9 +6825,10 @@ def setup_guardrail(
         judge_enabled_by_this_run = False
         # Connector resolution order in non-interactive mode:
         #   1. explicit --connector / --agent flag
-        #   2. configured primary, roster, or non-default claw.mode
+        #   2. configured primary, roster, or non-default claw.mode; a saved
+        #      OpenClaw with no local installation keeps a remote/fleet link
         #   3. <data_dir>/picked_connector, only when that agent is installed
-        #   4. an older implied OpenClaw kept by the loader (installation or fleet link)
+        #   4. an older implied OpenClaw kept by the loader
         # There is no connector fallback on an unconfigured host.
         # We deliberately do NOT run filesystem auto-detect (the
         # ``~/.claude`` / ``~/.codex`` heuristic) in non-interactive mode:
@@ -6837,10 +6839,18 @@ def setup_guardrail(
         # confirm the suggested default.
         if explicit_connector:
             target_connector = explicit_connector
+        elif gc.connector == "openclaw" and not gc.connectors and not openclaw_fleet_link_configured(app.cfg):
+            # An older local setup could pin OpenClaw before the operator
+            # picked an agent. A remote host or explicit fleet mode above
+            # remains authoritative even without a local OpenClaw binary.
+            installed = _detect_installed_connectors()
+            target_connector = (
+                "openclaw"
+                if "openclaw" in installed
+                else _installed_picked_connector(getattr(app.cfg, "data_dir", None), installed)
+                or ""
+            )
         elif gc.connector or gc.connectors:
-            # These are saved selections, including a legacy remote OpenClaw
-            # fleet. A local installation probe applies only to an implied
-            # claw.mode default, not to a connector the operator configured.
             target_connector = app.cfg.active_connector()
         elif app.cfg.has_connector_configured() and app.cfg.active_connector() != "openclaw":
             target_connector = app.cfg.active_connector()
