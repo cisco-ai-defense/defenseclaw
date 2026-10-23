@@ -50,7 +50,7 @@ func TestRemovedConnectorWithAFailedCredentialRevocationStaysPending(t *testing.
 				var pending bool
 				var detail string
 				if path == "multi-connector removal" {
-					failed, _ := teardownRemovedConnectorsReport(reg, []string{"codex", "cursor"}, []string{"cursor"}, opts, context.Background())
+					failed, _ := teardownRemovedConnectorsReport(reg, []string{"codex", "cursor"}, []string{"cursor"}, opts, "", context.Background())
 					pending = len(failed) == 1 && failed[0] == "codex"
 					detail = strings.Join(failed, ",")
 				} else {
