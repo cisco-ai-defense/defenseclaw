@@ -39,7 +39,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 SCHEMA_VERSION = 2
 REQUIRED_KEYS = (
@@ -67,7 +67,7 @@ BOOLEAN_KEYS = ("ok", "noop", "installed", "transaction_pending", "coverage_comp
 MAX_INPUT_BYTES = 4 << 20
 
 
-def load_result(path: Path) -> dict[str, Any]:
+def load_result(path: Path) -> Dict[str, Any]:
     """Read one lifecycle result. The file must hold exactly one JSON object:
     MDMs parse the lifecycle's stdout, so any other text is a defect too."""
     raw = path.read_bytes()
@@ -91,7 +91,7 @@ def healthy_service_state(state: str) -> bool:
     return state == "running" or state.startswith("active/")
 
 
-def structural_problems(document: dict[str, Any]) -> list[str]:
+def structural_problems(document: Dict[str, Any]) -> List[str]:
     problems = [f"missing key {key!r}" for key in REQUIRED_KEYS if key not in document]
     if problems:
         return problems
@@ -121,7 +121,7 @@ def structural_problems(document: dict[str, Any]) -> list[str]:
     return problems
 
 
-def check(document: dict[str, Any], args: argparse.Namespace) -> list[str]:
+def check(document: Dict[str, Any], args: argparse.Namespace) -> List[str]:
     problems = structural_problems(document)
     if problems:
         return problems
@@ -221,7 +221,7 @@ def check(document: dict[str, Any], args: argparse.Namespace) -> list[str]:
     return problems
 
 
-def policy_problems(policy: Any, args: argparse.Namespace) -> list[str]:
+def policy_problems(policy: Any, args: argparse.Namespace) -> List[str]:
     if not args.policy_applied and args.config_generation_above is None:
         return []
     if not isinstance(policy, dict):
@@ -240,9 +240,9 @@ def policy_problems(policy: Any, args: argparse.Namespace) -> list[str]:
     return problems
 
 
-def machine_policy_problems(policies: dict[str, Any], args: argparse.Namespace) -> list[str]:
-    problems: list[str] = []
-    connectors: list[str] = []
+def machine_policy_problems(policies: Dict[str, Any], args: argparse.Namespace) -> List[str]:
+    problems = []  # type: List[str]
+    connectors = []  # type: List[str]
     for connector in args.machine_policy_target + args.machine_policy + args.machine_policy_enforced:
         if connector not in connectors:
             connectors.append(connector)
@@ -261,7 +261,7 @@ def machine_policy_problems(policies: dict[str, Any], args: argparse.Namespace) 
     return problems
 
 
-def describe(document: dict[str, Any]) -> str:
+def describe(document: Dict[str, Any]) -> str:
     return (
         "action={} ok={} noop={} installed={} installed_version={} exit_code={} "
         "coverage_complete={} security_complete={}"
@@ -277,7 +277,7 @@ def describe(document: dict[str, Any]) -> str:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("result", type=Path, help="file holding the lifecycle JSON result")
     parser.add_argument("--label", default="", help="step name to print")

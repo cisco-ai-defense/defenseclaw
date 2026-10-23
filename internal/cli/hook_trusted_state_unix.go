@@ -107,7 +107,20 @@ func linuxManagedHookContextReason(readlink func(string) (string, error), readFi
 				return hookexec.ManagedProcessContextUnknownReason
 			}
 			if !bytes.Equal(selfView, hostView) {
-				return kind.reason
+				if kind.fallback != "mountinfo" {
+					return kind.reason
+				}
+				// Mounts can change between the two snapshots. A second
+				// bounded comparison avoids refusing a host-context call for
+				// that brief difference; a stable mismatch stays closed.
+				selfView, selfErr = readFile("/proc/self/mountinfo")
+				hostView, hostErr = readFile("/proc/1/mountinfo")
+				if selfErr != nil || hostErr != nil {
+					return hookexec.ManagedProcessContextUnknownReason
+				}
+				if !bytes.Equal(selfView, hostView) {
+					return kind.reason
+				}
 			}
 			continue
 		}

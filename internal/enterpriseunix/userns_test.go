@@ -756,3 +756,35 @@ func TestMacOSUserNamespaceSettingIsNotRequired(t *testing.T) {
 		t.Fatalf("macOS install wrote a Linux sysctl file: %v", err)
 	}
 }
+
+// A same-boot reinstall can use the old boot proof while the live kernel
+// stayed restricted. Its uninstall marker must not invalidate that proof on
+// later transactions after another restricted boot.
+func TestLinuxProvenRestrictionAfterUninstallNeedsNoReboot(t *testing.T) {
+	h, cfg := restrictedHost(t)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg}))
+	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+	if got := h.read(userNamespaceUninstalled); got != "boot-before\n" {
+		t.Fatalf("uninstall marker = %q", got)
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg}))
+	if _, err := os.Stat(h.env.P(userNamespaceUninstalled)); !os.IsNotExist(err) {
+		t.Fatalf("reinstall retained the spent uninstall marker: %v", err)
+	}
+	writeKernelSetting(t, h, userNamespaceBootIDPath, "boot-after\n")
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		if r := h.run(Options{Action: action}); hasMessageCode(r.Errors, codeUserNamespaces) {
+			t.Fatalf("%s demanded a reboot on a proven boot: %+v", action, r.Errors)
+		}
+	}
+	h.env.ProductVersion = "1.0.5"
+	upgraded := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.5")})
+	if !upgraded.Installed || hasMessageCode(upgraded.Errors, codeUserNamespaces) {
+		t.Fatalf("upgrade on a proven boot demanded another reboot: %+v", upgraded.Errors)
+	}
+	for _, marker := range []string{userNamespaceBootMarker, ptraceBootMarker} {
+		if got := h.read(marker); got != "boot-prior\n" {
+			t.Fatalf("upgrade rewrote proven boot marker %s: %q", marker, got)
+		}
+	}
+}

@@ -200,8 +200,8 @@ func TestLinuxManagedHookContextReason(t *testing.T) {
 		"/proc/self/ns/mnt": "mnt:[2]", "/proc/1/ns/mnt": "mnt:[2]",
 	}
 	for _, tc := range []struct {
-		name, uidMap, selfMount, status, want string
-		hostLinksDenied, differentMounts      bool
+		name, uidMap, selfMount, status, want                             string
+		hostLinksDenied, hostViewsDenied, differentMounts, changingMounts bool
 	}{
 		{name: "host login", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "Name:\thook\nTracerPid:\t0\n"},
 		{name: "private user namespace", uidMap: "0 1000 1\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", want: hookexec.ManagedUserNamespaceReason},
@@ -209,7 +209,9 @@ func TestLinuxManagedHookContextReason(t *testing.T) {
 		{name: "traced hook", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t42\n", want: hookexec.ManagedTracedProcessReason},
 		{name: "unverifiable context", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "Name:\thook\n", want: hookexec.ManagedProcessContextUnknownReason},
 		{name: "protected host namespace links", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true},
+		{name: "hidden host proc view", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true, hostViewsDenied: true, want: hookexec.ManagedProcessContextUnknownReason},
 		{name: "protected links with a different mount view", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true, differentMounts: true, want: hookexec.ManagedMountNamespaceReason},
+		{name: "protected links during mount change", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true, changingMounts: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			links := make(map[string]string, len(baseLinks))
@@ -217,6 +219,7 @@ func TestLinuxManagedHookContextReason(t *testing.T) {
 				links[path] = target
 			}
 			links["/proc/self/ns/mnt"] = tc.selfMount
+			mountReads := 0
 			got := linuxManagedHookContextReason(func(path string) (string, error) {
 				if tc.hostLinksDenied && strings.HasPrefix(path, "/proc/1/ns/") {
 					return "", os.ErrPermission
@@ -230,13 +233,23 @@ func TestLinuxManagedHookContextReason(t *testing.T) {
 				case "/proc/self/uid_map":
 					return []byte(tc.uidMap), nil
 				case "/proc/1/uid_map":
+					if tc.hostViewsDenied {
+						return nil, os.ErrPermission
+					}
 					return []byte("0 0 4294967295\n"), nil
 				case "/proc/self/mountinfo":
 					if tc.differentMounts {
 						return []byte("private mount\n"), nil
 					}
+					mountReads++
+					if tc.changingMounts && mountReads == 1 {
+						return []byte("previous host mount\n"), nil
+					}
 					return []byte("host mount\n"), nil
 				case "/proc/1/mountinfo":
+					if tc.hostViewsDenied {
+						return nil, os.ErrPermission
+					}
 					return []byte("host mount\n"), nil
 				case "/proc/self/status":
 					return []byte(tc.status), nil

@@ -204,12 +204,16 @@ processes (for example with PRoot), can start an agent with its own view of the
 machine-policy files, the runtime descriptor and `/run/defenseclaw-hook`. That
 agent never calls the hook, so its tool calls are outside your enforcement
 ([Residual risks](/docs/enterprise/plan/threat-model#residual-risks)). An agent
-started in a private user or mount namespace that still sees the policy is
-refused when it calls the managed hook. A traced hook or one whose Linux process
-context cannot be checked is refused too. The hook gives a specific reason and
-attempts to report it to the gateway when the hook socket is reachable. This
-check runs only when the agent invokes the hook; it cannot stop an agent whose
-private policy view prevented registration.
+started in a private user or mount namespace that still sees the policy calls
+the managed hook, which checks its proc view and refuses a private namespace,
+tracer or unverifiable context that it observes. The hook gives a specific
+reason and attempts to report it to the gateway when the hook socket is
+reachable. This is a best-effort invocation check: a process controlling the
+hook's proc view can supply false files, and an agent whose private policy view
+prevented hook registration makes no call to check. On a host with `hidepid=1`
+or `hidepid=2`, if the hook cannot read `/proc/1`, it refuses managed calls with
+`enterprise_managed_process_context_unverified`. Check this before enrolling
+agents on such hosts.
 
 DefenseClaw leaves these kernel settings alone by default. Closing them is
 host-wide, and on a managed RHEL 9.8 host it broke other work:
@@ -251,7 +255,10 @@ reports `unhealthy` until then. A third marker,
 uninstall removed the file: a reinstall after a boot without the file needs
 another reboot. Restoring a missing file from an installed deployment also
 requires a new reboot; an older uninstall marker cannot attest that repair.
-The markers survive uninstall and purge.
+The next restricted install or `ensure` clears the uninstall marker, so a
+later boot with the file in place stays healthy. The boot markers survive
+uninstall and purge; the uninstall marker survives until that next restricted
+install or `ensure`.
 
 Setting `leave` again (or removing the key) removes the managed sysctl file, as
 an uninstall does. The running kernel keeps the restricted values until you

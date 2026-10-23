@@ -232,6 +232,14 @@ func (e *Env) restrictManagedPolicyViews(priorRestricted bool) error {
 	if problem := e.ptraceProblem(); problem != "" {
 		return fmt.Errorf("%s", problem)
 	}
+	// The persistent file is back and the boot is attested again, either by
+	// the markers just written or by the proven same-boot uninstall this
+	// transaction relied on. The uninstall marker has served its purpose;
+	// kept, it would make every later transaction distrust a proven boot
+	// and demand another reboot (GAP-0851).
+	if err := os.Remove(e.P(userNamespaceUninstalled)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clear %s after restoring the restriction: %w", userNamespaceUninstalled, err)
+	}
 	return nil
 }
 

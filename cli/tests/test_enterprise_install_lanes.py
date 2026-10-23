@@ -12,6 +12,7 @@ every lane relies on.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -32,6 +33,22 @@ UNIX_LANE = SCRIPTS / "test-enterprise-unix-install.sh"
 POSTINSTALL_REBOOT_TEST = ROOT / "packaging/linux/tests/test_postinstall_userns_reboot.sh"
 # CI selects Python modules that name the changed file's basename.
 POSTINSTALL = ROOT / "packaging/linux/postinstall.sh"
+
+
+def test_lifecycle_checker_keeps_python36_annotations() -> None:
+    # RHEL 8 runs this file with platform-python 3.6, where built-in
+    # collection generics and union annotations cannot be evaluated.
+    source = CHECKER.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(CHECKER), feature_version=(3, 6))
+    for node in ast.walk(tree):
+        assert not (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in {"dict", "list", "tuple", "set", "frozenset"}
+        ), f"Python 3.6 cannot evaluate {ast.get_source_segment(source, node)}"
+        assert not (
+            isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr)
+        ), f"Python 3.6 cannot evaluate {ast.get_source_segment(source, node)}"
 
 
 def _result(**overrides: Any) -> dict[str, Any]:
