@@ -187,19 +187,28 @@ func TestManagedStandaloneShellHooksOpenOnlyForAnOutage(t *testing.T) {
 			return true
 		}
 	}
+	truncatedAnswer := func(status int) func(int, http.ResponseWriter) bool {
+		return func(_ int, w http.ResponseWriter) bool {
+			w.Header().Set("Content-Length", "128")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"error":"unavailable"}`))
+			return true
+		}
+	}
 	rateLimited := `{"error":"rate_limited","reason":"enterprise_managed_rate_limited","retry_after_seconds":1}`
 	for _, conn := range []Connector{
 		NewHermesConnector(), NewKiroConnector(), NewCursorConnector(),
-		NewDevinConnector(), NewAntigravityConnector(), NewClaudeCodeConnector(),
+		NewDevinConnector(), NewAntigravityConnector(), NewClaudeCodeConnector(), NewCopilotConnector(),
 		NewCodexConnector(),
 	} {
 		hook := hookArgvConnectorCase(t, conn.Name())
 		for _, tc := range []struct {
-			name    string
-			serve   func(int, http.ResponseWriter) bool
-			stdin   string
-			stopped bool
-			blocks  bool
+			name      string
+			serve     func(int, http.ResponseWriter) bool
+			stdin     string
+			stopped   bool
+			untrusted bool
+			blocks    bool
 		}{
 			{name: "rate limited until the resends end", serve: answer(http.StatusTooManyRequests, rateLimited), blocks: true},
 			{name: "rate limited, then the resend fails", serve: func(n int, w http.ResponseWriter) bool {
@@ -213,10 +222,19 @@ func TestManagedStandaloneShellHooksOpenOnlyForAnOutage(t *testing.T) {
 				return true
 			}, blocks: true},
 			{name: "gateway 5xx", serve: answer(http.StatusServiceUnavailable, `{"error":"unavailable"}`), blocks: true},
+			{name: "gateway 500", serve: answer(http.StatusInternalServerError, `{"error":"internal"}`), blocks: true},
+			{name: "gateway 502", serve: answer(http.StatusBadGateway, `{"error":"bad gateway"}`), blocks: true},
 			{name: "gateway 4xx", serve: answer(http.StatusBadRequest, `{"error":"bad request"}`), blocks: true},
+			{name: "gateway 401", serve: answer(http.StatusUnauthorized, `{"error":"unauthorized"}`), blocks: true},
+			{name: "gateway 403", serve: answer(http.StatusForbidden, `{"error":"forbidden"}`), blocks: true},
+			{name: "gateway 404", serve: answer(http.StatusNotFound, `{"error":"missing"}`), blocks: true},
+			{name: "gateway 400 truncated", serve: truncatedAnswer(http.StatusBadRequest), blocks: true},
+			{name: "gateway 503 truncated", serve: truncatedAnswer(http.StatusServiceUnavailable), blocks: true},
 			{name: "unusable answer", serve: answer(http.StatusOK, `{"action":"proceed"}`), blocks: true},
+			{name: "missing action", serve: answer(http.StatusOK, `{}`), blocks: true},
 			{name: "input too large to inspect", stdin: `{"pad":"` + strings.Repeat("x", 1100<<10) + `"}`, blocks: true},
-			{name: "gateway stopped", stopped: true, blocks: false},
+			{name: "gateway stopped", stopped: true, blocks: conn.Name() == "copilot"},
+			{name: "socket trust failed", untrusted: true, blocks: true},
 			{name: "allow verdict", serve: answer(http.StatusOK, `{"action":"allow"}`), blocks: false},
 		} {
 			t.Run(fmt.Sprintf("%s %s", conn.Name(), tc.name), func(t *testing.T) {
@@ -227,6 +245,9 @@ func TestManagedStandaloneShellHooksOpenOnlyForAnOutage(t *testing.T) {
 					if err := os.Remove(f.socket); err != nil {
 						t.Fatal(err)
 					}
+				}
+				if tc.untrusted {
+					f.untrustSocketDir(t)
 				}
 				stdin := hook.stdin
 				if tc.stdin != "" {

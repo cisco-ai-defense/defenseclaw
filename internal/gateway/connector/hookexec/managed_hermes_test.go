@@ -58,7 +58,7 @@ func TestManagedHermesToolCallBlocksWhenDefenseClawCannotCheck(t *testing.T) {
 	}{
 		{name: "gateway unreachable", want: "the DefenseClaw gateway is not available",
 			rt: &stubRT{err: errors.New("connection refused")}},
-		{name: "gateway 5xx", want: "the DefenseClaw gateway is not available",
+		{name: "gateway 5xx", want: "returned an answer DefenseClaw could not use",
 			rt: &stubRT{status: 503, body: "unavailable"}},
 		{name: "gateway refused", want: "returned an answer DefenseClaw could not use",
 			rt: &stubRT{status: 401, body: "unauthorized"}},

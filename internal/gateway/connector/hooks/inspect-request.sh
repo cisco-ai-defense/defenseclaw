@@ -127,8 +127,8 @@ fail_unreachable() {
 
 fail_response() {
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
-  # outage only (no answer or a 5xx, fail_unreachable). A refusal (4xx,
-  # 429) or an unusable answer blocks: the agent can provoke either.
+  # outage only (no answer through fail_unreachable). Every answered error
+  # and unusable verdict blocks, including 5xx.
   FAIL_MODE="closed"
 {{end}}  defenseclaw_log_hook_delivery_failure inspect inspect-request "$1" response "$FAIL_MODE"
   echo "defenseclaw: inspect-request hook error: $1" >&2
@@ -150,17 +150,18 @@ fail_unauthorized() {
   exit 2
 }
 
-{{if not .SecureClient}}# A checked call needs a complete JSON parser. The string-only helper cannot
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{.ManagedHTTPFailureSH}}{{end}}{{if not .SecureClient}}# A checked call needs a complete JSON parser. The string-only helper cannot
 # validate a gateway verdict, so refuse before sending or parsing one.
 if ! command -v jq >/dev/null 2>&1 && ! _dc_python3_usable; then
-  if defenseclaw_should_fail_closed_on_unreachable; then
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  fail_response "DefenseClaw needs jq or python3 to check this call"
+{{else}}  if defenseclaw_should_fail_closed_on_unreachable; then
     defenseclaw_log_hook_failure inspect inspect-request "DefenseClaw needs jq or python3 to check this call" response closed fail_closed
     echo "defenseclaw: DefenseClaw needs jq or python3 to check this call; blocking request" >&2
     exit 2
   fi
   defenseclaw_log_hook_failure inspect inspect-request "DefenseClaw needs jq or python3 to check this call" response open fail_open
   echo "defenseclaw: DefenseClaw needs jq or python3 to check this call; allowing request (fail mode open)" >&2
-  exit 0
+  exit 0{{end}}
 fi
 {{end}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
@@ -195,13 +196,16 @@ RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/api/v1/inspect/request" 
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
   "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}") || {
-  fail_unreachable "gateway unreachable"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  defenseclaw_split_response
+  defenseclaw_managed_http_result "$HTTP_CODE" incomplete
+{{end}}  fail_unreachable "gateway unreachable"
 }{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
 
-if [ -z "$HTTP_CODE" ]; then
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
+{{else}}if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
   fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
@@ -209,7 +213,7 @@ elif [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
   fail_unauthorized "gateway returned HTTP ${HTTP_CODE}"
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
-fi
+fi{{end}}
 
 {{if .Sandbox}}# Every DefenseClaw inspect verdict names its action: an empty or
 # action-less reply from the sandbox ingress is not a verdict.

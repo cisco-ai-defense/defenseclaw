@@ -247,19 +247,22 @@ func gatewayNoAnswer(ctx context.Context) bool {
 }
 
 // noAnswerFailMode keeps managed non-tool events, locally spent budgets and a
-// call the gateway answered 429 first (Options.gatewayBusy,
+// call the gateway answered with an HTTP error first (Options.answeredErrorStatus,
 // ManagedOutageFailsOpen) closed. No answer proves no gateway decision, so
 // every managed hook closes; per-user hooks keep their installed fail mode.
 // failNoAnswer and renderNoAnswer both use it, so the decision and failure
 // row agree.
 func noAnswerFailMode(opts Options, failMode string) string {
-	if opts.answerSpentLocally || opts.gatewayBusy || opts.ManagedEnterprise {
+	if opts.answerSpentLocally || opts.answeredErrorStatus != 0 || opts.ManagedEnterprise {
 		return "closed"
 	}
 	return failMode
 }
 
 func failNoAnswer(opts Options, sp spec, failMode string) int {
+	if managedNativeDecision(opts) && opts.answeredErrorStatus != 0 {
+		return failAfterErrorStatus(opts, sp, "closed", opts.answeredErrorStatus)
+	}
 	failMode = noAnswerFailMode(opts, failMode)
 	if opts.ManagedEnterprise {
 		return failUnreachable(opts, sp, failMode, managedGatewayNoAnswerReason)

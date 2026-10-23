@@ -248,12 +248,9 @@ type Options struct {
 	// gateway request with less than hookGatewayAnswerFloor of the answer
 	// budget left: a missing answer then fails closed (failNoAnswer).
 	answerSpentLocally bool
-	// gatewayBusy is set on a standalone hook outside Secure Client once the
-	// gateway answered the call with 429 (a rate limit or a full gateway):
-	// the gateway is up, so no failure after it is an outage
-	// (ManagedOutageFailsOpen). The call gets a verdict from a resend or is
-	// closed in every fail mode.
-	gatewayBusy bool
+	// answeredErrorStatus records an HTTP refusal seen before a retry. A
+	// failed retry cannot turn that answered error into an outage allow.
+	answeredErrorStatus int
 	// managedOutageOpen is set on a standalone hook outside Secure Client
 	// for a failure that ManagedOutageFailsOpen lets through (the gateway is
 	// not running, was still restarting, or gave no answer). Only such a
@@ -906,8 +903,15 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// outage, and fail mode open does not let it through
 	// (failAfterErrorStatus). The watchdog's answer is closed from then on.
 	knownStatus := 0
+	// markManagedAnsweredError (w8-mgmt) records the status on opts too, so
+	// ManagedOutageFailsOpen, noAnswerFailMode and the watchdog's rendered
+	// answer treat every later failure of the call as an answered error.
 	noteStatus := func() {
-		if err == nil && managedNativeDecision(opts) && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
+		if err != nil {
+			return
+		}
+		markManagedAnsweredError(&opts, sp, resp.StatusCode)
+		if managedNativeDecision(opts) && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
 			knownStatus = resp.StatusCode
 			opts.answerWatch.gatewayAnsweredError(opts, sp)
 		}
@@ -919,13 +923,6 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// deadline instead of failing the tool call for a burst the gateway
 	// clears in seconds (GAP-0205).
 	for retry := 0; !opts.SecureClient && err == nil && resp.StatusCode == http.StatusTooManyRequests && retry < hookBusyRetries; retry++ {
-		if managedNativeDecision(opts) && !opts.gatewayBusy {
-			// A rate limit is no outage: the administrator's open does
-			// not apply to it, also when the resends run out of time or
-			// the watchdog answers first (r104 W4b2 review P1).
-			opts.gatewayBusy = true
-			opts.answerWatch.closeForBusyGateway(opts, sp)
-		}
 		delay := retryAfterDelay(resp.Header.Get("Retry-After"))
 		_ = resp.Body.Close()
 		if !retryFitsAnswer(opts.answerBy, delay) {
@@ -978,6 +975,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failResponse(opts, sp, "closed", "gateway delivery confirmation unavailable")
 	}
 	if err != nil {
+		if managedNativeDecision(opts) && opts.answeredErrorStatus != 0 {
+			return failAfterErrorStatus(opts, sp, "closed", opts.answeredErrorStatus)
+		}
 		reason := "gateway unreachable"
 		switch cause := context.Cause(ctx); {
 		case errors.Is(cause, errGatewayNoAnswer):
@@ -1011,10 +1011,12 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			_ = resp.Body.Close()
 		}
 	}()
-	// The decision is in only when its whole body is: the answer budget
-	// holds while it is read. A gateway that sent its headers and part of a
-	// body, then stalled or dropped the connection, has not answered, and
-	// the bytes it sent are never taken as its decision.
+	// A successful verdict is in only when its whole body is: the answer
+	// budget holds while it is read. A gateway that sent its headers and part
+	// of a body, then stalled or dropped the connection, has not answered, and
+	// the bytes it sent are never taken as its decision. An error status is
+	// already an answered refusal even if its body stalls or the connection
+	// drops.
 	var body []byte
 	var readErr error
 	if delivery != nil || resp.Header.Get(HookDeliveryRequiredHeader) == "1" {
@@ -1028,12 +1030,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		stopAnswer()
 	}
 	if (readErr != nil || int64(len(body)) > defaultMaxBody) && managedNativeDecision(opts) &&
-		(resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
-		// The status line already says the gateway refused the call's
-		// credential: an integrity failure, closed on a standalone host in
-		// every fail mode, whatever happens to the body after it. Before,
-		// a truncated or oversized 401/403 body took the no-answer or
-		// unusable-answer path, which an open fail mode allows.
+		(resp.StatusCode < 200 || resp.StatusCode >= 300) {
+		// The status line already answered with an error. A truncated or
+		// oversized body cannot turn that error into an outage allow.
 		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
 	if readErr != nil {
@@ -1052,6 +1051,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 	switch {
 	case resp.StatusCode >= 500 && resp.StatusCode < 600:
+		if managedNativeDecision(opts) {
+			return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
+		}
 		return failUnreachable(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	case resp.StatusCode == http.StatusForbidden && refusalReason(body) == SurfaceUnverifiedReason:
 		// A policy decision, not a failure: block in every fail mode (a stop
@@ -1636,6 +1638,21 @@ func (sp spec) decide(opts Options, body []byte) int {
 // standalone profile, Unix or Windows).
 func managedNativeDecision(opts Options) bool {
 	return opts.ManagedEnterprise && !opts.SecureClient
+}
+
+// markManagedAnsweredError makes the first HTTP error decisive for the
+// watchdog and every later failure path. A later valid verdict can still
+// decide the call; a failed retry cannot become a gateway outage.
+func markManagedAnsweredError(opts *Options, sp spec, status int) {
+	if !managedNativeDecision(*opts) || status >= 200 && status < 300 || opts.answeredErrorStatus == status {
+		return
+	}
+	opts.answeredErrorStatus = status
+	opts.answerWatch.closeForAnsweredError(*opts, sp)
+}
+
+func answeredErrorReason(opts Options) string {
+	return fmt.Sprintf("gateway returned HTTP %d", opts.answeredErrorStatus)
 }
 
 // managedIntegrityFailMode is the fail mode of an integrity failure (an
@@ -2832,11 +2849,11 @@ func managedPeerFailMode(opts Options, failMode string, err error) string {
 // availability or a runtime failure, and only when err proves the gateway
 // service is not running. Every other error (a peer
 // DefenseClaw cannot verify, another program on the gateway port, an
-// unusable answer), any failure of a call the gateway answered 429
-// (Options.gatewayBusy: the gateway is up and rate-limited it) and every
+// unusable answer), any failure after an HTTP error reply
+// (Options.answeredErrorStatus) and every
 // closed or unset mode keep the refusal.
 func ManagedOutageFailsOpen(opts Options, err error) bool {
-	if err == nil || !managedNativeDecision(opts) || opts.StrictAvailability || opts.gatewayBusy ||
+	if err == nil || !managedNativeDecision(opts) || opts.StrictAvailability || opts.answeredErrorStatus != 0 ||
 		strings.TrimSpace(opts.ManagedRuntimeFailure) != "" || normalizeFailMode(opts.FailMode) != "open" {
 		return false
 	}

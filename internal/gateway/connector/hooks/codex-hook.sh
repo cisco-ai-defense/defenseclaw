@@ -318,7 +318,7 @@ unset API_TOKEN PAYLOAD{{else}}HOOK_MAX_TIME=10
   HOOK_MAX_TIME=2
 fi
 
-{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{.ManagedHTTPFailureSH}}{{end}}{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
   # A bearer is an HTTP field value: CR or LF is never valid in it, and either
   # would end the curl config line defenseclaw_gateway_post writes it to.
@@ -361,7 +361,11 @@ codex_gateway_post_response() {
 }
 CURL_STATUS=0
 RESPONSE=$(codex_gateway_post) || CURL_STATUS=$?
-# A refused or dropped connection means this account's gateway is restarting
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}if [ "$CURL_STATUS" -ne 0 ]; then
+  defenseclaw_split_response
+  defenseclaw_managed_http_result "$HTTP_CODE" incomplete
+fi
+{{end}}# A refused or dropped connection means this account's gateway is restarting
 # or not running (after a reboot, for example): send the call again for up to
 # 3 seconds, starting the gateway after a refusal. SessionEnd has no time for
 # it. See defenseclaw_await_gateway in _hardening.sh.
@@ -383,22 +387,25 @@ PAYLOAD=
 AUTH_HEADER_ARGS=()
 unset API_TOKEN PAYLOAD
 if [ "$CURL_STATUS" -ne 0 ]; then
-  fail_unreachable "gateway unreachable"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  defenseclaw_split_response
+  defenseclaw_managed_http_result "$HTTP_CODE" incomplete
+{{end}}  fail_unreachable "gateway unreachable"
 fi{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
 
-# 5xx (server error) is treated as transport — the gateway hit an
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
+{{else}}# 5xx (server error) is treated as transport — the gateway hit an
 # infrastructure problem, not a policy verdict. 4xx falls through to
 # response-layer handling so auth/payload bugs surface loudly.
 if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  {{if and .Managed (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "gateway returned HTTP ${HTTP_CODE}"
+  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
-fi
+fi{{end}}
 
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.codex_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"

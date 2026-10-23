@@ -668,10 +668,8 @@ func TestManagedSharedHookCombinesSeveralConnectorRecordsToTheStrictest(t *testi
 
 // The combined managed open covers a gateway outage only, in every shared
 // inspect script. A managed host whose records are all open allows a call
-// when the gateway is unreachable or answers 5xx, but a refusal (400, 429)
-// or a 200 without a usable action blocks: the agent can force a 400 with
-// an input whose escaped body passes the gateway's limit and a 429 by
-// flooding its own hook budget. Before, the combined open allowed all four.
+// when the gateway is unreachable. Every answered error and unusable verdict
+// blocks, including 5xx: an answered error is not an outage.
 func TestManagedSharedHookOpenCoversOutagesOnly(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hooks are not used on Windows")
@@ -680,23 +678,33 @@ func TestManagedSharedHookOpenCoversOutagesOnly(t *testing.T) {
 		t.Skip("bash is not installed")
 	}
 	for _, reply := range []struct {
-		name   string
-		status int
-		body   string
-		want   int
+		name      string
+		status    int
+		body      string
+		truncated bool
+		want      int
 	}{
-		{"allow", http.StatusOK, `{"action":"allow"}`, 0},
-		{"HTTP 400", http.StatusBadRequest, `{"error":"request body too large"}`, 2},
-		{"HTTP 429", http.StatusTooManyRequests, `{"error":"rate limited"}`, 2},
-		{"HTTP 404", http.StatusNotFound, ``, 2},
-		{"missing action", http.StatusOK, `{}`, 2},
-		{"invalid action", http.StatusOK, `{"action":"unrecognized"}`, 2},
-		{"unparseable reply", http.StatusOK, `garbage`, 2},
-		{"HTTP 503", http.StatusServiceUnavailable, ``, 0},
-		{"gateway unreachable", 0, ``, 0},
+		{name: "allow", status: http.StatusOK, body: `{"action":"allow"}`, want: 0},
+		{name: "HTTP 400", status: http.StatusBadRequest, body: `{"error":"request body too large"}`, want: 2},
+		{name: "HTTP 401", status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`, want: 2},
+		{name: "HTTP 403", status: http.StatusForbidden, body: `{"error":"forbidden"}`, want: 2},
+		{name: "HTTP 429", status: http.StatusTooManyRequests, body: `{"error":"rate limited"}`, want: 2},
+		{name: "HTTP 404", status: http.StatusNotFound, want: 2},
+		{name: "missing action", status: http.StatusOK, body: `{}`, want: 2},
+		{name: "invalid action", status: http.StatusOK, body: `{"action":"unrecognized"}`, want: 2},
+		{name: "unparseable reply", status: http.StatusOK, body: `garbage`, want: 2},
+		{name: "HTTP 500", status: http.StatusInternalServerError, want: 2},
+		{name: "HTTP 502", status: http.StatusBadGateway, want: 2},
+		{name: "HTTP 503", status: http.StatusServiceUnavailable, want: 2},
+		{name: "HTTP 400 truncated", status: http.StatusBadRequest, body: `{"error":"bad"}`, truncated: true, want: 2},
+		{name: "HTTP 503 truncated", status: http.StatusServiceUnavailable, body: `{"error":"unavailable"}`, truncated: true, want: 2},
+		{name: "gateway unreachable", want: 0},
 	} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
+			if reply.truncated {
+				w.Header().Set("Content-Length", "128")
+			}
 			w.WriteHeader(reply.status)
 			_, _ = io.WriteString(w, reply.body)
 		}))
@@ -731,6 +739,42 @@ func TestManagedSharedHookOpenCoversOutagesOnly(t *testing.T) {
 			})
 		}
 		server.Close()
+	}
+
+	// Missing local parser is an unusable inspection path, not a gateway
+	// outage, even when the administrator opened the outage mode.
+	noParser := t.TempDir()
+	for _, entry := range []string{"bash", "curl", "mktemp", "tr", "sed", "tail", "dirname", "pwd", "readlink"} {
+		binary, err := exec.LookPath(entry)
+		if err != nil {
+			continue
+		}
+		if err := os.Symlink(binary, filepath.Join(noParser, entry)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"inspect-request.sh", "inspect-tool.sh", "inspect-response.sh", "inspect-tool-response.sh"} {
+		t.Run("missing JSON parser/"+name, func(t *testing.T) {
+			dir := t.TempDir()
+			const unusedAddr = "127.0.0.1:1"
+			if err := writeHookScriptsCommonWithOptions(dir, unusedAddr, "test-token", "open", nil, true, "codex", false); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeHookConfigSidecar(dir, unusedAddr, "claudecode", "open", true); err != nil {
+				t.Fatal(err)
+			}
+			bakeHookPathForTest(t, filepath.Join(dir, name), noParser)
+			cmd := exec.Command("bash", filepath.Join(dir, name))
+			cmd.Env = append(os.Environ(), "PATH="+noParser, "HOME="+t.TempDir(), "DEFENSECLAW_HOME="+t.TempDir(), "DEFENSECLAW_MANAGED_HOOK=1", "DEFENSECLAW_CONNECTOR=codex")
+			cmd.Stdin = strings.NewReader(`{"tool":"Bash","input":"echo marker","content":"marker"}`)
+			output, err := cmd.CombinedOutput()
+			if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 2 {
+				t.Fatalf("missing parser did not fail closed: err=%v output=%q", err, output)
+			}
+			if !strings.Contains(string(output), "needs jq or python3") {
+				t.Fatalf("hook failed before parser check: %q", output)
+			}
+		})
 	}
 
 	// Nor does a body the hook cannot encode open it: on a host without jq,

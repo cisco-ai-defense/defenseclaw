@@ -74,6 +74,9 @@ func renderHookTemplate(name string, data templateData) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read hook template %s: %w", name, err)
 	}
+	if data.Managed && !data.SecureClient && !data.Sandbox {
+		data.ManagedHTTPFailureSH = managedShellHTTPFailure
+	}
 	rendered, err := renderTemplate(string(content), data)
 	if err != nil {
 		return nil, fmt.Errorf("render hook %s: %w", name, err)

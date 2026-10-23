@@ -90,6 +90,9 @@ type templateData struct {
 	// shellHookSocketTransport). Empty keeps the TCP transport, and the
 	// rendered hook is then byte-identical to one without the block.
 	HookSocketTransportSH string
+	// ManagedHTTPFailureSH is the one answer classifier rendered into each
+	// standalone managed shell hook. Other profiles keep their pinned bytes.
+	ManagedHTTPFailureSH string
 	// ForeignHookGuardSH is the standalone foreign-hook guard block the
 	// Hermes shell hook runs before its gateway request (see
 	// shellHookForeignGuard). HookSocketTransportSH carries the block itself

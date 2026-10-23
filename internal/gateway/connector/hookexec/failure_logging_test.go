@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,6 +166,48 @@ func TestManagedNativeOutageLogsInCallingUsersHome(t *testing.T) {
 				t.Fatalf("outage decision in mode %s: %+v", mode, r)
 			}
 		})
+	}
+}
+
+func TestManagedNativeAnsweredServerErrorLogsAsResponse(t *testing.T) {
+	for _, connector := range []string{"codex", "claudecode"} {
+		for _, status := range []int{500, 503} {
+			for _, truncated := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%d/truncated=%t", connector, status, truncated), func(t *testing.T) {
+					var home string
+					rt := &stubRT{status: status, body: `{"error":"unavailable"}`}
+					if truncated {
+						rt.onRequest = func(*stubRT, *http.Request) (*http.Response, error) {
+							return &http.Response{StatusCode: status, Header: make(http.Header),
+								Body: &erroringBody{data: `{"error":"unavailable"}`, err: io.ErrUnexpectedEOF}}, nil
+						}
+					}
+					r := run(t, connector, rt, func(opts *Options) {
+						opts.ManagedEnterprise = true
+						opts.FailMode = "open"
+						home = filepath.Join(t.TempDir(), ".defenseclaw")
+						if err := os.MkdirAll(home, 0o700); err != nil {
+							t.Fatal(err)
+						}
+						opts.FailureLogHome = func() string { return home }
+					})
+					if !blocked(r) || r.rt.requests != 1 {
+						t.Fatalf("answered HTTP %d: blocked=%v requests=%d stdout=%q stderr=%q", status, blocked(r), r.rt.requests, r.stdout, r.stderr)
+					}
+					data, err := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					var record map[string]string
+					if err := json.Unmarshal(bytes.TrimSpace(data), &record); err != nil {
+						t.Fatalf("decode failure log %q: %v", data, err)
+					}
+					if record["category"] != "response" || record["fail_mode"] != "closed" || record["outcome"] != "fail_closed" {
+						t.Fatalf("answered HTTP %d logged as %+v", status, record)
+					}
+				})
+			}
+		}
 	}
 }
 
