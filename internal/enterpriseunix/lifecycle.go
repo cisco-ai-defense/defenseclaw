@@ -1479,7 +1479,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 
-	if err := l.planOpenShell(p, record); err != nil {
+	if err := l.planOpenShell(p); err != nil {
 		return nil, &codedError{code: codeOpenShell, err: err}
 	}
 

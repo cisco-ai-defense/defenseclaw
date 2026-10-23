@@ -443,7 +443,7 @@ type openshellPlan struct {
 // and links when openshell.enabled is set, and the links to remove when it
 // is not. Files the previous deployment wrote that are no longer wanted are
 // removed by the plan's stale list.
-func (l *lifecycle) planOpenShell(p *plan, record *Deployment) error {
+func (l *lifecycle) planOpenShell(p *plan) error {
 	env := l.env
 	if p.payload != nil {
 		env.agentDigest = p.payload.Digests[binGateway]
@@ -467,13 +467,9 @@ func (l *lifecycle) planOpenShell(p *plan, record *Deployment) error {
 		return nil
 	}
 
-	// A new setup choice without an installable pin refuses before changing
-	// anything. An unchanged config already applied by an older release may
-	// have no pin: keep its host services through the package upgrade and
-	// report the missing sandbox prerequisite. The account daemon refuses
-	// new sandboxes until the administrator supplies the pin.
-	legacyUnpinned := settings.Version == "" && p.configFromInstalled && record != nil && record.ConfigSHA256 == p.config.SHA
-	if settings.Install == config.EnterpriseOpenShellInstallSetup && openshell.TarballPins[settings.Version] == nil && !legacyUnpinned {
+	// An enabled setup needs a release this build can install. Older releases
+	// refused an enabled setup without that pin too.
+	if settings.Install == config.EnterpriseOpenShellInstallSetup && openshell.TarballPins[settings.Version] == nil {
 		return fmt.Errorf("enterprise.openshell.version %q is not a release this DefenseClaw build can install in setup mode; set it to one of: %s",
 			settings.Version, strings.Join(openshell.PinnedTarballReleases(), ", "))
 	}
