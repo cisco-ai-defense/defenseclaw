@@ -725,8 +725,9 @@ func (set *guardrailProfileSet) provenProfileCovers(a, b string, connectors []st
 }
 
 // profileCoverage checks sandbox enforcement and wherever b blocks by hook,
-// inspect or proxy mode: a blocks there too, with b's rule pack and rules,
-// from a block level at or below b's and a HILT that asks wherever b's asks.
+// inspect or proxy mode: a blocks there too, scanning every rule pack b
+// scans there (scansRulePacksOf), from a block level at or below b's and a
+// HILT that asks wherever b's asks.
 // Where b only observes, its guardrail settings do not matter. A name that
 // is not a profile is the base configuration. alert_at and block_message do
 // not enforce anything and are not compared.
@@ -754,8 +755,7 @@ func (set *guardrailProfileSet) profileCoverage(a, b string, connectors []string
 		if (hookB && hookModeForConfig(ca, name) != "action") || (inspectB && inspectMode(ca, name) != "action") {
 			return false
 		}
-		if effectiveRulePackKey(ca, name) != effectiveRulePackKey(cb, name) ||
-			!reflect.DeepEqual(ca.Guardrail.EffectiveRulePackRef(name), cb.Guardrail.EffectiveRulePackRef(name)) {
+		if !set.scansRulePacksOf(a, b, name) {
 			return false
 		}
 		blockA, _ := guardrailThresholdRanks(resolveThresholds(ca, name))
@@ -767,6 +767,63 @@ func (set *guardrailProfileSet) profileCoverage(a, b string, connectors []string
 		}
 		if !hiltCovers(hiltEnabledForConfig(ca, name), hiltMinRankForConfig(ca, name), hiltEnabledForConfig(cb, name), hiltMinRankForConfig(cb, name)) ||
 			!hiltCovers(hiltEnabled(&ca.Guardrail, name), hiltMinRank(&ca.Guardrail, name), hiltEnabled(&cb.Guardrail, name), hiltMinRank(&cb.Guardrail, name)) {
+			return false
+		}
+	}
+	return true
+}
+
+// rulePackID is the composed rule pack a profile scans one connector with:
+// its scope key (directory and rules) and its named reference.
+type rulePackID struct {
+	key string
+	ref config.RulePackRef
+}
+
+// scannedRulePacks are the rule packs name scans connectorName with, in the
+// order its scan composes them: a profile's own (the base configuration's
+// for a name that is no profile), or, for a meet, the packs of its members
+// that block there (enforcingMembers), as profileMeet.ruleGeneration and
+// profileMeet.rulePack take them. A meet's own configuration names the
+// base pack, which the meet never scans by that reference, so it is never
+// read here. ok is false for a meet this set cannot derive.
+func (set *guardrailProfileSet) scannedRulePacks(name, connectorName string) (packs []rulePackID, ok bool) {
+	members := []string{strings.TrimSpace(name)}
+	if config.IsProfileMeet(members[0]) {
+		meet := set.meet(members[0])
+		if meet == nil {
+			return nil, false
+		}
+		members = set.enforcingMembers(meet.members, connectorName)
+	}
+	for _, member := range members {
+		cfg := set.profileConfig(member)
+		if cfg == nil {
+			return nil, false
+		}
+		id := rulePackID{key: effectiveRulePackKey(cfg, connectorName), ref: cfg.Guardrail.EffectiveRulePackRef(connectorName)}
+		if !slices.ContainsFunc(packs, func(have rulePackID) bool { return reflect.DeepEqual(have, id) }) {
+			packs = append(packs, id)
+		}
+	}
+	return packs, len(packs) > 0
+}
+
+// scansRulePacksOf reports whether a scans connectorName with everything b
+// scans there: every rule pack of b's is one of a's (so every rule b
+// enforces is in a's rules, every sensitive tool b inspects is inspected,
+// and a allows only what b allows), and both compose their pack from the
+// same first one, whose judge prompts and local patterns a composed pack
+// keeps (mergeRulePacks). Anything else is not proved: an uncertain
+// assignment it decides keeps its missing fact.
+func (set *guardrailProfileSet) scansRulePacksOf(a, b, connectorName string) bool {
+	packsA, okA := set.scannedRulePacks(a, connectorName)
+	packsB, okB := set.scannedRulePacks(b, connectorName)
+	if !okA || !okB || !reflect.DeepEqual(packsA[0], packsB[0]) {
+		return false
+	}
+	for _, pack := range packsB {
+		if !slices.ContainsFunc(packsA, func(have rulePackID) bool { return reflect.DeepEqual(have, pack) }) {
 			return false
 		}
 	}
