@@ -5554,7 +5554,7 @@ def _connector_contract_upgrade_guidance(
     rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
     contracts = HOOK_CONTRACTS.get(key, ())
     if key == "kiro":
-        return f"Update Kiro CLI to {KIRO_CLI_HOOK_FLOOR} or later, then rerun setup."
+        return f"Update Kiro CLI to {KIRO_CLI_HOOK_FLOOR} or later, then run: {rerun}."
     if not contracts:
         return f"Use a {label} version covered by a DefenseClaw hook contract, then run: {rerun}."
 
