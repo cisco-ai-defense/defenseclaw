@@ -2414,6 +2414,22 @@ func TestSessionSummary(t *testing.T) {
 		}, check: noStop,
 			want: []string{sbName + " was deleted from outside this session, which ended Claude Code; there is nothing left to review, and its undo point went with it"},
 			not:  []string{"stopped from outside", "could not review", "Keep changes?"}},
+		{name: "deleted from elsewhere after the exec relay lost TLS", opts: claude, exit: 255, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 255
+			ta.term.stderr = "Error:   × code: Unknown error, message: h2 protocol error: error reading a body from connection | hyper::Error(Body, Error { kind: Io(Custom { kind: UnexpectedEof, error: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/ }) })\n"
+			ta.term.during = func() { ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "deleting" }) }
+			ta.Sleep = func(_ context.Context, d time.Duration) error {
+				if d == settlePhaseInterval {
+					ta.daemon.mu.Lock()
+					delete(ta.daemon.sandboxes, sbName)
+					ta.daemon.mu.Unlock()
+				}
+				return nil
+			}
+		}, check: noStop,
+			want:    []string{sbName + " was deleted from outside this session, which ended Claude Code; there is nothing left to review, and its undo point went with it"},
+			notLive: []string{"h2 protocol error", "hyper::Error", "close_notify"}},
 		{name: "undone from elsewhere", opts: claude, exit: 255, setup: elsewhere(true), check: noStop,
 			want: []string{sbName + " was undone from outside this session (`defenseclaw sandbox undo` or the TUI): the folder is back at its undo point, " +
 				"and that stopped Claude Code", "Sandbox kept (stopped)"}, not: []string{"the harness itself failed"}},

@@ -348,7 +348,8 @@ func (s *session) printCLIErr(explained bool) {
 // relayClosed reports whether the OpenShell CLI's error is its exec relay
 // that closed under the session (the gateway restarted or went away).
 func relayClosed(text string) bool {
-	return strings.Contains(text, "exec relay closed") || strings.Contains(text, "The service is currently unavailable")
+	return strings.Contains(text, "exec relay closed") || strings.Contains(text, "The service is currently unavailable") ||
+		(strings.Contains(text, "h2 protocol error") && strings.Contains(text, "hyper::Error"))
 }
 
 // loginShell starts the sandbox user's login shell (bash where the image

@@ -186,7 +186,7 @@ func guiDomainUnsupported(res CommandResult, message string) bool {
 // /dev/console owner alone establishes an active GUI console session.
 // It is used only for reload advice, never for hook authorization.
 func (e *Env) activeMacOSConsoleSession(ctx context.Context, uid int) (bool, error) {
-	exists, err := e.macOSAgentDomainExists(ctx, "gui/"+strconv.Itoa(uid))
+	_, exists, err := e.macOSAgentDomain(ctx, "gui/"+strconv.Itoa(uid))
 	if err != nil || !exists {
 		return false, err
 	}

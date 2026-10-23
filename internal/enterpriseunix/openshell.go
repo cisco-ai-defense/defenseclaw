@@ -801,6 +801,9 @@ type pending struct {
 	From *openshellApplied `json:"from,omitempty"`
 	// Sandboxes is how many ran when the change was last tried.
 	Sandboxes int `json:"sandboxes"`
+	// Hold is the named blocker and next step from the last failed status or
+	// drain check. It is shown on status and verify while the change waits.
+	Hold string `json:"hold,omitempty"`
 }
 
 func (e *Env) loadOpenShellState() *openshellState {

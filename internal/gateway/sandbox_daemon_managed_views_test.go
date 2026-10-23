@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -239,6 +240,69 @@ func TestManagedStatusRereadsStaleSettings(t *testing.T) {
 	f.d.settingsAt.Store(0)
 	if st, err = client.Status(context.Background()); err != nil || st.Managed.Unavailable != "" {
 		t.Fatalf("a failed read dropped the settings: %+v, %v", st.Managed, err)
+	}
+}
+
+// A driver switch can leave the manager's last runtime config disabled while
+// the managed gateway has already made sandboxes available again. Status must
+// report the current setting so run does not offer an exception for a switch.
+func TestManagedStatusUsesCurrentEnablementAfterDriverSwitch(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.run(t)
+	f.d.settingsMu.Lock()
+	f.d.settings.Enabled, f.d.settings.Available = true, false
+	f.d.settings.Unavailable = sandboxrelay.UnavailableSetupChanging
+	f.d.settingsMu.Unlock()
+	f.d.reloadConfig()
+	f.d.settingsMu.Lock()
+	f.d.settings.Available, f.d.settings.Unavailable = true, ""
+	f.d.settingsMu.Unlock()
+	st, err := sandboxapi.NewUnixClient(f.socket).Status(context.Background())
+	if err != nil || !st.Enabled || st.Managed == nil || st.Managed.Unavailable != "" {
+		t.Fatalf("driver switch completed but status still says off: %+v, %v", st, err)
+	}
+}
+
+func TestManagedStatusPreservesGatewayCauseWhenListenersIdle(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.run(t)
+	f.d.rt.setListening("ingress", false)
+	st, err := sandboxapi.NewUnixClient(f.socket).Status(context.Background())
+	if err != nil || st == nil || st.Available || st.IngressAddr != "" ||
+		!strings.Contains(st.Reason, "gateway registration") || strings.Contains(st.Reason, "openshell.ingress_port") {
+		t.Fatalf("managed status hid the primary unavailable cause: %+v, %v", st, err)
+	}
+}
+
+// A policy view of an off computer must not wait for the kept sandbox's
+// OpenShell gateway during daemon startup. That gateway cannot start without
+// the organization's gateway.toml after sandboxes were turned off.
+func TestManagedPolicyExplainWhenOffSkipsKeptGateway(t *testing.T) {
+	var probed atomic.Int32
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.listPhases = func(ctx context.Context) (map[string]string, bool) {
+			probed.Add(1)
+			<-ctx.Done()
+			return nil, false
+		}
+	})
+	f.d.settingsMu.Lock()
+	f.d.settings.Enabled, f.d.settings.Available = false, false
+	f.d.settingsMu.Unlock()
+	f.d.reloadConfig()
+	if err := f.d.regs.put(daemonRegistration{ID: "kept-reg", Sandbox: "kept", UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	var seen []sandboxrelay.ExplainRequest
+	f.relay.explain = contractorsExplain(&seen)
+	f.run(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := sandboxapi.NewUnixClient(f.socket).Explain(ctx, sandboxapi.ExplainRequest{}); err != nil {
+		t.Fatalf("policy explain on an off computer waited for OpenShell: %v", err)
+	}
+	if probed.Load() != 0 {
+		t.Fatalf("probed the stopped account gateway %d times", probed.Load())
 	}
 }
 

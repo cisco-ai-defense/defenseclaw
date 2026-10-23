@@ -1543,6 +1543,7 @@ func TestPolicyReloadCutsAreNoBlocks(t *testing.T) {
 func TestAMappingDenialAfterAReloadIsNoBlock(t *testing.T) {
 	r := newReachEnv(t)
 	denied := "NET:OPEN [MED] DENIED " + testClaudeBin + "(0) -> bedrock-mantle.us-east-1.api.aws:443 [reason:transparent_tcp_mapping_denied]"
+	r.line("CONFIG:PUBLISHED [INFO] Policy DNS mapped bedrock-mantle.us-east-1.api.aws resolved=1.2.3.4 synthetic=198.18.0.2 ports=443 mapping_id=m1")
 	blocks := func() (int, int) {
 		return len(r.events(r.name, sandboxapi.ActivityEgressBlocked, "")), r.get(r.name).Egress.Blocked
 	}
@@ -1565,6 +1566,28 @@ func TestAMappingDenialAfterAReloadIsNoBlock(t *testing.T) {
 	r.line(denied)
 	if lines, n := blocks(); lines != 1 || n != 1 {
 		t.Fatalf("after a global profile import: feed %d, blocked %d; want no new block", lines, n)
+	}
+}
+
+// GAP-0684: a provider import can replay an earlier OCSF refusal and can
+// precede a real denial on a side port. Each distinct refusal appears once.
+func TestProviderImportKeepsSidePortRefusalAndDoesNotReplayOldOne(t *testing.T) {
+	r := newReachEnv(t)
+	const host = "bedrock-mantle.us-east-1.api.aws"
+	r.line("CONFIG:PUBLISHED [INFO] Policy DNS mapped " + host + " resolved=1.2.3.4 synthetic=198.18.0.2 ports=443 mapping_id=m1")
+	before := "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> " + host + ":9443 [reason:transparent_tcp_policy_denied]"
+	at := r.m.now()
+	r.ocsf(r.name, before, at)
+	if got := r.get(r.name).Egress.Blocked; got != 1 {
+		t.Fatalf("pre-import blocked = %d, want one", got)
+	}
+	r.advance(feedFoldWindow + time.Second)
+	r.m.beforeGlobalImport(t.Context(), "another-provider")
+	r.ocsf(r.name, before, at) // the old stream event, with its original timestamp
+	r.line("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.2:8443 [reason:transparent_tcp_mapping_denied]")
+	lines := r.events(r.name, sandboxapi.ActivityEgressBlocked, "")
+	if got := r.get(r.name).Egress.Blocked; got != 1 || len(lines) != 2 || lines[0].Port != 9443 || lines[1].Port != 8443 {
+		t.Fatalf("blocked destinations = %d, feed = %+v; want the host refused and both distinct port attempts", got, lines)
 	}
 }
 

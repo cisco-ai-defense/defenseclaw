@@ -561,7 +561,8 @@ func TestSandboxDaemonReadyBeforeFirstRun(t *testing.T) {
 	f.run(t)
 	client := sandboxapi.NewUnixClient(f.socket)
 	st, err := client.Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "claudecode"})
-	if err != nil || st == nil || st.Managed == nil || f.os.prepared.Load() != 1 {
+	if err != nil || st == nil || st.Managed == nil || st.IngressAddr == "" || st.EgressAddr == "" ||
+		f.d.rt.listenersReady() != nil || f.os.prepared.Load() != 1 {
 		t.Fatalf("ready: %+v, %v (prepared %d)", st, err, f.os.prepared.Load())
 	}
 	f.os.prepare = func(sandboxrelay.DaemonSettings) (bool, error) {
@@ -571,6 +572,9 @@ func TestSandboxDaemonReadyBeforeFirstRun(t *testing.T) {
 		!strings.Contains(err.Error(), openShellPrerequisiteReason) {
 		t.Fatalf("unready: %v", err)
 	}
+	if err := f.d.rt.listenersReady(); err != nil {
+		t.Fatalf("refused Ready removed listeners it found: %v", err)
+	}
 
 	g := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
 		o.Settings.Available, o.Settings.Unavailable = false, "no OpenShell here"
@@ -579,6 +583,44 @@ func TestSandboxDaemonReadyBeforeFirstRun(t *testing.T) {
 	if _, err := sandboxapi.NewUnixClient(g.socket).Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "claudecode"}); !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) ||
 		g.os.prepared.Load() != 0 {
 		t.Fatalf("unavailable settings: %v (prepared %d)", err, g.os.prepared.Load())
+	}
+}
+
+func TestSandboxDaemonReadyFailureReleasesNewListenersWithoutGatewayList(t *testing.T) {
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.countRunning = func(context.Context) (int, error) { return 0, errors.New("OpenShell gateway unavailable") }
+	})
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{Allowed: true}, nil
+	}
+	f.os.prepare = func(sandboxrelay.DaemonSettings) (bool, error) {
+		return false, openShellPrerequisiteError("OpenShell could not be prepared: offline")
+	}
+	f.run(t)
+	_, err := sandboxapi.NewUnixClient(f.socket).Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "claudecode"})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) || f.d.listening() {
+		t.Fatalf("refused Ready kept newly bound listeners: %v (listening %t)", err, f.d.listening())
+	}
+}
+
+func TestSandboxDaemonReadyRefusesBusyIngressBeforeInstall(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{Allowed: true}, nil
+	}
+	addr := "127.0.0.1:" + strconv.Itoa(f.d.currentSettings().Operational.IngressPort)
+	squatter, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = squatter.Close() })
+	f.run(t)
+	_, err = sandboxapi.NewUnixClient(f.socket).Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "claudecode"})
+	if err == nil {
+		t.Fatalf("busy ingress reported ready after preparing OpenShell %d times", f.os.prepared.Load())
+	}
+	if e := sandboxapi.AsError(err); e.Detail != SandboxAccountBusyReason || f.os.prepared.Load() != 0 {
+		t.Fatalf("busy ingress changed account or reported ready: %v (prepared %d)", err, f.os.prepared.Load())
 	}
 }
 

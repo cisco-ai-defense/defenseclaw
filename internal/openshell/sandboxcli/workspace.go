@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -638,7 +639,26 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	}
 	switch {
 	case res != nil:
-		defer func() { a.markStoppedCopy(sb, handedOver, res.Result) }()
+		defer func() {
+			// A connect may start the copy while this pull applies a saved
+			// read. Do not record it as stopped or omit the attached session.
+			// This check is bounded because the gateway can go away too.
+			checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+			defer cancel()
+			now, err := api.Get(checkCtx, o.Name)
+			if err != nil {
+				return
+			}
+			if now.Phase == "ready" {
+				if n := a.attachedSessions(o.Name); n > 0 {
+					a.note(o.Name + " keeps running: " + attachedText(o.Name, n) + " → stop it once " + map[bool]string{true: "it ends", false: "they end"}[n == 1] + ": " + CommandName + " stop " + o.Name)
+				}
+				return
+			}
+			if now.Phase == "stopped" {
+				a.markStoppedCopy(sb, handedOver, res.Result)
+			}
+		}()
 	case sb.Phase != "ready":
 		a.note("starting " + o.Name + " to read its work…")
 		a.forgetStoppedCopy(o.Name)

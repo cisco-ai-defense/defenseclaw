@@ -380,6 +380,7 @@ func managedSentence(e *sandboxapi.Error) (sentence, code string) {
 var gatewayTransportErrors = []string{
 	"client connection is closing", "transport is closing", "code = unavailable", "connection error: desc",
 	"error reading from server", "grpc: ",
+	"h2 protocol error: error reading a body from connection", "peer closed connection without sending tls close_notify",
 }
 
 // gatewayUnreachableErrors are the words of the OpenShell CLI's failure to

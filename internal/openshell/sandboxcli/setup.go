@@ -1677,6 +1677,16 @@ func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) (r
 		switch {
 		case err != nil:
 			return false, false, true
+		case st.Enabled && (st.Available || strings.Contains(st.Reason, "listener is not running in this process")) && (st.IngressAddr == "" || st.EgressAddr == ""):
+			var missing []string
+			if st.IngressAddr == "" {
+				missing = append(missing, "ingress (openshell.ingress_port)")
+			}
+			if st.EgressAddr == "" {
+				missing = append(missing, "egress (openshell.egress_port)")
+			}
+			a.warn("the daemon does not hold its sandbox " + strings.Join(missing, " and ") + " listener; another process may hold the port. Free or move the port, then restart it with `defenseclaw-gateway restart` and rerun setup")
+			return false, false, false
 		case st.Enabled && st.Available && (driver == "" || drives == driver):
 			a.ok("the daemon runs the sandbox subsystem (ingress " + st.IngressAddr + ", egress proxy " + st.EgressAddr + ")")
 			return true, st.DockerGroupMissing, false

@@ -99,6 +99,13 @@ func (a *App) managedExplainAssumption(ctx context.Context, o PolicyOptions) str
 	if err != nil {
 		return note
 	}
+	// A disabled or unavailable managed daemon can have a kept registration
+	// whose List waits for the account gateway. On a ready daemon, let the
+	// caller's deadline govern List so a healthy, slower response is shown.
+	st, err := api.Status(ctx)
+	if err != nil || st == nil || !st.Enabled || !st.Available {
+		return note
+	}
 	list, err := api.List(ctx)
 	if err != nil {
 		return note

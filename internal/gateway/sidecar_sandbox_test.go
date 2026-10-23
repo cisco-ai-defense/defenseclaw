@@ -250,6 +250,52 @@ func TestSandboxRuntimeServesListeners(t *testing.T) {
 	})
 }
 
+// GAP-0701: the configured address cannot be reported as this daemon's
+// listener when a second account owns the ingress port.
+func TestSandboxStatusDoesNotClaimAnotherAccountsIngress(t *testing.T) {
+	f := newSandboxRuntimeFixture(t, false)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(f.cfg.OpenShell.IngressPort))
+	var err error
+	f.squatter, err = net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.squatter.Close() })
+	f.run(t, nil)
+	eventuallyTrue(t, func() bool {
+		f.rt.listenMu.Lock()
+		defer f.rt.listenMu.Unlock()
+		return f.rt.listening["egress"]
+	})
+	h := f.api.tokenAuth(f.api.apiCSRFProtect(f.api.sandboxAPIHandler()))
+	w := serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathStatus, ""))
+	var st sandboxapi.Status
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	// This fixture has no OpenShell gateway, so that earlier failure remains
+	// the status cause even though another account also holds ingress.
+	if w.Code != http.StatusOK || st.IngressAddr != "" || st.EgressAddr == "" || st.Available || !strings.Contains(st.Reason, "gateway") {
+		t.Fatalf("status claims a listener held by another account: %d %+v", w.Code, st)
+	}
+}
+
+func TestSandboxStatusListenerAvailabilityRequiresOwnership(t *testing.T) {
+	rt := &sandboxRuntime{}
+	rt.setListening("egress", true)
+	st := &sandboxapi.Status{Enabled: true, Available: true, IngressAddr: "127.0.0.1:19081", EgressAddr: "127.0.0.1:19082"}
+	rt.statusListenerAddresses(st)
+	if st.Available || st.IngressAddr != "" || st.EgressAddr == "" ||
+		!strings.Contains(st.Reason, "openshell.ingress_port") || !strings.Contains(st.Reason, "restart") {
+		t.Fatalf("unheld ingress still reported ready: %+v", st)
+	}
+	alreadyUnavailable := &sandboxapi.Status{Enabled: true, Reason: sandboxapi.AccountBusyMessage, IngressAddr: "127.0.0.1:19081"}
+	rt.statusListenerAddresses(alreadyUnavailable)
+	if alreadyUnavailable.Reason != sandboxapi.AccountBusyMessage || alreadyUnavailable.IngressAddr != "" {
+		t.Fatalf("listener status hid the primary unavailable cause: %+v", alreadyUnavailable)
+	}
+}
+
 // TestSandboxRuntimeRefusesSandboxesWithoutItsListeners pins that no
 // sandbox is created while another program holds a sandbox listener port:
 // OpenShell would relay the sandbox's hooks (with its real ingress token)

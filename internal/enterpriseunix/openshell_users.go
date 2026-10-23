@@ -37,6 +37,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
 // Per-account sandbox lifecycle. The sandbox daemon, the account's OpenShell
@@ -457,9 +458,10 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 		// crashed, was killed or (macOS) left when idle, and the account's
 		// OpenShell gateway unit (setup mode) keeps hosting its sandboxes.
 		// The launcher starts the daemon on demand and the daemon counts what
-		// the gateway runs, so ask it; only an account with neither is idle.
+		// the gateway runs, so ask it. When neither service runs, durable
+		// guest records still need checking before calling the account idle.
 		if !o.unitRunning(ctx, a, userUnitGatewayService, labelOpenShellGateway) {
-			return st, nil
+			return st, e.retainedComputeRefusal(a)
 		}
 	}
 	res, err := o.runAs(ctx, a, userCommandTimeout, e.launcherPath(), "sandbox", "status", "--output", "json")
@@ -491,7 +493,108 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 	}
 	st.StartedAt = reply.StartedAt
 	st.PendingRestart = reply.Managed != nil && reply.Managed.PendingRestart
+	if st.busy() == 0 {
+		// A daemon restarted on new inputs may no longer see a guest left by
+		// the old gateway. Its zero count is not a disposition of that guest.
+		if err := e.retainedComputeRefusal(a); err != nil {
+			return st, err
+		}
+	}
 	return st, nil
+}
+
+// retainedComputeRefusal checks the daemon's durable records when runtime
+// status would let an account switch. A package upgrade can stop both old
+// services while an OpenShell 0.1.3 MicroVM remains in Error: the new
+// daemon's zero count cannot prove that its VM has stopped. Read only the
+// account's own records through owned directory descriptors and refuse a
+// record whose last observed OpenShell state may still hold compute.
+func (e *Env) retainedComputeRefusal(a SandboxAccount) error {
+	home, err := e.openHome(a)
+	if err != nil || home < 0 {
+		return err
+	}
+	defer unix.Close(home)
+	rel := filepath.Join(e.daemonStateRel(), "sandboxes", "manager")
+	parent, name, err := walkDirs(home, rel, a.UID)
+	if err != nil || parent < 0 {
+		return err
+	}
+	defer unix.Close(parent)
+	fd, err := openOwnedDir(parent, name, a.UID)
+	if err != nil || fd < 0 {
+		return err
+	}
+	dir := os.NewFile(uintptr(fd), name)
+	defer dir.Close()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return fmt.Errorf("inspect retained sandboxes of %s: %w", a.Name, err)
+	}
+	for _, entry := range entries {
+		sandboxName, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !openshell.ValidSandboxName(sandboxName) {
+			continue
+		}
+		data, present, err := e.readBelowHome(a, filepath.Join(rel, entry.Name()), 8<<20)
+		if err != nil {
+			return fmt.Errorf("inspect retained sandbox %s of %s: %w; repair its account state, then retry", sandboxName, a.Name, err)
+		}
+		if !present {
+			return fmt.Errorf("retained sandbox %s of %s changed while inspected; retry", sandboxName, a.Name)
+		}
+		var rec struct {
+			Name           string `json:"name"`
+			Driver         string `json:"driver"`
+			Phase          string `json:"phase"`
+			PhaseReason    string `json:"phase_reason"`
+			SessionRelease string `json:"session_release"`
+		}
+		if err := json.Unmarshal(data, &rec); err != nil || rec.Name != sandboxName {
+			return fmt.Errorf("retained sandbox %s of %s has an unreadable record; repair its account state, then retry", sandboxName, a.Name)
+		}
+		driver, known := openshell.LookupDriver(rec.Driver)
+		if known && driver.StopFlushes {
+			continue
+		}
+		phase := openshell.PhaseUnknown
+		switch strings.ToLower(rec.Phase) {
+		case "ready":
+			phase = openshell.PhaseReady
+		case "provisioning":
+			phase = openshell.PhaseProvisioning
+		case "starting":
+			phase = openshell.PhaseStarting
+		case "stopping":
+			phase = openshell.PhaseStopping
+		case "stopped":
+			phase = openshell.PhaseStopped
+		case "deleting":
+			phase = openshell.PhaseDeleting
+		case "completed":
+			phase = openshell.PhaseCompleted
+		case "error":
+			phase = openshell.PhaseError
+		}
+		if !openshell.HoldsGateway(phase, rec.PhaseReason, false) {
+			continue
+		}
+		runs := false
+		if release, err := openshell.ParseVersion(rec.SessionRelease); err == nil {
+			minimum, _ := openshell.ParseVersion(openshell.SupportedMin)
+			runs = release.Compare(minimum) >= 0
+		}
+		detail := sandboxapi.DisplayText(rec.PhaseReason)
+		if runes := []rune(detail); len(runes) > 160 {
+			detail = string(runes[:160]) + "…"
+		}
+		if detail != "" {
+			detail = ": " + detail
+		}
+		return fmt.Errorf("retained MicroVM %s of %s is %s%s and may still hold compute; %s; then rerun `%s`",
+			sandboxName, a.Name, phase, detail, openshell.StopWayOn(sandboxName, phase, rec.PhaseReason, runs), e.lifecycleCommand(ActionEnsure))
+	}
+	return nil
 }
 
 // unitRunning reports whether the account's user unit (systemd) or agent
@@ -916,10 +1019,12 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 			continue
 		case err != nil:
 			entry.Sandboxes = -1
+			entry.Hold = err.Error()
 			entry.Reason = entry.reasonBase() + " (the lifecycle could not tell whether a sandbox of this account runs: " + err.Error() + ")"
 			state.Pending[key] = entry
 			continue
 		case status.Active && status.busy() > 0:
+			entry.Hold = ""
 			// Not only the running ones: a switch or stop takes the
 			// account's OpenShell gateway down, under a MicroVM that
 			// completed or is in OpenShell's error state (until OpenShell
@@ -930,6 +1035,7 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 			continue
 		}
 		if err := l.performAccountChange(ctx, ops, account, entry, status, cur); err != nil {
+			entry.Hold = err.Error()
 			entry.Reason = entry.reasonBase() + " (" + err.Error() + ")"
 			state.Pending[key] = entry
 			var held *drainHeld

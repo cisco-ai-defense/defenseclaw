@@ -953,6 +953,11 @@ func (d *SandboxDaemon) runningSandboxes(ctx context.Context) (int, error) {
 	if d.opts.countRunning != nil {
 		return d.opts.countRunning(ctx)
 	}
+	if !d.currentSettings().Enabled {
+		// The organization removed the managed OpenShell setup. Its gateway
+		// cannot answer, and an idle daemon must still serve policy views.
+		return d.rt.manager.KnownComputeCount(), nil
+	}
 	list, err := d.rt.manager.List(ctx)
 	if err != nil {
 		return 0, err
@@ -1156,13 +1161,14 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 		d.refreshSettings(ctx)
 	}
 	if adopt {
-		// Unlisted (nil phases), no sandbox counts as running: only the
-		// closed start-up floor can change, as revalidate's does, and no
-		// lease renews.
 		d.adoptMu.Lock()
-		d.adoptLocked(phases, listed, moved)
+		// The policy requests above can overlap a Create or Start. Re-list
+		// inside the adoption lock so an older phase snapshot cannot put a
+		// previous registration's floor back in force.
+		adoptPhases, adoptListed := d.sandboxPhases(ctx)
+		d.adoptLocked(adoptPhases, adoptListed, moved)
 		d.adoptMu.Unlock()
-		if listed {
+		if adoptListed {
 			for _, a := range answered {
 				d.leases.renew(a.id, a.sent)
 			}
@@ -1221,6 +1227,12 @@ func (d *SandboxDaemon) adoptRunningFloor(phases map[string]string) bool {
 // false when the manager cannot list them, and then nothing is reported (a
 // registration no report renews lapses after sandboxreg.LiveLease).
 func (d *SandboxDaemon) sandboxPhases(ctx context.Context) (map[string]string, bool) {
+	if !d.currentSettings().Enabled {
+		// A stopped registration is kept while sandboxes are off. The
+		// account gateway cannot answer without the managed setup, so do
+		// not try to infer a live phase for the policy report.
+		return nil, false
+	}
 	if d.opts.listPhases != nil {
 		return d.opts.listPhases(ctx)
 	}
@@ -1310,6 +1322,8 @@ func (d *SandboxDaemon) revalidate(ctx context.Context) []daemonRegistration {
 	ctx, cancel := context.WithTimeout(ctx, revalidateTimeout)
 	defer cancel()
 	revoked := d.pollRegistrations(ctx, false)
+	d.adoptMu.Lock()
+	defer d.adoptMu.Unlock()
 	phases, _ := d.sandboxPhases(ctx)
 	floor := d.regs.newestFloor(func(name string) bool { return sandboxMayRun(phases[name]) })
 	if floor == nil {
@@ -1546,6 +1560,8 @@ func (d *SandboxDaemon) stopRevoked(ctx context.Context, r daemonRegistration) {
 // each existing sandbox against its own confirmed registration; the current
 // floor is used for a new run and the daemon's no-run configuration.
 func (d *SandboxDaemon) adoptFloor(name string) {
+	d.adoptMu.Lock()
+	defer d.adoptMu.Unlock()
 	r, ok := d.regs.get(name)
 	if !ok || !r.Confirmed || r.Revoked {
 		return
@@ -1696,7 +1712,10 @@ func sandboxListenError(err error) error {
 // Before any sandbox of the caller registered, the policy is the one the
 // managed gateway names for a new run (GAP-0179).
 func (d *SandboxDaemon) managedStatus(ctx context.Context) *sandboxapi.ManagedStatus {
-	s := d.freshSettings(ctx)
+	return d.managedStatusFor(ctx, d.freshSettings(ctx))
+}
+
+func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.DaemonSettings) *sandboxapi.ManagedStatus {
 	out := &sandboxapi.ManagedStatus{
 		RequestAccess:    s.RequestAccess,
 		InstallMode:      s.Enterprise.Install,
@@ -1902,11 +1921,19 @@ var _ SandboxController = (*managedSandboxController)(nil)
 func (c *managedSandboxController) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	st, err := c.Manager.Status(ctx)
 	if st != nil {
-		st.Managed = c.d.managedStatus(ctx)
+		s := c.d.freshSettings(ctx)
+		st.Managed = c.d.managedStatusFor(ctx, s)
+		// The manager's runtime config can lag a driver switch. Enabled is
+		// the organization's current choice, separate from readiness.
+		st.Enabled = s.Enabled
+		if !s.Enabled || !s.Available {
+			st.Available, st.Reason = false, s.Unavailable
+		}
 		if st.Gateway != nil {
 			c.d.driverInForce(st.Managed, st.Gateway.Driver)
 		}
 		c.d.neutralGatewayStatus(st)
+		c.d.rt.statusListenerAddresses(st)
 		// The daemon's own resolution knows neither the caller's required
 		// pack nor its profile minimum: the pack and profile are the
 		// managed gateway's for the caller's newest sandbox, else for a
@@ -2104,6 +2131,7 @@ func (c *managedSandboxController) Ready(ctx context.Context, req sandboxapi.Rea
 	if err := d.lockLifecycle(ctx); err != nil {
 		return nil, managedBusyError(err)
 	}
+	boundForReady := false
 	s := d.freshSettings(ctx)
 	err := managedSettingsRefusal(s)
 	if err == nil {
@@ -2129,16 +2157,33 @@ func (c *managedSandboxController) Ready(ctx context.Context, req sandboxapi.Rea
 				err = &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
 					Message: "Your organization doesn't allow this agent in a sandbox.", Detail: sandboxrelay.ReasonNotAllowed}
 			default:
-				err = d.readyOpenShell(ctx, s, "")
+				// Status reports unavailable until this process holds both
+				// listeners. Bind them before setup installs anything, so a
+				// busy port refuses Ready without changing the account.
+				wasListening := d.listening()
+				if err = d.ensureListeners(); err == nil {
+					boundForReady = !wasListening
+					err = d.readyOpenShell(ctx, s, "")
+				}
 			}
 		}
 	}
-	d.unlockLifecycle()
+	if err != nil && boundForReady {
+		// A failed Ready leaves a listener it found in place, but releases
+		// listeners it bound itself even when the gateway cannot list boxes.
+		d.releaseListeners()
+	}
 	if err != nil {
+		d.unlockLifecycle()
 		d.reportAccountBusy(ctx, "", err)
 		return nil, err
 	}
-	return c.Status(ctx)
+	// A supervisor pass may release idle listeners as soon as the lifecycle
+	// unlocks. Report the readiness this call established while it still
+	// holds that lock; Create will bind again if an idle pass follows.
+	st, statusErr := c.Status(ctx)
+	d.unlockLifecycle()
+	return st, statusErr
 }
 
 // Create resolves the run at the managed gateway, creates the sandbox
@@ -2214,10 +2259,12 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 		undo()
 		return nil, managedPolicyUnloadable(err)
 	}
+	d.adoptMu.Lock()
 	d.floorMu.Lock()
 	d.floor = &floor
 	d.floorMu.Unlock()
 	d.reloadConfig()
+	d.adoptMu.Unlock()
 	if err := d.readyOpenShell(ctx, s, reg); err != nil {
 		undo()
 		return nil, err
