@@ -86,6 +86,53 @@ func TestHermesVerifyFailsWhenHermesRunsANamedProfile(t *testing.T) {
 	}
 }
 
+// 'hermes profile delete' leaves profiles/.deleted behind. An intact
+// default-profile registration stays verified, per user and managed, and a
+// second Setup (the no-op ensure) succeeds without changing it.
+func TestHermesVerifyAndEnsureAcceptDeletedProfileMetadata(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	configPath := filepath.Join(root, "hermes", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = configPath
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+
+	conn := NewHermesConnector()
+	opts := prepareHermesSetupAdmissionFixture(t, SetupOpts{
+		DataDir:  filepath.Join(root, ".defenseclaw"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	})
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(filepath.Dir(configPath), "profiles", ".deleted", "coder"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registered, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, managed := range []bool{false, true} {
+		check := opts
+		check.ManagedEnterprise = managed
+		if present, err := OwnedHooksPresent(conn, check); err != nil || !present {
+			t.Fatalf("managed=%v: OwnedHooksPresent with profiles/.deleted = %v, %v; want present", managed, present, err)
+		}
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("second Setup with profiles/.deleted: %v", err)
+	}
+	if after, err := os.ReadFile(configPath); err != nil || string(after) != string(registered) {
+		t.Fatalf("second Setup changed the registration (err %v)", err)
+	}
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("OwnedHooksPresent after the second Setup = %v, %v; want present", present, err)
+	}
+}
+
 // GAP-0499: a service acting for an account (the managed guardian) sets up
 // and verifies the Hermes home the account configured. When that home
 // cannot be resolved, Setup refuses and Verify fails; only the lists of

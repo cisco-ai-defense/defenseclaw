@@ -83,6 +83,45 @@ func hermesStandaloneOptions(t *testing.T, home string) InstallOptions {
 	return standaloneOptions(home, "hermes", "observe", "0.21.5")
 }
 
+// 'hermes profile delete' can leave profiles/.deleted behind. The managed
+// verification of an intact default-profile registration still passes, and
+// the guardian's ensure (Install again) succeeds without changing it; a real
+// named profile still fails Verify.
+func TestManagedHermesVerifyAndEnsureAcceptDeletedProfileMetadata(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	setStandaloneProfileForTest(t, true)
+	home := newTestHome(t)
+	opts := hermesStandaloneOptions(t, home)
+	opts.ManagedHookSocket = "/var/run/defenseclaw/hook.sock"
+	opts.ManagedServiceUID = 461
+	configPath := filepath.Join(home, ".hermes", "config.yaml")
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	mustMkdir(t, filepath.Join(home, ".hermes", "profiles", ".deleted", "coder"), 0o700)
+	registered, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify with profiles/.deleted: %v", err)
+	}
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("ensure (Install again) with profiles/.deleted: %v", err)
+	}
+	if after, err := os.ReadFile(configPath); err != nil || string(after) != string(registered) {
+		t.Fatalf("ensure changed the Hermes registration (err %v)", err)
+	}
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify after ensure: %v", err)
+	}
+	mustMkdir(t, filepath.Join(home, ".hermes", "profiles", "coder"), 0o700)
+	if _, err := Verify(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "coder") {
+		t.Fatalf("Verify with a named profile = %v, want it refused", err)
+	}
+}
+
 // Unix verification read only the agent config reference and the lock, so
 // a user who deleted ~/.defenseclaw/hooks/hermes-hook.sh (or edited it, or
 // removed the shared _hardening.sh) left the Hermes config pointing at a

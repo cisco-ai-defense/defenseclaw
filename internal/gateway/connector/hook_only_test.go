@@ -2200,6 +2200,82 @@ func TestHermesSingleProfileAdmitsDefaultMultiplexWithoutNamedProfiles(t *testin
 	}
 }
 
+// Hermes keeps its own metadata under profiles/ (.deleted after 'hermes
+// profile delete') and never runs an entry whose name is no profile id, so
+// those leave a default-only HERMES_HOME admitted. A name Hermes can run,
+// in any case (a case-insensitive file system opens profiles/Coder for
+// 'hermes -p coder'), or as a symlink, is still refused.
+func TestHermesSingleProfileIgnoresEntriesHermesNeverRunsAsAProfile(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		make    func(t *testing.T, profiles string)
+		refused string
+	}{
+		{name: "deleted-profile metadata", make: mkdirUnder(".deleted")},
+		{name: "other dot directory", make: mkdirUnder(".trash")},
+		{name: "default directory", make: mkdirUnder("default")},
+		{name: "underscore-led name", make: mkdirUnder("_scratch")},
+		{name: "dash-led name", make: mkdirUnder("-old")},
+		{name: "dotted name", make: mkdirUnder("coder.bak")},
+		{name: "name over 64 bytes", make: mkdirUnder(strings.Repeat("a", 65))},
+		{name: "regular file named like a profile", make: func(t *testing.T, profiles string) {
+			if err := os.WriteFile(filepath.Join(profiles, "coder"), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "named profile", make: mkdirUnder("coder"), refused: "coder"},
+		{name: "named profile beside metadata", make: mkdirUnder(".deleted", "coder2"), refused: "coder2"},
+		{name: "upper-case named profile", make: mkdirUnder("Coder"), refused: "Coder"},
+		{name: "64-byte named profile", make: mkdirUnder(strings.Repeat("b", 64)), refused: strings.Repeat("b", 64)},
+		{name: "symlinked named profile", make: func(t *testing.T, profiles string) {
+			target := filepath.Join(filepath.Dir(profiles), "elsewhere")
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(profiles, "work")); err != nil {
+				t.Skipf("symlink: %v", err)
+			}
+		}, refused: "work"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			configPath := filepath.Join(root, "config.yaml")
+			profiles := filepath.Join(root, "profiles")
+			if err := os.MkdirAll(profiles, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tc.make(t, profiles)
+			err := validateHermesSingleProfile(configPath)
+			if tc.refused == "" {
+				if err != nil {
+					t.Fatalf("validateHermesSingleProfile = %v, want nil: Hermes never runs this entry as a profile", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "hermes profile delete "+tc.refused) {
+				t.Fatalf("validateHermesSingleProfile = %v, want the named profile %q refused", err, tc.refused)
+			}
+		})
+	}
+}
+
+// mkdirUnder makes each name a directory under profiles/; ".deleted" gets a
+// child, the leftovers of a deleted profile.
+func mkdirUnder(names ...string) func(t *testing.T, profiles string) {
+	return func(t *testing.T, profiles string) {
+		t.Helper()
+		for _, name := range names {
+			dir := filepath.Join(profiles, name)
+			if name == ".deleted" {
+				dir = filepath.Join(dir, "coder-20261023")
+			}
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
 func TestHermesTeardownRejectsTamperedPristineCustodyBeforeSurgicalCleanup(t *testing.T) {
 	root := testenv.PrivateTempDir(t)
 	configPath := filepath.Join(root, "hermes", "config.yaml")

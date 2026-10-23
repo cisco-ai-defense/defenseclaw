@@ -4245,6 +4245,9 @@ func validateHermesSingleProfile(configPath string) error {
 			return fmt.Errorf("Hermes profiles directory exceeds the bounded inspection limit") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		for _, entry := range entries {
+			if !hermesProfileEntryName(entry.Name()) {
+				continue
+			}
 			if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 				return fmt.Errorf("Hermes named profile %q is unsupported by the single-HERMES_HOME connector; remove it with 'hermes profile delete %s' (or move it out of %s) and retry; no changes made", entry.Name(), entry.Name(), profilesDir) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			}
@@ -4257,6 +4260,30 @@ func validateHermesSingleProfile(configPath string) error {
 	// the default profile plus the named profiles under profiles/, which are
 	// refused above. With none, it serves only this HERMES_HOME (GAP-1844).
 	return nil
+}
+
+// hermesProfileEntryName reports whether an entry under profiles/ is one
+// Hermes can run as a named profile. Hermes lists, serves and resolves only
+// names matching [a-z0-9][a-z0-9_-]{0,63}, and "default" always means the
+// root HERMES_HOME, so its own metadata (the .deleted 'hermes profile
+// delete' can leave, other dot directories) and any other name are never a
+// profile.
+// The name is lowercased first: on a case-insensitive file system
+// 'hermes -p coder' opens profiles/Coder.
+func hermesProfileEntryName(name string) bool {
+	name = strings.ToLower(name)
+	if name == "default" || len(name) == 0 || len(name) > 64 {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case i > 0 && (r == '_' || r == '-'):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func readHermesBoundedConfig(path string) (map[string]interface{}, error) {
