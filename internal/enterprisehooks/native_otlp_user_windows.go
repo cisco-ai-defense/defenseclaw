@@ -251,61 +251,95 @@ func expandWindowsAccountVariables(value string, vars map[string]string) string 
 // reaches (errWindowsAccountFileNotOwned otherwise). A missing file keeps
 // os.ErrNotExist.
 func readWindowsAccountFile(path string, sid *windows.SID, home string) ([]byte, error) {
+	data, _, err := openWindowsAccountFile(path, sid, home)
+	return data, err
+}
+
+// openWindowsAccountFile is readWindowsAccountFile that also returns the
+// final path of the file read, with every link resolved: repair edits that
+// file, which keeps the account's link in place (the compare-and-swap edit
+// refuses a path through a reparse point).
+func openWindowsAccountFile(path string, sid *windows.SID, home string) ([]byte, string, error) {
 	if strings.TrimSpace(path) == "" {
-		return nil, os.ErrNotExist
+		return nil, "", os.ErrNotExist
 	}
 	name := filepath.Base(path)
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, os.ErrNotExist
+			return nil, "", os.ErrNotExist
 		}
-		return nil, fmt.Errorf("inspect %s: %w", name, err)
+		return nil, "", fmt.Errorf("inspect %s: %w", name, err)
 	}
 	ptr, err := winpath.UTF16Ptr(path)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	handle, err := windows.CreateFile(ptr, windows.FILE_READ_DATA|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING,
 		windows.FILE_ATTRIBUTE_NORMAL, 0)
 	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
-		return nil, os.ErrNotExist
+		return nil, "", os.ErrNotExist
 	}
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", name, err)
+		return nil, "", fmt.Errorf("open %s: %w", name, err)
 	}
 	file := os.NewFile(uintptr(handle), name)
 	defer file.Close()
 	if kind, err := windows.GetFileType(handle); err != nil || kind != windows.FILE_TYPE_DISK {
-		return nil, fmt.Errorf("%s is not a regular file", name)
+		return nil, "", fmt.Errorf("%s is not a regular file", name)
 	}
 	info, err := file.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("inspect %s: %w", name, err)
+		return nil, "", fmt.Errorf("inspect %s: %w", name, err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", name)
+		return nil, "", fmt.Errorf("%s is not a regular file", name)
 	}
 	if info.Size() > connector.UserNativeOTLPReadLimit {
-		return nil, connector.UserNativeOTLPFileTooLarge(name)
+		return nil, "", connector.UserNativeOTLPFileTooLarge(name)
 	}
 	if rejectWindowsReparseChain(path) != nil || !windowsPathWithin(home, path) {
 		owner, err := windowsHandleOwner(handle)
 		if err != nil {
-			return nil, fmt.Errorf("read the owner of %s: %w", name, err)
+			return nil, "", fmt.Errorf("read the owner of %s: %w", name, err)
 		}
 		if sid == nil || !owner.Equals(sid) {
-			return nil, errWindowsAccountFileNotOwned
+			return nil, "", errWindowsAccountFileNotOwned
 		}
+	}
+	final, err := windowsHandleFinalPath(handle)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve %s: %w", name, err)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, connector.UserNativeOTLPReadLimit+1))
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", name, err)
+		return nil, "", fmt.Errorf("read %s: %w", name, err)
 	}
 	if int64(len(data)) > connector.UserNativeOTLPReadLimit {
-		return nil, connector.UserNativeOTLPFileTooLarge(name)
+		return nil, "", connector.UserNativeOTLPFileTooLarge(name)
 	}
-	return data, nil
+	return data, final, nil
+}
+
+// windowsHandleFinalPath is the normalized DOS path of the file an open
+// handle names, every link resolved.
+func windowsHandleFinalPath(handle windows.Handle) (string, error) {
+	buffer := make([]uint16, windows.MAX_LONG_PATH)
+	n, err := windows.GetFinalPathNameByHandle(handle, &buffer[0], uint32(len(buffer)), 0) // FILE_NAME_NORMALIZED | VOLUME_NAME_DOS
+	if err != nil {
+		return "", err
+	}
+	if int(n) >= len(buffer) {
+		return "", errors.New("the final path is too long")
+	}
+	final := windows.UTF16ToString(buffer[:n])
+	switch {
+	case strings.HasPrefix(final, `\\?\UNC\`):
+		final = `\\` + final[len(`\\?\UNC\`):]
+	case strings.HasPrefix(final, `\\?\`):
+		final = final[len(`\\?\`):]
+	}
+	return final, nil
 }
 
 // removeWindowsManagedUserNativeOTLPAsTarget removes that exporter from every
@@ -326,7 +360,8 @@ func removeWindowsManagedUserNativeOTLPAsTarget(connectorName string, sid *windo
 	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
 	complete := true
 	for _, config := range configs {
-		if _, err := readWindowsAccountFile(config.path, sid, home); err != nil {
+		_, final, err := openWindowsAccountFile(config.path, sid, home)
+		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
@@ -336,7 +371,7 @@ func removeWindowsManagedUserNativeOTLPAsTarget(connectorName string, sid *windo
 			}
 			return windowsNativeOTLPUncheckable(connectorName, config.label, err)
 		}
-		if _, err := connector.RemoveUserNativeOTLPAt(connectorName, config.path, opts); err != nil {
+		if _, err := connector.RemoveUserNativeOTLPAt(connectorName, final, opts); err != nil {
 			return fmt.Errorf("enterprise hooks: remove %s native OTLP exporter from an earlier per-user install (%s): %w",
 				connectorName, config.label, err)
 		}
