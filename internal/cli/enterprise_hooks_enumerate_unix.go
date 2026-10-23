@@ -461,8 +461,9 @@ func enterpriseHooksEnumerateDiscoverAll(ctx context.Context, account unixidenti
 		wanted[strings.ToLower(strings.TrimSpace(name))] = true
 	}
 	// The Kiro IDE installs travel next to the kiro-cli one.
-	wanted[enterprisehooks.KiroIDEDiscoveryKey] = wanted["kiro"]
-	wanted[enterprisehooks.KiroIDEMachineDiscoveryKey] = wanted["kiro"]
+	for _, key := range enterprisehooks.KiroIDEDiscoveryKeys() {
+		wanted[key] = wanted["kiro"]
+	}
 	versions := map[string]string{}
 	for name, version := range response.Versions {
 		if wanted[name] && enterprisehooks.ValidUnixAgentVersion(version) {
