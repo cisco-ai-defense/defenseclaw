@@ -29,14 +29,15 @@ package connector
 //     remove the hook. The stub is written into the file itself first (the
 //     same file, so every other name of it, a hard link, gets it too; the
 //     whole stub, synced and read back), and then a copy is renamed over
-//     the path in one atomic step (removedOnlyConnector.replaceScript).
+//     the path through an identity-bound compare-and-swap
+//     (removedOnlyConnector.replaceScript).
 //     An OmniGent module whose bytes are not the ones the older setup
 //     recorded it wrote (its backup record's post-setup hash) was edited:
 //     its exact bytes are saved first, synced and read back, under
 //     connector_backups/omnigent/ (removedOnlyConnector.keepEdited), and the
 //     stub replaces it only once they are; the older teardown kept such a
-//     module. The OpenHands script never had that record, and the older
-//     teardown wrote its stub over it whatever its bytes.
+//     module. The OpenHands script never had that record, so its marked bytes
+//     are saved before any in-place write too.
 //  2. It revokes the DefenseClaw tokens issued for the connector, but only
 //     once nothing but the stub is left at the script path. An old hook that
 //     may still run (a hard-linked file the stub could not be written into;
@@ -296,31 +297,38 @@ const (
 
 // scriptStateAndLinks is what is at path and, for a regular file, how many
 // names (hard links) it has and its bytes.
-func (c removedOnlyConnector) scriptStateAndLinks(path string) (removedScriptState, uint32, []byte, error) {
+func (c removedOnlyConnector) scriptStateAndLinks(path string) (removedScriptState, uint32, []byte, os.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return removedScriptAbsent, 0, nil, nil
+		return removedScriptAbsent, 0, nil, nil, nil
 	}
 	if err != nil {
-		return 0, 0, nil, err
+		return 0, 0, nil, nil, err
 	}
 	if !info.Mode().IsRegular() || info.Size() > removedScriptReadLimit {
-		return removedScriptForeign, 0, nil, nil
+		return removedScriptForeign, 0, nil, nil, nil
 	}
 	file, err := os.OpenFile(path, os.O_RDONLY|otlpOpenNoFollow(), 0)
 	if err != nil {
-		return 0, 0, nil, err
+		return 0, 0, nil, nil, err
 	}
 	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("stat opened %s: %w", path, err)
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		return 0, 0, nil, nil, fmt.Errorf("%s changed while it was opened: %w", path, errAtomicTransformConflict)
+	}
 	links, err := atomicTransformBoundLinkCountPlatform(file)
 	if err != nil {
-		return 0, 0, nil, err
+		return 0, 0, nil, nil, err
 	}
 	data, err := io.ReadAll(io.LimitReader(file, removedScriptReadLimit+1))
 	if err != nil {
-		return 0, 0, nil, err
+		return 0, 0, nil, nil, err
 	}
-	return c.classifyScript(data), links, data, nil
+	return c.classifyScript(data), links, data, opened, nil
 }
 
 func (c removedOnlyConnector) classifyScript(data []byte) removedScriptState {
@@ -397,10 +405,10 @@ func (c removedOnlyConnector) Teardown(_ context.Context, opts SetupOpts) error 
 	// after some tokens were revoked could let it fail open. Backup receipts
 	// stay intact, and neither the vendor config nor import path is changed.
 	if err := c.replaceScript(opts.DataDir); err != nil {
-		return fmt.Errorf("%s teardown: %w; its tokens were kept (with them an old hook reaches the gateway, which blocks every call), and the next start tries again", c.name, err)
+		return fmt.Errorf("%s teardown: %w; its tokens were kept, the retired gateway route blocks every call, and the next start tries again", c.name, err)
 	}
 	if err := c.hookLeft(opts.DataDir); err != nil {
-		return fmt.Errorf("%s teardown: %w; its tokens were kept, so the old hook still reaches the gateway, which blocks every call", c.name, err)
+		return fmt.Errorf("%s teardown: %w; its tokens were kept, and the retired gateway route blocks every call", c.name, err)
 	}
 	if err := c.revokeTokens(opts.DataDir); err != nil {
 		return fmt.Errorf("%s teardown: %w; the deny stub and backup receipts were kept, and the next start retries token revocation", c.name, err)
@@ -446,7 +454,7 @@ func (c removedOnlyConnector) preflightTokens(dataDir string) error {
 // them while the old file is still at the path).
 func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	path := c.scriptPath(dataDir)
-	state, links, data, err := c.scriptStateAndLinks(path)
+	state, _, data, original, err := c.scriptStateAndLinks(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w; nothing was changed", path, err)
 	}
@@ -459,91 +467,159 @@ func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	if err := keep(data, nil); err != nil {
 		return fmt.Errorf("%w; nothing was changed", err)
 	}
-	inPlace := c.writeStubInPlace(path, keep)
-	if inPlace != nil && links > 1 {
-		// The save may have replaced one of the names (a hard link at the
-		// saved copy's name, keepEdited), so they are counted again.
-		if _, now, _, err := c.scriptStateAndLinks(path); err == nil && now <= 1 {
-			links = now
-		}
-	}
-	if inPlace != nil && links > 1 {
-		return fmt.Errorf("%s is the hook script an older DefenseClaw wrote and has %d names (hard links), and the stub could not be written into it: %w. To finish: %s",
-			path, links, inPlace, c.hardLinkStep(path))
-	}
+	written, inPlace := c.writeStubInPlace(path, keep)
 	if inPlace != nil {
-		// The rename replaces what is there now, which may have changed
-		// since the first read.
-		if state, _, data, err := c.scriptStateAndLinks(path); err != nil {
+		// A failed in-place write can coincide with a new file at the path.
+		// Only the old, still-owned file may be published over.
+		var state removedScriptState
+		var data []byte
+		var links uint32
+		state, links, data, written, err = c.scriptStateAndLinks(path)
+		if err != nil {
 			return fmt.Errorf("read %s again: %w (writing the stub into it: %v)", path, err, inPlace)
-		} else if state == removedScriptOwned {
-			if err := keep(data, nil); err != nil {
-				return fmt.Errorf("%w (writing the stub into it: %v)", err, inPlace)
-			}
+		}
+		if state == removedScriptAbsent || state == removedScriptForeign {
+			return fmt.Errorf("%s became absent or foreign after the in-place write failed; refusing to replace it (writing the stub into it: %v)", path, inPlace)
+		}
+		if !os.SameFile(original, written) {
+			return fmt.Errorf("%s changed identity after the in-place write failed; refusing to replace it (writing the stub into the prior file: %v)", path, inPlace)
+		}
+		if links > 1 {
+			return fmt.Errorf("%s is the hook script an older DefenseClaw wrote and has %d names (hard links), and the stub could not be written into it: %w. To finish: %s",
+				path, links, inPlace, c.hardLinkStep(path))
+		}
+		if state == removedScriptStub {
+			return nil
+		}
+		if err := keep(data, written); err != nil {
+			return fmt.Errorf("%w (writing the stub into it: %v)", err, inPlace)
 		}
 	}
-	if err := atomicReplaceFileNoFollow(path, []byte(c.tombstone), c.mode); err != nil {
+	if err := c.publishVerifiedStub(dataDir, path, written, inPlace == nil, keep); err != nil {
 		if inPlace == nil {
-			return fmt.Errorf("%s holds the stub that blocks every call, but its copy could not be renamed over it: %w", path, err)
+			return fmt.Errorf("the stub was written into the previously verified file, but %s could not be safely replaced: %w", path, err)
 		}
 		return fmt.Errorf("replace %s with the stub that blocks every call: %w (writing it into the file: %v)", path, err, inPlace)
 	}
 	return nil
 }
 
-// removedEditedInfix names the saved copy of an edited script:
+// publishVerifiedStub binds the final publication to the file verified by
+// the in-place write or the second read. The compare-and-swap engine retains
+// a raced replacement for recovery instead of renaming over it. Force gives
+// the path a separate stub file after a successful in-place write, while all
+// hard links of the original keep the in-place stub.
+func (c removedOnlyConnector) publishVerifiedStub(
+	dataDir, path string, verified os.FileInfo, writtenInPlace bool,
+	keep func([]byte, os.FileInfo) error,
+) error {
+	// keepEdited has already made this folder private when it needed a saved
+	// copy; an unedited OmniGent module has its setup receipt here instead.
+	// The CAS recovery intent lives in this same folder.
+	stateDir := filepath.Join(dataDir, "connector_backups", c.name)
+	return removedStubTransform(path, stateDir, c.mode, func(current []byte, exists bool) (atomicTransformResult, error) {
+		if !exists {
+			return atomicTransformResult{}, fmt.Errorf("%s became absent before stub publication", path)
+		}
+		named, err := os.Lstat(path)
+		if err != nil {
+			return atomicTransformResult{}, fmt.Errorf("inspect %s before stub publication: %w", path, err)
+		}
+		if !named.Mode().IsRegular() || !os.SameFile(named, verified) {
+			return atomicTransformResult{}, fmt.Errorf("%s changed identity before stub publication: %w", path, errAtomicTransformConflict)
+		}
+		state := c.classifyScript(current)
+		if writtenInPlace {
+			if state != removedScriptStub {
+				return atomicTransformResult{}, fmt.Errorf("%s changed after the in-place stub write", path)
+			}
+		} else if state == removedScriptOwned {
+			if err := keep(current, named); err != nil {
+				return atomicTransformResult{}, err
+			}
+		} else if state != removedScriptStub {
+			return atomicTransformResult{}, fmt.Errorf("%s became foreign before stub publication", path)
+		}
+		return atomicTransformResult{Data: []byte(c.tombstone), Perm: c.mode, Force: true}, nil
+	})
+}
+
+// removedEditedInfix names the saved copy of a marked script:
 // connector_backups/<connector>/<script>.edited-<first 16 hex digits of its
-// SHA-256>. The name does not end in .py or .sh, so nothing imports or runs
-// it by its name.
+// SHA-256>, with -2, -3, ... on a collision. The name does not end in .py or
+// .sh, so nothing imports or runs it by its name.
 const removedEditedInfix = ".edited-"
 
-// removedKeepEditedWrite writes the saved copy; tests replace it to fail.
-var removedKeepEditedWrite = atomicReplaceFileNoFollow
+// removedKeepEditedWrite publishes a new saved copy without replacing an
+// existing file; tests replace it to fail.
+var removedKeepEditedWrite = atomicCreateFileNoFollow
 
 // keepEdited saves the exact bytes of the script at path before the teardown
 // replaces them, when they may be the user's edit: the connector records the
 // hash of what its setup wrote (editLogical), and data is not that. A record
 // for another file, or none, proves nothing, so data is saved then too. The
-// copy is written to a temporary file, synced, renamed into place (the
-// folder synced) and read back; an error means it is not saved, and the
-// caller must not replace the script. The same bytes are saved once.
+// copy is written to a temporary file, synced, published without replacement
+// (the folder synced) and read back; an error means it is not saved, and the
+// caller must not replace the script. The same bytes are saved once. OpenHands
+// has no post-setup hash, so every marked hook is saved before a write.
 //
 // live is the file data was read from (nil: the file at path now). A copy
 // counts as saved only when it is a file of its own (removedSavedCopy): a
 // name of the live file (a hard link), a link to it, or a file that another
 // name or other accounts can change is no copy, since the stub written into
-// the live file, or a later change, would reach it too. Such a name is
-// replaced with a copy of its own; a link or folder there is never written
-// through, so the save fails.
+// the live file, or a later change, would reach it too. Such a name is left
+// in place and a new numbered copy is made instead; a link or folder at the
+// hash-derived name stops the save for manual recovery.
 func (c removedOnlyConnector) keepEdited(dataDir, path string, live os.FileInfo, data []byte) error {
-	if c.editLogical == "" {
-		return nil
-	}
-	record, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, c.name, c.editLogical))
-	if err == nil && record.Connector == c.name && record.LogicalName == c.editLogical &&
-		sameManagedTargetPath(record.Path, path) && record.PostSHA256 == sha256Hex(data) {
-		return nil
+	if c.editLogical != "" {
+		record, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, c.name, c.editLogical))
+		if err == nil && record.Connector == c.name && record.LogicalName == c.editLogical &&
+			sameManagedTargetPath(record.Path, path) && record.PostSHA256 == sha256Hex(data) {
+			return nil
+		}
 	}
 	if live == nil {
+		var err error
 		if live, err = os.Lstat(path); err != nil {
 			return fmt.Errorf("save the edited %s before replacing it: %w", path, err)
 		}
 	}
-	saved := c.editedCopyPath(dataDir, data)
-	if err := ensureManagedBackupDirRestricted(filepath.Dir(saved)); err != nil {
+	base := c.editedCopyPath(dataDir, data)
+	if err := ensureManagedBackupDirRestricted(filepath.Dir(base)); err != nil {
 		return fmt.Errorf("save the edited %s before replacing it: %w", path, err)
 	}
-	if removedSavedCopy(saved, live, data) == nil {
+	for i := 0; i < 1000; i++ {
+		saved := base
+		if i > 0 {
+			saved = fmt.Sprintf("%s-%d", base, i+1)
+		}
+		if removedSavedCopy(saved, live, data) == nil {
+			return nil
+		}
+		info, err := os.Lstat(saved)
+		switch {
+		case err == nil && !info.Mode().IsRegular():
+			return fmt.Errorf("save the edited %s: %s is not a regular file; move it out of the way, then run %s",
+				path, saved, c.teardownCommand())
+		case err == nil:
+			// It may contain an operator's later edit. Never replace it.
+			continue
+		case err != nil && !errors.Is(err, os.ErrNotExist):
+			return fmt.Errorf("inspect saved copy %s before replacing %s: %w", saved, path, err)
+		}
+		if err := removedKeepEditedWrite(saved, data, 0o600); errors.Is(err, os.ErrExist) {
+			continue
+		} else if err != nil {
+			return fmt.Errorf("save the edited %s to %s before replacing it: %w; move %s out of the way, then run %s",
+				path, saved, err, saved, c.teardownCommand())
+		}
+		if err := removedSavedCopy(saved, live, data); err != nil {
+			return fmt.Errorf("save the edited %s: %s is not a copy of its own that reads back as it: %w", path, saved, err)
+		}
 		return nil
 	}
-	if err := removedKeepEditedWrite(saved, data, 0o600); err != nil {
-		return fmt.Errorf("save the edited %s to %s before replacing it: %w; move %s out of the way, then run %s",
-			path, saved, err, saved, c.teardownCommand())
-	}
-	if err := removedSavedCopy(saved, live, data); err != nil {
-		return fmt.Errorf("save the edited %s: %s is not a copy of its own that reads back as it: %w", path, saved, err)
-	}
-	return nil
+	return fmt.Errorf("save the edited %s: all saved-copy names beginning %s are occupied; move one out of the way, then run %s",
+		path, base, c.teardownCommand())
 }
 
 // removedSavedCopy returns nil when saved is a copy of data of its own: a
@@ -581,7 +657,7 @@ func removedSavedCopy(saved string, live os.FileInfo, data []byte) error {
 	if links != 1 {
 		return fmt.Errorf("%s has %d names (hard links)", saved, links)
 	}
-	if err := removedSavedCopyPrivate(opened); err != nil {
+	if err := removedSavedCopyPrivate(file, opened); err != nil {
 		return fmt.Errorf("%s: %w", saved, err)
 	}
 	got, err := io.ReadAll(io.LimitReader(file, int64(len(data))+1))
@@ -598,11 +674,8 @@ func (c removedOnlyConnector) editedCopyPath(dataDir string, data []byte) string
 	return filepath.Join(dataDir, "connector_backups", c.name, c.script+removedEditedInfix+sha256Hex(data)[:16])
 }
 
-// editedCopies lists the saved copies of an edited script (keepEdited).
+// editedCopies lists the saved copies of a marked script (keepEdited).
 func (c removedOnlyConnector) editedCopies(dataDir string) []string {
-	if c.editLogical == "" {
-		return nil
-	}
 	matches, _ := filepath.Glob(filepath.Join(dataDir, "connector_backups", c.name, c.script+removedEditedInfix+"*"))
 	return matches
 }
@@ -625,62 +698,62 @@ var (
 // of inPlaceStub, the cut, the mode) only finishes the file, which is synced
 // and read back. keep saves the old bytes it read through the handle, with
 // the handle's file (keepEdited), before anything is written.
-func (c removedOnlyConnector) writeStubInPlace(path string, keep func([]byte, os.FileInfo) error) error {
+func (c removedOnlyConnector) writeStubInPlace(path string, keep func([]byte, os.FileInfo) error) (os.FileInfo, error) {
 	file, err := os.OpenFile(path, os.O_RDWR|otlpOpenNoFollow(), 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !info.Mode().IsRegular() || info.Size() > removedScriptReadLimit {
-		return fmt.Errorf("%s changed while it was read", path)
+		return nil, fmt.Errorf("%s changed while it was read", path)
 	}
 	folder, err := os.Stat(filepath.Dir(path))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := removedInPlaceRefusal(info, folder); err != nil {
-		return err
+		return nil, err
 	}
 	old, err := io.ReadAll(io.LimitReader(file, removedScriptReadLimit+1))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if c.classifyScript(old) != removedScriptOwned {
-		return fmt.Errorf("%s changed while it was read", path)
+		return nil, fmt.Errorf("%s changed while it was read", path)
 	}
 	if err := keep(old, info); err != nil {
-		return err
+		return nil, err
 	}
 	stub := c.inPlaceStub(len(old))
 	head := len(c.tombstone)
 	if n, err := removedInPlaceWriteAt(file, stub[:head], 0); err != nil {
-		return removedPutBack(file, old, n, err)
+		return nil, removedPutBack(file, old, n, err)
 	}
 	if _, err := removedInPlaceWriteAt(file, stub[head:], int64(head)); err != nil {
-		return fmt.Errorf("the file begins with the whole stub, which blocks every call, but the rest could not be written: %w", err)
+		return nil, fmt.Errorf("the file begins with the whole stub, which blocks every call, but the rest could not be written: %w", err)
 	}
 	if err := removedInPlaceTruncate(file, int64(len(stub))); err != nil {
-		return fmt.Errorf("the file begins with the whole stub, which blocks every call, but its old tail could not be cut: %w", err)
+		return nil, fmt.Errorf("the file begins with the whole stub, which blocks every call, but its old tail could not be cut: %w", err)
 	}
 	if err := file.Chmod(c.mode); err != nil {
-		return err
+		return nil, err
 	}
 	if err := file.Sync(); err != nil {
-		return err
+		return nil, err
 	}
 	got := make([]byte, len(stub)+1)
 	n, err := file.ReadAt(got, 0)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return err
+		return nil, err
 	}
 	if !bytes.Equal(got[:n], stub) {
-		return fmt.Errorf("%s does not read back as the stub", path)
+		return nil, fmt.Errorf("%s does not read back as the stub", path)
 	}
-	return nil
+	return info, nil
 }
 
 // removedPutBack puts back the old bytes a failed write of the stub's first
@@ -708,7 +781,7 @@ func removedPutBack(file *os.File, old []byte, n int, cause error) error {
 // fails.
 func (c removedOnlyConnector) hookLeft(dataDir string) error {
 	path := c.scriptPath(dataDir)
-	state, links, _, err := c.scriptStateAndLinks(path)
+	state, links, _, _, err := c.scriptStateAndLinks(path)
 	switch {
 	case err != nil:
 		return fmt.Errorf("read %s: %w", path, err)
@@ -730,7 +803,9 @@ func (c removedOnlyConnector) hardLinkStep(path string) string {
 	if runtime.GOOS == "windows" {
 		list = "fsutil hardlink list " + path + " lists them"
 	}
-	return "delete every other name of this file (" + list + "), then run " + c.teardownCommand() + ", which writes the stub and revokes the tokens"
+	return "copy back what you need from connector_backups before deleting any linked name there; " +
+		"delete every other name of this file (" + list + "), then run " + c.teardownCommand() +
+		", which writes the stub and revokes the tokens"
 }
 
 // foreignStep is the manual step for a script path DefenseClaw cannot prove
@@ -884,7 +959,7 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 		}
 	}
 	script := c.scriptPath(opts.DataDir)
-	state, links, _, err := c.scriptStateAndLinks(script)
+	state, links, _, _, err := c.scriptStateAndLinks(script)
 	tokenStep := c.teardownCommand()
 	switch {
 	case err != nil:
@@ -914,7 +989,11 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 			"copy back what you need, then delete this folder")
 	}
 	for _, saved := range c.editedCopies(opts.DataDir) {
-		add(saved, "your edited "+c.script+", as it was when the teardown replaced it with the stub that blocks every call",
+		what := "your edited " + c.script
+		if c.name == removedOpenHandsID {
+			what = "the prior " + c.script + " (including any edits)"
+		}
+		add(saved, what+", as it was when the teardown replaced it with the stub that blocks every call",
 			"copy back what you need (not into DefenseClaw's hooks folder), then delete it")
 	}
 	if kept := c.keptTokenPath(opts.DataDir); kept != "" {

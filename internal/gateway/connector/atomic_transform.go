@@ -52,6 +52,10 @@ type atomicTransformResult struct {
 	Data   []byte
 	Remove bool
 	Perm   os.FileMode
+	// Force publishes a distinct file even when Data and Perm already match.
+	// Retired connector teardown needs this after writing a deny stub into an
+	// old file: the path gets a distinct file while other names keep the stub.
+	Force bool
 }
 
 type atomicFileSnapshot struct {

@@ -24,7 +24,9 @@ import hashlib
 import io
 import json
 import os
+import re
 import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1562,6 +1564,115 @@ class RemovedConnectorLeftoversTests(unittest.TestCase):
             for path in (config, module, pth, backup_dir):
                 self.assertIn(path, report)
             self.assertIn("remove defenseclaw_omnigent_policy from policy_modules", report)
+
+
+class RemovedConnectorBackupsKeptTests(unittest.TestCase):
+    """until 1.1 (rel-1-0-4 GAP-0651): a data removal never deletes what the leftover list tells the user to keep."""
+
+    def _stage(self, home: str) -> tuple[str, dict[str, str]]:
+        data_dir = os.path.join(home, ".defenseclaw")
+        backups = os.path.join(data_dir, "connector_backups")
+        kept = {
+            os.path.join("omnigent", "config.json"): json.dumps(
+                {"connector": "omnigent", "logical_name": "config", "path": os.path.join(home, "oc", "config.yaml")}
+            ),
+            os.path.join("omnigent", "defenseclaw_omnigent_policy.py.edited-0123"): "# my edit\n",
+            os.path.join("openhands", "config.json"): json.dumps({"connector": "openhands"}),
+        }
+        files = {
+            os.path.join(data_dir, "config.yaml"): "config_version: 9\n",
+            os.path.join(data_dir, "hooks", "defenseclaw_omnigent_policy.py"): (
+                "# defenseclaw-managed-policy v0\n# support was removed in DefenseClaw 1.0.4\n"
+            ),
+            os.path.join(backups, "codex", "config.toml.json"): "{}",
+            # A config only the backup record names (OMNIGENT_CONFIG_HOME at setup).
+            os.path.join(home, "oc", "config.yaml"): "policy_modules: [defenseclaw_omnigent_policy]\n",
+        }
+        files.update({os.path.join(backups, rel): body for rel, body in kept.items()})
+        for path, body in files.items():
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(body)
+        return data_dir, kept
+
+    def _run(self, plan: cmd_uninstall.UninstallPlan, teardown_stdout: str) -> tuple[list[str], str]:
+        echoed: list[str] = []
+        proc = subprocess.CompletedProcess([], 0, stdout=teardown_stdout, stderr="")
+        with (
+            patch.object(cmd_uninstall, "_validate_plan"),
+            patch.object(cmd_uninstall, "_stop_gateway"),
+            patch.object(cmd_uninstall, "_gateway_supports_connector_teardown", return_value=True),
+            patch.object(cmd_uninstall.subprocess, "run", return_value=proc),
+            patch.object(cmd_uninstall, "_remove_probe_created_state"),
+            patch.object(cmd_uninstall, "_remove_created_dirs"),
+            patch.object(cmd_uninstall, "_remove_orphan_copilot_plugin"),
+            patch.object(cmd_uninstall, "_remove_mcp_writer_backups"),
+            patch.object(cmd_uninstall, "_remove_legacy_codex_candidate"),
+            patch.object(cmd_uninstall, "_remove_empty_plugin_cache"),
+            patch.object(cmd_uninstall, "remove_own_api_port_claims"),
+            patch.object(cmd_uninstall, "_requires_deferred_cleanup", return_value=False),
+            patch.object(cmd_uninstall, "_render_execution_result"),
+            patch.object(cmd_uninstall.click, "echo", side_effect=lambda text="", **_: echoed.append(str(text))),
+            patch.object(cmd_uninstall.ux, "echo", side_effect=lambda text="", **_: echoed.append(str(text))),
+        ):
+            error = ""
+            try:
+                cmd_uninstall._execute_plan(plan)
+            except click.ClickException as exc:
+                error = exc.format_message()
+        return echoed, error
+
+    def test_uninstall_all_keeps_the_backups_it_tells_the_user_to_copy_back_from(self):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch("os.path.expanduser", side_effect=lambda p, home=home: p.replace("~", home, 1)),
+        ):
+            data_dir, kept = self._stage(home)
+            backups = os.path.join(data_dir, "connector_backups", "omnigent")
+            # What the gateway's removed-connector teardown prints (removed.go FormatRemovedLeftovers).
+            teardown_stdout = (
+                "OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:\n"
+                f"  - {backups}: the copies of your files DefenseClaw saved before its setup changed them "
+                "(pristine_bytes, base64). To remove: copy back what you need, then delete this folder.\n"
+            )
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=data_dir, connectors=("omnigent",), stop_gateway=True, remove_data_dir=True, gateway_path="gw"
+            )
+            echoed, error = self._run(plan, teardown_stdout)
+            self.assertEqual(error, "")
+            self.assertFalse(os.path.lexists(data_dir))
+            root = data_dir + "-removed-connector-backups"
+            for rel, body in kept.items():
+                with open(os.path.join(root, rel), encoding="utf-8") as fh:
+                    self.assertEqual(fh.read(), body, rel)
+            self.assertFalse(os.path.lexists(os.path.join(root, "codex")))
+            text = "\n".join(echoed)
+            self.assertIn(f"  - {os.path.join(root, 'omnigent')}: the copies of your files", text)
+            self.assertIn(os.path.join(root, "omnigent", "defenseclaw_omnigent_policy.py.edited-0123"), text)
+            # The config only the moved record names is still listed.
+            self.assertIn(os.path.join(home, "oc", "config.yaml"), text)
+            # Every path the uninstall tells the user about is still there.
+            named = re.findall(r"^\s*(?:·\s*)?- (\S.*?): ", text, flags=re.MULTILINE)
+            self.assertTrue(named)
+            for path in named:
+                self.assertTrue(os.path.lexists(path), f"the uninstall names {path}, which it removed:\n{text}")
+
+    def test_a_backup_that_cannot_move_stops_the_uninstall_before_any_removal(self):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch("os.path.expanduser", side_effect=lambda p, home=home: p.replace("~", home, 1)),
+        ):
+            data_dir, kept = self._stage(home)
+            with open(data_dir + "-removed-connector-backups", "w", encoding="utf-8") as fh:
+                fh.write("in the way")
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=data_dir, connectors=("omnigent",), stop_gateway=True, remove_data_dir=True, gateway_path="gw"
+            )
+            _echoed, error = self._run(plan, "")
+            self.assertIn("No data or binaries were removed", error)
+            for rel in kept:
+                self.assertTrue(os.path.isfile(os.path.join(data_dir, "connector_backups", rel)), rel)
+            self.assertTrue(os.path.isfile(os.path.join(data_dir, "config.yaml")))
 
 
 class ConnectorTeardownDispatchTests(unittest.TestCase):

@@ -52,7 +52,7 @@ import click
 # pulled name-by-name so the wizard call sites read like
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
-from defenseclaw import connector_paths, envvars, platform_support, terminal_checkbox, ux
+from defenseclaw import connector_paths, envvars, platform_support, removed_connectors, terminal_checkbox, ux
 from defenseclaw.audit_actions import (
     ACTION_SETUP_GATEWAY,
     ACTION_SETUP_GUARDRAIL,
@@ -10620,13 +10620,19 @@ def _print_observability_summary(
                 f"  This install now has {len(actives)} connectors configured; "
                 f"{len(guarded)} guarded now: {', '.join(guarded)}."
             )
-            fixes = "; ".join(
-                f"defenseclaw setup {'claude-code' if c == 'claudecode' else c}" for c in unguarded
-            )
-            click.echo(
-                f"  Not guarded now: {', '.join(unguarded)}. "
-                f"To guard {'it' if len(unguarded) == 1 else 'them'} again, run: {fixes}"
-            )
+            click.echo(f"  Not guarded now: {', '.join(unguarded)}.")
+            retry = _retryable_setup_peers(set(unguarded))
+            if retry:
+                fixes = "; ".join(
+                    f"defenseclaw setup {'claude-code' if c == 'claudecode' else c}" for c in retry
+                )
+                click.echo(f"  To guard {', '.join(retry)} again, run: {fixes}")
+            retired = sorted(c for c in unguarded if removed_connectors.is_removed(c))
+            if retired:
+                click.echo(
+                    f"  Removed in 1.0.4: {', '.join(retired)}. "
+                    "Run defenseclaw doctor for the manual cleanup steps."
+                )
         else:
             click.echo(f"  This install now has {len(actives)} connectors: {', '.join(actives)}.")
         click.echo("  To revert just this connector (the others keep running):")
@@ -15128,6 +15134,13 @@ def _lock_contract_failure_detail(connector: str, entry: Any, invariant: str) ->
     appears while setting up an unrelated connector.
     """
 
+    if removed_connectors.is_removed(connector):
+        return (
+            f"{connector} was removed in 1.0.4; there is no supported version or setup route. "
+            "Its old hook registration cannot be used. Run `defenseclaw doctor` for the "
+            "manual cleanup steps for retired connector state."
+        )
+
     raw_version = ""
     if isinstance(entry, dict) and isinstance(entry.get("raw_agent_version"), str):
         raw_version = entry["raw_agent_version"].strip()
@@ -15404,11 +15417,19 @@ def _partition_unconvergeable_peers(
         click.echo()
         for name, detail in sorted(skipped.items()):
             ux.warn(f"skipping {name}: {detail}")
-        ux.subhead(
-            "Continuing with the rest of the roster. "
-            f"Re-run setup for {', '.join(sorted(skipped))} after fixing the above."
-        )
+        retry = _retryable_setup_peers(skipped)
+        if retry:
+            ux.subhead(
+                "Continuing with the rest of the roster. "
+                f"Re-run setup for {', '.join(retry)} after fixing the above."
+            )
     return keep, frozenset(skipped) | frozenset(quiet)
+
+
+def _retryable_setup_peers(names: set[str] | dict[str, str]) -> list[str]:
+    """A removed connector has no setup route to re-run."""
+    return sorted(name for name in names if not removed_connectors.is_removed(name))
+
 
 def _opencode_awaiting_restart(readiness: _ConnectorRuntimeReadiness) -> bool:
     """OpenCode's plugin is current, but no OpenCode has loaded it since the restart.
@@ -15632,20 +15653,28 @@ def _wait_for_connector_runtime(
                             # the connector being set up can still converge,
                             # instead of failing the transaction and rolling
                             # back the hooks that were just written for it.
-                            ux.warn(
-                                f"skipping {failure.connector}: "
-                                f"{failure.invariant}: {failure.detail}"
-                            )
+                            if removed_connectors.is_removed(failure.connector):
+                                ux.warn(
+                                    f"skipping {failure.connector}: "
+                                    f"{_lock_contract_failure_detail(failure.connector, None, failure.invariant)}"
+                                )
+                            else:
+                                ux.warn(
+                                    f"skipping {failure.connector}: "
+                                    f"{failure.invariant}: {failure.detail}"
+                                )
                             skipped_peers.add(failure.connector)
                             continue
                         results.put_nowait(failure)
                         return
                 if not cancelled.is_set() and time.monotonic() < deadline:
                     if skipped_peers:
-                        ux.subhead(
-                            "Continuing with the rest of the roster. "
-                            f"Re-run setup for {', '.join(sorted(skipped_peers))} to fix the above."
-                        )
+                        retry = _retryable_setup_peers(skipped_peers)
+                        if retry:
+                            ux.subhead(
+                                "Continuing with the rest of the roster. "
+                                f"Re-run setup for {', '.join(retry)} to fix the above."
+                            )
                     results.put_nowait(pending_reload or _ConnectorRuntimeReadiness(True))
             except Exception as exc:  # noqa: BLE001 - worker failures are bounded readiness evidence.
                 if not cancelled.is_set() and time.monotonic() < deadline:
@@ -15735,17 +15764,22 @@ def _wait_for_connector_runtime(
             )
             if refused:
                 for name in sorted(refused):
-                    reason = not_started_reasons.get(name)
-                    ux.warn(
-                        f"skipping {name}: the restarted gateway did not activate it "
-                        + (f"({_connector_not_started_detail(name, reason)})" if reason
-                           else "(gateway.log names the reason)")
-                        + ", so it is not guarded now"
+                    if removed_connectors.is_removed(name):
+                        ux.warn(f"skipping {name}: {_lock_contract_failure_detail(name, None, 'roster')}")
+                    else:
+                        reason = not_started_reasons.get(name)
+                        ux.warn(
+                            f"skipping {name}: the restarted gateway did not activate it "
+                            + (f"({_connector_not_started_detail(name, reason)})" if reason
+                               else "(gateway.log names the reason)")
+                            + ", so it is not guarded now"
+                        )
+                retry = _retryable_setup_peers(refused)
+                if retry:
+                    rerun = ", ".join(
+                        f"defenseclaw setup {'claude-code' if name == 'claudecode' else name}" for name in retry
                     )
-                rerun = ", ".join(
-                    f"defenseclaw setup {'claude-code' if name == 'claudecode' else name}" for name in sorted(refused)
-                )
-                ux.subhead(f"Continuing with the rest of the roster. To guard it again, run: {rerun}")
+                    ux.subhead(f"Continuing with the rest of the roster. To guard it again, run: {rerun}")
                 expected = expected - refused
                 skipped_peers.update(refused)
                 _remember_runtime_skipped_peers(refused)

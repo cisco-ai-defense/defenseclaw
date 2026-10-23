@@ -27,7 +27,7 @@ import (
 
 // removedSavedCopyPrivate refuses a saved copy of an edited module that
 // the group or other accounts may read or change.
-func removedSavedCopyPrivate(info os.FileInfo) error {
+func removedSavedCopyPrivate(_ *os.File, info os.FileInfo) error {
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		return fmt.Errorf("its mode is %o, not private (600)", perm)
 	}

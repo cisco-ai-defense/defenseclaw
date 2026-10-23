@@ -201,7 +201,22 @@ class LeftoversTests(_Host):
             "-samefile " + script if os.name != "nt" else "fsutil hardlink list " + script, items[script].step
         )
         self.assertIn("delete every other name of this file", items[script].step)
+        step = items[script].step
+        self.assertIn("copy back what you need from connector_backups", step)
+        self.assertLess(step.index("copy back what you need"), step.index("delete every other name"))
         self.assertEqual(items[token].step, f"follow the step for {script} first")
+
+    def test_edited_module_linked_to_its_saved_copy_says_copy_back_first(self):
+        module = _write(os.path.join(self.hooks, "defenseclaw_omnigent_policy.py"), "# defenseclaw-managed-policy v6\n# edit\n")
+        saved = os.path.join(self.data, "connector_backups", "omnigent", "defenseclaw_omnigent_policy.py.edited-0123456789abcdef")
+        os.makedirs(os.path.dirname(saved), exist_ok=True)
+        try:
+            os.link(module, saved)
+        except OSError as exc:
+            self.skipTest(f"hard link: {exc}")
+        step = self.items("omnigent")[module].step
+        self.assertLess(step.index("copy back what you need"), step.index("delete every other name"))
+        self.assertIn("fsutil hardlink list " if os.name == "nt" else "find / -xdev -samefile ", step)
 
     def test_a_config_that_no_longer_names_defenseclaw_is_not_listed(self):
         config = self.openhands()
@@ -458,3 +473,51 @@ class StatusTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpgradeGuideTests(unittest.TestCase):
+    """rel-1-0-4 GAP-0656, GAP-0651: the upgrade page says what the upgrade and uninstall do."""
+
+    def _section(self) -> str:
+        path = os.path.join(_REPO, "docs-site", "content", "docs", "get-started", "upgrade.mdx")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        section = text.split("## Renamed and removed connectors", 1)[1].split("\n## ", 1)[0]
+        return re.sub(r"\s+", " ", section)
+
+    def test_a_config_with_only_a_removed_connector_is_refused_as_the_page_says(self):
+        from defenseclaw import migrations
+
+        section = self._section()
+        for name in removed_connectors.NAMES:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as data_dir:
+                with open(os.path.join(data_dir, "config.yaml"), "w", encoding="utf-8") as fh:
+                    fh.write(f"config_version: 9\nguardrail:\n  connector: {name}\n  connectors:\n    {name}: {{}}\n")
+                with self.assertRaises(migrations.MigrationError) as raised:
+                    migrations.migrate(data_dir, check=True)
+                message = str(raised.exception)
+                self.assertIn("nothing was changed", message)
+                self.assertIn(f"`defenseclaw setup remove {name} --yes --force`", message)
+        self.assertIn(
+            "If OpenHands or OmniGent is the only connector it lists, the upgrade stops before it changes anything",
+            section,
+        )
+        self.assertIn("`defenseclaw setup remove openhands --yes --force` (or `omnigent`)", section)
+
+    def test_the_page_names_where_a_data_removal_keeps_the_backups(self):
+        from defenseclaw.removed_connectors import kept_backups_root
+
+        self.assertEqual(
+            kept_backups_root("~/.defenseclaw"), os.path.normpath("~/.defenseclaw-removed-connector-backups")
+        )
+        self.assertIn("`~/.defenseclaw-removed-connector-backups/<connector>`", self._section())
+
+    def test_103_openhands_upgrade_explains_why_hook_entries_remain(self):
+        section = self._section()
+        self.assertIn("A 1.0.3 OpenHands upgrade leaves its entries in `hooks.json` for manual removal", section)
+        self.assertIn("even when that file still has the bytes setup wrote", section)
+        self.assertIn("The deny stub and retired gateway route block calls through those entries", section)
+
+    def test_hard_link_recovery_in_the_guide_preserves_saved_bytes_first(self):
+        section = self._section()
+        self.assertIn("copy back any needed bytes from `connector_backups` before deleting a linked name there", section)

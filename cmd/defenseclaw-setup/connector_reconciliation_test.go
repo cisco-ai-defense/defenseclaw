@@ -1134,6 +1134,7 @@ func resetRemovedConnectorNotes(t *testing.T) {
 	reset := func() {
 		removedConnectorNotes.Lock()
 		removedConnectorNotes.byConnector, removedConnectorNotes.order = nil, nil
+		removedConnectorNotes.moved, removedConnectorNotes.dataRemoved = nil, ""
 		removedConnectorNotes.Unlock()
 	}
 	reset()

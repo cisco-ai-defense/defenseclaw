@@ -112,6 +112,9 @@ func TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript(t *testing.T) {
 					t.Fatal(err)
 				}
 				skip := append(append([]string{h.script(c)}, links...), h.tokens(c)...)
+				if c.name == removedOpenHandsID {
+					skip = append(skip, c.editedCopyPath(h.dataDir, []byte(old.body)))
+				}
 				before := h.snapshot(t, skip...)
 				err = c.Teardown(context.Background(), h.opts)
 				if runtime.GOOS == "windows" {
@@ -132,6 +135,7 @@ func TestRemovedTeardownWritesTheStubUnderEveryNameOfTheScript(t *testing.T) {
 				h.requireStubUnderEveryName(t, c, first, links)
 				if c.name == removedOpenHandsID {
 					requireRemovedHookBlocks(t, h.script(c))
+					h.requireEditedSaved(t, c, old.body)
 				}
 				requireRemovedSame(t, "teardown of a hard-linked script", h.snapshot(t, skip...), before)
 				again := h.snapshot(t)
@@ -277,7 +281,11 @@ func TestRemovedInPlaceWriteThatFailsLeavesNoPartScript(t *testing.T) {
 					t.Fatal(err)
 				}
 				names := append([]string{h.script(c)}, links...)
-				before := h.snapshot(t, names...)
+				skip := append([]string(nil), names...)
+				if c.name == removedOpenHandsID {
+					skip = append(skip, c.editedCopyPath(h.dataDir, []byte(old)))
+				}
+				before := h.snapshot(t, skip...)
 				restore := removedInPlaceSeams(t, f.writeAt, f.truncate)
 				err = c.Teardown(context.Background(), h.opts)
 				if err == nil || !strings.Contains(err.Error(), f.want) || !strings.Contains(err.Error(), "To finish: "+c.hardLinkStep(h.script(c))) ||
@@ -288,7 +296,10 @@ func TestRemovedInPlaceWriteThatFailsLeavesNoPartScript(t *testing.T) {
 				if err := c.VerifyClean(h.opts); err == nil {
 					t.Fatal("VerifyClean passed while the old file may still run")
 				}
-				requireRemovedSame(t, "a failed write into the file", h.snapshot(t, names...), before)
+				requireRemovedSame(t, "a failed write into the file", h.snapshot(t, skip...), before)
+				if c.name == removedOpenHandsID {
+					h.requireEditedSaved(t, c, old)
+				}
 				for _, name := range names {
 					info, err := os.Stat(name)
 					if err != nil || !os.SameFile(first, info) {

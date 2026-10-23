@@ -23,11 +23,11 @@ import (
 	"os"
 )
 
-// removedSavedCopyPrivate: on Windows the saved copy is private by the
-// owner-only DACL of the backup folder (ensureManagedBackupDirRestricted)
-// and of the file atomicReplaceFileNoFollow creates; Go's mode bits say
-// nothing about it.
-func removedSavedCopyPrivate(os.FileInfo) error { return nil }
+// removedSavedCopyPrivate checks the private file DACL through the same open
+// handle used to read its bytes. Go's Windows mode bits say nothing about it.
+func removedSavedCopyPrivate(file *os.File, _ os.FileInfo) error {
+	return validateAtomicTransformBoundFilePrivatePlatform(file)
+}
 
 // removedInPlaceRefusal is never nil on Windows: no release wrote an
 // OpenHands script there (its hooks.json runs the native launcher, which

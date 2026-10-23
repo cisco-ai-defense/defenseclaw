@@ -1096,6 +1096,109 @@ class TestLockContractFailureDetail:
         detail = cmd_setup._lock_contract_failure_detail("devin", newer, invariant)
         assert "predates" in detail and "defenseclaw-gateway restart" in detail
 
+    @pytest.mark.parametrize("removed", ["omni" + "gent", "open" + "hands"])
+    def test_removed_connector_in_old_lock_names_cleanup_without_setup_advice(
+        self, removed: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cmd_setup.removed_connectors.is_removed(removed)
+        assert cmd_setup.removed_connectors.is_removed("open-hands")
+        assert cmd_setup.removed_connectors.is_removed("open_hands")
+        assert not cmd_setup.removed_connectors.is_removed("devin")
+        entry = {
+            "connector": removed,
+            "raw_agent_version": "0.10.0",
+            "normalized_agent_version": "0.10.0",
+            "compatibility_status": "unknown",
+            "hook_fail_mode": "closed",
+        }
+        invariant = connector_lock_contract_invariant(removed, entry)
+        assert invariant
+        detail = cmd_setup._lock_contract_failure_detail(removed, entry, invariant)
+        assert "removed in 1.0.4" in detail
+        assert "defenseclaw doctor" in detail
+        assert "Install a supported" not in detail
+        assert "guardrail disable" not in detail
+
+        lock = tmp_path / "hook_contract_lock.json"
+        lock.write_text(json.dumps({"version": 2, "connectors": {removed: entry}}), encoding="utf-8")
+        keep, skipped = cmd_setup._partition_unconvergeable_peers(
+            str(lock), {"kiro", removed}, required={"kiro"}
+        )
+        output = capsys.readouterr().out
+        assert keep == {"kiro"} and skipped == frozenset({removed})
+        assert "removed in 1.0.4" in output
+        assert "Re-run setup for" not in output
+        assert "guardrail disable" not in output
+
+        lock.write_text(
+            json.dumps({"version": 2, "connectors": {removed: entry, "devin": {**entry, "connector": "devin"}}}),
+            encoding="utf-8",
+        )
+        cmd_setup._partition_unconvergeable_peers(
+            str(lock), {"kiro", removed, "devin"}, required={"kiro"}
+        )
+        mixed_output = capsys.readouterr().out
+        assert "Re-run setup for devin" in mixed_output
+        assert f"Re-run setup for {removed}" not in mixed_output
+
+    def test_refused_retired_peer_never_gets_setup_advice(self, monkeypatch, tmp_path: Path, capsys) -> None:
+        cfg = _config(tmp_path)
+        (tmp_path / "hook_contract_lock.json").write_text(
+            json.dumps({"version": 2, "connectors": {"amp": _entry("amp", tmp_path)}}),
+            encoding="utf-8",
+        )
+        (tmp_path / "active_connector.json").write_text(
+            json.dumps({"version": 3, "names": ["amp"], "inactive_names": []}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+        monkeypatch.setattr(
+            cmd_doctor,
+            "connector_setup_readiness",
+            lambda _cfg, name: cmd_doctor.ConnectorSetupReadiness(True, name, "ready"),
+        )
+        result = cmd_setup._wait_for_connector_runtime(
+            str(tmp_path), ["amp", "omnigent"], None, None, timeout=0.5, required={"amp"}
+        )
+        assert result and result.skipped == frozenset({"omnigent"})
+        output = capsys.readouterr().out
+        assert "removed in 1.0.4" in output
+        assert "defenseclaw doctor" in output
+        assert "defenseclaw setup omnigent" not in output
+
+    def test_retired_peer_with_readiness_failure_never_gets_retry_advice(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        cfg = _config(tmp_path)
+        (tmp_path / "hook_contract_lock.json").write_text(
+            json.dumps({"version": 2, "connectors": {"amp": _entry("amp", tmp_path), "omnigent": {}}}),
+            encoding="utf-8",
+        )
+        (tmp_path / "active_connector.json").write_text(
+            json.dumps({"version": 3, "names": ["amp", "omnigent"], "inactive_names": []}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+        monkeypatch.setattr(
+            cmd_setup, "_partition_unconvergeable_peers", lambda _path, expected, **_kwargs: (expected, frozenset())
+        )
+        monkeypatch.setattr(cmd_setup, "_connector_runtime_snapshot_ready", lambda *_args, **_kwargs: True)
+
+        def readiness(_cfg, name):
+            if name == "omnigent":
+                return cmd_doctor.ConnectorSetupReadiness(False, name, "version", "install a supported version")
+            return cmd_doctor.ConnectorSetupReadiness(True, name, "ready")
+
+        monkeypatch.setattr(cmd_doctor, "connector_setup_readiness", readiness)
+        result = cmd_setup._wait_for_connector_runtime(
+            str(tmp_path), ["amp", "omnigent"], None, None, timeout=0.5, required={"amp"}
+        )
+        assert result
+        output = capsys.readouterr().out
+        assert "removed in 1.0.4" in output
+        assert "Re-run setup for omnigent" not in output
+        assert "install a supported version" not in output
+
     def test_unversioned_agent_names_a_missing_install(self) -> None:
         # GAP-1285: OpenCode not installed for the account reports no version.
         entry = {"connector": "opencode", "compatibility_status": "unversioned", "hook_fail_mode": "open"}

@@ -406,3 +406,49 @@ func TestRetiredConnectorCleanupLogsTheConfigItLeaves(t *testing.T) {
 	}
 	t.Fatalf("no log line names %s and the defenseclaw_guardrail policy:\n%s", h.configPath, out)
 }
+
+// rel-1-0-4 GAP-0661 (the T7 live cell L7-dead-ro): with ~/.omnigent
+// read-only the first 1.0.4 start still finishes the cleanup, which never
+// writes the agent's config: the module becomes the stub, the token goes, the
+// lock entry stays, and one line names config.yaml with its step. Making the
+// folder writable and starting again changes nothing: what is left is the
+// user's to remove (the leftover list), never DefenseClaw's to delete.
+func TestRetiredConnectorCleanupNeverWritesAReadOnlyAgentConfig(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("directory modes do not stop writes here")
+	}
+	h := stageRetiredOmnigent(t)
+	configDir := filepath.Dir(h.configPath)
+	if err := os.Chmod(configDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(configDir, 0o755) })
+	before := h.snapshot(t)
+	var err error
+	out := captureStderr(t, func() {
+		err = retireOrDropUnregisteredConnector(context.Background(), connector.NewDefaultRegistry(), h.dataDir, "omnigent", "removed", nil)
+	})
+	if err != nil {
+		t.Fatalf("retire with a read-only config folder: %v", err)
+	}
+	h.requireStub(t)
+	if got := h.snapshot(t); !reflect.DeepEqual(got, before) {
+		t.Fatalf("the cleanup changed more than the module and the token:\n got %v\nwant %v", got, before)
+	}
+	if got := connector.LoadHookContractLockEntry(h.dataDir, "omnigent"); got.Connector != "omnigent" {
+		t.Fatalf("lock entry = %+v, want it kept", got)
+	}
+	if n := strings.Count(out, "removed connector omnigent left "+h.configPath+":"); n != 1 {
+		t.Fatalf("%d log lines name %s, want 1:\n%s", n, h.configPath, out)
+	}
+	if err := os.Chmod(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	after := retiredSnapshot(t, []string{h.home})
+	if err := retireOrDropUnregisteredConnector(context.Background(), connector.NewDefaultRegistry(), h.dataDir, "omnigent", "removed", nil); err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+	if got := retiredSnapshot(t, []string{h.home}); !reflect.DeepEqual(got, after) {
+		t.Fatalf("the second start changed files:\n got %v\nwant %v", got, after)
+	}
+}
