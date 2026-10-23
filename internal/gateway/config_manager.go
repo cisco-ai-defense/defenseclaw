@@ -147,6 +147,9 @@ type configReloadSource struct {
 	sourceName string
 	raw        []byte
 	compiledV8 *config.ObservabilityV8CompiledConfig
+	// recoveryOnly permits a managed rebuild solely to prove that the
+	// restored config and assets still match the published generation.
+	recoveryOnly bool
 }
 
 type configSnapshotApplyFunc func(
@@ -1291,11 +1294,20 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	// once before the manager has an applied generation.
 	startupBoot := !assets && !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
 		sha256.Sum256(source.raw) == m.startupSource
+	pendingBundle := m.pendingBundleGeneration(source.raw)
+	// A rejected hand edit can be repaired by restoring the exact applied
+	// bytes. The sidecar must compare a fresh build, including referenced
+	// assets, with its published generation before clearing health. A changed
+	// generation cannot be activated here without a new signed bundle.
+	recoveryOnly := m.rejected && !pendingBundle && m.appliedRaw != nil &&
+		bytes.Equal(m.appliedRaw, source.raw) && len(diff.Changed) == 0 &&
+		oldCfg.StandaloneEnterprise() && next.StandaloneEnterprise()
 	if (oldCfg.StandaloneEnterprise() || next.StandaloneEnterprise()) && !startupBoot &&
-		!m.pendingBundleGeneration(source.raw) &&
+		!pendingBundle && !recoveryOnly &&
 		(assets || m.rejected || !bytes.Equal(m.appliedRaw, source.raw) || len(diff.Changed) > 0) {
 		err := fmt.Errorf("config reload refused: this managed computer takes config and policy from a signed policy bundle; apply a new signed bundle")
 		m.rejected = true
+		recordGenerationBuildError(err)
 		m.recordLoadError(ctx, "managed_unbundled_reload", err)
 		if m.health != nil {
 			m.setConfigHealth(StateError, err.Error(), map[string]interface{}{
@@ -1316,7 +1328,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if len(diff.Changed) == 0 && (assets || m.rejected) {
 		diff.Changed = []string{configDiffAssets}
 	}
-	if len(diff.Changed) == 0 && m.pendingBundleGeneration(source.raw) {
+	if len(diff.Changed) == 0 && pendingBundle {
 		// The bundle may have changed only a referenced policy file. Build
 		// its generation before recording that it was applied.
 		diff.Changed = []string{configDiffAssets}
@@ -1373,9 +1385,13 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		m.recordLoadError(ctx, "apply_unavailable", nil)
 		return fmt.Errorf("config reload schema v8 requires a source-aware apply callback")
 	}
+	source.recoveryOnly = recoveryOnly
 	applyStarted := time.Now()
 	applyErr := m.applySnapshot(ctx, oldCfg, next, diff, cloneConfigReloadSource(source))
 	applyElapsed = time.Since(applyStarted)
+	if recoveryOnly && applyErr == nil {
+		applyErr = fmt.Errorf("config reload refused: restored managed generation was not proven unchanged; apply a new signed policy bundle")
+	}
 	if errors.Is(applyErr, errGenerationUnchanged) {
 		// The rebuild succeeded and matches the live generation: nothing to
 		// swap, but an earlier rejected edit is resolved (a pack restored
@@ -1383,17 +1399,19 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		// state; otherwise they stay until an unrelated config write.
 		m.rejected = false
 		m.rejectedAssets.Store(nil)
-		exportCandidateKey()
 		clearGenerationBuildError()
-		recordHandEdit(ctx, next, m.path, source.raw)
-		refreshConfigGeneration(source.raw)
-		// The startup reconcile of the boot bytes applies nothing new: they
-		// become the applied bytes, so a later event for the same bytes
-		// does not attribute their writer again.
-		if m.appliedRaw == nil && m.startupKnown && sha256.Sum256(source.raw) == m.startupSource {
-			m.appliedRaw = source.raw
+		if !recoveryOnly {
+			exportCandidateKey()
+			recordHandEdit(ctx, next, m.path, source.raw)
+			refreshConfigGeneration(source.raw)
+			// The startup reconcile of the boot bytes applies nothing new: they
+			// become the applied bytes, so a later event for the same bytes
+			// does not attribute their writer again.
+			if m.appliedRaw == nil && m.startupKnown && sha256.Sum256(source.raw) == m.startupSource {
+				m.appliedRaw = source.raw
+			}
+			version.SetContentHash(source.raw)
 		}
-		version.SetContentHash(source.raw)
 		if m.health != nil {
 			state, msg := StateRunning, ""
 			if envOverlayErr != nil {

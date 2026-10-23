@@ -2097,6 +2097,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		recordGenerationBuildError(err)
 		return fmt.Errorf("config reload generation: %w", err)
 	}
+	if source.recoveryOnly {
+		if generationUnchanged(previousGen, nextGen) {
+			return errGenerationUnchanged
+		}
+		return fmt.Errorf("config reload refused: restored managed config or referenced assets differ from the applied generation; apply a new signed policy bundle")
+	}
 	if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets && generationUnchanged(previousGen, nextGen) {
 		return errGenerationUnchanged
 	}
