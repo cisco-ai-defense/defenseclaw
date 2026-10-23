@@ -2047,6 +2047,8 @@ def test_linux_preinstall_ends_an_idle_earlier_daemon_and_leaves_a_current_one(t
             # Not this deployment's daemon: its other commands and another install.
             f" 1001  77 {DAEMON} stop-sandboxes",
             " 1001  78 /home/alice/.local/bin/defenseclaw-gateway sandbox-daemon",
+            " 1001  79 /opt/defenseclaw/bin/launch-agents/not-a-digest/defenseclaw-gateway sandbox-daemon",
+            " 1001  80 /opt/defenseclaw/bin/launch-agents/0f0f/defenseclaw-gateway sandbox-daemon stop-sandboxes",
         ], '{"sandboxes":1,"running":0}', GUARD_IDLE_LIST)
         result = host.run(_linux_guarded_preinstall(host, tmp_path, launcher), "2")
         assert result.returncode == 0, result.stderr
@@ -2081,9 +2083,16 @@ def test_both_package_preinstalls_are_stamped_with_the_guard() -> None:
         ROOT / ".goreleaser.yaml").read_text(encoding="utf-8")
 
 
-def test_macos_pkg_preinstall_refuses_while_an_earlier_daemon_runs_a_sandbox(tmp_path: Path) -> None:
+# GAP-0979: the LaunchAgent of DefenseClaw 1.0.3 runs the package's
+# content-addressed copy of the gateway (bin/launch-agents/<sha256>/), which
+# the guard did not match: it saw no daemon and let the upgrade go on.
+@pytest.mark.parametrize("program", [
+    "/opt/cisco/defenseclaw/bin/defenseclaw-gateway",
+    "/opt/cisco/defenseclaw/bin/launch-agents/" + "0f" * 32 + "/defenseclaw-gateway",
+])
+def test_macos_pkg_preinstall_refuses_while_an_earlier_daemon_runs_a_sandbox(tmp_path: Path, program: str) -> None:
     daemon = "/opt/cisco/defenseclaw/bin/defenseclaw-gateway sandbox-daemon"
-    host, launcher = _guard_host(tmp_path, [f"  501  4242 {daemon}"], '{"sandboxes":2,"running":1}', GUARD_LIST)
+    host, launcher = _guard_host(tmp_path, [f"  501  4242 {program} sandbox-daemon"], '{"sandboxes":2,"running":1}', GUARD_LIST)
     host.state.mkdir()
     (host.state / "deployment.json").write_text('{"product_version": "1.0.3"}', encoding="utf-8")
     script = _macos_pkg_preinstall(host, "1.0.4").replace(f"{daemon[:-len(' sandbox-daemon')]} /usr/local/bin/defenseclaw", f"{daemon[:-len(' sandbox-daemon')]} {launcher}")
@@ -2101,7 +2110,7 @@ def test_macos_pkg_preinstall_refuses_while_an_earlier_daemon_runs_a_sandbox(tmp
     # With nothing running the daemon is ended (no unit to stop on macOS).
     idle = subprocess.Popen(["sleep", "300"])
     try:
-        (tmp_path / "ps.out").write_text(f"  501 {idle.pid} {daemon}\n", encoding="utf-8")
+        (tmp_path / "ps.out").write_text(f"  501 {idle.pid} {program} sandbox-daemon\n", encoding="utf-8")
         (tmp_path / "list.json").write_text(GUARD_IDLE_LIST, encoding="utf-8")
         (host.state / "last-package-result.json").unlink()
         result = host.run(_stamp(tmp_path, script, "1.0.4"))

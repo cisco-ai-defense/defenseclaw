@@ -143,8 +143,21 @@ dc_legacy_sandbox_guard() {
     dc_guard_reason= dc_guard_message=
     dc_nl='
 '
-    dc_daemons=$(ps -A -o uid= -o pid= -o args= 2>/dev/null | awk -v want="$dc_guard_gateway sandbox-daemon" '
-        { uid = $1; pid = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); if ($0 == want) print uid, pid }')
+    # The daemon runs GATEWAY, or on macOS the package's content-addressed
+    # copy of it that the LaunchAgent executes (DefenseClaw 1.0.3:
+    # bin/launch-agents/<sha256>/defenseclaw-gateway beside GATEWAY).
+    dc_daemons=$(ps -A -o uid= -o pid= -o args= 2>/dev/null | awk -v gw="$dc_guard_gateway" '
+        BEGIN {
+            base = gw; sub(/.*\//, "", base)
+            pre = substr(gw, 1, length(gw) - length(base)) "launch-agents/"
+            suf = "/" base " sandbox-daemon"
+        }
+        {
+            uid = $1; pid = $2; $1 = ""; $2 = ""; sub(/^ +/, "")
+            if ($0 == gw " sandbox-daemon") { print uid, pid; next }
+            mid = substr($0, length(pre) + 1, length($0) - length(pre) - length(suf))
+            if (index($0, pre) == 1 && substr($0, length($0) - length(suf) + 1) == suf && mid ~ /^[0-9a-f]+$/) print uid, pid
+        }')
     [ -n "$dc_daemons" ] || return 0
     dc_held= dc_quiet=
     while read -r dc_uid dc_pid; do

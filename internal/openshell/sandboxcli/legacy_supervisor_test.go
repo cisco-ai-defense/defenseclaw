@@ -92,6 +92,34 @@ func TestDoctorIsNotReadyWhileALegacySandboxRuns(t *testing.T) {
 	}
 }
 
+// GAP-0902 review (loop round 4): the doctor named only legacy sandboxes,
+// from the list, and left out a MicroVM the daemon's status names
+// contained, which also holds back every new run. It now fails a row for
+// each contained one, as the status names it, with the command that ends
+// it; none, no row.
+func TestDoctorIsNotReadyWhileAContainedSandboxRuns(t *testing.T) {
+	row := func(ta *testApp) *openshell.Check {
+		t.Helper()
+		ta.HostDoctor = func(context.Context, *openshell.Doctor) *openshell.DoctorReport { return &openshell.DoctorReport{} }
+		return ta.runDoctor(bg).Get(CheckIDContainedSandbox)
+	}
+	ta := newTestApp(t, "")
+	ta.daemon.add(sampleSandbox("plain"))
+	ta.daemon.status.Unprotected = []sandboxapi.UnprotectedSandbox{{Name: "old", Phase: "ready", Stop: "defenseclaw sandbox stop old"}}
+	if c := row(ta); c != nil {
+		t.Fatalf("a contained row with no contained sandbox: %+v", c)
+	}
+	ta.daemon.status.Unprotected = append(ta.daemon.status.Unprotected,
+		sandboxapi.UnprotectedSandbox{Name: "held", Phase: "starting", Stop: "defenseclaw sandbox stop held", Reason: sandboxapi.UnprotectedContained})
+	c := row(ta)
+	if c == nil || c.Status != openshell.StatusFail || c.Fix == nil ||
+		!strings.Contains(c.Detail, "held: "+sandboxapi.ContainedUnprotected) || strings.Contains(c.Detail, "old") ||
+		!strings.Contains(c.Detail, "creates and starts no sandbox until it is gone") ||
+		c.Fix.Summary != "save the work you need in held, then run `defenseclaw sandbox stop held`" {
+		t.Fatalf("contained row = %+v", c)
+	}
+}
+
 // TestAStopAnOlderDaemonCouldNotMakeSaysTheWayOn (GAP-0871): a sandbox
 // daemon of DefenseClaw 1.0.2 or 1.0.3 that a package upgrade left running
 // answers the stop of a MicroVM in OpenShell's error state with

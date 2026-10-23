@@ -288,7 +288,7 @@ func TestAContainedVMStaysUnprotectedInEveryPhaseThatMayHoldIt(t *testing.T) {
 		{phase: audit.SandboxPhaseError, reason: "MainProcessFailed: exit 1", live: true, stop: "delete"},
 		{phase: audit.SandboxPhaseError, reason: "ProcessExited: the VM exited"},
 		{phase: audit.SandboxPhaseStopped},
-		{phase: audit.SandboxPhaseDeleting},
+		{phase: audit.SandboxPhaseDeleting, live: true, stop: "stop"},
 		{phase: audit.SandboxPhaseDeleted},
 		{phase: phaseMissing},
 	} {

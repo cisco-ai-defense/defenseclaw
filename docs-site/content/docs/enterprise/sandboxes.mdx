@@ -330,9 +330,13 @@ this release, so:
 
 **Linger.** By default Linux stops the user's service manager when the user's
 last login session ends; stopping the sandbox daemon stops that account's
-sandboxes. To keep these services running after logout on Linux, turn linger
-on for that user. Foreground harness sessions still end on a terminal hang-up,
-as described below.
+sandboxes. A MicroVM whose disk DefenseClaw cannot sync first is not stopped:
+the stop is tried again for up to 90 seconds, and if the sync still fails the
+journal names the sandbox, because stopping the OpenShell gateway then ends
+the VM and what it wrote since its last sync may be lost. To keep these
+services running after logout on Linux, turn linger on for that user.
+Foreground harness sessions still end on a terminal hang-up, as described
+below.
 
 ```bash
 sudo loginctl enable-linger alice

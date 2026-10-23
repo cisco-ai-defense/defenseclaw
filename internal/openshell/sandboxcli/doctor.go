@@ -48,6 +48,9 @@ const (
 	// OpenShell release older than openshell.SupportedMin
 	// (sandboxapi.Sandbox.OldSupervisor).
 	CheckIDLegacySandbox = "legacy-sandbox"
+	// CheckIDContainedSandbox fails while a MicroVM runs contained
+	// (sandboxapi.UnprotectedContained).
+	CheckIDContainedSandbox = "contained-sandbox"
 	// CheckIDManagedRuntime is a managed computer's OpenShell as the
 	// account's daemon reports it.
 	CheckIDManagedRuntime = "managed-runtime"
@@ -173,6 +176,9 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		if st.available {
 			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress))
 			if c := a.legacySandboxCheck(ctx); c != nil {
+				rep.Checks = append(rep.Checks, *c)
+			}
+			if c := a.containedSandboxCheck(ctx); c != nil {
 				rep.Checks = append(rep.Checks, *c)
 			}
 		}
@@ -322,6 +328,44 @@ func (a *App) legacySandboxCheck(ctx context.Context) *openshell.Check {
 			" session runs the supervisor of an OpenShell release older than " + openshell.SupportedMin + ", whose network broker can let connections " +
 			"bypass sandbox policy, NVIDIA/OpenShell#4494, and DefenseClaw cannot contain it); DefenseClaw stops " + itThem(names) +
 			" for nobody, and creates and starts no sandbox until " + gone,
+		Fix: &openshell.Fix{Summary: strings.Join(ways, "; ")}}
+}
+
+// containedSandboxCheck fails while a MicroVM runs contained, as the
+// daemon's status names it (sandboxapi.UnprotectedContained, the one
+// account of it the status and the run refusal give too): DefenseClaw had
+// to stop it but could not sync its disk first, so it keeps it running
+// with the network it added withdrawn, and creates and starts no sandbox
+// until it is gone. DefenseClaw stops none itself, so the fix names the
+// command that ends each. nil when none runs, or when the status cannot be
+// read (the daemon row says so).
+func (a *App) containedSandboxCheck(ctx context.Context) *openshell.Check {
+	api, err := a.api()
+	if err != nil {
+		return nil
+	}
+	st, err := api.Status(ctx)
+	if err != nil {
+		return nil
+	}
+	var names, ways []string
+	for _, u := range st.Unprotected {
+		if u.Reason == sandboxapi.UnprotectedContained {
+			names = append(names, u.Name)
+			ways = append(ways, "save the work you need in "+u.Name+", then run `"+u.Stop+"`")
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	gone := "it is gone"
+	if len(names) > 1 {
+		gone = "they are gone"
+	}
+	return &openshell.Check{ID: CheckIDContainedSandbox, Title: "Contained sandboxes", Status: openshell.StatusFail,
+		Detail: strings.Join(names, ", ") + ": " + sandboxapi.ContainedUnprotected + " (DefenseClaw had to stop " + itThem(names) +
+			", but could not sync the MicroVM's disk first, so it keeps " + itThem(names) + " running with the network rules and providers it added withdrawn); " +
+			"DefenseClaw stops " + itThem(names) + " for nobody, and creates and starts no sandbox until " + gone,
 		Fix: &openshell.Fix{Summary: strings.Join(ways, "; ")}}
 }
 

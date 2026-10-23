@@ -304,10 +304,24 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 			plural(st.TelemetryFailures, "record", "records"), truncate(sandboxapi.DisplayText(st.TelemetryError), 200)), ansiRed))
 	}
 	for _, u := range st.Unprotected {
-		// A live legacy guest (GAP-0901): no new sandbox runs until it is
+		// A live legacy guest (GAP-0901) or a contained one (GAP-0902), in
+		// the daemon's words for each: no new sandbox runs until it is
 		// gone, and DefenseClaw does not stop it for the user.
-		row("Unprotected", a.style(u.Name+": "+sandboxapi.LegacyUnprotected+"; no new sandbox runs until it is gone: `"+u.Stop+"`", ansiRed))
+		row("Unprotected", a.style(u.Name+": "+unprotectedWords(u)+"; no new sandbox runs until it is gone: `"+u.Stop+"`", ansiRed))
 	}
+}
+
+// unprotectedWords names the state of the unprotected guest u: a live
+// legacy one (no reason: what a daemon of the first 1.0.4 builds sends too)
+// or a contained one, and the daemon's own reason for any other.
+func unprotectedWords(u sandboxapi.UnprotectedSandbox) string {
+	switch u.Reason {
+	case "":
+		return sandboxapi.LegacyUnprotected
+	case sandboxapi.UnprotectedContained:
+		return sandboxapi.ContainedUnprotected
+	}
+	return "running unprotected: " + u.Reason
 }
 
 func (a *App) printSandbox(sb *sandboxapi.Sandbox) {

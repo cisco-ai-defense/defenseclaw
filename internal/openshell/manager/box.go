@@ -793,11 +793,39 @@ func oldSupervisorLive(phase audit.SandboxPhase, rec record) bool {
 // OpenShell cannot be asked for the one after it (restorePhase), and a
 // restarted daemon that has not reached the gateway knows none: neither
 // proves the VM gone, so it stays unprotected, its network withdrawal is
-// retried and no new sandbox runs. Only OpenShell's own account of the VM
-// stopped, deleted, missing or gone releases it.
+// retried and no new sandbox runs. Deleting does not release it either: a
+// delete that failed leaves that phase when OpenShell cannot be asked for
+// the one after it (restorePhase), and until OpenShell reports the delete
+// done the VM may still run. Only OpenShell's account of the VM stopped,
+// deleted, missing or gone releases it.
 func containedLive(phase audit.SandboxPhase, rec record) bool {
-	return rec.Contained != "" && holdsCompute(phase, rec.Driver, rec.PhaseReason)
+	return rec.Contained != "" && (holdsCompute(phase, rec.Driver, rec.PhaseReason) || phase == audit.SandboxPhaseDeleting)
 }
+
+// unprotectedKind reports whether b is a guest DefenseClaw cannot show
+// protected while it may still run, and which: unprotectedLegacy for a
+// live legacy one (oldSupervisorLive), sandboxapi.UnprotectedContained for
+// a contained one (containedLive), "" for none. It is the one account the
+// status, the run refusal and the view give of it. A box being created, or
+// one deleted or kept only for its snapshot, is none. So is one OpenShell
+// no longer has, but only when the gateway it was created on says so: one
+// missing from another gateway or compute driver than its own (elsewhere,
+// gatewayElsewhere) may still run there. The caller holds m.mu.
+func unprotectedKind(b *box) string {
+	if b.deleted || b.retained || b.creating || b.missing && b.elsewhere == "" {
+		return ""
+	}
+	switch {
+	case oldSupervisorLive(b.phase, b.rec):
+		return unprotectedLegacy
+	case containedLive(b.phase, b.rec):
+		return sandboxapi.UnprotectedContained
+	}
+	return ""
+}
+
+// unprotectedLegacy is the unprotectedKind of a live legacy guest.
+const unprotectedLegacy = "legacy"
 
 // unprotectedLive reports a guest DefenseClaw cannot show protected while
 // it runs, a live legacy one (oldSupervisorLive) or a contained one
@@ -926,13 +954,13 @@ func (m *Manager) legacyRunRefusal(except string) error {
 	var legacy, contained []string
 	ways := map[string]string{}
 	for name, b := range m.boxes {
-		if name == except || b.retained || b.missing || b.deleted || b.creating {
+		if name == except {
 			continue
 		}
-		switch {
-		case oldSupervisorLive(b.phase, b.rec):
+		switch unprotectedKind(b) {
+		case unprotectedLegacy:
 			legacy = append(legacy, name)
-		case containedLive(b.phase, b.rec):
+		case sandboxapi.UnprotectedContained:
 			contained = append(contained, name)
 		default:
 			continue
@@ -1331,13 +1359,14 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		v.StartedAt = started
 		v.UptimeSeconds = int64(m.now().Sub(started) / time.Second)
 	}
-	if oldSupervisorLive(b.phase, r) {
+	switch unprotectedKind(b) {
+	case unprotectedLegacy:
 		v.Warnings = append(slices.Clone(v.Warnings), oldSupervisorWarning(r.Name, b.phase, r.Driver))
 		if b.oldSupervisorNetworkErr != "" {
 			v.Warnings = append(v.Warnings, legacyRulesKept+b.oldSupervisorNetworkErr)
 		}
 		v.OldSupervisor = true
-	} else if containedLive(b.phase, r) {
+	case sandboxapi.UnprotectedContained:
 		v.Warnings = append(slices.Clone(v.Warnings), containedWords(r.Name, r.Contained, b.phase, r.Driver))
 		if b.oldSupervisorNetworkErr != "" {
 			v.Warnings = append(v.Warnings, containedRulesKept+b.oldSupervisorNetworkErr)

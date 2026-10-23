@@ -92,10 +92,17 @@ func TestStatusNamesTheUnprotectedLegacySandboxes(t *testing.T) {
 	ta.daemon.status.Unprotected = []sandboxapi.UnprotectedSandbox{
 		{Name: "kept", Phase: "ready", Stop: "defenseclaw sandbox stop kept"},
 		{Name: "ended", Phase: "completed", Stop: "defenseclaw sandbox delete ended"},
+		// GAP-0902 review (loop round 4): a contained one was named a
+		// legacy sandbox.
+		{Name: "held", Phase: "starting", Stop: "defenseclaw sandbox stop held", Reason: sandboxapi.UnprotectedContained},
 	}
 	ta.ok(t, ta.Status(bg, "", OutputText))
 	has(t, ta.output(), "kept: "+sandboxapi.LegacyUnprotected+"; no new sandbox runs until it is gone: `defenseclaw sandbox stop kept`",
-		"ended: "+sandboxapi.LegacyUnprotected+"; no new sandbox runs until it is gone: `defenseclaw sandbox delete ended`")
+		"ended: "+sandboxapi.LegacyUnprotected+"; no new sandbox runs until it is gone: `defenseclaw sandbox delete ended`",
+		"held: "+sandboxapi.ContainedUnprotected+"; no new sandbox runs until it is gone: `defenseclaw sandbox stop held`")
+	if strings.Contains(ta.output(), "held: "+sandboxapi.LegacyUnprotected) {
+		t.Fatalf("a contained sandbox is named a legacy one:\n%s", ta.output())
+	}
 	ta.out.Reset()
 	ta.ok(t, ta.Status(bg, "", OutputJSON))
 	has(t, ta.output(), `"unprotected"`, `defenseclaw sandbox stop kept`)

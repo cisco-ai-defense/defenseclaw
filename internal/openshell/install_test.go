@@ -373,7 +373,9 @@ func TestInstallUpgradesInPlace(t *testing.T) {
 		for _, want := range []string{"upgrades the installed openshell 0.1.1 to " + openshell.InstallerTag + " in place",
 			"the script restarts the OpenShell gateway once the release is installed, which drops the connections of every sandbox on it",
 			"on the docker driver, Docker pulls the release's supervisor images from ghcr.io",
-			"on the MicroVM driver, nothing runs while a sandbox does"} {
+			"on the MicroVM driver, nothing runs while a sandbox does",
+			// GAP-0999: the lifecycle lock holds back no other OpenShell client.
+			"DefenseClaw creates and starts no sandbox, but it cannot hold back the openshell CLI or another OpenShell client"} {
 			if !strings.Contains(f.out.String(), want) {
 				t.Errorf("plan lacks %q:\n%s", want, f.out.String())
 			}
@@ -390,7 +392,7 @@ func TestInstallUpgradesInPlace(t *testing.T) {
 		}
 		plan := f.out.String()
 		if !strings.Contains(plan, "which stops every MicroVM sandbox on it") || !strings.Contains(plan, "nothing runs while a MicroVM sandbox does") ||
-			strings.Contains(plan, "ghcr.io") || strings.Contains(plan, "docker driver") {
+			!strings.Contains(plan, "cannot hold back the openshell CLI or another OpenShell client") || strings.Contains(plan, "ghcr.io") || strings.Contains(plan, "docker driver") {
 			t.Fatalf("plan:\n%s", plan)
 		}
 	})

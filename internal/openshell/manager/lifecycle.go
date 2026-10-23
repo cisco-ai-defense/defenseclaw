@@ -125,10 +125,10 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 		if !b.missing && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason) {
 			live++
 		}
-		if !b.missing && !b.creating && unprotectedLive(b.phase, b.rec) {
+		if kind := unprotectedKind(b); kind != "" {
 			u := sandboxapi.UnprotectedSandbox{Name: b.rec.Name, Phase: string(b.phase), Stop: legacyStopCommand(b.rec.Name, b.phase)}
-			if !oldSupervisorLive(b.phase, b.rec) {
-				u.Reason = sandboxapi.UnprotectedContained
+			if kind == sandboxapi.UnprotectedContained {
+				u.Reason = kind
 			}
 			st.Unprotected = append(st.Unprotected, u)
 		}

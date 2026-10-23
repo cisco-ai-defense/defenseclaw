@@ -527,6 +527,11 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 			"before the script: on the docker driver, Docker pulls the release's supervisor images from ghcr.io (the restarted gateway does not start without them); "+
 				"on the MicroVM driver, nothing runs while a sandbox does (the restart would stop it without a flush)")
 	}
+	if upgrading {
+		// The lifecycle lock holds back DefenseClaw's own starts only
+		// (GAP-0999): OpenShell has no barrier every client honours.
+		plan.Notes = append(plan.Notes, upgradeOtherClientsNote)
+	}
 	if i.GOOS == "darwin" && e2fsprogsIn(i.E2fsprogsDirs) == "" {
 		// Setup offers it once OpenShell is installed only where the
 		// doctor does not find it: a Mac that has it gets no note.
@@ -646,6 +651,12 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 	}
 	return &InstallResult{Plan: plan, Installed: true, CLIVersion: after.Version}, nil
 }
+
+// upgradeOtherClientsNote is the plan's note of an in-place upgrade that
+// DefenseClaw starts no sandbox until the upgraded gateway is healthy, but
+// cannot hold back another OpenShell client meanwhile.
+const upgradeOtherClientsNote = "until the upgraded gateway answers, DefenseClaw creates and starts no sandbox, but it cannot hold back the openshell CLI " +
+	"or another OpenShell client: start no sandbox with one meanwhile, since the restart would end a MicroVM it started without a flush"
 
 // InstallE2fsprogs installs e2fsprogs with Homebrew
 // (InstallE2fsprogsCommand): OpenShell's MicroVM driver formats every
