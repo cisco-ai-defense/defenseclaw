@@ -292,6 +292,13 @@ hooks and machine policy are intact.
 | Linux | `dpkg-query -W -f='${Status} ${Version}' defenseclaw-enterprise` or `rpm -q defenseclaw-enterprise` (package channel only). Or `detect.sh --min-version X.Y.Z`, which covers every channel. | `detect.sh --require-healthy`, or the wrapper's `--action verify` exits `0`. |
 | macOS | `pkgutil --pkg-info com.cisco.defenseclaw.enterprise` reports `version: X.Y.Z` (pkg channel). Or `detect.sh --min-version X.Y.Z`. | `detect.sh --require-healthy`, or the wrapper's `--action verify` exits `0`. |
 
+On Linux, DefenseClaw leaves host kernel settings as found. `status` and
+`verify` report open user namespace and ptrace routes as observed warnings,
+with incomplete security. `detect.sh --require-healthy` reports `unhealthy`
+while either route remains open. An administrator may apply optional host
+hardening with their own tools after testing affected workloads. No
+DefenseClaw lifecycle step schedules or waits for a reboot.
+
 `detect.ps1 [-MinimumVersion X.Y.Z] [-RequireHealthy] [-RequireSessionsProtected]`
 follows Intune's custom-detection rules: "detected" is exit `0` with one line on
 standard output (`DefenseClaw Enterprise <version>`) and nothing on standard

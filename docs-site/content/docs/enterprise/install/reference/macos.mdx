@@ -340,3 +340,16 @@ An MDM configuration profile for `com.openai.codex` or `com.anthropic.claudecode
 outranks those files; export DefenseClaw's entries in plist form and add them to
 your profile ([Higher-precedence sources](/docs/enterprise/configure/machine-policy#higher-precedence-sources),
 [Inspect, export and verify](/docs/enterprise/configure/machine-policy#inspect-export-and-verify)).
+After changing a vendor policy file or MDM preference, run
+`sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure --json`.
+Until the new policy view is verified and pinned, managed hooks refuse calls with
+`enterprise_managed_policy_view_unverified`. This includes a per-user managed
+preference that appears when an account signs in.
+
+On a managed 1.0.2 macOS 15.8 test host, a standard user started Claude Code inside
+a `sandbox-exec` profile that hid its machine policy directory. Claude ran a
+Bash tool call, while the gateway recorded no matching call and administrator
+`status` and `verify` still reported complete security. A hook cannot refuse
+an agent that never loads it. Until agent launch and policy registration are
+enforced outside that process-local view, a healthy result does not prove that
+all Claude tool calls are inspected ([M-34](/docs/enterprise/plan/threat-model/)).

@@ -281,6 +281,9 @@ line-length = 120
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
+# This checker runs under RHEL 8's Python 3.6. Keep its runtime annotations
+# compatible even though the rest of the repository targets newer Python.
+"scripts/check_enterprise_lifecycle_result.py" = ["UP006", "UP007", "UP035", "UP045"]
 # Test suites lean on conventions ruff dislikes by default: descriptive
 # CapWords_Suffix class names, ``MockScanner`` / ``MockPE`` mock locals,
 # short ``C`` aliases for credential modules, deliberately-unused

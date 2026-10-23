@@ -502,6 +502,11 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		if err := os.WriteFile(stat, []byte(fmt.Sprintf("btime %d\n", time.Now().Unix())), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		// Tests of unrelated lifecycle behavior need explicit, readable
+		// kernel facts before status can claim complete security. Tests for
+		// open or unavailable controls replace or remove these fake values.
+		writeHostFile(t, h, sysctlMaxUserNamespaces, "0\n")
+		writeHostFile(t, h, sysctlPtraceScope, "2\n")
 	}
 	return h
 }

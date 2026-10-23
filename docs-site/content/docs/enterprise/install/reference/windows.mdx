@@ -431,6 +431,14 @@ a later file that sets it to `false` turns the lock off; `policy verify` and
 `enterprise windows verify` report that file. `policy verify --live` is not
 available on Windows. To see the hooks run, make a tool call from the user's
 session and read it with `audit export`.
+
+On a managed Windows test host, a standard user could create a private DOS
+device map, but the tested map did not change a fresh read of the installed
+Codex policy. This does not establish how every agent behaves under every
+process-local view. `status` and `verify` inspect stored policy and cannot by
+themselves prove that every agent process loaded its hook; compare a native
+tool call with the gateway audit when validating this boundary ([W-63](/docs/enterprise/plan/threat-model/)).
+
 ## Recover a pending transaction
 
 A lifecycle that fails normally rolls back. If the rollback cannot finish, the

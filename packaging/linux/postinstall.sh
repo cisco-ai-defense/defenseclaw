@@ -133,6 +133,33 @@ message_of() {
         head -n 1 | unescape
 }
 
+# Keep the errors and warnings arrays separate. A message can contain a ']'
+# inside its JSON string, so a plain sed character class would truncate it.
+message_codes() {
+    printf '%s\n' "$result" | awk -v name="$1" '
+        BEGIN { RS = "\001" }
+        {
+            start = index($0, "\"" name "\"")
+            if (!start) exit
+            s = substr($0, start)
+            start = index(s, "[")
+            if (!start) exit
+            quoted = 0; escaped = 0
+            for (i = start + 1; i <= length(s); i++) {
+                c = substr(s, i, 1)
+                if (escaped) { escaped = 0; continue }
+                if (c == "\\" && quoted) { escaped = 1; continue }
+                if (c == "\"") { quoted = !quoted; continue }
+                if (c == "]" && !quoted) {
+                    print substr(s, start + 1, i - start - 1)
+                    exit
+                }
+            }
+        }' |
+        grep -oE '"code":[[:space:]]*"[^" ]+"' |
+        sed 's/^"code":[[:space:]]*"//; s/"$//'
+}
+
 case "$status" in
     0)
         echo "defenseclaw-enterprise: the managed deployment is active."
@@ -148,6 +175,7 @@ case "$status" in
         echo "  Apply this package with: sudo $gateway enterprise linux ensure --from-package$downgrade" >&2
         ;;
     *)
+        rollback_warning=$(message_codes warnings | grep -E '^(rolled_back|rollback_failed)$')
         # Name the cause (the first error of the JSON result, one line) so
         # the administrator does not have to open the file (GAP-1744).
         cause=$(printf '%s\n' "$result" |
@@ -162,7 +190,7 @@ case "$status" in
         elif [ -z "$result" ]; then
             echo "defenseclaw-enterprise: the package is installed but its deployment state could not be confirmed." >&2
             finish="check and apply this package with"
-        elif [ -n "$running" ] && [ -z "$(message_of rollback_failed)" ]; then
+        elif [ -n "$running" ] && ! printf '%s\n' "$rollback_warning" | grep -Fxq rollback_failed; then
             echo "defenseclaw-enterprise: the package is installed but not applied; the previous deployment ($running) keeps running unchanged." >&2
             finish="apply this package with"
         else

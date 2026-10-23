@@ -183,9 +183,9 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	if machinePolicyIncomplete(r) {
 		r.SecurityComplete = false
 	}
-	if strict {
-		l.warnUnprivilegedUserNamespaces()
-	}
+	// This is the observed host setting. The hook proves its managed policy
+	// view separately on each invocation.
+	l.warnOpenPolicyViews()
 	if strict {
 		// An agent the guardian or the enumerator could not protect for one
 		// account (an unverified hook contract, an agent it could not enroll)
@@ -1118,6 +1118,11 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.AddWarning(codeConfigRejected, problem)
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
+	if record != nil {
+		for _, problem := range l.policyViewPinProblems(record.MachinePolicyConnectors) {
+			r.AddWarning(codeMachinePolicyIncomplete, problem+"; run `"+env.lifecycleCommand(ActionEnsure)+"` to publish the verified policy view")
+		}
+	}
 	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 &&
 		!machinePolicyIncomplete(r) && reloadError == "" && (r.Policy == nil || r.Policy.Applied)
 	l.describeHookContracts(ctx)

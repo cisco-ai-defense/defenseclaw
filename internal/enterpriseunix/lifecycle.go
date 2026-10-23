@@ -1933,7 +1933,6 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 
 	l.rememberGeneration()
-
 	failAndRollback := func(code string, cause error) int {
 		r.AddError(code, cause.Error())
 		// Before the rollback, which can free space: what was full when the
@@ -1972,7 +1971,12 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			// back before the services restart.
 			revertConfig = func() { newerConfig = l.revertRejectedConfig(record, committedConfig, p.config.Raw, cause.Error()) }
 		}
-		restored, err := l.rollback(ctx, snap, pending, false, keepNewerConfig, revertConfig)
+		restoreLiveBeforeStart := func(_ bool) {
+			if revertConfig != nil {
+				revertConfig()
+			}
+		}
+		restored, err := l.rollback(ctx, snap, pending, false, keepNewerConfig, restoreLiveBeforeStart)
 		if newerConfig != nil {
 			l.restoreNewerConfig(record.ServiceGID, newerConfig)
 		}
@@ -2353,6 +2357,11 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 	for _, file := range p.files {
 		if err := mkdirParents(env.P(filepath.Dir(file.Path))); err != nil {
 			return nil, err
+		}
+		if file.Kind == "host-security" {
+			if err := env.Trust(env.P(filepath.Dir(file.Path)), TrustAdminDir); err != nil {
+				return nil, fmt.Errorf("%s is not administrator-controlled: %w", filepath.Dir(file.Path), err)
+			}
 		}
 	}
 	return created, nil
@@ -2771,10 +2780,10 @@ const keptSnapshotAdvice = "the previous deployment could not be fully restored;
 // policies stops first, so its policies are retired with the binary that
 // loaded them and never under it; it starts again when the restore fails.
 // beforeRestore runs once the services are stopped, just before the
-// snapshot is put back, and beforeStart right after. restored is false when
-// any file could not be put back; the snapshot must then be kept for a
-// retry.
-func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pending, restoreFirst bool, beforeRestore, beforeStart func()) (restored bool, err error) {
+// snapshot is put back. beforeStart runs afterwards and learns whether all
+// files were restored. restored is false when any file could not be put
+// back; the snapshot must then be kept for a retry.
+func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pending, restoreFirst bool, beforeRestore func(), beforeStart func(bool)) (restored bool, err error) {
 	env := l.env
 	units := env.Services.Units()
 	previouslyActive, previouslyEnabled := intent.PreviouslyActive, intent.PreviouslyEnabled
@@ -2848,7 +2857,7 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 	}
 	restoreErr := env.restore(snap)
 	if beforeStart != nil {
-		beforeStart()
+		beforeStart(restoreErr == nil)
 	}
 	l.rollbackConfigSHA, l.rollbackConfigFile = "", nil
 	if restoreErr == nil {
@@ -3173,6 +3182,9 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 		}
 	}
 	if l.machinePolicyDrift(p) {
+		return false, ""
+	}
+	if !l.policyViewPinsCurrent(p.machinePolicy) {
 		return false, ""
 	}
 	if l.helperModeDrift(ctx, p) {

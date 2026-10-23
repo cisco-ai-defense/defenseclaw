@@ -13,6 +13,19 @@ Some agents read a machine-wide policy file that standard users cannot change. F
 
 Only agents you select in the config are protected; see [Choose the agents to protect](/docs/enterprise/configure/configuration#choose-the-agents-to-protect). DefenseClaw's entries are derived from the config (`guardrail.connectors` and `enterprise.machine_policy`) and never read back as policy. The next `ensure`, `repair` or `reconcile` rewrites a changed entry, and `verify` reports the drift until then. Change the config, not the vendor file.
 
+You may maintain your own settings in vendor policy files. After an administrator
+or MDM changes one, run `ensure` as root. A managed hook refuses calls while its
+current vendor policy differs from the digest in the trusted runtime descriptor;
+`status`, `verify` and `reconcile` report `machine_policy_incomplete` until a
+verified view is pinned. `reconcile` also re-pins a verified view when it runs,
+but vendor policy paths do not automatically trigger it.
+
+On macOS, Codex and Claude Code hooks check the shared policy and only the
+invoking account's managed preference. The root lifecycle attests each
+per-account preference in the protected runtime descriptor. A hook refuses
+when its relevant preference is unreadable, missing, changed or otherwise
+unverifiable. Another account's preference does not affect this hook.
+
 ## Routes by connector
 
 What each route does during a gateway outage is in the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).

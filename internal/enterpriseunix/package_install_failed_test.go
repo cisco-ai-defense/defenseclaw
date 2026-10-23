@@ -41,6 +41,15 @@ func TestPackageInstallFailedNamesTheFinishStepPerOS(t *testing.T) {
 	}
 }
 
+func TestLegacyNamespacePackageFailureIsReported(t *testing.T) {
+	h := newTestHost(t, "linux")
+	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, lastPackageResultFile),
+		`{"ok":false,"installed":true,"action":"ensure","errors":[{"code":"unprivileged_user_namespaces","message":"legacy reboot failure"}]}`)
+	if got := h.env.lastPackageInstallFailure(); got != "unprivileged_user_namespaces: legacy reboot failure" {
+		t.Fatalf("the recorded package failure was hidden: %q", got)
+	}
+}
+
 // GAP-2380: after a failed first pkg install, verify's unmanaged_leftovers
 // warning still said to activate the deployment with `ensure --from-package
 // --config <file>`, beside the package_install_failed warning that says to

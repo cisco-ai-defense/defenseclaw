@@ -1,11 +1,4 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
 // SPDX-License-Identifier: Apache-2.0
 
 //go:build !windows
@@ -14,46 +7,30 @@ package enterpriseunix
 
 import (
 	"fmt"
-	"io"
-	"os"
 	"strings"
 )
 
-// codeUserNamespaces warns that standard users can create user namespaces.
-const codeUserNamespaces = "unprivileged_user_namespaces"
-
-// Kernel settings that decide whether an unprivileged process can create a
-// user namespace (and, inside it, a mount namespace of its own).
+// These are observed Linux kernel settings. DefenseClaw never changes them.
 const (
-	sysctlMaxUserNamespaces       = "/proc/sys/user/max_user_namespaces"
-	sysctlUnprivilegedUsernsClone = "/proc/sys/kernel/unprivileged_userns_clone"
-	sysctlAppArmorRestrictUserns  = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
-	// kernel.apparmor_restrict_unprivileged_unconfined decides whether an
-	// unconfined process may change to another AppArmor profile (aa-exec,
-	// change_profile). Ubuntu 24.04 ships it at 0, so without it a standard
-	// user can enter a profile that allows user namespaces and create one
-	// despite kernel.apparmor_restrict_unprivileged_userns=1.
+	codeUserNamespaces               = "unprivileged_user_namespaces"
+	codeUnprivilegedPtrace           = "unprivileged_ptrace"
+	sysctlMaxUserNamespaces          = "/proc/sys/user/max_user_namespaces"
+	sysctlPtraceScope                = "/proc/sys/kernel/yama/ptrace_scope"
+	sysctlUnprivilegedUsernsClone    = "/proc/sys/kernel/unprivileged_userns_clone"
+	sysctlAppArmorRestrictUserns     = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
 	sysctlAppArmorRestrictUnconfined = "/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined"
 )
 
-// warnUnprivilegedUserNamespaces adds a verify warning on Linux when a
-// standard user can create a private user and mount namespace. Inside one,
-// the user is uid 0 for their own processes and can mount over the
-// root-owned vendor machine policy, runtime descriptor and hook socket
-// directory, so an agent started there does not see the administrator's
-// enforcement. DefenseClaw cannot close that from user space; the host
-// setting can.
-func (l *lifecycle) warnUnprivilegedUserNamespaces() {
+const restrictPolicyViewsAdvice = "ask the host administrator to apply optional kernel hardening with their own tools"
+
+// warnOpenPolicyViews reports only live kernel facts. An invoked managed hook
+// separately proves that its view still contains the administrator's policy.
+func (l *lifecycle) warnOpenPolicyViews() {
 	if l.env.GOOS != "linux" {
 		return
 	}
 	read := func(path string) (string, bool) {
-		file, err := os.Open(l.env.P(path))
-		if err != nil {
-			return "", false
-		}
-		defer file.Close()
-		data, err := io.ReadAll(io.LimitReader(file, 64))
+		data, err := readBounded(l.env.P(path), 64)
 		if err != nil {
 			return "", false
 		}
@@ -61,6 +38,11 @@ func (l *lifecycle) warnUnprivilegedUserNamespaces() {
 	}
 	if message := unprivilegedUserNamespaceWarning(read); message != "" {
 		l.result.AddWarning(codeUserNamespaces, message)
+		l.result.SecurityComplete = false
+	}
+	if message := unprivilegedPtraceWarning(read); message != "" {
+		l.result.AddWarning(codeUnprivilegedPtrace, message)
+		l.result.SecurityComplete = false
 	}
 }
 
@@ -74,7 +56,10 @@ func (l *lifecycle) warnUnprivilegedUserNamespaces() {
 // change to a profile that allows user namespaces, so the warning names it.
 func unprivilegedUserNamespaceWarning(read func(path string) (string, bool)) string {
 	limit, ok := read(sysctlMaxUserNamespaces)
-	if !ok || limit == "0" {
+	if !ok {
+		return fmt.Sprintf("cannot read %s, so DefenseClaw cannot verify that standard users are prevented from creating private policy views; inspect the kernel setting, %s", sysctlMaxUserNamespaces, restrictPolicyViewsAdvice)
+	}
+	if limit == "0" {
 		return ""
 	}
 	if value, ok := read(sysctlUnprivilegedUsernsClone); ok && value == "0" {
@@ -95,11 +80,37 @@ func unprivilegedUserNamespaceWarning(read func(path string) (string, bool)) str
 			"private user and mount namespace can be given its own view of the machine policy, runtime "+
 			"descriptor and hook socket directory, outside the administrator's enforcement; set "+
 			"kernel.apparmor_restrict_unprivileged_unconfined=1 or user.max_user_namespaces=0 (for example "+
-			"in /etc/sysctl.d)", limit, unconfined)
+			"in /etc/sysctl.d), %s", limit, unconfined, restrictPolicyViewsAdvice)
 	}
 	return fmt.Sprintf("standard users can create user namespaces (user.max_user_namespaces=%s): "+
 		"an agent started in a private user and mount namespace can be given its own view of the "+
 		"machine policy, runtime descriptor and hook socket directory, outside the administrator's "+
-		"enforcement; set user.max_user_namespaces=0 (for example in /etc/sysctl.d) or restrict "+
-		"unprivileged user namespaces with SELinux or AppArmor", limit)
+		"enforcement; set user.max_user_namespaces=0 (for example in /etc/sysctl.d), restrict "+
+		"unprivileged user namespaces with SELinux or AppArmor, %s", limit, restrictPolicyViewsAdvice)
+}
+
+// unprivilegedPtraceWarning returns the warning text, or "" when Yama
+// restricts ptrace to administrators (scope 2 or 3). Unavailable evidence
+// cannot establish that tracing is disabled.
+func unprivilegedPtraceWarning(read func(path string) (string, bool)) string {
+	scope, ok := read(sysctlPtraceScope)
+	if !ok {
+		return fmt.Sprintf("cannot read %s, so DefenseClaw cannot verify that standard users cannot trace agents and rewrite policy paths; inspect the kernel setting, %s", sysctlPtraceScope, restrictPolicyViewsAdvice)
+	}
+	if ptraceRestricted([]byte(scope)) {
+		return ""
+	}
+	return fmt.Sprintf("standard users can trace their own processes (kernel.yama.ptrace_scope=%s): a tracer "+
+		"such as PRoot can rewrite the paths an agent opens and give it its own view of the machine policy, "+
+		"outside the administrator's enforcement; set kernel.yama.ptrace_scope=2 (for example in "+
+		"/etc/sysctl.d), %s", scope, restrictPolicyViewsAdvice)
+}
+
+func ptraceRestricted(value []byte) bool {
+	switch strings.TrimSpace(string(value)) {
+	case "2", "3":
+		return true
+	default:
+		return false
+	}
 }
