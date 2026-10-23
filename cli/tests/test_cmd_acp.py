@@ -321,6 +321,76 @@ def test_verify_rejects_a_contract_lock_the_guard_cannot_open(tmp_path, monkeypa
         cleanup_app(app, db_path, data_dir)
 
 
+def test_verify_rejects_guard_refused_metadata_in_an_adopted_lock(tmp_path, monkeypatch):
+    """An adopted alias is unhealthy whenever its lock cannot pass the guard."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    suffix = ".exe" if os.name == "nt" else ""
+    guard = _binary(tmp_path / f"defenseclaw-acp{suffix}")
+    agent = _binary(tmp_path / f"kiro-cli{suffix}")
+    settings.write_text(json.dumps({"agent_servers": {"My Kiro": {"command": agent, "args": ["acp"]}}}))
+    verify = ["verify", "--client", "zed", "--agent", "kiro"]
+    try:
+        adopted = CliRunner().invoke(
+            acp_cmd, ["adopt", "--client", "zed", "--guard-binary", guard, "--yes"], obj=app
+        )
+        assert adopted.exit_code == 0, adopted.output
+        assert list(json.loads(settings.read_text())["agent_servers"]) == ["My Kiro"]
+        assert CliRunner().invoke(acp_cmd, verify, obj=app).exit_code == 0
+        lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+        original = json.loads(lock_path.read_text())
+
+        def set_field(value, *keys):
+            def change(lock):
+                target = lock
+                for key in keys[:-1]:
+                    target = target[key]
+                target[keys[-1]] = value
+            return change
+
+        cases = {
+            "stale schema digest": (set_field("f" * 64, "protocol", "schema_sha256"), "protocol pins"),
+            "stale schema version": (set_field("schema-v0", "protocol", "schema_version"), "protocol pins"),
+            "wrong lock version": (set_field(2, "version"), "malformed or incomplete"),
+            "boolean lock version": (set_field(True, "version"), "malformed or incomplete"),
+            "unexpected field": (set_field("unexpected", "protocol", "extra"), "malformed or incomplete"),
+            "wrong decoded field type": (set_field(12, "agent", "version"), "malformed or incomplete"),
+            "missing pin": (lambda lock: lock["protocol"].pop("schema_sha256"), "malformed or incomplete"),
+        }
+        for label, (mutate, expected) in cases.items():
+            lock = json.loads(json.dumps(original))
+            mutate(lock)
+            atomic_write_private_bytes(lock_path, json.dumps(lock).encode())
+            result = CliRunner().invoke(acp_cmd, verify, obj=app)
+            assert result.exit_code != 0, (label, result.output)
+            assert f"contract lock {expected}" in result.output, (label, result.output)
+            repair_prefix = "defenseclaw 'acp' 'setup'" if os.name == "nt" else "defenseclaw acp setup"
+            assert f"run {repair_prefix}" in result.output, (label, result.output)
+            if label == "stale schema digest":
+                status = CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app)
+                assert status.exit_code == 0, status.output
+                binding = json.loads(status.output)["bindings"]["zed/kiro"]
+                assert binding["healthy"] is False
+                assert any("protocol pins" in problem for problem in binding["problems"])
+        serialized = json.dumps(original)
+        for label, body in {
+            "invalid first version": '{"version": "invalid", ' + serialized[1:],
+            "unknown first protocol field": '{"protocol": {"extra": 1}, ' + serialized[1:],
+        }.items():
+            # Go decodes each occurrence, while Python normally keeps only
+            # the last value. Both malformed first occurrences refuse start.
+            atomic_write_private_bytes(lock_path, body.encode())
+            result = CliRunner().invoke(acp_cmd, verify, obj=app)
+            assert result.exit_code != 0, (label, result.output)
+            assert "contract lock is unreadable" in result.output, (label, result.output)
+        atomic_write_private_bytes(lock_path, json.dumps(original).encode())
+        assert CliRunner().invoke(acp_cmd, verify, obj=app).exit_code == 0
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
 def test_verify_checks_copied_guard_entries_by_the_guards_rules(tmp_path, monkeypatch):
     """GAP-0525: verify reports exactly the copies the guard refuses.
 

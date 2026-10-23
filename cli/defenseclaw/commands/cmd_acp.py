@@ -39,8 +39,8 @@ from defenseclaw.file_permissions import (
     windows_private_file_protection_error,
 )
 
-_SCHEMA_VERSION = "schema-v1.21.0"
-_SCHEMA_SHA256 = "caf62ff962ada396878372ced11efb2c6764e59d90919a38583c319948931a42"
+_SCHEMA_VERSION = ACP_REGISTRY["protocol"]["release"]
+_SCHEMA_SHA256 = ACP_REGISTRY["protocol"]["sha256"]
 # Go strings.TrimSpace excludes U+001C-U+001F, which Python str.strip removes.
 _GO_WHITESPACE = (
     " \t\n\v\f\r\x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
@@ -341,6 +341,16 @@ _LOCK_FIELDS: dict[str, frozenset[str]] = {
     "agent": frozenset({"id", "path", "sha256", "version"}),
     "guard": frozenset({"path", "sha256", "managed_custody"}),
 }
+
+
+def _unique_lock_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Do not let a later JSON field hide one the guard's decoder refuses."""
+    fields: dict[str, Any] = {}
+    for name, value in pairs:
+        if name in fields:
+            raise ValueError(f"duplicate contract lock field {name!r}")
+        fields[name] = value
+    return fields
 
 
 def _lock_is_complete(document: dict[str, Any]) -> bool:
@@ -952,8 +962,8 @@ def _verify_binding(
         problems.append(f"contract lock {lock_problem}")
         return problems
     try:
-        lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        lock = json.loads(lock_path.read_text(encoding="utf-8"), object_pairs_hook=_unique_lock_fields)
+    except (OSError, UnicodeError, ValueError):
         problems.append("contract lock is unreadable")
         return problems
     if not isinstance(lock, dict):
@@ -969,31 +979,33 @@ def _verify_binding(
         or lock_agent.get("id") != agent
     ):
         problems.append("contract lock identity does not match")
-    adopted = lock_client.get("adopted_entries", []) if isinstance(lock_client, dict) else []
-    if not isinstance(adopted, list) or not all(isinstance(name, str) for name in adopted):
-        problems.append("contract lock adopted entries are malformed")
-    else:
-        problems.extend(
-            f"adopted editor entry {name!r} no longer launches the DefenseClaw guard"
-            for name in adopted
-            if name not in names
-        )
-    if isinstance(lock_client, dict):
-        locked_client_path = lock_client.get("config_path")
-        client_digest = lock_client.get("config_sha256")
-        if not isinstance(locked_client_path, str) or Path(locked_client_path).resolve() != client_path.resolve():
-            problems.append("client configuration path does not match")
-        elif settings_usable and (not isinstance(client_digest, str) or client_digest != _client_digest(client_path)):
-            problems.append("client configuration digest has drifted")
+    # Ownership only establishes which entry setup wrote. The guard also
+    # decodes the whole lock with a closed field set and requires the current
+    # version and protocol pins before it will start the agent. In particular,
+    # a stale, nonempty protocol digest still proves ownership of an alias.
+    if not _lock_is_complete(lock):
+        problems.append("contract lock malformed or incomplete")
+        return problems
+    if lock["protocol"]["schema_version"] != _SCHEMA_VERSION or lock["protocol"]["schema_sha256"] != _SCHEMA_SHA256:
+        problems.append("contract lock protocol pins do not match this guard")
+        return problems
+    problems.extend(
+        f"adopted editor entry {name!r} no longer launches the DefenseClaw guard"
+        for name in lock_client.get("adopted_entries", [])
+        if name not in names
+    )
+    locked_client_path = lock_client["config_path"]
+    if Path(locked_client_path).resolve() != client_path.resolve():
+        problems.append("client configuration path does not match")
+    elif settings_usable and lock_client["config_sha256"] != _client_digest(client_path):
+        problems.append("client configuration digest has drifted")
     for key in ("agent", "guard"):
         item = lock.get(key)
-        path_value = item.get("path") if isinstance(item, dict) else None
-        digest = item.get("sha256") if isinstance(item, dict) else None
-        if not isinstance(path_value, str) or not Path(path_value).is_file():
+        path_value = item["path"]
+        if not Path(path_value).is_file():
             problems.append(f"{key} executable is missing")
-        elif digest != _sha256_file(path_value) and not (
+        elif item["sha256"] != _sha256_file(path_value) and not (
             key == "guard"
-            and isinstance(lock_guard, dict)
             and lock_guard.get("managed_custody") is True
             and _managed_guard_custody_is_trusted(path_value)
         ):
@@ -1032,16 +1044,15 @@ def _verify_binding(
         args = entry.get("args")
         options = _guard_options(entry)
         if (
-            entry.get("command") != (lock_guard.get("path") if isinstance(lock_guard, dict) else None)
+            entry.get("command") != lock_guard["path"]
             or not isinstance(args, list)
             or not options
-            or not isinstance(lock_agent, dict)
             or not _launches_locked_agent(entry, options, lock, agent)
             or any(options.get(flag) != expected for flag, expected in {
                 "--client": client, "--agent": agent,
                 "--contract-lock": str(lock_path.resolve()),
                 "--token-file": str(Path(data_dir).expanduser().resolve() / "acp" / (
-                    f"{client}-{agent}.token" if isinstance(lock_guard, dict) and lock_guard.get("managed_custody")
+                    f"{client}-{agent}.token" if lock_guard.get("managed_custody")
                     else ".token"
                 )),
             }.items())
