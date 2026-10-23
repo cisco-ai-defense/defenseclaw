@@ -117,9 +117,9 @@ func managedHookBody(session, event string) string {
 	return `{"hook_event_name":"PreToolUse","session_id":"` + session + `","cwd":"/tmp","tool_name":"Bash","tool_use_id":"` + session + `-tool","tool_input":{"command":"echo ok"}}`
 }
 
-// GAP-0286: a managed hook can receive a proposed allow, then have its
-// answer watchdog block before it gives the answer to the agent. Audit and
-// hook_decision record the decision the agent was given, never the proposal.
+// GAP-0286: a managed hook can receive a proposed allow, then lose its
+// connection before a delivery receipt. The audit records only the delivery
+// it can prove; an explicit block receipt confirms the watchdog's refusal.
 func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 	f := newManagedHookAuditFixture(t, nil)
 	call := func(session, receipt string) {
@@ -197,10 +197,10 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 
 	sessions := []string{"timeout", "delivered", "rejected", "disconnected", "legacy-no-receipt", "prompt", "open-timeout"}
 	want := map[string]string{
-		"timeout":           "block/no_answer",
+		"timeout":           "unconfirmed/no_answer",
 		"delivered":         "allow",
 		"rejected":          "block/rejected",
-		"disconnected":      "block/no_answer",
+		"disconnected":      "unconfirmed/no_answer",
 		"legacy-no-receipt": "unconfirmed/no_answer",
 		"prompt":            "allow",
 		"open-timeout":      "unconfirmed/no_answer",
@@ -213,15 +213,16 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 	}
 	// Every call has its hook_decision, an unconfirmed one included: the
 	// hook result stays a technical ok (schema enum ok|panic).
-	wantDecisions := []string{"allow/ok", "allow/ok", "block/ok", "block/ok", "block/ok", "unconfirmed/ok", "unconfirmed/ok"}
+	wantDecisions := []string{"allow/ok", "allow/ok", "block/ok", "unconfirmed/ok", "unconfirmed/ok", "unconfirmed/ok", "unconfirmed/ok"}
 	if got := f.decisions(t); strings.Join(got, ",") != strings.Join(wantDecisions, ",") {
 		t.Errorf("hook_decision records = %v, want %v", got, wantDecisions)
 	}
 }
 
-// The real managed hook and the real gateway: an answer given in time is
-// confirmed and audited as given, and an allow the gateway sends after the
-// hook's answer budget is audited as the block the agent got.
+// The real managed hook and gateway: an answer given in time is confirmed
+// and audited as given. When the answer arrives after the hook's budget and
+// its block receipt cannot get back, the gateway records unconfirmed rather
+// than claiming a block it cannot prove from its side of the connection.
 func TestManagedHookAndGatewayAuditTheAnswerTheAgentGot(t *testing.T) {
 	var late atomic.Bool
 	f := newManagedHookAuditFixture(t, func(w http.ResponseWriter) http.ResponseWriter {
@@ -256,7 +257,7 @@ func TestManagedHookAndGatewayAuditTheAnswerTheAgentGot(t *testing.T) {
 	if code, out := run("hook-late"); code == 0 && !strings.Contains(out, "deny") {
 		t.Fatalf("late answer was taken: code=%d output=%q", code, out)
 	}
-	want := map[string]string{"hook-in-time": "allow", "hook-late": "block/no_answer"}
+	want := map[string]string{"hook-in-time": "allow", "hook-late": "unconfirmed/no_answer"}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		got := f.audited(t, "hook-in-time", "hook-late")
@@ -368,7 +369,7 @@ func TestUnreceiptedManagedHookDecisions(t *testing.T) {
 		{"claudecode", "Stop", gone, "allow"},
 		{"codex", "PreToolUse", t.Context(), "unconfirmed"},
 		{"copilot", "preToolUse", t.Context(), "unconfirmed"},
-		{"opencode", "tool.execute.before", gone, "block"},
+		{"opencode", "tool.execute.before", gone, "unconfirmed"},
 		{"claudecode", "UserPromptSubmit", gone, "block"},
 	} {
 		if got := api.unreceiptedHookDecision(tc.ctx, tc.connector, tc.event, allow).Action; got != tc.want {

@@ -92,36 +92,34 @@ const hookActionUnconfirmed = "unconfirmed"
 
 // deliveredHookDecision is the decision of a call that asked for a delivery
 // receipt: the offered answer once the hook acknowledged it, and the hook's
-// own block when it refused it. Without a receipt the hook's answer watchdog
-// won or the connection was lost: a closed hook blocked the call, and an
-// administrator-selected open outage leaves it unconfirmed.
-func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookResponse, receipt string) agentHookResponse {
+// own block when it refused it. With no receipt, the gateway cannot know
+// whether the hook consumed its offered answer before the connection closed.
+// The audit therefore records an unconfirmed delivery unless either outcome
+// would have been a block.
+func deliveredHookDecision(resp agentHookResponse, receipt string) agentHookResponse {
 	switch receipt {
 	case hookexec.HookDeliveryReceiptAck:
 		return resp
 	case hookexec.HookDeliveryReceiptBlock:
 		return failedClosedHookDelivery(resp, "managed hook rejected the proposed answer")
 	}
-	switch {
-	case a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) == "open":
-		return unconfirmedHookDelivery(resp)
-	case resp.Action == "block":
+	if resp.Action == "block" {
 		// The policy block and the fallback have the same result.
 		return resp
 	}
-	return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
+	return unconfirmedHookDelivery(resp)
 }
 
 // unreceiptedHookDecision is the decision of a standalone managed call that
 // sent no delivery receipt.
-//   - A caller that hung up before the decision was recorded never got it: a
-//     closed hook blocked the call.
 //   - A native hook's tool call without a receipt comes from an earlier hook
 //     binary (a package upgrade in flight) or a connection without full
-//     duplex. Its answer watchdog may have blocked after the gateway decided,
-//     so only a block is known.
+//     duplex. It may have taken the answer before closing the connection, or
+//     its watchdog may have blocked, so only an evaluated block is known.
 //   - A 1.0.4 hook that released its request before the gateway's late 103
 //     took the answer without a receipt, the same as an earlier binary.
+//   - A non-native caller that hung up before the decision was recorded never
+//     got it: a closed hook blocked the call.
 //   - Every other call keeps its evaluated decision. In-agent plugins, policy
 //     bridges and events without an answer deadline send no receipt.
 func (a *APIServer) unreceiptedHookDecision(ctx context.Context, connectorName, event string, resp agentHookResponse) agentHookResponse {
@@ -133,9 +131,11 @@ func (a *APIServer) unreceiptedHookDecision(ctx context.Context, connectorName, 
 	switch {
 	case closed && resp.Action == "block":
 		return resp
+	case hookexec.DeliveryReceiptEvent(connectorName, event):
+		return unconfirmedHookDelivery(resp)
 	case closed && gone:
 		return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
-	case gone, hookexec.DeliveryReceiptEvent(connectorName, event):
+	case gone:
 		return unconfirmedHookDelivery(resp)
 	}
 	return resp

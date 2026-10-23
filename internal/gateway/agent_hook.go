@@ -716,7 +716,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			if receipt == hookexec.HookDeliveryReleased {
 				resp = a.unreceiptedHookDecision(r.Context(), connectorName, req.HookEventName, resp)
 			} else {
-				resp = a.deliveredHookDecision(connectorName, resp, receipt)
+				resp = deliveredHookDecision(resp, receipt)
 			}
 		} else {
 			resp = a.unreceiptedHookDecision(r.Context(), connectorName, req.HookEventName, resp)
