@@ -18,6 +18,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -133,7 +135,7 @@ func newHookCmd() *cobra.Command {
 				var err error
 				input, err = openCursorHookInputFile(opts.HookDir, inputFile)
 				if err != nil {
-					return err
+					return hookFailure(hookFailureContext{connector, failMode, enterpriseManaged}, err)
 				}
 				opts.Stdin = input
 			}
@@ -310,21 +312,56 @@ func (c hookFailureContext) resolve() hookFailureContext {
 	return c
 }
 
-// hookFailureExitCode is the exit status of a hook invocation that fails
-// before hookexec runs: an unknown flag, a malformed or unlisted flag value,
-// a positional argument. Cobra reports these as 1. Kiro treats every status
-// other than 0 and 2 as a failed hook, shows its stderr as a warning and
-// lets the prompt or tool call go ahead (kiro.dev/docs/hooks/actions). A
-// Kiro hook that fails closed (an administrator-managed hook, or any hook
-// whose flag or hook sidecar does not say open, resolved as hookexec
-// resolves it) exits 2, the only status Kiro honors as
-// a block. An explicitly fail-open Kiro hook and every other connector keep 1.
-func hookFailureExitCode(failure hookFailureContext) int {
-	failure = failure.resolve()
-	if strings.EqualFold(strings.TrimSpace(failure.connector), "kiro") && hookPreRunFailsClosed(failure) {
-		return 2
+// hookFailureIO is the hook process's stdin, stdout and stderr for a failure
+// answered before Run; a variable for tests.
+var hookFailureIO = func() (io.Reader, io.Writer, io.Writer) { return os.Stdin, os.Stdout, os.Stderr }
+
+// answerHookFailureClosed answers a hook invocation that fails before
+// hookexec runs (an unknown flag, a malformed or unlisted flag value, a
+// positional argument, an unusable Cursor input file) whose policy is
+// closed (hookPreRunFailsClosed: a managed hook, any hook while its
+// account's installer holds the data directory, else a mode that is not
+// open). Cobra reports these as 1, which Claude Code, Codex, Kiro, Hermes,
+// Copilot and Antigravity all run the call on: hookexec answers with the
+// connector's own block for the event the raw arguments name (GAP-0862,
+// GAP-0982). A Secure Client hook keeps its upstream statuses, Kiro's
+// blocking 2 included; an open hook and an unknown connector keep 1.
+func answerHookFailureClosed(failure hookFailureContext, err error) (int, bool) {
+	name := strings.ToLower(strings.TrimSpace(failure.connector))
+	if !hookPreRunFailsClosed(failure) || !slices.Contains(hookexec.SupportedConnectors(), name) {
+		return 0, false
 	}
-	return 1
+	managed := failure.managed || implicitEnterpriseManagedHook()
+	if managed && secureClientHost() {
+		if name == "kiro" {
+			return 2, true
+		}
+		return 0, false
+	}
+	home, trusted := trustedNativeHookHome()
+	if !trusted {
+		home = config.DefaultDataPath()
+	}
+	stdin, stdout, stderr := hookFailureIO()
+	opts := hookexec.Options{
+		Connector:         name,
+		Event:             hookRawFlagValue("event"),
+		HookContractID:    hookRawFlagValue("hook-contract"),
+		HookSurface:       strings.TrimSpace(hookRawFlagValue("hook-surface")),
+		Home:              home,
+		ManagedEnterprise: managed,
+		Stdin:             stdin,
+		Stdout:            stdout,
+		Stderr:            stderr,
+	}
+	reason := "hook invocation error: " + err.Error()
+	if managed {
+		opts.ExplainUnenrolledAccount = implicitEnterpriseManagedHook()
+		opts.ManagedRuntimeFailure = reason
+	} else {
+		opts.InvocationFailure = reason
+	}
+	return hookexec.Run(context.Background(), opts), true
 }
 
 // hookPreRunFailsClosed reports whether the failed invocation's policy is to
@@ -364,13 +401,13 @@ func nativeHookFailMode(mode string) string {
 	return "closed"
 }
 
-// hookFailure labels a pre-run hook failure with the connector's failure
-// status (see hookFailureExitCode).
+// hookFailure answers a pre-run hook failure closed where its policy is
+// closed (answerHookFailureClosed) and labels it with that answer's status.
 func hookFailure(failure hookFailureContext, err error) error {
 	if err == nil {
 		return nil
 	}
-	if code := hookFailureExitCode(failure); code != 1 {
+	if code, answered := answerHookFailureClosed(failure.resolve(), err); answered {
 		return withExitCode(err, code)
 	}
 	return err

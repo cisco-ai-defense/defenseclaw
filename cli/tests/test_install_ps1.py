@@ -17,6 +17,7 @@ scripts/test-install-lifecycle.ps1. These checks pin what other code relies on.
 from __future__ import annotations
 
 import os
+import json
 import re
 import shutil
 import subprocess
@@ -1213,6 +1214,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $Staging = '{staging}'
 $SetupHookState = '{state}'
+$SetupDelegatedHooks = Join-Path '{staging}' 'delegated'
 $Setup = {setup}
 $events = New-Object System.Collections.Generic.List[string]
 $script:looks = @({looks})
@@ -1235,6 +1237,8 @@ function Get-RestoredNote {{ return 'restored' }}
 function Get-UtcClock {{ return 'T' }}
 function Write-Info([string]$m) {{ }}
 function Die([string]$m) {{ throw $m }}
+function Write-Warn([string]$m) {{ $events.Add("warn") }}
+function Protect-SetupLauncherFile([string]$Path) {{ }}
 """
 
 
@@ -1309,6 +1313,11 @@ def test_setup_hook_launcher_answers_until_the_fail_mode_hold_is_ready(
     script.write_text(
         stubs
         + _ps1_function("Move-Path")
+        + _ps1_function("Get-Field")
+        + _ps1_function("Read-Json")
+        + _ps1_function("Invoke-Quietly")
+        + _ps1_function("Test-SetupLauncherTrampoline")
+        + _ps1_function("Publish-SetupLauncherTrampoline")
         + _ps1_function("Disable-SetupHooks")
         + _ps1_function("Enable-SetupHooks")
         + _ps1_function("Restore-SetupInstall")
@@ -1887,3 +1896,139 @@ Write-Output "WAITS=$script:waits MISSING_AT_WAIT=$script:missingAtWait"
         kept = [tmp_path / name for name in leftovers if name.startswith("defenseclaw-hook.exe.old-")]
         assert len(kept) == 2 and any(path.name.endswith(".restore") for path in kept), leftovers
         assert all(path.read_text(encoding="ascii") == old_body for path in kept)
+
+
+_TRAMPOLINE_STUBS = """
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$Staging = '{staging}'
+$SetupHookState = '{state}'
+$SetupDelegatedHooks = '{delegated}'
+$BinDir = '{bin}'
+$DataDir = '{data}'
+$protected = New-Object System.Collections.Generic.List[string]
+function Protect-SetupLauncherFile([string]$Path) {{ $protected.Add($Path) }}
+function Write-Warn([string]$m) {{ Write-Host "warn $m" }}
+"""
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
+@pytest.mark.parametrize("shell", _POWERSHELLS)
+@pytest.mark.parametrize("case", ["trampoline", "full-launcher", "launcher-changed", "refresh", "enable"])
+def test_setup_launcher_delegates_to_this_releases_hook(tmp_path: Path, shell: str, case: str) -> None:
+    # GAP-1000: an agent session started before a Setup -> 1.0.x upgrade keeps
+    # running Setup's stable launcher, which answered every call with exit 0
+    # and no decision once its state was set aside. Setup 0.8.10's launcher is
+    # a trampoline: the installer points it at a private copy of this
+    # release's hook (closed during the install, the gateway's verdict after),
+    # keeps Setup's own state to put back, and refreshes the copy on every
+    # later install. A launcher it cannot point elsewhere keeps the no-op.
+    runtime, staging, bin_dir, data = tmp_path / "HookRuntime", tmp_path / "staging", tmp_path / "bin", tmp_path / "data"
+    for folder in (runtime, staging / "bin", bin_dir, data):
+        folder.mkdir(parents=True)
+    launcher = runtime / "defenseclaw-hook.exe"
+    launcher.write_bytes(b"setup-0.8.10-trampoline")
+    state = runtime / "hook-runtime-state.json"
+    original = {
+        "schema_version": 2,
+        "status": "active",
+        "runtime_root": str(runtime),
+        "launcher_path": str(launcher),
+        "launcher_sha256": _sha256(launcher) if case != "launcher-changed" else "0" * 64,
+        "launcher_kind": "trampoline",
+        "hook_path": str(tmp_path / "Programs" / "DefenseClaw" / "bin" / "defenseclaw-hook.exe"),
+        "hook_sha256": "1" * 64,
+        "data_root": str(data),
+        "gateway_path": str(tmp_path / "Programs" / "DefenseClaw" / "bin" / "defenseclaw-gateway.exe"),
+        "gateway_sha256": "2" * 64,
+        "transaction_id": "3" * 32,
+    }
+    if case == "full-launcher":
+        for key in ("launcher_kind", "hook_path", "hook_sha256"):
+            del original[key]
+    original_text = json.dumps(original)
+    state.write_text(original_text, encoding="utf-8")
+    for folder, label in ((staging / "bin", "staged"), (bin_dir, "live")):
+        (folder / "defenseclaw-hook.exe").write_bytes(f"{label}-1.0.4-hook".encode())
+        (folder / "defenseclaw-gateway.exe").write_bytes(f"{label}-1.0.4-gateway".encode())
+    delegated = runtime / "delegated"
+    actions = {
+        "trampoline": "Disable-SetupHooks",
+        "full-launcher": "Disable-SetupHooks",
+        "launcher-changed": "Disable-SetupHooks",
+        "refresh": (
+            "Disable-SetupHooks; $first = (Get-Content -LiteralPath $SetupHookState -Raw | ConvertFrom-Json).hook_path; "
+            "Write-Host \"first=$first\"; "
+            "[void](Publish-SetupLauncherTrampoline $SetupHookState (Join-Path $BinDir 'defenseclaw-hook.exe') (Join-Path $BinDir 'defenseclaw-gateway.exe'))"
+        ),
+        "enable": "Disable-SetupHooks; Enable-SetupHooks",
+    }
+    script = tmp_path / "trampoline.ps1"
+    script.write_text(
+        _TRAMPOLINE_STUBS.format(staging=staging, state=state, delegated=delegated, bin=bin_dir, data=data)
+        + "".join(
+            _ps1_function(name)
+            for name in (
+                "Get-Field",
+                "Read-Json",
+                "Move-Path",
+                "Invoke-Quietly",
+                "Test-SetupLauncherTrampoline",
+                "Publish-SetupLauncherTrampoline",
+                "Disable-SetupHooks",
+                "Enable-SetupHooks",
+            )
+        )
+        + actions[case]
+        + "\nforeach ($p in $protected) { Write-Host \"protected $p\" }\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "warn" not in completed.stdout, completed.stdout
+    kept = staging / "hook-runtime-state.json"
+    if case in ("full-launcher", "launcher-changed"):
+        # Nothing to delegate to: Setup's state is set aside, as before.
+        assert not state.exists() and kept.read_text(encoding="utf-8") == original_text, completed.stdout
+        assert not delegated.exists() or not any(delegated.iterdir()), completed.stdout
+        return
+    if case == "enable":
+        assert state.read_text(encoding="utf-8") == original_text, completed.stdout
+        assert not kept.exists(), completed.stdout
+        return
+    assert kept.read_text(encoding="utf-8") == original_text, completed.stdout
+    live = json.loads(state.read_text(encoding="utf-8-sig"))
+    copy = Path(live["hook_path"])
+    source = (bin_dir if case == "refresh" else staging / "bin") / "defenseclaw-hook.exe"
+    assert copy.parent.parent == delegated and copy.name == "defenseclaw-hook.exe", live
+    assert copy.read_bytes() == source.read_bytes() and live["hook_sha256"] == _sha256(copy), live
+    assert live["transaction_id"] == copy.parent.name and re.fullmatch(r"[0-9a-f]{32}", live["transaction_id"]), live
+    for key in ("runtime_root", "launcher_path", "launcher_sha256"):
+        assert live[key] == original[key], (key, live)
+    assert (live["schema_version"], live["status"], live["launcher_kind"]) == (2, "active", "trampoline"), live
+    assert live["data_root"] == str(data) and live["gateway_path"] == str(bin_dir / "defenseclaw-gateway.exe"), live
+    assert live["gateway_sha256"] == _sha256(source.parent / "defenseclaw-gateway.exe"), live
+    assert f"protected {copy}" in completed.stdout, completed.stdout
+    # Exactly one copy is left: an earlier one goes once a newer one is live.
+    assert [p.name for p in delegated.iterdir()] == [copy.parent.name], list(delegated.iterdir())
+    if case == "refresh":
+        assert f"first={copy}" not in completed.stdout, completed.stdout
+
+
+def test_the_installer_keeps_setups_launcher_pointed_at_its_own_hook() -> None:
+    # GAP-1000: every place that sets Setup's launcher state aside or puts it
+    # back goes through the trampoline helpers.
+    assert "Publish-SetupLauncherTrampoline $state (Join-Path $Staging" in _ps1_function("Disable-SetupHooks")
+    assert "Test-SetupLauncherTrampoline" in _ps1_function("Enable-SetupHooks")
+    assert "Publish-SetupLauncherTrampoline" in _ps1_function("Remove-SetupInstall")
+    assert "Test-SetupLauncherTrampoline" in _ps1_function("Complete-Swap")
+    assert "Enable-SetupHooks" in _ps1_function("Resume-InterruptedRun")

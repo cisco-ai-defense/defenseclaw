@@ -212,7 +212,15 @@ func queryManagedGatewayServicePID(serviceName string) (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
-	service, err := windows.OpenService(manager, name, windows.SERVICE_QUERY_STATUS)
+	// Users may read the gateway service's configuration (its DACL grants
+	// BU SERVICE_QUERY_CONFIG); a start type that cannot be read counts as
+	// disabled (managedGatewayStoppedError).
+	configKnown := true
+	service, err := windows.OpenService(manager, name, windows.SERVICE_QUERY_STATUS|windows.SERVICE_QUERY_CONFIG)
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		configKnown = false
+		service, err = windows.OpenService(manager, name, windows.SERVICE_QUERY_STATUS)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -230,14 +238,44 @@ func queryManagedGatewayServicePID(serviceName string) (uint32, error) {
 		return 0, err
 	}
 	if status.CurrentState != windows.SERVICE_RUNNING || status.ProcessId == 0 {
-		return 0, fmt.Errorf(
-			"%w (state=%d pid=%d)",
-			errManagedGatewayNotRunning,
-			status.CurrentState,
-			status.ProcessId,
-		)
+		startType, known := uint32(0), false
+		if configKnown {
+			startType, known = managedGatewayServiceStartType(service)
+		}
+		return 0, managedGatewayStoppedError(status.CurrentState, status.ProcessId, startType, known)
 	}
 	return status.ProcessId, nil
+}
+
+// managedGatewayServiceStartType reads the service's start type.
+func managedGatewayServiceStartType(service windows.Handle) (uint32, bool) {
+	var needed uint32
+	err := windows.QueryServiceConfig(service, nil, 0, &needed)
+	if !errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) || needed == 0 || needed > 64<<10 {
+		return 0, false
+	}
+	buffer := make([]byte, needed)
+	config := (*windows.QUERY_SERVICE_CONFIG)(unsafe.Pointer(&buffer[0]))
+	if err := windows.QueryServiceConfig(service, config, needed, &needed); err != nil {
+		return 0, false
+	}
+	return config.StartType, true
+}
+
+// managedGatewayStoppedError is the error of a gateway service that is not
+// running: errManagedGatewayNotRunning, and errManagedGatewayQuiesced too
+// when its start type is disabled (the enterprise lifecycle disables every
+// service before it stops it for a package transition) or cannot be read.
+func managedGatewayStoppedError(state, pid, startType uint32, startTypeKnown bool) error {
+	switch {
+	case !startTypeKnown:
+		return fmt.Errorf("%w: %w (state=%d pid=%d start type unreadable)",
+			errManagedGatewayNotRunning, errManagedGatewayQuiesced, state, pid)
+	case startType == windows.SERVICE_DISABLED:
+		return fmt.Errorf("%w: %w (state=%d pid=%d start type disabled)",
+			errManagedGatewayNotRunning, errManagedGatewayQuiesced, state, pid)
+	}
+	return fmt.Errorf("%w (state=%d pid=%d)", errManagedGatewayNotRunning, state, pid)
 }
 
 func connectedManagedGatewayPID(conn net.Conn) (uint32, error) {

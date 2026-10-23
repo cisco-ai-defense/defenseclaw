@@ -50,8 +50,8 @@
     "/usr/local/lib/defenseclaw/hooks/codex-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 15043,
-      "sha256": "79137452a40c00c6dc95fb25d59315ad7de39eb9dc7e35b3da5d2b10a8a2ba7e"
+      "size": 15430,
+      "sha256": "cbb3460c13c4e37d4514acb01aeb19fd8d72a0fc6bed176383b37438ec34d9b9"
     },
     "/usr/local/lib/defenseclaw/hooks/codex-notify.sh": {
       "mode": "-rwxr-xr-x",

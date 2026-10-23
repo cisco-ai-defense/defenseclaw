@@ -423,9 +423,11 @@ OUTPUT=$(echo "$RESULT" | _dc_jq -c '.claude_code_output // empty' 2>/dev/null) 
 {{if not .SecureClient}}# A block or confirmation reaches Claude Code as the native object, which
 # Claude Code acts on: one that does not deny (or ask) for this event would
 # let the call run beside the gateway's block. The hook refuses such an
-# answer closed, in every fail mode, as the native hook does (GAP-0950).
+# answer closed, in every fail mode, as the native hook does (GAP-0950). A
+# confirmation with no object at all would let the call run too: Claude Code
+# asks only through it (GAP-0983).
+_DC_GATEWAY_ACTION="$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null)" || _DC_GATEWAY_ACTION=""
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
-  _DC_GATEWAY_ACTION="$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null)" || _DC_GATEWAY_ACTION=""
   case "$_DC_GATEWAY_ACTION" in
     block|confirm)
       _DC_PAYLOAD_EVENT="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || _DC_PAYLOAD_EVENT=""
@@ -435,6 +437,9 @@ if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
       fi
       ;;
   esac
+elif [ "$_DC_GATEWAY_ACTION" = "confirm" ]; then
+  [ "$FAIL_MODE" = "closed" ] || FAIL_MODE=closed
+  fail_response "confirm without native output in gateway response"
 fi
 {{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
