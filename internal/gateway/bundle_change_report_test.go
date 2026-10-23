@@ -22,6 +22,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -358,7 +359,11 @@ func TestBundleReceiptReporterSaysWhichOfferOfAChangeIsItsFirst(t *testing.T) {
 		}
 	}
 	// A reporter that could not read the spool at its first poll takes no
-	// change as a first offer until it has read it.
+	// change as a first offer until it has read it. On Windows a path under
+	// a file reads as one that does not exist, which holds no change either.
+	if runtime.GOOS == "windows" {
+		return
+	}
 	file := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(file, []byte("not a folder"), 0o600); err != nil {
 		t.Fatal(err)
