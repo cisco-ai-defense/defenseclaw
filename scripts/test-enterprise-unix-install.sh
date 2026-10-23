@@ -9,7 +9,7 @@
 #   1. installs the package; its postinstall runs `ensure --from-package`
 #      (on Linux it then checks what this systemd reports loading the units)
 #   2. applies a config that enables two connectors (a real config change)
-#   3. runs ensure again, which must be a no-op
+#   3. runs ensure again (macOS no-op; Linux still awaits the first reboot)
 #   4. runs verify and status, checks the services and runs the MDM detect.sh
 #   5. uninstalls (dpkg -r / rpm -e run the lifecycle from preremove; macOS
 #      runs `enterprise macos uninstall`) and checks nothing is left running,
@@ -39,8 +39,8 @@
 #
 # Every lifecycle result is saved under --results and checked with
 # scripts/check_enterprise_lifecycle_result.py. For the lifecycle commands the
-# lane runs itself, the process exit status must also be 0 and equal the
-# result's exit_code.
+# lane runs itself, the process exit status must equal the result's exit_code.
+# Only an explicitly expected failed result may have a nonzero status.
 #
 # It installs and removes system services: run it as root only on a
 # disposable host (a CI runner or a container), never on a workstation.
@@ -219,29 +219,65 @@ finish() {
 trap finish EXIT
 
 # check <result-file> <label> <checker arguments...>: the step fails on any
-# error and on any warning the arguments do not allow (--allow-warning), and,
-# for a lifecycle the lane ran itself, when the process status disagrees with
-# the result (exit_status_matches).
+# error other than the expected reboot or injected fault, and on any warning
+# the arguments do not allow (--allow-warning). For a lifecycle the lane ran
+# itself, the process status must agree with the result (exit_status_matches).
 check() {
     local file=$1 label=$2
     shift 2
     "$python" "$checker" "$file" --label "$label" --platform "$platform" "$@"
-    exit_status_matches "$file" "$label"
+    exit_status_matches "$file" "$label" "$@"
 }
 
 # exit_status_matches <result-file> <label>: MDM scripts and remediation act
 # on the process exit status, not on the JSON, so the status run_lifecycle
-# kept beside the result must be 0 and equal the result's exit_code. Results
+# kept beside the result must equal the result's exit_code. A nonzero result is
+# accepted only for a declared expected failure. Results
 # written by the package scripts have no status file; the lane checks the
 # package manager's own exit status for those.
 exit_status_matches() {
     local file=$1 label=$2 status_file=${1%.json}.rc rc reported
+    shift 2
+    local expected_failure=0 arg
+    for arg in "$@"; do
+        case "$arg" in --expect-error | --reboot-pending) expected_failure=1 ;; esac
+    done
     [ -f "$status_file" ] || return 0
     rc=$(cat "$status_file")
     reported=$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("exit_code"))' "$file")
-    if [ "$rc" != 0 ] || [ "$rc" != "$reported" ]; then
+    if [ "$rc" != "$reported" ] || { [ "$rc" != 0 ] && [ "$expected_failure" != 1 ]; }; then
         die "$label: the lifecycle process exited $rc, its result reports exit_code $reported"
     fi
+}
+
+# A pre-reboot Linux result is allowed only while the host really has the
+# applied restriction and a persistent boot-time sysctl file.
+assert_userns_restriction() {
+    [ "$platform" = linux ] || return 0
+    [ "$(cat /proc/sys/user/max_user_namespaces)" = 0 ] || die "live user.max_user_namespaces is not zero"
+    ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope)
+    case "$ptrace_scope" in
+        2 | 3) ;;
+        *) die "live kernel.yama.ptrace_scope is below two" ;;
+    esac
+    [ -f /etc/sysctl.d/99-zz-defenseclaw-userns.conf ] || die "the managed user namespace sysctl file is missing"
+    grep -Fxq 'user.max_user_namespaces = 0' /etc/sysctl.d/99-zz-defenseclaw-userns.conf ||
+        die "the managed user namespace sysctl file does not persist zero"
+    grep -Fxq "kernel.yama.ptrace_scope = $ptrace_scope" /etc/sysctl.d/99-zz-defenseclaw-userns.conf ||
+        die "the managed sysctl file does not persist ptrace scope $ptrace_scope"
+    # PRoot uses PTRACE_TRACEME as an ordinary user. Fork first so the
+    # potential tracer (the parent) is also unprivileged; runuser itself is a
+    # privileged parent and could make a direct TRACEME check pass at scope 2.
+    as_standard_user "$python" -c '
+import ctypes, errno, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+pid = os.fork()
+if pid == 0:
+    result = libc.ptrace(0, 0, 0, 0)  # PTRACE_TRACEME
+    os._exit(0 if result == -1 and ctypes.get_errno() == errno.EPERM else 1)
+_, status = os.waitpid(pid, 0)
+sys.exit(0 if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 else 1)
+' || die "a standard user can still trace a child process"
 }
 
 # lifecycle <result-name> <action> [arguments...]: run the installed gateway's
@@ -551,7 +587,9 @@ seed_upgrade_secret() {
 # upgrade_secret_kept: the stored credential holds exactly upgrade_secret_value.
 upgrade_secret_kept() {
     [ -n "$upgrade_secret_value" ] && [ -f "$secrets_dir/$upgrade_secret_name" ] &&
-        printf '%s' "$upgrade_secret_value" | cmp -s - "$secrets_dir/$upgrade_secret_name"
+        printf '%s' "$upgrade_secret_value" |
+            "${python:-python3}" -c 'import pathlib, sys; sys.exit(pathlib.Path(sys.argv[1]).read_bytes() != sys.stdin.buffer.read())' \
+                "$secrets_dir/$upgrade_secret_name"
 }
 
 write_admin_config() {
@@ -606,6 +644,8 @@ upgrade_lane() {
     step "apply the administrator config on the previous release"
     write_admin_config
     lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane
+    # The older binary may report open namespaces as a warning. The new
+    # release reports an error until reboot; these allowances are old-only.
     check "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
         --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"
     cp "$stage/config.yaml" "$results/config-before.yaml"
@@ -639,9 +679,11 @@ upgrade_lane() {
     # it after it saved this result.
     held=()
     [ "$platform" != linux ] || held=(--held-service defenseclaw-enterprise-apply.path)
+    fault_errors=(--expect-error lifecycle_test_fault)
+    [ "$platform" != linux ] || fault_errors+=(--expect-error unprivileged_user_namespaces)
     "$python" "$checker" "$results/05-upgrade-fault.json" --label upgrade-fault --platform "$platform" \
-        --action ensure --expect-error lifecycle_test_fault --ready ${held[@]+"${held[@]}"} \
-        --allow-warning lifecycle_test_fault --allow-warning rolled_back --allow-warning unprivileged_user_namespaces
+        --action ensure "${fault_errors[@]}" --ready ${held[@]+"${held[@]}"} \
+        --allow-warning lifecycle_test_fault --allow-warning rolled_back
     services_running
     if [ "$platform" = linux ]; then
         systemctl is-active --quiet defenseclaw-enterprise-apply.path ||
@@ -655,8 +697,9 @@ upgrade_lane() {
     step "upgrade to $version (ensure --from-package)"
     lifecycle 06-upgrade ensure --from-package --reason ci-upgrade-lane
     # The version 9 config keeps its bytes, so its generation does not drop.
-    check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready --complete \
+    check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready "${complete_or_pending[@]}" \
         "${policy_checks[@]}" --policy-applied --config-generation-above "$((previous_generation - 1))"
+    assert_userns_restriction
     sandbox_files_present
     launcher_offers_only_sandbox
     cp "$config" "$results/config-upgraded.yaml"
@@ -670,6 +713,14 @@ upgrade_lane() {
 # Both connectors' machine policy is written, owned by DefenseClaw and locked.
 policy_checks=(--machine-policy claudecode --machine-policy codex
     --machine-policy-enforced claudecode --machine-policy-enforced codex)
+complete_or_pending=(--complete)
+converged=(--noop)
+initial_pending=()
+if [ "$platform" = linux ]; then
+    complete_or_pending=(--reboot-pending)
+    converged=(--changed)
+    initial_pending=(--reboot-pending)
+fi
 if [ -n "$upgrade_from" ]; then
     upgrade_lane
 else
@@ -687,7 +738,8 @@ else
     # host with eligible users is honestly security-incomplete (GAP-0266); the
     # step after this one applies the config and requires --complete.
     check "$results/01-package-install.json" package-install --action ensure --changed --installed --version "$version" --ready \
-        --coverage-complete --allow-warning no_connectors_enabled
+        --coverage-complete "${initial_pending[@]}" --allow-warning no_connectors_enabled
+    assert_userns_restriction
     [ "$install_rc" -eq 0 ] || die "the package manager exited $install_rc"
     [ -x "$gateway" ] || die "$gateway was not installed"
     [ -f "$config" ] || die "the lifecycle did not write $config"
@@ -714,7 +766,8 @@ else
     write_admin_config
     lifecycle 02-ensure-config ensure --from-package --config "$stage/config.yaml" --reason ci-install-lane
     check "$results/02-ensure-config.json" ensure-config --action ensure --changed --installed --version "$version" --ready \
-        --complete "${policy_checks[@]}"
+        "${complete_or_pending[@]}" "${policy_checks[@]}"
+    assert_userns_restriction
     [ "$(cksum <"$stage/config.yaml")" = "$(cksum <"$config")" ] || die "$config is not the applied administrator config"
     [ -n "$(policy_entries)" ] || die "no DefenseClaw machine-policy entry was written under ${policy_dirs[*]}"
     echo "machine policy entries: $(policy_entries | tr '\n' ' ')"
@@ -727,29 +780,31 @@ fi
 # ---- converge ----------------------------------------------------------------
 # The apply trigger runs ensure after the admin config lands; on a slow runner it can
 # still hold the lifecycle lock, so wait for it instead of failing with lifecycle_busy.
-step "ensure again (must be a no-op)"
+step "ensure again (converged; Linux still awaits reboot)"
 lifecycle 03-ensure-noop ensure --from-package --reason ci-install-lane --lock-wait 2m
-check "$results/03-ensure-noop.json" ensure-noop --action ensure --noop --installed --version "$version" --ready \
-    --complete
+check "$results/03-ensure-noop.json" ensure-noop --action ensure "${converged[@]}" --installed --version "$version" --ready \
+    "${complete_or_pending[@]}"
+assert_userns_restriction
 
 step "verify"
 lifecycle 04-verify verify
 retry_busy 04-verify verify
-# verify reports whether unprivileged user namespaces are open, a setting of
-# the host's kernel (the runner's, or the container host's), not of the package.
 check "$results/04-verify.json" verify --action verify --installed --version "$version" --ready \
-    --complete "${policy_checks[@]}" --allow-warning unprivileged_user_namespaces
+    "${complete_or_pending[@]}" "${policy_checks[@]}"
+assert_userns_restriction
 
 step "status"
 lifecycle 05-status status
 retry_busy 05-status status
 check "$results/05-status.json" status --action status --installed --version "$version" \
-    --complete "${policy_checks[@]}"
+    "${complete_or_pending[@]}" "${policy_checks[@]}"
 services_running
 
 step "MDM detection (detect.sh --require-healthy)"
 detected=$(detect_value --require-healthy --min-version "$version" || true)
-[ "$detected" = "$version" ] || die "detect.sh printed '$detected', want '$version'"
+expected_detection=$version
+[ "$platform" != linux ] || expected_detection=unhealthy
+[ "$detected" = "$expected_detection" ] || die "detect.sh printed '$detected', want '$expected_detection'"
 echo "detect.sh: $detected"
 
 # ---- uninstall ---------------------------------------------------------------

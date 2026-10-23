@@ -184,9 +184,6 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		r.SecurityComplete = false
 	}
 	if strict {
-		l.warnUnprivilegedUserNamespaces()
-	}
-	if strict {
 		// An agent the guardian or the enumerator could not protect for one
 		// account (an unverified hook contract, an agent it could not enroll)
 		// stays a warning for that account: the rest of the host is
@@ -866,9 +863,10 @@ func (e *Env) lastPackageInstallFailure() string {
 		return ""
 	}
 	var last struct {
-		OK     bool                       `json:"ok"`
-		Action string                     `json:"action"`
-		Errors []enterprisestatus.Message `json:"errors"`
+		OK        bool                       `json:"ok"`
+		Installed bool                       `json:"installed"`
+		Action    string                     `json:"action"`
+		Errors    []enterprisestatus.Message `json:"errors"`
 	}
 	if json.Unmarshal(raw, &last) != nil || last.OK || len(last.Errors) == 0 {
 		return ""
@@ -878,7 +876,29 @@ func (e *Env) lastPackageInstallFailure() string {
 	default:
 		return ""
 	}
+	if e.GOOS == "linux" && last.Installed {
+		// The package applied, but a user namespace from before the host
+		// restriction can survive until reboot. Report that through status
+		// and verify without claiming the package itself was not applied.
+		onlyReboot := true
+		for _, problem := range last.Errors {
+			if problem.Code != codeUserNamespaces {
+				onlyReboot = false
+			}
+		}
+		if onlyReboot {
+			return ""
+		}
+	}
 	first := last.Errors[0]
+	if first.Code == codeUserNamespaces {
+		for _, problem := range last.Errors[1:] {
+			if problem.Code != codeUserNamespaces {
+				first = problem
+				break
+			}
+		}
+	}
 	return strings.TrimSpace(first.Code + ": " + first.Message)
 }
 
@@ -1119,6 +1139,24 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
 	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
+	if record != nil {
+		if problem := env.userNamespaceProblem(); problem != "" {
+			r.AddError(codeUserNamespaces, problem)
+			r.SecurityComplete = false
+		}
+		if problem := env.ptraceProblem(); problem != "" {
+			r.AddError(codeUnprivilegedPtrace, problem)
+			r.SecurityComplete = false
+		}
+		if problem := env.userNamespaceBootProblem(); problem != "" {
+			r.AddError(codeUserNamespaces, problem)
+			r.SecurityComplete = false
+		}
+		if problem := env.ptraceBootProblem(); problem != "" {
+			r.AddError(codeUserNamespaces, problem)
+			r.SecurityComplete = false
+		}
+	}
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeChangedGuardianFiles()

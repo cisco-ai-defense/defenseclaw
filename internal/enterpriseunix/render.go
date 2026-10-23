@@ -85,6 +85,7 @@ func (e *Env) renderFiles(in renderInputs) ([]desiredFile, error) {
 
 	switch e.GOOS {
 	case "linux":
+		add(userNamespacesConfigPath, e.desiredPolicyViewConfig(), 0o644, root, "host-security")
 		if in.Channel != ChannelPackage {
 			for _, unit := range e.Services.Units() {
 				data, err := systemdunits.ReadFile(unit.Name)
