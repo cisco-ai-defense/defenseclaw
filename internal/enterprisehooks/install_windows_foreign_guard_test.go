@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"golang.org/x/sys/windows"
 )
 
 // windowsGuardCaptureConnector stands in for the Amp and OpenCode plugin
@@ -42,10 +43,19 @@ func (c *windowsGuardCaptureConnector) AgentPaths(opts connector.SetupOpts) conn
 // guard) and verification never requires it. The capture connector takes a
 // name the dispatch routes like Amp and OpenCode (not Claude, Codex, Cursor
 // or Copilot) without the per-user agent discovery; it names no shipped
-// connector.
+// connector. Native Windows refuses a connector it has not certified, so the
+// test certifies the fixture name (GAP-0921).
 func TestWindowsGenericLifecyclePassesTheForeignHookGuardToPlugins(t *testing.T) {
 	fixture := newWindowsGenericCodexFixture(t)
 	const name = "plugin-fixture"
+	// A connector without a hook contract installs through the Secure Client
+	// best-effort contract (#1163) only.
+	useWindowsSecureClientForTest(t)
+	previousSupported := windowsConnectorSupportedOnHost
+	windowsConnectorSupportedOnHost = func(connectorName string) bool {
+		return connectorName == name || previousSupported(connectorName)
+	}
+	t.Cleanup(func() { windowsConnectorSupportedOnHost = previousSupported })
 	var rendered, seen []string
 	registry := connector.NewRegistry()
 	registry.RegisterBuiltin(&windowsGuardCaptureConnector{
@@ -55,6 +65,17 @@ func TestWindowsGenericLifecyclePassesTheForeignHookGuardToPlugins(t *testing.T)
 		rendered: &rendered,
 		seen:     &seen,
 	})
+	// The certified per-user plugin connectors read their runtime below the
+	// vendor folder the standalone install creates in ProgramData.
+	vendor := t.TempDir()
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestPathExactOwner(t, vendor, administrators)
+	previousAncestor := windowsStandaloneHookRuntimeAncestor
+	windowsStandaloneHookRuntimeAncestor = func() (string, error) { return vendor, nil }
+	t.Cleanup(func() { windowsStandaloneHookRuntimeAncestor = previousAncestor })
 	guard, err := windowsEnterpriseHookExecutable()
 	if err != nil {
 		t.Fatal(err)

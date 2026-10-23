@@ -1326,7 +1326,6 @@ func TestEnumerateWindowsDisabledAccountKeepsItsWarningWhenASessionIsUnidentifie
 	})
 	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
 	windowsLocalAccountDisabled = func(string) (bool, error) { return true, nil }
-	windowsSignedInSessionUsers = readWindowsSignedInSessionUsers
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o700); err != nil {
 		t.Fatal(err)
@@ -1336,6 +1335,10 @@ func TestEnumerateWindowsDisabledAccountKeepsItsWarningWhenASessionIsUnidentifie
 	}
 	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
 	stubActiveSessions(t, map[string][]string{})
+	// stubActiveSessions stubs the signed-in reader too; this test reads the
+	// sessions through the real reader over the stubbed session API
+	// (GAP-0921).
+	windowsSignedInSessionUsers = readWindowsSignedInSessionUsers
 	for _, tc := range []struct {
 		name     string
 		tokenErr error
@@ -1347,6 +1350,7 @@ func TestEnumerateWindowsDisabledAccountKeepsItsWarningWhenASessionIsUnidentifie
 		stubWindowsSessionAPI(t, []windowsSession{{id: 2, state: windows.WTSDisconnected}}, nil, map[uint32]error{2: tc.tokenErr}, nil)
 		var reported []UnprotectedAgent
 		if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+			Logger:            func(subject, reason string) { t.Logf("%s: %s: %s", tc.name, subject, reason) },
 			ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
 		}); err != nil {
 			t.Fatal(err)
