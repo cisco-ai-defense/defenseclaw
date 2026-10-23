@@ -271,7 +271,7 @@ func TestDoctorChecksWhatLinuxMicroVMsNeed(t *testing.T) {
 			_ = os.Remove(f.linuxDriverPath())
 			f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
 		}, want: checkWant{"vm-driver", fail, "openshell-driver-vm is not installed (NVIDIA's openshell package does not ship it)"},
-			fix: &fixWant{text: "the gateway version is unknown; restore the gateway connection", manual: true}},
+			fix: &fixWant{text: "openshell-driver-vm-aarch64-unknown-linux-gnu.tar.gz", manual: true}},
 		// An in-place upgrade of NVIDIA's package leaves the driver it
 		// does not ship (GAP-0652): one older than the gateway fails.
 		{name: "driver older than the gateway", setup: func(f *doctorFixture) {
@@ -382,22 +382,27 @@ func TestDoctorOffersMicroVMsOnALinuxHostWithKVM(t *testing.T) {
 // must not turn an unreachable gateway into a panic or an invented version.
 func TestLinuxMicroVMProbeWithUnknownGatewayVersion(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		setup func(*doctorFixture)
+		name       string
+		setup      func(*doctorFixture)
+		wantStatus openshell.CheckStatus
+		wantDetail string
 	}{
 		{"no registration", func(f *doctorFixture) {
 			if err := os.RemoveAll(filepath.Join(f.dir, "gateways")); err != nil {
 				f.t.Fatal(err)
 			}
-		}},
+		}, openshell.StatusSkip, "no usable registration"},
 		{"dial fails", func(f *doctorFixture) {
 			f.doctor.Dial = func(*openshell.Registration) (openshell.Client, error) {
 				return nil, errors.New("connection refused")
 			}
-		}},
+		}, openshell.StatusFail, "the gateway is not running: nothing listens on"},
 		{"health fails", func(f *doctorFixture) {
 			f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
-		}},
+		}, openshell.StatusFail, "the gateway is not running: nothing listens on"},
+		{"health times out", func(f *doctorFixture) {
+			f.fake.FailNext(openshelltest.MethodHealth, errors.New("context deadline exceeded"))
+		}, openshell.StatusFail, "the gateway is not answering: "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDoctorFixture(t)
@@ -409,8 +414,102 @@ func TestLinuxMicroVMProbeWithUnknownGatewayVersion(t *testing.T) {
 				r.MicroVM.DriverVersion != "" || r.MicroVM.DriverOlderThan != "" || r.Get(openshell.CheckIDVMDriver) != nil {
 				t.Fatalf("gateway version %q, MicroVM facts %+v; checks:\n%s", r.GatewayVersion, r.MicroVM, r)
 			}
-			if c := r.Get(openshell.CheckIDGatewayVersion); c == nil || !strings.Contains(c.Detail, "version unknown") {
-				t.Fatalf("gateway check = %+v; want unknown version", c)
+			// The Python doctor parses these leading details when it groups
+			// an unreachable gateway with its dependent sandbox checks.
+			if c := r.Get(openshell.CheckIDGatewayVersion); c == nil || c.Status != tc.wantStatus || !strings.HasPrefix(c.Detail, tc.wantDetail) {
+				t.Fatalf("gateway check = %+v; want %s detail beginning %q", c, tc.wantStatus, tc.wantDetail)
+			}
+		})
+	}
+}
+
+// Even with no answering gateway, a missing driver still has a useful
+// digest-pinned install command for this build's release. The advice must
+// tell the operator to confirm the gateway's release before using it.
+func TestMissingLinuxVMDriverWithUnknownGatewayKeepsPinnedInstall(t *testing.T) {
+	for _, arch := range []struct {
+		name    string
+		archive string
+	}{
+		{"amd64", "openshell-driver-vm-x86_64-unknown-linux-gnu.tar.gz"},
+		{"arm64", "openshell-driver-vm-aarch64-unknown-linux-gnu.tar.gz"},
+	} {
+		for _, tc := range []struct {
+			name  string
+			setup func(*doctorFixture)
+		}{
+			{"no registration", func(f *doctorFixture) {
+				if err := os.RemoveAll(filepath.Join(f.dir, "gateways")); err != nil {
+					f.t.Fatal(err)
+				}
+			}},
+			{"dial fails", func(f *doctorFixture) {
+				f.doctor.Dial = func(*openshell.Registration) (openshell.Client, error) {
+					return nil, errors.New("connection refused")
+				}
+			}},
+			{"health fails", func(f *doctorFixture) {
+				f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
+			}},
+		} {
+			t.Run(arch.name+"/"+tc.name, func(t *testing.T) {
+				f := newDoctorFixture(t)
+				f.onLinuxMicroVMs()
+				f.doctor.GOARCH = arch.name
+				if err := os.Remove(f.linuxDriverPath()); err != nil {
+					t.Fatal(err)
+				}
+				tc.setup(f)
+				r := f.run()
+				c := expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusFail, "openshell-driver-vm is not installed")
+				if c.Fix == nil || c.Fix.Automatic || c.Fix.Command == "" ||
+					!strings.Contains(c.Fix.Command, openshell.TarballBaseURL+openshell.InstallerTag+"/"+arch.archive) ||
+					!strings.Contains(c.Fix.Command, openshell.TarballPins[openshell.InstallerVersion][arch.archive]) ||
+					!strings.Contains(c.Fix.Command, "sha256sum -c -") ||
+					!strings.Contains(c.Fix.Summary, "restore the gateway connection") ||
+					!strings.Contains(c.Fix.Summary, openshell.InstallerVersion) {
+					t.Fatalf("missing driver repair = %+v", c.Fix)
+				}
+			})
+		}
+	}
+}
+
+// A configured driver_dir remains the install target even when no binary is
+// present there and the gateway cannot report its release.
+func TestMissingLinuxVMDriverUsesConfiguredInstallDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sudo bool
+	}{{"writable", false}, {"not writable", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoctorFixture(t)
+			f.onLinuxMicroVMs()
+			if err := os.Remove(f.linuxDriverPath()); err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(f.home, "configured driver")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.sudo {
+				if err := os.Chmod(dir, 0o555); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			}
+			f.writeTOML(strings.Replace(linuxVMTOML, "[openshell.drivers.vm]\n", "[openshell.drivers.vm]\ndriver_dir = \""+dir+"\"\n", 1), f.started.Add(-time.Minute))
+			f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
+			r := f.run()
+			c := expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusFail, "openshell-driver-vm is not installed")
+			commandTarget := "'" + dir + "'/openshell-driver-vm"
+			if tc.sudo {
+				commandTarget = "'" + filepath.Join(dir, "openshell-driver-vm") + "'"
+			}
+			if c.Fix == nil || c.Fix.Sudo != tc.sudo ||
+				!strings.Contains(c.Fix.Command, commandTarget) ||
+				strings.Contains(c.Fix.Command, "$HOME/.local/libexec/openshell") {
+				t.Fatalf("configured driver directory %q, repair = %+v", dir, c.Fix)
 			}
 		})
 	}

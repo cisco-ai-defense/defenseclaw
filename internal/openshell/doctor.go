@@ -1903,7 +1903,7 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 		global.Status, global.Detail = StatusSkip, why
 	}
 	if r.reg == nil || r.regErr != nil {
-		version.Status, version.Detail = StatusSkip, "gateway version unknown: no usable registration"
+		version.Status, version.Detail = StatusSkip, "no usable registration"
 		skipRest("no usable registration")
 		return
 	}
@@ -1941,7 +1941,6 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 			version.Detail = "the gateway reports unhealthy"
 			version.Fix = r.gatewayRecoveryFix()
 		}
-		version.Detail = "gateway version unknown: " + version.Detail
 		skipRest("the gateway is not answering")
 		return
 	}

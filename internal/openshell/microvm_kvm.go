@@ -260,6 +260,9 @@ func (r *doctorRun) linuxMicroVMHost(ctx context.Context) *MicroVMHost {
 	m.E2fsprogs = e2fsprogsIn(r.E2fsprogsDirs)
 	m.DriverRunning = r.running.Name == DriverVM
 	m.DriverBinary, m.userRepairDir = r.findVMDriver(ctx)
+	if m.DriverBinary == "" && r.config != nil && filepath.IsAbs(r.config.VM.DriverDir) {
+		m.missingDriverDir = r.config.VM.DriverDir
+	}
 	if r.gateway != nil && r.gateway.Version != (Version{}) {
 		m.gatewayVersion = r.gateway.Version.String()
 	}
@@ -298,26 +301,26 @@ func (r *doctorRun) vmDriverVersion(ctx context.Context, path string) (Version, 
 // A PATH-adjacent driver is searched after the user's default directory, so
 // a new copy there wins without writing beside the gateway. Only the build's
 // pinned release gets an install command; other releases need a verified
-// matching driver, and an unknown gateway release needs a fresh probe.
+// matching driver. If the driver is missing and the gateway does not answer,
+// the pinned command is conditional on confirming that gateway's release.
 func (m *MicroVMHost) vmDriverFix(goarch string) *Fix {
 	release := m.gatewayVersion
 	if release == "" {
 		release = m.DriverOlderThan
 	}
-	if release == "" {
-		return &Fix{Summary: "the gateway version is unknown; restore the gateway connection and rerun `defenseclaw sandbox doctor` before choosing a MicroVM driver release"}
-	}
-	if release == InstallerVersion && m.DriverBinary == "" {
-		return InstallVMDriverFix(goarch)
-	}
 	dir := "~/.local/libexec/openshell"
 	if m.DriverBinary != "" {
 		dir = filepath.Dir(m.DriverBinary)
+	} else if m.missingDriverDir != "" {
+		dir = m.missingDriverDir
 	}
 	if m.userRepairDir != "" && !vmDriverDirNeedsSudo(m.userRepairDir) {
 		dir = m.userRepairDir
 	}
-	if release != InstallerVersion {
+	if release == "" && m.DriverBinary != "" {
+		return &Fix{Summary: "the gateway version is unknown; restore the gateway connection and rerun `defenseclaw sandbox doctor` before choosing a MicroVM driver release"}
+	}
+	if release != "" && release != InstallerVersion {
 		v, err := ParseVersion(release)
 		if err != nil {
 			return &Fix{Summary: "the gateway version is unrecognized; restore a supported gateway and rerun `defenseclaw sandbox doctor` before choosing a MicroVM driver release"}
@@ -339,10 +342,20 @@ func (m *MicroVMHost) vmDriverFix(goarch string) *Fix {
 			Sudo: sudo}
 	}
 	var fix *Fix
-	if vmDriverDirNeedsSudo(dir) {
+	if dir != "~/.local/libexec/openshell" && vmDriverDirNeedsSudo(dir) {
 		fix = adminVMDriverFixIn("linux", goarch, dir)
 	} else {
 		fix = installVMDriverFixIn(goarch, dir)
+	}
+	if release == "" {
+		if fix.Command != "" {
+			fix.Summary = "restore the gateway connection and confirm it runs OpenShell " + InstallerVersion + " before using this pinned install command; " +
+				fix.Summary + "; if the gateway runs another release, install its matching driver instead"
+		}
+		return fix
+	}
+	if m.DriverBinary == "" {
+		return fix
 	}
 	fix.Summary += "; restart the OpenShell gateway and run `defenseclaw sandbox doctor` to verify its effective driver"
 	return fix

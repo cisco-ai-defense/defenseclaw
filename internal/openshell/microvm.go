@@ -96,6 +96,9 @@ type MicroVMHost struct {
 	// userRepairDir is the earlier user directory when DriverBinary was
 	// found beside the gateway on PATH without an explicit driver_dir.
 	userRepairDir string
+	// missingDriverDir is the configured driver_dir when no binary was
+	// found; a repair must install there so the gateway can select it.
+	missingDriverDir string
 	// DriverVersion is the version DriverBinary reports (Linux), and
 	// DriverOlderThan the gateway's version when that is newer: an in-place
 	// upgrade of NVIDIA's package leaves the driver, which it does not ship,
