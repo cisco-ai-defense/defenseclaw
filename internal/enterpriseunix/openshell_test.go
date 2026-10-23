@@ -248,6 +248,51 @@ func TestRefusedOpenShellSetupPinKeepsAppliedPrerequisites(t *testing.T) {
 	}
 }
 
+// Releases through 1.0.3 refused an enabled unpinned setup config, so no
+// genuine deployment record can authorize one. Even a manually altered
+// record must not make the missing install pin acceptable.
+func TestUnpinnedSetupCannotUseMatchingDeploymentRecord(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newOSHost(t, goos)
+			pinned := sandboxConfig(t, goos, true, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5"})
+			requireOK(t, h.ensure(pinned))
+			beforePrerequisites := h.read(h.env.prerequisitesPath())
+			beforeApplied := h.env.loadOpenShellState().Applied
+			if beforeApplied == nil || beforeApplied.Version != "0.1.5" {
+				t.Fatalf("initial setup state = %+v", beforeApplied)
+			}
+
+			unpinned := sandboxConfig(t, goos, true, map[string]any{"install": "setup", "driver": "docker"})
+			if err := os.WriteFile(h.env.P(h.env.Layout.ConfigPath), unpinned, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			record, err := h.env.loadDeployment()
+			if err != nil {
+				t.Fatal(err)
+			}
+			record.ConfigSHA256 = sha256Bytes(unpinned)
+			if err := h.env.saveDeployment(record); err != nil {
+				t.Fatal(err)
+			}
+
+			r := h.run(Options{Action: ActionEnsure, PayloadDir: h.payloadOnce()})
+			if r.OK || !strings.Contains(fmt.Sprint(r.Errors), "enterprise.openshell.version") {
+				t.Fatalf("matched record bypassed setup pin refusal: errors %+v, warnings %+v", r.Errors, r.Warnings)
+			}
+			if got := h.read(h.env.Layout.ConfigPath); got != string(unpinned) {
+				t.Errorf("refusal changed installed config")
+			}
+			if got := h.env.loadOpenShellState().Applied; got == nil || got.Version != beforeApplied.Version {
+				t.Errorf("refusal changed applied setup: %+v", got)
+			}
+			if got := h.read(h.env.prerequisitesPath()); got != beforePrerequisites {
+				t.Errorf("refusal changed prerequisites")
+			}
+		})
+	}
+}
+
 // payloadOnce stages one payload per host, so repeated ensures see the same
 // binaries.
 func (h *osHost) payloadOnce() string {
