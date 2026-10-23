@@ -30,7 +30,22 @@ func TestHookAndShimGatewayCallsBypassProxy(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if set.dir == "shims" {
+				if !strings.Contains(string(body), `_dc_shim_post "`) || strings.Contains(string(body), `http://${_DC_SHIM_ADDR}`) {
+					t.Errorf("%s/%s bypasses the account-bound native gateway transport", set.dir, entry.Name())
+				}
+				calls++
+				continue
+			}
 			for n, line := range strings.Split(string(body), "\n") {
+				// The native helper parses the URL to obtain a path, then
+				// proves the connected socket before sending any HTTP bytes.
+				if strings.Contains(line, `_dc_post_prefix="http://${API_ADDR}"`) {
+					if !strings.Contains(string(body), `hook-post --api-addr "$API_ADDR"`) {
+						t.Errorf("%s/%s has no connected-peer native post", set.dir, entry.Name())
+					}
+					continue
+				}
 				if strings.HasPrefix(strings.TrimSpace(line), "#") ||
 					(!strings.Contains(line, "http://${API_ADDR}") && !strings.Contains(line, "http://${_DC_SHIM_ADDR}")) {
 					continue

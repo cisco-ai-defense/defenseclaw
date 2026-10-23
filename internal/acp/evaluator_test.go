@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -34,6 +35,60 @@ func TestNewHTTPEvaluatorRequiresLiteralLoopback(t *testing.T) {
 		if _, err := NewHTTPEvaluator(endpoint, "secret"); err != nil {
 			t.Fatalf("NewHTTPEvaluator(%q): %v", endpoint, err)
 		}
+	}
+}
+
+func TestPerUserEvaluatorPinsRequestsToConfiguredGateway(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer origin.Close()
+	var received atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer other.Close()
+	evaluator, err := NewHTTPEvaluator(origin.URL, "private-acp-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, other.URL+"/api/v1/acp/challenge", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set(AuthRequestMACHeader, "private-auth-proof")
+	response, err := evaluator.client.Do(request)
+	if err == nil {
+		_ = response.Body.Close()
+	}
+	if err == nil || received.Load() != 0 {
+		t.Fatalf("per-user evaluator sent %d authenticated requests to another endpoint; error = %v", received.Load(), err)
+	}
+}
+
+func TestManagedEvaluatorUsesServiceTransport(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer origin.Close()
+	var received atomic.Int32
+	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer service.Close()
+	evaluator, err := NewManagedHTTPEvaluator(origin.URL, "managed-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := evaluator.client.Get(service.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if received.Load() != 1 {
+		t.Fatalf("managed service received %d requests, want one", received.Load())
 	}
 }
 

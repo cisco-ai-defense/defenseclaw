@@ -33,7 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
-//go:embed shims/*.sh
+//go:embed shims/*.sh shims/peer.inc
 var shimFS embed.FS
 
 // Embed every .sh under hooks/, including helpers prefixed with `_`
@@ -236,6 +236,10 @@ func WriteShimScriptsWithToken(shimDir, apiAddr, token string) error {
 	}
 
 	data := templateData{APIAddr: apiAddr, FailMode: defaultHookFailMode, TokenFile: ".token"}
+	peerHelper, err := shimFS.ReadFile("shims/peer.inc")
+	if err != nil {
+		return fmt.Errorf("read shim peer helper: %w", err)
+	}
 
 	for _, name := range shimBinaries {
 		content, err := shimFS.ReadFile("shims/" + name + ".sh")
@@ -243,7 +247,10 @@ func WriteShimScriptsWithToken(shimDir, apiAddr, token string) error {
 			return fmt.Errorf("read shim template %s: %w", name, err)
 		}
 
-		rendered, err := renderTemplate(string(content), data)
+		// Embed the transport in each shim so runtime lookup cannot be
+		// redirected to a file writable by a different account.
+		withHelper := strings.Replace(string(content), "#!/bin/bash\n", "#!/bin/bash\n"+string(peerHelper)+"\n", 1)
+		rendered, err := renderTemplate(withHelper, data)
 		if err != nil {
 			return fmt.Errorf("render shim %s: %w", name, err)
 		}
