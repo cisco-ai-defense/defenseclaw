@@ -205,13 +205,20 @@ func TestAdoptedAnswerWatchdogAnswersClosedWhenAnInstallStartsMidCall(t *testing
 			}
 			t.Run(name, func(t *testing.T) {
 				release := make(chan struct{})
-				t.Cleanup(func() { close(release) })
 				stdout := &firstWriteRecorder{}
 				exited := make(chan int, 1)
 				homes := make(chan string, 1)
 				returned := make(chan runResult, 1)
+				done := make(chan struct{})
+				// Run's held request ends with the test, and the test waits
+				// for Run: nothing of it outlives the test's settings.
+				t.Cleanup(func() {
+					close(release)
+					<-done
+				})
 				started := time.Now()
 				go func() {
+					defer close(done)
 					returned <- run(t, form.connector, &stubRT{status: http.StatusOK, body: `{"action":"allow"}`}, func(opts *Options) {
 						opts.Event = form.event
 						opts.FailMode = "open"

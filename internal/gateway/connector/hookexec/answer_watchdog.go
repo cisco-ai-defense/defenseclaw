@@ -375,7 +375,10 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 // takes longer counts as a held lock.
 func installLockHeldWithin(home string, wait time.Duration) bool {
 	held := make(chan bool, 1)
-	go func() { held <- installLockHeld(home) }()
+	// The read is taken now: a look still held on a stalled disk after the
+	// answer touches nothing of the call's.
+	lstat := installLockLstat
+	go func() { held <- installLockHeldBy(lstat, home) }()
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {

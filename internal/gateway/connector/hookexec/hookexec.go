@@ -2278,7 +2278,11 @@ var installLockLstat = os.Lstat
 // upgrade), or it cannot be read for any reason but its absence. A lock
 // whose state cannot be verified is held (GAP-0862).
 func installLockHeld(home string) bool {
-	_, err := installLockLstat(filepath.Join(home, ".install.lock"))
+	return installLockHeldBy(installLockLstat, home)
+}
+
+func installLockHeldBy(lstat func(string) (fs.FileInfo, error), home string) bool {
+	_, err := lstat(filepath.Join(home, ".install.lock"))
 	return err == nil || !errors.Is(err, fs.ErrNotExist)
 }
 
