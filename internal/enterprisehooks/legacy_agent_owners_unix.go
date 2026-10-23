@@ -25,7 +25,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -179,19 +178,24 @@ func LegacyAgentOwnerToken(incarnation, home string) string {
 	if home == "" || !filepath.IsAbs(home) {
 		return ""
 	}
-	info, err := os.Stat(home)
-	if err != nil || !info.IsDir() {
-		return ""
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
+	proof, ok := homeIdentity(home)
 	if !ok {
 		return ""
 	}
-	token := "home:" + strconv.FormatUint(uint64(st.Dev), 10) + ":" + strconv.FormatUint(uint64(st.Ino), 10)
-	if birth, ok := homeBirth(home); ok {
-		token += ":" + strconv.FormatInt(birth, 10)
+	token := "home:" + strconv.FormatUint(proof.dev, 10) + ":" + strconv.FormatUint(proof.ino, 10)
+	if proof.hasBirth {
+		token += ":" + strconv.FormatInt(proof.birth, 10)
 	}
 	return token
+}
+
+// homeProof is what one stat of a home directory gives the owner token:
+// its device and inode, and its creation time in nanoseconds where the file
+// system keeps one.
+type homeProof struct {
+	dev, ino uint64
+	birth    int64
+	hasBirth bool
 }
 
 // LegacyAgentOwnersRecorded reports whether dir holds the migration map.
@@ -279,21 +283,27 @@ func WriteLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, now tim
 }
 
 // legacyAgentHolderOfRecord is the account name the guardian's identity
-// record of uid in dir gives, when the record is recent (written within
-// IdentitySpoolMaxAge, not in the future): before the first pass of 1.0.4,
-// the account the 1.0.x guardian last saw holding the uid. "" otherwise.
-func legacyAgentHolderOfRecord(dir string, uid int, now time.Time) string {
+// record of uid in dir gives, "" without one: before the first pass of
+// 1.0.4, the account the 1.0.x guardian last saw holding the uid. The
+// record's age does not matter. The name only makes the account pending,
+// and a later pass binds it only once it proves the account that holds
+// the uid under that name. Taking only a record written within
+// IdentitySpoolMaxAge left an account out for good when the 1.0.x guardian
+// had not rewritten its record in the last hour (a host that was off, or
+// a directory that had not answered) and the lookups at the upgrade found
+// it twice not found (SSSD offline), although its 1.0.x record named it
+// (review of r104 Q-identity, continuation 3, loop round 1).
+func legacyAgentHolderOfRecord(dir string, uid int) string {
 	record, err := ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), nil)
-	if err != nil || record.UpdatedAt.IsZero() || record.UpdatedAt.After(now.Add(time.Minute)) ||
-		now.Sub(record.UpdatedAt) > IdentitySpoolMaxAge {
+	if err != nil {
 		return ""
 	}
-	return record.User
+	return strings.TrimSpace(record.User)
 }
 
 // unnamedLegacyAgentOwners names, in owners as pending, each uid in unnamed:
 // a listed account of a pass before the map is recorded that neither the
-// listing, its lookup nor a recent guardian record named. Its account is
+// listing, its lookup nor a guardian record named. Its account is
 // looked up once more. It reports whether the map may be recorded now:
 // false while one stays unnamed (a lookup that fails or does not finish),
 // so the map is recorded at a later pass that names every account. A uid

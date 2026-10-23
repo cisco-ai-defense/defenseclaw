@@ -131,6 +131,12 @@ type identityCacheEntry[T any] struct {
 	ok         bool
 	usedByHook bool
 	fetchedAt  time.Time
+	// lookupStartedAt is when the lookup that fetched facts started. A
+	// lookup already in flight when an invalidation lands may have read the
+	// directory before the change the invalidation stands for (a UPN
+	// removed, a profile assignment pushed), so its answer does not count
+	// as one from after the invalidation (invalidatedLocked).
+	lookupStartedAt time.Time
 	// generation identifies a successful current lookup. A fresh read that
 	// timed out may use its completion shortly after it finishes, and nearby
 	// reads within one hook interval share that answer.
@@ -441,11 +447,23 @@ func (c *identityCache[T]) unsettled(facts T) bool {
 }
 
 // invalidatedLocked reports facts fetched before an invalidation (invalidate
-// for every key, refreshSoon for one) that no refresh has answered since.
-// They are served as expired facts are, and are never current: a decision
-// that needs current facts waits for the refresh.
+// for every key, refreshSoon for one) that no lookup started after it has
+// answered since. They are served as expired facts are, and are never
+// current: a decision that needs current facts waits for the refresh. The
+// facts count from when their lookup started, not when it finished: a
+// lookup in flight when the invalidation landed answered with what the
+// directory gave before it, and that answer cleared the invalidation, so an
+// exempt_users UPN the directory had just dropped still exempted the caller
+// (review of r104 Q-identity, continuation 3, loop round 1).
 func (c *identityCache[T]) invalidatedLocked(entry *identityCacheEntry[T]) bool {
-	return entry.ok && (entry.fetchedAt.Before(c.staleBefore) || entry.fetchedAt.Before(entry.staleBefore))
+	if !entry.ok {
+		return false
+	}
+	answered := entry.fetchedAt
+	if !entry.lookupStartedAt.IsZero() && entry.lookupStartedAt.Before(answered) {
+		answered = entry.lookupStartedAt
+	}
+	return answered.Before(c.staleBefore) || answered.Before(entry.staleBefore)
 }
 
 // lifetime is how long facts are served before a refresh: the full TTL,
@@ -618,6 +636,7 @@ func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T
 		switch {
 		case err == nil:
 			entry.facts, entry.ok, entry.fetchedAt, entry.trustedUntil = facts, true, now, until
+			entry.lookupStartedAt = started
 			entry.generation++
 			if !entry.pendingFresh {
 				// An ordinary cache refresh has no timed-out fresh reader
@@ -634,6 +653,11 @@ func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T
 			entry.freshUntil = time.Time{}
 		}
 		entry.nextAttempt = now.Add(identityDirectoryRetry)
+		if err == nil && c.invalidatedLocked(entry) {
+			// An invalidation landed during the lookup: the refresh it
+			// needs may start at once.
+			entry.nextAttempt = time.Time{}
+		}
 		entry.inflight = nil
 		note := c.noteResultLocked(key, entry, err, now)
 		c.mu.Unlock()
