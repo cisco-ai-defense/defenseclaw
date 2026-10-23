@@ -11,7 +11,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -57,7 +56,8 @@ func readWindowsBundleEnforcement() (bundleEnforcement, managed.StandaloneLayout
 		return bundleEnforcement{}, layout, nil, false
 	}
 	driver := newWindowsBundleDriver(layout)
-	if _, err := os.Lstat(driver.AnchorsPath); err != nil {
+	bundleMode, err := windowsBundleMode(driver)
+	if err != nil || !bundleMode {
 		return bundleEnforcement{}, layout, driver, false
 	}
 	// A store this account cannot read (a standard user's status) or a
