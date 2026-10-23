@@ -104,7 +104,9 @@ func TestPerUserFailOpenHookNamesTheRestart(t *testing.T) {
 		}
 	})
 	if !strings.Contains(installing.stdout, `"permissionDecision":"deny"`) ||
-		!strings.Contains(installing.stdout, "being installed or upgraded") {
+		!strings.Contains(installing.stdout, "being installed or upgraded") ||
+		!strings.Contains(installing.stdout, "run the installer again") ||
+		strings.Contains(installing.stdout, "defenseclaw-gateway start") {
 		t.Fatalf("code=%d stdout=%q, want the call blocked with the install named", installing.code, installing.stdout)
 	}
 }
@@ -137,7 +139,9 @@ func TestPerUserCopilotDeniesDuringInstall(t *testing.T) {
 					want = `"behavior":"deny"`
 				}
 				if result.code != 0 || !strings.Contains(result.stdout, want) ||
-					!strings.Contains(result.stdout, "being installed or upgraded") {
+					!strings.Contains(result.stdout, "being installed or upgraded") ||
+					!strings.Contains(result.stdout, "run the installer again") ||
+					strings.Contains(result.stdout, "defenseclaw-gateway start") {
 					t.Fatalf("install call allowed: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
 				}
 			})

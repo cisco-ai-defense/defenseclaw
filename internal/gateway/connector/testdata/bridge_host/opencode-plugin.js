@@ -521,7 +521,7 @@ async function defenseclawLogFailOpen(reason, category) {
 // The installer holds this data-directory lock while it replaces this
 // account's stopped gateway. An open outage mode cannot bypass that upgrade.
 const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account, " +
-  "and its gateway starts again when that is done. Try again in a moment; if it does not come back, run `defenseclaw-gateway start`.";
+  "and its gateway starts again when that is done. Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install.";
 
 async function defenseclawInstallWindow() {
   try {

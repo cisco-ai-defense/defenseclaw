@@ -387,6 +387,53 @@ def test_loaded_plugins_block_windows_install_before_gateway_stop() -> None:
     assert [line for line in result.stdout.splitlines() if line] == ["opencode", "amp", "amp"]
 
 
+@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None, reason="native Windows PowerShell required")
+def test_windows_agent_scan_ignores_other_session_owner_denial() -> None:
+    guard = _ps1_function("Assert-NoLoadedPluginAgents")
+    script = guard + r'''
+function Die($Message) { throw $Message }
+$session = (Get-Process -Id $PID).SessionId
+$script:scanSession = $session + 1
+$script:ownerReturn = 2
+$script:ownerDomain = ''
+$script:ownerUser = ''
+function Get-CimInstance($ClassName) {
+    [pscustomobject]@{ Name = 'opencode.exe'; CommandLine = 'opencode.exe'; ProcessId = 7001; SessionId = $script:scanSession }
+}
+function Invoke-CimMethod($InputObject, $MethodName) {
+    [pscustomobject]@{ ReturnValue = $script:ownerReturn; Domain = $script:ownerDomain; User = $script:ownerUser }
+}
+function Get-LoadedPluginAgent($Process) { return 'opencode' }
+Assert-NoLoadedPluginAgents
+"other-session-owner-denied-ok"
+$script:scanSession = $session
+try {
+    Assert-NoLoadedPluginAgents
+    throw 'same-session-owner-denial-was-ignored'
+} catch {
+    if ($_.Exception.Message -notlike 'Could not check the owner*') { throw }
+}
+"same-session-owner-denied-closed"
+$parts = [Security.Principal.WindowsIdentity]::GetCurrent().Name -split '\\', 2
+$script:ownerDomain = $parts[0]
+$script:ownerUser = $parts[1]
+$script:ownerReturn = 0
+$script:scanSession = $session + 1
+try {
+    Assert-NoLoadedPluginAgents
+    throw 'same-account-other-session-was-ignored'
+} catch {
+    if ($_.Exception.Message -notlike 'Close OpenCode and Amp*') { throw }
+}
+"same-account-other-session-denied-closed"
+'''
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "other-session-owner-denied-ok" in result.stdout
+    assert "same-session-owner-denied-closed" in result.stdout
+    assert "same-account-other-session-denied-closed" in result.stdout
+
+
 def test_refused_late_swap_restores_setup_hooks_without_restarting_gateway(tmp_path: Path) -> None:
     if not POWERSHELL:
         pytest.skip("PowerShell is unavailable")

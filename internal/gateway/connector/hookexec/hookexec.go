@@ -2041,7 +2041,7 @@ func perUserGatewayDownText(opts Options, reason string) string {
 	if perUserInstallWindow(opts) {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": DefenseClaw is being installed or " +
 			"upgraded for this account, and its gateway starts again when that is done. Try again in a moment; " +
-			"if it does not come back, run `defenseclaw-gateway start`."
+			"if the installer has stopped, run the installer again to finish or undo the interrupted install."
 	}
 	if reason == perUserGatewayRestartingReason {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": this account's DefenseClaw gateway is " +

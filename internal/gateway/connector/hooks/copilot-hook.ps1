@@ -127,7 +127,7 @@ catch {
     # cannot answer, so the adapter must supply Copilot's own denial.
     if ($installGuard -or (Test-CopilotInstallWindow)) {
         [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed while DefenseClaw is being installed or upgraded: ' + $failure)
-        $message = 'DefenseClaw is being installed or upgraded for this account; try again in a moment.'
+        $message = 'DefenseClaw is being installed or upgraded for this account; try again in a moment, or run the installer again if it has stopped.'
         switch ($Event) {
             'preToolUse' {
                 [Console]::Out.WriteLine('{"permissionDecision":"deny","permissionDecisionReason":"' + $message + '"}')

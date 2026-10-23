@@ -1376,9 +1376,6 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
     source = INSTALL_SH.read_text(encoding="utf-8")
     rollback = source[source.index('if [[ "${ROLLBACK}" == true ]]; then') : source.index('# ──', source.index('if [[ "${ROLLBACK}" == true ]]; then') + 1)]
     assert rollback.index("assert_no_loaded_plugin_agents") < rollback.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway"')
-    upgrade_guard = source.index("assert_no_loaded_plugin_agents\nWAS_RUNNING=false")
-    assert upgrade_guard < source.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway"', upgrade_guard)
-
     probe = tmp_path / "ps"
     probe.write_text('#!/bin/sh\nprintf "%s\\n" "$DC_TEST_PS_ROWS"\n', encoding="ascii")
     probe.chmod(0o755)
@@ -1388,6 +1385,9 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
         ("2 opencode opencode", False),
         ("3 amp amp", False),
         ("4 node node /opt/node_modules/@sourcegraph/amp/cli.js", False),
+        # macOS truncates `comm` to the start of the absolute launch path.
+        ("5 /Users/u/.openc /Users/u/.opencode/bin/opencode", False),
+        ("6 /Users/u/.amp/b /Users/u/.amp/bin/amp", False),
     ]:
         run = subprocess.run(
             [BASH, "-c", 'die() { printf "%s\\n" "$*" >&2; return 1; }\n' + body + "assert_no_loaded_plugin_agents"],
@@ -1395,6 +1395,9 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
             capture_output=True, text=True, timeout=10, check=False,
         )
         assert (run.returncode == 0) is expected, (rows, run.stdout, run.stderr)
+
+    upgrade_guard = source.index("assert_no_loaded_plugin_agents\nWAS_RUNNING=false")
+    assert upgrade_guard < source.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway"', upgrade_guard)
 
 
 def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:

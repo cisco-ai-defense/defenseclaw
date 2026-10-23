@@ -29,7 +29,7 @@ copilot_per_user_install_block() {
       defenseclaw_log_hook_failure copilot copilot-hook "${1:-install or upgrade in progress}" "${2:-transport}" closed fail_closed
     fi
     echo "defenseclaw: blocking Copilot call while DefenseClaw is being installed or upgraded" >&2
-    local message='DefenseClaw is being installed or upgraded for this account; try again in a moment.'
+    local message='DefenseClaw is being installed or upgraded for this account; try again in a moment, or run the installer again if it has stopped.'
     case "$_DC_COPILOT_EVENT" in
       preToolUse) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$message" ;;
       permissionRequest) printf '{"behavior":"deny","message":"%s"}\n' "$message" ;;

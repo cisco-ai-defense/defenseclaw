@@ -17,6 +17,12 @@ options and exit codes, source builds and what the install creates.
 
 ## Install
 
+Before a first install or upgrade, quit OpenCode and Amp completely. Their
+DefenseClaw plugins load only at process start, so an already running agent
+would not gain the new protection. The installer refuses to continue while
+either agent is running for your account. Start a new agent process after the
+installer reports the gateway healthy.
+
 macOS and Linux:
 
 ```bash

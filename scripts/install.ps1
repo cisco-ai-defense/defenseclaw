@@ -792,16 +792,22 @@ function Get-LoadedPluginAgent($Process) {
 function Assert-NoLoadedPluginAgents {
     $loaded = @()
     $current = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    try { $currentSession = (Get-Process -Id $PID -ErrorAction Stop).SessionId } catch {
+        Die "Could not check this installer's process session; the gateway was not stopped"
+    }
     try { $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {
         Die "Could not check running OpenCode and Amp processes; the gateway was not stopped"
     }
     foreach ($process in $processes) {
         $agent = Get-LoadedPluginAgent $process
         if (-not $agent) { continue }
-        try { $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop } catch {
-            Die "Could not check the owner of a running $agent process; the gateway was not stopped"
-        }
-        if ([int]$owner.ReturnValue -ne 0) {
+        $owner = $null
+        try { $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop } catch { }
+        if ($null -eq $owner -or [int]$owner.ReturnValue -ne 0) {
+            # A standard user may not read another account's process owner
+            # on a shared host. Ignore that uncertainty only across sessions;
+            # a readable same-account process in any session still blocks.
+            if ($null -ne $process.SessionId -and [int]$process.SessionId -ne [int]$currentSession) { continue }
             Die "Could not check the owner of a running $agent process; the gateway was not stopped"
         }
         if (("$($owner.Domain)\$($owner.User)") -ieq $current) { $loaded += "$agent (PID $($process.ProcessId))" }

@@ -489,13 +489,16 @@ installed_version() {
 # list cannot establish that the swap is safe.
 loaded_plugin_agents() {
     local processes
-    processes="$(ps -u "$(id -u)" -o pid= -o comm= -o args= 2>/dev/null)" || return 2
+    processes="$(ps -u "$(id -u)" -o pid= -o ucomm= -o args= 2>/dev/null)" || return 2
     printf '%s\n' "$processes" | awk '
         {
             pid=$1; executable=tolower($2); sub(/^.*\//, "", executable)
+            # macOS can truncate the middle column to a launch-path prefix.
+            # argv[0] still carries the executable path in that case.
+            command=tolower($3); sub(/^.*\//, "", command)
             agent=""
-            if (executable == "opencode" || executable == "opencode.exe") agent="OpenCode"
-            else if (executable == "amp" || executable == "amp.exe") agent="Amp"
+            if (executable == "opencode" || executable == "opencode.exe" || command == "opencode" || command == "opencode.exe") agent="OpenCode"
+            else if (executable == "amp" || executable == "amp.exe" || command == "amp" || command == "amp.exe") agent="Amp"
             else if (executable ~ /^(node|bun)(\.exe)?$/) {
                 args=tolower($0)
                 if (args ~ /(^|[\/[:space:]])opencode([\/[:space:]]|$)/) agent="OpenCode"

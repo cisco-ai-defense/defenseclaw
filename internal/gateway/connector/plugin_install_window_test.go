@@ -48,7 +48,9 @@ func pluginInstallWindowCases(t *testing.T, asset, extension, harness string) {
 			}
 			blocked := session.request("during install", "call")
 			if !strings.HasPrefix(blocked, "block:") ||
-				!strings.Contains(blocked, "being installed or upgraded") {
+				!strings.Contains(blocked, "being installed or upgraded") ||
+				!strings.Contains(blocked, "run the installer again") ||
+				strings.Contains(blocked, "defenseclaw-gateway start") {
 				t.Fatalf("%s with install lock = %q; want a block naming the install", failure, blocked)
 			}
 			afterLog, afterErr := os.ReadFile(filepath.Join(dataDir, "logs", "hook-failures.jsonl"))
@@ -150,7 +152,9 @@ func TestAmpPluginInstallWindowBlocksFailOpen(t *testing.T) {
 				if wantBlocked {
 					if verdict.Action != "reject-and-continue" || verdict.Status != "error" ||
 						!strings.Contains(verdict.Message, "being installed or upgraded") ||
-						!strings.Contains(verdict.Error, "being installed or upgraded") {
+						!strings.Contains(verdict.Error, "being installed or upgraded") ||
+						!strings.Contains(verdict.Message, "run the installer again") ||
+						strings.Contains(verdict.Message, "defenseclaw-gateway start") {
 						t.Fatalf("Amp with install lock = %+v; want both boundaries blocked", verdict)
 					}
 				} else if verdict.Action != "allow" || verdict.Status != "unchanged" {

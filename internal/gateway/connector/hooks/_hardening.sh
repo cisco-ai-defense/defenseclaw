@@ -1338,7 +1338,7 @@ defenseclaw_unreachable_next_step() {
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
   if [ -e "${data}/.install.lock" ]; then
-    printf '%s' 'DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done; try again in a moment, or run `defenseclaw-gateway start` if it does not come back'
+    printf '%s' 'DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done; try again in a moment, or run the installer again if it has stopped'
   elif [ -e "${data}/gateway.stopped" ]; then
     printf '%s' 'the gateway was stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection'
   elif defenseclaw_own_gateway_stopped && defenseclaw_own_config_invalid; then
