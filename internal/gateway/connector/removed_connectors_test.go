@@ -316,8 +316,11 @@ func TestRemovedTeardownChangesOnlyTheScriptAndTokens(t *testing.T) {
 						plant(t, filepath.Join(h.dataDir, "hooks", hookConfigSidecarName+".openhands"))
 					}
 					h.opts.ManagedEnterprise = managed
-					// The lock changes only to seal the stub (requireSealed).
-					skip := append([]string{h.script(c), filepath.Join(h.dataDir, hookContractLockFile)}, h.tokens(c)...)
+					// The lock changes only to seal the stub (requireSealed). A
+					// managed Windows lock keeps its owner-stamped .lock file
+					// (filelock_windows.go), as every managed writer of it does.
+					lock := filepath.Join(h.dataDir, hookContractLockFile)
+					skip := append([]string{h.script(c), lock, lock + ".lock"}, h.tokens(c)...)
 					before := h.snapshot(t, skip...)
 					conn, _ := RetiredConnector(c.name)
 					for run := 1; run <= 2; run++ {

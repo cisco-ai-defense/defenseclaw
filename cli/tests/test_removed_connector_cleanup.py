@@ -46,10 +46,11 @@ _OPENHANDS_103 = "#!/bin/bash\n# defenseclaw-managed-hook v6\nexec defenseclaw-h
 _OMNIGENT_STUB = "# defenseclaw-managed-policy v0 (disabled tombstone)\n_REASON = 'OmniGent support was removed in DefenseClaw 1.0.4.'\n"
 
 
-def _write(path: str, body: str) -> str:
+def _write(path: str, body: str, mode: int = 0o600) -> str:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(body)
+    os.chmod(path, mode)
     return path
 
 
@@ -81,7 +82,7 @@ class _Host(unittest.TestCase):
             json.dumps({"pre_tool_use": [{"hooks": [{"type": "command", "command": script_path}]}]}),
         )
         _backup(self.data, "openhands", "config", config)
-        _write(script_path, script)
+        _write(script_path, script, 0o700)
         _write(os.path.join(self.hooks, ".hookcfg.openhands"), "DEFENSECLAW_CONNECTOR=openhands\n")
         return config
 
@@ -386,8 +387,17 @@ class GoParityTests(unittest.TestCase):
             "if it is not yours, delete it; if it is, move it out of DefenseClaw's hooks folder; then run ",
             "delete every other name of this file (",
             "follow the step for ",
+            removed_connectors.SCRIPT_GONE_WHAT,
+            removed_connectors.STUB_UNUSABLE_WHAT,
+            ", which puts it right",
         ):
             self.assertIn(phrase, source)
+        # The stub modes the readers expect are the ones the teardown writes.
+        self.assertIn("mode: 0o700", source.split("removedOmnigent = removedOnlyConnector{")[0])
+        self.assertIn("mode: 0o600", source.split("removedOmnigent = removedOnlyConnector{")[1])
+        self.assertEqual(
+            {c.name: c.mode for c in removed_connectors._CONNECTORS}, {"openhands": 0o700, "omnigent": 0o600}
+        )
 
 
 class DoctorTests(_Host):
@@ -396,7 +406,7 @@ class DoctorTests(_Host):
         result = _DoctorResult()
         with (
             patch.object(cmd_doctor, "_json_mode", True),
-            patch.object(removed_connectors, "leftovers", lambda data_dir: _leftovers(data_dir, self.home)),
+            patch.object(removed_connectors, "leftovers", lambda data_dir, **kw: _leftovers(data_dir, self.home, **kw)),
         ):
             _check_removed_connector_cleanup(SimpleNamespace(data_dir=self.data), result)
         [check] = result.checks
@@ -420,7 +430,7 @@ class DoctorTests(_Host):
         result = _DoctorResult()
         with (
             patch.object(cmd_doctor, "_json_mode", True),
-            patch.object(removed_connectors, "leftovers", lambda data_dir: _leftovers(data_dir, self.home)),
+            patch.object(removed_connectors, "leftovers", lambda data_dir, **kw: _leftovers(data_dir, self.home, **kw)),
         ):
             _check_removed_connector_cleanup(SimpleNamespace(data_dir=self.data), result)
         [check] = result.checks
@@ -444,9 +454,108 @@ class DoctorTests(_Host):
         self.assertNotIn(os.path.join(self.hooks, "openhands-hook.sh"), items)
         self.assertIn(config, items)
 
+    # T8 smoke review loop round 3: a stub whose mode drifted (an OpenHands
+    # hook that is not executable fails to start, and OpenHands lets the call
+    # through; one others may write can be made to allow) was listed as the
+    # stub that blocks. It is named, with the teardown that puts it right, and
+    # the row fails. A mode that still works stays the stub.
+    @unittest.skipIf(os.name == "nt", "no mode bits on Windows")
+    def test_fails_while_the_stub_cannot_be_run_or_loaded(self):
+        script = os.path.join(self.hooks, "openhands-hook.sh")
+        module = os.path.join(self.hooks, "defenseclaw_omnigent_policy.py")
+        for name, path, mode, unusable in (
+            ("openhands", script, 0o600, True),
+            ("openhands", script, 0o644, True),
+            ("openhands", script, 0o777, True),
+            ("openhands", script, 0o720, True),
+            ("openhands", script, 0o755, False),
+            ("omnigent", module, 0o666, True),
+            ("omnigent", module, 0o620, True),
+            ("omnigent", module, 0o644, False),
+        ):
+            with self.subTest(name=name, mode=oct(mode)):
+                if name == "openhands":
+                    self.openhands()
+                else:
+                    _write(module, _OMNIGENT_STUB)
+                os.chmod(path, mode)
+                item = self.items(name)[path]
+                result = _DoctorResult()
+                with (
+                    patch.object(cmd_doctor, "_json_mode", True),
+                    patch.object(
+                        removed_connectors, "leftovers", lambda data_dir, **kw: _leftovers(data_dir, self.home, **kw)
+                    ),
+                ):
+                    _check_removed_connector_cleanup(SimpleNamespace(data_dir=self.data), result)
+                checks = [c for c in result.checks if name in c["label"].lower()]
+                if unusable:
+                    self.assertEqual(item.what, removed_connectors.STUB_UNUSABLE_WHAT)
+                    self.assertEqual(
+                        item.step, f"run defenseclaw-gateway connector teardown --connector {name}, which puts it right"
+                    )
+                    self.assertIn("fail", [c["status"] for c in checks])
+                else:
+                    self.assertIn("the stub that blocks every", item.what)
+                os.remove(path)
+
+    # T8 smoke review loop round 3: a workspace-pinned 1.0.x OpenHands setup
+    # registered its hook in <workspace>/.openhands/hooks.json. With the
+    # script gone, that registration was not seen: no row. The configured
+    # workspace (or the one the lock entry records) is checked too, and the
+    # row fails; a workspace inside the data directory was never used.
+    def test_fails_while_a_workspace_registration_runs_a_script_that_is_gone(self):
+        script = os.path.join(self.hooks, "openhands-hook.sh")
+        workspace = os.path.join(self.home, "repo")
+        config = _write(
+            os.path.join(workspace, ".openhands", "hooks.json"),
+            json.dumps({"pre_tool_use": [{"hooks": [{"type": "command", "command": script}]}]}),
+        )
+        self.assertEqual(self.items("openhands"), {})
+        for how in ("configured", "lock"):
+            with self.subTest(how=how):
+                kw = {"workspace": workspace} if how == "configured" else {}
+                if how == "lock":
+                    _write(
+                        os.path.join(self.data, "hook_contract_lock.json"),
+                        json.dumps(
+                            {"connectors": {"openhands": {"registration_posture": {"workspace_dir": workspace}}}}
+                        ),
+                    )
+                items = {
+                    i.path: i
+                    for left in removed_connectors.leftovers(self.data, home=self.home, **kw)
+                    if left.connector == "openhands"
+                    for i in left.items
+                }
+                self.assertIn(config, items)
+                self.assertEqual(items[script].what, removed_connectors.SCRIPT_GONE_WHAT)
+        result = _DoctorResult()
+        cfg = SimpleNamespace(data_dir=self.data, connector_workspace_dir=lambda: workspace)
+        os.remove(os.path.join(self.data, "hook_contract_lock.json"))
+        with (
+            patch.object(cmd_doctor, "_json_mode", True),
+            patch.object(removed_connectors, "leftovers", lambda data_dir, **kw: _leftovers(data_dir, self.home, **kw)),
+        ):
+            _check_removed_connector_cleanup(cfg, result)
+        [check] = result.checks
+        self.assertEqual(check["status"], "fail")
+        self.assertIn(config, check["detail"])
+        inside = os.path.join(self.data, "repo")
+        _write(
+            os.path.join(inside, ".openhands", "hooks.json"),
+            json.dumps({"pre_tool_use": [{"hooks": [{"type": "command", "command": script}]}]}),
+        )
+        os.remove(config)
+        self.assertEqual(
+            [left for left in removed_connectors.leftovers(self.data, home=self.home, workspace=inside)], []
+        )
+
     def test_prints_no_row_without_leftovers(self):
         result = _DoctorResult()
-        with patch.object(removed_connectors, "leftovers", lambda data_dir: _leftovers(data_dir, self.home)):
+        with patch.object(
+            removed_connectors, "leftovers", lambda data_dir, **kw: _leftovers(data_dir, self.home, **kw)
+        ):
             _check_removed_connector_cleanup(SimpleNamespace(data_dir=self.data), result)
         self.assertEqual(result.checks, [])
 
@@ -454,8 +563,8 @@ class DoctorTests(_Host):
 _REAL_LEFTOVERS = removed_connectors.leftovers
 
 
-def _leftovers(data_dir: str, home: str):
-    return _REAL_LEFTOVERS(data_dir, home=home)
+def _leftovers(data_dir: str, home: str, **kw):
+    return _REAL_LEFTOVERS(data_dir, home=home, **kw)
 
 
 class StatusTests(unittest.TestCase):

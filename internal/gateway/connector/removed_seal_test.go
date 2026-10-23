@@ -89,7 +89,7 @@ func TestRemovedTeardownSealsTheStubInTheLock(t *testing.T) {
 			}
 			// A host an earlier 1.0.4 build tore down: the stub is in place,
 			// the tokens are gone, and the lock still seals the old hook.
-			if err := sealRemovedConnectorScript(h.dataDir, c.name, c.script, "sha256:00", false); err != nil {
+			if err := sealRemovedConnectorScript(h.dataDir, c.name, c.script, "sha256:00", nil, false); err != nil {
 				t.Fatal(err)
 			}
 			if err := conn.VerifyClean(h.opts); err == nil || !strings.Contains(err.Error(), "the hook contract lock seals "+c.script) {
@@ -227,4 +227,175 @@ func TestRemovedTeardownRefusesAHooksPathThatIsNotAFolder(t *testing.T) {
 	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
 		t.Fatalf("the teardown wrote through the link: %v", entries)
 	}
+}
+
+// T8 smoke review loop round 3: an active 1.0.x install whose hook contract
+// lock, or its entry for the connector, is gone. The teardown wrote the stub
+// and VerifyClean passed with nothing sealed. The stub is now sealed in an
+// entry of its own, with the agent config that runs it, and read back;
+// VerifyClean fails while no entry seals it.
+func TestRemovedTeardownSealsTheStubWhenTheLockOrItsEntryIsGone(t *testing.T) {
+	for _, c := range removedConnectorsUnderTest() {
+		for _, tc := range []struct {
+			name string
+			lose func(t *testing.T, h *removedHost)
+		}{
+			{"the lock gone", func(t *testing.T, h *removedHost) {
+				if err := os.Remove(filepath.Join(h.dataDir, hookContractLockFile)); err != nil {
+					t.Fatal(err)
+				}
+			}},
+			{"the entry gone", func(t *testing.T, h *removedHost) {
+				writeRemovedFile(t, filepath.Join(h.dataDir, hookContractLockFile), `{"version":2,"updated_at":"2026-10-01T00:00:00Z","connectors":{`+
+					`"codex":{"connector":"codex","contract_id":"codex-hooks-v1","hook_script_digests":{"codex-hook.sh":"sha256:00"},"defenseclaw_version":"1.0.3","hook_fail_mode":"closed","updated_at":"2026-10-01T00:00:00Z"}}}`+"\n", 0o600)
+			}},
+		} {
+			t.Run(c.name+"/"+tc.name, func(t *testing.T) {
+				h := newRemovedHost(t)
+				h.stage(t, c)
+				tc.lose(t, h)
+				codexBefore := LoadHookContractLockEntry(h.dataDir, "codex")
+				conn, _ := RetiredConnector(c.name)
+				if err := conn.Teardown(context.Background(), h.opts); err != nil {
+					t.Fatal(err)
+				}
+				h.requireStub(t, c)
+				h.requireSealed(t, c, removedStubDigest(c))
+				if entry := LoadHookContractLockEntry(h.dataDir, c.name); !removedLockNamesConfig(entry, h.agentConfig) {
+					t.Fatalf("the new entry does not name %s, which runs the stub: %+v", h.agentConfig, entry.Locations)
+				}
+				if got := LoadHookContractLockEntry(h.dataDir, "codex"); !reflect.DeepEqual(got, codexBefore) {
+					t.Fatalf("the seal changed the codex entry:\n got %+v\nwant %+v", got, codexBefore)
+				}
+				if err := conn.VerifyClean(h.opts); err != nil {
+					t.Fatalf("VerifyClean after the teardown: %v", err)
+				}
+				// Lost again after the teardown: VerifyClean fails until the
+				// next teardown seals it again.
+				tc.lose(t, h)
+				if err := conn.VerifyClean(h.opts); err == nil || !strings.Contains(err.Error(), "has no "+c.name+" entry that seals the stub") {
+					t.Fatalf("VerifyClean with no entry sealing the stub = %v, want it incomplete", err)
+				}
+				if err := conn.Teardown(context.Background(), h.opts); err != nil {
+					t.Fatal(err)
+				}
+				h.requireSealed(t, c, removedStubDigest(c))
+				if err := conn.VerifyClean(h.opts); err != nil {
+					t.Fatalf("VerifyClean after the second teardown: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// An entry that seals the stub but does not name an agent config that runs it
+// (the registration moved, or a workspace one was never recorded) is not the
+// exact seal: VerifyClean fails, and the teardown adds the config.
+func TestRemovedTeardownNamesEveryConfigThatRunsTheStub(t *testing.T) {
+	c := removedOpenHands
+	h := newRemovedHost(t)
+	h.stage(t, c)
+	conn, _ := RetiredConnector(c.name)
+	if err := conn.Teardown(context.Background(), h.opts); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(h.home, "repo")
+	extra := filepath.Join(workspace, ".openhands", "hooks.json")
+	writeRemovedFile(t, extra, `{"pre_tool_use":[{"matcher":"*","hooks":[{"type":"command","command":"`+h.script(c)+`"}]}]}`, 0o600)
+	opts := h.opts
+	opts.WorkspaceDir = workspace
+	if err := conn.VerifyClean(opts); err == nil || !strings.Contains(err.Error(), "does not name "+extra) {
+		t.Fatalf("VerifyClean with %s unrecorded = %v, want it incomplete", extra, err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	entry := LoadHookContractLockEntry(h.dataDir, c.name)
+	if !removedLockNamesConfig(entry, extra) || !removedLockNamesConfig(entry, h.agentConfig) {
+		t.Fatalf("the entry does not name both configs: %+v", entry.Locations)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after the teardown: %v", err)
+	}
+}
+
+// T8 smoke review loop round 3: a 1.0.x OpenHands setup with a pinned
+// workspace registered its hook in <workspace>/.openhands/hooks.json. With
+// the script, its backup and lock records gone, the teardown checked only the
+// home config and passed, while OpenHands let the call through on the missing
+// script. The configured workspace (or the one the lock entry recorded) is
+// now checked too: the stub goes there and is sealed. A workspace inside the
+// data directory was never used for the hooks (the setup fell back to the
+// home), so it is not checked either.
+func TestRemovedOpenHandsTeardownFindsAWorkspaceRegistration(t *testing.T) {
+	c := removedOpenHands
+	for _, tc := range []struct {
+		name string
+		// pin returns the options the teardown gets.
+		pin func(t *testing.T, h *removedHost, workspace string) SetupOpts
+	}{
+		{"the configured workspace", func(_ *testing.T, h *removedHost, workspace string) SetupOpts {
+			opts := h.opts
+			opts.WorkspaceDir = workspace
+			return opts
+		}},
+		{"the workspace the lock entry records", func(t *testing.T, h *removedHost, workspace string) SetupOpts {
+			writeRemovedFile(t, filepath.Join(h.dataDir, hookContractLockFile), `{"version":2,"updated_at":"2026-10-01T00:00:00Z","connectors":{`+
+				`"openhands":{"connector":"openhands","registration_posture":{"workspace_dir":`+strconvQuote(workspace)+`,"guardrail_mode":"action","hilt_enabled":false},"updated_at":"2026-10-01T00:00:00Z"}}}`+"\n", 0o600)
+			return h.opts
+		}},
+		{"a workspace given as ~/repo", func(_ *testing.T, h *removedHost, _ string) SetupOpts {
+			opts := h.opts
+			opts.WorkspaceDir = "~/repo"
+			return opts
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRemovedHost(t)
+			workspace := filepath.Join(h.home, "repo")
+			config := filepath.Join(workspace, ".openhands", "hooks.json")
+			writeRemovedFile(t, config, `{"pre_tool_use":[{"matcher":"*","hooks":[{"type":"command","command":"`+h.script(c)+`","timeout":60}]}]}`, 0o600)
+			opts := tc.pin(t, h, workspace)
+			conn, _ := RetiredConnector(c.name)
+			if err := conn.VerifyClean(opts); err == nil || !strings.Contains(err.Error(), "is gone, but "+config) {
+				t.Fatalf("VerifyClean with the workspace registration live and no script = %v, want it incomplete", err)
+			}
+			gone := false
+			for _, left := range c.leftovers(opts) {
+				gone = gone || (left.Path == h.script(c) && left.What == RemovedScriptGoneWhat)
+			}
+			if !gone {
+				t.Fatalf("leftovers do not name the gone script under the workspace registration: %+v", c.leftovers(opts))
+			}
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatal(err)
+			}
+			h.requireStub(t, c)
+			if entry := LoadHookContractLockEntry(h.dataDir, c.name); entry.HookScriptDigests[c.script] != removedStubDigest(c) || !removedLockNamesConfig(entry, config) {
+				t.Fatalf("the lock entry after the teardown = %+v, want the stub sealed with %s", entry, config)
+			}
+			if err := conn.VerifyClean(opts); err != nil {
+				t.Fatalf("VerifyClean after the teardown: %v", err)
+			}
+		})
+	}
+	t.Run("a workspace inside the data directory", func(t *testing.T) {
+		h := newRemovedHost(t)
+		workspace := filepath.Join(h.dataDir, "repo")
+		writeRemovedFile(t, filepath.Join(workspace, ".openhands", "hooks.json"), `{"pre_tool_use":[{"matcher":"*","hooks":[{"type":"command","command":"`+h.script(c)+`"}]}]}`, 0o600)
+		opts := h.opts
+		opts.WorkspaceDir = workspace
+		conn, _ := RetiredConnector(c.name)
+		if err := conn.Teardown(context.Background(), opts); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(h.script(c)); !os.IsNotExist(err) {
+			t.Fatalf("the teardown wrote %s for a workspace inside the data directory: %v", h.script(c), err)
+		}
+	})
+}
+
+func strconvQuote(s string) string {
+	data, _ := json.Marshal(s)
+	return string(data)
 }

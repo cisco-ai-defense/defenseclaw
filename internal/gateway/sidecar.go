@@ -5004,7 +5004,7 @@ func (s *Sidecar) reconcileUnconfiguredConnectors(ctx context.Context, registry 
 		APIAddr:      apiListenAddr(s.currentConfig()),
 		WorkspaceDir: s.currentConfig().ConnectorWorkspaceDir(),
 	}
-	failed, dropped := teardownRemovedConnectorsReport(registry, previous, nil, opts, ctx)
+	failed, dropped := teardownRemovedConnectorsReport(registry, previous, nil, opts, opts.WorkspaceDir, ctx)
 	for _, name := range dropped {
 		s.auditDroppedConnectorState(name, "removed")
 	}
@@ -5157,7 +5157,8 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 			resolveOpts: func(conn connector.Connector) (connector.SetupOpts, error) {
 				return s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
 			},
-			clearLock: connector.ClearHookContractLockEntry,
+			clearLock:    connector.ClearHookContractLockEntry,
+			workspaceDir: s.currentConfig().ConnectorWorkspaceDir(),
 			audit: func(name string) {
 				s.auditDroppedConnectorState(name, "lock-only")
 			},
@@ -5194,7 +5195,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		failedRemoved = append(unavailable, teardownFailed...)
 	} else {
 		var dropped []string
-		failedRemoved, dropped = teardownRemovedConnectorsReport(registry, previous, names, baseOpts, ctx)
+		failedRemoved, dropped = teardownRemovedConnectorsReport(registry, previous, names, baseOpts, s.currentConfig().ConnectorWorkspaceDir(), ctx)
 		for _, name := range dropped {
 			s.auditDroppedConnectorState(name, "removed")
 		}
@@ -6023,7 +6024,7 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 				// lock state; requested Setup then publishes the new active
 				// roster. A name a plugin may still provide falls through to the
 				// strict rollback-authority check below.
-				if err := retireOrDropUnregisteredConnector(ctx, registry, s.currentConfig().DataDir, name, "previous", nil); err != nil {
+				if err := retireOrDropUnregisteredConnector(ctx, registry, s.retiredConnectorOpts(), name, "previous", nil); err != nil {
 					return err
 				}
 				s.auditDroppedConnectorState(name, "previous")
@@ -7207,7 +7208,11 @@ func teardownPreviousConnector(registry *connector.Registry, newName string, opt
 // its agent config files are left untouched, only its DefenseClaw lock entry
 // is dropped (dropUnregisteredConnectorState), and it is returned in dropped
 // so Sidecar callers can audit it.
-func teardownRemovedConnectorsReport(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, ctx context.Context) (failed, dropped []string) {
+//
+// retiredWorkspace is the configured connector workspace (claw.workspace_dir)
+// the teardown of a retired connector also checks: a workspace-pinned older
+// setup registered its hook there.
+func teardownRemovedConnectorsReport(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, retiredWorkspace string, ctx context.Context) (failed, dropped []string) {
 	if registry == nil || len(previous) == 0 {
 		return nil, nil
 	}
@@ -7232,7 +7237,7 @@ func teardownRemovedConnectorsReport(registry *connector.Registry, previous, cur
 				failed = append(failed, prevName)
 				continue
 			}
-			if err := retireOrDropUnregisteredConnector(ctx, registry, opts.DataDir, prevName, "removed", nil); err != nil {
+			if err := retireOrDropUnregisteredConnector(ctx, registry, retiredConnectorOpts(opts.DataDir, retiredWorkspace), prevName, "removed", nil); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %v\n", err)
 				failed = append(failed, prevName)
 				continue
@@ -7325,7 +7330,12 @@ func connectorDroppable(registry *connector.Registry, name string) bool {
 // its lock entry even then: its teardown changes only its hook script and
 // tokens, and clearing its entry is a no-op. Any other name only loses
 // DefenseClaw's lock state (dropUnregisteredConnectorState).
-func retireOrDropUnregisteredConnector(ctx context.Context, registry *connector.Registry, dataDir, name, surface string, clearLock func(dataDir, connectorName string) error) error {
+//
+// opts is retiredConnectorOpts: the data directory and the configured
+// connector workspace, where a workspace-pinned older setup registered its
+// hook.
+func retireOrDropUnregisteredConnector(ctx context.Context, registry *connector.Registry, opts connector.SetupOpts, name, surface string, clearLock func(dataDir, connectorName string) error) error {
+	dataDir := opts.DataDir
 	retired, ok := connector.RetiredConnector(name)
 	if !ok {
 		return dropUnregisteredConnectorState(registry, dataDir, name, surface, clearLock)
@@ -7333,7 +7343,6 @@ func retireOrDropUnregisteredConnector(ctx context.Context, registry *connector.
 	if clearLock == nil {
 		clearLock = connector.ClearHookContractLockEntry
 	}
-	opts := connector.SetupOpts{DataDir: dataDir}
 	teardownErr := retired.Teardown(ctx, opts)
 	logRemovedConnectorLeftovers(retired.Name(), opts)
 	if teardownErr != nil {
@@ -7361,13 +7370,32 @@ func logRemovedConnectorLeftovers(name string, opts connector.SetupOpts) {
 }
 
 // removedConnectorAlreadyTornDown reports whether name is a removed connector
-// (until 1.1) whose teardown has nothing left to do.
-func removedConnectorAlreadyTornDown(dataDir, name string) bool {
+// (until 1.1) whose teardown has nothing left to do; opts is
+// retiredConnectorOpts.
+func removedConnectorAlreadyTornDown(opts connector.SetupOpts, name string) bool {
 	if !connector.IsRemovedConnector(name) {
 		return false
 	}
 	retired, ok := connector.RetiredConnector(name)
-	return ok && retired.VerifyClean(connector.SetupOpts{DataDir: dataDir}) == nil
+	return ok && retired.VerifyClean(opts) == nil
+}
+
+// retiredConnectorOpts are the options a retired connector's teardown and
+// verification get: the data directory and the configured connector
+// workspace (claw.workspace_dir), where a workspace-pinned 1.0.x OpenHands
+// setup registered its hook (<workspace>/.openhands/hooks.json). Nothing
+// else: they write or read no other connector's state.
+func retiredConnectorOpts(dataDir, workspaceDir string) connector.SetupOpts {
+	return connector.SetupOpts{DataDir: dataDir, WorkspaceDir: workspaceDir}
+}
+
+// retiredConnectorOpts is retiredConnectorOpts for the current config.
+func (s *Sidecar) retiredConnectorOpts() connector.SetupOpts {
+	cfg := s.currentConfig()
+	if cfg == nil {
+		return connector.SetupOpts{}
+	}
+	return retiredConnectorOpts(cfg.DataDir, cfg.ConnectorWorkspaceDir())
 }
 
 // auditDroppedConnectorState records that boot dropped the state of a
@@ -7388,6 +7416,9 @@ type orphanConnectorOptsResolver func(connector.Connector) (connector.SetupOpts,
 type orphanConnectorReconcileOps struct {
 	resolveOpts orphanConnectorOptsResolver
 	clearLock   func(dataDir, connectorName string) error
+	// workspaceDir is the configured connector workspace a retired
+	// connector's teardown also checks (retiredConnectorOpts).
+	workspaceDir string
 	// audit, when set, records each unregistered connector whose lock entry
 	// was dropped.
 	audit func(connectorName string)
@@ -7461,12 +7492,13 @@ func reconcileOrphanedConnectorRegistrations(
 			if !connectorDroppable(registry, name) {
 				return fmt.Errorf("protected lock-only connector %q is not registered and a plugin may still provide it (check plugin discovery); %s", name, removedConnectorDocHint)
 			}
-			if removedConnectorAlreadyTornDown(dataDir, name) {
+			retiredOpts := retiredConnectorOpts(dataDir, ops.workspaceDir)
+			if removedConnectorAlreadyTornDown(retiredOpts, name) {
 				// until 1.1: a removed connector's lock entry stays after
 				// its teardown, so only a teardown still due runs.
 				continue
 			}
-			if err := retireOrDropUnregisteredConnector(ctx, registry, dataDir, name, "lock-only", ops.clearLock); err != nil {
+			if err := retireOrDropUnregisteredConnector(ctx, registry, retiredOpts, name, "lock-only", ops.clearLock); err != nil {
 				return err
 			}
 			if ops.audit != nil {
@@ -7617,7 +7649,7 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 			}
 			// No build-shipped owner can tear this name down, so retrying would
 			// fail forever. Drop DefenseClaw's lock state and leave host files.
-			if err := retireOrDropUnregisteredConnector(context.Background(), registry, s.currentConfig().DataDir, name, "removed", nil); err != nil {
+			if err := retireOrDropUnregisteredConnector(context.Background(), registry, s.retiredConnectorOpts(), name, "removed", nil); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %v — retaining for teardown retry\n", err)
 				failed = append(failed, name)
 				continue

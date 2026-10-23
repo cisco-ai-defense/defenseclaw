@@ -2356,3 +2356,82 @@ def test_a_signature_that_does_not_verify_stops_the_install(tmp_path: Path) -> N
 
     assert result.returncode == 1 and "die: Could not sign defenseclaw-gateway for this Mac" in result.stdout
     assert not (staging / "binaries.sha256").exists()
+
+
+# ── 1.0.4 (T8 smoke review loop round 3) ────────────────────────────────────
+
+
+def test_an_upgrade_finishes_the_removed_connector_cleanup_or_fails(tmp_path: Path) -> None:
+    # A gateway start that brought the other connectors up only logged a
+    # removed connector (OpenHands, OmniGent) whose teardown it could not
+    # finish, and the upgrade exited 0. The installer now checks each: one not
+    # done is torn down again, and one still not done is named with its cause
+    # and the install exits 3.
+    home = tmp_path / "dc"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls"
+    gateway = bin_dir / "defenseclaw-gateway"
+
+    def run(dirty: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        # dirty: connector -> "once" (clean after a teardown) or "always".
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        for name, how in dirty.items():
+            (state / name).write_text(how, encoding="utf-8")
+        gateway.write_text(
+            "#!/bin/sh\n"
+            f'echo "$*" >> "{calls}"\n'
+            "name=$4; action=$2\n"
+            f'state="{state}/$name"\n'
+            '[ -f "$state" ] || exit 0\n'
+            'if [ "$action" = teardown ]; then\n'
+            '  [ "$(cat "$state")" = once ] && rm -f "$state"\n'
+            "  exit 1\n"
+            "fi\n"
+            'echo "  X $name: $name cleanup incomplete: /h/openhands-hook.sh is gone, but /w/.openhands/hooks.json still runs it. To finish: run defenseclaw-gateway connector teardown --connector $name" >&2\n'
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+        script = tmp_path / "finish.sh"
+        script.write_text(
+            'set -euo pipefail\nerr() { echo "err: $*" >&2; }\n'
+            + _install_sh_functions("finish_retired_connector_cleanup")
+            + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" LOG="{tmp_path / "log"}" VERSION=1.0.4\n'
+            + "finish_retired_connector_cleanup\n",
+            encoding="utf-8",
+        )
+        if calls.exists():
+            calls.unlink()
+        return _run([str(script)], tmp_path)
+
+    verify = f"connector verify --connector {{}} --data-dir {home}"
+    teardown = f"connector teardown --connector {{}} --data-dir {home}"
+
+    clean = run({})
+    assert clean.returncode == 0, clean.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [verify.format("openhands"), verify.format("omnigent")]
+
+    healed = run({"omnigent": "once"})
+    assert healed.returncode == 0, healed.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        verify.format("openhands"),
+        verify.format("omnigent"),
+        teardown.format("omnigent"),
+        verify.format("omnigent"),
+    ]
+
+    stuck = run({"openhands": "always"})
+    assert stuck.returncode == 1
+    assert "could not finish removing the openhands connector" in stuck.stderr
+    assert "/w/.openhands/hooks.json still runs it" in stuck.stderr
+    assert "To finish: run defenseclaw-gateway connector teardown --connector openhands" in stuck.stderr
+    assert "omnigent" not in stuck.stderr
+
+    # The upgrade runs it once the gateway it started is up, and exits 3.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    main = text[text.index("finish_swap\n# until 1.1") : text.index("exit ${START_RC}")]
+    assert main.index(
+        'if [[ -n "${PREV_VERSION}" && "${WAS_RUNNING}" == true ]] && ! finish_retired_connector_cleanup; then\n    START_RC=3\nfi'
+    ) < main.index("report_retired_connector_leftovers")

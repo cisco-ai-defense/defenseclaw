@@ -653,7 +653,8 @@ def _print_removed_connector_cleanup(cfg) -> None:
     """until 1.1: name a removed connector that left things to remove by hand."""
     from defenseclaw.removed_connectors import leftovers
 
-    for left in leftovers(str(getattr(cfg, "data_dir", "") or "")):
+    workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
+    for left in leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace):
         _status_row(
             "Cleanup",
             ux._style(f"{left.label} was removed in 1.0.4; {len(left.items)} item(s) to remove by hand", fg="yellow")
@@ -1944,7 +1945,8 @@ def _status_payload(app) -> dict:
     )
     from defenseclaw.removed_connectors import leftovers
 
-    if left := [item.as_json() for item in leftovers(str(cfg.data_dir or ""))]:
+    workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
+    if left := [item.as_json() for item in leftovers(str(cfg.data_dir or ""), workspace=workspace)]:
         # until 1.1: what the removed OpenHands/OmniGent teardown left.
         payload["removed_connector_cleanup"] = left
 

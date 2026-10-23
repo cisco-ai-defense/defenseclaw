@@ -38,3 +38,8 @@ func removedSavedCopyPrivate(os.FileInfo) error { return nil }
 func removedInPlaceRefusal(os.FileInfo, os.FileInfo) error {
 	return errors.New("on Windows the stub is only renamed over the path")
 }
+
+// removedStubMetadataRefusal is nil on Windows: no mode bit or owner check
+// decides whether an agent runs or loads a file there. until 1.1, with
+// removed.go.
+func removedStubMetadataRefusal(os.FileInfo, os.FileInfo, os.FileMode) error { return nil }

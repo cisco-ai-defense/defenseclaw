@@ -1083,6 +1083,10 @@ if [[ "${WAS_RUNNING}" == true ]]; then
     rm -f "${SNAP}/GATEWAY_RESTART_UNPROVEN"
 fi
 finish_swap
+# until 1.1: an upgrade never ends with a removed connector's hook left unsealed.
+if [[ -n "${PREV_VERSION}" && "${WAS_RUNNING}" == true ]] && ! finish_retired_connector_cleanup; then
+    START_RC=3
+fi
 report_retired_connector_leftovers
 trap - HUP PIPE
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
@@ -1918,6 +1922,27 @@ finish_swap() {
     find -H "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
         -exec rm -rf {} + 2>/dev/null || true
     ok "Installed DefenseClaw ${VERSION}"
+}
+
+# until 1.1: the gateway tears the removed connectors (OpenHands, OmniGent)
+# down when it starts, but a start that brings the other connectors up only
+# logs one it could not finish. Check each here: one not done is torn down
+# again, and one still not done (an agent config that runs a hook DefenseClaw
+# could not put the sealed stub under) is named with its cause and step, and
+# the install exits 3, not 0.
+finish_retired_connector_cleanup() {
+    local gateway="${BIN_DIR}/defenseclaw-gateway" name why failed=0
+    [[ -x "${gateway}" ]] || return 0
+    for name in openhands omnigent; do
+        "${gateway}" connector verify --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" >>"${LOG}" 2>&1 && continue
+        "${gateway}" connector teardown --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" >>"${LOG}" 2>&1 || true
+        why="$("${gateway}" connector verify --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" 2>&1)" && continue
+        printf '%s\n' "${why}" >>"${LOG}"
+        why="$(printf '%s' "${why}" | tr '\n' ' ' | sed -E 's/^[[:space:]]*(✗|X)[[:space:]]+//; s/[[:space:]]+$//')"
+        err "DefenseClaw ${VERSION} could not finish removing the ${name} connector, so its agent may not be blocked: ${why:-see ${LOG}}"
+        failed=1
+    done
+    return "${failed}"
 }
 
 # until 1.1: the removed connectors' teardown deliberately keeps vendor
