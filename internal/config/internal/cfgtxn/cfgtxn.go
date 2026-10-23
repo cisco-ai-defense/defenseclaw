@@ -55,6 +55,29 @@ var ErrFileLockBusy = errors.New("configwrite: another DefenseClaw process is ch
 // ErrConflict means the file changed after the transaction read it.
 var ErrConflict = errors.New("configwrite: config.yaml changed since it was read")
 
+// afterPublicationError marks an error that occurred after config.yaml was
+// replaced, even when Commit put the previous bytes back before returning.
+// The caller must reconcile the running gateway, which may have loaded the
+// candidate during that interval. An error before the rename must never
+// trigger that reconciliation.
+type afterPublicationError struct{ error }
+
+func (e afterPublicationError) Unwrap() error { return e.error }
+
+// AfterPublication preserves that config.yaml was published before err.
+func AfterPublication(err error) error {
+	if err == nil || PublicationOccurred(err) {
+		return err
+	}
+	return afterPublicationError{err}
+}
+
+// PublicationOccurred reports whether err follows a config.yaml rename.
+func PublicationOccurred(err error) bool {
+	var published afterPublicationError
+	return errors.As(err, &published)
+}
+
 // GenerationState is config.generation.json.
 type GenerationState struct {
 	// Generation is monotonic; a writer that finds the file missing or
@@ -267,9 +290,9 @@ func (t *Txn) Read() (raw []byte, mode os.FileMode, exists bool, err error) {
 // Commit replaces config.yaml with candidate (durably) and then advances
 // config.generation.json. The lock must still be held. When either step
 // fails after the new bytes reached config.yaml (a failed directory fsync, a
-// full disk before the generation file), the previous bytes are put back so
-// the error means nothing changed; if that restore fails too, the error says
-// config.yaml holds the new bytes.
+// full disk before the generation file), the previous bytes are put back and
+// the error records that a gateway might have loaded the candidate. If that
+// restore fails too, the error says config.yaml holds the new bytes.
 func (t *Txn) Commit(expected, candidate []byte, expectedExists bool, mode os.FileMode, w Writer) (GenerationState, error) {
 	if t == nil || t.lock == nil {
 		return GenerationState{}, errors.New("configwrite: commit without the writer lock")
@@ -283,11 +306,14 @@ func (t *Txn) Commit(expected, candidate []byte, expectedExists bool, mode os.Fi
 		return GenerationState{}, ErrConflict
 	}
 	if err := WriteFileDurable(t.path, candidate, mode); err != nil {
-		return GenerationState{}, t.undoCommit(err, candidate, previous, existed, mode)
+		if !PublicationOccurred(err) {
+			return GenerationState{}, err
+		}
+		return GenerationState{}, AfterPublication(t.undoCommit(err, candidate, previous, existed, mode))
 	}
 	state, err := t.RecordGeneration(SHA256Hex(candidate), w)
 	if err != nil {
-		return GenerationState{}, t.undoCommit(err, candidate, previous, existed, mode)
+		return GenerationState{}, AfterPublication(t.undoCommit(err, candidate, previous, existed, mode))
 	}
 	return state, nil
 }
@@ -470,7 +496,7 @@ func WriteFileDurablePublished(path string, data []byte, mode os.FileMode, publi
 	}
 	committed = true
 	if err := syncDir(dir); err != nil {
-		return fmt.Errorf("configwrite: fsync directory %s: %w", dir, err)
+		return AfterPublication(fmt.Errorf("configwrite: fsync directory %s: %w", dir, err))
 	}
 	return nil
 }

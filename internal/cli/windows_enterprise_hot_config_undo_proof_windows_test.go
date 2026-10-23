@@ -150,7 +150,7 @@ func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
 								return err
 							}
 						}
-						return errors.New("generation write and writer restore failed after config publication")
+						return configwrite.AfterPublication(errors.New("generation write and writer restore failed after config publication"))
 					}
 					return nil
 				}

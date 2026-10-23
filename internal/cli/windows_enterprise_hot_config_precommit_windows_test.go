@@ -21,6 +21,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -93,6 +94,179 @@ func TestWindowsHotConfigPrecommitConflictKeepsConcurrentConfigAndGateway(t *tes
 					installed, generation, writes, reloads, host.stops, opts.hotConfigRestoreFailed)
 			}
 		})
+	}
+}
+
+// The same error kind can occur on either side of the config publication.
+// Only the postpublication rows may restore a config or reload a gateway.
+func TestWindowsHotConfigWriteFailuresFollowPublicationPhase(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
+	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"
+	for _, failure := range []struct {
+		name string
+		err  error
+	}{
+		{"conflict", configwrite.ErrConflict},
+		{"lock busy", configwrite.ErrLockBusy},
+		{"write", errors.New("write failed")},
+		{"read", errors.New("read failed")},
+		{"validation", errors.New("validation failed")},
+		{"permission", os.ErrPermission},
+	} {
+		for _, published := range []bool{false, true} {
+			for _, bundle := range []bool{false, true} {
+				name := failure.name + "/before/Setup"
+				if published {
+					name = failure.name + "/after/Setup"
+				}
+				if bundle {
+					name = strings.TrimSuffix(name, "Setup") + "bundle"
+				}
+				t.Run(name, func(t *testing.T) {
+					host, opts := newHotConfigHost(t, previous, next)
+					host.adopted = true
+					if bundle {
+						opts.bundle = host.bundleRun()
+					}
+					generation := []byte(`{"generation":3,"config_sha256":"` + configwrite.SHA256Hex([]byte(previous)) + `"}`)
+					if err := os.WriteFile(configwrite.GenerationPath(host.configPath), generation, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					attempts, reloads := 0, 0
+					write := windowsEnterpriseHotConfigWrite
+					windowsEnterpriseHotConfigWrite = func(ctx context.Context, path string, raw []byte, opt configwrite.Options) error {
+						attempts++
+						if attempts == 1 {
+							if !published {
+								return failure.err
+							}
+							if err := write(ctx, path, raw, opt); err != nil {
+								return err
+							}
+							return configwrite.AfterPublication(failure.err)
+						}
+						return write(ctx, path, raw, opt)
+					}
+					windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error {
+						reloads++
+						return nil
+					}
+					oldDigest := windowsEnterprisePolicyDigest
+					t.Cleanup(func() { windowsEnterprisePolicyDigest = oldDigest })
+					windowsEnterprisePolicyDigest = host.digest
+					result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+					applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+						&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+					installed, readErr := os.ReadFile(host.configPath)
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					afterGeneration, readErr := os.ReadFile(configwrite.GenerationPath(host.configPath))
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					wantAttempts, wantReloads := 1, 0
+					if published {
+						wantAttempts, wantReloads = 2, 1
+					}
+					generationCorrect := bytes.Equal(afterGeneration, generation)
+					if published {
+						generationCorrect = !generationCorrect
+					}
+					if applied || string(installed) != previous || !generationCorrect ||
+						attempts != wantAttempts || reloads != wantReloads || host.stops != 0 || opts.hotConfigRestoreFailed {
+						t.Fatalf("applied=%t config=%q generation=%q writes=%d reloads=%d stops=%d restoreFailed=%t errors=%+v",
+							applied, installed, afterGeneration, attempts, reloads, host.stops, opts.hotConfigRestoreFailed, result.Errors)
+					}
+				})
+			}
+		}
+	}
+}
+
+// If the installed CLI disappears after the initial policy proof, undo can
+// still prove the previous policy through the service's authenticated health.
+// A gateway that already kept that policy continues running; one that loaded
+// the candidate is restarted on the restored config.
+func TestWindowsHotConfigUndoSurvivesInstalledCLILoss(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
+	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"
+	for _, candidateLoaded := range []bool{false, true} {
+		for _, bundle := range []bool{false, true} {
+			name := fmt.Sprintf("candidate-loaded=%t/bundle=%t", candidateLoaded, bundle)
+			t.Run(name, func(t *testing.T) {
+				host, opts := newHotConfigHost(t, previous, next)
+				if bundle {
+					opts.bundle = host.bundleRun()
+				}
+				recorded := []byte(`{"generation":3,"config_sha256":"` + configwrite.SHA256Hex([]byte(previous)) + `"}`)
+				if err := os.WriteFile(configwrite.GenerationPath(host.configPath), recorded, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				loadedCandidate := false
+				write := windowsEnterpriseHotConfigWrite
+				windowsEnterpriseHotConfigWrite = func(ctx context.Context, path string, raw []byte, opt configwrite.Options) error {
+					if err := write(ctx, path, raw, opt); err != nil {
+						return err
+					}
+					if bytes.Equal(raw, []byte(next)) {
+						loadedCandidate = candidateLoaded
+					}
+					return nil
+				}
+				windowsEnterpriseHotConfigValidate = func(string, string, string, bool) (windowsServiceConfigValidation, error) {
+					return windowsServiceConfigValidation{}, errors.New("postpublication validation failed")
+				}
+				proofCalls := 0
+				oldDigest, oldHealth := windowsEnterprisePolicyDigest, windowsEnterpriseHotConfigGatewayPolicy
+				t.Cleanup(func() {
+					windowsEnterprisePolicyDigest, windowsEnterpriseHotConfigGatewayPolicy = oldDigest, oldHealth
+				})
+				windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
+					proofCalls++
+					if proofCalls == 1 {
+						return host.digest(ctx)
+					}
+					return nil, os.ErrNotExist
+				}
+				priorDigest := "sha256:" + strings.Repeat("a", 64)
+				nextDigest := "sha256:" + strings.Repeat("b", 64)
+				healthCalls := 0
+				windowsEnterpriseHotConfigGatewayPolicy = func(context.Context, managed.StandaloneLayout) (gateway.PolicyHealth, error) {
+					healthCalls++
+					if loadedCandidate {
+						return gateway.PolicyHealth{EffectiveDigest: nextDigest, BundleID: host.bundleID, BundleVersion: host.bundleVersion}, nil
+					}
+					return gateway.PolicyHealth{EffectiveDigest: priorDigest, BundleID: host.bundleID, BundleVersion: host.bundleVersion}, nil
+				}
+				reloads, restarts := 0, 0
+				windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error {
+					reloads++
+					return os.ErrNotExist
+				}
+				windowsEnterpriseHotConfigRestart = func() (bool, error) {
+					restarts++
+					loadedCandidate = false
+					return true, nil
+				}
+				result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+				applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+					&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+				installed, err := os.ReadFile(host.configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantRestarts := 0
+				if candidateLoaded {
+					wantRestarts = 1
+				}
+				if applied || string(installed) != previous || reloads != 1 || restarts != wantRestarts ||
+					healthCalls == 0 || host.stops != 0 || opts.hotConfigRestoreFailed || loadedCandidate {
+					t.Fatalf("applied=%t config=%q reloads=%d restarts=%d healthCalls=%d stops=%d restoreFailed=%t candidateLive=%t errors=%+v",
+						applied, installed, reloads, restarts, healthCalls, host.stops, opts.hotConfigRestoreFailed, loadedCandidate, result.Errors)
+				}
+			})
+		}
 	}
 }
 

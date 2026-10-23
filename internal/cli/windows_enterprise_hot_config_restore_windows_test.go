@@ -48,7 +48,7 @@ func TestWindowsEnterpriseHotConfigFailedRestoreStopsTheEnsure(t *testing.T) {
 					return err
 				}
 				if writeFails {
-					return errors.New("initial write failed after config publication")
+					return configwrite.AfterPublication(errors.New("initial write failed after config publication"))
 				}
 				return nil
 			}

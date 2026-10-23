@@ -266,7 +266,8 @@ func executeEnterpriseSetup(
 		return captured.Bytes(), err
 	}, func(ctx context.Context) ([]byte, error) {
 		// The trusted staged CLI and module stay until this recovery ends:
-		// cleanup runs below. It only replays the protected pending journal.
+		// cleanup runs below. It replays pending rollback or committed
+		// uninstall hook teardown using the protected lifecycle evidence.
 		return enterpriseSetupRecoveryRunner(ctx, cliPath,
 			enterpriseLifecycleArguments(stageRoot, standaloneRecoveryOptions(opts)), stageRoot, childEnvironment)
 	})

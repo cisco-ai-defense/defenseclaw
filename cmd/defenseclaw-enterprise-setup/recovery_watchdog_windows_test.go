@@ -8,21 +8,24 @@ package main
 import (
 	"bytes"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
-// GAP-0726: the independent child waits until the uninstall parent has
-// exited, then replays only a pending transaction. A successful uninstall
-// leaves no pending record and must not be undone.
+// The independent child waits until the uninstall parent has exited, then
+// runs authenticated recovery even after pending.json was removed: hook
+// finalization and state purge happen after that commit point.
 func TestStandaloneUninstallRecoveryWatcher(t *testing.T) {
-	oldOpen, oldPending, oldReplay := setupRecoveryOpenParent, setupRecoveryPending, setupRecoveryReplay
+	oldOpen, oldNeeded, oldReplay := setupRecoveryOpenParent, setupRecoveryNeeded, setupRecoveryReplay
 	t.Cleanup(func() {
-		setupRecoveryOpenParent, setupRecoveryPending, setupRecoveryReplay = oldOpen, oldPending, oldReplay
+		setupRecoveryOpenParent, setupRecoveryNeeded, setupRecoveryReplay = oldOpen, oldNeeded, oldReplay
 	})
 	var events []string
 	var output bytes.Buffer
@@ -36,27 +39,34 @@ func TestStandaloneUninstallRecoveryWatcher(t *testing.T) {
 			return nil
 		}}, nil
 	}
-	setupRecoveryPending = func() (bool, error) { events = append(events, "pending checked"); return true, nil }
+	setupRecoveryNeeded = func() (bool, error) { events = append(events, "evidence checked"); return true, nil }
 	setupRecoveryReplay = func() error { events = append(events, "replayed"); return nil }
 	if code := runEnterpriseSetup([]string{"--internal-recover-after-parent", "4321"}, &output, &output); code != 0 {
 		t.Fatalf("pending uninstall recovery exit=%d: %s", code, output.String())
 	}
-	if want := []string{"parent opened", "parent exited", "pending checked", "replayed"}; !reflect.DeepEqual(events, want) {
+	if want := []string{"parent opened", "parent exited", "evidence checked", "replayed"}; !reflect.DeepEqual(events, want) {
 		t.Fatalf("recovery order=%v, want %v", events, want)
 	}
 	if !bytes.HasPrefix(output.Bytes(), []byte("READY\n")) {
 		t.Fatalf("watcher did not announce readiness before replay: %q", output.String())
 	}
 	events = nil
-	setupRecoveryPending = func() (bool, error) { events = append(events, "pending checked"); return false, nil }
 	if code := runEnterpriseSetup([]string{"--internal-recover-after-parent", "4321"}, &output, &output); code != 0 {
 		t.Fatalf("committed uninstall recovery exit=%d: %s", code, output.String())
 	}
-	if want := []string{"parent opened", "parent exited", "pending checked"}; !reflect.DeepEqual(events, want) {
-		t.Fatalf("committed uninstall incorrectly replayed: %v", events)
+	if want := []string{"parent opened", "parent exited", "evidence checked", "replayed"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("committed uninstall skipped postcommit recovery: %v", events)
 	}
 	events = nil
-	setupRecoveryPending = func() (bool, error) { return true, nil }
+	setupRecoveryNeeded = func() (bool, error) { events = append(events, "evidence checked"); return false, nil }
+	if code := runEnterpriseSetup([]string{"--internal-recover-after-parent", "4321"}, &output, &output); code != 0 {
+		t.Fatalf("settled uninstall recovery exit=%d: %s", code, output.String())
+	}
+	if want := []string{"parent opened", "parent exited", "evidence checked"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("settled uninstall ran unnecessary recovery: %v", events)
+	}
+	events = nil
+	setupRecoveryNeeded = func() (bool, error) { return true, nil }
 	setupRecoveryReplay = func() error { return errors.New("recovery failed") }
 	if code := runEnterpriseSetup([]string{"--internal-recover-after-parent", "4321"}, &output, &output); code != enterpriseFailureExitCode {
 		t.Fatalf("failed recovery exit=%d, want %d", code, enterpriseFailureExitCode)
@@ -66,6 +76,33 @@ func TestStandaloneUninstallRecoveryWatcher(t *testing.T) {
 	if code := runEnterpriseSetup([]string{"--internal-recover-after-parent", "4321"}, &output, &output); code != enterpriseFailureExitCode ||
 		bytes.Contains(output.Bytes(), []byte("READY\n")) {
 		t.Fatalf("inaccessible parent announced readiness: exit=%d output=%q", code, output.String())
+	}
+}
+
+func TestStandaloneUninstallRecoveryNeedsPendingOrTrustedTombstone(t *testing.T) {
+	oldLayout, oldDeployment := setupRecoveryLayout, standaloneSetupDeployment
+	t.Cleanup(func() { setupRecoveryLayout, standaloneSetupDeployment = oldLayout, oldDeployment })
+	lifecycleDir := filepath.Join(t.TempDir(), "install")
+	setupRecoveryLayout = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{LifecycleDir: lifecycleDir}, nil
+	}
+	for _, tc := range []struct {
+		state winpath.EnterpriseDeploymentState
+		need  bool
+		err   bool
+	}{
+		{state: winpath.EnterpriseDeploymentAbsent},
+		{state: winpath.EnterpriseDeploymentInstalled},
+		{state: winpath.EnterpriseDeploymentTombstone, need: true},
+		{state: winpath.EnterpriseDeploymentUnknown, err: true},
+	} {
+		standaloneSetupDeployment = func() (winpath.EnterpriseDeployment, error) {
+			return winpath.EnterpriseDeployment{State: tc.state}, nil
+		}
+		needed, err := standaloneUninstallRecoveryNeeded()
+		if needed != tc.need || (err != nil) != tc.err {
+			t.Fatalf("state %s: recovery needed=%t error=%v", tc.state, needed, err)
+		}
 	}
 }
 
@@ -122,5 +159,25 @@ func TestStandaloneUninstallRecoveryRequiresRunningEnforcement(t *testing.T) {
 		if err := proveStandaloneUninstallRecovery(candidate); err == nil {
 			t.Fatalf("unproven recovery accepted: %+v", candidate)
 		}
+	}
+	uninstalled := *result
+	uninstalled.Installed = false
+	uninstalled.Services = []enterprisestatus.Service{
+		{Kind: "gateway", State: "absent", Required: true},
+		{Kind: "guardian", State: "absent", Required: true},
+		{Kind: "enumerator", State: "absent", Required: true},
+		{Kind: "sensor_helper", State: "absent", Required: true},
+	}
+	if err := proveStandaloneUninstallRecovery(uninstalled); err != nil {
+		t.Fatalf("completed uninstall refused: %v", err)
+	}
+	uninstalled.Services = uninstalled.Services[:3]
+	if err := proveStandaloneUninstallRecovery(uninstalled); err == nil {
+		t.Fatal("uninstall without proof of absent sensor helper accepted")
+	}
+	uninstalled.Services = append(uninstalled.Services, enterprisestatus.Service{Kind: "sensor_helper", State: "absent", Required: true})
+	uninstalled.Services[0].State = "stopped"
+	if err := proveStandaloneUninstallRecovery(uninstalled); err == nil {
+		t.Fatal("uninstall with a surviving gateway service accepted")
 	}
 }

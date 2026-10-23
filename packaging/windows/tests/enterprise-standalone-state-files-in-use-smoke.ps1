@@ -225,6 +225,37 @@ $stream.Dispose()
             Test-StateIntact 'install-root holder refusal' $layout
             Stop-TestReader $reader
 
+            # Two short hook invocations on a busy host can be seen on
+            # different passes. Neither PID survived the recheck.
+            $savedInstallRootHolders = ${function:Get-DefenseClawInstallRootHolders}
+            try {
+                $script:HolderPass = 0
+                function Get-DefenseClawInstallRootHolders {
+                    param($InstallRoot, $SelfUninstallCallerPID, $ExcludedProcessIds,
+                        [switch]$FailOnQueryError, [switch]$IncludeProcessId)
+                    $script:HolderPass++
+                    $holderId = 200000 + $script:HolderPass
+                    return [pscustomobject]@{
+                        Id = $holderId
+                        Description = "defenseclaw-hook.exe (pid $holderId)"
+                    }
+                }
+                Test-Accepted 'different short hook holders across recheck' {
+                    Assert-DefenseClawStandaloneInstallTreeNotInUse `
+                        -Layout $layout `
+                        -GatewayServiceName DefenseClawGateway `
+                        -GuardianServiceName DefenseClawHookGuardian
+                }
+                if ($script:HolderPass -ne 2) {
+                    $failures.Add("install holder check ran $script:HolderPass passes, expected two")
+                }
+            }
+            finally {
+                Microsoft.PowerShell.Management\Set-Item `
+                    -Path function:Get-DefenseClawInstallRootHolders `
+                    -Value $savedInstallRootHolders
+            }
+
             # A Restart Manager query that fails refuses the purge before it
             # changes anything: the check did not run, and the purge must not
             # start blind.

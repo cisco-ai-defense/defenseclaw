@@ -558,6 +558,8 @@ jobs:
         run: uv run --frozen python -m pytest cli/tests/test_install_ps1.py -q
       - name: Committed uninstall finalized retry regression
         run: ./packaging/windows/tests/enterprise-uninstall-finalized-retry-smoke.ps1
+      - name: Committed uninstall postcommit recovery regression
+        run: ./packaging/windows/tests/enterprise-uninstall-postcommit-recovery-smoke.ps1
       - name: Shared hook install scope preflight regression
         run: ./packaging/windows/tests/enterprise-cross-scope-install-preflight-smoke.ps1
       - name: Managed path ACL verdict regression

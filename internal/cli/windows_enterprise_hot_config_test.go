@@ -732,11 +732,14 @@ func testWindowsHotBundleReload(t *testing.T, identical bool) {
 		next = previous
 	}
 	host, opts := newHotConfigHost(t, previous, next)
-	// When the candidate is byte-identical, the running gateway already
-	// enforces that same policy before the reload request.
+	// Equal bytes already have the same policy digest. The prior gateway
+	// still names the old bundle, so only adoption of the new identity after
+	// the reload can confirm this delivery.
 	host.adopted = identical
 	host.bundleID, host.bundleVersion = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", 2
 	opts.bundle = host.bundleRun()
+	wantBundleID, wantBundleVersion := host.bundleID, host.bundleVersion
+	host.bundleID, host.bundleVersion = "previous-bundle", 1
 	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
 	stub.install(t)
 	savedDigest := windowsEnterprisePolicyDigest
@@ -746,6 +749,7 @@ func testWindowsHotBundleReload(t *testing.T, identical bool) {
 	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error {
 		reloads++
 		host.adopted = true
+		host.bundleID, host.bundleVersion = wantBundleID, wantBundleVersion
 		return nil
 	}
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)

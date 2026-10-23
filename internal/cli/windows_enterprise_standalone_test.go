@@ -613,6 +613,35 @@ func TestWindowsEnterpriseStandaloneUninstallOnCleanHostIsNoop(t *testing.T) {
 	}
 }
 
+func TestWindowsEnterpriseStandaloneCLIUninstallUsesTransactionModule(t *testing.T) {
+	originalFootprint := windowsEnterpriseStandaloneFootprint
+	originalRunner := windowsEnterpriseStandaloneRunner
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneFootprint = originalFootprint
+		windowsEnterpriseStandaloneRunner = originalRunner
+	})
+	windowsEnterpriseStandaloneFootprint = func() (bool, error) { return true, nil }
+	var script string
+	var args []string
+	windowsEnterpriseStandaloneRunner = func(_ context.Context, _ *cobra.Command, path string, supplied []string) (windowsEnterpriseStandaloneRun, error) {
+		script, args = path, append([]string(nil), supplied...)
+		return windowsEnterpriseStandaloneRun{}, errors.New("stopped at the shared module boundary")
+	}
+	command := &cobra.Command{}
+	command.SetOut(&bytes.Buffer{})
+	command.SetErr(&bytes.Buffer{})
+	opts := &windowsEnterpriseLifecycleOptions{resolvedProfile: "standalone", jsonOutput: true}
+	installer := `C:\stage\install-enterprise.ps1`
+	_ = runWindowsEnterpriseStandaloneAction(
+		context.Background(), command, "uninstall", opts, installer,
+		windowsEnterprisePowerShellArgs("uninstall", opts),
+	)
+	if script != installer || windowsEnterpriseInstallerAction(args) != "Uninstall" ||
+		!containsString(args, "Standalone") {
+		t.Fatalf("CLI uninstall bypassed the shared transaction module: script=%q args=%q", script, args)
+	}
+}
+
 func TestWindowsEnterpriseEventMapping(t *testing.T) {
 	for _, tc := range []struct {
 		action string

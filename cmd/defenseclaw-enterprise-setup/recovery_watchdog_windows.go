@@ -24,13 +24,15 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 var (
 	enterpriseSetupArmUninstallRecovery = armStandaloneUninstallRecovery
 	setupRecoveryCreationFlags          = standaloneSetupRecoveryCreationFlags
 	setupRecoveryOpenParent             = openStandaloneSetupParent
-	setupRecoveryPending                = standaloneUninstallTransactionPending
+	setupRecoveryLayout                 = managed.StandaloneWindowsLayout
+	setupRecoveryNeeded                 = standaloneUninstallRecoveryNeeded
 	setupRecoveryReplay                 = replayStandaloneSetupTransaction
 )
 
@@ -123,12 +125,12 @@ func runStandaloneSetupRecoveryWatchdog(parentArgument string, stdout, stderr io
 		fmt.Fprintln(stderr, err)
 		return enterpriseFailureExitCode
 	}
-	pending, err := setupRecoveryPending()
+	needed, err := setupRecoveryNeeded()
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return enterpriseFailureExitCode
 	}
-	if !pending {
+	if !needed {
 		return 0
 	}
 	if err := setupRecoveryReplay(); err != nil {
@@ -136,6 +138,34 @@ func runStandaloneSetupRecoveryWatchdog(parentArgument string, stdout, stderr io
 		return enterpriseFailureExitCode
 	}
 	return 0
+}
+
+// A committed uninstall keeps its trusted tombstone until postcommit hook
+// cleanup and state purge finish. A completed uninstall has neither record;
+// an ordinary refusal still has installed metadata. Both are read-only exits
+// for the watcher, so they cannot recreate a lifecycle directory or hooks.
+func standaloneUninstallRecoveryNeeded() (bool, error) {
+	layout, err := setupRecoveryLayout()
+	if err != nil {
+		return false, err
+	}
+	path := filepath.Join(layout.LifecycleDir, "pending.json")
+	if _, err := os.Lstat(path); err == nil {
+		if err := managed.ValidateTrustedFilePath(path, "standalone pending transaction"); err != nil {
+			return false, err
+		}
+		return true, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	deployment, err := standaloneSetupDeployment()
+	if err != nil {
+		return false, err
+	}
+	if deployment.State == winpath.EnterpriseDeploymentUnknown {
+		return false, errors.New("cannot prove standalone uninstall recovery is settled: deployment metadata is unreadable")
+	}
+	return deployment.State == winpath.EnterpriseDeploymentTombstone, nil
 }
 
 type standaloneSetupParent interface {
@@ -177,23 +207,6 @@ func (parent standaloneSetupParentHandle) Close() error {
 	return windows.CloseHandle(parent.handle)
 }
 
-func standaloneUninstallTransactionPending() (bool, error) {
-	layout, err := managed.StandaloneWindowsLayout()
-	if err != nil {
-		return false, err
-	}
-	path := filepath.Join(layout.LifecycleDir, "pending.json")
-	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	} else if err != nil {
-		return false, err
-	}
-	if err := managed.ValidateTrustedFilePath(path, "standalone pending transaction"); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
 func replayStandaloneSetupTransaction() error {
 	opts := enterpriseSetupOptions{Action: "recover", Standalone: true, JSON: true, LifecycleTimeout: 30 * time.Minute}
 	var output bytes.Buffer
@@ -213,8 +226,23 @@ func replayStandaloneSetupTransaction() error {
 
 func proveStandaloneUninstallRecovery(report enterprisestatus.Result) error {
 	if report.SchemaVersion != 2 || report.Action != "recover" || report.Profile != managed.ProfileStandalone ||
-		!report.OK || !report.Installed || report.TransactionPending || report.ExitCode != 0 {
-		return errors.New("uninstall recovery did not prove a settled enforcing installation")
+		!report.OK || report.TransactionPending || report.ExitCode != 0 || len(report.Errors) != 0 {
+		return errors.New("uninstall recovery did not prove a settled installation or completed uninstall")
+	}
+	if !report.Installed {
+		absent := make(map[string]bool, 4)
+		for _, service := range report.Services {
+			if service.State != "absent" {
+				return errors.New("uninstall recovery left a managed service behind")
+			}
+			absent[service.Kind] = true
+		}
+		for _, kind := range []string{"gateway", "guardian", "enumerator", "sensor_helper"} {
+			if !absent[kind] {
+				return fmt.Errorf("uninstall recovery did not prove %s service absent", kind)
+			}
+		}
+		return nil
 	}
 	gateway, guardian := false, false
 	for _, service := range report.Services {

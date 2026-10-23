@@ -425,8 +425,29 @@ func windowsEnterpriseHotConfigApply(
 			} else {
 				_ = windowsEnterpriseHotBundleReload(restoreCtx, layout)
 			}
-			if targetsErr == nil && !windowsEnterpriseHotConfigEnforcesInstalled(restoreCtx, wait) {
-				gatewayErr = errors.New("the gateway did not report the restored config's policy before the deadline")
+			if targetsErr == nil {
+				proven, cliUnavailable := windowsEnterpriseHotConfigEnforcesInstalled(restoreCtx, wait)
+				if !proven && cliUnavailable {
+					// The CLI was available before publication but can vanish
+					// while undo runs. The service's authenticated /health still
+					// reports its live policy. If it has not taken the old
+					// config, restart that service on the restored bytes and prove
+					// the old policy there. A missing CLI alone is not an outage.
+					proven = windowsEnterpriseHotConfigPriorPolicyLive(restoreCtx, layout, priorPolicy)
+					if !proven {
+						restarted, restartErr := windowsEnterpriseHotConfigRestart()
+						if restartErr != nil || !restarted {
+							restarted, _ = windowsEnterpriseHotConfigRecover()
+						}
+						if restarted && opts.bundle != nil {
+							opts.bundle.gatewayRestarted = true
+						}
+						proven = windowsEnterpriseHotConfigWaitForPriorPolicy(restoreCtx, layout, priorPolicy, windowsEnterpriseHotConfigRestartTimeout)
+					}
+				}
+				if !proven {
+					gatewayErr = errors.New("the gateway did not report the restored config's policy before the deadline")
+				}
 			}
 		}
 		if restoreErr == nil && targetsErr == nil && gatewayErr == nil {
@@ -454,19 +475,20 @@ func windowsEnterpriseHotConfigApply(
 		}
 	}
 	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, writeOptions); err != nil {
-		if errors.Is(err, configwrite.ErrConflict) {
-			// ReplaceDocument returns ErrConflict before candidate publication,
-			// including its final compare under the writer lock. Another writer
-			// owns the newer bytes: neither undo nor an SCM stop is warranted.
-			// Setup's transaction reads the current config again; a bundle
-			// reports a retryable conflict without transaction fallback.
-			failBundle("bundle_config_write_failed", "the installed config changed before the bundle write; retry with a fresh policy bundle: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
+		if !configwrite.PublicationOccurred(err) {
+			// Locks, reads, validation, permission checks and the final CAS
+			// all fail before publication. Only the new candidate's rename
+			// crosses the boundary at which the gateway might load it.
+			message := "the bundle config could not be installed before publication: " + windowsEnterpriseBoundedDiagnostic(err.Error())
+			if errors.Is(err, configwrite.ErrConflict) {
+				message = "the installed config changed before the bundle write; retry with a fresh policy bundle: " + windowsEnterpriseBoundedDiagnostic(err.Error())
+			}
+			failBundle("bundle_config_write_failed", message)
 			return false, nil
 		}
-		// Publication can precede a failed generation write and failed writer
-		// restore. Even unchanged bytes may have been restored after the gateway
-		// loaded the candidate. Inspect, undo, and prove the running policy on
-		// every write error before a transaction can use these bytes as preimage.
+		// A failed generation write or directory sync may follow publication.
+		// Even if the writer restored old bytes, the watcher may have loaded
+		// the candidate. Prove the previous policy is live before fallback.
 		undo()
 		failBundle("bundle_config_write_failed", "the bundle config could not be installed: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 		return false, nil
@@ -627,20 +649,23 @@ func windowsEnterpriseHotConfigAdopted(ctx context.Context, wait time.Duration, 
 // gateway that rejected the undone config and still runs the restored
 // policy is proven, while one that runs the undone policy never reports
 // the restored digest, whatever its reload error says.
-func windowsEnterpriseHotConfigEnforcesInstalled(ctx context.Context, wait time.Duration) bool {
+func windowsEnterpriseHotConfigEnforcesInstalled(ctx context.Context, wait time.Duration) (enforced, cliUnavailable bool) {
 	deadline := time.Now().Add(wait)
 	for {
-		out, _ := windowsEnterprisePolicyDigest(ctx)
+		out, err := windowsEnterprisePolicyDigest(ctx)
 		var report policyDigestReport
-		if json.Unmarshal(out, &report) == nil && report.Digest != "" && report.Digest == report.GatewayReportedDigest {
-			return true
+		if err != nil || json.Unmarshal(out, &report) != nil || report.Digest == "" {
+			return false, true
+		}
+		if report.Digest == report.GatewayReportedDigest {
+			return true, false
 		}
 		if ctx.Err() != nil || !time.Now().Before(deadline) {
-			return false
+			return false, false
 		}
 		select {
 		case <-ctx.Done():
-			return false
+			return false, false
 		case <-time.After(windowsEnterpriseHotConfigPoll):
 		}
 	}

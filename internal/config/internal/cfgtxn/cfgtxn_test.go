@@ -48,8 +48,8 @@ func TestCommitRestoresGenerationAfterPostRenameFailure(t *testing.T) {
 		}
 		return failedSync
 	}
-	if _, err := txn.Commit(first, []byte("config_version: 9\n# rejected\n"), true, 0o600, Writer{Actor: "rejected", Reason: "edit"}); !errors.Is(err, failedSync) {
-		t.Fatalf("Commit error = %v, want directory fsync failure", err)
+	if _, err := txn.Commit(first, []byte("config_version: 9\n# rejected\n"), true, 0o600, Writer{Actor: "rejected", Reason: "edit"}); !errors.Is(err, failedSync) || !PublicationOccurred(err) {
+		t.Fatalf("Commit error = %v, want a postpublication directory fsync failure", err)
 	}
 	configAfter, err := os.ReadFile(path)
 	if err != nil {
@@ -94,8 +94,8 @@ func TestCommitDoesNotReplaceConfigWhenPreviousReadFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := txn.Commit([]byte("original"), []byte("candidate"), true, 0o600, Writer{Actor: "test", Reason: "regression"}); err == nil {
-		t.Fatal("commit succeeded despite failed previous read")
+	if _, err := txn.Commit([]byte("original"), []byte("candidate"), true, 0o600, Writer{Actor: "test", Reason: "regression"}); err == nil || PublicationOccurred(err) {
+		t.Fatalf("failed previous read was reported as publication: %v", err)
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
