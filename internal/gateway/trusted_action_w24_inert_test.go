@@ -34,6 +34,19 @@ func TestTrustedActionW24InertDefinitionsDoNotBlock(t *testing.T) {
 		{"bare scriptblock in invoked block", `& { { Remove-Item -Recurse -Force C:\ } }`, actionfacts.DialectPowerShell, false},
 		{"invoked scriptblock", `& { Remove-Item -Recurse -Force C:\ }`, actionfacts.DialectPowerShell, true},
 		{"scriptblock piped to a consumer", `{ Remove-Item -Recurse -Force C:\ } | ForEach-Object Invoke`, actionfacts.DialectPowerShell, true},
+		{"exported name as data", "f() { rm -rf /; }; export -f f; ls f", actionfacts.DialectPOSIX, false},
+		{"child shell calls nothing", "f() { rm -rf /; }; export -f f; bash -c 'echo ok'", actionfacts.DialectPOSIX, false},
+		{"child shell calls the function", "f() { rm -rf /; }; export -f f; bash -c 'echo ok; f'", actionfacts.DialectPOSIX, true},
+		{"command skips the function", "f() { rm -rf /; }; command f", actionfacts.DialectPOSIX, false},
+		{"builtin skips the function", "f() { rm -rf /; }; builtin f", actionfacts.DialectPOSIX, false},
+		{"command eval calls the function", "f() { rm -rf /; }; command eval f", actionfacts.DialectPOSIX, true},
+		{"subshell definition", "( f() { rm -rf /; }; ); f", actionfacts.DialectPOSIX, false},
+		{"call inside the subshell", "( f() { rm -rf /; }; f )", actionfacts.DialectPOSIX, true},
+		{"scriptblock to Out-Null", `{ Remove-Item -Recurse -Force C:\ } | Out-Null`, actionfacts.DialectPowerShell, false},
+		{"scriptblock to a consumer alias", `{ Remove-Item -Recurse -Force C:\ } | % Invoke`, actionfacts.DialectPowerShell, true},
+		{"if block", `if ($true) { Write-Output a }`, actionfacts.DialectPowerShell, false},
+		{"bare scriptblock in if body", `if ($true) { { Remove-Item -Recurse -Force C:\ } }`, actionfacts.DialectPowerShell, false},
+		{"if body runs", `if ($true) { Remove-Item -Recurse -Force C:\ }`, actionfacts.DialectPowerShell, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cwd, home := "/repo", "/home/alice"

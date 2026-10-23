@@ -89,14 +89,15 @@ func windowsSimpleGroupSource(source string, dialect windowsDialect) (string, []
 		}
 		if atStart && dialect == windowsPowerShell && char == '{' {
 			// A bare { } that is a whole statement is a scriptblock value:
-			// PowerShell writes it out and runs nothing in it. Keep it as an
-			// inert string of the same length. A block followed by a pipe,
-			// member access or argument may be invoked; it stays a group.
+			// PowerShell writes it out and runs nothing in it, and so do the
+			// inert consumers of a pipeline (| Out-Null). Keep it as an inert
+			// string of the same length. A block followed by member access,
+			// an argument or another consumer may be invoked; it stays a group.
 			end := windowsSimpleScriptBlockEnd(runes, i)
 			if end < 0 {
 				return "", nil, false
 			}
-			if windowsSimpleStatementEnds(runes, end+1) {
+			if windowsSimpleStatementEnds(runes, end+1) || windowsSimpleInertPipeline(runes, end+1) {
 				for j := i + 1; j < end; j++ {
 					clean[j] = ' '
 				}
@@ -204,6 +205,67 @@ func windowsSimpleStatementEnds(runes []rune, from int) bool {
 	}
 	return from+1 < len(runes) && (runes[from] == '&' && runes[from+1] == '&' ||
 		runes[from] == '|' && runes[from+1] == '|')
+}
+
+// windowsSimpleInertConsumers take a pipeline value without invoking it:
+// they discard, write, format, measure or convert it.
+var windowsSimpleInertConsumers = map[string]bool{
+	"out-null": true, "out-string": true, "out-host": true, "out-default": true,
+	"out-file": true, "write-output": true, "echo": true, "write": true,
+	"write-host": true, "get-member": true, "gm": true, "measure-object": true,
+	"measure": true, "format-list": true, "fl": true, "format-table": true,
+	"ft": true, "format-wide": true, "fw": true, "convertto-json": true,
+	"convertto-xml": true, "convertto-csv": true, "convertto-html": true,
+}
+
+// windowsSimpleInertPipeline reports whether the PowerShell value that ends
+// at from flows only into inert consumers until its statement ends. A stage
+// with a variable, subexpression, scriptblock, type, splat or redirect could
+// invoke the value, so it is not inert.
+func windowsSimpleInertPipeline(runes []rune, from int) bool {
+	stages := 0
+	for {
+		for from < len(runes) && (runes[from] == ' ' || runes[from] == '\t') {
+			from++
+		}
+		if from >= len(runes) || runes[from] != '|' || from+1 < len(runes) && runes[from+1] == '|' {
+			return stages != 0 && windowsSimpleStatementEnds(runes, from)
+		}
+		start := from + 1
+		var quote rune
+		for from = start; from < len(runes); from++ {
+			char := runes[from]
+			if quote == 0 && strings.ContainsRune("|;\r\n}#&", char) {
+				break
+			}
+			if quote == '\'' {
+				if char == quote {
+					quote = 0
+				}
+				continue
+			}
+			if strings.ContainsRune("$(){}[]@`<>", char) {
+				return false
+			}
+			if quote != 0 {
+				if char == quote {
+					quote = 0
+				}
+				continue
+			}
+			if char == '\'' || char == '"' {
+				quote = char
+			}
+		}
+		if quote != 0 {
+			return false
+		}
+		fields := strings.Fields(string(runes[start:from]))
+		if len(fields) == 0 || !windowsSimpleInertConsumers[strings.ToLower(fields[0])] {
+			return false
+		}
+		stages++
+	}
 }
 
 func windowsSimpleNeedsBoundary(runes []rune, from int) bool {

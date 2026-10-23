@@ -139,7 +139,7 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 	if command == "" || depth >= 8 || len(command) > MaxPayloadBytes {
 		return "dynamic-command"
 	}
-	words, ok := actionWindowsWords(command)
+	words, ok := actionWindowsWords(actionWindowsControlSource(command))
 	if !ok || len(words) == 0 {
 		return "shell-parse"
 	}
@@ -479,4 +479,147 @@ func actionWindowsWrapperDecision(program string, words []string, cwd, home stri
 		return "dynamic-command"
 	}
 	return actionWindowsStatement(words[index:], cwd, home, depth+1)
+}
+
+// actionWindowsControlSource turns PowerShell control syntax into statement
+// boundaries, so each statement of a body is judged as if it runs: if,
+// elseif, while, until and foreach with an inert header, else, try, catch,
+// finally and do, the braces of their bodies, and the while or until of a do
+// loop. A header that can run or assign something, or unbalanced text, keeps
+// its spelling and so its strict decision.
+func actionWindowsControlSource(command string) string {
+	if !strings.Contains(command, "{") {
+		return command
+	}
+	out := []byte(command)
+	var control []bool
+	atStart := true
+	var quote byte
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if quote != 0 {
+			if c == quote {
+				if i+1 < len(command) && command[i+1] == quote {
+					i++
+				} else {
+					quote = 0
+				}
+			} else if quote == '"' && c == '`' {
+				i++
+			}
+			continue
+		}
+		switch c {
+		case '`':
+			i++
+			atStart = false
+			continue
+		case '\'', '"':
+			quote = c
+			atStart = false
+			continue
+		case ' ', '\t':
+			continue
+		case '\r', '\n', ';', '|', '&':
+			atStart = true
+			continue
+		case '$':
+			if i+1 < len(command) && command[i+1] == '{' {
+				// ${name} is a variable, not a block.
+				end := strings.IndexByte(command[i:], '}')
+				if end < 0 {
+					return command
+				}
+				i += end
+				atStart = false
+				continue
+			}
+		case '{':
+			control = append(control, false)
+			atStart = true
+			continue
+		case '}':
+			if len(control) == 0 {
+				return command
+			}
+			if control[len(control)-1] {
+				out[i] = ';'
+			}
+			control = control[:len(control)-1]
+			atStart = true
+			continue
+		}
+		if atStart {
+			if end, block := actionWindowsControlHead(command, i); end > i {
+				for j := i; j < end; j++ {
+					if out[j] != '\r' && out[j] != '\n' {
+						out[j] = ' '
+					}
+				}
+				if block {
+					out[end-1] = ';'
+					control = append(control, true)
+				}
+				i = end - 1
+				continue
+			}
+		}
+		atStart = false
+	}
+	if quote != 0 || len(control) != 0 {
+		return command
+	}
+	return string(out)
+}
+
+// actionWindowsControlHead returns the end of the control keyword and inert
+// header at start: after the { of its body (block), or, for the while or
+// until of a do loop, at the end of its statement.
+func actionWindowsControlHead(command string, start int) (end int, block bool) {
+	lower := strings.ToLower(command[start:])
+	for _, keyword := range []string{"elseif", "else", "if", "while", "until", "foreach", "try", "catch", "finally", "do"} {
+		next := start + len(keyword)
+		if !strings.HasPrefix(lower, keyword) || next < len(command) &&
+			!strings.ContainsRune(" \t\r\n({", rune(command[next])) {
+			continue
+		}
+		index := actionWindowsSkipSpace(command, next)
+		header := keyword == "if" || keyword == "elseif" || keyword == "while" ||
+			keyword == "until" || keyword == "foreach"
+		if header {
+			if index >= len(command) || command[index] != '(' {
+				return 0, false
+			}
+			closing := strings.IndexByte(command[index:], ')')
+			if closing < 0 || !actionWindowsInertHeader(command[index+1:index+closing]) {
+				return 0, false
+			}
+			index = actionWindowsSkipSpace(command, index+closing+1)
+		}
+		if index < len(command) && command[index] == '{' {
+			return index + 1, true
+		}
+		if (keyword == "while" || keyword == "until") &&
+			(index >= len(command) || strings.ContainsRune(";\r\n}", rune(command[index]))) {
+			return index, false
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
+func actionWindowsSkipSpace(command string, index int) int {
+	for index < len(command) && strings.ContainsRune(" \t\r\n", rune(command[index])) {
+		index++
+	}
+	return index
+}
+
+// actionWindowsInertHeader reports a condition in expression mode, which
+// runs no command: it starts with a variable, literal or operator, and has
+// no subexpression, block, type, splat, redirect, assignment or statement.
+func actionWindowsInertHeader(header string) bool {
+	header = strings.TrimSpace(header)
+	return header != "" && strings.ContainsRune("$'\"-!0123456789", rune(header[0])) &&
+		!strings.ContainsAny(header, "(){}[]@`<>=|;&\r\n")
 }

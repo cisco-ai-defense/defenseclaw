@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"maps"
 	"path"
 	"slices"
 	"strconv"
@@ -243,6 +244,19 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	// redirects are those of the compound commands being replaced, outermost
 	// first, as text to append to each statement.
 	var redirects []string
+	functions := make(map[string]*syntax.Stmt)
+	// exported are the functions this action exported. A child shell imports
+	// them, so each body is judged once, at the first later command that may
+	// start one and call it; an export alone runs nothing.
+	var exported []string
+	// isolated runs walk in a separate shell process (a subshell, pipeline
+	// stage, substitution or background job): a function it defines or
+	// exports is gone when it ends.
+	isolated := func(walk func() bool) bool {
+		savedFunctions, savedExported := maps.Clone(functions), slices.Clone(exported)
+		defer func() { functions, exported = savedFunctions, savedExported }()
+		return walk()
+	}
 	scope := "0"
 	nextScope := 0
 	childScope := func(sharedShell bool, walk func() bool) bool {
@@ -254,6 +268,9 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		}
 		scope = parent + "/" + kind + strconv.Itoa(nextScope)
 		defer func() { scope = parent }()
+		if !sharedShell {
+			return isolated(walk)
+		}
 		return walk()
 	}
 	// keep adds the text of node, or of a command and its redirects.
@@ -278,12 +295,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		return true
 	}
 	subshells := 0
-	functions := make(map[string]*syntax.Stmt)
 	functionDepth := 0
-	// exported are the functions this action exported. A child shell imports
-	// them, so each body is judged once, at the first later command that may
-	// start one; an export alone runs nothing.
-	var exported []string
 	var importedBodies []*syntax.Stmt
 	var flatten func(stmt *syntax.Stmt) bool
 	flattenAll := func(stmts []*syntax.Stmt) bool {
@@ -341,6 +353,22 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		case *syntax.FuncDecl:
 			if !allSimple || typed.Name == nil || typed.Body == nil {
 				return true, false
+			}
+			if pipe, ok := typed.Body.Cmd.(*syntax.BinaryCmd); ok &&
+				(pipe.Op == syntax.Pipe || pipe.Op == syntax.PipeAll) {
+				// The parser reads `f() { ...; } | cat` as a definition whose
+				// body is the pipeline. Bash runs a pipeline whose first stage
+				// defines f in its own subshell, so f is gone after it, and
+				// the other stages run.
+				var stages func(stmt *syntax.Stmt) bool
+				stages = func(stmt *syntax.Stmt) bool {
+					binary, ok := stmt.Cmd.(*syntax.BinaryCmd)
+					if !ok || binary.Op != syntax.Pipe && binary.Op != syntax.PipeAll {
+						return true
+					}
+					return stages(binary.X) && childScope(false, func() bool { return flatten(binary.Y) })
+				}
+				return true, stages(typed.Body)
 			}
 			functions[typed.Name.Value] = typed.Body
 			return true, true
@@ -438,7 +466,17 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				return false
 			}
 			reduced = true
-			if replaced, ok := flattenRedirected(stmt); replaced {
+			if allSimple && stmt.Background {
+				// A background job is a subshell: what it defines stays there.
+				replaced, ok := false, false
+				isolated(func() bool {
+					replaced, ok = flattenRedirected(stmt)
+					return ok
+				})
+				if replaced {
+					return ok
+				}
+			} else if replaced, ok := flattenRedirected(stmt); replaced {
 				return ok
 			}
 			if allSimple && !flattenSubstitutions(stmt) {
@@ -485,10 +523,16 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				if body, found := functions[name]; found {
 					bodies = append(bodies, body)
 				}
-				program, _ := simpleStaticWord(call.Args[0], nil)
-				_, _, trapAction, _ := simpleNestedScript(call, nil, nil, nil)
+				// command eval and builtin trap still run their text in this
+				// shell, where function lookup applies again.
+				effective := call
+				if args, runs, known := simpleLookupBypassArgs(call.Args); known && runs {
+					effective = &syntax.CallExpr{Args: args}
+				}
+				program, _ := simpleStaticWord(effective.Args[0], nil)
+				_, _, trapAction, _ := simpleNestedScript(effective, nil, nil, nil)
 				if (program == "eval" || program == "trap" && trapAction) && len(functions) != 0 {
-					called, ok := simpleEvalFunctionNames(call)
+					called, ok := simpleEvalFunctionNames(effective)
 					if !ok {
 						return false
 					}
@@ -678,26 +722,71 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 	return names, true
 }
 
-// simpleFunctionCallName resolves literal spellings and the shell builtins
-// that can run a name supplied after them. Their interpretation can differ
-// among shells, so including the body is the conservative policy view.
+// simpleFunctionCallName returns the name call looks up as a function, or ""
+// when it calls none. A literal program word is one, and so is the word eval
+// or time runs. command and builtin skip function lookup: the word after them
+// runs a builtin or a program (command) or only a builtin (builtin), never a
+// function. An eval after them still runs its text with function lookup.
 func simpleFunctionCallName(call *syntax.CallExpr) (string, bool) {
-	name, ok := simpleStaticWord(call.Args[0], nil)
+	args, runs, known := simpleLookupBypassArgs(call.Args)
+	if !known {
+		return "", false
+	}
+	if !runs {
+		return "", true
+	}
+	name, ok := simpleStaticWord(args[0], nil)
 	if !ok {
 		return "", false
 	}
+	if len(args) != len(call.Args) && name != "eval" {
+		return "", true
+	}
 	switch name {
-	case "command", "builtin", "eval", "time":
+	case "eval", "time":
 		index := 1
-		for index < len(call.Args) && strings.HasPrefix(call.Args[index].Lit(), "-") {
+		for index < len(args) && strings.HasPrefix(args[index].Lit(), "-") {
 			index++
 		}
-		if index == len(call.Args) {
+		if index == len(args) {
 			return name, true
 		}
-		return simpleStaticWord(call.Args[index], nil)
+		return simpleStaticWord(args[index], nil)
 	}
 	return name, true
+}
+
+// simpleLookupBypassArgs strips the command and builtin prefixes of args,
+// which make the next word skip function lookup. runs is false when the call
+// runs nothing: command -v or -V only describes a name, and a bare prefix or
+// an unknown option is an error.
+func simpleLookupBypassArgs(args []*syntax.Word) (rest []*syntax.Word, runs, known bool) {
+	for len(args) != 0 {
+		name, ok := simpleStaticWord(args[0], nil)
+		if !ok || name != "command" && name != "builtin" {
+			return args, true, true
+		}
+		index := 1
+		for index < len(args) {
+			option, ok := simpleStaticWord(args[index], nil)
+			if !ok {
+				return nil, false, false
+			}
+			if option == "--" {
+				index++
+				break
+			}
+			if len(option) < 2 || option[0] != '-' {
+				break
+			}
+			if name == "builtin" || strings.Trim(option[1:], "p") != "" {
+				return nil, false, true
+			}
+			index++
+		}
+		args = args[index:]
+	}
+	return nil, false, true
 }
 
 // pipelineHasCompoundCommand keeps an ordinary pipeline intact. Its data
@@ -762,47 +851,193 @@ var simpleNonSpawningBuiltins = map[string]bool{
 // elsewhere may be a shell script.
 var simpleSystemProgramDirs = []string{"/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"}
 
+// simpleShellPrograms are the shells a child may be. Only a shell runs a
+// function, so only shell text can call an exported one.
+var simpleShellPrograms = map[string]bool{
+	"sh": true, "bash": true, "rbash": true, "dash": true, "ksh": true,
+	"mksh": true, "zsh": true, "ash": true, "busybox": true,
+}
+
+// simpleCommandRunners run a command or shell text taken from their argv, in
+// a form the static wrapper walk does not resolve.
+var simpleCommandRunners = map[string]bool{
+	"xargs": true, "find": true, "parallel": true, "watch": true, "flock": true,
+	"su": true, "runuser": true, "sg": true, "script": true, "strace": true,
+	"ltrace": true, "nice": true, "ionice": true, "stdbuf": true, "setsid": true,
+	"taskset": true, "chrt": true, "unshare": true, "doas": true, "pkexec": true,
+	"systemd-run": true, "ssh-agent": true, "dbus-run-session": true,
+	"tmux": true, "screen": true, "fakeroot": true, "unbuffer": true,
+	"time": true, "caffeinate": true, "sandbox-exec": true, "firejail": true,
+	"bwrap": true, "expect": true,
+}
+
+// simpleInlineInterpreters run inline code that may start a shell.
+var simpleInlineInterpreters = map[string]bool{
+	"python": true, "python2": true, "python3": true, "perl": true, "ruby": true,
+	"node": true, "nodejs": true, "deno": true, "bun": true, "php": true,
+	"lua": true, "awk": true, "gawk": true, "mawk": true, "nawk": true,
+	"tclsh": true, "Rscript": true, "osascript": true, "pwsh": true,
+	"powershell": true,
+}
+
 // simpleMayImportExportedFunctions reports whether call may start a shell
-// that imports the exported functions of its action and so may run one: a
-// shell named anywhere in its argv (directly, through a wrapper such as env,
-// sudo, xargs or find -exec, or in an interpreter's script text), $SHELL or
-// $BASH, a script launched by path, or an argv word that names an exported
-// function. A builtin that starts no process imports nothing.
+// that imports the exported functions of its action and calls one of them.
+// Only a shell runs a function, so a function name counts only where shell
+// text is: the script of a -c shell (also through env, sudo, nohup, timeout,
+// exec, eval or trap), and what a command runner such as xargs, find -exec or
+// watch hands to a shell. A shell whose script this walk cannot read (a
+// script file, stdin, a runtime word) may call any of them, and so may a
+// program run by a path outside the system directories or named like a shell
+// script. An interpreter's inline code may start a shell, so a shell or
+// function name in it counts. Any other argv word is data: ls f runs no f.
 func simpleMayImportExportedFunctions(call *syntax.CallExpr, source string, exported []string) bool {
-	if call == nil || len(call.Args) == 0 {
+	if call == nil {
 		return false
 	}
-	program, known := simpleStaticWord(call.Args[0], nil)
-	if known && simpleNonSpawningBuiltins[program] {
-		return false
-	}
-	if known && strings.Contains(program, "/") && !slices.ContainsFunc(simpleSystemProgramDirs,
-		func(dir string) bool { return strings.HasPrefix(program, dir) }) {
+	return simpleArgvMayCallExported(call.Args, source, exported, 0)
+}
+
+func simpleArgvMayCallExported(args []*syntax.Word, source string, exported []string, depth int) bool {
+	if depth >= 8 {
 		return true
 	}
-	for _, arg := range call.Args {
-		start, end := int(arg.Pos().Offset()), int(arg.End().Offset())
+	args, runs, known := simpleLookupBypassArgs(args)
+	if !known {
+		return true
+	}
+	if !runs || len(args) == 0 {
+		return false
+	}
+	program, static := simpleStaticWord(args[0], nil)
+	if !static {
+		// A runtime program, such as $SHELL, may be a shell.
+		return true
+	}
+	if simpleNonSpawningBuiltins[program] {
+		return false
+	}
+	if script, _, nested, scriptStatic := simpleNestedScriptArgs(args, nil, 0, nil, nil); nested {
+		return !scriptStatic || simpleScriptMayCallExported(script, exported, depth+1)
+	}
+	base := path.Base(program)
+	switch {
+	case program == "eval" || program == "trap" || program == "source" || program == ".":
+		// Runtime text, or a file whose text this walk cannot read.
+		return true
+	case simpleShellPrograms[base]:
+		// A script file or stdin, unless the shell only checks syntax.
+		return base == "busybox" || base == "rbash" || !simpleShellNoExec(args, nil, base)
+	case strings.Contains(program, "/") && !slices.ContainsFunc(simpleSystemProgramDirs,
+		func(dir string) bool { return strings.HasPrefix(program, dir) }),
+		simpleShellScriptName(program):
+		return true
+	case simpleNestedWrapper(base):
+		if child, ok := simpleWrapperChildArgs(args); ok {
+			return simpleArgvMayCallExported(child, source, exported, depth+1)
+		}
+		return simpleRunnerMayCallExported(args[1:], source, exported, depth+1)
+	case simpleCommandRunners[base]:
+		return simpleRunnerMayCallExported(args[1:], source, exported, depth+1)
+	case simpleInlineInterpreters[base]:
+		return simpleWordsNameShellOrFunction(args[1:], source, exported, 1)
+	}
+	// Shell text inside a word, such as tmux new 'bash -c f'.
+	return simpleWordsNameShellOrFunction(args[1:], source, exported, 2)
+}
+
+// simpleScriptMayCallExported reports whether shell text may call an exported
+// function: a call of its name, or a command that may start a shell that does.
+func simpleScriptMayCallExported(script string, exported []string, depth int) bool {
+	if depth >= 8 {
+		return true
+	}
+	file, ok := shellparse.Parse(script)
+	if !ok {
+		return true
+	}
+	calls := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, isCall := node.(*syntax.CallExpr)
+		if calls || !isCall || len(call.Args) == 0 {
+			return !calls
+		}
+		name, known := simpleFunctionCallName(call)
+		calls = !known || slices.Contains(exported, name) ||
+			simpleArgvMayCallExported(call.Args, script, exported, depth)
+		return !calls
+	})
+	return calls
+}
+
+// simpleRunnerMayCallExported reads the argv a command runner may hand to a
+// shell: a shell and its arguments, an exported function name, a script path,
+// shell text, or a {} that xargs, find or parallel replaces with input.
+func simpleRunnerMayCallExported(words []*syntax.Word, source string, exported []string, depth int) bool {
+	for index, word := range words {
+		value, static := simpleStaticScriptWord(word, nil)
+		if !static || strings.Contains(value, "{}") {
+			// Runtime text, or a placeholder for an input item.
+			return true
+		}
+		if simpleShellPrograms[path.Base(value)] {
+			return simpleArgvMayCallExported(words[index:], source, exported, depth)
+		}
+		if slices.Contains(exported, value) || strings.HasPrefix(value, "./") ||
+			strings.HasPrefix(value, "../") || simpleShellScriptName(value) {
+			return true
+		}
+		if strings.ContainsAny(value, " \t\n;&|()<>`$") && simpleScriptMayCallExported(value, exported, depth+1) {
+			return true
+		}
+	}
+	return false
+}
+
+// simpleWordsNameShellOrFunction reports whether a word of argv, as written,
+// names a shell, $SHELL or $BASH, a shell script or an exported function among
+// at least minTokens program-name tokens.
+func simpleWordsNameShellOrFunction(words []*syntax.Word, source string, exported []string, minTokens int) bool {
+	for _, word := range words {
+		start, end := int(word.Pos().Offset()), int(word.End().Offset())
 		if start < 0 || end <= start || end > len(source) {
 			// No text to read: assume the worst.
 			return true
 		}
-		raw := source[start:end]
-		if strings.HasPrefix(strings.Trim(raw, `'"`), "./") ||
-			strings.HasPrefix(strings.Trim(raw, `'"`), "../") {
-			return true
+		tokens := strings.FieldsFunc(source[start:end], simpleNotWordTokenRune)
+		if len(tokens) < minTokens {
+			continue
 		}
-		for _, token := range strings.FieldsFunc(raw, simpleNotWordTokenRune) {
-			switch path.Base(token) {
-			case "sh", "bash", "rbash", "dash", "ksh", "mksh", "zsh", "ash", "busybox", "SHELL", "BASH":
-				return true
-			}
-			if strings.HasSuffix(token, ".sh") || strings.HasSuffix(token, ".bash") ||
-				slices.Contains(exported, token) {
+		for _, token := range tokens {
+			if base := path.Base(token); simpleShellPrograms[base] || base == "SHELL" || base == "BASH" ||
+				simpleShellScriptName(token) || slices.Contains(exported, token) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// simpleShellScriptName reports a .sh or .bash name that is not a pattern.
+func simpleShellScriptName(name string) bool {
+	return (strings.HasSuffix(name, ".sh") || strings.HasSuffix(name, ".bash")) &&
+		!strings.ContainsAny(name, "*?[")
+}
+
+// simpleWrapperChildArgs returns the command a static wrapper argv runs.
+func simpleWrapperChildArgs(args []*syntax.Word) ([]*syntax.Word, bool) {
+	argv := make([]string, len(args))
+	for index, arg := range args {
+		value, known := simpleStaticScriptWord(arg, nil)
+		if !known {
+			return nil, false
+		}
+		argv[index] = value
+	}
+	index, found, uncertain := simpleWrapperChild(argv, path.Base(argv[0]))
+	if !found || uncertain || index <= 0 || index >= len(args) {
+		return nil, false
+	}
+	return args[index:], true
 }
 
 // simpleNotWordTokenRune separates the program-name and path tokens of an

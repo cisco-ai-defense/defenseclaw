@@ -949,29 +949,15 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 			}
 			argv[index] = value
 		}
-		var childIndex int
-		switch wrapper {
-		case "nohup":
-			childIndex = 1
-			if len(argv) > 1 && argv[1] == "--" {
-				childIndex++
+		childIndex, found, uncertain := simpleWrapperChild(argv, wrapper)
+		if uncertain {
+			if simplePotentialShellScript(args) {
+				return "", false, true, false
 			}
-		case "timeout":
-			childIndex = simpleTimeoutChildIndex(argv)
-		case "env":
-			childIndex = simpleEnvChildIndex(argv)
-		default:
-			child, found, uncertain := staticPOSIXWrapperArgv(argv, wrapper)
-			if uncertain {
-				if simplePotentialShellScript(args) {
-					return "", false, true, false
-				}
-				return "", false, false, false
-			}
-			if !found {
-				return "", false, false, false
-			}
-			childIndex = len(argv) - len(child)
+			return "", false, false, false
+		}
+		if !found {
+			return "", false, false, false
 		}
 		if childIndex <= 0 || childIndex >= len(args) {
 			return "", false, true, false
@@ -1028,6 +1014,30 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		}
 	}
 	return "", false, false, false
+}
+
+// simpleWrapperChild returns the index of the command that a static wrapper
+// argv runs. found is false when it runs none; uncertain when an option of
+// the wrapper is not understood.
+func simpleWrapperChild(argv []string, wrapper string) (index int, found, uncertain bool) {
+	switch wrapper {
+	case "nohup":
+		index = 1
+		if len(argv) > 1 && argv[1] == "--" {
+			index++
+		}
+	case "timeout":
+		index = simpleTimeoutChildIndex(argv)
+	case "env":
+		index = simpleEnvChildIndex(argv)
+	default:
+		child, found, uncertain := staticPOSIXWrapperArgv(argv, wrapper)
+		if uncertain || !found {
+			return 0, found, uncertain
+		}
+		index = len(argv) - len(child)
+	}
+	return index, true, false
 }
 
 func simpleShellNoExec(args []*syntax.Word, vars map[string]string, program string) bool {
