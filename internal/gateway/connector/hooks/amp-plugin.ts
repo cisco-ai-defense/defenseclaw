@@ -22,7 +22,8 @@
 {{else}}// The file is rendered at setup time with a stable scoped-token sidecar path.
 // It loads and validates the credential for every request, so rotation never
 // leaves a replacement credential in this longer-lived plugin. It deliberately
-// does not read secrets or policy from process environment variables.
+// does not read secrets or policy from process environment variables; the
+// one exception, DEFENSECLAW_STRICT_AVAILABILITY, can only close an outage.
 {{end}}
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
 import { execFile{{if not .Sandbox}}, execFileSync{{end}} } from 'node:child_process'
