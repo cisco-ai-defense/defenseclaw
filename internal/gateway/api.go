@@ -75,6 +75,9 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// Both API listeners must finish the same recovery pass before serving.
+	pendingHookRecoveryOnce sync.Once
+	pendingHookRecoveryErr  error
 	// sandboxAuthority is owned by this server and initialized on first use.
 	sandboxAuthority sandboxAuthorityHolder
 
@@ -1159,6 +1162,9 @@ func (a *APIServer) apiPortHeld(hasHookSocket bool, err error) bool {
 }
 
 func (a *APIServer) Run(ctx context.Context) error {
+	if err := a.ensurePendingHookRecovery(ctx); err != nil {
+		return fmt.Errorf("api: recover pending hook decisions: %w", err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
 	mux.HandleFunc("/health", a.handleHealth)

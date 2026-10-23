@@ -103,6 +103,7 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 	combined := fmt.Sprintf("connector=%s %s details_json=%s",
 		env.Connector, legacy, strconv.Quote(jsonDetails))
 	return a.logger.LogEventCtx(ctx, audit.Event{
+		ID:         env.occurrenceID,
 		Action:     auditAction,
 		Target:     env.Event,
 		Actor:      "defenseclaw",

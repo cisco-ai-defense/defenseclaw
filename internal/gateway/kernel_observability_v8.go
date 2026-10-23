@@ -27,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -559,10 +560,14 @@ func kernelBlockUserName(event sensor.KernelEvent) string {
 }
 
 func kernelBlockUserNameWithLookup(event sensor.KernelEvent, lookup func(int) string) string {
-	if event.User != "" || event.UID == nil {
-		return event.User
+	return kernelUIDUserName(event.User, event.UID, lookup)
+}
+
+func kernelUIDUserName(name string, uid *int, lookup func(int) string) string {
+	if name == "" && uid != nil {
+		name = lookup(*uid)
 	}
-	return lookup(*event.UID)
+	return useridentity.BareAccountName(name)
 }
 
 // kernelOccurrenceID is a stable occurrence id for one denial, so a
@@ -786,7 +791,8 @@ func (adapter *aiRuntimeV8Adapter) emitCustomerKernelEvent(ctx context.Context, 
 			return observability.Record{}, buildErr
 		}
 		identity := adapter.identityFields(runtimeIdentity{
-			UserID: uidString(event.UID), LoginID: loginString(event.UID, event.AUID), UserName: event.User,
+			UserID: uidString(event.UID), LoginID: loginString(event.UID, event.AUID),
+			UserName:        kernelUIDUserName(event.User, event.UID, kernelBlockUIDName),
 			AgentIdentityID: customerAgentIdentityID(event),
 		})
 		envelope := aiDiscoveryV8EmitEnvelope(ctx, emitCtx, "kernel_event")

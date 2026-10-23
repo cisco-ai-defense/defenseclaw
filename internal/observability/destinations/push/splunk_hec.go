@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"runtime"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -253,6 +254,7 @@ func encodeHECEnvelope(envelope hecEnvelope) ([]byte, error) {
 }
 
 type compatibilityAlias struct {
+	OSType              string `json:"os.type,omitempty"`
 	ID                  string `json:"id,omitempty"`
 	RecordID            string `json:"record_id,omitempty"`
 	Timestamp           string `json:"timestamp,omitempty"`
@@ -302,6 +304,7 @@ func projectedAliases(projected []byte) (compatibilityAlias, string, bool) {
 		return compatibilityAlias{}, "", false
 	}
 	alias := compatibilityAlias{
+		OSType:   runtime.GOOS,
 		RecordID: stringAt(wire, "record_id"), Timestamp: stringAt(wire, "timestamp"),
 		Bucket: stringAt(wire, "bucket"), EventName: stringAt(wire, "event_name"),
 		Severity: stringAt(wire, "severity"), Source: stringAt(wire, "source"),

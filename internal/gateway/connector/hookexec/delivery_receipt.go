@@ -21,6 +21,11 @@ import (
 // gateway whose 103 comes later reads the same marker in place of a receipt.
 const hookDeliveryCapabilityWait = 250 * time.Millisecond
 
+// The agent has its answer before this wait starts. Limit a missing HTTP
+// confirmation independently of the answer deadline so the hook process
+// returns within the tool call's registered timeout.
+const hookDeliveryReceiptTimeout = hookResponseGrace
+
 type hookDeliveryRequest struct {
 	writer *io.PipeWriter
 	ready  chan struct{}

@@ -4,7 +4,6 @@
 package gateway
 
 import (
-	"context"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -19,10 +18,8 @@ func TestDowngradedManagedHookDoesNotAuditAnUnprovenBlock(t *testing.T) {
 		Enterprise:     config.EnterpriseConfig{Profile: "standalone"},
 	}}
 	api.scannerCfg.Guardrail.HookFailMode = "closed"
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
 	for _, connector := range []string{"claudecode", "codex", "opencode"} {
-		got := api.unreceiptedHookDecision(ctx, connector, map[string]string{
+		got := api.unreceiptedHookDecision(false, connector, map[string]string{
 			"claudecode": "PreToolUse", "codex": "PreToolUse", "opencode": "tool.execute.before",
 		}[connector], agentHookResponse{Action: "allow", RawAction: "allow", Mode: "action"})
 		if got.Action != hookActionUnconfirmed || got.RawAction != "allow" || got.Mode != "action" || got.Reason != hookexec.ManagedGatewayNoAnswerReason {
@@ -40,13 +37,11 @@ func TestUnreceiptedObserveHookKeepsModeAndUnconfirmedAction(t *testing.T) {
 		Enterprise:     config.EnterpriseConfig{Profile: "standalone"},
 	}}
 	api.scannerCfg.Guardrail.HookFailMode = "closed"
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
 	proposal := agentHookResponse{
 		Action: "alert", RawAction: "block", Mode: "observe", WouldBlock: true,
 	}
 	for name, got := range map[string]agentHookResponse{
-		"older hook":      api.unreceiptedHookDecision(ctx, "claudecode", "PreToolUse", proposal),
+		"older hook":      api.unreceiptedHookDecision(false, "claudecode", "PreToolUse", proposal),
 		"missing receipt": api.deliveredHookDecision("claudecode", proposal, ""),
 	} {
 		if got.Action != hookActionUnconfirmed || got.RawAction != "block" || got.Mode != "observe" || got.WouldBlock || got.Reason != hookexec.ManagedGatewayNoAnswerReason {
