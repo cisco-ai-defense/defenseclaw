@@ -173,15 +173,16 @@ _PRECEDENCE = [
      "codex", None),
     ("remote-disabled-hint", _LEGACY + _gateway("10.0.0.5", "disabled"), "codex", ["codex"], False, "codex", None),
     ("loopback-disabled-no-hint", _LEGACY + _gateway(fleet_mode="disabled"), None, [], False, None, None),
-    # An implied OpenClaw (claw.mode only) loses to an installed hint and is
-    # never selected absent, even where the loader keeps it.
+    # An implied OpenClaw (claw.mode only) loses to an installed hint. With
+    # no hint it is selected only where the loader keeps it.
     ("implied-absent-no-hint", _IMPLIED + _gateway(), None, [], False, None, None),
     ("implied-disabled-hint", _IMPLIED + _gateway(fleet_mode="disabled"), "codex", ["codex"], False, "codex", None),
-    ("implied-disabled-no-hint", _IMPLIED + _gateway(fleet_mode="disabled"), None, [], False, None, None),
-    ("implied-typo-no-hint", _IMPLIED + _gateway(fleet_mode="enabledd"), None, [], False, None, None),
+    ("implied-typo-hint", _IMPLIED + _gateway(fleet_mode="enabledd"), "codex", ["codex"], False, "codex", None),
+    ("implied-disabled-no-hint-loader-keeps", _IMPLIED + _gateway(fleet_mode="disabled"), None, [], False,
+     "openclaw", None),
     ("implied-enabled-no-hint", _IMPLIED + _gateway(fleet_mode="enabled"), None, [], False, "openclaw", None),
     ("implied-present-hint", _IMPLIED + _gateway(), "codex", ["codex"], True, "codex", None),
-    ("implied-present-no-hint", _IMPLIED + _gateway(), None, [], True, "openclaw", ""),
+    ("implied-present-no-hint", _IMPLIED + _gateway(), None, [], True, "openclaw", None),
     # A stale OpenClaw never overrides an installed, enabled roster connector.
     ("roster-stale-primary", _roster("codex: {enabled: true}") + _gateway(), None, ["codex"], False, "codex", None),
     ("roster-stale-primary-hint-in-roster", _roster("codex: {}", "cursor: {}") + _gateway(), "cursor",

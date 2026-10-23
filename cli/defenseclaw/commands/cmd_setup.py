@@ -5443,22 +5443,22 @@ def _non_interactive_guardrail_connector(app: AppContext, gc) -> str:
          installed;
       3. otherwise an older implied OpenClaw that the loader kept.
 
-    OpenClaw from 1 or 3 is kept only when this host has OpenClaw or a fleet
-    link points at an OpenClaw gateway (``openclaw_setup_fleet_link_configured``).
-    A stale OpenClaw instead yields the installed hint when it is in the
-    enabled roster, else the first installed enabled roster connector, else
-    (no roster) the installed hint. With none of these the result is ``""``
-    and setup refuses: a default never selects an agent the host does not
-    have (GAP-0568), and roster entries stay enrolled either way.
+    Whether an implied OpenClaw (3) exists is the loader's decision
+    (``openclaw_implied_but_not_installed``). OpenClaw from 1 is kept only
+    when this host has OpenClaw or a fleet link points at an OpenClaw gateway
+    (``openclaw_setup_fleet_link_configured``). A stale OpenClaw instead
+    yields the installed hint when it is in the enabled roster, else the
+    first installed enabled roster connector, else (no roster) the installed
+    hint. With none of these the result is ``""`` and setup refuses: a
+    default never selects an agent the host does not have (GAP-0568), and
+    roster entries stay enrolled either way.
     """
     cfg = app.cfg
     data_dir = getattr(cfg, "data_dir", None)
     configured = cfg.active_connector() if cfg.has_connector_configured() else ""
     pinned = bool(str(gc.connector or "").strip() or gc.connectors) or configured not in {"", "openclaw"}
     if not pinned:
-        picked = _installed_picked_connector(data_dir)
-        if picked:
-            return picked
+        return _installed_picked_connector(data_dir) or configured
     if configured != "openclaw" or openclaw_presence.openclaw_setup_fleet_link_configured(cfg):
         return configured
     installed = _detect_installed_connectors()
