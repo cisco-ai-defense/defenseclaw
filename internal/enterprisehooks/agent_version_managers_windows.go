@@ -44,8 +44,8 @@ var windowsStandaloneNPMPackages = map[string][]string{
 }
 
 const (
-	// windowsVersionManagerMaxEntries bounds each version directory walk.
-	windowsVersionManagerMaxEntries = 64
+	// windowsVersionManagerMaxEntries bounds each version directory listing.
+	windowsVersionManagerMaxEntries = 256
 	// windowsVersionManagerMaxVersions bounds the Node versions searched
 	// per version manager, newest first.
 	windowsVersionManagerMaxVersions = 16
@@ -60,30 +60,39 @@ var (
 // version managers keep under profileHome, for package names that are not
 // known in advance (the Volta image is per package; see the caller).
 func windowsStandaloneNodeModulesRoots(profileHome string) []string {
+	roots, _ := windowsStandaloneNodeModulesRootsBounded(profileHome, windowsVersionManagerMaxVersions)
+	return roots
+}
+
+// windowsStandaloneNodeModulesRootsBounded is windowsStandaloneNodeModulesRoots
+// with at most limit versions per manager; truncated reports that a manager
+// holds more (or more entries than one listing reads), so the separate-copy
+// scan says so instead of dropping the oldest silently.
+func windowsStandaloneNodeModulesRootsBounded(profileHome string, limit int) (roots []string, truncated bool) {
 	roaming := filepath.Join(profileHome, "AppData", "Roaming")
 	local := filepath.Join(profileHome, "AppData", "Local")
-	var roots []string
 	if prefix := windowsUserNPMRCPrefix(profileHome); prefix != "" {
 		roots = append(roots, filepath.Join(prefix, "node_modules"))
+	}
+	add := func(parent string, pattern *regexp.Regexp, below ...string) {
+		dirs, more := windowsVersionDirs(parent, pattern, limit)
+		truncated = truncated || more
+		for _, dir := range dirs {
+			roots = append(roots, filepath.Join(append([]string{dir}, below...)...))
+		}
 	}
 	// nvm-windows keeps each Node under NVM_HOME\v<version>, whose
 	// node_modules holds that Node's global packages.
 	for _, nvmHome := range []string{filepath.Join(roaming, "nvm"), filepath.Join(local, "nvm")} {
-		for _, dir := range newestWindowsVersionDirs(nvmHome, windowsNodeVersionDirectoryName) {
-			roots = append(roots, filepath.Join(dir, "node_modules"))
-		}
+		add(nvmHome, windowsNodeVersionDirectoryName, "node_modules")
 	}
 	// fnm: FNM_DIR\node-versions\v<version>\installation.
 	for _, fnmHome := range []string{filepath.Join(roaming, "fnm"), filepath.Join(local, "fnm")} {
-		for _, dir := range newestWindowsVersionDirs(filepath.Join(fnmHome, "node-versions"), windowsNodeVersionDirectoryName) {
-			roots = append(roots, filepath.Join(dir, "installation", "node_modules"))
-		}
+		add(filepath.Join(fnmHome, "node-versions"), windowsNodeVersionDirectoryName, "installation", "node_modules")
 	}
 	// pnpm: PNPM_HOME\global\<layout version>\node_modules.
-	for _, dir := range newestWindowsVersionDirs(filepath.Join(local, "pnpm", "global"), windowsPNPMLayoutDirectoryName) {
-		roots = append(roots, filepath.Join(dir, "node_modules"))
-	}
-	return roots
+	add(filepath.Join(local, "pnpm", "global"), windowsPNPMLayoutDirectoryName, "node_modules")
+	return roots, truncated
 }
 
 // discoverWindowsStandaloneVersionManagerAgentVersion reads the connector's
@@ -112,21 +121,28 @@ func discoverWindowsStandaloneVersionManagerAgentVersion(profileHome, connectorN
 	return ""
 }
 
-// newestWindowsVersionDirs lists the plain subdirectories of parent whose
-// names match pattern, newest version first, bounded.
-func newestWindowsVersionDirs(parent string, pattern *regexp.Regexp) []string {
+// windowsVersionDirs lists at most limit plain version subdirectories of
+// parent, newest first; truncated reports more matches than limit, or more
+// entries than windowsVersionManagerMaxEntries.
+func windowsVersionDirs(parent string, pattern *regexp.Regexp, limit int) (dirs []string, truncated bool) {
 	if err := winpath.RejectReparseChain(parent); err != nil {
-		return nil
+		return nil, false
 	}
-	entries, err := os.ReadDir(parent)
+	f, err := os.Open(parent)
 	if err != nil {
-		return nil
+		return nil, false
+	}
+	entries, err := f.ReadDir(windowsVersionManagerMaxEntries + 1)
+	_ = f.Close()
+	if err != nil && err != io.EOF {
+		return nil, false
+	}
+	if len(entries) > windowsVersionManagerMaxEntries {
+		truncated = true
+		entries = entries[:windowsVersionManagerMaxEntries]
 	}
 	var names []string
-	for index, entry := range entries {
-		if index >= windowsVersionManagerMaxEntries {
-			break
-		}
+	for _, entry := range entries {
 		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !pattern.MatchString(entry.Name()) {
 			continue
 		}
@@ -135,14 +151,14 @@ func newestWindowsVersionDirs(parent string, pattern *regexp.Regexp) []string {
 	sort.SliceStable(names, func(i, j int) bool {
 		return compareWindowsEnterpriseVersion(strings.TrimPrefix(names[i], "v"), strings.TrimPrefix(names[j], "v")) > 0
 	})
-	if len(names) > windowsVersionManagerMaxVersions {
-		names = names[:windowsVersionManagerMaxVersions]
+	if len(names) > limit {
+		names, truncated = names[:limit], true
 	}
-	dirs := make([]string, 0, len(names))
+	dirs = make([]string, 0, len(names))
 	for _, name := range names {
 		dirs = append(dirs, filepath.Join(parent, name))
 	}
-	return dirs
+	return dirs, truncated
 }
 
 // windowsUserNPMRCPrefix returns the npm global prefix %USERPROFILE%\.npmrc

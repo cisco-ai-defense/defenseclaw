@@ -6,9 +6,12 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -25,57 +28,79 @@ func privateInstallContractReason(name, version string) string {
 	return ""
 }
 
-// DiscoverWindowsPrivateAgentInstalls checks the fixed npm roots and one
-// directory below a profile, where npm --prefix leaves a runnable local
-// copy. It performs bounded static reads and refuses reparse chains while
-// the enumerator runs as LocalSystem.
-func DiscoverWindowsPrivateAgentInstalls(home string, names []string) []PrivateAgentInstall {
-	relevant := ""
-	for _, name := range names {
-		if name == "claudecode" || name == "codex" || name == "copilot" {
-			relevant = name
-			break
-		}
+// windowsPrivateInstallMachineRoots are machine npm prefixes every account
+// can run a copy from: Node's own folder, where npm puts global packages
+// when the prefix is the Node installation. Tests replace it.
+var windowsPrivateInstallMachineRoots = func() []string {
+	programFiles := strings.TrimSpace(os.Getenv("ProgramFiles"))
+	if programFiles == "" || !filepath.IsAbs(programFiles) {
+		programFiles = `C:\Program Files`
 	}
-	if relevant == "" {
+	return []string{filepath.Join(programFiles, "nodejs")}
+}
+
+// DiscoverWindowsPrivateAgentInstalls checks the fixed npm roots, every
+// installed Node of the version managers (not only the newest few), the
+// Volta package images, the vendor's local install, the native installer's
+// versions, the machine npm prefix and one directory below a profile,
+// where npm --prefix leaves a runnable local copy. It performs bounded
+// static reads and refuses reparse chains while the enumerator runs as
+// LocalSystem; a part it cannot read or that exceeds its bound is reported
+// incomplete with the reason.
+func DiscoverWindowsPrivateAgentInstalls(home string, names []string) []PrivateAgentInstall {
+	wanted := privateInstallConnectors(names, func(name string) bool { return name == "claudecode" || name == "codex" || name == "copilot" })
+	if len(wanted) == 0 {
 		return nil
 	}
 	home = filepath.Clean(home)
+	scan := newPrivateInstallScan()
 	if winpath.RejectReparseChain(home) != nil {
-		return []PrivateAgentInstall{{Connector: relevant, Incomplete: true}}
-	}
-	f, err := os.Open(home)
-	if err != nil {
-		return []PrivateAgentInstall{{Connector: relevant, Incomplete: true}}
-	}
-	entries, err := f.Readdirnames(privateAgentInstallMaxEntries + 1)
-	_ = f.Close()
-	if err != nil && err != io.EOF || len(entries) > privateAgentInstallMaxEntries {
-		return []PrivateAgentInstall{{Connector: relevant, Incomplete: true}}
+		scan.skipAll(wanted, PrivateInstallSkippedLocation)
+		return scan.result()
 	}
 	roots := []string{home, filepath.Join(home, ".claude", "local"), filepath.Join(home, "AppData", "Roaming", "npm"),
 		filepath.Join(home, ".bun", "install", "global"),
 		filepath.Join(home, "AppData", "Local", "Yarn", "Data", "global")}
-	for _, modules := range windowsStandaloneNodeModulesRoots(home) {
+	modulesRoots, truncated := windowsStandaloneNodeModulesRootsBounded(home, privateAgentInstallMaxVersionDirs)
+	if truncated {
+		scan.skipAll(wanted, PrivateInstallSkippedVersionManagers)
+	}
+	for _, modules := range modulesRoots {
 		roots = append(roots, filepath.Dir(modules))
+	}
+	f, err := os.Open(home)
+	var entries []string
+	if err == nil {
+		entries, err = f.Readdirnames(privateAgentInstallMaxEntries + 1)
+		_ = f.Close()
+		if err == io.EOF {
+			err = nil
+		}
+	}
+	if err != nil || len(entries) > privateAgentInstallMaxEntries {
+		scan.skipAll(wanted, PrivateInstallSkippedHome)
+		entries = nil
 	}
 	for _, entry := range entries {
 		child := filepath.Join(home, entry)
 		if winpath.RejectReparseChain(child) != nil {
-			continue
+			continue // the profile's compatibility junctions name folders scanned through their own roots
 		}
 		if info, err := os.Lstat(child); err == nil && info.IsDir() {
 			roots = append(roots, child)
 		}
 	}
-	seen := map[string]bool{}
-	var found []PrivateAgentInstall
-	incomplete := false
-	for _, name := range names {
-		packages := windowsStandaloneNPMPackages[name]
-		if name != "claudecode" && name != "copilot" && name != "codex" {
+	for _, machine := range windowsPrivateInstallMachineRoots() {
+		info, err := os.Lstat(machine)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || winpath.RejectReparseChain(machine) != nil {
+			// Absent, or nvm-windows' link to the active version under one
+			// profile's nvm root, which that profile's scan reads.
 			continue
 		}
+		roots = append(roots, machine)
+	}
+	for _, name := range wanted {
+		packages := windowsStandaloneNPMPackages[name]
 		packageRoots := append([]string(nil), roots...)
 		for _, packageName := range packages {
 			// Volta gives each package an image below AppData\Local, outside
@@ -85,95 +110,137 @@ func DiscoverWindowsPrivateAgentInstalls(home string, names []string) []PrivateA
 		for _, root := range packageRoots {
 			for _, packageName := range packages {
 				for _, modules := range []string{"node_modules", filepath.Join("lib", "node_modules")} {
-					packageDir := filepath.Join(root, modules, packageName)
-					if seen[packageDir] {
-						continue
-					}
-					if winpath.RejectReparseChain(packageDir) != nil {
-						incomplete = true
-						continue
-					}
-					seen[packageDir] = true
-					if name == "claudecode" {
-						if info, err := os.Lstat(filepath.Join(packageDir, "cli.js")); err != nil || !info.Mode().IsRegular() {
-							continue
-						}
-					}
-					path := filepath.Join(packageDir, "package.json")
-					if info, err := os.Lstat(path); (err != nil || !info.Mode().IsRegular()) && name != "claudecode" {
-						continue
-					}
-					version, ok := readWindowsAgentVersionCandidate(path)
-					if ok && privateInstallReason(name, version) == "" {
-						continue
-					}
-					found = append(found, PrivateAgentInstall{Connector: name, Version: version, Path: packageDir})
-					if len(found) >= privateAgentInstallMaxFindings {
-						return append(found, PrivateAgentInstall{Connector: relevant, Incomplete: true})
-					}
+					scanWindowsNPMPackage(scan, name, filepath.Join(root, modules, packageName))
 				}
 			}
 		}
 	}
-	if containsPrivateConnector(names, "claudecode") {
+	if containsPrivateConnector(wanted, "claudecode") {
 		local := filepath.Join(home, ".claude", "local")
-		entry := filepath.Join(local, "node_modules", "@anthropic-ai", "claude-code", "cli.js")
-		if _, err := os.Lstat(entry); os.IsNotExist(err) {
+		packageDir := filepath.Join(local, "node_modules", "@anthropic-ai", "claude-code")
+		if runnable, known := windowsNPMPackageRunnable("claudecode", packageDir); !known {
+			scan.skip("claudecode", PrivateInstallSkippedLocation)
+		} else if !runnable {
 			for _, base := range []string{"claude", "claude.cmd", "claude.exe"} {
 				wrapper := filepath.Join(local, base)
-				if info, err := os.Lstat(wrapper); err == nil {
-					if winpath.RejectReparseChain(wrapper) != nil {
-						incomplete = true
-					} else if info.Mode().IsRegular() {
-						found = append(found, PrivateAgentInstall{Connector: "claudecode", Path: wrapper})
+				info, err := os.Lstat(wrapper)
+				switch {
+				case err == nil && winpath.RejectReparseChain(wrapper) != nil:
+					scan.skip("claudecode", PrivateInstallSkippedLocation)
+				case err == nil && info.Mode().IsRegular():
+					if scan.judge(windowsCopyIdentity(wrapper)) {
+						scan.add(PrivateAgentInstall{Connector: "claudecode", Path: wrapper})
 					}
-				} else if !os.IsNotExist(err) {
-					incomplete = true
+				case err != nil && !os.IsNotExist(err):
+					scan.skip("claudecode", PrivateInstallSkippedLocation)
 				}
 			}
-		} else if err != nil {
-			incomplete = true
+		}
+		scanWindowsClaudeVersions(scan, filepath.Join(home, ".local", "share", "claude", "versions"))
+	}
+	return scan.result()
+}
+
+// windowsCopyIdentity names one copy: the scan refuses reparse points, so
+// the cleaned path, case-folded as NTFS compares names, is the copy.
+func windowsCopyIdentity(path string) string {
+	return strings.ToLower(filepath.Clean(path))
+}
+
+// windowsNPMPackageRunnable reports whether an agent's npm package holds an
+// entry point (privateNPMEntries): a package record without one is a
+// leftover, not a copy. known is false when a reparse point or a read error
+// leaves the answer unknown.
+func windowsNPMPackageRunnable(connector, dir string) (runnable, known bool) {
+	known = true
+	manifest, err := readBoundedWindowsAgentPackageJSON(filepath.Join(dir, "package.json"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		known = false
+	}
+	for _, entry := range privateNPMEntries(connector, manifest) {
+		path := filepath.Join(dir, filepath.FromSlash(entry))
+		if winpath.RejectReparseChain(path) != nil {
+			known = false
+			continue
+		}
+		info, err := os.Lstat(path)
+		switch {
+		case err == nil && info.Mode().IsRegular():
+			return true, true
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			known = false
 		}
 	}
-	if containsPrivateConnector(names, "claudecode") {
-		versionsDir := filepath.Join(home, ".local", "share", "claude", "versions")
-		if winpath.RejectReparseChain(versionsDir) != nil {
-			return append(found, PrivateAgentInstall{Connector: "claudecode", Incomplete: true})
-		}
-		f, err := os.Open(versionsDir)
-		if err == nil {
-			versions, listErr := f.Readdirnames(privateAgentInstallMaxFindings + 1)
-			_ = f.Close()
-			if listErr != nil && listErr != io.EOF || len(versions) > privateAgentInstallMaxFindings {
-				return append(found, PrivateAgentInstall{Connector: "claudecode", Incomplete: true})
-			}
-			for _, version := range versions {
-				path := filepath.Join(versionsDir, version)
-				if winpath.RejectReparseChain(path) != nil {
-					incomplete = true
-					continue
-				}
-				if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
-					if !windowsNativeClaudeVersionName(version) {
-						version = ""
-					}
-					if privateInstallReason("claudecode", version) == "" {
-						continue
-					}
-					found = append(found, PrivateAgentInstall{Connector: "claudecode", Version: version, Path: path})
-				}
-				if len(found) >= privateAgentInstallMaxFindings {
-					return append(found, PrivateAgentInstall{Connector: "claudecode", Incomplete: true})
-				}
-			}
-		} else if !os.IsNotExist(err) {
-			return append(found, PrivateAgentInstall{Connector: "claudecode", Incomplete: true})
-		}
+	return false, known
+}
+
+func scanWindowsNPMPackage(scan *privateInstallScan, name, packageDir string) {
+	identity := windowsCopyIdentity(packageDir)
+	if scan.seen[identity] {
+		return
 	}
-	if incomplete {
-		found = append(found, PrivateAgentInstall{Connector: relevant, Incomplete: true})
+	if winpath.RejectReparseChain(packageDir) != nil {
+		scan.skip(name, PrivateInstallSkippedLocation)
+		return
 	}
-	return found
+	if info, err := os.Lstat(packageDir); err != nil || !info.IsDir() {
+		return
+	}
+	scan.judge(identity)
+	runnable, known := windowsNPMPackageRunnable(name, packageDir)
+	if !known {
+		scan.skip(name, PrivateInstallSkippedLocation)
+		return
+	}
+	if !runnable {
+		return // a leftover package record without an entry point
+	}
+	version, ok := readWindowsAgentVersionCandidate(filepath.Join(packageDir, "package.json"))
+	if ok && privateInstallReason(name, version) == "" {
+		return
+	}
+	scan.add(PrivateAgentInstall{Connector: name, Version: version, Path: packageDir})
+}
+
+func scanWindowsClaudeVersions(scan *privateInstallScan, versionsDir string) {
+	if winpath.RejectReparseChain(versionsDir) != nil {
+		scan.skip("claudecode", PrivateInstallSkippedLocation)
+		return
+	}
+	f, err := os.Open(versionsDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			scan.skip("claudecode", PrivateInstallSkippedLocation)
+		}
+		return
+	}
+	versions, listErr := f.Readdirnames(privateAgentInstallMaxVersionDirs + 1)
+	_ = f.Close()
+	if listErr != nil && listErr != io.EOF {
+		scan.skip("claudecode", PrivateInstallSkippedLocation)
+		return
+	}
+	if len(versions) > privateAgentInstallMaxVersionDirs {
+		scan.skip("claudecode", PrivateInstallSkippedNativeVersions)
+	}
+	for _, version := range versions {
+		path := filepath.Join(versionsDir, version)
+		if winpath.RejectReparseChain(path) != nil {
+			scan.skip("claudecode", PrivateInstallSkippedLocation)
+			continue
+		}
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || !scan.judge(windowsCopyIdentity(path)) {
+			continue
+		}
+		if !windowsNativeClaudeVersionName(version) {
+			version = ""
+		}
+		if privateInstallReason("claudecode", version) == "" {
+			continue
+		}
+		scan.add(PrivateAgentInstall{Connector: "claudecode", Version: version, Path: path})
+	}
 }
 
 func containsPrivateConnector(names []string, name string) bool {

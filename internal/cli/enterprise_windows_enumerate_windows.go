@@ -382,6 +382,14 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 			agents = append(agents, agent)
 		},
 	})
+	// The administrator's enabled targets are the enrollment: only they are
+	// inspected, whatever the automatic filters say (GAP-0906). An
+	// unreadable manifest leaves every eligible profile inspected.
+	if authored, loadErr := enterprisehooks.LoadManifest(manifestPath); loadErr == nil {
+		opts.ManifestSubjects = enterprisehooks.WindowsManifestSubjects(authored)
+	} else {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN the administrator's targets are unreadable; inspecting every eligible profile: %v\n", loadErr)
+	}
 	enterprisehooks.SetUnverifiedVersionsPolicy(cfg.Enterprise.Enrollment.UnverifiedVersionsFor)
 	var ownerUnknown []enterprisehooks.UnprotectedAgent
 	opts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg))

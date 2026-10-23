@@ -182,9 +182,9 @@ func openCodeManagedConfigRelocated(env map[string]string) bool {
 // directory (a symlink, junction, bind mount, short or case alias, macOS
 // /etc -> /private/etc), or neither exists yet and both name the same entry
 // of one parent directory. A relative path, one that cannot be resolved,
-// and on Windows a network or device path, is not proven and stays
-// reported. Unix resolves ".." after links, so a spelling with ".." is
-// compared by the directory it resolves to, never by its text.
+// and on Windows a network or device path or a link to one, is not proven
+// and stays reported. Unix resolves ".." after links, so a spelling with
+// ".." is compared by the directory it resolves to, never by its text.
 func sameLaunchPath(a, b string) bool {
 	physical := runtime.GOOS != "windows" && (launchPathHasDotDot(a) || launchPathHasDotDot(b))
 	if !physical {
@@ -200,13 +200,13 @@ func sameLaunchPath(a, b string) bool {
 const maxLaunchPathDepth = 64
 
 func sameLaunchDirectory(a, b string, physical bool, depth int) bool {
-	if depth > maxLaunchPathDepth || !launchPathResolvable(a) || !launchPathResolvable(b) {
+	if depth > maxLaunchPathDepth || !filepath.IsAbs(a) || !filepath.IsAbs(b) {
 		return false
 	}
-	aInfo, aErr := os.Stat(a)
-	bInfo, bErr := os.Stat(b)
+	aID, aErr := statLaunchPath(a)
+	bID, bErr := statLaunchPath(b)
 	if aErr == nil && bErr == nil {
-		return aInfo.IsDir() && bInfo.IsDir() && os.SameFile(aInfo, bInfo)
+		return sameLaunchDirIdentity(aID, bID)
 	}
 	// A directory the agent has not created yet is the same one only when
 	// both spellings name one entry of one existing parent.
@@ -222,20 +222,6 @@ func sameLaunchDirectory(a, b string, physical bool, depth int) bool {
 		return false
 	}
 	return sameLaunchDirectory(aParent, bParent, false, depth+1)
-}
-
-// launchPathResolvable admits only absolute local paths. Status runs
-// privileged; on Windows, resolving a UNC or device spelling from a user's
-// environment could contact a server the user names.
-func launchPathResolvable(path string) bool {
-	if !filepath.IsAbs(path) {
-		return false
-	}
-	if runtime.GOOS == "windows" {
-		volume := filepath.VolumeName(path)
-		return len(volume) == 2 && volume[1] == ':'
-	}
-	return true
 }
 
 func launchPathHasDotDot(path string) bool {

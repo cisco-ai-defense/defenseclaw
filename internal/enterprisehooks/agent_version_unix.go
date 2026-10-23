@@ -110,14 +110,22 @@ func UnixAgentProbeKnown(connector string) bool {
 // prefix elsewhere) belongs to whoever installed it, so discovery reads it
 // only when unixDiscoveryCandidateTrusted admits it.
 func userNodePrefixes(home string) []string {
-	prefixes := []string{
+	prefixes, _ := userNodePrefixesBounded(home, unixVersionedPrefixLimit)
+	return prefixes
+}
+
+// userNodePrefixesBounded is userNodePrefixes with at most limit installed
+// Node versions per version manager; truncated reports that a manager
+// holds more, so a caller that must see every copy can say so.
+func userNodePrefixesBounded(home string, limit int) (prefixes []string, truncated bool) {
+	prefixes = []string{
 		filepath.Join(home, ".npm-global"),
 		filepath.Join(home, ".local"),
 		filepath.Join(home, ".bun", "install", "global"),
 		filepath.Join(home, ".volta", "tools", "image"),
 	}
 	if !unixUserDiscoveryExtended() {
-		return prefixes
+		return prefixes, false
 	}
 	if prefix := userNPMRCPrefix(home); prefix != "" {
 		prefixes = append(prefixes, prefix)
@@ -127,12 +135,14 @@ func userNodePrefixes(home string) []string {
 		filepath.Join(home, ".config", "yarn", "global"),
 	)
 	for _, pattern := range userVersionedNodePrefixPatterns(home) {
-		prefixes = append(prefixes, newestVersionedDirs(pattern, unixVersionedPrefixLimit)...)
+		dirs, more := versionedDirs(pattern, limit)
+		prefixes = append(prefixes, dirs...)
+		truncated = truncated || more
 	}
 	return append(prefixes,
 		filepath.Join(home, ".linuxbrew"),
 		"/home/linuxbrew/.linuxbrew",
-	)
+	), truncated
 }
 
 // unixUserDiscoveryExtended reports whether discovery may look through the
@@ -166,9 +176,16 @@ func userVersionedNodePrefixPatterns(home string) []string {
 // first (the version is the first path element the wildcard matched,
 // "v22.11.0" or "22.11.0"), at most limit of them.
 func newestVersionedDirs(pattern string, limit int) []string {
+	dirs, _ := versionedDirs(pattern, limit)
+	return dirs
+}
+
+// versionedDirs is newestVersionedDirs that also reports whether more than
+// limit directories matched.
+func versionedDirs(pattern string, limit int) ([]string, bool) {
 	matches, err := filepath.Glob(pattern)
 	if err != nil || len(matches) == 0 {
-		return nil
+		return nil, false
 	}
 	star := strings.Index(pattern, "*")
 	versionOf := func(match string) string {
@@ -186,9 +203,9 @@ func newestVersionedDirs(pattern string, limit int) []string {
 	}
 	sort.SliceStable(dirs, func(i, j int) bool { return compareUnixVersions(versionOf(dirs[i]), versionOf(dirs[j])) > 0 })
 	if len(dirs) > limit {
-		dirs = dirs[:limit]
+		return dirs[:limit], true
 	}
-	return dirs
+	return dirs, false
 }
 
 // userNPMRCPrefix returns the npm global prefix set in ~/.npmrc
