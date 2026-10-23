@@ -9269,9 +9269,14 @@ def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
         return f"Hermes config {config_path} differs from current effective config {current_config}"
 
     data_dir = str(getattr(cfg, "data_dir", "") or "")
-    expected = os.path.join(data_dir, "hooks", "hermes-hook.sh")
+    expected = os.path.normpath(os.path.join(data_dir, "hooks", "hermes-hook.sh"))
     scripts, digests = _locked_hook_scripts(cfg, "hermes")
-    if not data_dir or [os.fspath(script) for script in scripts] != [expected]:
+    # The gateway seals Hermes' script beside the shared inspect-*.sh runtime
+    # and _hardening.sh it sources (connector.hookRuntimeArtifactPaths), so the
+    # lock lists all of them. The probe runs only the one Hermes script, which
+    # must be sealed once, at this install's path (GAP-0833).
+    sealed = [os.fspath(script) for script in scripts if script.name == "hermes-hook.sh"]
+    if not data_dir or sealed != [expected]:
         return f"Hermes execution probe for {config_path} has no exact sealed hook script; live=false; run setup"
     digest = digests.get("hermes-hook.sh", "")
     try:

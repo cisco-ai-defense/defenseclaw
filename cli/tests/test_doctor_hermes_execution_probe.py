@@ -22,6 +22,21 @@ from defenseclaw import fail_mode
 from defenseclaw.commands import cmd_doctor
 from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS, WindowsHookCheck
 
+# What the gateway seals for Hermes on Unix, in its order: the shared
+# inspect-*.sh runtime, Hermes' own script and the _hardening.sh it sources
+# (connector.hookRuntimeArtifactPaths). Go pins the same list in
+# TestHookContractLockSealsEachConnectorScriptBesideTheSharedRuntime; change
+# both together. A lock naming hermes-hook.sh alone is not what any release
+# writes, so every check below reads the real layout (GAP-0833).
+_GATEWAY_HERMES_LOCKED_SCRIPTS = (
+    "inspect-tool.sh",
+    "inspect-request.sh",
+    "inspect-response.sh",
+    "inspect-tool-response.sh",
+    "hermes-hook.sh",
+    "_hardening.sh",
+)
+
 
 def _registered_unix_hermes(tmp_path, monkeypatch):
     """Register a sealed Unix Hermes hook; return it and a reseal-and-check call."""
@@ -51,7 +66,8 @@ def _registered_unix_hermes(tmp_path, monkeypatch):
         lock_path.write_text(json.dumps({"connectors": {"hermes": {"hook_script_digests": {
             "hermes-hook.sh": "sha256:" + hashlib.sha256(script.read_bytes()).hexdigest(),
         }, "locations": {
-            "hook_config_paths": [str(config)], "hook_script_paths": [str(script)],
+            "hook_config_paths": [str(config)],
+            "hook_script_paths": [str(hooks_dir / name) for name in _GATEWAY_HERMES_LOCKED_SCRIPTS],
         }}}}), encoding="utf-8")
 
     seal()
@@ -122,6 +138,104 @@ def test_windows_hermes_fail_mode_rejects_old_lock_path(tmp_path, monkeypatch):
     cfg = SimpleNamespace(data_dir=str(tmp_path / "dc"))
     assert fail_mode._native_deny_registration_freshness(cfg, "hermes") == "registration-config-binding-stale"
     assert not calls
+
+
+def _rewrite_locked_scripts(tmp_path, paths):
+    lock_path = tmp_path / "dc" / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock["connectors"]["hermes"]["locations"]["hook_script_paths"] = paths
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_doctor_and_fail_mode_accept_the_lock_the_gateway_writes(tmp_path, monkeypatch):
+    """GAP-0833: every setup and upgrade sealed this layout and doctor failed it."""
+    _script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    row = check()
+    assert row["status"] == "pass", row
+    cfg = SimpleNamespace(data_dir=str(tmp_path / "dc"))
+    assert fail_mode._unix_registration_freshness(cfg, "hermes") is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@pytest.mark.parametrize("case", ["missing", "other-install", "also-other-install", "twice", "dotdot"])
+def test_hermes_doctor_probes_only_one_hook_sealed_at_this_install(tmp_path, monkeypatch, case):
+    script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    assert check()["status"] == "pass"
+    hooks = script.parent
+    shared = [str(hooks / name) for name in _GATEWAY_HERMES_LOCKED_SCRIPTS if name != script.name]
+    other = tmp_path / "old-dc" / "hooks" / script.name
+    other.parent.mkdir(parents=True)
+    other.write_bytes(script.read_bytes())
+    other.chmod(0o700)
+    paths = {
+        "missing": shared,
+        "other-install": [*shared, str(other)],
+        "also-other-install": [*shared, str(script), str(other)],
+        "twice": [*shared, str(script), str(script)],
+        "dotdot": [*shared, str(hooks / ".." / "hooks" / script.name)],
+    }[case]
+    _rewrite_locked_scripts(tmp_path, paths)
+    row = check(reseal=False)
+    assert row["status"] == "fail", row
+    assert "no exact sealed hook script" in row["detail"]
+    cfg = SimpleNamespace(data_dir=str(tmp_path / "dc"))
+    assert fail_mode._unix_registration_freshness(cfg, "hermes") == "registration-command-stale"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_upgrade_from_1_0_2_layout_passes_once_the_gateway_reseals(tmp_path, monkeypatch):
+    """A 1.0.2 per-user install upgraded in place (GAP-0833).
+
+    1.0.2 registered the same command and approvals and sealed the same lock
+    layout (a v1 lock: digests in the entry). Its hook has no execution-probe
+    branch, so until the new gateway renders and reseals it, doctor fails and
+    names the probe, not a lock-shape mismatch. After the reseal (a v2 lock
+    with the shared digests at the root) doctor passes and fail-mode reports
+    no stale registration.
+    """
+    script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    hooks = script.parent
+    lock_path = tmp_path / "dc" / "hook_contract_lock.json"
+    cfg = SimpleNamespace(data_dir=str(tmp_path / "dc"))
+
+    def digest(path):
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def write_lock(version, hook_body):
+        for name in _GATEWAY_HERMES_LOCKED_SCRIPTS:
+            if name != script.name:
+                (hooks / name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        script.write_text(hook_body, encoding="utf-8")
+        script.chmod(0o700)
+        everything = {name: digest(hooks / name) for name in _GATEWAY_HERMES_LOCKED_SCRIPTS}
+        entry = {
+            "hook_script_digests": everything if version == 1 else {script.name: everything[script.name]},
+            "locations": {
+                "hook_config_paths": [str(tmp_path / "hermes" / "config.yaml")],
+                "hook_script_paths": [str(hooks / name) for name in _GATEWAY_HERMES_LOCKED_SCRIPTS],
+            },
+        }
+        lock = {"connectors": {"hermes": entry}}
+        if version == 2:
+            lock["version"] = 2
+            lock["shared_hook_script_digests"] = {
+                name: value for name, value in everything.items() if name != script.name
+            }
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    # As found after the binary swap: 1.0.2's hook and lock.
+    write_lock(1, "#!/bin/sh\n# defenseclaw-managed-hook v5\nexit 0\n")
+    row = check(reseal=False)
+    assert row["status"] == "fail", row
+    assert "execution probe failed" in row["detail"]
+    assert fail_mode._unix_registration_freshness(cfg, "hermes") == "registration-command-stale"
+
+    # The new gateway's Setup renders the hook and reseals the lock.
+    write_lock(2, "#!/bin/sh\n# defenseclaw-managed-hook v6\n" + _PROOF)
+    row = check(reseal=False)
+    assert row["status"] == "pass", row
+    assert fail_mode._unix_registration_freshness(cfg, "hermes") is None
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
