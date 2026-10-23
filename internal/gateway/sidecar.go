@@ -4652,10 +4652,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		!s.currentConfig().Guardrail.EffectiveEnabled(conn.Name())
 	if !s.currentConfig().Guardrail.Enabled || connectorOff {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — running connector teardown for %s\n", conn.Name())
-		if err := conn.Teardown(ctx, setupOpts); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] connector teardown: %v\n", err)
+		teardownErr := conn.Teardown(ctx, setupOpts)
+		if teardownErr != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] connector teardown: %v\n", teardownErr)
 		}
-		if err := conn.VerifyClean(setupOpts); err != nil {
+		if err := verifyConnectorRemoved(conn, setupOpts, teardownErr); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: teardown of %s left stale state: %v\n", conn.Name(), err)
 			teardownErr := fmt.Errorf("connector %s teardown incomplete: %w", conn.Name(), err)
 			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
@@ -5192,10 +5193,11 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	if !s.currentConfig().Guardrail.Enabled {
 		failedTeardown := append([]string(nil), failedRemoved...)
 		for _, conn := range conns {
-			if err := conn.Teardown(ctx, baseOpts); err != nil {
-				fmt.Fprintf(os.Stderr, "[guardrail] connector %s teardown: %v\n", conn.Name(), err)
+			teardownErr := conn.Teardown(ctx, baseOpts)
+			if teardownErr != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] connector %s teardown: %v\n", conn.Name(), teardownErr)
 			}
-			if err := conn.VerifyClean(baseOpts); err != nil {
+			if err := verifyConnectorRemoved(conn, baseOpts, teardownErr); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: teardown of %s left stale state: %v\n", conn.Name(), err)
 				failedTeardown = append(failedTeardown, conn.Name())
 				continue
@@ -7184,11 +7186,12 @@ func teardownPreviousConnector(registry *connector.Registry, newName string, opt
 		}
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] connector changed %s → %s — tearing down %s\n", prev, newName, prev)
-	if err := old.Teardown(ctx, opts); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] teardown of previous connector %s: %v\n", prev, err)
+	teardownErr := old.Teardown(ctx, opts)
+	if teardownErr != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] teardown of previous connector %s: %v\n", prev, teardownErr)
 	}
 
-	if err := old.VerifyClean(opts); err != nil {
+	if err := verifyConnectorRemoved(old, opts, teardownErr); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: previous connector %s left stale state: %v\n", prev, err)
 		return err
 	}
@@ -7253,10 +7256,11 @@ func teardownRemovedConnectorsReport(registry *connector.Registry, previous, cur
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s no longer active — tearing down\n", prevName)
-		if err := old.Teardown(ctx, opts); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] teardown of removed connector %s: %v\n", prevName, err)
+		teardownErr := old.Teardown(ctx, opts)
+		if teardownErr != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] teardown of removed connector %s: %v\n", prevName, teardownErr)
 		}
-		if err := old.VerifyClean(opts); err != nil {
+		if err := verifyConnectorRemoved(old, opts, teardownErr); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: removed connector %s left stale state: %v\n", prevName, err)
 			failed = append(failed, prevName)
 			continue
@@ -7687,10 +7691,11 @@ func teardownRemovedConnectorCandidates(
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s no longer active — tearing down transactionally\n", name)
-		if err := candidate.conn.Teardown(ctx, priorOpts); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] teardown of removed connector %s: %v\n", name, err)
+		teardownErr := candidate.conn.Teardown(ctx, priorOpts)
+		if teardownErr != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] teardown of removed connector %s: %v\n", name, teardownErr)
 		}
-		if err := candidate.conn.VerifyClean(priorOpts); err != nil {
+		if err := verifyConnectorRemoved(candidate.conn, priorOpts, teardownErr); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: removed connector %s left stale state: %v\n", name, err)
 			failed = append(failed, name)
 			continue
@@ -7899,6 +7904,26 @@ func publishFreshHookRegistrationEvidence(opts connector.SetupOpts, conn connect
 	}
 	if !current {
 		return errors.New("fresh runtime registration evidence does not match the active connector contract")
+	}
+	return nil
+}
+
+// verifyConnectorRemoved is the clean-removal proof of a teardown whose error
+// the caller only logs: VerifyClean, and, after a teardown that failed, the
+// absence of the hook credential it issued. A teardown that removed the hook
+// registration but could not delete the connector-scoped token left a
+// credential that still authenticates to its hook route; the removal is then
+// not complete, so the lock entry stays and the next start retries it
+// (GAP-0858).
+func verifyConnectorRemoved(conn connector.Connector, opts connector.SetupOpts, teardownErr error) error {
+	if err := conn.VerifyClean(opts); err != nil {
+		return err
+	}
+	if teardownErr == nil {
+		return nil
+	}
+	if err := connector.HookAPITokenRevocationPending(opts, conn.Name()); err != nil {
+		return fmt.Errorf("%w (teardown: %v)", err, teardownErr)
 	}
 	return nil
 }
