@@ -64,9 +64,12 @@ type agentIdentityRecorder struct {
 	// read number (agentIdentityFacts.UPNRead). It outlives flushes, so a
 	// hook that read the UPN before another never writes its older UPN,
 	// before or after the newer one is written. Past
-	// agentIdentityRecorderMaxPending identities new ones are not tracked
-	// (none is evicted) and take their sightings as they arrive.
-	upns map[string]agentIdentityUPN
+	// agentIdentityRecorderMaxPending identities the oldest sighting is
+	// dropped and upnFloor raised to its read: a sighting of an identity
+	// not tracked that was read no later than upnFloor may be older than a
+	// dropped one, so the row lists no UPN until a newer read.
+	upns     map[string]agentIdentityUPN
+	upnFloor uint64
 
 	// persistErr is why the last write to inventory.db failed, "" after
 	// one succeeded: the ledger then runs from memory, and its counts and
@@ -148,14 +151,29 @@ type agentIdentityUPN struct {
 }
 
 // applyUPNLocked sets rec's UPN to the newest sighting: facts's, unless a
-// hook that read the UPN later was applied first.
+// hook that read the UPN later was applied first. A sighting that may be
+// older than a dropped one sets no UPN (upnFloor).
 func (r *agentIdentityRecorder) applyUPNLocked(rec *inventory.AgentIdentityRecord, facts agentIdentityFacts) {
 	sighting := agentIdentityUPN{read: facts.UPNRead, upn: facts.UserUPN, unavailable: facts.UPNUnavailable}
-	if newest, tracked := r.upns[facts.ID]; tracked && newest.read > sighting.read {
+	newest, tracked := r.upns[facts.ID]
+	switch {
+	case tracked && newest.read > sighting.read:
 		sighting = newest
-	} else if tracked || len(r.upns) < agentIdentityRecorderMaxPending {
+	case !tracked && r.upnFloor > 0 && sighting.read <= r.upnFloor:
+		sighting = agentIdentityUPN{unavailable: true}
+	default:
 		if r.upns == nil {
 			r.upns = make(map[string]agentIdentityUPN)
+		}
+		if !tracked && len(r.upns) >= agentIdentityRecorderMaxPending {
+			oldestID, oldest := "", uint64(0)
+			for id, s := range r.upns {
+				if oldestID == "" || s.read < oldest {
+					oldestID, oldest = id, s.read
+				}
+			}
+			delete(r.upns, oldestID)
+			r.upnFloor = max(r.upnFloor, oldest)
 		}
 		r.upns[facts.ID] = sighting
 	}

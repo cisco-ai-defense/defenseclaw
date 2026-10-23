@@ -18,7 +18,10 @@ import (
 // answer back, and only the newest translation started can confirm its
 // answer, so an agent identity row never lists an overtaken UPN as current.
 // A failure of the newest translation keeps the last good answer for
-// profile matching (GAP-0129), unconfirmed.
+// profile matching (GAP-0129), unconfirmed. Loop round 2: that last good
+// answer also outlives an eviction and overlapping failures, so a verified
+// UPN the newer translations started without is still the answer, kept,
+// until a newer translation answers.
 func TestADUPNCacheNeverConfirmsAnOvertakenTranslation(t *testing.T) {
 	const sid, sam = "S-1-5-21-1-2-3-1105", `CORP\alice`
 	key := strings.ToUpper(sid) + "\x00" + strings.ToLower(sam)
@@ -102,52 +105,68 @@ func TestADUPNCacheNeverConfirmsAnOvertakenTranslation(t *testing.T) {
 		}
 	}
 
+	const verifiedUPN = "verified@corp.example.com"
+	overlapping := func(t *testing.T, order [3]int, verified, evictAfterNewest bool, failed int) {
+		t.Helper()
+		cache, start, evict, now := setup(t)
+		answers := [3]string{"first@corp.example.com", "second@corp.example.com", "third@corp.example.com"}
+		if verified {
+			finish(start(), verifiedUPN)
+			check(t, cache, "verified", verifiedUPN, true)
+			*now = now.Add(adUPNTTL)
+		}
+		var running [3]translation
+		for i := range running {
+			if i > 0 {
+				evict()
+			}
+			running[i] = start()
+		}
+		if evictAfterNewest {
+			evict()
+		}
+		newestAnswered := -1
+		for _, i := range order {
+			answer := answers[i]
+			if failed&(1<<i) != 0 {
+				answer = ""
+			} else {
+				newestAnswered = max(newestAnswered, i)
+			}
+			finish(running[i], answer)
+			want := ""
+			if newestAnswered >= 0 {
+				want = answers[newestAnswered]
+			} else if verified {
+				want = verifiedUPN
+			}
+			check(t, cache, fmt.Sprintf("translation %d done", i), want, newestAnswered == 2)
+		}
+		cache.mu.Lock()
+		left := len(cache.inflight)
+		cache.mu.Unlock()
+		if left != 0 {
+			t.Fatalf("inflight keeps %d identities after every translation finished", left)
+		}
+	}
+
 	// Every completion order of three overlapping translations (an eviction
-	// before each newer one starts), with and without another eviction
-	// after the newest starts, with every translation answering or one of
-	// them failing. After each completion the answer is that of the newest
-	// translation that answered so far, and it is confirmed only when it is
-	// the newest translation's own.
+	// before each newer one starts), with and without a verified answer
+	// before them, with and without another eviction after the newest
+	// starts, with every set of them failing. After each completion the
+	// answer is that of the newest translation that answered so far, or
+	// else the verified one, and it is confirmed only when it is the newest
+	// translation's own.
 	for _, order := range [][3]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}} {
-		for _, evictAfterNewest := range []bool{false, true} {
-			for _, failed := range []int{-1, 0, 1, 2} {
-				name := fmt.Sprintf("order %d%d%d, eviction after the newest %t, failed %d",
-					order[0], order[1], order[2], evictAfterNewest, failed)
-				t.Run(name, func(t *testing.T) {
-					cache, start, evict, _ := setup(t)
-					answers := [3]string{"first@corp.example.com", "second@corp.example.com", "third@corp.example.com"}
-					var running [3]translation
-					for i := range running {
-						if i > 0 {
-							evict()
-						}
-						running[i] = start()
-					}
-					if evictAfterNewest {
-						evict()
-					}
-					newestAnswered := -1
-					for _, i := range order {
-						answer := answers[i]
-						if i == failed {
-							answer = ""
-						} else {
-							newestAnswered = max(newestAnswered, i)
-						}
-						finish(running[i], answer)
-						want := ""
-						if newestAnswered >= 0 {
-							want = answers[newestAnswered]
-						}
-						check(t, cache, fmt.Sprintf("translation %d done", i), want, newestAnswered == 2)
-					}
-					cache.mu.Lock()
-					left := len(cache.inflight)
-					cache.mu.Unlock()
-					if left != 0 {
-						t.Fatalf("inflight keeps %d identities after every translation finished", left)
-					}
-				})
+		for _, verified := range []bool{false, true} {
+			for _, evictAfterNewest := range []bool{false, true} {
+				for failed := range 8 {
+					name := fmt.Sprintf("order %d%d%d, verified before %t, eviction after the newest %t, failed %03b",
+						order[0], order[1], order[2], verified, evictAfterNewest, failed)
+					t.Run(name, func(t *testing.T) {
+						overlapping(t, order, verified, evictAfterNewest, failed)
+					})
+				}
 			}
 		}
 	}
@@ -194,6 +213,37 @@ func TestADUPNCacheNeverConfirmsAnOvertakenTranslation(t *testing.T) {
 		retry := start()
 		finish(retry, newUPN)
 		check(t, cache, "retry verified", newUPN, true)
+	})
+	t.Run("both translations fail after an eviction, the newest first", func(t *testing.T) {
+		cache, start, evict, now := setup(t)
+		finish(start(), oldUPN)
+		*now = now.Add(adUPNTTL)
+		first := start()
+		evict()
+		second := start()
+		if got := cache.lookup(sid, sam, 0); got != oldUPN {
+			t.Fatalf("lookup while both run = %q; want the verified %q", got, oldUPN)
+		}
+		finish(second, "")
+		check(t, cache, "newest translation failed", oldUPN, false)
+		finish(first, "")
+		check(t, cache, "overtaken translation failed", oldUPN, false)
+		*now = now.Add(adUPNFailureTTL)
+		retry := start()
+		finish(retry, newUPN)
+		check(t, cache, "retry verified", newUPN, true)
+	})
+	t.Run("the overtaken translation fails while the newest runs", func(t *testing.T) {
+		cache, start, evict, now := setup(t)
+		finish(start(), oldUPN)
+		*now = now.Add(adUPNTTL)
+		first := start()
+		evict()
+		second := start()
+		finish(first, "")
+		check(t, cache, "overtaken translation failed", oldUPN, false)
+		finish(second, newUPN)
+		check(t, cache, "newest translation verified", newUPN, true)
 	})
 	t.Run("one eviction and no newer translation", func(t *testing.T) {
 		cache, start, evict, _ := setup(t)
