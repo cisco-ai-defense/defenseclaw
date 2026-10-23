@@ -171,6 +171,23 @@ func installedPolicy(h *bundleHost) (string, uint64) {
 	return "sha256:" + sha256Bytes(raw), state.Generation
 }
 
+func upgradeBundleHostDigest(b *bundleHost) {
+	originalDigester := b.env.BundleDigester
+	b.env.ProductVersion = "1.0.4"
+	b.env.BundleDigester = func(ctx context.Context, cfg *config.Config, raw []byte, platform, root string) (string, error) {
+		value, err := originalDigester(ctx, cfg, raw, platform, root)
+		return "sha256:" + sha256Bytes([]byte(value+"/1.0.4")), err
+	}
+	b.installedDigest = func(raw []byte) string {
+		bundlesDir := filepath.Join(b.env.Layout.ConfigDir, enterprisebundle.BundlesDirName)
+		for _, name := range enterprisebundle.VersionDirsNamed(raw, bundlesDir) {
+			raw = bytes.ReplaceAll(raw, []byte(filepath.Join(bundlesDir, name)), []byte("${bundle_root}"))
+		}
+		value := "sha256:" + sha256Bytes(raw)
+		return "sha256:" + sha256Bytes([]byte(value+"/1.0.4"))
+	}
+}
+
 func newBundleHost(t *testing.T, platforms ...string) *bundleHost {
 	t.Helper()
 	goos := "linux"
@@ -473,20 +490,7 @@ func TestBundleRepeatAfterProductUpgradeUsesVerifiedDigest(t *testing.T) {
 				requireOK(t, b.apply(path))
 				first := b.receipt(bundleID(1))
 				oldDigest := first.EffectivePolicyDigest
-				originalDigester := b.env.BundleDigester
-				b.env.ProductVersion = "1.0.4"
-				b.env.BundleDigester = func(ctx context.Context, cfg *config.Config, raw []byte, platform, root string) (string, error) {
-					value, err := originalDigester(ctx, cfg, raw, platform, root)
-					return "sha256:" + sha256Bytes([]byte(value+"/1.0.4")), err
-				}
-				b.installedDigest = func(raw []byte) string {
-					bundlesDir := filepath.Join(b.env.Layout.ConfigDir, enterprisebundle.BundlesDirName)
-					for _, name := range enterprisebundle.VersionDirsNamed(raw, bundlesDir) {
-						raw = bytes.ReplaceAll(raw, []byte(filepath.Join(bundlesDir, name)), []byte("${bundle_root}"))
-					}
-					value := "sha256:" + sha256Bytes(raw)
-					return "sha256:" + sha256Bytes([]byte(value+"/1.0.4"))
-				}
+				upgradeBundleHostDigest(b)
 				if err := os.WriteFile(b.env.P(b.env.Layout.ConfigPath), []byte(strings.Replace(restart,
 					"hook_self_heal: false", "hook_self_heal: true", 1)), 0o640); err != nil {
 					t.Fatal(err)
@@ -1328,6 +1332,58 @@ func TestBundleRecoveryKeepsPendingWhenGatewayRetainsUnconfirmedPolicy(t *testin
 	requireOK(t, b.run(Options{Action: ActionEnsure}))
 	if pending, err := b.env.loadPending(); err != nil || pending != nil {
 		t.Fatalf("successful retry left the transaction pending: %+v, %v", pending, err)
+	}
+}
+
+// Recovery must confirm the last good bundle using the upgraded gateway's
+// digest, while leaving the original confirmed receipt's digest intact.
+func TestBundleRecoveryAfterProductUpgradeUsesCurrentDigest(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, sourceVersion := range []string{"1.0.2", "1.0.3"} {
+			t.Run(goos+"/"+sourceVersion, func(t *testing.T) {
+				b := newBundleHost(t, goos)
+				b.env.ProductVersion = sourceVersion
+				v1, v2, _ := bundleConfigs(b.testHost)
+				requireOK(t, b.apply(b.dir(1, v1)))
+				oldDigest := b.state().Current.EffectivePolicyDigest
+				upgradeBundleHostDigest(b)
+				if digest, _ := installedPolicy(b); digest == oldDigest {
+					t.Fatal("the upgraded gateway still reports the old product's digest")
+				}
+				// This is the confirmation step after rollback has restored the
+				// current bundle's config, deployment and generation. Calling it
+				// directly keeps the test focused on that proof.
+				l := &lifecycle{env: b.env}
+				if err := l.confirmRecoveredBundle(t.Context()); err != nil {
+					t.Fatalf("recovered signed bundle was not confirmed: %v", err)
+				}
+				if current := b.state().Current; current == nil || current.BundleID != bundleID(1) || current.EffectivePolicyDigest != oldDigest {
+					t.Fatalf("recovery changed the confirmed receipt: %+v", current)
+				}
+				path := b.dir(2, v2)
+				b.env.bundleFault = func(phase string) error {
+					if phase == enterprisebundle.StateApplied {
+						panic("killed after applied receipt")
+					}
+					return nil
+				}
+				func() {
+					defer func() { _ = recover() }()
+					b.apply(path)
+				}()
+				b.env.bundleFault = nil
+				if pending, err := b.env.loadPending(); err != nil || pending == nil {
+					t.Fatalf("interrupted transaction is not pending: %+v, %v", pending, err)
+				}
+				requireOK(t, b.run(Options{Action: ActionEnsure}))
+				if current := b.state().Current; current == nil || current.BundleID != bundleID(1) || current.EffectivePolicyDigest != oldDigest {
+					t.Fatalf("rollback changed the confirmed receipt: %+v", current)
+				}
+				if pending, err := b.env.loadPending(); err != nil || pending != nil {
+					t.Fatalf("successful recovery left the transaction pending: %+v, %v", pending, err)
+				}
+			})
+		}
 	}
 }
 

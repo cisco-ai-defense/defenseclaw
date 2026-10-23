@@ -68,7 +68,8 @@ func readWindowsBundleEnforcement() (bundleEnforcement, managed.StandaloneLayout
 		return bundleEnforcement{}, layout, driver, false
 	}
 	e := bundleEnforcement{Current: st.Current}
-	e.CurrentConfig, _, e.CurrentErr = driver.CurrentConfig()
+	e.CurrentDigest, e.CurrentConfig, e.CurrentErr = enterprisebundle.VerifiedCurrentDigest(context.Background(), driver.Store,
+		st.Current, enterprisebundle.PlatformWindows, enterprisebundle.DeviceLayoutFromManaged(layout), bundleDigester)
 	if installed, err := readBoundedConfigFile(layout.ConfigPath, windowsBundleMaxConfig); err == nil {
 		e.InstalledConfig = installed
 	}
