@@ -74,8 +74,6 @@ import (
 
 const (
 	openShellGatewayUnit          = "defenseclaw-openshell-gateway.service"
-	openShellGatewayLabel         = "com.cisco.defenseclaw.openshell-gateway"
-	openShellGatewayPlist         = "/Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.plist"
 	openShellGatewayRepairCommand = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair"
 	daemonSystemctl               = "/usr/bin/systemctl"
 	daemonLaunchctl               = "/bin/launchctl"
@@ -88,6 +86,15 @@ const (
 	// `openshell gateway add --local` reads it.
 	openShellTLSDirRel = ".local/state/openshell/tls"
 )
+
+// openShellLaunchAgentsDir holds the LaunchAgent plists; a var for tests.
+var openShellLaunchAgentsDir = openshell.LaunchAgentsDir
+
+// openShellGatewayAgent is the installed OpenShell gateway job: its label
+// carries the gateway program's tag (openshell.LaunchAgentLabel).
+func openShellGatewayAgent() (label, plist string) {
+	return openshell.FindLaunchAgent(openShellLaunchAgentsDir, openshell.GatewayAgentBase)
+}
 
 // Waits for the OpenShell gateway; vars so tests run at speed.
 var (
@@ -576,7 +583,8 @@ func (o *accountOpenShell) ensureRunning(ctx context.Context, port int, cfg stri
 		if o.goos == "darwin" && !healChecked && !time.Now().Before(healAt) {
 			healChecked = true
 			domain := o.launchDomain(ctx)
-			target := domain + "/" + openShellGatewayLabel
+			label, _ := openShellGatewayAgent()
+			target := domain + "/" + label
 			out, printErr := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil)
 			if printErr == nil && openshell.ParseLaunchAgentState([]byte(out)).Failure(false) != "" {
 				if err := o.reloadLaunchAgent(ctx, domain); err != nil {
@@ -712,7 +720,8 @@ func (o *accountOpenShell) managedUnitActive(ctx context.Context) bool {
 		out, err := o.run(ctx, daemonSystemctl, []string{"--user", "is-active", openShellGatewayUnit}, userManagerEnv(o.uid))
 		return err == nil && strings.TrimSpace(out) == "active"
 	case "darwin":
-		out, err := o.run(ctx, daemonLaunchctl, []string{"print", o.launchDomain(ctx) + "/" + openShellGatewayLabel}, nil)
+		label, _ := openShellGatewayAgent()
+		out, err := o.run(ctx, daemonLaunchctl, []string{"print", o.launchDomain(ctx) + "/" + label}, nil)
 		return err == nil && strings.Contains(out, "state = running")
 	}
 	return false
@@ -731,7 +740,8 @@ func (o *accountOpenShell) Stop(ctx context.Context, s sandboxrelay.DaemonSettin
 	case "linux":
 		out, err = o.run(ctx, daemonSystemctl, []string{"--user", "stop", openShellGatewayUnit}, userManagerEnv(o.uid))
 	case "darwin":
-		target := o.launchDomain(ctx) + "/" + openShellGatewayLabel
+		label, _ := openShellGatewayAgent()
+		target := o.launchDomain(ctx) + "/" + label
 		if _, perr := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil); perr != nil {
 			return false
 		}
@@ -755,10 +765,11 @@ func (o *accountOpenShell) startUnit(ctx context.Context) (bool, error) {
 		return false, commandError(daemonSystemctl+" --user start "+openShellGatewayUnit, out, err)
 	case "darwin":
 		domain := o.launchDomain(ctx)
-		target := domain + "/" + openShellGatewayLabel
+		label, plist := openShellGatewayAgent()
+		target := domain + "/" + label
 		printed, err := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil)
 		if err != nil {
-			out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, openShellGatewayPlist}, nil)
+			out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, plist}, nil)
 			if err := commandError(daemonLaunchctl+" bootstrap "+domain, out, err); err != nil {
 				return false, err
 			}
@@ -781,11 +792,12 @@ func (e *openShellLaunchAgentReloadError) Error() string {
 func (e *openShellLaunchAgentReloadError) Unwrap() error { return e.err }
 
 func (o *accountOpenShell) reloadLaunchAgent(ctx context.Context, domain string) error {
-	target := domain + "/" + openShellGatewayLabel
+	label, plist := openShellGatewayAgent()
+	target := domain + "/" + label
 	if out, err := o.run(ctx, daemonLaunchctl, []string{"bootout", target}, nil); err != nil {
 		o.logf("boot out your OpenShell gateway LaunchAgent: %v: %s", err, firstOutputLine(out))
 	}
-	out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, openShellGatewayPlist}, nil)
+	out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, plist}, nil)
 	if err := commandError(daemonLaunchctl+" bootstrap "+domain, out, err); err != nil {
 		return &openShellLaunchAgentReloadError{err: err}
 	}
@@ -836,7 +848,8 @@ func (o *accountOpenShell) unitState(ctx context.Context) string {
 			return fmt.Sprintf("the unit is %s/%s, last exit status %s", fields["ActiveState"], fields["SubState"], firstNonEmptyString(status, "none"))
 		}
 	case "darwin":
-		out, err := o.run(ctx, daemonLaunchctl, []string{"print", o.launchDomain(ctx) + "/" + openShellGatewayLabel}, nil)
+		label, _ := openShellGatewayAgent()
+		out, err := o.run(ctx, daemonLaunchctl, []string{"print", o.launchDomain(ctx) + "/" + label}, nil)
 		if err != nil {
 			return "its state is unknown"
 		}

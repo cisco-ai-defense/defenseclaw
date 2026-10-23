@@ -74,6 +74,86 @@ func TestSandboxDaemonPollCanAdoptDuringCreate(t *testing.T) {
 	}
 }
 
+// GAP-0615: a floor change from Start or Create must wait for the policy
+// poll's adoption. The channels put both operations at the adoption point.
+func TestSandboxDaemonFloorChangesWaitForAdoption(t *testing.T) {
+	t.Run("adoptFloor", func(t *testing.T) {
+		f := newSandboxDaemonFixture(t)
+		if err := f.d.regs.put(daemonRegistration{ID: "reg-a", Sandbox: "box", Confirmed: true,
+			Floor: config.OpenShellAdminConfig{MinProfile: "strict"}, UpdatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		f.d.adoptMu.Lock()
+		locked := true
+		defer func() {
+			if locked {
+				f.d.adoptMu.Unlock()
+			}
+		}()
+		started, done := make(chan struct{}), make(chan struct{})
+		go func() { close(started); f.d.adoptFloor("box"); close(done) }()
+		<-started
+		select {
+		case <-done:
+			t.Fatal("adoptFloor passed the policy adoption lock")
+		case <-time.After(100 * time.Millisecond):
+		}
+		f.d.adoptMu.Unlock()
+		locked = false
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("adoptFloor did not finish after adoption")
+		}
+	})
+	t.Run("create", func(t *testing.T) {
+		f := newSandboxDaemonFixture(t)
+		runPastRevalidate(t, f)
+		resolved, prepared := make(chan struct{}), make(chan struct{})
+		f.relay.resolve = func(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error) {
+			close(resolved)
+			return sandboxrelay.ResolveResponse{V: 1, Registration: sandboxrelay.RegistrationView{ID: "reg-new"},
+				Effective: json.RawMessage(`{"profile":"strict","floor":{"min_profile":"strict","allow_yolo":false}}`)}, nil
+		}
+		f.os.prepare = func(sandboxrelay.DaemonSettings) (bool, error) {
+			close(prepared)
+			return true, nil
+		}
+		f.d.adoptMu.Lock()
+		locked := true
+		defer func() {
+			if locked {
+				f.d.adoptMu.Unlock()
+			}
+		}()
+		ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+		done := make(chan struct{})
+		project := t.TempDir()
+		go func() {
+			_, _ = ctl.Create(t.Context(), sandboxapi.CreateRequest{Harness: "claudecode", Project: project})
+			close(done)
+		}()
+		select {
+		case <-resolved:
+		case <-time.After(5 * time.Second):
+			t.Fatal("create did not resolve the floor")
+		}
+		select {
+		case <-prepared:
+			t.Fatal("Create passed the policy adoption lock")
+		case <-time.After(100 * time.Millisecond):
+		}
+		f.d.adoptMu.Unlock()
+		locked = false
+		select {
+		case <-prepared:
+		case <-time.After(5 * time.Second):
+			t.Fatal("create did not prepare after adoption")
+		}
+		<-done
+	})
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

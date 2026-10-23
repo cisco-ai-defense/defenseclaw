@@ -21,7 +21,7 @@ func sshOnlyLaunchdJob(h *osHost, f *fixtureLaunchdRunner, job *launchdJobFixtur
 		f.userJobs = make(map[int]map[string]*launchdJobFixture)
 	}
 	f.userDomains[uid] = true
-	f.userJobs[uid] = map[string]*launchdJobFixture{labelOpenShellGateway: job}
+	f.userJobs[uid] = map[string]*launchdJobFixture{h.env.launchAgentLabel(labelOpenShellGateway): job}
 	return "user/" + strconv.Itoa(uid)
 }
 
@@ -31,7 +31,7 @@ func TestMacOSUserDomainCodeSigningStatusVerifyRepair(t *testing.T) {
 	for _, action := range []string{ActionStatus, ActionVerify} {
 		r := h.run(Options{Action: action})
 		message := messagesOf(r.Errors, codeSandboxUserState)
-		if !strings.Contains(message, h.alice.Name) || !strings.Contains(message, domain) || !strings.Contains(message, labelOpenShellGateway) || r.SecurityComplete {
+		if !strings.Contains(message, h.alice.Name) || !strings.Contains(message, domain) || !strings.Contains(message, h.env.launchAgentLabel(labelOpenShellGateway)) || r.SecurityComplete {
 			t.Fatalf("%s missed ssh-only code signing job: errors=%+v security_complete=%v", action, r.Errors, r.SecurityComplete)
 		}
 	}
@@ -42,10 +42,10 @@ func TestMacOSUserDomainCodeSigningStatusVerifyRepair(t *testing.T) {
 	if len(r.Errors) != 0 || r.ExitCode != 0 {
 		t.Fatalf("repair failed: %+v", r.Errors)
 	}
-	if got := strings.Join(f.mutated, "\n"); !strings.Contains(got, "bootout "+domain+"/"+labelOpenShellGateway) || !strings.Contains(got, "bootstrap "+domain+" ") || !strings.Contains(got, "kickstart "+domain+"/"+labelOpenShellGateway) {
+	if got := strings.Join(f.mutated, "\n"); !strings.Contains(got, "bootout "+domain+"/"+h.env.launchAgentLabel(labelOpenShellGateway)) || !strings.Contains(got, "bootstrap "+domain+" ") || !strings.Contains(got, "kickstart "+domain+"/"+h.env.launchAgentLabel(labelOpenShellGateway)) {
 		t.Fatalf("repair did not restart the user-domain job: %v", f.mutated)
 	}
-	if r := h.run(Options{Action: ActionVerify}); strings.Contains(messagesOf(r.Errors, codeSandboxUserState), labelOpenShellGateway) {
+	if r := h.run(Options{Action: ActionVerify}); strings.Contains(messagesOf(r.Errors, codeSandboxUserState), h.env.launchAgentLabel(labelOpenShellGateway)) {
 		t.Fatalf("repaired job still failed verify: %+v", r.Errors)
 	}
 }
@@ -53,12 +53,15 @@ func TestMacOSUserDomainCodeSigningStatusVerifyRepair(t *testing.T) {
 func TestMacOSUserDomainPackageIdentityReloadsOnce(t *testing.T) {
 	h, f := newMacOSPackageLaunchdHost(t)
 	domain := sshOnlyLaunchdJob(h, f, &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", runs: 5})
+	old := h.env.launchAgentLabel(labelOpenShellGateway)
 	replaceMacOSPackageBinaries(t, h, "1.0.2")
 	r := h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"})
 	if len(r.Errors) != 0 {
 		t.Fatalf("package ensure failed: %+v", r.Errors)
 	}
-	if got := strings.Join(f.mutated, "\n"); !strings.Contains(got, "bootout "+domain+"/"+labelOpenShellGateway) || !strings.Contains(got, "bootstrap "+domain+" ") {
+	// The upgraded gateway has a new label (GAP-0206).
+	current := h.env.launchAgentLabel(labelOpenShellGateway)
+	if got := strings.Join(f.mutated, "\n"); current == old || !strings.Contains(got, "bootout "+domain+"/"+old) || !strings.Contains(got, "bootstrap "+domain+" "+h.env.P("/Library/LaunchAgents/"+current+".plist")) {
 		t.Fatalf("package upgrade did not refresh user-domain job: %v", f.mutated)
 	}
 	f.mutated = nil
@@ -72,8 +75,8 @@ func TestMacOSLaunchAgentUsesEachLoadedDomain(t *testing.T) {
 	h, f, _ := newLaunchdTestHost(t)
 	uid := h.alice.UID
 	f.userDomains = map[int]bool{uid: true}
-	f.userJobs = map[int]map[string]*launchdJobFixture{uid: {labelOpenShellGateway: {loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", runs: 5}}}
-	f.jobs[uid][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "running", runs: 1}
+	f.userJobs = map[int]map[string]*launchdJobFixture{uid: {h.env.launchAgentLabel(labelOpenShellGateway): {loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", runs: 5}}}
+	f.jobs[uid][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: true, state: "running", runs: 1}
 	r := h.run(Options{Action: ActionRepair})
 	if len(r.Errors) != 0 || len(f.mutated) != 3 {
 		t.Fatalf("repair did not reload only stale user job: errors=%+v calls=%v", r.Errors, f.mutated)
@@ -83,17 +86,17 @@ func TestMacOSLaunchAgentUsesEachLoadedDomain(t *testing.T) {
 			t.Fatalf("wrong domain mutated: %v", f.mutated)
 		}
 	}
-	f.jobs[uid][labelOpenShellGateway].state = "not running"
-	f.jobs[uid][labelOpenShellGateway].reason = "OS_REASON_CODESIGNING"
-	f.jobs[uid][labelOpenShellGateway].runs = 5
-	f.userJobs[uid][labelOpenShellGateway].state = "not running"
-	f.userJobs[uid][labelOpenShellGateway].reason = "OS_REASON_CODESIGNING"
+	f.jobs[uid][h.env.launchAgentLabel(labelOpenShellGateway)].state = "not running"
+	f.jobs[uid][h.env.launchAgentLabel(labelOpenShellGateway)].reason = "OS_REASON_CODESIGNING"
+	f.jobs[uid][h.env.launchAgentLabel(labelOpenShellGateway)].runs = 5
+	f.userJobs[uid][h.env.launchAgentLabel(labelOpenShellGateway)].state = "not running"
+	f.userJobs[uid][h.env.launchAgentLabel(labelOpenShellGateway)].reason = "OS_REASON_CODESIGNING"
 	f.mutated = nil
 	r = h.run(Options{Action: ActionRepair})
 	if len(r.Errors) != 0 || len(f.mutated) != 6 {
 		t.Fatalf("repair did not reload both failed jobs: errors=%+v calls=%v", r.Errors, f.mutated)
 	}
-	if !strings.Contains(strings.Join(f.mutated, "\n"), fmt.Sprintf("bootout gui/%d/%s", uid, labelOpenShellGateway)) || !strings.Contains(strings.Join(f.mutated, "\n"), fmt.Sprintf("bootout user/%d/%s", uid, labelOpenShellGateway)) {
+	if !strings.Contains(strings.Join(f.mutated, "\n"), fmt.Sprintf("bootout gui/%d/%s", uid, h.env.launchAgentLabel(labelOpenShellGateway))) || !strings.Contains(strings.Join(f.mutated, "\n"), fmt.Sprintf("bootout user/%d/%s", uid, h.env.launchAgentLabel(labelOpenShellGateway))) {
 		t.Fatalf("both domains were not reloaded: %v", f.mutated)
 	}
 }

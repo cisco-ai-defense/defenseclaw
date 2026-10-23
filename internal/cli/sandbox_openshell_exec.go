@@ -43,7 +43,7 @@ import (
 
 // sandboxOpenShellExecCmd is the exec shim the managed OpenShell gateway
 // unit runs in both install modes (D4): defenseclaw-openshell-gateway.service
-// on Linux, the com.cisco.defenseclaw.openshell-gateway LaunchAgent on macOS.
+// on Linux, the com.cisco.defenseclaw.openshell-gateway.<tag> LaunchAgent on macOS.
 // Unit files cannot expand $HOME on macOS and the upstream unit's umask
 // breaks every MicroVM (UMask 0077, GAP-0009), so the shim sets the umask,
 // the root-owned rendered gateway configuration, the account's MicroVM

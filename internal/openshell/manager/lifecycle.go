@@ -182,6 +182,21 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	return out, nil
 }
 
+// KnownComputeCount counts sandboxes that may hold compute from the
+// manager's saved phases, without contacting OpenShell. It is used while
+// managed sandboxes are off and their account gateway cannot start.
+func (m *Manager) KnownComputeCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, b := range m.boxes {
+		if !b.deleted && !b.retained && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason) {
+			n++
+		}
+	}
+	return n
+}
+
 // Get returns one sandbox.
 func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
 	b, err := m.box(name)

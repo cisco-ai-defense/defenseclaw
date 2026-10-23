@@ -75,12 +75,17 @@ type fakeDaemon struct {
 	// onGet runs before a sandbox is returned (hook counters move during
 	// a session).
 	onGet func(sb *sandboxapi.Sandbox)
+	// onStart can model another command starting the sandbox between a get
+	// and this command's start.
+	onStart func(sb *sandboxapi.Sandbox) *sandboxapi.Error
 	// toolCalls is how many tool calls a harness the fakes ran makes
 	// (hookTraffic): a session with a turn.
 	toolCalls int64
 	// onStatus runs before the status is returned (the daemon notices a
 	// change).
 	onStatus func(st *sandboxapi.Status)
+	// onList can model a managed daemon waiting for a stopped account gateway.
+	onList func(context.Context)
 	// onExplain, when set, edits the explain answer to a request.
 	onExplain func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain)
 	// createMCP and createWarnings are what create reports.
@@ -352,6 +357,9 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(map[string]any{"events": out})
 	case path == sandboxapi.PathSandboxes && r.Method == http.MethodGet:
+		if d.onList != nil {
+			d.onList(r.Context())
+		}
 		list := []sandboxapi.Sandbox{}
 		for _, sb := range d.sandboxes {
 			list = append(list, *sb)
@@ -452,6 +460,14 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			reply(sb)
 		case verb == "start":
+			if d.onStart != nil {
+				if e := d.onStart(sb); e != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(e.HTTPStatus())
+					_ = json.NewEncoder(w).Encode(e)
+					return
+				}
+			}
 			var req sandboxapi.StartRequest
 			_ = json.Unmarshal(body, &req)
 			if sb.Phase != "ready" {
@@ -813,6 +829,8 @@ type fakeCopy struct {
 	refreshErr error
 	// onPull runs as a Pull (not a reuse) reads the copy.
 	onPull func()
+	// onApply runs while an applied pull owns the command.
+	onApply func()
 	// diff is what Diff answers.
 	diff string
 }
@@ -919,6 +937,9 @@ func (f *fakeCopy) Pull(_ context.Context, o workspace.PullOptions) (*workspace.
 
 func (f *fakeCopy) Apply(_ context.Context, o workspace.ApplyOptions) (*workspace.ApplyResult, error) {
 	f.step("apply " + string(o.Mode))
+	if f.onApply != nil {
+		f.onApply()
+	}
 	f.mu.Lock()
 	f.apply = append(f.apply, o)
 	applied, err := f.applied, f.applyErr

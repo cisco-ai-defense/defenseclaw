@@ -46,10 +46,10 @@ import (
 
 // sandboxDaemonCmd runs this account's sandbox daemon on a standalone
 // managed computer: the user unit defenseclaw-sandbox.service (Linux,
-// socket-activated) or the LaunchAgent com.cisco.defenseclaw.sandbox
-// (macOS, bootstrapped on demand by the launcher). It runs as the user and
-// takes no config file: the managed gateway's hook socket gives it its
-// settings and judges everything its sandboxes do.
+// socket-activated) or the LaunchAgent com.cisco.defenseclaw.sandbox.<tag>
+// (macOS, bootstrapped on demand by the launcher; openshell.LaunchAgentLabel).
+// It runs as the user and takes no config file: the managed gateway's hook
+// socket gives it its settings and judges everything its sandboxes do.
 var sandboxDaemonCmd = &cobra.Command{
 	Use:               "sandbox-daemon",
 	Short:             "Run this account's sandbox daemon (standalone managed computers)",

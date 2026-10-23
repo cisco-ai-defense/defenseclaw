@@ -551,6 +551,9 @@ func TestSandboxDaemonCreateReadiesOpenShell(t *testing.T) {
 // ready nothing (GAP-0437, GAP-0441).
 func TestSandboxDaemonReadyBeforeFirstRun(t *testing.T) {
 	f := newSandboxDaemonFixture(t)
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{Allowed: true}, nil
+	}
 	f.run(t)
 	client := sandboxapi.NewUnixClient(f.socket)
 	st, err := client.Ready(context.Background())
@@ -572,6 +575,28 @@ func TestSandboxDaemonReadyBeforeFirstRun(t *testing.T) {
 	if _, err := sandboxapi.NewUnixClient(g.socket).Ready(context.Background()); !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) ||
 		g.os.prepared.Load() != 0 {
 		t.Fatalf("unavailable settings: %v (prepared %d)", err, g.os.prepared.Load())
+	}
+}
+
+// GAP-0534: Ready is callable directly, and must consult the current
+// organization profile before setup mode installs anything for the account.
+func TestSandboxDaemonReadyRefusesForbiddenAccountBeforeInstall(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{Profile: "no-sandboxes", Allowed: false}, nil
+	}
+	f.run(t)
+	_, err := sandboxapi.NewUnixClient(f.socket).Ready(context.Background())
+	if !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) || f.os.prepared.Load() != 0 {
+		t.Fatalf("forbidden account ready = %v (prepared %d)", err, f.os.prepared.Load())
+	}
+	// An unavailable policy answer cannot authorize an install either.
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{}, sandboxrelay.ErrGatewayUnreachable
+	}
+	_, err = sandboxapi.NewUnixClient(f.socket).Ready(context.Background())
+	if !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) || f.os.prepared.Load() != 0 {
+		t.Fatalf("unreadable policy ready = %v (prepared %d)", err, f.os.prepared.Load())
 	}
 }
 

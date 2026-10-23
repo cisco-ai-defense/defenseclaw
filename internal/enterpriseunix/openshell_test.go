@@ -226,6 +226,28 @@ func (h *osHost) ensure(cfg []byte) *enterprisestatus.Result {
 	return h.run(Options{Action: ActionEnsure, PayloadDir: h.payloadOnce(), ConfigFile: writeTempConfig(h.t, cfg)})
 }
 
+// GAP-0754: a rejected candidate cannot publish its own prerequisite result.
+// Users continue under the previously applied sandbox settings.
+func TestRefusedOpenShellSetupPinKeepsAppliedPrerequisites(t *testing.T) {
+	h := newOSHost(t, "darwin")
+	h.writeExecutables(t, openshell.PackageE2fsprogsDir+"/sbin/mke2fs", openshell.PackageE2fsprogsDir+"/sbin/debugfs", "/usr/local/bin/docker")
+	h.env.Trust = func(string, TrustKind) error { return nil }
+	valid := sandboxConfig(t, "darwin", true, map[string]any{"install": "setup", "driver": "vm", "version": "0.1.5"})
+	requireOK(t, h.ensure(valid))
+	before := h.read(h.env.prerequisitesPath())
+	var record openshell.PrerequisitesRecord
+	if err := json.Unmarshal([]byte(before), &record); err != nil || !record.Ready {
+		t.Fatalf("applied prerequisites = %+v, %v", record, err)
+	}
+	r := h.ensure(sandboxConfig(t, "darwin", true, map[string]any{"install": "setup", "driver": "vm"}))
+	if r.OK || !strings.Contains(fmt.Sprint(r.Errors), "enterprise.openshell.version") {
+		t.Fatalf("missing pin was accepted: %+v", r)
+	}
+	if after := h.read(h.env.prerequisitesPath()); after != before {
+		t.Errorf("refused ensure changed prerequisites.json:\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
 // payloadOnce stages one payload per host, so repeated ensures see the same
 // binaries.
 func (h *osHost) payloadOnce() string {

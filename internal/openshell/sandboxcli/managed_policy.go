@@ -952,8 +952,9 @@ func managedRuntimeCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 	switch {
 	case m.Unavailable == sandboxrelay.UnavailableSetupChanging:
 		// The organization's switch of the setup is under way: it clears
-		// by itself, and is nothing to ask IT about (#1203).
-		c.Status = openshell.StatusWarn
+		// by itself, and is nothing to ask IT about. A run refuses until
+		// it clears, so doctor must not report ready (GAP-0528).
+		c.Status = openshell.StatusFail
 		c.Detail = m.Unavailable
 		c.Fix = &openshell.Fix{Summary: "nothing to do on this computer; run the command again in a few minutes"}
 	case m.Unavailable != "":

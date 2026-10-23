@@ -661,6 +661,7 @@ func TestEnterpriseOpenShellValidation(t *testing.T) {
 	}{
 		{"defaults", "linux", EnterpriseOpenShellConfig{}, ""},
 		{"setup exact", "darwin", EnterpriseOpenShellConfig{Install: "setup", Driver: "vm", Version: "0.1.3", GatewayPort: 17671, E2fsprogsDir: "/opt/cisco/defenseclaw-deps/e2fsprogs"}, ""},
+		{"setup missing pin", "darwin", EnterpriseOpenShellConfig{Install: "setup", Driver: "vm"}, "install: setup needs an exact version"},
 		{"prerequisite range", "linux", EnterpriseOpenShellConfig{Install: "prerequisite", Version: ">=0.1.1 <0.2.0"}, ""},
 		{"linux vm prerequisite is judged by ensure", "linux", EnterpriseOpenShellConfig{Driver: "vm"}, ""},
 		{"setup range", "linux", EnterpriseOpenShellConfig{Install: "setup", Version: ">=0.1.1"}, "install: setup needs an exact version"},

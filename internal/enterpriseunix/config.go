@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/local"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
@@ -657,6 +658,51 @@ func (e *Env) checkCandidateAssets(v *validatedConfig) error {
 			return &plainConfigError{msg: plain, err: err}
 		}
 		return fmt.Errorf("config does not build: %w", err)
+	}
+	return nil
+}
+
+// checkRequiredSandboxPacks loads every administrator-required sandbox pack
+// that a gateway generation would load. A malformed or mismatched pack must
+// fail planning before ensure writes config.yaml or restarts the gateway
+// (GAP-0546). The rooted test host maps the same paths below Env.Root; on a
+// real host LoadGenerationPack also enforces root ownership and path trust.
+func (e *Env) checkRequiredSandboxPacks(cfg *config.Config) error {
+	names := []string{""}
+	for name := range cfg.Guardrail.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	loaded := map[string]*packs.Pack{}
+	subject := packs.Subject{UID: os.Getuid()}
+	for _, name := range names {
+		floor, _, err := cfg.SandboxManagedFloor(name)
+		if err != nil {
+			return fmt.Errorf("sandbox policy floor %q does not load: %w", name, err)
+		}
+		ref := strings.TrimSpace(floor.RequiredPack)
+		if ref == "" || packs.IsBuiltin(ref) {
+			continue
+		}
+		pack, ok := loaded[ref]
+		if !ok {
+			mapped := ref
+			if filepath.IsAbs(ref) {
+				mapped = e.P(ref)
+			}
+			if e.Root == "" {
+				pack, err = packs.LoadGenerationPack(subject, mapped, cfg.OpenShell.PackDir)
+			} else {
+				pack, err = packs.LoadRequired(subject, mapped, e.P(cfg.OpenShell.PackDir), false)
+			}
+			if err != nil {
+				return fmt.Errorf("required sandbox pack %s does not load: %w", ref, err)
+			}
+			loaded[ref] = pack
+		}
+		if pin := strings.TrimSpace(floor.RequiredPackDigest); pin != "" && pack.Digest != pin {
+			return fmt.Errorf("required sandbox pack %s has digest %s, not its pinned required_pack_digest %s", ref, pack.Digest, pin)
+		}
 	}
 	return nil
 }

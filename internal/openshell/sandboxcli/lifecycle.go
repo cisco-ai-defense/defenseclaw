@@ -566,10 +566,21 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	started, kept := false, sb.Phase == "ready"
 	if sb.Phase != "ready" {
 		a.note("starting " + sb.Name + "…")
-		if sb, kept, err = a.startSandbox(ctx, api, sb, StartOptions{}, true); err != nil {
-			return err
+		before := sb
+		startedSandbox, retained, startErr := a.startSandbox(ctx, api, before, StartOptions{}, true)
+		if startErr != nil {
+			// A pull may have started this stopped copy after our first get.
+			// Attach to the now-ready sandbox; this connect did not start it.
+			if !strings.Contains(startErr.Error(), "is ready, not stopped") {
+				return startErr
+			}
+			if sb, err = api.Get(ctx, before.Name); err != nil || sb.Phase != "ready" {
+				return startErr
+			}
+			a.note(before.Name + " is running now; attaching…")
+		} else {
+			sb, kept, started = startedSandbox, retained, true
 		}
-		started = true
 	}
 	continueAfterDetached := false
 	if spec.Name == "claudecode" && slices.Contains(o.Args, "--continue") {

@@ -42,6 +42,22 @@ func managedStatusFixture() *sandboxapi.ManagedStatus {
 		RequestAccess: "it-security@example.com", InstallMode: "setup", Driver: "docker", OpenShellVersion: "0.1.3"}
 }
 
+// GAP-0720: the optional running-sandbox note must not make a read-only
+// policy explain wait for a kept sandbox's unavailable account gateway.
+func TestPolicyExplainDoesNotWaitForManagedSandboxList(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.explain.Managed = managedExplainFixture()
+	ta.daemon.onList = func(ctx context.Context) { <-ctx.Done() }
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	ta.ok(t, ta.PolicyExplain(ctx, PolicyOptions{}))
+	if elapsed := time.Since(start); elapsed >= 3*time.Second {
+		t.Fatalf("read-only policy explain waited %s for the sandbox list", elapsed)
+	}
+	has(t, ta.output(), "Your sandbox policy on this computer")
+}
+
 // withManagedHost makes the CLI treat this computer as a managed one.
 func withManagedHost(t *testing.T) {
 	t.Helper()

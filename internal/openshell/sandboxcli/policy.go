@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -99,7 +100,12 @@ func (a *App) managedExplainAssumption(ctx context.Context, o PolicyOptions) str
 	if err != nil {
 		return note
 	}
-	list, err := api.List(ctx)
+	// The running-sandbox note is optional. A kept registration on a
+	// managed computer whose OpenShell gateway is off can make List wait
+	// for that gateway; the policy answer has already arrived.
+	listCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer cancel()
+	list, err := api.List(listCtx)
 	if err != nil {
 		return note
 	}

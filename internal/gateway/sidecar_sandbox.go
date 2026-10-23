@@ -134,6 +134,33 @@ func (rt *sandboxRuntime) listenersReady() error {
 	return nil
 }
 
+// statusListenerAddresses reports only ports this process actually holds.
+// A configured address alone is not proof: another account may have bound it.
+func (rt *sandboxRuntime) statusListenerAddresses(st *sandboxapi.Status) {
+	if st == nil {
+		return
+	}
+	rt.listenMu.Lock()
+	defer rt.listenMu.Unlock()
+	if !rt.listening["ingress"] {
+		st.IngressAddr = ""
+	}
+	if !rt.listening["egress"] {
+		st.EgressAddr = ""
+	}
+}
+
+type sandboxStatusController struct {
+	SandboxController
+	runtime *sandboxRuntime
+}
+
+func (c *sandboxStatusController) Status(ctx context.Context) (*sandboxapi.Status, error) {
+	st, err := c.SandboxController.Status(ctx)
+	c.runtime.statusListenerAddresses(st)
+	return st, err
+}
+
 // gatewayState reports the OpenShell gateway connection as the "openshell"
 // part of the sandbox subsystem health.
 func (rt *sandboxRuntime) gatewayState(err error) {
@@ -374,7 +401,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 		return nil, fmt.Errorf("egress proxy: %w", err)
 	}
 	mgr.AttachProxy(proxy)
-	api.SetSandboxController(mgr)
+	api.SetSandboxController(&sandboxStatusController{SandboxController: mgr, runtime: rt})
 	rt.manager, rt.proxy = mgr, proxy
 	feed := mgr.Feed()
 	rt.fleet = mgr

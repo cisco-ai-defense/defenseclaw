@@ -391,6 +391,7 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 			},
 			calls: []string{
 				"/bin/launchctl print gui/501",
+				"/bin/launchctl print user/501",
 				"/bin/launchctl print user/501/com.cisco.defenseclaw.sandbox",
 				"/bin/launchctl bootstrap user/501 /Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist",
 				"/bin/launchctl print user/501/com.cisco.defenseclaw.openshell-gateway",

@@ -72,7 +72,7 @@ func (e *Env) checkLauncher() (prereqRow, bool) {
 // currentOpenShellSettings are the settings the result describes: the plan of
 // the running transaction, else what the last commit applied.
 func (l *lifecycle) currentOpenShellSettings() (openshellSettings, bool) {
-	if l.osPlan != nil {
+	if l.osPlan != nil && len(l.result.Errors) == 0 {
 		return l.osPlan.settings, l.osPlan.settings.Enabled
 	}
 	applied := l.env.loadOpenShellState().Applied
@@ -166,7 +166,7 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	l.describeMacOSAgents(ctx)
 	// The gateway reads this to say, in its own words, why a host run of a
 	// required agent cannot move into a sandbox. status and verify only read.
-	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify {
+	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify && len(r.Errors) == 0 {
 		if err := env.publishPrerequisites(ctx, settings); err != nil {
 			r.AddWarning(codeState, "could not record "+openshell.PrerequisitesFile+": "+err.Error())
 		}
@@ -224,6 +224,9 @@ func (l *lifecycle) describePending(ctx context.Context, entry pending) {
 	switch {
 	case entry.Sandboxes < 0:
 		waiting = "the lifecycle could not tell whether sandboxes run"
+		if entry.Hold != "" {
+			waiting += ": " + entry.Hold
+		}
 	case entry.Sandboxes == 1:
 		waiting = "1 sandbox runs (or is starting, stopping, or a MicroVM that OpenShell does not report stopped)"
 	case entry.Sandboxes == 0:

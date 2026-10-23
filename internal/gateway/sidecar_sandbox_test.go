@@ -250,6 +250,34 @@ func TestSandboxRuntimeServesListeners(t *testing.T) {
 	})
 }
 
+// GAP-0701: the configured address cannot be reported as this daemon's
+// listener when a second account owns the ingress port.
+func TestSandboxStatusDoesNotClaimAnotherAccountsIngress(t *testing.T) {
+	f := newSandboxRuntimeFixture(t, false)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(f.cfg.OpenShell.IngressPort))
+	var err error
+	f.squatter, err = net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.squatter.Close() })
+	f.run(t, nil)
+	eventuallyTrue(t, func() bool {
+		f.rt.listenMu.Lock()
+		defer f.rt.listenMu.Unlock()
+		return f.rt.listening["egress"]
+	})
+	h := f.api.tokenAuth(f.api.apiCSRFProtect(f.api.sandboxAPIHandler()))
+	w := serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathStatus, ""))
+	var st sandboxapi.Status
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusOK || st.IngressAddr != "" || st.EgressAddr == "" {
+		t.Fatalf("status claims a listener held by another account: %d %+v", w.Code, st)
+	}
+}
+
 // TestSandboxRuntimeRefusesSandboxesWithoutItsListeners pins that no
 // sandbox is created while another program holds a sandbox listener port:
 // OpenShell would relay the sandbox's hooks (with its real ingress token)

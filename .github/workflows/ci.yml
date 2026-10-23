@@ -1283,6 +1283,8 @@ jobs:
           go-version-file: go.mod
       - name: Build the unsigned standalone pkg
         shell: bash
+        env:
+          MACOS_APP_SIGN_IDENTITY: "-"
         run: scripts/build-macos-enterprise-pkg.sh --version 9.9.9 --dist-dir "$RUNNER_TEMP/enterprise-install"
       - name: Install, converge, verify and remove the pkg
         shell: bash
@@ -1458,6 +1460,8 @@ jobs:
       - name: Build the unsigned standalone pkg
         if: steps.previous.outputs.version != ''
         shell: bash
+        env:
+          MACOS_APP_SIGN_IDENTITY: "-"
         run: scripts/build-macos-enterprise-pkg.sh --version 9.9.9 --dist-dir "$RUNNER_TEMP/enterprise-install"
       - name: Upgrade, drill the rollback, converge, verify and remove
         if: steps.previous.outputs.version != ''

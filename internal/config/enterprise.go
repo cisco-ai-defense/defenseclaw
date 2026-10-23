@@ -942,6 +942,9 @@ func validateEnterpriseOpenShell(cfg *Config, goos string) error {
 	if err := oneOf("enterprise.openshell.driver_fallback", o.DriverFallback, EnterpriseOpenShellFallbackDocker, EnterpriseOpenShellFallbackNone); err != nil {
 		return err
 	}
+	if o.Install == EnterpriseOpenShellInstallSetup && strings.TrimSpace(o.Version) == "" {
+		return fmt.Errorf("config: enterprise.openshell.version is missing; install: setup needs an exact version such as 0.1.5")
+	}
 	if v := strings.TrimSpace(o.Version); v != "" {
 		exact := enterpriseOpenShellExactVersion.MatchString(v)
 		bounds := enterpriseOpenShellVersionRange.FindStringSubmatch(v)

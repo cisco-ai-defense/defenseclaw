@@ -245,6 +245,10 @@ type Env struct {
 	// SandboxUsers is how the lifecycle acts in user accounts for the sandbox
 	// subsystem (default: commands run as the user); tests replace it.
 	SandboxUsers SandboxUserOps
+	// agentDigest is the SHA-256 of the gateway the plan being applied
+	// installs, which tags the macOS LaunchAgent labels (launchAgentLabel);
+	// "" outside a plan, where the installed gateway is read.
+	agentDigest string
 
 	// ProductVersion is the version of the running lifecycle binary.
 	ProductVersion string

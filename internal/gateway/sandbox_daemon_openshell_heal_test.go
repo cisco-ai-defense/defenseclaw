@@ -8,9 +8,20 @@ package gateway
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
+)
+
+// With no tagged plist installed, the job has the bare label of 1.0.0 to
+// 1.0.3 (openshell.FindLaunchAgent).
+const (
+	openShellGatewayLabel = openshell.GatewayAgentBase
+	openShellGatewayPlist = openshell.LaunchAgentsDir + "/" + openshell.GatewayAgentBase + ".plist"
 )
 
 const gatewayCodeSigningState = "state = not running\nruns = 2\nlast exit reason = OS_REASON_CODESIGNING\n"
@@ -170,5 +181,40 @@ func TestAccountOpenShellListeningBeforeGraceDoesNotInspectAgain(t *testing.T) {
 	}
 	if _, err := r.o.ensureRunning(context.Background(), 17670, ""); err != nil || prints != 1 {
 		t.Fatalf("happy path: err=%v job prints=%d", err, prints)
+	}
+}
+
+// The daemon bootstraps and starts the gateway job of the installed, tagged
+// label, not the bare one 1.0.0 to 1.0.3 installed, whose start macOS
+// killed for code signing after an upgrade (GAP-0206).
+func TestAccountOpenShellStartsTheTaggedGatewayLabel(t *testing.T) {
+	fastGatewayWaits(t)
+	dir := t.TempDir()
+	tagged := openshell.GatewayAgentBase + ".0123456789ab"
+	if err := os.WriteFile(filepath.Join(dir, tagged+".plist"), []byte("<plist/>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := openShellLaunchAgentsDir
+	openShellLaunchAgentsDir = dir
+	t.Cleanup(func() { openShellLaunchAgentsDir = old })
+	r := newOpenShellRig(t, "darwin")
+	r.fail["launchctl print"] = "Could not find domain"
+	r.holder = func(call int) int {
+		if call < 3 {
+			return 0
+		}
+		return 5001
+	}
+	if _, err := r.o.Prepare(context.Background(), setupSettings()); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	got := strings.Join(r.ran(), "\n")
+	for _, want := range []string{
+		"launchctl bootstrap user/5001 " + filepath.Join(dir, tagged+".plist"),
+		"launchctl kickstart user/5001/" + tagged,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("commands lack %q:\n%s", want, got)
+		}
 	}
 }

@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/wrapper"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // DefenseClaw doctor check IDs (the host checks are openshell.CheckID*).
@@ -108,8 +109,13 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	if a.Cfg != nil || managed {
 		st = a.probeDaemon(ctx, managed)
 		for i := range d.Ports {
-			// The running daemon holds its own listeners.
-			d.Ports[i].ServedByDaemon = st.listening
+			// A daemon can hold one port while another program owns the other.
+			switch d.Ports[i].Name {
+			case "ingress":
+				d.Ports[i].ServedByDaemon = st.ingressListening
+			case "egress":
+				d.Ports[i].ServedByDaemon = st.egressListening
+			}
 		}
 		// The uid the daemon reports (an older one reports none, and the
 		// check then has nothing to compare).
@@ -247,9 +253,9 @@ func managedRenderedDoctorDriver(paths *openshell.RenderedPaths) (openshell.Comp
 }
 
 type statusProbe struct {
-	// listening is set when the daemon holds its listeners; unavailable
-	// when it runs but serves no sandbox.
-	listening, unavailable bool
+	// A configured port is not proof the daemon holds it.
+	ingressListening, egressListening bool
+	unavailable                       bool
 	// available is set when the daemon serves sandboxes; ingress is its
 	// hook ingress address.
 	available bool
@@ -449,6 +455,8 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 		if serr == nil {
 			p.daemonUID = st.DaemonUID
 			p.managed = st.Managed
+			p.ingressListening = st.IngressAddr != ""
+			p.egressListening = st.EgressAddr != ""
 		}
 		managed = managed || (serr == nil && st.Managed != nil)
 		switch {
@@ -475,7 +483,6 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			// starts it, installing OpenShell first in setup mode. Nothing
 			// failed (GAP-0439, GAP-0441). Another account's sandboxes
 			// holding the port are the busy row below (GAP-0461).
-			p.listening = st.IngressAddr != ""
 			if st.DockerGroupMissing {
 				// Nothing has failed yet, but the first run's image build will
 				// (GAP-0556): the daemon cannot reach Docker.
@@ -484,7 +491,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			}
 			c.Status, c.Detail = openshell.StatusPass, "running; "+a.managedFirstRunText(st.Managed)
 		case !st.Available:
-			p.listening, p.unavailable = st.IngressAddr != "", true
+			p.unavailable = true
 			c.Status, c.Detail = openshell.StatusFail, "running, but sandboxes are unavailable: "+sandboxapi.DisplayText(firstNonEmpty(st.Reason, "not connected to OpenShell"))
 			switch {
 			case st.Managed != nil && st.GatewayElsewhere != "":
@@ -501,13 +508,13 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			// The account's user services started before the group was
 			// given, and a restart of one keeps their groups: a new login
 			// gives them (GAP-0367).
-			p.listening, p.available, p.ingress = true, true, st.IngressAddr
+			p.available, p.ingress = true, st.IngressAddr
 			c.Status, c.Detail, c.Fix = dockerGroupMissingRow(true)
 		case st.DockerGroupMissing:
-			p.listening, p.available, p.ingress = true, true, st.IngressAddr
+			p.available, p.ingress = true, st.IngressAddr
 			c.Status, c.Detail, c.Fix = dockerGroupMissingRow(false)
 		default:
-			p.listening, p.available, p.ingress = true, true, st.IngressAddr
+			p.available, p.ingress = true, st.IngressAddr
 			c.Status = openshell.StatusPass
 			c.Detail = fmt.Sprintf("connected to %s; ingress %s, egress proxy %s", gatewayText(st.Gateway), st.IngressAddr, st.EgressAddr)
 		}
@@ -1055,10 +1062,13 @@ func (a *App) printDoctor(rep *openshell.DoctorReport) {
 	// The last line is the verdict, a failing one too (it ended on the
 	// last check's line, with only the exit status to tell).
 	a.println()
-	if failed := failedChecks(rep); failed > 0 {
-		a.bad("not ready for sandboxes: " + plural(int64(failed), "check", "checks") + " failed")
-	} else if why, off := sandboxesOff(rep); off {
+	why, off := sandboxesOff(rep)
+	failed := failedChecks(rep)
+	setupChanging := rep.Get(CheckIDManagedRuntime)
+	if off && (failed == 0 || failed == 1 && setupChanging != nil && setupChanging.Status == openshell.StatusFail && setupChanging.Detail == sandboxrelay.UnavailableSetupChanging) {
 		a.warn("not ready for sandboxes yet: " + why)
+	} else if failed > 0 {
+		a.bad("not ready for sandboxes: " + plural(int64(failed), "check", "checks") + " failed")
 	} else {
 		a.ok("ready for sandboxes")
 	}
@@ -1075,10 +1085,12 @@ func failedChecks(rep *openshell.DoctorReport) int {
 	return n
 }
 
-// sandboxesOff reports a report without failures whose sandboxes are still
-// turned off (openshell.enabled is false, a warning of the daemon check):
-// the machine can run them, but no sandbox starts until they are on.
+// sandboxesOff reports a daemon whose sandboxes are turned off or a managed
+// setup change that has not finished: a run refuses in either state.
 func sandboxesOff(rep *openshell.DoctorReport) (string, bool) {
+	if c := rep.Get(CheckIDManagedRuntime); c != nil && c.Status == openshell.StatusFail && c.Detail == sandboxrelay.UnavailableSetupChanging {
+		return c.Detail, true
+	}
 	c := rep.Get(CheckIDDaemon)
 	if c == nil || c.Status != openshell.StatusWarn {
 		return "", false

@@ -163,8 +163,9 @@ else
     detect="$repo/packaging/mdm/macos/detect.sh"
     launcher=/usr/local/bin/defenseclaw
     launcher_target=$install_root/bin/defenseclaw-gateway
-    sandbox_files=(/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist
-        /Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.plist)
+    # Each label carries the first 12 digits of the gateway's SHA-256
+    # (macos_agent_files).
+    sandbox_files=()
     openshell_config_dir=$config_dir/openshell
 fi
 gateway=$install_root/bin/defenseclaw-gateway
@@ -403,6 +404,7 @@ as_standard_user() {
 # Linux, the directory of the rendered OpenShell gateway.toml.
 sandbox_files_present() {
     local file root_group
+    [ "$platform" = linux ] || macos_agent_files
     root_group=0 # root:root, root:wheel
     [ -L "$launcher" ] || die "$launcher is not a symbolic link"
     [ "$(readlink "$launcher")" = "$launcher_target" ] || die "$launcher points at '$(readlink "$launcher")', want $launcher_target"
@@ -423,9 +425,23 @@ sandbox_files_present() {
     echo "sandbox launcher $launcher -> $launcher_target and ${#sandbox_files[@]} user service definitions are in place"
 }
 
-# sandbox_files_gone: an uninstall left no launcher, user unit or launch agent.
+# macos_agent_files: the launch agents of the installed gateway, whose labels
+# carry the first 12 digits of its SHA-256 (openshell.LaunchAgentLabel).
+macos_agent_files() {
+    local tag
+    tag=$(shasum -a 256 "$gateway" | cut -c1-12) || die "cannot hash $gateway"
+    sandbox_files=("/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.$tag.plist"
+        "/Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.$tag.plist")
+}
+
+# sandbox_files_gone: an uninstall left no launcher, user unit or launch agent
+# (on macOS, of any label).
 sandbox_files_gone() {
     local file
+    if [ "$platform" != linux ]; then
+        sandbox_files=(/Library/LaunchAgents/com.cisco.defenseclaw.sandbox*.plist
+            /Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway*.plist)
+    fi
     for file in "$launcher" "${sandbox_files[@]}"; do
         { [ ! -e "$file" ] && [ ! -L "$file" ]; } || die "$file remains after uninstall"
     done

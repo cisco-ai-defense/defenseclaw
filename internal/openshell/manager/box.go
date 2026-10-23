@@ -141,6 +141,13 @@ type box struct {
 	// synthetic maps the synthetic addresses OpenShell's policy DNS handed
 	// the sandbox to their names (noteSyntheticAddress).
 	synthetic map[string]string
+	// mappedPorts are the last ports OpenShell mapped for each name.
+	mappedPorts map[string][]int
+	// seenDenials suppresses a replay of an earlier refusal. The ring bounds
+	// its memory even when a sandbox probes many destinations.
+	seenDenials      map[[32]byte]struct{}
+	seenDenialOrder  [][32]byte
+	seenDenialCursor int
 	// portLines is what the feed last said this session of each host port
 	// other than DefenseClaw's own: reached (true, hostPortAllowed) or
 	// closed (false, hostPortDenied).

@@ -26,7 +26,7 @@ With the stock `0.1.1` rpm, the `driver: vm` checks fail because the release is 
 | What | Linux | macOS |
 | --- | --- | --- |
 | Launcher (a link to `defenseclaw-gateway`) | `/usr/bin/defenseclaw` | `/usr/local/bin/defenseclaw` |
-| User units | `/usr/lib/systemd/user/defenseclaw-sandbox.socket`, `defenseclaw-sandbox.service`, `defenseclaw-openshell-gateway.service` | `/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist`, `com.cisco.defenseclaw.openshell-gateway.plist` |
+| User units | `/usr/lib/systemd/user/defenseclaw-sandbox.socket`, `defenseclaw-sandbox.service`, `defenseclaw-openshell-gateway.service` | `/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.<tag>.plist`, `com.cisco.defenseclaw.openshell-gateway.<tag>.plist` (`<tag>`: first 12 digits of the gateway binary's SHA-256) |
 | Rendered OpenShell gateway settings | `/etc/defenseclaw/openshell/gateway.toml` | `/opt/cisco/defenseclaw/etc/openshell/gateway.toml` |
 | Sandbox packs | `/etc/defenseclaw/policies/sandbox/` | `/opt/cisco/defenseclaw/etc/policies/sandbox/` |
 | Daemon socket | `$XDG_RUNTIME_DIR/defenseclaw/sandbox.sock` | `~/Library/Application Support/DefenseClaw Sandbox/sandbox.sock` |
