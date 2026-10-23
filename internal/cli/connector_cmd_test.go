@@ -26,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -48,9 +49,15 @@ func TestMain(m *testing.M) {
 		serveCodexPolicyFixture()
 		os.Exit(0)
 	}
+	cleanupHermes, err := hermespath.IsolateHostForTests()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "isolate the tests from the host's Hermes:", err)
+		os.Exit(1)
+	}
 	restore := isolateTestHost()
 	code := m.Run()
 	restore()
+	cleanupHermes()
 	os.Exit(code)
 }
 

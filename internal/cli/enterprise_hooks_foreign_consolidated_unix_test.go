@@ -375,7 +375,10 @@ func TestStandaloneForeignCleanupWorkersDoNotHoldTheLock(t *testing.T) {
 			t.Errorf("worker for %s has no foreign cleanup commit session", account.User)
 		}
 		for _, uid := range []int{4242, 4243} {
-			if !accountRemovalLockFree(t, strconv.Itoa(uid), 100*time.Millisecond) {
+			// Both workers probe the same account gate. Give those probes
+			// time to serialize under the race detector; a worker that holds
+			// the gate through its callback still cannot pass this check.
+			if !accountRemovalLockFree(t, strconv.Itoa(uid), time.Second) {
 				t.Errorf("the worker for %s holds uid %d's removal lock before any removal", account.User, uid)
 			}
 		}

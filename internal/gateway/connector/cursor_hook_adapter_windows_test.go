@@ -41,7 +41,9 @@ const cursorAdapterPIDFileEnv = "TEST_CURSOR_ADAPTER_PID_FILE"
 const copilotAdapterHelperMode = "TEST_COPILOT_ADAPTER_MODE"
 const copilotAdapterPIDFileEnv = "TEST_COPILOT_ADAPTER_PID_FILE"
 
-func TestMain(m *testing.M) {
+// prepareConnectorTestProcess runs the adapter helper modes, which exit,
+// and otherwise installs the connector unit-test fixtures (TestMain).
+func prepareConnectorTestProcess() {
 	switch os.Getenv(copilotAdapterHelperMode) {
 	case "result":
 		payload, err := io.ReadAll(os.Stdin)
@@ -97,7 +99,6 @@ func TestMain(m *testing.M) {
 		codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
 			return codexEffectivePolicy{Source: "connector unit-test policy fixture"}, nil
 		}
-		os.Exit(m.Run())
 	}
 }
 

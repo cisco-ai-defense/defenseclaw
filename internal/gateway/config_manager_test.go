@@ -534,6 +534,108 @@ observability: {}
 	}
 }
 
+func TestStandaloneConfigManagerRejectsUnbundledConfigAndAssetReload(t *testing.T) {
+	setPendingRestart(nil)
+	t.Cleanup(func() { setPendingRestart(nil) })
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	raw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.DeploymentMode = "managed_enterprise"
+	initial.Enterprise.Profile = "standalone"
+	if !initial.StandaloneEnterprise() {
+		t.Fatal("fixture is not standalone enterprise")
+	}
+	applied := 0
+	boot := true
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+		if boot {
+			boot = false
+			return errGenerationUnchanged
+		}
+		applied++
+		return nil
+	})
+	loadSnapshot := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, snapshot []byte) (*config.Config, error) {
+		candidate, loadErr := loadSnapshot(source, snapshot)
+		if loadErr == nil {
+			candidate.DeploymentMode = "managed_enterprise"
+			candidate.Enterprise.Profile = "standalone"
+		}
+		return candidate, loadErr
+	}
+	mgr.setStartupSource(path, raw)
+	if err := mgr.Reload(context.Background(), "startup_reconcile"); err != nil {
+		t.Fatalf("startup reconcile of boot bytes: %v", err)
+	}
+	unbundled := []byte(fmt.Sprintf("config_version: 8\ndata_dir: %q\ngateway:\n  api_port: %d\nobservability: {}\n",
+		dir, initial.Gateway.APIPort+1))
+	if err := os.WriteFile(path, unbundled, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(context.Background(), "watch"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+		t.Fatalf("unbundled config reload = %v, want named refusal", err)
+	}
+	if pending, _ := livePendingRestart.Load().([]string); len(pending) != 0 {
+		t.Fatalf("unbundled gateway port edit advertised a pending restart: %v", pending)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadAssets(context.Background(), "asset_watch"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+		t.Fatalf("unbundled asset reload = %v, want named refusal", err)
+	}
+	if applied != 0 {
+		t.Fatalf("unbundled reload applied %d times", applied)
+	}
+}
+
+func TestStandaloneConfigManagerRejectsUnbundledStartupAssetReload(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	raw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.DeploymentMode = "managed_enterprise"
+	initial.Enterprise.Profile = "standalone"
+	called := false
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+		called = true
+		return nil
+	})
+	loadSnapshot := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, snapshot []byte) (*config.Config, error) {
+		candidate, loadErr := loadSnapshot(source, snapshot)
+		if loadErr == nil {
+			candidate.DeploymentMode = "managed_enterprise"
+			candidate.Enterprise.Profile = "standalone"
+		}
+		return candidate, loadErr
+	}
+	mgr.setStartupSource(path, raw)
+	if err := mgr.ReloadAssets(context.Background(), "startup_reconcile"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+		t.Fatalf("unbundled startup asset reload = %v, want named refusal", err)
+	}
+	if err := mgr.Reload(context.Background(), "startup_reconcile"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+		t.Fatalf("startup retry after the rejected assets = %v, want named refusal", err)
+	}
+	if called {
+		t.Fatal("unbundled startup asset reload applied")
+	}
+}
+
 func TestConfigManagerDetectsSecretOnlyObservabilityReload(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)

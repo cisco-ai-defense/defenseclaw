@@ -1963,8 +1963,39 @@ def _status_payload(app) -> dict:
             health = None
     if skip_live_health:
         payload["sidecar"] = {"running": None, "reason": "not checked while config.yaml is invalid"}
+    elif health is not None:
+        payload["sidecar"] = {"running": True}
     else:
-        payload["sidecar"] = {"running": health is not None}
+        from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder
+
+        try:
+            holder = _foreign_gateway_port_holder(cfg)
+        except Exception:  # noqa: BLE001 - an unreadable listener is not proof that the gateway stopped
+            holder = ""
+        pid = 0 if holder else _live_gateway_pid(cfg)
+        if pid:
+            public = OrchestratorClient(host=bind, port=cfg.gateway.api_port)
+            detail = _status_refused_detail(cfg, client, public)
+            payload["sidecar"] = {
+                "running": None,
+                "reason": detail
+                or f"PID file names a live process ({pid}), but authenticated gateway health did not answer",
+            }
+        elif holder:
+            payload["sidecar"] = {
+                "running": None,
+                "reason": (
+                    f"this account's gateway could not be confirmed; port {cfg.gateway.api_port} is held by {holder}"
+                ),
+            }
+        else:
+            payload["sidecar"] = {
+                "running": None,
+                "reason": (
+                    "authenticated gateway status is unavailable; "
+                    "process and listener state could not be confirmed"
+                ),
+            }
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)

@@ -18,6 +18,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 )
 
 // Environment-redirected user config.
@@ -43,8 +45,9 @@ const (
 	// envValueLimit bounds one recorded path.
 	envValueLimit = 1024
 	// envRefreshAfter is how old a redirect's last-seen time gets before a
-	// hook that sees it again rewrites the record.
-	envRefreshAfter = 24 * time.Hour
+	// hook that sees it again rewrites the record. A Hermes check relies on
+	// it: a redirect that old when Setup ran has not been seen since.
+	envRefreshAfter = hermespath.RecordRefreshInterval
 )
 
 // EnvRedirect is one set of redirects an agent ran with: the environment

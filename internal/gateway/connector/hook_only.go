@@ -1059,7 +1059,25 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
 		return withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
-			return c.setup(ctx, opts, configPath)
+			// The home an earlier Setup bound the receipts to is released
+			// first, or capturing the configured home fails on a target
+			// mismatch (an upgrade from 1.0.3 on Windows, GAP-0499).
+			bound, _, err := otherHermesHomes(opts, configPath)
+			if err != nil {
+				return fmt.Errorf("%w; no changes made", err)
+			}
+			if bound != "" {
+				if errs := c.releaseHermesHome(opts, bound); len(errs) > 0 {
+					return fmt.Errorf("hermes release the earlier Hermes home %s: %s", bound, strings.Join(errs, "; "))
+				}
+			}
+			if err := c.setup(ctx, opts, configPath); err != nil {
+				return err
+			}
+			// Best effort: without the record Verify counts every redirect
+			// the hooks recorded, which only fails more.
+			_ = recordHermesHomeSetUp(opts.DataDir, filepath.Dir(configPath), time.Now())
+			return nil
 		})
 	}
 	return c.setup(ctx, opts, "")
@@ -1188,8 +1206,8 @@ func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, erro
 	if !c.pluginArtifact {
 		hermesConfig := ""
 		if c.name == "hermes" {
-			// Without a resolved config the generic reader finds no path
-			// and reports the hooks present.
+			// The config the account's Hermes reads, or not verified: an
+			// unresolved home, another HERMES_HOME or a named profile.
 			var err error
 			if hermesConfig, err = hermesVerifiedConfigPath(opts); err != nil {
 				return false, err
@@ -1637,17 +1655,42 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 
 	logicalName := c.managedBackupLogicalName()
 	path := hermesConfigPath
-	if c.name != "hermes" {
+	if c.name == "hermes" {
+		errs = append(errs, c.releaseOtherHermesHomes(opts, path)...)
+		errs = append(errs, c.releaseHermesHome(opts, path)...)
+	} else {
 		path = managedFileBackupTargetPath(opts.DataDir, c.name, logicalName, c.configPath(opts))
+		errs = append(errs, c.teardownConfig(opts, logicalName, path)...)
 	}
-	// Hermes: a captured config.yaml that already registers DefenseClaw's
-	// hook (a file put back from an earlier enrollment) is not restored, or
-	// DefenseClaw's entries would stay; only they are removed instead.
-	var restored bool
-	var err error
-	if c.name != "hermes" || !hermesConfigBackupHoldsOwnedHooks(opts.DataDir, logicalName, path, c.hookCommand(opts)) {
-		restored, err = restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, logicalName, path)
+
+	if c.name == "cursor" {
+		if err := removeCursorHookArtifacts(opts); err != nil {
+			errs = append(errs, fmt.Sprintf("remove Cursor hook artifacts: %v", err))
+		}
+	} else if err := writeDisabledHookTombstone(opts, c.scriptName, c.name); err != nil {
+		errs = append(errs, fmt.Sprintf("disabled hook tombstone: %v", err))
 	}
+	// The last known good copy of an agent config holds the account's
+	// settings and is of no use once DefenseClaw no longer manages the file
+	// (GAP-0564).
+	if spec, ok := agentConfigSpecFor(c.name); ok && len(errs) == 0 {
+		if err := spec.removeCopies(opts.DataDir); err != nil {
+			errs = append(errs, fmt.Sprintf("remove the copy of %s: %v", path, err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("%s teardown: %s", c.name, strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// teardownConfig restores the agent config path the "config" receipt holds,
+// or removes only DefenseClaw's entries from it, as Teardown does for every
+// hook-only connector but Hermes (releaseHermesHome).
+func (c *hookOnlyConnector) teardownConfig(opts SetupOpts, logicalName, path string) []string {
+	var errs []string
+	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, logicalName, path)
 	switch {
 	case err != nil:
 		errs = append(errs, restoreBackupFailure(err))
@@ -1707,33 +1750,157 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 			errs = append(errs, fmt.Sprintf("remove DefenseClaw hook entries: %v", err))
 		}
 	}
-	if c.name == "hermes" {
-		command := hermesConfiguredHookCommand(c.hookCommand(opts), opts.HookExecutable)
-		if err := teardownHermesAllowlist(opts, hermesConfigPath, command); err != nil {
-			errs = append(errs, fmt.Sprintf("restore shell hook allowlist: %v", err))
-		}
-	}
+	return errs
+}
 
-	if c.name == "cursor" {
-		if err := removeCursorHookArtifacts(opts); err != nil {
-			errs = append(errs, fmt.Sprintf("remove Cursor hook artifacts: %v", err))
-		}
-	} else if err := writeDisabledHookTombstone(opts, c.scriptName, c.name); err != nil {
-		errs = append(errs, fmt.Sprintf("disabled hook tombstone: %v", err))
+// releaseHermesHome takes DefenseClaw's hooks and approvals out of the
+// Hermes home of configPath. A captured config.yaml is put back when the
+// file is unchanged since Setup, unless the copy itself registers
+// DefenseClaw's hook (a file put back from an earlier enrollment); otherwise
+// only DefenseClaw's entries are removed. The allowlist follows
+// (teardownHermesAllowlist), and the receipts are discarded.
+func (c *hookOnlyConnector) releaseHermesHome(opts SetupOpts, configPath string) []string {
+	var errs []string
+	hookScript := c.hookCommand(opts)
+	var restored bool
+	var err error
+	if !hermesConfigBackupHoldsOwnedHooks(opts.DataDir, hermesConfigLogicalName, configPath, hookScript) {
+		restored, err = restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, hermesConfigLogicalName, configPath)
 	}
-	// The last known good copy of an agent config holds the account's
-	// settings and is of no use once DefenseClaw no longer manages the file
-	// (GAP-0564).
-	if spec, ok := agentConfigSpecFor(c.name); ok && len(errs) == 0 {
-		if err := spec.removeCopies(opts.DataDir); err != nil {
-			errs = append(errs, fmt.Sprintf("remove the copy of %s: %v", path, err))
+	switch {
+	case err != nil:
+		errs = append(errs, restoreBackupFailure(err))
+	case !restored:
+		if err := c.removeConfigEntriesWithManagedBackup(opts, hermesConfigLogicalName, configPath, hookScript); err != nil {
+			errs = append(errs, fmt.Sprintf("remove hook entries: %v", err))
+		} else {
+			discardManagedFileBackup(opts.DataDir, c.name, hermesConfigLogicalName)
 		}
 	}
+	command := hermesConfiguredHookCommand(hookScript, opts.HookExecutable)
+	if err := teardownHermesAllowlist(opts, configPath, command); err != nil {
+		errs = append(errs, fmt.Sprintf("restore shell hook allowlist: %v", err))
+	}
+	return errs
+}
 
-	if len(errs) > 0 {
-		return fmt.Errorf("%s teardown: %s", c.name, strings.Join(errs, "; "))
+// hermesConfigLogicalName is the receipt of the Hermes config.yaml.
+const hermesConfigLogicalName = "config.yaml"
+
+// otherHermesHomes returns the Hermes configs besides configPath that can
+// hold this data directory's hooks: the one the config receipt of an
+// earlier Setup is bound to ("" when it is configPath or there is none),
+// and the account's profile default when it differs from both. Up to
+// 1.0.3 the Windows guardian set up the profile default
+// %LOCALAPPDATA%\hermes whatever HERMES_HOME the account configured, and
+// bound the receipts to it (GAP-0499). HermesConfigPathOverride names the
+// only home.
+func otherHermesHomes(opts SetupOpts, configPath string) (bound, profileDefault string, err error) {
+	if HermesConfigPathOverride != "" {
+		return "", "", nil
+	}
+	backup, err := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, "hermes", hermesConfigLogicalName))
+	if err != nil && !os.IsNotExist(err) {
+		return "", "", fmt.Errorf("load the Hermes config receipt: %w", err)
+	}
+	if err == nil {
+		if bound, err = validateManagedFileBackupTarget(backup, "hermes", hermesConfigLogicalName, backup.Path); err != nil {
+			return "", "", fmt.Errorf("validate the Hermes config receipt: %w", err)
+		}
+		if sameManagedTarget(bound, configPath) {
+			bound = ""
+		}
+	}
+	profileDefault = hermespath.ConfigPathForUserHome(userHomeDir())
+	if profileDefault == "" || sameManagedTarget(profileDefault, configPath) || (bound != "" && sameManagedTarget(profileDefault, bound)) {
+		profileDefault = ""
+	}
+	return bound, profileDefault, nil
+}
+
+func sameManagedTarget(a, b string) bool {
+	a, errA := normalizeManagedTargetPath(a)
+	b, errB := normalizeManagedTargetPath(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// releaseOtherHermesHomes takes this data directory's hooks out of the
+// Hermes homes besides configPath (otherHermesHomes): the home the receipts
+// are bound to is released as Teardown releases it, and the profile
+// default loses DefenseClaw's own entries. Otherwise the receipts made
+// Setup and Teardown of the configured home fail on a target mismatch, and
+// the default home kept hooks that run a removed executable after
+// uninstall.
+func (c *hookOnlyConnector) releaseOtherHermesHomes(opts SetupOpts, configPath string) []string {
+	bound, profileDefault, err := otherHermesHomes(opts, configPath)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	var errs []string
+	if bound != "" {
+		for _, failure := range c.releaseHermesHome(opts, bound) {
+			errs = append(errs, fmt.Sprintf("%s: %s", bound, failure))
+		}
+	}
+	if profileDefault != "" {
+		if err := c.removeHermesHomeEntries(opts, profileDefault); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", profileDefault, err))
+		}
+	}
+	return errs
+}
+
+// removeHermesHomeEntries removes this data directory's hooks and the
+// approvals for them from a Hermes home no receipt is bound to.
+func (c *hookOnlyConnector) removeHermesHomeEntries(opts SetupOpts, configPath string) error {
+	hookScript := c.hookCommand(opts)
+	command := hermesConfiguredHookCommand(hookScript, opts.HookExecutable)
+	hooks, approvals, err := hermesHomeHoldsOwnedEntries(configPath, hookScript, command)
+	if err != nil {
+		return err
+	}
+	if hooks {
+		if err := removeHermesHooks(configPath, hookScript, nil); err != nil {
+			return fmt.Errorf("remove hook entries: %w", err)
+		}
+	}
+	if approvals {
+		if err := removeHermesOwnedApprovals(filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName), command, nil); err != nil {
+			return fmt.Errorf("remove shell hook approvals: %w", err)
+		}
 	}
 	return nil
+}
+
+// hermesHomeHoldsOwnedEntries reports whether the Hermes home of configPath
+// registers this data directory's hook (hookScript) or holds DefenseClaw's
+// approval of its command.
+func hermesHomeHoldsOwnedEntries(configPath, hookScript, command string) (hooks, approvals bool, err error) {
+	cfg, err := readYAMLObject(configPath)
+	if err != nil {
+		return false, false, err
+	}
+	hooks = containsHookScript(cfg["hooks"], hookScript)
+	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	document, err := readHermesAllowlist(allowlistPath)
+	if err != nil {
+		return false, false, err
+	}
+	for _, raw := range document["approvals"].([]interface{}) {
+		entry, _ := raw.(map[string]interface{})
+		owned, _ := entry[hermesAllowlistOwnerField].(bool)
+		entryCommand, _ := entry["command"].(string)
+		if owned && entryCommand == command {
+			approvals = true
+		}
+	}
+	return hooks, approvals, nil
 }
 
 // removeCursorHookArtifacts removes only files that still carry the
@@ -1854,6 +2021,9 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 		if err := validateHermesWindowsConfigPath(configPath); err != nil {
 			return err
 		}
+		if err := verifyOtherHermesHomesClean(opts, configPath, c.hookCommand(opts)); err != nil {
+			return err
+		}
 	}
 	path := managedFileBackupTargetPath(opts.DataDir, c.name, logicalName, configPath)
 	if c.name == "hermes" {
@@ -1952,6 +2122,29 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 		return verifyHermesCleanup(opts, configPath, hermesConfiguredHookCommand(needle, opts.HookExecutable))
 	}
 	return c.verifyCursorHookArtifactsClean(opts)
+}
+
+// verifyOtherHermesHomesClean fails while a Hermes home besides configPath
+// (otherHermesHomes) still holds this data directory's hooks or approvals.
+func verifyOtherHermesHomesClean(opts SetupOpts, configPath, hookScript string) error {
+	bound, profileDefault, err := otherHermesHomes(opts, configPath)
+	if err != nil {
+		return fmt.Errorf("hermes teardown not verified: %w", err)
+	}
+	command := hermesConfiguredHookCommand(hookScript, opts.HookExecutable)
+	for _, other := range []string{bound, profileDefault} {
+		if other == "" {
+			continue
+		}
+		hooks, approvals, err := hermesHomeHoldsOwnedEntries(other, hookScript, command)
+		if err != nil {
+			return fmt.Errorf("hermes teardown not verified: %s: %w", other, err)
+		}
+		if hooks || approvals {
+			return fmt.Errorf("hermes teardown incomplete: DefenseClaw hook entries remain in %s", other)
+		}
+	}
+	return nil
 }
 
 func verifyHermesCleanup(opts SetupOpts, configPath, command string) error {
@@ -2479,14 +2672,22 @@ func hermesResolvedConfigPath(SetupOpts) (string, error) {
 
 // hermesVerifiedConfigPath resolves the Hermes config a check inspects and
 // fails, rather than inspecting another home, when the Hermes the account
-// runs would not read it: a home that cannot be resolved, or a named
-// profile Hermes selects instead of the default one DefenseClaw set up
-// (GAP-0499). A check that passed on the default profile proved nothing
-// about a profile Hermes runs from.
+// runs would not read it: a home that cannot be resolved, a HERMES_HOME the
+// account's environment sets to another home or to a value a service
+// cannot resolve (hermespath.VerifyAccountHome), or a named profile Hermes
+// selects instead of the default one DefenseClaw set up (GAP-0499). A check
+// that passed on the default home or profile proved nothing about another
+// one Hermes runs from.
 func hermesVerifiedConfigPath(opts SetupOpts) (string, error) {
 	configPath, err := hermesResolvedConfigPath(opts)
 	if err != nil {
 		return "", fmt.Errorf("hermes hooks not verified: %w", err)
+	}
+	if home := activeUserHomeOverride(); HermesConfigPathOverride == "" && home != "" && (runtime.GOOS == "windows" || !isProcessUserHome(home)) {
+		hermesHome := filepath.Dir(configPath)
+		if err := hermespath.VerifyAccountHome(home, hermesHome, hermesHomeSetUpAt(opts.DataDir, hermesHome)); err != nil {
+			return "", fmt.Errorf("hermes hooks not verified: %w", err)
+		}
 	}
 	if err := validateHermesWindowsConfigPath(configPath); err != nil {
 		return "", fmt.Errorf("hermes hooks not verified: %w", err)
@@ -2495,6 +2696,47 @@ func hermesVerifiedConfigPath(opts SetupOpts) (string, error) {
 		return "", fmt.Errorf("hermes hooks not verified: %w", err)
 	}
 	return configPath, nil
+}
+
+// hermesHomeSetUpFileName records the Hermes home the last successful Setup
+// registered the hooks in, and when. A redirect the DefenseClaw hooks last
+// saw long enough before that no longer fails Verify
+// (hermespath.VerifyAccountHome).
+const hermesHomeSetUpFileName = "hermes-home-setup.json"
+
+type hermesHomeSetUp struct {
+	Home    string `json:"home"`
+	SetUpAt string `json:"set_up_at"`
+}
+
+func recordHermesHomeSetUp(dataDir, home string, now time.Time) error {
+	data, err := json.Marshal(hermesHomeSetUp{Home: home, SetUpAt: now.UTC().Format(time.RFC3339)})
+	if err != nil {
+		return err
+	}
+	return atomicReplaceFileNoFollow(filepath.Join(dataDir, hermesHomeSetUpFileName), data, 0o600)
+}
+
+// hermesHomeSetUpAt is when Setup last registered the hooks in home, or
+// zero when no readable record names home or its time is in the future.
+func hermesHomeSetUpAt(dataDir, home string) time.Time {
+	path := filepath.Join(dataDir, hermesHomeSetUpFileName)
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() || info.Size() > 64<<10 {
+		return time.Time{}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return time.Time{}
+	}
+	var record hermesHomeSetUp
+	if json.Unmarshal(data, &record) != nil || !sameManagedTarget(record.Home, home) {
+		return time.Time{}
+	}
+	at, err := time.Parse(time.RFC3339, record.SetUpAt)
+	if err != nil || at.After(time.Now()) {
+		return time.Time{}
+	}
+	return at
 }
 
 // isProcessUserHome reports whether home is this process's own home folder.
@@ -3797,6 +4039,17 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 			return err
 		}
 	}
+	if err := removeHermesOwnedApprovals(path, command, backup); err != nil {
+		return err
+	}
+	discardManagedFileBackup(opts.DataDir, "hermes", logicalName)
+	return nil
+}
+
+// removeHermesOwnedApprovals removes DefenseClaw's approvals of command
+// from the Hermes allowlist at path. The approvals the copy Setup captured
+// (backup) held go back as Hermes wrote them.
+func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup) error {
 	document, err := readHermesAllowlist(path)
 	if err != nil {
 		return err
@@ -3859,11 +4112,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	if err != nil {
 		return err
 	}
-	if err := atomicWriteFile(path, append(data, '\n'), 0o600); err != nil {
-		return err
-	}
-	discardManagedFileBackup(opts.DataDir, "hermes", logicalName)
-	return nil
+	return atomicWriteFile(path, append(data, '\n'), 0o600)
 }
 
 // hermesConfigBackupHoldsOwnedHooks reports whether the config.yaml copy

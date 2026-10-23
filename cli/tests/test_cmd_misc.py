@@ -2128,6 +2128,31 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("HEC): disabled", result.output)
 
+    def test_setup_splunk_disable_logs_without_docker_on_windows(self):
+        from defenseclaw.commands.cmd_setup import setup
+        from defenseclaw.observability.local_stack import LocalStackError
+
+        self._seed_splunk_destinations(local=True)
+        destinations = self._v8_destinations()
+        destinations[0]["name"] = "local-splunk"
+        self._write_v8_destinations(destinations)
+        with (
+            patch("defenseclaw.commands.cmd_setup._native_windows_local_splunk", return_value=True),
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.observability.local_splunk.prepare_native_local_splunk_stop",
+                side_effect=LocalStackError("Docker CLI was not found on PATH"),
+            ),
+            patch("defenseclaw.observability.local_stack.resolve_native_docker_executable", return_value=""),
+            patch("defenseclaw.commands.cmd_setup._port_in_use", return_value=False),
+        ):
+            result = self.runner.invoke(
+                setup, ["splunk", "--disable", "--logs"], obj=self.app, catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Local Splunk stack was not running", result.output)
+        self.assertFalse(self._v8_destinations()[0]["enabled"])
+
     def test_setup_splunk_disable_both(self):
         from defenseclaw.commands.cmd_setup import setup
 

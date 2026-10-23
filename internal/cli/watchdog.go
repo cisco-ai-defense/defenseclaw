@@ -222,8 +222,10 @@ notifications when the sidecar is unreachable or degraded.
 Run in the foreground:  defenseclaw-gateway watchdog
 Run as background:      defenseclaw-gateway watchdog start
 Stop:                   defenseclaw-gateway watchdog stop`,
-	RunE:              runWatchdogForeground,
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return nil },
+	RunE: runWatchdogForeground,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		return refuseGatewayLifecycleOnManagedHost()
+	},
 }
 
 var watchdogStartCmd = &cobra.Command{
@@ -387,7 +389,10 @@ func watchdogForegroundAcquireError(pidPath string, err error) error {
 		}
 		return fmt.Errorf("the watchdog already runs in the background. %s", next)
 	}
-	return fmt.Errorf("watchdog: another instance is already running (cannot acquire %s): %w", pidPath, err)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("watchdog: data directory %s does not exist; initialize DefenseClaw before starting the watchdog: %w", filepath.Dir(pidPath), err)
+	}
+	return fmt.Errorf("watchdog: cannot acquire PID file %s: %w", pidPath, err)
 }
 
 func watchdogHealthURL(cfg *config.Config) string {

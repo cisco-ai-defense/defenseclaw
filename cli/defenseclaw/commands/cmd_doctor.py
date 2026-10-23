@@ -4190,6 +4190,17 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         except (json.JSONDecodeError, TypeError):
             detail = body if body.startswith("response exceeds") else "could not parse /health response"
             _emit("warn", "Sidecar health JSON", detail, r=r)
+    elif holder := _foreign_gateway_port_holder(cfg):
+        # A refused health probe does not prove the port is free. A holder
+        # found independently is the cause the operator needs to act on.
+        _emit(
+            "fail",
+            "Sidecar API",
+            _foreign_gateway_port_detail(cfg, holder),
+            r=r,
+            remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
+        )
+        r.gateway_down = "foreign"
     elif code == 0 and "refused" in body.lower():
         start = "start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'"
         _emit(
@@ -4200,16 +4211,6 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             remediation=start,
         )
         r.gateway_down = "stopped"
-    elif holder := _foreign_gateway_port_holder(cfg):
-        # Something else answers on the port without a gateway /health.
-        _emit(
-            "fail",
-            "Sidecar API",
-            _foreign_gateway_port_detail(cfg, holder),
-            r=r,
-            remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
-        )
-        r.gateway_down = "foreign"
     else:
         _emit(
             "fail",

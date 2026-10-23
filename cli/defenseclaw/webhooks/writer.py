@@ -501,6 +501,9 @@ def validate_webhook_url(url: str) -> None:
         raise ValueError("webhook url is required")
     try:
         parsed = urlparse(url)
+        # urlparse defers port validation until .port is read. Validate even
+        # disabled entries so a later list/show cannot crash on saved data.
+        _ = parsed.port
     except ValueError as exc:
         raise ValueError(f"invalid URL: {exc}") from exc
 
@@ -587,10 +590,15 @@ def redact_webhook_url(url: str) -> str:
         # Not a recognisable absolute URL — redact wholesale rather than
         # risk echoing an opaque secret token.
         return "***"
-    host = parts.hostname or ""
-    if parts.port:
-        host = f"{host}:{parts.port}"
-    netloc = f"***@{host}" if (parts.username or parts.password) else host
+    try:
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        netloc = f"***@{host}" if (parts.username or parts.password) else host
+    except ValueError:
+        # Existing config may predate URL validation. Redact the whole value
+        # when its authority is malformed, including any embedded secret.
+        return "***"
     redacted = f"{parts.scheme}://{netloc}"
     if parts.path and parts.path != "/":
         redacted += "/***"

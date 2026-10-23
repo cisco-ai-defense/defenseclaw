@@ -180,7 +180,7 @@ func TestStandaloneReloadRebuildsTheAIDefenseClient(t *testing.T) {
 	}
 }
 
-func TestConfigManagerReloadAppliesEnterpriseOnlyStandaloneChanges(t *testing.T) {
+func TestConfigManagerReloadRefusesUnbundledEnterpriseOnlyStandaloneChanges(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
 	writeConfigForManagerTest(t, path, dir, "observe")
@@ -189,15 +189,13 @@ func TestConfigManagerReloadAppliesEnterpriseOnlyStandaloneChanges(t *testing.T)
 		t.Fatalf("initial load: %v", err)
 	}
 	initial := withEnterpriseProfile(loaded, managed.ProfileStandalone)
-	var applied ConfigDiff
 	calls := 0
-	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, _ ConfigDiff, _ configReloadSource) error {
 		calls++
-		applied = diff
 		return nil
 	})
-	// The candidate differs from the running config only in its enterprise
-	// block, which used to reload as "no change".
+	// An enterprise-only candidate used to reload as "no change". The
+	// standalone manager now requires its signed bundle generation too.
 	mgr.loadSnapshot = func(path string, raw []byte) (*config.Config, error) {
 		cfg, err := config.LoadRuntimeV8CandidateFromBytes(path, raw)
 		if err != nil {
@@ -207,14 +205,11 @@ func TestConfigManagerReloadAppliesEnterpriseOnlyStandaloneChanges(t *testing.T)
 		cfg.Enterprise.Inspection.AIDefense = config.EnterpriseAIDefenseConfig{Enabled: true, Credential: "ai-defense-api-key"}
 		return cfg, nil
 	}
-	if err := mgr.Reload(context.Background(), "test"); err != nil {
-		t.Fatalf("reload: %v", err)
+	if err := mgr.Reload(context.Background(), "test"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+		t.Fatalf("unbundled enterprise-only reload = %v, want signed-bundle refusal", err)
 	}
-	if calls != 1 || !slices.Contains(applied.Changed, "enterprise.inspection") {
-		t.Fatalf("enterprise-only change was not applied: calls=%d diff=%+v", calls, applied)
-	}
-	if !mgr.Current().Enterprise.Inspection.AIDefense.Enabled {
-		t.Fatal("the running snapshot kept the old enterprise block")
+	if calls != 0 || mgr.Current().Enterprise.Inspection.AIDefense.Enabled {
+		t.Fatalf("unbundled enterprise-only change applied: calls=%d current=%+v", calls, mgr.Current().Enterprise.Inspection.AIDefense)
 	}
 }
 
@@ -266,11 +261,11 @@ func TestConfigManagerReloadProfileGuard(t *testing.T) {
 				}
 				return
 			}
-			if err != nil {
-				t.Fatalf("unmanaged to managed reload = %v, want the candidate handed to apply", err)
+			if err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+				t.Fatalf("unmanaged to managed reload = %v, want signed-bundle refusal", err)
 			}
-			if applied == nil || !slices.Contains(applied.RestartRequired, "deployment_mode") {
-				t.Fatalf("unmanaged to managed must reach apply as a deployment_mode restart, got %+v", applied)
+			if applied != nil {
+				t.Fatalf("unbundled managed candidate reached apply: %+v", *applied)
 			}
 		})
 	}
