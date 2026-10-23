@@ -178,9 +178,6 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	l.warnDirectoryUnreachable()
 	l.warnSELinuxConfinedUsers()
 	problems = append(problems, l.describeMachinePolicy(record)...)
-	for _, problem := range l.policyViewPinProblems(record.MachinePolicyConnectors) {
-		r.AddWarning(codeMachinePolicyIncomplete, problem+"; run `"+env.lifecycleCommand(ActionEnsure)+"` to publish the verified policy view")
-	}
 	problems = append(problems, l.describeTetragon(ctx)...)
 	l.describeStatusV2(record)
 	if machinePolicyIncomplete(r) {
@@ -1121,6 +1118,11 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.AddWarning(codeConfigRejected, problem)
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
+	if record != nil {
+		for _, problem := range l.policyViewPinProblems(record.MachinePolicyConnectors) {
+			r.AddWarning(codeMachinePolicyIncomplete, problem+"; run `"+env.lifecycleCommand(ActionEnsure)+"` to publish the verified policy view")
+		}
+	}
 	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()

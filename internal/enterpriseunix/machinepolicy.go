@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -816,10 +817,10 @@ func intersectSorted(values, allowed []string) []string {
 	return out
 }
 
-// republishMachinePolicy repairs DefenseClaw's vendor machine policy
-// entries between transactions (the reconcile action). It never rewrites
-// the descriptor or restarts services: when the covered set changed, the
-// result tells the administrator to run ensure.
+// republishMachinePolicy repairs DefenseClaw's vendor machine policy entries
+// between transactions (the reconcile action). A verified view of the same
+// covered connectors can be pinned without restarting services. A changed
+// covered set still needs ensure to apply the deployment.
 func (l *lifecycle) republishMachinePolicy(record *Deployment) {
 	env, r := l.env, l.result
 	raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
@@ -847,4 +848,87 @@ func (l *lifecycle) republishMachinePolicy(record *Deployment) {
 		!sameStrings(coveredMachinePolicy(intended, result), intersectSorted(record.MachinePolicyConnectors, intended)) {
 		r.AddWarning(codeMachinePolicyIncomplete, "the machine-policy connectors in place differ from the runtime descriptor; run ensure")
 	}
+	if record != nil && len(record.MachinePolicyConnectors) != 0 && publishErr == nil {
+		l.repinVerifiedMachinePolicyView(record, validated.Loaded, intended)
+	}
+}
+
+// repinVerifiedMachinePolicyView changes only the policy-view digests in the
+// committed descriptor. The root-side verifier must accept every machine
+// policy source and the covered set must still match the running deployment.
+// A partial publish, an outranking source, or a changed connector set cannot
+// become a new trusted pin through reconcile.
+func (l *lifecycle) repinVerifiedMachinePolicyView(record *Deployment, cfg *config.Config, intended []string) {
+	env, r := l.env, l.result
+	opts := enterprisepolicy.LayoutOptions(env.Layout, "", "")
+	opts.GOOS, opts.Root, opts.SkipTrustChecks = env.GOOS, env.Root, env.Root != ""
+	before := make(map[string]string, len(record.MachinePolicyConnectors))
+	for _, name := range record.MachinePolicyConnectors {
+		digest, err := enterprisepolicy.PolicyViewDigest(opts, name)
+		if err != nil {
+			r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf("cannot re-pin %s policy view: %v", name, err))
+			return
+		}
+		before[name] = digest
+	}
+	verified, verifyErr := env.MachinePolicy.Verify(cfg)
+	if verifyErr != nil || !verified.Complete() ||
+		!sameStrings(coveredMachinePolicy(intended, verified), record.MachinePolicyConnectors) {
+		return // describe reports any stale pin; machine-policy coverage is reported separately
+	}
+	path := env.P(env.Layout.DescriptorPath)
+	if err := env.Trust(path, TrustAdminFile); err != nil {
+		r.AddWarning(codeMachinePolicyIncomplete, "cannot re-pin the policy view: runtime descriptor is not trusted: "+err.Error())
+		return
+	}
+	previous, err := readBounded(path, 64<<10)
+	if err != nil || record.Files[env.Layout.DescriptorPath] != sha256Bytes(previous) {
+		r.AddWarning(codeMachinePolicyIncomplete, "cannot re-pin the policy view: runtime descriptor differs from the committed deployment; run ensure")
+		return
+	}
+	descriptor, err := managed.ParseRuntimeDescriptor(previous)
+	if err != nil || !sameStrings(descriptor.MachinePolicyConnectors, record.MachinePolicyConnectors) {
+		r.AddWarning(codeMachinePolicyIncomplete, "cannot re-pin the policy view: runtime descriptor connector set differs from the committed deployment; run ensure")
+		return
+	}
+	digests := make(map[string]string, len(record.MachinePolicyConnectors))
+	for _, name := range record.MachinePolicyConnectors {
+		digest, err := enterprisepolicy.PolicyViewDigest(opts, name)
+		if err != nil {
+			r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf("cannot re-pin %s policy view: %v", name, err))
+			return
+		}
+		if digest != before[name] {
+			r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf("%s policy view changed during root verification; run ensure after the policy update finishes", name))
+			return
+		}
+		digests[name] = digest
+	}
+	descriptor.PolicyViewDigests = digests
+	updated, err := managed.MarshalRuntimeDescriptor(descriptor)
+	if err != nil {
+		r.AddWarning(codeMachinePolicyIncomplete, "cannot re-pin the policy view: "+err.Error())
+		return
+	}
+	if bytes.Equal(updated, previous) {
+		return
+	}
+	if err := env.writeFileAtomic(path, updated, 0o644, rootOwner()); err != nil {
+		r.AddWarning(codeMachinePolicyIncomplete, "cannot write the verified policy-view pin: "+err.Error())
+		return
+	}
+	committed := *record
+	committed.Files = copyStringMap(record.Files)
+	committed.Files[env.Layout.DescriptorPath] = sha256Bytes(updated)
+	committed.UpdatedAt = env.Now().UTC().Format(time.RFC3339)
+	if err := env.saveDeployment(&committed); err != nil {
+		if restoreErr := env.writeFileAtomic(path, previous, 0o644, rootOwner()); restoreErr != nil {
+			r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf("cannot record the verified policy-view pin: %v; cannot restore the previous descriptor: %v", err, restoreErr))
+		} else {
+			r.AddWarning(codeMachinePolicyIncomplete, "cannot record the verified policy-view pin: "+err.Error())
+		}
+		return
+	}
+	*record = committed
+	l.noteChange("pinned the verified vendor machine-policy view in the runtime descriptor")
 }

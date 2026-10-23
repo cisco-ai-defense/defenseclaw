@@ -240,8 +240,8 @@ func TestLinuxManagedHookContextReason(t *testing.T) {
 		"/proc/self/ns/mnt": "mnt:[2]", "/proc/1/ns/mnt": "mnt:[2]",
 	}
 	for _, tc := range []struct {
-		name, uidMap, selfMount, status, want                                                   string
-		hostLinksDenied, hostViewsDenied, differentMounts, changingMounts, secondHostReadDenied bool
+		name, uidMap, selfMount, status, want                                                                   string
+		hostLinksDenied, hostViewsDenied, selfViewDenied, differentMounts, changingMounts, secondHostReadDenied bool
 	}{
 		{name: "host login", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "Name:\thook\nTracerPid:\t0\n"},
 		{name: "private user namespace", uidMap: "0 1000 1\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", want: hookexec.ManagedUserNamespaceReason},
@@ -250,6 +250,7 @@ func TestLinuxManagedHookContextReason(t *testing.T) {
 		{name: "unverifiable context", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "Name:\thook\n", want: hookexec.ManagedProcessContextUnknownReason},
 		{name: "protected host namespace links", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true},
 		{name: "hidden host proc view uses policy digest", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true, hostViewsDenied: true},
+		{name: "unreadable self mount view fails closed", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true, selfViewDenied: true, want: hookexec.ManagedProcessContextUnknownReason},
 		{name: "protected links with a different mount view", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true, differentMounts: true, want: hookexec.ManagedMountNamespaceReason},
 		{name: "protected links during mount change", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true, changingMounts: true},
 		{name: "host proc becomes hidden during mount retry", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true, changingMounts: true, secondHostReadDenied: true},
@@ -279,6 +280,9 @@ func TestLinuxManagedHookContextReason(t *testing.T) {
 					}
 					return []byte("0 0 4294967295\n"), nil
 				case "/proc/self/mountinfo":
+					if tc.selfViewDenied {
+						return nil, os.ErrPermission
+					}
 					if tc.differentMounts {
 						return []byte("private mount\n"), nil
 					}

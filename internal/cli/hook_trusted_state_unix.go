@@ -103,7 +103,10 @@ func linuxManagedHookContextReason(readlink func(string) (string, error), readFi
 			// host uid map checked above.
 			selfView, selfErr := readFile("/proc/self/" + kind.fallback)
 			hostView, hostErr := readFile("/proc/1/" + kind.fallback)
-			if selfErr != nil || hostErr != nil {
+			if selfErr != nil {
+				return hookexec.ManagedProcessContextUnknownReason
+			}
+			if hostErr != nil {
 				// RHEL can deny /proc/1 even for a host-context user.
 				// The trusted descriptor's policy-content pin is the
 				// invocation proof when that comparison is unavailable.

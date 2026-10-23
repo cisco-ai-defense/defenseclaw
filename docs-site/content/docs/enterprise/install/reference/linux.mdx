@@ -213,6 +213,12 @@ hook when it can observe them. If RHEL denies access to `/proc/1`, the hook
 uses the policy digest as its proof. This check cannot run if an agent omitted
 its managed hook before launch.
 
+After an administrator or MDM changes a vendor machine-policy file or adds a
+drop-in, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --json`.
+The hook refuses calls until DefenseClaw verifies the current
+policy and publishes its new digest. Vendor policy paths are not watched by
+the apply unit; the daily verify timer reports drift but does not repair it.
+
 DefenseClaw never writes host-wide kernel or sysctl settings. An
 administrator may apply optional hardening with their own host management
 tools after testing the host's workloads. On a managed RHEL 9.8 host these

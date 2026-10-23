@@ -89,7 +89,8 @@ func TestLifecyclePinsPublishedPolicyViewAndRepairsDrift(t *testing.T) {
 		t.Fatalf("repair changed the intended policy digest: %q, want %q", after, pinned)
 	}
 	// An administrator can add unrelated valid policy text without removing
-	// the hook. The hook closes until ensure publishes a pin for those bytes.
+	// the hook. Reconcile must publish a pin for those bytes after verifying
+	// the current policy view, without needing a full ensure transaction.
 	withNote := []byte(h.read(codexRequirements) + "\n# administrator note\n")
 	if err := os.WriteFile(path, withNote, 0o644); err != nil {
 		t.Fatal(err)
@@ -102,14 +103,116 @@ func TestLifecyclePinsPublishedPolicyViewAndRepairsDrift(t *testing.T) {
 	if status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
 		t.Fatalf("status hid a policy-view mismatch while the hook refuses calls: %+v", status)
 	}
-	result := h.run(Options{Action: ActionEnsure})
+	result := h.run(Options{Action: ActionReconcile})
 	requireOK(t, result)
-	if result.Noop {
-		t.Fatal("ensure ignored a policy-view digest mismatch")
-	}
 	if after := assertPin(); after == pinned {
-		t.Fatalf("ensure did not pin the updated policy view: %q", after)
+		t.Fatalf("reconcile did not pin the updated policy view: %q", after)
 	}
+	record, err := h.env.loadDeployment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Files[h.env.Layout.DescriptorPath] != sha256Bytes([]byte(h.read(h.env.Layout.DescriptorPath))) {
+		t.Fatal("reconcile did not record the updated descriptor digest")
+	}
+	if status := h.run(Options{Action: ActionStatus}); hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("status still reports a stale pin after reconcile: %+v", status.Warnings)
+	}
+	// A failed root-side policy verification must leave the old pin in
+	// place, and reconcile must say that the managed hook still refuses.
+	pinned = assertPin()
+	if err := os.WriteFile(path, append(withNote, []byte("# second administrator note\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.env.MachinePolicy = &unverifiedPolicy{MachinePolicyManager: h.env.MachinePolicy}
+	result = h.run(Options{Action: ActionReconcile})
+	if !hasWarning(result, codeMachinePolicyIncomplete) || result.SecurityComplete {
+		t.Fatalf("reconcile hid its stale policy pin: %+v", result)
+	}
+	descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if descriptor.PolicyViewDigests["codex"] != pinned {
+		t.Fatal("reconcile re-pinned a view that the root-side verifier rejected")
+	}
+	t.Run("administrator Claude policy and drop-in", func(t *testing.T) {
+		h := newTestHost(t, "linux")
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+		opts := enterprisepolicy.LayoutOptions(h.env.Layout, "", "")
+		opts.Root, opts.SkipTrustChecks = h.env.Root, true
+		previous := ""
+		for _, file := range []string{"/etc/claude-code/managed-settings.json", "/etc/claude-code/managed-settings.d/40-admin.json"} {
+			writeHostFile(t, h, file, `{"permissions":{"deny":["Bash(status)"]}}`)
+			if got := h.run(Options{Action: ActionReconcile}); hasWarning(got, codeMachinePolicyIncomplete) {
+				t.Fatalf("reconcile did not accept verified administrator policy %s: %+v", file, got.Warnings)
+			}
+			descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			observed, err := enterprisepolicy.PolicyViewDigest(opts, "claudecode")
+			if err != nil || observed == previous || descriptor.PolicyViewDigests["claudecode"] != observed {
+				t.Fatalf("administrator policy %s was not pinned: observed %q, previous %q, descriptor %q, err %v", file, observed, previous, descriptor.PolicyViewDigests["claudecode"], err)
+			}
+			previous = observed
+		}
+	})
+	t.Run("policy changes during root verification", func(t *testing.T) {
+		h := newTestHost(t, "linux")
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+		descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pinned := descriptor.PolicyViewDigests["codex"]
+		path := h.env.P(codexRequirements)
+		original := h.read(codexRequirements)
+		if err := os.WriteFile(path, []byte(original+"\n# first administrator edit\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		changing := &policyEditAfterVerify{
+			MachinePolicyManager: h.env.MachinePolicy,
+			path:                 path,
+			data:                 []byte(original + "\n# second administrator edit\n"),
+		}
+		h.env.MachinePolicy = changing
+		result := h.run(Options{Action: ActionReconcile})
+		if !changing.edited || changing.editErr != nil {
+			t.Fatalf("test policy change failed: edited=%v err=%v", changing.edited, changing.editErr)
+		}
+		if !hasWarning(result, codeMachinePolicyIncomplete) || result.SecurityComplete {
+			t.Fatalf("reconcile hid a policy change during verification: warnings=%+v security_complete=%v", result.Warnings, result.SecurityComplete)
+		}
+		descriptor, err = managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if descriptor.PolicyViewDigests["codex"] != pinned {
+			t.Fatal("reconcile pinned policy bytes that changed during root verification")
+		}
+	})
+}
+
+type unverifiedPolicy struct{ MachinePolicyManager }
+
+func (p *unverifiedPolicy) Verify(*config.Config) (enterprisepolicy.Result, error) {
+	return enterprisepolicy.Result{}, errors.New("root-side policy verification failed")
+}
+
+type policyEditAfterVerify struct {
+	MachinePolicyManager
+	path    string
+	data    []byte
+	edited  bool
+	editErr error
+}
+
+func (p *policyEditAfterVerify) Verify(cfg *config.Config) (enterprisepolicy.Result, error) {
+	result, err := p.MachinePolicyManager.Verify(cfg)
+	p.edited = true
+	p.editErr = os.WriteFile(p.path, p.data, 0o644)
+	return result, err
 }
 
 func TestEnsureMigratesDescriptorWithoutPolicyPin(t *testing.T) {
