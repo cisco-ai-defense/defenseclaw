@@ -622,7 +622,7 @@ func (codexTarget) Verify(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := newCodexState(opts, policy, path)
-	if policy.Ownership == config.MachinePolicyOwnershipOff {
+	if policy.Ownership == config.MachinePolicyOwnershipOff && opts.goos() != "windows" {
 		state.Route = RouteUnsupported
 		return state, nil
 	}
@@ -631,7 +631,11 @@ func (codexTarget) Verify(opts Options) (State, error) {
 		return state, err
 	}
 	if !exists {
-		state.conflict("%s does not exist", path)
+		if opts.goos() == "windows" {
+			state.conflict("%s does not exist: %s", path, windowsMissingMachineHookDiagnostic("Codex"))
+		} else {
+			state.conflict("%s does not exist", path)
+		}
 		state.finish()
 		return state, nil
 	}

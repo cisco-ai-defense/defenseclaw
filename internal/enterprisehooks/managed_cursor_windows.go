@@ -511,6 +511,12 @@ func validateWindowsCursorManagedArtifacts(
 		}
 		return artifacts, nil
 	}
+	return validateWindowsCursorManagedReceipt(artifacts)
+}
+
+func validateWindowsCursorManagedReceipt(
+	artifacts windowsCursorManagedArtifacts,
+) (windowsCursorManagedArtifacts, error) {
 	if !artifacts.receipt.existed {
 		return artifacts, errors.New("enterprise hooks: Cursor managed rollback receipt is missing")
 	}
@@ -799,13 +805,79 @@ func RefreshWindowsCursorManagedAdapter(hookExecutable string) (bool, error) {
 	return refreshWindowsCursorManagedAdapter(hookExecutable, true)
 }
 
-// RestoreWindowsCursorManagedAdapter rewrites the active Cursor enterprise
-// adapter only when it no longer matches its protected state or is missing
-// (GAP-2474, GAP-2479). It
-// leaves an earlier release's recorded adapter alone, so a lifecycle snapshot
-// still captures it (GAP-1068). It reports whether it rewrote the adapter.
+// RestoreWindowsCursorManagedAdapter repairs a damaged adapter, and on a
+// standalone host also repairs a missing or changed hooks.json registration
+// from authenticated protected state. It leaves an earlier release's recorded
+// adapter alone, so a lifecycle snapshot still captures it (GAP-1068).
 func RestoreWindowsCursorManagedAdapter(hookExecutable string) (bool, error) {
 	return refreshWindowsCursorManagedAdapter(hookExecutable, false)
+}
+
+// The protected state and private receipt are authoritative for an existing
+// standalone guard. Repair only the registration; preserve every unrelated
+// hook in a replaced hooks.json and leave target enrollment untouched.
+// Callers hold the Cursor transaction lock.
+func restoreWindowsCursorManagedHooksRegistration(
+	current windowsCursorManagedArtifacts,
+	hookExecutable string,
+) (bool, error) {
+	if !windowsEnterpriseStandaloneProcess() || !current.state.existed ||
+		!current.adapter.existed || !current.receipt.existed {
+		return false, nil
+	}
+	var state windowsCursorManagedPolicyState
+	if err := json.Unmarshal(current.state.data, &state); err != nil {
+		return false, nil
+	}
+	canonical, err := windowsCursorManagedStateBody(state)
+	if err != nil || !bytes.Equal(canonical, current.state.data) ||
+		!sameWindowsEnterprisePath(state.HookExecutable, hookExecutable) {
+		return false, nil
+	}
+	validated, err := validateWindowsCursorManagedStateIdentity(current)
+	if err != nil {
+		return false, nil
+	}
+	validated, err = validateWindowsCursorManagedReceipt(validated)
+	if err != nil {
+		return false, nil
+	}
+	if current.hooks.existed {
+		if err := windowsManagedPolicyFileTrustCheck(current.hooks.path); err != nil {
+			return false, err
+		}
+	}
+	base := current.hooks.data
+	if !current.hooks.existed {
+		base = []byte("{}\n")
+	}
+	hooks, err := connector.MergeWindowsCursorEnterpriseHooks(
+		base, current.adapter.path, cursorManagedPolicyFailMode(validated.parsed),
+	)
+	if err != nil {
+		return false, err
+	}
+	if len(hooks) > windowsCursorManagedHooksLimit ||
+		(current.hooks.existed && bytes.Equal(hooks, current.hooks.data)) {
+		return false, nil
+	}
+	rollback := func(cause error) error {
+		if restoreErr := restoreWindowsCursorManagedFile(current.hooks, current.hooksMetadata); restoreErr != nil {
+			return errors.Join(cause, fmt.Errorf("restore Cursor hooks.json preimage: %w", restoreErr))
+		}
+		return cause
+	}
+	if err := writeWindowsCursorManagedFilePreservingMetadata(current.hooks, current.hooksMetadata, hooks); err != nil {
+		return false, rollback(err)
+	}
+	repaired, err := snapshotWindowsCursorManagedArtifacts()
+	if err != nil {
+		return false, rollback(err)
+	}
+	if _, err := validateWindowsCursorManagedArtifacts(repaired); err != nil {
+		return false, rollback(err)
+	}
+	return true, nil
 }
 
 func refreshWindowsCursorManagedAdapter(hookExecutable string, upgradeTemplate bool) (bool, error) {
@@ -820,6 +892,20 @@ func refreshWindowsCursorManagedAdapter(hookExecutable string, upgradeTemplate b
 			return err
 		}
 		artifacts, err := validateWindowsCursorManagedArtifactsReclaimingOrphans(current)
+		if err != nil {
+			restoredHooks, restoreErr := restoreWindowsCursorManagedHooksRegistration(current, hookExecutable)
+			if restoreErr != nil {
+				return fmt.Errorf("restore Cursor hooks.json registration: %w", errors.Join(err, restoreErr))
+			}
+			if restoredHooks {
+				refreshed = true
+				current, err = snapshotWindowsCursorManagedArtifacts()
+				if err != nil {
+					return err
+				}
+				artifacts, err = validateWindowsCursorManagedArtifacts(current)
+			}
+		}
 		if err != nil {
 			candidate, candidateErr := windowsCursorManagedAdapterDriftCandidate(current, hookExecutable)
 			if candidateErr != nil {

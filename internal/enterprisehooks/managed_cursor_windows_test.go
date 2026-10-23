@@ -942,3 +942,99 @@ func TestWindowsCursorPublicValidatorDoesNotReclaimOrphanHookRefs(t *testing.T) 
 		t.Fatal("public validator rewrote hooks.json outside the locked install/repair path")
 	}
 }
+
+// A configured empty guard still has protected state when hooks.json is
+// deleted or replaced. Reconciliation must restore its registration from
+// that state without discarding an administrator's unrelated Cursor hooks.
+func TestWindowsCursorEmptyGuardRestoresMissingOrReplacedRegistration(t *testing.T) {
+	previousRoot, previousOwner := windowsCursorManagedRootResolver, windowsManagedPolicyOwnerSID
+	previousStandalone := windowsEnterpriseStandaloneProcess
+	previousIdentity, previousHookTrust := windowsEnterpriseMutationIdentityCheck, windowsEnterpriseHookTrustCheck
+	previousAncestorTrust, previousDirTrust, previousFileTrust := windowsManagedPolicyAncestorTrustCheck, windowsManagedPolicyDirTrustCheck, windowsManagedPolicyFileTrustCheck
+	root := filepath.Join(t.TempDir(), "Cursor")
+	windowsCursorManagedRootResolver = func() (string, error) { return root, nil }
+	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) {
+		return windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	}
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	windowsEnterpriseMutationIdentityCheck = func() error { return nil }
+	windowsEnterpriseHookTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyAncestorTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyDirTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() {
+		windowsCursorManagedRootResolver, windowsManagedPolicyOwnerSID = previousRoot, previousOwner
+		windowsEnterpriseStandaloneProcess = previousStandalone
+		windowsEnterpriseMutationIdentityCheck, windowsEnterpriseHookTrustCheck = previousIdentity, previousHookTrust
+		windowsManagedPolicyAncestorTrustCheck, windowsManagedPolicyDirTrustCheck, windowsManagedPolicyFileTrustCheck = previousAncestorTrust, previousDirTrust, previousFileTrust
+	})
+	t.Setenv(connector.WindowsGatewayServiceNameEnv, "DefenseClawGateway")
+	const hook = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	if err := EnsureWindowsStandaloneCursorManagedPolicy(connector.SetupOpts{
+		APIAddr: "127.0.0.1:18970", HookExecutable: hook,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := windowsCursorManagedPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateBefore, err := os.ReadFile(paths.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		replace []byte
+	}{
+		{name: "deleted"},
+		{name: "replaced", replace: []byte(`{"version":1,"hooks":{"operatorEvent":[{"type":"command","command":"operator-hook"}]}}`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.replace == nil {
+				if err := os.Remove(paths.Hooks); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := windowsManagedPolicyWriter(paths.Hooks, test.replace, true); err != nil {
+				t.Fatal(err)
+			}
+			if _, active, err := ReadWindowsCursorManagedPolicyTargets(); err == nil || !active {
+				t.Fatalf("damaged registration appeared healthy: active=%t err=%v", active, err)
+			}
+			restored, err := RestoreWindowsCursorManagedAdapter(hook)
+			if err != nil || !restored {
+				t.Fatalf("restore Cursor registration: restored=%t err=%v", restored, err)
+			}
+			targets, active, err := ReadWindowsCursorManagedPolicyTargets()
+			if err != nil || !active || len(targets) != 0 {
+				t.Fatalf("repaired empty guard: active=%t targets=%v err=%v", active, targets, err)
+			}
+			hooks, err := os.ReadFile(paths.Hooks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := connector.VerifyWindowsCursorEnterpriseHooks(hooks, paths.Adapter, "closed"); err != nil {
+				t.Fatalf("repaired registration is not closed: %v", err)
+			}
+			if test.replace != nil && !bytes.Contains(hooks, []byte("operator-hook")) {
+				t.Fatal("repair removed an unrelated Cursor hook")
+			}
+			stateAfter, err := os.ReadFile(paths.State)
+			if err != nil || !bytes.Equal(stateAfter, stateBefore) {
+				t.Fatalf("repair changed protected enrollment: err=%v", err)
+			}
+		})
+	}
+	if err := os.Remove(paths.Hooks); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedPolicyWriter(paths.Receipt, []byte("{}\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := RestoreWindowsCursorManagedAdapter(hook); err == nil || restored {
+		t.Fatalf("unauthenticated receipt restored a registration: restored=%t err=%v", restored, err)
+	}
+	if _, err := os.Stat(paths.Hooks); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unauthenticated registration was written: %v", err)
+	}
+}

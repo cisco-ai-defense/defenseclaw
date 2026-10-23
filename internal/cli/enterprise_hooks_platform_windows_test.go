@@ -166,6 +166,223 @@ func TestWindowsConfiguredMachinePolicyRepairsLegacyEmptyEnrollment(t *testing.T
 	}
 }
 
+// A configured connector's guard is independent of enrollment. Reconcile
+// keeps a present guard, restores an absent one, and preserves only the
+// protected SIDs that the manifest still authorizes. The absent/enrolled
+// cells model recovery from authenticated ownership state.
+func TestWindowsMachineGuardRepairStateTable(t *testing.T) {
+	const sid = "S-1-5-21-111-222-333-1001"
+	const home = `C:\Users\alice`
+	for _, connectorName := range []string{"claudecode", "cursor"} {
+		for _, guardPresent := range []bool{false, true} {
+			for _, enrolled := range []bool{false, true} {
+				name := connectorName + "/guard=" + map[bool]string{false: "absent", true: "present"}[guardPresent] +
+					"/enrollment=" + map[bool]string{false: "empty", true: "Alice"}[enrolled]
+				t.Run(name, func(t *testing.T) {
+					previousCfg := cfg
+					previousClaudeReader, previousClaudePublisher := enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher
+					previousClaudeEnsurer, previousClaudeIdentity := enterpriseHookClaudePolicyEnsurer, enterpriseHookClaudePolicyIdentityVerifier
+					previousCursorReader, previousCursorPublisher := enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher
+					previousCursorEnsurer, previousCursorRestorer := enterpriseHookCursorPolicyEnsurer, enterpriseHookCursorPolicyRestorer
+					previousCursorIdentity := enterpriseHookCursorPolicyIdentityVerifier
+					previousCodexLayout, previousCodexReader := enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader
+					t.Cleanup(func() {
+						cfg = previousCfg
+						enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher = previousClaudeReader, previousClaudePublisher
+						enterpriseHookClaudePolicyEnsurer, enterpriseHookClaudePolicyIdentityVerifier = previousClaudeEnsurer, previousClaudeIdentity
+						enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher = previousCursorReader, previousCursorPublisher
+						enterpriseHookCursorPolicyEnsurer, enterpriseHookCursorPolicyRestorer = previousCursorEnsurer, previousCursorRestorer
+						enterpriseHookCursorPolicyIdentityVerifier = previousCursorIdentity
+						enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader = previousCodexLayout, previousCodexReader
+					})
+					cfg = &config.Config{
+						DeploymentMode: managed.DeploymentModeManagedEnterprise,
+						Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
+						Guardrail:      config.GuardrailConfig{Connector: connectorName},
+					}
+					manifest := enterprisehooks.Manifest{}
+					if enrolled {
+						manifest.Targets = []enterprisehooks.ManifestTarget{{SID: sid, UserHome: home, Connector: connectorName}}
+					}
+					active := guardPresent
+					claudeDamaged := connectorName == "claudecode" && !guardPresent && enrolled
+					cursorDamaged := connectorName == "cursor" && !guardPresent && enrolled
+					var claudeTargets []string
+					var cursorTargets []enterprisehooks.WindowsCursorManagedRuntimeTarget
+					restoreTargets := func() {
+						if !enrolled {
+							return
+						}
+						claudeTargets = []string{sid}
+						cursorTargets = []enterprisehooks.WindowsCursorManagedRuntimeTarget{{SID: sid, DataDir: filepath.Join(home, ".defenseclaw")}}
+					}
+					if guardPresent {
+						restoreTargets()
+					}
+					ensures := 0
+					enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) {
+						if connectorName != "claudecode" {
+							return nil, false, nil
+						}
+						if claudeDamaged {
+							return nil, false, errors.New("Claude policy was deleted; owned state remains")
+						}
+						return append([]string(nil), claudeTargets...), active, nil
+					}
+					enterpriseHookClaudePolicyEnsurer = func(opts connector.SetupOpts) error {
+						if connectorName != "claudecode" || opts.ManagedTargetSID != "" {
+							t.Fatalf("unexpected Claude ensurer call: %+v", opts)
+						}
+						ensures++
+						claudeDamaged = false
+						active = true
+						restoreTargets()
+						return nil
+					}
+					enterpriseHookClaudePolicyTargetsPublisher = func(targets []string) error {
+						if connectorName == "claudecode" {
+							claudeTargets = append([]string(nil), targets...)
+						}
+						return nil
+					}
+					enterpriseHookCursorPolicyTargetsReader = func() ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error) {
+						if connectorName != "cursor" {
+							return nil, false, nil
+						}
+						if cursorDamaged {
+							return nil, false, errors.New("Cursor adapter was deleted; owned state remains")
+						}
+						return append([]enterprisehooks.WindowsCursorManagedRuntimeTarget(nil), cursorTargets...), active, nil
+					}
+					restores := 0
+					enterpriseHookCursorPolicyRestorer = func(string) (bool, error) {
+						if !cursorDamaged {
+							t.Fatal("Cursor restore called without authenticated adapter drift")
+						}
+						restores++
+						cursorDamaged = false
+						active = true
+						restoreTargets()
+						return true, nil
+					}
+					enterpriseHookCursorPolicyEnsurer = func(opts connector.SetupOpts) error {
+						if connectorName != "cursor" || opts.ManagedTargetSID != "" {
+							t.Fatalf("unexpected Cursor ensurer call: %+v", opts)
+						}
+						ensures++
+						active = true
+						restoreTargets()
+						return nil
+					}
+					enterpriseHookCursorPolicyTargetsPublisher = func(targets []enterprisehooks.WindowsCursorManagedRuntimeTarget) error {
+						if connectorName == "cursor" {
+							cursorTargets = append([]enterprisehooks.WindowsCursorManagedRuntimeTarget(nil), targets...)
+						}
+						return nil
+					}
+					enterpriseHookCodexRequirementsLayoutResolver = func(string) (connector.WindowsCodexMachineRequirementsOptions, error) {
+						return connector.WindowsCodexMachineRequirementsOptions{
+							HookBinary:  `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
+							GatewayAddr: "127.0.0.1:32109", GatewayServiceName: "DefenseClawGateway",
+						}, nil
+					}
+					enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+						return connector.WindowsCodexManagedRuntimeRegistry{}, nil
+					}
+					enterpriseHookClaudePolicyIdentityVerifier = func(string, string, string) error { return nil }
+					enterpriseHookCursorPolicyIdentityVerifier = func(string, string, string) error { return nil }
+
+					for _, exact := range []bool{false, true} {
+						if err := syncEnterpriseHookManagedMachineEnrollments(manifest, "127.0.0.1:32109", exact); err != nil {
+							t.Fatalf("repair (exact=%t): %v", exact, err)
+						}
+						if err := verifyEnterpriseHookManagedEnrollments(manifest, "127.0.0.1:32109"); err != nil {
+							t.Fatalf("verify repaired guard (exact=%t): %v", exact, err)
+						}
+					}
+					wantRestores := 0
+					wantEnsures := 0
+					if !guardPresent {
+						if connectorName == "cursor" && enrolled {
+							wantRestores = 1
+						} else {
+							wantEnsures = 1
+						}
+					}
+					if !active || ensures != wantEnsures || restores != wantRestores {
+						t.Fatalf("repair action: active=%t ensures=%d restores=%d; want ensures=%d restores=%d",
+							active, ensures, restores, wantEnsures, wantRestores)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestWindowsCursorGuardRepairRefusesUnverifiedPublication(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		initialReadError bool
+		ensuredReadError bool
+	}{
+		{name: "ensure returned without an active guard"},
+		{name: "ensured guard could not be read", ensuredReadError: true},
+		{name: "damaged adapter could not be authenticated", initialReadError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			previousCfg := cfg
+			previousClaudeReader := enterpriseHookClaudePolicyTargetsReader
+			previousCodexLayout, previousCodexReader := enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader
+			previousCursorReader, previousCursorPublisher := enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher
+			previousCursorEnsurer, previousCursorRestorer := enterpriseHookCursorPolicyEnsurer, enterpriseHookCursorPolicyRestorer
+			t.Cleanup(func() {
+				cfg = previousCfg
+				enterpriseHookClaudePolicyTargetsReader = previousClaudeReader
+				enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader = previousCodexLayout, previousCodexReader
+				enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher = previousCursorReader, previousCursorPublisher
+				enterpriseHookCursorPolicyEnsurer, enterpriseHookCursorPolicyRestorer = previousCursorEnsurer, previousCursorRestorer
+			})
+			cfg = &config.Config{
+				DeploymentMode: managed.DeploymentModeManagedEnterprise,
+				Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
+				Guardrail:      config.GuardrailConfig{Connector: "cursor"},
+			}
+			enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) { return nil, false, nil }
+			enterpriseHookCodexRequirementsLayoutResolver = func(string) (connector.WindowsCodexMachineRequirementsOptions, error) {
+				return connector.WindowsCodexMachineRequirementsOptions{
+					HookBinary: `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
+				}, nil
+			}
+			enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+				return connector.WindowsCodexManagedRuntimeRegistry{}, nil
+			}
+			reads := 0
+			enterpriseHookCursorPolicyTargetsReader = func() ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error) {
+				reads++
+				if test.initialReadError || (test.ensuredReadError && reads > 1) {
+					return nil, false, errors.New("Cursor ownership could not be authenticated")
+				}
+				return nil, false, nil
+			}
+			enterpriseHookCursorPolicyRestorer = func(string) (bool, error) {
+				return false, errors.New("Cursor adapter recovery refused untrusted state")
+			}
+			enterpriseHookCursorPolicyEnsurer = func(connector.SetupOpts) error { return nil }
+			published := false
+			enterpriseHookCursorPolicyTargetsPublisher = func([]enterprisehooks.WindowsCursorManagedRuntimeTarget) error {
+				published = true
+				return nil
+			}
+			if err := syncEnterpriseHookManagedMachineEnrollments(enterprisehooks.Manifest{}, "127.0.0.1:32109", false); err == nil {
+				t.Fatal("repair accepted a missing or untrusted Cursor guard")
+			}
+			if published {
+				t.Fatal("repair published enrollment without an authenticated Cursor guard")
+			}
+		})
+	}
+}
+
 func TestWindowsClaudeDeletedPolicyReconcileRetainsEnrolledTargets(t *testing.T) {
 	const aliceSID = "S-1-12-1-1111111111-2222222222-3333333333-4000000000"
 	previousCfg := cfg

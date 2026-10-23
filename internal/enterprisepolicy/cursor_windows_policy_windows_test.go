@@ -12,29 +12,69 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// The standalone guardian keeps Cursor's machine hook published even when
-// no user is enrolled. Verify reports an absent hooks.json as drift and names
-// the action required to restore protection.
-func TestWindowsCursorVerifyReportsMissingMachineHook(t *testing.T) {
-	opts := windowsTestOptions(t)
-	state, err := cursorTarget{}.Verify(opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hooks := filepath.Join(opts.WindowsProgramData, "Cursor", "hooks.json")
-	if state.Covered || len(state.Conflicts) != 1 {
-		t.Fatalf("state = %+v, want one conflict and not covered", state)
-	}
-	want := hooks + " does not exist: Cursor's configured machine hook is missing; this is a protection failure"
-	if !strings.HasPrefix(state.Conflicts[0], want) {
-		t.Fatalf("conflict = %q, want it to start with %q", state.Conflicts[0], want)
-	}
-	for _, action := range []string{"Stop Cursor use until repaired", "enterprise windows reconcile --profile standalone", "enterprise windows repair --profile standalone"} {
-		if !strings.Contains(state.Conflicts[0], action) {
-			t.Errorf("conflict = %q, want %q", state.Conflicts[0], action)
+// A configured Windows machine hook must stay in force even with no enrolled
+// users. Policy verify must treat its absence as a protection failure and
+// give the administrator a recovery command for every affected connector.
+func TestWindowsPolicyVerifyReportsMissingConfiguredMachineHooks(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		connector string
+	}{
+		{name: "Claude Code", connector: ConnectorClaudeCode},
+		{name: "Codex", connector: ConnectorCodex},
+		{name: "Cursor", connector: ConnectorCursor},
+	} {
+		for _, ownership := range []string{"default", config.MachinePolicyOwnershipOff} {
+			t.Run(test.name+"/"+ownership, func(t *testing.T) {
+				root := t.TempDir()
+				programFiles := filepath.Join(root, "ProgramFiles")
+				programData := filepath.Join(root, "ProgramData")
+				for _, path := range []string{programFiles, programData} {
+					if err := createProtectedDir(path); err != nil {
+						t.Fatal(err)
+					}
+				}
+				testWindowsTrust(t, root)
+				opts := Options{
+					GOOS:                "windows",
+					HookBinary:          `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
+					WindowsProgramFiles: programFiles,
+					WindowsProgramData:  programData,
+					StateDir:            filepath.Join(root, "state", "machine-policy"),
+				}
+				if ownership == config.MachinePolicyOwnershipOff {
+					opts = withPolicy(opts, test.connector, func(p *config.EnterpriseConnectorPolicy) {
+						p.Ownership = config.MachinePolicyOwnershipOff
+					})
+				}
+				result, err := VerifyAll(opts, []string{test.connector})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result.Complete() || len(result.States) != 1 {
+					t.Fatalf("missing %s machine hook passed verify: %+v", test.name, result)
+				}
+				state := result.States[0]
+				if state.Route != RouteMachinePolicy || state.Covered {
+					t.Fatalf("missing %s machine hook is covered: %+v", test.name, state)
+				}
+				conflicts := strings.Join(state.Conflicts, " ")
+				for _, want := range []string{
+					test.name + "'s configured machine hook is missing",
+					"protection failure even with zero enrolled users",
+					"Stop " + test.name + " use until repaired",
+					"enterprise windows reconcile --profile standalone",
+					"enterprise windows repair --profile standalone",
+				} {
+					if !strings.Contains(conflicts, want) {
+						t.Errorf("conflicts = %q, want %q", conflicts, want)
+					}
+				}
+			})
 		}
 	}
 }

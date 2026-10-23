@@ -996,7 +996,7 @@ func classifyLegacyWindowsManagedHooksActivation(
 		)
 	}
 
-	if err := validateLegacyWindowsManagedHooksClaudePreactivation(); err != nil {
+	if err := validateLegacyWindowsManagedHooksMachinePolicyPreactivation(ctx); err != nil {
 		return "", err
 	}
 	codexRegistry, err := connector.ResolveWindowsCodexManagedRuntimeRegistry(
@@ -1012,15 +1012,6 @@ func classifyLegacyWindowsManagedHooksActivation(
 		(codexRegistry.Active && !ctx.opts.CodexTargetEnabled) {
 		return "", errors.New(
 			"legacy deployment has no Guardian activation but Codex enrollment is not the exact preactivation form",
-		)
-	}
-	cursorTargets, cursorActive, err := enterprisehooks.ReadWindowsCursorManagedPolicyTargets()
-	if err != nil {
-		return "", err
-	}
-	if cursorActive || len(cursorTargets) != 0 {
-		return "", errors.New(
-			"legacy deployment has no Guardian activation but Cursor enrollment is not the exact preactivation form",
 		)
 	}
 	selectorPaths, err := windowsManagedHooksLifecycleSelectorPaths(ctx)
@@ -1043,6 +1034,68 @@ func classifyLegacyWindowsManagedHooksActivation(
 		}
 	}
 	return windowsManagedHooksNeverActivated, nil
+}
+
+var (
+	windowsManagedHooksLifecycleClaudePreactivation = validateLegacyWindowsManagedHooksClaudePreactivation
+	windowsManagedHooksLifecycleClaudeTargets       = enterprisehooks.ReadWindowsClaudeManagedPolicyTargets
+	windowsManagedHooksLifecycleClaudeIdentity      = enterprisehooks.VerifyWindowsClaudeManagedPolicyIdentity
+	windowsManagedHooksPreactivationCursorTargets   = enterprisehooks.ReadWindowsCursorManagedPolicyTargets
+	windowsManagedHooksLifecycleCursorIdentity      = enterprisehooks.VerifyWindowsCursorManagedPolicyIdentity
+)
+
+func validateLegacyWindowsManagedHooksMachinePolicyPreactivation(
+	ctx windowsManagedHooksLifecycleContext,
+) error {
+	claudeTargets, claudeActive, err := windowsManagedHooksLifecycleClaudeTargets()
+	if err != nil {
+		return err
+	}
+	if claudeActive {
+		// Reconciliation can publish the configured closed guard before the
+		// first Guardian activation. Its authenticated empty enrollment is a
+		// preactivation state, provided it belongs to this deployment.
+		if ctx.opts.SecureClient || !ctx.opts.ClaudeTargetEnabled ||
+			len(ctx.claudeTargets) != 0 || len(claudeTargets) != 0 {
+			return errors.New(
+				"legacy deployment has no Guardian activation but Claude enrollment is not the exact preactivation form",
+			)
+		}
+		if err := windowsManagedHooksLifecycleClaudeIdentity(
+			ctx.opts.HookBinary, ctx.opts.GatewayAddr, ctx.opts.GatewayServiceName,
+		); err != nil {
+			return fmt.Errorf("verify preactivation Claude machine policy identity: %w", err)
+		}
+	} else {
+		if len(claudeTargets) != 0 {
+			return errors.New("inactive Claude machine policy reported target SIDs")
+		}
+		if err := windowsManagedHooksLifecycleClaudePreactivation(); err != nil {
+			return err
+		}
+	}
+	cursorTargets, cursorActive, err := windowsManagedHooksPreactivationCursorTargets()
+	if err != nil {
+		return err
+	}
+	if cursorActive {
+		if ctx.opts.SecureClient || !ctx.opts.CursorTargetEnabled ||
+			len(ctx.cursorTargets) != 0 || len(cursorTargets) != 0 {
+			return errors.New(
+				"legacy deployment has no Guardian activation but Cursor enrollment is not the exact preactivation form",
+			)
+		}
+		if err := windowsManagedHooksLifecycleCursorIdentity(
+			ctx.opts.HookBinary, ctx.opts.GatewayAddr, ctx.opts.GatewayServiceName,
+		); err != nil {
+			return fmt.Errorf("verify preactivation Cursor machine policy identity: %w", err)
+		}
+	} else if len(cursorTargets) != 0 {
+		return errors.New(
+			"inactive Cursor machine policy reported targets",
+		)
+	}
+	return nil
 }
 
 func validateLegacyWindowsManagedHooksClaudePreactivation() error {

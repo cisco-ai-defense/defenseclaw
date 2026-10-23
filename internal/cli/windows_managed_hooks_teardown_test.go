@@ -630,6 +630,15 @@ func TestWindowsManagedHooksTeardownAcceptsActiveEmptyMachinePolicies(t *testing
 	if err := validateWindowsManagedHooksTeardownJournal(identity, identity); err != nil {
 		t.Fatalf("active zero-target snapshot rejected during teardown: %v", err)
 	}
+	legacyCodex := identity
+	legacyCodex.CodexPolicyActive = false
+	if err := validateWindowsManagedHooksTeardownJournal(legacyCodex, identity); err != nil {
+		t.Fatalf("authenticated inactive zero-target Codex preimage rejected: %v", err)
+	}
+	if err := validateWindowsManagedHooksTeardownEnrollment(legacyCodex, nil, true,
+		connector.WindowsCodexManagedRuntimeRegistry{}, nil, true); err != nil {
+		t.Fatalf("inactive zero-target Codex preimage rejected: %v", err)
+	}
 	if err := validateWindowsManagedHooksTeardownEnrollment(identity, nil, true,
 		connector.WindowsCodexManagedRuntimeRegistry{Active: true}, nil, true); err != nil {
 		t.Fatalf("active zero-target enrollment rejected during teardown: %v", err)

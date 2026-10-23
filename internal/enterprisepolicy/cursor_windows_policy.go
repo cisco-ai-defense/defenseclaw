@@ -23,11 +23,6 @@ import (
 // functions the Secure Client profile certifies, unchanged.
 const cursorAdapterRecord = "cursor-adapter"
 
-// windowsCursorMissingHookReason describes an absent Windows Cursor enterprise
-// hooks file as drift. The guardian keeps the configured machine hook in place
-// even when no user is enrolled.
-const windowsCursorMissingHookReason = "Cursor's configured machine hook is missing; this is a protection failure. Stop Cursor use until repaired. From an elevated session, run 'defenseclaw enterprise windows reconcile --profile standalone' or 'defenseclaw enterprise windows repair --profile standalone'"
-
 func windowsCursorPaths(opts Options) (hooks, adapter string, err error) {
 	hooks, err = CursorEnterpriseHooksPath(opts)
 	if err != nil {
@@ -112,10 +107,6 @@ func windowsCursorVerify(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := newCursorState(policy, []string{hooksPath, adapterPath})
-	if policy.Ownership == config.MachinePolicyOwnershipOff {
-		state.Route = RouteUnsupported
-		return state, nil
-	}
 	current, exists, err := readPolicyFile(opts, hooksPath)
 	if err != nil {
 		return state, err
@@ -123,7 +114,7 @@ func windowsCursorVerify(opts Options) (State, error) {
 	if !exists {
 		// The configured machine hook must stay published with zero enrolled
 		// users; its absence is a protection failure that needs repair.
-		state.conflict("%s does not exist: %s", hooksPath, windowsCursorMissingHookReason)
+		state.conflict("%s does not exist: %s", hooksPath, windowsMissingMachineHookDiagnostic("Cursor"))
 	} else {
 		windowsCursorInspect(opts, current, adapterPath, &state)
 	}

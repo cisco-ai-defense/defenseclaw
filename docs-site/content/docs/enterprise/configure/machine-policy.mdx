@@ -9,7 +9,7 @@ keywords:
   - allowManagedHooksOnly
 ---
 
-Some agents read a machine-wide policy file that standard users cannot change. For those agents, the standalone profile uses that file instead of each user's own config. On managed Windows, configured Claude Code, Codex and Cursor refuse an unenrolled account even with zero enrolled users because their machine hooks remain installed. The other agents are protected per user: the guardian writes DefenseClaw's hook into each enrolled user's agent config and repairs it. Terms are in [Concepts](/docs/enterprise/plan/concepts).
+Some agents read a machine-wide policy file that standard users cannot change. For those agents, the standalone profile uses that file instead of each user's own config. On managed Windows, configured Claude Code, Codex and Cursor machine hooks stay installed before the first enrollment and after the last enrolled user is removed. Even with zero enrolled users, their hooks refuse an unenrolled account. The other agents are protected per user: the guardian writes DefenseClaw's hook into each enrolled user's agent config and repairs it. Terms are in [Concepts](/docs/enterprise/plan/concepts).
 
 Only agents you select in the config are protected; see [Choose the agents to protect](/docs/enterprise/configure/configuration#choose-the-agents-to-protect). DefenseClaw's entries are derived from the config (`guardrail.connectors` and `enterprise.machine_policy`) and never read back as policy. The next `ensure`, `repair` or `reconcile` rewrites a changed entry, and `verify` reports the drift until then. Change the config, not the vendor file.
 
@@ -79,7 +79,7 @@ For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of `opencode
 
 ## Ownership modes
 
-```yaml title="config.yaml (excerpt)"
+```yaml title="config.yaml (Linux and macOS example)"
 enterprise:
   machine_policy:
     default:
@@ -95,9 +95,9 @@ enterprise:
 | --- | --- |
 | `merge` (default) | Writes its entries and repairs them |
 | `verify_only` | Only checks the file. When its entries are missing, it reports `missing_defenseclaw_hooks` and the export command to use. |
-| `off` | Neither writes nor checks the file. On Linux and macOS, Codex, Claude Code, Cursor and Copilot then get no DefenseClaw hooks at all, and `policy show` lists them as `ownership off: machine policy not managed`. OpenCode keeps its per-user plugin. |
+| `off` | On Linux and macOS, leaves the machine policy alone. Codex, Claude Code, Cursor and Copilot then have no DefenseClaw hooks, and `policy show` lists them as `ownership off: machine policy not managed`; OpenCode keeps its per-user plugin. On Windows, configured Claude Code, Codex and Cursor machine hooks remain installed and are verified even with zero enrolled users. The setting applies to Copilot, OpenCode and the Claude Code version floor there. |
 
-Quote `"off"`: YAML 1.1 tools read a bare `off` as the boolean `false`, which the config refuses. Use `verify_only` when an MDM already writes the file: export DefenseClaw's entries (below) and add them to the MDM's template. On Windows, `ownership` applies to Copilot and OpenCode and to the Claude Code [version floor](#claude-code-version-floor) drop-in; the Windows lifecycle writes `90-defenseclaw.json` whatever it says.
+Quote `"off"`: YAML 1.1 tools read a bare `off` as the boolean `false`, which the config refuses. Use `verify_only` when an MDM already writes a policy file on Linux or macOS: export DefenseClaw's entries (below) and add them to the MDM's template. On Windows, the lifecycle writes the configured Claude Code, Codex and Cursor machine hooks regardless of `ownership`, and `enterprise policy verify` checks them even before the first user enrolls and after the last is removed.
 
 ## Who writes machine policy
 

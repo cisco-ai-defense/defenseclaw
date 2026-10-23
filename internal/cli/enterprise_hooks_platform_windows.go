@@ -44,6 +44,7 @@ var enterpriseHookCodexTargetsPublisher = connector.PublishWindowsCodexManagedRu
 var enterpriseHookClaudePolicyEnsurer = enterprisehooks.EnsureWindowsStandaloneClaudeManagedPolicy
 var enterpriseHookClaudePolicyDeactivator = enterprisehooks.DeactivateWindowsClaudeManagedPolicy
 var enterpriseHookCursorPolicyEnsurer = enterprisehooks.EnsureWindowsStandaloneCursorManagedPolicy
+var enterpriseHookCursorPolicyRestorer = enterprisehooks.RestoreWindowsCursorManagedAdapter
 var enterpriseHookCursorPolicyDeactivator = enterprisehooks.DeactivateWindowsCursorManagedPolicy
 
 // enterpriseHookRemovedAccountNote follows each failure status and verify
@@ -365,6 +366,18 @@ func syncEnterpriseHookManagedMachineEnrollments(
 	}
 
 	currentCursor, cursorActive, err := enterpriseHookCursorPolicyTargetsReader()
+	if err != nil && cfg.StandaloneEnterprise() && configured["cursor"] {
+		// The protected state can outlive a deleted adapter or hooks.json.
+		// Restore its registration from authenticated state, then read its
+		// enrollment before pre-sync can publish a smaller target set.
+		restored, restoreErr := enterpriseHookCursorPolicyRestorer(codexOpts.HookBinary)
+		if restoreErr != nil {
+			return fmt.Errorf("restore configured Cursor machine policy: %w", errors.Join(err, restoreErr))
+		}
+		if restored {
+			currentCursor, cursorActive, err = enterpriseHookCursorPolicyTargetsReader()
+		}
+	}
 	if err != nil {
 		if (!cfg.StandaloneEnterprise() || !configured["cursor"]) &&
 			(publishExact || len(desiredCursor) == 0) {
@@ -381,8 +394,13 @@ func syncEnterpriseHookManagedMachineEnrollments(
 			}); err != nil {
 				return fmt.Errorf("ensure configured Cursor machine policy: %w", err)
 			}
-			currentCursor = nil
-			cursorActive = true
+			currentCursor, cursorActive, err = enterpriseHookCursorPolicyTargetsReader()
+			if err != nil {
+				return fmt.Errorf("read ensured Cursor machine policy: %w", err)
+			}
+			if !cursorActive {
+				return errors.New("configured Cursor machine policy did not become active")
+			}
 		case !configured["cursor"] && cursorActive:
 			if err := enterpriseHookCursorPolicyDeactivator(); err != nil {
 				return fmt.Errorf("deactivate removed Cursor connector: %w", err)

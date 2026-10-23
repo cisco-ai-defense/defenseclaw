@@ -563,6 +563,19 @@ func runWindowsManagedHooksTeardown(
 		codexTargets,
 		cursorTargets,
 	)
+	if action == "prepare" && identity.CodexPolicyActive && len(identity.CodexTargets) == 0 {
+		// The pre-1.0.4 zero-target state has no Codex requirements, even
+		// though Codex is configured. Capture the authenticated policy bit
+		// that rollback must restore; a new empty guard remains active.
+		registry, resolveErr := connector.ResolveWindowsCodexManagedRuntimeRegistry(opts.HookBinary)
+		if resolveErr != nil {
+			return fail(resolveErr)
+		}
+		if len(registry.Targets) != 0 {
+			return fail(errors.New("codex machine enrollment does not match the protected manifest"))
+		}
+		identity.CodexPolicyActive = registry.Active
+	}
 	var cleanupReceiptPath string
 	if strings.TrimSpace(contractCleanupReceipt) != "" ||
 		strings.TrimSpace(contractCleanupScope) != "" {
@@ -1946,7 +1959,8 @@ func validateWindowsManagedHooksTeardownJournal(
 		journal.HookBinary != identity.HookBinary ||
 		journal.GatewayAddr != identity.GatewayAddr ||
 		journal.GatewayServiceName != identity.GatewayServiceName ||
-		journal.CodexPolicyActive != identity.CodexPolicyActive ||
+		(journal.CodexPolicyActive != identity.CodexPolicyActive &&
+			(len(journal.CodexTargets) != 0 || len(identity.CodexTargets) != 0)) ||
 		len(journal.Targets) != len(identity.Targets) ||
 		len(journal.PendingTargets) != len(identity.PendingTargets) ||
 		len(journal.ClaudeTargetSIDs) != len(identity.ClaudeTargetSIDs) ||
