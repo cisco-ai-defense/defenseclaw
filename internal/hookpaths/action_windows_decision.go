@@ -484,15 +484,17 @@ func actionWindowsWrapperDecision(program string, words []string, cwd, home stri
 // actionWindowsControlSource turns PowerShell control syntax into statement
 // boundaries, so each statement of a body is judged as if it runs: if,
 // elseif, while, until and foreach with an inert header, else, try, catch,
-// finally and do, the braces of their bodies, and the while or until of a do
-// loop. A header that can run or assign something, or unbalanced text, keeps
+// finally and do, switch with an inert header and simple case labels, the
+// braces of their bodies, and the while or until of a do loop. A header that can run or assign something, or unbalanced text, keeps
 // its spelling and so its strict decision.
 func actionWindowsControlSource(command string) string {
 	if !strings.Contains(command, "{") {
 		return command
 	}
 	out := []byte(command)
-	var control []bool
+	// control holds each open brace: 0 for a block left as written, 'c' for
+	// a control body and 's' for a switch body, whose labels open bodies.
+	var control []byte
 	atStart := true
 	var quote byte
 	for i := 0; i < len(command); i++ {
@@ -535,14 +537,14 @@ func actionWindowsControlSource(command string) string {
 				continue
 			}
 		case '{':
-			control = append(control, false)
+			control = append(control, 0)
 			atStart = true
 			continue
 		case '}':
 			if len(control) == 0 {
 				return command
 			}
-			if control[len(control)-1] {
+			if control[len(control)-1] != 0 {
 				out[i] = ';'
 			}
 			control = control[:len(control)-1]
@@ -550,15 +552,19 @@ func actionWindowsControlSource(command string) string {
 			continue
 		}
 		if atStart {
-			if end, block := actionWindowsControlHead(command, i); end > i {
+			end, kind := actionWindowsControlHead(command, i)
+			if end <= i && len(control) != 0 && control[len(control)-1] == 's' {
+				end, kind = actionWindowsSwitchLabel(command, i), 'c'
+			}
+			if end > i {
 				for j := i; j < end; j++ {
 					if out[j] != '\r' && out[j] != '\n' {
 						out[j] = ' '
 					}
 				}
-				if block {
+				if kind != 0 {
 					out[end-1] = ';'
-					control = append(control, true)
+					control = append(control, kind)
 				}
 				i = end - 1
 				continue
@@ -573,39 +579,80 @@ func actionWindowsControlSource(command string) string {
 }
 
 // actionWindowsControlHead returns the end of the control keyword and inert
-// header at start: after the { of its body (block), or, for the while or
-// until of a do loop, at the end of its statement.
-func actionWindowsControlHead(command string, start int) (end int, block bool) {
+// header at start: after the { of its body, with kind 'c' ('s' for a switch
+// body), or, for the while or until of a do loop, at the end of its
+// statement, with kind 0.
+func actionWindowsControlHead(command string, start int) (end int, kind byte) {
 	lower := strings.ToLower(command[start:])
-	for _, keyword := range []string{"elseif", "else", "if", "while", "until", "foreach", "try", "catch", "finally", "do"} {
+	for _, keyword := range []string{"elseif", "else", "if", "while", "until", "foreach", "switch", "try", "catch", "finally", "do"} {
 		next := start + len(keyword)
 		if !strings.HasPrefix(lower, keyword) || next < len(command) &&
 			!strings.ContainsRune(" \t\r\n({", rune(command[next])) {
 			continue
 		}
 		index := actionWindowsSkipSpace(command, next)
-		header := keyword == "if" || keyword == "elseif" || keyword == "while" ||
-			keyword == "until" || keyword == "foreach"
-		if header {
+		for keyword == "switch" && index+1 < len(command) && command[index] == '-' {
+			// -Regex, -Wildcard, -Exact, -CaseSensitive
+			option := index + 1
+			for option < len(command) && asciiLetter(command[option]) {
+				option++
+			}
+			if option == index+1 {
+				return 0, 0
+			}
+			index = actionWindowsSkipSpace(command, option)
+		}
+		switch keyword {
+		case "if", "elseif", "while", "until", "foreach", "switch":
 			if index >= len(command) || command[index] != '(' {
-				return 0, false
+				return 0, 0
 			}
 			closing := strings.IndexByte(command[index:], ')')
-			if closing < 0 || !actionWindowsInertHeader(command[index+1:index+closing]) {
-				return 0, false
+			if closing < 0 || !actionWindowsInertHeader(keyword, command[index+1:index+closing]) {
+				return 0, 0
 			}
 			index = actionWindowsSkipSpace(command, index+closing+1)
 		}
 		if index < len(command) && command[index] == '{' {
-			return index + 1, true
+			if keyword == "switch" {
+				return index + 1, 's'
+			}
+			return index + 1, 'c'
 		}
 		if (keyword == "while" || keyword == "until") &&
 			(index >= len(command) || strings.ContainsRune(";\r\n}", rune(command[index]))) {
-			return index, false
+			return index, 0
 		}
-		return 0, false
+		return 0, 0
 	}
-	return 0, false
+	return 0, 0
+}
+
+// actionWindowsSwitchLabel returns the end, after the { of its body, of a
+// switch case whose label is a literal: a quoted string without expansion, a
+// number or a bare word such as default. Any other label keeps its spelling.
+func actionWindowsSwitchLabel(command string, start int) int {
+	index := start
+	if c := command[start]; c == '\'' || c == '"' {
+		closing := strings.IndexByte(command[start+1:], c)
+		if closing < 0 || strings.ContainsAny(command[start+1:start+1+closing], "$`") {
+			return 0
+		}
+		index = start + closing + 2
+	} else {
+		for index < len(command) && (asciiLetter(command[index]) ||
+			command[index] >= '0' && command[index] <= '9' || strings.ContainsRune("_.-", rune(command[index]))) {
+			index++
+		}
+		if index == start {
+			return 0
+		}
+	}
+	index = actionWindowsSkipSpace(command, index)
+	if index >= len(command) || command[index] != '{' {
+		return 0
+	}
+	return index + 1
 }
 
 func actionWindowsSkipSpace(command string, index int) int {
@@ -615,11 +662,61 @@ func actionWindowsSkipSpace(command string, index int) int {
 	return index
 }
 
-// actionWindowsInertHeader reports a condition in expression mode, which
-// runs no command: it starts with a variable, literal or operator, and has
-// no subexpression, block, type, splat, redirect, assignment or statement.
-func actionWindowsInertHeader(header string) bool {
-	header = strings.TrimSpace(header)
-	return header != "" && strings.ContainsRune("$'\"-!0123456789", rune(header[0])) &&
-		!strings.ContainsAny(header, "(){}[]@`<>=|;&\r\n")
+// actionWindowsInertHeader reports a condition that runs no command: each
+// token is a quoted string, a variable, a number or an operator (-eq, -not,
+// !$x), separated by spaces or commas, and there is no subexpression, block, type, splat, redirect,
+// assignment or statement. A command name anywhere, such as the collection of
+// foreach ($n in Get-ChildItem ...), is not inert.
+func actionWindowsInertHeader(keyword, header string) bool {
+	if strings.ContainsAny(header, "(){}[]@`<>=|;&\r\n") {
+		return false
+	}
+	var tokens []string
+	for i := 0; i < len(header); {
+		switch c := header[i]; {
+		case c == ' ' || c == '\t' || c == ',':
+			i++
+		case c == '\'' || c == '"':
+			end := i + 1
+			for ; end < len(header); end++ {
+				if header[end] != c {
+					continue
+				}
+				if end+1 < len(header) && header[end+1] == c {
+					end++ // a doubled quote
+					continue
+				}
+				break
+			}
+			if end >= len(header) {
+				return false
+			}
+			tokens = append(tokens, "'")
+			i = end + 1
+		default:
+			end := i
+			for end < len(header) && !strings.ContainsRune(" \t,", rune(header[end])) {
+				end++
+			}
+			tokens = append(tokens, header[i:end])
+			i = end
+		}
+	}
+	if keyword == "foreach" {
+		if len(tokens) < 3 || len(tokens[0]) < 2 || tokens[0][0] != '$' || !strings.EqualFold(tokens[1], "in") {
+			return false
+		}
+		tokens = tokens[2:]
+	}
+	if len(tokens) == 0 {
+		return false
+	}
+	for _, token := range tokens {
+		token = strings.TrimPrefix(token, "!")
+		if token == "" || token != "'" && token[0] != '$' && (token[0] < '0' || token[0] > '9') &&
+			!(token[0] == '-' && len(token) > 1 && token[1] != '-') {
+			return false
+		}
+	}
+	return true
 }

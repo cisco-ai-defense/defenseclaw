@@ -45,6 +45,9 @@ func TestTrustedActionW24InertDefinitionsDoNotBlock(t *testing.T) {
 		{"scriptblock to Out-Null", `{ Remove-Item -Recurse -Force C:\ } | Out-Null`, actionfacts.DialectPowerShell, false},
 		{"scriptblock to a consumer alias", `{ Remove-Item -Recurse -Force C:\ } | % Invoke`, actionfacts.DialectPowerShell, true},
 		{"if block", `if ($true) { Write-Output a }`, actionfacts.DialectPowerShell, false},
+		{"foreach block", `foreach ($n in 'a','b') { Write-Output $n }`, actionfacts.DialectPowerShell, false},
+		{"switch block", `switch ($true) { 'a' { Write-Output a } default { Write-Output b } }`, actionfacts.DialectPowerShell, false},
+		{"do while block", `do { Write-Output a } while ($false)`, actionfacts.DialectPowerShell, false},
 		{"bare scriptblock in if body", `if ($true) { { Remove-Item -Recurse -Force C:\ } }`, actionfacts.DialectPowerShell, false},
 		{"if body runs", `if ($true) { Remove-Item -Recurse -Force C:\ }`, actionfacts.DialectPowerShell, true},
 	} {

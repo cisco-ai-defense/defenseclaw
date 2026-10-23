@@ -23,6 +23,11 @@ func TestActionWindowsControlBodies(t *testing.T) {
 		{"try catch finally", `try { Write-Output a } catch { Write-Output b } finally { Write-Output c }`, false},
 		{"multiline if", "if ($true)\n{\n  Write-Output a\n}\nWrite-Output b", false},
 		{"if then statement", `if ($true) { Write-Output a }; Get-ChildItem`, false},
+		{"switch with literal labels", `switch ($x) { 'a' { Write-Output a } 1 { Get-ChildItem } default { Write-Output b } }`, false},
+		{"switch with an option", "switch -Regex ($x) {\n  '^a' { Write-Output a }\n}", false},
+		{"protected write in switch case", `switch ($x) { 'a' { Set-Content C:\Users\alice\.ssh\authorized_keys k } }`, true},
+		{"dynamic write in switch case", `switch ($x) { default { Set-Content $p k } }`, true},
+		{"command in switch header", `switch (Set-Content C:\Users\alice\.ssh\authorized_keys k) { default { Write-Output a } }`, true},
 		{"protected write in body", `if ($true) { Set-Content C:\Users\alice\.ssh\authorized_keys k }`, true},
 		{"dynamic write target in body", `if ($true) { Set-Content $p k }`, true},
 		{"protected write after quoted brace", `if ($true) { Write-Output '}'; Set-Content C:\Users\alice\.ssh\authorized_keys k }`, true},
@@ -30,6 +35,9 @@ func TestActionWindowsControlBodies(t *testing.T) {
 		{"protected write in do body", `do { Set-Content C:\Users\alice\.ssh\authorized_keys k } while ($false)`, true},
 		{"protected write in else body", `if ($false) { Write-Output a } else { Set-Content C:\Users\alice\.ssh\authorized_keys k }`, true},
 		{"command in header", `if (Set-Content C:\Users\alice\.ssh\authorized_keys k) { Write-Output a }`, true},
+		{"command in foreach collection", `foreach ($name in Get-ChildItem C:\Users\alice\.ssh) { Write-Output $name }`, true},
+		{"foreach without a variable", `foreach (Get-ChildItem in $x) { Write-Output a }`, true},
+		{"command after a header operator", `if (!Set-Content C:\Users\alice\.ssh\authorized_keys k) { Write-Output a }`, true},
 		{"assignment in header", `if ($p = Set-Content C:\Users\alice\.ssh\authorized_keys k) { Write-Output a }`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
