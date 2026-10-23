@@ -145,6 +145,47 @@ describe('ZeptoClaw removal', () => {
   });
 });
 
+function repoText(name: string): string {
+  return readFileSync(join(repo, name), 'utf8').split(/\s+/).join(' ');
+}
+
+describe('1.0.4 managed outage and upgrade claims', () => {
+  it('states the protected process-and-session record boundary everywhere operators see outage guidance', () => {
+    const outagePages = [
+      'reference/configuration/fail-modes.mdx',
+      'enterprise/configure/reference.mdx',
+      'enterprise/operate/reference.mdx',
+      'enterprise/operate/lifecycle.mdx',
+      'troubleshooting/enterprise/index.mdx',
+    ];
+    for (const name of outagePages) {
+      const guidance = page(name);
+      assert.match(guidance, /foreign_hooks: remove.*(?:process.*session|session.*process).*15 minutes/i, name);
+      assert.doesNotMatch(guidance, /(?:guarded connectors|foreign-hook guard).*block outages too|outage blocks those calls too|Every call checked while the gateway is down is blocked/i, name);
+    }
+    const changelog = repoText('CHANGELOG.md');
+    assert.doesNotMatch(changelog, /guarded connectors .*still block every tool call during a gateway outage/i);
+    assert.doesNotMatch(changelog, /Every call checked while the gateway is down is blocked/i);
+    assert.match(changelog, /During an outage under `open`, a guarded call runs only when the records of its agent process and its session/);
+  });
+
+  it('describes bounded Windows WAL catch-up and the remaining hook delay', () => {
+    const enterprise = page('troubleshooting/enterprise/index.mdx');
+    assert.match(enterprise, /Windows.*audit\.db-wal.*bounded catch-up/i);
+    assert.match(enterprise, /bounded catch-up.*256 MiB/i);
+    assert.match(enterprise, /0\.9.to.1\.2 GB.*10 calls a second/i);
+    assert.match(enterprise, /hook answers.*(?:slow|wait|delay).*default.*closed/i);
+    assert.doesNotMatch(enterprise, /audit\.db-wal.*20 GB|fix needs a change to how the audit store indexes hook records and is deferred/i);
+  });
+
+  it('keeps one supervisor upgrade entry with automatic stop and failed-stop recovery', () => {
+    const changelog = repoText('CHANGELOG.md');
+    assert.equal((changelog.match(/\*\*Sandboxes run only on OpenShell 0\.1\.5 or later\.\*\*/g) ?? []).length, 1);
+    assert.match(changelog, /DefenseClaw stops it as soon as it sees it.*A stop that fails is a second finding/);
+    assert.doesNotMatch(changelog, /A sandbox that keeps running through the upgrade keeps the old supervisor: the feed/);
+  });
+});
+
 describe('Intune base config versus the signed bundle', () => {
   it('names exactly the blocks the packager compares', () => {
     const packager = readFileSync(

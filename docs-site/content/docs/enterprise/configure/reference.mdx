@@ -56,7 +56,7 @@ asset_policy:
 
 A threshold comes from the most specific place that sets it: profile connector, profile, `guardrail.connectors`, application protection, global, then the rule pack's default. The file is checked against the closed config schema: a key that does not exist, or that a version 9 file no longer accepts (for example `skill_actions`, `mcp_actions`, `plugin_actions` or `guardrail.rule_pack_dir`), fails validation and the host keeps its current config.
 
-On managed standalone hosts the default is `closed`. An administrator can select `guardrail.hook_fail_mode: open` to let supported hooks allow calls during a gateway outage, with an inspection-bypassed warning. Runtime integrity, peer identity and credential refusals stay fail-closed. An unusable gateway answer also blocks on standalone hosts. See [Fail modes](/docs/reference/configuration/fail-modes#refusals-that-ignore-the-fail-mode) for the exact boundary.
+On managed standalone hosts the default is `closed`. An administrator can select `guardrail.hook_fail_mode: open` to let supported hooks allow calls during a classified gateway outage, with an inspection-bypassed warning. With `foreign_hooks: remove`, guarded calls also need fresh, trusted records for both the agent process and session (at most 15 minutes old); missing, blocked or stale records block them. Runtime integrity, peer identity and credential refusals stay fail-closed. An unusable gateway answer also blocks on standalone hosts. See [Fail modes](/docs/reference/configuration/fail-modes#refusals-that-ignore-the-fail-mode) for the exact boundary.
 
 ### Custom rule packs
 
