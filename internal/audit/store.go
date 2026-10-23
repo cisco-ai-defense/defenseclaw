@@ -608,9 +608,42 @@ func txExecContextObserved(
 	}
 	res, err := tx.ExecContext(ctx, query, args...)
 	if isSQLiteBusy(err) && observer != nil {
-		_ = observer.RecordSQLiteBusyMetric(ctx, op)
+		reportSQLiteBusyDetached(ctx, observer, op)
 	}
 	return res, err
+}
+
+// sqliteBusyDetachedReports bounds the BUSY reports of open transactions
+// that are still running: a burst of contention drops the reports beyond it
+// instead of piling up goroutines.
+var sqliteBusyDetachedReports = make(chan struct{}, 4)
+
+const sqliteBusyDetachedReportTimeout = 5 * time.Second
+
+// reportSQLiteBusyDetached reports a BUSY that a statement of an open
+// transaction met, in the background and bounded. The observer records the
+// busy metric and its correlation observations in the audit store, whose
+// pool has one connection, and the caller's open transaction holds that
+// connection until the statement's error has gone back up. Reported in line,
+// the observer waited for the connection its own caller held, with no
+// deadline, and every later audit write and managed hook queued behind it:
+// fresh native sessions were refused with HTTP 429 while /health answered
+// 200 (rel-1-0-4 GAP-0944).
+func reportSQLiteBusyDetached(ctx context.Context, observer SQLiteBusyObservabilityV8, op string) {
+	select {
+	case sqliteBusyDetachedReports <- struct{}{}:
+	default:
+		return
+	}
+	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sqliteBusyDetachedReportTimeout)
+	go func() {
+		defer func() {
+			_ = recover()
+			cancel()
+			<-sqliteBusyDetachedReports
+		}()
+		_ = observer.RecordSQLiteBusyMetric(reportCtx, op)
+	}()
 }
 
 // ---------------------------------------------------------------------------
