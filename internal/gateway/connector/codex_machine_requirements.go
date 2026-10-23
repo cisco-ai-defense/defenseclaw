@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -350,10 +351,14 @@ func windowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptions) code
 
 // windowsCodexOwnedHookGroup reports whether raw is a DefenseClaw managed
 // group of any release: one command handler whose command (and
-// command_windows) is the system PowerShell -EncodedCommand line that runs
-// hookBinary as the managed Codex hook. An upgrade from 1.0.0 kept the
-// 1.0.0 group (its Start-Process form) next to the current one, so every
-// Codex event ran, was audited and was judged twice (GAP-1025).
+// command_windows) is, byte for byte, a managed Codex command DefenseClaw
+// renders for hookBinary (windowsCodexOwnedHookCommand). An upgrade from
+// 1.0.0 kept the 1.0.0 group (its Start-Process form) next to the current
+// one, so every Codex event ran, was audited and was judged twice
+// (GAP-1025). A group whose script only names hookBinary or the managed
+// flags (in diagnostic text, with an extra statement or an extra argument)
+// is the administrator's: reconcile, removal and stale-layout inference
+// leave it alone.
 func windowsCodexOwnedHookGroup(raw interface{}, hookBinary string) bool {
 	group, ok := raw.(map[string]interface{})
 	if !ok || len(group) == 0 || len(group) > 2 {
@@ -374,13 +379,72 @@ func windowsCodexOwnedHookGroup(raw interface{}, hookBinary string) bool {
 	if windows, _ := handler["command_windows"].(string); windows != command {
 		return false
 	}
+	return windowsCodexOwnedHookCommand(command, hookBinary)
+}
+
+// windowsCodexBoundArgumentsPattern finds the event and hook contract in the
+// decoded script of a bound managed Codex command: both the awaited and the
+// Start-Process forms quote the launcher's argument list.
+var windowsCodexBoundArgumentsPattern = regexp.MustCompile(
+	`'--event'[ ,]'((?:[^']|'')*)'[ ,]'--hook-contract'[ ,]'((?:[^']|'')*)'`,
+)
+
+// windowsCodexOwnedHookCommand reports whether command is exactly a managed
+// Codex command DefenseClaw renders for hookBinary: the unbound form
+// (windowsCodexManagedHookCommand), or the bound form for the event and hook
+// contract the command names, current (windowsCodexBoundManagedHookCommand)
+// or of the 1.0.0 certification builds
+// (legacyStartProcessWindowsCodexBoundManagedHookCommand). The event and the
+// contract are read from the script only to render the candidate; ownership
+// is the byte-for-byte equality, so no script that merely mentions the
+// launcher is DefenseClaw's.
+func windowsCodexOwnedHookCommand(command, hookBinary string) bool {
+	if strings.TrimSpace(hookBinary) == "" || strings.TrimSpace(command) == "" {
+		return false
+	}
+	if command == windowsCodexManagedHookCommand(hookBinary) {
+		return true
+	}
 	prefix := windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand "
 	if !strings.HasPrefix(command, prefix) {
 		return false
 	}
 	script, ok := powershellDecodedCommand(strings.TrimPrefix(command, prefix))
-	return ok && strings.Contains(script, powershellQuoteLiteral(hookBinary)) &&
-		strings.Contains(script, "codex") && strings.Contains(script, "--enterprise-managed")
+	if !ok {
+		return false
+	}
+	for _, match := range windowsCodexBoundArgumentsPattern.FindAllStringSubmatch(script, -1) {
+		event := strings.ReplaceAll(match[1], "''", "'")
+		contract := strings.ReplaceAll(match[2], "''", "'")
+		if command == windowsCodexBoundManagedHookCommand(hookBinary, event, contract) ||
+			command == legacyStartProcessWindowsCodexBoundManagedHookCommand(hookBinary, event, contract) {
+			return true
+		}
+	}
+	return false
+}
+
+// legacyStartProcessWindowsCodexBoundManagedHookCommand reconstructs the
+// bound managed command of the 1.0.0 certification builds, which started the
+// launcher with Start-Process -Wait -PassThru before the awaited
+// Process.Start statements (windowsAwaitedHookStatements). It is never
+// generated: reconcile replaces it and a standalone removal takes it
+// (GAP-1025). It serves upgrades from those 1.0.0 builds; remove it with
+// the 1.0.x upgrade path.
+func legacyStartProcessWindowsCodexBoundManagedHookCommand(hookBinary, event, contractID string) string {
+	arguments := []string{"hook", "--connector", "codex", "--enterprise-managed", "--event", event, "--hook-contract", contractID}
+	quoted := make([]string, len(arguments))
+	for i, argument := range arguments {
+		quoted[i] = powershellQuoteLiteral(argument)
+	}
+	script := strings.Join([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+		"$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
+			" -ArgumentList @(" + strings.Join(quoted, ",") + ") -NoNewWindow -Wait -PassThru",
+		"exit $hookProcess.ExitCode",
+	}, "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 }
 
 func (l codexMachineRequirementsLayout) expectedGroup(group codexHookGroup) map[string]interface{} {
