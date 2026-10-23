@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -124,6 +127,10 @@ func (a *APIServer) pendingHookDir() string {
 	return filepath.Join(dir, pendingHookDirName)
 }
 
+// beginPendingHookOccurrence makes the occurrence durable before its answer
+// is offered. With an error it also returns the occurrence when a failed
+// write could not be undone durably: the caller still owns it and audits the
+// call under its IDs.
 func (a *APIServer) beginPendingHookOccurrence(
 	ctx context.Context, req agentHookRequest, proposed agentHookResponse,
 	rawEventIDs []string, bodyBytes int64, elapsed time.Duration,
@@ -148,60 +155,84 @@ func (a *APIServer) beginPendingHookOccurrence(
 	// The handler owns its occurrence from before it is published until it
 	// returns; recovery in this process leaves it alone.
 	livePendingHooks.claim(p.path)
-	if err := p.publish(); err != nil {
-		// A write that failed late can still have published the file.
-		// This call is answered 503 and audited here, so recovery must not
-		// audit it a second time.
-		_ = os.Remove(p.path)
+	if _, err := p.publish(); err != nil {
+		// A write that failed late can still have published the file. This
+		// call is answered 503 and audited by the caller, so the removal is
+		// made durable: a file a crash brings back would be audited again.
+		if removeErr := p.remove(); removeErr != nil {
+			// The file can outlive this process. The caller keeps the
+			// occurrence and audits the call under its IDs.
+			return p, errors.Join(err, removeErr)
+		}
 		livePendingHooks.release(p.path)
 		return nil, err
 	}
 	return p, nil
 }
 
-// publish writes the occurrence and syncs its directory.
-func (p *pendingHookOccurrence) publish() error {
+// pendingHookPublish is how far a publish got.
+type pendingHookPublish int
+
+const (
+	// pendingHookNotWritten: the file on disk does not carry this version,
+	// or it could not be read back.
+	pendingHookNotWritten pendingHookPublish = iota
+	// pendingHookWritten: the file carries this version, but a crash can
+	// still bring back the earlier one or lose the file.
+	pendingHookWritten
+	// pendingHookDurable: this version survives a crash.
+	pendingHookDurable
+)
+
+// publish writes the occurrence and makes it durable: the file, its
+// directory entry, and the entry of each directory the write created. A
+// failed write can still have replaced the file, so the file is read back.
+// The error is set whenever a step failed, also when the result is durable.
+func (p *pendingHookOccurrence) publish() (pendingHookPublish, error) {
 	data, err := json.Marshal(p)
 	if err != nil {
-		return err
+		return pendingHookNotWritten, err
 	}
 	if len(data) > maxPendingHookBytes {
-		return fmt.Errorf("hook pending occurrence exceeds %d bytes", maxPendingHookBytes)
+		return pendingHookNotWritten, fmt.Errorf("hook pending occurrence exceeds %d bytes", maxPendingHookBytes)
 	}
-	if err := safefile.WritePrivate(p.path, data); err != nil {
-		return err
+	dir := filepath.Dir(p.path)
+	created := missingPendingHookDirs(dir)
+	writeErr := safefile.WritePrivate(p.path, data)
+	if writeErr != nil && !p.carries(data) {
+		return pendingHookNotWritten, writeErr
 	}
-	return syncDaemonDir(filepath.Dir(p.path))
+	if err := makePendingHookDirDurable(dir, created); err != nil {
+		return pendingHookWritten, errors.Join(writeErr, err)
+	}
+	return pendingHookDurable, writeErr
+}
+
+// carries reports whether the occurrence file on disk holds data.
+func (p *pendingHookOccurrence) carries(data []byte) bool {
+	got, err := pendingHookFS().read(p.path, maxPendingHookBytes)
+	return err == nil && bytes.Equal(got, data)
 }
 
 // setFinal records the answer the hook took and reports whether the
-// published occurrence carries it, which is what recovery will audit. A
-// failed rewrite can still have replaced the file, so the file is read back.
+// occurrence carries it durably, which is what recovery will audit. A final
+// answer that is on disk but not synced is not durable: a crash can bring
+// back the unconfirmed one.
 func (p *pendingHookOccurrence) setFinal(resp agentHookResponse, elapsed time.Duration) (bool, error) {
 	next := *p
 	final := pendingResponse(resp)
 	next.Final = &final
 	next.ElapsedNanos = int64(elapsed)
-	err := next.publish()
-	if err == nil || next.finalPublished() {
+	state, err := next.publish()
+	if state == pendingHookDurable {
 		*p = next
 		return true, err
 	}
 	return false, err
 }
 
-// finalPublished reports whether the occurrence file on disk carries a final
-// answer.
-func (p *pendingHookOccurrence) finalPublished() bool {
-	data, err := safefile.ReadRegularFileBounded(p.path, maxPendingHookBytes)
-	if err != nil {
-		return false
-	}
-	var published pendingHookOccurrence
-	return json.Unmarshal(data, &published) == nil && published.ID == p.ID && published.Final != nil
-}
-
-// publishedResponse is the answer recovery audits for this occurrence.
+// publishedResponse is the answer this process can stand behind for the
+// occurrence: its durable final answer, else the unconfirmed one.
 func (p *pendingHookOccurrence) publishedResponse() agentHookResponse {
 	if p.Final != nil {
 		return p.Final.response()
@@ -209,11 +240,132 @@ func (p *pendingHookOccurrence) publishedResponse() agentHookResponse {
 	return p.Unconfirmed.response()
 }
 
+// responseMatching is the occurrence's answer whose decision is action, the
+// decision a terminal record of this occurrence already holds: its final
+// answer, its unconfirmed answer, or the closed fallback of a call answered
+// 503. ok is false for an action no record states (none, other).
+func (p *pendingHookOccurrence) responseMatching(action string) (agentHookResponse, bool) {
+	want := normalizeHookActionLabel(action)
+	if want == "none" || want == "other" {
+		return agentHookResponse{}, false
+	}
+	if p.Final != nil && normalizeHookActionLabel(p.Final.Action) == want {
+		return p.Final.response(), true
+	}
+	resp := p.Unconfirmed.response()
+	switch {
+	case normalizeHookActionLabel(resp.Action) == want:
+		return resp, true
+	case want == "block" && normalizeHookActionLabel(resp.RawAction) != "block":
+		// The closed fallback the hook took when the gateway answered 503.
+		return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason), true
+	}
+	// A final answer whose rewrite a crash undid.
+	resp.Action = want
+	resp.Reason, resp.SourceReason = pendingHookRecoveredReason, pendingHookRecoveredReason
+	return resp, true
+}
+
+// remove deletes the occurrence and makes the removal durable. A file or
+// directory that is not there is already removed.
 func (p *pendingHookOccurrence) remove() error {
-	if err := os.Remove(p.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := os.Remove(p.path); err != nil && !pendingHookPathAbsent(err) {
 		return err
 	}
-	return syncDaemonDir(filepath.Dir(p.path))
+	if err := pendingHookFS().syncDir(filepath.Dir(p.path)); err != nil && !pendingHookPathAbsent(err) {
+		return err
+	}
+	return nil
+}
+
+func pendingHookPathAbsent(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+}
+
+// missingPendingHookDirs is dir and each of its ancestors that does not
+// exist yet, deepest first: the directories a write into dir creates.
+func missingPendingHookDirs(dir string) []string {
+	var missing []string
+	current := dir
+	for {
+		if _, err := os.Lstat(current); !errors.Is(err, fs.ErrNotExist) {
+			return missing
+		}
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			return missing
+		}
+		current = parent
+	}
+}
+
+// pendingHookDurableDirs holds, per pending directory, the directory whose
+// entry in its parent this process has made durable. A directory removed
+// and created again while the gateway runs is a different directory.
+var pendingHookDurableDirs = struct {
+	mu   sync.Mutex
+	dirs map[string]os.FileInfo
+}{dirs: map[string]os.FileInfo{}}
+
+// makePendingHookDirDurable syncs dir, so a file renamed into it survives a
+// crash, and the parent of each directory the write created, so the
+// directories themselves survive. The first publish of a process also syncs
+// the parent of dir: an earlier process can have created it and stopped
+// before its parent was synced.
+func makePendingHookDirDurable(dir string, created []string) error {
+	ops := pendingHookFS()
+	if err := ops.syncDir(dir); err != nil {
+		return err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	pendingHookDurableDirs.mu.Lock()
+	known := pendingHookDurableDirs.dirs[dir]
+	pendingHookDurableDirs.mu.Unlock()
+	if len(created) == 0 && known != nil && os.SameFile(known, info) {
+		return nil
+	}
+	parents := []string{filepath.Dir(dir)}
+	for _, made := range created {
+		if parent := filepath.Dir(made); parent != parents[len(parents)-1] {
+			parents = append(parents, parent)
+		}
+	}
+	for _, parent := range parents {
+		if err := ops.syncDir(parent); err != nil {
+			return err
+		}
+	}
+	pendingHookDurableDirs.mu.Lock()
+	pendingHookDurableDirs.dirs[dir] = info
+	pendingHookDurableDirs.mu.Unlock()
+	return nil
+}
+
+// pendingHookFileOps are the file operations of the pending spool that can
+// fail for reasons outside the gateway. Tests replace them to inject those
+// failures.
+type pendingHookFileOps struct {
+	syncDir  func(string) error
+	validate func(string) error
+	read     func(string, int64) ([]byte, error)
+}
+
+var (
+	defaultPendingHookFileOps = pendingHookFileOps{
+		syncDir: syncDaemonDir, validate: safefile.ValidatePrivateFile, read: safefile.ReadRegularFileBounded,
+	}
+	pendingHookFileOpsOverride atomic.Pointer[pendingHookFileOps]
+)
+
+func pendingHookFS() *pendingHookFileOps {
+	if ops := pendingHookFileOpsOverride.Load(); ops != nil {
+		return ops
+	}
+	return &defaultPendingHookFileOps
 }
 
 // release ends the handler's ownership. An occurrence it could not audit
@@ -280,8 +432,9 @@ var pendingHookReported = struct {
 // has handled defaultPendingHookStartupEntries entries or
 // defaultPendingHookStartupBudget has passed, whichever is first. A large
 // backlog or a busy audit store never holds a listener longer. Recovery never
-// stops the gateway: an entry it cannot read is skipped or quarantined with a
-// finding, and an entry it cannot audit yet stays on disk for a later pass.
+// stops the gateway: a foreign entry is skipped and one proven invalid or
+// untrusted is quarantined, each with a finding, and an entry it cannot read
+// or audit yet stays on disk for a later pass.
 func (a *APIServer) ensurePendingHookRecovery(ctx context.Context) {
 	a.pendingHookRecoveryOnce.Do(func() {
 		budget := a.pendingHookStartupBudget
@@ -425,18 +578,24 @@ func (a *APIServer) recoverPendingHookEntry(ctx context.Context, dir string, ent
 		}
 	}()
 	p, err := readPendingHookOccurrence(path, id, entry)
-	if errors.Is(err, fs.ErrNotExist) {
+	var unreadable *pendingHookUnreadableError
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		// Finalized and removed after this pass listed the directory.
 		return
-	}
-	if err != nil {
+	case errors.As(err, &unreadable):
+		// Valid as far as anyone knows: kept for the next pass.
+		a.reportPendingHookProblem("unreadable occurrence kept for retry", name, err)
+		return
+	case err != nil:
 		a.quarantinePendingHookOccurrence(path, name, err)
 		return
 	}
 	req := p.Request.request(p.ID, p.BodyBytes)
-	resp := p.Unconfirmed.response()
-	if p.Final != nil {
-		resp = p.Final.response()
+	resp, err := a.pendingHookRecoveryResponse(ctx, p)
+	if err != nil {
+		a.reportPendingHookProblem("audit lookup failed", name, err)
+		return
 	}
 	persistCtx := audit.ContextWithEnvelope(ctx, p.Envelope)
 	persistCtx = ContextWithAgentIdentity(persistCtx, p.Identity)
@@ -456,16 +615,62 @@ func (a *APIServer) recoverPendingHookEntry(ctx context.Context, dir string, ent
 	}
 }
 
+// pendingHookRecoveryResponse is the answer recovery audits. A terminal
+// record of the occurrence that is already stored is the authority for its
+// missing companion: the file can be older than that record (a final
+// rewrite a crash undid), and the two records of one call never disagree.
+// With neither record stored, the occurrence file is the authority.
+func (a *APIServer) pendingHookRecoveryResponse(ctx context.Context, p *pendingHookOccurrence) (agentHookResponse, error) {
+	if a.store == nil {
+		return p.publishedResponse(), nil
+	}
+	for _, id := range []string{p.ID, p.ID + "-decision"} {
+		action, found, err := a.store.StoredHookDecisionAction(ctx, id)
+		if err != nil {
+			return agentHookResponse{}, err
+		}
+		if !found {
+			continue
+		}
+		if resp, ok := p.responseMatching(action); ok {
+			return resp, nil
+		}
+	}
+	return p.publishedResponse(), nil
+}
+
+// pendingHookUnreadableError is an occurrence recovery could not read for
+// an operating-system reason (too many open files, an I/O error, a sharing
+// violation, a replace during the read). Nothing proves it invalid, so it
+// is kept and read again by a later pass.
+type pendingHookUnreadableError struct{ err error }
+
+func (e *pendingHookUnreadableError) Error() string { return e.err.Error() }
+func (e *pendingHookUnreadableError) Unwrap() error { return e.err }
+
+// readPendingHookOccurrence reads one occurrence. Only a file proven
+// invalid (not a regular file, too large, not an occurrence) or untrusted
+// (its protection drifted) is refused; any other failure is a
+// *pendingHookUnreadableError.
 func readPendingHookOccurrence(path, id string, entry fs.DirEntry) (*pendingHookOccurrence, error) {
 	if !entry.Type().IsRegular() {
 		return nil, fmt.Errorf("entry type %s is not a regular file", entry.Type())
 	}
-	if err := safefile.ValidatePrivateFile(path); err != nil {
+	ops := pendingHookFS()
+	if err := ops.validate(path); err != nil {
+		var errno syscall.Errno
+		if errors.As(err, &errno) {
+			return nil, &pendingHookUnreadableError{err: err}
+		}
 		return nil, err
 	}
-	data, err := safefile.ReadRegularFileBounded(path, maxPendingHookBytes)
+	data, err := ops.read(path, maxPendingHookBytes)
 	if err != nil {
-		return nil, err
+		if info, statErr := os.Lstat(path); statErr == nil &&
+			(!info.Mode().IsRegular() || info.Size() > maxPendingHookBytes) {
+			return nil, err
+		}
+		return nil, &pendingHookUnreadableError{err: err}
 	}
 	var p pendingHookOccurrence
 	if err := json.Unmarshal(data, &p); err != nil {
@@ -488,5 +693,5 @@ func (a *APIServer) quarantinePendingHookOccurrence(path, name string, cause err
 		a.reportPendingHookProblem("quarantine failed", name, err)
 		return
 	}
-	_ = syncDaemonDir(filepath.Dir(path))
+	_ = pendingHookFS().syncDir(filepath.Dir(path))
 }
