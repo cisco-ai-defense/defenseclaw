@@ -129,7 +129,11 @@ func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
 				}
 				gw := &undoProofGateway{host: host, loaded: []byte(tc.previous), stuck: stuck, restartFails: tc.restartFails}
 				if tc.bundle {
-					opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{BundleID: bundleID, Version: 2}}}
+					// A staged bundle needs its signer and policy principal before
+					// this test can exercise the config publication and undo.
+					opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{
+						BundleID: bundleID, Version: 2, Principal: "control-plane:acme/alice", SignerKeyID: "k1",
+					}}}
 				}
 				write := windowsEnterpriseHotConfigWrite
 				windowsEnterpriseHotConfigWrite = func(ctx context.Context, path string, raw []byte, opt configwrite.Options) error {
@@ -146,7 +150,7 @@ func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
 								return err
 							}
 						}
-						return errors.New("generation write and writer restore failed after config publication")
+						return configwrite.AfterPublication(errors.New("generation write and writer restore failed after config publication"))
 					}
 					return nil
 				}

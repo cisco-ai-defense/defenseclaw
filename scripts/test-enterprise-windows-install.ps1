@@ -552,6 +552,57 @@ try {
     $run = Invoke-Lifecycle -Name '02-setup-ensure-noop' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
     Assert-Result $run 'setup-ensure-noop' (@('--action', 'ensure', '--noop', '--installed', '--version', $Version, '--ready') + $installedChecks)
 
+    Step 'Setup /ensure repairs a drifted runtime ACL with CONFIG='
+    $runtimeDirectory = Join-Path $stateRoot 'runtime'
+    & icacls.exe $runtimeDirectory /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "icacls could not drift $runtimeDirectory" }
+    $run = Invoke-Lifecycle -Name '02-ensure-runtime-acl-repair' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+    Assert-Result $run 'ensure-runtime-acl-repair' (@('--action', 'ensure', '--installed', '--version', $Version, '--ready') +
+        $installedChecks + @('--allow-warning', 'ensure_repair'))
+    Assert-ServicesRunning
+    $writeMask = [int][Security.AccessControl.FileSystemRights]::Write
+    foreach ($ace in (Get-Acl -LiteralPath $runtimeDirectory).Access) {
+        $sid = $ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($sid -eq 'S-1-5-32-545' -and $ace.AccessControlType -eq 'Allow' -and
+            (([int]$ace.FileSystemRights -band $writeMask) -ne 0)) {
+            Fail "Setup left a Users write ACE on $runtimeDirectory"
+        }
+    }
+
+    Step 'Setup /ensure refuses foreign-OS config before replacing the running deployment'
+    $foreignConfig = Join-Path $stage 'foreign-os-config.yaml'
+    [IO.File]::WriteAllText($foreignConfig, "data_dir: /opt/cisco/defenseclaw/runtime`n" + $configText + "`n", [Text.UTF8Encoding]::new($false))
+    & icacls.exe $foreignConfig /setowner '*S-1-5-32-544' | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "icacls could not set the owner of $foreignConfig" }
+    $previousHash = (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash
+    $previousServices = @{}
+    foreach ($name in $serviceNames) {
+        $previousServices[$name] = Get-CimInstance Win32_Service -Filter "Name='$name'"
+    }
+    $run = Invoke-Lifecycle -Name '02-foreign-os-refused' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$foreignConfig", 'JSON=1')
+    $refusal = Get-Content -LiteralPath $run.Result -Raw | ConvertFrom-Json
+    if ($run.ExitCode -ne 1639 -or [bool]$refusal.transaction_pending -or
+        -not (@($refusal.errors | ForEach-Object { [string]$_.message }) -join ' ').Contains('data_dir')) {
+        Fail "foreign-OS ensure did not refuse data_dir before the transaction (exit $($run.ExitCode))"
+    }
+    if ((Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash -cne $previousHash) {
+        Fail 'foreign-OS ensure replaced the installed config'
+    }
+    foreach ($name in $serviceNames) {
+        $current = Get-CimInstance Win32_Service -Filter "Name='$name'"
+        $previous = $previousServices[$name]
+        if ([int]$current.ProcessId -ne [int]$previous.ProcessId -or [int]$current.ProcessId -eq 0 -or
+            [string]$current.StartMode -cne [string]$previous.StartMode) {
+            Fail "foreign-OS ensure restarted, stopped or disabled $name"
+        }
+    }
+    Assert-ServicesRunning
+
+    Step 'Setup /repair still converges after a refused foreign-OS config'
+    $run = Invoke-Lifecycle -Name '02-repair-after-refusal' -FilePath $Setup -Arguments @('/repair', 'JSON=1')
+    Assert-Result $run 'repair-after-refusal' (@('--action', 'repair', '--installed', '--version', $Version, '--ready') + $installedChecks)
+    Assert-ServicesRunning
+
     Step 'installed CLI verify'
     $run = Invoke-Lifecycle -Name '03-verify' -FilePath $cli -Arguments @('enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
     Assert-Result $run 'verify' (@('--action', 'verify', '--installed', '--version', $Version, '--ready') + $installedChecks)

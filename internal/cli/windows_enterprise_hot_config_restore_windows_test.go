@@ -48,7 +48,7 @@ func TestWindowsEnterpriseHotConfigFailedRestoreStopsTheEnsure(t *testing.T) {
 					return err
 				}
 				if writeFails {
-					return errors.New("initial write failed after config publication")
+					return configwrite.AfterPublication(errors.New("initial write failed after config publication"))
 				}
 				return nil
 			}
@@ -242,7 +242,9 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 					return nil, err
 				}
 				effective := "sha256:" + configwrite.SHA256Hex(installed)
-				enforced := ""
+				// The healthy gateway enforces the previous policy before
+				// publication, even in the row where it never adopts next.
+				enforced := "sha256:" + configwrite.SHA256Hex([]byte(previous))
 				if tc.adopted {
 					enforced = effective
 					adoptedNext = adoptedNext || effective == nextDigest
@@ -326,9 +328,9 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoIsNotRestarted(t *testing.T) {
 		windowsEnterpriseHotConfigRecover = func() (bool, error) { recovers++; return true, nil }
 		stopFails := stopErr
 		windowsEnterpriseHotConfigFailClosed = func() error { host.stops++; return stopFails }
-		windowsEnterprisePolicyDigest = host.digest
 		stub := &ensureStub{t: t}
 		stub.install(t)
+		windowsEnterprisePolicyDigest = host.digest
 		result := newWindowsEnterpriseStandaloneResult("ensure", opts)
 		applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
 			&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)

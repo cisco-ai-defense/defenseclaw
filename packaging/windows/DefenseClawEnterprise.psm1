@@ -13971,6 +13971,54 @@ function Assert-DefenseClawStandaloneSensorHelperOwned {
     }
 }
 
+function Restore-DefenseClawTransactionConfigPreimage {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    # The hidden hook rollback reads config.yaml for the managed endpoint.
+    # A failed candidate may be unloadable, so put the authenticated prior
+    # config back before that rollback runs. The generic file restore below
+    # remains idempotent if recovery is interrupted after this copy.
+    $configPath = [IO.Path]::GetFullPath([string]$Layout.ConfigPath)
+    $entry = Get-DefenseClawTransactionFileSnapshotEntry `
+        -Snapshot $Snapshot `
+        -Path $configPath `
+        -Label 'prior config'
+    $existed = $entry.PSObject.Properties['existed']
+    if ($null -eq $existed -or $existed.Value -isnot [bool]) {
+        throw 'pending transaction has an invalid prior config preimage'
+    }
+    if (-not [bool]$existed.Value) {
+        return
+    }
+    $backup = Assert-DefenseClawDescendant `
+        -Path ([string]$entry.backup) `
+        -Root $Layout.StateRoot `
+        -Label 'prior config transaction preimage'
+    if (-not [string]::Equals(
+            [IO.Path]::GetDirectoryName($backup),
+            [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($SnapshotPath)),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'prior config transaction preimage is outside the snapshot directory'
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $backup -PathType Leaf)) {
+        throw 'prior config transaction preimage is missing'
+    }
+    Assert-DefenseClawNoReparsePath -Path $backup
+    Install-DefenseClawFileAtomic `
+        -Source $backup `
+        -Destination $configPath `
+        -SkipIfContentMatches
+    Set-DefenseClawPathAcl `
+        -Path $configPath `
+        -Kind ConfigFile `
+        -GatewayServiceSID (Get-DefenseClawDeterministicServiceSID `
+            -ServiceName ([string]$Snapshot.gateway_service))
+}
+
 function Restore-DefenseClawTransaction {
     param(
         [Parameter(Mandatory)][string]$SnapshotPath,
@@ -14172,6 +14220,12 @@ function Restore-DefenseClawTransaction {
         -Path $SnapshotPath `
         -Phase quiesced `
         -ServicesQuiescedAt $restoreQuiescedAt
+    if (Test-DefenseClawStandaloneProfile) {
+        Restore-DefenseClawTransactionConfigPreimage `
+            -Snapshot $snapshot `
+            -SnapshotPath $SnapshotPath `
+            -Layout $Layout
+    }
     $managedHooksLifecycleRecovery =
         Resolve-DefenseClawManagedHooksLifecycleRecoveryBinding `
             -Layout $Layout `

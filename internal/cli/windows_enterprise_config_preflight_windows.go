@@ -22,6 +22,7 @@ import (
 
 // windowsEnterpriseStandaloneLayoutForPreflight is replaceable in tests.
 var windowsEnterpriseStandaloneLayoutForPreflight = managed.StandaloneWindowsLayout
+var windowsEnterpriseStandaloneRuntimeCandidateCheck = config.ValidateManagedStandaloneRuntimeCandidate
 
 // windowsEnterpriseStandaloneConfigSource refuses an administrator config
 // that a standard user could change before the lifecycle reads it, naming
@@ -96,6 +97,32 @@ func windowsEnterpriseStandaloneConfigCompile(configPath string) error {
 	if err := validateStandaloneGatewayConfig(configPath, layout.DataDir, layout.SecretsDir); err != nil {
 		return fmt.Errorf("%v; fix it and run again (nothing was changed)", err)
 	}
+	// The generic compiler accepts settings that the installed service rejects
+	// against the fixed Windows layout. Check the exact candidate bytes as if
+	// they were at config.yaml before the transaction can replace that file.
+	raw, err := readConfigV8Source(configPath)
+	if err != nil {
+		return err
+	}
+	if layout.GOOS == "" {
+		layout.GOOS = "windows"
+	}
+	// Resolve omitted paths with the service's installed config identity,
+	// rather than the arbitrary directory holding CONFIG=.
+	restoreCandidate := setTemporaryEnvironment(map[string]string{
+		managed.ConfigPathEnv: layout.ConfigPath,
+	})
+	defer restoreCandidate()
+	candidate, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, raw)
+	if err == nil {
+		err = config.ValidateManagedStandaloneConfig(raw, candidate, nil, layout)
+	}
+	if err == nil {
+		err = windowsEnterpriseStandaloneRuntimeCandidateCheck(candidate)
+	}
+	if err != nil {
+		return fmt.Errorf("%v; fix it and run again (nothing was changed)", err)
+	}
 	return nil
 }
 
@@ -108,6 +135,12 @@ func windowsEnterpriseStandaloneConfigCompile(configPath string) error {
 // the transaction, which migrates it (writing its pins with this release's
 // digest) and then runs the same check.
 func windowsEnterpriseStandaloneKeptConfigPreflight() error {
+	// An interrupted transaction may have left the candidate in config.yaml
+	// while its services are stopped. The lifecycle must restore its recorded
+	// preimage before this release inspects the kept config.
+	if windowsEnterpriseStandaloneTransactionPending() {
+		return nil
+	}
 	layout, err := windowsEnterpriseStandaloneLayoutForPreflight()
 	if err != nil {
 		return nil

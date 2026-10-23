@@ -467,6 +467,93 @@ func TestInvalidConfigIsRefusedBeforeAnyChange(t *testing.T) {
 	}
 }
 
+// A managed listener the gateway would reject must be refused while the
+// previous deployment is still enforcing. Both Unix layouts share this
+// pre-swap check.
+func TestEnsureRefusesNonLoopbackProxyBeforeSwap(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			before := h.read(h.env.Layout.ConfigPath)
+			serviceCalls := len(h.services.calls)
+			candidate := filepath.Join(t.TempDir(), "config.yaml")
+			bad := strings.Replace(before, "  mode: observe", "  host: 0.0.0.0\n  mode: observe", 1)
+			if err := os.WriteFile(candidate, []byte(bad), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r := h.run(Options{Action: ActionEnsure, ConfigFile: candidate})
+			requireError(t, r, codeConfig)
+			if got := h.read(h.env.Layout.ConfigPath); got != before {
+				t.Fatalf("installed config changed: %q", got)
+			}
+			for _, call := range h.services.calls[serviceCalls:] {
+				if strings.HasPrefix(call, "stop ") || strings.HasPrefix(call, "start ") {
+					t.Fatalf("refused listener restarted a service: %v", h.services.calls[serviceCalls:])
+				}
+			}
+		})
+	}
+}
+
+// The service checks the administrator policy tree as a runtime input.
+// Ensure must reject a replacement that points at a user-owned tree before
+// stopping the previous gateway.
+func TestEnsureRefusesUntrustedPolicyInputBeforeSwap(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, tc := range []struct {
+			name, relative string
+		}{
+			{"directory", ""},
+			{"policy module", "rego/decision.rego"},
+		} {
+			t.Run(goos+"/"+tc.name, func(t *testing.T) {
+				h := newTestHost(t, goos)
+				requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+				before := h.read(h.env.Layout.ConfigPath)
+				serviceCalls := len(h.services.calls)
+				policyDir := filepath.Join(t.TempDir(), "policy")
+				untrusted := h.env.P(filepath.Join(policyDir, tc.relative))
+				if err := os.MkdirAll(filepath.Dir(untrusted), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if tc.relative == "" {
+					if err := os.Mkdir(untrusted, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(untrusted, []byte("package policy\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				originalTrust := h.env.Trust
+				h.env.Trust = func(path string, kind TrustKind) error {
+					if path == untrusted {
+						return errors.New("a standard user can write to the policy input")
+					}
+					return originalTrust(path, kind)
+				}
+				candidate := filepath.Join(t.TempDir(), "config.yaml")
+				bad := strings.Replace(before, "policy_dir: "+h.env.Layout.VendorPolicyDir, "policy_dir: "+policyDir, 1)
+				if err := os.WriteFile(candidate, []byte(bad), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				r := h.run(Options{Action: ActionEnsure, ConfigFile: candidate})
+				requireError(t, r, codeConfig)
+				if got := messagesOf(r.Errors, codeConfig); !strings.Contains(got, "policy_dir") || !strings.Contains(got, "not administrator-controlled") {
+					t.Fatalf("policy input refusal = %q", got)
+				}
+				if got := h.read(h.env.Layout.ConfigPath); got != before {
+					t.Fatalf("installed config changed: %q", got)
+				}
+				for _, call := range h.services.calls[serviceCalls:] {
+					if strings.HasPrefix(call, "stop ") || strings.HasPrefix(call, "start ") {
+						t.Fatalf("refused policy input restarted a service: %v", h.services.calls[serviceCalls:])
+					}
+				}
+			})
+		}
+	}
+}
+
 // A guardrail.rules layer the gateway would refuse when it starts is refused
 // with its reason before any change, not left to keep the gateway from
 // starting (GAP-0025).

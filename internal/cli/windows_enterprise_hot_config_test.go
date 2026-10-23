@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -108,6 +109,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	validateSeam, writeSeam := windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite
 	timeoutSeam, restartTimeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll
 	sourceSeam, refreshSeam := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigRefreshTargets
+	runtimeCandidateSeam := windowsEnterpriseStandaloneRuntimeCandidateCheck
 	reloadSeam, failClosedSeam := windowsEnterpriseHotBundleReload, windowsEnterpriseHotConfigFailClosed
 	closeHooksSeam, hooksHeldSeam, releaseHooksSeam := windowsEnterpriseHotConfigCloseHooks, windowsEnterpriseHotConfigHooksHeld, windowsEnterpriseHotConfigReleaseHooks
 	restartSeam, recoverSeam := windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover
@@ -122,10 +124,12 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll = timeoutSeam, pollSeam
 		windowsEnterpriseHotConfigRestartTimeout = restartTimeoutSeam
 		windowsEnterpriseHotConfigSourceCheck = sourceSeam
+		windowsEnterpriseStandaloneRuntimeCandidateCheck = runtimeCandidateSeam
 		windowsEnterpriseHotBundleReload = reloadSeam
 	})
 	// The supplied file stands for an administrator-only staged config.
 	windowsEnterpriseHotConfigSourceCheck = func(string) error { return nil }
+	windowsEnterpriseStandaloneRuntimeCandidateCheck = func(*config.Config) error { return nil }
 	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
 		return managed.StandaloneLayout{ConfigPath: host.configPath, ConfigDir: filepath.Dir(host.configPath), DataDir: dir, ServiceUser: `NT SERVICE\DefenseClawGateway`}, nil
 	}
@@ -795,8 +799,14 @@ func testWindowsHotBundleReload(t *testing.T, identical bool) {
 		next = previous
 	}
 	host, opts := newHotConfigHost(t, previous, next)
+	// Equal bytes already have the same policy digest. The prior gateway
+	// still names the old bundle, so only adoption of the new identity after
+	// the reload can confirm this delivery.
+	host.adopted = identical
 	host.bundleID, host.bundleVersion = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", 2
 	opts.bundle = host.bundleRun()
+	wantBundleID, wantBundleVersion := host.bundleID, host.bundleVersion
+	host.bundleID, host.bundleVersion = "previous-bundle", 1
 	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
 	stub.install(t)
 	savedDigest := windowsEnterprisePolicyDigest
@@ -806,6 +816,7 @@ func testWindowsHotBundleReload(t *testing.T, identical bool) {
 	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error {
 		reloads++
 		host.adopted = true
+		host.bundleID, host.bundleVersion = wantBundleID, wantBundleVersion
 		return nil
 	}
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
@@ -884,9 +895,11 @@ func TestWindowsRepeatedBundleRestartRequiresTheGatewayBundleIdentity(t *testing
 		writes    int
 	}{
 		{name: "gateway names the confirmed bundle", reportID: bundleID, reportVer: 4, current: confirmed, applied: true, writes: 1},
-		{name: "gateway names another bundle", reportID: other, reportVer: 4, current: confirmed, code: "bundle_policy_not_adopted", writes: 2},
-		{name: "gateway names another version", reportID: bundleID, reportVer: 3, current: confirmed, code: "bundle_policy_not_adopted", writes: 2},
-		{name: "gateway names no bundle", current: confirmed, code: "bundle_policy_not_adopted", writes: 2},
+		// The previous config is unrecorded in this fixture, so undo restores
+		// its bytes directly rather than recording a second writer call.
+		{name: "gateway names another bundle", reportID: other, reportVer: 4, current: confirmed, code: "bundle_policy_not_adopted", writes: 1},
+		{name: "gateway names another version", reportID: bundleID, reportVer: 3, current: confirmed, code: "bundle_policy_not_adopted", writes: 1},
+		{name: "gateway names no bundle", current: confirmed, code: "bundle_policy_not_adopted", writes: 1},
 		{name: "confirmed bundle moved", reportID: bundleID, reportVer: 4, current: drifted, code: "bundle_state_invalid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -906,9 +919,9 @@ func TestWindowsRepeatedBundleRestartRequiresTheGatewayBundleIdentity(t *testing
 			}
 			restarts := 0
 			windowsEnterpriseHotConfigRestart = func() (bool, error) { restarts++; return true, nil }
-			windowsEnterprisePolicyDigest = host.digest
 			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
 			stub.install(t)
+			windowsEnterprisePolicyDigest = host.digest
 			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
 			applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
 				&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
