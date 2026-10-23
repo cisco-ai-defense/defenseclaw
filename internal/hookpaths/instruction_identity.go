@@ -94,12 +94,13 @@ func (f *InstructionFiles) identify() {
 }
 
 // Alias reports the protected instruction file that an existing write target
-// is under another name: a symlink to it, the physical file a symlinked
-// instruction file reaches, a case, short-name or stream variant of an
-// instruction file in its directory, or a hard link to one of the call's
-// instruction files. A missing file, one that is not regular and one already
-// spelled as an instruction name report nothing: the name rules judge the
-// last.
+// is under another name: a symlink or hard link to one of the call's
+// instruction files, the physical file a symlinked one reaches, or a case,
+// short-name or stream variant of one. Only the call's instruction files
+// count: an instruction-named file in no load location that the session did
+// not load is ordinary, and so is every other name of it. A missing file,
+// one that is not regular and one already spelled as an instruction name
+// report nothing: the name rules judge the last.
 func (f *InstructionFiles) Alias(path string) string {
 	if f == nil || !filepath.IsAbs(path) {
 		return ""
@@ -113,20 +114,8 @@ func (f *InstructionFiles) Alias(path string) string {
 	if err != nil || !info.Mode().IsRegular() {
 		return ""
 	}
-	if _, named := InstructionFileName(filepath.Base(real), instructionNameFold()); named {
-		if real == path {
-			return ""
-		}
-		return real
-	}
-	// A case variant on a case-insensitive volume, and a Windows short or
-	// stream name, open an instruction file of the same directory.
-	dir := filepath.Dir(real)
-	for _, name := range InstructionFileNames {
-		candidate := filepath.Join(dir, name)
-		if other, err := os.Stat(candidate); err == nil && other.Mode().IsRegular() && os.SameFile(info, other) {
-			return candidate
-		}
+	if _, named := InstructionFileName(filepath.Base(real), instructionNameFold()); named && real == path {
+		return ""
 	}
 	f.identify()
 	for _, file := range f.files {

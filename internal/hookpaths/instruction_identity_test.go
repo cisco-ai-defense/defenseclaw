@@ -185,14 +185,86 @@ func sameInstructionPath(got, want string) bool {
 	return got == want
 }
 
+// A symlink anywhere reaches the call's instruction file. One to an
+// instruction-named file that is not one of the call's files is ordinary.
 func TestInstructionAliasThroughSymlinkElsewhere(t *testing.T) {
 	root := instructionIdentityRoot(t)
 	instruction := instructionIdentityFile(t, filepath.Join(root, "project"), "CLAUDE.md")
 	link := instructionIdentitySymlink(t, instruction, filepath.Join(root, "tmp", "rules"))
-	got := NewInstructionFiles(filepath.Join(root, "cwd"), filepath.Join(root, "home"), nil).Alias(link)
-	if !sameInstructionPath(got, instruction) {
-		t.Fatalf("symlink alias = %q; want %q", got, instruction)
+	for _, tc := range []struct{ cwd, want string }{
+		{filepath.Join(root, "project"), instruction},
+		{filepath.Join(root, "cwd"), ""},
+	} {
+		got := NewInstructionFiles(tc.cwd, filepath.Join(root, "home"), nil).Alias(link)
+		if !sameInstructionPath(got, tc.want) {
+			t.Fatalf("symlink alias from %s = %q; want %q", tc.cwd, got, tc.want)
+		}
 	}
+}
+
+// Action mode protects the call's instruction files and nothing else. An
+// instruction-named file in no load location that the session did not load
+// is ordinary, and so is every other name of it: a hard link or symlink in
+// its own directory, in the project or anywhere else, and a case variant on
+// a case-insensitive volume. The same names reach it once the session loads
+// it or the agent works in its directory.
+func TestInstructionAliasOnlyTheCallsInstructionFiles(t *testing.T) {
+	root := instructionIdentityRoot(t)
+	project := filepath.Join(root, "project")
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range InstructionFileNames {
+		unrelated := filepath.Join(root, "unrelated-"+name)
+		instruction := instructionIdentityFile(t, unrelated, name)
+		for _, kind := range []struct {
+			name string
+			make func(t *testing.T) string
+		}{
+			{"same-directory hard link", func(t *testing.T) string {
+				return instructionIdentityLink(t, instruction, filepath.Join(unrelated, "notes.txt"))
+			}},
+			{"hard link elsewhere", func(t *testing.T) string {
+				return instructionIdentityLink(t, instruction, filepath.Join(root, "tmp", name+".txt"))
+			}},
+			{"same-directory symlink", func(t *testing.T) string {
+				return instructionIdentitySymlink(t, instruction, filepath.Join(unrelated, "notes.link"))
+			}},
+			{"symlink in the project", func(t *testing.T) string {
+				return instructionIdentitySymlink(t, instruction, filepath.Join(project, name+".link"))
+			}},
+			{"case variant", func(t *testing.T) string {
+				variant := filepath.Join(unrelated, strings.ToLower(name))
+				if runtime.GOOS == "windows" || variant == instruction {
+					t.Skip("Windows judges a case variant by name; some names have none")
+				}
+				if other, err := os.Stat(variant); err != nil || !sameStat(t, instruction, other) {
+					t.Skip("case-sensitive volume")
+				}
+				return variant
+			}},
+		} {
+			t.Run(name+"/"+kind.name, func(t *testing.T) {
+				alias := kind.make(t)
+				if got := NewInstructionFiles(project, home, nil).Alias(alias); got != "" {
+					t.Fatalf("Alias(%q) of an unloaded %s in no load location = %q; want none", alias, name, got)
+				}
+				if got := NewInstructionFiles(project, home, []string{instruction}).Alias(alias); !sameInstructionPath(got, instruction) {
+					t.Fatalf("Alias(%q) of a loaded %s = %q; want %q", alias, name, got, instruction)
+				}
+				if got := NewInstructionFiles(unrelated, home, nil).Alias(alias); !sameInstructionPath(got, instruction) {
+					t.Fatalf("Alias(%q) with the agent beside %s = %q; want %q", alias, name, got, instruction)
+				}
+			})
+		}
+	}
+}
+
+func sameStat(t *testing.T, path string, info os.FileInfo) bool {
+	t.Helper()
+	other, err := os.Stat(path)
+	return err == nil && os.SameFile(info, other)
 }
 
 func instructionResolve(t *testing.T, cwd, tool string, input map[string]any) map[string]string {
@@ -221,8 +293,9 @@ func TestResolveReportsInstructionIdentity(t *testing.T) {
 	project := filepath.Join(root, "project")
 	instruction := instructionIdentityFile(t, project, "CLAUDE.md")
 	alias := instructionIdentityLink(t, instruction, filepath.Join(root, "tmp", "notes.txt"))
-	far := instructionIdentityLink(t, instructionIdentityFile(t, filepath.Join(root, "far"), "SOUL.md"),
-		filepath.Join(root, "tmp", "far.txt"))
+	farSoul := instructionIdentityFile(t, filepath.Join(root, "far"), "SOUL.md")
+	far := instructionIdentityLink(t, farSoul, filepath.Join(root, "tmp", "far.txt"))
+	beside := instructionIdentityLink(t, farSoul, filepath.Join(root, "far", "notes.txt"))
 	ordinary := instructionIdentityFile(t, filepath.Join(root, "tmp"), "plain.txt")
 	newName := filepath.Join(root, "tmp", "new")
 	for _, tc := range []struct {
@@ -239,6 +312,8 @@ func TestResolveReportsInstructionIdentity(t *testing.T) {
 		{"python open", "Bash", map[string]any{"command": "python3 -c \"open('" + alias + "', 'a').write('x')\""}, instruction},
 		{"multi edit", "MultiEdit", map[string]any{"file_path": alias, "edits": []map[string]any{{"old_string": "instructions", "new_string": "x"}}}, instruction},
 		{"instruction file in no load location", "Bash", map[string]any{"command": "printf x >> " + far}, ""},
+		{"beside an instruction file in no load location", "Write", map[string]any{"file_path": beside, "content": "x"}, ""},
+		{"append beside an instruction file in no load location", "Bash", map[string]any{"command": "printf x >> " + beside}, ""},
 		{"ordinary file", "Bash", map[string]any{"command": "printf x >> " + ordinary}, ""},
 		{"hard link creation", "Bash", map[string]any{"command": "ln CLAUDE.md " + newName}, ""},
 		{"symbolic link creation", "Bash", map[string]any{"command": "ln -s " + instruction + " " + newName}, ""},

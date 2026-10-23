@@ -278,6 +278,70 @@ func TestInstructionProtectionLoadedFileHardLink(t *testing.T) {
 	}
 }
 
+// Normal file work is never blocked: an unrelated directory holds an
+// instruction-named file that is in no load location and that the session
+// did not load, and a hard link of it beside it. Writing that link is
+// ordinary in action mode, from the gateway's own view and from the hook
+// client's evidence. Once the session loads the file, or the agent works in
+// that directory, the same write is a write to the instruction file.
+func TestInstructionProtectionUnloadedInstructionFileNeighbors(t *testing.T) {
+	root := instructionIdentityTestRoot(t)
+	project := filepath.Join(root, "project")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, rule string }{
+		{"SOUL.md", "COG-SOUL"},
+		{"CLAUDE.md", "COG-CLAUDE-MD"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			unrelated := filepath.Join(root, "unrelated-"+tc.name)
+			instruction := writeActiveAgentTestFile(t, unrelated, tc.name)
+			notes := instructionIdentityTestLink(t, instruction, filepath.Join(unrelated, "notes.txt"))
+			for _, call := range instructionIdentityWrites(notes) {
+				for source, ctx := range instructionIdentityContexts(t, project, call.tool, call.input) {
+					response := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH").evaluateClaudeCodeHook(
+						ctx, claudeCodeHookRequest{
+							HookEventName: "PreToolUse", SessionID: "unrelated", CWD: project,
+							ToolName: call.tool, ToolInput: call.input,
+						})
+					if response.Action == guardrailActionBlock {
+						t.Fatalf("%s beside an unloaded %s (%s) was blocked: %v", call.tool, tc.name, source, response.Findings)
+					}
+					for rule := range instructionRuleFiles {
+						if findingStringHasRuleID(response.Findings, rule) {
+							t.Fatalf("%s beside an unloaded %s (%s) got %s: %v", call.tool, tc.name, source, rule, response.Findings)
+						}
+					}
+				}
+			}
+			call := instructionIdentityWrites(notes)[0]
+			for source, ctx := range instructionIdentityContexts(t, project, call.tool, call.input) {
+				api := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH")
+				api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+					HookEventName: "InstructionsLoaded", SessionID: "loaded", CWD: project, FilePath: instruction,
+				})
+				response := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+					HookEventName: "PreToolUse", SessionID: "loaded", CWD: project, ToolName: call.tool, ToolInput: call.input,
+				})
+				if response.Action != guardrailActionBlock || !findingStringHasRuleID(response.Findings, tc.rule) {
+					t.Fatalf("write beside a loaded %s (%s): action=%q findings=%v", tc.name, source, response.Action, response.Findings)
+				}
+			}
+			for source, ctx := range instructionIdentityContexts(t, unrelated, call.tool, call.input) {
+				response := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH").evaluateClaudeCodeHook(
+					ctx, claudeCodeHookRequest{
+						HookEventName: "PreToolUse", SessionID: "beside", CWD: unrelated,
+						ToolName: call.tool, ToolInput: call.input,
+					})
+				if response.Action != guardrailActionBlock || !findingStringHasRuleID(response.Findings, tc.rule) {
+					t.Fatalf("write with the agent beside %s (%s): action=%q findings=%v", tc.name, source, response.Action, response.Findings)
+				}
+			}
+		})
+	}
+}
+
 // Creating a link writes no file, and text about links is not a write: an
 // allow-listed shell runs every command here as the release does, in the
 // default (observe) mode and in action mode, from the gateway's own view and
