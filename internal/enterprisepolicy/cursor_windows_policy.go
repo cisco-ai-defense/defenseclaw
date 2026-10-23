@@ -118,6 +118,7 @@ func windowsCursorVerify(opts Options) (State, error) {
 	} else {
 		windowsCursorInspect(opts, current, adapterPath, &state)
 	}
+	verifyWindowsHookExecutable(opts, "Cursor", &state)
 	state.finish()
 	return state, nil
 }

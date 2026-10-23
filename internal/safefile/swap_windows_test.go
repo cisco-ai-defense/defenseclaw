@@ -157,6 +157,39 @@ func TestRemoveFileIfUnchanged(t *testing.T) {
 	requireSwapDirForTest(t, dir, map[string]string{})
 }
 
+// A read-only file that holds exactly the expected bytes is removed too, as
+// the Codex requirements deletion this replaced did
+// (FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE). A read-only file with other
+// bytes is still kept.
+func TestRemoveFileIfUnchangedRemovesAReadOnlyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "requirements.toml")
+	if err := os.WriteFile(path, []byte("newer save"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+	if _, err := RemoveFileIfUnchanged(path, []byte("ours"), 16, nil); !errors.Is(err, ErrSwapRaced) {
+		t.Fatalf("remove another read-only file: %v", err)
+	}
+	requireSwapDirForTest(t, dir, map[string]string{"requirements.toml": "newer save"})
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("ours"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := RemoveFileIfUnchanged(path, []byte("ours"), 16, nil); err != nil || !result.Swapped {
+		t.Fatalf("remove our read-only file: %+v err=%v", result, err)
+	}
+	requireSwapDirForTest(t, dir, map[string]string{})
+}
+
 func swapTestString(value string) *string { return &value }
 
 func posixRenameForTest(t *testing.T, source, destination string) {

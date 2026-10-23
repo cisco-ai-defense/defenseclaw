@@ -12,12 +12,13 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // A configured machine policy cannot prove coverage when the executable its
-// direct commands invoke is gone. No user enrollment is needed for the policy.
+// hook or adapter invokes is gone. No user enrollment is needed for the policy.
 func TestWindowsVerifyRequiresInstalledHookExecutable(t *testing.T) {
-	for _, connector := range []string{ConnectorClaudeCode, ConnectorCodex, ConnectorCopilot} {
+	for _, connector := range []string{ConnectorClaudeCode, ConnectorCodex, ConnectorCursor, ConnectorCopilot} {
 		ownerships := []string{"default", config.MachinePolicyOwnershipOff}
 		if connector == ConnectorCopilot {
 			ownerships = ownerships[:1] // Copilot ownership off disables its policy.
@@ -59,6 +60,19 @@ func TestWindowsVerifyRequiresInstalledHookExecutable(t *testing.T) {
 					}
 					if err == nil {
 						path, err = CodexRequirementsPath(opts)
+					}
+				case ConnectorCursor:
+					var adapterPath string
+					path, adapterPath, err = windowsCursorPaths(opts)
+					if err == nil {
+						var adapter []byte
+						adapter, err = gatewayconnector.RenderWindowsCursorEnterpriseAdapter(hook, "closed")
+						if err == nil {
+							policy, err = gatewayconnector.MergeWindowsCursorEnterpriseHooks(nil, adapterPath, "closed")
+							if err == nil {
+								writeFile(t, adapterPath, string(adapter))
+							}
+						}
 					}
 				case ConnectorCopilot:
 					policy, err = renderCopilotDropIn(opts)
@@ -108,6 +122,18 @@ func TestWindowsVerifyRequiresInstalledHookExecutable(t *testing.T) {
 				verify(false)
 				writeFile(t, hook, "restored executable")
 				verify(true)
+
+				// A policy file without the registered hook is still an
+				// unguarded agent, even though the executable is present.
+				unguarded := `{"hooks":{}}`
+				if connector == ConnectorCodex {
+					unguarded = "[hooks]\n"
+				}
+				writeFile(t, path, unguarded)
+				result, err := VerifyAll(opts, []string{connector})
+				if err != nil || result.Complete() || len(result.States) != 1 || result.States[0].Covered {
+					t.Fatalf("unguarded machine policy passed verify: %+v, %v", result, err)
+				}
 			})
 		}
 	}
@@ -119,6 +145,8 @@ func connectorDisplayName(connector string) string {
 		return "Claude Code"
 	case ConnectorCodex:
 		return "Codex"
+	case ConnectorCursor:
+		return "Cursor"
 	default:
 		return "Copilot"
 	}
