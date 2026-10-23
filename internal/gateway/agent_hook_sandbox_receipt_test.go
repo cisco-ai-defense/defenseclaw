@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -226,6 +227,25 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			}
 			if got := f.audited(t, faultSession)[faultSession]; got != "block" {
 				t.Fatalf("failed ACK final audit = %q, want block", got)
+			}
+			rows, err = f.store.ListEvents(200)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found = false
+			for _, row := range rows {
+				if row.SessionID != faultSession || row.Action != string(audit.ActionConnectorHook) {
+					continue
+				}
+				found = true
+				for _, field := range []string{"action=block", "raw_action=allow", "severity=HIGH", "mode=action", "reason=" + hookexec.ManagedGatewayNoAnswerReason} {
+					if !strings.Contains(row.Details, field) {
+						t.Fatalf("closed receipt audit lacks %s: %s", field, row.Details)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("failed acknowledgement has no recovered audit row")
 			}
 		})
 	}
