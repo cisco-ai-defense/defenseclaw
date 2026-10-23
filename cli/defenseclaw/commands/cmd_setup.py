@@ -7651,6 +7651,72 @@ def _codex_registration_path(lock_body: bytes) -> str | None:
     return os.path.abspath(matches[0])
 
 
+def _effective_codex_rollback_path(record_path: str, captured: str) -> str:
+    """Apply the managed backup loader's home-move rule to rollback evidence.
+
+    A receipt copied into the current home may still name the previous home.
+    Match managedBackupTargetAfterHomeMove in Go: only an absent old root (or
+    an emptied old home) with the corresponding current file can be rebased.
+    """
+    home = os.path.abspath(os.path.expanduser("~"))
+    captured = os.path.normpath(captured)
+
+    def within(path: str, root: str) -> bool:
+        try:
+            relative = os.path.relpath(path, root)
+        except ValueError:  # Different Windows volumes.
+            return False
+        return relative == "." or (relative != ".." and not relative.startswith(".." + os.sep))
+
+    if not (within(os.path.abspath(record_path), home) and not within(captured, home)):
+        return captured
+
+    def target_under(old_root: str) -> str | None:
+        if within(home, old_root) or within(old_root, home):
+            return None
+        relative = os.path.relpath(captured, old_root)
+        if relative in (".", "..") or relative.startswith(".." + os.sep):
+            return None
+        candidate = os.path.join(home, relative)
+        return candidate if os.path.lexists(candidate) else None
+
+    ancestors: list[str] = []
+    parent = os.path.dirname(captured)
+    while parent != os.path.dirname(parent):
+        ancestors.append(parent)
+        parent = os.path.dirname(parent)
+    missing = None
+    for ancestor in reversed(ancestors):
+        try:
+            os.lstat(ancestor)
+        except FileNotFoundError:
+            missing = ancestor
+            break
+        except OSError:
+            return captured
+    if missing is None:
+        return captured
+    target = target_under(missing)
+    if target is not None:
+        return target
+    previous_home = os.path.dirname(missing)
+    try:
+        previous_info = os.lstat(previous_home)
+        if (
+            stat.S_ISDIR(previous_info.st_mode)
+            and not (
+                os.name == "nt"
+                and getattr(previous_info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            )
+        ):
+            with os.scandir(previous_home) as entries:
+                if next(entries, None) is None:
+                    target = target_under(previous_home)
+    except OSError:
+        pass
+    return target if target is not None else captured
+
+
 @dataclass(frozen=True)
 class _SetupRegistrationLocationEvidence:
     connector: str
@@ -8422,14 +8488,20 @@ def _capture_setup_desired_snapshot_once(cfg, *, capture_codex_backup: bool = Fa
         )
     codex_rollback = None
     if capture_codex_backup and data_dir:
+        backup_record = _codex_backup_path(data_dir)
         backup_existed, backup_body, backup_generation = _capture_protected_setup_file(
-            _codex_backup_path(data_dir),
+            backup_record,
             _SETUP_CODEX_BACKUP_MAX_BYTES,
             "Codex managed backup",
             trust_windows_administrators=True,
         )
-        backup_path = _codex_backup_identity(backup_body)["path"] if backup_existed else None
+        backup_path = (
+            _effective_codex_rollback_path(backup_record, _codex_backup_identity(backup_body)["path"])
+            if backup_existed else None
+        )
         registration_path = _codex_registration_path(lock_body) if lock_existed else None
+        if backup_existed and registration_path is not None:
+            registration_path = _effective_codex_rollback_path(backup_record, registration_path)
         prior_path = registration_path or backup_path
         codex_rollback = _SetupCodexRollbackPoint(
             backup_existed=backup_existed,
@@ -8822,16 +8894,17 @@ def _verify_restored_codex_root(cfg, snapshot: _SetupConfigSnapshot) -> list[str
     if prior is None or prior.root is None:
         return []
     failures: list[str] = []
+    backup_record = _codex_backup_path(cfg.data_dir)
     try:
         existed, body, _generation = _capture_protected_setup_file(
-            _codex_backup_path(cfg.data_dir), _SETUP_CODEX_BACKUP_MAX_BYTES, "Codex managed backup",
+            backup_record, _SETUP_CODEX_BACKUP_MAX_BYTES, "Codex managed backup",
             trust_windows_administrators=True,
         )
         if not existed:
             failures.append("Codex managed backup is missing after rollback")
         else:
             current = _codex_backup_identity(body)
-            current_root = os.path.dirname(current["path"])
+            current_root = os.path.dirname(_effective_codex_rollback_path(backup_record, current["path"]))
             if os.path.normcase(os.path.normpath(current_root)) != os.path.normcase(os.path.normpath(prior.root)):
                 failures.append("Codex managed backup still names the new root")
             if prior.backup_existed:
@@ -8850,6 +8923,8 @@ def _verify_restored_codex_root(cfg, snapshot: _SetupConfigSnapshot) -> list[str
                 "hook_contract_lock.json",
             )
             current_path = _codex_registration_path(body) if existed else None
+            if prior.backup_existed and current_path is not None:
+                current_path = _effective_codex_rollback_path(backup_record, current_path)
             if current_path is None or (
                 os.path.normcase(os.path.normpath(current_path))
                 != os.path.normcase(os.path.normpath(prior.registration_path))
