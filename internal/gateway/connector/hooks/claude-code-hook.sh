@@ -407,22 +407,26 @@ case "$ACTION" in
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
 
-if [ "$ACTION" = "block" ]; then
+# A Stop directive that contradicts a gateway block ends the turn rather than
+# allowing it, as in hookexec nativeOutputAgrees: continue must be false with a
+# stopReason, or absent with decision block. A block
+# without a directive is a policy denial and gets the exit-2 feedback below.
+if [ "$ACTION" = "block" ] && [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   CLAUDE_EVENT=$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null) || CLAUDE_EVENT=""
   case "$CLAUDE_EVENT" in
     Stop|SubagentStop|TeammateIdle)
-      NATIVE_CONTINUE=""
-      NATIVE_STOP_REASON=""
-      NATIVE_DECISION=""
-      NATIVE_REASON=""
-      if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
-        NATIVE_CONTINUE=$(printf '%s' "$OUTPUT" | _dc_jq -c '.continue' 2>/dev/null) || NATIVE_CONTINUE=""
-        NATIVE_STOP_REASON=$(printf '%s' "$OUTPUT" | _dc_jq -r '.stopReason // empty' 2>/dev/null) || NATIVE_STOP_REASON=""
-        NATIVE_DECISION=$(printf '%s' "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null) || NATIVE_DECISION=""
-        NATIVE_REASON=$(printf '%s' "$OUTPUT" | _dc_jq -r '.reason // empty' 2>/dev/null) || NATIVE_REASON=""
+      NATIVE_CONTINUE=$(printf '%s' "$OUTPUT" | _dc_jq -c '.continue' 2>/dev/null) || NATIVE_CONTINUE=""
+      NATIVE_STOP_REASON=$(printf '%s' "$OUTPUT" | _dc_jq -r '.stopReason // empty' 2>/dev/null) || NATIVE_STOP_REASON=""
+      NATIVE_DECISION=$(printf '%s' "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null) || NATIVE_DECISION=""
+      NATIVE_REASON=$(printf '%s' "$OUTPUT" | _dc_jq -r '.reason // empty' 2>/dev/null) || NATIVE_REASON=""
+      NATIVE_AGREES=no
+      if [ "$NATIVE_CONTINUE" = "false" ] && [ -n "$NATIVE_STOP_REASON" ]; then
+        NATIVE_AGREES=yes
+      elif { [ -z "$NATIVE_CONTINUE" ] || [ "$NATIVE_CONTINUE" = "null" ]; } &&
+           [ "$NATIVE_DECISION" = "block" ] && [ -n "$NATIVE_REASON" ]; then
+        NATIVE_AGREES=yes
       fi
-      if ! { [ "$NATIVE_CONTINUE" = "false" ] && [ -n "$NATIVE_STOP_REASON" ]; } &&
-         ! { [ "$NATIVE_DECISION" = "block" ] && [ -n "$NATIVE_REASON" ]; }; then
+      if [ "$NATIVE_AGREES" != "yes" ]; then
         REASON=$(printf '%s' "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
         [ -n "$REASON" ] || REASON="DefenseClaw hook failed closed."
         OUTPUT=$(printf '{"continue":false,"stopReason":"%s"}' "$(defenseclaw_json_escape "$REASON")")
