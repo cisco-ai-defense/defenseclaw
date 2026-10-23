@@ -1549,7 +1549,7 @@ switch ('{case}') {{
     'renamed-aside' {{ $script:images = @([pscustomobject]@{{ ProcessId = 78; Name = 'defenseclaw-gateway.exe.old-20261023T000000000'; ExecutablePath = "$gatewayImage.old-20261023T000000000" }}) }}
     'setup-image' {{
         $Setup = [pscustomobject]@{{ Root = (Join-Path $DataDir 'Setup') }}
-        $script:images = @([pscustomobject]@{{ ProcessId = 79; ExecutablePath = (Join-Path $Setup.Root 'bin\defenseclaw-gateway.exe') }})
+        $script:images = @([pscustomobject]@{{ ProcessId = 79; ExecutablePath = (Join-Path $Setup.Root 'bin\\defenseclaw-gateway.exe') }})
     }}
     'started-after-close' {{
         # The watchdog starts the gateway again once the hooks are closed.
