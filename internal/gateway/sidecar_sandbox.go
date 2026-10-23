@@ -583,7 +583,9 @@ func stopSandboxesWithoutListener(ctx context.Context, fleet sandboxFleet, publi
 		default:
 			continue
 		}
-		if _, err := fleet.Stop(ctx, sb.Name); err != nil {
+		// A MicroVM whose disk cannot be synced first is contained, not
+		// stopped (GAP-0902): the error says so.
+		if _, err := fleet.Stop(manager.WithEmergencyStop(ctx, "the sandbox "+part+" listener is not running"), sb.Name); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
@@ -591,7 +593,8 @@ func stopSandboxesWithoutListener(ctx context.Context, fleet sandboxFleet, publi
 				unstoppable[sb.Name] = true
 				fmt.Fprintf(os.Stderr, "[sandbox] %s: stop %s: %v\n", gatewaylog.ErrCodeOpenShellListenerFailed, sb.Name, err)
 				publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: sb.Name, Severity: "CRITICAL",
-					Reason: sandboxListenerLostReason, Message: why + ", and DefenseClaw could not stop it: stop it yourself"})
+					Reason: sandboxListenerLostReason, Message: why + ", and DefenseClaw could not stop it (" + sandboxapi.AsError(err).Error() +
+						"): stop it yourself"})
 			}
 			continue
 		}

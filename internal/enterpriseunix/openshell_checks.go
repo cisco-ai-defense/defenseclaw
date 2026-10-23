@@ -203,28 +203,38 @@ func (l *lifecycle) describeLegacySandboxes(ctx context.Context) {
 		}
 		seen[a.UID] = true
 		st, err := ops.Status(ctx, a)
-		var lines []string
+		type unprotected struct{ state, line, why string }
+		legacy := ". Its session runs the supervisor of an OpenShell release older than " + openshell.SupportedMin + ", whose network broker can " +
+			"let its connections bypass sandbox policy and DefenseClaw cannot contain; DefenseClaw stops no sandbox for its user, and runs no new " +
+			"sandbox for " + a.Name + " until it is gone"
+		var lines []unprotected
 		switch {
 		case err != nil:
-			lines = []string{"its sandbox daemon could not say whether one runs (" + err.Error() + "); as " + a.Name + ", `defenseclaw sandbox status` names any"}
+			lines = []unprotected{{sandboxapi.LegacyUnprotected, "its sandbox daemon could not say whether one runs (" + err.Error() + "); as " + a.Name +
+				", `defenseclaw sandbox status` names any", legacy}}
 		case st.Legacy && st.busy() > 0:
 			held := "1 sandbox"
 			if n := st.busy(); n != 1 {
 				held = fmt.Sprintf("%d sandboxes", n)
 			}
-			lines = []string{"the sandbox daemon of an earlier DefenseClaw holds " + held + ", which this version cannot show protected; as " + a.Name +
-				", `defenseclaw sandbox list` names them, and `defenseclaw sandbox stop NAME` ends a running one"}
+			lines = []unprotected{{sandboxapi.LegacyUnprotected, "the sandbox daemon of an earlier DefenseClaw holds " + held + ", which this version " +
+				"cannot show protected; as " + a.Name + ", `defenseclaw sandbox list` names them, and `defenseclaw sandbox stop NAME` ends a running one", legacy}}
 		default:
 			for _, u := range st.Unprotected {
-				lines = append(lines, u.Name+"; as "+a.Name+", `"+u.Stop+"` ends it")
+				line := u.Name + "; as " + a.Name + ", `" + u.Stop + "` ends it"
+				if u.Reason == sandboxapi.UnprotectedContained {
+					lines = append(lines, unprotected{sandboxapi.ContainedUnprotected, line, ". DefenseClaw had to stop it, but its MicroVM's disk " +
+						"could not be synced first, so it keeps running with its network withdrawn; DefenseClaw stops no sandbox for its user after a " +
+						"failed sync, and runs no new sandbox for " + a.Name + " until it is gone"})
+					continue
+				}
+				lines = append(lines, unprotected{sandboxapi.LegacyUnprotected, line, legacy})
 			}
 		}
-		for _, line := range lines {
+		for _, u := range lines {
 			l.result.Services = append(l.result.Services, enterprisestatus.Service{Name: "sandbox unprotected " + a.Name, Kind: sandboxRowKind,
-				State: sandboxapi.LegacyUnprotected + ": " + line})
-			l.result.AddWarning(codeLegacySandbox, a.Name+": "+sandboxapi.LegacyUnprotected+": "+line+". Its session runs the supervisor of an OpenShell "+
-				"release older than "+openshell.SupportedMin+", whose network broker can let its connections bypass sandbox policy and DefenseClaw cannot "+
-				"contain; DefenseClaw stops no sandbox for its user, and runs no new sandbox for "+a.Name+" until it is gone")
+				State: u.state + ": " + u.line})
+			l.result.AddWarning(codeLegacySandbox, a.Name+": "+u.state+": "+u.line+u.why)
 			l.result.SecurityComplete = false
 		}
 	}

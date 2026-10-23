@@ -531,7 +531,7 @@ func (m *Manager) stopForAlarm(name, bindingID string, kind audit.SandboxFinding
 	if kind == audit.SandboxFindingHookSilence {
 		what = "silent hooks"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
+	ctx, cancel := context.WithTimeout(WithEmergencyStop(context.Background(), what), defaultOpTimeout)
 	defer cancel()
 	b, unlock, err := m.lockBox(name)
 	if err != nil {

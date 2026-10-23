@@ -435,27 +435,30 @@ func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec re
 }
 
 // stopUnverified stops again a sandbox a start must not leave running (it
-// failed the workload check, or still has a rule of its last session),
-// flushing its disk first where the driver's stop does not (the last
-// session's work stays for pull), and records the phase OpenShell reports
-// then. It returns why the stop failed: the sandbox then still runs, and
-// the start's refusal must say so rather than that it was stopped
-// (GAP-0014).
+// failed the workload check, still has a rule of its last session, or did
+// not get its network back on a new supervisor), flushing its disk first
+// where the driver's stop does not (the last session's work stays for
+// pull), and records the phase OpenShell reports then. A flush that fails
+// holds the stop back (GAP-0902): the VM keeps running, contained
+// (containUnsynced). It returns why the sandbox was not stopped: it then
+// still runs, and the start's refusal must say so rather than that it was
+// stopped (GAP-0014).
 func (m *Manager) stopUnverified(ctx context.Context, gw *Gateway, b *box) error {
 	ctx, cancel := detached(ctx, rollbackTimeout)
 	defer cancel()
 	m.mu.Lock()
 	name := b.rec.Name
 	m.mu.Unlock()
-	var flushErr error
 	if !gw.Driver.StopFlushes {
-		flushErr = m.flushSandbox(ctx, gw, name)
+		if flushErr := m.flushSandbox(ctx, gw, name); flushErr != nil {
+			m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
+			err := containedStopRefusal(name, flushErr, m.containUnsynced(ctx, b, "its start failed"))
+			m.logf("%s: sandbox %s must not keep running after its start: %v", gatewaylog.ErrCodeOpenShellSandboxFailed, name, err)
+			return err
+		}
 	}
 	_, err := gw.Client.StopSandbox(ctx, name)
 	if err == nil {
-		if flushErr != nil {
-			m.flushFailed(name, flushErr)
-		}
 		_, err = gw.Client.WaitStopped(ctx, name)
 	}
 	if err != nil {

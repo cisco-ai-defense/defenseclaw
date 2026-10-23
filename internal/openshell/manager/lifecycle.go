@@ -125,9 +125,12 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 		if !b.missing && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason) {
 			live++
 		}
-		if !b.missing && !b.creating && oldSupervisorLive(b.phase, b.rec) {
-			st.Unprotected = append(st.Unprotected, sandboxapi.UnprotectedSandbox{Name: b.rec.Name, Phase: string(b.phase),
-				Stop: legacyStopCommand(b.rec.Name, b.phase)})
+		if !b.missing && !b.creating && unprotectedLive(b.phase, b.rec) {
+			u := sandboxapi.UnprotectedSandbox{Name: b.rec.Name, Phase: string(b.phase), Stop: legacyStopCommand(b.rec.Name, b.phase)}
+			if !oldSupervisorLive(b.phase, b.rec) {
+				u.Reason = sandboxapi.UnprotectedContained
+			}
+			st.Unprotected = append(st.Unprotected, u)
 		}
 	}
 	slices.SortFunc(st.Unprotected, func(a, b sandboxapi.UnprotectedSandbox) int { return strings.Compare(a.Name, b.Name) })
@@ -344,7 +347,9 @@ func (m *Manager) refuseRetained(b *box) error {
 // (sandboxapi.DiscardUnsynced), which only the user's own stop does, after
 // it asked them (GAP-0902): DefenseClaw never stops a MicroVM after a failed
 // sync on its own, for a hook alarm, a policy, a lost listener or the
-// stop-sandboxes of a sign-out alike. Once OpenShell takes an accepted one,
+// stop-sandboxes of a sign-out alike. A stop it makes for a security alarm
+// (WithEmergencyStop) contains the VM instead (containUnsynced), and says
+// whether it could. Once OpenShell takes an accepted one,
 // the feed says what it may have lost (flushFailed), never for a stop that
 // was refused or not made. One whose main process
 // completed or failed OpenShell returns as it is: it keeps its phase, and
@@ -374,6 +379,9 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	run, flushErr := m.endHarness(ctx, gw, b)
 	if flushErr != nil && !sandboxapi.DiscardUnsynced(ctx) {
 		m.logf("sandbox %s: not stopped: its disk could not be synced first: %v", name, flushErr)
+		if why, ok := emergencyStop(ctx); ok {
+			return containedStopRefusal(name, flushErr, m.containUnsynced(ctx, b, why))
+		}
 		return unsyncedStopRefusal(name, flushErr)
 	}
 	if !ended {
@@ -467,6 +475,49 @@ func unsyncedStopRefusal(name string, err error) error {
 			"), so a stop now would lose what it wrote since its last sync; it keeps running",
 		Detail: "save the work you need and stop it again, or stop it anyway, losing that: `defenseclaw sandbox stop " + name +
 			" --discard-unsynced` (on a terminal, `defenseclaw sandbox stop " + name + "` asks first)"}
+}
+
+// containedStopRefusal is the error of a stop DefenseClaw made for a
+// security alarm (WithEmergencyStop), or of a start's stop of a sandbox it
+// must not leave running (stopUnverified), that left the MicroVM name
+// running because its disk could not be synced first (flushErr), contained
+// instead (containUnsynced); containErr is what of the containment could
+// not be done or confirmed.
+func containedStopRefusal(name string, flushErr, containErr error) error {
+	state := "DefenseClaw contained it instead: " + containedContainment
+	if containErr != nil {
+		state = "and DefenseClaw could not confirm it contained (" + truncate(sandboxapi.DisplayText(containErr.Error()), 300) + ")"
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeUnsynced,
+		Message: "sandbox " + name + " was not stopped: its MicroVM's disk could not be synced first (" + truncate(sandboxapi.DisplayText(flushErr.Error()), 200) +
+			"), so it keeps running, " + containedUnprotected + "; " + state,
+		Detail: "save the work you need, then stop it: `defenseclaw sandbox stop " + name + "` (on a terminal it asks before it stops the VM without the sync)"}
+}
+
+// emergencyStopKey is the context key of WithEmergencyStop.
+type emergencyStopKey struct{}
+
+// WithEmergencyStop is ctx for a stop DefenseClaw makes on its own for a
+// security alarm, why in words (a hook alarm, repeated foreign network
+// rules, a lost listener, a revoked registration): one that must not leave
+// the sandbox as it is. Where that stop would lose what a MicroVM has not
+// synced, DefenseClaw never makes it (GAP-0902): it contains the VM
+// instead (containUnsynced) and the stop fails with what it did.
+func WithEmergencyStop(ctx context.Context, why string) context.Context {
+	return context.WithValue(ctx, emergencyStopKey{}, why)
+}
+
+// EmergencyStopReason is the why of a WithEmergencyStop ctx, "" for any
+// other.
+func EmergencyStopReason(ctx context.Context) string {
+	why, _ := ctx.Value(emergencyStopKey{}).(string)
+	return why
+}
+
+// emergencyStop reports a WithEmergencyStop ctx and its why.
+func emergencyStop(ctx context.Context) (string, bool) {
+	why := EmergencyStopReason(ctx)
+	return why, why != ""
 }
 
 // lockStart takes the gateway's lifecycle lock for a create or a start
@@ -830,8 +881,9 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	// even when the closed-network checkpoint was not reached. The closed
 	// and providers fields alone are what earlier 1.0.4 builds of this
 	// change recorded, until 1.0.4 ships.
+	// A contained VM (record.Contained) gets the same.
 	restoreLegacyNetwork := rec.OldSupervisorNetworkRestore || rec.OldSupervisorNetworkClosed || len(rec.OldSupervisorProviders) > 0 ||
-		oldSupervisorLingering(auditPhase(sb.Status.Phase), rec)
+		rec.Contained != "" || oldSupervisorLingering(auditPhase(sb.Status.Phase), rec)
 	// A sandbox an OpenShell before 0.1.5 created keeps a Docker bootstrap
 	// that 0.1.5 cannot read (GAP-0300): it moves to 0.1.5's format first.
 	if err := m.migrateBootstrap(gw, rec.Name, sb); err != nil {
@@ -1005,10 +1057,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		// legacy supervisor can still run background work. Session approvals
 		// removed above are not brought into the new session.
 		if err := m.restoreOldSupervisorNetwork(ctx, gw, b, sb, eff); err != nil {
-			stopErr := m.stopUnverified(ctx, gw, b)
 			detail := "DefenseClaw stopped the new session before it could run without its network policy"
-			if stopErr != nil {
-				detail += "; stopping it also failed: " + stopErr.Error()
+			if stopErr := m.stopUnverified(ctx, gw, b); stopErr != nil {
+				// Not stopped (a failed sync contains it instead, GAP-0902):
+				// the start failed, and the VM still runs.
+				detail = "DefenseClaw did not stop the new session, so it is still running: " + stopErr.Error()
 			}
 			return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
 				Message: "sandbox " + rec.Name + " did not restore its network on the new OpenShell supervisor: " + err.Error(),

@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -284,6 +285,8 @@ type fakeSandboxFleet struct {
 	failStops map[string]int
 	stopped   []string
 	listErr   error
+	// whys are the manager.EmergencyStopReason of every stop.
+	whys []string
 }
 
 func (f *fakeSandboxFleet) List(context.Context) ([]sandboxapi.Sandbox, error) {
@@ -300,9 +303,10 @@ func (f *fakeSandboxFleet) List(context.Context) ([]sandboxapi.Sandbox, error) {
 	return out, nil
 }
 
-func (f *fakeSandboxFleet) Stop(_ context.Context, name string) (*sandboxapi.Sandbox, error) {
+func (f *fakeSandboxFleet) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.whys = append(f.whys, manager.EmergencyStopReason(ctx))
 	if f.failStops[name] > 0 {
 		f.failStops[name]--
 		return nil, errors.New("openshell unavailable")
@@ -411,6 +415,21 @@ func TestContainListenerLossStopsRunningSandboxes(t *testing.T) {
 	}
 	if len(failures) != 1 || failures["dc-stubborn"] != 1 {
 		t.Fatalf("failed stops reported = %v, want dc-stubborn once", failures)
+	}
+	// Each is a security stop: a MicroVM whose disk cannot be synced
+	// first is contained instead (GAP-0902), and a failed one says why.
+	fleet.mu.Lock()
+	whys := slices.Clone(fleet.whys)
+	fleet.mu.Unlock()
+	for _, why := range whys {
+		if why != "the sandbox ingress listener is not running" {
+			t.Fatalf("stop reasons = %q", whys)
+		}
+	}
+	for _, ev := range feed.snapshot() {
+		if strings.Contains(ev.Message, "stop it yourself") && !strings.Contains(ev.Message, "could not stop it (openshell unavailable)") {
+			t.Fatalf("the failed stop does not say why: %+v", ev)
+		}
 	}
 	for _, name := range want {
 		if stoppedMsgs[name] != 1 {

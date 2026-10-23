@@ -226,7 +226,7 @@ func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 		}
 	}
 	m.mu.Unlock()
-	if rec.OldSupervisorNetworkClosed || oldSupervisorLive(phase, rec) {
+	if rec.OldSupervisorNetworkClosed || rec.Contained != "" || oldSupervisorLive(phase, rec) {
 		m.suspendOldSupervisorEgress(b)
 		return
 	}
@@ -253,22 +253,30 @@ func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 const oldSupervisorEgressOff = legacyUnprotected + ": it may run the supervisor of an OpenShell release older than " + openshell.SupportedMin +
 	", so DefenseClaw's egress proxy is closed to it until it stops"
 
+const containedEgressOff = containedUnprotected + ": DefenseClaw had to stop it but could not sync its MicroVM's disk first, " +
+	"so DefenseClaw's egress proxy is closed to it until its next session"
+
 // suspendOldSupervisorEgress closes the DefenseClaw proxy route, including
-// tunnels already open. Called again on policy refresh so a legacy guest
-// (oldSupervisorLive) is never registered again while it lives.
+// tunnels already open. Called again on policy refresh so a legacy or
+// contained guest (unprotectedLive) is never registered again while it
+// lives.
 func (m *Manager) suspendOldSupervisorEgress(b *box) {
 	m.mu.Lock()
-	cred, rec := b.cred, b.rec
+	cred, rec, phase := b.cred, b.rec, b.phase
 	m.mu.Unlock()
 	if rec.BindingID == "" {
 		return
 	}
-	why := egress.Decision{Category: egress.CategoryEgressOff, Source: egress.SourceDefault, Reason: oldSupervisorEgressOff}
+	reason := oldSupervisorEgressOff
+	if rec.Contained != "" && !oldSupervisorLive(phase, rec) {
+		reason = containedEgressOff
+	}
+	why := egress.Decision{Category: egress.CategoryEgressOff, Source: egress.SourceDefault, Reason: reason}
 	if cred.Username == "" || m.creds.Suspend(cred, m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, nil, nil), why) != nil {
 		m.creds.Revoke(rec.BindingID)
 	}
 	m.recheckEgress(rec.BindingID)
-	m.noteEgressOff(b, oldSupervisorEgressOff)
+	m.noteEgressOff(b, reason)
 }
 
 // containOldSupervisorNetwork closes DefenseClaw's egress proxy to a live
@@ -321,17 +329,29 @@ func (m *Manager) scheduleOldSupervisorNetwork(b *box) {
 
 // containOldSupervisorNetworkLocked runs with the sandbox operation lock,
 // so the start cannot race between closing its old rules and recording that
-// it must restore the create-time rules on the new supervisor.
+// it must restore the create-time rules on the new supervisor. It withdraws
+// the network of a live legacy or contained guest (unprotectedLive).
 func (m *Manager) containOldSupervisorNetworkLocked(ctx context.Context, b *box) {
 	m.mu.Lock()
 	rec, phase := b.rec, b.phase
 	m.mu.Unlock()
-	if !oldSupervisorLive(phase, rec) {
+	if !unprotectedLive(phase, rec) {
 		m.mu.Lock()
 		b.oldSupervisorNetworkErr = ""
 		m.mu.Unlock()
 		return
 	}
+	_ = m.closeNetworkLocked(ctx, b)
+}
+
+// closeNetworkLocked withdraws every OpenShell network rule and provider of
+// b and confirms the closed policy loaded (withdrawOldSupervisorRules),
+// records it closed, and says once in the feed that a withdrawal failed.
+// It returns why it failed. The caller holds b's operation lock.
+func (m *Manager) closeNetworkLocked(ctx context.Context, b *box) error {
+	m.mu.Lock()
+	rec, phase := b.rec, b.phase
+	m.mu.Unlock()
 	err := m.withdrawOldSupervisorRules(ctx, b)
 	m.mu.Lock()
 	newlyClosed := err == nil && !b.rec.OldSupervisorNetworkClosed
@@ -356,11 +376,87 @@ func (m *Manager) containOldSupervisorNetworkLocked(ctx context.Context, b *box)
 	changed := previous != b.oldSupervisorNetworkErr
 	m.mu.Unlock()
 	if err != nil && changed {
-		m.logf("old supervisor: cannot close the network of %s: %v", rec.Name, err)
+		m.logf("cannot close the network of %s: %v", rec.Name, err)
+		reason, msg := sandboxapi.ReasonOldSupervisor, legacyUnprotected+": "+legacyRulesKept
+		if !oldSupervisorLive(phase, rec) {
+			reason, msg = sandboxapi.ReasonContained, containedUnprotected+": "+containedRulesKept
+		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
-			Reason: sandboxapi.ReasonOldSupervisor, Message: "⚠ " + rec.Name + ": " + legacyUnprotected + ": " + legacyRulesKept + err.Error() + "; " +
-				legacyWayOn(rec.Name, phase, rec.Driver)})
+			Reason: reason, Message: "⚠ " + rec.Name + ": " + msg + err.Error() + "; " + legacyWayOn(rec.Name, phase, rec.Driver)})
 	}
+	return err
+}
+
+// containUnsynced keeps running, contained, the MicroVM of b that
+// DefenseClaw must not leave as it is (why: a security alarm's stop,
+// WithEmergencyStop, or a start that failed, stopUnverified) but cannot
+// stop without losing what its guest has not synced: DefenseClaw never
+// stops a MicroVM after a failed sync on its own (GAP-0902). The record
+// says so first (record.Contained), so a restarted daemon keeps it
+// contained and the next start restores its create-time network. Then
+// DefenseClaw's egress proxy closes to it, its ingress token is rotated
+// where a provider delivers it (the token a program on a lost listener may
+// have seen stops authenticating; the next start delivers a new one), and
+// the network rules (approved host ports among them) and providers it
+// added are withdrawn, confirmed loaded; reconcile retries a withdrawal
+// that failed. It is reported unprotected, no new sandbox runs while it
+// lives (containedLive), and the feed says so. It returns what could not
+// be done or confirmed. The caller holds b's operation lock.
+func (m *Manager) containUnsynced(ctx context.Context, b *box, why string) error {
+	m.mu.Lock()
+	first := b.rec.Contained == ""
+	if first {
+		b.rec.Contained = why
+	}
+	m.mu.Unlock()
+	var errs []error
+	if first {
+		// Kept in memory when the record cannot say so: it fails closed.
+		if err := m.saveRecord(b); err != nil {
+			errs = append(errs, fmt.Errorf("record that it is contained: %w", err))
+		}
+	}
+	m.suspendOldSupervisorEgress(b)
+	if err := m.rotateContainedIngress(b); err != nil {
+		errs = append(errs, err)
+	}
+	if err := m.closeNetworkLocked(ctx, b); err != nil {
+		errs = append(errs, fmt.Errorf("withdraw its network rules and providers: %w", err))
+	}
+	err := errors.Join(errs...)
+	m.mu.Lock()
+	name, contained, phase, driver := b.rec.Name, b.rec.Contained, b.phase, b.rec.Driver
+	m.mu.Unlock()
+	msg := "⚠ " + name + ": " + containedWords(name, contained, phase, driver)
+	if err != nil {
+		msg += ". DefenseClaw could not confirm it contained: " + err.Error()
+	}
+	m.logf("sandbox %s: kept running, contained, for %s: %v", name, why, err)
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
+		Reason: sandboxapi.ReasonContained, Message: truncate(msg, 2048)})
+	return err
+}
+
+// rotateContainedIngress rotates the ingress token of a contained sandbox
+// whose token a provider delivers: the guest's token stops authenticating
+// at once, and the next start delivers a new one. With token_delivery: env
+// the token is a variable of the sandbox spec, which OpenShell cannot
+// change after create, so it is kept, as a start keeps it.
+func (m *Manager) rotateContainedIngress(b *box) error {
+	m.mu.Lock()
+	id, delivery := b.rec.BindingID, b.rec.TokenDelivery
+	m.mu.Unlock()
+	if id == "" || delivery != config.OpenShellTokenDeliveryProvider {
+		return nil
+	}
+	binding, _, err := m.opts.Bindings.Rotate(id)
+	if err != nil {
+		return fmt.Errorf("rotate its ingress token: %w", err)
+	}
+	if m.opts.ForgetBinding != nil {
+		m.opts.ForgetBinding(binding.ID)
+	}
+	return nil
 }
 
 func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error {
@@ -384,7 +480,7 @@ func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error 
 		return err
 	}
 	if sb == nil || (sb.Status.Phase != openshell.PhaseReady && sb.Status.Phase != openshell.PhaseCompleted && sb.Status.Phase != openshell.PhaseError) {
-		return fmt.Errorf("OpenShell no longer reports this legacy sandbox live")
+		return fmt.Errorf("OpenShell no longer reports this sandbox live")
 	}
 	// OpenShell composes attached providers' direct endpoints into the
 	// effective policy. Removing their generated rule names from the base
@@ -436,7 +532,7 @@ func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error 
 			return err
 		}
 		if sb == nil || (sb.Status.Phase != openshell.PhaseReady && sb.Status.Phase != openshell.PhaseCompleted && sb.Status.Phase != openshell.PhaseError) {
-			return fmt.Errorf("OpenShell no longer reports this legacy sandbox live")
+			return fmt.Errorf("OpenShell no longer reports this sandbox live")
 		}
 		names := make([]string, 0, len(cfg.Policy.NetworkPolicies))
 		for rule := range cfg.Policy.NetworkPolicies {
@@ -543,6 +639,7 @@ func (m *Manager) restoreOldSupervisorNetwork(ctx context.Context, gw *Gateway, 
 	b.rec.OldSupervisorNetworkClosed = false
 	b.rec.OldSupervisorProviders = nil
 	b.rec.OldSupervisorNetworkRestore = false
+	b.rec.Contained = ""
 	b.oldSupervisorNetworkErr = ""
 	m.mu.Unlock()
 	if err := m.saveRecord(b); err != nil {
@@ -550,6 +647,7 @@ func (m *Manager) restoreOldSupervisorNetwork(ctx context.Context, gw *Gateway, 
 		b.rec.OldSupervisorNetworkClosed = rec.OldSupervisorNetworkClosed
 		b.rec.OldSupervisorProviders = rec.OldSupervisorProviders
 		b.rec.OldSupervisorNetworkRestore = rec.OldSupervisorNetworkRestore
+		b.rec.Contained = rec.Contained
 		m.mu.Unlock()
 		return err
 	}

@@ -794,7 +794,7 @@ func (m *Manager) scheduleForeignStop(name, bindingID string) {
 	m.tamperStops.Add(1)
 	go func() {
 		defer m.tamperStops.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
+		ctx, cancel := context.WithTimeout(WithEmergencyStop(context.Background(), "repeated network rules added outside DefenseClaw"), defaultOpTimeout)
 		defer cancel()
 		b, unlock, err := m.lockBox(name)
 		if err != nil {

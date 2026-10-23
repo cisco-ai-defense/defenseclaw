@@ -73,6 +73,45 @@ func TestALegacySandboxIsReportedUnprotected(t *testing.T) {
 	}
 }
 
+// GAP-0902 review: a MicroVM DefenseClaw had to stop for a security alarm
+// but keeps running contained, because its disk could not be synced first,
+// is reported unprotected in its own words (not as a legacy guest's old
+// supervisor), with the command that ends it, and the deployment is not
+// security-complete.
+func TestAContainedSandboxIsReportedUnprotected(t *testing.T) {
+	h := newOSHost(t, "linux")
+	h.ops.loggedIn = []SandboxAccount{h.alice}
+	h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Running: 2, Live: 2, Unprotected: []UnprotectedSandbox{
+		{Name: "held", Stop: "defenseclaw sandbox stop held", Reason: sandboxapi.UnprotectedContained},
+		{Name: "kept", Stop: "defenseclaw sandbox stop kept"}}}
+	seeded := &enterprisestatus.Result{SecurityComplete: true}
+	(&lifecycle{env: h.env, opts: Options{Action: ActionStatus}, result: seeded}).describeLegacySandboxes(context.Background())
+	warning := messagesOf(seeded.Warnings, codeLegacySandbox)
+	var held, kept string
+	for _, line := range strings.Split(warning, "\n") {
+		switch {
+		case strings.Contains(line, "held;"):
+			held = line
+		case strings.Contains(line, "kept;"):
+			kept = line
+		}
+	}
+	if seeded.SecurityComplete || !strings.HasPrefix(held, "alice: "+sandboxapi.ContainedUnprotected+": held; as alice, `defenseclaw sandbox stop held` ends it") ||
+		!strings.Contains(held, "its MicroVM's disk could not be synced first") || strings.Contains(held, "older than") ||
+		!strings.HasPrefix(kept, "alice: "+sandboxapi.LegacyUnprotected+": kept") || !strings.Contains(kept, "older than") {
+		t.Fatalf("security_complete=%v warning=%q", seeded.SecurityComplete, warning)
+	}
+	rows := 0
+	for _, s := range seeded.Services {
+		if s.Name == "sandbox unprotected alice" && strings.HasPrefix(s.State, sandboxapi.ContainedUnprotected+": held") {
+			rows++
+		}
+	}
+	if rows != 1 {
+		t.Fatalf("services = %+v", seeded.Services)
+	}
+}
+
 // Status warns and is not security-complete while a legacy sandbox runs,
 // and verify fails on it.
 func TestVerifyFailsWhileALegacySandboxRuns(t *testing.T) {

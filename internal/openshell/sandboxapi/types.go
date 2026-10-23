@@ -133,10 +133,11 @@ type Status struct {
 	// Managed is set by a managed host's per-user sandbox daemon: the
 	// caller's own policy, never another account's.
 	Managed *ManagedStatus `json:"managed,omitempty"`
-	// Unprotected names every live legacy guest (Sandbox.OldSupervisor),
-	// which runs unprotected until its user ends it, with the command that
-	// does: the managed lifecycle's status and verify read it. Unset by a
-	// daemon before DefenseClaw 1.0.4, whose running sandboxes all are.
+	// Unprotected names every live legacy guest (Sandbox.OldSupervisor)
+	// and every contained one (UnprotectedContained), which run unprotected
+	// until their user ends them, with the command that does: the managed
+	// lifecycle's status and verify read it. Unset by a daemon before
+	// DefenseClaw 1.0.4, whose running sandboxes all are.
 	Unprotected []UnprotectedSandbox `json:"unprotected,omitempty"`
 }
 
@@ -146,12 +147,27 @@ type Status struct {
 // DefenseClaw cannot contain.
 const LegacyUnprotected = "running unprotected: legacy sandbox"
 
+// ContainedUnprotected opens every account of a contained guest: a MicroVM
+// DefenseClaw had to stop on its own (a hook alarm, repeated foreign
+// network rules, a lost listener, a revoked registration, a start that
+// failed) but keeps running, its network withdrawn, because its disk could
+// not be synced first and a stop would lose what its guest had not written
+// (GAP-0902).
+const ContainedUnprotected = "running unprotected: contained sandbox"
+
+// UnprotectedContained is the UnprotectedSandbox.Reason of a contained
+// guest (ContainedUnprotected).
+const UnprotectedContained = "contained"
+
 // UnprotectedSandbox is one entry of Status.Unprotected.
 type UnprotectedSandbox struct {
 	Name  string `json:"name"`
 	Phase string `json:"phase"`
 	// Stop is the command its user runs to end it.
 	Stop string `json:"stop"`
+	// Reason is why it is unprotected: "" for a live legacy guest
+	// (LegacyUnprotected), UnprotectedContained for a contained one.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Busy is how many sandboxes may hold compute (Live, and never fewer than
@@ -1556,6 +1572,12 @@ const ReasonUnflushedStop = "unflushed_stop"
 // sandbox gets when its session started on an OpenShell release older than
 // openshell.SupportedMin, whose supervisor it keeps until it stops.
 const ReasonOldSupervisor = "old_supervisor"
+
+// ReasonContained is the Reason of the (HIGH) finding event of a MicroVM
+// DefenseClaw had to stop for a security alarm, or after a start that
+// failed, but keeps running contained because its disk could not be synced
+// first (ContainedUnprotected).
+const ReasonContained = "contained"
 
 // ReasonUpstreamFailed is the Reason of the (INFO) finding event the feed
 // gets the first time the egress proxy could not complete an allowed

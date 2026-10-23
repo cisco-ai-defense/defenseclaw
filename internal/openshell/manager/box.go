@@ -124,7 +124,8 @@ type box struct {
 	tamperStop  bool
 	silenceSent bool
 	// oldSupervisorNetworkErr is the last failure to withdraw the network
-	// rules and providers of a live legacy guest (oldSupervisorLive).
+	// rules and providers of a live legacy or contained guest
+	// (unprotectedLive).
 	oldSupervisorNetworkErr string
 	// oldSupervisorNetworkBusy prevents duplicate containment workers while
 	// a lifecycle operation holds op.
@@ -545,6 +546,13 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		m.containOldSupervisorNetwork(ctx, b)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
 			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorMessage(rec.Name, rec.SessionRelease, phase, rec.Driver, m.upgradeWayOn(release))})
+	} else if containedLive(phase, rec) {
+		// A contained VM (containUnsynced, which said so when it contained
+		// it) is named again for a restarted daemon that finds it, and when
+		// its workload ends with its VM still held; reconcile withdraws its
+		// network again (reconcileOldSupervisor).
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
+			Reason: sandboxapi.ReasonContained, Message: truncate("⚠ "+rec.Name+": "+containedWords(rec.Name, rec.Contained, phase, rec.Driver), 2048)})
 	}
 	m.syncGuard(b, phase)
 	m.syncObserve(b, phase)
@@ -769,6 +777,42 @@ func oldSupervisorLive(phase audit.SandboxPhase, rec record) bool {
 	return phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(rec.SessionRelease) || oldSupervisorLingering(phase, rec)
 }
 
+// containedLive reports a contained MicroVM (record.Contained) whose VM may
+// still run: ready, or its workload ended with the VM still held.
+func containedLive(phase audit.SandboxPhase, rec record) bool {
+	return rec.Contained != "" && (phase == audit.SandboxPhaseReady ||
+		(phase == audit.SandboxPhaseCompleted || phase == audit.SandboxPhaseError) && holdsCompute(phase, rec.Driver, rec.PhaseReason))
+}
+
+// unprotectedLive reports a guest DefenseClaw cannot show protected while
+// it runs, a live legacy one (oldSupervisorLive) or a contained one
+// (containedLive): DefenseClaw withdraws what it added to its network,
+// reports it unprotected and runs no new sandbox while it lives.
+func unprotectedLive(phase audit.SandboxPhase, rec record) bool {
+	return oldSupervisorLive(phase, rec) || containedLive(phase, rec)
+}
+
+// containedUnprotected opens every account of a contained guest
+// (containedLive).
+const containedUnprotected = sandboxapi.ContainedUnprotected
+
+// containedContainment is what DefenseClaw does about a contained guest.
+const containedContainment = "DefenseClaw closed its egress proxy, rotated its ingress token where a provider delivers it, and withdraws the network " +
+	"rules (approved host ports among them) and providers it added; it does not stop the VM for you, and until it is gone it creates and " +
+	"starts no sandbox"
+
+// containedRulesKept opens the warning about a withdrawal of a contained
+// guest's network rules that failed (the error follows).
+const containedRulesKept = "DefenseClaw could not withdraw the network rules it added to this contained sandbox, or confirm them withdrawn, so they may still let it out: "
+
+// containedWords is what the view and the feed say of the contained guest
+// name (containedLive) in phase on driver, that DefenseClaw had to stop
+// for why.
+func containedWords(name, why string, phase audit.SandboxPhase, driver string) string {
+	return containedUnprotected + ": DefenseClaw had to stop it (" + why + "), but its MicroVM's disk could not be synced first, so it keeps " +
+		"running rather than lose what its guest has not written to its disk. " + containedContainment + ": " + legacyWayOn(name, phase, driver)
+}
+
 // legacyWayOn is how the user ends the live legacy guest name in phase on
 // compute driver driver ("" is docker): the stop of a ready one, which on
 // a MicroVM syncs its disk first because that release's stop does not, and
@@ -839,44 +883,62 @@ func oldSupervisorMessage(name, release string, phase audit.SandboxPhase, driver
 // interval is the backoff after a failed policy update.
 func (m *Manager) reconcileOldSupervisor(ctx context.Context, b *box) {
 	m.mu.Lock()
-	live := oldSupervisorLive(b.phase, b.rec)
+	live := unprotectedLive(b.phase, b.rec)
 	m.mu.Unlock()
 	if live {
 		m.containOldSupervisorNetwork(ctx, b)
 	}
 }
 
-// legacyRunRefusal refuses a create or a start while a live legacy guest
-// (oldSupervisorLive) other than except runs: its network cannot be
-// contained (GAP-0831), so DefenseClaw runs no new sandbox until its user
-// ends it. except is the sandbox a start ends that way (an ended legacy
-// MicroVM started with --end-vm). The refusal names each guest with the
-// command that ends it.
+// legacyRunRefusal refuses a create or a start while a guest DefenseClaw
+// cannot show protected (unprotectedLive) other than except runs: a live
+// legacy guest, whose network cannot be contained (GAP-0831), or a
+// contained one, which DefenseClaw had to stop but could not sync first.
+// DefenseClaw runs no new sandbox until its user ends it. except is the
+// sandbox a start ends that way (an ended legacy MicroVM started with
+// --end-vm). The refusal names each guest with the command that ends it.
 func (m *Manager) legacyRunRefusal(except string) error {
 	m.mu.Lock()
-	var live []string
+	var legacy, contained []string
 	ways := map[string]string{}
 	for name, b := range m.boxes {
-		if name == except || b.retained || b.missing || b.deleted || b.creating || !oldSupervisorLive(b.phase, b.rec) {
+		if name == except || b.retained || b.missing || b.deleted || b.creating {
 			continue
 		}
-		live = append(live, name)
+		switch {
+		case oldSupervisorLive(b.phase, b.rec):
+			legacy = append(legacy, name)
+		case containedLive(b.phase, b.rec):
+			contained = append(contained, name)
+		default:
+			continue
+		}
 		ways[name] = name + ": " + legacyWayOn(name, b.phase, b.rec.Driver)
 	}
 	m.mu.Unlock()
-	if len(live) == 0 {
+	if len(legacy)+len(contained) == 0 {
 		return nil
 	}
-	slices.Sort(live)
-	detail := make([]string, 0, len(live))
-	for _, name := range live {
+	slices.Sort(legacy)
+	slices.Sort(contained)
+	var why []string
+	if len(legacy) > 0 {
+		why = append(why, strings.Join(legacy, ", ")+" runs ("+legacyUnprotected+"): its session runs the supervisor "+
+			"of an OpenShell release older than "+openshell.SupportedMin+", whose network broker can let connections bypass sandbox policy "+
+			"(NVIDIA/OpenShell#4494), and DefenseClaw cannot contain it")
+	}
+	if len(contained) > 0 {
+		why = append(why, strings.Join(contained, ", ")+" runs ("+containedUnprotected+"): DefenseClaw had to stop it, but its MicroVM's disk "+
+			"could not be synced first, so it keeps running contained")
+	}
+	names := slices.Concat(legacy, contained)
+	detail := make([]string, 0, len(names))
+	for _, name := range names {
 		detail = append(detail, ways[name])
 	}
 	return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
-		Message: "DefenseClaw runs no new sandbox while " + strings.Join(live, ", ") + " runs (" + legacyUnprotected + "): its session runs the supervisor " +
-			"of an OpenShell release older than " + openshell.SupportedMin + ", whose network broker can let connections bypass sandbox policy " +
-			"(NVIDIA/OpenShell#4494), and DefenseClaw cannot contain it",
-		Detail: strings.Join(detail, "; ") + "; then run again"}
+		Message: "DefenseClaw runs no new sandbox while " + strings.Join(why, ", and while "),
+		Detail:  strings.Join(detail, "; ") + "; then run again"}
 }
 
 // unflushedStopMessage is the feed's warning about the MicroVM name that
@@ -1251,6 +1313,11 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 			v.Warnings = append(v.Warnings, legacyRulesKept+b.oldSupervisorNetworkErr)
 		}
 		v.OldSupervisor = true
+	} else if containedLive(b.phase, r) {
+		v.Warnings = append(slices.Clone(v.Warnings), containedWords(r.Name, r.Contained, b.phase, r.Driver))
+		if b.oldSupervisorNetworkErr != "" {
+			v.Warnings = append(v.Warnings, containedRulesKept+b.oldSupervisorNetworkErr)
+		}
 	}
 	v.Hooks = sandboxapi.HookCoverage{
 		LastHookAt: b.hooks.lastHook, LastOTLPAt: b.hooks.lastOTLP, HookRequests: b.hooks.requests,
