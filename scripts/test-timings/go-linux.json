@@ -1498,7 +1498,7 @@
    "TestWindowsAtomicPolicyParityProfilePosture": 3.6,
    "TestWindowsCommandFullHookAuditCorrelation": 19.7,
    "TestWindowsCommandHookParityObserveAndAction": 7.6,
-   "TestWindowsConnectorContractCompoundRegistryPersistenceRemainsShadowWhenPartial": 7.9,
+   "TestWindowsConnectorContractCompoundRegistryPersistencePerDialect": 7.9,
    "TestWindowsConnectorMarkerRuleUsesCompleteCMDWrapperArgv": 4.0,
    "TestWindowsDownloadExecuteLiveConnectorToolNamesRemainShadowWhenPartial": 5.8,
    "TestWindowsExactSecurityControlStrictDetectionOnlyPosture": 15.6,

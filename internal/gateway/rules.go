@@ -832,6 +832,7 @@ type ruleScanOptions struct {
 	includeToolCallOnly bool
 	excludeTrustExploit bool
 	excludedRuleIDs     map[string]struct{}
+	onlyRuleIDs         map[string]struct{}
 	contentScope        ruleContentScope
 	onlyCategory        string
 }
@@ -839,6 +840,11 @@ type ruleScanOptions struct {
 func (o ruleScanOptions) allows(ruleID string, toolCallOnly bool) bool {
 	if toolCallOnly && !o.includeToolCallOnly {
 		return false
+	}
+	if o.onlyRuleIDs != nil {
+		if _, allowed := o.onlyRuleIDs[ruleID]; !allowed {
+			return false
+		}
 	}
 	_, excluded := o.excludedRuleIDs[ruleID]
 	return !excluded

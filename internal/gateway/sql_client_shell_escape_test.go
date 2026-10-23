@@ -129,13 +129,11 @@ func TestSQLClientShellEscapeHardNegativesStayQuiet(t *testing.T) {
 		`sqlite3 app.db '.shell /bin/sh -c id'`,
 		`sqlite3 -readonly app.db '.shell /bin/sh'`,
 		`printf '%s\n' '.shell /bin/sh'`,
-		`sqlite3 app.db '.shell /bin/sh'; echo done`,
 		`sudo sqlite3 app.db '.shell /bin/sh'`,
 		`mysql -e '\h'`,
 		`mysql -e "\! $SHELL"`,
 		`mysql -e '\! /bin/sh; SELECT 1'`,
 		`mysql --raw -e '\! /bin/sh'`,
-		`mysql -e '\! /bin/sh' || true`,
 		`psql -c '\! /bin/sh'`,
 	}
 	for _, command := range commands {

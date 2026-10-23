@@ -54,7 +54,7 @@ func HomeResolvedTwin(input Input) (twin Facts, ok bool) {
 		return Facts{}, false
 	}
 	source := capture.source
-	if sequence, listed := shortCircuitListSequence(source); listed {
+	if sequence, listed := shortCircuitListSequence(source, false); listed {
 		source = sequence
 	}
 	resolved, ok := homeResolvedSource(source, home)

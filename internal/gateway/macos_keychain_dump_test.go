@@ -54,12 +54,13 @@ func TestMacOSLoginKeychainDumpProfilePosture(t *testing.T) {
 }
 
 func TestMacOSLoginKeychainDumpOwnerRejectsNearMisses(t *testing.T) {
+	const pipeline = `security dump-keychain -d login.keychain | grep acct`
 	for _, command := range []string{
 		`security dump-keychain login.keychain`,
 		`security dump-keychain -d build.keychain`,
 		`security find-certificate -a -p`,
 		`security dump-keychain -d "$KEYCHAIN"`,
-		`security dump-keychain -d login.keychain | grep acct`,
+		pipeline,
 		`echo 'security dump-keychain -d login.keychain'`,
 	} {
 		input := actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", DialectHint: actionfacts.DialectPOSIX}
@@ -71,6 +72,21 @@ func TestMacOSLoginKeychainDumpOwnerRejectsNearMisses(t *testing.T) {
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input: input, LegacyText: command, Connector: "codex", EnforcementCapable: true,
 		})
+		if command == pipeline {
+			alone := `security dump-keychain -d login.keychain`
+			aloneInput := input
+			aloneInput.Command = alone
+			aloneFindings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: aloneInput, LegacyText: alone, Connector: "codex", EnforcementCapable: true,
+			})
+			got := findingWithID(findings, macOSLoginKeychainDumpRuleID)
+			want := findingWithID(aloneFindings, macOSLoginKeychainDumpRuleID)
+			if got == nil || want == nil || got.contributesToEnforcement() != want.contributesToEnforcement() {
+				t.Fatalf("pipeline stage differs from standalone: got=%v, alone=%v",
+					FindingStrings(findings), FindingStrings(aloneFindings))
+			}
+			continue
+		}
 		if findingStringHasRuleID(FindingStrings(findings), macOSLoginKeychainDumpRuleID) {
 			t.Fatalf("negative produced owner finding: command=%q findings=%v", command, FindingStrings(findings))
 		}

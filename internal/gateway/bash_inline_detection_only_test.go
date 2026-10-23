@@ -551,7 +551,9 @@ func TestShellProfilePostureRequiresTypedMutation(t *testing.T) {
 				{
 					name:  "unresolved active mutation",
 					input: actionfacts.Input{Tool: "shell", Command: "printf x >> /home/alice/.bashrc; future-command --unknown-mode", CWD: "/repo", ActiveHome: "/home/alice"},
-					want:  profile == "strict", wantRoute: "fallback",
+					// The complete profile mutation keeps its own proof despite
+					// the unresolved sibling command.
+					want: true, wantRoute: "semantic", wantEnforce: true,
 				},
 				{
 					name:  "unresolved active read",
@@ -587,7 +589,8 @@ func TestShellProfilePostureRequiresTypedMutation(t *testing.T) {
 						matched.ContributesToEnforcement != test.wantEnforce {
 						t.Fatalf("finding = %+v, want route=%s enforce=%t", *matched, test.wantRoute, test.wantEnforce)
 					}
-					if !result.Authoritative && result.Action == guardrailActionBlock {
+					if !result.Authoritative && result.Action == guardrailActionBlock &&
+						!matched.ContributesToEnforcement {
 						t.Fatalf("unresolved lexical visibility blocked: %+v", result)
 					}
 				})

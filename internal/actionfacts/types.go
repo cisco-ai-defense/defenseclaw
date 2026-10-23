@@ -971,6 +971,7 @@ const (
 	IssueOpaqueArtifact        IssueCode = "opaque_artifact"
 	IssueUnknownOperandGrammar IssueCode = "unknown_operand_grammar"
 	IssueConflictingSources    IssueCode = "conflicting_sources"
+	IssueIncomparableSources   IssueCode = "incomparable_sources"
 	IssueInputLimit            IssueCode = "input_limit"
 	IssueNodeLimit             IssueCode = "node_limit"
 	IssueDepthLimit            IssueCode = "depth_limit"

@@ -1498,6 +1498,16 @@ func TestAnalyzeConflictingCommandAndToolSchemaDoesNotMintToolFacts(t *testing.T
 	}
 }
 
+func TestAnalyzeIncomparableExecutionSourcesRetainUncertainty(t *testing.T) {
+	facts := Analyze(Input{Tool: "shell", Command: "bash -n /tmp/runner.sh",
+		Argv: []string{"bash", "/tmp/runner.sh"}, CWD: "/repo", DialectHint: DialectPOSIX})
+	if facts.Parse.Status != StatusPartial ||
+		!containsIssue(facts.Parse.Issues, IssueIncomparableSources) ||
+		facts.Authoritative() {
+		t.Fatalf("incomparable raw and argv sources = %+v", facts.Parse)
+	}
+}
+
 func TestAnalyzeCopyAndMoveToolSchemasRequireExactRoles(t *testing.T) {
 	tests := []struct {
 		name        string

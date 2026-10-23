@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -265,15 +266,7 @@ func parseShell(command string) (*syntax.File, bool) {
 	if len(command) > MaxPayloadBytes {
 		return nil, false
 	}
-	var file *syntax.File
-	var err error
-	for _, variant := range []syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX} {
-		file, err = syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
-		if err == nil {
-			return file, true
-		}
-	}
-	return nil, false
+	return shellparse.Parse(command)
 }
 
 // staticShellWord expands a redirect word that names one fixed path: quotes,

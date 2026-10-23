@@ -31,6 +31,7 @@ const (
 	findingProofExactCodeGuard
 	findingProofExactFallback
 	findingProofParserShadow
+	findingProofEvaluationFailure
 )
 
 // findingProof is deliberately value-free. It records neither argv nor shell
@@ -120,6 +121,13 @@ func newParserShadowFindingProof(ruleID string) findingProof {
 	return newFindingProof(findingProofParserShadow, ruleID, false)
 }
 
+// A bounded parser failure must not leave an unvisited command as an allow
+// path. These IDs are issued only by the local per-command evaluator.
+func newEvaluationFailureFindingProof(ruleID string) findingProof {
+	return newFindingProof(findingProofEvaluationFailure, ruleID,
+		ruleID == "ACTION-COMPOUND-LIMIT" || ruleID == "ACTION-COMPOUND-UNPROVEN")
+}
+
 func newFindingProof(
 	kind findingProofKind,
 	ruleID string,
@@ -149,7 +157,8 @@ func (p findingProof) authorizes(ruleID string) bool {
 	case findingProofActionFactsSemantic,
 		findingProofActionFactsSubgraph,
 		findingProofExactCodeGuard,
-		findingProofExactFallback:
+		findingProofExactFallback,
+		findingProofEvaluationFailure:
 		return true
 	default:
 		return false
