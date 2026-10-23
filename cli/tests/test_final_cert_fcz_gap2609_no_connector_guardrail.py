@@ -127,91 +127,98 @@ def test_non_interactive_guardrail_refuses_legacy_config_without_claw_or_agent()
         cleanup_app(app, db_path, tmp_dir)
 
 
-def test_non_interactive_guardrail_refuses_stale_openclaw_selection(tmp_path) -> None:
-    from unittest.mock import patch
-
-    from defenseclaw import config as config_module
-    from defenseclaw.commands import cmd_setup
-    from defenseclaw.context import AppContext
-
-    # An older init wrote claw.mode without setting guardrail.connector.
-    # An absent local OpenClaw cannot turn that default into a selection.
-    (tmp_path / "config.yaml").write_text("config_version: 9\nclaw:\n  mode: openclaw\n", encoding="utf-8")
-    app = AppContext()
-    with patch("defenseclaw.openclaw_presence.openclaw_installed", return_value=False):
-        app.cfg = config_module.load(data_dir=str(tmp_path))
-    argv = ["guardrail", "--non-interactive", "--no-restart", "--cisco-api-key-env", "ASIA_PACIFIC_KEY"]
-    with (
-        patch.object(cmd_setup, "_detect_installed_connectors", return_value=[]),
-        patch.object(cmd_setup, "_installed_picked_connector", return_value=None),
-        patch.object(cmd_setup, "_ensure_connector_available") as check,
-    ):
-        result = CliRunner().invoke(cmd_setup.setup, argv, obj=app)
-    assert result.exit_code == 1, result.output
-    assert "no agent connector is configured" in result.output
-    check.assert_not_called()
-    assert app.cfg.guardrail.connector == ""
-    assert app.cfg.cisco_ai_defense.api_key_env != "ASIA_PACIFIC_KEY"
+_SAVED = "guardrail:\n  connector: openclaw\n"
+_IMPLIED = "claw:\n  mode: openclaw\n"
+_LEGACY = "claw:\n  mode: openclaw\n" + _SAVED
 
 
-@pytest.mark.parametrize("claw_block", ["", "claw:\n  mode: openclaw\n"], ids=["no-claw-block", "saved-claw-mode"])
+def _gateway(host: str = "127.0.0.1", fleet_mode: str = "auto") -> str:
+    return f"gateway:\n  host: {host}\n  fleet_mode: '{fleet_mode}'\n"
+
+
+def _roster(*entries: str, primary: str | None = "openclaw") -> str:
+    head = "claw:\n  mode: openclaw\nguardrail:\n"
+    if primary is not None:
+        head += f"  connector: {primary}\n"
+    return head + "  connectors:\n" + "".join(f"    {entry}\n" for entry in entries)
+
+
+# Non-interactive ``setup guardrail`` precedence. Columns: config.yaml body,
+# picked_connector hint, connectors discovery reports installed, whether
+# OpenClaw is present to the presence check (openclaw.json or a binary
+# outside discovery), the selection (None = refuse), and the selection where
+# OpenClaw is unsupported (native Windows) when that differs.
+_PRECEDENCE = [
+    # A saved local OpenClaw is kept only when this host has it.
+    ("saved-local-absent-hint", _LEGACY + _gateway(), "codex", ["codex"], False, "codex", None),
+    ("saved-local-absent-no-hint", _LEGACY + _gateway(), None, [], False, None, None),
+    ("saved-local-absent-unverified-hint", _LEGACY + _gateway(), "codex", [], False, None, None),
+    ("saved-mixed-case-absent-hint", "guardrail:\n  connector: OpenClaw\n" + _gateway(), "codex", ["codex"], False,
+     "codex", None),
+    ("saved-local-present-outside-discovery", _LEGACY + _gateway(), None, [], True, "openclaw", ""),
+    ("saved-local-present-beats-hint", _LEGACY + _gateway(), "codex", [], True, "openclaw", ""),
+    # Only a fleet mode that dials keeps an absent OpenClaw.
+    ("remote-auto-no-claw-block", _SAVED + _gateway("10.0.0.5"), "codex", ["codex"], False, "openclaw", None),
+    ("remote-auto-saved-claw-mode", _LEGACY + _gateway("10.0.0.5"), None, [], False, "openclaw", None),
+    ("remote-enabled", _LEGACY + _gateway("10.0.0.5", "enabled"), None, [], False, "openclaw", None),
+    ("loopback-enabled", _LEGACY + _gateway(fleet_mode="enabled"), "codex", ["codex"], False, "openclaw", None),
+    ("loopback-on", _SAVED + _gateway(fleet_mode="on"), "codex", ["codex"], False, "openclaw", None),
+    ("loopback-true", _SAVED + _gateway(fleet_mode="true"), "codex", ["codex"], False, "openclaw", None),
+    ("loopback-typo-dials-like-auto", _LEGACY + _gateway(fleet_mode="enabledd"), "codex", ["codex"], False,
+     "codex", None),
+    ("loopback-disabled-hint", _LEGACY + _gateway(fleet_mode="disabled"), "codex", ["codex"], False, "codex", None),
+    ("loopback-off-hint", _LEGACY + _gateway(fleet_mode="off"), "codex", ["codex"], False, "codex", None),
+    ("loopback-false-hint", _LEGACY + _gateway(fleet_mode="false"), "codex", ["codex"], False, "codex", None),
+    ("loopback-disabled-spaced-case", _LEGACY + _gateway(fleet_mode=" Disabled "), "codex", ["codex"], False,
+     "codex", None),
+    ("remote-disabled-hint", _LEGACY + _gateway("10.0.0.5", "disabled"), "codex", ["codex"], False, "codex", None),
+    ("loopback-disabled-no-hint", _LEGACY + _gateway(fleet_mode="disabled"), None, [], False, None, None),
+    # An implied OpenClaw (claw.mode only) loses to an installed hint and is
+    # never selected absent, even where the loader keeps it.
+    ("implied-absent-no-hint", _IMPLIED + _gateway(), None, [], False, None, None),
+    ("implied-disabled-hint", _IMPLIED + _gateway(fleet_mode="disabled"), "codex", ["codex"], False, "codex", None),
+    ("implied-disabled-no-hint", _IMPLIED + _gateway(fleet_mode="disabled"), None, [], False, None, None),
+    ("implied-typo-no-hint", _IMPLIED + _gateway(fleet_mode="enabledd"), None, [], False, None, None),
+    ("implied-enabled-no-hint", _IMPLIED + _gateway(fleet_mode="enabled"), None, [], False, "openclaw", None),
+    ("implied-present-hint", _IMPLIED + _gateway(), "codex", ["codex"], True, "codex", None),
+    ("implied-present-no-hint", _IMPLIED + _gateway(), None, [], True, "openclaw", ""),
+    # A stale OpenClaw never overrides an installed, enabled roster connector.
+    ("roster-stale-primary", _roster("codex: {enabled: true}") + _gateway(), None, ["codex"], False, "codex", None),
+    ("roster-stale-primary-hint-in-roster", _roster("codex: {}", "cursor: {}") + _gateway(), "cursor",
+     ["codex", "cursor"], False, "cursor", None),
+    ("roster-stale-primary-hint-outside-roster", _roster("codex: {}") + _gateway(), "claudecode",
+     ["codex", "claudecode"], False, "codex", None),
+    ("roster-stale-primary-disabled-fleet", _roster("codex: {}") + _gateway(fleet_mode="disabled"), None, ["codex"],
+     False, "codex", None),
+    ("roster-enrolled-openclaw-absent", _roster("openclaw: {}", "codex: {}") + _gateway(), None, ["codex"], False,
+     "codex", None),
+    ("roster-claw-mode-openclaw-no-primary", _roster("openclaw: {}", "codex: {}", primary=None) + _gateway(), None,
+     ["codex"], False, "codex", None),
+    ("roster-claw-mode-only-codex", _roster("codex: {}", primary=None) + _gateway(), None, [], False, "codex", None),
+    ("roster-disabled-skipped", _roster("codex: {enabled: false}", "cursor: {}") + _gateway(), "codex",
+     ["codex", "cursor"], False, "cursor", None),
+    ("roster-only-disabled", _roster("codex: {enabled: false}") + _gateway(), "codex", ["codex"], False, None, None),
+    ("roster-not-installed", _roster("codex: {}") + _gateway(), None, [], False, None, None),
+    ("roster-remote-fleet-keeps-openclaw", _roster("codex: {}") + _gateway("10.0.0.5"), None, ["codex"], False,
+     "openclaw", None),
+    ("roster-present-openclaw", _roster("codex: {}") + _gateway(), None, ["codex"], True, "openclaw", "codex"),
+    ("configured-primary-beats-hint", "guardrail:\n  connector: codex\n" + _gateway(), "cursor", ["cursor"], False,
+     "codex", None),
+]
+
+
 @pytest.mark.parametrize(
-    ("host", "fleet_mode"),
-    [
-        ("10.0.0.5", "auto"),
-        ("10.0.0.5", "enabled"),
-        ("127.0.0.1", "enabled"),
-    ],
+    ("config_body", "picked", "installed", "openclaw_present", "expected", "expected_unsupported"),
+    [pytest.param(*row[1:], id=row[0]) for row in _PRECEDENCE],
 )
-def test_non_interactive_guardrail_keeps_saved_openclaw_without_local_install(
-    tmp_path, claw_block: str, host: str, fleet_mode: str
-) -> None:
-    from unittest.mock import patch
-
-    from defenseclaw import config as config_module
-    from defenseclaw.commands import cmd_setup
-    from defenseclaw.context import AppContext
-
-    config_text = (
-        "config_version: 9\n"
-        f"{claw_block}"
-        "guardrail:\n  connector: openclaw\n"
-        f"gateway:\n  host: {host}\n  fleet_mode: {fleet_mode}\n"
-    )
-    (tmp_path / "config.yaml").write_text(config_text, encoding="utf-8")
-    app = AppContext()
-    with patch("defenseclaw.openclaw_presence.openclaw_installed", return_value=False):
-        app.cfg = config_module.load(data_dir=str(tmp_path))
-    assert app.cfg.active_connector() == "openclaw"
-    argv = ["guardrail", "--yes", "--no-restart", "--cisco-api-key-env", "ASIA_PACIFIC_KEY"]
-    with (
-        patch.object(cmd_setup, "_detect_installed_connectors", return_value=[]),
-        patch.object(cmd_setup, "_installed_picked_connector", return_value=None),
-        patch.object(cmd_setup, "_capture_setup_config_snapshot", return_value=object()),
-        patch.object(cmd_setup, "_ensure_connector_available", side_effect=click.ClickException("connector selected")) as selected,
-    ):
-        result = CliRunner().invoke(cmd_setup.setup, argv, obj=app)
-    assert "connector selected" in result.output, result.output
-    assert "no agent connector is configured" not in result.output
-    selected.assert_called_once_with("openclaw")
-    assert app.cfg.guardrail.connector == "openclaw"
-
-
-@pytest.mark.parametrize(
-    ("host", "fleet_mode", "picked", "expected"),
-    [
-        ("127.0.0.1", "auto", True, "codex"),
-        ("127.0.0.1", "auto", False, None),
-        ("127.0.0.1", "disabled", True, "codex"),
-        ("127.0.0.1", "off", True, "codex"),
-        ("127.0.0.1", "false", True, "codex"),
-        ("127.0.0.1", "disabled", False, None),
-        ("10.0.0.5", "auto", True, "openclaw"),
-        ("127.0.0.1", "enabled", True, "openclaw"),
-    ],
-)
-def test_saved_openclaw_default_respects_installed_hint_and_fleet_link(
-    tmp_path, host: str, fleet_mode: str, picked: bool, expected: str | None
+def test_non_interactive_guardrail_connector_precedence(
+    tmp_path,
+    config_body: str,
+    picked: str | None,
+    installed: list[str],
+    openclaw_present: bool,
+    expected: str | None,
+    expected_unsupported: str | None,
 ) -> None:
     from unittest.mock import patch
 
@@ -220,76 +227,24 @@ def test_saved_openclaw_default_respects_installed_hint_and_fleet_link(
     from defenseclaw.commands import cmd_setup
     from defenseclaw.context import AppContext
 
-    (tmp_path / "config.yaml").write_text(
-        "config_version: 9\n"
-        "claw:\n  mode: openclaw\n"
-        "guardrail:\n  connector: openclaw\n"
-        f"gateway:\n  host: {host}\n  fleet_mode: '{fleet_mode}'\n",
-        encoding="utf-8",
-    )
+    if expected_unsupported is not None and not platform_support.connector_supported_on_os("openclaw"):
+        expected = expected_unsupported or None
+    (tmp_path / "config.yaml").write_text("config_version: 9\n" + config_body, encoding="utf-8")
     if picked:
-        (tmp_path / "picked_connector").write_text("codex\n", encoding="utf-8")
+        (tmp_path / "picked_connector").write_text(f"{picked}\n", encoding="utf-8")
     app = AppContext()
-    with patch("defenseclaw.openclaw_presence.openclaw_installed", return_value=False) as openclaw_installed:
+    # Hold the presence result through both config load and setup: setup
+    # probes it again, and the test host may have OpenClaw.
+    with patch("defenseclaw.openclaw_presence.openclaw_installed", return_value=openclaw_present):
         app.cfg = config_module.load(data_dir=str(tmp_path))
-        argv = ["guardrail", "--yes", "--no-restart", "--cisco-api-key-env", "ASIA_PACIFIC_KEY"]
-        with (
-            patch.object(cmd_setup, "_detect_installed_connectors", return_value=["codex"] if picked else []),
-            patch.object(cmd_setup, "_capture_setup_config_snapshot", return_value=object()),
-            patch.object(
-                cmd_setup, "_ensure_connector_available", side_effect=click.ClickException("connector selected")
-            ) as selected,
-        ):
-            result = CliRunner().invoke(cmd_setup.setup, argv, obj=app)
-    if expected is None:
-        assert "no agent connector is configured" in result.output, result.output
-        selected.assert_not_called()
-    else:
-        assert "connector selected" in result.output, result.output
-        selected.assert_called_once_with(expected)
-    if host == "127.0.0.1" and fleet_mode in {"auto", "disabled", "off", "false"} and platform_support.connector_supported_on_os("openclaw"):
-        openclaw_installed.assert_called_once_with(app.cfg)
-    else:
-        openclaw_installed.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    ("installed", "picked", "roster_enabled", "expected"),
-    [
-        (["codex"], True, True, "codex"),
-        (["codex"], False, True, "codex"),
-        ([], True, True, None),
-        (["codex"], True, False, None),
-    ],
-)
-def test_stale_openclaw_primary_with_roster_uses_verified_connector(
-    tmp_path, installed: list[str], picked: bool, roster_enabled: bool, expected: str | None
-) -> None:
-    from unittest.mock import patch
-
-    from defenseclaw import config as config_module
-    from defenseclaw.commands import cmd_setup
-    from defenseclaw.context import AppContext
-
-    (tmp_path / "config.yaml").write_text(
-        "config_version: 9\n"
-        "claw:\n  mode: openclaw\n"
-        "guardrail:\n  connector: openclaw\n  connectors:\n"
-        f"    codex: {{enabled: {'true' if roster_enabled else 'false'}}}\n"
-        "gateway:\n  host: 127.0.0.1\n  fleet_mode: auto\n",
-        encoding="utf-8",
-    )
-    if picked:
-        (tmp_path / "picked_connector").write_text("codex\n", encoding="utf-8")
-    app = AppContext()
-    with patch("defenseclaw.openclaw_presence.openclaw_installed", return_value=False):
-        app.cfg = config_module.load(data_dir=str(tmp_path))
+        roster_before = dict(app.cfg.guardrail.connectors)
         with (
             patch.object(cmd_setup, "_detect_installed_connectors", return_value=installed),
             patch.object(cmd_setup, "_capture_setup_config_snapshot", return_value=object()),
+            patch.object(cmd_setup, "_ensure_connector_available") as selected,
             patch.object(
-                cmd_setup, "_ensure_connector_available", side_effect=click.ClickException("connector selected")
-            ) as selected,
+                cmd_setup, "_apply_guardrail_extra_options", side_effect=click.ClickException("connector selected")
+            ),
         ):
             result = CliRunner().invoke(
                 cmd_setup.setup,
@@ -299,55 +254,13 @@ def test_stale_openclaw_primary_with_roster_uses_verified_connector(
     if expected is None:
         assert "no agent connector is configured" in result.output, result.output
         selected.assert_not_called()
+        assert app.cfg.cisco_ai_defense.api_key_env != "ASIA_PACIFIC_KEY"
     else:
         assert "connector selected" in result.output, result.output
         selected.assert_called_once_with(expected)
-    assert set(app.cfg.guardrail.connectors) == {"codex"}
-
-
-@pytest.mark.parametrize("picked", [False, True], ids=["without-hint", "with-unverified-codex-hint"])
-def test_saved_local_openclaw_present_outside_discovery_is_kept(tmp_path, picked: bool) -> None:
-    from unittest.mock import patch
-
-    from defenseclaw import config as config_module
-    from defenseclaw import platform_support
-    from defenseclaw.commands import cmd_setup
-    from defenseclaw.context import AppContext
-
-    (tmp_path / "config.yaml").write_text(
-        "config_version: 9\n"
-        "claw:\n  mode: openclaw\n"
-        "guardrail:\n  connector: openclaw\n"
-        "gateway:\n  host: 127.0.0.1\n  fleet_mode: auto\n",
-        encoding="utf-8",
-    )
-    if picked:
-        (tmp_path / "picked_connector").write_text("codex\n", encoding="utf-8")
-    app = AppContext()
-    with patch("defenseclaw.openclaw_presence.openclaw_installed", return_value=True):
-        app.cfg = config_module.load(data_dir=str(tmp_path))
-        assert app.cfg.active_connector() == "openclaw"
-        with (
-            patch.object(cmd_setup, "_detect_installed_connectors", return_value=[]),
-            patch.object(cmd_setup, "_capture_setup_config_snapshot", return_value=object()),
-            patch.object(
-                cmd_setup,
-                "_ensure_connector_available",
-                side_effect=click.ClickException("connector selected"),
-            ) as selected,
-        ):
-            result = CliRunner().invoke(
-                cmd_setup.setup,
-                ["guardrail", "--yes", "--no-restart", "--cisco-api-key-env", "ASIA_PACIFIC_KEY"],
-                obj=app,
-            )
-    if platform_support.connector_supported_on_os("openclaw"):
-        assert "connector selected" in result.output, result.output
-        selected.assert_called_once_with("openclaw")
-        assert app.cfg.guardrail.connector == "openclaw"
-    else:
-        assert "no agent connector is configured" in result.output, result.output
-        selected.assert_not_called()
+        assert app.cfg.guardrail.connector == expected
+    # Setup selects among the enrolled connectors; it never drops one.
+    assert app.cfg.guardrail.connectors == roster_before
 
 
 def test_restart_without_a_connector_does_not_start_openclaw(tmp_path) -> None:

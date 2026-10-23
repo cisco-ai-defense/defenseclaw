@@ -5433,6 +5433,50 @@ def _installed_picked_connector(data_dir: str | None, installed: list[str] | Non
     return picked if picked in installed else None
 
 
+def _non_interactive_guardrail_connector(app: AppContext, gc) -> str:
+    """Return the connector a non-interactive ``setup guardrail`` configures.
+
+    Precedence:
+      1. the configured primary, roster or non-default ``claw.mode``
+         (``Config.active_connector``);
+      2. otherwise the ``picked_connector`` hint, only when that agent is
+         installed;
+      3. otherwise an older implied OpenClaw that the loader kept.
+
+    OpenClaw from 1 or 3 is kept only when this host has OpenClaw or a fleet
+    link points at an OpenClaw gateway (``openclaw_setup_fleet_link_configured``).
+    A stale OpenClaw instead yields the installed hint when it is in the
+    enabled roster, else the first installed enabled roster connector, else
+    (no roster) the installed hint. With none of these the result is ``""``
+    and setup refuses: a default never selects an agent the host does not
+    have (GAP-0568), and roster entries stay enrolled either way.
+    """
+    cfg = app.cfg
+    data_dir = getattr(cfg, "data_dir", None)
+    configured = cfg.active_connector() if cfg.has_connector_configured() else ""
+    pinned = bool(str(gc.connector or "").strip() or gc.connectors) or configured not in {"", "openclaw"}
+    if not pinned:
+        picked = _installed_picked_connector(data_dir)
+        if picked:
+            return picked
+    if configured != "openclaw" or openclaw_presence.openclaw_setup_fleet_link_configured(cfg):
+        return configured
+    installed = _detect_installed_connectors()
+    if platform_support.connector_supported_on_os("openclaw") and (
+        "openclaw" in installed or openclaw_presence.openclaw_installed(cfg)
+    ):
+        return "openclaw"
+    picked = _installed_picked_connector(data_dir, installed)
+    if not gc.connectors:
+        return picked or ""
+    enrolled = [
+        name
+        for name in cfg.active_connectors()
+        if name in installed and getattr(_existing_connector_override(gc, name), "enabled", None) is not False
+    ]
+    return picked if picked in enrolled else next(iter(enrolled), "")
+
+
 def _select_connector_interactive(current: str, data_dir: str | None = None) -> str:
     """Present a numbered menu and return the selected connector name.
 
@@ -6953,13 +6997,10 @@ def setup_guardrail(
         # flip ``gc.judge.enabled`` on, so the hook-gate default only fires when
         # this run actually turns the judge on (not on every re-run).
         judge_enabled_by_this_run = False
-        # Connector resolution order in non-interactive mode:
-        #   1. explicit --connector / --agent flag
-        #   2. configured primary, roster, or non-default claw.mode; a saved
-        #      local OpenClaw is checked for installation even with a roster
-        #   3. <data_dir>/picked_connector, only when that agent is installed
-        #   4. an older implied OpenClaw kept by the loader
-        # There is no connector fallback on an unconfigured host.
+        # Connector resolution order in non-interactive mode: an explicit
+        # --connector / --agent flag, then _non_interactive_guardrail_connector
+        # (configured primary or roster, installed picked hint, older implied
+        # OpenClaw). There is no connector fallback on an unconfigured host.
         # We deliberately do NOT run filesystem auto-detect (the
         # ``~/.claude`` / ``~/.codex`` heuristic) in non-interactive mode:
         # those directories often pre-exist on developer workstations
@@ -6967,39 +7008,7 @@ def setup_guardrail(
         # back during scripted installs. Filesystem detection is only
         # used in the interactive picker where the operator can see and
         # confirm the suggested default.
-        if explicit_connector:
-            target_connector = explicit_connector
-        elif (
-            gc.connector == "openclaw"
-            and not openclaw_presence.openclaw_setup_fleet_link_configured(app.cfg)
-        ):
-            # An older local setup could pin OpenClaw before the operator
-            # picked an agent. A remote host or explicit fleet mode above
-            # remains authoritative even without a local OpenClaw binary.
-            installed = _detect_installed_connectors()
-            if platform_support.connector_supported_on_os("openclaw") and (
-                "openclaw" in installed or openclaw_presence.openclaw_installed(app.cfg)
-            ):
-                target_connector = "openclaw"
-            else:
-                picked = _installed_picked_connector(getattr(app.cfg, "data_dir", None), installed)
-                if gc.connectors:
-                    enrolled = [
-                        name for name in app.cfg.active_connectors()
-                        if name in installed
-                        and getattr(_existing_connector_override(gc, name), "enabled", None) is not False
-                    ]
-                    target_connector = picked if picked in enrolled else next(iter(enrolled), "")
-                else:
-                    target_connector = picked or ""
-        elif gc.connector or gc.connectors:
-            target_connector = app.cfg.active_connector()
-        elif app.cfg.has_connector_configured() and app.cfg.active_connector() != "openclaw":
-            target_connector = app.cfg.active_connector()
-        else:
-            target_connector = _installed_picked_connector(getattr(app.cfg, "data_dir", None)) or (
-                app.cfg.active_connector() if app.cfg.has_connector_configured() else ""
-            )
+        target_connector = explicit_connector or _non_interactive_guardrail_connector(app, gc)
         if not target_connector:
             raise click.ClickException(no_connector_message)
         _ensure_connector_available(normalize_connector(target_connector))
@@ -7024,7 +7033,7 @@ def setup_guardrail(
                 # is not set up; the summary, claw.mode and the gateway's
                 # primary must follow the connector this run configures.
                 gc.connector = target_connector
-        elif not gc.connector or gc.connector == "openclaw":
+        elif not (gc.connector or "").strip() or normalize_connector(gc.connector.strip()) == "openclaw":
             gc.connector = target_connector
         per_connector_target = bool(
             explicit_connector
