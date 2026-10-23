@@ -109,10 +109,13 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 		"true && > out/build.log",      // PAN-0005
 		"  >> out/build.log",           // PAN-0006
 		"tar -C unpack -xf keys.tar; echo hi > report.txt",
+		// An unknown copy source names no destination (W24 loop round 2,
+		// the 1.0.3 result).
+		`for f in *.txt; do cp "$f" build/; done; echo ok > report.txt`, // FP-0004
+		`cp "$F" out.txt && echo done > report.txt`,                     // FP-0005
 	}
 	blocked := []string{
-		`for f in *.txt; do cp "$f" build/; done; echo ok > report.txt`, // FP-0004: unknown source
-		`cp "$F" out.txt && echo done > report.txt`,                     // FP-0005: unknown source
+		`cp "$F" "$DEST" && echo done > report.txt`,
 		"tar -C unpack -xf keys.tar && echo k >> unpack/n1.txt",
 		"tar xzf pkg.tgz && ./configure > build.log",
 		"tar -C unpack -xf keys.tar && echo k >> outlink",

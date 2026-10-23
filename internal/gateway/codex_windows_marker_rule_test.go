@@ -76,8 +76,9 @@ func TestCodexWindowsActionBlocksCompleteArgvMarker(t *testing.T) {
 				ToolInput: map[string]interface{}{"command": tc.command},
 			})
 			if tc.name == "PowerShell call operator without Windows home" {
-				if resp.Action != "block" || resp.RawAction != "block" ||
-					!strings.Contains(resp.Reason, "persistence.ssh_authorized_keys_command") {
+				// A POSIX parse error is uncertainty, not SSH persistence
+				// evidence (W24 loop round 2).
+				if strings.Contains(resp.Reason, "persistence.ssh_authorized_keys_command") {
 					t.Fatalf("unresolved call operator: action=%s raw=%s reason=%s", resp.Action, resp.RawAction, resp.Reason)
 				}
 				return

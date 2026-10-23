@@ -141,9 +141,13 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 	}
 	words, ok := actionWindowsWords(actionWindowsControlSource(command))
 	if !ok || len(words) == 0 {
-		return "shell-parse"
+		if actionUncertaintyReaches(command, cwd, home) {
+			return "shell-parse"
+		}
+		return ""
 	}
 	values := make(map[string]string)
+	uncertain := ""
 	for start := 0; start < len(words); {
 		end := start
 		for end < len(words) && words[end] != ";" && words[end] != "|" && words[end] != "||" && words[end] != "&" && words[end] != "&&" {
@@ -180,18 +184,25 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 					statement[i] = value
 				}
 			}
-			if reason := actionWindowsStatement(statement, cwd, home, depth); reason != "" {
+			if reason := actionWindowsStatement(statement, cwd, home, depth); actionUncertainReason(reason) {
+				uncertain = actionFirstUncertain(uncertain, reason)
+			} else if reason != "" {
 				return reason
 			}
 		}
 		start = end + 1
 	}
-	return ""
+	return actionDecisionResult("", uncertain, command, cwd, home)
 }
 
 func actionWindowsStatement(words []string, cwd, home string, depth int) string {
 	if depth >= 8 {
 		return "dynamic-command"
+	}
+	// A POSIX loop or branch body (Git Bash) starts its first statement
+	// after do, then or else: judge the command that follows.
+	for len(words) > 1 && (words[0] == "do" || words[0] == "then" || words[0] == "else") {
+		words = words[1:]
 	}
 	first := 0
 	for first < len(words) && strings.Contains(words[first], "=") && !strings.HasPrefix(words[first], "-") {
@@ -259,15 +270,11 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 				if i+2 >= len(words) {
 					return "nested-shell"
 				}
-				encoded, err := base64.StdEncoding.DecodeString(words[i+2])
-				if err != nil || len(encoded)%2 != 0 || len(encoded) == 0 {
+				decoded, ok := actionWindowsDecodeCommand(words[i+2])
+				if !ok {
 					return "nested-shell"
 				}
-				letters := make([]uint16, len(encoded)/2)
-				for j := range letters {
-					letters[j] = uint16(encoded[j*2]) | uint16(encoded[j*2+1])<<8
-				}
-				return actionWindowsCommandDecision(string(utf16.Decode(letters)), cwd, home, depth+1)
+				return actionWindowsCommandDecision(decoded, cwd, home, depth+1)
 			case "-file":
 				return "nested-shell" // file and arguments may contain commands
 			}
@@ -292,6 +299,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 		return actionWindowsWrapperDecision(program, words, cwd, home, depth+1)
 	}
 	writeCapable := actionProgramMayWrite(program) || strings.Contains(commandLike(words), ">")
+	uncertainSource := false
 	for i, word := range words[1:] {
 		if word == ">" || word == ">>" || word == "<" || word == "<<" {
 			continue
@@ -313,13 +321,71 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 		if strings.ContainsAny(word, "/\\$%") || len(word) >= 2 && word[1] == ':' {
 			readOnly := actionPrivateKeyReader(program, true)
 			protected, resolved := actionWindowsProtected(word, cwd, home, readOnly)
+			if !protected && !resolved && actionWindowsCopySource(program, i+1, words) {
+				// An unresolved copy or move source names no destination.
+				uncertainSource = true
+				continue
+			}
 			if protected || !resolved && writeCapable && actionWindowsPathPosition(program, i+1, words) &&
 				!actionWindowsBoundedSourceGlob(program, i+1, words, word, cwd, home) {
 				return "dynamic-argument"
 			}
 		}
 	}
+	if uncertainSource {
+		return actionUncertainSource
+	}
 	return ""
+}
+
+// actionWindowsDecodeCommand decodes a PowerShell -EncodedCommand payload.
+func actionWindowsDecodeCommand(payload string) (string, bool) {
+	encoded, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil || len(encoded)%2 != 0 || len(encoded) == 0 {
+		return "", false
+	}
+	letters := make([]uint16, len(encoded)/2)
+	for j := range letters {
+		letters[j] = uint16(encoded[j*2]) | uint16(encoded[j*2+1])<<8
+	}
+	return string(utf16.Decode(letters)), true
+}
+
+// actionWindowsCopySource reports the source operand of a copy or move: the
+// value of -Path, -LiteralPath or -PSPath, or the first positional operand.
+// The destination is -Destination or a later positional operand. A target
+// directory option (-t) makes every operand a source: keep the strict view.
+func actionWindowsCopySource(program string, index int, words []string) bool {
+	switch program {
+	case "copy-item", "cpi", "copy", "cp", "move-item", "mi", "move", "mv":
+	default:
+		return false
+	}
+	for _, word := range words[1:] {
+		if name := strings.TrimLeft(strings.ToLower(word), "-"); name != strings.ToLower(word) &&
+			(name == "t" || strings.HasPrefix(name, "target")) {
+			return false
+		}
+	}
+	if previous := words[index-1]; strings.HasPrefix(previous, "-") {
+		switch strings.TrimLeft(strings.ToLower(previous), "-") {
+		case "path", "literalpath", "pspath", "lp":
+			return true
+		case "destination":
+			return false
+		}
+	}
+	positional := 0
+	for i := 1; i < index; i++ {
+		if strings.HasPrefix(words[i], "-") {
+			if strings.EqualFold(strings.TrimLeft(words[i], "-"), "destination") {
+				i++ // its value is not a positional operand
+			}
+			continue
+		}
+		positional++
+	}
+	return positional == 0
 }
 
 func actionWindowsPathPosition(program string, index int, words []string) bool {

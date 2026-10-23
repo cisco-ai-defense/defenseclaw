@@ -49,7 +49,9 @@ func TestTrustedActionW24Continuation(t *testing.T) {
 		{"dash nested list", "dash -c 'true && rm -rf /'", "/repo", "/home/alice", "CMD-RM-RF", actionfacts.DialectPOSIX, true},
 		{"bash option nested list", "bash -o pipefail -c 'true && rm -rf /'", "/repo", "/home/alice", "CMD-RM-RF", actionfacts.DialectPOSIX, true},
 		{"bash plus option nested list", "bash +o pipefail -c 'true && rm -rf /'", "/repo", "/home/alice", "CMD-RM-RF", actionfacts.DialectPOSIX, true},
-		{"bash unsupported option", "bash -Z -c 'echo okay'", "/repo", "/home/alice", "persistence.ssh_authorized_keys_command", actionfacts.DialectPOSIX, true},
+		// An unknown option is uncertainty, not persistence (W24 loop round 2).
+		{"bash unsupported option", "bash -Z -c 'echo okay'", "/repo", "/home/alice", "", actionfacts.DialectPOSIX, false},
+		{"bash unsupported option naming the protected file", "bash -Z -c 'echo okay' ~/.ssh/authorized_keys", "/repo", "/home/alice", "persistence.ssh_authorized_keys_command", actionfacts.DialectPOSIX, true},
 		{"bash login option", "bash -lc 'echo okay'", "/repo", "/home/alice", "", actionfacts.DialectPOSIX, false},
 		{"command wrapped nested list", "command sh -c 'true && rm -rf /'", "/repo", "/home/alice", "CMD-RM-RF", actionfacts.DialectPOSIX, true},
 		{"exec wrapped nested list", "exec sh -c 'true && rm -rf /'", "/repo", "/home/alice", "CMD-RM-RF", actionfacts.DialectPOSIX, true},

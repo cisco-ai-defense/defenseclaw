@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -171,17 +170,6 @@ func TestGenericPythonInlineInvocationIsQuietAcrossModes(t *testing.T) {
 					HookEventName: "PreToolUse", ToolName: "Bash",
 					ToolInput: map[string]interface{}{"command": command}, CWD: "/repo",
 				})
-				if strings.HasPrefix(command, "python3 /tmp/") {
-					wantAction := guardrailActionBlock
-					if mode == "observe" {
-						wantAction = guardrailActionAllow
-					}
-					if response.Action != wantAction || response.RawAction != guardrailActionBlock ||
-						!findingStringHasRuleID(response.Findings, "persistence.ssh_authorized_keys_command") {
-						t.Fatalf("%s response for outside script %q = %+v, want closed action proof", mode, command, response)
-					}
-					continue
-				}
 				if response.Action != guardrailActionAllow || response.RawAction != guardrailActionAllow ||
 					response.Severity != "NONE" || findingStringHasRuleID(response.Findings, "CMD-PYTHON-C") {
 					t.Fatalf("%s response for %q = %+v, want quiet generic invocation", mode, command, response)
@@ -238,7 +226,9 @@ func TestPythonInlineSpecificOwnersRemainDetectionOnlyWithoutTypedProof(t *testi
 	}
 }
 
-func TestEvaluateCodexHook_DynamicExecutablesFailClosed(t *testing.T) {
+// A computed executable is parser uncertainty: it stays detection only, as
+// in 1.0.3, and is not SSH persistence evidence (W24 loop round 2).
+func TestEvaluateCodexHook_DynamicExecutablesRemainDetectionOnly(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "codex"
@@ -272,10 +262,11 @@ func TestEvaluateCodexHook_DynamicExecutablesFailClosed(t *testing.T) {
 				ToolInput: map[string]interface{}{"command": test.command},
 				CWD:       "/repo",
 			})
-			if response.Action != guardrailActionBlock ||
-				response.RawAction != guardrailActionBlock || response.WouldBlock ||
-				!findingStringHasRuleID(response.Findings, "persistence.ssh_authorized_keys_command") {
-				t.Fatalf("hook response = %+v, want closed dynamic executable", response)
+			if response.Action != guardrailActionAllow ||
+				response.RawAction != guardrailActionAllow || response.WouldBlock ||
+				findingStringHasRuleID(response.Findings, trustedParserUncertaintyRuleID) ||
+				findingStringHasRuleID(response.Findings, "persistence.ssh_authorized_keys_command") {
+				t.Fatalf("hook response = %+v, want parser uncertainty excluded from findings", response)
 			}
 		})
 	}

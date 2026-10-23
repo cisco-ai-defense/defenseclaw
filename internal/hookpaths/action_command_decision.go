@@ -75,7 +75,7 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 	}
 	file, ok := parseShell(command)
 	if !ok {
-		if actionTextMayWrite(command) {
+		if actionTextMayWrite(command) && actionUncertaintyReaches(command, cwd, home) {
 			return "shell-parse"
 		}
 		return ""
@@ -91,10 +91,18 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 	values := actionValues{"HOME": home, "PWD": cwd, "RANDOM": actionGeneratedMarker, "$": "1"}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
-	reason := ""
+	// reason is persistence evidence: a resolved protected target or an
+	// unresolved write destination. uncertain is a child this proof cannot
+	// read or model; it counts only with actionUncertaintyReaches below, and
+	// the walk goes on so that a later write destination is still judged.
+	reason, uncertain := "", ""
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if reason != "" {
 			return false
+		}
+		if loop, ok := node.(*syntax.ForClause); ok {
+			actionBindLoopValue(loop, values, cwd, home)
+			return true
 		}
 		if declaration, ok := node.(*syntax.FuncDecl); ok {
 			if declaration.Name == nil || !called[declaration.Name.Value] {
@@ -141,6 +149,11 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 						(redirect.Op != syntax.RdrIn || actionStmtMayWrite(stmt, home)) &&
 						!provenBoundedRedirect(file, redirect, cwd, home) &&
 						(len(bounded) == 0 || boundedUnknown) {
+						if redirect.Op == syntax.RdrIn {
+							// An unresolved input names no destination.
+							uncertain = actionFirstUncertain(uncertain, actionUncertainSource)
+							continue
+						}
 						reason = "dynamic-argument"
 						return false
 					}
@@ -155,8 +168,8 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 		if !fixed {
 			program, fixed = boundPrograms[call]
 			if !fixed {
-				reason = "dynamic-command"
-				return false
+				uncertain = actionFirstUncertain(uncertain, "dynamic-command")
+				return true
 			}
 		}
 		words := make([]string, len(call.Args))
@@ -170,11 +183,15 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 				safeProcess := actionKnownReadOnlyProcessSubstitution(arg, home)
 				if actionPathArgument(programBase(program), i+1, len(call.Args)) &&
 					!actionBoundedCallDestination(file, call, cwd, home) ||
-					actionStmtMayWrite(stmt, home) && actionUnresolvedReadPathArgument(programBase(program)) && !safeProcess ||
+					programBase(program) == "sort" && actionSortOutputWord(arg) ||
 					wordHasCommandSubstitution(arg) && actionStmtMayWrite(stmt, home) &&
 						!safeProcess {
 					reason = "dynamic-argument"
 					return false
+				}
+				// An unresolved copy or read source names no destination.
+				if actionStmtMayWrite(stmt, home) && actionUnresolvedReadPathArgument(programBase(program)) && !safeProcess {
+					uncertain = actionFirstUncertain(uncertain, actionUncertainSource)
 				}
 				if programBase(program) == "env" {
 					var rendered strings.Builder
@@ -196,12 +213,97 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 				return true // A fixed producer bound every child operand.
 			}
 		}
-		if reason == "" {
-			reason = actionChildDecision(words, stmt, cwd, home, depth)
+		if child := actionChildDecision(words, stmt, cwd, home, depth); actionUncertainReason(child) {
+			uncertain = actionFirstUncertain(uncertain, child)
+		} else {
+			reason = child
 		}
 		return reason == ""
 	})
-	return reason
+	return actionDecisionResult(reason, uncertain, command, cwd, home)
+}
+
+// actionUncertainSource is the internal class of an unresolved copy or read
+// source. It leaves this package only as "dynamic-argument", with evidence.
+const actionUncertainSource = "dynamic-source"
+
+// actionUncertainReason reports a class that names no protected target: a
+// script or interpreter body this proof does not read (an argument-taking or
+// unreadable script, an interpreter host, stdin), eval or source, a computed
+// program, a parse error or an unresolved copy source. Balanced defaults:
+// such uncertainty is not persistence evidence by itself. A resolved
+// protected target, an unresolved write destination and a copy into a
+// protected directory stay evidence.
+func actionUncertainReason(reason string) bool {
+	switch reason {
+	case "nested-shell", "interpreter-path", "interpreter-argument", "eval-source",
+		"dynamic-command", "shell-parse", actionUncertainSource:
+		return true
+	}
+	return false
+}
+
+func actionFirstUncertain(current, next string) string {
+	if current != "" {
+		return current
+	}
+	return next
+}
+
+// actionDecisionResult keeps an uncertain class only when the command text
+// itself can reach a protected file (the release's protected-write evidence).
+func actionDecisionResult(reason, uncertain, command, cwd, home string) string {
+	if reason != "" || uncertain == "" || !actionUncertaintyReaches(command, cwd, home) {
+		return reason
+	}
+	if uncertain == actionUncertainSource {
+		return "dynamic-argument"
+	}
+	return uncertain
+}
+
+// actionUncertaintyReaches reports evidence that an unmodelled child can
+// reach a protected file: the text names the .ssh directory (also as an 8.3
+// alias) or an SSH key file, or one of its paths resolves to the home, the
+// .ssh directory or a protected file. A -EncodedCommand payload is read too.
+func actionUncertaintyReaches(command, cwd, home string) bool {
+	return actionUncertaintyReachesDepth(command, cwd, home, 0)
+}
+
+func actionUncertaintyReachesDepth(command, cwd, home string, depth int) bool {
+	if depth >= 8 {
+		return true
+	}
+	lower := strings.ToLower(command)
+	for _, name := range []string{".ssh", "ssh~", "authorized_keys", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"} {
+		if strings.Contains(lower, name) {
+			return true
+		}
+	}
+	if actionTextDynamicWrite(command) {
+		return true
+	}
+	if !actionWindowsHome(home) {
+		return protectedReachFromText(command, cwd, home)
+	}
+	words, _ := actionWindowsWords(command)
+	root, rootKnown := actionWindowsPath(home, cwd, home)
+	for i, word := range words {
+		switch strings.ToLower(word) {
+		case "-encodedcommand", "-enc", "-ec", "-e":
+			if i+1 < len(words) {
+				if decoded, ok := actionWindowsDecodeCommand(words[i+1]); ok &&
+					actionUncertaintyReachesDepth(decoded, cwd, home, depth+1) {
+					return true
+				}
+			}
+		}
+		if resolved, ok := actionWindowsPath(word, cwd, home); ok && rootKnown &&
+			(resolved == root || strings.HasPrefix(resolved, root+"/.ssh")) {
+			return true
+		}
+	}
+	return false
 }
 
 func actionLiteralFunctionArgs(file *syntax.File, home string) map[string][]string {
@@ -302,6 +404,17 @@ func actionProgramMayWrite(program string) bool {
 		return false
 	}
 	return true // Unknown programs can write internally.
+}
+
+// actionSortOutputWord reports an attached sort output option, -oFILE or
+// --output=FILE: its value is a write destination.
+func actionSortOutputWord(word *syntax.Word) bool {
+	var rendered strings.Builder
+	if syntax.NewPrinter().Print(&rendered, word) != nil {
+		return true
+	}
+	value := strings.TrimLeft(rendered.String(), `"'`)
+	return strings.HasPrefix(value, "-o") && len(value) > 2 || strings.HasPrefix(value, "--output=")
 }
 
 func actionStmtMayWrite(stmt *syntax.Stmt, home string) bool {
@@ -980,4 +1093,112 @@ func actionWrappedDecision(program string, words []string, cwd, home string, dep
 		return "dynamic-command"
 	}
 	return actionWordsDecision(words[index:], cwd, home, depth+1)
+}
+
+// actionBindLoopValue binds the variable of a for loop over literal words or
+// unquoted pathname patterns (expanded here, bounded). Every value is known,
+// so the body is judged with one of them: the only value that can reach a
+// protected file or a private key if there is one, else the first. With
+// more than one such value, or any other item, the variable stays unknown.
+func actionBindLoopValue(loop *syntax.ForClause, values actionValues, cwd, home string) {
+	iter, ok := loop.Loop.(*syntax.WordIter)
+	if !ok || iter.Name == nil {
+		return
+	}
+	name := iter.Name.Value
+	delete(values, name)
+	if !iter.InPos.IsValid() || len(iter.Items) == 0 {
+		return // "$@", or no iteration
+	}
+	var candidates []string
+	for _, item := range iter.Items {
+		if value, fixed := StaticWord(item, home); fixed {
+			candidates = append(candidates, value)
+			continue
+		}
+		if len(item.Parts) != 1 {
+			return
+		}
+		literal, ok := item.Parts[0].(*syntax.Lit)
+		if !ok || !strings.ContainsAny(literal.Value, "*?[") || strings.ContainsAny(literal.Value, "{}$`\\") {
+			return
+		}
+		pattern := literal.Value
+		if strings.HasPrefix(pattern, "~/") {
+			pattern = filepath.Join(home, pattern[2:])
+		}
+		matches, err := filepath.Glob(OperandPath(pattern, cwd))
+		if err != nil || len(matches) > 4096 {
+			return
+		}
+		if len(matches) == 0 {
+			matches = []string{pattern} // the shell keeps an unmatched word
+		}
+		candidates = append(candidates, matches...)
+		if len(candidates) > 4096 {
+			return
+		}
+	}
+	protected := newProtectedFiles(home)
+	ssh := filepath.Join(home, ".ssh")
+	var risky []string
+	for _, candidate := range candidates {
+		if candidate == "" || strings.ContainsAny(candidate, "\x00"+actionGeneratedMarker) {
+			return
+		}
+		if protectedReachPath(OperandPath(candidate, cwd), protected, ssh) || actionPrivateReadPath(candidate, cwd, home) {
+			risky = append(risky, candidate)
+		}
+	}
+	switch len(risky) {
+	case 0:
+		values[name] = candidates[0]
+	case 1:
+		values[name] = risky[0]
+	}
+}
+
+// actionTextDynamicWrite reports a write to a computed target in text the
+// proof could not parse or expand, such as the body of env -S "sh -c '...
+// >> \"$destination\"'": a redirect or tee operand that starts with $ or a
+// backtick. A computed destination is a possible protected destination.
+func actionTextDynamicWrite(command string) bool {
+	computed := func(index int) bool {
+		for index < len(command) && strings.ContainsRune(" \t\\\"'", rune(command[index])) {
+			index++
+		}
+		return index < len(command) && (command[index] == '$' || command[index] == '`')
+	}
+	for index := 0; index < len(command); index++ {
+		if command[index] != '>' {
+			continue
+		}
+		next := index + 1
+		if next < len(command) && (command[next] == '>' || command[next] == '|') {
+			next++
+		}
+		if next < len(command) && (command[next] == '&' || command[next] == '(') {
+			continue // a descriptor copy (2>&1) or a process substitution
+		}
+		if computed(next) {
+			return true
+		}
+	}
+	for _, field := range strings.FieldsFunc(command, func(r rune) bool { return strings.ContainsRune(";|&\n", r) }) {
+		words := strings.Fields(field)
+		for index, word := range words {
+			if strings.Trim(word, `"'\`) != "tee" {
+				continue
+			}
+			for _, operand := range words[index+1:] {
+				if strings.ContainsAny(operand, "<>") {
+					break // a redirection, judged above
+				}
+				if operand = strings.TrimLeft(operand, `"'\`); strings.HasPrefix(operand, "$") || strings.HasPrefix(operand, "`") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

@@ -1215,9 +1215,12 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cp --archive disklink notes.txt`,
 		`cp -a -t copy tree`,
 		`tar "$o" xenial.tar > log`,
-		`"$PY" x.py > out.txt`,
+		`"$PY" x.py > "$OUT"`,
 	}
 	allowed := []string{
+		// A computed program is uncertainty, not persistence evidence
+		// (W24 loop round 2); its literal ordinary redirect is allowed.
+		`"$PY" x.py > out.txt`,
 		`cd build && echo ok >> notes.txt`,
 		`cd build && echo ok > notes.txt; tar xf keys.tar`,
 		`cd dirlink && cat authorized_keys`,
@@ -1368,11 +1371,11 @@ func TestR103B07FalsePositiveRows(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
 				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
 			request := trustedActionRequest{Input: input}
-			// FP-0004/0005 have unknown copy source operands. The shared
-			// action decision closes them under the new class rule.
-			wantBlock := tc.id == "FP-0004" || tc.id == "FP-0005"
-			if got := trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)); got != wantBlock {
-				t.Fatalf("%s blocked=%t, want %t", tc.command, got, wantBlock)
+			// FP-0004/0005 have unknown copy source operands. A source names
+			// no destination, so they stay allowed as in 1.0.3 (W24 loop
+			// round 2); a protected destination still blocks below.
+			if trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+				t.Fatalf("%s classified as an SSH-key write", tc.command)
 			}
 		})
 	}

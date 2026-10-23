@@ -38,17 +38,26 @@ func TestGAP0958NoCommandTextHasNoActionDecision(t *testing.T) {
 		name, command, cwd, home string
 	}{
 		{"POSIX protected write", `echo key >> ~/.ssh/authorized_keys`, posixCWD, posixHome},
-		{"POSIX empty nested shell", `sh -c`, posixCWD, posixHome},
 		{"PowerShell protected write", `Add-Content -Path "$env:USERPROFILE\.ssh\authorized_keys" -Value key`, `C:\Users\alice\project`, `C:\Users\alice`},
 		{"cmd protected write", `echo key>>%USERPROFILE%\.ssh\authorized_keys`, `C:\Users\alice\project`, `C:\Users\alice`},
-		{"cmd launcher without a child", `cmd /c`, `C:\Users\alice\project`, `C:\Users\alice`},
-		{"cmd launcher with a blank child", `cmd /c ""`, `C:\Users\alice\project`, `C:\Users\alice`},
-		{"pwsh launcher without a child", `pwsh -Command`, `C:\Users\alice\project`, `C:\Users\alice`},
-		{"pwsh stdin", `pwsh -`, `C:\Users\alice\project`, `C:\Users\alice`},
+		{"pwsh stdin to the protected file", `pwsh - > $env:USERPROFILE\.ssh\authorized_keys`, `C:\Users\alice\project`, `C:\Users\alice`},
 		{"Windows backtick command in a write", "Set-Content -Path `$x -Value key", `C:\Users\alice\project`, `C:\Users\alice`},
 	} {
 		if got := ActionCommandDecision(tc.command, tc.cwd, tc.home); got == "" {
 			t.Errorf("%s: %q decision is empty, want a block", tc.name, tc.command)
+		}
+	}
+	// W24 loop round 2: a launcher with an empty child or stdin runs no
+	// command text this proof can read. That is uncertainty, not evidence.
+	for _, tc := range []struct{ name, command, cwd, home string }{
+		{"POSIX empty nested shell", `sh -c`, posixCWD, posixHome},
+		{"cmd launcher without a child", `cmd /c`, `C:\Users\alice\project`, `C:\Users\alice`},
+		{"cmd launcher with a blank child", `cmd /c ""`, `C:\Users\alice\project`, `C:\Users\alice`},
+		{"pwsh launcher without a child", `pwsh -Command`, `C:\Users\alice\project`, `C:\Users\alice`},
+		{"pwsh stdin", `pwsh -`, `C:\Users\alice\project`, `C:\Users\alice`},
+	} {
+		if got := ActionCommandDecision(tc.command, tc.cwd, tc.home); got != "" {
+			t.Errorf("%s: %q decision = %q, want none", tc.name, tc.command, got)
 		}
 	}
 }
