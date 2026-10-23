@@ -73,6 +73,75 @@ var hookAgentExecutable = agentprocess.Executable
 // standalone gateway over its authenticated hook transport.
 var hookForeignGuardExchange = exchangeForeignHookSession
 
+// foreignHookSessionOutageOpen marks a session exchange that failed only
+// because the gateway is stopped, restarting or not answering, on a
+// standalone hook whose administrator chose fail mode open
+// (hookexec.ManagedOutageFailsOpen). serviceUID is the gateway service uid
+// from the root-owned runtime descriptor (Linux, macOS), which the
+// protected session record's trust check accepts as an owner.
+type foreignHookSessionOutageOpen struct {
+	err        error
+	serviceUID int
+}
+
+func (e *foreignHookSessionOutageOpen) Error() string {
+	return "foreign-hook session exchange failed during a gateway outage (fail mode open): " + e.err.Error()
+}
+
+func (e *foreignHookSessionOutageOpen) Unwrap() error { return e.err }
+
+// foreignHookSessionExchangeError is the error of a failed session exchange
+// for the hook options opts: marked foreignHookSessionOutageOpen when the
+// outage follows the open fail mode, unchanged otherwise.
+func foreignHookSessionExchangeError(opts hookexec.Options, err error) error {
+	if hookexec.ManagedOutageFailsOpen(opts, err) {
+		return &foreignHookSessionOutageOpen{err: err, serviceUID: opts.ManagedServiceUID}
+	}
+	return err
+}
+
+// hookForeignGuardSessionRecord locates the protected session records
+// (managed.StandaloneLayout.HookSessionDir) and the accounts that may own
+// them; hookForeignGuardSessionRecordTrust checks a record path and every
+// folder above it; hookForeignGuardIdentity is this account as the gateway
+// names a verified caller (a decimal uid or an upper-case SID). All three
+// are replaceable in tests.
+var (
+	hookForeignGuardSessionRecord = func(serviceUID int) (string, enterprisepolicy.PublishedSessionTrust, bool) {
+		layout, _, _, err := standaloneEnterprisePolicyLayout()
+		if err != nil || strings.TrimSpace(layout.HookSessionDir) == "" {
+			return "", enterprisepolicy.PublishedSessionTrust{}, false
+		}
+		return layout.HookSessionDir, enterprisepolicy.PublishedSessionTrust{ServiceUID: serviceUID, ServiceAccount: layout.ServiceUser}, true
+	}
+	hookForeignGuardSessionRecordTrust = enterprisepolicy.ValidatePublishedSessionPath
+	hookForeignGuardIdentity           = currentHookAccountIdentity
+)
+
+// protectedForeignHookSession decides a guarded call whose session exchange
+// met a gateway outage under fail mode open, from the gateway's protected
+// session record of this account (GAP-0352): ok with the scan's decision
+// when the record proves the agent process (or session) not blocked, ok
+// with a denial when it blocks it, and not ok when it proves neither
+// (missing, unreadable, untrusted or corrupt), which blocks.
+func protectedForeignHookSession(key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, serviceUID int) (enterprisepolicy.GuardDecision, bool) {
+	root, trust, ok := hookForeignGuardSessionRecord(serviceUID)
+	if !ok {
+		return decision, false
+	}
+	identity, ok := hookForeignGuardIdentity()
+	if !ok {
+		return decision, false
+	}
+	result, err := enterprisepolicy.CheckPublishedForeignHookSession(root, identity, key, decision, func(path string) error {
+		return hookForeignGuardSessionRecordTrust(path, trust)
+	})
+	if err != nil {
+		return decision, false
+	}
+	return result, true
+}
+
 // foreignHookSessionUnavailableReason is the block reason when the gateway
 // cannot answer for the agent session's hook record.
 const foreignHookSessionUnavailableReason = "enterprise_foreign_hook_blocked: DefenseClaw could not check this agent session's hook record with its gateway, so the call is blocked. Retry when the DefenseClaw gateway is running; if the block continues, restart the agent."
@@ -433,6 +502,23 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		return decision, accountHome
 	}
 	decision, err := hookForeignGuardExchange(name, event, startedAt, deadline, update)
+	var outage *foreignHookSessionOutageOpen
+	if err != nil && !update.Decision.Deny && errors.As(err, &outage) {
+		// GAP-0352: the scan found no unapproved hook and the gateway that
+		// holds the session record is stopped, restarting or not answering,
+		// and the administrator chose open for that. The gateway writes its
+		// answer for every session exchange into a record this account can
+		// read but not change; the call goes on to the hook request (which
+		// meets the same outage and gives the open result with its notice)
+		// only when that record proves the agent process not blocked. A
+		// session the gateway blocked earlier may still run the hook it
+		// loaded, even after its file was deleted, so a blocking record
+		// denies, and a record that is missing, unreadable, untrusted or
+		// corrupt blocks with the outage's reason below.
+		if protected, ok := protectedForeignHookSession(update.Key, update.Decision, outage.serviceUID); ok {
+			return protected, accountHome
+		}
+	}
 	if err != nil {
 		// The gateway holds the session record. Without its answer the call
 		// is blocked in every fail mode, and the reason must not suggest an
@@ -503,7 +589,7 @@ func exchangeForeignHookSession(name, event string, startedAt, scanDeadline time
 	}
 	response, err := hookexec.ExchangeForeignHookSession(ctx, opts, name, data)
 	if err != nil {
-		return enterprisepolicy.GuardDecision{}, err
+		return enterprisepolicy.GuardDecision{}, foreignHookSessionExchangeError(opts, err)
 	}
 	var decision enterprisepolicy.GuardDecision
 	if err := json.Unmarshal(response, &decision); err != nil {

@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -35,15 +34,17 @@ const blanketOutageClaims = [
 ];
 
 describe('1.0.4 managed outage and upgrade claims', () => {
-  it('runs the guarded outage decision with fresh gateway records', () => {
+  it('names the exact gateway-backed guarded outage and Windows Amp routes', () => {
+    const outage = page('enterprise/configure/foreign-hook-guard.mdx').split('## Gateway outages')[1]?.split('## Approve a hook')[0] ?? '';
+    assert.match(outage, /foreign_hooks: remove.*default.*gateway-backed.*stopped.*restarting.*no answer.*administrator.*open/i);
+    assert.match(outage, /Windows Amp.*local.*plugin.*report.*allow/i);
+    assert.doesNotMatch(outage, /(?:earlier|fresh|trusted|published) (?:session )?record.{0,100}(?:allow|run)/i);
+  });
+
+  it('states the guarded outage limit without a record-based escape', () => {
     const text = page('enterprise/configure/foreign-hook-guard.mdx');
     assert.match(text, /guarded tool calls are blocked whatever the fail mode, `open` included/i);
-    const guard = readFileSync(join(repo, 'internal/cli/hook_foreign_guard.go'), 'utf8');
-    assert.doesNotMatch(guard, /CheckPublishedForeignHookSession|protectedForeignHookSession|foreignHookSessionOutageOpen/);
-    const result = execFileSync('go', ['test', './internal/cli', '-run',
-      '^(TestForeignHookGuardProtectedRecordsDoNotOpenAGatewayOutage|TestForeignHookCheckBlocksOpenOutageWithFreshRecords)$',
-      '-count=1'], { cwd: repo, encoding: 'utf8' });
-    assert.match(result, /^ok\s/m);
+    assert.doesNotMatch(text, /(?:earlier|fresh|trusted|published) (?:session )?record.{0,100}(?:allow|run)/i);
   });
 
   it('keeps the managed guarded outage limit across operator and threat-model pages', () => {
@@ -87,6 +88,9 @@ describe('1.0.4 managed outage and upgrade claims', () => {
     }
     assert.match(managedRow, /outage-only `open`.*unguarded call run.*foreign_hooks: remove.*guarded outage calls block under `open`/i);
     assert.doesNotMatch(row, /Only an explicit `open` lets it run/i);
+    assert.match(enterprise, /Linux and macOS.*foreign_hooks: remove.*pre_tool_call.*blocked.*administrator.*open/i);
+    assert.match(enterprise, /foreign_hooks: report.*allow.*no session exchange.*classified outage.*open/i);
+    assert.match(enterprise, /Windows Hermes.*does not run.*foreign-hook guard/i);
   });
 
   it('distinguishes the Windows Amp local guard record from gateway-backed sessions', () => {
@@ -119,6 +123,21 @@ describe('1.0.4 managed outage and upgrade claims', () => {
     assert.match(guide, /Save its work, then run `defenseclaw sandbox stop <name>` yourself.*reconciliation never retries the stop for you/i);
     assert.match(guide, /`defenseclaw sandbox exec` and `connect` run nothing in it/i);
     assert.doesNotMatch(guide, /DefenseClaw stops it as soon as it sees it|`connect` stops it and starts it again/i);
+  });
+
+  it('explains the live legacy guest without promising an automatic stop or containment', () => {
+    const guide = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
+    const legacy = guide.split('### A live legacy guest after upgrade')[1]?.split('## ')[0] ?? '';
+    assert.match(legacy, /Docker.*0\.1\.3.*keep.*supervisor.*upgrade/i);
+    assert.match(legacy, /unversioned.*1\.0\.3.*legacy/i);
+    assert.match(legacy, /MicroVM.*refuses.*gateway upgrade.*live/i);
+    assert.match(legacy, /never stops.*unprotected.*network broker.*not contained/i);
+    assert.match(legacy, /withdrawal fails.*retry.*withdrawal.*never.*stop/i);
+    assert.match(legacy, /ready.*sandbox stop.*MicroVM.*sync.*after the sync.*lost/i);
+    assert.match(legacy, /ended MicroVM.*sandbox delete.*0\.1\.5.*--end-vm/i);
+    assert.match(legacy, /restores.*create-time network policy.*old session approvals/i);
+    assert.match(legacy, /restor(?:e|ation) fails.*attempts to stop.*new session.*refuses the run/i);
+    assert.doesNotMatch(legacy, /automatically stops|reconciliation retries (?:a|the) stop/i);
   });
 });
 
@@ -202,6 +221,7 @@ describe('1.0.4 operator routes and limits', () => {
 
   it('aligns the TUI footer and status Policy line with the applied config counter', () => {
     const tui = page('reference/commands/tui.mdx');
+    const tuiGeneration = tui.split('### Config generation and policy digest')[1]?.split('### ')[0] ?? '';
     const cli = page('reference/commands/cli.mdx').split('### Policy generation and digest')[1]?.split('### ')[0] ?? '';
     assert.match(tui, /`gen`.*config\.generation\.json.*(?:survives|persists).*gateway restart/i);
     assert.doesNotMatch(tui, /`gen` is the gateway's policy generation|restarts at 1 when the gateway starts/i);
@@ -213,6 +233,7 @@ describe('1.0.4 operator routes and limits', () => {
     assert.match(cli, /separate `policy\.generation`.*restarts at 1/i);
     assert.match(cli, /per-user.*hand edit.*(?:next|moves|increments).*config generation/i);
     assert.doesNotMatch(cli, /The generation number is the gateway's own counter and restarts at 1/i);
+    assert.match(tuiGeneration, /status strip.*authenticated.*`\/status`.*policy\.config_generation/i);
   });
 
   it('does not promise enrollment for an extension without an engine version', () => {

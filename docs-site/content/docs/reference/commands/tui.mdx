@@ -157,7 +157,9 @@ configuration and the policy assets it names. Compare the pair with
 `defenseclaw status --json`. The Policy line in plain `defenseclaw status`
 shows the same `policy.config_generation` as `config generation N`. The raw
 `policy.generation` field is a separate gateway-local counter that restarts at
-1; `defenseclaw-gateway policy digest` computes the digest from disk.
+1; `defenseclaw-gateway policy digest` computes the digest from disk. The TUI
+status strip reads the authenticated gateway `/status` policy snapshot's
+`policy.config_generation`, rather than the gateway-local policy counter.
 
 A save through the TUI or CLI config writer moves the counter once the gateway
 has applied it. On a per-user install, an applied hand edit also moves the

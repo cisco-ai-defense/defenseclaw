@@ -135,7 +135,7 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) (err error) {
 		}
 		phase := auditPhase(sb.Status.Phase)
 		m.lifecycle(ctx, b, phase, audit.SandboxTriggerReconcile, startup, nil, sb.Status.ExitCode)
-		m.reconcileOldSupervisor(ctx, b)
+		m.retryOldSupervisorStop(b)
 		m.startWatch(b)
 		m.triageSandbox(ctx, b)
 	}

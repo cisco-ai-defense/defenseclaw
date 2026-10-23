@@ -216,12 +216,6 @@ type record struct {
 	// until it stops (openshell.SupportedMin). Empty in records from before
 	// it was kept, whose sessions all began on an older release.
 	SessionRelease string `json:"session_release,omitempty"`
-	// A legacy guest's network withdrawal is recorded before its first
-	// change, then confirmed after OpenShell loads it. A later start restores
-	// the create-time policy on the new supervisor, across daemon restarts.
-	OldSupervisorNetworkRestore bool     `json:"old_supervisor_network_restore,omitempty"`
-	OldSupervisorNetworkClosed  bool     `json:"old_supervisor_network_closed,omitempty"`
-	OldSupervisorProviders      []string `json:"old_supervisor_providers,omitempty"`
 	// HookCounts are the hook counters as the daemon last kept them
 	// (keepHookCounts): a restarted daemon goes on from them. Copies of a
 	// record share them, so they are replaced, never changed in place.

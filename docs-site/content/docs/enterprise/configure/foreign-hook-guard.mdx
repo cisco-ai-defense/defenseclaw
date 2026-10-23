@@ -50,7 +50,7 @@ The last sentence appears only when the hook was present at session start. With 
 
 The [connector table](#which-connectors-it-covers) names where this guard runs on each OS. [Fail modes](/docs/reference/configuration/fail-modes#effective-behavior) describes the outage result when a connector has no guard.
 
-With `foreign_hooks: remove` (the default), the guard checks the session with the gateway for every covered connector except Windows Amp. While the gateway cannot answer (it is stopped or restarting), those guarded tool calls are blocked whatever the fail mode, `open` included:
+With `foreign_hooks: remove` (the default), the gateway-backed guard checks each covered session except Windows Amp. If the gateway is stopped, restarting or gives no answer, an administrator's `open` cannot override it: guarded tool calls are blocked whatever the fail mode, `open` included:
 
 ```text
 enterprise_foreign_hook_blocked: DefenseClaw could not check this agent
@@ -58,7 +58,7 @@ session's hook record with its gateway, so the call is blocked. Retry when
 the DefenseClaw gateway is running; if the block continues, restart the agent.
 ```
 
-This is a known limit in 1.0.4: the guard keeps those session records in the gateway, so it cannot prove during an outage that a session is clean. Windows Amp keeps its guard record locally, but its managed plugin blocks gateway outages in every fail mode, even when `foreign_hooks` is `report` or `allow`. Calls without this guard follow their connector's hook or plugin route; an `open` setting alone does not guarantee that a call runs. Stop and session-end events get the agent's normal allow, so a blocked agent can still end its turn and exit.
+This is a known limit in 1.0.4: the guard keeps those session records in the gateway, so it cannot prove during an outage that a session is clean. An earlier online allow does not approve the next call while the gateway is down. Windows Amp keeps its guard record locally, but its managed plugin blocks gateway outages in every fail mode, even when `foreign_hooks` is `report` or `allow`. Calls without this guard follow their connector's hook or plugin route; an `open` setting alone does not guarantee that a call runs. Stop and session-end events get the agent's normal allow, so a blocked agent can still end its turn and exit.
 
 ## Approve a hook
 
