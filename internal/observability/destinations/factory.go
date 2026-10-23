@@ -15,6 +15,9 @@ package destinations
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -163,6 +166,29 @@ type Factory struct {
 	managedProvider  managedaid.ProviderResolver
 	canaryMu         sync.RWMutex
 	canary           map[uint64]*otlpGenerationCanaryRegistry
+}
+
+type preparedIdentityAdapter struct {
+	delivery.Adapter
+	digest string
+}
+
+func (adapter *preparedIdentityAdapter) RecordedDeliveryIdentity() string { return adapter.digest }
+
+// preparedIdentity binds acknowledgement tracking to the same resolved
+// values used to prepare the transport. Only their digest leaves this scope.
+func preparedIdentity(adapter delivery.Adapter, token, bearer string, headers map[string]string, ca []byte) delivery.Adapter {
+	encoded, err := json.Marshal(struct {
+		Token   string            `json:"token"`
+		Bearer  string            `json:"bearer"`
+		Headers map[string]string `json:"headers"`
+		CA      []byte            `json:"ca"`
+	}{token, bearer, headers, ca})
+	if err != nil {
+		return &preparedIdentityAdapter{Adapter: adapter}
+	}
+	sum := sha256.Sum256(encoded)
+	return &preparedIdentityAdapter{Adapter: adapter, digest: hex.EncodeToString(sum[:])}
 }
 
 var _ observabilityruntime.DestinationAdapterFactory = (*Factory)(nil)
@@ -371,7 +397,7 @@ func (factory *Factory) prepareOTLPLogs(
 		return nil, cleanup, err
 	}
 	factory.emitOTLPWarnings(destination, hasSecretHeaderReferences(destination.Transport.Headers) || hasAuthenticationLikeHeader(headers))
-	return adapter, cleanup, nil
+	return preparedIdentity(adapter, "", "", headers, tlsConfig.CABundle), cleanup, nil
 }
 
 func prepareOTLPSafely(ctx context.Context, config otlp.Config, dependencies otlp.Dependencies) (factory *otlp.Factory, err error) {
@@ -439,7 +465,7 @@ func (factory *Factory) prepareSplunk(
 	if err := ctx.Err(); err != nil {
 		return nil, cleanup, err
 	}
-	return adapter, cleanup, nil
+	return preparedIdentity(adapter, token, "", nil, tlsOptions.CABundle), cleanup, nil
 }
 
 func (factory *Factory) prepareHTTPJSONL(
@@ -486,7 +512,7 @@ func (factory *Factory) prepareHTTPJSONL(
 	if err := ctx.Err(); err != nil {
 		return nil, cleanup, err
 	}
-	return adapter, cleanup, nil
+	return preparedIdentity(adapter, "", bearer, headers, tlsOptions.CABundle), cleanup, nil
 }
 
 func hasSecretHeaderReferences(source map[string]config.ObservabilityV8HeaderValue) bool {

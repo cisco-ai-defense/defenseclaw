@@ -61,6 +61,13 @@ type DestinationAdapterFactory interface {
 	) (delivery.Adapter, DestinationAdapterCleanup, error)
 }
 
+// PreparedDestinationIdentity is supplied by adapters that resolve mutable
+// authentication or trust material during preparation. It contains only a
+// digest of the material actually given to the adapter, never its value.
+type PreparedDestinationIdentity interface {
+	RecordedDeliveryIdentity() string
+}
+
 type destinationDispatchFactory struct {
 	adapters     DestinationAdapterFactory
 	resources    *telemetry.V8ProviderFactory
@@ -142,6 +149,19 @@ func (factory *destinationDispatchFactory) Prepare(
 		if err != nil {
 			return nil, &destinationDispatchError{}
 		}
+		prepared, hasPrepared := adapter.(PreparedDestinationIdentity)
+		if hasPrepared {
+			fingerprint := prepared.RecordedDeliveryIdentity()
+			if fingerprint == "" {
+				return nil, &destinationDispatchError{}
+			}
+			identity = append(identity, 0)
+			identity = append(identity, fingerprint...)
+		} else if destinationHasSecretReferences(destination) {
+			// An adapter with a mutable secret but no prepared identity
+			// cannot safely inherit an earlier acknowledgement.
+			return nil, &destinationDispatchError{}
+		}
 		entry := &destinationDispatcher{
 			kind: destination.Kind, dispatcher: dispatcher, identity: string(identity),
 		}
@@ -149,6 +169,20 @@ func (factory *destinationDispatchFactory) Prepare(
 		component.byName[destination.Name] = entry
 	}
 	return component, nil
+}
+
+func destinationHasSecretReferences(destination config.ObservabilityV8EffectiveDestination) bool {
+	transport := destination.Transport
+	if transport.TokenEnv != "" || transport.TokenCredential != "" ||
+		transport.BearerEnv != "" || transport.BearerCredential != "" {
+		return true
+	}
+	for _, header := range transport.Headers {
+		if header.Secret != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func destinationSelectsLogs(destination config.ObservabilityV8EffectiveDestination) bool {

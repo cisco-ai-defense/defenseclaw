@@ -545,6 +545,20 @@ func (owner *sidecarOwnedObservabilityV8Runtime) EmitRuntimeV8(
 	}, err
 }
 
+func (owner *sidecarOwnedObservabilityV8Runtime) ReconcileRuntimeV8StoredReplay(
+	ctx context.Context, metadata router.Metadata, floorOnly bool,
+) (bool, error) {
+	if owner == nil || owner.runtime == nil {
+		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	owner.lifecycleMu.RLock()
+	defer owner.lifecycleMu.RUnlock()
+	if owner.closed {
+		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	return owner.runtime.ReconcileStoredReplay(ctx, metadata, floorOnly)
+}
+
 // EmitRuntimeV8LogBatch adapts audit's opaque generated operations to the
 // runtime's short-lived generation-pinned batch. Collection, local
 // persistence, redaction, and destination routing remain independent per

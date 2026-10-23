@@ -680,6 +680,74 @@ func TestFactoryResolvesProtectedCredentialReferences(t *testing.T) {
 	}
 }
 
+func TestFactoryPreparedIdentityChangesWithResolvedAuthentication(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	for _, test := range []struct {
+		name        string
+		destination config.ObservabilityV8DestinationSource
+	}{
+		{"Splunk token credential", config.ObservabilityV8DestinationSource{
+			Name: "archive", Kind: config.ObservabilityV8DestinationSplunkHEC,
+			Endpoint: server.URL, TokenCredential: "recipient-key",
+			NetworkSafety: config.ObservabilityV8NetworkSafetySource{AllowPrivateNetworks: true},
+		}},
+		{"HTTP bearer credential", config.ObservabilityV8DestinationSource{
+			Name: "archive", Kind: config.ObservabilityV8DestinationHTTPJSONL,
+			Endpoint: server.URL, BearerCredential: "recipient-key",
+			NetworkSafety: config.ObservabilityV8NetworkSafetySource{AllowPrivateNetworks: true},
+		}},
+		{"HTTP header credential", config.ObservabilityV8DestinationSource{
+			Name: "archive", Kind: config.ObservabilityV8DestinationHTTPJSONL,
+			Endpoint: server.URL, Headers: map[string]config.ObservabilityV8HeaderValue{
+				"X-Recipient": config.ObservabilityV8CredentialHeader("recipient-key"),
+			},
+			NetworkSafety: config.ObservabilityV8NetworkSafetySource{AllowPrivateNetworks: true},
+		}},
+		{"OTLP header credential", config.ObservabilityV8DestinationSource{
+			Name: "archive", Kind: config.ObservabilityV8DestinationOTLP,
+			Endpoint: server.URL, Protocol: "http/protobuf",
+			TLS: config.ObservabilityV8TLSSource{Insecure: true},
+			Headers: map[string]config.ObservabilityV8HeaderValue{
+				"X-Recipient": config.ObservabilityV8CredentialHeader("recipient-key"),
+			},
+			NetworkSafety: config.ObservabilityV8NetworkSafetySource{AllowPrivateNetworks: true},
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			secrets := &secretResolver{
+				values: map[string]string{}, credentials: map[string]string{"recipient-key": "first-recipient-placeholder"},
+				calls: map[string]int{},
+			}
+			factory := newTestFactory(t, io.Discard, secrets, nil, net.Dialer{}, nil)
+			destination := compileDestination(t, test.destination)
+			identity := func() string {
+				adapter, cleanup, err := factory.PrepareDestination(context.Background(), destination, testResourceContext(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = cleanup(context.Background()) }()
+				prepared, ok := adapter.(observabilityruntime.PreparedDestinationIdentity)
+				if !ok || prepared.RecordedDeliveryIdentity() == "" {
+					t.Fatal("prepared adapter has no private acknowledgement identity")
+				}
+				return prepared.RecordedDeliveryIdentity()
+			}
+			first := identity()
+			secrets.mu.Lock()
+			secrets.credentials["recipient-key"] = "replacement-recipient-placeholder"
+			secrets.mu.Unlock()
+			second := identity()
+			if first == second || strings.Contains(first, "first-recipient-placeholder") || strings.Contains(second, "replacement-recipient-placeholder") {
+				t.Fatal("acknowledgement identity did not bind the resolved recipient privately")
+			}
+		})
+	}
+}
+
 func TestFactoryLoadsCABundleOnceAndDoesNotRequestDuringPrepare(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -769,7 +837,7 @@ func TestFactoryPreparesHTTPOTLPLogsWithDetachedSecretsCAOverridesAndExactRetry(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := adapter.(*otlp.LogAdapter); !ok {
+	if _, ok := adapter.(observabilityruntime.PreparedDestinationIdentity); !ok {
 		t.Fatalf("adapter = %T", adapter)
 	}
 	mu.Lock()
@@ -919,7 +987,7 @@ func TestFactoryOTLPDefaultAllSignalsBuildsOnlyItsLogAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := adapter.(*otlp.LogAdapter); !ok {
+	if _, ok := adapter.(observabilityruntime.PreparedDestinationIdentity); !ok {
 		t.Fatalf("adapter = %T", adapter)
 	}
 	if counters := deliverOne(t, destination.Name, adapter, `{"record_id":"default-all"}`); counters.Delivered != 1 {

@@ -296,6 +296,15 @@ func (pipeline *LocalLogPipeline) Process(
 	return pipeline.process(ctx, metadata, builder, false, "", !observability.ExportAfterLocalWrite(ctx))
 }
 
+// StoredReplayDeliveries reads current routes without rebuilding a durable
+// record, so an acknowledged change can be reconciled before replay.
+func (pipeline *LocalLogPipeline) StoredReplayDeliveries(metadata router.Metadata, floorOnly bool) ([]router.Delivery, error) {
+	if pipeline == nil || pipeline.evaluator == nil {
+		return nil, &Error{code: ErrorInvalidDependency}
+	}
+	return pipeline.evaluator.StoredReplayDeliveries(metadata, floorOnly)
+}
+
 // ProcessLocalOnly applies the same collection, mandatory-floor, generated
 // record, central-redaction, and SQLite contracts as Process while refusing to
 // construct optional destination projections. It is reserved for explicitly
@@ -494,7 +503,13 @@ func (pipeline *LocalLogPipeline) prepare(
 		}
 		return record, nil
 	}
-	result, err := pipeline.evaluator.Evaluate(metadata, safeBuilder)
+	var result router.Result
+	var err error
+	if floorOnly, replay := observability.StoredReplayForm(ctx); replay {
+		result, err = pipeline.evaluator.EvaluateStoredReplay(metadata, floorOnly, safeBuilder)
+	} else {
+		result, err = pipeline.evaluator.Evaluate(metadata, safeBuilder)
+	}
 	if err != nil {
 		var buildFailure *recordBuildFailure
 		if errors.As(err, &buildFailure) {

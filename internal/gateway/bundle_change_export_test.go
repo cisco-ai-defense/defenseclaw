@@ -41,13 +41,16 @@ import (
 // destination that can be told to refuse the change's exports (HTTP 400), the
 // gateway's audit database, and one credential change event in a spool.
 type changeExportFixture struct {
-	capture    *hookModelV8OTLPCapture
-	sidecar    *Sidecar
-	dataDir    string
-	configPath string
-	endpoint   string
-	refusing   atomic.Bool
-	refused    atomic.Int64
+	capture         *hookModelV8OTLPCapture
+	sidecar         *Sidecar
+	dataDir         string
+	configPath      string
+	endpoint        string
+	refusing        atomic.Bool
+	refused         atomic.Int64
+	trackRecipients atomic.Bool
+	tenantA         atomic.Int64
+	tenantB         atomic.Int64
 	// slow delays the destination's answer to the change's exports.
 	slow     atomic.Bool
 	logger   *audit.Logger
@@ -62,15 +65,23 @@ func newChangeExportFixture(t *testing.T) *changeExportFixture {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Refuse only the change's exports: refusing every record would
 		// open the destination's circuit for 30 s.
-		if (f.refusing.Load() || f.slow.Load()) && r.URL.Path == "/v1/logs" {
+		if (f.refusing.Load() || f.slow.Load() || f.trackRecipients.Load()) && r.URL.Path == "/v1/logs" {
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, "read", http.StatusBadRequest)
 				return
 			}
+			if bytes.Contains(body, []byte(f.ev.EventID)) {
+				switch r.Header.Get("X-Recipient") {
+				case "first recipient":
+					f.tenantA.Add(1)
+				case "replacement recipient":
+					f.tenantB.Add(1)
+				}
+			}
 			if f.slow.Load() && bytes.Contains(body, []byte(f.ev.EventID)) {
 				time.Sleep(300 * time.Millisecond)
-			} else if bytes.Contains(body, []byte(f.ev.EventID)) {
+			} else if f.refusing.Load() && bytes.Contains(body, []byte(f.ev.EventID)) {
 				f.refused.Add(1)
 				http.Error(w, "refused", http.StatusBadRequest)
 				return
@@ -372,6 +383,115 @@ func TestBundleReceiptReporterReoffersAChangeAfterDestinationRebind(t *testing.T
 			}
 			if countB != wantB || f.exported() != wantA {
 				t.Fatalf("pending change exports: endpoint A=%d, endpoint B=%d; want %d and %d", f.exported(), countB, wantA, wantB)
+			}
+		})
+	}
+}
+
+// A referenced authentication value is part of the recipient identity. The
+// same configured destination may address another tenant after rotation.
+func TestBundleReceiptReporterReoffersAChangeAfterAuthenticationRotation(t *testing.T) {
+	f := newChangeExportFixture(t)
+	f.trackRecipients.Store(true)
+	const name = "W8_DEST_RECIPIENT"
+	t.Setenv(name, "first recipient")
+	raw := hookModelV8BootstrapRaw(f.dataDir, f.endpoint, []string{"logs"})
+	raw = bytes.Replace(raw, []byte("      protocol: http/protobuf\n"),
+		[]byte("      protocol: http/protobuf\n      headers:\n        X-Recipient: {env: "+name+"}\n"), 1)
+	if result, err := f.sidecar.ReloadObservabilityRuntime(t.Context(), f.configPath, raw); err != nil ||
+		result.Status() != runtimegraph.ReloadApplied {
+		t.Fatalf("configure recipient: status=%v error=%v", result.Status(), err)
+	}
+	f.slow.Store(true)
+	first := f.reporter()
+	first.poll(t.Context())
+	deadline := time.Now().Add(20 * time.Second)
+	for settled, delivered := false, false; !settled || !delivered; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("first recipient did not acknowledge the change")
+		}
+		settled, delivered = first.changes[f.ev.EventID].delivery.Settled()
+	}
+	if first.hasSeen(f.ev.EventID) || f.tenantA.Load() != 1 {
+		t.Fatalf("before rotation: reported=%t first recipient=%d", first.hasSeen(f.ev.EventID), f.tenantA.Load())
+	}
+	f.slow.Store(false)
+	t.Setenv(name, "replacement recipient")
+	// A separate config edit restarts the adapter while leaving this
+	// destination's compiled transport and routes unchanged.
+	rotated := bytes.Replace(raw, []byte("export_interval_seconds: 1"), []byte("export_interval_seconds: 2"), 1)
+	if bytes.Equal(rotated, raw) {
+		t.Fatal("test did not change the graph")
+	}
+	if result, err := f.sidecar.ReloadObservabilityRuntime(t.Context(), f.configPath, rotated); err != nil ||
+		result.Status() != runtimegraph.ReloadApplied {
+		t.Fatalf("rotate recipient: status=%v error=%v", result.Status(), err)
+	}
+	restarted := f.reporter()
+	pollUntil(t, restarted, func() bool { return restarted.hasSeen(f.ev.EventID) })
+	if a, b := f.tenantA.Load(), f.tenantB.Load(); a != 1 || b != 1 {
+		t.Fatalf("pending change deliveries: first recipient=%d, replacement recipient=%d; want one each", a, b)
+	}
+}
+
+// A collection edit must not change the form of a row already stored. An
+// unchanged recipient needs no replay; a replacement receives that row.
+func TestBundleReceiptReporterReconcilesAStoredChangeAfterCollectionReload(t *testing.T) {
+	for _, replaceRecipient := range []bool{false, true} {
+		name := "unchanged recipient"
+		if replaceRecipient {
+			name = "replacement recipient"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newChangeExportFixture(t)
+			f.slow.Store(true)
+			first := f.reporter()
+			first.poll(t.Context())
+			deadline := time.Now().Add(20 * time.Second)
+			for settled, delivered := false, false; !settled || !delivered; time.Sleep(20 * time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatal("original recipient did not acknowledge the change")
+				}
+				settled, delivered = first.changes[f.ev.EventID].delivery.Settled()
+			}
+			if first.hasSeen(f.ev.EventID) || f.exported() != 1 {
+				t.Fatalf("before reload: reported=%t exports=%d", first.hasSeen(f.ev.EventID), f.exported())
+			}
+			f.slow.Store(false)
+			endpoint := f.endpoint
+			var replacement *hookModelV8OTLPCapture
+			if replaceRecipient {
+				replacement = &hookModelV8OTLPCapture{}
+				server := httptest.NewServer(http.HandlerFunc(replacement.handler))
+				t.Cleanup(server.Close)
+				endpoint = server.URL
+			}
+			raw := hookModelV8BootstrapRaw(f.dataDir, endpoint, []string{"logs"})
+			raw = bytes.Replace(raw, []byte("compliance.activity:\n      collect: {logs: true"),
+				[]byte("compliance.activity:\n      collect: {logs: false"), 1)
+			if bytes.Contains(raw, []byte("compliance.activity:\n      collect: {logs: true")) {
+				t.Fatal("test did not disable collection")
+			}
+			if result, err := f.sidecar.ReloadObservabilityRuntime(t.Context(), f.configPath, raw); err != nil ||
+				result.Status() != runtimegraph.ReloadApplied {
+				t.Fatalf("disable collection: status=%v error=%v", result.Status(), err)
+			}
+			restarted := f.reporter()
+			pollUntil(t, restarted, func() bool { return restarted.hasSeen(f.ev.EventID) })
+			countB := 0
+			if replacement != nil {
+				for _, record := range hookModelV8CapturedLogs(replacement.logSnapshot()) {
+					if encoded, err := protojson.Marshal(record); err == nil && strings.Contains(string(encoded), f.ev.EventID) {
+						countB++
+					}
+				}
+			}
+			wantB := 0
+			if replaceRecipient {
+				wantB = 1
+			}
+			if a := f.exported(); a != 1 || countB != wantB {
+				t.Fatalf("stored change deliveries: original=%d replacement=%d; want 1 and %d", a, countB, wantB)
 			}
 		})
 	}

@@ -63,3 +63,20 @@ func StoredReplay(ctx context.Context) bool {
 	marked, _ := ctx.Value(storedReplayKey{}).(bool)
 	return marked
 }
+
+type storedReplayFormKey struct{}
+
+// WithStoredReplayForm records the admission form of a durable row. A replay
+// keeps that form even if the current collection policy has changed.
+func WithStoredReplayForm(ctx context.Context, floorOnly bool) context.Context {
+	return context.WithValue(WithStoredReplay(ctx), storedReplayFormKey{}, floorOnly)
+}
+
+// StoredReplayForm returns the original floor form when a replay has one.
+func StoredReplayForm(ctx context.Context) (floorOnly bool, present bool) {
+	if !StoredReplay(ctx) {
+		return false, false
+	}
+	floorOnly, present = ctx.Value(storedReplayFormKey{}).(bool)
+	return floorOnly, present
+}

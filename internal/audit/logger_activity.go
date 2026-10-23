@@ -75,7 +75,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 			if err := l.syncOccurrence(ctx, delivery); err != nil {
 				return err
 			}
-			ctx = withStoredOccurrence(observability.WithStoredReplay(ctx), row)
+			ctx = withStoredOccurrence(observability.WithStoredReplayForm(ctx, row.floorOnly), row)
 		} else {
 			ctx = observability.WithExportAfterLocalWrite(ctx)
 		}

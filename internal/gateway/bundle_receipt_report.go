@@ -379,8 +379,8 @@ func (r *bundleReceiptReporter) acknowledgedDir() string {
 }
 
 // acknowledgedDestinations returns the event-scoped destination identities
-// recorded as having change event id. Name-only records from an earlier
-// 1.0.4 build are ignored; they cannot identify the endpoint that received it.
+// recorded as having change event id. Earlier name-only and v2 records are
+// ignored; they cannot prove which resolved recipient received the change.
 func (r *bundleReceiptReporter) acknowledgedDestinations(id string) []string {
 	if !enterprisestatus.ValidChangeEventID(id) {
 		return nil

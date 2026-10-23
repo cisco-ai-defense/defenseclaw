@@ -73,8 +73,8 @@ func NewRecordedRemoteDelivery(scope string, acknowledged []string, record func(
 	return delivery
 }
 
-// TrackingKey uses the compiled destination's unmasked transport and routing
-// identity for a recorded occurrence. The identity is hashed with the
+// TrackingKey uses the compiled destination's transport, routing and prepared
+// authentication identity for a recorded occurrence. The identity is hashed with the
 // occurrence id, so a private acknowledgement file cannot be reused for a
 // different change or expose a reusable secret-derived plan fingerprint.
 // In-memory deliveries continue to use the destination name.
@@ -83,13 +83,13 @@ func (delivery *RemoteDelivery) TrackingKey(destination, identity string) string
 		return destination
 	}
 	sum := sha256.Sum256([]byte(delivery.scope + "\x00" + identity))
-	return "v2:" + hex.EncodeToString(sum[:])
+	return "v3:" + hex.EncodeToString(sum[:])
 }
 
-// ValidRecordedDeliveryKey rejects pre-identity, name-only journal records.
-// Those records cannot prove which endpoint or route received a change.
+// ValidRecordedDeliveryKey rejects older journal records that did not bind
+// resolved authentication. They cannot prove which recipient received a change.
 func ValidRecordedDeliveryKey(key string) bool {
-	if len(key) != len("v2:")+sha256.Size*2 || key[:3] != "v2:" {
+	if len(key) != len("v3:")+sha256.Size*2 || key[:3] != "v3:" {
 		return false
 	}
 	for _, digit := range key[3:] {

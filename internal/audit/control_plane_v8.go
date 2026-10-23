@@ -84,6 +84,12 @@ type RuntimeV8Emitter interface {
 	) (RuntimeV8EmitOutcome, error)
 }
 
+// RuntimeV8StoredReplayReconciler checks the current graph's recipients of an
+// already durable row before the producer rebuilds its stored record.
+type RuntimeV8StoredReplayReconciler interface {
+	ReconcileRuntimeV8StoredReplay(context.Context, router.Metadata, bool) (bool, error)
+}
+
 // RuntimeV8FindingContentFingerprinter is the optional key-custody capability
 // used at the forensic persistence boundary. Implementations retain the
 // installation correlation key and return only the schema-sized keyed token;
@@ -215,6 +221,17 @@ func (l *Logger) emitControlPlaneV8WithEvidenceAndMetrics(
 	row, replay := storedOccurrenceFrom(ctx)
 	if observability.StoredReplay(ctx) && !replay {
 		return auditV8Persisted, fmt.Errorf("audit: a stored replay of %q has no stored record", event.Action)
+	}
+	if replay {
+		if reconciler, ok := binding.emitter.(RuntimeV8StoredReplayReconciler); ok {
+			acknowledged, err := reconciler.ReconcileRuntimeV8StoredReplay(ctx, metadata, row.floorOnly)
+			if err != nil {
+				return auditV8Persisted, err
+			}
+			if acknowledged {
+				return auditV8Persisted, nil
+			}
+		}
 	}
 	build := func(snapshot RuntimeV8BuildContext, admission router.Admission) (observability.Record, error) {
 		if !replay {

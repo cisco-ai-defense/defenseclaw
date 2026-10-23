@@ -337,6 +337,48 @@ func (runtime *Runtime) Emit(
 	return runtime.emit(ctx, metadata, builder, false)
 }
 
+// ReconcileStoredReplay checks current recipients of a durable change before
+// rebuilding it. A recipient acknowledged under the same prepared identity
+// needs no new offer; a replacement forces replay of the stored form.
+func (runtime *Runtime) ReconcileStoredReplay(
+	ctx context.Context, metadata router.Metadata, floorOnly bool,
+) (bool, error) {
+	tracker := observability.RemoteDeliveryFrom(ctx)
+	if runtime == nil || runtime.manager == nil || ctx == nil || tracker == nil {
+		return false, &Error{code: ErrorInvalidDependency}
+	}
+	lease, err := runtime.manager.Acquire(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer lease.Release()
+	graph := lease.Graph()
+	component, ok := lease.Component(LocalLogComponentName)
+	local, localOK := component.(*localLogComponent)
+	if graph == nil || !ok || !localOK || local.pipeline == nil || local.digest != graph.Digest() {
+		return false, &Error{code: ErrorComponentUnavailable}
+	}
+	deliveries, routeErr := local.pipeline.StoredReplayDeliveries(metadata, floorOnly)
+	if routeErr != nil {
+		return false, routeErr
+	}
+	for _, route := range deliveries {
+		if route.DestinationKind == config.ObservabilityV8DestinationLocalSQLite {
+			continue
+		}
+		component, ok := lease.Component(DestinationDispatchComponentName)
+		dispatch, dispatchOK := component.(*destinationDispatchComponent)
+		if !ok || !dispatchOK || dispatch.digest != graph.Digest() {
+			return false, &Error{code: ErrorComponentUnavailable}
+		}
+		key := dispatch.trackingKey(route.DestinationName, route.DestinationKind, tracker)
+		if key == "" || !tracker.Acknowledged(key) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // EmitLocalOnly pins the same immutable graph and persists through the same
 // central local pipeline as Emit, but it never constructs or enqueues optional
 // destination work. It is intentionally separate from ordinary routing so a

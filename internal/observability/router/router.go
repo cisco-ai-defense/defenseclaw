@@ -678,6 +678,44 @@ func (evaluator *Evaluator) Evaluate(metadata Metadata, builder RecordBuilder) (
 	if err != nil {
 		return Result{}, err
 	}
+	return evaluator.evaluateAdmitted(metadata, admission, builder)
+}
+
+// StoredReplayDeliveries selects current routes for a record already stored
+// under its original admission. Collection cannot retroactively change the
+// form of that row or revoke an earlier destination acknowledgement.
+func (evaluator *Evaluator) StoredReplayDeliveries(metadata Metadata, floorOnly bool) ([]Delivery, error) {
+	admission, err := storedReplayAdmission(metadata, floorOnly)
+	if err != nil || evaluator == nil {
+		return nil, fmt.Errorf("invalid stored replay")
+	}
+	return evaluator.route(metadata, admission), nil
+}
+
+// EvaluateStoredReplay rebuilds only the stored form, then routes it through
+// the current graph. The producer verifies the rebuilt record against its row.
+func (evaluator *Evaluator) EvaluateStoredReplay(metadata Metadata, floorOnly bool, builder RecordBuilder) (Result, error) {
+	admission, err := storedReplayAdmission(metadata, floorOnly)
+	if err != nil || evaluator == nil {
+		return Result{}, fmt.Errorf("invalid stored replay")
+	}
+	return evaluator.evaluateAdmitted(metadata, admission, builder)
+}
+
+func storedReplayAdmission(metadata Metadata, floorOnly bool) (Admission, error) {
+	if err := metadata.validate(); err != nil {
+		return AdmissionDrop, err
+	}
+	if metadata.identity.Signal != observability.SignalLogs || floorOnly && !metadata.mandatory {
+		return AdmissionDrop, fmt.Errorf("invalid stored replay form")
+	}
+	if floorOnly {
+		return AdmissionFloor, nil
+	}
+	return AdmissionOrdinary, nil
+}
+
+func (evaluator *Evaluator) evaluateAdmitted(metadata Metadata, admission Admission, builder RecordBuilder) (Result, error) {
 	result := Result{admission: admission}
 	if admission == AdmissionDrop {
 		return result, nil
