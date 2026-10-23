@@ -565,10 +565,10 @@ func TestStandaloneManagedRateLimitBlocksUnderOpen(t *testing.T) {
 			})
 		}
 	}
-	// A per-user hook in fail mode open keeps its open result.
+	// A rate limit is an answered gateway, so per-user open also closes.
 	perUser := run(t, "codex", &stubRT{onRequest: func(*stubRT, *http.Request) (*http.Response, error) { return busy() }}, nil)
-	if blocked(perUser) {
-		t.Fatalf("per-user open: a rate limit must keep the open result: code=%d stdout=%q", perUser.code, perUser.stdout)
+	if !blocked(perUser) {
+		t.Fatalf("per-user open: a rate limit must block: code=%d stdout=%q", perUser.code, perUser.stdout)
 	}
 }
 

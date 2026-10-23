@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v9
+# defenseclaw-managed-hook v10
 # Shell-side hook hardening helpers.
 DEFENSECLAW_BAKED_HOOK_PATH=""
 #
@@ -65,6 +65,8 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        (Release 26.8.4 shipped these helpers as its v7; this line carries
 #        them above main's v8 so an older writer cannot remove a helper used
 #        by newer hook scripts.)
+#   v10 — validates the entire JSON answer, including nested fields and
+#         duplicate keys, before the awk fallback can extract an action.
 #   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
 #        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
 #        the entire agent payload into a shell variable BEFORE the
@@ -787,15 +789,12 @@ defenseclaw_inspect_tool_body() {
   fi
 }
 
-# defenseclaw_json_string_field extracts a simple top-level JSON string field.
-# It is intentionally small: hook block/allow parsing only needs fields like
-# "action" and "reason" when jq is unavailable (common in Git Bash on Windows).
-# A third argument "strict" also fails when text follows the object.
+# defenseclaw_json_string_field extracts a top-level JSON string field when
+# jq and python3 are unavailable. The whole answer is validated first: a
+# malformed sibling field cannot turn an "action":"allow" into a verdict.
 defenseclaw_json_string_field() {
   local json="${1:-}"
   local field="${2:-}"
-  local strict="0"
-  [ "${3:-}" != "strict" ] || strict="1"
   local extracted status
   case "$field" in
     ""|*[!A-Za-z0-9_]*) return 1 ;;
@@ -803,71 +802,112 @@ defenseclaw_json_string_field() {
   if ! command -v awk >/dev/null 2>&1; then
     return 2
   fi
-  if extracted="$(printf '%s' "$json" | awk -v wanted="$field" -v strict="$strict" '
+  if extracted="$(printf '%s' "$json" | awk -v wanted="$field" '
     { text = text $0 "\n" }
+    function ws() {
+      while (p <= n && substr(text,p,1) ~ /[[:space:]]/) p++
+    }
+    function str(   start,c,esc,d) {
+      if (substr(text,p,1) != "\"") return 0
+      p++; start=p
+      while (p <= n) {
+        c=substr(text,p,1)
+        if (c == "\"") {
+          parsed=substr(text,start,p-start)
+          p++
+          return 1
+        }
+        if (c == "\\") {
+          p++
+          esc=substr(text,p,1)
+          if (esc == "u") {
+            for (d=1; d<=4; d++)
+              if (substr(text,p+d,1) !~ /^[0-9a-fA-F]$/) return 0
+            p+=5
+            continue
+          }
+          if (index("\"\\/bfnrt",esc) == 0) return 0
+          p++
+          continue
+        }
+        if (c ~ /[[:cntrl:]]/) return 0
+        p++
+      }
+      return 0
+    }
+    function number(   c) {
+      if (substr(text,p,1) == "-") p++
+      c=substr(text,p,1)
+      if (c == "0") p++
+      else if (c ~ /^[1-9]$/) {
+        do { p++; c=substr(text,p,1) } while (c ~ /^[0-9]$/)
+      } else return 0
+      if (substr(text,p,1) == ".") {
+        p++
+        if (substr(text,p,1) !~ /^[0-9]$/) return 0
+        while (substr(text,p,1) ~ /^[0-9]$/) p++
+      }
+      c=substr(text,p,1)
+      if (c == "e" || c == "E") {
+        p++; c=substr(text,p,1)
+        if (c == "+" || c == "-") p++
+        if (substr(text,p,1) !~ /^[0-9]$/) return 0
+        while (substr(text,p,1) ~ /^[0-9]$/) p++
+      }
+      return 1
+    }
+    function val(level,   c) {
+      if (level > 64) return 0
+      ws(); c=substr(text,p,1)
+      if (c == "{") return obj(level)
+      if (c == "[") return arr(level)
+      if (c == "\"") return str()
+      if (substr(text,p,4) == "true" || substr(text,p,4) == "null") { p+=4; return 1 }
+      if (substr(text,p,5) == "false") { p+=5; return 1 }
+      return number()
+    }
+    function arr(level,   c) {
+      p++; ws()
+      if (substr(text,p,1) == "]") { p++; return 1 }
+      while (p <= n) {
+        if (!val(level+1)) return 0
+        ws(); c=substr(text,p,1); p++
+        if (c == "]") return 1
+        if (c != ",") return 0
+      }
+      return 0
+    }
+    function obj(level,   id,key,c) {
+      id=++objects
+      p++; ws()
+      if (substr(text,p,1) == "}") { p++; return 1 }
+      while (p <= n) {
+        if (!str()) return 0
+        key=parsed
+        if (index(key,"\\") || seen[id SUBSEP key]++) return 0
+        ws()
+        if (substr(text,p,1) != ":") return 0
+        p++; ws()
+        if (level == 0 && key == wanted) {
+          if (!str()) return 0
+          result=parsed; found=1
+        } else if (!val(level+1)) return 0
+        ws(); c=substr(text,p,1); p++
+        if (c == "}") return 1
+        if (c != ",") return 0
+        ws()
+      }
+      return 0
+    }
     END {
-      depth = 0
-      started = 0
       found = 0
       n = length(text)
-      for (i = 1; i <= n; i++) {
-        c = substr(text, i, 1)
-        if (!started) {
-          if (c ~ /[[:space:]]/) continue
-          if (c != "{") exit 2
-          started = 1
-          depth = 1
-          continue
-        }
-        if (c == "\"") {
-          start = i + 1
-          escaped = 0
-          for (j = start; j <= n; j++) {
-            ch = substr(text, j, 1)
-            if (escaped) { escaped = 0; continue }
-            if (ch == "\\") { escaped = 1; continue }
-            if (ch == "\"") break
-          }
-          if (j > n) exit 2
-          token = substr(text, start, j - start)
-          if (depth == 1) {
-            k = j + 1
-            while (k <= n && substr(text, k, 1) ~ /[[:space:]]/) k++
-            if (substr(text, k, 1) == ":" && token == wanted) {
-              if (found) exit 2
-              v = k + 1
-              while (v <= n && substr(text, v, 1) ~ /[[:space:]]/) v++
-              if (substr(text, v, 1) != "\"") exit 2
-              value_start = v + 1
-              escaped = 0
-              for (value_end = value_start; value_end <= n; value_end++) {
-                ch = substr(text, value_end, 1)
-                if (escaped) { escaped = 0; continue }
-                if (ch == "\\") { escaped = 1; continue }
-                if (ch == "\"") break
-              }
-              if (value_end > n) exit 2
-              result = substr(text, value_start, value_end - value_start)
-              found = 1
-              i = value_end
-              continue
-            }
-          }
-          i = j
-          continue
-        }
-        if (c == "{" || c == "[") depth++
-        else if (c == "}" || c == "]") {
-          depth--
-          if (depth < 0) exit 2
-          if (depth == 0) {
-            if (strict == "1" && substr(text, i + 1) ~ /[^[:space:]]/) exit 2
-            if (found) { print result; exit 0 }
-            exit 1
-          }
-        }
-      }
-      exit 2
+      p=1; ws()
+      if (substr(text,p,1) != "{" || !obj(0)) exit 2
+      ws()
+      if (p <= n) exit 2
+      if (found) { print result; exit 0 }
+      exit 1
     }
   ')"; then
     printf '%s' "$extracted" | sed 's/\\"/"/g; s/\\\\/\\/g; s/\\n/ /g; s/\\r/ /g; s/\\t/ /g'

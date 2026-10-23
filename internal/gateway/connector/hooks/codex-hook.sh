@@ -239,13 +239,11 @@ fail_unreachable() {
 {{end}}  exit 0
 }
 
-# Response-layer failure: gateway answered but the answer was bad
-# (auth failure, malformed JSON, missing action). A managed standalone
-# administrator's open choice covers an outage only.
+# A gateway response that cannot be used is a failed check, not an outage.
 fail_response() {
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
-  # outage only (the service not running, restarting or giving no answer
-  # in time). A refusal, an error status or an unusable answer blocks.
+{{if and (not .SecureClient) (not .Sandbox)}}  # Outside Secure Client the open fail mode covers a gateway outage only
+  # (the service not running, restarting or giving no answer in time). A
+  # refusal, an error status or an unusable answer blocks.
   FAIL_MODE="closed"
 {{end}}  local reason
   reason="$(defenseclaw_response_failure_reason "$1")"

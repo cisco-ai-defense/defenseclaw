@@ -116,6 +116,9 @@ type APIServer struct {
 	// hermesTasks gives a Hermes hook that names only its task the session
 	// of that task.
 	hermesTasks hermesTaskSessions
+	// preToolDecisions pairs audited Claude Code/Codex PreToolUse decisions
+	// with later post-tool observations, without a background worker.
+	preToolDecisions preToolDecisionTracker
 
 	// mcpAdmissionPending names an MCP server the install watcher admits
 	// but has not admitted yet (GAP-0112). Set once before serving.

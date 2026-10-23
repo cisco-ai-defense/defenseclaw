@@ -1075,6 +1075,11 @@ func (a *APIServer) finalizeAgentHook(
 				connectorName, req.HookEventName, resp.Action, denied, auditErr)
 		}
 	}
+	if !replay && result.AuditPersisted && !panicked {
+		safeSection("pre_tool_audit", func() {
+			a.auditMissingPreToolDecision(ctx, req, resp)
+		})
+	}
 
 	safeSection("health", func() {
 		if !a.recordsConnectorHealth(ctx) {
@@ -2229,10 +2234,8 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 			"event_name",
 			"eventName",
 			"agent_action_name",
+			"event",
 		)
-		if event == "" {
-			event = inferAgentHookEvent(payload)
-		}
 	}
 	values := make(map[connector.CorrelationTarget]connector.CorrelationValue)
 	identifiers := spec.HookValues(payload)
@@ -2599,19 +2602,6 @@ func extractAgentIdentityFromHookPayload(payload map[string]interface{}) (agentI
 		agentName = firstHookIdentityString(payload, "agent")
 	}
 	return agentID, agentName, agentType
-}
-
-func inferAgentHookEvent(payload map[string]interface{}) string {
-	if firstValue(payload, "toolName", "tool_name", "toolArgs", "tool_args", "tool_input") != nil {
-		return "PreToolUse"
-	}
-	if firstString(payload, "prompt", "user_prompt", "initialPrompt", "initial_prompt") != "" {
-		return "UserPromptSubmit"
-	}
-	if firstValue(payload, "toolResult", "tool_result", "tool_response", "result") != nil {
-		return "PostToolUse"
-	}
-	return ""
 }
 
 // hookEvaluatorPanicHook is a test-only seam: when non-nil it is

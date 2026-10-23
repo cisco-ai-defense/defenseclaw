@@ -758,13 +758,14 @@ retry_busy 04-verify verify
 # verify reports whether unprivileged user namespaces are open, a setting of
 # the host's kernel (the runner's, or the container host's), not of the package.
 check "$results/04-verify.json" verify --action verify --installed --version "$version" --ready \
-    --complete "${policy_checks[@]}" --allow-warning unprivileged_user_namespaces
+    --coverage-complete --security-incomplete "${policy_checks[@]}" \
+    --allow-warning unprivileged_user_namespaces --allow-warning hook_process_fail_open
 
 step "status"
 lifecycle 05-status status
 retry_busy 05-status status
 check "$results/05-status.json" status --action status --installed --version "$version" \
-    --complete "${policy_checks[@]}"
+    --coverage-complete --security-incomplete "${policy_checks[@]}" --allow-warning hook_process_fail_open
 services_running
 
 step "MDM detection (detect.sh --require-healthy)"

@@ -90,7 +90,7 @@ func TestPerUserHermesToolCallFailsClosedUnlessOpen(t *testing.T) {
 					t.Fatalf("code %d, want 0 (stderr %q)", result.code, result.stderr)
 				}
 				logged := lastHookFailure(t, home)["fail_mode"]
-				if failMode == "open" && tc.name != "oversized" {
+				if failMode == "open" && tc.name != "oversized" && tc.name != "malformed answer" {
 					if strings.TrimSpace(result.stdout) != "" {
 						t.Fatalf("stdout %q, want the neutral result for an explicit open", result.stdout)
 					}

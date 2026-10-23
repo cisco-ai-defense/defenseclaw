@@ -178,10 +178,10 @@ The other actions are `/install`, `/upgrade`, `/repair`, `/reconcile`, `/status`
 
 ## Claude Code attestation
 
-On Windows, `security_complete` needs at least one of Codex, Claude Code or
-Cursor enabled, and no agent reported as `agent_unprotected` or
-`hook_contract_unverified`. With Claude Code enabled it also needs an
-administrator's attestation that Claude Code runs DefenseClaw's managed hooks:
+On Windows, at least one of Codex, Claude Code or Cursor must be enabled, and
+no agent may be reported as `agent_unprotected` or `hook_contract_unverified`.
+With Claude Code enabled, an administrator must attest that Claude Code runs
+DefenseClaw's managed hooks:
 
 1. Install. `security_complete` is `false` at this point.
 2. In an enrolled user's own session, start Claude Code and have it make one tool
@@ -209,9 +209,15 @@ a minute and a half every user's agents are refused (fail closed,
 `enterprise_managed_gateway_not_running`). Plan it in the same maintenance window
 as the upgrade it follows. The record is bound to the SHA-256 of the installed
 Claude Code policy file and of the hook binary, so every upgrade makes it stale
-and `security_complete` returns to `false` until you repeat steps 2 and 3. Computers
+and that proof becomes stale until you repeat steps 2 and 3. Computers
 on the same release and Claude Code contract have the same binding, so an MDM can
 check one reference computer and push the Setup form to the others.
+
+This attestation proves the installed policy path. It cannot prove that the
+user's hook process will run to completion. With Codex or Claude Code enabled,
+`status` and `verify` continue to report `security_complete: false` and
+`hook_process_fail_open` after attestation: a stopped or timed-out pre-tool hook
+can still let the tool run without a DefenseClaw decision.
 
 The guardian writes a user's registrations only while that user has an active
 (connected) session. `status` and `verify` also report agents the enumerator

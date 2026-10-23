@@ -448,6 +448,7 @@ $run = $null
 # scanner_judge_missing once the Setup has installed the scanner runtime.
 $installedChecks = @(
     '--coverage-complete', '--security-incomplete', '--allow-warning', 'scanner_judge_missing',
+    '--allow-warning', 'hook_process_fail_open',
     '--machine-policy-enforced', 'codex', '--machine-policy-target', 'claudecode'
 )
 

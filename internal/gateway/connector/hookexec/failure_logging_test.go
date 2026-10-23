@@ -67,7 +67,7 @@ func TestDeliveryFailureDiagnostics(t *testing.T) {
 						if err := json.Unmarshal(failure, &record); err != nil {
 							t.Fatalf("expected one failure record: %v: %s", err, failure)
 						}
-						blocked := mode == "closed" || scenario == "managed-missing-token" || scenario == "oversized" ||
+						blocked := mode == "closed" || scenario == "malformed" || scenario == "managed-missing-token" || scenario == "oversized" ||
 							(strict && (scenario == "outage" || scenario == "missing-token"))
 						want := "fail_open"
 						if blocked {
@@ -76,7 +76,7 @@ func TestDeliveryFailureDiagnostics(t *testing.T) {
 						// A managed standalone hook runs closed whatever the
 						// connector or environment asks for.
 						wantMode := mode
-						if scenario == "managed-missing-token" || scenario == "oversized" {
+						if scenario == "malformed" || scenario == "managed-missing-token" || scenario == "oversized" {
 							wantMode = "closed"
 						}
 						if record["connector"] != connector || record["fail_mode"] != wantMode || record["outcome"] != want || strings.Contains(r.stderr, "WARNING hook fail-open") == blocked {

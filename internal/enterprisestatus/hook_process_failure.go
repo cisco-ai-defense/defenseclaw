@@ -4,8 +4,7 @@
 package enterprisestatus
 
 import (
-	"slices"
-	"strings"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // CodeHookProcessFailOpen identifies an agent that may continue a tool call
@@ -51,21 +50,17 @@ func (r *Result) AddHookProcessFailureWarnings() {
 	}
 }
 
-// The reviewed Hermes v2 contract begins at 0.21 and includes these dated
-// pins. Every Hermes deployment keeps the killed-hook warning; this check
-// selects the narrower message when every reported version blocks timeouts.
+// Every Hermes deployment keeps the killed-hook warning. Only versions in
+// the reviewed v2 contract receive the narrower timeout message.
 func hermesTimeoutClosed(versions []string) bool {
 	if len(versions) == 0 {
 		return false
 	}
 	for _, version := range versions {
-		if strings.HasPrefix(version, "0.21.") {
-			continue
+		resolved := connector.ResolveHookContractStrict("hermes", version)
+		if resolved.Status != connector.HookCompatibilityKnown || resolved.Contract.ContractID != "hermes-hooks-v2" {
+			return false
 		}
-		if slices.Contains([]string{"2026.8.31", "2026.9.7", "2026.9.11", "2026.9.14", "2026.9.21", "2026.9.24"}, version) {
-			continue
-		}
-		return false
 	}
 	return true
 }

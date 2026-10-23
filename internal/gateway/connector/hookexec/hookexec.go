@@ -900,12 +900,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			return failUnreachable(opts, sp, failMode, coldStartFailedReason)
 		}
 	}
-	// knownStatus is the last error status the gateway answered this call
-	// with, on a standalone hook: the gateway is up, so a call it then
-	// leaves without a decision (a 429 whose resend does not fit the answer
-	// budget or gets no answer, an error answer whose body is cut off) is no
-	// outage, and fail mode open does not let it through
-	// (failAfterErrorStatus). The watchdog's answer is closed from then on.
+	// A response status is evidence that the gateway answered. An incomplete
+	// 2xx body is an unusable answer, not an outage that may fail open.
+	// Error statuses retain their existing retry and refusal handling.
 	knownStatus := 0
 	// markManagedAnsweredError (w8-mgmt) records the status on opts too, so
 	// ManagedOutageFailsOpen, noAnswerFailMode and the watchdog's rendered
@@ -915,7 +912,8 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			return
 		}
 		markManagedAnsweredError(&opts, sp, resp.StatusCode)
-		if managedNativeDecision(opts) && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
+		if resp != nil && !opts.SecureClient &&
+			(resp.StatusCode >= 200 && resp.StatusCode < 300 || managedNativeDecision(opts)) {
 			knownStatus = resp.StatusCode
 			opts.answerWatch.gatewayAnsweredError(opts, sp)
 		}
@@ -1045,14 +1043,15 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
 	if readErr != nil {
-		// The status line of an error answer already says the gateway is
-		// up: a body cut off after it is no outage on a standalone hook.
+		// HTTP 2xx plus an incomplete body is a malformed answer. The
+		// gateway was reached, so outage-open mode cannot apply.
 		return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 	}
 	if int64(len(body)) > defaultMaxBody {
-		// Closed on a standalone hook in every fail mode, whatever the
-		// status (managedNonOutageMode).
-		return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "gateway response too large")
+		if opts.SecureClient {
+			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "gateway response too large")
+		}
+		return failResponse(opts, sp, "closed", "gateway response too large")
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -1138,6 +1137,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 // with that status, as when its whole body is in. Per-user and Secure Client
 // hooks, and a call with no error status, keep failNoAnswer.
 func failAfterErrorStatus(opts Options, sp spec, failMode string, status int) int {
+	if status >= 200 && status < 300 && !opts.SecureClient {
+		return failResponse(opts, sp, "closed", "incomplete gateway response")
+	}
 	if status == 0 || !managedNativeDecision(opts) {
 		return failNoAnswer(opts, sp, failMode)
 	}
@@ -1487,6 +1489,9 @@ func validCopilotEvent(event string) bool {
 // decide shapes the connector-native stdout + exit code from a 2xx gateway
 // response body, returning a fail_response result if the body is not JSON.
 func (sp spec) decide(opts Options, body []byte) int {
+	if !opts.SecureClient && !validUniqueGatewayResponse(body) {
+		return failResponse(opts, sp, "closed", "invalid or ambiguous JSON response")
+	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
 		return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid JSON response")
@@ -1502,7 +1507,7 @@ func (sp spec) decide(opts Options, body []byte) int {
 			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid or missing action in gateway response")
 		}
 		if !opts.SecureClient && !lifecycle {
-			return failNativeDecision(opts, sp, "invalid or missing action in gateway response")
+			return failResponse(opts, sp, "closed", "invalid or missing action in gateway response")
 		}
 		action = "allow"
 		if lifecycle && sp.style == stylePluginBridge {

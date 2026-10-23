@@ -144,7 +144,8 @@ fails. The JSON has the same shape as the [Linux sample](/docs/enterprise/instal
 | `ok`, `errors` | `true`, empty |
 | `installed_version` | The version you deployed |
 | `readiness` | `gateway`, `guardian`, `enumerator` and `sensor_helper` all `true` |
-| `coverage_complete`, `security_complete` | `true` |
+| `coverage_complete` | `true` when the enabled hooks are installed |
+| `security_complete` | `false` with Codex or Claude Code enabled; `hook_process_fail_open` warns that a stopped or timed-out hook can let a tool run |
 | `policy` | `applied` is `true` ([digest](/docs/enterprise/operate/operations#effective-policy-digest-and-config-generation)) |
 | `enrollment.targets` | Per-user targets. `0` is normal when you enable only machine-policy connectors |
 

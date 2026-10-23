@@ -22,6 +22,7 @@ func TestHookProcessFailureWarnings(t *testing.T) {
 		{"hermes", []string{"0.19.0"}, true, "unknown-version"},
 		{"hermes", []string{"0.21.5"}, true, "non-2 process exit"},
 		{"hermes", []string{"2026.9.14"}, true, "non-2 process exit"},
+		{"hermes", []string{"Hermes Agent v0.21.5 (2026.9.24)"}, true, "non-2 process exit"},
 		{"hermes", []string{"0.21.5", "0.19.0"}, true, "unknown-version"},
 		{"hermes", nil, true, "unknown-version"},
 		{"opencode", []string{"1.19.0"}, false, ""},

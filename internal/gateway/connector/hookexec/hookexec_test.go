@@ -1231,7 +1231,7 @@ func TestResponseFailure(t *testing.T) {
 		if r.stdout != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}}`+"\n" {
 			t.Errorf("stdout = %q", r.stdout)
 		}
-		if !strings.Contains(r.stderr, "invalid JSON response") {
+		if !strings.Contains(r.stderr, "invalid or ambiguous JSON response") {
 			t.Errorf("stderr = %q, want invalid JSON", r.stderr)
 		}
 	})
@@ -1584,7 +1584,7 @@ func TestCopilotFailureContract(t *testing.T) {
 					if result.stdout != want {
 						t.Fatalf("managed: stdout=%q stderr=%q, want %q", result.stdout, result.stderr, want)
 					}
-				case hook == "per-user open" && tc.name != "oversized":
+				case hook == "per-user open" && tc.name != "oversized" && tc.name != "malformed":
 					if result.stdout != "" {
 						t.Fatalf("per-user open: stdout=%q stderr=%q, want the fail-open result", result.stdout, result.stderr)
 					}
@@ -3088,25 +3088,26 @@ func TestManagedNativeDecisionRejectsMissingActionAndOutput(t *testing.T) {
 	}
 }
 
-func TestOSSOpenNativeDecisionMissingActionUsesOpenFailure(t *testing.T) {
+func TestOSSOpenNativeDecisionMissingActionClosesWhereSupported(t *testing.T) {
 	for _, tc := range []struct {
 		connector, event, body, wantOutput string
+		wantCode                           int
 	}{
-		{"cursor", "beforeShellExecution", `{}`, `{"permission":"allow"}` + "\n"},
-		{"copilot", "preToolUse", `{}`, ""},
-		{"devin", "PreToolUse", `{}`, ""},
-		{"kiro", "PreToolUse", `{}`, ""},
-		{"opencode", "tool.execute.before", `{}`, ""},
-		{"cursor", "beforeShellExecution", `{"action":"allow"}`, `{"permission":"allow"}` + "\n"},
-		{"copilot", "preToolUse", `{"action":"allow"}`, ""},
-		{"devin", "PreToolUse", `{"action":"allow"}`, ""},
-		{"kiro", "PreToolUse", `{"action":"allow"}`, ""},
-		{"opencode", "tool.execute.before", `{"action":"allow"}`, `{"action":"allow"}` + "\n"},
+		{"cursor", "beforeShellExecution", `{}`, `{"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}` + "\n", 0},
+		{"copilot", "preToolUse", `{}`, `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw blocked this tool call: the DefenseClaw gateway returned an answer DefenseClaw could not use. Run ` + "`defenseclaw doctor`" + ` to see why."}` + "\n", 0},
+		{"devin", "PreToolUse", `{}`, "DefenseClaw hook failed closed\n", 2},
+		{"kiro", "PreToolUse", `{}`, "", 2},
+		{"opencode", "tool.execute.before", `{}`, `{"hook_output":{"decision":"deny","reason":"DefenseClaw hook failed closed"}}` + "\n", 2},
+		{"cursor", "beforeShellExecution", `{"action":"allow"}`, `{"permission":"allow"}` + "\n", 0},
+		{"copilot", "preToolUse", `{"action":"allow"}`, "", 0},
+		{"devin", "PreToolUse", `{"action":"allow"}`, "", 0},
+		{"kiro", "PreToolUse", `{"action":"allow"}`, "", 0},
+		{"opencode", "tool.execute.before", `{"action":"allow"}`, `{"action":"allow"}` + "\n", 0},
 	} {
 		var stdout, stderr bytes.Buffer
 		opts := Options{Connector: tc.connector, Event: tc.event, FailMode: "open", Stdout: &stdout, Stderr: &stderr}
 		code := specs[tc.connector].decide(opts, []byte(tc.body))
-		if code != 0 || stdout.String() != tc.wantOutput {
+		if code != tc.wantCode || stdout.String() != tc.wantOutput {
 			t.Errorf("%s %s: code=%d stdout=%q stderr=%q, want %q", tc.connector, tc.body, code, stdout.String(), stderr.String(), tc.wantOutput)
 		}
 	}
