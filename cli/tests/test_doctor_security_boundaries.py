@@ -107,6 +107,62 @@ def test_overflow_owner_fails_closed_without_scanner_custody_channel(monkeypatch
     assert file_permissions.tracked_host_owner_uid("/unmapped-owner", info) == -1
 
 
+def _impostor_sockets():
+    import socket
+
+    listener = socket.create_server(("127.0.0.1", 0))
+    tcp = socket.create_connection(listener.getsockname())
+    server, _ = listener.accept()
+    listener.close()
+    udp_server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_server.bind(("127.0.0.1", 0))
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.connect(udp_server.getsockname())
+    yield "tcp", tcp, server
+    yield "udp", udp, udp_server
+    for name, kind in (
+        ("unix stream", socket.SOCK_STREAM),
+        ("own seqpacket pair", socket.SOCK_SEQPACKET),
+        ("unix datagram", socket.SOCK_DGRAM),
+    ):
+        mine, other = socket.socketpair(socket.AF_UNIX, kind)
+        yield name, mine, other
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux tracked-scanner channel")
+def test_overflow_owner_refuses_a_socket_that_is_not_the_launchers(monkeypatch) -> None:
+    """r104 W25: the variable names fd 5; the socket on it must prove it is the launcher's."""
+    import select
+
+    monkeypatch.setenv("DEFENSECLAW_TRACKED_HOST_STAT_FD", "5")
+    monkeypatch.setattr(file_permissions.os, "getpid", lambda: 1)
+    # As inside a scanner's PID namespace, so only the socket checks decide.
+    monkeypatch.setattr(file_permissions, "_in_child_pid_namespace", lambda: True, raising=False)
+    real = os.stat("/etc/passwd")
+    info = SimpleNamespace(st_uid=65534, st_dev=real.st_dev, st_ino=real.st_ino)
+    saved = os.dup(5) if _fd_open(5) else None
+    try:
+        for name, mine, other in _impostor_sockets():
+            with mine, other:
+                os.dup2(mine.fileno(), 5)
+                assert file_permissions.tracked_host_owner_uid("/etc/passwd", info) == -1, name
+                assert not select.select([other], [], [], 0.1)[0], f"a request was written to the {name}"
+    finally:
+        if saved is None:
+            os.close(5)
+        else:
+            os.dup2(saved, 5)
+            os.close(saved)
+
+
+def _fd_open(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return False
+    return True
+
+
 def test_dotenv_control_keys_are_named_with_their_replacement_not_on_every_command(
     caplog: pytest.LogCaptureFixture,
     tmp_path,

@@ -251,10 +251,10 @@ func (d *Daemon) HasManagedProcessIdentity(pid int) bool {
 	return d.verifyProcessForControl(info)
 }
 
-// HasAuthenticatedMigrationProcessIdentity recognizes process identities
-// suitable for authenticated listener proof, including older unbound records
-// and a current gateway temporarily hidden by a scanner. It never authorizes
-// a PID signal by itself.
+// HasAuthenticatedMigrationProcessIdentity recognizes only the strong,
+// unbound record written by the immediately preceding release. It does not
+// authorize process control by itself; callers must additionally corroborate
+// listener ownership and authenticated runtime PID/data-directory metadata.
 func (d *Daemon) HasAuthenticatedMigrationProcessIdentity(pid int) bool {
 	info, err := d.readPIDInfo()
 	if err != nil || info.PID != pid {
@@ -263,9 +263,7 @@ func (d *Daemon) HasAuthenticatedMigrationProcessIdentity(pid int) bool {
 	// A current record whose executable was replaced while it ran has the same
 	// standing: stop and restart may reach it only through the authenticated
 	// control plane.
-	return d.verifyProcessForAuthenticatedMigration(info) || d.verifyReplacedExecutable(info) ||
-		d.verifyUnreadableExecutable(info) ||
-		(info.StartIdentity != "" && d.verifyProcessForControl(info))
+	return d.verifyProcessForAuthenticatedMigration(info) || d.verifyReplacedExecutable(info)
 }
 
 // verifyProcess verifies every identity signal present in a PID record. It
@@ -275,14 +273,16 @@ func (d *Daemon) HasAuthenticatedMigrationProcessIdentity(pid int) bool {
 // use verifyProcessForControl, which additionally requires the current
 // data-directory binding and an executable identity.
 //
-// A permission-denied executable read is accepted for liveness only with a
-// current data-directory-bound record and matching kernel start identity.
-// It never grants direct process-control authority.
+// Both the executable check and the start-identity check have been hardened
+// to fail-CLOSED when their respective metadata is genuinely unavailable for
+// a process we *can* signal: the previous implementation fell back to "true"
+// on `os.Readlink` errors (Linux) and process-inspection errors (Darwin),
+// which let any unreaped zombie pass verification.
 func (d *Daemon) verifyProcess(info pidInfo) bool {
 	if info.DataDir != "" && !pathidentity.Same(info.DataDir, d.dataDir) {
 		return false
 	}
-	if !d.verifyExecutable(info) && !d.verifyUnreadableExecutable(info) && !d.verifyExecutable(info) {
+	if !d.verifyExecutable(info) {
 		return false
 	}
 	if !d.verifyStartIdentity(info) {
@@ -302,23 +302,7 @@ func (d *Daemon) verifyProcessForControl(info pidInfo) bool {
 		!pathidentity.Same(info.DataDir, d.dataDir) {
 		return false
 	}
-	// A temporarily non-dumpable gateway can be detected for status, but
-	// that observation never authorizes a signal to a PID.
-	return d.verifyExecutable(info) && d.verifyStartIdentity(info)
-}
-
-// A tracked scanner may briefly require the gateway to be non-dumpable on
-// hosts that refuse mount namespaces. Preserve a strong, data-dir-bound PID
-// record for liveness while /proc/<pid>/exe is inaccessible. Control still
-// requires either an exact executable read or authenticated listener proof.
-func (d *Daemon) verifyUnreadableExecutable(info pidInfo) bool {
-	if runtime.GOOS != "linux" || strings.TrimSpace(info.DataDir) == "" ||
-		strings.TrimSpace(info.Executable) == "" || strings.TrimSpace(info.StartIdentity) == "" ||
-		!pathidentity.Same(info.DataDir, d.dataDir) {
-		return false
-	}
-	_, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", info.PID))
-	return errors.Is(err, os.ErrPermission) && d.verifyStartIdentity(info)
+	return d.verifyProcess(info)
 }
 
 // verifyProcessForAuthenticatedMigration recognizes the strong PID record
@@ -890,10 +874,10 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 // StopGracefully first asks the running gateway to drain itself through its
 // authenticated control plane. A current, data-directory-bound PID record may
 // fall back to platform termination when that request fails. The immediately
-// preceding strong record format (executable + start identity, no data_dir)
-// and a temporarily unreadable executable require an accepted authenticated
-// request; neither is signalled or force-killed by PID. PID state is cleared
-// only after the original process handle has confirmed exit.
+// preceding strong record format (executable + start identity, no data_dir) is
+// migration-only: it must exit after an accepted authenticated request and is
+// never signalled or force-killed by PID. PID state is cleared only after the
+// original process handle has confirmed exit.
 func (d *Daemon) StopGracefully(timeout time.Duration, request GracefulStopRequest) error {
 	return d.stop(timeout, request)
 }
@@ -912,16 +896,10 @@ func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error 
 		return ErrNotRunning
 	}
 	currentControlIdentity := d.verifyProcessForControl(started)
-	authenticatedOnly := !currentControlIdentity &&
+	authenticatedMigration := !currentControlIdentity &&
 		request != nil &&
-		(d.verifyProcessForAuthenticatedMigration(started) || d.verifyReplacedExecutable(started) ||
-			d.verifyUnreadableExecutable(started))
-	if !currentControlIdentity && !authenticatedOnly {
-		// The final scanner may have ended between the first executable read
-		// and the restricted fallback check.
-		currentControlIdentity = d.verifyProcessForControl(started)
-	}
-	if !currentControlIdentity && !authenticatedOnly {
+		(d.verifyProcessForAuthenticatedMigration(started) || d.verifyReplacedExecutable(started))
+	if !currentControlIdentity && !authenticatedMigration {
 		return fmt.Errorf(
 			"%w: daemon PID record is not bound to data directory %s",
 			ErrUnsafeProcessIdentity,
@@ -943,15 +921,15 @@ func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error 
 				return nil
 			}
 		}
-		if authenticatedOnly {
+		if authenticatedMigration {
 			if requestErr != nil {
 				return fmt.Errorf(
-					"%w: authenticated shutdown was not accepted: %v",
+					"%w: authenticated migration shutdown was not accepted: %v",
 					ErrUnsafeProcessIdentity,
 					requestErr,
 				)
 			}
-			// Never turn an authenticated-only record into signal authority. The
+			// Never turn an unbound upgrade record into signal authority. The
 			// accepted control-plane request may be retried after the operator
 			// investigates why the old process did not drain.
 			return ErrStopTimeout

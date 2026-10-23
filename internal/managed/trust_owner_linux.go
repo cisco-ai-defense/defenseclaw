@@ -23,6 +23,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -40,19 +41,9 @@ func hostOwnerUID(path string, info os.FileInfo, mapped uint32) uint32 {
 		return mapped
 	}
 	unknown := ^uint32(0)
-	if os.Getenv("DEFENSECLAW_TRACKED_HOST_STAT_FD") != "5" {
-		// An overflow UID can equal the service UID. Never trust it without
-		// the launcher's host-inode evidence.
-		return unknown
-	}
-	if os.Getppid() != 1 || len(path) == 0 || len(path) > 4096 {
-		return unknown
-	}
-	// The peer is the launcher outside the scanner's PID namespace. The
-	// kernel reports that peer as PID 0 from inside the scanner. A daemon
-	// reparented to host PID 1 must never write to an incidental fd 5.
-	peer, err := unix.GetsockoptUcred(5, unix.SOL_SOCKET, unix.SO_PEERCRED)
-	if err != nil || peer.Pid != 0 {
+	// An overflow UID can equal the service UID. Never trust it without the
+	// launcher's host-inode evidence.
+	if len(path) == 0 || len(path) > 4096 || !trackedHostStatChannel() {
 		return unknown
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
@@ -91,4 +82,48 @@ func hostOwnerUID(path string, info os.FileInfo, mapped uint32) uint32 {
 		return unknown
 	}
 	return uid
+}
+
+// trackedHostStatChannel reports whether fd 5 is the scanner launcher's
+// channel. The environment variable only names the descriptor; the process
+// and the socket must prove it. This process runs below the scanner (its
+// parent is the scanner's PID 1) in a PID namespace other than the host's,
+// and fd 5 is a connected AF_UNIX SOCK_SEQPACKET socket whose peer runs as
+// this user outside that namespace, so the kernel reports the peer's PID as 0.
+// A host daemon reparented to PID 1, and every other socket on fd 5 (TCP, UDP,
+// a stream or a socketpair of its own), fails before a request is sent.
+func trackedHostStatChannel() bool {
+	if os.Getenv("DEFENSECLAW_TRACKED_HOST_STAT_FD") != "5" || os.Getppid() != 1 || !inChildPIDNamespace() {
+		return false
+	}
+	return hostStatPeerIsLauncher(5)
+}
+
+func hostStatPeerIsLauncher(fd int) bool {
+	domain, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_DOMAIN)
+	if err != nil || domain != unix.AF_UNIX {
+		return false
+	}
+	kind, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_TYPE)
+	if err != nil || kind != unix.SOCK_SEQPACKET {
+		return false
+	}
+	peer, err := unix.GetsockoptUcred(fd, unix.SOL_SOCKET, unix.SO_PEERCRED)
+	return err == nil && peer.Pid == 0 &&
+		peer.Uid == uint32(os.Geteuid()) && peer.Gid == uint32(os.Getegid())
+}
+
+// inChildPIDNamespace reports whether this process has a PID in more than one
+// namespace, that is, it does not run in the host's PID namespace.
+func inChildPIDNamespace() bool {
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		if ids, ok := strings.CutPrefix(line, "NSpid:"); ok {
+			return len(strings.Fields(ids)) > 1
+		}
+	}
+	return false
 }

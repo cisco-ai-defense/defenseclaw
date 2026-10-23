@@ -103,12 +103,16 @@ func RunContained(cmd *exec.Cmd) error {
 // launcher's pidfd, and the launcher holds the command's pidfd. Parent-death
 // signals link both processes to their owners. The command can signal its
 // children by PID; the gateway and launcher are outside its PID namespace and
-// non-dumpable, and its inherited seccomp filter refuses ptrace, cross-process
-// memory/fd access and clearing its parent-death signal. A read-only launcher
-// channel reports the real UID of an inode after matching its device and
-// inode numbers, so managed root-owned files retain their custody checks.
-// If a namespace, pidfd or filter cannot be established, nothing from the
-// command runs and RunTracked returns ErrNotContained.
+// its Landlock domain, which refuses ptrace access (memory, environment,
+// descriptors) to every process outside it, and its inherited seccomp filter
+// refuses ptrace, cross-process memory/fd access and clearing its parent-death
+// signal. Containment changes only the command's tree, never this process's
+// own state, so daemon status, stop, restart and upgrade work during a scan.
+// A read-only launcher channel reports the real UID of an inode after matching
+// its device and inode numbers, so managed root-owned files retain their
+// custody checks. If a namespace, pidfd, Landlock domain or filter cannot be
+// established, nothing from the command runs and RunTracked returns
+// ErrNotContained.
 // On macOS a supervisor, a short-lived copy of this binary in a process
 // group of its own, runs the command in a session of its own. It follows
 // every descendant with kqueue NOTE_FORK and NOTE_EXIT and the
