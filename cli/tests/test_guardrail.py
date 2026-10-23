@@ -1429,7 +1429,6 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             [
                 "",  # enable guardrail
                 "2",  # action mode
-                "",  # hook fail-mode (default = open)
                 "y",  # human approval — INLINE PROMPT (mode == action)
                 "MEDIUM",  # approval min severity
                 "",  # local scanner
@@ -3040,7 +3039,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                     "# defenseclaw-managed-hook v9\ndefenseclaw-hook.exe\n"
                     "ProcessStartInfo\nRedirectStandardInput\n"
                     "RedirectStandardOutput\nWaitForExit\n"
-                    '{"continue":true}\n'
+                    '{"continue":false,"permission":"deny"}\n'
                 )
                 command = "& '" + runtime_path.replace("'", "''") + "'"
             else:
@@ -3055,7 +3054,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                         "type": "command",
                         "command": command,
                         "timeout": 30,
-                        "failClosed": False,
+                        "failClosed": True,
                     }
                 ]
                 for event in CURSOR_HOOK_EVENTS
@@ -3074,7 +3073,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                         "contract_id": "cursor-hooks-v1",
                         "compatibility_status": "unversioned",
                         "hook_script_version": "v8",
-                        "hook_fail_mode": "open",
+                        "hook_fail_mode": "closed",
                         "hook_script_digests": {
                             runtime_name: "sha256:" + hashlib.sha256(Path(runtime_path).read_bytes()).hexdigest(),
                         },
@@ -3091,9 +3090,9 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
 
             guardrail = SimpleNamespace(
                 connectors={},
-                hook_fail_mode="open",
+                hook_fail_mode="closed",
                 effective_mode=lambda _name: "observe",
-                effective_hook_fail_mode=lambda _name: "open",
+                effective_hook_fail_mode=lambda _name: "closed",
                 effective_hilt=lambda _name: SimpleNamespace(enabled=False),
             )
             cfg = SimpleNamespace(

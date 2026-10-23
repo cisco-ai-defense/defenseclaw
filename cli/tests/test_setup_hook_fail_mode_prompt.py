@@ -1,7 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""GAP-1388/GAP-0353: closed is the recommended default; a saved open is named as the current setting."""
+"""Per-user setup closes failures, including a saved open from an older release."""
 
 from __future__ import annotations
 
@@ -30,10 +30,10 @@ def test_new_install_defaults_closed() -> None:
     assert chosen == "closed"
 
 
-def test_saved_open_default_is_named_as_the_current_setting() -> None:
+def test_saved_open_is_replaced_with_closed() -> None:
     output, chosen = _run("open")
-    assert "Current setting: open" in output
-    assert chosen == "open"
+    assert "Per-user hooks fail closed" in output
+    assert chosen == "closed"
 
 
 def test_interactive_init_action_policy_defaults_closed() -> None:

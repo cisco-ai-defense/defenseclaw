@@ -29,7 +29,9 @@ import { dirname, join } from "node:path";
 // env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
 const DC_API_ADDR = "{{.APIAddr}}";
 const DC_TOKEN_FILE = "{{.TokenFileJS}}";
-const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
+const DC_FAIL_MODE = "{{.FailMode}}"; // managed outage choice or Secure Client
+const DC_RESPONSE_FAIL_MODE = "closed";
+const DC_MANAGED_HOOK = true;
 // The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the process
 // environment is not read (GAP-0315). As in the shell hooks,
 // DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035); it can
@@ -610,9 +612,9 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       signal: controller.signal,
     }, token), controller.signal);
     if (!res.ok) {
-      // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
-      // is an outage, as in the shell hooks, so strict availability closes it.
-      if ((res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE) === "closed") {
+      // An HTTP status proves the gateway answered. Outage-open cannot
+      // convert a refusal or server error into an unchecked tool call.
+      if (DC_RESPONSE_FAIL_MODE === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
       if (actionable) await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
@@ -620,7 +622,6 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     }
     const data = await res.json();
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
-
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
     const out = data && data.hook_output;
@@ -632,13 +633,17 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     }
     return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
   } catch (err) {
-    // Transport failure (gateway unreachable / timeout). Honor fail mode:
-    // closed → block, open → allow. An uninstalled deployment allows.
+    // A managed outage-open choice applies only to the trusted hook socket
+    // refusing a connection or being absent. Timeouts and other failures block.
     if (await defenseclawDeploymentRemoved()) return null;
     if (DC_TRANSPORT_FAIL_MODE === "closed") {
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }
+    if (!DC_MANAGED_HOOK || !DC_HOOK_SOCKET || !defenseclawGatewayStopped(err)) {
+      return { reason: "DefenseClaw hook failed closed (unverified gateway outage)" };
+    }
+
     if (actionable) await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");
     return null;
   } finally {

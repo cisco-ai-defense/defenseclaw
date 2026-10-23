@@ -186,8 +186,8 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 # FAIL_MODE was already set above (before the missing-token branch).
-# Response-layer and transport-layer failures both respect FAIL_MODE;
-# DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
+# Outside Secure Client, response failures close and eligible connection
+# outages follow FAIL_MODE. DEFENSECLAW_STRICT_AVAILABILITY=1 can only close.
 
 {{if and (not .Sandbox) (not .Managed)}}# claude_fail_closed_decision prints the JSON block decision for a prompt,
 # tool call or permission request that is blocked because the gateway did not
@@ -339,20 +339,41 @@ defenseclaw_hook_post() {
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 RESPONSE=$(defenseclaw_hook_post) || {
-  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"
+  _dc_post_status=$?
+{{if and (not .SecureClient) (not .Sandbox)}}  # Curl can fail after receiving HTTP headers (short or stalled body).
+  if [[ "${RESPONSE##*$'\n'}" == [1-9][0-9][0-9] ]] || [ "$_dc_post_status" = 18 ]; then
+    fail_response "incomplete gateway response"
+  fi
+  if [ "$_dc_post_status" = 28 ]; then
+    FAIL_MODE="closed"
+    fail_unreachable "gateway unreachable"
+  fi
+{{end}}  defenseclaw_await_gateway "$_dc_post_status" _dc_hook_post_response || {
+    _dc_post_status=$?
+{{if and (not .SecureClient) (not .Sandbox)}}    if [[ "${RESPONSE##*$'\n'}" == [1-9][0-9][0-9] ]] || [ "$_dc_post_status" = 18 ]; then
+      fail_response "incomplete gateway response"
+    fi
+    if [ "$_dc_post_status" = 28 ]; then
+      FAIL_MODE="closed"
+      fail_unreachable "gateway unreachable"
+    fi
+{{end}}    fail_unreachable "gateway unreachable"
+  }
 }
-defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
+defenseclaw_retry_busy _dc_hook_post_response || {{if and (not .SecureClient) (not .Sandbox)}}fail_response "gateway returned HTTP 429"{{else}}fail_unreachable "gateway unreachable"{{end}}{{end}}
 
 defenseclaw_split_response
 
 if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+  {{if and (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "gateway returned HTTP ${HTTP_CODE}"
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
+{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
+{{end}}
 {{if and (not .Managed) (not .Sandbox)}}# Decode the action and its structured output together. Successful personal
 # hooks need one parser process rather than two (#1130). The fallback keeps
 # working on supported hosts without jq; managed/Secure Client renders retain

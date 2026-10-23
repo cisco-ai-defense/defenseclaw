@@ -332,7 +332,8 @@ defenseclaw_shared_hook_token_file() {
   fi
 }
 
-# Resolve the availability posture of the shared inspect-* scripts. One
+# Resolve the availability posture of managed shared inspect-* scripts.
+# Per-user shared scripts pin closed before they reach this resolver. One
 # physical script serves every connector of this data directory, and nothing
 # authenticates which connector an invocation runs for: DEFENSECLAW_CONNECTOR
 # is the agent's environment, and two connector records leave the sidecars

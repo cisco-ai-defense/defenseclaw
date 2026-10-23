@@ -24,7 +24,9 @@ import { dirname, join } from 'node:path'
 
 const DC_API_ADDR = "{{.APIAddr}}"
 const DC_TOKEN_FILE = "{{.TokenFileJS}}"
-const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"
+const DC_FAIL_MODE: string = "closed" // managed outage choice or Secure Client
+const DC_RESPONSE_FAIL_MODE: string = "closed"
+const DC_MANAGED_HOOK = false
 // Standalone managed installs talk to the gateway's peer-authorized unix hook
 // socket instead of the TCP API: the gateway identifies the caller by
 // kernel-verified uid, so no bearer token leaves this process, and a user who
@@ -456,7 +458,7 @@ function gatewayStopped(error: unknown): boolean {
 }
 
 function failureResponse(reason: string): GatewayResponse {
-	if (DC_FAIL_MODE === "closed") {
+	if (DC_RESPONSE_FAIL_MODE === "closed") {
 		return { action: "block", reason: `DefenseClaw hook failed closed (${reason})` }
 	}
 	return { action: "allow" }
@@ -643,7 +645,8 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			return data
 		} catch (error) {
 			if (await deploymentRemoved()) return { action: "allow" }
-			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
+			if (DC_MANAGED_HOOK && DC_HOOK_SOCKET && gatewayStopped(error)) {
+				if (DC_FAIL_MODE === "open") return { action: "allow" }
 				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
 			}
 			return failureResponse(safeError(error))

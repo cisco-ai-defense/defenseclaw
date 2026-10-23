@@ -241,7 +241,8 @@ fail_unreachable() {
 {{end}}}
 
 fail_response() {
-  defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
+{{if and (not .SecureClient) (not .Sandbox)}}  FAIL_MODE="closed"
+{{end}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
   echo "defenseclaw: copilot hook error: $1" >&2
   {{if .Managed}}{{$failure}}{{else}}copilot_hook_failure "the DefenseClaw gateway returned an answer DefenseClaw could not use. Run \`defenseclaw doctor\` to see why."{{end}}
 }
@@ -305,9 +306,28 @@ defenseclaw_hook_post() {
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 RESPONSE=$(defenseclaw_hook_post) || {
-  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"
+  _dc_post_status=$?
+{{if and (not .SecureClient) (not .Sandbox)}}  # Curl can fail after receiving HTTP headers (short or stalled body).
+  if [[ "${RESPONSE##*$'\n'}" == [1-9][0-9][0-9] ]] || [ "$_dc_post_status" = 18 ]; then
+    fail_response "incomplete gateway response"
+  fi
+  if [ "$_dc_post_status" = 28 ]; then
+    FAIL_MODE="closed"
+    fail_unreachable "gateway unreachable"
+  fi
+{{end}}  defenseclaw_await_gateway "$_dc_post_status" _dc_hook_post_response || {
+    _dc_post_status=$?
+{{if and (not .SecureClient) (not .Sandbox)}}    if [[ "${RESPONSE##*$'\n'}" == [1-9][0-9][0-9] ]] || [ "$_dc_post_status" = 18 ]; then
+      fail_response "incomplete gateway response"
+    fi
+    if [ "$_dc_post_status" = 28 ]; then
+      FAIL_MODE="closed"
+      fail_unreachable "gateway unreachable"
+    fi
+{{end}}    fail_unreachable "gateway unreachable"
+  }
 }
-defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
+defenseclaw_retry_busy _dc_hook_post_response || {{if and (not .SecureClient) (not .Sandbox)}}fail_response "gateway returned HTTP 429"{{else}}fail_unreachable "gateway unreachable"{{end}}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
@@ -319,11 +339,13 @@ esac
 {{end}}if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+  {{if and (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "gateway returned HTTP ${HTTP_CODE}"
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
+{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
+{{end}}
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }

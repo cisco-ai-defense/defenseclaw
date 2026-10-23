@@ -920,10 +920,6 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 runtime_drift_rows.append(f"{_connector_label(name)} ({name}){fail_drift}")
             if cfm == "closed":
                 runtime_limit_rows.append(f"{_connector_label(name)} ({name}) is closed: {runtime_state.limit}")
-        elif _cursor_stays_fail_closed(gc, name):
-            # Cursor hooks always fail closed in action mode, whatever is
-            # saved; show that, like `guardrail fail-mode` (GAP-1717).
-            cfm = "closed"
         # Per-connector on/off: a connector turned off via
         # `guardrail disable --connector X` is reported as disabled so the
         # roster never implies it is enforcing when its hooks have been torn
@@ -1499,14 +1495,14 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
 
     gc = app.cfg.guardrail
     label = _connector_label(key.strip().lower())
-    global_fm = (gc.hook_fail_mode or "open").lower()
+    global_fm = (gc.hook_fail_mode or "closed").lower()
     current = (
         gc.effective_hook_fail_mode(key)
         if hasattr(gc, "effective_hook_fail_mode")
         else global_fm
     ).lower()
     if current not in ("open", "closed"):
-        current = "open"
+        current = "closed"
 
     entry = conns.get(key)
     stored_mode = str(getattr(entry, "hook_fail_mode", "") or "").strip().lower()
@@ -1550,9 +1546,10 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         click.echo()
         return
 
-    pinned = _cursor_pinned_fail_mode(gc, key)
-    if pinned is not None and mode != pinned:
-        _refuse_cursor_fail_mode(gc, key, mode, pinned)
+    if mode == "open" and str(getattr(app.cfg, "deployment_mode", "") or "").lower() != "managed_enterprise":
+        raise click.UsageError(
+            "Per-user hooks always fail closed. Only a managed administrator can select outage-open."
+        )
 
     if mode == configured_mode and runtime_state.desired == mode and runtime_state.current:
         ux.echo(f"  {ux.dim(f'{label} hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
@@ -1820,19 +1817,18 @@ def fail_mode_cmd(
 ) -> None:
     """Show or change the hook failure behavior.
 
-    The hook fail mode controls what generated hooks do when delivery or
-    authentication fails, or when the DefenseClaw gateway returns a 4xx,
-    an unparseable JSON body, or no ``action`` field. Two values are supported:
+    Per-user hooks always fail closed. On a managed standalone host only an
+    administrator can choose open for an eligible gateway connection outage.
+    HTTP errors, invalid or incomplete responses, and missing answers at the
+    hook deadline block outside Secure Client in either mode:
 
       \b
-      open   — allow the tool/prompt and log the failure.
-               A gateway outage never blocks your agent.
+      open   — managed administrator outage choice only.
       closed — block supported events when inspection is unavailable.
                The default on a new install: every prompt and
                tool call is inspected or blocked.
 
-    Transport failures (gateway unreachable / timeout / 5xx) follow the
-    same connector-scoped setting. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
+    Secure Client keeps its own open behavior. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
     additionally forces transport and missing-token failures closed.
 
     Without an argument this prints the current value. With
@@ -1848,6 +1844,11 @@ def fail_mode_cmd(
     (multi-connector installs only), writing a per-connector override
     while the global default and the other connectors are left untouched.
     """
+    if mode == "open" and str(getattr(app.cfg, "deployment_mode", "") or "").lower() != "managed_enterprise":
+        raise click.UsageError(
+            "Per-user hooks always fail closed. Only a managed administrator can select outage-open."
+        )
+
     if connector_flag:
         _set_connector_fail_mode(
             app, connector_flag, mode, restart=restart, yes=yes
@@ -1859,7 +1860,7 @@ def fail_mode_cmd(
     # (an OpenShell policy connector, a connector set up later), so a no-op
     # needs the saved global value to be exactly the requested one.
     saved_global = str(gc.hook_fail_mode or "").strip().lower()
-    current = saved_global if saved_global in ("open", "closed") else "open"
+    current = saved_global if saved_global in ("open", "closed") else "closed"
 
     if mode is None:
         click.echo()
@@ -1899,8 +1900,6 @@ def fail_mode_cmd(
                     _eff += f" ({_state.note})"
             elif _is_proxy_connector(_name):
                 _eff = "closed (proxy-backed, no hooks: blocked while the gateway is down)"
-            elif _cursor_stays_fail_closed(gc, _name):
-                _eff = "closed (Cursor hooks always fail closed in action mode)"
             if _eff.startswith("open") and not upstream_fail_open(app.cfg, _name):
                 _open_names.append(_name)
             _eff_disp = ux._style(_eff, fg="yellow") if _eff == "closed" else _eff
@@ -1908,10 +1907,17 @@ def fail_mode_cmd(
         click.echo()
         # One rule per view: each connector follows the value shown above
         # (GAP-1717: a global "ALLOW" line contradicted Cursor's "closed").
-        if current == "open":
+        if current == "open" and str(getattr(app.cfg, "deployment_mode", "") or "").lower() != "managed_enterprise":
             ux.subhead(
-                "Invalid, unauthorized, incomplete, and unreachable gateway responses ALLOW the "
-                "tool/prompt for connectors that are open above and BLOCK it for those that are closed.",
+                "Per-user hooks always fail closed. This saved open is inactive; "
+                "run defenseclaw guardrail fail-mode closed to clear it.",
+                indent="  ",
+            )
+            click.echo(f"  {ux.dim('Switch to closed:')} defenseclaw guardrail fail-mode closed")
+        elif current == "open":
+            ux.subhead(
+                "Invalid or incomplete gateway answers BLOCK outside Secure Client; "
+                "gateway connection outages may ALLOW for connectors that are open above.",
                 indent="  ",
             )
             click.echo(f"  {ux.dim('Switch to closed:')} defenseclaw guardrail fail-mode closed")
@@ -1933,7 +1939,8 @@ def fail_mode_cmd(
                 # GAP-1109: a connector override (or observe mode) keeps these
                 # open although the global default is closed.
                 _warn_still_fail_open(gc, _open_names)
-            click.echo(f"  {ux.dim('Switch to open:')}   defenseclaw guardrail fail-mode open")
+            if str(getattr(app.cfg, "deployment_mode", "") or "").lower() == "managed_enterprise":
+                click.echo(f"  {ux.dim('Switch to open:')}   defenseclaw guardrail fail-mode open")
         click.echo()
         return
 
@@ -1949,8 +1956,7 @@ def fail_mode_cmd(
             stored = str(getattr(entry, "hook_fail_mode", "") or "").strip().lower()
             target_modes[name] = stored if stored in ("open", "closed") else current
             runtime_states[name] = resolve_connector_fail_mode(app.cfg, name)
-    # Cursor keeps the value its guardrail mode pins (GAP-1432).
-    desired_modes = {name: _cursor_pinned_fail_mode(gc, name) or mode for name in fail_mode_targets}
+    desired_modes = dict.fromkeys(fail_mode_targets, mode)
 
     if (
         fail_mode_targets
@@ -1968,9 +1974,6 @@ def fail_mode_cmd(
         ux.echo(f"  {ux.dim('Hook fail mode is already')} {mode!r} {ux.dim(f'{scope} — nothing to do.')}")
         return
     single_connector = _resolve_active_connector(app.cfg)
-    single_pinned = None if fail_mode_targets else _cursor_pinned_fail_mode(gc, single_connector)
-    if single_pinned is not None and mode != single_pinned:
-        _refuse_cursor_fail_mode(gc, single_connector, mode, single_pinned)
     single_state = (
         resolve_connector_fail_mode(app.cfg, single_connector)
         if not fail_mode_targets and _tracks_runtime_fail_mode(app.cfg, single_connector)
@@ -2034,28 +2037,13 @@ def fail_mode_cmd(
                     f"{mode} is saved for when it is turned on again"
                 )
                 continue
-            if desired_modes[name] != mode:
-                click.echo(
-                    f"      - {_connector_label(name)} ({name}): stays {desired_modes[name]} "
-                    + ux.dim(
-                        f"(Cursor {'action' if desired_modes[name] == 'closed' else 'observe'} mode "
-                        f"keeps hook failures {desired_modes[name]})"
-                    )
-                )
-                continue
-            # Show what guardrail status shows: an observe connector without
-            # its own value already runs fail-open, and a hook-installed
-            # connector shows its installed runtime value (GAP-1370).
+            # Show what guardrail status shows, including an installed hook
+            # that still carries an older fail mode.
             shown = gc.effective_hook_fail_mode(name) if hasattr(gc, "effective_hook_fail_mode") else old
             installed = getattr(runtime_states[name], "runtime", None)
             if _tracks_runtime_fail_mode(app.cfg, name) and installed:
                 shown = installed
-            if _cursor_stays_fail_closed(gc, name) and mode == "open":
-                click.echo(
-                    f"      - {_connector_label(name)} ({name}): stays closed; Cursor hooks always fail "
-                    "closed in action mode (open is saved for observe mode)"
-                )
-            elif shown != mode:
+            if shown != mode:
                 ux.echo(f"      - {_connector_label(name)} ({name}): {shown} {ux.dim('→')} {ux.accent(mode)}")
             elif old != mode:
                 click.echo(f"      - {_connector_label(name)} ({name}): already {mode}; saved as its own setting")
@@ -2115,12 +2103,13 @@ def fail_mode_cmd(
         ux.subhead("open is saved for hook connectors you set up later.", indent="    ")
     else:
         ux.subhead(
-            ("Once the guardrail is enabled, invalid or unavailable gateway responses will ALLOW"
+            ("Once the guardrail is enabled, eligible gateway connection outages may ALLOW"
              if guardrail_off
-             else "Invalid or unavailable gateway responses will now ALLOW")
+             else "Eligible gateway connection outages may now ALLOW")
             + " the agent and log the failure to ~/.defenseclaw/logs/hook-failures.jsonl.",
             indent="  ",
         )
+        ux.subhead("Outside Secure Client, invalid or incomplete gateway answers, including a missing answer at the deadline, BLOCK.", indent="    ")
     click.echo()
 
     if not yes and not _confirm_proceed():
@@ -2157,33 +2146,6 @@ def _is_proxy_connector(name: str) -> bool:
     from defenseclaw.platform_support import PROXY_CONNECTORS
 
     return normalize_connector(name) in PROXY_CONNECTORS
-
-
-def _cursor_pinned_fail_mode(gc, name: str) -> str | None:
-    """Cursor's hook failure mode follows its guardrail mode, or None for others.
-
-    Cursor's managed hooks are fail-closed in action mode and fail-open in
-    observe mode, as ``setup cursor`` writes them. A fail-mode change that
-    stored the other value left doctor failing "inconsistent Cursor posture"
-    until ``setup cursor`` (GAP-1432).
-    """
-    if normalize_connector(name) != "cursor":
-        return None
-    mode = gc.effective_mode(name) if hasattr(gc, "effective_mode") else getattr(gc, "mode", "observe")
-    return "closed" if str(mode or "").strip().lower() == "action" else "open"
-
-
-def _refuse_cursor_fail_mode(gc, name: str, mode: str, pinned: str) -> None:
-    other = "observe" if pinned == "closed" else "action"
-    current = "action" if pinned == "closed" else "observe"
-    multi = bool(getattr(gc, "connectors", {}) or {})
-    ux.err(f"Cursor in {current} mode keeps hook failures {pinned}; fail mode {mode} is not applied.", indent="  ")
-    ux.subhead(
-        f"To change it, switch Cursor's guardrail mode: defenseclaw guardrail mode {other}"
-        + (" --connector cursor" if multi else ""),
-        indent="    ",
-    )
-    raise SystemExit(1)
 
 
 # What fail mode closed cannot change for Hermes on Linux and macOS: its hook
@@ -3354,16 +3316,6 @@ def _connector_block_for_write(gc, key: str):
         block = PerConnectorGuardrailConfig()
         conns[key] = block
     return block
-
-
-def _cursor_stays_fail_closed(gc, name: str) -> bool:
-    """Cursor's hook contract fails closed in action mode whatever is saved."""
-    if normalize_connector(name) != "cursor":
-        return False
-    try:
-        return (gc.effective_mode(name) or "").strip().lower() == "action"
-    except Exception:  # noqa: BLE001 — an unknown connector keeps the saved value.
-        return False
 
 
 def _disabled_on_its_own(gc, name: str) -> bool:
@@ -5050,7 +5002,6 @@ def mode_cmd(
         return (getattr(block, "mode", "") or "").strip() if block is not None else ""
 
     affected = [connector_key] if connector_key else [c for c in actives if not _override(c)]
-    fail_before = {c: _cursor_pinned_fail_mode(gc, c) or gc.effective_hook_fail_mode(c) for c in affected}
     previous = _effective(connector_key)
 
     if connector_key is None:
@@ -5131,22 +5082,6 @@ def mode_cmd(
         _connector_block_for_write(gc, connector_key).mode = mode
     new_mode = _effective(connector_key)
     source = "override" if connector_key and not clear else "global"
-    fail_after = {c: _cursor_pinned_fail_mode(gc, c) or gc.effective_hook_fail_mode(c) for c in affected}
-    # Keep the persisted Cursor value in sync so later setup, status and
-    # migration reads cannot see the previous mode's hook posture.
-    for c in affected:
-        if normalize_connector(c) == "cursor":
-            if gc.connectors:
-                _connector_block_for_write(gc, c).hook_fail_mode = fail_after[c]
-            else:
-                gc.hook_fail_mode = fail_after[c]
-    fail_flips = {c: fm for c, fm in fail_after.items() if fm != fail_before[c]}
-    if fail_flips:
-        # Only hook connectors bake a fail mode into their registration.
-        from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
-
-        fail_flips = {c: fm for c, fm in fail_flips.items() if normalize_connector(c) in _HOOK_ENFORCED_CONNECTORS}
-
     try:
         app.cfg.save()
     except (OSError, ValueError, ConfigWriteError) as exc:
@@ -5154,12 +5089,8 @@ def mode_cmd(
     _log_guardrail_change(
         app, "guardrail-mode", f"scope={scope} mode={new_mode} previous={previous} cleared={str(clear).lower()}"
     )
-    # Decisions read the gateway's live configuration generation, so a mode
-    # change reloads hot. Only per-user Cursor's hook fail mode follows the
-    # guardrail mode (observe open, action closed; every other hook keeps its
-    # fail mode across a mode switch, owner rule): its registration bakes the
-    # value, so a flip restarts the gateway, which re-bakes it.
-    outcome = _apply_to_running_gateway(app, needs_restart=bool(fail_flips), restart=restart, quiet=json_out)
+    # Guardrail mode does not change the independent hook outage posture.
+    outcome = _apply_to_running_gateway(app, needs_restart=False, restart=restart, quiet=json_out)
     unguarded = (
         _unguarded_hook_connectors(app, affected) if new_mode == "action" and outcome in ("live", "restarted") else []
     )
@@ -5174,19 +5105,11 @@ def mode_cmd(
     else:
         message = f"{_connector_label(scope)} is now in {new_mode} mode: it {plain[new_mode]}."
         not_covered = []
-    consequence = {
-        "closed": "the action is blocked if the hook can't reach the gateway",
-        "open": "the action goes ahead if the hook can't reach the gateway",
-    }
     notes = [
-        f"Hook failures for {_connector_label(c)} now fail {fm}: {consequence.get(fm, fm)}."
-        for c, fm in fail_flips.items()
-    ]
-    notes.extend(
         f"{_connector_label(c)} keeps its own mode ({policy_catalog.mode_label(_override(c))}); "
         f"change it with: defenseclaw guardrail mode {new_mode} --connector {c}"
         for c in not_covered
-    )
+    ]
     if unguarded:
         # Action mode without registered hooks blocks nothing; the command must
         # not report success then (GAP-1035).

@@ -2610,7 +2610,7 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
 
     # hermes has no override → inherits the global effective values.
     assert fields["guardrail.connectors.hermes.enabled"].value == "true"
-    assert fields["guardrail.connectors.hermes.hook_fail_mode"].value == "open"
+    assert fields["guardrail.connectors.hermes.hook_fail_mode"].value == "closed"
     assert fields["guardrail.connectors.hermes.block_message"].value == "global blocked"
     assert fields["guardrail.connectors.hermes.hilt.enabled"].value == "false"
     assert fields["guardrail.connectors.hermes.hilt.min_severity"].value == "HIGH"

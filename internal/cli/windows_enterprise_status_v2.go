@@ -112,6 +112,18 @@ func readWindowsEnterpriseStatusV2Manifest(path string) ([]enterprisestatus.Conn
 // applyWindowsEnterpriseStatusV2 adds the status v2 blocks to a status or
 // verify of an installed standalone deployment.
 func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
+	if result.Action == "ensure" {
+		if !result.Installed {
+			return
+		}
+		// The installed result needs the same hook-process warning, but the
+		// status-only connector block is not part of ensure's JSON contract.
+		in := windowsEnterpriseStatusV2Read()
+		result.Connectors = windowsEnterpriseConnectorsBlock(result, in)
+		result.AddHookProcessFailureWarnings()
+		result.Connectors = nil
+		return
+	}
 	if result.Action != "status" && result.Action != "verify" {
 		return
 	}

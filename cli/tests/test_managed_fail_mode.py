@@ -1,15 +1,14 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""The customer chooses open or closed; the default is closed (owner, 2026-10-20).
+"""Only a managed administrator may choose outage-open (owner, 2026-10-23).
 
 Mirrors internal/config/hook_fail_mode_matrix_test.go: for every connector,
-per-user, managed standalone and Secure Client, in observe and action mode,
-an explicit open or closed wins (on a managed computer the administrator's
-config sets it), and an unset fail mode is closed except under Secure Client,
-where it is open (#1163). Per-user Cursor follows its guardrail mode. On the
-standalone profile no connector is lowered to an upstream fail-open: its
-managed hooks block through the native deny.
+per-user, managed standalone and Secure Client, in observe and action mode.
+Per-user is closed even with a saved open. On a managed computer the
+administrator's explicit value wins; Secure Client defaults to open (#1163).
+On the standalone profile no connector is lowered to an upstream fail-open:
+its managed hooks block through the native deny.
 """
 
 from __future__ import annotations
@@ -78,8 +77,8 @@ def test_hook_fail_mode_matrix(connector, deployment, mode, global_mode, connect
     cfg = _config(deployment, mode, global_mode, connector, connector_mode)
     if want is None:
         want = DEPLOYMENTS[deployment][2]
-    if connector == "cursor" and deployment == "per-user":
-        want = "closed" if mode == "action" else "open"
+    if deployment == "per-user":
+        want = "closed"
     assert cfg.guardrail.effective_hook_fail_mode(connector) == want
     assert cfg.managed_outside_secure_client() is (deployment == "standalone")
 

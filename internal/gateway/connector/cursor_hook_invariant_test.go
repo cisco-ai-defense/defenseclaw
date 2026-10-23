@@ -18,10 +18,10 @@ package connector
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -30,7 +30,7 @@ import (
 
 // The core invariant that keeps Cursor from locking an agent out: the
 // Cursor hook MUST NEVER write empty stdout on an allow / observe /
-// fail-open outcome, because Cursor treats a failClosed:true hook with
+// fail-closed outcome, because Cursor treats a failClosed:true hook with
 // empty stdout as a hook failure and blocks the tool. These tests run
 // the real rendered hook against a stub gateway so a future edit that
 // reintroduces a silent `exit 0` fails CI instead of shipping a
@@ -119,11 +119,9 @@ func TestCursorHook_GatewayDenyEnvelopePassedThrough(t *testing.T) {
 	assertDenyEnvelope(t, stdout)
 }
 
-// TestCursorHook_NeverEmptyStdout is the umbrella guard: across every
-// scenario a Cursor agent can drive, stdout is a valid, non-empty JSON
-// object carrying only fields documented for that event. Empty stdout would let
-// Cursor's failClosed:true guard block the tool.
-func TestCursorHook_NeverEmptyStdout(t *testing.T) {
+// TestCursorHook_FailedChecksCannotAllow covers both native deny documents
+// and nonzero exits under Cursor's failClosed:true registration.
+func TestCursorHook_FailedChecksCannotAllow(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -144,34 +142,28 @@ func TestCursorHook_NeverEmptyStdout(t *testing.T) {
 				"open",
 				`{"hook_event_name":"beforeShellExecution"}`,
 			)
-			if err != nil {
-				t.Fatalf("expected exit 0 (fail-open), got %v; stderr=%s", err, stderr)
+			if !hookCallBlocked(err, stdout) {
+				t.Fatalf("failed check was allowed: err=%v stdout=%q stderr=%s", err, stdout, stderr)
 			}
-			trimmed := strings.TrimSpace(stdout)
-			if trimmed == "" {
-				t.Fatal("stdout empty — Cursor fail-closes on empty stdout and would block the tool")
-			}
-			var obj map[string]interface{}
-			if e := json.Unmarshal([]byte(trimmed), &obj); e != nil {
-				t.Fatalf("stdout is not a JSON object: %v\ngot: %q", e, trimmed)
-			}
-			if _, ok := obj["permission"]; !ok {
-				t.Fatalf("stdout carries no permission field: %q", trimmed)
+			if err == nil {
+				assertDenyEnvelope(t, stdout)
 			}
 		})
 	}
 
-	t.Run("oversized_fail_open", func(t *testing.T) {
+	t.Run("oversized_legacy_open", func(t *testing.T) {
 		stdout, stderr, err := runCursorHookAgainst(
 			t,
 			"127.0.0.1:1",
 			"open",
 			strings.Repeat("x", (1<<20)+1),
 		)
-		if err != nil {
-			t.Fatalf("expected exit 0 for oversized fail-open input, got %v; stderr=%s", err, stderr)
+		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 2 {
+			t.Fatalf("expected exit 2 for oversized input, got %v; stderr=%s", err, stderr)
 		}
-		assertJSONEnvelope(t, stdout)
+		if !hookCallBlocked(err, stdout) {
+			t.Fatalf("oversized input was allowed: err=%v stdout=%q", err, stdout)
+		}
 	})
 }
 

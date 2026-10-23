@@ -7768,17 +7768,19 @@ def _check_cursor_configured_runtime(
     mode_resolver = getattr(guardrail, "effective_mode", None)
     fail_resolver = getattr(guardrail, "effective_hook_fail_mode", None)
     mode = str(mode_resolver("cursor") if callable(mode_resolver) else "observe").strip().lower()
-    fail_mode = str(fail_resolver("cursor") if callable(fail_resolver) else "open").strip().lower()
+    fail_mode = str(fail_resolver("cursor") if callable(fail_resolver) else "closed").strip().lower()
     mode = "action" if mode == "action" else "observe"
-    # Cursor observe hooks fail open, except on a managed deployment outside
-    # Secure Client, where the Cursor registration carries the
-    # administrator's fail mode (unset closed) in either guardrail mode.
     standalone = getattr(cfg, "managed_outside_secure_client", None)
-    if callable(standalone) and standalone() is True:
-        expected_fail_mode = "open" if fail_mode == "open" else "closed"
-    else:
+    managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    secure_client = managed and not (callable(standalone) and standalone() is True)
+    if secure_client:
+        # Secure Client retains its existing mode-coupled hook contract.
         expected_fail_mode = "closed" if mode == "action" else "open"
-    expected_fail_closed = expected_fail_mode == "closed"
+    else:
+        expected_fail_mode = "open" if fail_mode == "open" else "closed"
+    # Outside Secure Client the agent must block a stopped hook process even
+    # when the managed administrator opened verified gateway outages.
+    expected_fail_closed = expected_fail_mode == "closed" if secure_client else True
     hilt = None
     hilt_resolver = getattr(guardrail, "effective_hilt", None)
     if callable(hilt_resolver):
@@ -7792,7 +7794,6 @@ def _check_cursor_configured_runtime(
     # Human approval row already says so, as it does for the other
     # connectors without a prompt. Only a managed deployment, whose posture
     # an administrator pins, still treats it as inconsistent.
-    managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
     if fail_mode != expected_fail_mode or (hilt_enabled and managed):
         _emit(
             "fail",
@@ -8760,16 +8761,12 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
 
     configured_mode = str(fail_mode.get("configured") or "")
     lock_mode_target = configured_mode
-    # Runtime locks are rendered from the mode-aware desired posture.  The
-    # report keeps the raw legacy/global value in ``configured`` so Status can
-    # explain observe-mode compatibility, but that raw value is not lock
-    # authority.  Upstream fail-open connectors are the exception: their lock
-    # records configured policy while the host remains effectively open.
+    # Runtime locks are rendered from the desired hook posture. The report
+    # keeps any saved legacy per-user open value in ``configured``, but that
+    # value is not lock authority. Upstream fail-open connectors are the
+    # exception: their lock records configured policy.
     if not upstream_fail_open(cfg, name):
         lock_mode_target = str(fail_mode.get("desired") or configured_mode)
-    if name == "cursor":
-        configured_mode = "closed" if _doctor_effective_guardrail_mode(cfg.guardrail, "cursor") == "action" else "open"
-        lock_mode_target = configured_mode
     if lock_mode != lock_mode_target:
         effective = str(fail_mode.get("effective") or "unknown")
         return ConnectorSetupReadiness(
@@ -14887,9 +14884,16 @@ def _check_hook_contract_lock(
             f" `defenseclaw setup {connector}` or the next gateway start refreshes the lock"
         )
     if connector == "cursor":
-        expected_cursor_fail_mode = (
-            "closed" if _doctor_effective_guardrail_mode(cfg.guardrail, "cursor") == "action" else "open"
-        )
+        from defenseclaw.commands.cmd_status import _enterprise_profile
+
+        if _enterprise_profile(cfg) == "secure_client":
+            expected_cursor_fail_mode = (
+                "closed" if _doctor_effective_guardrail_mode(cfg.guardrail, "cursor") == "action" else "open"
+            )
+        else:
+            resolver = getattr(cfg.guardrail, "effective_hook_fail_mode", None)
+            resolved = resolver("cursor") if callable(resolver) else "closed"
+            expected_cursor_fail_mode = "open" if str(resolved or "").strip().lower() == "open" else "closed"
         detail += " priority_conflict_detection=unavailable none_inferred=true"
         if str(entry.get("hook_fail_mode") or "") != expected_cursor_fail_mode:
             _emit("fail", "Hook contract", detail + f" expected_hook_fail_mode={expected_cursor_fail_mode}", r=r)

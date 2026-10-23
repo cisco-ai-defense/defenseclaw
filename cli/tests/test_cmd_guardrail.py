@@ -389,16 +389,23 @@ class GroupHelpTests(unittest.TestCase):
 
 
 class FailModeCommandTests(unittest.TestCase):
+    def test_per_user_open_choice_is_refused_before_writing_config(self):
+        app = make_ctx(enabled=True, connector="codex")
+        result = CliRunner().invoke(
+            cmd_guardrail.fail_mode_cmd, ["open", "--yes", "--no-restart"], obj=app
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Per-user hooks always fail closed", result.output)
+        app.cfg.save.assert_not_called()
+
     def test_show_current_value_open(self):
         runner = CliRunner()
         app = make_ctx(enabled=True, hook_fail_mode="open")
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("guardrail.hook_fail_mode: open", result.output)
-        # Must explain the on-call-friendly behavior so an operator
-        # reading the output understands what "open" means without
-        # leaving the terminal.
-        self.assertIn("ALLOW", result.output)
+        self.assertIn("saved open is inactive", result.output)
+        self.assertIn("Per-user hooks always fail closed", result.output)
         app.cfg.save.assert_not_called()
 
     def test_show_current_value_closed(self):
@@ -1068,7 +1075,7 @@ class PerConnectorToggleTests(unittest.TestCase):
 
 
 class CursorModePostureTests(unittest.TestCase):
-    def test_action_restarts_and_normalizes_stored_fail_mode(self):
+    def test_action_keeps_a_saved_legacy_open_value_inactive(self):
         app = make_multi_ctx({"cursor": None, "codex": None})
         app.cfg.guardrail.connectors["cursor"].hook_fail_mode = "open"
         with (
@@ -1084,8 +1091,8 @@ class CursorModePostureTests(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
-        self.assertEqual(app.cfg.guardrail.connectors["cursor"].hook_fail_mode, "closed")
-        restart.assert_called_once()
+        self.assertEqual(app.cfg.guardrail.connectors["cursor"].hook_fail_mode, "open")
+        restart.assert_not_called()
 
 
 class PerConnectorFailModeTests(unittest.TestCase):
@@ -1122,7 +1129,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         # Only codex gets the override; claudecode keeps the global default.
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("codex"), "closed")
-        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("claudecode"), "open")
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("claudecode"), "closed")
         # Global default is untouched.
         self.assertEqual(app.cfg.guardrail.hook_fail_mode, "open")
         app.cfg.save.assert_called_once()
@@ -1137,7 +1144,10 @@ class PerConnectorFailModeTests(unittest.TestCase):
             cmd_guardrail.fail_mode_cmd, ["--connector", "codex"], obj=app
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("unknown", result.output)
+        self.assertTrue(
+            "unknown" in result.output or "Runtime drift" in result.output,
+            msg=result.output,
+        )
         self.assertIn("desired closed", result.output)
         self.assertIn("override", result.output)
         app.cfg.save.assert_not_called()
@@ -1357,7 +1367,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("codex"), "closed")
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("claudecode"), "closed")
 
-    def test_bare_set_open_reconciles_closed_connector_override(self):
+    def test_bare_set_open_refuses_per_user_override(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "cursor": None})
         app.cfg.guardrail.hook_fail_mode = "open"
@@ -1373,19 +1383,13 @@ class PerConnectorFailModeTests(unittest.TestCase):
             result = runner.invoke(
                 cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app
             )
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertNotIn("nothing to do", result.output)
-        self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "open")
-        self.assertEqual(app.cfg.guardrail.connectors["cursor"].hook_fail_mode, "open")
-        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "open")
-        app.cfg.save.assert_called_once()
-        restart_mock.assert_called_once()
-        self.assertEqual(
-            set(restart_mock.call_args.kwargs["connectors"]),
-            {"codex", "cursor"},
-        )
+        self.assertEqual(result.exit_code, 2, msg=result.output)
+        self.assertIn("Per-user hooks always fail closed", result.output)
+        self.assertEqual(app.cfg.guardrail.connectors["cursor"].hook_fail_mode, "closed")
+        app.cfg.save.assert_not_called()
+        restart_mock.assert_not_called()
 
-    def test_bare_set_open_keeps_cursor_action_fail_closed(self):
+    def test_bare_set_open_refuses_cursor_action_mode(self):
         # GAP-1432: Cursor's action mode pins its hooks fail-closed (as
         # `setup cursor` writes them). Storing open left doctor failing
         # "inconsistent Cursor posture" until `setup cursor --yes --restart`.
@@ -1401,15 +1405,14 @@ class PerConnectorFailModeTests(unittest.TestCase):
             patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", return_value=state),
         ):
             result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "open")
+        self.assertEqual(result.exit_code, 2, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "closed")
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
-        self.assertIn("stays closed", result.output)
-        self.assertIn("1 connector overrides = open; Cursor stays closed)", result.output)
+        self.assertIn("Per-user hooks always fail closed", result.output)
 
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["open", "--connector", "cursor", "--yes"], obj=app)
-        self.assertEqual(result.exit_code, 1, msg=result.output)
-        self.assertIn("guardrail mode observe --connector cursor", result.output)
+        self.assertEqual(result.exit_code, 2, msg=result.output)
+        self.assertIn("Per-user hooks always fail closed", result.output)
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
 
     def test_confirm_refuses_when_output_is_piped(self):
@@ -1419,6 +1422,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
 
         runner = CliRunner()
         app = make_multi_ctx({"codex": None})
+        app.cfg.deployment_mode = "managed_enterprise"
         app.cfg.guardrail.hook_fail_mode = "closed"
         app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
         state = SimpleNamespace(current=True, drift=(), desired="closed")
@@ -1452,7 +1456,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(restart_mock.call_count, 2)
         self.assertIn("restored", result.output)
 
-    def test_connector_open_clears_dormant_closed_override_in_observe_mode(self):
+    def test_connector_open_refuses_per_user_override(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
         app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
@@ -1464,12 +1468,10 @@ class PerConnectorFailModeTests(unittest.TestCase):
                 ["open", "--connector", "codex", "--yes"],
                 obj=app,
             )
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertNotIn("nothing to do", result.output)
-        self.assertRegex(result.output, r"closed (?:→|->) open")
-        self.assertNotIn("open → open", result.output)
-        self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "open")
-        app.cfg.save.assert_called_once()
+        self.assertEqual(result.exit_code, 2, msg=result.output)
+        self.assertIn("Per-user hooks always fail closed", result.output)
+        self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "closed")
+        app.cfg.save.assert_not_called()
 
     def test_bare_show_fans_out_to_all_active_connectors(self):
         # No value AND no --connector: the bare read MUST show EVERY active

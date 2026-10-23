@@ -11,7 +11,6 @@
 package hookexec
 
 import (
-	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -79,17 +78,15 @@ func TestPerUserHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 	}
 }
 
-// A connector the account runs fail open (observe mode) keeps its choice
-// after the budget, and is told that the gateway is restarting.
-func TestPerUserFailOpenHookNamesTheRestart(t *testing.T) {
+// An older per-user open preference closes when the restart budget ends,
+// with a reason that names the restart.
+func TestPerUserOpenHookBlocksAndNamesTheRestart(t *testing.T) {
 	fastRestartRetries(t)
 	result := run(t, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
 		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 150*time.Millisecond)
 	})
-	var notice map[string]string
-	if result.code != 0 || json.Unmarshal([]byte(result.stdout), &notice) != nil ||
-		!strings.Contains(notice["systemMessage"], "restarting or not running") {
-		t.Fatalf("code=%d stdout=%q, want the restart notice", result.code, result.stdout)
+	if !blocked(result) || !strings.Contains(result.stdout+result.stderr, "restarting or not running") {
+		t.Fatalf("code=%d stdout=%q stderr=%q, want a restart block", result.code, result.stdout, result.stderr)
 	}
 }
 

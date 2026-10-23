@@ -101,7 +101,7 @@ func runOutageToolCall(t *testing.T, home, dataDir string, call outageToolCall) 
 // per-user hooks of agents without a fail-closed hook contract of their own,
 // and for Cursor, whose observe verdicts are nonblocking: with the gateway
 // down, this release's Copilot, Antigravity and Cursor hooks block a tool
-// call unless the config opens their outages. Before r104 W3 G3-upg the
+// call, even when an older config saved open. Before r104 W3 G3-upg the
 // Copilot and Antigravity renders were lowered to open for an unset mode
 // (and Copilot's script let every failure run whatever its mode), and a
 // Cursor in observe rendered open.
@@ -115,13 +115,13 @@ func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 	}{
 		{"copilot unset", "copilot", SetupOpts{}, true},
 		{"copilot closed", "copilot", SetupOpts{HookFailMode: "closed", ConfiguredHookFailMode: "closed"}, true},
-		{"copilot open", "copilot", SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, false},
+		{"copilot open", "copilot", SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, true},
 		{"antigravity unset", "antigravity", SetupOpts{}, true},
-		{"antigravity open", "antigravity", SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, false},
-		// The gateway passes Cursor's resolved mode (open in observe) and the
-		// config's own value separately.
+		{"antigravity open", "antigravity", SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, true},
+		// An older gateway could pass Cursor's observe-open mode. The new
+		// renderer closes it even when the config itself saved open.
 		{"cursor observe unset", "cursor", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, true},
-		{"cursor observe open", "cursor", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, false},
+		{"cursor observe open", "cursor", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, true},
 		{"cursor action open", "cursor", SetupOpts{GuardrailMode: "action", HookFailMode: "closed", ConfiguredHookFailMode: "open"}, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {

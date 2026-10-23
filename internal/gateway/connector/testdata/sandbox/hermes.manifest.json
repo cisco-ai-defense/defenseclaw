@@ -4,6 +4,7 @@
   "tamper_tier": "user",
   "env": {},
   "binaries": [
+    "awk (runtime)",
     "bash (runtime)",
     "chmod (runtime)",
     "curl (runtime)",
@@ -44,8 +45,8 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 100417,
-      "sha256": "f9655759848833488f7135b53f8b8edcd5605dd200b34b9958a13fe1db399729"
+      "size": 100491,
+      "sha256": "164b89c7d5da3782611c281a7b36af02bdf0b1fbe3ccb3751666a2bca2162415"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
@@ -56,32 +57,32 @@
     "/usr/local/lib/defenseclaw/hooks/hermes-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7736,
-      "sha256": "6c8c0c7f70f7a389461c66d08b8d26172133cf605e8b43ff74557c679080a81b"
+      "size": 7754,
+      "sha256": "3c6c14b60b59cc45280c29a584bbada0fb631274b93d0a64361fee62ce0a7750"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6920,
-      "sha256": "c675a2b1c5db1d006ec3735badc3bb380311fce3728f01f06e03bd7e42e5117e"
+      "size": 7030,
+      "sha256": "082b29df9bc420891cd2dc97c1daad2f6b7d8f09f61d788f667a281af4f76e3c"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6111,
-      "sha256": "a7765b7833c87b1f57249635127a136738ff515fbfb63e95b5181cea3f44095c"
+      "size": 6221,
+      "sha256": "5e3ad7aaf895f7ec009ecc139c5057f9a3bea923a5431417ed6a9531319cf695"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6539,
-      "sha256": "172c978d205a4d054792350cf036271e83d930a4c72a323af02bdd57b0e8fbda"
+      "size": 6649,
+      "sha256": "87ab9c09a9ffbda90949c40b38e6370791d407c2f2cdb94bfc390e1ec79e5d9f"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6888,
-      "sha256": "e5d3eb9c945b60caf7212f20265b49b24fc7e3bff22a04d8f1ab0c7498744853"
+      "size": 6998,
+      "sha256": "0d8eec9dcfe2727ae142c38153f44a4c9ee6df115b897611f005c7f9ac485ecb"
     }
   }
 }

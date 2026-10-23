@@ -67,12 +67,9 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 RUNTIME_CONNECTOR="{{.ConnectorName}}"
 FAIL_MODE="closed"
 readonly RUNTIME_CONNECTOR FAIL_MODE{{else}}RUNTIME_CONNECTOR="$(defenseclaw_shared_runtime_connector "$HOOK_DIR")"
-FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"{{end}}{{if not .Managed}}
-# A missing or disabled DEFENSECLAW_HOME is not retirement for a hook
-# installed closed. This one script serves every connector, so its installed
-# mode is the sidecar next to it (HOOK_DIR), read above, not a render-time
-# value: missing or unreadable state reads closed, and an inherited closed
-# mode or strict availability tightens it, as every later failure (GAP-0315).
+{{if .Managed}}FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"{{else}}FAIL_MODE="closed"{{end}}{{end}}{{if not .Managed}}
+# A missing or disabled per-user home is a failed inspection. The per-user
+# mode stays closed even if an earlier shared sidecar records open.
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
@@ -188,7 +185,15 @@ RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/api/v1/inspect/tool-resp
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
   "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}") || {
-  fail_unreachable "gateway unreachable"
+  _dc_post_status=$?
+{{if not .SecureClient}}  # A status line or curl 18 proves an incomplete gateway response.
+  if [[ "${RESPONSE##*$'\n'}" == [1-9][0-9][0-9] ]] || [ "$_dc_post_status" = 18 ]; then
+    fail_response "incomplete gateway response"
+  fi
+  if [ "$_dc_post_status" = 28 ]; then
+    FAIL_MODE="closed"
+  fi
+{{end}}  fail_unreachable "gateway unreachable"
 }{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
@@ -197,13 +202,15 @@ RESULT=$(echo "$RESPONSE" | sed '$d')
 if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+  {{if not .SecureClient}}fail_response{{else}}fail_unreachable{{end}} "gateway returned HTTP ${HTTP_CODE}"
 elif [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
   fail_unauthorized "gateway returned HTTP ${HTTP_CODE}"
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
+{{if not .SecureClient}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
+{{end}}
 {{if .Sandbox}}# Every DefenseClaw inspect verdict names its action: an empty or
 # action-less reply from the sandbox ingress is not a verdict.
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {

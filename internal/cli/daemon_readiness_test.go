@@ -218,7 +218,7 @@ func TestRotationConnectorStateRejectsFallbackPolicyDrift(t *testing.T) {
 	mixed := expected
 	mixed.Connectors = append([]rotationConnectorPolicy(nil), expected.Connectors...)
 	mixed.Connectors[0].Mode = "observe"
-	mixed.Connectors[0].HookFailMode = "open"
+	mixed.Connectors[0].HookFailMode = "closed"
 	fallback.Guardrail.Connectors["claudecode"] = config.PerConnectorGuardrailConfig{Mode: "observe", HookFailMode: "open"}
 	if err := verifyRotationConfigState(fallback, mixed); err != nil {
 		t.Fatalf("exact mixed connector state rejected: %v", err)

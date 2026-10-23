@@ -5,6 +5,22 @@ package config
 
 import "testing"
 
+// An explicit per-user open left by an older installation is retained in
+// config for migration, but it cannot turn a failed hook into permission to
+// run a tool. Only a managed administrator can choose outage-open.
+func TestPerUserConfiguredOpenResolvesClosedForEveryConnector(t *testing.T) {
+	for _, connector := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode"} {
+		for _, mode := range []string{"observe", "action"} {
+			cfg := &Config{}
+			cfg.Guardrail.Mode = mode
+			cfg.Guardrail.HookFailMode = "open"
+			if got := cfg.EffectiveHookFailModeForConnector(connector); got != "closed" {
+				t.Errorf("%s %s: effective fail mode = %q, want closed", connector, mode, got)
+			}
+		}
+	}
+}
+
 // TestEveryConnectorHookFailModeMatrix pins the owner decisions of
 // 2026-10-14 and 2026-10-20 ("the customer can choose open or closed based
 // on policy, and the default is closed; it should not ignore stuff") for
@@ -13,11 +29,10 @@ import "testing"
 // explicit closed, set globally, per connector or through the automatic
 // protection overlay:
 //
-//   - per-user and managed standalone: unset closed, open open, closed
-//     closed (a managed computer's config is the administrator's);
+//   - per-user: closed even when an older config saved open;
+//   - managed standalone: unset closed, open open, closed closed (the
+//     managed computer's config is the administrator's);
 //   - Secure Client: unset open (#1163), open open, closed closed;
-//   - per-user Cursor follows its guardrail mode (observe open, action
-//     closed) whatever is configured.
 //
 // Anything but "open" (any case) is closed, a typo included.
 func TestEveryConnectorHookFailModeMatrix(t *testing.T) {
@@ -74,11 +89,8 @@ func TestEveryConnectorHookFailModeMatrix(t *testing.T) {
 						want = d.unset
 					}
 					action := want
-					if name == "cursor" && d.mode != "managed_enterprise" {
-						want, action = "open", "closed"
-						if mode == "action" {
-							want = "closed"
-						}
+					if d.mode != "managed_enterprise" {
+						want, action = "closed", "closed"
 					}
 					what := name + " " + d.name + " " + mode + " " + s.name
 					if got := cfg.EffectiveHookFailModeForConnector(name); got != want {

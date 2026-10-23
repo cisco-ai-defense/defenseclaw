@@ -415,6 +415,11 @@ type Options struct {
 // by synchronous PreToolUse stdout {"decision":"deny"}; no Antigravity
 // behavior relies on a non-zero process exit code.
 func Run(ctx context.Context, opts Options) int {
+	if !opts.ManagedEnterprise && !opts.SecureClient {
+		// Old per-user sidecars can still say open during an upgrade. The hook
+		// process must enforce the current fail-closed contract regardless.
+		opts.FailMode = "closed"
+	}
 	if watchdog := opts.AnswerWatchdog; watchdog != nil {
 		// The hook command armed the watchdog before it resolved the
 		// runtime (GAP-0155): every answer of the call, the early ones
@@ -907,7 +912,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		if err == nil && resp != nil && !opts.SecureClient &&
 			(resp.StatusCode >= 200 && resp.StatusCode < 300 || managedNativeDecision(opts)) {
 			knownStatus = resp.StatusCode
-			opts.answerWatch.gatewayAnsweredError(opts, sp)
+			opts.answerWatch.gatewayAnsweredError(opts, sp, resp.StatusCode)
 		}
 	}
 	noteStatus()
@@ -997,6 +1002,10 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// managedPeerFailMode).
 			return failUnreachable(withManagedOutage(opts, err), sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 		}
+		if !opts.SecureClient && (errors.Is(err, context.DeadlineExceeded) ||
+			errors.Is(err, errGatewayTookCallNoAnswer) || errors.Is(ctx.Err(), context.DeadlineExceeded)) {
+			return failNoAnswer(opts, sp, failMode)
+		}
 		if reason == "gateway unreachable" && !opts.SecureClient && !secureClientHook(opts) && errors.Is(err, errGatewayTookCallNoAnswer) {
 			// Same fail mode; the record says the gateway stalled, not that
 			// it could not be reached. Secure Client keeps its reason.
@@ -1049,9 +1058,18 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		opts.gatewayRefusal = perUserRefusalText(opts, resp.StatusCode, body)
 	}
+	// An HTTP status proves that the gateway was reached. Only Secure Client
+	// may apply an open preference to a refusal or server error.
+	answeredFailMode := failMode
+	if !opts.SecureClient {
+		answeredFailMode = "closed"
+	}
 	switch {
 	case resp.StatusCode >= 500 && resp.StatusCode < 600:
-		return failUnreachable(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
+		if !opts.SecureClient && !managedNativeDecision(opts) {
+			return failResponse(opts, sp, answeredFailMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
+		}
+		return failUnreachable(opts, sp, answeredFailMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	case (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusRequestEntityTooLarge) &&
 		refusalReason(body) == MalformedHookPayloadReason && !opts.SecureClient:
 		// A malformed event is a local check failure, never a gateway
@@ -1084,9 +1102,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failEnrollmentRefusal(opts, sp, managedRootDeniedReason)
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		// An authentication refusal is integrity, not an outage.
-		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
+		return failResponse(opts, sp, answeredFailMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
-		return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
+		return failResponse(opts, sp, answeredFailMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
 
 	code := sp.decide(opts, body)
@@ -1507,9 +1525,10 @@ func (sp spec) decide(opts Options, body []byte) int {
 		(sp.style == styleHookEcho || sp.style == styleHookEchoDecision || sp.style == styleHookDecisionStderr || sp.style == stylePluginBridge) {
 		return failResponse(opts, sp, "closed", "missing native output in gateway response")
 	}
-	if !opts.SecureClient && normalizeFailMode(opts.FailMode) != "open" &&
+	if !opts.SecureClient &&
 		(action == "block" || action == "confirm") &&
 		(sp.style == styleHookEcho || sp.style == styleHookEchoDecision || sp.style == styleHookDecisionStderr || sp.style == stylePluginBridge) &&
+		(sp.connector != "cursor" || output != "" || managedNativeDecision(opts)) &&
 		!nativeOutputAgrees(sp, opts.Event, action, output) {
 		return failNativeDecision(opts, sp, "native output contradicts gateway action")
 	}
@@ -1682,7 +1701,11 @@ func managedNonOutageMode(opts *Options, failMode string) string {
 }
 
 func failNativeDecision(opts Options, sp spec, reason string) int {
-	if sp.connector == "copilot" && normalizeFailMode(opts.FailMode) != "open" && !opts.SecureClient {
+	if !opts.SecureClient {
+		// A complete but contradictory answer cannot use outage-open mode.
+		opts.FailMode = "closed"
+	}
+	if sp.connector == "copilot" && !opts.SecureClient {
 		// Copilot CLI ignores a failed hook process, but honors its native
 		// structured deny. An unusable 2xx verdict is a failed check.
 		if body := copilotVSCodeLocalOutput(opts.Event, "block", reason); sp.dialect == copilotVSCodeLocalSurface && body != "" {
@@ -1826,27 +1849,30 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 }
 
 func decideHermes(opts Options, sp spec, fields map[string]json.RawMessage) int {
+	invalidMode, configuredMode := "closed", "closed"
+	if opts.SecureClient {
+		invalidMode, configuredMode = "open", normalizeFailMode(opts.FailMode)
+	}
 	action, ok := rawString(fields, "action")
 	if !ok {
-		return failResponse(opts, sp, "open", "invalid or missing action in Hermes gateway response")
+		return failResponse(opts, sp, invalidMode, "invalid or missing action in Hermes gateway response")
 	}
 	rawOutput, present := fields[sp.outputField]
 	if !present || strings.TrimSpace(string(rawOutput)) == "null" {
 		if hermesToolCallEvent(opts.Event) && !managedHermesAnswerUsable(action) {
 			// A block without its directive, or an answer with no usable
-			// verdict, would let the call run: a hook that fails closed
-			// blocks it (hermesFailClosed), one in fail mode open lets it
-			// run and logs that it did.
+			// verdict, would let the call run. Outside Secure Client an
+			// unusable response blocks in every outage mode.
 			if action == "block" {
-				return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "Hermes gateway block without a hook_output directive")
+				return failResponse(opts, sp, configuredMode, "Hermes gateway block without a hook_output directive")
 			}
-			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid or missing action in Hermes gateway response")
+			return failResponse(opts, sp, configuredMode, "invalid or missing action in Hermes gateway response")
 		}
 		return 0
 	}
 	var output map[string]json.RawMessage
 	if err := json.Unmarshal(rawOutput, &output); err != nil || output == nil {
-		return failResponse(opts, sp, "open", "invalid Hermes hook_output object")
+		return failResponse(opts, sp, invalidMode, "invalid Hermes hook_output object")
 	}
 
 	valid := false
@@ -1866,7 +1892,7 @@ func decideHermes(opts Options, sp spec, fields map[string]json.RawMessage) int 
 			nonEmptyJSONString(output, "message")
 	}
 	if !valid {
-		return failResponse(opts, sp, "open", "unsupported or contradictory Hermes gateway response")
+		return failResponse(opts, sp, invalidMode, "unsupported or contradictory Hermes gateway response")
 	}
 	fmt.Fprintln(opts.Stdout, compactField(fields, sp.outputField))
 	return 0
@@ -2062,10 +2088,6 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
-	if notice := perUserGatewayDownNotice(opts, sp, reason); notice != "" {
-		fmt.Fprintln(opts.Stdout, notice)
-		return 0
-	}
 	return emitFailOpenAllow(opts, sp, reason)
 }
 
@@ -2083,48 +2105,6 @@ func coldStartFailureReason(err error) string {
 		cause = cause[:300]
 	}
 	return coldStartFailedReason + ": " + cause
-}
-
-// perUserGatewayDownNotice is the systemMessage a fail-open per-user Claude
-// Code or Codex hook prints when the gateway of this account is down. Those
-// agents do not show stderr after exit 0, so an observe-mode agent ran
-// unguarded with no message (GAP-0377). The Unix hooks print the same notice
-// (defenseclaw_unreachable_notice_json) on the same events.
-func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
-	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
-		return ""
-	}
-	var events []string
-	switch sp.connector {
-	case "claudecode":
-		events = []string{"SessionStart", "UserPromptSubmit", "PreToolUse"}
-	case "codex":
-		events = []string{"SessionStart", "PreToolUse"}
-	default:
-		return ""
-	}
-	if !slices.ContainsFunc(events, func(event string) bool { return strings.EqualFold(event, strings.TrimSpace(opts.Event)) }) {
-		return ""
-	}
-	text := ""
-	switch {
-	case reason == "gateway unreachable":
-		text = "DefenseClaw is not checking this session: this account's gateway is not running. " +
-			"Run `defenseclaw-gateway start` to resume protection." + perUserGatewayStatusHint
-	case reason == perUserGatewayRestartingReason:
-		text = "DefenseClaw is not checking this session: this account's gateway is restarting or not running " +
-			"(no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection." + perUserGatewayStatusHint
-	case reason == perUserGatewayNoAnswerReason:
-		text = "DefenseClaw is not checking this session: this account's gateway did not answer in time " +
-			"(it may be restarting or busy). Check it with `defenseclaw-gateway status`."
-	case strings.HasPrefix(reason, coldStartFailedReason):
-		// The logged reason carries the cause of the failed start (GAP-0480).
-		text = "DefenseClaw is not checking this session: the gateway could not be started. " +
-			"Run `defenseclaw-gateway start` to see why."
-	default:
-		return ""
-	}
-	return `{"systemMessage":` + mustJSONString(text) + `}`
 }
 
 // perUserGatewayStatusHint ends a per-user gateway-down notice: the command

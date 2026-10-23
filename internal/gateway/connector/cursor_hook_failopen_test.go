@@ -142,15 +142,15 @@ func assertJSONEnvelope(t *testing.T, out string) {
 	}
 }
 
-func TestCursorHook_FailOpenOnUnreachableEmitsAllow(t *testing.T) {
+func TestCursorHook_LegacyOpenOnUnreachableEmitsDeny(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
 	stdout, stderr, err := runCursorHook(t, "127.0.0.1:1", "open", true)
-	if err != nil {
-		t.Fatalf("expected exit 0 (fail-open), got %v; stderr=%s", err, stderr)
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected exit 2 for legacy open, got %v; stderr=%s", err, stderr)
 	}
-	assertAllowEnvelope(t, stdout)
+	assertDenyEnvelope(t, stdout)
 }
 
 func TestCursorHook_FailClosedOnUnreachableEmitsDeny(t *testing.T) {
@@ -175,7 +175,7 @@ func TestCursorHook_FailClosedOnUnreachableEmitsDeny(t *testing.T) {
 	}
 }
 
-func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
+func TestCursorHook_DisabledMarkerEmitsDeny(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -199,29 +199,25 @@ func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("expected exit 0 when .disabled present, got %v; stderr=%s", err, stderr.String())
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("expected a block when .disabled is present; stdout=%s", stdout.String())
+	} else if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected exit 2 when .disabled is present, got %v; stderr=%s", err, stderr.String())
 	}
-	// The disabled guard deliberately does not parse or retain the event body;
-	// it still emits Cursor's exact no-fields success object.
-	assertJSONEnvelope(t, stdout.String())
+	// Cursor's failClosed:true registration treats this nonzero exit as a
+	// denial even though the disabled guard does not parse the event body.
 }
 
-func TestCursorHook_MissingTokenFailsOpenWithAllow(t *testing.T) {
+func TestCursorHook_MissingTokenBlocksWithLegacyOpen(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
-	// No .token file and no DEFENSECLAW_GATEWAY_TOKEN, not strict =>
-	// historical allow-and-warn, but must emit an explicit allow so a
-	// fail-open entry never depends on Cursor's empty-output fallback.
+	// A missing token is a failed inspection even with an old open setting.
 	stdout, stderr, err := runCursorHook(t, "127.0.0.1:1", "open", false)
-	if err != nil {
-		t.Fatalf("expected exit 0 (fail-open on missing token), got %v; stderr=%s", err, stderr)
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected exit 2 on missing token, got %v; stderr=%s", err, stderr)
 	}
-	assertAllowEnvelope(t, stdout)
-	if !strings.Contains(stderr, "allowing cursor tool") {
-		t.Errorf("stderr should announce allowing on the fail-open path, got: %q", stderr)
-	}
+	assertDenyEnvelope(t, stdout)
 }
 
 // TestCursorHook_StrictMissingTokenBlocks pins the other side of the

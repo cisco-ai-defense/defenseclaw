@@ -801,7 +801,12 @@ _RECONCILE_CONNECTORS = frozenset(
 
 
 def _changed_hook_fail_modes(before: object, after: object) -> list[tuple[str, str]]:
-    """The guarded connectors whose effective hook fail mode a write changed, with the new mode."""
+    """Guarded connectors whose runtime or saved fail mode changed.
+
+    A legacy per-user open remains closed at runtime in 1.0.4. Changing that
+    saved value still has to refresh an older open script while the gateway is
+    stopped; comparing only the resolved modes would miss that repair.
+    """
     try:
         guardrail = after.guardrail
         if not guardrail.enabled:
@@ -812,6 +817,14 @@ def _changed_hook_fail_modes(before: object, after: object) -> list[tuple[str, s
     if before is None:
         return []
     from defenseclaw.fail_mode import upstream_fail_open
+
+    def saved_modes(config: object, name: str) -> tuple[str, str]:
+        policy = config.guardrail
+        connector = (getattr(policy, "connectors", None) or {}).get(name)
+        return (
+            str(getattr(policy, "hook_fail_mode", "") or "").strip().lower(),
+            str(getattr(connector, "hook_fail_mode", "") or "").strip().lower(),
+        )
 
     changed = []
     for name in names:
@@ -824,7 +837,10 @@ def _changed_hook_fail_modes(before: object, after: object) -> list[tuple[str, s
             if hasattr(guardrail, "effective_enabled") and not guardrail.effective_enabled(name):
                 continue
             new = guardrail.effective_hook_fail_mode(name)
-            if before.guardrail.effective_hook_fail_mode(name) != new:
+            if (
+                before.guardrail.effective_hook_fail_mode(name) != new
+                or saved_modes(before, name) != saved_modes(after, name)
+            ):
                 changed.append((name, new))
         except Exception:  # noqa: BLE001
             continue

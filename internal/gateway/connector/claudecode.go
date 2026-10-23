@@ -630,10 +630,7 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 	if otlpToken != "" {
 		headers["authorization"] = "Bearer " + otlpToken
 	}
-	failMode := "open"
-	if strings.TrimSpace(opts.HookFailMode) != "" {
-		failMode = normalizeHookFailMode(opts.HookFailMode)
-	}
+	failMode := setupHookFailMode(opts)
 	extra := map[string]string{
 		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
 		"DEFENSECLAW_FAIL_MODE":        failMode,

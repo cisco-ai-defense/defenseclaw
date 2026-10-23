@@ -33,6 +33,8 @@ import { dirname{{if not .Sandbox}}, join{{end}} } from 'node:path'
 
 const DC_API_ADDR = "{{.APIAddr}}"
 {{if .Sandbox}}const DC_FAIL_MODE: string = "closed" // sandbox hooks always fail closed
+const DC_RESPONSE_FAIL_MODE: string = "closed"
+const DC_MANAGED_HOOK = false
 const DC_TIMEOUT_MS = {{.SandboxMaxTime}}000
 const DC_RETRY_TIMEOUT_MS = {{.SandboxRetryMaxTime}}000
 // OpenShell placeholders (openshell:resolve:env:v<revision>_<KEY>) and the
@@ -44,7 +46,9 @@ const DC_HOOK_SOCKET: string = ""
 const DC_FOREIGN_GUARD: string = ""
 const DC_INSTALL_MARKER: string = ""
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}"
-const DC_FAIL_MODE: string = "{{if and .Managed (not .SecureClient)}}closed{{else}}{{.FailMode}}{{end}}" // "open" or "closed"
+const DC_FAIL_MODE: string = "{{if or .Managed .SecureClient}}{{.FailMode}}{{else}}closed{{end}}" // managed outage choice or Secure Client
+const DC_RESPONSE_FAIL_MODE: string = "{{if .SecureClient}}{{.FailMode}}{{else}}closed{{end}}"
+const DC_MANAGED_HOOK = {{.Managed}}
 // Standalone managed installs talk to the gateway's peer-authorized unix hook
 // socket instead of the TCP API: the gateway identifies the caller by
 // kernel-verified uid, so no bearer token leaves this process, and a user who
@@ -513,7 +517,7 @@ function gatewayStopped(error: unknown): boolean {
 }
 
 function failureResponse(reason: string): GatewayResponse {
-	if (DC_FAIL_MODE === "closed") {
+	if (DC_RESPONSE_FAIL_MODE === "closed") {
 		return { action: "block", reason: `DefenseClaw hook failed closed (${reason})` }
 	}
 	return { action: "allow" }
@@ -700,7 +704,8 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			return data
 		} catch (error) {
 			if (await deploymentRemoved()) return { action: "allow" }
-			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
+			if (DC_MANAGED_HOOK && DC_HOOK_SOCKET && gatewayStopped(error)) {
+				if (DC_FAIL_MODE === "open") return { action: "allow" }
 				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
 			}
 			return failureResponse(safeError(error))

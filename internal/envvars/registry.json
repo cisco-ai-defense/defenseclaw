@@ -7258,7 +7258,7 @@
     {
       "name": "DEFENSECLAW_GATEWAY_AUTOSTART",
       "category": "security_opt_out",
-      "purpose": "Set to 0, false, no or off in the agent's environment to stop the Unix hooks from starting a stopped per-user gateway when their request is refused. Fail-closed hooks then block and fail-open hooks let the call through until the gateway is started.",
+      "purpose": "Set to 0, false, no or off in the agent's environment to stop the Unix hooks from starting a stopped per-user gateway when their request is refused. Per-user hooks block the unchecked call until the gateway is started.",
       "default": "unset (hooks start a stopped per-user gateway)",
       "accepted_values": [
         "0",

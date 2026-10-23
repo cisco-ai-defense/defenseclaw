@@ -191,6 +191,9 @@ func normalizeHookFailMode(mode string) string {
 // open under Secure Client (#1163) on an authenticated Secure Client
 // deployment (SecureClientDeploymentVerified) and closed everywhere else.
 func setupHookFailMode(opts SetupOpts) string {
+	if !opts.ManagedEnterprise && !opts.SecureClientHookDelivery {
+		return "closed"
+	}
 	if strings.TrimSpace(opts.HookFailMode) == "" && opts.SecureClientHookDelivery && SecureClientDeploymentVerified() {
 		return secureClientHookFailMode
 	}
@@ -552,6 +555,12 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 // sidecar source of failMode (HookFailModeSourceConfig, or "" for an open
 // CapableHookFailMode lowered).
 func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, failModeSource string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient, secureClientDelivery bool) error {
+	if !managed && !secureClient {
+		// Direct writers and upgrade helpers can receive a legacy open value.
+		// A per-user render must still block if its gateway is unavailable.
+		failMode = "closed"
+		failModeSource = HookFailModeSourceConfig
+	}
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
@@ -1528,27 +1537,11 @@ func closeBakedHookFailMode(path string, opens *strings.Replacer) (bool, error) 
 // OutageHookFailMode is the fail mode conn's hooks follow while the gateway
 // is down when they answer for themselves (the native hook, the shared shell
 // readers, the installers' pre-swap refresh): the mode resolveHookFailMode
-// takes from the config, which keeps an unset mode closed outside Secure
-// Client. Two opens are not an operator's and are not applied here: a
-// per-user Cursor open, which resolveHookFailMode takes from the guardrail
-// mode (observe), is closed unless the config sets open
-// (opts.ConfiguredHookFailMode; Cursor's host registration separately closes
-// hook-process failure), and CapableHookFailMode's lowering of closed to open for a vendor
+// takes from the config. Per-user hooks are closed regardless of an older
+// saved open. CapableHookFailMode's lowering of closed to open for a vendor
 // hook surface that cannot fail closed is the vendor's limit.
 func OutageHookFailMode(opts SetupOpts, conn Connector) string {
-	mode := resolveHookFailMode(opts, conn)
-	if mode == "open" && perUserCursorRender(opts, conn) &&
-		!strings.EqualFold(strings.TrimSpace(opts.ConfiguredHookFailMode), "open") {
-		return "closed"
-	}
-	return mode
-}
-
-// perUserCursorRender reports a Cursor render whose resolved fail mode
-// follows its guardrail mode (resolveHookFailMode): neither managed nor
-// Secure Client.
-func perUserCursorRender(opts SetupOpts, conn Connector) bool {
-	return conn != nil && conn.Name() == "cursor" && !opts.ManagedEnterprise && !opts.SecureClientHookDelivery
+	return resolveHookFailMode(opts, conn)
 }
 
 // renderedHookFailMode is the fail mode conn's rendered hooks bake and its
@@ -1969,22 +1962,12 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //  0. A managed standalone render takes the mode the administrator's config
 //     resolved (config.Config.EffectiveHookFailModeForConnector): explicit
 //     open is open, anything else closed, Cursor included.
-//  1. Outside Secure Client, Cursor observe mode always resolves to "open"
-//     and action mode to "closed"; host failClosed and adapter transport
-//     failures must not enforce outside action mode.
-//  2. Otherwise, an EXPLICIT operator value in opts.HookFailMode — either
-//     "open" or "closed" — wins. The operator answered
-//     `defenseclaw setup guardrail`'s fail-mode prompt (or used
-//     `defenseclaw guardrail fail-mode <value>`); silently
-//     overriding their answer would violate the operator-defined
-//     fail-mode contract documented in
-//     “GuardrailConfig.HookFailMode“.
-//  3. EMPTY/unset opts.HookFailMode uses the connector default:
-//     defaultHookFailMode ("closed"), upgraded from the codex/claudecode
-//     enforcement flags. Under Secure Client (opts.SecureClientHookDelivery,
-//     #1163) the explicit value wins for every connector, Cursor included,
-//     and an unset mode is "open" (setupHookFailMode).
-//  4. Hook-only connectors may use explicit "closed" only when their
+//  1. An authenticated Secure Client delivery follows its explicit value or
+//     defaults to "open" (#1163). Its legacy profile keeps Cursor's observe
+//     posture until delivery migrates.
+//  2. Every per-user hook renders "closed", including an explicit open left
+//     in config by an older release.
+//  3. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit
 //     vendor fail-closed fields, except in a managed standalone render,
@@ -1992,9 +1975,9 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     Copilot CLI, Antigravity and Hermes hooks, which block through the
 //     agent's native deny (CapableHookFailMode, hookBlocksItsOwnFailures).
 //
-// Transport-layer failures (gateway unreachable / timeout / 5xx) follow
-// FailMode too. DEFENSECLAW_STRICT_AVAILABILITY=1 remains an unconditional
-// force-closed override.
+// Only a managed standalone administrator may use open for an eligible
+// gateway connection outage. DEFENSECLAW_STRICT_AVAILABILITY=1 can only
+// tighten this choice.
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
 	render := resolveConnectorHookRender(opts, c)
 	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, render.token, render.failMode, render.failModeSource, render.extras, opts.ManagedEnterprise,
@@ -2100,12 +2083,9 @@ func managedStandaloneRender(opts SetupOpts) bool {
 // authenticated Secure Client deployment (setupHookFailMode): guardrail mode
 // and enforcement flags do not change availability policy.
 //
-// Everywhere else the explicit string in opts.HookFailMode normally wins;
-// Cursor first applies its observe/action boundary because observe is never
-// allowed to block. An empty value falls back to the connector-default and is
-// upgraded to "closed" when the operator has set the matching enforcement flag
-// for codex / claudecode (avarice F-0681).
-func resolveHookFailMode(opts SetupOpts, c Connector) string {
+// A standalone managed render follows the administrator's explicit choice.
+// A per-user render is always closed, including legacy explicit open.
+func resolveHookFailMode(opts SetupOpts, conn Connector) string {
 	if managedStandaloneRender(opts) {
 		// The administrator's config chose this mode (explicit open, or
 		// closed by default); Cursor's observe boundary does not change it.
@@ -2114,33 +2094,15 @@ func resolveHookFailMode(opts SetupOpts, c Connector) string {
 	if opts.SecureClientHookDelivery {
 		return setupHookFailMode(opts)
 	}
-	if c != nil && c.Name() == "cursor" {
-		// Cursor mode owns its availability posture: action registrations are
-		// fail-closed and observe registrations are fail-open. This prevents a
-		// global setting inherited from another connector from making observe
-		// blocking or action silently nonblocking.
-		if strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "action") ||
-			strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "enforce") {
-			return "closed"
+	if shellHookSecureClientProfile(opts) {
+		if conn != nil && conn.Name() == "cursor" &&
+			!strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "action") &&
+			!strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "enforce") {
+			return "open"
 		}
-		return "open"
+		return setupHookFailMode(opts)
 	}
-	if strings.TrimSpace(opts.HookFailMode) != "" {
-		return normalizeHookFailMode(opts.HookFailMode)
-	}
-	if c != nil {
-		switch c.Name() {
-		case "codex":
-			if opts.CodexEnforcement {
-				return "closed"
-			}
-		case "claudecode":
-			if opts.ClaudeCodeEnforcement {
-				return "closed"
-			}
-		}
-	}
-	return defaultHookFailMode
+	return "closed"
 }
 
 // WriteHookScriptsForConnector generates the generic inspection scripts

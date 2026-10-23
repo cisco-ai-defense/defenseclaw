@@ -63,13 +63,12 @@ from defenseclaw import ux
     type=click.Choice(["open", "closed"], case_sensitive=False),
     default=None,
     help=(
-        "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
-        "'closed' (the default on a new install) blocks where the hook supports it, "
-        "so the agent's tools are blocked while the gateway is down; 'open' allows + logs. "
-        "Omit it to keep the current setting. "
+        "Per-user hooks always fail closed when inspection is unavailable. "
+        "The open value is reserved for administrator-managed outage policy and "
+        "Secure Client; quickstart refuses it. Omit the option to use closed. "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and "
         "missing-token failures closed. "
-        "Change it later with `defenseclaw guardrail fail-mode open|closed`."
+        "Inspect the posture with `defenseclaw guardrail fail-mode`."
     ),
 )
 @click.option(
@@ -162,6 +161,8 @@ def quickstart_cmd(
     from defenseclaw.ux import CLIRenderer
 
     refuse_first_run_when_managed()
+    if fail_mode == "open":
+        raise click.UsageError("Per-user hooks always fail closed; --fail-mode open is unavailable during quickstart.")
     connector_source: dict[str, str] = {}
     if agent_name:
         connector = agent_name

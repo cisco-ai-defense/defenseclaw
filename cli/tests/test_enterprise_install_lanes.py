@@ -42,7 +42,7 @@ def test_hook_process_warning_keeps_install_lanes_honest(tmp_path: Path) -> None
 
     unix = UNIX_LANE.read_text(encoding="utf-8")
     lines = unix.splitlines()
-    for step in ("04-verify", "05-status"):
+    for step in ("02-ensure-config", "03-ensure-noop", "04-verify", "05-status", "06-upgrade"):
         matches = [i for i, line in enumerate(lines) if f'check "$results/{step}.json"' in line]
         assert len(matches) == 1, step
         i = matches[0]

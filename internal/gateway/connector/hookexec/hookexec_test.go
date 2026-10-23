@@ -789,7 +789,7 @@ func TestHermesJSONStdinAndValidOutputShapes(t *testing.T) {
 	}
 }
 
-func TestHermesMalformedOrMismatchedGatewayOutputFailsOpen(t *testing.T) {
+func TestHermesMalformedOrMismatchedGatewayOutputBlocksToolCalls(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		event    string
@@ -832,22 +832,20 @@ func TestHermesMalformedOrMismatchedGatewayOutputFailsOpen(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// A per-user hook in fail mode open: these answers never block.
-			// In fail mode closed a tool call blocks instead
-			// (TestPerUserHermesToolCallFailsClosedUnlessOpen).
+			// An unusable pre-tool answer blocks even with outage-open selected.
+			// Audit-only events still cannot veto a tool call.
 			input := fmt.Sprintf(`{"event":%q}`, tc.event)
 			result := run(t, "hermes", ok(tc.response), func(opts *Options) {
 				opts.Event = ""
 				opts.Stdin = strings.NewReader(input)
 				opts.FailMode = "open"
 			})
-			if result.code != 0 || result.stdout != "" {
-				t.Fatalf(
-					"Hermes mismatch synthesized enforcement: code=%d stdout=%q stderr=%q",
-					result.code,
-					result.stdout,
-					result.stderr,
-				)
+			if tc.event == "pre_tool_call" {
+				if !blocked(result) {
+					t.Fatalf("Hermes tool call allowed unusable answer: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+				}
+			} else if result.code != 0 || result.stdout != "" {
+				t.Fatalf("Hermes audit-only event blocked: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
 			}
 		})
 	}
@@ -1084,8 +1082,8 @@ func TestPerUserColdStartOutlivesTheCall(t *testing.T) {
 		}
 	})
 	defer close(release)
-	if r.code != 0 {
-		t.Fatalf("MessageDisplay fail-open code=%d stderr=%q", r.code, r.stderr)
+	if !blocked(r) {
+		t.Fatalf("MessageDisplay failure was not closed: code=%d stderr=%q", r.code, r.stderr)
 	}
 	ctx := <-startCtx
 	if ctx.Err() != nil {
@@ -1097,16 +1095,13 @@ func TestPerUserColdStartOutlivesTheCall(t *testing.T) {
 	}
 }
 
-// --- Response-layer failure (4xx / bad JSON): honors FAIL_MODE ---
+// --- Response-layer failures are closed outside Secure Client. ---
 
 func TestResponseFailure(t *testing.T) {
-	t.Run("4xx fail open allows", func(t *testing.T) {
+	t.Run("4xx fail open blocks", func(t *testing.T) {
 		r := run(t, "claudecode", &stubRT{status: 401, body: "unauthorized"}, nil)
-		if r.code != 0 {
-			t.Fatalf("code = %d, want 0", r.code)
-		}
-		if r.stdout != "" {
-			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		if r.code != blockExit || !strings.Contains(r.stderr, "HTTP 401") {
+			t.Fatalf("code = %d stderr = %q, want an authentication refusal", r.code, r.stderr)
 		}
 	})
 
@@ -1122,13 +1117,13 @@ func TestResponseFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("cursor response failure fail open emits valid allow json", func(t *testing.T) {
+	t.Run("cursor response failure fail open emits valid deny json", func(t *testing.T) {
 		r := run(t, "cursor", &stubRT{status: 401, body: "unauthorized"}, nil)
 		if r.code != 0 {
 			t.Fatalf("code = %d, want 0", r.code)
 		}
-		if r.stdout != cursorFallbackOutput("PreToolUse", false, "")+"\n" {
-			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
+		if r.stdout != cursorFallbackOutput("PreToolUse", true, "DefenseClaw hook failed closed")+"\n" {
+			t.Errorf("stdout = %q, want Cursor deny JSON", r.stdout)
 		}
 	})
 
@@ -1254,27 +1249,21 @@ func TestMissingToken(t *testing.T) {
 		o.HookDir = filepath.Join(o.Home, "empty") // no .token here
 	}
 
-	t.Run("default allows without calling gateway", func(t *testing.T) {
+	t.Run("default blocks without calling gateway", func(t *testing.T) {
 		rt := ok(`{"action":"allow"}`)
 		r := run(t, "claudecode", rt, noToken)
-		if r.code != 0 {
-			t.Fatalf("code = %d, want 0", r.code)
+		if !blocked(r) {
+			t.Fatalf("code = %d stdout=%q, want a block", r.code, r.stdout)
 		}
 		if rt.requests != 0 {
 			t.Fatalf("gateway called %d times, want 0", rt.requests)
 		}
-		if r.stdout != "" {
-			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
-		}
 	})
 
-	t.Run("cursor default emits valid allow json", func(t *testing.T) {
+	t.Run("cursor default blocks", func(t *testing.T) {
 		r := run(t, "cursor", ok(`{"action":"allow"}`), noToken)
-		if r.code != 0 {
-			t.Fatalf("code = %d, want 0", r.code)
-		}
-		if r.stdout != cursorFallbackOutput("PreToolUse", false, "")+"\n" {
-			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
+		if !blocked(r) {
+			t.Fatalf("code = %d stdout=%q, want Cursor deny", r.code, r.stdout)
 		}
 	})
 
@@ -1462,8 +1451,8 @@ func TestAntigravityEventBindingRequiresReviewedExactEvent(t *testing.T) {
 // A Copilot hook denies the tool call on every DefenseClaw-side failure with
 // Copilot's native structured decision: an administrator-managed
 // (standalone enterprise) hook always, a per-user hook in fail mode closed
-// with a text that says why and what to do. A per-user hook in fail mode open
-// lets the call run.
+// with a text that says why and what to do. A per-user open hook still blocks
+// a completed gateway error response.
 func TestCopilotFailureContract(t *testing.T) {
 	type failureCase struct {
 		name   string
@@ -1513,10 +1502,6 @@ func TestCopilotFailureContract(t *testing.T) {
 					want := `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw policy service is unavailable."}` + "\n"
 					if result.stdout != want {
 						t.Fatalf("managed: stdout=%q stderr=%q, want %q", result.stdout, result.stderr, want)
-					}
-				case hook == "per-user open" && tc.name != "oversized" && tc.name != "malformed":
-					if result.stdout != "" {
-						t.Fatalf("per-user open: stdout=%q stderr=%q, want the fail-open result", result.stdout, result.stderr)
 					}
 				case tc.name == "unavailable-home":
 					want := `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}` + "\n"
@@ -1573,7 +1558,7 @@ func TestAntigravityFailureFallbacksUseDocumentedEventOutput(t *testing.T) {
 		closed bool
 		want   string
 	}{
-		{"PreToolUse", false, `{"decision":"allow"}` + "\n"},
+		{"PreToolUse", false, `{"decision":"deny","reason":"DefenseClaw policy service is unavailable."}` + "\n"},
 		{"PreToolUse", true, `{"decision":"deny","reason":"DefenseClaw policy service is unavailable."}` + "\n"},
 		{"PostToolUse", true, "{}\n"},
 		{"PreInvocation", true, "{}\n"},
@@ -1925,7 +1910,7 @@ func TestInvalidTraceparentDropped(t *testing.T) {
 
 // --- DEFENSECLAW_HOME guard ---
 
-func TestNonCursorDisabledOrMissingHomeIsNoop(t *testing.T) {
+func TestNonCursorDisabledOrMissingHomeBlocks(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		home func(t *testing.T) string
@@ -1951,14 +1936,11 @@ func TestNonCursorDisabledOrMissingHomeIsNoop(t *testing.T) {
 				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
 				HTTPClient: &http.Client{Transport: rt},
 			})
-			if code != 0 {
-				t.Fatalf("code = %d, want 0", code)
+			if code == 0 && !strings.Contains(out.String(), "deny") && !strings.Contains(out.String(), "block") {
+				t.Fatalf("code = %d stdout=%q, want a block", code, out.String())
 			}
 			if rt.requests != 0 {
 				t.Fatalf("gateway called %d times, want 0", rt.requests)
-			}
-			if out.String() != "" {
-				t.Fatalf("stdout = %q, want empty for non-Cursor no-op", out.String())
 			}
 		})
 	}
@@ -2214,7 +2196,7 @@ func TestWindowsUnenrolledRefusalLeadsWithTheNextStep(t *testing.T) {
 	}
 }
 
-func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {
+func TestCursorDisabledOrMissingHomeBlocks(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		home func(t *testing.T) string
@@ -2237,11 +2219,8 @@ func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {
 				Connector: "cursor", Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "open",
 				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
 			})
-			if code != 0 {
-				t.Fatalf("code = %d, want 0", code)
-			}
-			if out.String() != cursorFallbackOutput("", false, "")+"\n" {
-				t.Fatalf("stdout = %q, want Cursor allow JSON", out.String())
+			if code == 0 && !strings.Contains(out.String(), "deny") && !strings.Contains(out.String(), "block") {
+				t.Fatalf("code = %d stdout=%q, want Cursor deny", code, out.String())
 			}
 		})
 	}
@@ -2450,9 +2429,9 @@ func TestCodexSessionEndDeadlineCancelsBlockingTransport(t *testing.T) {
 	}
 }
 
-// gatewayDownReason is the per-user denial text of an unreachable gateway (GAP-1337).
-func gatewayDownReason(event string) string {
-	return mustJSONString(perUserGatewayDownText(Options{Event: event}, "gateway unreachable"))
+// gatewayNoAnswerReason is the per-user denial text for a deadline with no answer.
+func gatewayNoAnswerReason(event string) string {
+	return mustJSONString(perUserGatewayDownText(Options{Event: event}, perUserGatewayNoAnswerReason))
 }
 
 func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
@@ -2462,15 +2441,15 @@ func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
 	}{
 		{
 			event:      "SessionStart",
-			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("SessionStart") + "}\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayNoAnswerReason("SessionStart") + "}\n",
 		},
 		{
 			event:      "PreCompact",
-			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("PreCompact") + "}\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayNoAnswerReason("PreCompact") + "}\n",
 		},
 		{
 			event:      "PostCompact",
-			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("PostCompact") + "}\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayNoAnswerReason("PostCompact") + "}\n",
 		},
 		{
 			// A blocked stop event keeps Codex running the turn (#1140):
@@ -2485,7 +2464,7 @@ func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
 		{
 			event: "PreToolUse",
 			wantStdout: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",` +
-				`"permissionDecisionReason":` + gatewayDownReason("PreToolUse") + "}}\n",
+				`"permissionDecisionReason":` + gatewayNoAnswerReason("PreToolUse") + "}}\n",
 		},
 		{
 			event:      "SessionEnd",
@@ -2517,7 +2496,7 @@ func TestCodexV3GenericFailClosedUsesLifecycleControl(t *testing.T) {
 		opts.FailMode = "closed"
 		opts.StrictAvailability = true
 	})
-	wantStdout := `{"continue":false,"stopReason":` + gatewayDownReason("SessionStart") + "}\n"
+	wantStdout := `{"continue":false,"stopReason":` + gatewayNoAnswerReason("SessionStart") + "}\n"
 	if result.code != 0 || result.stdout != wantStdout {
 		t.Fatalf("code=%d stdout=%q want %q stderr=%q", result.code, result.stdout, wantStdout, result.stderr)
 	}
@@ -2566,8 +2545,12 @@ func TestCodexGatewayControlIsDiscardedOutsideBoundContract(t *testing.T) {
 				opts.Event = "PreCompact"
 				opts.HookContractID = contractID
 			})
-			if result.code != 0 || result.stdout != "" {
-				t.Fatalf("unsupported gateway control leaked: code=%d stdout=%q", result.code, result.stdout)
+			wantCode := 2
+			if contractID == "codex-hooks-v2" {
+				wantCode = 0
+			}
+			if result.code != wantCode || result.stdout != "" {
+				t.Fatalf("unsupported gateway control leaked: code=%d stdout=%q, want code %d", result.code, result.stdout, wantCode)
 			}
 		})
 	}
@@ -3059,21 +3042,16 @@ func TestManagedNativeDecisionAcceptsExplicitAllowWithoutNativeOutput(t *testing
 }
 
 func TestUnreachable(t *testing.T) {
-	t.Run("default fail open", func(t *testing.T) {
+	t.Run("per-user closes a gateway outage", func(t *testing.T) {
 		r := run(t, "claudecode", &stubRT{err: errors.New("dial tcp: refused")}, nil)
-		if r.code != 0 {
-			t.Fatalf("code = %d, want 0 (DefenseClaw outage must not brick agent)", r.code)
+		if !blocked(r) {
+			t.Fatalf("code = %d stdout=%q, want a block", r.code, r.stdout)
 		}
-		if !strings.Contains(r.stderr, "allowing claude-code tool") {
-			t.Errorf("stderr = %q, want allow notice", r.stderr)
+		if !strings.Contains(r.stderr, "blocking claude-code tool") {
+			t.Errorf("stderr = %q, want block notice", r.stderr)
 		}
-		// GAP-0377: Claude Code hides stderr after exit 0, so the user reads
-		// the per-user outage notice from systemMessage, as on Unix.
-		var notice map[string]string
-		if json.Unmarshal([]byte(r.stdout), &notice) != nil ||
-			!strings.Contains(notice["systemMessage"], "defenseclaw-gateway start") ||
-			!strings.Contains(notice["systemMessage"], "`defenseclaw-gateway status`") {
-			t.Errorf("stdout = %q, want a systemMessage naming defenseclaw-gateway start and status", r.stdout)
+		if !strings.Contains(r.stdout+r.stderr, "defenseclaw-gateway start") {
+			t.Errorf("stdout=%q stderr=%q, want the gateway restart advice", r.stdout, r.stderr)
 		}
 		managed := run(t, "claudecode", &stubRT{err: errors.New("dial tcp: refused")}, func(o *Options) {
 			o.ManagedUnixSocket = "/run/defenseclaw/hook.sock"
@@ -3083,13 +3061,10 @@ func TestUnreachable(t *testing.T) {
 		}
 	})
 
-	t.Run("cursor fail open emits valid allow json", func(t *testing.T) {
+	t.Run("cursor per-user outage emits deny", func(t *testing.T) {
 		r := run(t, "cursor", &stubRT{err: errors.New("dial tcp: refused")}, nil)
-		if r.code != 0 {
-			t.Fatalf("code = %d, want 0", r.code)
-		}
-		if r.stdout != cursorFallbackOutput("PreToolUse", false, "")+"\n" {
-			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
+		if !blocked(r) {
+			t.Fatalf("code = %d stdout=%q, want Cursor deny", r.code, r.stdout)
 		}
 	})
 

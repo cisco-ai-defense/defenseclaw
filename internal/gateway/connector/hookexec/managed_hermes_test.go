@@ -132,10 +132,6 @@ func TestManagedHermesNativeRuntimeFailureNamesTheCause(t *testing.T) {
 // with none set blocks (TestPerUserHermesToolCallFailsClosedUnlessOpen).
 func TestHermesNeutralResultOutsideManagedToolCalls(t *testing.T) {
 	for name, mutate := range map[string]func(*Options){
-		"per-user open": func(o *Options) {
-			o.FailMode = "open"
-			o.StrictAvailability = false
-		},
 		"secure client": func(o *Options) {
 			o.ManagedEnterprise = true
 			o.SecureClient = true
@@ -279,8 +275,8 @@ func TestManagedHermesUnboundEventBlocksRefusedInput(t *testing.T) {
 // command binds no event and whose top-level hook_event_name and event
 // fields disagree may be a tool call, so a managed hook outside Secure
 // Client blocks it with the Hermes directive, logs fail_mode closed and
-// does not ask the gateway. Agreeing fields, a bound event, per-user and
-// Secure Client hooks keep the gateway's verdict.
+// does not ask the gateway. A per-user hook also closes ambiguous input.
+// Agreeing fields, a bound event and Secure Client keep the gateway's verdict.
 func TestManagedHermesDisagreeingEventFieldsBlock(t *testing.T) {
 	// The 115-byte BW-03 case (e) input.
 	const disagree = `{"hook_event_name":"pre_tool_call","event":"pre_llm_call","tool_name":"terminal","tool_input":{"command":"echo x"}}`
@@ -296,7 +292,7 @@ func TestManagedHermesDisagreeingEventFieldsBlock(t *testing.T) {
 		{name: "managed, fields agree", stdin: agree, managed: true},
 		{name: "managed, bound event", stdin: disagree, event: "pre_llm_call", managed: true},
 		{name: "managed Secure Client, fields disagree", stdin: disagree, managed: true, secureClient: true},
-		{name: "per-user, fields disagree", stdin: disagree},
+		{name: "per-user, fields disagree", stdin: disagree, blocks: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var home string

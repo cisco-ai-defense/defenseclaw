@@ -585,9 +585,10 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 	render := func(failMode string) []byte {
 		t.Helper()
 		return []byte(renderOpenCodePluginTemplate(t, templateData{
-			APIAddr:     "127.0.0.1:18970",
-			TokenFileJS: javaScriptStringContent(tokenPath),
-			FailMode:    failMode,
+			APIAddr:      "127.0.0.1:18970",
+			TokenFileJS:  javaScriptStringContent(tokenPath),
+			FailMode:     failMode,
+			SecureClient: failMode == "open",
 		}))
 	}
 	openPlugin := filepath.Join(dir, "opencode-open.mjs")

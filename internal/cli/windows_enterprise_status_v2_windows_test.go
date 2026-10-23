@@ -133,7 +133,7 @@ func TestWindowsStatusV2GatewayAndConfigFailures(t *testing.T) {
 }
 
 func TestWindowsManagedCodexStatusAndVerifyShowHookProcessFailure(t *testing.T) {
-	for _, action := range []string{"status", "verify"} {
+	for _, action := range []string{"status", "verify", "ensure"} {
 		t.Run(action, func(t *testing.T) {
 			cfg := windowsStatusV2Config()
 			fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{cfg: cfg})

@@ -84,8 +84,8 @@ def upstream_fail_open(cfg: Any, connector: str) -> bool:
     open, as its hook render does (CapableHookFailMode). Per-user hooks (the
     Linux and macOS shell hooks and the Windows native hook) and a managed
     deployment outside Secure Client (Config.managed_outside_secure_client)
-    block a call they cannot check through the agent's native deny, so they
-    follow the configured fail mode; an unset one is closed.
+    block a call they cannot check through the agent's native deny. Per-user
+    hooks always run closed; a managed administrator may choose outage-open.
     """
     name = normalize(connector)
     if name not in _UPSTREAM_FAIL_OPEN_CONNECTORS:
@@ -180,14 +180,10 @@ class ConnectorFailModeState:
     def note(self) -> str:
         """Why the effective mode is not the configured guardrail.hook_fail_mode, or "".
 
-        Per-user Cursor follows its guardrail mode (observe open, action
-        closed) whatever the global value says
-        (GuardrailConfig.effective_hook_fail_mode), so ``closed`` in
-        config.yaml next to ``open`` in its observe-mode hooks is intended;
-        reporting says so instead of looking like drift (GAP-0129). Every
-        other connector follows its configured value in observe mode too.
+        A per-user hook runs closed even if an older config saved open.
+        Managed hooks follow the administrator's configured outage mode.
         A closed Copilot CLI, Antigravity or Hermes hook names the vendor
-        limit it keeps instead.
+        limit it keeps.
         """
 
         notes = []
@@ -195,8 +191,8 @@ class ConnectorFailModeState:
             notes.append(self.limit)
         elif self.configured != self.desired and self.effective == self.desired:
             notes.append(
-                f"observe mode keeps hooks fail-{self.desired}; "
-                f"guardrail.hook_fail_mode={self.configured} applies in action mode"
+                f"configured hook_fail_mode={self.configured} is overridden by "
+                f"the fail-{self.desired} policy"
             )
         return "; ".join(notes)
 

@@ -71,14 +71,15 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "c746534fa168d50f542d085a7947e2d43ba4c026f62c404e4627cb83e4148eec",  # amp-plugin.ts
+            "21d54026a0cbcdc6153de054892eba3e3c9bd573857b2780c93311d1c7f1c304",  # amp-plugin.ts
+            "becef9278497660544e4a0b66d40d23a45af12601b8cf90c03a4a924395e0cc1",  # amp-plugin-managed.ts
             "392bc21bb99d9978b69683dca8fd022d074037a1e9df6f885916c6525537cdd6",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "b7397e3041d3c0101bd23f20961fa89801aedc126137c5d786c32f79a7e7dcb6",  # opencode-plugin.js
-            "e2e93161e1954e6bfad005924378b57247fbbb903e44a0c6df82453d7eb64b90",  # opencode-plugin-managed.js
+            "df63701cd0760f2303c620662d7dbe981876e252ed9ab17f8ed12e9183ce34d9",  # opencode-plugin.js
+            "ed7455a4ae954f9614b219f4d657c9ccfc8ec153f08db02afcd45eafa4fa670e",  # opencode-plugin-managed.js
             "f81b5b2f208d2535ac028c49bc95941d5666bee72315053386c05cd9411e34de",  # opencode-plugin-secure-client.js
         }
     ),
@@ -467,7 +468,34 @@ def _matches_immutable_bridge_template(
     if specifications is None or expected_digests is None:
         return False
     lines = payload.splitlines(keepends=True)
+    managed_mode: tuple[int, bytes] | None = None
     for prefix, suffix, canonical, kind in specifications:
+        if kind == "mode":
+            # Per-user host bridges bake closed. Managed host bridges carry
+            # the administrator's mode; their immutable managed marker gives
+            # them a separate fingerprint. The pinned Secure Client bridge
+            # keeps its older dynamic line and fingerprint.
+            fixed_suffix = suffix.replace(b'"open" or "closed"', b'managed outage choice or Secure Client')
+            matches = [index for index, line in enumerate(lines) if line.startswith(prefix)]
+            if len(matches) != 1:
+                return False
+            index = matches[0]
+            line = lines[index]
+            if line.endswith(fixed_suffix):
+                value = line[len(prefix) : -len(fixed_suffix)]
+                if value not in {b"closed", b"open"}:
+                    return False
+                managed_mode = index, prefix + b"{{.FailMode}}" + fixed_suffix
+                if value == b"open":
+                    lines[index] = managed_mode[1]
+                continue
+            if not line.endswith(suffix):
+                return False
+            value = line[len(prefix) : -len(suffix)]
+            if not _valid_bridge_dynamic_value(kind, value, connector=connector, data_dir=data_dir):
+                return False
+            lines[index] = canonical
+            continue
         matches = [
             index
             for index, line in enumerate(lines)
@@ -485,7 +513,13 @@ def _matches_immutable_bridge_template(
         ):
             return False
         lines[index] = canonical
-    return hashlib.sha256(b"".join(lines)).hexdigest() in expected_digests
+    if hashlib.sha256(b"".join(lines)).hexdigest() in expected_digests:
+        return True
+    if managed_mode is not None:
+        index, canonical = managed_mode
+        lines[index] = canonical
+        return hashlib.sha256(b"".join(lines)).hexdigest() in expected_digests
+    return False
 
 
 def _matches_registered_bridge_publication(path: str, payload: bytes) -> bool:

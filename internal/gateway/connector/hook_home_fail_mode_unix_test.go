@@ -20,11 +20,9 @@ import (
 	"testing"
 )
 
-// GAP-0315 review: a per-user hook installed open exits before it sources
-// _hardening.sh when its DEFENSECLAW_HOME is missing or disabled. That early
-// exit follows the installed mode, with strict availability closing it as it
-// closes every later outage, and answers with the connector's own block.
-// DEFENSECLAW_FAIL_MODE is not read (1.0.4 lead directive).
+// A missing or disabled DEFENSECLAW_HOME is a failed per-user inspection.
+// Even a saved open from an older release must render closed before that
+// early exit. DEFENSECLAW_FAIL_MODE in the agent's environment is ignored.
 func TestPerUserHookHomeUnavailableFollowsTheInstalledMode(t *testing.T) {
 	for _, agent := range []struct {
 		conn   Connector
@@ -51,10 +49,10 @@ func TestPerUserHookHomeUnavailableFollowsTheInstalledMode(t *testing.T) {
 			env       []string
 			wantBlock bool
 		}{
-			{"no-env", nil, false},
-			{"env-closed", []string{"DEFENSECLAW_FAIL_MODE=Closed"}, false},
+			{"no-env", nil, true},
+			{"env-closed", []string{"DEFENSECLAW_FAIL_MODE=Closed"}, true},
 			{"strict", []string{"DEFENSECLAW_STRICT_AVAILABILITY=yes"}, true},
-			{"env-open", []string{"DEFENSECLAW_FAIL_MODE=open"}, false},
+			{"env-open", []string{"DEFENSECLAW_FAIL_MODE=open"}, true},
 		} {
 			t.Run(agent.script+"/"+tc.name, func(t *testing.T) {
 				cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, agent.script)}, agent.args...)...)

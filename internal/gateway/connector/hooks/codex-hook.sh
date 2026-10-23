@@ -354,6 +354,11 @@ codex_gateway_post_response() {
 }
 CURL_STATUS=0
 RESPONSE=$(codex_gateway_post) || CURL_STATUS=$?
+{{if and (not .SecureClient) (not .Sandbox)}}if [ "$CURL_STATUS" -ne 0 ] &&
+  { [[ "${RESPONSE##*$'\n'}" == [1-9][0-9][0-9] ]] || [ "$CURL_STATUS" = 18 ]; }; then
+  fail_response "incomplete gateway response"
+fi
+{{end}}
 # A refused or dropped connection means this account's gateway is restarting
 # or not running (after a reboot, for example): send the call again for up to
 # 3 seconds, starting the gateway after a refusal. SessionEnd has no time for
@@ -366,6 +371,8 @@ if [ "$CURL_STATUS" -ne 0 ] && [ "$BOUND_EVENT" != "SessionEnd" ]; then
   fi
 fi
 if [ "$CURL_STATUS" -eq 0 ]; then
+  _DC_ANSWERED_429=0
+  [ "${RESPONSE##*$'\n'}" != 429 ] || _DC_ANSWERED_429=1
   defenseclaw_retry_busy codex_gateway_post_response || CURL_STATUS=$?
 fi
 API_TOKEN=
@@ -373,23 +380,33 @@ PAYLOAD=
 AUTH_HEADER_ARGS=()
 unset API_TOKEN PAYLOAD
 if [ "$CURL_STATUS" -ne 0 ]; then
+{{if and (not .SecureClient) (not .Sandbox)}}  if [ "${_DC_ANSWERED_429:-0}" = 1 ] ||
+    [[ "${RESPONSE##*$'\n'}" == [1-9][0-9][0-9] ]] || [ "$CURL_STATUS" = 18 ]; then
+    fail_response "incomplete gateway response"
+  fi
+  if [ "$CURL_STATUS" = 28 ]; then
+    FAIL_MODE="closed"
+    fail_unreachable "gateway unreachable"
+  fi
+{{end}}
   fail_unreachable "gateway unreachable"
 fi{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
 
-# 5xx (server error) is treated as transport — the gateway hit an
-# infrastructure problem, not a policy verdict. 4xx falls through to
-# response-layer handling so auth/payload bugs surface loudly.
+# An HTTP status proves the gateway answered. Outside Secure Client a 5xx
+# closes like any other response failure; 4xx uses response-layer handling.
 if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+  {{if and (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "gateway returned HTTP ${HTTP_CODE}"
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
+{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
+{{end}}
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.codex_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }

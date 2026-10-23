@@ -119,14 +119,8 @@ func (cannotFailClosedForTest) HookCapabilities(SetupOpts) HookCapability {
 	return HookCapability{SupportsFailClosed: false}
 }
 
-// A per-user render records the config as the source of a mode only when it
-// is the outage mode the config chose (OutageHookFailMode). Copilot and
-// Antigravity render an unset mode closed (their hooks print the native
-// denial), and a Cursor in observe renders closed unless the config sets open
-// (its observe registration stays fail-open): both carry the source. An open
-// CapableHookFailMode lowered for a vendor that cannot fail closed is that
-// vendor's limit and has no source, so the native hook fails it closed and
-// the installers' refresh writes closed.
+// Per-user renders record closed as the config source even when an older
+// config saved open or the vendor cannot block a killed hook process.
 func TestPerUserRenderRecordsOnlyAnOutageModeTheConfigChose(t *testing.T) {
 	for _, test := range []struct {
 		name                          string
@@ -135,13 +129,13 @@ func TestPerUserRenderRecordsOnlyAnOutageModeTheConfigChose(t *testing.T) {
 		wantMode, wantSource, wantOut string
 	}{
 		{"copilot unset", NewCopilotConnector(), SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
-		{"copilot explicit open", NewCopilotConnector(), SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
+		{"copilot explicit open", NewCopilotConnector(), SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
 		{"antigravity unset", NewAntigravityConnector(), SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
 		{"cursor observe unset", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
-		{"cursor observe explicit open", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
+		{"cursor observe explicit open", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
 		{"cursor action explicit open", NewCursorConnector(), SetupOpts{GuardrailMode: "action", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
-		{"capability-lowered unset", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{}, "open", "", "closed"},
-		{"capability-lowered explicit open", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
+		{"capability-lowered unset", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
+		{"capability-lowered explicit open", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dataDir := t.TempDir()
@@ -162,18 +156,22 @@ func TestPerUserRenderRecordsOnlyAnOutageModeTheConfigChose(t *testing.T) {
 			if got := OutageHookFailMode(opts, test.conn); got != test.wantOut {
 				t.Fatalf("outage fail mode %q, want %q", got, test.wantOut)
 			}
-			if got := HookFailClosed(opts, test.conn); got != (test.wantMode == "closed") {
+			wantCapability := test.wantMode == "closed"
+			if _, incapable := test.conn.(cannotFailClosedForTest); incapable {
+				// The fake connector exposes a vendor surface that cannot block,
+				// even though its generated runtime record stays closed.
+				wantCapability = false
+			}
+			if got := HookFailClosed(opts, test.conn); got != wantCapability {
 				t.Fatalf("HookFailClosed = %v, want %v", got, test.wantMode == "closed")
 			}
 		})
 	}
 }
 
-// A per-user Cursor's contract (its hook lock) follows the guardrail mode
-// while its outage mode is closed without an explicit open: the runtime
-// validation accepts a closed runtime under an open contract and still
-// refuses an open runtime under a closed one.
-func TestCursorRuntimeMayBeClosedUnderAnOpenContract(t *testing.T) {
+// A per-user Cursor renders closed even when an older saved mode or contract
+// says open. Runtime validation accepts that tightened runtime during upgrade.
+func TestCursorLegacyOpenCannotReopenClosedRuntime(t *testing.T) {
 	cursor := NewCursorConnector()
 	for _, test := range []struct {
 		name     string
@@ -183,7 +181,7 @@ func TestCursorRuntimeMayBeClosedUnderAnOpenContract(t *testing.T) {
 	}{
 		{"observe, unset", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "open", true},
 		{"observe, explicit open", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", true},
-		{"open runtime, closed contract", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", false},
+		{"closed runtime, closed contract", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dataDir := t.TempDir()
@@ -192,8 +190,8 @@ func TestCursorRuntimeMayBeClosedUnderAnOpenContract(t *testing.T) {
 			if err := WriteHookScriptsForConnectorObjectWithOpts(filepath.Join(dataDir, "hooks"), opts, cursor); err != nil {
 				t.Fatal(err)
 			}
-			if test.contract == "open" && resolveHookFailMode(opts, cursor) != "open" {
-				t.Fatal("precondition: the observe contract is not open")
+			if mode := resolveHookFailMode(opts, cursor); mode != "closed" {
+				t.Fatalf("per-user Cursor resolved %q, want closed", mode)
 			}
 			if err := ValidateHookRuntimeState(dataDir, "cursor", test.contract); (err == nil) != test.ok {
 				t.Fatalf("validate against %s: %v, want ok=%v", test.contract, err, test.ok)
@@ -684,7 +682,7 @@ func TestManagedSharedHookOpenCoversOutagesOnly(t *testing.T) {
 		{"missing action", http.StatusOK, `{}`, 2},
 		{"invalid action", http.StatusOK, `{"action":"unrecognized"}`, 2},
 		{"unparseable reply", http.StatusOK, `garbage`, 2},
-		{"HTTP 503", http.StatusServiceUnavailable, ``, 0},
+		{"HTTP 503", http.StatusServiceUnavailable, ``, 2},
 		{"gateway unreachable", 0, ``, 0},
 	} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

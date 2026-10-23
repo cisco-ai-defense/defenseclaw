@@ -642,6 +642,22 @@ func TestAMPFailModeDefaultsClosed(t *testing.T) {
 	}
 }
 
+func TestAMPLegacyPerUserOpenRendersClosed(t *testing.T) {
+	scripts, err := renderHookScripts("127.0.0.1:18970", "open", ".token", []string{"amp-plugin.ts"}, false, "amp", true, "", "", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, script := range scripts {
+		if script.name == "amp-plugin.ts" {
+			if !strings.Contains(string(script.body), `const DC_FAIL_MODE: string = "closed"`) {
+				t.Fatal("legacy per-user open reached the Amp plugin")
+			}
+			return
+		}
+	}
+	t.Fatal("Amp plugin was not rendered")
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

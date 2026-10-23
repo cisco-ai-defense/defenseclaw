@@ -23,11 +23,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
-// rel-1-0-2 GAP-0446 item 1: an OpenCode tool call that goes ahead because
+// Under Secure Client, an OpenCode tool call that goes ahead because
 // DefenseClaw could not check it (fail mode open) writes the same
 // hook-failures.jsonl line as the shell and native hooks, in the install's
 // data directory, so the gateway's fail-open report finds it.
-func TestOpenCodePluginFailOpenWritesAHookFailureLine(t *testing.T) {
+func TestOpenCodeSecureClientFailOpenWritesAHookFailureLine(t *testing.T) {
 	nodeForTest(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -52,9 +52,10 @@ func TestOpenCodePluginFailOpenWritesAHookFailureLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := templateData{
-		APIAddr:     strings.TrimPrefix(server.URL, "http://"),
-		TokenFileJS: javaScriptStringContent(token),
-		FailMode:    "open",
+		APIAddr:      strings.TrimPrefix(server.URL, "http://"),
+		TokenFileJS:  javaScriptStringContent(token),
+		FailMode:     "open",
+		SecureClient: true,
 	}
 	harness := strings.Replace(openCodePluginHarness, `console.log("allow");`, `await plugin["tool.execute.after"]({ tool: "bash", sessionID: "S", messageID: "M", callID: "C" + i }, { output: "marker" }); console.log("allow");`, 1)
 	lines := runNodeHarness(t, harness, writeRenderedPlugin(t, "opencode-plugin.js", "defenseclaw.mjs", data), "1")

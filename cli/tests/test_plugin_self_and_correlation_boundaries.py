@@ -134,13 +134,14 @@ def _render_bridge_publication(
     install_marker: str = "",
     listener_proof: str = "",
     managed: bool = False,
+    fail_mode: str = "closed",
 ) -> bytes:
     template_name = {
         "amp": "amp-plugin.ts",
         "opencode": "opencode-plugin.js",
     }[connector]
-    if managed and connector == "opencode":
-        template_name = "opencode-plugin-managed.js"
+    if managed:
+        template_name = template_name.replace(".", "-managed.", 1)
     template = (_bridge_host_templates(repository_root) / template_name).read_text(
         encoding="utf-8"
     )
@@ -151,7 +152,7 @@ def _render_bridge_publication(
     rendered = (
         template.replace("{{.APIAddr}}", "127.0.0.1:18970")
         .replace("{{.TokenFileJS}}", token_path_js)
-        .replace("{{.FailMode}}", "closed")
+        .replace("{{.FailMode}}", fail_mode)
         .replace("{{.HookSocketJS}}", "")
         .replace("{{.ServiceUID}}", "0")
         .replace("{{.ForeignHookGuardJS}}", json.dumps(foreign_guard)[1:-1])
@@ -438,6 +439,17 @@ def test_registered_connector_bridge_requires_exact_published_bytes(
 
     assert first_party_self_reason(target) == "installed DefenseClaw connector bridge"
 
+    mode_line = (
+        b'const DC_FAIL_MODE = "closed";'
+        if connector == "opencode"
+        else b'const DC_FAIL_MODE: string = "closed"'
+    )
+    assert mode_line in published
+    opened = published.replace(mode_line, mode_line.replace(b'"closed"', b'"open"'), 1)
+    _write_bridge_publication(data_dir, target, connector=connector, payload=opened)
+    assert first_party_self_reason(target) is None
+    _write_bridge_publication(data_dir, target, connector=connector, payload=published)
+
     # Product/API marker strings at the same expected path are insufficient
     # after a third party replaces the setup-published bytes.
     third_party = (
@@ -575,7 +587,7 @@ def test_bridge_rendered_with_the_listener_proof_stays_first_party(
 @pytest.mark.parametrize(
     ("connector", "template_names"),
     [
-        ("amp", ("amp-plugin.ts", "amp-plugin-secure-client.ts")),
+        ("amp", ("amp-plugin.ts", "amp-plugin-managed.ts", "amp-plugin-secure-client.ts")),
         ("opencode", ("opencode-plugin.js", "opencode-plugin-managed.js", "opencode-plugin-secure-client.js")),
     ],
 )
@@ -599,19 +611,20 @@ def test_bridge_template_fingerprints_match_gateway_sources(
     assert digests == self_identity._BRIDGE_TEMPLATE_DIGESTS[connector]
 
 
-def test_managed_opencode_bridge_stays_first_party(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("connector", ["opencode", "amp"])
+def test_managed_bridge_stays_first_party(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, connector: str
 ) -> None:
     home = tmp_path / "home"
     data_dir = home / ".defenseclaw"
-    target = home / ".config/opencode/plugins/defenseclaw.js"
+    target = home / (".config/opencode/plugins/defenseclaw.js" if connector == "opencode" else ".config/amp/plugins/defenseclaw.ts")
     repository_root = Path(__file__).resolve().parents[2]
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
     published = _render_bridge_publication(
-        repository_root, data_dir, connector="opencode", managed=True
+        repository_root, data_dir, connector=connector, managed=True, fail_mode="open"
     )
-    _write_bridge_publication(data_dir, target, connector="opencode", payload=published)
+    _write_bridge_publication(data_dir, target, connector=connector, payload=published)
     assert first_party_self_reason(target) == "installed DefenseClaw connector bridge"
 
 

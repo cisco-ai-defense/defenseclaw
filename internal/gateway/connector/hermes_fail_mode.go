@@ -25,7 +25,7 @@ package connector
 // used, the token is missing, or the input is too large. Downgrading the
 // render to "open" let such a tool call run during a gateway outage with a
 // closed or unset hook_fail_mode, against the rule that hooks fail open only
-// under Secure Client. An explicit "open" still renders open.
+// under Secure Client. A saved per-user "open" also resolves closed.
 //
 // Managed renders keep their own rules: a standalone render is closed for
 // every connector (managedStandaloneRender), and Secure Client keeps these

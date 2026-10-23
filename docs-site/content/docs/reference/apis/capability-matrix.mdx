@@ -69,7 +69,7 @@ Hermes 0.21+ blocks a `pre_tool_call` on hook spawn error or timeout when Setup 
   also in observe mode. The default is `closed`. If the administrator explicitly selects `open`,
   a gateway outage can allow the call. Oversized input, a gateway 5xx, an unusable
   answer and other transport errors still block. See [Fail modes](/docs/reference/configuration/fail-modes).
-- On a per-user install, fail-open calls recorded by the shell hooks, native hook and OpenCode plugin become a `guardrail-degraded` alert when the gateway starts again. Amp does not write these failure records ([Fail modes](/docs/reference/configuration/fail-modes#reporting-and-diagnosis)).
+- On a per-user install, hooks block failed inspections. Historical fail-open calls recorded before the 1.0.4 upgrade can become a `guardrail-degraded` alert when the gateway starts again. Amp does not write these failure records ([Fail modes](/docs/reference/configuration/fail-modes#reporting-and-diagnosis)).
 - Cursor writes `failClosed: true` outside Secure Client in action and observe mode. Observe still allows ordinary calls and records `would_block` findings; the host flag covers a hook process that cannot answer.
 
 ### I want to run the agent in an OpenShell sandbox

@@ -137,11 +137,9 @@ def refuse_first_run_when_managed() -> None:
     type=click.Choice(["open", "closed"], case_sensitive=False),
     default=None,
     help=(
-        "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
-        "'closed' (the default on a new install) = block where the hook supports "
-        "a blocking response; 'open' = allow + log. It applies in observe and action "
-        "mode alike (Cursor follows its guardrail mode). Omitted, the wizard asks and "
-        "--non-interactive keeps the current setting (closed on a new install). "
+        "Per-user hooks always fail closed when inspection is unavailable. "
+        "The open value is reserved for administrator-managed outage policy and "
+        "Secure Client; init refuses it. Omitted, init uses closed. "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces "
         "transport and missing-token failures closed."
     ),
@@ -257,6 +255,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     from defenseclaw.commands.cmd_setup import _validated_api_key_env_name
 
     refuse_first_run_when_managed()
+    if fail_mode == "open":
+        raise click.UsageError("Per-user hooks always fail closed; --fail-mode open is unavailable during init.")
 
     from defenseclaw import config as config_module
 
@@ -1462,23 +1462,6 @@ def _prompt_action_connectors(
     return action
 
 
-def _current_hook_fail_mode(data_dir: str | os.PathLike[str] | None = None) -> str:
-    """The hook fail mode an Enter at the init prompt keeps.
-
-    A new install gets the config default, closed, which --non-interactive,
-    quickstart and the fail-mode help all name; a re-run keeps the saved
-    value (GAP-0047)."""
-    try:
-        from defenseclaw import config as cfg_mod
-
-        if not os.path.isfile(cfg_mod.config_path_for_data_dir(data_dir or cfg_mod.default_data_path())):
-            return "closed"
-        saved = (cfg_mod.load(data_dir=data_dir).guardrail.hook_fail_mode or "").strip().lower()
-        return saved if saved in {"open", "closed"} else "closed"
-    except Exception:  # noqa: BLE001 - an unreadable config offers the default
-        return "closed"
-
-
 def _prompt_action_policy(
     *,
     fail_mode: str | None,
@@ -1491,23 +1474,9 @@ def _prompt_action_policy(
     These (hook fail-mode + HITL) only matter when at least one connector
     enforces, so we ask them a single time after the action subset is known
     rather than per connector. Pre-supplied flags skip the matching prompt."""
-    # Hook fail-mode: surface the choice so first-run operators don't have to
-    # discover `defenseclaw guardrail fail-mode` later.
-    if fail_mode is None:
-        terminal_checkbox.restore_line_prompt_mode()
-        ux.section("Hook fail-mode (delivery and response failures)")
-        ux.subhead(
-            "What hooks do when delivery/authentication fails or the gateway response is invalid.",
-        )
-        ux.subhead(
-            "Strict availability can additionally force transport and missing-token failures closed.",
-        )
-        fail_mode = click.prompt(
-            "  " + ux.bold("Fail mode"),
-            type=click.Choice(["open", "closed"], case_sensitive=False),
-            default=_current_hook_fail_mode(data_dir),
-            show_choices=True,
-        )
+    # Per-user hooks always close a failed inspection, including when an
+    # earlier install saved open. There is no outage-open choice in init.
+    fail_mode = "closed"
     # Human-In-the-Loop (HITL) only fires in action mode, so it is only asked
     # here (after at least one connector opted into action).
     if human_approval is None:
@@ -1999,10 +1968,6 @@ def _prompt_first_run(
             hilt_min_severity=hilt_min_severity,
             data_dir=data_dir,
         )
-        if "cursor" in action_set and (shared_fail or "").lower() == "open":
-            # GAP-1517: Cursor's hook contract ties failures to its mode.
-            ux.subhead("Cursor keeps fail mode closed: in action mode its hooks always fail closed.")
-
     # Offer the judge for every connector the operator selected for action.
     # Hook-contract downgrades still apply to the saved profile, but they
     # must not hide the checkbox — `defenseclaw setup` already uses the
@@ -2664,10 +2629,7 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
     if not proxy and _closed_fail_mode_connectors(report, connectors):
         # --non-interactive keeps the closed default the wizard asks about
         # (GAP-1424): say what it means and how to change it.
-        renderer.echo(
-            "  Fail mode is closed: hooks block the agent while the gateway is unreachable;"
-            " to allow and log instead: defenseclaw guardrail fail-mode open"
-        )
+        renderer.echo("  Fail mode is closed: hooks block the agent while the gateway is unreachable.")
     if not proxy and platform_support.host_os() in {"linux", "darwin"}:
         # No service unit restarts a per-user gateway on Linux or macOS; the
         # agent shell hooks start it on their next call (RHEL-U3-06).

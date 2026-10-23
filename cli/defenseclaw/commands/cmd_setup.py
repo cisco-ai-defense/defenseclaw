@@ -4156,8 +4156,7 @@ def _rotate_token_connector_state(
         if callable(fail_mode_resolver):
             hook_fail_mode = str(fail_mode_resolver(name) or "").strip().lower()
         else:
-            configured_fail_mode = str(getattr(guardrail, "hook_fail_mode", "") or "closed").strip().lower()
-            hook_fail_mode = configured_fail_mode if mode == "action" else "open"
+            hook_fail_mode = "closed"
         enabled_resolver = getattr(guardrail, "effective_enabled", None)
         enabled = bool(enabled_resolver(name)) if callable(enabled_resolver) else True
 
@@ -7264,7 +7263,7 @@ def setup_guardrail(
             rp_label = gc.effective_rule_pack(c) or "default"
             rows.append((f"  [{c}] mode", gc.effective_mode(c)))
             rows.append((f"  [{c}] rule_pack", rp_label))
-            rows.append((f"  [{c}] hook_fail_mode", gc.effective_hook_fail_mode(c) or "open"))
+            rows.append((f"  [{c}] hook_fail_mode", gc.effective_hook_fail_mode(c) or "closed"))
             rows.append(
                 (
                     f"  [{c}] hilt",
@@ -7291,7 +7290,7 @@ def setup_guardrail(
         if gc.block_message:
             truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
             rows.append(("guardrail.block_message", truncated))
-        rows.append(("guardrail.hook_fail_mode", gc.hook_fail_mode or "open"))
+        rows.append(("guardrail.hook_fail_mode", gc.hook_fail_mode or "closed"))
         rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
         rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
     if gc.judge.enabled:
@@ -9904,6 +9903,9 @@ def _apply_hook_connector_setup(
     # collides with the canonical one — which GuardrailConfig.Validate now
     # rejects at load, so an un-normalized write would brick config loading.
     connector = normalize_connector(connector)
+    if str(fail_mode or "").strip().lower() == "open":
+        ux.err("Per-user hooks always fail closed; --fail-mode open is unavailable.")
+        return False
     if connector not in _HOOK_ENFORCED_CONNECTORS:
         ux.echo(
             f"  ✗ hook-driven setup is only supported for {sorted(_HOOK_ENFORCED_CONNECTORS)} (got {connector!r})",
@@ -10093,32 +10095,11 @@ def _apply_hook_connector_setup(
         else:
             gc.block_message = block_message
     if fail_mode is not None or connector == "cursor":
-        normalized_fail = "closed" if str(fail_mode).strip().lower() == "closed" else "open"
-        if connector == "cursor":
-            mode_fail = "closed" if desired_mode == "action" else "open"
-            if fail_mode is not None and normalized_fail != mode_fail:
-                ux.echo(
-                    f"  ⚠ Cursor {desired_mode} mode pins hook failures={mode_fail}; "
-                    f"ignoring --fail-mode {normalized_fail}."
-                )
-            normalized_fail = mode_fail
+        normalized_fail = "closed"
         if per_connector:
             gc.connectors[connector].hook_fail_mode = normalized_fail
         else:
             gc.hook_fail_mode = normalized_fail
-    if (
-        fail_mode is None
-        and desired_mode == "action"
-        and connector not in {"cursor", "hermes", "copilot", "antigravity"}
-        and gc.effective_hook_fail_mode(connector) == "open"
-    ):
-        if _batch_summary is not None:
-            _batch_summary.setdefault("fail_open", []).append(connector)
-        else:
-            ux.echo(
-                f"  ⚠ {connector} hook failures are fail-open: while the gateway is down or "
-                "unreachable, tool calls run uninspected. Pass --fail-mode closed to block them."
-            )
     if connector == "cursor":
         if hilt:
             ux.echo("  ⚠ Cursor native human approval is not implemented; disabling it for this connector.")
@@ -10258,10 +10239,10 @@ def _apply_hook_connector_setup(
         # toward unsafe global edits on multi-connector installs.
         ux.echo(f"  ✓ {connector} mode={desired_mode}")
     if connector == "cursor":
-        effective_fail_mode = "closed" if desired_mode == "action" else "open"
+        effective_fail_mode = "closed"
         ux.echo(
             f"  ✓ cursor hook failures={effective_fail_mode} "
-            f"(failClosed={'true' if desired_mode == 'action' else 'false'})"
+            "(failClosed=true)"
         )
         ux.echo(
             "  ℹ Cursor runs all matching hooks and merges Enterprise > Team > Project > User; "
@@ -10480,7 +10461,7 @@ def _print_observability_summary(
         enforcement_label = (
             "enabled (user-hook native deny; failClosed=true; no native ask)"
             if mode == "action"
-            else "disabled (observe-only; failClosed=false)"
+            else "disabled (observe-only; hook failures fail closed)"
         )
     else:
         enforcement_label = "enabled (hook-driven)" if mode == "action" else "disabled (observe-only)"
@@ -13731,50 +13712,9 @@ def execute_guardrail_setup(
 
 
 def _prompt_hook_fail_mode(gc) -> None:
-    """Interactive prompt that sets ``gc.hook_fail_mode`` to "open" or
-    "closed" based on operator input.
-
-    Centralized so every entry point (initial setup, mode change,
-    observability-only flow) emits the same wording and the same
-    default-selection rule. The current value drives the default so
-    operators who answer the prompt in past invocations don't have
-    their explicit choice silently rotated by a subsequent mode flip.
-    """
-    ux.section("Hook fail mode")
-    ux.subhead("How hooks behave when delivery/authentication fails or")
-    ux.subhead("the gateway returns 4xx, malformed JSON, or no action.")
-    click.echo()
-    ux.echo("    " + ux.bold("[1] open  ") + " — allow the tool/prompt and log the failure")
-    click.echo("                 " + ux.dim("A stopped gateway lets calls that policy blocks run."))
-    ux.echo(
-        "    "
-        + ux.bold("[2] closed")
-        + " — block supported events when inspection is unavailable "
-        + ux.dim("(recommended)")
-    )
-    click.echo("                 " + ux.dim("The default on a new install: action mode keeps"))
-    click.echo("                 " + ux.dim("blocking while the gateway is down."))
-    click.echo()
-    click.echo(
-        "  "
-        + ux.dim(
-            "Note: DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces "
-            "transport and missing-token failures closed, even when this "
-            "choice is open."
-        )
-    )
-    current_fail = (getattr(gc, "hook_fail_mode", "") or "closed").lower()
-    fail_default = "1" if current_fail == "open" else "2"
-    if fail_default == "1":
-        # The default keeps the saved value, which can differ from the
-        # recommended choice; say so instead of leaving [1] unexplained.
-        click.echo("  " + ux.dim("Current setting: open. Press Enter to keep it, or type 2 for closed."))
-    fail_choice = click.prompt(
-        "  Select hook fail mode",
-        type=click.Choice(["1", "2"]),
-        default=fail_default,
-    )
-    gc.hook_fail_mode = "open" if fail_choice == "1" else "closed"
+    """Keep per-user hook failures closed during interactive setup."""
+    gc.hook_fail_mode = "closed"
+    ux.subhead("Per-user hooks fail closed when inspection is unavailable.")
 
 
 def _apply_judge_runtime_defaults(gc) -> None:

@@ -204,8 +204,8 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 }
 
 // The same rule end to end, through the real setup writers and the real
-// inspect-* scripts: with DEFENSECLAW_HOME missing, a hook that resolves open
-// exits 0 and one that resolves closed blocks.
+// inspect-* scripts: with DEFENSECLAW_HOME missing, every per-user hook
+// blocks even when an old sidecar records open.
 func TestSharedInspectHooksNeverTakeAPeersOpenMode(t *testing.T) {
 	type install struct {
 		conn Connector
@@ -229,17 +229,14 @@ func TestSharedInspectHooksNeverTakeAPeersOpenMode(t *testing.T) {
 			[]string{"", "claudecode", "codex"}, false},
 		{"upgrade-1.0-open-one-closed-one-open", "v2", []install{{NewCodexConnector(), "closed"}, {NewClaudeCodeConnector(), "open"}},
 			[]string{"", "claudecode"}, false},
-		// Controls: a connector of an install every connector chose open
-		// stays open, and so does a legacy open the config chose
-		// (writeHookConfigSidecar records its config source) that no
-		// connector refresh has rewritten yet or whose records are all open.
+		// Legacy open records remain inert, whether scoped or unscoped.
 		{"both-open", "", []install{{NewCodexConnector(), "open"}, {NewClaudeCodeConnector(), "open"}},
-			[]string{"claudecode", "codex"}, true},
+			[]string{"claudecode", "codex"}, false},
 		{"both-open-unattributed", "", []install{{NewCodexConnector(), "open"}, {NewClaudeCodeConnector(), "open"}},
 			[]string{"", "cursor"}, false},
 		{"upgrade-1.0-open-both-open-unattributed", "v2", []install{{NewCodexConnector(), "open"}, {NewClaudeCodeConnector(), "open"}},
-			[]string{""}, true},
-		{"legacy-open-not-refreshed", "v2", nil, []string{""}, true},
+			[]string{""}, false},
+		{"legacy-open-not-refreshed", "v2", nil, []string{""}, false},
 		// Loop round 3: the same install with fail_modes made null is
 		// malformed and blocks.
 		{"legacy-open-not-refreshed-null-map", "v2-null-map", nil, []string{""}, false},

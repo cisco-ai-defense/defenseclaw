@@ -482,7 +482,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 if connector == "cursor":
                     self.assertIn("defenseclaw setup cursor --mode action", result.output)
                     self.assertIn(
-                        "cursor hook failures=open (failClosed=false)",
+                        "cursor hook failures=closed (failClosed=true)",
                         result.output,
                     )
                     self.assertIn(
@@ -611,7 +611,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         )
         restart_mock.assert_not_called()
 
-    def test_cursor_observe_reports_fail_open_despite_explicit_closed_preference(self):
+    def test_cursor_observe_reports_fail_closed_with_explicit_closed_preference(self):
         from defenseclaw.config import PerConnectorGuardrailConfig
 
         self.app.cfg.guardrail.connectors = {
@@ -639,10 +639,10 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("cursor mode=observe", result.output)
         self.assertIn(
-            "cursor hook failures=open (failClosed=false)",
+            "cursor hook failures=closed (failClosed=true)",
             result.output,
         )
-        self.assertNotIn("failClosed=true", result.output)
+        self.assertIn("hook failures fail closed", result.output)
 
     def test_later_connector_setup_waits_for_cursor_and_full_active_roster(self):
         from defenseclaw.config import PerConnectorGuardrailConfig

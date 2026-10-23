@@ -21,10 +21,9 @@ import (
 // counts against it: a restart (gatewayRestartBudget), a dial, a gateway that
 // accepted the call but does not answer (it is stopping, it is starting, or
 // it is so busy that the call waits for its turn), and the resends after a
-// 429 or a 401. When the budget ends the call fails: closed for a managed
-// hook whatever its fail mode, the account's fail mode for a per-user hook
-// (closed unless the account chose open). It is never allowed because the
-// gateway was slow (GAP-0155, GAP-0167, GAP-0139, GAP-0160).
+// 429 or a 401. When the budget ends, every hook outside Secure Client fails
+// closed. A slow gateway cannot allow a call without a decision (GAP-0155,
+// GAP-0167, GAP-0139, GAP-0160).
 //
 // The agent may wait at most 5 s for DefenseClaw, and the deadline itself
 // runs late on a loaded host: the answer is written by a process that the

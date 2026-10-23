@@ -237,9 +237,7 @@ fail_unreachable() {
 }
 
 fail_response() {
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
-  # outage only (the service not running, restarting or giving no answer
-  # in time). A refusal, an error status or an unusable answer blocks.
+{{if and (not .SecureClient) (not .Sandbox)}}  # A gateway answer or local parse failure cannot use outage-open mode.
   FAIL_MODE="closed"
 {{end}}  defenseclaw_log_hook_delivery_failure antigravity antigravity-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: antigravity hook error: $1" >&2
@@ -310,11 +308,30 @@ defenseclaw_hook_post() {
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 RESPONSE=$(defenseclaw_hook_post) || {
-  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"
+  _dc_post_status=$?
+{{if and (not .SecureClient) (not .Sandbox)}}  # Curl can fail after receiving HTTP headers (short or stalled body).
+  if [[ "${RESPONSE##*$'\n'}" == [1-9][0-9][0-9] ]] || [ "$_dc_post_status" = 18 ]; then
+    fail_response "incomplete gateway response"
+  fi
+  if [ "$_dc_post_status" = 28 ]; then
+    FAIL_MODE="closed"
+    fail_unreachable "gateway unreachable"
+  fi
+{{end}}  defenseclaw_await_gateway "$_dc_post_status" _dc_hook_post_response || {
+    _dc_post_status=$?
+{{if and (not .SecureClient) (not .Sandbox)}}    if [[ "${RESPONSE##*$'\n'}" == [1-9][0-9][0-9] ]] || [ "$_dc_post_status" = 18 ]; then
+      fail_response "incomplete gateway response"
+    fi
+    if [ "$_dc_post_status" = 28 ]; then
+      FAIL_MODE="closed"
+      fail_unreachable "gateway unreachable"
+    fi
+{{end}}    fail_unreachable "gateway unreachable"
+  }
 }
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# The gateway answered 429, so it is up: a resend that fails after it is no
 # outage in a standalone managed hook.
-{{end}}defenseclaw_retry_busy _dc_hook_post_response || {{if and .Managed (not .SecureClient) (not .Sandbox)}}fail_response "gateway returned HTTP 429"{{else}}fail_unreachable "gateway unreachable"{{end}}{{end}}
+{{end}}defenseclaw_retry_busy _dc_hook_post_response || {{if and (not .SecureClient) (not .Sandbox)}}fail_response "gateway returned HTTP 429"{{else}}fail_unreachable "gateway unreachable"{{end}}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
@@ -322,7 +339,7 @@ RESULT=$(echo "$RESPONSE" | sed '$d')
 if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  {{if and .Managed (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "gateway returned HTTP ${HTTP_CODE}"
+  {{if and (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "gateway returned HTTP ${HTTP_CODE}"
 {{if .Sandbox}}elif [ "$HTTP_CODE" -ge 400 ] 2>/dev/null && [ "$HTTP_CODE" -lt 500 ] 2>/dev/null; then
   # The request was refused (a malformed hook input, a token or route the
   # ingress does not accept, a rate limit), which is no unreachable service.
@@ -331,6 +348,8 @@ elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
+{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
+{{end}}
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }

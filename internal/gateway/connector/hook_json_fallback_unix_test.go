@@ -6,13 +6,16 @@
 package connector
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The awk tier runs where neither jq nor a usable python3 is available.
@@ -42,6 +45,227 @@ func TestShellFallbackRejectsMalformedGatewayJSON(t *testing.T) {
 				}
 			} else if err == nil {
 				t.Fatalf("malformed response accepted: %q", out)
+			}
+		})
+	}
+}
+
+// A gateway that has sent HTTP 200 cannot become an outage because curl
+// reports an incomplete transfer. A request that times out before headers
+// also has no usable answer. Every shell connector closes both cases in
+// per-user open mode, as the native hook does.
+func TestPerUserShellHTTP200FailuresBlockEveryConnector(t *testing.T) {
+	for _, conn := range hookArgvShellConnectors {
+		conn := conn
+		t.Run(conn.Name(), func(t *testing.T) {
+			t.Parallel()
+			for _, tc := range []struct {
+				name, body    string
+				partial       bool
+				stall         bool
+				beforeHeaders bool
+			}{
+				{"malformed", `{"action":"allow","extra":[invalid]}`, false, false, false},
+				{"truncated 200", `{"action":"allow"}`, true, false, false},
+				{"stalled 200", `{"action":"allow"}`, true, true, false},
+				{"no answer before headers", `{"action":"allow"}`, false, false, true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						if tc.beforeHeaders {
+							time.Sleep(1100 * time.Millisecond)
+						}
+						if tc.partial {
+							w.Header().Set("Content-Length", strconv.Itoa(len(tc.body)+64))
+						}
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte(tc.body))
+						if tc.partial {
+							w.(http.Flusher).Flush()
+							if tc.stall {
+								time.Sleep(1100 * time.Millisecond)
+							}
+							panic(http.ErrAbortHandler)
+						}
+					}))
+					defer server.Close()
+					invoke := hookArgvConnectorCase(t, conn.Name())
+					home := t.TempDir()
+					hooks := filepath.Join(home, "hooks")
+					if err := WriteHookScriptsForConnectorObjectWithOpts(hooks, SetupOpts{
+						DataDir: home, APIAddr: strings.TrimPrefix(server.URL, "http://"), APIToken: "test-token", HookFailMode: "open",
+					}, conn); err != nil {
+						t.Fatal(err)
+					}
+					if tc.stall || tc.beforeHeaders {
+						// Keep the real HTTP timeout case fast while preserving curl's
+						// behavior after response headers have arrived.
+						helper := filepath.Join(hooks, "_hardening.sh")
+						script, err := os.ReadFile(helper)
+						if err != nil {
+							t.Fatal(err)
+						}
+						short := strings.Replace(string(script), `--max-time "$_dc_post_max_time"`, `--max-time 1`, 1)
+						if short == string(script) {
+							t.Fatal("curl timeout not found")
+						}
+						if err := os.WriteFile(helper, []byte(short), 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					cmd := exec.Command("bash", append([]string{filepath.Join(hooks, invoke.script)}, invoke.args...)...)
+					cmd.Stdin = strings.NewReader(invoke.stdin)
+					cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home)
+					out, err := cmd.CombinedOutput()
+					if !hookCallBlocked(err, string(out)) {
+						t.Fatalf("%s HTTP 200 allowed %s in open mode: %v %s", tc.name, conn.Name(), err, out)
+					}
+				})
+			}
+		})
+	}
+}
+
+// A saved open choice from an older per-user install cannot allow a tool
+// call when its gateway is stopped. Only an administrator-managed hook may
+// use an outage-open choice outside Secure Client.
+func TestPerUserOpenShellBlocksGatewayConnectionOutage(t *testing.T) {
+	for _, conn := range hookArgvShellConnectors {
+		conn := conn
+		t.Run(conn.Name(), func(t *testing.T) {
+			t.Parallel()
+			invoke := hookArgvConnectorCase(t, conn.Name())
+			home := t.TempDir()
+			hooks := filepath.Join(home, "hooks")
+			if err := WriteHookScriptsForConnectorObjectWithOpts(hooks, SetupOpts{
+				DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "test-token", HookFailMode: "open",
+			}, conn); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("bash", append([]string{filepath.Join(hooks, invoke.script)}, invoke.args...)...)
+			cmd.Stdin = strings.NewReader(invoke.stdin)
+			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+			out, err := cmd.CombinedOutput()
+			if !hookCallBlocked(err, string(out)) {
+				t.Fatalf("%s allowed a per-user gateway outage in open mode: %v %s", conn.Name(), err, out)
+			}
+		})
+	}
+}
+
+// Shared inspect hooks must also close a gateway response that has started,
+// including with an administrator's outage-open choice. These scripts serve
+// Claude Code and OpenCode paths that predate the connector-specific hooks.
+func TestManagedOpenSharedInspectHooksBlockUnusableHTTP200(t *testing.T) {
+	for _, tc := range []struct {
+		name, body     string
+		partial, stall bool
+	}{
+		{"malformed", `{"action":"block","action":"allow"}`, false, false},
+		{"truncated 200", `{"action":"allow"}`, true, false},
+		{"stalled 200", `{"action":"allow"}`, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.partial {
+					w.Header().Set("Content-Length", strconv.Itoa(len(tc.body)+64))
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tc.body))
+				if tc.partial {
+					w.(http.Flusher).Flush()
+					if tc.stall {
+						time.Sleep(1500 * time.Millisecond)
+					}
+					panic(http.ErrAbortHandler)
+				}
+			}))
+			defer server.Close()
+			home := t.TempDir()
+			hooks := filepath.Join(home, "hooks")
+			if err := writeHookScriptsCommonWithTransport(hooks, strings.TrimPrefix(server.URL, "http://"), "test-token", "open", HookFailModeSourceConfig, nil, true, "codex", true, "", "", false, false); err != nil {
+				t.Fatal(err)
+			}
+			if tc.stall {
+				helper := filepath.Join(hooks, "_hardening.sh")
+				body, err := os.ReadFile(helper)
+				if err != nil {
+					t.Fatal(err)
+				}
+				short := strings.Replace(string(body), `--max-time "$_dc_post_max_time"`, `--max-time 1`, 1)
+				if short == string(body) {
+					t.Fatal("curl timeout not found")
+				}
+				if err := os.WriteFile(helper, []byte(short), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, name := range []string{"inspect-request.sh", "inspect-tool.sh", "inspect-response.sh", "inspect-tool-response.sh"} {
+				t.Run(name, func(t *testing.T) {
+					cmd := exec.Command("bash", filepath.Join(hooks, name))
+					cmd.Stdin = strings.NewReader(`{"tool":"Bash","content":"marker"}`)
+					cmd.Env = append(sanitizedTestEnv(), "HOME="+home)
+					out, err := cmd.CombinedOutput()
+					if !hookCallBlocked(err, string(out)) {
+						t.Fatalf("managed outage-open hook allowed an unusable 200: %v %s", err, out)
+					}
+				})
+			}
+		})
+	}
+}
+
+// Check the real jq path as well as the Python fallback; both previously
+// collapsed duplicate keys or ignored a second JSON document.
+func TestShellResponseParsersRejectAmbiguousJSON(t *testing.T) {
+	for _, tier := range []string{"jq", "python"} {
+		t.Run(tier, func(t *testing.T) {
+			if tier == "jq" {
+				if _, err := exec.LookPath("jq"); err != nil {
+					t.Skip("jq is unavailable")
+				}
+			}
+			parserPath := t.TempDir()
+			for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+				entries, err := os.ReadDir(dir)
+				if err != nil {
+					continue
+				}
+				for _, entry := range entries {
+					if entry.IsDir() || (entry.Name() == "jq" && tier != "jq") ||
+						(strings.HasPrefix(entry.Name(), "python") && tier != "python") {
+						continue
+					}
+					link := filepath.Join(parserPath, entry.Name())
+					if _, err := os.Lstat(link); os.IsNotExist(err) {
+						_ = os.Symlink(filepath.Join(dir, entry.Name()), link)
+					}
+				}
+			}
+			for i, body := range []string{`{"action":"block","action":"allow"}`, `{"action":"allow"}{}`} {
+				t.Run(fmt.Sprintf("case%d", i), func(t *testing.T) {
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						_, _ = w.Write([]byte(body))
+					}))
+					defer server.Close()
+					conn := NewCodexConnector()
+					invoke := hookArgvConnectorCase(t, conn.Name())
+					home := t.TempDir()
+					hooks := filepath.Join(home, "hooks")
+					if err := WriteHookScriptsForConnectorObjectWithOpts(hooks, SetupOpts{
+						DataDir: home, APIAddr: strings.TrimPrefix(server.URL, "http://"), APIToken: "test-token", HookFailMode: "open",
+					}, conn); err != nil {
+						t.Fatal(err)
+					}
+					bakeHookPathForTest(t, filepath.Join(hooks, invoke.script), parserPath)
+					cmd := exec.Command("bash", append([]string{filepath.Join(hooks, invoke.script)}, invoke.args...)...)
+					cmd.Stdin = strings.NewReader(invoke.stdin)
+					cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home)
+					out, err := cmd.CombinedOutput()
+					if !hookCallBlocked(err, string(out)) {
+						t.Fatalf("%s parser allowed ambiguous answer %q: %v %s", tier, body, err, out)
+					}
+				})
 			}
 		})
 	}
