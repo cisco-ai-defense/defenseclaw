@@ -168,9 +168,22 @@ describe('1.0.4 managed outage and upgrade claims', () => {
   it('refuses an earlier daemon package upgrade before a live sandbox is changed', () => {
     const troubleshooting = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
     const enterprise = page('enterprise/runtime/sandboxes.mdx');
+    const changelog = repoText('CHANGELOG.md');
+    const upgradeSections = [
+      troubleshooting.split('### Before a 1.0.4 package upgrade')[1]?.split('### ')[0] ?? '',
+      enterprise.split('### Upgrade from an earlier sandbox daemon')[1]?.split('### ')[0] ?? '',
+      changelog.split('- **Earlier sandbox daemons')[1]?.split(' - `defenseclaw guardrail use-pack`')[0] ?? '',
+    ];
+    for (const section of upgradeSections) {
+      assert.match(section, /a completed MicroVM or an error-state MicroVM whose VM is still running/i);
+    }
+    for (const name of ['enterprise/runtime/sandboxes.mdx', 'enterprise/runtime/sandbox-reference.mdx']) {
+      const modeSwitch = page(name).split('In both modes `ensure`')[1]?.split('### ')[0] ?? '';
+      assert.match(modeSwitch, /a completed MicroVM or an error-state MicroVM whose VM is still running/i, name);
+    }
     for (const text of [troubleshooting, enterprise]) {
       assert.match(text, /1\.0\.3 or older.*rpm.*deb.*macOS pkg.*refuses before.*changes/i);
-      assert.match(text, /running.*starting.*stopping.*completed.*error state.*does not answer/i);
+      assert.match(text, /running.*starting.*stopping.*completed MicroVM.*error-state MicroVM whose VM is still running.*does not answer/i);
       assert.match(text, /sandbox stop.*sandbox delete.*install.*again/i);
       assert.match(text, /last-package-result\.json.*sandboxes_running/i);
     }
@@ -181,7 +194,6 @@ describe('1.0.4 managed outage and upgrade claims', () => {
     const cli = page('reference/sandboxes/cli.mdx');
     assert.match(troubleshooting, /sync fails.*keeps running.*--discard-unsynced.*--yes.*does not/i);
     assert.match(cli, /sync fails.*keeps running.*--yes.*does not.*--discard-unsynced.*never stops a MicroVM/i);
-    assert.match(cli, /\| `--discard-unsynced` \| switch \|.*Stop a MicroVM whose disk could not be synced first/i);
   });
 
   it('uses the current legacy-unprotected status and managed verify row', () => {

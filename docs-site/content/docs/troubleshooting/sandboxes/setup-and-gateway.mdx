@@ -60,8 +60,8 @@ A sandbox daemon from DefenseClaw 1.0.3 or older can stop its user's
 OpenShell gateway after replacement, even under a MicroVM whose workload
 ended. The 1.0.4 rpm, deb and macOS pkg refuses before it changes any files
 when such a daemon has a sandbox running, starting or stopping, a completed
-MicroVM or one in an error state, or the daemon does not answer. The refusal
-names each user and sandbox. Ask that user to save work and run
+MicroVM or an error-state MicroVM whose VM is still running, or the daemon does
+not answer. The refusal names each user and sandbox. Ask that user to save work and run
 `defenseclaw sandbox stop <name>` for a running guest or
 `defenseclaw sandbox delete <name>` for an ended MicroVM, then install the
 package again. DefenseClaw stops none of them. On macOS,
