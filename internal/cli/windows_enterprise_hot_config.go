@@ -355,6 +355,10 @@ func windowsEnterpriseHotConfigApply(
 	// otherwise snapshot the config this attempt left behind as its
 	// preimage (GAP-1178, review loop round 3).
 	targetsRefreshed := false
+	// The targets published before this attempt refreshed them: an undo
+	// whose enumerator cannot publish the restored config's targets puts
+	// exactly these back (GAP-0847).
+	var publishedBefore windowsHotConfigPublishedTargets
 	gatewayRestartAttempted := false
 	gatewayOnNewConfig := func() bool {
 		return gatewayRestartAttempted || (opts.bundle != nil && opts.bundle.gatewayRestarted)
@@ -396,6 +400,18 @@ func windowsEnterpriseHotConfigApply(
 			if targetsRefreshed {
 				if targetsErr = windowsEnterpriseHotConfigRefreshTargets(restoreCtx, layout); targetsErr == nil {
 					targetsRepublished = true
+				} else if publishedBefore.restore != nil {
+					// A user the candidate dropped has no hook, so closing
+					// hooks cannot protect them: the targets published before
+					// this attempt go back as they were, and the guardian
+					// registers their hooks again (GAP-0847).
+					if putBackErr := publishedBefore.restore(); putBackErr == nil {
+						result.AddWarning("targets_restored_from_record", "the hook enumerator could not publish the enrolled targets for the restored config ("+
+							windowsEnterpriseBoundedDiagnostic(targetsErr.Error())+"); the targets published before this attempt were put back as they were")
+						targetsErr, targetsRepublished = nil, true
+					} else {
+						targetsErr = fmt.Errorf("%w; putting back the targets published before this attempt failed too: %v", targetsErr, putBackErr)
+					}
 				}
 			}
 			// The gateway goes back to the restored config: a restart for one
@@ -439,8 +455,16 @@ func windowsEnterpriseHotConfigApply(
 				layout.ConfigPath+": "+windowsEnterpriseBoundedDiagnostic(restoreErr.Error())+"; "+installed+"; "+gateway+
 				". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify")+"; repair with the last good config before starting the gateway again")
 		case targetsErr != nil:
+			unprotected := ""
+			if publishedBefore.dropped != nil {
+				if dropped := publishedBefore.dropped(); len(dropped) > 0 {
+					// Closing hooks does not reach these: name them.
+					unprotected = "; these previously enrolled targets have no DefenseClaw hook now: " + windowsEnterpriseBoundedDiagnostic(strings.Join(dropped, ", "))
+				}
+			}
 			result.AddError("targets_restore_failed", "the previous config is back, but the enrolled targets could not be published for it again: "+
-				windowsEnterpriseBoundedDiagnostic(targetsErr.Error())+"; "+installed+"; "+gateway+". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify")+"; repair before starting the gateway again")
+				windowsEnterpriseBoundedDiagnostic(targetsErr.Error())+"; "+installed+unprotected+"; "+gateway+". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("repair")+
+				" to enroll them again, then "+windowsEnterpriseAdminCommand("verify")+" before starting the gateway again")
 		default:
 			result.AddError("config_restore_failed", "the previous config is back at "+layout.ConfigPath+", but "+gatewayErr.Error()+
 				"; "+installed+"; "+gateway+". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify")+"; repair before starting the gateway again")
@@ -501,6 +525,18 @@ func windowsEnterpriseHotConfigApply(
 	// upgrade transaction does; the guardian reconciles them with the config
 	// it reloads (enterpriseHookStandaloneConfigRefresh).
 	if refreshTargets {
+		// The refresh can drop a user's hook; it runs only once the targets
+		// it replaces are recorded, so an undo can enroll that user again
+		// (GAP-0847). A record that cannot be read leaves the targets as they
+		// are and the change to the upgrade transaction.
+		record, err := windowsEnterpriseHotConfigTargetsRecord(layout)
+		if err != nil {
+			undo()
+			failBundle("bundle_targets_refresh_failed", "the bundle's enrolled targets were not refreshed: the published targets could not be recorded first ("+
+				windowsEnterpriseBoundedDiagnostic(err.Error())+")")
+			return false, nil
+		}
+		publishedBefore = record
 		targetsRefreshed = true
 		if err := windowsEnterpriseHotConfigRefreshTargets(ctx, layout); err != nil {
 			undo()
@@ -578,6 +614,67 @@ var windowsEnterpriseHotConfigRefreshTargets = func(ctx context.Context, layout 
 		return fmt.Errorf("refresh the enrolled targets: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// windowsHotConfigPublishedTargets is the hook guardian's targets.yaml as it
+// was published before a hot apply refreshed it: restore puts exactly those
+// targets back, and dropped names each of them the targets published now no
+// longer enroll (GAP-0847).
+type windowsHotConfigPublishedTargets struct {
+	restore func() error
+	dropped func() []string
+}
+
+// windowsEnterpriseHotConfigTargetsRecord records the published targets
+// before the apply refreshes them. With none published no user has a hook
+// to lose, and there is nothing to put back. A seam for tests.
+var windowsEnterpriseHotConfigTargetsRecord = func(layout managed.StandaloneLayout) (windowsHotConfigPublishedTargets, error) {
+	before, err := enterprisehooks.LoadManifest(layout.ManifestPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return windowsHotConfigPublishedTargets{restore: func() error { return nil }, dropped: func() []string { return nil }}, nil
+	}
+	if err != nil {
+		return windowsHotConfigPublishedTargets{}, err
+	}
+	return windowsHotConfigPublishedTargets{
+		restore: func() error {
+			_, err := enterprisehooks.WriteTargetsManifestAtomic(layout.ManifestPath, before)
+			return err
+		},
+		dropped: func() []string {
+			now, err := enterprisehooks.LoadManifest(layout.ManifestPath)
+			if err != nil {
+				now = enterprisehooks.Manifest{}
+			}
+			return windowsHotConfigDroppedTargets(before, now)
+		},
+	}, nil
+}
+
+// windowsHotConfigDroppedTargets names each enabled target of before that
+// now does not enroll, as "user (SID) connector".
+func windowsHotConfigDroppedTargets(before, now enterprisehooks.Manifest) []string {
+	key := func(target enterprisehooks.ManifestTarget) string {
+		return strings.ToUpper(strings.TrimSpace(target.SID)) + "\x00" + strings.ToLower(strings.TrimSpace(target.Connector))
+	}
+	enrolled := make(map[string]bool, len(now.Targets))
+	for _, target := range now.Targets {
+		if target.IsEnabled() {
+			enrolled[key(target)] = true
+		}
+	}
+	var dropped []string
+	for _, target := range before.Targets {
+		if !target.IsEnabled() || enrolled[key(target)] {
+			continue
+		}
+		user := strings.TrimSpace(target.User)
+		if user == "" {
+			user = "an account"
+		}
+		dropped = append(dropped, fmt.Sprintf("%s (%s) %s", user, strings.TrimSpace(target.SID), strings.TrimSpace(target.Connector)))
+	}
+	return dropped
 }
 
 // windowsEnterpriseHotConfigAdopted waits for the gateway to report the

@@ -973,6 +973,60 @@ $global:OpenThrows = $false
 """
 
 
+def test_a_failed_exact_root_cleanup_names_the_programs_that_hold_its_files(tmp_path) -> None:
+    # GAP-0848: the printed FORCE=1 uninstall failed on a product file another
+    # program kept open, and its error named only the file. The refusal now
+    # names the programs that hold files in the cleanup root (an image run
+    # from it, or a Restart Manager holder), so "end or close each program
+    # the error names" can be done as printed; when none is left it says the
+    # holder closed the file. Any other refusal is unchanged.
+    module = _text(MODULE)
+    cleanup = _function_body(module, "Invoke-DefenseClawNamespaceRootCleanup")
+    assert "Get-DefenseClawNamespaceRootCleanupHolderText `" in cleanup
+    root = tmp_path / "DefenseClaw"
+    _run_lifecycle_functions(
+        tmp_path,
+        [
+            "ConvertTo-DefenseClawBoundedDiagnostic",
+            "Format-DefenseClawProcessInUse",
+            "Get-DefenseClawInstallRootHolders",
+            "Get-DefenseClawNamespaceRootCleanupHolderText",
+        ],
+        _FAKE_RENAME_NATIVE
+        + r"""
+function Initialize-DefenseClawNativeSecurity { return [FakeNative] }
+$script:StateFileInUseCheckLimit = 16384
+$root = '""" + str(root) + r"""'
+[void][IO.Directory]::CreateDirectory([IO.Path]::Combine($root, 'bin'))
+[IO.File]::WriteAllText([IO.Path]::Combine($root, 'bin', 'defenseclaw-hook.exe'), 'stand-in')
+function Get-DefenseClawProcessImages { return $global:Images }
+$held = 'enterprise hooks: pin Windows namespace purge child "defenseclaw-hook.exe" without following: ' + $root + '\bin\defenseclaw-hook.exe is held open by another program (still open after waiting 30s; close or end that program and run the same command again): A file cannot be opened because the share access flags are incompatible.'
+$hook = [pscustomobject]@{ Id = 4242; Path = ($root + '\bin\defenseclaw-hook.exe'); UserName = 'CORP\alice'; Parent = 'claude' }
+$elsewhere = [pscustomobject]@{ Id = 31; Path = 'C:\Windows\explorer.exe'; UserName = ''; Parent = '' }
+$scanner = [pscustomobject]@{ ProcessId = 5151; AppName = 'Scanner'; ServiceName = '' }
+function Invoke-Case([string]$Name, [string]$Failure, $Images, $RmHolders, [bool]$RmThrows, [string[]]$Want, [string[]]$Unwanted = @()) {
+    $global:Images = @($Images)
+    $global:RmHolders = [object[]]@($RmHolders)
+    $global:RmThrows = $RmThrows
+    $text = Get-DefenseClawNamespaceRootCleanupHolderText -Root $root -Failure $Failure
+    foreach ($item in $Want) {
+        if (-not $text.Contains($item)) { throw "${Name}: '$text' does not say '$item'" }
+    }
+    foreach ($item in $Unwanted) {
+        if ($text.Contains($item)) { throw "${Name}: '$text' says '$item'" }
+    }
+    if ($Want.Count -eq 0 -and $text -ne '') { throw "${Name}: '$text', want nothing" }
+    Write-Host "${Name}: $text"
+}
+Invoke-Case 'a hook process from the root' $held @($hook, $elsewhere) @() $false @("programs that hold files in $root now: ", 'defenseclaw-hook.exe (pid 4242, account CORP\alice, started by claude)') @('explorer')
+Invoke-Case 'a Restart Manager holder' $held @($elsewhere) @($scanner) $false @('Scanner (pid 5151)')
+Invoke-Case 'the holder has gone' $held @($elsewhere) @() $false @("no program holds a file in $root now, so the one that held it has closed it")
+Invoke-Case 'Restart Manager failed' $held @() @() $true @('no program holds a file')
+Invoke-Case 'another refusal' 'enterprise hooks: Windows namespace purge root identity changed' @($hook) @($scanner) $false @()
+""",
+    )
+
+
 def test_a_committed_retirement_defers_only_to_a_holder_it_finds(tmp_path) -> None:
     # W4 review, loop round 1: access denied is what both a program holding
     # a file in InstallRoot and an access list (a deny on InstallRoot or its

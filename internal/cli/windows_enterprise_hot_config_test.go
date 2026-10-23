@@ -33,20 +33,27 @@ import (
 // hotConfigHost stages an installed config and a supplied one, and stubs what
 // a config-only ensure touches outside them.
 type hotConfigHost struct {
-	configPath    string
-	next          string
-	writes        []string
-	adopted       bool
-	recovers      int
-	digestCalls   int
-	adoptAfter    int
-	refreshes     int
-	stops         int
-	closes        int
-	closureHeld   bool
-	releases      int
-	bundleID      string
-	bundleVersion uint64
+	configPath  string
+	next        string
+	writes      []string
+	adopted     bool
+	recovers    int
+	digestCalls int
+	adoptAfter  int
+	refreshes   int
+	// The targets record of a refreshing apply (GAP-0847): how often it was
+	// taken and put back, what fails, and the targets it says are dropped.
+	targetRecords    int
+	targetRestores   int
+	targetRecordErr  error
+	targetRestoreErr error
+	dropped          []string
+	stops            int
+	closes           int
+	closureHeld      bool
+	releases         int
+	bundleID         string
+	bundleVersion    uint64
 }
 
 // digest is what the installed CLI's policy digest prints: the policy the
@@ -108,6 +115,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	validateSeam, writeSeam := windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite
 	timeoutSeam, restartTimeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll
 	sourceSeam, refreshSeam := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigRefreshTargets
+	recordSeam := windowsEnterpriseHotConfigTargetsRecord
 	reloadSeam, failClosedSeam := windowsEnterpriseHotBundleReload, windowsEnterpriseHotConfigFailClosed
 	closeHooksSeam, hooksHeldSeam, releaseHooksSeam := windowsEnterpriseHotConfigCloseHooks, windowsEnterpriseHotConfigHooksHeld, windowsEnterpriseHotConfigReleaseHooks
 	restartSeam, recoverSeam := windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover
@@ -116,6 +124,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		windowsEnterpriseHotConfigFailClosed = failClosedSeam
 		windowsEnterpriseHotConfigCloseHooks, windowsEnterpriseHotConfigHooksHeld, windowsEnterpriseHotConfigReleaseHooks = closeHooksSeam, hooksHeldSeam, releaseHooksSeam
 		windowsEnterpriseHotConfigRefreshTargets = refreshSeam
+		windowsEnterpriseHotConfigTargetsRecord = recordSeam
 		windowsEnterpriseIsElevated = elevatedSeam
 		windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock = layoutSeam, lockSeam
 		windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite = validateSeam, writeSeam
@@ -133,6 +142,19 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	windowsEnterpriseHotConfigRefreshTargets = func(context.Context, managed.StandaloneLayout) error {
 		host.refreshes++
 		return nil
+	}
+	windowsEnterpriseHotConfigTargetsRecord = func(managed.StandaloneLayout) (windowsHotConfigPublishedTargets, error) {
+		host.targetRecords++
+		if host.targetRecordErr != nil {
+			return windowsHotConfigPublishedTargets{}, host.targetRecordErr
+		}
+		return windowsHotConfigPublishedTargets{
+			restore: func() error {
+				host.targetRestores++
+				return host.targetRestoreErr
+			},
+			dropped: func() []string { return host.dropped },
+		}, nil
 	}
 	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error { return nil }
 	// No test stops or starts a real gateway service: an unproven undo and
