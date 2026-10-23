@@ -41,12 +41,15 @@ type fakeBundleReceiptSink struct {
 	principals []string
 	versions   []uint64
 	changes    []audit.ConfigChange
-	changeErr  error
+	// offers is every change offered, the refused offers included.
+	offers    []audit.ConfigChange
+	changeErr error
 }
 
 func (f *fakeBundleReceiptSink) LogConfigChange(
 	change audit.ConfigChange, _ *observability.RemoteDelivery, _ *audit.ConfigChangePins,
 ) error {
+	f.offers = append(f.offers, change)
 	if f.changeErr != nil {
 		return f.changeErr
 	}
