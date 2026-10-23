@@ -420,18 +420,23 @@ func (a enterpriseHookAcceptedAccounts) has(uid int, names ...string) bool {
 // enterpriseHookNameCallerUIDs lists, in order, the uids of the callers the
 // gateway accepts by name only: exempt_users entries (a uid entry as
 // written) and protected targets without a uid. A name resolves through a
-// bounded lookup (enterprisehooks.LookupStandaloneUserBounded). A name the
-// lookup does not resolve to an account, because it does not answer or
-// answers not found, keeps the uid of each identity record that spells it
-// by its verified facts (enterpriseHookRecordSpells), while no other
-// account holds that uid now. The account database often has no entry for
-// the spellings the gateway matches an exemption by (a UPN, a principal,
-// DOMAIN\name, a bare name where SSSD names accounts fully qualified), and
-// SSSD answers not found while its backend is offline. Comparing only the
-// record's account name, and skipping the records after a not-found answer,
-// left such a caller's record unrefreshed: it aged out after an hour while
-// the gateway still exempted the caller, which then lost the profile its UPN
-// selects (GAP-0881).
+// bounded lookup (enterprisehooks.LookupStandaloneUserBounded), and every
+// name also keeps the uid of each identity record that spells it by its
+// verified facts (enterpriseHookRecordSpells), while no other account holds
+// that uid now. The account database often has no entry for the spellings
+// the gateway matches an exemption by (a UPN, a principal, DOMAIN\name, a
+// bare name where SSSD names accounts fully qualified), and SSSD answers
+// not found while its backend is offline. Comparing only the record's
+// account name, and skipping the records after a not-found answer, left
+// such a caller's record unrefreshed: it aged out after an hour while the
+// gateway still exempted the caller, which then lost the profile its UPN
+// selects (GAP-0881). One name can exempt two accounts: a bare alice
+// exempts the local alice by name and the directory account
+// alice@corp.example by its facts (managedHookAuthorizer.exempt). The
+// records were read only when the lookup failed, so a local namesake the
+// lookup found left the directory account's record to age out (GAP-0937).
+// Every record is read, one at a time: the scan stopped after 4,096 records,
+// and a caller whose record sorted later lost it (GAP-0964).
 func enterpriseHookNameCallerUIDs(ctx context.Context, dir string, leftOut *enterpriseHookLeftOutAccounts,
 	accepted enterpriseHookAcceptedAccounts) []int {
 	var names []string
@@ -453,30 +458,24 @@ func enterpriseHookNameCallerUIDs(ctx context.Context, dir string, leftOut *ente
 		}
 		waitCtx, cancel := context.WithTimeout(ctx, enterpriseHookLeftOutLookupWait)
 		defer cancel()
-		var records []enterprisehooks.IdentitySpoolRecord
 		for _, name := range names {
-			account, err := enterprisehooks.LookupStandaloneUserBounded(waitCtx, name)
-			if err == nil && account.UID > 0 {
+			if account, err := enterprisehooks.LookupStandaloneUserBounded(waitCtx, name); err == nil && account.UID > 0 {
 				uids = append(uids, account.UID)
-				continue
-			}
-			if records == nil {
-				records = enterprisehooks.ReadIdentitySpoolRecords(dir, nil, enterpriseHookNameCallerRecordLimit)
-			}
-			for _, record := range records {
-				uid, convErr := strconv.Atoi(record.Key)
-				if convErr != nil || uid <= 0 || !enterpriseHookRecordSpells(record, name) {
-					continue
-				}
-				// The record is the account's last proven identity; the uid is
-				// refreshed only while the account database does not give it to
-				// another account (a reused uid is its new owner's to scan).
-				if holder := leftOut.accountAt(uid); holder.answered && holder.name != strings.TrimSpace(record.User) {
-					continue
-				}
-				uids = append(uids, uid)
 			}
 		}
+		enterprisehooks.WalkIdentitySpoolRecords(dir, nil, func(record enterprisehooks.IdentitySpoolRecord) bool {
+			uid, err := strconv.Atoi(record.Key)
+			if err != nil || uid <= 0 || !slices.ContainsFunc(names, func(name string) bool { return enterpriseHookRecordSpells(record, name) }) {
+				return true
+			}
+			// The record is the account's last proven identity; the uid is
+			// refreshed only while the account database does not give it to
+			// another account (a reused uid is its new owner's to scan).
+			if holder := leftOut.accountAt(uid); !holder.answered || holder.name == strings.TrimSpace(record.User) {
+				uids = append(uids, uid)
+			}
+			return true
+		})
 	}
 	slices.Sort(uids)
 	return slices.Compact(uids)
@@ -514,10 +513,6 @@ func enterpriseHookRecordSpells(record enterprisehooks.IdentitySpoolRecord, name
 	}
 	return !strings.Contains(name, "@") && record.AccountIncarnation != "files" && useridentity.EqualFold(name, bare)
 }
-
-// enterpriseHookNameCallerRecordLimit bounds the records
-// enterpriseHookNameCallerUIDs reads.
-const enterpriseHookNameCallerRecordLimit = 4096
 
 // listedUIDs lists the uids the authorization names, in order.
 func (a enterpriseHookAcceptedAccounts) listedUIDs() []int {

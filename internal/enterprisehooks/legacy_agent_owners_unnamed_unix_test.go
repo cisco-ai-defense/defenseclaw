@@ -21,18 +21,25 @@ import (
 // the account had no name, the map left it out, and it was recorded closed
 // because another account resolved. Once NSS answered again the map could
 // not add it, and its 1.0.x agents entry stayed unbound for good; 1.0.3
-// matched it. Now the map takes the name the guardian's recent record of the
-// uid gives (the account that held it before the upgrade), or the name a
-// last lookup gives, as pending; with neither it is not recorded until a
-// pass names every listed account. A uid two successive passes find
-// unresolved holds no account and is left out.
+// matched it. Now the map takes the name the guardian's record of the uid
+// gives (the account that held it before the upgrade), or the name a last
+// lookup gives, as pending; with neither it is not recorded until a pass
+// names every listed account. A uid two successive passes find unresolved
+// holds no account and is left out.
+//
+// Continuation 3, loop round 1: only a record written within the last hour
+// counted, so an account whose 1.0.x record was older (the host was off, or
+// its directory had not answered) and that SSSD, offline, answered twice
+// not found was left out for good. Any record of the uid names it now.
 func TestUnnamedAccountAtUpgradeIsNotLeftOutOfTheMap(t *testing.T) {
 	notAnswering := errors.New("sssd: the domain controller did not answer")
 	for _, tc := range []struct {
 		name string
-		// recorded: the guardian holds a recent record of uid 501 naming
-		// alice from before the upgrade.
-		recorded bool
+		// recorded: the guardian holds a record of uid 501 naming alice
+		// from before the upgrade, written recordAge ago (10 minutes when
+		// unset).
+		recorded  bool
+		recordAge time.Duration
 		// lookup is the last lookup of uid 501 at pass n.
 		lookup func(pass int) (unixidentity.Account, error)
 		// deferred: passes the map is not recorded at.
@@ -42,6 +49,9 @@ func TestUnnamedAccountAtUpgradeIsNotLeftOutOfTheMap(t *testing.T) {
 	}{
 		{name: "the guardian's record names the account", recorded: true,
 			lookup:     func(int) (unixidentity.Account, error) { return unixidentity.Account{}, notAnswering },
+			aliceBound: true},
+		{name: "an old guardian record names the account", recorded: true, recordAge: 3 * time.Hour,
+			lookup:     func(int) (unixidentity.Account, error) { return unixidentity.Account{}, unixidentity.ErrNotFound },
 			aliceBound: true},
 		{name: "the last lookup names the account",
 			lookup:     func(int) (unixidentity.Account, error) { return unixidentity.Account{UID: 501, Name: "alice"}, nil },
@@ -85,7 +95,11 @@ func TestUnnamedAccountAtUpgradeIsNotLeftOutOfTheMap(t *testing.T) {
 				return unixidentity.Account{UID: uid, Name: names[uid]}, nil
 			}
 			if tc.recorded {
-				before := IdentitySpoolRecord{Key: "501", User: "alice", UpdatedAt: time.Now().UTC().Add(-10 * time.Minute), AccountIncarnation: "files"}
+				age := 10 * time.Minute
+				if tc.recordAge > 0 {
+					age = tc.recordAge
+				}
+				before := IdentitySpoolRecord{Key: "501", User: "alice", UpdatedAt: time.Now().UTC().Add(-age), AccountIncarnation: "files"}
 				if err := writeIdentitySpoolFile(dir, "501.json", before, nil); err != nil {
 					t.Fatal(err)
 				}

@@ -524,26 +524,38 @@ const (
 // ReadIdentitySpoolRecords reads at most limit records of dir, in file name
 // order, skipping any that do not parse or that trust refuses.
 func ReadIdentitySpoolRecords(dir string, trust func(path, label string) error, limit int) []IdentitySpoolRecord {
-	if dir == "" || limit <= 0 {
-		return nil
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	if limit <= 0 {
 		return nil
 	}
 	var records []IdentitySpoolRecord
+	WalkIdentitySpoolRecords(dir, trust, func(record IdentitySpoolRecord) bool {
+		records = append(records, record)
+		return len(records) < limit
+	})
+	return records
+}
+
+// WalkIdentitySpoolRecords calls fn with each record in dir that reads
+// (ReadIdentitySpoolRecord, validated by trust), in file-name order, until
+// fn returns false. It holds one record at a time, so a caller that must
+// see every record has no cap to stop at (GAP-0964).
+func WalkIdentitySpoolRecords(dir string, trust func(path, label string) error, fn func(IdentitySpoolRecord) bool) {
+	if dir == "" {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
 	for _, entry := range entries {
 		key, ok := strings.CutSuffix(entry.Name(), ".json")
 		if !ok || entry.IsDir() || !validIdentitySpoolKey(key) {
 			continue
 		}
-		if record, err := ReadIdentitySpoolRecord(dir, key, trust); err == nil {
-			if records = append(records, record); len(records) == limit {
-				break
-			}
+		if record, err := ReadIdentitySpoolRecord(dir, key, trust); err == nil && !fn(record) {
+			return
 		}
 	}
-	return records
 }
 
 // MarshalIdentitySpoolRecord serializes a record: the record object, and

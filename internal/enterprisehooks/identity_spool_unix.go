@@ -157,7 +157,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		// the lookup below give none.
 		holderBefore := ""
 		if ownersUnrecorded && account.User == "" {
-			holderBefore = legacyAgentHolderOfRecord(dir, account.UID, time.Now())
+			holderBefore = legacyAgentHolderOfRecord(dir, account.UID)
 		}
 		lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
 		record, err := identitySpoolCollect(lookupCtx, account, time.Now().UTC())

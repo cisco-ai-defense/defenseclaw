@@ -38,7 +38,7 @@ func TestLegacyAgentOwnerToken(t *testing.T) {
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := homeBirth(home); !ok {
+	if proof, ok := homeIdentity(home); !ok || !proof.hasBirth {
 		t.Log("this file system keeps no creation time: a recreated home that takes the freed inode keeps its token")
 	} else if b := LegacyAgentOwnerToken("files", home); b == "" || b == a {
 		t.Fatalf("recreated home token %q, before %q; want another", b, a)
