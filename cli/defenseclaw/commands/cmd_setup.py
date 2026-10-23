@@ -7502,6 +7502,7 @@ _AGENT_SELECTION_MAX_BYTES = 64 << 10
 _AGENT_DISCOVERY_MAX_BYTES = 4 << 20
 _HOOK_CONTRACT_LOCK_MAX_BYTES = 16 << 20
 _SETUP_CONFIG_MAX_BYTES = 16 << 20
+_SETUP_CODEX_BACKUP_MAX_BYTES = 32 << 20
 _ACTIVE_CONNECTOR_STATE_MAX_BYTES = 64 << 10
 # Runtime evidence is hashed in chunks and never held in memory. The Windows
 # hook executable (about 115 MB) is one of these files, so the cap only stops
@@ -7599,6 +7600,56 @@ class _SetupConfigSnapshot:
     hook_contract_lock_bytes: bytes
     hook_contract_lock_generation: tuple[int, int, int, int] | None
     applied_runtime: _SetupAppliedRuntimeEvidence | None
+    codex_rollback: _SetupCodexRollbackPoint | None = None
+
+
+@dataclass(frozen=True)
+class _SetupCodexRollbackPoint:
+    backup_existed: bool
+    backup_bytes: bytes = field(repr=False)
+    backup_generation: tuple[int, int, int, int] | None
+    registration_path: str | None
+    root: str | None
+
+
+def _codex_backup_path(data_dir: str) -> str:
+    return os.path.join(os.path.abspath(os.fspath(data_dir)), "connector_backups", "codex", "config.toml.json")
+
+
+def _codex_backup_identity(body: bytes) -> dict[str, Any]:
+    try:
+        backup = _json.loads(body)
+    except (UnicodeDecodeError, ValueError):
+        raise OSError("Codex rollback backup is malformed") from None
+    if not isinstance(backup, dict) or (
+        backup.get("version") != 1
+        or backup.get("connector") != "codex"
+        or backup.get("logical_name") != "config.toml"
+    ):
+        raise OSError("Codex rollback backup has an invalid identity")
+    path = backup.get("path")
+    if not isinstance(path, str) or not os.path.isabs(path) or os.path.basename(path) != "config.toml":
+        raise OSError("Codex rollback backup has an invalid registration path")
+    return backup
+
+
+def _codex_registration_path(lock_body: bytes) -> str | None:
+    _document, entries = _decode_setup_hook_contract_lock(lock_body)
+    entry = entries.get("codex")
+    if entry is None:
+        return None
+    locations = entry.get("locations")
+    paths = locations.get("hook_config_paths") if isinstance(locations, dict) else None
+    if paths is None:
+        return None
+    if not isinstance(paths, list):
+        raise OSError("Codex rollback registration is malformed")
+    matches = [path for path in paths if isinstance(path, str) and os.path.basename(path) == "config.toml"]
+    if not matches:
+        return None
+    if len(matches) != 1 or not os.path.isabs(matches[0]):
+        raise OSError("Codex rollback registration has no unique config.toml path")
+    return os.path.abspath(matches[0])
 
 
 @dataclass(frozen=True)
@@ -8327,7 +8378,7 @@ def _capture_setup_prior_agent_discovery(data_dir) -> tuple[bool, bytes, tuple[i
         return None
 
 
-def _capture_setup_desired_snapshot_once(cfg) -> _SetupConfigSnapshot:
+def _capture_setup_desired_snapshot_once(cfg, *, capture_codex_backup: bool = False) -> _SetupConfigSnapshot:
     data_dir = getattr(cfg, "data_dir", None)
     config_existed = False
     config_body = b""
@@ -8370,6 +8421,24 @@ def _capture_setup_desired_snapshot_once(cfg) -> _SetupConfigSnapshot:
             _HOOK_CONTRACT_LOCK_MAX_BYTES,
             "hook_contract_lock.json",
         )
+    codex_rollback = None
+    if capture_codex_backup and data_dir:
+        backup_existed, backup_body, backup_generation = _capture_protected_setup_file(
+            _codex_backup_path(data_dir),
+            _SETUP_CODEX_BACKUP_MAX_BYTES,
+            "Codex managed backup",
+            trust_windows_administrators=True,
+        )
+        backup_path = _codex_backup_identity(backup_body)["path"] if backup_existed else None
+        registration_path = _codex_registration_path(lock_body) if lock_existed else None
+        prior_path = registration_path or backup_path
+        codex_rollback = _SetupCodexRollbackPoint(
+            backup_existed=backup_existed,
+            backup_bytes=backup_body,
+            backup_generation=backup_generation,
+            registration_path=registration_path,
+            root=os.path.dirname(prior_path) if prior_path is not None else None,
+        )
     return _SetupConfigSnapshot(
         config=copy.deepcopy(cfg),
         config_existed=config_existed,
@@ -8388,10 +8457,12 @@ def _capture_setup_desired_snapshot_once(cfg) -> _SetupConfigSnapshot:
         hook_contract_lock_bytes=lock_body,
         hook_contract_lock_generation=lock_generation,
         applied_runtime=None,
+        codex_rollback=codex_rollback,
     )
 
 
 def _setup_snapshot_authority_fence(snapshot: _SetupConfigSnapshot) -> tuple[Any, ...]:
+    codex = snapshot.codex_rollback
     return (
         snapshot.config_existed,
         snapshot.config_generation,
@@ -8408,6 +8479,10 @@ def _setup_snapshot_authority_fence(snapshot: _SetupConfigSnapshot) -> tuple[Any
         snapshot.hook_contract_lock_existed,
         snapshot.hook_contract_lock_generation,
         hashlib.sha256(snapshot.hook_contract_lock_bytes).digest(),
+        codex.backup_existed if codex is not None else None,
+        codex.backup_generation if codex is not None else None,
+        hashlib.sha256(codex.backup_bytes).digest() if codex is not None else None,
+        codex.registration_path if codex is not None else None,
     )
 
 
@@ -8415,13 +8490,14 @@ def _capture_setup_config_snapshot(
     cfg,
     *,
     capture_runtime: bool = False,
+    capture_codex_backup: bool = False,
 ) -> _SetupConfigSnapshot:
     if not capture_runtime:
-        return _capture_setup_desired_snapshot_once(cfg)
+        return _capture_setup_desired_snapshot_once(cfg, capture_codex_backup=capture_codex_backup)
     for _attempt in range(_SETUP_RUNTIME_SNAPSHOT_ATTEMPTS):
-        before = _capture_setup_desired_snapshot_once(cfg)
+        before = _capture_setup_desired_snapshot_once(cfg, capture_codex_backup=capture_codex_backup)
         runtime = _capture_setup_applied_runtime(cfg)
-        after = _capture_setup_desired_snapshot_once(cfg)
+        after = _capture_setup_desired_snapshot_once(cfg, capture_codex_backup=capture_codex_backup)
         if _setup_snapshot_authority_fence(before) == _setup_snapshot_authority_fence(after):
             return replace(after, applied_runtime=runtime)
     raise OSError("setup rollback authority changed while runtime evidence was captured")
@@ -8738,6 +8814,52 @@ def _verify_restored_setup_persistence(
             continue
         if (existed, body) != (expected_existed, expected_body):
             failures.append(f"{label} differs from the rollback point")
+    return failures
+
+
+def _verify_restored_codex_root(cfg, snapshot: _SetupConfigSnapshot) -> list[str]:
+    """Prove a failed root move did not leave Codex pinned to the new root."""
+    prior = getattr(snapshot, "codex_rollback", None)
+    if prior is None or prior.root is None:
+        return []
+    failures: list[str] = []
+    try:
+        existed, body, _generation = _capture_protected_setup_file(
+            _codex_backup_path(cfg.data_dir), _SETUP_CODEX_BACKUP_MAX_BYTES, "Codex managed backup",
+            trust_windows_administrators=True,
+        )
+        if not existed:
+            failures.append("Codex managed backup is missing after rollback")
+        else:
+            current = _codex_backup_identity(body)
+            current_root = os.path.dirname(current["path"])
+            if os.path.normcase(os.path.normpath(current_root)) != os.path.normcase(os.path.normpath(prior.root)):
+                failures.append("Codex managed backup still names the new root")
+            if prior.backup_existed:
+                original = _codex_backup_identity(prior.backup_bytes)
+                for key in ("existed", "mode", "pristine_sha256", "pristine_bytes"):
+                    if current.get(key) != original.get(key):
+                        failures.append("Codex managed backup lost the prior settings restore point")
+                        break
+    except Exception as exc:  # noqa: BLE001 - report without exposing private backup bytes.
+        failures.append(f"Codex managed backup verification unavailable [{_setup_runtime_ref(type(exc).__name__)}]")
+    if prior.registration_path is not None:
+        try:
+            existed, body, _generation = _capture_protected_setup_file(
+                os.path.join(os.path.abspath(os.fspath(cfg.data_dir)), _HOOK_CONTRACT_LOCK_FILENAME),
+                _HOOK_CONTRACT_LOCK_MAX_BYTES,
+                "hook_contract_lock.json",
+            )
+            current_path = _codex_registration_path(body) if existed else None
+            if current_path is None or (
+                os.path.normcase(os.path.normpath(current_path))
+                != os.path.normcase(os.path.normpath(prior.registration_path))
+            ):
+                failures.append("Codex hook registration did not return to the previous root")
+        except Exception as exc:  # noqa: BLE001 - continue bounded rollback reporting.
+            failures.append(
+                f"Codex hook registration verification unavailable [{_setup_runtime_ref(type(exc).__name__)}]"
+            )
     return failures
 
 
@@ -9470,36 +9592,37 @@ def _rollback_failed_connector_application(
     )
     if authority_safe:
         try:
-            if exact_runtime:
-                lifecycle_error = _restore_prior_setup_lifecycle(
-                    app,
-                    snapshot,
-                    failed_registration_locations or (),
-                )
-                pre_lock_runtime_failures = _verify_restored_setup_runtime(
-                    app.cfg,
-                    snapshot,
-                    failed_registration_locations or (),
-                )
-                if pre_lock_runtime_failures:
-                    # The failed-generation lock is still the only protected
-                    # authority for any residue that reconciliation did not
-                    # remove. Preserve it until the applied runtime is proven
-                    # exact; the final verifier reports the bounded mismatch.
-                    raise OSError("restored applied runtime is not exact before lock restoration")
-                # Reconciliation consumed the preserved failed-generation
-                # lock to remove that active registration, republished the
-                # prior connector generation, and now matches the captured
-                # runtime. Restore the exact prior lock bytes only after that
-                # proof has succeeded.
-                _restore_setup_hook_contract_lock_snapshot(app.cfg, snapshot)
-                if lifecycle_error is not None:
-                    raise lifecycle_error
-            else:
-                restore_kwargs: dict[str, Any] = {"skip_openclaw": isinstance(cause, _OpenClawGatewayNotRunning)}
-                if isinstance(cause, _GatewayRestartFailed) and not isinstance(cause, _OpenClawGatewayNotRunning):
-                    restore_kwargs["same_failure"] = cause
-                _restart_restored_connector_runtime(app, **restore_kwargs)
+            with _temporary_codex_rollback_root(snapshot, app.cfg):
+                if exact_runtime:
+                    lifecycle_error = _restore_prior_setup_lifecycle(
+                        app,
+                        snapshot,
+                        failed_registration_locations or (),
+                    )
+                    pre_lock_runtime_failures = _verify_restored_setup_runtime(
+                        app.cfg,
+                        snapshot,
+                        failed_registration_locations or (),
+                    )
+                    if pre_lock_runtime_failures:
+                        # The failed-generation lock is still the only protected
+                        # authority for any residue that reconciliation did not
+                        # remove. Preserve it until the applied runtime is proven
+                        # exact; the final verifier reports the bounded mismatch.
+                        raise OSError("restored applied runtime is not exact before lock restoration")
+                    # Reconciliation consumed the preserved failed-generation
+                    # lock to remove that active registration, republished the
+                    # prior connector generation, and now matches the captured
+                    # runtime. Restore the exact prior lock bytes only after that
+                    # proof has succeeded.
+                    _restore_setup_hook_contract_lock_snapshot(app.cfg, snapshot)
+                    if lifecycle_error is not None:
+                        raise lifecycle_error
+                else:
+                    restore_kwargs: dict[str, Any] = {"skip_openclaw": isinstance(cause, _OpenClawGatewayNotRunning)}
+                    if isinstance(cause, _GatewayRestartFailed) and not isinstance(cause, _OpenClawGatewayNotRunning):
+                        restore_kwargs["same_failure"] = cause
+                    _restart_restored_connector_runtime(app, **restore_kwargs)
         except BaseException as exc:  # Report both non-secret transaction failures.
             if _secret_safe:
                 secret_rollback_failed = True
@@ -9533,6 +9656,8 @@ def _rollback_failed_connector_application(
                 rollback_errors.append(detail)
     elif exact_runtime:
         rollback_errors.append("runtime reconciliation was skipped because restored authority was not exact")
+
+    rollback_errors.extend(_verify_restored_codex_root(app.cfg, snapshot))
 
     left_changed: list[str] = []
     if exact_runtime:
@@ -10014,7 +10139,11 @@ def _apply_hook_connector_setup(
     cfg = app.cfg
     gc = cfg.guardrail
     try:
-        setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
+        setup_snapshot = _capture_setup_config_snapshot(
+            app.cfg,
+            capture_runtime=_windows_runtime_rollback(restart),
+            capture_codex_backup=connector == "codex" and restart,
+        )
     except _SetupGatewayNoAnswerError as exc:
         # Same next step as the busy-gateway restart check (GAP-1668).
         ux.echo(
@@ -11483,6 +11612,7 @@ def _apply_setup_batch(
     setup_snapshot = _prior_snapshot or _capture_setup_config_snapshot(
         app.cfg,
         capture_runtime=_windows_runtime_rollback(restart),
+        capture_codex_backup="codex" in connectors and restart,
     )
 
     if "opencode" in connectors:
@@ -11798,7 +11928,11 @@ def _dispatch_bare_setup(
             ux.echo("  Aborted — no connectors selected.")
             return
 
-    setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
+    setup_snapshot = _capture_setup_config_snapshot(
+        app.cfg,
+        capture_runtime=_windows_runtime_rollback(restart),
+        capture_codex_backup="codex" in targets and restart,
+    )
     exact_windows_opencode = any(_windows_opencode_requires_exact_selection(name) for name in targets)
     protected_selection: _VerifiedSetupAgentSelections | None = None
     if exact_windows_opencode:
@@ -12333,6 +12467,29 @@ def _temporary_codex_setup_marker(root: str | None) -> Iterator[None]:
             os.environ.pop("DEFENSECLAW_EXPLICIT_CODEX_SETUP", None)
         else:
             os.environ["DEFENSECLAW_EXPLICIT_CODEX_SETUP"] = previous
+
+
+@contextmanager
+def _temporary_codex_rollback_root(snapshot: _SetupConfigSnapshot, cfg) -> Iterator[None]:
+    """Let the gateway reverse a failed Codex move using its own lifecycle."""
+    prior = getattr(snapshot, "codex_rollback", None)
+    active = cfg.active_connectors() if hasattr(cfg, "active_connectors") else ()
+    root = prior.root if prior is not None and "codex" in active else None
+    if root is None:
+        yield
+        return
+    previous_home = os.environ.get("CODEX_HOME")
+    os.environ["CODEX_HOME"] = root
+    try:
+        # Matching the explicit marker to CODEX_HOME makes Go tear down the
+        # failed new registration and re-create the prior backup and hooks.
+        with _temporary_codex_setup_marker(root):
+            yield
+    finally:
+        if previous_home is None:
+            os.environ.pop("CODEX_HOME", None)
+        else:
+            os.environ["CODEX_HOME"] = previous_home
 
 
 def _prune_orphaned_connector_hooks(cfg, connector: str) -> tuple[list[str], str]:
