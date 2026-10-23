@@ -261,6 +261,22 @@ func TestEditedHookEntriesReplacedAndRemoved(t *testing.T) {
 				if err := os.WriteFile(path, []byte(edited), 0o600); err != nil {
 					t.Fatal(err)
 				}
+				if name == "copilot" && variant == "foreign" {
+					err := tc.install(t, root, path)
+					if err == nil || !strings.Contains(err.Error(), "another hook file") {
+						t.Fatalf("repair must refuse the independent command: %v", err)
+					}
+					if got := readHookFileForTest(t, path); got != edited {
+						t.Fatalf("refused repair changed the hook file: %s", got)
+					}
+					if err := tc.teardown(t, root, path); err != nil {
+						t.Fatalf("uninstall: %v", err)
+					}
+					if got := readHookFileForTest(t, path); !strings.Contains(got, editedPath) {
+						t.Fatalf("uninstall removed the independent command: %s", got)
+					}
+					return
+				}
 				if err := tc.install(t, root, path); err != nil {
 					t.Fatalf("repair: %v", err)
 				}
@@ -457,6 +473,25 @@ func TestOwnedHooksPresentRejectsSingleEditedEntry(t *testing.T) {
 					t.Fatalf("%s: OwnedHooksPresent after repair = %v, %v", label, present, err)
 				}
 			}
+			expectRefused := func(t *testing.T, path, label string, pristine, tampered []byte) {
+				t.Helper()
+				if err := os.WriteFile(path, tampered, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if present, err := OwnedHooksPresent(conn, opts); err != nil || present {
+					t.Fatalf("%s: OwnedHooksPresent = %v, %v; want false", label, present, err)
+				}
+				err := conn.Setup(ctx, opts)
+				if err == nil || !strings.Contains(err.Error(), "another hook file") {
+					t.Fatalf("%s: Setup must refuse an unproven handler: %v", label, err)
+				}
+				if got := readHookFileForTest(t, path); got != string(tampered) {
+					t.Fatalf("%s: refused repair changed the hook file: %s", label, got)
+				}
+				if err := os.WriteFile(path, pristine, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			checked := 0
 			for _, path := range HookConfigPathsForConnector(conn, opts) {
 				pristine, err := os.ReadFile(path)
@@ -503,7 +538,11 @@ func TestOwnedHooksPresentRejectsSingleEditedEntry(t *testing.T) {
 				// deleted copy as DefenseClaw's; a user's own hook of that
 				// name is kept.
 				if bytes.Contains(repointed, []byte(lane+" --")) || bytes.Contains(repointed, []byte(lane+"' --")) {
-					expectRepaired(t, path, "repointed at a deleted copy", pristine, repointed)
+					if name == "copilot" {
+						expectRefused(t, path, "repointed at a deleted copy", pristine, repointed)
+					} else {
+						expectRepaired(t, path, "repointed at a deleted copy", pristine, repointed)
+					}
 				}
 				// A shell wrapper in front of an old copy runs it too.
 				writeOldHookCopyForTest(t, lane)
@@ -533,9 +572,7 @@ func TestOwnedHooksPresentRejectsSingleEditedEntry(t *testing.T) {
 				hooks[event] = []interface{}{userHook, ours}
 				withUser := encodeHookFileForTest(t, path, document)
 				if name == "copilot" {
-					// defenseclaw.json is DefenseClaw's file: on an event it
-					// binds, another hook is not kept (rel-1-0-4 GAP-0600).
-					expectRepaired(t, path, "another hook on a bound event", pristine, withUser)
+					expectRefused(t, path, "another hook on a bound event", pristine, withUser)
 					continue
 				}
 				// The user's own hook is ignored, then kept by every repair.
@@ -657,7 +694,8 @@ func encodeHookFileForTest(t *testing.T, path string, document map[string]interf
 // defenseclaw.json) an entry beside DefenseClaw's on a bound event ran a
 // hook DefenseClaw does not keep current while the presence check passed: a
 // shell or env wrapper around an old copy, a renamed copy, or a copy without
-// the generated-hook marker. Presence fails and Setup leaves its render alone.
+// the generated-hook marker. Presence fails; Setup repairs proven managed
+// copies and refuses an unproven command without changing the hook file.
 func TestOwnedHookFileHoldsOnlyTheSetupRender(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows registers the native hook launcher, not a hook script")
@@ -743,6 +781,19 @@ func TestOwnedHookFileHoldsOnlyTheSetupRender(t *testing.T) {
 				}
 				if present, err := OwnedHooksPresent(conn, opts); err != nil || present {
 					t.Fatalf("%s: OwnedHooksPresent = %v, %v; want false", label, present, err)
+				}
+				if name == "copilot" && (label == "renamed copy" || label == "marker-stripped copy") {
+					err := conn.Setup(ctx, opts)
+					if err == nil || !strings.Contains(err.Error(), "another hook file") {
+						t.Fatalf("%s: Setup must refuse the unproven handler: %v", label, err)
+					}
+					if got := readHookFileForTest(t, path); got != string(encodeHookFileForTest(t, path, document)) {
+						t.Fatalf("%s: refused repair changed the hook file: %s", label, got)
+					}
+					if err := os.WriteFile(path, pristine, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					continue
 				}
 				if err := conn.Setup(ctx, opts); err != nil {
 					t.Fatalf("%s: repair: %v", label, err)

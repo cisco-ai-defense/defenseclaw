@@ -4801,10 +4801,20 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 			return fmt.Errorf("copilot: unsupported hook event %q in resolved contract", event)
 		}
 		selected[event] = true
-		// defenseclaw.json is DefenseClaw's file: on an event it binds, any
-		// entry but Setup's render (an old copy, a wrapper, a renamed script)
-		// is not DefenseClaw's current hook, and Copilot ran it beside the
-		// re-added entry (rel-1-0-4 GAP-0600). The event holds the render alone.
+		// Copilot runs every entry in an event array. An independent entry in
+		// this file must be moved before Setup can safely restore the current
+		// hook. Check all entries before writing any event back to disk.
+		if raw, present := hooks[event]; present {
+			entries, ok := raw.([]interface{})
+			if !ok {
+				entries = []interface{}{raw}
+			}
+			for _, entry := range entries {
+				if !copilotBoundEventOwnsHook(entry, hookScript) {
+					return fmt.Errorf("copilot: cannot repair event %q in %s: an independent or unrecognized handler is present; move it to another hook file in the same hooks directory, then run defenseclaw setup copilot again", event, path)
+				}
+			}
+		}
 		hooks[event] = []interface{}{copilotHookRegistration(goos, event, hookScript)}
 	}
 	// Remove DefenseClaw's handler from events outside this contract too. An
@@ -4835,6 +4845,110 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 		}
 	}
 	return writeJSONObject(path, cfg)
+}
+
+// A bound event may be replaced only when every executable command in its
+// entry is a known DefenseClaw form. Do not claim a combined command or a
+// nested handler merely because it also mentions our script.
+func copilotBoundEventOwnsHook(raw interface{}, hookScript string) bool {
+	entry, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if kind, present := entry["type"]; present && kind != "command" {
+		return false
+	}
+	for _, key := range []string{"handlers", "hooks", "action"} {
+		if _, present := entry[key]; present {
+			return false
+		}
+	}
+	owned := false
+	for _, key := range []string{"bash", "command", "powershell", "command_windows", "commandWindows"} {
+		value, present := entry[key]
+		if !present {
+			continue
+		}
+		command, ok := value.(string)
+		if !ok || !copilotBoundEventOwnsCommand(key, command, hookScript) {
+			return false
+		}
+		owned = true
+	}
+	return owned
+}
+
+func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
+	if isCopilotPowerShellAdapterCommand(hookScript) {
+		if key != "powershell" && key != "command" {
+			return false
+		}
+		if isCopilotNativeHookCommand(command) {
+			return true
+		}
+		for _, event := range copilotCurrentHookEvents {
+			if command == copilotHookInvocationCommandForEvent("windows", event, hookScript) {
+				return true
+			}
+		}
+		return copilotMarkedAdapterCommand(command)
+	}
+	if managedHookCommandEntry(map[string]interface{}{key: command}, hookScript) {
+		return true
+	}
+	if key == "powershell" {
+		return copilotMarkedAdapterCommand(command)
+	}
+	if key != "bash" && key != "command" {
+		return false
+	}
+	word, rest, ok := hookScriptWordAfterWrapper(strings.TrimSpace(command))
+	if !ok || !filepath.IsAbs(word) || filepath.Clean(word) != word ||
+		(rest != "" && !copilotBoundEventArgument(rest)) {
+		return false
+	}
+	if copilotMarkedShellCopy(word) {
+		return true
+	}
+	_, owned := editedDefenseClawHookScript(word+rest, "copilot-hook.sh")
+	return owned
+}
+
+func copilotMarkedShellCopy(path string) bool {
+	body, err := safefile.ReadRegularFileBounded(path, 1<<20)
+	if err != nil {
+		return false
+	}
+	if len(body) > 512 {
+		body = body[:512]
+	}
+	return bytes.Contains(body, []byte("# defenseclaw-managed-hook v"))
+}
+
+func copilotMarkedAdapterCommand(command string) bool {
+	binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command))
+	if len(binding) != 3 || !ValidCopilotHookEvent(binding[2]) {
+		return false
+	}
+	adapter := strings.ReplaceAll(binding[1], "''", "'")
+	body, err := safefile.ReadRegularFileBounded(adapter, 1<<20)
+	if err != nil {
+		return false
+	}
+	if len(body) > 512 {
+		body = body[:512]
+	}
+	return bytes.Contains(body, []byte("# defenseclaw-managed-hook v")) &&
+		bytes.Contains(bytes.ToLower(body), []byte("copilot"))
+}
+
+func copilotBoundEventArgument(rest string) bool {
+	for _, event := range copilotCurrentHookEvents {
+		if rest == " --event "+shellWord(event) || rest == " --event "+event {
+			return true
+		}
+	}
+	return false
 }
 
 func copilotUnexpectedEventOwnsHook(raw interface{}, hookScript string) bool {

@@ -478,9 +478,9 @@ func (c *hookOnlyConnector) rendersExactHookEntries() bool {
 // functions Setup writes with, and no other entry that Setup's reconcile
 // claims as DefenseClaw's (an edited script path or name, a misplaced or
 // duplicate entry). Entries Setup does not claim, the user's own hooks, are
-// ignored, except in Copilot's defenseclaw.json, DefenseClaw's own file, where
-// an event Setup binds holds nothing else. Every entry that fails the check is
-// one Setup replaces, so a heal always converges.
+// ignored, except in Copilot's defenseclaw.json: a bound event must hold only
+// DefenseClaw's current handler. Setup refuses an independent handler in that
+// event and tells the operator to move it to another hook file.
 func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document map[string]interface{}) bool {
 	if document == nil {
 		return false
