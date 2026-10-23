@@ -511,7 +511,7 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 			if rc == "7" && waitColdStartCapture(t, run.capDir, "gateway.log") == "" {
 				t.Fatal("a refused call did not start the gateway")
 			}
-			if code := exitCodeOf(run.err); code != 2 || !strings.Contains(run.stderr, "blocking codex tool") ||
+			if code := exitCodeOf(run.err); !codexBlockAnswer("PreToolUse", code, run.stdout) || !strings.Contains(run.stderr, "blocking codex tool") ||
 				!strings.Contains(run.stderr, "restarting or not running") {
 				t.Fatalf("exit %d stderr %q, want a block naming the restart", code, run.stderr)
 			}

@@ -10266,7 +10266,8 @@ func TestCodexHookScriptRejectsMismatchedRegisteredEvent(t *testing.T) {
 		wantCode int
 	}{
 		{failMode: "open", wantCode: 0},
-		{failMode: "closed", wantCode: 2},
+		// Codex's own PreToolUse block on stdout (GAP-0949).
+		{failMode: "closed", wantCode: 0},
 	} {
 		t.Run(test.failMode, func(t *testing.T) {
 			dir := t.TempDir()
@@ -10289,14 +10290,17 @@ func TestCodexHookScriptRejectsMismatchedRegisteredEvent(t *testing.T) {
 				os.Environ(),
 				"DEFENSECLAW_HOME="+t.TempDir(),
 			)
-			var stderr bytes.Buffer
-			cmd.Stderr = &stderr
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
 			err := cmd.Run()
 			gotCode := 0
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				gotCode = exitErr.ExitCode()
 			} else if err != nil {
 				t.Fatalf("run mismatched hook: %v", err)
+			}
+			if blocks := codexBlockAnswer("PreToolUse", gotCode, stdout.String()); blocks != (test.failMode == "closed") {
+				t.Fatalf("mismatch blocks=%v exit=%d stdout=%q, want Codex's PreToolUse block only when closed", blocks, gotCode, stdout.String())
 			}
 			if gotCode != test.wantCode {
 				t.Fatalf(
@@ -10353,6 +10357,7 @@ func TestCodexHookScriptBindsEventWithoutJQOrPython(t *testing.T) {
 	bakeHookPathForTest(t, scriptPath, toolDir)
 	dcHome := t.TempDir()
 
+	runStdout := ""
 	run := func(input string) (int, string) {
 		t.Helper()
 		cmd := exec.Command(
@@ -10367,8 +10372,9 @@ func TestCodexHookScriptBindsEventWithoutJQOrPython(t *testing.T) {
 			"DEFENSECLAW_HOME="+dcHome,
 			"DEFENSECLAW_FAIL_MODE=closed",
 		)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		defer func() { runStdout = stdout.String() }()
 		err := cmd.Run()
 		if err == nil {
 			return 0, stderr.String()
@@ -10399,8 +10405,9 @@ func TestCodexHookScriptBindsEventWithoutJQOrPython(t *testing.T) {
 	if err := os.Remove(curlArgs); err != nil {
 		t.Fatalf("reset curl evidence: %v", err)
 	}
-	if code, stderr := run(`{"hook_event_name":"SessionEnd"}`); code != 2 {
-		t.Fatalf("mismatched event exit=%d want=2 stderr=%q", code, stderr)
+	// Codex's own PreToolUse block, built without jq or python3 (GAP-0949).
+	if code, stderr := run(`{"hook_event_name":"SessionEnd"}`); !codexBlockAnswer("PreToolUse", code, runStdout) {
+		t.Fatalf("mismatched event exit=%d stdout=%q stderr=%q, want Codex's PreToolUse block", code, runStdout, stderr)
 	}
 	if _, err := os.Stat(curlArgs); !os.IsNotExist(err) {
 		t.Fatalf("mismatched event reached curl; stat error=%v", err)
@@ -10468,10 +10475,11 @@ func TestCodexHookScript_FailClosed_DefaultForObservabilitySetup(t *testing.T) {
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
 	)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
 	err := cmd.Run()
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok || exitErr.ExitCode() != 2 {
-		t.Fatalf("observability Codex hook should fail-closed by default, got: %v", err)
+	if err != nil || !codexBlockAnswer("PreToolUse", 0, stdout.String()) {
+		t.Fatalf("observability Codex hook should fail-closed by default with Codex's PreToolUse block, got: %v stdout=%q", err, stdout.String())
 	}
 	failureLog, err := os.ReadFile(filepath.Join(dcHome, "logs", "hook-failures.jsonl"))
 	if err != nil {
@@ -10878,8 +10886,9 @@ func TestCodexHookScript_NoStructuredOutput_EmitsInlineBlockJSON(t *testing.T) {
 			err, stdout.String(), stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, `"decision":"block"`) {
-		t.Errorf("stdout must contain decision=block JSON, got: %q", out)
+	// Codex's own block for the registered event (GAP-0949).
+	if !codexBlockAnswer("PreToolUse", 0, out) {
+		t.Errorf("stdout must carry Codex's PreToolUse block, got: %q", out)
 	}
 	if !strings.Contains(out, "hypothetical legacy verdict") {
 		t.Errorf("stdout must carry the block reason in the inline JSON, got: %q", out)

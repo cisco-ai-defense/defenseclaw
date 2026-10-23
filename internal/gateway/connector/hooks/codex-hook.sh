@@ -12,12 +12,32 @@
 # (the hook still posts to the gateway, it just starts a new root
 # span).
 set -euo pipefail
-{{if and (not .Managed) (not .Sandbox)}}# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
+{{if not .SecureClient}}# codex_event_can_control CONTRACT EVENT returns 0 for an event whose answer
+# Codex acts on (the native hook's codexEventCanControl).
+codex_event_can_control() {
+  case "${2:-}" in
+    UserPromptSubmit|PreToolUse|PermissionRequest|PostToolUse|Stop) return 0 ;;
+    SessionStart|SubagentStop|PreCompact|PostCompact)
+      case "${1:-}" in codex-hooks-v3|codex-hooks-v4) return 0 ;; esac
+      ;;
+  esac
+  return 1
+}
+{{end}}{{if and (not .Managed) (not .Sandbox)}}# _DC_HOOK_DATA_DIR is the data directory this hook was installed in, the
+# folder above its hooks folder (defenseclaw_install_held). Until the hook
+# path is resolved below it is the folder above the path the agent ran.
+_DC_HOOK_DATA_DIR="${BASH_SOURCE[0]:-$0}"
+case "$_DC_HOOK_DATA_DIR" in
+  */*) _DC_HOOK_DATA_DIR="${_DC_HOOK_DATA_DIR%/*}/.." ;;
+  *) _DC_HOOK_DATA_DIR=".." ;;
+esac
+# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
 # installer holds its data directory DATA: DATA/.install.lock exists as any
 # file type, or DATA exists but cannot be searched, so the lock cannot be
-# shown absent; no DATA to look in counts as held too. It is the one install
-# check of every shell hook. The native hook (installLockHeld), the in-agent
-# plugins and the Windows adapters apply the same rule (GAP-0914).
+# shown absent; no DATA to look in counts as held too. The native hook
+# (installLockHeld), the in-agent plugins and the Windows adapters apply the
+# same rule (GAP-0914). defenseclaw_install_held below, the one install check
+# of every shell hook, reads it.
 defenseclaw_install_lock_held() {
   local data="${1:-}"
   [ -n "$data" ] || return 0
@@ -32,19 +52,73 @@ defenseclaw_install_lock_held() {
   fi
   return 1
 }
+# defenseclaw_install_held returns 0 (true) while an installer holds either
+# data directory of this account's hook: the one DEFENSECLAW_HOME names, else
+# ~/.defenseclaw, where install.sh and install.ps1 take the lock, and the one
+# the hook was installed in (_DC_HOOK_DATA_DIR, the folder above its hooks
+# folder), which the gateway rendered it into from its resolved data
+# directory. An agent that runs the hook without DEFENSECLAW_HOME, or a
+# data_dir apart from DEFENSECLAW_HOME, still finds the lock (GAP-0948).
+defenseclaw_install_held() {
+  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}" && return 0
+  [ -n "${_DC_HOOK_DATA_DIR:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_DATA_DIR}"
+}
 # A failure before the helpers load (a hook path that does not resolve, a
-# missing or broken _hardening.sh, a set -e error) blocks with exit 2
-# in fail mode closed, under strict availability and while this account's
-# installer holds its data directory; fail mode open keeps the exit status.
-# The installed mode decides (GAP-0315).
+# missing or broken _hardening.sh, a set -e error) blocks in fail mode
+# closed, under strict availability and while this account's installer holds
+# its data directory, and so does every exit 2, with Codex's own block of
+# the registered event (codex_closed_answer); fail mode open keeps the exit
+# status. The installed mode decides (GAP-0315).
 # defenseclaw_harden_env replaces this trap with the hook's own.
 _DC_BOOT_FAIL_MODE="{{.FailMode}}"
 defenseclaw_boot_fails_closed() {
   [ "$_DC_BOOT_FAIL_MODE" = "open" ] || return 0
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) return 0 ;; esac
-  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}"
+  defenseclaw_install_held
 }
-trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_closed; then exit 2; fi' EXIT
+# The registered event and contract, from the arguments setup binds (--event,
+# --hook-contract), before the helpers load; the binding check below
+# validates them.
+_DC_CODEX_EVENT=""
+_DC_CODEX_CONTRACT=""
+_DC_CODEX_BLOCK_REASON=""
+_dc_codex_arg_prev=""
+for _dc_codex_arg in "$@"; do
+  case "$_dc_codex_arg_prev" in
+    --event) _DC_CODEX_EVENT="$_dc_codex_arg" ;;
+    --hook-contract) _DC_CODEX_CONTRACT="$_dc_codex_arg" ;;
+  esac
+  _dc_codex_arg_prev="$_dc_codex_arg"
+done
+unset _dc_codex_arg _dc_codex_arg_prev
+# codex_closed_answer [REASON] answers a call this hook blocks as Codex reads
+# a block of the registered event: the event's block object on stdout and
+# exit 0, as the native hook answers (emitCodexBlock). Codex v0.130+ reads a
+# non-zero UserPromptSubmit status as a hook failure and submits the prompt,
+# so exit 2 is no block there (GAP-0949). An event Codex gives no control
+# keeps exit 2, and so do Stop and SubagentStop, where a block only keeps
+# Codex running (#1140) as exit 2 does. Codex shows REASON, else why: the
+# install, or the failure the hook recorded (_DC_CODEX_BLOCK_REASON).
+codex_closed_answer() {
+  local reason="${1:-}"
+  if [ -z "$reason" ] && defenseclaw_install_held; then
+    reason="DefenseClaw blocked this: DefenseClaw is being installed or upgraded for this account (fail mode closed). Try again when it is done."
+  fi
+  reason="${reason:-${_DC_CODEX_BLOCK_REASON:-DefenseClaw blocked this because its hook failed (fail mode closed). Run defenseclaw doctor to see why.}}"
+  reason="${reason//\\/\\\\}"
+  reason="${reason//\"/\\\"}"
+  reason="${reason//[[:cntrl:]]/ }"
+  codex_event_can_control "$_DC_CODEX_CONTRACT" "$_DC_CODEX_EVENT" || exit 2
+  case "$_DC_CODEX_EVENT" in
+    Stop|SubagentStop) exit 2 ;;
+    SessionStart|PreCompact|PostCompact) printf '{"continue":false,"stopReason":"%s"}\n' "$reason" ;;
+    PermissionRequest) printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"%s"}}}\n' "$reason" ;;
+    PreToolUse) printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$reason" ;;
+    *) printf '{"decision":"block","reason":"%s"}\n' "$reason" ;;
+  esac
+  exit 0
+}
+trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -eq 2 ] || { [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_closed; }; then codex_closed_answer; fi' EXIT
 {{end}}
 # Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
@@ -88,12 +162,14 @@ export DEFENSECLAW_HOME
 # a missing token.
 unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+{{if not .Sandbox}}# The hook path is resolved: this is the data directory it was installed in.
+_DC_HOOK_DATA_DIR="${HOOK_DIR}/.."
+{{end}}if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
   # The installed mode decides; strict availability tightens this exit as it
   # tightens every later outage.
   _DC_HOME_FAIL_MODE="{{.FailMode}}"
-  ! defenseclaw_install_lock_held "${DEFENSECLAW_HOME}" || _DC_HOME_FAIL_MODE="closed"
+  ! defenseclaw_install_held || _DC_HOME_FAIL_MODE="closed"
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
   if [ "$_DC_HOME_FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
@@ -116,7 +192,11 @@ fi
 . "${HOOK_DIR}/_sandbox.sh"
 {{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
-
+{{if and (not .Managed) (not .Sandbox)}}# defenseclaw_harden_env replaced the EXIT trap with its cleanup: keep it, and
+# answer every block below (exit 2) as Codex reads one for the registered
+# event (codex_closed_answer, GAP-0949).
+trap '_dc_codex_rc=$?; _defenseclaw_hook_cleanup; if [ "$_dc_codex_rc" -eq 2 ]; then codex_closed_answer; fi' EXIT
+{{end}}
 # Fail mode governs response-layer failures (4xx, bad JSON, missing
 # action) and transport failures (gateway unreachable / timeout / 5xx).
 # DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override. Set BEFORE the
@@ -145,7 +225,8 @@ BOUND_CONTRACT=
 fail_binding() {
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
 {{end}}  local reason="$1"
-{{if and .Managed (not .SecureClient)}}  # A managed binding error is integrity, not an outage: closed in every
+{{if and (not .Managed) (not .Sandbox)}}  _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because its Codex hook registration does not match this call (${reason}). Run defenseclaw setup codex to register it again."
+{{end}}{{if and .Managed (not .SecureClient)}}  # A managed binding error is integrity, not an outage: closed in every
   # fail mode, as in the native runner.
   defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response closed
   echo "defenseclaw: codex hook binding error: $reason" >&2
@@ -198,8 +279,9 @@ PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome re
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "stdin body exceeded cap" transport
   echo "defenseclaw: codex hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" != "open" ]; then
-    printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
-    exit 2
+{{if and (not .Managed) (not .Sandbox)}}    _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because the hook payload is too large for DefenseClaw to inspect."
+{{else}}    printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
+{{end}}    exit 2
   fi
   exit 0
 }
@@ -251,6 +333,7 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 # Follow FAIL_MODE; strict availability is an additional force-closed override.
 fail_unreachable() {
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+  _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because it could not reach its gateway ($1). Run defenseclaw-gateway status to check it."
 {{end}}  # A blocked Stop only keeps Codex running the turn (#1140).
   if defenseclaw_should_fail_closed_on_unreachable; then
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "$1" transport
@@ -281,6 +364,7 @@ fail_unreachable() {
 # administrator's open choice covers an outage only.
 fail_response() {
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+  _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because its gateway's answer could not be used (fail mode closed). Run defenseclaw doctor to see why."
 {{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
 {{end}}  local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
@@ -437,7 +521,23 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.codex_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
+{{if not .SecureClient}}# A block or confirmation reaches Codex as the native object, which Codex acts
+# on: one that does not deny (or ask) for the registered event would let the
+# call run beside the gateway's block. The hook refuses such an answer
+# closed, in every fail mode, as the native hook does (GAP-0950).
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+  _DC_GATEWAY_ACTION="$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null)" || _DC_GATEWAY_ACTION=""
+  case "$_DC_GATEWAY_ACTION" in
+    block|confirm)
+      if codex_event_can_control "$BOUND_CONTRACT" "$BOUND_EVENT" &&
+        ! defenseclaw_native_output_agrees codex "$BOUND_EVENT" "$_DC_GATEWAY_ACTION" "$OUTPUT"; then
+        [ "$FAIL_MODE" = "closed" ] || FAIL_MODE=closed
+        fail_response "native output contradicts gateway action"
+      fi
+      ;;
+  esac
+fi
+{{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 fi
 
@@ -477,7 +577,8 @@ if [ "$ACTION" = "block" ]; then
   if [ -z "$REASON" ]; then
     REASON="Blocked by DefenseClaw Codex policy."
   fi
-  printf '{"decision":"block","reason":"%s"}\n' "$(defenseclaw_json_escape "$REASON")"
+{{if and (not .Managed) (not .Sandbox)}}  codex_closed_answer "$REASON"
+{{else}}  printf '{"decision":"block","reason":"%s"}\n' "$(defenseclaw_json_escape "$REASON")"
   exit 0
-fi
+{{end}}fi
 exit 0

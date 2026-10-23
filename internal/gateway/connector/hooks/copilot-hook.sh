@@ -36,12 +36,21 @@ case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) FAIL_MODE="c
 # failure DefenseClaw sees prints Copilot's native deny with the reason ($1)
 # instead; Copilot's other events cannot block. Fail mode open lets the call
 # run.
+# _DC_HOOK_DATA_DIR is the data directory this hook was installed in, the
+# folder above its hooks folder (defenseclaw_install_held). Until the hook
+# path is resolved below it is the folder above the path the agent ran.
+_DC_HOOK_DATA_DIR="${BASH_SOURCE[0]:-$0}"
+case "$_DC_HOOK_DATA_DIR" in
+  */*) _DC_HOOK_DATA_DIR="${_DC_HOOK_DATA_DIR%/*}/.." ;;
+  *) _DC_HOOK_DATA_DIR=".." ;;
+esac
 # defenseclaw_install_lock_held DATA returns 0 (true) while this account's
 # installer holds its data directory DATA: DATA/.install.lock exists as any
 # file type, or DATA exists but cannot be searched, so the lock cannot be
-# shown absent; no DATA to look in counts as held too. It is the one install
-# check of every shell hook. The native hook (installLockHeld), the in-agent
-# plugins and the Windows adapters apply the same rule (GAP-0914).
+# shown absent; no DATA to look in counts as held too. The native hook
+# (installLockHeld), the in-agent plugins and the Windows adapters apply the
+# same rule (GAP-0914). defenseclaw_install_held below, the one install check
+# of every shell hook, reads it.
 defenseclaw_install_lock_held() {
   local data="${1:-}"
   [ -n "$data" ] || return 0
@@ -56,12 +65,23 @@ defenseclaw_install_lock_held() {
   fi
   return 1
 }
+# defenseclaw_install_held returns 0 (true) while an installer holds either
+# data directory of this account's hook: the one DEFENSECLAW_HOME names, else
+# ~/.defenseclaw, where install.sh and install.ps1 take the lock, and the one
+# the hook was installed in (_DC_HOOK_DATA_DIR, the folder above its hooks
+# folder), which the gateway rendered it into from its resolved data
+# directory. An agent that runs the hook without DEFENSECLAW_HOME, or a
+# data_dir apart from DEFENSECLAW_HOME, still finds the lock (GAP-0948).
+defenseclaw_install_held() {
+  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}" && return 0
+  [ -n "${_DC_HOOK_DATA_DIR:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_DATA_DIR}"
+}
 # copilot_hook_failure reads the install state when it answers, through the
 # shared check, also before the helpers load: a hook path that does not
 # resolve or a missing helper during an install or upgrade is closed
 # (GAP-0914).
 copilot_hook_failure() {
-  if [ "$FAIL_MODE" != "closed" ] && defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}"; then
+  if [ "$FAIL_MODE" != "closed" ] && defenseclaw_install_held; then
     FAIL_MODE="closed"
   fi
   [ "$FAIL_MODE" != "open" ] || exit 0
@@ -120,9 +140,11 @@ export DEFENSECLAW_HOME
 # a missing token.
 unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+{{if not .Sandbox}}# The hook path is resolved: this is the data directory it was installed in.
+_DC_HOOK_DATA_DIR="${HOOK_DIR}/.."
+{{end}}if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
-  ! defenseclaw_install_lock_held "${DEFENSECLAW_HOME}" || FAIL_MODE="closed"
+  ! defenseclaw_install_held || FAIL_MODE="closed"
   if [ "$FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     copilot_hook_failure

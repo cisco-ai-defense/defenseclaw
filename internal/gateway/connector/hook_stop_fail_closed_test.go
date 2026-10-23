@@ -249,11 +249,11 @@ func TestPerUserShellHooksLetAFailedStopEventThrough(t *testing.T) {
 	}
 
 	codexTool := runPerUserHookForStop(t, NewCodexConnector(), "codex-hook.sh", codexArgs("PreToolUse"), codexPreToolUse, "exit:7", "DEFENSECLAW_FAIL_MODE=closed")
-	if codexTool.code != 2 || strings.Contains(codexTool.stderr, stopEventNotBlockedLead) {
+	if !codexBlockAnswer("PreToolUse", codexTool.code, codexTool.stdout) || strings.Contains(codexTool.stderr, stopEventNotBlockedLead) {
 		t.Errorf("codex PreToolUse: exit %d stderr=%q, want the fail-closed block", codexTool.code, codexTool.stderr)
 	}
 	codexPrompt := runPerUserHookForStop(t, NewCodexConnector(), "codex-hook.sh", codexArgs("UserPromptSubmit"), `{"hook_event_name":"UserPromptSubmit","prompt":"hi"}`, `502|{}`, "DEFENSECLAW_FAIL_MODE=closed")
-	if codexPrompt.code != 2 {
+	if !codexBlockAnswer("UserPromptSubmit", codexPrompt.code, codexPrompt.stdout) {
 		t.Errorf("codex UserPromptSubmit: exit %d stderr=%q, want the fail-closed block", codexPrompt.code, codexPrompt.stderr)
 	}
 	// A per-user Claude Code hook blocks a tool call with its own JSON deny
