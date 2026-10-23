@@ -41,7 +41,12 @@ func TestADUPNCacheNeverConfirmsAnOvertakenTranslation(t *testing.T) {
 		start = func() translation {
 			t.Helper()
 			cache.lookup(sid, sam, 0)
-			reply := <-started
+			var reply chan string
+			select {
+			case reply = <-started:
+			case <-time.After(10 * time.Second):
+				t.Fatal("lookup started no translation")
+			}
 			cache.mu.Lock()
 			done := cache.entries[key].done
 			cache.mu.Unlock()
@@ -50,6 +55,7 @@ func TestADUPNCacheNeverConfirmsAnOvertakenTranslation(t *testing.T) {
 			}
 			return translation{reply: reply, done: done}
 		}
+		evictions := 0
 		evict = func() {
 			t.Helper()
 			cache.mu.Lock()
@@ -57,7 +63,16 @@ func TestADUPNCacheNeverConfirmsAnOvertakenTranslation(t *testing.T) {
 				cache.entries[fmt.Sprintf("other-%d", i)] = adUPNEntry{expires: clock.Add(time.Hour)}
 			}
 			cache.mu.Unlock()
-			cache.lookup("S-1-5-21-1-2-3-9999", `CORP\bob`, time.Second) // clears the cache
+			// A SID not cached yet, so its lookup starts a translation and
+			// clears the cache; a second eviction must not reuse the first's.
+			evictions++
+			cache.lookup(fmt.Sprintf("S-1-5-21-1-2-3-%d", 9000+evictions), `CORP\bob`, time.Second)
+			cache.mu.Lock()
+			left := len(cache.entries)
+			cache.mu.Unlock()
+			if left > 2 {
+				t.Fatalf("eviction left %d entries", left)
+			}
 		}
 		return cache, start, evict, &clock
 	}
@@ -125,6 +140,46 @@ func TestADUPNCacheNeverConfirmsAnOvertakenTranslation(t *testing.T) {
 		finish(second, newUPN)
 		check(t, cache, "newest translation done", newUPN, false)
 	})
+	// W19 review (loop round 3): with three overlapping translations an older
+	// completion repopulates the evicted entry, and a middle one that finishes
+	// next must still not be confirmed while the newest runs. Every completion
+	// order, with and without an eviction after the newest starts: only the
+	// newest translation's answer is ever confirmed, and lookup always gives
+	// the answer stored last (GAP-0129).
+	for _, order := range [][3]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}} {
+		for _, evictAfterNewest := range []bool{false, true} {
+			name := fmt.Sprintf("three translations finish in order %d%d%d, eviction after the newest %t",
+				order[0], order[1], order[2], evictAfterNewest)
+			t.Run(name, func(t *testing.T) {
+				cache, start, evict, _ := setup(t)
+				answers := [3]string{"first@corp.example.com", "second@corp.example.com", "third@corp.example.com"}
+				var running [3]translation
+				for i := range running {
+					if i > 0 {
+						evict()
+					}
+					running[i] = start()
+				}
+				if evictAfterNewest {
+					evict()
+				}
+				for _, i := range order {
+					finish(running[i], answers[i])
+					check(t, cache, fmt.Sprintf("translation %d done", i), answers[i], i != 2)
+				}
+				if cache.unconfirmed(sid, sam, answers[2]) != (order[2] != 2) {
+					t.Fatalf("newest answer confirmed %t after all finished in order %v",
+						!cache.unconfirmed(sid, sam, answers[2]), order)
+				}
+				cache.mu.Lock()
+				left := len(cache.inflight)
+				cache.mu.Unlock()
+				if left != 0 {
+					t.Fatalf("inflight keeps %d identities after every translation finished", left)
+				}
+			})
+		}
+	}
 	t.Run("one eviction and no newer translation", func(t *testing.T) {
 		cache, start, evict, _ := setup(t)
 		first := start()
