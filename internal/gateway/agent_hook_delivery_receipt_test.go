@@ -117,61 +117,64 @@ func managedHookBody(session, event string) string {
 	return `{"hook_event_name":"PreToolUse","session_id":"` + session + `","cwd":"/tmp","tool_name":"Bash","tool_use_id":"` + session + `-tool","tool_input":{"command":"echo ok"}}`
 }
 
+// offer makes a receipt-channel PreToolUse call, checks the gateway offers
+// an allow, and answers it with receipt ("" lets the hook time out).
+func (f managedHookAuditFixture) offer(t *testing.T, session, receipt string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	reader, writer := io.Pipe()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, f.server.URL+"/api/v1/claudecode/hook", reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := managedHookBody(session, "PreToolUse")
+	request.Header.Set(hookexec.HookDeliveryReceiptHeader, "1")
+	request.Header.Set(hookexec.HookDeliveryPayloadBytesHeader, strconv.Itoa(len(body)))
+	request.Header.Set("Content-Type", "application/json")
+	responseCh := make(chan *http.Response, 1)
+	errorCh := make(chan error, 1)
+	go func() {
+		response, requestErr := f.server.Client().Do(request)
+		if requestErr != nil {
+			errorCh <- requestErr
+			return
+		}
+		responseCh <- response
+	}()
+	if _, err := io.WriteString(writer, body); err != nil {
+		t.Fatal(err)
+	}
+	var response *http.Response
+	select {
+	case response = <-responseCh:
+	case err := <-errorCh:
+		t.Fatalf("gateway did not offer the hook a decision: %v", err)
+	case <-ctx.Done():
+		t.Fatal("gateway waited for the hook to finish before offering its decision")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", response.StatusCode)
+	}
+	line, err := bufio.NewReader(response.Body).ReadString('\n')
+	if err != nil || !strings.Contains(line, `"action":"allow"`) {
+		t.Fatalf("proposed answer %q: %v", line, err)
+	}
+	if receipt != "" {
+		if _, err := io.WriteString(writer, receipt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = writer.Close()
+	_, _ = io.Copy(io.Discard, response.Body)
+}
+
 // GAP-0286: a managed hook can receive a proposed allow, then have its
 // answer watchdog block before it gives the answer to the agent. Audit and
 // hook_decision record the decision the agent was given, never the proposal.
 func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 	f := newManagedHookAuditFixture(t, nil)
-	call := func(session, receipt string) {
-		t.Helper()
-		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-		defer cancel()
-		reader, writer := io.Pipe()
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, f.server.URL+"/api/v1/claudecode/hook", reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		body := managedHookBody(session, "PreToolUse")
-		request.Header.Set(hookexec.HookDeliveryReceiptHeader, "1")
-		request.Header.Set(hookexec.HookDeliveryPayloadBytesHeader, strconv.Itoa(len(body)))
-		request.Header.Set("Content-Type", "application/json")
-		responseCh := make(chan *http.Response, 1)
-		errorCh := make(chan error, 1)
-		go func() {
-			response, requestErr := f.server.Client().Do(request)
-			if requestErr != nil {
-				errorCh <- requestErr
-				return
-			}
-			responseCh <- response
-		}()
-		if _, err := io.WriteString(writer, body); err != nil {
-			t.Fatal(err)
-		}
-		var response *http.Response
-		select {
-		case response = <-responseCh:
-		case err := <-errorCh:
-			t.Fatalf("gateway did not offer the hook a decision: %v", err)
-		case <-ctx.Done():
-			t.Fatal("gateway waited for the hook to finish before offering its decision")
-		}
-		defer response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			t.Fatalf("status %d", response.StatusCode)
-		}
-		line, err := bufio.NewReader(response.Body).ReadString('\n')
-		if err != nil || !strings.Contains(line, `"action":"allow"`) {
-			t.Fatalf("proposed answer %q: %v", line, err)
-		}
-		if receipt != "" {
-			if _, err := io.WriteString(writer, receipt); err != nil {
-				t.Fatal(err)
-			}
-		}
-		_ = writer.Close()
-		_, _ = io.Copy(io.Discard, response.Body)
-	}
 	legacy := func(session, event string, ctx context.Context) string {
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", strings.NewReader(managedHookBody(session, event))).WithContext(ctx)
 		reply := httptest.NewRecorder()
@@ -179,9 +182,9 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 		return reply.Body.String()
 	}
 
-	call("timeout", "")
-	call("delivered", hookexec.HookDeliveryReceiptAck)
-	call("rejected", hookexec.HookDeliveryReceiptBlock)
+	f.offer(t, "timeout", "")
+	f.offer(t, "delivered", hookexec.HookDeliveryReceiptAck)
+	f.offer(t, "rejected", hookexec.HookDeliveryReceiptBlock)
 	gone, hangUp := context.WithCancel(t.Context())
 	hangUp()
 	legacy("disconnected", "PreToolUse", gone)
@@ -193,7 +196,7 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 	// decision is what the agent got.
 	legacy("prompt", "UserPromptSubmit", t.Context())
 	f.api.scannerCfg.Guardrail.HookFailMode = "open"
-	call("open-timeout", "")
+	f.offer(t, "open-timeout", "")
 
 	sessions := []string{"timeout", "delivered", "rejected", "disconnected", "legacy-no-receipt", "prompt", "open-timeout"}
 	want := map[string]string{

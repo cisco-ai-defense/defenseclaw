@@ -305,10 +305,14 @@ func TestRecoveredHookVerdictUsesRegisteredProfiles(t *testing.T) {
 					}
 					return
 				}
-				if response["action"] != "block" || response["raw_action"] != "block" || response["would_block"] != false || response["mode"] != "action" {
-					t.Fatalf("panic response=%v, want closed block/action", response)
+				// The closed answer is the event's native control: a block
+				// where the hook can carry one, else the advisory allow.
+				want := panicNativeActionOracle(name, tc.event, profile)
+				wantWouldBlock := want == "allow"
+				if response["action"] != want || response["raw_action"] != "block" || response["would_block"] != wantWouldBlock || response["mode"] != "action" {
+					t.Fatalf("panic response=%v, want %s/action would_block=%v", response, want, wantWouldBlock)
 				}
-				expected := agentHookResponseForProfile(profile, req, "block", "block", "WARN", "comparison reason for recovered hook evaluation error", nil, "action", false, profile.Capabilities)
+				expected := agentHookResponseForProfile(profile, req, want, "block", "WARN", "comparison reason for recovered hook evaluation error", nil, "action", wantWouldBlock, profile.Capabilities)
 				switch {
 				case terminalLifecycleEvent(name, tc.event):
 					if wire, ok := output.(map[string]interface{}); !ok || wire["continue"] != false || wire["stopReason"] == "" {
@@ -319,8 +323,7 @@ func TestRecoveredHookVerdictUsesRegisteredProfiles(t *testing.T) {
 						t.Fatalf("hook output=%v, normal verdict output=%v", got, want)
 					}
 				}
-				mappedAction, _ := mapHookActionForProfile("block", "action", tc.event, profile.Capabilities, profile, req.Payload)
-				if mappedAction == "block" {
+				if want == "block" {
 					denies := panicWireDenies(panicTestOutput(name, response))
 					if name == "amp" {
 						denies = response["action"] == "block"

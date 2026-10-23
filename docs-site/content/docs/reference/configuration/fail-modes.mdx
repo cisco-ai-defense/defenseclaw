@@ -15,7 +15,7 @@ One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows
 
 | Control | Effect | Default and scope |
 | --- | --- | --- |
-| `guardrail.hook_fail_mode` | `open` allows an eligible outage; `closed` blocks supported hook events when delivery or the gateway response fails. Under `closed` a recovered evaluator panic blocks advisory events too, but never a stop, session-end or idle event. Managed refusals below block in either mode. | `closed`. Under Secure Client an unset value is `open` ([Secure Client](#secure-client)). Per connector: `guardrail.connectors.<name>.hook_fail_mode`. |
+| `guardrail.hook_fail_mode` | `open` allows an eligible outage; `closed` blocks supported hook events when delivery or the gateway response fails. Under `closed` a recovered evaluator panic blocks every event whose native hook can block, Claude Code `PostToolBatch` included, but never a stop, session-end or idle event. Managed refusals below block in either mode. | `closed`. Under Secure Client an unset value is `open` ([Secure Client](#secure-client)). Per connector: `guardrail.connectors.<name>.hook_fail_mode`. |
 | `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force a closed connector open. | Unset. Per agent process. |
 | `DEFENSECLAW_FAIL_MODE` | Not read by 1.0.4 hooks in any profile: the installed mode is the fail mode. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)). | Set the mode with `defenseclaw guardrail fail-mode`. |
 
@@ -69,7 +69,7 @@ On a managed standalone host the administrator-owned hooks of GitHub Copilot CLI
 
 ## Effective behavior
 
-These outcomes apply to supported blocking events; a recovered evaluator panic also blocks advisory events. No failure blocks a stop, session-end or idle event ([Stop and session-end events](#stop-and-session-end-events)). Failure records and later alerts depend on the connector ([Reporting](#reporting-and-diagnosis)).
+These outcomes apply to supported blocking events; a recovered evaluator panic also blocks Claude Code `PostToolBatch`. An event whose native hook cannot block, such as Claude Code or Antigravity `PostToolUse` and Cursor `afterFileEdit`, is allowed with `would_block` and audited as not enforced. No failure blocks a stop, session-end or idle event ([Stop and session-end events](#stop-and-session-end-events)). Failure records and later alerts depend on the connector ([Reporting](#reporting-and-diagnosis)).
 
 | Failure | Per-user / Secure Client `open` | Managed standalone `open` | Effective `closed` |
 | --- | --- | --- | --- |
@@ -79,10 +79,10 @@ These outcomes apply to supported blocking events; a recovered evaluator panic a
 | Gateway returns 4xx (also when the body after it is cut off, and a 429 whose resend cannot be answered within the answer budget), malformed JSON or no action | Allow where the connector supports fail-open. | Block. | Block. |
 | Hook input over its bounded payload | Refuse to process it, allow. | Block. | Refuse to process it, block where the connector supports a block response. |
 | Valid gateway verdict | Honor the connector and event mapping. | Same. | Same. Fail mode does not make an observation-only event blocking. |
-| Internal evaluator error (a recovered panic) | Allow with `would_block`, a warning, an audit row with result `panic` and telemetry. An explicit `closed` under Secure Client blocks. | Block every hook event except stop, session-end and idle events, advisory events included, even when the administrator selected `open`; an evaluator panic is not an eligible gateway outage. Audit with result `panic` and emit telemetry. | Block every hook event except stop, session-end and idle events, advisory events included, in action and observe mode; audit with result `panic` and emit telemetry. |
+| Internal evaluator error (a recovered panic) | Allow with `would_block`, a warning, an audit row with result `panic` and telemetry. An explicit `closed` under Secure Client blocks. | Block every event whose native hook can block, except stop, session-end and idle events, even when the administrator selected `open`; an evaluator panic is not an eligible gateway outage. Allow an event whose native hook cannot block, with `would_block`. Audit with result `panic` and emit telemetry. | Block every event whose native hook can block, except stop, session-end and idle events, in action and observe mode; allow an event whose native hook cannot block, with `would_block`; audit with result `panic` and emit telemetry. |
 | Ordered-chain state unavailable or inconsistent | Keep the current event's standalone verdict; skip only the chain join. | Same. | Same. Chain storage never creates or removes a single-event block. |
 
-Observe mode never enforces a policy verdict. The failure blocks in the table above still apply on a standalone managed host in observe mode. A recovered evaluator error there gives no verdict, so it blocks every hook event except stop, session-end and idle events, in observe mode too, even when the administrator selected `hook_fail_mode: open`. That block is a fail-closed answer without a policy finding: alert on the `defenseclaw.panics.total` counter and on audit rows with result `panic`, and inspect gateway health.
+Observe mode never enforces a policy verdict. The failure blocks in the table above still apply on a standalone managed host in observe mode. A recovered evaluator error there gives no verdict, so it blocks every event whose native hook can block, except stop, session-end and idle events, in observe mode too, even when the administrator selected `hook_fail_mode: open`. That block is a fail-closed answer without a policy finding: alert on the `defenseclaw.panics.total` counter and on audit rows with result `panic`, and inspect gateway health.
 
 An exact unexpired deny receipt can replay its stable denial without duplicate finding telemetry.
 

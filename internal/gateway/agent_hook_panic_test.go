@@ -544,7 +544,9 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 		{"claudecode", "PreToolUse", "observe", "closed", "block"},
 		{"codex", "PreToolUse", "observe", "closed", "block"},
 		{"hermes", "pre_tool_call", "observe", "closed", "block"},
-		{"claudecode", "PostToolUse", "action", "closed", "block"},
+		// PostToolUse is advisory in Claude Code's contract: its native
+		// answer cannot refuse the completed call.
+		{"claudecode", "PostToolUse", "action", "closed", "allow"},
 	} {
 		t.Run(strings.Join([]string{tc.connector, tc.event, tc.mode, tc.failMode}, "/"), func(t *testing.T) {
 			previous, had := hookProfileRuntimes[tc.connector]
@@ -593,8 +595,8 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 			if row.Structured["result"] != "panic" || row.Structured["action"] != tc.wantAction || row.Structured["would_block"] != wantWouldBlock {
 				t.Fatalf("audit=%v, want panic/%s/would_block=%v", row.Structured, tc.wantAction, wantWouldBlock)
 			}
-			if tc.event == "PostToolUse" && !decisionIsDenied(response["claude_code_output"]) {
-				t.Fatalf("post-tool output=%v, want a closed-failure denial", response["claude_code_output"])
+			if tc.event == "PostToolUse" && (decisionIsDenied(response["claude_code_output"]) || row.Enforced) {
+				t.Fatalf("post-tool output=%v enforced=%v, want the advisory answer", response["claude_code_output"], row.Enforced)
 			}
 			extra, _ := row.Structured["extra"].(map[string]any)
 			if extra["panic"] != "true" {
@@ -913,8 +915,11 @@ func TestHookEvaluatorPanicRuleForEveryRegisteredEvent(t *testing.T) {
 								t.Fatalf("panic response=%+v, want a neutral allow that does not repeat the hook", resp)
 							}
 						default:
-							if resp.Action != "block" || resp.Mode != "action" || resp.WouldBlock {
-								t.Fatalf("panic response=%+v, want closed block/action", resp)
+							// A certified block event blocks; an advisory event keeps
+							// the allow with would_block its native hook can carry
+							// (TestHookEvaluatorPanicActionFollowsNativeControl).
+							if want := panicNativeActionOracle(connectorName, event, profile); resp.Action != want || resp.Mode != "action" || resp.WouldBlock != (want == "allow") {
+								t.Fatalf("panic response=%+v, want %s in action mode", resp, want)
 							}
 						}
 					})
