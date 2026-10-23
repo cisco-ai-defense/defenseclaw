@@ -186,7 +186,7 @@ func launchCoverageExplanation(reason string) string {
 	case "claude_npm_launch_unverified":
 		return "the running Claude Code npm script has an unsupported or unreadable managed hook contract"
 	case "claude_version_unverified":
-		return "the running Claude Code build is not identified as a release with a verified managed hook contract"
+		return "the running Claude Code build is not identified as a release with a verified managed hook contract (it is older, unrecognized, or was replaced on disk by an update after it started)"
 	default:
 		return strings.ReplaceAll(reason, "_", " ")
 	}
