@@ -502,43 +502,11 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		if err := os.WriteFile(stat, []byte(fmt.Sprintf("btime %d\n", time.Now().Unix())), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		// Most lifecycle tests start with a host restricted before this boot.
-		// The earlier boot marker proves that no old user namespace survived.
-		// Transition tests remove that proof or reopen the setting explicitly.
-		path := env.P(sysctlMaxUserNamespaces)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte("0\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		ptrace := env.P(sysctlPtraceScope)
-		if err := os.MkdirAll(filepath.Dir(ptrace), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(ptrace, []byte("2\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		boot := env.P(userNamespaceBootIDPath)
-		if err := os.MkdirAll(filepath.Dir(boot), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(boot, []byte("boot-before\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		config := env.P(userNamespacesConfigPath)
-		if err := os.MkdirAll(filepath.Dir(config), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(config, userNamespacesConfig, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(env.P(userNamespaceBootMarker), []byte("boot-prior\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(env.P(ptraceBootMarker), []byte("boot-prior\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		// Tests of unrelated lifecycle behavior need explicit, readable
+		// kernel facts before status can claim complete security. Tests for
+		// open or unavailable controls replace or remove these fake values.
+		writeHostFile(t, h, sysctlMaxUserNamespaces, "0\n")
+		writeHostFile(t, h, sysctlPtraceScope, "2\n")
 	}
 	return h
 }

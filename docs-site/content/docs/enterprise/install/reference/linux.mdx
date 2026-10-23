@@ -196,53 +196,49 @@ sudo systemctl show defenseclaw-gateway.service \
 
 ## User namespaces
 
-The managed install writes `/etc/sysctl.d/99-zz-defenseclaw-userns.conf` with
-`user.max_user_namespaces = 0` and `kernel.yama.ptrace_scope = 2`, and applies
-both to the running kernel. These settings prevent a standard user from
-mounting over machine policy or translating its paths with ptrace before
-starting an agent. A preexisting, stricter ptrace scope of `3` is preserved.
-`status` and `verify` report
-`unprivileged_user_namespaces` or `unprivileged_ptrace` and
-`security_complete: false` if either live setting or the persistent file is
-missing, changed or unreadable. `ensure` restores the settings.
+On most distributions as shipped (Ubuntu 24.04 and RHEL 9 included), `status`
+and `verify` warn `unprivileged_user_namespaces`, `unprivileged_ptrace` or both
+and report `security_complete: false`. A standard
+user who can create a private user and mount namespace, or trace their own
+processes (for example with PRoot), can start an agent with its own view of the
+machine-policy files, the runtime descriptor and `/run/defenseclaw-hook`. That
+agent never calls the hook, so its tool calls are outside your enforcement
+([Residual risks](/docs/enterprise/plan/threat-model#residual-risks)). For
+an invoked machine-policy hook, DefenseClaw compares the content digest of
+the policy files it can read with the digest pinned in the administrator-owned
+runtime descriptor. A missing, changed or unreadable policy causes
+`enterprise_managed_policy_view_unverified` and a closed refusal on Linux and
+macOS. Linux also refuses a private user or mount namespace and a traced
+hook when it can observe them. If RHEL denies access to `/proc/1`, the hook
+uses the policy digest as its proof. This check cannot run if an agent omitted
+its managed hook before launch.
 
-**Reboot after the first managed install or an upgrade from an older
-deployment, even if the live value was already zero.** A user namespace
-created earlier in that boot, or a tracer already attached to an agent, can
-survive the sysctl change. DefenseClaw
-records the boot ID in the root-owned
-`/etc/sysctl.d/.defenseclaw-userns-restricted-boot-id` and
-`/etc/sysctl.d/.defenseclaw-ptrace-restricted-boot-id` markers and keeps
-`security_complete: false` until the host starts a new boot with the
-restrictions in effect. Status and verify also fail if either marker is
-missing or changed. Another root-owned marker,
-`/etc/sysctl.d/.defenseclaw-userns-uninstalled-boot-id`, records when an
-uninstall removed the persistent file. All markers survive uninstall: a
-same-boot reinstall can keep a prior safe boot only when the restriction was
-intact at uninstall, while a reinstall after a boot without that file requires
-another reboot. If the kernel setting cannot
-be applied, the transaction fails. After uninstall, the lifecycle removes
-its persistent sysctl file but leaves the running restriction in place until
-reboot.
+After an administrator or MDM changes a vendor machine-policy file or adds a
+drop-in, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --json`.
+The hook refuses calls until DefenseClaw verifies the current
+policy and publishes its new digest. Vendor policy paths are not watched by
+the apply unit; the daily verify timer reports drift but does not repair it.
 
-These are host-wide kernel settings, including for processes outside
-DefenseClaw. On a managed RHEL 9.8 compatibility lane, setting
-`user.max_user_namespaces=0` made a standard user's `unshare -Ur` and
-RootlessKit fail and stopped Codex's workspace sandbox from running a command.
-An OpenShell Docker sandbox ran with that setting alone, but failed when
-`kernel.yama.ptrace_scope=2` was applied; the combined settings also failed.
-Ordinary Claude Code and Hermes turns ran on that lane, without proving their
-optional sandboxes work. The OpenShell MicroVM probe was inconclusive because
-gateway JWT signing was not configured. Expect rootless container workflows,
-user namespace based command sandboxes, and process debugging with `gdb` or
-`strace` to be affected; test each required workload before managed rollout.
-Do not roll out this managed configuration on a host that requires any of the
-failed workloads until the namespace and ptrace enforcement strategy is
-resolved.
-The hook rejects a private user namespace when invoked, but a private view
-that hides machine policy before agent startup can prevent the agent from
-invoking the hook at all. Application control must also prevent modified or
-loader-injected clients from bypassing policy registration.
+DefenseClaw never writes host-wide kernel or sysctl settings. An
+administrator may apply optional hardening with their own host management
+tools after testing the host's workloads. On a managed RHEL 9.8 host these
+settings disrupted other work:
+
+| Setting | What stopped working |
+| --- | --- |
+| `user.max_user_namespaces=0` | Codex's workspace sandbox, RootlessKit and rootless containers, a standard user's `unshare -Ur` |
+| `kernel.yama.ptrace_scope=2` | OpenShell Docker sandboxes, a standard user's `gdb` and `strace` |
+
+`status` and `verify` report the observed live kernel values through
+`unprivileged_user_namespaces` and `unprivileged_ptrace` warnings. They do
+not treat old boot markers or a prior value as proof of current protection.
+
+On Ubuntu 24.04 you can close only the namespace route with
+`kernel.apparmor_restrict_unprivileged_unconfined=1`, which also restricts
+bubblewrap-based command sandboxes. Neither setting stops a modified agent
+client or loader and runtime preloads (`LD_PRELOAD`, `LD_AUDIT`,
+`NODE_OPTIONS=--require`); use application control such as fapolicyd for
+those.
 
 ## Tetragon and AI Discovery Plane C
 
@@ -365,9 +361,11 @@ sudo apt purge defenseclaw-enterprise
 ```
 
 On a tarball host, `uninstall --purge` removes the deployment, including
-`/opt/defenseclaw`. The two host-security boot markers under `/etc/sysctl.d`
-remain after every removal mode, and the live namespace limit stays zero until
-reboot. They prevent a same-boot reinstall from forgetting earlier exposure.
+`/opt/defenseclaw`. DefenseClaw no longer creates sysctl files or reboot
+markers under `/etc/sysctl.d`, and removing the deployment does not change the
+running kernel. Administrators of a host that received an earlier 1.0.4
+prerelease opt-in should review its existing `/etc/sysctl.d` files with their
+own host management tools.
 
 ## Upgrades and changes
 

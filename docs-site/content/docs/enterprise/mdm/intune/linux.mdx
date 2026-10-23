@@ -141,8 +141,9 @@ ten minutes), or after the user selects **Refresh** in the Intune app.
 The platform script's own run status is the first signal: it fails whenever `ensure`
 fails. For a separate health signal, add a second root platform script: a copy of
 `packaging/mdm/linux/detect.sh` with `DC_REQUIRE_HEALTHY=1` and, optionally,
-`DC_MIN_VERSION="X.Y.Z"`. It exits `0` when DefenseClaw is installed, new enough and
-passes `verify`, and `1` otherwise. Set its retries to **No retries**.
+`DC_MIN_VERSION="X.Y.Z"`. It exits `0` when DefenseClaw is installed, new enough,
+passes `verify` and reports `security_complete: true`, and `1` otherwise. Set
+its retries to **No retries**.
 
 Intune's custom compliance cannot run `detect.sh` (Microsoft runs Linux discovery
 scripts as the signed-in user, and DefenseClaw's status is readable only by root),
@@ -150,11 +151,11 @@ and a failed platform script does not make a Linux device noncompliant. Read eac
 script's per-device status instead (open the configuration profile and select
 **Device status**). The package database answers inventory:
 
-After a first managed install or upgrade, DefenseClaw applies the Linux host
-restrictions but reports `unprivileged_user_namespaces` until the next reboot.
-During that interval, `detect.sh --require-healthy` reports `unhealthy`; this
-is the expected pending-reboot state, not a completed rollout. Schedule the
-reboot and rerun the health script before marking the device healthy.
+DefenseClaw leaves Linux kernel settings as found. If the observed values
+allow unprivileged namespaces or ptrace, `status` and `verify` report
+incomplete security and `detect.sh --require-healthy` reports `unhealthy`.
+An administrator may apply optional host hardening with their own tools.
+There is no DefenseClaw pending-reboot state.
 
 ```bash
 dpkg-query -W -f='${Status} ${Version}\n' defenseclaw-enterprise

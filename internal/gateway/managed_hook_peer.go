@@ -578,16 +578,15 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.Header.Get(hookexec.ClientRefusalHeader) == hookexec.ManagedUserNamespaceReason {
-			// A hook in a private user namespace refused its agent before it
-			// could check the runtime state; the refusal left no audit row or
-			// log line, unlike a refused unenrolled account (GAP-0923).
+		if reason := r.Header.Get(hookexec.ClientRefusalHeader); hookexec.IsManagedProcessContextReason(reason) {
+			// A hook refused an unsafe or unverified process context before it
+			// could inspect the event. Keep the refusal in the audit and log.
 			connectorName, _ := a.managedHookRouteScope(r)
 			fmt.Fprintf(os.Stderr,
-				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s: the agent runs in a private user namespace\n",
-				peer.UID, connectorName, route, hookexec.ManagedUserNamespaceReason)
-			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, hookexec.ManagedUserNamespaceReason, connectorName)
-			writeManagedHookRefusal(w, http.StatusForbidden, hookexec.ManagedUserNamespaceReason)
+				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s: the agent process context is unsafe or unverified\n",
+				peer.UID, connectorName, route, reason)
+			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, reason, connectorName)
+			writeManagedHookRefusal(w, http.StatusForbidden, reason)
 			return
 		}
 		connectorName, inspect := a.managedHookRouteScope(r)

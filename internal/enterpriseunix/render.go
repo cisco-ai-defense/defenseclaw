@@ -53,7 +53,9 @@ type renderInputs struct {
 	LoadCredential bool
 	// MachinePolicy are the connectors the descriptor records as protected
 	// by vendor machine policy.
-	MachinePolicy []string
+	MachinePolicy         []string
+	PolicyViewDigests     map[string]string
+	PolicyViewUserSources map[string]map[string]managed.PolicyViewFilePin
 }
 
 // renderFiles returns every non-binary file the deployment consists of.
@@ -85,7 +87,6 @@ func (e *Env) renderFiles(in renderInputs) ([]desiredFile, error) {
 
 	switch e.GOOS {
 	case "linux":
-		add(userNamespacesConfigPath, e.desiredPolicyViewConfig(), 0o644, root, "host-security")
 		if in.Channel != ChannelPackage {
 			for _, unit := range e.Services.Units() {
 				data, err := systemdunits.ReadFile(unit.Name)
@@ -245,6 +246,21 @@ func proxyEnvironment(cfg *validatedConfig) map[string]string {
 }
 
 func (e *Env) renderDescriptor(in renderInputs) ([]byte, error) {
+	digests := in.PolicyViewDigests
+	userSources := in.PolicyViewUserSources
+	if digests == nil {
+		// An unchanged plan keeps the last committed pins. A publish updates
+		// them only after the vendor policy is actually on disk.
+		path := e.P(e.Layout.DescriptorPath)
+		if e.Trust(path, TrustAdminFile) == nil {
+			if data, err := readBounded(path, 64<<10); err == nil {
+				if previous, err := managed.ParseRuntimeDescriptor(data); err == nil {
+					digests = previous.PolicyViewDigests
+					userSources = previous.PolicyViewUserSources
+				}
+			}
+		}
+	}
 	d := &managed.RuntimeDescriptor{
 		SchemaVersion:           managed.RuntimeDescriptorSchemaVersion,
 		Profile:                 managed.ProfileStandalone,
@@ -255,10 +271,20 @@ func (e *Env) renderDescriptor(in renderInputs) ([]byte, error) {
 		APIAddr:                 e.Layout.APIAddr,
 		HookSocket:              e.Layout.HookSocketPath,
 		MachinePolicyConnectors: append([]string{}, in.MachinePolicy...),
+		PolicyViewDigests:       make(map[string]string),
+		PolicyViewUserSources:   make(map[string]map[string]managed.PolicyViewFilePin),
 		DisableSelfUpdate:       true,
 		InstalledAt:             in.InstalledAt,
 	}
 	sort.Strings(d.MachinePolicyConnectors)
+	for _, name := range d.MachinePolicyConnectors {
+		if digest := digests[name]; digest != "" {
+			d.PolicyViewDigests[name] = digest
+		}
+		if len(userSources[name]) != 0 {
+			d.PolicyViewUserSources[name] = userSources[name]
+		}
+	}
 	if in.Config != nil {
 		d.DisableSelfUpdate = in.Config.SelfUpdateDisabled
 		d.OpenHookConnectors = openHookConnectors(in.Config, d.MachinePolicyConnectors)

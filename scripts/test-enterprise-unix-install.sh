@@ -608,6 +608,11 @@ case "$kind" in
     pkg) ! pkgutil --pkg-info "$macos_package_id" >/dev/null 2>&1 || die "$macos_package_id is already installed" ;;
 esac
 [ -z "$(policy_entries)" ] || die "DefenseClaw machine-policy entries already exist: $(policy_entries)"
+if [ "$platform" = linux ]; then
+    found_userns=$(cat /proc/sys/user/max_user_namespaces)
+    found_ptrace=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)
+    echo "kernel as found: user.max_user_namespaces=$found_userns kernel.yama.ptrace_scope=$found_ptrace"
+fi
 echo "package: $package"
 echo "version: $version"
 
