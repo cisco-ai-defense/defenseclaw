@@ -38,21 +38,7 @@ func shellHookBlocksNatively(script string, code int, stdout string) bool {
 // failMode and returns the hook directory.
 func renderPerUserShellHooks(t *testing.T, tc installInFlightShellCase, data, failMode string) string {
 	t.Helper()
-	hooks := filepath.Join(data, "hooks")
-	addr := freeAPIAddr(t)
-	if tc.conn.Name() == "cursor" {
-		// Cursor's connector setup renders its action hook closed in every
-		// mode; the open render is the one an observe install runs.
-		if err := writeHookScriptsCommonWithFailMode(hooks, addr, "test-token", failMode, []string{"cursor-hook.sh"}); err != nil {
-			t.Fatal(err)
-		}
-		return hooks
-	}
-	opts := SetupOpts{DataDir: data, APIAddr: addr, APIToken: "test-token", HookFailMode: failMode, GuardrailMode: "action", WorkspaceDir: data}
-	if err := WriteHookScriptsForConnectorObjectWithOpts(hooks, opts, tc.conn); err != nil {
-		t.Fatal(err)
-	}
-	return hooks
+	return renderPerUserShellHooksAt(t, tc, data, failMode, freeAPIAddr(t))
 }
 
 // runPerUserShellHookAt runs the rendered hook at path with data as the
@@ -159,7 +145,8 @@ func TestPerUserShellHookBootstrapFailureClosesDuringAnInstall(t *testing.T) {
 }
 
 // shellInstallLockCheck is the one install check of the shell hooks, as
-// _hardening.sh defines it.
+// _hardening.sh defines it: defenseclaw_install_lock_held and
+// defenseclaw_install_held, which reads it for each data directory.
 func shellInstallLockCheck(t *testing.T) string {
 	t.Helper()
 	hardening, err := hookFS.ReadFile("hooks/_hardening.sh")
@@ -171,19 +158,25 @@ func shellInstallLockCheck(t *testing.T) string {
 	if start < 0 {
 		t.Fatal("_hardening.sh defines no defenseclaw_install_lock_held")
 	}
-	end := strings.Index(text[start:], "\n}\n")
-	if end < 0 {
-		t.Fatal("defenseclaw_install_lock_held has no end")
+	held := strings.Index(text[start:], "\ndefenseclaw_install_held() {\n")
+	if held < 0 {
+		t.Fatal("_hardening.sh defines no defenseclaw_install_held after defenseclaw_install_lock_held")
 	}
-	return text[start : start+end+3]
+	end := strings.Index(text[start+held:], "\n}\n")
+	if end < 0 {
+		t.Fatal("defenseclaw_install_held has no end")
+	}
+	return text[start : start+held+end+3]
 }
 
 // Every rendered per-user shell hook carries the same install check as
 // _hardening.sh, before its helpers load, and reads .install.lock only
-// through it; the check holds the lock by the rule the native hook, the
-// in-agent plugins and the Windows adapters use: the lock exists as any
-// file type, or the data directory exists but cannot be searched, or there
-// is no data directory to look in.
+// through it, and every install check of the hook is defenseclaw_install_held:
+// the data directory DEFENSECLAW_HOME names (else ~/.defenseclaw) and the one
+// the hook was installed in (GAP-0948). The check holds the lock by the rule
+// the native hook, the in-agent plugins and the Windows adapters use: the
+// lock exists as any file type, or the data directory exists but cannot be
+// searched, or there is no data directory to look in.
 func TestShellHooksShareTheOneInstallCheck(t *testing.T) {
 	check := shellInstallLockCheck(t)
 	seen := map[string]bool{}
@@ -207,6 +200,12 @@ func TestShellHooksShareTheOneInstallCheck(t *testing.T) {
 		}
 		if strings.Index(text, check) > strings.Index(text, `"${HOOK_DIR}/_hardening.sh"`) {
 			t.Errorf("%s defines the install check after it loads its helpers", tc.invoke.script)
+		}
+		if got, want := strings.Count(text, `defenseclaw_install_lock_held "`), strings.Count(check, `defenseclaw_install_lock_held "`); got != want {
+			t.Errorf("%s reads one data directory's lock %d times, want only through defenseclaw_install_held (%d)", tc.invoke.script, got, want)
+		}
+		if !strings.Contains(text, `_DC_HOOK_DATA_DIR="${HOOK_DIR}/.."`) {
+			t.Errorf("%s does not check the data directory it was installed in once its path is resolved", tc.invoke.script)
 		}
 	}
 	for _, script := range []string{"inspect-tool.sh", "inspect-request.sh", "inspect-response.sh", "inspect-tool-response.sh"} {
@@ -264,6 +263,42 @@ func TestShellHooksShareTheOneInstallCheck(t *testing.T) {
 		}
 		if got := strings.TrimSpace(string(out)) == "held"; got != row.held {
 			t.Errorf("%s: held=%v, want %v (%s)", row.name, got, row.held, out)
+		}
+	}
+
+	// defenseclaw_install_held: the installer may hold either data
+	// directory (GAP-0948).
+	free, held := mk("both-free", nil), mk("both-held", func(p string) error { return os.Mkdir(p, 0o700) })
+	both := []struct {
+		name     string
+		home     string // DEFENSECLAW_HOME, "" for none
+		userHome string // HOME
+		hookData string // _DC_HOOK_DATA_DIR, "" for none
+		held     bool
+	}{
+		{"neither directory is held", free, root, free, false},
+		{"the hook's data directory is held", free, root, held, true},
+		{"DEFENSECLAW_HOME is held", held, root, free, true},
+		{"no DEFENSECLAW_HOME, no ~/.defenseclaw, the hook's data directory is held", "", root, held, true},
+		{"no DEFENSECLAW_HOME, no ~/.defenseclaw, the hook's data directory is free", "", root, free, false},
+		{"no hook data directory and DEFENSECLAW_HOME is free", free, root, "", false},
+		{"no DEFENSECLAW_HOME and no HOME", "", "", free, true},
+	}
+	for _, row := range both {
+		cmd := exec.Command("bash", "-c", "set -euo pipefail\n"+check+`if defenseclaw_install_held; then echo held; else echo free; fi`)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + row.userHome}
+		if row.home != "" {
+			cmd.Env = append(cmd.Env, "DEFENSECLAW_HOME="+row.home)
+		}
+		if row.hookData != "" {
+			cmd.Env = append(cmd.Env, "_DC_HOOK_DATA_DIR="+row.hookData)
+		}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: %v: %s", row.name, err, out)
+		}
+		if got := strings.TrimSpace(string(out)) == "held"; got != row.held {
+			t.Errorf("defenseclaw_install_held, %s: held=%v, want %v (%s)", row.name, got, row.held, out)
 		}
 	}
 }
