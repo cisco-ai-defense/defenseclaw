@@ -69,6 +69,9 @@ describe('1.0.4 managed outage and upgrade claims', () => {
       assert.doesNotMatch(text, /--discard-unsynced/i, name);
       assert.doesNotMatch(text, /sync fails.{0,100}keeps running/i, name);
       assert.doesNotMatch(text, /stop still proceeds with the stop/i, name);
+      if (name === 'reference/sandboxes/cli.mdx') {
+        assert.match(text, /`--yes` skips the normal detached-run or attached-session confirmation\. There is no separate failed-sync confirmation or loss-acceptance flag/i, name);
+      }
     }
   });
 
@@ -89,8 +92,11 @@ describe('1.0.4 managed outage and upgrade claims', () => {
       assert.match(section, /save or pull.*work.*stop.*sandbox/i, `package section ${index}`);
       assert.doesNotMatch(section, /sandboxes_running|package.*refuses before replacing files.*sandbox/i, `package section ${index}`);
       if (index < 2) {
+        assert.match(section, /sandbox daemon from DefenseClaw 1\.0\.3 or older can stop its user's OpenShell gateway/i, `package section ${index}`);
         assert.match(section, /completed MicroVM or an error-state MicroVM whose VM is still running/i, `package section ${index}`);
         assert.match(section, /error-state MicroVM whose VM has exited does not need a stop for a later gateway restart/i, `package section ${index}`);
+      } else {
+        assert.match(section, /before upgrading from 1\.0\.3 or earlier/i, `package section ${index}`);
       }
     }
   });
