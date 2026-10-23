@@ -53,12 +53,12 @@ func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) 
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	attempts := 0
+	attemptsByConnector := make(map[string]int)
 	for _, row := range rows {
-		attempts += row.Attempts
+		attemptsByConnector[row.Report.Connector] += row.Attempts
 	}
-	if len(rows) != 3 || attempts != 51 {
-		t.Fatalf("rows after the stop = %+v (attempts %d), want 3 rows covering all 51 refusals", rows, attempts)
+	if len(attemptsByConnector) != 2 || attemptsByConnector["claudecode"] != 50 || attemptsByConnector["codex"] != 1 {
+		t.Fatalf("rows after the stop = %+v (counts %v), want all 51 refusals by connector", rows, attemptsByConnector)
 	}
 }
 
