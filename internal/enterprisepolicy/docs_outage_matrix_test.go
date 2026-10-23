@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -80,6 +81,19 @@ func codeOutage(conn connector.Connector) documentedOutage {
 		managedOpen = managedOpenBlocksLinuxMacOS
 		if _, machinePolicy := targets[conn.Name()]; machinePolicy {
 			managedOpen = managedOpenPerUserRouteBlocksLM
+		}
+	}
+	if conn.Name() == ConnectorOpenCode {
+		// The managed OpenCode plugin runs the foreign-hook check before the
+		// native machine-policy hook. The default guard blocks an outage on
+		// every OS even when the administrator selected open.
+		policy := config.EnterpriseMachinePolicyConfig{}.PolicyFor(conn.Name())
+		guardAllOS := true
+		for _, goos := range []string{"linux", "darwin", "windows"} {
+			guardAllOS = guardAllOS && GuardApplies(conn.Name(), goos, policy)
+		}
+		if guardAllOS {
+			managedOpen = connector.OutageBlocks
 		}
 	}
 	env := "no"

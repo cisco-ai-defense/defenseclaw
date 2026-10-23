@@ -19,7 +19,7 @@ On per-user installs, `defenseclaw doctor` reports active security override flag
 
 ## Managed hosts and the environment
 
-Per-user installs and the Secure Client profile read the raw environment. A **managed standalone** host (`deployment_mode: managed_enterprise`, `enterprise.profile: standalone`) is different: the administrator owns `config.yaml`, and every row below has a **Managed host** policy that stops user-controlled opt-outs from weakening it.
+Per-user installs and the Secure Client profile read the raw environment, except that a per-user config drops stray deployment pins. A **managed standalone** host (`deployment_mode: managed_enterprise`, `enterprise.profile: standalone`) is different: the administrator owns `config.yaml`, and every row below has a **Managed host** policy that stops user-controlled opt-outs from weakening it.
 
 Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C service process, and some (TLS verification overrides) can weaken security. Administrators control the service environment; `defenseclaw doctor` cannot inspect a separate systemd service's environment.
 
@@ -52,10 +52,12 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
   either its `config.yaml` or the service environment says
   `managed_enterprise`, so unsetting or changing the variable in a shell cannot
   turn a managed host into an unmanaged one. Both pins are refused from
-  `.env`. The reverse is no escalation either: exporting
-  `DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise` in a shell only makes that
-  process's writers refuse changes (exit code `3`, `This device is managed`).
-  It does not enrol the device or apply an administrator's policy.
+  `.env`. For a per-user `config.yaml` on Linux, macOS and Windows, the CLI
+  and gateway ignore a stray shell export of either pin before loading that
+  config; per-user writers still work. A managed service with a machine-owned
+  config keeps its pin, and managed writers refuse local changes. Exporting
+  `DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise` in a user shell does not
+  enrol the device or apply an administrator's policy.
 - **Settings have a config key where one exists.** `DEFENSECLAW_REPO` is the deprecated alias of `update.source`, `DEFENSECLAW_NO_UPDATE_CHECK` has `update.check: false`, and `guardrail.judge.trace` replaces `DEFENSECLAW_JUDGE_TRACE` (which is read only on the Secure Client integration). `DEFENSECLAW_CUSTOM_PROVIDERS_PATH` names the derived `custom-providers.json`, not an input. See [Source of truth](/docs/reference/configuration/source-of-truth#environment-variables-and-env).
 
 {/* AUTOGEN-BEGIN: env-vars */}

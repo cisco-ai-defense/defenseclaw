@@ -175,7 +175,7 @@ describe('managed outage documentation', () => {
     assert.doesNotMatch(modes, /no-answer deadline[^.]*including Secure Client/i);
   });
 
-  it('limits Secure Client truncated-response blocks to connectors that can deliver one', () => {
+  it('pins Hermes Secure Client fail-open delivery and its capability row', () => {
     const hook = readFileSync(join(repo, 'internal/gateway/connector/hookexec/hookexec.go'), 'utf8');
     const readFailure = hook.match(/if readErr != nil \{([\s\S]*?)\n\t\}/)?.[1] ?? '';
     assert.match(readFailure, /return (?:failNoAnswer\(opts, sp, failMode\)|failAfterErrorStatus\(opts, sp, failMode, knownStatus\))/);
@@ -198,11 +198,42 @@ describe('managed outage documentation', () => {
     }
 
     const secure = page('reference/configuration/fail-modes.mdx').split('### Secure Client')[1]?.split('### Connector limits')[0] ?? '';
-    assert.match(secure, /For native Secure Client hooks that can block a delivery failure, a successful response cut off after headers is blocked\./);
-    assert.match(secure, /Hermes[^.]*default `open`[^.]*allows the tool call[^.]*records the failure/i);
+    assert.match(secure, /default `open`[^.]*Hermes tool call[^.]*records the failure/i);
     for (const path of docPages()) {
       assert.doesNotMatch(readFileSync(path, 'utf8').split(/\s+/).join(' '), /a successful response cut off after headers blocks\./i, path);
     }
+  });
+
+  it('states Secure Client partial-body delivery on Windows and macOS without a blanket block claim', () => {
+    const hook = readFileSync(join(repo, 'internal/gateway/connector/hookexec/hookexec.go'), 'utf8');
+    assert.match(hook, /if readErr != nil \{\s*return failNoAnswer\(opts, sp, failMode\)/);
+    assert.match(hook, /func managedNativeDecision\(opts Options\) bool \{\s*return opts\.ManagedEnterprise && !opts\.SecureClient/);
+    const deadline = readFileSync(join(repo, 'internal/gateway/connector/hookexec/answer_deadline.go'), 'utf8');
+    assert.match(deadline, /func noAnswerFailMode[\s\S]*?return failMode/);
+    const render = readFileSync(join(repo, 'internal/gateway/connector/subprocess.go'), 'utf8');
+    assert.match(render, /func shellHookSecureClientDelivery\(opts SetupOpts\) bool \{\s*return shellHookSecureClientProfile\(opts\) && opts\.SecureClientHookDelivery && SecureClientDeploymentVerified\(\)/);
+    assert.match(render, /func setupHookFailMode\(opts SetupOpts\) string \{\s*if strings\.TrimSpace\(opts\.HookFailMode\) == "" && opts\.SecureClientHookDelivery && SecureClientDeploymentVerified\(\) \{/);
+    const codex = readFileSync(join(repo, 'internal/gateway/connector/hooks/codex-hook.sh'), 'utf8');
+    assert.match(codex, /if \[ "\$CURL_STATUS" -ne 0 \]; then\s*fail_unreachable "gateway unreachable"/);
+    assert.match(codex, /fail_unreachable\(\)[\s\S]*?if defenseclaw_should_fail_closed_on_unreachable; then\s*exit 2[\s\S]*?exit 0/);
+    const secure = page('reference/configuration/fail-modes.mdx').split('### Secure Client')[1]?.split('### Connector limits')[0] ?? '';
+    assert.match(secure, /Windows native Secure Client[^.]*cut off after headers[^.]*default `open`[^.]*allow/i);
+    assert.match(secure, /macOS Secure Client[^.]*shell hooks[^.]*cut off[^.]*default `open`[^.]*allow/i);
+    assert.match(secure, /explicit `closed`[^.]*block where the connector can deliver a block/i);
+    assert.match(secure, /outside the 1\.0\.4 test scope/i);
+    assert.doesNotMatch(secure, /successful response cut off after headers is blocked/);
+  });
+
+  it('limits every-mode HTTP 401 and 403 refusals to managed standalone hooks', () => {
+    const hook = readFileSync(join(repo, 'internal/gateway/connector/hookexec/hookexec.go'), 'utf8');
+    assert.match(hook, /func managedIntegrityFailMode\(opts Options, failMode string\) string \{\s*if managedNativeDecision\(opts\) \{\s*return "closed"\s*\}\s*return failMode/);
+    assert.match(hook, /case resp\.StatusCode == http\.StatusUnauthorized \|\| resp\.StatusCode == http\.StatusForbidden:\s*\/\/ An authentication refusal is integrity, not an outage\.\s*return failResponse\(opts, sp, managedIntegrityFailMode\(opts, failMode\)/);
+    const modes = page('reference/configuration/fail-modes.mdx');
+    const refusals = modes.split('### Refusals that ignore the fail mode')[1]?.split('### Secure Client')[0] ?? '';
+    assert.match(refusals, /block in every fail mode on a managed standalone host/);
+    const secure = modes.split('### Secure Client')[1]?.split('### Connector limits')[0] ?? '';
+    assert.match(secure, /HTTP 401 and 403[^.]*effective fail mode[^.]*default `open`[^.]*allow/i);
+    assert.doesNotMatch(modes, /block in every fail mode on a managed computer/);
   });
 
   it('scopes an unreadable Windows listener table to a stopped service', () => {
@@ -318,6 +349,77 @@ describe('quarantine publication and cleanup', () => {
     assert.match(text, /After publication.*verified copy stays in quarantine storage/i);
     assert.match(text, /source.*partly or completely removed/i);
     assert.match(text, /`quarantine failed`.*install block and runtime disable stay/i);
+  });
+
+  it('keeps the quarantine-failure audit neutral about the source location', () => {
+    const watcher = readFileSync(join(repo, 'internal/watcher/watcher.go'), 'utf8');
+    const failure = watcher.split('func (w *InstallWatcher) emitQuarantineFailure')[1]?.split('func quarantineUnmaterialized')[0] ?? '';
+    assert.match(failure, /Quarantine failed; inspect the source and quarantine copy/);
+    assert.doesNotMatch(failure, /asset stays in place/);
+    const scanners = page('reference/scanning/scanners.mdx');
+    assert.match(scanners, /After publication.*source may be partly or completely removed/i);
+    assert.match(scanners, /Check `skill info` and the quarantine location before recovering the skill/);
+  });
+});
+
+describe('routed 1.0.4 documentation gaps', () => {
+  it('describes managed OpenCode outages under the default guard and per OS without it', () => {
+    const plugin = readFileSync(join(repo, 'internal/gateway/connector/hooks/opencode-plugin.js'), 'utf8');
+    assert.match(plugin, /defenseclawForeignHookCheck\(event, cwd\)[\s\S]*?if \(!DC_FOREIGN_GUARD\) return Promise\.resolve\(""\)/);
+    assert.match(plugin, /function defenseclawForeignHookCheck[\s\S]*?if \(err\) \{\s*fail\(/);
+    assert.match(plugin, /DC_FAIL_MODE = "\{\{if and \.Managed \(not \.SecureClient\)\}\}closed\{\{else\}\}\{\{\.FailMode\}\}\{\{end\}\}"/);
+    const policy = readFileSync(join(repo, 'internal/enterprisepolicy/publicpolicy.go'), 'utf8');
+    assert.match(policy, /guardConnectors = map\[string\]bool\{[\s\S]*?"opencode":\s*true/);
+    const machinePlugin = readFileSync(join(repo, 'internal/enterprisepolicy/opencode_managed_plugin.js'), 'utf8');
+    assert.match(machinePlugin, /"--enterprise-managed"/);
+    const hook = readFileSync(join(repo, 'internal/gateway/connector/hookexec/hookexec.go'), 'utf8');
+    assert.match(hook, /func ManagedOutageFailsOpen[\s\S]*?errManagedGatewayNotRunning\) \|\| errors\.Is\(err, errGatewayRestarting\) \|\|/);
+    const reference = page('enterprise/configure/reference.mdx');
+    const managed = reference.split('### Managed OpenCode plugin')[1]?.split('### What DefenseClaw writes')[0] ?? '';
+    assert.match(managed, /default foreign-hook guard[^.]*gateway outage blocks[^.]*Linux, macOS and Windows/i);
+    assert.match(managed, /`foreign_hooks: report` or `allow`[^.]*machine-policy route[^.]*every OS/i);
+    assert.match(managed, /per-user route[^.]*Linux and macOS[^.]*both modes/i);
+    assert.ok(managed.includes('/docs/reference/apis/capability-matrix#gateway-outage'));
+    assert.doesNotMatch(managed, /It fails closed:.*gateway is unreachable/i);
+    const machine = page('enterprise/configure/machine-policy.mdx');
+    assert.match(machine, /default foreign-hook guard[^.]*outage blocks on Linux, macOS and Windows/i);
+    assert.match(machine, /`foreign_hooks: report` or `allow`[^.]*classified gateway outage[^.]*every OS/i);
+    const matrix = JSON.parse(readFileSync(join(site, 'data/capability-matrix.json'), 'utf8'));
+    assert.equal(matrix.connectors.find((row: { id: string }) => row.id === 'opencode')?.outage.managedOpen, 'blocks');
+    assert.match(page('reference/apis/capability-matrix.mdx'), /OpenCode's machine-policy route follows the installed mode on every OS/);
+  });
+
+  it('describes ACP adoption and asks operators to inspect extra picker entries', () => {
+    const source = readFileSync(join(repo, 'cli/defenseclaw/commands/cmd_acp.py'), 'utf8');
+    assert.match(source, /aliases = \[name for name in names if name != _managed_name\(agent\)\]/);
+    assert.match(source, /written = aliases or names or \[_managed_name\(agent\)\]/);
+    const feature = page('features/acp-guard.mdx');
+    assert.match(feature, /Fresh `defenseclaw acp setup`[^.]*`DefenseClaw · <agent>`/);
+    assert.match(feature, /`defenseclaw setup acp`[^.]*existing direct picker entry in place[^.]*without adding a duplicate for that adopted key/i);
+    assert.match(feature, /`acp verify` and inspect the editor's picker[^.]*copied guard/i);
+    const howto = page('how-to/agents/guard-an-acp-editor.mdx');
+    assert.match(howto, /`acp verify` and inspect the editor's picker[^.]*copied guard[^.]*remove those entries in the editor/i);
+  });
+
+  it('states that a stray deployment pin is dropped for per-user config on every OS', () => {
+    const go = readFileSync(join(repo, 'internal/managed/pin_guard.go'), 'utf8');
+    assert.match(go, /func IgnoreUnmanagedPins[\s\S]*?!underDirectory\(configPath, homeDir\) \|\| declaresManaged\(configPath\)/);
+    const python = readFileSync(join(repo, 'cli/defenseclaw/config.py'), 'utf8');
+    assert.match(python, /def ignore_unmanaged_deployment_pins[\s\S]*?if declares_managed:\s*return \[\][\s\S]*?os\.environ\.pop\(name, None\)/);
+    const vars = page('reference/configuration/env-vars.mdx');
+    const pins = vars.split('**The deployment pins cannot be used')[1]?.split('**Settings have a config key')[0] ?? '';
+    assert.match(pins, /per-user `config\.yaml`[^.]*Linux, macOS and Windows[^.]*ignore[^.]*shell export/i);
+    assert.match(pins, /managed service[^.]*machine-owned config[^.]*pin/i);
+    assert.doesNotMatch(pins, /only makes that process's writers refuse changes/);
+  });
+
+  it('states Antigravity event binding syntax per OS', () => {
+    const source = readFileSync(join(repo, 'internal/gateway/connector/helpers.go'), 'utf8');
+    assert.match(source, /func antigravityHookInvocationCommandForEvent[\s\S]*?if goos == "windows"[\s\S]*?windowsNativePowerShellHookCommandForEvent\("antigravity", event/);
+    assert.match(source, /return strings\.TrimSpace\(unixCommand\) \+ " " \+ event/);
+    const reference = page('reference/connectors/antigravity.mdx');
+    assert.match(reference, /Windows[^.]*`--event`[^.]*Linux and macOS[^.]*positional event/i);
+    assert.doesNotMatch(reference, /each event's native `--event` binding/);
   });
 });
 

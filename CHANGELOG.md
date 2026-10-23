@@ -10,6 +10,7 @@ for current behavior.
 
 ## [Unreleased] — 1.0.4
 
+- **Quarantine failure audit points to both locations.** A verified copy may already be in quarantine storage when source cleanup fails, so the watcher alert and audit ask the operator to inspect the source and copy instead of claiming the source remains in place.
 - **Managed local scans and policy tests no longer need service-owned state.** JSON code scans use a process-local redaction key without opening the gateway audit database or correlation key; policy tests report no tests when an installed config-only policy has no Rego directory.
 - **Invalid enterprise profiles keep the source version and field in diagnostics.** Non-string values are refused at `enterprise.profile` before profile resolution, and version-9 error JSON keeps `config_version: 9`.
 - **Fleet policy versions always returns an array.** The empty SQLite-backed response now sends `versions: []`, matching the API contract and the in-memory backend.

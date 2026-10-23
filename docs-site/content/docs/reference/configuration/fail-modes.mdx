@@ -36,7 +36,7 @@ Any value other than `open` (in any case) is `closed`. Per-connector behavior is
 
 ### Refusals that ignore the fail mode
 
-These are not an outage, so they block in every fail mode on a managed computer:
+These are not an outage, so they block in every fail mode on a managed standalone host:
 
 - The administrator-owned runtime is missing or fails its checks (the runtime descriptor on Linux and macOS, the runtime generation on Windows).
 - Another program answers in place of the gateway service.
@@ -51,7 +51,9 @@ Event-specific outage limits are in the [gateway outage table](/docs/reference/a
 
 ### Secure Client
 
-Under the Secure Client integration only, an unset `guardrail.hook_fail_mode` resolves to `open` for every connector (Codex and Claude Code included), independent of the guardrail mode, and an explicit `closed` (global or per connector) is kept. Its authenticated hook can follow that mode when the gateway is unreachable or returns a complete but unusable answer, and records the failure. A managed standalone tool hook with administrator `open` can allow when its gateway gives no answer by the deadline; guarded calls, locally spent budgets and calls answered first with HTTP 429 block. Other events use their event-specific outcomes. Secure Client hooks have no separate no-answer deadline and keep their whole request budget: a request that times out before headers follows its effective fail mode. For native Secure Client hooks that can block a delivery failure, a successful response cut off after headers is blocked. Hermes with its default `open` allows the tool call and records the failure. Only an authenticated Secure Client deployment gets the open default: the profile the protected config resolves and, for the native Windows hook, a host whose Secure Client installation, deployment record and gateway service check out. Every other install keeps the closed default.
+Under the Secure Client integration only, an unset `guardrail.hook_fail_mode` resolves to `open` for every connector (Codex and Claude Code included), independent of the guardrail mode, and an explicit `closed` (global or per connector) is kept. Its authenticated hook can follow that mode when the gateway is unreachable or returns a complete but unusable answer, and records the failure. HTTP 401 and 403 on Secure Client follow the effective fail mode: the default `open` can allow a supported tool call and records the refusal. A managed standalone tool hook with administrator `open` can allow when its gateway gives no answer by the deadline; guarded calls, locally spent budgets and calls answered first with HTTP 429 block. Other events use their event-specific outcomes. Secure Client hooks have no separate no-answer deadline and keep their whole request budget: a request that times out before headers follows its effective fail mode.
+
+For a Windows native Secure Client hook, a successful response cut off after headers is handled as no answer; the default `open` can allow a Codex or Claude Code tool call and records the failure. For macOS Secure Client, shell hooks treat a transfer cut off before a full response as a delivery failure; the default `open` can allow a Codex, Claude Code or Hermes tool call and records the failure. An explicit `closed` can block where the connector can deliver a block. Secure Client is outside the 1.0.4 test scope; these statements describe the code paths, not a live block guarantee. Only an authenticated Secure Client deployment gets the open default: the profile the protected config resolves and, for the native Windows hook, a host whose Secure Client installation, deployment record and gateway service check out. Every other install keeps the closed default.
 
 ### Connector limits
 

@@ -193,7 +193,7 @@
     },
     {
       "id": "opencode",
-      "outage": {"perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "per-user-route-blocks-linux-macos", "secureClientClosed": "blocks", "strictAvailability": "yes", "envFailMode": "no"},
+      "outage": {"perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "secureClientClosed": "blocks", "strictAvailability": "yes", "envFailMode": "no"},
       "label": "OpenCode",
       "windowsSupport": "supported",
       "windowsNote": "Direct native Windows x64 execution is supported for the admitted WinGet CLI.",

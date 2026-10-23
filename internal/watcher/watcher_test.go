@@ -1465,6 +1465,55 @@ func TestDeniedSkillWhoseQuarantineFailsSaysSo(t *testing.T) {
 	t.Fatal("quarantine failure emitted no runtime alert")
 }
 
+// A verified copy can be published before source removal fails. Neither the
+// audit event nor the alert may tell an operator that source files still exist.
+func TestQuarantineFailureAuditDoesNotClaimSourceRemains(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "before publication", err: errors.New("publication failed")},
+		{name: "after publication", err: fmt.Errorf("%w: source cleanup failed", enforce.ErrQuarantinePublished)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, store, logger, skillDir := setupTestEnv(t)
+			capture := &watcherTestRuntime{}
+			logger.SetRuntimeV8Emitter(capture)
+			w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+			evt := InstallEvent{Type: InstallSkill, Name: "blocked", Path: filepath.Join(skillDir, "blocked"), Connector: "claudecode"}
+			w.emitQuarantineFailure(context.Background(), evt, tc.err)
+			logs, _ := capture.snapshot()
+			var auditFound, alertFound bool
+			for _, record := range logs {
+				if record.EventName() != "legacy.audit.watcher.block" && record.EventName() != "subsystem.degraded" {
+					continue
+				}
+				body, ok := record.Body()
+				if !ok {
+					t.Fatalf("%s has no body", record.EventName())
+				}
+				fields, err := body.Object()
+				if err != nil {
+					t.Fatal(err)
+				}
+				message := fmt.Sprint(fields)
+				if strings.Contains(message, "stays in place") || !strings.Contains(message, "source") || !strings.Contains(message, "quarantine copy") {
+					t.Fatalf("%s = %q, want both locations without a source-state claim", record.EventName(), message)
+				}
+				switch record.EventName() {
+				case "legacy.audit.watcher.block":
+					auditFound = true
+				case "subsystem.degraded":
+					alertFound = true
+				}
+			}
+			if !auditFound || !alertFound {
+				t.Fatalf("quarantine failure emitted audit=%t alert=%t, want both", auditFound, alertFound)
+			}
+		})
+	}
+}
+
 // A quarantine that published its copy and then failed to remove the
 // source keeps its pending record when the destination cannot be inspected
 // afterwards: the copy may still be there and the record restores it. Only

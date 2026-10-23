@@ -26,7 +26,7 @@ The vendor installer (`irm https://antigravity.google/cli/install.ps1 | iex`) pu
 
 ### Repair and doctor
 
-`defenseclaw doctor` passively validates the exact five-event mixed schema and 30-second timeouts, each event's native `--event` binding, the protected `defenseclaw-hook.exe` PE target and contract lock, connector-scoped gateway authentication and runtime freshness, and stale, malformed, foreign, missing or inconsistent registrations. Doctor never executes command text read from `hooks.json`. Run `defenseclaw setup antigravity` again to repair, using the same guarded backup and rollback path as first setup. Teardown restores the pre-Setup file when unchanged. If you edited it, teardown removes only DefenseClaw's current and legacy commands, keeps other hooks, disables cached launchers and checks that no registration remains.
+`defenseclaw doctor` passively validates the exact five-event mixed schema and 30-second timeouts, each event's bound argument (positional on Linux and macOS, `--event` in the Windows native launcher), the protected `defenseclaw-hook.exe` PE target and contract lock on Windows, connector-scoped gateway authentication and runtime freshness, and stale, malformed, foreign, missing or inconsistent registrations. Doctor never executes command text read from `hooks.json`. Run `defenseclaw setup antigravity` again to repair, using the same guarded backup and rollback path as first setup. Teardown restores the pre-Setup file when unchanged. If you edited it, teardown removes only DefenseClaw's current and legacy commands, keeps other hooks, disables cached launchers and checks that no registration remains.
 
 ### Configuration boundary
 
@@ -80,7 +80,7 @@ DefenseClaw's hook contract covers `agy` `>=1.1.8`. Google's [changelog](https:/
 
 ### Hook schema
 
-All handlers are synchronous with a 30-second timeout. The event name is not in Antigravity's stdin, so DefenseClaw binds each registration to a trusted `--event` argument and forwards it to the gateway in a local header, without rewriting the stdin captured for audit.
+All handlers are synchronous with a 30-second timeout. The event name is not in Antigravity's stdin. Windows binds each registration through a native `--event` launcher argument; Linux and macOS bind a positional event after `antigravity-hook.sh`. DefenseClaw forwards that bound event to the gateway in a local header without rewriting the stdin captured for audit.
 
 | Event | Registration shape | Stdin beyond common metadata | DefenseClaw stdout |
 | --- | --- | --- | --- |

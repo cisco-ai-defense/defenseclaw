@@ -105,7 +105,7 @@ On Linux and macOS the lifecycle (`ensure`, install, upgrade, repair) writes eve
 
 ## Managed OpenCode plugin
 
-The payload ships a plugin at `<InstallRoot>/share/opencode/defenseclaw.js`, and DefenseClaw adds it to OpenCode's managed config. It holds no credential and fails closed. OpenCode uses this route only while the file is administrator-owned and OpenCode's managed config names it; otherwise the per-user plugin stays and `policy show` says why. [Detail](/docs/enterprise/configure/reference#managed-opencode-plugin).
+The payload ships a plugin at `<InstallRoot>/share/opencode/defenseclaw.js`, and DefenseClaw adds it to OpenCode's managed config. The managed OpenCode plugin holds no credential and blocks unchecked tool calls by default. With the default foreign-hook guard, a gateway outage blocks on Linux, macOS and Windows even under administrator `open`. If the administrator selects `foreign_hooks: report` or `allow`, explicit `open` can allow a classified gateway outage on the machine-policy route on every OS when the hook binary runs; the default `closed` blocks. The managed per-user plugin still blocks an outage on Linux and macOS in both modes. OpenCode uses the machine-policy route only while the file is administrator-owned and OpenCode's managed config names it; otherwise the per-user plugin stays and `policy show` says why. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [detail](/docs/enterprise/configure/reference#managed-opencode-plugin).
 
 ## Locks on Linux and macOS
 

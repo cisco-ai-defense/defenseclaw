@@ -32,7 +32,7 @@ The ACP guard sits between an editor that speaks the Agent Client Protocol (ACP)
 
 ## How it works
 
-- `defenseclaw acp setup` replaces the editor's agent entry with a `DefenseClaw · <agent>` entry that starts `defenseclaw-acp`.
+- Fresh `defenseclaw acp setup` writes a `DefenseClaw · <agent>` entry that starts `defenseclaw-acp`. On Linux, macOS and Windows, `defenseclaw setup acp` adopts an existing direct picker entry in place, keeping its name and `env` without adding a duplicate for that adopted key. Later `acp setup` updates entries DefenseClaw can identify for that pair. Run `acp verify` and inspect the editor's picker for any other entry that can launch the agent directly or through a copied guard. Remove such entries in the editor.
 - The guard checks prompts, agent output, permission requests, file and terminal calls, and vendor extensions.
 - It talks only to the gateway on a loopback address. Each request is encrypted and each verdict is authenticated, so another process on the port cannot read content or fake a verdict.
 - Setup starts in observe mode: it records findings and does not block on them. In observe mode the guard still refuses a message it could not check when the profile's `fail_mode` is `closed`, and on a managed computer unless the administrator set `fail_mode: open`. Add `--activate` for action mode.
