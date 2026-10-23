@@ -20,6 +20,13 @@ func (c *identityCache[T]) getNonblocking(key string) (T, bool) {
 // A failed or timed-out lookup never returns facts from before it. Managed
 // macOS hooks use this for secondary groups: Open Directory gives no change
 // notification for their removal.
+//
+// When the wait expires as the lookup completes, the outcome is read under
+// the cache lock, not from which select case won: a lookup still in flight
+// is marked for the next hook (pendingFresh), and one that has finished
+// returns its answer now. Marking a finished lookup pending lost its answer:
+// the completion had already counted it as served, so the next hook started
+// another slow lookup and could refuse, although the answer was current.
 func (c *identityCache[T]) getFresh(key string, wait time.Duration) (T, bool) {
 	var zero T
 	if c == nil || key == "" || c.resolve == nil || wait <= 0 {
@@ -54,16 +61,19 @@ func (c *identityCache[T]) getFresh(key string, wait time.Duration) (T, bool) {
 	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
+	timedOut := false
 	select {
 	case <-done:
 	case <-timer.C:
-		c.mu.Lock()
-		entry.pendingFresh = true
-		c.mu.Unlock()
-		return zero, false
+		timedOut = true
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if timedOut && entry.inflight == done {
+		// Still running: the next hook may use its answer once it completes.
+		entry.pendingFresh = true
+		return zero, false
+	}
 	c.dropAgedLocked(key, entry, c.now())
 	if entry.ok && entry.generation > before {
 		entry.pendingFresh, entry.servedGeneration = false, entry.generation

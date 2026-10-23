@@ -38,7 +38,7 @@ func TestExemptUsersNameFormsPerPlatform(t *testing.T) {
 			Assurance: useridentity.AssuranceVerified, ResolvedAt: now},
 	}
 	restore := managedHookExemptFacts
-	managedHookExemptFacts = func(uid int) (useridentity.DirectoryFacts, bool) { f, ok := facts[uid]; return f, ok }
+	managedHookExemptFacts = func(uid int, _ bool) (useridentity.DirectoryFacts, bool) { f, ok := facts[uid]; return f, ok }
 	t.Cleanup(func() { managedHookExemptFacts = restore })
 
 	linux := managedHookPeer{UID: 94404076, Name: "ent-alice@dclab.test"}

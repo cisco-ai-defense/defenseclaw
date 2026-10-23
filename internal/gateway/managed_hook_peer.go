@@ -257,14 +257,28 @@ func (z *managedHookAuthorizer) exempt(peer managedHookPeer) bool {
 	if !named || peer.Name == "" || !identityFactsEnabled.Load() {
 		return false
 	}
-	facts, _ := managedHookExemptFacts(peer.UID)
-	if facts.ResolvedAt.IsZero() {
+	matches := func(facts useridentity.DirectoryFacts) bool {
+		if facts.ResolvedAt.IsZero() {
+			return false
+		}
+		subject := profileSubjectFromVerified(VerifiedSubject{
+			UserID: uid, IDKind: useridentity.KindPOSIXUID, UserName: peer.Name, Directory: facts,
+		}, false)
+		return anyMatches(z.enrollment.ExemptUsers, func(entry string) bool { return userEntryMatches(&subject, entry) })
+	}
+	// Settled facts already cached for the account that holds the uid now
+	// bind its names: when they match no entry, the caller is not exempt,
+	// without waiting for the directory. Only a possible exemption (the
+	// cached facts match an entry, or none are settled) waits for verified
+	// facts, within the exemption's bound. A managed Mac waited for a fresh
+	// Open Directory answer on every hook of every caller a named entry did
+	// not match by uid or exact name, up to 2 s per hook (review of r104
+	// Q-identity, loop round 1).
+	if cached, ok := managedHookExemptFacts(peer.UID, true); ok && !matches(cached) {
 		return false
 	}
-	subject := profileSubjectFromVerified(VerifiedSubject{
-		UserID: uid, IDKind: useridentity.KindPOSIXUID, UserName: peer.Name, Directory: facts,
-	}, false)
-	return anyMatches(z.enrollment.ExemptUsers, func(entry string) bool { return userEntryMatches(&subject, entry) })
+	facts, _ := managedHookExemptFacts(peer.UID, false)
+	return matches(facts)
 }
 
 // hostRunExempt reports whether the caller is exempt from enrollment as decide
@@ -278,13 +292,11 @@ func (z *managedHookAuthorizer) hostRunExempt(peer managedHookPeer) bool {
 
 // managedHookExemptFacts are the verified directory facts exempt matches a
 // caller's names with, from the cache the caller's hook requests use; tests
-// replace it.
-var managedHookExemptFacts = func(uid int) (useridentity.DirectoryFacts, bool) {
-	// A named exemption needs verified name forms even when no profile
-	// assignment selects by identity. Wait for a cold lookup so the first
-	// hook after a restart can use a UPN or DOMAIN\\name exemption.
-	return verifiedIdentityDirectory(strconv.Itoa(uid), true)
-}
+// replace it. cached asks only for settled facts the cache already holds,
+// without waiting; otherwise the facts are read within the exemption's
+// bound (exemptIdentityDirectory), so the first hook after a restart can
+// use a UPN or DOMAIN\name exemption.
+var managedHookExemptFacts = exemptIdentityDirectory
 
 // decide authorizes one hook call. surface is the caller's
 // hookexec.AgentSurfaceHeader: under unverified_versions: refuse a call
