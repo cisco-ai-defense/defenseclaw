@@ -222,8 +222,64 @@ func TestCopilotExtraFieldVerifyAndReconcileAgree(t *testing.T) {
 	if _, err := target.Reconcile(opts); err == nil || !strings.Contains(err.Error(), "move independent content to a separate handler") {
 		t.Fatalf("reconcile did not refuse the extra field: %v", err)
 	}
+	if published, err := Publish(opts, []string{copilotConnector}); err == nil ||
+		len(published.MachinePolicyConnectors) != 0 {
+		t.Fatalf("publish claimed the combined handler: %+v, %v", published, err)
+	}
 	if got := readFile(t, path); got != string(edited) {
 		t.Fatalf("reconcile changed the combined handler: %s", got)
+	}
+}
+
+func TestCopilotManagedNullHooksAreInert(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			opts := Options{GOOS: goos, HookBinary: "/opt/defenseclaw/bin/defenseclaw-hook"}
+			if goos == "windows" {
+				opts.HookBinary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+			}
+			for _, current := range []string{
+				`{"version":1,"hooks":null}`,
+				`{"version":1,"hooks":null,"operator":{"enabled":true}}`,
+			} {
+				merged, err := mergeCopilotDropIn(opts, []byte(current))
+				if err != nil {
+					t.Fatalf("inert hooks in %s: %v", current, err)
+				}
+				var doc map[string]any
+				if err := json.Unmarshal(merged, &doc); err != nil {
+					t.Fatal(err)
+				}
+				if doc["hooks"] == nil || (strings.Contains(current, "operator") && doc["operator"] == nil) {
+					t.Fatalf("publish lost the current hooks or independent top-level content: %s", merged)
+				}
+			}
+			for _, current := range []string{`{"hooks":false}`, `{"hooks":[]}`} {
+				if merged, err := mergeCopilotDropIn(opts, []byte(current)); err == nil || merged != nil {
+					t.Fatalf("non-object hooks %s were accepted: %s, %v", current, merged, err)
+				}
+			}
+		})
+	}
+
+	opts := testOptions(t)
+	opts.CopilotCLIPolicyOnly = true
+	path, err := copilotDropInPath(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const original = `{"version":1,"hooks":null,"operator":{"enabled":true}}`
+	writeFile(t, path, original)
+	target := copilotTarget{}
+	state, err := target.Reconcile(opts)
+	if err != nil || !state.Covered {
+		t.Fatalf("publish did not install hooks in an inert drop-in: %+v, %v", state, err)
+	}
+	if verified, err := target.Verify(opts); err != nil || !verified.Covered {
+		t.Fatalf("verify disagreed with publish: %+v, %v", verified, err)
+	}
+	if _, err := target.RemoveOwned(opts); err != nil || readFile(t, path) != original {
+		t.Fatalf("remove did not restore the independent original: %s, %v", readFile(t, path), err)
 	}
 }
 

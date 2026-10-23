@@ -505,10 +505,10 @@ func mergeCopilotDropIn(opts Options, current []byte) ([]byte, error) {
 	doc.set("version", json.Number("1"))
 	value, present := doc.get("hooks")
 	hooks, ok := value.(*object)
-	if present && !ok {
+	if present && value != nil && !ok {
 		return nil, errors.New("hooks is not an object")
 	}
-	if !present {
+	if !present || value == nil {
 		hooks = newObject()
 		doc.set("hooks", hooks)
 	}

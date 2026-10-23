@@ -366,33 +366,37 @@ func TestTamperedCopilotDropInFailsVerifyAndIsPutBack(t *testing.T) {
 	}
 }
 
-func TestCombinedCopilotDropInEnsureRefusesSecondExecutable(t *testing.T) {
-	h := newTestHost(t, "linux")
-	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "copilot")}))
-	writeFreshLedger(t, h)
-	dropIn := "/etc/github-copilot/policy.d/" + enterprisepolicy.DefenseClawDropInName
-	var doc map[string]any
-	if err := json.Unmarshal([]byte(h.read(dropIn)), &doc); err != nil {
-		t.Fatal(err)
-	}
-	pre := doc["hooks"].(map[string]any)["preToolUse"].([]any)[0].(map[string]any)
-	pre["command"] = "operator-tool"
-	combined, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(h.env.P(dropIn), combined, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	verify := h.run(Options{Action: ActionVerify})
-	requireError(t, verify, codeVerify)
-	if !strings.Contains(messagesOf(verify.Errors, codeVerify), "move independent content to a separate handler") {
-		t.Fatalf("verify did not identify the combined handler: %+v", verify.Errors)
-	}
-	ensure := h.run(Options{Action: ActionEnsure, Reason: "path"})
-	if ensure.OK || ensure.SecurityComplete || h.read(dropIn) != string(combined) ||
-		!strings.Contains(fmt.Sprint(ensure.Errors), "move independent content to a separate handler") {
-		t.Fatalf("ensure changed or claimed the combined handler: %+v", ensure)
+func TestCombinedCopilotDropInEnsureRefusesIndependentContent(t *testing.T) {
+	for _, field := range []string{"command", "operator"} {
+		t.Run(field, func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "copilot")}))
+			writeFreshLedger(t, h)
+			dropIn := "/etc/github-copilot/policy.d/" + enterprisepolicy.DefenseClawDropInName
+			var doc map[string]any
+			if err := json.Unmarshal([]byte(h.read(dropIn)), &doc); err != nil {
+				t.Fatal(err)
+			}
+			pre := doc["hooks"].(map[string]any)["preToolUse"].([]any)[0].(map[string]any)
+			pre[field] = "operator-tool"
+			combined, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.env.P(dropIn), combined, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			verify := h.run(Options{Action: ActionVerify})
+			requireError(t, verify, codeVerify)
+			if !strings.Contains(messagesOf(verify.Errors, codeVerify), "move independent content to a separate handler") {
+				t.Fatalf("verify did not identify the combined handler: %+v", verify.Errors)
+			}
+			ensure := h.run(Options{Action: ActionEnsure, Reason: "path"})
+			if ensure.OK || ensure.SecurityComplete || h.read(dropIn) != string(combined) ||
+				!strings.Contains(fmt.Sprint(ensure.Errors), "move independent content to a separate handler") {
+				t.Fatalf("ensure changed or claimed the combined handler: %+v", ensure)
+			}
+		})
 	}
 }
 
