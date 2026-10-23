@@ -48,7 +48,7 @@ The last sentence appears only when the hook was present at session start. With 
 
 ## Gateway outages
 
-The guard needs the gateway's session record to prove that a session is clean. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for the affected connectors and recovery steps.
+The default guard covers [Copilot](/docs/reference/connectors/copilot), [Cursor](/docs/reference/connectors/cursor), [Devin](/docs/reference/connectors/devin), [OpenCode](/docs/reference/connectors/opencode), [Amp](/docs/reference/connectors/amp) and [Hermes](/docs/reference/connectors/hermes). Their gateway-backed session checks have the per-OS limits shown in the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage). Windows Amp keeps its session locally, and Windows Hermes does not run the guard. If the gateway cannot answer, a tool call whose check needs that record blocks even under administrator `open`.
 
 ## Approve a hook
 

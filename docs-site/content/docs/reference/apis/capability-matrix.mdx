@@ -68,8 +68,21 @@ The default is `closed` everywhere except Secure Client. On a managed standalone
 
 <OutageMatrix />
 
-- **Managed tool calls default to closed.** The managed column shows the administrator's explicit `open` for a proven stopped gateway under the default foreign-hook guard. A restart or missing answer blocks even under `open` on every OS. That guard blocks Copilot CLI, Cursor, Devin and OpenCode on Linux, macOS and Windows even under `open`; Amp and Hermes block on Linux and macOS. With `foreign_hooks: report` or `allow`, Copilot's and OpenCode's machine-policy routes follow the installed mode for a proven stopped gateway on every OS; their per-user routes still block on Linux and macOS. Windows Amp keeps its guard session locally; its plugin's outage result is given in the managed column. `status --json` and `verify --json` report the mode of the installed route.
-- **The foreign-hook guard can still block.** With `foreign_hooks: remove` (the default), the foreign-hook guard checks Copilot CLI, Cursor, Devin, OpenCode and Amp on Linux, macOS and Windows, and Hermes on Linux and macOS. Except for Windows Amp, a guarded tool call needs the gateway's session record. A stopped, restarting or unanswered gateway leaves that check unproven, so the guarded call blocks even under administrator `open`. Windows has no Hermes foreign-hook guard; its hook can follow administrator `open` only for a proven stopped gateway. Start the gateway, then restart the agent if its session still fails the check. See [Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#gateway-outages).
+### Default-guard outage class
+
+With `foreign_hooks: remove`, these guarded tool calls have the following outcome under administrator `open` at a proven stopped gateway. The capability rows above are the source for each OS. A restarting or unanswered gateway blocks every managed standalone tool call, even under `open`.
+
+| Connector ID | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| `copilot` | Blocks | Blocks | Blocks |
+| `cursor` | Blocks | Blocks | Blocks |
+| `devin` | Blocks | Blocks | Blocks |
+| `opencode` | Blocks | Blocks | Blocks |
+| `amp` | Blocks | Blocks | Runs |
+| `hermes` | Blocks | Blocks | Runs |
+
+- **Managed tool calls default to closed.** The managed column shows the administrator's explicit `open` for a proven stopped gateway under the default foreign-hook guard; the table above makes the guarded class explicit for each OS. A restart or missing answer blocks even under `open` on every OS. With `foreign_hooks: report` or `allow`, Copilot's and OpenCode's machine-policy routes follow the installed mode for a proven stopped gateway on every OS; their per-user routes still block on Linux and macOS. Windows Amp keeps its guard session locally; its plugin's outage result is given in the managed column. `status --json` and `verify --json` report the mode of the installed route.
+- **The foreign-hook guard can still block.** With `foreign_hooks: remove` (the default), the foreign-hook guard checks the connectors in the table above. Except for Windows Amp, a guarded tool call needs the gateway's session record. A stopped, restarting or unanswered gateway leaves that check unproven, so the guarded call blocks even under administrator `open`. Windows has no Hermes foreign-hook guard; its hook can follow administrator `open` only for a proven stopped gateway. Start the gateway, then restart the agent if its session still fails the check. See [Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#gateway-outages).
 - **A hook must run to deny.** Claude Code, Codex, Devin, Kiro, Copilot CLI, Antigravity and Hermes can run a call when a hook cannot start or times out. Cursor writes `failClosed: true` in action mode and `false` in per-user observe mode. A loaded Amp or OpenCode plugin denies a tool call it cannot check in mode `closed`.
 - **Vendor limits still apply.** Antigravity does not document non-zero hook exit status as enforcement; DefenseClaw sends its native deny on `PreToolUse`. Hermes accepts a valid block answer and, from 0.21, exit 2; other exits, a killed hook or a timeout can let a call run. Kiro CLI 2.24.1 ran a tool after a 12-second `preToolUse` hook exceeded its default timeout. DefenseClaw registers a 30-second timeout.
 - **Cursor CLI has an outage display limit.** Builds without `beforeSubmitPrompt` can send the prompt without a hook check. In action mode a refused prompt can disappear without a displayed reason, although tool refusals show their reason. Run `defenseclaw-gateway status`; on a per-user install, `defenseclaw-gateway start` restores a stopped gateway.

@@ -14,6 +14,43 @@ function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }
 
+type OutageRow = { id: string; outage: { managedOpen: string } };
+
+function outageRows(): OutageRow[] {
+  return JSON.parse(readFileSync(join(site, 'data/capability-matrix.json'), 'utf8')).connectors;
+}
+
+function guardedConnectorIDs(source: string): string[] {
+  const ids = new Set<string>();
+  for (const mapName of ['guardConnectors', 'unixGuardConnectors']) {
+    const body = source.match(new RegExp(`var ${mapName} = map\\[string\\]bool\\{([\\s\\S]*?)\\n\\}`))?.[1];
+    assert.ok(body, `${mapName} is missing`);
+    for (const entry of body.matchAll(/(?:Connector([A-Za-z]+)|"([a-z]+)"):\s*true/g)) {
+      ids.add((entry[1] ?? entry[2]).toLowerCase());
+    }
+  }
+  return [...ids].sort();
+}
+
+function managedOpenBlocksOnOS(value: string, goos: 'Linux' | 'macOS' | 'Windows'): boolean {
+  switch (value) {
+    case 'blocks': return true;
+    case 'blocks-linux-macos': return goos !== 'Windows';
+    case 'runs':
+    case 'per-user-route-blocks':
+    case 'per-user-route-blocks-linux-macos':
+    case 'runs-blocks-with-hooks-only-preserve': return false;
+    default: assert.fail(`unknown managed-open outage value: ${value}`);
+  }
+}
+
+function assertProvenStoppedOutageOnly(hook: string): void {
+  const body = hook.split('func ManagedOutageFailsOpen')[1]?.split('\n}')[0] ?? '';
+  assert.match(body, /!managedNativeDecision\(opts\)[\s\S]*?normalizeFailMode\(opts\.FailMode\) != "open"/);
+  assert.match(body, /return errors\.Is\(err, errManagedGatewayNotRunning\)\s*$/);
+  assert.doesNotMatch(body, /errGatewayRestarting|errGatewayNoAnswer/);
+}
+
 function assertPartialBodyUsesDeliveryMode(hook: string): void {
   // Both hook versions route a truncated body through the effective delivery
   // mode. The newer path also checks a known error status on standalone hosts.
@@ -72,19 +109,21 @@ describe('managed outage documentation', () => {
     assert.doesNotMatch(layers, /Managed Claude Code and Codex hooks \| Always closed/);
   });
 
-  it('states the Hermes guard boundary on each managed OS', () => {
+  it('states the Unix-only Hermes guard boundary from its capability row', () => {
     const source = readFileSync(join(repo, 'internal/enterprisepolicy/publicpolicy.go'), 'utf8');
-    assert.match(source, /ConnectorHermes: true/);
-    const scope = source.split('func GuardApplies')[1]?.split('func BuildPublicPolicy')[0];
-    assert.match(scope ?? '', /if unixGuardConnectors\[connector\] {\s*return goos != "windows"/);
+    assert.match(source, /var unixGuardConnectors = map\[string\]bool\{\s*ConnectorHermes:\s*true/);
+    const scope = source.split('func GuardApplies')[1]?.split('func ForeignHookSessionLocal')[0] ?? '';
+    assert.match(scope, /if unixGuardConnectors\[connector\] \{\s*return goos != "windows"/);
+    const value = outageRows().find((row) => row.id === 'hermes')?.outage.managedOpen;
+    assert.ok(value, 'Hermes has no managed-open outage row');
     const matrix = page('reference/apis/capability-matrix.mdx');
-    // The note ends at the next bullet; without it the rest of the page would match.
-    const next = '- **A hook must run to deny';
-    const guard = matrix.split('**The foreign-hook guard can still block.**')[1];
-    assert.ok(guard?.includes(next), 'foreign-hook guard note and the bullet after it');
-    const note = guard.split(next)[0];
-    assert.match(note, /Hermes on Linux and macOS/);
-    assert.match(note, /Windows.*Hermes.*administrator.*proven stopped gateway/i);
+    const note = matrix.split('**The foreign-hook guard can still block.**')[1]?.split('- **A hook must run to deny')[0] ?? '';
+    assert.match(note, /Windows has no Hermes foreign-hook guard/);
+    if (managedOpenBlocksOnOS(value, 'Windows')) {
+      assert.doesNotMatch(note, /Windows has no Hermes foreign-hook guard; its hook can follow administrator `open`/);
+    } else {
+      assert.match(note, /Windows has no Hermes foreign-hook guard; its hook can follow administrator `open` only for a proven stopped gateway/);
+    }
   });
 
   it('keeps an unverified gateway socket or peer closed in every fail mode', () => {
@@ -101,14 +140,13 @@ describe('managed outage documentation', () => {
 
   it('limits managed open to a proven stopped gateway, including restart and no-answer paths', () => {
     const hook = readFileSync(join(repo, 'internal/gateway/connector/hookexec/hookexec.go'), 'utf8');
-    const outage = hook.split('func ManagedOutageFailsOpen')[1]?.split('// managedCopilotOpen')[0];
-    assert.match(outage ?? '', /return errors\.Is\(err, errManagedGatewayNotRunning\)\s*\}/);
+    assertProvenStoppedOutageOnly(hook);
     const restart = hook.split('case errors.Is(cause, errGatewayRestarting):')[1]?.split('case ', 1)[0];
     assert.match(restart ?? '', /return failUnreachable\(opts, sp, "closed", managedGatewayRestartingReason\)/);
     assertPartialBodyUsesDeliveryMode(hook);
     const deadline = readFileSync(join(repo, 'internal/gateway/connector/hookexec/answer_deadline.go'), 'utf8');
     const noAnswer = deadline.split('func noAnswerFailMode')[1]?.split('func failNoAnswer')[0];
-    assert.match(noAnswer ?? '', /opts\.ManagedEnterprise\s*\{\s*return "closed"[\s\S]*return failMode/);
+    assert.match(noAnswer ?? '', /if [^\n]*opts\.ManagedEnterprise[^\n]*\{\s*return "closed"[\s\S]*return failMode/);
 
     const pages = [
       'reference/configuration/fail-modes.mdx',
@@ -227,14 +265,21 @@ describe('managed outage documentation', () => {
     assert.match(render, /func setupHookFailMode\(opts SetupOpts\) string \{\s*if strings\.TrimSpace\(opts\.HookFailMode\) == "" && opts\.SecureClientHookDelivery && SecureClientDeploymentVerified\(\) \{/);
     const codex = readFileSync(join(repo, 'internal/gateway/connector/hooks/codex-hook.sh'), 'utf8');
     assert.match(codex, /if \[ "\$CURL_STATUS" -ne 0 \]; then\s*fail_unreachable "gateway unreachable"/);
-    assert.match(codex, /fail_unreachable\(\)[\s\S]*?if defenseclaw_should_fail_closed_on_unreachable; then\s*exit 2[\s\S]*?exit 0/);
+    const codexFailure = codex.split('fail_unreachable() {')[1]?.split('\n}')[0] ?? '';
+    assert.match(codexFailure, /if defenseclaw_should_fail_closed_on_unreachable; then\s*exit 2[\s\S]*?exit 0/);
+    assert.match(codex, /RESPONSE=\$\(codex_gateway_post\) \|\| CURL_STATUS=\$\?/);
+    const secure = page('reference/configuration/fail-modes.mdx').split('### Secure Client')[1]?.split('### Connector limits')[0] ?? '';
+    const macClaim = secure.match(/For macOS Secure Client[^.]*default `open` can allow a ([^.]+?) tool call/i)?.[1] ?? '';
+    assert.deepEqual(macClaim.split(/,\s*|\s+or\s+/).sort(), ['Claude Code', 'Codex', 'Hermes']);
     for (const name of ['claude-code', 'hermes']) {
       const shell = readFileSync(join(repo, `internal/gateway/connector/hooks/${name}-hook.sh`), 'utf8');
       const failure = shell.split('fail_unreachable() {').pop()?.split('\n}')[0] ?? '';
+      assert.match(shell, /RESPONSE=\$\(defenseclaw_hook_post\) \|\| \{/, name);
       assert.match(shell, /defenseclaw_await_gateway[^\n]*\|\| fail_unreachable "gateway unreachable"/, name);
       assert.match(failure, /if defenseclaw_should_fail_closed_on_unreachable; then[\s\S]*?exit 2[\s\S]*?exit 0/, name);
     }
-    const secure = page('reference/configuration/fail-modes.mdx').split('### Secure Client')[1]?.split('### Connector limits')[0] ?? '';
+    const shared = readFileSync(join(repo, 'internal/gateway/connector/hooks/_hardening.sh'), 'utf8');
+    assert.match(shared, /defenseclaw_gateway_post\(\)[\s\S]*?curl -q -s[\s\S]*?--max-time "\$_dc_post_max_time"/);
     assert.match(secure, /Windows native Secure Client[^.]*cut off after headers[^.]*default `open`[^.]*allow/i);
     assert.match(secure, /macOS Secure Client[^.]*shell hooks[^.]*cut off[^.]*default `open`[^.]*allow/i);
     assert.match(secure, /explicit `closed`[^.]*block where the connector can deliver a block/i);
@@ -383,25 +428,30 @@ describe('quarantine publication and cleanup', () => {
 describe('routed 1.0.4 documentation gaps', () => {
   it('covers every guarded managed connector during an outage on each OS', () => {
     const policy = readFileSync(join(repo, 'internal/enterprisepolicy/publicpolicy.go'), 'utf8');
-    const guard = policy.split('var guardConnectors =')[1]?.split('var unixGuardConnectors')[0] ?? '';
-    const rows = JSON.parse(readFileSync(join(site, 'data/capability-matrix.json'), 'utf8')).connectors;
-    for (const [name, label] of [
-      ['cursor', 'Cursor'],
-      ['copilot', 'Copilot'],
-      ['devin', 'Devin'],
-      ['opencode', 'OpenCode'],
-    ]) {
-      assert.match(guard, new RegExp(`(?:Connector${label}|"${name}"):\\s*true`), name);
-      assert.equal(rows.find((row: { id: string }) => row.id === name)?.outage.managedOpen, 'blocks', name);
+    const ids = guardedConnectorIDs(policy);
+    const rows = new Map(outageRows().map((row) => [row.id, row]));
+    const matrix = readFileSync(join(site, 'content/docs/reference/apis/capability-matrix.mdx'), 'utf8');
+    const section = matrix.split('### Default-guard outage class')[1]?.split('### ', 1)[0] ?? '';
+    assert.match(section, /foreign_hooks: remove/);
+    assert.match(section, /proven stopped gateway/);
+    assert.match(section, /restarting or unanswered gateway blocks/);
+    const documented = new Map<string, string[]>();
+    for (const [, id, linux, macos, windows] of section.matchAll(/^\| `([a-z]+)` \| (Blocks|Runs) \| (Blocks|Runs) \| (Blocks|Runs) \|$/gm)) {
+      assert.ok(!documented.has(id), `duplicate default-guard row for ${id}`);
+      documented.set(id, [linux, macos, windows]);
     }
-    assert.match(guard, /"amp":\s*true/);
-    const amp = rows.find((row: { id: string }) => row.id === 'amp')?.outage;
-    assert.ok(['blocks', 'blocks-linux-macos'].includes(amp?.managedOpen), 'Amp blocks on Linux and macOS');
-    if (amp?.managedOpenNoGuard !== undefined) assert.equal(amp.managedOpenNoGuard, 'blocks');
-    const matrix = page('reference/apis/capability-matrix.mdx');
-    assert.match(matrix, /foreign-hook guard[^.]*Copilot CLI, Cursor, Devin, OpenCode and Amp[^.]*Linux, macOS and Windows/i);
-    assert.match(matrix, /Hermes[^.]*Linux and macOS/i);
-    assert.doesNotMatch(matrix, /Copilot[^.]*machine-policy route[^.]*follows the administrator's outage mode for that condition/i);
+    assert.deepEqual([...documented.keys()].sort(), ids);
+    for (const id of ids) {
+      const value = rows.get(id)?.outage.managedOpen;
+      assert.ok(value, `${id} has no managed-open outage row`);
+      const expected = (['Linux', 'macOS', 'Windows'] as const).map((os) => managedOpenBlocksOnOS(value, os) ? 'Blocks' : 'Runs');
+      assert.deepEqual(documented.get(id), expected, `${id}: default-guard outage differs from the capability row`);
+    }
+    const guard = readFileSync(join(site, 'content/docs/enterprise/configure/foreign-hook-guard.mdx'), 'utf8');
+    const guardOutages = guard.split('## Gateway outages')[1]?.split('## ', 1)[0] ?? '';
+    const named = [...guardOutages.matchAll(/\]\(\/docs\/reference\/connectors\/([a-z]+)\)/g)].map((match) => match[1]);
+    assert.deepEqual(named.sort(), ids, 'foreign-hook guard outage page must name the source-guarded connector class');
+    assert.ok(guardOutages.includes('/docs/reference/apis/capability-matrix#gateway-outage'));
   });
 
   it('describes managed OpenCode outages under the default guard and per OS without it', () => {
@@ -414,19 +464,22 @@ describe('routed 1.0.4 documentation gaps', () => {
     const machinePlugin = readFileSync(join(repo, 'internal/enterprisepolicy/opencode_managed_plugin.js'), 'utf8');
     assert.match(machinePlugin, /"--enterprise-managed"/);
     const hook = readFileSync(join(repo, 'internal/gateway/connector/hookexec/hookexec.go'), 'utf8');
-    assert.match(hook, /func ManagedOutageFailsOpen[\s\S]*?return errors\.Is\(err, errManagedGatewayNotRunning\)/);
+    assertProvenStoppedOutageOnly(hook);
     const reference = page('enterprise/configure/reference.mdx');
     const managed = reference.split('### Managed OpenCode plugin')[1]?.split('### What DefenseClaw writes')[0] ?? '';
-    assert.match(managed, /default foreign-hook guard[^.]*gateway outage blocks[^.]*Linux, macOS and Windows/i);
+    const opencode = outageRows().find((row) => row.id === 'opencode')?.outage.managedOpen;
+    assert.ok(opencode, 'OpenCode has no capability-matrix outage row');
+    const blocksEveryOS = (['Linux', 'macOS', 'Windows'] as const).every((os) => managedOpenBlocksOnOS(opencode, os));
+    if (blocksEveryOS) assert.match(managed, /default foreign-hook guard[^.]*gateway outage blocks[^.]*Linux, macOS and Windows/i);
+    else assert.doesNotMatch(managed, /default foreign-hook guard[^.]*gateway outage blocks[^.]*Linux, macOS and Windows/i);
     assert.match(managed, /`foreign_hooks: report` or `allow`[^.]*machine-policy route[^.]*every OS/i);
     assert.match(managed, /per-user route[^.]*Linux and macOS[^.]*both modes/i);
     assert.ok(managed.includes('/docs/reference/apis/capability-matrix#gateway-outage'));
     assert.doesNotMatch(managed, /It fails closed:.*gateway is unreachable/i);
     const machine = page('enterprise/configure/machine-policy.mdx');
-    assert.match(machine, /default foreign-hook guard[^.]*outage blocks on Linux, macOS and Windows/i);
+    if (blocksEveryOS) assert.match(machine, /default foreign-hook guard[^.]*outage blocks on Linux, macOS and Windows/i);
+    else assert.doesNotMatch(machine, /default foreign-hook guard[^.]*outage blocks on Linux, macOS and Windows/i);
     assert.match(machine, /`foreign_hooks: report` or `allow`[^.]*classified gateway outage[^.]*every OS/i);
-    const matrix = JSON.parse(readFileSync(join(site, 'data/capability-matrix.json'), 'utf8'));
-    assert.equal(matrix.connectors.find((row: { id: string }) => row.id === 'opencode')?.outage.managedOpen, 'blocks');
     assert.match(page('reference/apis/capability-matrix.mdx'), /Copilot's and OpenCode's machine-policy routes follow the installed mode for a proven stopped gateway on every OS/);
   });
 

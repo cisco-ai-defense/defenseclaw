@@ -139,30 +139,40 @@ func TestDefaultForeignHookGuardOutageCoversEveryManagedConnector(t *testing.T) 
 			rows[row.ID] = *row.Outage
 		}
 	}
+	guarded := map[string]bool{}
 	for name := range guardConnectors {
+		guarded[name] = true
+	}
+	for name := range unixGuardConnectors {
+		guarded[name] = true
+	}
+	for name := range guarded {
+		row, ok := rows[name]
+		if !ok {
+			t.Errorf("%s: no capability matrix outage row", name)
+			continue
+		}
 		policy := config.EnterpriseMachinePolicyConfig{}.PolicyFor(name)
 		for _, goos := range []string{"linux", "darwin", "windows"} {
-			if !GuardApplies(name, goos, policy) {
-				t.Errorf("%s: default foreign-hook guard absent on %s", name, goos)
+			applies := GuardApplies(name, goos, policy)
+			if applies != (guardConnectors[name] || goos != "windows" && unixGuardConnectors[name]) {
+				t.Errorf("%s: unexpected default foreign-hook guard on %s: %v", name, goos, applies)
+			}
+			if applies && !ForeignHookSessionLocal(name, goos) && !documentedManagedOpenBlocksOnOS(row.ManagedOpen, goos) {
+				t.Errorf("%s: %s default guard needs the gateway session, but managed open row is %q", name, goos, row.ManagedOpen)
 			}
 		}
-		got := rows[name].ManagedOpen
-		if ForeignHookSessionLocal(name, "windows") {
-			// Both representations block Linux and macOS. Windows depends on
-			// the plugin's own installed fail mode, which differs on the T8 train.
-			if got != connector.OutageBlocks && got != managedOpenBlocksLinuxMacOS {
-				t.Errorf("%s: managed open outage = %q, want Linux and macOS blocked", name, got)
-			}
-		} else if got != connector.OutageBlocks {
-			t.Errorf("%s: managed open outage = %q, want %q under the default guard", name, got, connector.OutageBlocks)
-		}
 	}
-	policy := config.EnterpriseMachinePolicyConfig{}.PolicyFor(ConnectorHermes)
-	if !GuardApplies(ConnectorHermes, "linux", policy) || !GuardApplies(ConnectorHermes, "darwin", policy) || GuardApplies(ConnectorHermes, "windows", policy) {
-		t.Error("Hermes foreign-hook guard must apply on Linux and macOS only")
-	}
-	if got := rows[ConnectorHermes].ManagedOpen; got != managedOpenBlocksLinuxMacOS {
-		t.Errorf("Hermes: managed open outage = %q, want %q", got, managedOpenBlocksLinuxMacOS)
+}
+
+func documentedManagedOpenBlocksOnOS(value, goos string) bool {
+	switch value {
+	case connector.OutageBlocks:
+		return true
+	case managedOpenBlocksLinuxMacOS:
+		return goos != "windows"
+	default:
+		return false
 	}
 }
 
