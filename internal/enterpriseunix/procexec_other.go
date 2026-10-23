@@ -18,3 +18,8 @@ import "errors"
 func processExecPath(int) (string, error) {
 	return "", errors.New("process executable path is read from /proc on this OS")
 }
+
+// processImagePath is used only on macOS; Linux reads /proc/<pid>/exe.
+func processImagePath(int) (string, error) {
+	return "", errors.New("process image path is read from /proc on this OS")
+}

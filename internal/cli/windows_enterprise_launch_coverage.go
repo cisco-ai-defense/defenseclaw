@@ -12,10 +12,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
@@ -35,6 +37,7 @@ var windowsManagedLaunchEnvironment = agentprocess.LaunchEnvironmentForPID
 // reads selected launch selectors from process memory and resolves the
 // account profile from the process owner SID. An unreadable process remains
 // unverified, never treated as proof that it loaded the managed connector.
+// Only the launches of enrolled accounts are judged (windowsLaunchEnrollment).
 func applyWindowsEnterpriseLaunchCoverage(result *enterprisestatus.Result) {
 	if result == nil || !result.Installed || result.TransactionPending ||
 		(result.Action != "status" && result.Action != "verify") {
@@ -60,12 +63,12 @@ func applyWindowsEnterpriseLaunchCoverage(result *enterprisestatus.Result) {
 			"the Windows agent process scan failed, so active agent launches cannot be verified: "+err.Error())
 		return
 	}
+	enrolled := loadWindowsLaunchEnrollment()
 	for _, process := range processes {
 		name := strings.ToLower(process.Connector)
 		if !selected[name] || windowsServiceIdentity(process.User) || windowsServiceSID(process.OwnerSID) {
 			continue
 		}
-		launchEnv, envErr := windowsManagedLaunchEnvironment(process.PID)
 		home := ""
 		ownerSID := process.OwnerSID
 		if ownerSID == "" && process.User != "" {
@@ -74,6 +77,10 @@ func applyWindowsEnterpriseLaunchCoverage(result *enterprisestatus.Result) {
 		if ownerSID != "" {
 			home, _ = enterpriseHookSIDProfilePath(ownerSID)
 		}
+		if !enrolled.covers(ownerSID, process.User, home, name) {
+			continue // excluded, exempt or not enrolled: DefenseClaw does not protect this account
+		}
+		launchEnv, envErr := windowsManagedLaunchEnvironment(process.PID)
 		reason := enterprisestatus.PluginLaunchCoverage(name, process.Args, launchEnv, envErr == nil, home)
 		if reason == "" && !process.ArgsKnown {
 			reason = "launch_arguments_unverified"
@@ -162,6 +169,83 @@ func postWindowsManagedCoverageAlert(source, summary string, details map[string]
 		return fmt.Errorf("gateway audit returned HTTP %d", response.StatusCode)
 	}
 	return nil
+}
+
+// windowsEnterpriseEnrollmentPolicy returns the installed config's
+// enterprise.enrollment; replaceable in tests.
+var windowsEnterpriseEnrollmentPolicy = func() (config.EnterpriseEnrollmentConfig, error) {
+	cfg, err := loadWindowsEnterpriseStandaloneConfig("")
+	if err != nil {
+		return config.EnterpriseEnrollmentConfig{}, err
+	}
+	return cfg.Enterprise.Enrollment, nil
+}
+
+// windowsLaunchEnrollment is the accounts whose agent launches count toward
+// managed coverage: the profiles the guardian manifest enrolls. The
+// enumerator gives an excluded profile no rows, and an exempt one only its
+// machine-policy rows (and the per-user rows it already had), so an
+// excluded or exempt account's launch neither lowers status and verify nor
+// reaches the audit. An unreadable manifest, or an owner whose SID is
+// unknown, is judged as enrolled.
+type windowsLaunchEnrollment struct {
+	known bool
+	// rows are the enabled manifest rows (windowsEnterpriseManifestRowKey);
+	// identities the SIDs (or users) that have at least one.
+	rows, identities map[string]bool
+	exclude, exempt  []string
+}
+
+func loadWindowsLaunchEnrollment() windowsLaunchEnrollment {
+	e := windowsLaunchEnrollment{identities: map[string]bool{}}
+	if rows, err := windowsEnterpriseEnrolledTargets(); err == nil {
+		e.known, e.rows = true, rows
+		for key := range rows {
+			identity, _, _ := strings.Cut(key, "\x00")
+			e.identities[identity] = true
+		}
+	}
+	if enrollment, err := windowsEnterpriseEnrollmentPolicy(); err == nil {
+		e.exclude, e.exempt = enrollment.ExcludeUsers, enrollment.ExemptUsers
+	}
+	return e
+}
+
+// covers reports whether the owner of a connector process is an enrolled
+// account. enterprise.enrollment entries match a SID, profile folder name,
+// account name or DOMAIN\account, case-insensitively, as the enumerator
+// matches them.
+func (e windowsLaunchEnrollment) covers(sid, user, home, connector string) bool {
+	sid, user = strings.TrimSpace(sid), strings.TrimSpace(user)
+	names := []string{sid, user}
+	if home = strings.TrimSpace(home); home != "" {
+		names = append(names, filepath.Base(filepath.Clean(home)))
+	}
+	if _, account, ok := strings.Cut(user, `\`); ok {
+		names = append(names, account)
+	}
+	row := sid != "" && e.rows[windowsEnterpriseManifestRowKey(enterprisehooks.ManifestTarget{SID: sid, Connector: connector})]
+	if windowsLaunchListMatches(e.exclude, names) || (!row && windowsLaunchListMatches(e.exempt, names)) {
+		return false
+	}
+	if !e.known || sid == "" || row {
+		return true
+	}
+	return e.identities[strings.ToUpper(sid)] || (user != "" && e.identities[user])
+}
+
+func windowsLaunchListMatches(list, names []string) bool {
+	for _, entry := range list {
+		if entry = strings.TrimSpace(entry); entry == "" {
+			continue
+		}
+		for _, name := range names {
+			if name != "" && strings.EqualFold(entry, name) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func windowsLaunchCoverageWarning(result *enterprisestatus.Result, code, message string) {

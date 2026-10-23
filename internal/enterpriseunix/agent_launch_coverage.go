@@ -41,8 +41,10 @@ func pluginLaunchConnectorName(name string) string {
 
 // describePluginLaunchCoverage checks running processes independently of the
 // plugins: a plugin that was skipped cannot tell the gateway it was skipped.
-// An uninspected or unprovable launch makes host coverage incomplete until
-// that process ends, even while the managed hook files remain installed.
+// An enrolled account's uninspected or unprovable launch makes host coverage
+// incomplete until that process ends, even while the managed hook files
+// remain installed. The launches of an account the deployment does not
+// enroll (launchEnrollment) are not judged or audited.
 func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *Deployment) {
 	if record == nil || record.NoStart || (l.opts.Action != ActionStatus && l.opts.Action != ActionVerify) {
 		return
@@ -91,6 +93,7 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 			claudeParents[session.PPID] = true
 		}
 	}
+	enrolled := env.launchEnrollment(cfg)
 	for _, session := range sessions {
 		name := pluginLaunchConnectorName(session.Agent)
 		if session.UID == 0 || session.UID == record.ServiceUID || !enabled[name] ||
@@ -99,6 +102,9 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 		}
 		if name == "claudecode" && claudeLaunchShim(session, claudeParents) {
 			continue // its Claude Code child is checked as a session of its own
+		}
+		if !enrolled.covers(session.UID, func() (string, string) { return env.pluginLaunchAccount(ctx, session.UID) }) {
+			continue // excluded, exempt or not admitted: DefenseClaw does not protect this account
 		}
 		l.describePluginLaunchSession(ctx, session, name)
 	}
@@ -258,9 +264,10 @@ type claudeExecutable struct {
 // session of its own.
 var claudeLaunchShims = map[string]bool{"volta-shim": true}
 
-// claudeRunningExecutable resolves the kernel's executable path. A relative
-// macOS exec path (a launch as ./claude) cannot be resolved by this process
-// and stays unknown.
+// claudeRunningExecutable resolves the kernel's executable path. The macOS
+// session scan replaces a relative exec path (a launch as ./claude) with the
+// kernel's absolute path of the running image (absoluteExecPath); one that
+// stays relative is unknown.
 func claudeRunningExecutable(executable string) claudeExecutable {
 	path, replaced := strings.CutSuffix(strings.TrimSpace(executable), " (deleted)")
 	if path == "" || !filepath.IsAbs(path) {

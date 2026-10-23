@@ -292,7 +292,12 @@ func (e *Env) darwinAgentSessionsWithError(ctx context.Context) ([]agentSession,
 			if execPath == nil {
 				execPath = processExecPath
 			}
+			imagePath := e.ProcessImagePath
+			if imagePath == nil {
+				imagePath = processImagePath
+			}
 			executable, _ := execPath(pid)
+			executable = absoluteExecPath(executable, func() (string, error) { return imagePath(pid) })
 			ppid, _ := darwinProcessParent(pid)
 			session := agentSession{PID: pid, PPID: ppid, UID: uid, Agent: agent, Started: now.Add(-elapsed), Args: argv, Executable: executable,
 				ArgsKnown: argvErr == nil, CodexServer: codexBackgroundServer(argv)}
