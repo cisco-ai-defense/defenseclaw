@@ -77,6 +77,16 @@ const (
 	windowsBundlePolicyWaits = 4
 )
 
+func windowsBundlePendingReportMessage(report enterprisebundle.SettleReport) string {
+	for _, id := range report.Pending {
+		if reason := report.PendingReasons[id]; reason != "" {
+			return fmt.Sprintf("%d policy bundle(s) remain applied and pending; receipt %s cannot be sealed because %s; repair the missing confirmation prerequisite with a signed bundle delivery",
+				len(report.Pending), id, boundedPolicyMessage(reason))
+		}
+	}
+	return fmt.Sprintf(windowsBundlePendingMessage, len(report.Pending))
+}
+
 var errWindowsBundleStoreBusy = errors.New("another policy bundle run holds the bundle store; retry when it ends")
 
 // Seams for tests.
@@ -950,7 +960,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	}
 	if n := len(report.Pending); n > 0 {
 		run.warnings = append(run.warnings, enterprisebundle.Warning{Code: enterprisebundle.WarnBundlePending,
-			Message: fmt.Sprintf(windowsBundlePendingMessage, n)})
+			Message: windowsBundlePendingReportMessage(report)})
 	}
 	if len(report.Interrupted) > 0 {
 		run.warnings = append(run.warnings, enterprisebundle.Warning{Code: string(enterprisebundle.CodeInterrupted),
@@ -1101,7 +1111,7 @@ func settleWindowsInterruptedBundles(settle *windowsBundleSettle, layout managed
 			"%d policy bundle(s) a previous run received were not applied (failed: interrupted); the last good bundle keeps enforcing", n))
 	}
 	if n := len(report.Pending); n > 0 {
-		settle.warn(enterprisebundle.WarnBundlePending, fmt.Sprintf(windowsBundlePendingMessage, n))
+		settle.warn(enterprisebundle.WarnBundlePending, windowsBundlePendingReportMessage(report))
 	}
 	if n := len(report.Completed); n > 0 {
 		settle.warn(enterprisebundle.WarnConfirmedAfterInterrupt, fmt.Sprintf(
