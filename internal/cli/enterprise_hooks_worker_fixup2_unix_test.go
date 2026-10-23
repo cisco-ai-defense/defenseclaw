@@ -240,7 +240,7 @@ func TestEnterpriseHookWorkerMatcherCoversInstallAndRemovalByConnector(t *testin
 	versions := map[string]string{
 		"amp": "0.0.1785334225", "codex": "codex-cli 0.142.0",
 		"claudecode": "2.1.187 (Claude Code)", "opencode": "1.18.33",
-		"kiro": "kiro-cli 2.24.1", "openhands": "1.16.0",
+		"kiro": "kiro-cli 2.27.1", "openhands": "1.16.0",
 		"antigravity": "1.2.11", "omnigent": "omnigent 0.7.0",
 		"hermes": "0.21.3", "cursor": "cursor 3.19.13",
 		"devin": "3000.4.25", "copilot": "GitHub Copilot CLI 1.0.76",

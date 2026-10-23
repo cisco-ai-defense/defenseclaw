@@ -33,6 +33,8 @@ from defenseclaw.doctor_gateway import ListenerEvidence
 from defenseclaw.doctor_health import ComponentEvidence, HealthStatus
 from defenseclaw.doctor_recovery import DeviceKeyHealthStatus, inspect_device_key
 
+from tests.permissions import set_known_windows_directory_acl
+
 
 @pytest.fixture(autouse=True)
 def _canonical_v8_validator_stub(monkeypatch):
@@ -488,6 +490,43 @@ def test_unavailable_or_untested_compatibility_is_advisory_not_a_lifecycle_block
     assert connector_gate.state == "noop"
     assert "no positive" in component_gate.detail
     assert "no positively unsupported" in connector_gate.detail
+
+
+def test_supported_kiro_ide_keeps_old_cli_finding_without_blocking_gateway_repair(tmp_path) -> None:
+    if os.name == "nt":
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        set_known_windows_directory_acl(data_dir)
+    else:
+        data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir, connector="kiro")
+
+    def signal(version, *, cli="", ide=""):
+        return SimpleNamespace(
+            installed=True, version=version, kiro_cli_version=cli, kiro_ide_version=ide
+        )
+
+    from defenseclaw import doctor_health
+
+    cases = (
+        (signal("1.0.182", cli="kiro-cli 2.26.1", ide="1.0.182"), "noop"),
+        (signal("kiro-cli 2.26.1", cli="kiro-cli 2.26.1"), "manual"),
+    )
+    for installed, expected_gate in cases:
+        with patch.object(
+            doctor_health, "read_cached_discovery",
+            return_value=SimpleNamespace(agents={"kiro": installed}),
+        ):
+            problems = cmd_doctor._connector_compatibility_problems(cfg)
+            gate = cmd_doctor._plan_connector_compatibility_gate(cfg)
+
+        assert any(
+            finding.status is HealthStatus.UNSUPPORTED and finding.installed_version == "2.26.1"
+            for finding in problems
+        )
+        assert gate.state == expected_gate
+        if expected_gate == "noop":
+            assert "selected Kiro surface can be repaired" in gate.detail
 
 
 def test_positive_unsupported_compatibility_blocks_gateway_lifecycle(tmp_path) -> None:

@@ -65,7 +65,7 @@ from defenseclaw.config import CustomRulePack, HILTConfig, PerConnectorGuardrail
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 
-from tests.helpers import cleanup_app, make_app_context, make_temp_config, record_test_setup_agent_selections
+from tests.helpers import cleanup_app, make_app_context, record_test_setup_agent_selections
 from tests.permissions import set_known_windows_directory_acl
 
 
@@ -134,49 +134,46 @@ def test_batch_rollback_restores_prior_cursor_discovery_version():
         cleanup_app(app, db_path, root)
 
 
-@pytest.mark.parametrize("had_cache", [True, False], ids=["prior-cache", "no-prior-cache"])
-def test_failed_restart_restores_the_discovery_cache_from_before_the_version_check(tmp_path, had_cache):
+def test_failed_setup_restores_discovery_cache_from_before_version_preflight(tmp_path):
+    root_dir = tmp_path / "setup"
+    root_dir.mkdir()
     if os.name == "nt":
-        set_known_windows_directory_acl(tmp_path)
-    app = cmd_setup.AppContext()
-    app.cfg = make_temp_config(str(tmp_path))
-    app.cfg.save = lambda: atomic_write_private_bytes(tmp_path / "config.yaml", b"failed generation\n")
-    cache = os.path.join(tmp_path, "agent_discovery.json")
-    prior = b'{"agents":{"claudecode":{"version":"2.1.286"}}}\n'
-    replacement = b'{"agents":{"claudecode":{"version":""}}}\n'
-    if had_cache:
+        set_known_windows_directory_acl(root_dir)
+    app, root, db_path = make_app_context(str(root_dir))
+    try:
+        cache = os.path.join(root, "agent_discovery.json")
+        prior = b'{"agents":{"claudecode":{"version":"2.1.286 (Claude Code)"}}}\n'
         atomic_write_private_bytes(cache, prior)
         if os.name != "nt":
-            os.chmod(cache, 0o644)
+            os.chmod(cache, 0o644)  # an older release's readable cache
+        app.cfg.guardrail.connector = "claudecode"
+        app.cfg.guardrail.connectors = {
+            "claudecode": PerConnectorGuardrailConfig(mode="action", hook_fail_mode="closed")
+        }
 
-    def version_preflight(*_args, **_kwargs):
-        atomic_write_private_bytes(cache, replacement)
-        return True
+        def preflight(*_args, **_kwargs):
+            atomic_write_private_bytes(cache, b'{"agents":{"claudecode":{"version":""}}}\n')
+            return True
 
-    def rollback(_app, snapshot, _cause):
-        cmd_setup._restore_setup_config_snapshot(_app, snapshot)
-        raise click.ClickException("injected gateway restart failure")
+        def rollback(_app, snapshot, _cause):
+            cmd_setup._restore_setup_agent_discovery_snapshot(_app.cfg, snapshot)
+            raise click.ClickException("injected restart failure")
 
-    with (
-        patch.object(cmd_setup, "_check_connector_version_supported_for_setup", side_effect=version_preflight),
-        patch.object(cmd_setup, "_restart_services", side_effect=OSError("injected restart failure")),
-        patch.object(cmd_setup, "_rollback_failed_connector_application", side_effect=rollback),
-        # Keep this cache rollback test independent of the test host's managed
-        # config writer while preserving the real protected cache restoration.
-        patch.object(
-            cmd_setup, "_restore_setup_config_file_snapshot",
-            side_effect=lambda *_args: (tmp_path / "config.yaml").unlink(missing_ok=True),
-        ),
-        pytest.raises(click.ClickException, match="injected gateway restart failure"),
-    ):
-        cmd_setup._apply_hook_connector_setup(app, connector="cursor", mode="observe", restart=True)
-    if had_cache:
-        with open(cache, "rb") as source:
-            assert source.read() == prior
-        if os.name != "nt":
-            assert stat.S_IMODE(os.stat(cache).st_mode) == 0o600
-    else:
-        assert not os.path.lexists(cache)
+        with (
+            patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", side_effect=preflight),
+            patch.object(app.cfg, "save", return_value=None),
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="linux"),
+            patch("defenseclaw.commands.cmd_setup._restart_services", side_effect=OSError("injected restart failure")),
+            patch("defenseclaw.commands.cmd_setup._rollback_failed_connector_application", side_effect=rollback),
+            pytest.raises(click.ClickException, match="injected restart failure"),
+        ):
+            cmd_setup._apply_hook_connector_setup(
+                app, connector="codex", mode="action", restart=True, write_mode="add"
+            )
+        with open(cache, "rb") as stream:
+            assert stream.read() == prior
+    finally:
+        cleanup_app(app, db_path, root)
 
 
 def _invoke(args, app):

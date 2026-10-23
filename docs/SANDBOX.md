@@ -2593,7 +2593,11 @@ These were measured on the pinned releases inside the community base image
   root-owned `index.js` chunks. So every launcher exports
   `NODE_DISABLE_COMPILE_CACHE=1` (Node then reports the cache disabled and
   reads nothing) and drops `NODE_OPTIONS` and `NODE_PATH`.
-- **Kiro CLI 2.24.1.** Kiro's release manifest publishes SHA-256 digests for
+- **Kiro CLI 2.24.1.** Known limit: this pin is below the 2.27.1 host floor
+  (before 2.27.1 a non-interactive `--v3` run loads no hooks). The launcher
+  runs only the V2 agent engine and refuses `--v3`, so that run cannot start
+  here; the pin moves with a newly pinned, hash-verified build. Kiro's
+  release manifest publishes SHA-256 digests for
   its headless Linux archives. `kiro-cli` is a front end that starts
   `kiro-cli-chat` from `PATH`; the launcher starts the pinned `kiro-cli-chat`
   directly. Kiro reads hooks from the agent it runs with, and picks the agent

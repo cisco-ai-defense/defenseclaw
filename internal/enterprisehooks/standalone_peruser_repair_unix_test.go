@@ -473,7 +473,7 @@ func TestStandaloneVerifyFollowsModeSwitchesInOneHome(t *testing.T) {
 		}
 	}
 	connectors := []struct{ name, version string }{
-		{"hermes", "0.19.0"}, {"openhands", "1.16.0"}, {"kiro", "2.24.1"}, {"copilot", "1.0.20"},
+		{"hermes", "0.19.0"}, {"openhands", "1.16.0"}, {"kiro", "2.27.1"}, {"copilot", "1.0.20"},
 		{"devin", "3000.4.25"}, {"amp", "0.0.1785334300"}, {"opencode", "1.18.31"},
 		{"antigravity", "1.2.11"}, {"cursor", "2.4.1"}, {"codex", "0.145.0"}, {"claudecode", "2.1.220"},
 	}

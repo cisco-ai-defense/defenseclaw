@@ -545,6 +545,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                     )
                 version_mock.assert_called_with(
                     connector,
+                    _refusal_scope={},
                     mode=expected_mode,
                     data_dir=self.app.cfg.data_dir,
                     _allow_prompt=False,
@@ -853,6 +854,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertNotIn("NameError", result.output)
                 version_mock.assert_called_with(
                     connector,
+                    _refusal_scope={},
                     mode="observe",
                     data_dir=self.app.cfg.data_dir,
                     _allow_prompt=False,

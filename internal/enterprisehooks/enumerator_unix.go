@@ -721,7 +721,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 					UID:       intPointer(account.UID),
 					Connector: conn,
 					Version:   version,
-					Code:      UnprotectedCodeHookContractUnverified,
+					Code:      UnprotectedCodeForReason(refused),
 					Reason:    refused + "; " + consequence,
 				})
 				logfSafely(opts.Logger, name, fmt.Sprintf("new (%s, %s) row skipped: %s", name, conn, refused))
@@ -803,6 +803,40 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	for user := range withRows {
 		if source := resolvedSource[user]; source != "" {
 			opts.State.Sources[user] = source
+		}
+	}
+	// Earlier releases enrolled Kiro below both hook floors. Keep CLI rows so
+	// their interactive hooks remain installed across upgrade, but report an
+	// uncovered product even when current version evidence is unavailable.
+	for _, target := range targets {
+		if !target.IsEnabled() || target.Connector != "kiro" {
+			continue
+		}
+		reason := standaloneAgentFloorRefusal(resolveHookContract("kiro", target.AgentVersion))
+		if reason == "" {
+			continue
+		}
+		code := UnprotectedCodeForReason(reason)
+		consequence := "an earlier enrollment keeps its interactive hooks installed, but this CLI's non-interactive runs do not load them"
+		if code == UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
+			consequence = "this IDE cannot read the global hooks file, even if an earlier enrollment left it installed"
+		}
+		if code != UnprotectedCodeKiroCLIBelowHookFloor && code != UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
+			continue
+		}
+		alreadyReported := false
+		for _, agent := range report.Unprotected {
+			if agent.User == target.User && agent.Connector == "kiro" && agent.Code == code {
+				alreadyReported = true
+				break
+			}
+		}
+		if !alreadyReported {
+			report.Unprotected = append(report.Unprotected, UnprotectedAgent{
+				User: target.User, UID: target.UID, Connector: "kiro", Version: target.AgentVersion,
+				Code:   code,
+				Reason: reason + "; " + consequence,
+			})
 		}
 	}
 
@@ -1155,11 +1189,13 @@ func unixKnownRowVersionRefused(connectorName, from, to string) string {
 // status and verify then reported the agent as covered (GAP-0151). On the
 // standalone profile a version newer than every tested range resolves to the
 // newest contract (an untested newer version) and is enrolled. A connector
-// with a standalone floor instead of a contract (Kiro) is checked by the
-// guardian's install (validateHookContract). Empty when the row is enrolled.
+// with a standalone floor instead of a contract (Kiro) must pass that floor
+// here too: the guardian cannot install a newly published row below it.
+// Empty when the row is enrolled.
 func unixNewRowVersionRefused(connectorName, version string) string {
 	if standaloneNotGatedAgentFloor(connectorName) != "" {
-		return ""
+		_, reason := standaloneNotGatedVersionAdmitted(resolveHookContract(connectorName, version))
+		return reason
 	}
 	resolution := resolveHookContract(connectorName, version)
 	switch resolution.Status {

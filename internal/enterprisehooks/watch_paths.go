@@ -80,7 +80,7 @@ func WatchDirs(opts InstallOptions) ([]string, error) {
 		HookContractID:           strings.TrimSpace(opts.HookContractID),
 	}
 	if setupOpts.AgentVersion == "" {
-		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
+		setupOpts.AgentVersion = cachedSetupAgentVersion(dataDir, conn.Name())
 	}
 	if setupOpts.HookContractID == "" {
 		resolution := resolveHookContract(conn.Name(), setupOpts.AgentVersion)
@@ -258,7 +258,7 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 		HookContractID:           strings.TrimSpace(opts.HookContractID),
 	}
 	if setupOpts.AgentVersion == "" {
-		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
+		setupOpts.AgentVersion = cachedSetupAgentVersion(dataDir, conn.Name())
 	}
 	if setupOpts.HookContractID == "" {
 		resolution := resolveHookContract(conn.Name(), setupOpts.AgentVersion)

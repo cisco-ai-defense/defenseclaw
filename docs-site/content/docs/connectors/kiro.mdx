@@ -22,6 +22,47 @@ an optional, independent [ACP path](#acp-guard) runs `kiro-cli acp` behind
 | Native Windows x64 | **Supported** | The same native hooks, run by DefenseClaw's native hook binary ([Native Windows](#native-windows)), plus the optional `defenseclaw-acp.exe` ACP guard. |
 | Windows ARM64 | **Not certified** | The guard cross-compiles, but the native Windows release is certified on x64 only. |
 
+## Supported versions
+
+Kiro CLI must be **2.27.1 or later**. Before 2.27.1, a non-interactive
+`kiro-cli chat --v3` run (`--no-interactive`) loads no hooks at all, from the
+agent or the workspace ([Kiro headless mode](https://kiro.dev/docs/cli/headless/)),
+so its tool calls never reach DefenseClaw: on kiro-cli 2.26.1 such a run
+completed a tool call that sent DefenseClaw nothing. DefenseClaw therefore
+treats an older kiro-cli as unsupported:
+
+- If it is the only supported Kiro installation, `defenseclaw setup kiro`
+  refuses it in observe and action mode before changing any Kiro file.
+- `defenseclaw doctor` reports that CLI as unsupported.
+- The enterprise guardian does not create a new row for that CLI (see
+  [Enterprise](#enterprise-standalone-profile)).
+- A CLI enrolled by an earlier managed release keeps its interactive hooks,
+  but `status` reports it as uncovered and `verify` fails until it is updated.
+
+When Kiro IDE 1.0.182 or later is installed alongside an older CLI, setup
+installs their shared global hooks for the IDE. Discovery and doctor report
+the CLI separately as unsupported: its non-interactive runs still send no
+hooks until it is updated. The managed guardian enrolls the IDE version and
+reports the older CLI as unprotected.
+
+Kiro IDE has its own floor, 1.0.182, for the global hook file. Every setup
+refuses an older IDE, in observe and action mode, when no supported kiro-cli
+or Kiro IDE is installed beside it: that IDE reads only workspace hooks, so
+DefenseClaw's global hooks never run in it. Managed `status` reports an
+installed older IDE as uncovered, and `verify` fails.
+
+DefenseClaw judges each installed Kiro form on its own: kiro-cli, a Kiro IDE
+installed for the user, and a Kiro IDE installed for the machine. A form whose
+version could not be read is unknown and not protected. That covers a version
+probe that failed or timed out, a Windows kiro-cli that has never run, and a
+`product.json` that names no version.
+
+- With no supported form, `defenseclaw setup kiro --mode action` and a managed
+  action-mode install refuse it. Observe setup warns.
+- Beside a supported form, setup installs the hooks for that form and names the
+  unknown one. Doctor reports it, and the guardian reports it as
+  `hook_contract_unverified` in `status` and `verify`.
+
 ## Setup
 
 ```bash
@@ -106,15 +147,16 @@ marker, so one host can run both surfaces with the correct veto on each.
 Which Kiro builds read the global hook file. Kiro documents a global scope,
 `~/.kiro/hooks/`, that it merges with the project's `.kiro/hooks/` ("Hooks:
 All scopes merged"), for Kiro IDE 1.0.182 and later and for `kiro-cli --v3`.
-Older Kiro IDE builds read only `<workspace>/.kiro/hooks/*.json`, so for them
-the enforcing file is the workspace copy. For those builds, set
-`claw.workspace_dir` to the project root before running setup. `defenseclaw
+Older Kiro IDE builds read only `<workspace>/.kiro/hooks/*.json`, so
+DefenseClaw does not count them as protected: update Kiro IDE to 1.0.182 or
+later. `defenseclaw
 doctor`'s `Connector scope [kiro]` check passes when the global
 `~/.kiro/hooks/defenseclaw.json` holds DefenseClaw's hooks. Doctor reads the
 installed Kiro IDE's version from its `resources/app/product.json` (it never
 starts the IDE) and warns (`kiro_ide_below_global_hooks_floor`) when that IDE
-is older than 1.0.182; when it finds no IDE, the pass detail says that older
-builds also need `claw.workspace_dir`. It fails
+is older than 1.0.182, or (`kiro_ide_version_unknown`) when its
+`product.json` names no version; when it finds no IDE, the pass detail says
+that older builds are not covered. It fails
 (`kiro_hooks_not_workspace_scoped`) only when neither the global
 registration nor a workspace copy is present; run `defenseclaw setup kiro`
 to fix that.
@@ -220,14 +262,18 @@ directory is machine-wide, so every enrolled user would share the copy, and
 the global file already covers it. Teardown still removes a workspace copy
 that an earlier release wrote.
 
-The standalone profile certifies kiro-cli 2.24.1 and later. That is the first
-build checked with `--v3` and `--agent-engine v3`. In action mode the guardian
-refuses to enroll a new user whose kiro-cli is older and reports the reason. A
-user an earlier release already enrolled below 2.24.1 keeps being repaired at
-that version; a kiro-cli change to another version below 2.24.1 is refused as
-hook contract drift until kiro-cli reaches 2.24.1. The guardian follows a
-kiro-cli self-update at or above 2.24.1 and re-renders the user's hooks. It
-does not follow a downgrade below that version.
+Every profile requires kiro-cli 2.27.1 or later for a new enrollment (see
+[Supported versions](#supported-versions)). In both guardrail modes the guardian
+refuses a new row for an older kiro-cli and reports the reason, unless a
+supported IDE is installed; then it enrolls the IDE and reports the CLI. A
+user an earlier release already enrolled below 2.27.1 keeps being repaired at
+that version, on every OS, so the interactive sessions keep their hooks. `status`
+reports that CLI as uncovered and `verify` fails because its non-interactive `--v3`
+runs send no hooks until it is updated. A kiro-cli
+change to another version below 2.27.1 is refused as hook contract drift until
+kiro-cli reaches 2.27.1. The guardian follows a kiro-cli self-update at or
+above 2.27.1 and re-renders the user's hooks. It does not follow a downgrade
+below that version.
 
 On Windows the guardian writes the same files under `%USERPROFILE%\.kiro`,
 with the hook command described in [Native Windows](#native-windows).
@@ -235,21 +281,26 @@ Windows discovery runs nothing. `kiro-cli.exe` records no version beside
 itself, but each run copies the build to
 `%LOCALAPPDATA%\Kiro-Cli\run\chat-cli-<version>.exe`; the guardian takes
 the copy whose size matches `kiro-cli.exe`. A kiro-cli that has never run has
-no copy; unless the Kiro IDE enrolls the user, it is enrolled at 2.24.1, the
-lowest reviewed contract, so its first chat already runs with the
-DefenseClaw agent, and the next pass after that run reads its real version. The IDE's version
+no copy, so its version is unknown. The guardian does not assume one: the
+user gets no kiro-cli row, and `enterprise windows status` reports the CLI as
+`hook_contract_unverified` (coverage incomplete) until its first run names the
+version; the next pass then enrolls or reports that version. A supported Kiro
+IDE still enrolls the user, and the CLI beside it is reported the same way. A
+row an earlier build enrolled at an assumed version is kept, so its hooks
+stay installed, and is reported until the CLI names its version. The IDE's version
 comes from the `product.json` folders in the hook scope callout above.
 
 Managed Windows pins each enrolled user to one of two reviewed hook
-contracts: `kiro-cli-windows-managed-hooks-v1` for kiro-cli 2.24.1 and later,
+contracts: `kiro-cli-windows-managed-hooks-v1` for kiro-cli 2.24.1 and later
+(new rows require 2.27.1),
 and `kiro-ide-windows-managed-hooks-v1` for Kiro IDE 1.0.182 and later (a
 `+kiro-ide` version). Both cover the global hook file, where
 DefenseClaw blocks on `UserPromptSubmit` and `PreToolUse` (kiro-cli `--v3`
 records a prompt block without vetoing the prompt), and the CLI 2.x agent,
 where only `preToolUse` can block; `PostToolUse` and `Stop` are audit only. Every
 hook command runs the standalone `defenseclaw-hook.exe` with
-`--enterprise-managed`. No earlier release enrolled Kiro on managed
-Windows, so a version below either floor is always refused there. Kiro hooks
+`--enterprise-managed`. An older enrolled CLI row is kept for upgrade
+compatibility, while a new row below either floor is refused. Kiro hooks
 cannot rewrite tool input, so the foreign-hook guard does not apply. If an
 enrolment fails, the rollback removes DefenseClaw's hook files when their
 owner is the account, LocalSystem or Administrators, even if their
@@ -307,7 +358,11 @@ replaces that list, so name every harness you want:
   It also drops the other Kiro variables that move Kiro's agents, settings or
   shell, and refuses `--agent`, `--v3`, `--agent-engine`, `--cloud` and
   `--repo`: DefenseClaw runs Kiro's local V2 agent engine, whose hooks it
-  verified. Kiro has no system settings tier and still loads user and project
+  verified. The image still pins kiro-cli 2.24.1, below the 2.27.1 floor in
+  [Supported versions](#supported-versions). Because the launcher refuses
+  `--v3`, the V3 non-interactive run that loads no hooks before 2.27.1 cannot
+  start there. The pin is a known limit until the image moves to a newly
+  pinned, hash-verified build. Kiro has no system settings tier and still loads user and project
   settings and MCP servers, and an interactive session runs the TUI runtime
   Kiro unpacks into the sandbox home (`~/.local/share/kiro-cli`), which the
   agent can change for the next session, so the tier is user. Kiro vetoes a tool only on

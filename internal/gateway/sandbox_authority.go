@@ -118,6 +118,9 @@ type sandboxRegistrationStore interface {
 	sandboxreg.GuestStore
 	CreateRun(uid int, r sandboxreg.Registration, run *sandboxreg.Run) error
 	Run(uid int, id string) (sandboxreg.Run, bool, error)
+	// GetWithRun reads a registration and its run record as one write
+	// stored them.
+	GetWithRun(uid int, id string) (sandboxreg.Registration, bool, sandboxreg.Run, bool, error)
 	UpdateRun(uid int, r sandboxreg.Registration, run *sandboxreg.Run) error
 	// Report records whether the daemon sees the registration's sandbox
 	// running; RevokeSandbox revokes the registrations bound to a sandbox

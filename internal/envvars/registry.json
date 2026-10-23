@@ -2070,6 +2070,106 @@
       "since": "0.8.8"
     },
     {
+      "name": "DEFENSECLAW_HOOK_BURST_CALLS",
+      "category": "test_fixture",
+      "purpose": "Sets the number of hook calls in the probe burst.",
+      "default": "unset",
+      "accepted_values": [
+        "non-negative integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_burst_probe_test.go",
+          "description": "Opt-in hook burst test fixture; never read by production gateway"
+        }
+      ],
+      "since": "1.0.4"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_BURST_OUT",
+      "category": "test_fixture",
+      "purpose": "Selects the output directory for burst probe profiles.",
+      "default": "unset",
+      "accepted_values": [
+        "temporary directory path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_burst_probe_test.go",
+          "description": "Opt-in hook burst test fixture; never read by production gateway"
+        }
+      ],
+      "since": "1.0.4"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_BURST_PROBE",
+      "category": "test_fixture",
+      "purpose": "Enables the opt-in hook burst probe test.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_burst_probe_test.go",
+          "description": "Opt-in hook burst test fixture; never read by production gateway"
+        }
+      ],
+      "since": "1.0.4"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_BURST_WARM",
+      "category": "test_fixture",
+      "purpose": "Sets the number of hook calls written before the probe burst.",
+      "default": "unset",
+      "accepted_values": [
+        "non-negative integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_burst_probe_test.go",
+          "description": "Opt-in hook burst test fixture; never read by production gateway"
+        }
+      ],
+      "since": "1.0.4"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_BURST_WORKERS",
+      "category": "test_fixture",
+      "purpose": "Sets the number of concurrent callers in the probe burst.",
+      "default": "unset",
+      "accepted_values": [
+        "non-negative integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_burst_probe_test.go",
+          "description": "Opt-in hook burst test fixture; never read by production gateway"
+        }
+      ],
+      "since": "1.0.4"
+    },
+    {
       "name": "DEFENSECLAW_HOOK_FLOOD_CALLS",
       "category": "test_fixture",
       "purpose": "Sets the number of hook calls in each probe flood.",

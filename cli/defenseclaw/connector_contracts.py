@@ -355,6 +355,207 @@ def normalize_agent_version(raw: str | None) -> str:
     return ".".join(normalized)
 
 
+# Mirror Go connector.KiroCLIHookFloor: before it a non-interactive
+# `kiro-cli chat --v3` run loads no hooks (kiro.dev/docs/cli/headless), so its
+# tool calls never reach DefenseClaw (rel-1-0-4 GAP-0227).
+KIRO_CLI_HOOK_FLOOR = str(HOOK_CONTRACT_MANIFEST["connectors"]["kiro"]["cli_hook_floor"])
+KIRO_IDE_GLOBAL_HOOKS_FLOOR = str(HOOK_CONTRACT_MANIFEST["connectors"]["kiro"]["ide_global_hooks_floor"])
+# The banner `kiro-cli --version` prints; the Kiro IDE launcher prints a bare
+# version, which is not a kiro-cli version.
+_KIRO_CLI_VERSION_RE = re.compile(r"(?i)^kiro-cli\s+v?[0-9]")
+
+
+def kiro_cli_below_hook_floor(raw: str | None) -> str:
+    """Return the normalized kiro-cli version when *raw* is a kiro-cli banner
+    below KIRO_CLI_HOOK_FLOOR, else ""."""
+
+    value = (raw or "").strip()
+    if not _KIRO_CLI_VERSION_RE.match(value):
+        return ""
+    normalized = normalize_agent_version(value)
+    if normalized and _compare_version(normalized, KIRO_CLI_HOOK_FLOOR) < 0:
+        return normalized
+    return ""
+
+
+def kiro_cli_below_hook_floor_reason(normalized: str) -> str:
+    """Mirror Go connector.KiroCLIBelowHookFloorReason."""
+
+    floor = KIRO_CLI_HOOK_FLOOR
+    return (
+        f"kiro-cli {normalized} is below {floor}: before {floor} a non-interactive kiro-cli --v3 run loads no hooks, "
+        f"so its tool calls never reach DefenseClaw; update Kiro CLI to {floor} or later"
+    )
+
+
+def kiro_ide_below_hook_floor(raw: str | None) -> str:
+    """Return an IDE version that cannot read the global hooks file."""
+
+    value = (raw or "").strip()
+    if not value or _KIRO_CLI_VERSION_RE.match(value):
+        return ""
+    normalized = normalize_agent_version(value)
+    if normalized and _compare_version(normalized, KIRO_IDE_GLOBAL_HOOKS_FLOOR) < 0:
+        return normalized
+    return ""
+
+
+# The one Kiro detection judgment, mirroring Go enterprisehooks.AssessKiro
+# (internal/enterprisehooks/kiro_forms.go); both are held to
+# internal/enterprisehooks/testdata/kiro_forms_table.json. Each installed form
+# (kiro-cli, each Kiro IDE install) is judged on its own: at or above its
+# floor it is protected, below it it is not, and a form whose version could
+# not be read is unknown, which is not protected. Setup and doctor use it.
+KIRO_FORM_CLI = "cli"
+KIRO_FORM_IDE = "ide"
+KIRO_CODE_CLI_BELOW_FLOOR = "kiro_cli_below_hook_floor"
+KIRO_CODE_IDE_BELOW_FLOOR = "kiro_ide_below_global_hooks_floor"
+KIRO_CODE_UNVERIFIED = "hook_contract_unverified"
+_KIRO_IDE_VERSION_SUFFIX = "+kiro-ide"
+
+
+@dataclass(frozen=True)
+class KiroFormVerdict:
+    """One installed Kiro form and its judgment."""
+
+    kind: str
+    version: str
+    normalized: str
+    protected: bool
+    code: str = ""
+    reason: str = ""
+    path: str = ""
+
+    @property
+    def below_floor(self) -> bool:
+        return self.code in (KIRO_CODE_CLI_BELOW_FLOOR, KIRO_CODE_IDE_BELOW_FLOOR)
+
+    @property
+    def unknown(self) -> bool:
+        return not self.protected and not self.normalized
+
+
+@dataclass(frozen=True)
+class KiroAssessment:
+    """Every installed Kiro form, the one a setup covers, and its refusals."""
+
+    forms: tuple[KiroFormVerdict, ...]
+    selected: KiroFormVerdict | None
+    #: Why action setup refuses: no installed form is protected (or none is
+    #: installed). "" when one is protected.
+    action_refusal: str
+    #: Why observe setup refuses too: no form is protected and one is known
+    #: to be below its floor (GAP-0828). An unknown form refuses action only.
+    every_mode_refusal: str
+
+    def unprotected(self) -> tuple[KiroFormVerdict, ...]:
+        return tuple(form for form in self.forms if not form.protected)
+
+
+def judge_kiro_form(kind: str, version: str = "", *, unread: str = "", path: str = "") -> KiroFormVerdict:
+    """Judge one installed Kiro form against its floor (Go JudgeKiroForm)."""
+
+    raw = (version or "").strip()
+    if raw.endswith(_KIRO_IDE_VERSION_SUFFIX):
+        raw = raw[: -len(_KIRO_IDE_VERSION_SUFFIX)].strip()
+    normalized = normalize_agent_version(raw)
+    where = (unread or "").strip()
+    if kind == KIRO_FORM_IDE:
+        if not normalized:
+            reason = (
+                f"{where or 'Kiro IDE is installed, but its version could not be read'}, so it is not verified "
+                f"against a known hook contract (the global hooks file needs Kiro IDE {KIRO_IDE_GLOBAL_HOOKS_FLOOR} "
+                "or later) and is not counted as protected"
+            )
+            return KiroFormVerdict(kind, raw, "", False, KIRO_CODE_UNVERIFIED, reason, path)
+        if _compare_version(normalized, KIRO_IDE_GLOBAL_HOOKS_FLOOR) < 0:
+            reason = (
+                f"Kiro IDE {normalized} is below {KIRO_IDE_GLOBAL_HOOKS_FLOOR}, the first build that reads the "
+                "global ~/.kiro/hooks file, so its agent sessions run without DefenseClaw hooks; update Kiro IDE"
+            )
+            return KiroFormVerdict(kind, raw, normalized, False, KIRO_CODE_IDE_BELOW_FLOOR, reason, path)
+        return KiroFormVerdict(kind, raw, normalized, True, path=path)
+    if not normalized:
+        reason = (
+            f"{where or 'kiro-cli is installed, but its version could not be read'}; without a version "
+            "DefenseClaw cannot check this kiro-cli against its hook floor, so it is not counted as protected"
+        )
+        return KiroFormVerdict(kind, raw, "", False, KIRO_CODE_UNVERIFIED, reason, path)
+    if _compare_version(normalized, KIRO_CLI_HOOK_FLOOR) < 0:
+        return KiroFormVerdict(
+            kind, raw, normalized, False, KIRO_CODE_CLI_BELOW_FLOOR, kiro_cli_below_hook_floor_reason(normalized), path
+        )
+    return KiroFormVerdict(kind, raw, normalized, True, path=path)
+
+
+def assess_kiro(forms: list[KiroFormVerdict] | tuple[KiroFormVerdict, ...]) -> KiroAssessment:
+    """Combine judged forms: a protected kiro-cli is selected, else a
+    protected IDE; without one action setup refuses (Go AssessKiro)."""
+
+    forms = tuple(forms)
+    selected = next((f for f in forms if f.protected and f.kind == KIRO_FORM_CLI), None) or next(
+        (f for f in forms if f.protected), None
+    )
+    if selected is not None:
+        return KiroAssessment(forms, selected, "", "")
+    action = next((f.reason for f in forms), "no Kiro installation was found, so no Kiro form is known to be protected")
+    every_mode = next((f.reason for f in forms if f.below_floor), "")
+    return KiroAssessment(forms, None, action, every_mode)
+
+
+def kiro_forms_from_signal(signal: Any) -> tuple[KiroFormVerdict, ...]:
+    """Judge every Kiro form an agent-discovery signal recorded.
+
+    ``kiro_forms`` (cache schema 7 and later) lists each probed install. A
+    signal without it (an earlier cache, or a hook-contract lock) has only
+    the selected version: a ``kiro-cli`` banner is the CLI, a bare version the
+    IDE, and an installed signal with no version an unknown kiro-cli.
+    """
+
+    recorded = getattr(signal, "kiro_forms", None)
+    if isinstance(recorded, (list, tuple)) and recorded:
+        out: list[KiroFormVerdict] = []
+        for item in recorded:
+            if not isinstance(item, dict):
+                continue
+            kind = KIRO_FORM_IDE if item.get("kind") == KIRO_FORM_IDE else KIRO_FORM_CLI
+            out.append(
+                judge_kiro_form(
+                    kind,
+                    str(item.get("version") or ""),
+                    unread=str(item.get("unread") or ""),
+                    path=str(item.get("path") or ""),
+                )
+            )
+        return tuple(out)
+    out = []
+    for kind, field_name in ((KIRO_FORM_CLI, "kiro_cli_version"), (KIRO_FORM_IDE, "kiro_ide_version")):
+        value = getattr(signal, field_name, "")
+        if isinstance(value, str) and value.strip():
+            out.append(judge_kiro_form(kind, value))
+    if out:
+        return tuple(out)
+    version = getattr(signal, "version", "")
+    version = version.strip() if isinstance(version, str) else ""
+    if version:
+        kind = KIRO_FORM_CLI if _KIRO_CLI_VERSION_RE.match(version) else KIRO_FORM_IDE
+        return (judge_kiro_form(kind, version),)
+    if bool(getattr(signal, "installed", False)):
+        error = getattr(signal, "error", "")
+        path = getattr(signal, "binary_path", "")
+        where = f"{path or 'kiro-cli'} is installed, but its version could not be read"
+        if isinstance(error, str) and error.strip():
+            where += f" ({error.strip()})"
+        return (judge_kiro_form(KIRO_FORM_CLI, "", unread=where, path=str(path or "")),)
+    return ()
+
+
+def assess_kiro_signal(signal: Any) -> KiroAssessment:
+    """:func:`assess_kiro` for an agent-discovery signal (or ``None``)."""
+
+    return assess_kiro(kiro_forms_from_signal(signal) if signal is not None else ())
+
+
 def resolve_connector_contract(
     connector: str,
     raw_version: str | None,
@@ -387,6 +588,15 @@ def resolve_connector_contract(
             STATUS_NOT_GATED,
             "acp-contract",
         }:
+            if name == "kiro" and (below := kiro_cli_below_hook_floor(raw)):
+                return ConnectorCompatibility(
+                    connector=name,
+                    raw_version=raw,
+                    normalized_version=below,
+                    status=STATUS_UNKNOWN,
+                    reason=kiro_cli_below_hook_floor_reason(below),
+                    contract=None,
+                )
             return ConnectorCompatibility(
                 connector=name,
                 raw_version=raw,

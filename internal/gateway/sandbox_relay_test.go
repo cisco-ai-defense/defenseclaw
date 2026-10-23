@@ -178,6 +178,16 @@ func (s *relayTestStore) Get(uid int, id string) (sandboxreg.Registration, bool,
 	return reg, ok, err
 }
 
+// GetWithRun answers the registration as Get does.
+func (s *relayTestStore) GetWithRun(uid int, id string) (sandboxreg.Registration, bool, sandboxreg.Run, bool, error) {
+	reg, ok, err := s.Get(uid, id)
+	if err != nil {
+		return sandboxreg.Registration{}, false, sandboxreg.Run{}, false, err
+	}
+	run, hasRun, err := s.Run(uid, id)
+	return reg, ok, run, hasRun, err
+}
+
 func (s *relayTestStore) set(err error, unbound bool) {
 	s.mu.Lock()
 	s.err, s.unbound = err, unbound

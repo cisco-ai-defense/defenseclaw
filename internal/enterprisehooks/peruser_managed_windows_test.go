@@ -419,12 +419,12 @@ func TestDiscoverWindowsStandalonePerUserAgentVersions(t *testing.T) {
 	if got := discover("kiro"); got != "" {
 		t.Fatalf("kiro with an IDE below the floor = %q", got)
 	}
-	// A kiro-cli that has never run is enrolled at the standalone floor, so
-	// its first chat is protected.
+	// A kiro-cli that has never run names no version, and none is assumed
+	// (GAP-0829).
 	kiroCLI := filepath.Join(home, "AppData", "Local", "Kiro-Cli")
 	write(filepath.Join(kiroCLI, "kiro-cli.exe"), "MZ-current")
-	if got := discover("kiro"); got != standaloneNotGatedAgentFloor("kiro") {
-		t.Fatalf("kiro-cli before its first run = %q, want the floor", got)
+	if got := discover("kiro"); got != "" {
+		t.Fatalf("kiro-cli before its first run = %q, want no version", got)
 	}
 	write(ide, `{"nameShort":"Kiro","applicationName":"kiro","version":"1.0.190"}`)
 	if got := discover("kiro"); got != "1.0.190"+KiroIDEVersionSuffix {
@@ -432,10 +432,10 @@ func TestDiscoverWindowsStandalonePerUserAgentVersions(t *testing.T) {
 	}
 	write(filepath.Join(kiroCLI, "run", "chat-cli-2.24.1.exe"), "MZ-current")
 	write(filepath.Join(kiroCLI, "run", "chat-cli-2.30.0.exe"), "MZ-other")
-	if got := discover("kiro"); got != "2.24.1" {
-		t.Fatalf("kiro-cli version = %q, want the run copy matching kiro-cli.exe", got)
+	if got := discover("kiro"); got != "1.0.190"+KiroIDEVersionSuffix {
+		t.Fatalf("Kiro version = %q, want the supported IDE beside an old CLI", got)
 	}
-	for version, admitted := range map[string]bool{"2.24.1": true, "2.20.0": false, "1.0.190" + KiroIDEVersionSuffix: true, "1.0.170" + KiroIDEVersionSuffix: false} {
+	for version, admitted := range map[string]bool{"2.27.1": true, "2.26.1": false, "2.20.0": false, "1.0.190" + KiroIDEVersionSuffix: true, "1.0.170" + KiroIDEVersionSuffix: false} {
 		if ok, reason := windowsStandaloneHookContractAdmitted("kiro", version); ok != admitted {
 			t.Fatalf("kiro %s admitted = %v (%s), want %v", version, ok, reason, admitted)
 		}

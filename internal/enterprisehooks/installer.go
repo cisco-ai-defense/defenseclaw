@@ -231,7 +231,7 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		setupOpts.GuardrailMode = strings.TrimSpace(opts.GuardrailMode)
 	}
 	if setupOpts.AgentVersion == "" {
-		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
+		setupOpts.AgentVersion = cachedSetupAgentVersion(dataDir, conn.Name())
 	}
 	if setupOpts.HookContractID == "" {
 		setupOpts.HookContractID = defaultHookContractID(resolveHookContract(conn.Name(), setupOpts.AgentVersion))
@@ -463,7 +463,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		setupOpts.HookAPITokenScoped = true
 	}
 	if setupOpts.AgentVersion == "" {
-		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
+		setupOpts.AgentVersion = cachedSetupAgentVersion(dataDir, conn.Name())
 	}
 	if setupOpts.HookContractID == "" {
 		setupOpts.HookContractID = defaultHookContractID(resolveHookContract(conn.Name(), setupOpts.AgentVersion))
@@ -1245,7 +1245,9 @@ func hookSidecarFiles(dataDir, connectorName string) ([]string, error) {
 //
 // Under Secure Client (#1163) missing, unsupported or incompatible version
 // evidence selects the reviewed best-effort contract in open delivery instead
-// of refusing installation. Every other profile keeps validateHookContract:
+// of refusing installation. Kiro CLI and IDE below their hook floors are
+// refused under every profile because those agent runs do not reach the hook.
+// Every other profile keeps validateHookContract:
 // an unverified contract in action mode and a contract drift are refused, and
 // the delivery mode is left as configured (fail-closed).
 func prepareHookContract(guardrailMode string, conn connector.Connector, opts connector.SetupOpts) (connector.SetupOpts, error) {
@@ -1264,6 +1266,15 @@ func prepareHookContract(guardrailMode string, conn connector.Connector, opts co
 	}
 	strictManagedRuntime := opts.ManagedEnterprise && runtime.GOOS == "windows"
 	if envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" && !strictManagedRuntime {
+		if reason := kiroHookFloorRefusal(resolution); reason != "" {
+			previous, current, err := loadHookContractLockPair(conn, opts, strictManagedRuntime)
+			if err != nil {
+				return connector.SetupOpts{}, err
+			}
+			if err := checkKiroHookFloor(conn, opts, reason, previous, current); err != nil {
+				return connector.SetupOpts{}, err
+			}
+		}
 		return opts, nil
 	}
 	if connector.HookContractNeedsActionOverride(resolution) {
@@ -1277,7 +1288,7 @@ func prepareHookContract(guardrailMode string, conn connector.Connector, opts co
 	if err != nil {
 		return connector.SetupOpts{}, err
 	}
-	if err := checkStandaloneNotGatedFloor(conn, opts, resolution, previous, current); err != nil {
+	if err := checkKiroHookFloor(conn, opts, kiroHookFloorRefusal(resolution), previous, current); err != nil {
 		return connector.SetupOpts{}, err
 	}
 	if hookContractsIncompatible(previous, current) {
@@ -1286,28 +1297,21 @@ func prepareHookContract(guardrailMode string, conn connector.Connector, opts co
 	return opts, nil
 }
 
-// checkStandaloneNotGatedFloor keeps the standalone floor of a not-gated
-// connector (Kiro). The floor gates new enrollments only: a user whose hooks
-// an earlier release installed below the floor already has a contract lock,
-// and keeps being repaired at the version they were rendered for, because
-// refusing the repair would leave the row not OK and the gateway would then
-// refuse the user's hook calls. A version change below the floor is refused.
-func checkStandaloneNotGatedFloor(
+// checkKiroHookFloor gates Kiro hook enrollment. An earlier enrolled CLI
+// keeps its interactive hooks repaired at the same version, while its
+// headless gap is reported. An IDE below its floor never reads global hooks,
+// so even an earlier lock cannot make it protected.
+func checkKiroHookFloor(
 	conn connector.Connector,
 	opts connector.SetupOpts,
-	resolution connector.HookContractResolution,
+	reason string,
 	previous, current connector.HookContractLockEntry,
 ) error {
-	if !standaloneProfileProcess() || standaloneNotGatedAgentFloor(conn.Name()) == "" ||
-		resolution.Status != connector.HookCompatibilityNotGated {
+	if reason == "" {
 		return nil
 	}
-	admitted, reason := standaloneNotGatedVersionAdmitted(resolution)
-	if admitted {
-		return nil
-	}
-	if previous.Connector == "" {
-		return fmt.Errorf("enterprise hooks: connector %s agent version %q is not certified for the standalone profile: %s", conn.Name(), opts.AgentVersion, reason)
+	if previous.Connector == "" || strings.HasSuffix(strings.TrimSpace(opts.AgentVersion), KiroIDEVersionSuffix) {
+		return fmt.Errorf("enterprise hooks: connector %s agent version %q cannot load hooks: %s", conn.Name(), opts.AgentVersion, reason)
 	}
 	if connector.HookContractLockDrifted(previous, current) {
 		floorNote := ""
@@ -1363,12 +1367,24 @@ func loadHookContractLockPair(
 // validateHookContract is the contract gate outside Secure Client (origin/main
 // semantics): in action mode an agent version without a verified hook
 // contract is refused, and a drifted contract lock is refused unless the
-// standalone profile accepts the version change.
+// standalone profile accepts the version change. Kiro's hook floor applies
+// in both guardrail modes before the compatibility override.
 func validateHookContract(mode string, conn connector.Connector, opts connector.SetupOpts) error {
+	resolution := resolveHookContract(conn.Name(), opts.AgentVersion)
+	floorReason := kiroHookFloorRefusal(resolution)
+	if floorReason != "" {
+		strictManagedRuntime := opts.ManagedEnterprise && runtime.GOOS == "windows"
+		previous, current, err := loadHookContractLockPair(conn, opts, strictManagedRuntime)
+		if err != nil {
+			return err
+		}
+		if err := checkKiroHookFloor(conn, opts, floorReason, previous, current); err != nil {
+			return err
+		}
+	}
 	if envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" {
 		return nil
 	}
-	resolution := resolveHookContract(conn.Name(), opts.AgentVersion)
 	if !strings.EqualFold(strings.TrimSpace(mode), "action") {
 		// The standalone guardian installs no hooks for an agent version
 		// with no hook contract, in any guardrail mode: they were rendered
@@ -1382,6 +1398,9 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 	if connector.HookContractNeedsActionOverride(resolution) {
 		return fmt.Errorf("enterprise hooks: connector %s agent version %q is not verified against a known hook contract: %s", conn.Name(), opts.AgentVersion, resolution.Reason)
 	}
+	if reason := kiroActionVersionRefusal(resolution); reason != "" {
+		return fmt.Errorf("enterprise hooks: connector %s agent version %q is not verified against a known hook contract: %s", conn.Name(), opts.AgentVersion, reason)
+	}
 	// Native Windows managed runtimes are administrator-published regular
 	// files. Unix guardians intentionally install hardened per-user symlinks,
 	// so keep their established contract reader and digest semantics.
@@ -1394,19 +1413,6 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: load hook contract lock: %w", err)
 	}
-	// The standalone floor of a not-gated connector (Kiro) gates new
-	// enrollments only. A user whose hooks an earlier release installed
-	// below the floor already has a contract lock: keep repairing that
-	// user's hooks at the version they were rendered for (a version change
-	// below the floor is still refused as drift, below), because refusing
-	// the repair would leave the row not OK, the gateway would then refuse
-	// the user's hook calls, and the hook script fails open by default.
-	if standaloneProfileProcess() && standaloneNotGatedAgentFloor(conn.Name()) != "" &&
-		resolution.Status == connector.HookCompatibilityNotGated && previous.Connector == "" {
-		if admitted, reason := standaloneNotGatedVersionAdmitted(resolution); !admitted {
-			return fmt.Errorf("enterprise hooks: connector %s agent version %q is not certified for the standalone profile: %s", conn.Name(), opts.AgentVersion, reason)
-		}
-	}
 	if previous.Connector != "" {
 		current, err := connector.NewHookContractLockEntryForMode(
 			opts,
@@ -1417,13 +1423,13 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err)
 		}
-		if connector.HookContractLockDrifted(previous, current) {
+		if connector.HookContractLockDrifted(previous, current) && !kiroIDEMarkerAdded(previous, current) {
 			if standaloneAcceptsAgentVersionChange(resolution) {
 				return nil
 			}
 			floorNote := ""
 			if standaloneProfileProcess() && standaloneNotGatedAgentFloor(conn.Name()) != "" {
-				if _, reason := standaloneNotGatedVersionAdmitted(resolution); reason != "" {
+				if reason := standaloneAgentFloorRefusal(resolution); reason != "" {
 					floorNote = "; " + reason
 				}
 			}
@@ -1451,7 +1457,9 @@ func standaloneAcceptsAgentVersionChange(resolution connector.HookContractResolu
 		return false
 	}
 	if resolution.Status == connector.HookCompatibilityKnown {
-		return true
+		// Managed Windows Kiro's contract covers builds below the floor
+		// that only an earlier release's rows keep.
+		return kiroCLIFloorRefusal(resolution) == ""
 	}
 	admitted, _ := standaloneNotGatedVersionAdmitted(resolution)
 	return admitted

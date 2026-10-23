@@ -542,7 +542,7 @@ A user without the `devin` CLI is enrolled when the Devin CLI the Desktop bundle
 
 #### Kiro IDE global hooks are not live-verified
 
-The Kiro IDE is discovered on every OS but its use of the global hook file is not live-verified. The guardian reads the IDE's version from its `product.json` (never runs it), enrolls a user who has only the IDE, and reports an IDE before 1.0.182, which reads only workspace hooks, as `kiro_ide_below_global_hooks_floor`. Whether the IDE enforces the global file, which shell it runs hook commands in on Windows, and where the Agent Hooks panel stores its toggle are open live checks; the Windows IDE locations are not verified against an install. Tracked in [#916](https://github.com/cisco-ai-defense/defenseclaw/issues/916).
+The Kiro IDE is discovered on every OS but its use of the global hook file is not live-verified. The guardian reads the IDE's version from its `product.json` (never runs it), enrolls a user who has only the IDE, and reports an IDE before 1.0.182, which reads only workspace hooks, as `kiro_ide_below_global_hooks_floor`; managed status marks it uncovered and verify fails. Whether the IDE enforces the global file, which shell it runs hook commands in on Windows, and where the Agent Hooks panel stores its toggle are open live checks; the Windows IDE locations are not verified against an install. Tracked in [#916](https://github.com/cisco-ai-defense/defenseclaw/issues/916).
 
 **Where:** Kiro IDE, every OS.
 
@@ -554,11 +554,11 @@ Only Kiro IDE 1.0.182 and later and `kiro-cli --v3` read the global `~/.kiro/hoo
 
 **Where:** Kiro, Linux, macOS and Windows.
 
-**What reduces it:** Keep kiro-cli at 2.24.1 or later. Treat a kiro-cli prompt block as a record, not a veto. Turn off configuration sync in the Kiro console.
+**What reduces it:** Keep kiro-cli at 2.27.1 or later (DefenseClaw refuses an older one: its non-interactive `--v3` runs load no hooks). Treat a kiro-cli prompt block as a record, not a veto. Turn off configuration sync in the Kiro console.
 
 #### Kiro on Windows before its first run
 
-Kiro on Windows is enrolled per user, and a kiro-cli that has never run has no version the guardian can read, so it is enrolled at 2.24.1 (the lowest reviewed contract) until its first run names the version. The Kiro hook returns a block as exit 2 whether Kiro starts it through `pwsh -Command`, `powershell -Command`, `cmd.exe` or directly.
+Kiro on Windows is enrolled per user, and a kiro-cli that has never run has no version the guardian can read. Its version is not assumed: until its first run names the version it has no row and status reports it as `hook_contract_unverified`, so its first session runs without DefenseClaw hooks and the deployment shows as not covered. The Kiro hook returns a block as exit 2 whether Kiro starts it through `pwsh -Command`, `powershell -Command`, `cmd.exe` or directly.
 
 **Where:** Kiro, Windows.
 

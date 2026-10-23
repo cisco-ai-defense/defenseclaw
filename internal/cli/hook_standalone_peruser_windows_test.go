@@ -38,20 +38,24 @@ func TestStandaloneEnterpriseHookExecutableMatchesOnlyTheStandaloneBinary(t *tes
 	}
 }
 
-func TestHookConnectorFromArgsAcceptsStandalonePerUserHookConnectors(t *testing.T) {
-	// OpenCode's managed plugin runs the hook binary for every event.
-	for _, name := range []string{"copilot", "antigravity", "devin", "hermes", "opencode", "codex", "claudecode", "cursor"} {
-		got, err := hookConnectorFromArgs([]string{"hook", "--connector", name})
-		if err != nil || got != name {
-			t.Fatalf("%s: got %q err=%v", name, got, err)
-		}
-	}
-	// A plugin-only connector never executes the hook binary.
+// A plugin-only connector never executes the hook binary, so a managed hook
+// call naming one resolves no runtime and is closed.
+func TestManagedHookOfAPluginOnlyConnectorIsClosed(t *testing.T) {
 	for _, name := range []string{"amp", "openhands"} {
-		if _, err := hookConnectorFromArgs([]string{"hook", "--connector", name}); err == nil {
+		nativeEnterpriseHookRuntimeSnapshot.Lock()
+		nativeEnterpriseHookRuntimeSnapshot.prepared = false
+		nativeEnterpriseHookRuntimeSnapshot.Unlock()
+		if prepareEnterpriseManagedHookRuntime(name) {
+			t.Fatalf("%s: managed hook ended as a no-op", name)
+		}
+		if !enterpriseManagedHookRuntimeForceClosed() {
 			t.Fatalf("%s accepted as an enterprise-managed hook connector", name)
 		}
 	}
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	nativeEnterpriseHookRuntimeSnapshot.prepared = false
+	nativeEnterpriseHookRuntimeSnapshot.err = nil
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 }
 
 func TestManagedHermesHookIgnoresTargetWritableTombstone(t *testing.T) {

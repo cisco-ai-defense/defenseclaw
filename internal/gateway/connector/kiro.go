@@ -32,6 +32,23 @@ const (
 	kiroDefaultAgentSettingKey  = "chat.defaultAgent"
 )
 
+// KiroCLIHookFloor is the oldest kiro-cli on which every engine runs
+// DefenseClaw's hooks. Before 2.27.1 a V3 non-interactive run (`kiro-cli
+// chat --v3 --no-interactive`) loads no hooks at all (kiro.dev/docs/cli/headless:
+// "Starting with Kiro CLI 2.27.1, V3 non-interactive runs load Hooks"): a
+// real 2.26.1 run completed a tool call that sent DefenseClaw nothing
+// (rel-1-0-4 GAP-0227). The managed profiles do not enroll an older kiro-cli,
+// and per-user setup and doctor refuse it (cli_hook_floor in
+// hook_contracts.json).
+const KiroCLIHookFloor = "2.27.1"
+
+// KiroCLIBelowHookFloorReason says why a kiro-cli below KiroCLIHookFloor
+// is refused.
+func KiroCLIBelowHookFloorReason(normalized string) string {
+	return fmt.Sprintf("kiro-cli %s is below %s: before %s a non-interactive kiro-cli --v3 run loads no hooks, "+
+		"so its tool calls never reach DefenseClaw; update Kiro CLI to %s or later", normalized, KiroCLIHookFloor, KiroCLIHookFloor, KiroCLIHookFloor)
+}
+
 // KiroHooksPathOverride and KiroHomeOverride are test seams. Production
 // Setup always writes the user-global ~/.kiro/hooks/defenseclaw.json file
 // and, when a workspace is selected, the matching workspace copy.

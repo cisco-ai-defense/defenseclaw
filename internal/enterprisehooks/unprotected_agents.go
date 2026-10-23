@@ -17,14 +17,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// An agent the standalone enumerator knows is installed for an eligible user
-// but cannot enroll (its version has no verified hook contract, is below the
-// platform minimum, cannot be read, or its install is not one the guardian
-// can manage) gets no DefenseClaw hooks. The enumerator records every such
-// agent next to the manifest, and the lifecycle's status and verify report
-// them, so an unprotected agent is never a silent gap.
+// The standalone enumerator records installed agents and surfaces that
+// DefenseClaw cannot cover. An earlier enrolled Kiro CLI below the headless
+// hook floor remains installed for interactive sessions, but is still
+// uncovered. The record sits next to the manifest for status and verify.
 
 // UnprotectedAgentsFileName is the record the standalone enumerator writes
 // next to the guardian manifest (root-only on Linux and macOS; SYSTEM and
@@ -39,6 +39,10 @@ const (
 	// UnprotectedCodeHookContractUnverified: the agent's version has no
 	// verified DefenseClaw hook contract.
 	UnprotectedCodeHookContractUnverified = "hook_contract_unverified"
+	// UnprotectedCodeKiroCLIBelowHookFloor: old kiro-cli has a headless
+	// engine that never loads the hook, even when an earlier release left
+	// interactive hooks installed for the account.
+	UnprotectedCodeKiroCLIBelowHookFloor = "kiro_cli_below_hook_floor"
 	// UnprotectedCodeAgentUnprotected: any other reason the agent could not
 	// be enrolled.
 	UnprotectedCodeAgentUnprotected = "agent_unprotected"
@@ -55,8 +59,8 @@ const (
 // unprotectedReasonMaxRunes bounds the user-influenced reason text.
 const unprotectedReasonMaxRunes = 400
 
-// UnprotectedAgent is one agent install the enumerator found but could not
-// enroll.
+// UnprotectedAgent is one installed agent or surface the enumerator found
+// that DefenseClaw cannot fully cover.
 type UnprotectedAgent struct {
 	User      string `json:"user"`
 	SID       string `json:"sid,omitempty"`
@@ -89,6 +93,13 @@ func UnprotectedAgentsPath(manifestPath string) string {
 
 // UnprotectedCodeForReason classifies an admission reason.
 func UnprotectedCodeForReason(reason string) string {
+	if strings.Contains(reason, "kiro-cli ") && strings.Contains(reason, "is below "+connector.KiroCLIHookFloor) {
+		return UnprotectedCodeKiroCLIBelowHookFloor
+	}
+	if strings.Contains(reason, "Kiro IDE version ") &&
+		strings.Contains(reason, "is below the certified minimum "+KiroIDEGlobalHooksFloor) {
+		return UnprotectedCodeKiroIDEBelowGlobalHooksFloor
+	}
 	if strings.Contains(reason, "not verified against a known hook contract") ||
 		strings.Contains(reason, "not covered by a known hook contract") {
 		return UnprotectedCodeHookContractUnverified
@@ -127,7 +138,8 @@ func (a UnprotectedAgent) Message() string {
 }
 
 // MarshalUnprotectedAgents serializes agents deterministically (sorted, one
-// entry per user and connector) so an unchanged set rewrites nothing.
+// entry per user and connector, except separate Kiro CLI and IDE surfaces)
+// so an unchanged set rewrites nothing.
 func MarshalUnprotectedAgents(agents []UnprotectedAgent) ([]byte, error) {
 	normalized := normalizeUnprotectedAgents(agents)
 	data, err := json.MarshalIndent(unprotectedAgentsFile{Version: 1, Agents: normalized}, "", "  ")
@@ -159,6 +171,7 @@ func ParseUnprotectedAgents(data []byte) ([]UnprotectedAgent, error) {
 			continue
 		}
 		if agent.Code != UnprotectedCodeHookContractUnverified && agent.Code != UnprotectedCodeSurfaceUnverified &&
+			agent.Code != UnprotectedCodeKiroCLIBelowHookFloor &&
 			agent.Code != UnprotectedCodeKiroIDEBelowGlobalHooksFloor && !accountOnly {
 			agent.Code = UnprotectedCodeAgentUnprotected
 		}
@@ -185,6 +198,16 @@ func normalizeUnprotectedAgents(agents []UnprotectedAgent) []UnprotectedAgent {
 			agent.Code = UnprotectedCodeForReason(agent.Reason)
 		}
 		key := strings.ToLower(agent.SID) + "\x00" + agent.User + "\x00" + agent.Connector + "\x00" + agent.Surface + "\x00" + agent.Host
+		if agent.Connector == "kiro" {
+			// One Kiro row can describe two installed products (kiro-cli and
+			// the IDE), each with its own reason, such as a kiro-cli below
+			// its floor or without a readable version next to an IDE below
+			// its floor or in an untrusted home. Each keeps its finding, and
+			// so does each IDE install (AssessKiro): forms are told apart by
+			// code, version and the install their reason names first.
+			form, _, _ := strings.Cut(agent.Reason, ";")
+			key += "\x00" + agent.Code + "\x00" + agent.Version + "\x00" + form
+		}
 		byKey[key] = agent
 	}
 	out := make([]UnprotectedAgent, 0, len(byKey))

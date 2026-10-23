@@ -136,3 +136,33 @@ func TestUnixUnprotectedAgentsRecordRoundTrip(t *testing.T) {
 		t.Fatal("an identical record was rewritten")
 	}
 }
+
+func TestKiroCLIAndIDESurfaceGapsBothSurviveTheStatusRecord(t *testing.T) {
+	data, err := MarshalUnprotectedAgents([]UnprotectedAgent{
+		{User: "alice", Connector: "kiro", Version: "2.24.1", Code: "kiro_cli_below_hook_floor",
+			Reason: "kiro-cli 2.24.1 is below 2.27.1 and sends no headless hooks"},
+		{User: "alice", Connector: "kiro", Version: "1.0.181", Code: UnprotectedCodeKiroIDEBelowGlobalHooksFloor,
+			Reason: "Kiro IDE 1.0.181 cannot read global hooks"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseUnprotectedAgents(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Code == got[1].Code {
+		t.Fatalf("status lost a Kiro product's uncovered surface: %+v", got)
+	}
+}
+
+func TestKiroFloorReasonsGetSurfaceSpecificCodes(t *testing.T) {
+	for _, tc := range []struct{ reason, want string }{
+		{"kiro-cli 2.24.1 is below 2.27.1; no headless hooks", UnprotectedCodeKiroCLIBelowHookFloor},
+		{"Kiro IDE version 1.0.181 is below the certified minimum 1.0.182", UnprotectedCodeKiroIDEBelowGlobalHooksFloor},
+	} {
+		if got := UnprotectedCodeForReason(tc.reason); got != tc.want {
+			t.Fatalf("%q classified as %q, want %q", tc.reason, got, tc.want)
+		}
+	}
+}

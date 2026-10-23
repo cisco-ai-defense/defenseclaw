@@ -852,6 +852,7 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 	type manifestConnector struct {
 		Kind                string                `json:"kind"`
 		CompatibilityGate   string                `json:"compatibility_gate"`
+		CLIHookFloor        string                `json:"cli_hook_floor"`
 		KnownBrokenVersions []manifestKnownBroken `json:"known_broken_versions"`
 		Contracts           []manifestContract    `json:"contracts"`
 	}
@@ -930,6 +931,11 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 		}
 	}
 
+	// Python setup and doctor refuse a kiro-cli below this floor; the managed
+	// profiles refuse it with KiroCLIHookFloor.
+	if got := gotManifest.Connectors["kiro"].CLIHookFloor; got != KiroCLIHookFloor {
+		t.Fatalf("kiro cli_hook_floor=%q want %q", got, KiroCLIHookFloor)
+	}
 	for _, ungated := range []string{"openclaw", "zeptoclaw", "kiro"} {
 		spec, ok := gotManifest.Connectors[ungated]
 		if !ok {

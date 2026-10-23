@@ -227,7 +227,7 @@ def test_discovery_absence_is_unavailable_and_unregistered_names_are_bounded() -
 def test_connector_rows_name_the_connector_and_accept_untested_newer_versions() -> None:
     discovery = SimpleNamespace(
         agents={
-            "kiro": _signal(installed=True, version="kiro-cli 2.22.0"),
+            "kiro": _signal(installed=True, version="kiro-cli 2.27.1"),
             "omnigent": _signal(installed=True, version="omnigent 0.15.0"),
         }
     )
@@ -299,3 +299,36 @@ def test_manual_choices_are_never_promoted_to_executable_repairs() -> None:
     with pytest.raises(RemediationAuthorizationError) as exc:
         authorize_remediation(choice, confirmed=True)
     assert exc.value.code == "manual-remediation-required"
+
+
+@pytest.mark.parametrize("version", ["kiro-cli 2.26.1", "kiro-cli 2.24.1"])
+def test_kiro_cli_below_the_hook_floor_is_unsupported_with_the_update_guidance(version: str) -> None:
+    # GAP-0227: before 2.27.1 a non-interactive kiro-cli --v3 run loads no
+    # hooks, so doctor reports the connector unsupported and says to update.
+    below, at_floor = assess_connector_health(
+        ("kiro",), SimpleNamespace(agents={"kiro": _signal(installed=True, version=version)})
+    ) + assess_connector_health(("kiro",), SimpleNamespace(agents={"kiro": _signal(installed=True, version="kiro-cli 2.27.1")}))
+
+    assert below.status is HealthStatus.UNSUPPORTED
+    assert below.reason_code == "connector-version-outside-contract"
+    assert below.installed_version == version.removeprefix("kiro-cli ")
+    assert "is below 2.27.1" in below.summary
+    assert "non-interactive kiro-cli --v3 run loads no hooks" in below.summary
+    assert below.remediations[0].summary == "Update Kiro CLI to 2.27.1 or later, then rerun setup"
+    assert below.remediations[0].kind is RemediationKind.MANUAL
+    assert not below.remediations[0].unattended_allowed
+
+    assert (at_floor.status, at_floor.reason_code) == (HealthStatus.SUPPORTED, "connector-not-version-gated")
+
+
+def test_kiro_doctor_reports_old_cli_separately_from_supported_ide() -> None:
+    signal = _signal(installed=True, version="1.0.182")
+    signal.kiro_cli_version = "kiro-cli 2.26.1"
+    signal.kiro_ide_version = "1.0.182"
+    findings = assess_connector_health(("kiro",), SimpleNamespace(agents={"kiro": signal}))
+
+    assert any(f.status is HealthStatus.SUPPORTED and f.installed_version == "1.0.182" for f in findings)
+    assert any(
+        f.status is HealthStatus.UNSUPPORTED and "kiro-cli 2.26.1 is below 2.27.1" in f.summary
+        for f in findings
+    )

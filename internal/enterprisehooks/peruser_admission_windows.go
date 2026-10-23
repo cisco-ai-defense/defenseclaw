@@ -169,6 +169,18 @@ func windowsStandaloneRowAdmission(profileHome, connectorName, version string) (
 	return windowsStandalonePerUserAdmission(profileHome, connectorName, version)
 }
 
+// windowsStandaloneEnrollmentAdmission is windowsStandaloneRowAdmission for
+// a version a row is not enrolled at yet: a new row's, or one a known row
+// would follow. It also refuses a kiro-cli below connector.KiroCLIHookFloor:
+// the managed contract covers the builds an earlier release enrolled only so
+// those rows keep being repaired at their own version, as on Unix.
+func windowsStandaloneEnrollmentAdmission(profileHome, connectorName, version string) (bool, string) {
+	if reason := kiroCLIFloorRefusal(resolveHookContract(connectorName, version)); reason != "" {
+		return false, reason
+	}
+	return windowsStandaloneRowAdmission(profileHome, connectorName, version)
+}
+
 // windowsStandaloneHookContractAdmitted reports whether version resolves to
 // a hook contract the guardian can install: a known contract or, for a
 // connector whose contract is not version-gated, a version at or above its
