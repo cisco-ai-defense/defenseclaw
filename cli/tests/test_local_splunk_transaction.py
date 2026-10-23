@@ -669,33 +669,48 @@ def test_local_setup_never_takes_over_an_unrecorded_destination(
     assert _destinations(tmp_path)[existing["name"]]["local_stack"] == _RECORD
 
 
-@pytest.mark.parametrize("platform", ["unix", "native"])
-@pytest.mark.parametrize("proof", ["owned", "wrong-token", "wrong-endpoint", "wrong-tree", "wrong-compose", "multiple-containers"])
+@pytest.mark.parametrize(
+    ("platform", "home_layout"),
+    [("unix", "home/alice"), ("unix", "Users/alice"), ("native", "Users/alice/AppData/Local")],
+    ids=["linux-layout", "macos-layout", "windows-layout"],
+)
+@pytest.mark.parametrize(
+    "proof",
+    ["owned", "wrong-token", "wrong-endpoint", "wrong-tree", "wrong-working-dir", "wrong-compose", "multiple-containers"],
+)
 def test_legacy_local_sink_migrates_only_with_bridge_and_container_proof(
-    tmp_path: Path, monkeypatch, platform: str, proof: str
+    tmp_path: Path, monkeypatch, platform: str, home_layout: str, proof: str
 ) -> None:
-    app = _app(tmp_path)
+    data_dir = tmp_path / home_layout / ".defenseclaw"
+    app = _app(data_dir)
     name = "local-splunk" if platform == "native" else "splunk-hec-127-0-0-1"
     token_env = LOCAL_TOKEN_ENV if platform == "native" else _SHARED
     credential = "older local fixture credential"
     endpoint = _REMOTE_HEC if proof == "wrong-endpoint" else _DEFAULT_HEC
     legacy = _hec(name, endpoint, token_env)
-    _write_state(tmp_path, [legacy], {"KEEP_ME": "unchanged", token_env: credential})
+    _write_state(data_dir, [legacy], {"KEEP_ME": "unchanged", token_env: credential})
     if os.name == "nt":
-        bridge_env_dir = tmp_path / "splunk-bridge" / "env"
+        bridge_env_dir = data_dir / "splunk-bridge" / "env"
         bridge_env_dir.mkdir(parents=True)
         set_known_windows_directory_acl(bridge_env_dir)
-    _write_bridge_contract(tmp_path, credential if proof != "wrong-token" else "other bridge credential")
-    bridge = tmp_path / "splunk-bridge"
+    _write_bridge_contract(data_dir, credential if proof != "wrong-token" else "other bridge credential")
+    bridge = data_dir / "splunk-bridge"
     (bridge / "bin").mkdir()
     (bridge / "bin" / "splunk-claw-bridge").write_text("bridge fixture", encoding="utf-8")
     (bridge / "compose").mkdir()
     compose = bridge / "compose" / "docker-compose.local.yml"
     compose.write_text("name: defenseclaw-splunk-local\n", encoding="utf-8")
+    # The 1.0.2/1.0.3 Unix bridge used `docker compose -f` without
+    # --project-directory, so Compose records the compose file's parent.
+    working_dir = bridge if platform == "native" else compose.parent
+    if proof == "wrong-working-dir":
+        working_dir = compose.parent if platform == "native" else bridge
+    elif proof == "wrong-tree":
+        working_dir = tmp_path / "other"
     labels = {
         "com.docker.compose.project": "defenseclaw-splunk-local",
         "com.docker.compose.service": "splunk",
-        "com.docker.compose.project.working_dir": str(bridge if proof != "wrong-tree" else tmp_path / "other"),
+        "com.docker.compose.project.working_dir": str(working_dir),
         "com.docker.compose.project.config_files": str(compose if proof != "wrong-compose" else tmp_path / "other.yml"),
     }
 
@@ -724,12 +739,12 @@ def test_legacy_local_sink_migrates_only_with_bridge_and_container_proof(
         if proof == "owned":
             from defenseclaw.commands.cmd_setup_observability import _stored_secret
 
-            assert _stored_secret(str(tmp_path), token_env) == credential
+            assert _stored_secret(str(data_dir), token_env) == credential
             assert cmd_setup._load_dotenv(str(bridge / "env" / ".env")) == {
                 "DEFENSECLAW_HEC_TOKEN": credential, "DEFENSECLAW_HEC_URL": _DEFAULT_HEC,
             }
             verified = cmd_setup._verified_legacy_local_splunk_destination(
-                str(tmp_path), name, native_windows=platform == "native", gateway_token_env="",
+                str(data_dir), name, native_windows=platform == "native", gateway_token_env="",
             )
             assert verified is not None, calls
             assert verified[0]["name"] == name
@@ -738,7 +753,7 @@ def test_legacy_local_sink_migrates_only_with_bridge_and_container_proof(
                 _native_local_setup(app)
             else:
                 _unix_local_setup(app)
-            sink = _destinations(tmp_path)[name]
+            sink = _destinations(data_dir)[name]
             assert sink["local_stack"] == _RECORD
             assert sink["token_env"] == LOCAL_TOKEN_ENV
         else:
@@ -747,7 +762,7 @@ def test_legacy_local_sink_migrates_only_with_bridge_and_container_proof(
                     _native_local_setup(app)
                 else:
                     _unix_local_setup(app)
-            assert _destinations(tmp_path)[name] == legacy
+            assert _destinations(data_dir)[name] == legacy
 
 
 def test_legacy_local_proof_expires_if_destination_changes_before_commit(tmp_path: Path) -> None:

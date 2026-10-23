@@ -17915,7 +17915,10 @@ def _verified_legacy_local_splunk_destination(
         if (
             labels.get("com.docker.compose.project") != COMPOSE_PROJECT
             or labels.get("com.docker.compose.service") != "splunk"
-            or not same_path(str(labels.get("com.docker.compose.project.working_dir", "")), stack_dir)
+            or not same_path(
+                str(labels.get("com.docker.compose.project.working_dir", "")),
+                stack_dir if native_windows else compose_dir,
+            )
             or not any(same_path(item.strip(), compose) for item in config_files.split(",") if item.strip())
         ):
             return None
