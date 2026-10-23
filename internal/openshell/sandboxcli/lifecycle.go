@@ -1176,7 +1176,9 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 			return apiError(statusErr)
 		}
 		if st != nil && !st.Enabled {
-			return fmt.Errorf("the administrator has turned sandboxes off (enterprise.openshell.enabled); kept sandboxes cannot be deleted until the account gateway runs. Ask the administrator to turn sandboxes on temporarily, then run `%s delete %s` again", CommandName, strings.Join(o.Names, " "))
+			// Concatenated, so the hint scan reads the suggested command
+			// (TestSandboxHintsNameCommandsThatExist).
+			return errors.New("the administrator has turned sandboxes off (enterprise.openshell.enabled); kept sandboxes cannot be deleted until the account gateway runs. Ask the administrator to turn sandboxes on temporarily, then run `" + CommandName + " delete " + strings.Join(o.Names, " ") + "` again")
 		}
 	}
 	var errs []error

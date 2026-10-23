@@ -67,6 +67,7 @@ func atomicWriteFileNoFollow(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("lstat %s: %w", path, err)
 	}
 	return atomicWriteFileAt(path, path, data, perm, atomicFilePublish, false)
+}
 
 // atomicCreateFileNoFollow publishes a new private file without replacing any
 // directory entry already at path. A collision remains the caller's to handle.
