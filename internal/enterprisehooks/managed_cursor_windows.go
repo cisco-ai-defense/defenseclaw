@@ -816,7 +816,10 @@ func rebuildWindowsCursorManagedGuardOnce(
 			preimage: current.state, limit: windowsCursorManagedStateLimit, data: candidate.state.data,
 		})
 	}
-	hooksChanged := !current.hooks.existed || !bytes.Equal(current.hooks.data, hooks)
+	// A guard ordinary users cannot read is rebuilt too: the shared writer
+	// publishes it again with the read added.
+	hooksChanged := !current.hooks.existed || !bytes.Equal(current.hooks.data, hooks) ||
+		windowsCursorHooksUnreadable(windowsCursorSharedHooks(current.hooks, current.hooksMetadata))
 	if len(plan) == 0 && !hooksChanged {
 		return false, nil
 	}
@@ -867,6 +870,9 @@ func rebuildWindowsCursorManagedGuardOnce(
 	validated, err := validateWindowsCursorManagedArtifacts(repaired)
 	if err == nil && !validated.active {
 		err = errors.New("enterprise hooks: rebuilt Cursor machine guard is not active")
+	}
+	if err == nil {
+		err = verifyWindowsCursorManagedHooksUsersCanRead(validated)
 	}
 	if err != nil {
 		if hooksWrite.Written && !windowsCursorSharedHooks(repaired.hooks, repaired.hooksMetadata).Same(hooksWrite.Published) {
@@ -993,6 +999,11 @@ func refreshWindowsCursorManagedAdapter(hookExecutable string, upgradeTemplate b
 			return err
 		}
 		artifacts, err := validateWindowsCursorManagedArtifactsReclaimingOrphans(current)
+		if err == nil {
+			// A guard ordinary users cannot read protects none of them: the
+			// rebuild publishes hooks.json again with the read.
+			err = verifyWindowsCursorManagedHooksUsersCanRead(artifacts)
+		}
 		if err != nil {
 			rebuilt, rebuildErr := restoreWindowsCursorManagedGuard(current, hookExecutable)
 			if rebuildErr != nil {
@@ -1005,6 +1016,9 @@ func refreshWindowsCursorManagedAdapter(hookExecutable string, upgradeTemplate b
 					return err
 				}
 				artifacts, err = validateWindowsCursorManagedArtifacts(current)
+				if err == nil {
+					err = verifyWindowsCursorManagedHooksUsersCanRead(artifacts)
+				}
 			}
 		}
 		if err != nil {
@@ -1020,8 +1034,10 @@ func refreshWindowsCursorManagedAdapter(hookExecutable string, upgradeTemplate b
 					return fmt.Errorf("%v (Cursor adapter restore failed: %v)", err, writeErr)
 				}
 			}
-			if artifacts, candidateErr = validateWindowsCursorManagedArtifacts(candidate); candidateErr != nil ||
-				!artifacts.active {
+			if artifacts, candidateErr = validateWindowsCursorManagedArtifacts(candidate); candidateErr == nil {
+				candidateErr = verifyWindowsCursorManagedHooksUsersCanRead(artifacts)
+			}
+			if candidateErr != nil || !artifacts.active {
 				if !current.adapter.existed {
 					if removeErr := restoreWindowsCursorManagedFile(current.adapter, current.adapterMetadata); removeErr != nil {
 						return fmt.Errorf("%v (Cursor adapter rollback failed: %v)", err, removeErr)
@@ -2481,7 +2497,12 @@ func windowsCursorRestoreOutcome(
 	if err != nil {
 		return nil, err
 	}
-	return nil, windowsCursorOptionsMatch(validated.parsed, opts)
+	if err := windowsCursorOptionsMatch(validated.parsed, opts); err != nil {
+		return nil, err
+	}
+	// An access list change that took the read from ordinary users is a
+	// newer save the restore publishes again, with the read.
+	return verifyWindowsCursorManagedHooksUsersCanRead(validated), nil
 }
 
 // verifyWindowsCursorManagedGuardActive reports whether the Cursor machine
@@ -2494,6 +2515,9 @@ func verifyWindowsCursorManagedGuardActive() error {
 	artifacts, err = validateWindowsCursorManagedArtifacts(artifacts)
 	if err == nil && !artifacts.active {
 		err = errors.New("enterprise hooks: Cursor machine guard is not active")
+	}
+	if err == nil {
+		err = verifyWindowsCursorManagedHooksUsersCanRead(artifacts)
 	}
 	return err
 }
