@@ -51,6 +51,7 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
   # The installed mode decides; strict availability tightens this exit as it
   # tightens every later outage.
   _DC_HOME_FAIL_MODE="{{.FailMode}}"
+  [ ! -e "${DEFENSECLAW_HOME}/.install.lock" ] && [ ! -L "${DEFENSECLAW_HOME}/.install.lock" ] || _DC_HOME_FAIL_MODE="closed"
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
   if [ "$_DC_HOME_FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
@@ -128,11 +129,13 @@ API_ADDR="{{.APIAddr}}"
 API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
 fail_unreachable() {
-  hermes_sandbox_block "$1" transport
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  hermes_sandbox_block "$1" transport
 }
 
 fail_response() {
-  hermes_sandbox_block "$(defenseclaw_response_failure_reason "$1")" response
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  hermes_sandbox_block "$(defenseclaw_response_failure_reason "$1")" response
 }
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token hermes hermes-hook "hermes tool" "${HOOK_DIR}/{{.TokenFile}}"
@@ -185,7 +188,8 @@ hermes_block() {
 }
 
 PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
 {{end}}
   echo "defenseclaw: hermes hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" != "open" ]; then
@@ -213,7 +217,8 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN
 
 fail_unreachable() {
-  defenseclaw_log_hook_delivery_failure hermes hermes-hook "$1" transport "$FAIL_MODE"
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_log_hook_delivery_failure hermes hermes-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "hermes tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
 {{if .SecureClient}}    printf '{"action":"block","message":"DefenseClaw hook failed closed"}\n'
@@ -224,7 +229,8 @@ fail_unreachable() {
 }
 
 fail_response() {
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
 {{end}}  defenseclaw_log_hook_delivery_failure hermes hermes-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: hermes hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then

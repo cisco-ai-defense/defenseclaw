@@ -114,7 +114,8 @@ API_ADDR="{{.APIAddr}}"
 # Transport and response failures respect FAIL_MODE;
 # DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
 fail_unreachable() {
-  defenseclaw_log_hook_delivery_failure inspect inspect-tool-response "$1" transport "$FAIL_MODE"
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_log_hook_delivery_failure inspect inspect-tool-response "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "tool-response" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
@@ -123,7 +124,8 @@ fail_unreachable() {
 }
 
 fail_response() {
-  defenseclaw_log_hook_delivery_failure inspect inspect-tool-response "$1" response "$FAIL_MODE"
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_log_hook_delivery_failure inspect inspect-tool-response "$1" response "$FAIL_MODE"
   echo "defenseclaw: inspect-tool-response hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0

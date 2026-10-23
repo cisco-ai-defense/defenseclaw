@@ -586,10 +586,17 @@ async function defenseclawPerUserInstallInProgress() {
   }
 }
 
+// defenseclawFailModeNow is the fail mode a failed tool check answers with,
+// read when it answers: closed while this account's installer holds its
+// data directory (.install.lock). A call that was waiting for the gateway
+// when an install or upgrade began answers closed too; a mode read when the
+// call started let it run (GAP-0893).
+async function defenseclawFailModeNow(mode, actionable) {
+  if (mode !== "open" || !actionable) return mode;
+  return await defenseclawPerUserInstallInProgress() ? "closed" : mode;
+}
+
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
-  const installClosed = actionable && await defenseclawPerUserInstallInProgress();
-  const failMode = installClosed ? "closed" : DC_FAIL_MODE;
-  const transportFailMode = installClosed ? "closed" : DC_TRANSPORT_FAIL_MODE;
   let token;
   try {
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
@@ -636,7 +643,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     if (!res.ok) {
       // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
       // is an outage, as in the shell hooks, so strict availability closes it.
-      if ((res.status >= 500 ? transportFailMode : failMode) === "closed") {
+      if (await defenseclawFailModeNow(res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE, actionable) === "closed") {
         if (res.status >= 500) return { reason: await defenseclawPerUserGatewayDownText(null, res.status) };
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
@@ -645,7 +652,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     }
     const data = await res.json();
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
-      if (failMode === "open") {
+      if (await defenseclawFailModeNow(DC_FAIL_MODE, actionable) === "open") {
         await defenseclawLogFailOpen("invalid gateway verdict", "response");
         return null;
       }
@@ -664,7 +671,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
-    if (transportFailMode === "closed") {
+    if (await defenseclawFailModeNow(DC_TRANSPORT_FAIL_MODE, actionable) === "closed") {
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: await defenseclawPerUserGatewayDownText(err, 0) };
     }

@@ -60,6 +60,7 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
   # The installed mode decides; strict availability tightens this exit as it
   # tightens every later outage.
   _DC_HOME_FAIL_MODE="{{.FailMode}}"
+  [ ! -e "${DEFENSECLAW_HOME}/.install.lock" ] && [ ! -L "${DEFENSECLAW_HOME}/.install.lock" ] || _DC_HOME_FAIL_MODE="closed"
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
   if [ "$_DC_HOME_FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
@@ -109,7 +110,8 @@ BOUND_EVENT=
 BOUND_CONTRACT=
 
 fail_binding() {
-  local reason="$1"
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  local reason="$1"
 {{if and .Managed (not .SecureClient)}}  # A managed binding error is integrity, not an outage: closed in every
   # fail mode, as in the native runner.
   defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response closed
@@ -156,7 +158,8 @@ DEFENSECLAW_HOOK_NAME="codex-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
 {{end}}
   [ "$FAIL_MODE" = "open" ] ||
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "stdin body exceeded cap" transport
@@ -214,7 +217,8 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 # refused, the request timed out, or the gateway answered with 5xx.
 # Follow FAIL_MODE; strict availability is an additional force-closed override.
 fail_unreachable() {
-  # A blocked Stop only keeps Codex running the turn (#1140).
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  # A blocked Stop only keeps Codex running the turn (#1140).
   if defenseclaw_should_fail_closed_on_unreachable; then
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "$1" transport
   fi
@@ -243,7 +247,8 @@ fail_unreachable() {
 # (auth failure, malformed JSON, missing action). A managed standalone
 # administrator's open choice covers an outage only.
 fail_response() {
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
 {{end}}  local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
   [ "$FAIL_MODE" = "open" ] ||
