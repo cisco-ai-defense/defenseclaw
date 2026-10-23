@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -24,6 +25,43 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/google/uuid"
 )
+
+// evictionAlerts counts, by session and by hook delivery id, the
+// audit-health alerts evicted journal rows left.
+func (f managedHookAuditFixture) evictionAlerts(t *testing.T) map[string]int {
+	t.Helper()
+	events, err := f.store.ListEvents(5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, event := range events {
+		if event.Action != string(audit.ActionAlert) || !strings.Contains(event.Details, pendingHookEvictedAlert) {
+			continue
+		}
+		var details struct {
+			ID string `json:"hook_delivery_id"`
+		}
+		if err := unmarshalAlertDetails(event.Details, &details); err != nil || details.ID == "" {
+			t.Fatalf("eviction alert details %q do not name the hook delivery (%v)", event.Details, err)
+		}
+		got[details.ID]++
+		if event.SessionID != "" {
+			got[event.SessionID]++
+		}
+	}
+	return got
+}
+
+// unmarshalAlertDetails decodes the details of a runtime alert row, which
+// reads "<source> degraded: <details JSON>".
+func unmarshalAlertDetails(details string, into any) error {
+	start := strings.Index(details, "{")
+	if start < 0 {
+		return fmt.Errorf("alert details %q hold no JSON", details)
+	}
+	return json.Unmarshal([]byte(details[start:]), into)
+}
 
 // evictedRows counts, by session, the unconfirmed-evicted audit rows, and
 // rows whose ID is one of ids plus "-evicted".
@@ -173,10 +211,11 @@ func TestPendingHookRecoveryNamesTheJournaledPolicyAndRepeatsNoLiveSideEffects(t
 
 // A row recovery cannot audit leaves the journal after
 // pendingHookRecoveryAttempts tries, its tries counted across gateway
-// restarts, as one unconfirmed-evicted audit row: never a second record
-// under the call's own IDs, and never a second evicted row. A row no build
-// can read, and one over the occurrence limit (which is never loaded),
-// leave at the first pass. Rows the store takes are audited as usual.
+// restarts. Its verdict was pinned, so its records may have left for the
+// remote destinations: it leaves one audit-health alert, never a connector
+// row under any ID. A row no build can read, and one over the occurrence
+// limit (which is never loaded), leave at the first pass, also with an
+// alert. Rows the store takes are audited as usual.
 func TestPendingHookEvictsRowsItCannotAudit(t *testing.T) {
 	f := newManagedHookAuditFixture(t, nil)
 	ctx := t.Context()
@@ -195,7 +234,7 @@ func TestPendingHookEvictsRowsItCannotAudit(t *testing.T) {
 	if err := f.store.JournalHookDelivery(ctx, "oversized", "an older build", []byte(oversized), wide); err != nil {
 		t.Fatal(err)
 	}
-	lift := refuseAuditInserts(t, f, "audit_events", `NEW.session_id LIKE 'stuck-%' AND NEW.id NOT LIKE '%-evicted'`)
+	lift := refuseAuditInserts(t, f, "audit_events", `NEW.session_id LIKE 'stuck-%' AND NEW.action <> 'alert'`)
 	defer lift()
 
 	for pass := 1; pass <= pendingHookRecoveryAttempts+1; pass++ {
@@ -214,18 +253,21 @@ func TestPendingHookEvictsRowsItCannotAudit(t *testing.T) {
 			}
 		}
 	}
-	evicted := f.evictedRows(t, append([]string{"unreadable", "oversized"}, stuckIDs...)...)
+	alerts := f.evictionAlerts(t)
 	for _, key := range append([]string{"unreadable", "oversized"}, append(stuck, stuckIDs...)...) {
-		if evicted[key] != 1 {
-			t.Fatalf("evicted rows of %s = %d, want one (all: %v)", key, evicted[key], evicted)
+		if alerts[key] != 1 {
+			t.Fatalf("eviction alerts of %s = %d, want one (all: %v)", key, alerts[key], alerts)
 		}
 	}
-	if evicted["writable"] != 0 {
-		t.Fatalf("the audited row was evicted too: %v", evicted)
+	if alerts["writable"] != 0 {
+		t.Fatalf("the audited row was evicted too: %v", alerts)
+	}
+	if evicted := f.evictedRows(t); len(evicted) != 0 {
+		t.Fatalf("evicted connector rows = %v, want none", evicted)
 	}
 	for _, session := range stuck {
-		if rows := f.hookRows(t, session); rows != 1 {
-			t.Fatalf("%s: connector rows = %d, want only its evicted row", session, rows)
+		if rows := f.hookRows(t, session); rows != 0 {
+			t.Fatalf("%s: connector rows = %d, want none", session, rows)
 		}
 	}
 	if got := strings.Join(f.decisions(t), ","); got != "unconfirmed/ok" {
@@ -257,6 +299,9 @@ func TestPendingHookEvictsARowWhoseTriesTheStoreWillNotRecord(t *testing.T) {
 	if got := f.evictedRows(t, p.ID)[p.ID]; got != 1 {
 		t.Fatalf("evicted rows = %d, want one", got)
 	}
+	if alerts := f.evictionAlerts(t); len(alerts) != 0 {
+		t.Fatalf("eviction alerts = %v, want none: no record of the call exists anywhere", alerts)
+	}
 }
 
 // A journal at its row limit while the store keeps refusing the records
@@ -270,7 +315,7 @@ func TestPendingHookFullJournalDrainsWhileTheStoreRefusesRecords(t *testing.T) {
 	awaitPendingHookDrain(t)
 	pendingHookJournalLimits.Rows, pendingHookDrainInterval = 2, 0
 	pendingHookDrainAt.Store(0)
-	lift := refuseAuditInserts(t, f, "audit_events", `NEW.session_id LIKE 'stuck-full-%' AND NEW.id NOT LIKE '%-evicted'`)
+	lift := refuseAuditInserts(t, f, "audit_events", `NEW.session_id LIKE 'stuck-full-%' AND NEW.action <> 'alert'`)
 	defer lift()
 	stuck := []string{"stuck-full-0", "stuck-full-1"}
 	for _, session := range stuck {
@@ -295,10 +340,11 @@ func TestPendingHookFullJournalDrainsWhileTheStoreRefusesRecords(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	evicted := f.evictedRows(t)
+	alerts, evicted := f.evictionAlerts(t), f.evictedRows(t)
 	for _, session := range stuck {
-		if evicted[session] != 1 || f.hookRows(t, session) != 1 {
-			t.Fatalf("%s: evicted rows %d, connector rows %d; want its one evicted row", session, evicted[session], f.hookRows(t, session))
+		if alerts[session] != 1 || evicted[session] != 0 || f.hookRows(t, session) != 0 {
+			t.Fatalf("%s: eviction alerts %d, evicted rows %d, connector rows %d; want its one alert",
+				session, alerts[session], evicted[session], f.hookRows(t, session))
 		}
 	}
 }
@@ -469,5 +515,208 @@ func TestPendingHookRefusesAnOverBudgetCallClosed(t *testing.T) {
 	}
 	if left := pendingEntries(t, f); len(left) != 1 {
 		t.Fatalf("journal rows after the over-budget call = %d, want 1", len(left))
+	}
+}
+
+// A call whose records were partly written when its journal row is evicted
+// keeps the one verdict it has: eviction writes no connector row under any
+// ID, here or at a remote destination, and leaves one audit-health alert
+// that names the call and the records the store holds. Here the store keeps
+// the connector row and refuses the hook_decision, keeps the hook_decision
+// and refuses the connector row, or refuses both while the remote
+// destination gets them (GAP-1536). Before, eviction wrote a second
+// connector row, unconfirmed-evicted, beside the stored or sent verdict.
+func TestPendingHookEvictionAddsNoVerdictToAPartlyWrittenCall(t *testing.T) {
+	for _, tc := range []struct {
+		name, refuse  string
+		connectorRows int
+		stored        string
+	}{
+		{"connector row stored, hook_decision refused", `NEW.event_name = 'hook_decision'`, 1, "connector"},
+		{"hook_decision stored, connector row refused", `NEW.action = 'connector-hook' AND NEW.id NOT LIKE '%-evicted'`, 0, "decision"},
+		{"both refused, both sent to the remote destination", `NEW.action <> 'alert' AND NEW.id NOT LIKE '%-evicted'`, 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			remote := newHookRemoteRecorder()
+			f := newManagedHookAuditFixtureExportingTo(t, nil, remote)
+			session := "partly-" + strings.ReplaceAll(tc.name, " ", "-")
+			lift := refuseAuditInserts(t, f, "audit_events", tc.refuse)
+			defer lift()
+			reply := &recordFullDuplexStatusWriter{ResponseRecorder: httptest.NewRecorder()}
+			ackedHookCall(t, f.api, session, reply)
+			if !strings.Contains(reply.Body.String(), hookexec.HookDeliveryConfirmed) {
+				t.Fatalf("gateway response = %q, want the receipt confirmation", reply.Body.String())
+			}
+			left := pendingEntries(t, f)
+			if len(left) != 1 {
+				t.Fatalf("journal rows = %v, want the call's", left)
+			}
+			id := left[0]
+			for pass := 1; pass <= pendingHookRecoveryAttempts; pass++ {
+				f.restartedAPI(t, true).recoverPendingHooks(t.Context())
+			}
+			if left := pendingEntries(t, f); len(left) != 0 {
+				t.Fatalf("journal rows after %d passes = %v, want none", pendingHookRecoveryAttempts, left)
+			}
+			remote.settled(t, 1, id, id+"-decision")
+			if got := remote.decisions(id + "-evicted"); len(got) != 0 {
+				t.Fatalf("the remote destination got an evicted row %v beside the call's verdict", got)
+			}
+			if got := strings.Join(remote.decisions(id), ","); !strings.HasPrefix(got, "answer") || strings.Contains(got, hookActionUnconfirmed) {
+				t.Fatalf("remote copies of the connector row = %q, want only the acknowledged answer", got)
+			}
+			if evicted := f.evictedRows(t, id); len(evicted) != 0 {
+				t.Fatalf("evicted connector rows = %v, want none", evicted)
+			}
+			if rows := f.hookRows(t, session); rows != tc.connectorRows {
+				t.Fatalf("connector rows = %d, want %d", rows, tc.connectorRows)
+			}
+			if alerts := f.evictionAlerts(t); alerts[id] != 1 {
+				t.Fatalf("eviction alerts = %v, want one for %s", alerts, id)
+			}
+			events, err := f.store.ListEvents(5000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range events {
+				if event.Action == string(audit.ActionAlert) && strings.Contains(event.Details, id) {
+					want := map[string]string{"connector": id, "decision": id + "-decision", "": ""}[tc.stored]
+					var details struct {
+						Stored  string `json:"stored_records"`
+						Verdict string `json:"hook_delivery_verdict"`
+					}
+					if err := unmarshalAlertDetails(event.Details, &details); err != nil ||
+						details.Stored != want || details.Verdict != "allow" {
+						t.Fatalf("eviction alert %s names stored records %q and verdict %q (%v); want %q and allow",
+							event.Details, details.Stored, details.Verdict, err, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+// A stored record of a call decides its missing companion with its whole
+// verdict: the companion has the reason the stored record holds (a policy
+// block's own reason, the hook's refusal, or none), never one recovery
+// makes up, and the pinned verdict of a later try is that one. A stored
+// record whose verdict the journal row cannot rebuild gets no companion:
+// the row is evicted after its tries with an audit-health alert, never a
+// second verdict. Before, recovery read only the action and wrote the
+// companion with a generic reason, or with the policy block's for a block
+// the hook took on its own.
+func TestPendingHookRecoveryKeepsTheReasonOfTheStoredRecord(t *testing.T) {
+	block := agentHookResponse{Action: "block", RawAction: "block", Mode: "action", Severity: "HIGH",
+		Reason:       "DefenseClaw blocked this tool call.",
+		SourceReason: "rule CMD-RM-RF matched: rm -rf /"}
+	other := block
+	other.SourceReason = "rule NET-EXFIL matched: curl -d @/etc/passwd"
+	for _, tc := range []struct {
+		name         string
+		proposed     agentHookResponse
+		stored       agentHookResponse
+		decisionOnly bool
+		rebuilt      bool
+	}{
+		{"connector row policy block", block, block, false, true},
+		{"hook_decision policy block", block, block, true, true},
+		{"connector row block the hook took", block, failedClosedHookDelivery(block, hookDeliveryRejectedReason), false, true},
+		{"hook_decision block the hook took", block, failedClosedHookDelivery(block, hookDeliveryRejectedReason), true, true},
+		{"connector row allow without a reason", pendingAllow, pendingAllow, false, true},
+		{"hook_decision allow without a reason", pendingAllow, pendingAllow, true, true},
+		{"connector row block of another evaluation", block, other, false, false},
+		{"hook_decision block of another evaluation", block, other, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newManagedHookAuditFixture(t, nil)
+			session := "reason-" + strings.ReplaceAll(tc.name, " ", "-")
+			p := orphanPendingHook(t, f, session, tc.proposed)
+			writer := f.restartedAPI(t, tc.decisionOnly)
+			lift := func() {}
+			if tc.decisionOnly {
+				lift = refuseConnectorHookAuditRows(t, f)
+			}
+			req := p.request()
+			req.pendingRecovery = false
+			writer.finalizeAgentHook(enrichAgentHookContext(t.Context(), req), req.ConnectorName, req, tc.stored,
+				nil, nil, time.Millisecond, false, nil)
+			lift()
+			storedID, companionID := p.ID, p.ID+"-decision"
+			if tc.decisionOnly {
+				storedID, companionID = companionID, storedID
+			}
+			before, found, err := f.store.StoredHookVerdict(t.Context(), storedID)
+			if err != nil || !found {
+				t.Fatalf("stored record %s: found %t, %v", storedID, found, err)
+			}
+			if want := hookSourceReason(tc.stored); before.Reason != want {
+				t.Fatalf("the stored record keeps the reason %q, want %q", before.Reason, want)
+			}
+
+			passes := 1
+			if !tc.rebuilt {
+				passes = pendingHookRecoveryAttempts
+			}
+			for range passes {
+				f.restartedAPI(t, true).recoverPendingHooks(t.Context())
+			}
+			if left := pendingEntries(t, f); len(left) != 0 {
+				t.Fatalf("journal rows = %v, want none", left)
+			}
+			companion, found, err := f.store.StoredHookVerdict(t.Context(), companionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.rebuilt {
+				if found {
+					t.Fatalf("a companion %+v was written for a verdict the row cannot rebuild", companion)
+				}
+				if alerts := f.evictionAlerts(t); alerts[p.ID] != 1 {
+					t.Fatalf("eviction alerts = %v, want one for the call", alerts)
+				}
+				if evicted := f.evictedRows(t, p.ID); len(evicted) != 0 {
+					t.Fatalf("evicted connector rows = %v, want none", evicted)
+				}
+				return
+			}
+			if !found || !strings.EqualFold(companion.Action, before.Action) || companion.Reason != before.Reason {
+				t.Fatalf("companion %s = %+v (found %t), want the stored record's verdict %+v", companionID, companion, found, before)
+			}
+			if rows := f.hookRows(t, session); rows != 1 {
+				t.Fatalf("connector rows = %d, want one", rows)
+			}
+		})
+	}
+}
+
+// The pinned verdict of a journal row is kept whole when the row's large
+// fields are truncated, so every write of it is the live one; a verdict
+// that does not fit whole is an error, which the caller treats as a pin
+// that failed. Before, its reason was truncated with the other fields.
+func TestPendingHookOccurrenceKeepsThePinnedVerdictWhole(t *testing.T) {
+	reason := strings.Repeat("r", 8<<10)
+	req := pendingToolRequest("whole-verdict")
+	req.ToolName = strings.Repeat("t", 100<<10)
+	verdict := pendingHookResponse{Action: "block", Reason: reason, SourceReason: reason}
+	p := &pendingHookOccurrence{ID: uuid.NewString(), Request: pendingRequest(req),
+		Proposed: verdict, NoReceipt: verdict, Decided: &verdict}
+	data, err := encodePendingHookOccurrence(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got pendingHookOccurrence
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Decided == nil || got.Decided.Reason != reason || got.Decided.SourceReason != reason {
+		t.Fatalf("pinned verdict after truncation = %.80v, want it whole", got.Decided)
+	}
+	if !strings.Contains(got.Request.ToolName, "…[truncated ") {
+		t.Fatalf("tool name %.40q… was not truncated", got.Request.ToolName)
+	}
+	huge := strings.Repeat("r", pendingHookJournalLimits.OccurrenceBytes)
+	p.Decided = &pendingHookResponse{Action: "block", Reason: huge}
+	if _, err := encodePendingHookOccurrence(p); !errors.Is(err, audit.ErrHookDeliveryOccurrenceTooLarge) {
+		t.Fatalf("encode of a pinned verdict over the limit = %v, want ErrHookDeliveryOccurrenceTooLarge", err)
 	}
 }
