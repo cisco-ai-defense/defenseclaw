@@ -233,6 +233,13 @@ func dispatchTrustedAction(
 						})
 					}
 				}
+				if simple.Possible {
+					// The child runs only through a runtime choice the walk
+					// did not decide. Its blocking matches become one MEDIUM
+					// finding: an alert in the default and permissive tiers,
+					// a block in strict (block_at MEDIUM).
+					childFindings = possibleExecutionFindings(childFindings, request.EnforcementCapable)
+				}
 				findings = withSimpleCommandFindings(findings, childFindings)
 			}
 		}()

@@ -205,6 +205,11 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 
 type sequenceStatement struct {
 	text, scope string
+	// possible marks a statement that may run, but only through a runtime
+	// choice this walk does not decide: a function the action selects with
+	// a variable it assigned (x=f; $x, GAP-0934). Its findings are added
+	// at the strict tier only (SimpleCommand.Possible).
+	possible bool
 }
 
 // sequenceStatementDetails is the one full-parser flattening step. The
@@ -249,14 +254,20 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	// them, so each body is judged once, at the first later command that may
 	// start one and call it; an export alone runs nothing.
 	var exported []string
+	// assigned holds the shell variables this action assigned, for a
+	// program word that selects a function through one ($x after x=f).
+	// simpleUnknownValue marks a variable with a value this walk cannot
+	// read (for, read, export).
+	assigned := make(map[string]string)
 	// isolated runs walk in a separate shell process (a subshell, pipeline
 	// stage, substitution or background job): a function it defines or
-	// exports is gone when it ends.
+	// exports, and a variable it assigns, are gone when it ends.
 	isolated := func(walk func() bool) bool {
-		savedFunctions, savedExported := maps.Clone(functions), slices.Clone(exported)
-		defer func() { functions, exported = savedFunctions, savedExported }()
+		savedFunctions, savedExported, savedAssigned := maps.Clone(functions), slices.Clone(exported), maps.Clone(assigned)
+		defer func() { functions, exported, assigned = savedFunctions, savedExported, savedAssigned }()
 		return walk()
 	}
+	possible := 0
 	scope := "0"
 	nextScope := 0
 	childScope := func(sharedShell bool, walk func() bool) bool {
@@ -291,7 +302,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		for index := len(redirects) - 1; index >= 0; index-- {
 			statement += " " + redirects[index]
 		}
-		statements = append(statements, sequenceStatement{text: statement, scope: scope})
+		statements = append(statements, sequenceStatement{text: statement, scope: scope, possible: possible > 0})
 		return true
 	}
 	subshells := 0
@@ -400,6 +411,9 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 					allSimple && !flattenSubstitutions(iteration) {
 					return true, false
 				}
+				if iteration.Name != nil {
+					assigned[iteration.Name.Value] = simpleUnknownValue
+				}
 			case *syntax.CStyleLoop:
 				// Arithmetic can contain command substitutions. Those run while
 				// evaluating the loop header, before its body.
@@ -498,6 +512,12 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			return false
 		}
 		if allSimple {
+			simpleTrackAssignments(stmt.Cmd, assigned)
+			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) > 1 && len(functions) != 0 {
+				if program, static := simpleStaticWord(call.Args[0], nil); static && program == "unset" {
+					exported = simpleUnsetFunctions(call.Args[1:], functions, exported, assigned)
+				}
+			}
 			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok && len(functions) != 0 &&
 				(decl.Variant.Value == "export" || decl.Variant.Value == "declare" ||
 					decl.Variant.Value == "typeset") {
@@ -514,10 +534,16 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			}
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) != 0 {
 				name, known := simpleFunctionCallName(call)
+				selected := false
 				if !known && len(functions) != 0 {
 					// A runtime program word may name any function defined in
-					// this action. No complete per-command view exists.
-					return false
+					// this action. No complete per-command view exists unless
+					// the word is a variable this action assigned a fixed
+					// name to (x=f; $x): that call may run the function.
+					name, selected = simpleAssignedProgramName(call.Args[0], assigned)
+					if !selected {
+						return false
+					}
 				}
 				var bodies []*syntax.Stmt
 				if body, found := functions[name]; found {
@@ -555,6 +581,10 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 						saved := redirects
 						redirects = append(redirects[:len(redirects):len(redirects)], moved)
 						defer func() { redirects = saved }()
+					}
+					if selected {
+						possible++
+						defer func() { possible-- }()
 					}
 					for _, body := range bodies {
 						if functionDepth >= 8 {
@@ -1045,4 +1075,126 @@ func simpleWrapperChildArgs(args []*syntax.Word) ([]*syntax.Word, bool) {
 func simpleNotWordTokenRune(r rune) bool {
 	return r != '_' && r != '.' && r != '/' && r != '-' && r != '+' &&
 		(r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z')
+}
+
+// simpleUnknownValue is an assigned variable whose value this walk cannot
+// read. It is not a valid shell name, so it never selects a function.
+const simpleUnknownValue = "\x00"
+
+// simpleTrackAssignments records the variables command assigns in the
+// current shell: a fixed value for name=literal, else simpleUnknownValue.
+// A prefix assignment (X=1 cmd) lasts only for that command and is ignored.
+func simpleTrackAssignments(command syntax.Command, assigned map[string]string) {
+	switch typed := command.(type) {
+	case *syntax.CallExpr:
+		if len(typed.Args) == 0 {
+			for _, assign := range typed.Assigns {
+				if assign == nil || assign.Name == nil {
+					continue
+				}
+				value, static := "", assign.Value == nil
+				if !static && assign.Index == nil && assign.Array == nil && !assign.Append {
+					value, static = simpleStaticWord(assign.Value, nil)
+				}
+				if !static {
+					value = simpleUnknownValue
+				}
+				assigned[assign.Name.Value] = value
+			}
+			return
+		}
+		program, _ := simpleStaticWord(typed.Args[0], nil)
+		switch program {
+		case "read", "mapfile", "readarray", "getopts", "printf", "let":
+			// These builtins set the variables they name from runtime data.
+			for _, arg := range typed.Args[1:] {
+				if name, static := simpleStaticWord(arg, nil); static && name != "" && !strings.HasPrefix(name, "-") {
+					assigned[name] = simpleUnknownValue
+				}
+			}
+		}
+	case *syntax.DeclClause:
+		for _, assign := range typed.Args {
+			if assign != nil && assign.Name != nil {
+				assigned[assign.Name.Value] = simpleUnknownValue
+			}
+		}
+	}
+}
+
+// simpleAssignedProgramName returns the function name a program word selects
+// through a variable the action assigned a fixed name to: $x, ${x} or "$x"
+// after x=f.
+func simpleAssignedProgramName(word *syntax.Word, assigned map[string]string) (string, bool) {
+	if word == nil || len(word.Parts) != 1 {
+		return "", false
+	}
+	part := word.Parts[0]
+	if quoted, ok := part.(*syntax.DblQuoted); ok {
+		if len(quoted.Parts) != 1 {
+			return "", false
+		}
+		part = quoted.Parts[0]
+	}
+	param, ok := part.(*syntax.ParamExp)
+	if !ok || param.Param == nil || param.Excl || param.Length || param.Width ||
+		param.Index != nil || param.Slice != nil || param.Repl != nil ||
+		param.Names != 0 || param.Exp != nil {
+		return "", false
+	}
+	value, found := assigned[param.Param.Value]
+	if !found || value == "" || value == simpleUnknownValue {
+		return "", false
+	}
+	return value, true
+}
+
+// simpleUnsetFunctions applies unset to the action's functions. unset -f
+// removes the named functions. Without -f or -v, bash unsets a variable of
+// that name, and only when there is none, the function. A name this walk
+// cannot read leaves every function in place.
+func simpleUnsetFunctions(args []*syntax.Word, functions map[string]*syntax.Stmt, exported []string, assigned map[string]string) []string {
+	functionsOnly, variablesOnly := false, false
+	options := true
+	for _, arg := range args {
+		value, static := simpleStaticWord(arg, nil)
+		if !static {
+			continue
+		}
+		if options && value == "--" {
+			options = false
+			continue
+		}
+		if options && strings.HasPrefix(value, "-") && len(value) > 1 {
+			for _, flag := range value[1:] {
+				switch flag {
+				case 'f':
+					functionsOnly = true
+				case 'v':
+					variablesOnly = true
+				case 'n':
+				default:
+					return exported // An invalid option makes unset fail.
+				}
+			}
+			continue
+		}
+		options = false
+		if functionsOnly && variablesOnly {
+			return exported // bash refuses -f with -v.
+		}
+		if variablesOnly {
+			delete(assigned, value)
+			continue
+		}
+		if !functionsOnly {
+			if _, variable := assigned[value]; variable {
+				delete(assigned, value)
+				continue
+			}
+		}
+		delete(functions, value)
+		exported = slices.DeleteFunc(exported, func(name string) bool { return name == value })
+	}
+	return exported
 }

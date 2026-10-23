@@ -13,6 +13,10 @@ import (
 type windowsSimpleGroupEvent struct {
 	offset int
 	open   bool
+	// possible marks a body that runs only when a condition this walk does
+	// not decide holds (GAP-0935): if, elseif, while, for or foreach with a
+	// header that is not a literal, and an else after such a branch.
+	possible bool
 }
 
 func windowsSimplePotentialGroup(source string, dialect windowsDialect) bool {
@@ -44,6 +48,10 @@ func windowsSimpleGroupSource(source string, dialect windowsDialect) (string, []
 	runes := []rune(source)
 	clean := []rune(source)
 	var stack []rune
+	var possibleStack []bool
+	// chainPossible is set when the group just closed was a possible branch:
+	// an else or elseif after it depends on the same condition.
+	chainPossible := false
 	var events []windowsSimpleGroupEvent
 	atStart := true
 	var quote rune
@@ -108,16 +116,22 @@ func windowsSimpleGroupSource(source string, dialect windowsDialect) (string, []
 			}
 		}
 		if atStart {
-			if opener, end, recognized, valid := windowsSimpleGroupOpening(runes, i, dialect); recognized {
+			if opener, end, recognized, valid, possible := windowsSimpleGroupOpening(runes, i, dialect); recognized {
 				if !valid || len(stack) >= 32 {
 					return "", nil, false
 				}
+				if chainPossible && (windowsSimpleKeyword(runes, i, "else") || windowsSimpleKeyword(runes, i, "elseif")) {
+					possible = true
+				}
+				chainPossible = false
 				blank(i, end)
 				stack = append(stack, opener)
-				events = append(events, windowsSimpleGroupEvent{offset: i, open: true})
+				possibleStack = append(possibleStack, possible)
+				events = append(events, windowsSimpleGroupEvent{offset: i, open: true, possible: possible})
 				i = end - 1
 				continue
 			}
+			chainPossible = false
 		}
 		if dialect == windowsCMD && (char == '{' || char == '}') {
 			// cmd treats braces as argument text (for example bcdedit
@@ -130,6 +144,8 @@ func windowsSimpleGroupSource(source string, dialect windowsDialect) (string, []
 				return "", nil, false
 			}
 			stack = stack[:len(stack)-1]
+			chainPossible = possibleStack[len(possibleStack)-1]
+			possibleStack = possibleStack[:len(possibleStack)-1]
 			blank(i, i+1)
 			// Adjacent branches have no shell list operator in their source.
 			// Preserve their command boundary in the policy view.
@@ -140,7 +156,7 @@ func windowsSimpleGroupSource(source string, dialect windowsDialect) (string, []
 					clean[i] = '&'
 				}
 			}
-			events = append(events, windowsSimpleGroupEvent{offset: i})
+			events = append(events, windowsSimpleGroupEvent{offset: i, possible: chainPossible})
 			atStart = true
 			continue
 		}
@@ -275,13 +291,16 @@ func windowsSimpleNeedsBoundary(runes []rune, from int) bool {
 	return from < len(runes) && !strings.ContainsRune(";&|\r\n)}", runes[from])
 }
 
-func windowsSimpleGroupOpening(runes []rune, start int, dialect windowsDialect) (rune, int, bool, bool) {
+// windowsSimpleGroupOpening recognizes a group opening at start. possible is
+// set for a control body whose header is not a literal: the body may run,
+// and its matches are strict-tier findings (SimpleCommand.Possible).
+func windowsSimpleGroupOpening(runes []rune, start int, dialect windowsDialect) (opener rune, end int, recognized, valid, possible bool) {
 	if dialect == windowsCMD {
 		if runes[start] == '(' {
-			return ')', start + 1, true, true
+			return ')', start + 1, true, true, false
 		}
 		if !windowsSimpleKeyword(runes, start, "if") {
-			return 0, 0, false, false
+			return 0, 0, false, false, false
 		}
 		end := start + 2
 		for end < len(runes) && runes[end] != '(' && runes[end] != '\r' && runes[end] != '\n' {
@@ -289,12 +308,12 @@ func windowsSimpleGroupOpening(runes []rune, start int, dialect windowsDialect) 
 		}
 		if end >= len(runes) || runes[end] != '(' ||
 			!windowsSimpleCMDIfHeader(string(runes[start:end])) {
-			return 0, 0, true, false
+			return 0, 0, true, false, false
 		}
-		return ')', end + 1, true, true
+		return ')', end + 1, true, true, false
 	}
 	if runes[start] == '{' {
-		return '}', start + 1, true, true
+		return '}', start + 1, true, true, false
 	}
 	if runes[start] == '&' || runes[start] == '.' {
 		end := start + 1
@@ -302,7 +321,7 @@ func windowsSimpleGroupOpening(runes []rune, start int, dialect windowsDialect) 
 			end++
 		}
 		if end < len(runes) && runes[end] == '{' {
-			return '}', end + 1, true, true
+			return '}', end + 1, true, true, false
 		}
 	}
 	for _, keyword := range []string{"if", "elseif", "while", "foreach", "for", "switch"} {
@@ -314,20 +333,30 @@ func windowsSimpleGroupOpening(runes []rune, start int, dialect windowsDialect) 
 			index++
 		}
 		if index >= len(runes) || runes[index] != '(' {
-			return 0, 0, true, false
+			return 0, 0, true, false, false
 		}
 		close := windowsSimpleCloseParen(runes, index)
-		if close < 0 || !windowsSimpleInertHeader(keyword, string(runes[index+1:close])) {
-			return 0, 0, true, false
+		if close < 0 {
+			return 0, 0, true, false, false
+		}
+		header := string(runes[index+1 : close])
+		if !windowsSimpleInertHeader(keyword, header) {
+			// A condition that is not a literal decides at run time whether
+			// the body runs (GAP-0935). switch bodies hold case labels and
+			// stay unflattened.
+			if keyword == "switch" || !windowsSimplePossibleHeader(header) {
+				return 0, 0, true, false, false
+			}
+			possible = true
 		}
 		end := close + 1
 		for end < len(runes) && (runes[end] == ' ' || runes[end] == '\t') {
 			end++
 		}
 		if end >= len(runes) || runes[end] != '{' {
-			return 0, 0, true, false
+			return 0, 0, true, false, false
 		}
-		return '}', end + 1, true, true
+		return '}', end + 1, true, true, possible
 	}
 	if windowsSimpleKeyword(runes, start, "else") {
 		end := start + 4
@@ -335,11 +364,19 @@ func windowsSimpleGroupOpening(runes []rune, start int, dialect windowsDialect) 
 			end++
 		}
 		if end >= len(runes) || runes[end] != '{' {
-			return 0, 0, true, false
+			return 0, 0, true, false, false
 		}
-		return '}', end + 1, true, true
+		return '}', end + 1, true, true, false
 	}
-	return 0, 0, false, false
+	return 0, 0, false, false, false
+}
+
+// windowsSimplePossibleHeader accepts a balanced one-line condition with no
+// scriptblock or statement separator: Test-Path x, $env:CI, $a -gt 0. The
+// header itself is judged with the whole action.
+func windowsSimplePossibleHeader(header string) bool {
+	header = strings.TrimSpace(header)
+	return header != "" && !strings.ContainsAny(header, ";{}\r\n`")
 }
 
 func windowsSimpleKeyword(runes []rune, start int, keyword string) bool {

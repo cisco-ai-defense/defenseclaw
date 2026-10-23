@@ -31,6 +31,12 @@ type SimpleCommand struct {
 	// EvaluationFailure is "limit" or "parse" when no complete per-command
 	// view can be produced. A parse gap is not an action refusal.
 	EvaluationFailure string
+	// Possible means the command may run, but only through a runtime choice
+	// this walk does not decide: a PowerShell body under a condition that is
+	// not a literal (GAP-0935) or a function selected through an assigned
+	// variable (GAP-0934). Its rule matches are added findings for the
+	// strict tier; they never refuse the action in the default tiers.
+	Possible bool
 }
 
 type simpleShellState struct {
@@ -217,7 +223,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			call, _ := stmt.Cmd.(*syntax.CallExpr)
 			command := SimpleCommand{Text: text, CWD: state.cwd,
 				ZshHistoryBuiltin:       simpleZshHistoryCall(call, effective, interpreter),
-				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound)}
+				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound),
+				Possible:                part.possible}
 			if !emitted[command] {
 				result = append(result, command)
 				emitted[command] = true
@@ -266,6 +273,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 						}
 						child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
 							simpleUnresolvedBoundVariable(child.Text, effective, bound)
+						child.Possible = child.Possible || part.possible
 						result = append(result, child)
 						if len(result) > maxSimpleEvaluations {
 							return []SimpleCommand{{EvaluationFailure: "limit"}}
@@ -376,15 +384,28 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 	failed := false
 	groupIndex := 0
 	var groups []simpleWindowsGroupSnapshot
+	var groupPossible []bool
+	possibleDepth := 0
 	processGroupEvents := func(before int) {
 		for groupIndex < len(groupEvents) && groupEvents[groupIndex].offset < before {
-			if groupEvents[groupIndex].open {
+			if event := groupEvents[groupIndex]; event.open {
+				if event.possible {
+					// The condition can assign or read anything: later
+					// commands keep no value from before it.
+					clear(variables)
+					possibleDepth++
+				}
 				groups = append(groups, state.groupSnapshot(variables))
+				groupPossible = append(groupPossible, event.possible)
 			} else if len(groups) == 0 {
 				failed = true
 			} else {
 				state.mergeGroup(groups[len(groups)-1], variables)
 				groups = groups[:len(groups)-1]
+				if groupPossible[len(groupPossible)-1] {
+					possibleDepth--
+				}
+				groupPossible = groupPossible[:len(groupPossible)-1]
 			}
 			groupIndex++
 		}
@@ -410,7 +431,7 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		if state.cwdUnknown && windowsSimpleRelativePathOperand(text, facts.Parse.Dialect) {
 			failed = true
 		}
-		result = append(result, SimpleCommand{Text: text, CWD: state.cwd})
+		result = append(result, SimpleCommand{Text: text, CWD: state.cwd, Possible: possibleDepth > 0})
 		state.next(part, dialect, childInput, variables)
 		processGroupEvents(end)
 	}

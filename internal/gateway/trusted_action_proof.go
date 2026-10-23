@@ -32,6 +32,7 @@ const (
 	findingProofExactFallback
 	findingProofParserShadow
 	findingProofEvaluationFailure
+	findingProofPossibleExecution
 )
 
 // findingProof is deliberately value-free. It records neither argv nor shell
@@ -158,7 +159,8 @@ func (p findingProof) authorizes(ruleID string) bool {
 		findingProofActionFactsSubgraph,
 		findingProofExactCodeGuard,
 		findingProofExactFallback,
-		findingProofEvaluationFailure:
+		findingProofEvaluationFailure,
+		findingProofPossibleExecution:
 		return true
 	default:
 		return false
