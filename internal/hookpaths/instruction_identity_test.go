@@ -44,6 +44,19 @@ func instructionIdentityLink(t *testing.T, target, link string) string {
 	return resolved
 }
 
+// instructionIdentitySymlink makes link a symbolic link to target and
+// returns link itself (not the file it reaches).
+func instructionIdentitySymlink(t *testing.T, target, link string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	return link
+}
+
 func instructionIdentityRoot(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -54,9 +67,9 @@ func instructionIdentityRoot(t *testing.T) string {
 }
 
 // GAP-0869: a hard link is the instruction file under another name, wherever
-// the link lives. Windows lists a file's names. POSIX cannot, so there a hard
-// link is matched with the instruction files of the agent folders and the
-// files the session loaded; any other multiply linked file is ordinary.
+// the link lives. It is matched by file identity with the instruction files
+// of the places agents load them from and the files the session loaded; any
+// other file is ordinary, however many links it has, on every OS.
 func TestInstructionAliasFollowsFileIdentity(t *testing.T) {
 	root := instructionIdentityRoot(t)
 	project := filepath.Join(root, "project")
@@ -95,27 +108,61 @@ func TestInstructionAliasFollowsFileIdentity(t *testing.T) {
 		{"single ordinary file", ordinary, project, "", nil},
 		{"missing file", filepath.Join(root, "tmp", "missing"), project, "", nil},
 		{"instruction itself", instruction, project, "", nil},
-		// The release allows these; POSIX cannot prove more without a
-		// listing of the file's names (pnpm and uv stores link files).
+		// pnpm and uv stores hard-link package files: a link count proves
+		// nothing about the file.
 		{"ordinary hard-link pair", pairB, project, "", nil},
 		{"ordinary pair with a loaded file", pairA, project, "", []string{instruction, elsewhere}},
 		{"loaded name that is not an instruction file", pairB, project, "", []string{pairA}},
+		// An instruction file in no load location that the session did not
+		// load is not one of the call's instruction files, on any OS.
+		{"instruction file in no load location", farAlias, project, "", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := InstructionAlias(tc.path, tc.cwd, home, tc.loaded); !sameInstructionPath(got, tc.want) {
-				t.Fatalf("InstructionAlias(%q) = %q; want %q", tc.path, got, tc.want)
+			if got := NewInstructionFiles(tc.cwd, home, tc.loaded).Alias(tc.path); !sameInstructionPath(got, tc.want) {
+				t.Fatalf("Alias(%q) = %q; want %q", tc.path, got, tc.want)
 			}
 		})
 	}
-	// An instruction file in no agent folder and not loaded: only Windows
-	// can name the other link.
-	got := InstructionAlias(farAlias, project, home, nil)
-	if runtime.GOOS == "windows" {
-		if !sameInstructionPath(got, elsewhere) {
-			t.Fatalf("Windows far alias = %q; want %q", got, elsewhere)
-		}
-	} else if got != "" {
-		t.Fatalf("POSIX far alias = %q; want none", got)
+}
+
+// GAP-0971: a symlinked instruction file is the file it reaches. Writing
+// that physical file, which has one link and an ordinary name, writes the
+// instruction file, whether the symlink is in a load location or the session
+// loaded it. Its ordinary neighbors stay ordinary.
+func TestInstructionAliasSymlinkedInstructionTarget(t *testing.T) {
+	root := instructionIdentityRoot(t)
+	project := filepath.Join(root, "project")
+	home := filepath.Join(root, "home")
+	shared := instructionIdentityFile(t, filepath.Join(root, "shared"), "instructions.txt")
+	neighbor := instructionIdentityFile(t, filepath.Join(root, "shared"), "other.txt")
+	projectLink := instructionIdentitySymlink(t, shared, filepath.Join(project, "CLAUDE.md"))
+	dotfile := instructionIdentityFile(t, filepath.Join(root, "dotfiles"), "agents.txt")
+	homeLink := instructionIdentitySymlink(t, dotfile, filepath.Join(home, ".codex", "AGENTS.md"))
+	persona := instructionIdentityFile(t, filepath.Join(root, "persona-src"), "soul.txt")
+	loadedLink := instructionIdentitySymlink(t, persona, filepath.Join(root, "persona", "SOUL.md"))
+	sharedAlias := instructionIdentityLink(t, shared, filepath.Join(root, "tmp", "copy.txt"))
+	subdir := filepath.Join(project, "src")
+	if err := os.MkdirAll(subdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, path, cwd, want string
+		loaded                []string
+	}{
+		{"project symlink target", shared, project, projectLink, nil},
+		{"from a subdirectory", shared, subdir, projectLink, nil},
+		{"hard link of the target", sharedAlias, project, projectLink, nil},
+		{"agent home symlink target", dotfile, project, homeLink, nil},
+		{"loaded symlink target", persona, project, loadedLink, []string{loadedLink}},
+		{"loaded symlink target, not loaded", persona, project, "", nil},
+		{"ordinary neighbor", neighbor, project, "", nil},
+		{"outside the project", shared, filepath.Join(root, "elsewhere"), "", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NewInstructionFiles(tc.cwd, home, tc.loaded).Alias(tc.path); !sameInstructionPath(got, tc.want) {
+				t.Fatalf("Alias(%q) = %q; want %q", tc.path, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -126,7 +173,7 @@ func TestInstructionAliasConfiguredAgentHome(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", config)
 	instruction := instructionIdentityFile(t, config, "CLAUDE.md")
 	alias := instructionIdentityLink(t, instruction, filepath.Join(root, "tmp", "notes.txt"))
-	if got := InstructionAlias(alias, filepath.Join(root, "project"), filepath.Join(root, "home"), nil); !sameInstructionPath(got, instruction) {
+	if got := NewInstructionFiles(filepath.Join(root, "project"), filepath.Join(root, "home"), nil).Alias(alias); !sameInstructionPath(got, instruction) {
 		t.Fatalf("alias of CLAUDE_CONFIG_DIR/CLAUDE.md = %q; want %q", got, instruction)
 	}
 }
@@ -141,14 +188,8 @@ func sameInstructionPath(got, want string) bool {
 func TestInstructionAliasThroughSymlinkElsewhere(t *testing.T) {
 	root := instructionIdentityRoot(t)
 	instruction := instructionIdentityFile(t, filepath.Join(root, "project"), "CLAUDE.md")
-	link := filepath.Join(root, "tmp", "rules")
-	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(instruction, link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	got := InstructionAlias(link, filepath.Join(root, "cwd"), filepath.Join(root, "home"), nil)
+	link := instructionIdentitySymlink(t, instruction, filepath.Join(root, "tmp", "rules"))
+	got := NewInstructionFiles(filepath.Join(root, "cwd"), filepath.Join(root, "home"), nil).Alias(link)
 	if !sameInstructionPath(got, instruction) {
 		t.Fatalf("symlink alias = %q; want %q", got, instruction)
 	}
@@ -170,7 +211,8 @@ func instructionResolve(t *testing.T, cwd, tool string, input map[string]any) ma
 }
 
 // The managed hook client checks identity as the user, so a gateway that
-// cannot read the user's home (ProtectHome) still learns the file.
+// cannot read the user's home (ProtectHome) still learns the file. Creating a
+// link writes nothing.
 func TestResolveReportsInstructionIdentity(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the Windows gateway checks file identity itself")
@@ -182,6 +224,7 @@ func TestResolveReportsInstructionIdentity(t *testing.T) {
 	far := instructionIdentityLink(t, instructionIdentityFile(t, filepath.Join(root, "far"), "SOUL.md"),
 		filepath.Join(root, "tmp", "far.txt"))
 	ordinary := instructionIdentityFile(t, filepath.Join(root, "tmp"), "plain.txt")
+	newName := filepath.Join(root, "tmp", "new")
 	for _, tc := range []struct {
 		name, tool string
 		input      map[string]any
@@ -192,14 +235,45 @@ func TestResolveReportsInstructionIdentity(t *testing.T) {
 		{"native write", "Write", map[string]any{"file_path": alias, "content": "x"}, instruction},
 		{"native edit", "Edit", map[string]any{"file_path": alias, "old_string": "instructions", "new_string": "x"}, instruction},
 		{"tee", "Bash", map[string]any{"command": "echo x | tee -a " + alias}, instruction},
-		{"hard link creation", "Bash", map[string]any{"command": "ln " + filepath.Join(project, "CLAUDE.md") + " " + filepath.Join(root, "tmp", "new")}, filepath.Join(project, "CLAUDE.md")},
-		{"link of an alias", "Bash", map[string]any{"command": "ln " + alias + " " + filepath.Join(root, "tmp", "again")}, instruction},
-		{"instruction file in no agent folder", "Bash", map[string]any{"command": "printf x >> " + far}, ""},
 		{"cp into the link", "Bash", map[string]any{"command": "cp " + ordinary + " " + alias}, instruction},
 		{"python open", "Bash", map[string]any{"command": "python3 -c \"open('" + alias + "', 'a').write('x')\""}, instruction},
 		{"multi edit", "MultiEdit", map[string]any{"file_path": alias, "edits": []map[string]any{{"old_string": "instructions", "new_string": "x"}}}, instruction},
+		{"instruction file in no load location", "Bash", map[string]any{"command": "printf x >> " + far}, ""},
 		{"ordinary file", "Bash", map[string]any{"command": "printf x >> " + ordinary}, ""},
-		{"symbolic link creation", "Bash", map[string]any{"command": "ln -s " + instruction + " " + filepath.Join(root, "tmp", "sym")}, ""},
+		{"hard link creation", "Bash", map[string]any{"command": "ln CLAUDE.md " + newName}, ""},
+		{"symbolic link creation", "Bash", map[string]any{"command": "ln -s " + instruction + " " + newName}, ""},
+		{"link of an alias", "Bash", map[string]any{"command": "ln " + alias + " " + newName}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			targets := instructionResolve(t, project, tc.tool, tc.input)
+			if got := targets[InstructionIdentityKey]; got != tc.want {
+				t.Fatalf("identity = %q, want %q (targets %v)", got, tc.want, targets)
+			}
+		})
+	}
+}
+
+// GAP-0971 in the hook client: a write to the physical file a symlinked
+// CLAUDE.md reaches carries that CLAUDE.md as its identity.
+func TestResolveReportsSymlinkedInstructionTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows gateway checks file identity itself")
+	}
+	root := instructionIdentityRoot(t)
+	project := filepath.Join(root, "project")
+	shared := instructionIdentityFile(t, filepath.Join(root, "shared"), "instructions.txt")
+	neighbor := instructionIdentityFile(t, filepath.Join(root, "shared"), "other.txt")
+	link := instructionIdentitySymlink(t, shared, filepath.Join(project, "CLAUDE.md"))
+	for _, tc := range []struct {
+		name, tool string
+		input      map[string]any
+		want       string
+	}{
+		{"native write", "Write", map[string]any{"file_path": shared, "content": "x"}, link},
+		{"native edit", "Edit", map[string]any{"file_path": shared, "old_string": "instructions", "new_string": "x"}, link},
+		{"shell append", "Bash", map[string]any{"command": "printf x >> " + shared}, link},
+		{"relative", "Bash", map[string]any{"command": "printf x > ../shared/instructions.txt"}, link},
+		{"neighbor", "Write", map[string]any{"file_path": neighbor, "content": "x"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			targets := instructionResolve(t, project, tc.tool, tc.input)
@@ -233,6 +307,7 @@ func TestResolveLeavesOrdinaryHardLinks(t *testing.T) {
 		{"tee", "Bash", map[string]any{"command": "echo x | tee -a '" + venv + "'"}},
 		{"hard link of it", "Bash", map[string]any{"command": "ln '" + installed + "' '" + filepath.Join(root, "tmp-copy") + "'"}},
 		{"cp link of it", "Bash", map[string]any{"command": "cp -al '" + venv + "' '" + filepath.Join(root, "tmp-copy2") + "'"}},
+		{"link then write", "Bash", map[string]any{"command": "ln '" + installed + "' '" + filepath.Join(root, "tmp-copy3") + "' && printf x >> '" + filepath.Join(root, "tmp-copy3") + "'"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			targets := instructionResolve(t, project, tc.tool, tc.input)
@@ -252,185 +327,16 @@ func TestDecodeInstructionIdentity(t *testing.T) {
 		value string
 		ok    bool
 	}{
-		{InstructionIdentityUnknown, true},
 		{filepath.Join(string(filepath.Separator)+"repo", "CLAUDE.md"), runtime.GOOS != "windows"},
+		{"?", false},
 		{"CLAUDE.md", false},
 	} {
 		if _, ok := Decode(encode(tc.value)); ok != tc.ok {
 			t.Errorf("Decode(identity=%q) ok=%t, want %t", tc.value, ok, tc.ok)
 		}
 	}
-	rest, _ := SplitOpaqueScopeFacts(map[string]string{CWDKey: "/repo", InstructionIdentityKey: "?"})
+	rest, _ := SplitOpaqueScopeFacts(map[string]string{CWDKey: "/repo", InstructionIdentityKey: "/repo/CLAUDE.md"})
 	if _, present := rest[InstructionIdentityKey]; present {
 		t.Fatal("the authorized-keys proof must not see the instruction-identity fact as an operand")
-	}
-}
-
-func TestInstructionLinkCreation(t *testing.T) {
-	root := instructionIdentityRoot(t)
-	project := filepath.Join(root, "project")
-	instruction := instructionIdentityFile(t, project, "CLAUDE.md")
-	alias := instructionIdentityLink(t, instruction, filepath.Join(root, "tmp", "notes.txt"))
-	instructionIdentityFile(t, project, "plain.txt")
-	shared := instructionIdentityFile(t, project, "shared.txt")
-	instructionIdentityLink(t, shared, filepath.Join(root, "store", "shared.txt"))
-	far := instructionIdentityFile(t, filepath.Join(root, "persona"), "SOUL.md")
-	farAlias := instructionIdentityLink(t, far, filepath.Join(root, "tmp", "draft.txt"))
-	home := filepath.Join(root, "home")
-	for _, tc := range []struct {
-		name, command, want string
-		unknown             bool
-	}{
-		{"ln", "ln CLAUDE.md notes.txt", instruction, false},
-		{"ln options", "ln -f -- CLAUDE.md /tmp/x", instruction, false},
-		{"ln target directory", "ln -t /tmp CLAUDE.md", instruction, false},
-		{"ln physical", "ln -P CLAUDE.md x", instruction, false},
-		{"link", "link CLAUDE.md x", instruction, false},
-		{"cp link", "cp -l CLAUDE.md x", instruction, false},
-		{"cp long link", "cp --link CLAUDE.md x", instruction, false},
-		{"cp archive link", "cp -al CLAUDE.md x", instruction, false},
-		{"busybox", "busybox ln CLAUDE.md x", instruction, false},
-		{"absolute", "ln '" + instruction + "' /tmp/x", instruction, false},
-		{"alias source", "ln '" + alias + "' /tmp/x", instruction, false},
-		{"in a chain", "true && ln CLAUDE.md x && printf y >> x", instruction, false},
-		{"wrapped", "sudo ln CLAUDE.md x", "CLAUDE.md", false},
-		{"find exec", "find . -name CLAUDE.md -exec ln {} /tmp/x \\;", "CLAUDE.md", false},
-		{"python", `python3 -c "import os; os.link('CLAUDE.md', 'x')"`, "CLAUDE.md", false},
-		{"pathlib", `python3 -c "from pathlib import Path; Path('x').hardlink_to('soul.md')"`, "SOUL.md", false},
-		{"node", `node -e "require('fs').linkSync('AGENTS.md', 'x')"`, "AGENTS.md", false},
-		{"powershell", `New-Item -ItemType HardLink -Path x -Target CLAUDE.md`, "CLAUDE.md", false},
-		{"cmd mklink", `cmd /c mklink /H x CLAUDE.md`, "CLAUDE.md", false},
-		{"fsutil", `fsutil hardlink create x openclaw.json`, "openclaw.json", false},
-		{"dynamic source", `ln "$SRC" x`, "", true},
-		{"dynamic interpreter", `python3 -c "import os,sys; os.link(sys.argv[1], 'x')" "$F"`, "", true},
-		{"symbolic", "ln -s CLAUDE.md x", "", false},
-		{"symbolic long", "ln --symbolic CLAUDE.md x", "", false},
-		{"cp symbolic", "cp -s CLAUDE.md x", "", false},
-		{"copy", "cp CLAUDE.md backup.md", "", false},
-		{"ordinary hard link", "ln plain.txt plain2.txt", "", false},
-		{"ordinary multiply linked source", "ln shared.txt shared2.txt", "", false},
-		{"cp link of a multiply linked source", "cp -al shared.txt shared3.txt", "", false},
-		{"data only", `echo "os.link(CLAUDE.md)"`, "", false},
-		{"read", "cat CLAUDE.md", "", false},
-		{"wrapped symbolic", "sudo ln -s /opt/x /usr/local/bin/x", "", false},
-		{"wrapped copy", `bash -lc "cp a b" > out.txt`, "", false},
-		{"wrapped dynamic", `xargs ln < list`, "", false},
-		// Hard-link API text in a string the program only prints is data.
-		{"python printed text", `python3 -c "print('os.link(')"`, "", false},
-		{"python printed texts", `python3 -I -c 'print("x", "Path.hardlink_to(" + "y"); print("z")'`, "", false},
-		{"node printed text", `node -e "console.log('fs.linkSync(')"`, "", false},
-		{"ruby printed text", `ruby -e "puts 'FileUtils.ln('"`, "", false},
-		{"perl printed text", `perl -e 'print "os.link(\n"'`, "", false},
-		{"printed text after cd", `cd /tmp && python3 -c "print('os.link(')"`, "", false},
-		{"printed text in a shell body", `bash -c 'python3 -c "print(\"os.link(\")"'`, "", false},
-		{"printed text piped", `printf 'os.link(a, b)' | python3 -c "print('x')"`, "", false},
-		// Executable hard-link calls, and text the code can read, stay unknown.
-		{"python call", `python3 -c "import os; os.link(a, b)"`, "", true},
-		{"python f-string call", `python3 -c "print(f'{os.link(a, b)}')"`, "", true},
-		{"python exec", `python3 -c "exec('os.link(a, b)')"`, "", true},
-		{"python argument text", `python3 -c "print('x')" 'os.link('`, "", true},
-		{"python stdin code", `printf 'os.link(a, b)' | python3 -c "exec(input())"`, "", true},
-		{"python here-document", "python3 -c \"print('x')\" <<'EOF'\nos.link(a, b)\nEOF", "", true},
-		{"python import path", `PYTHONPATH=. python3 -c "print('os.link(')"`, "", true},
-		{"node template", "node -e 'console.log(`${require(\"fs\").linkSync(a, b)}`)'", "", true},
-		{"ruby interpolation", `ruby -e 'puts "#{File.link(a, b)}"'`, "", true},
-		{"perl interpolation", `perl -e 'print "@{[ os.link(a) ]}"'`, "", true},
-		{"interpreter reads stdin", `echo 'os.link(a, b)' | python3`, "", true},
-		{"shell body call", `sh -c 'python3 -c "import os; os.link(a, b)"'`, "", true},
-		// A wrapper's ln or cp is read with its options, as a direct call is.
-		{"sudo symbolic", "sudo ln -s CLAUDE.md notes.txt", "", false},
-		{"env symbolic long", "env ln --symbolic CLAUDE.md x", "", false},
-		{"nice symbolic force", "nice -n 5 ln -sf CLAUDE.md x", "", false},
-		{"sudo busybox symbolic", "sudo busybox ln -s CLAUDE.md x", "", false},
-		{"sh -c symbolic", "sh -c 'ln -s CLAUDE.md x'", "", false},
-		{"find exec symbolic", `find . -name CLAUDE.md -exec ln -s {} /tmp/x \;`, "", false},
-		{"xargs symbolic", "printf 'CLAUDE.md\\n' | xargs -I{} ln -s {} /tmp/x", "", false},
-		{"sudo cp symbolic", "sudo cp -s CLAUDE.md x", "", false},
-		{"sudo cp", "sudo cp CLAUDE.md backup.md", "", false},
-		{"sudo hard after symbolic", "sudo ln -s a b; sudo ln CLAUDE.md x", "CLAUDE.md", false},
-		{"find exec hard after symbolic", `find . -name CLAUDE.md -exec ln -s {} /tmp/x \; -exec ln {} /tmp/y \;`, "CLAUDE.md", false},
-		{"sh -c hard after symbolic", "sh -c 'ln -s a b; ln CLAUDE.md x'", "CLAUDE.md", false},
-		{"sudo cp link", "sudo cp -l CLAUDE.md x", "CLAUDE.md", false},
-		{"sudo ln dynamic option", `sudo ln "$OPT" CLAUDE.md x`, "CLAUDE.md", false},
-		{"sudo ln symbolic option value", "sudo ln -S .s CLAUDE.md x", "CLAUDE.md", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, unknown := InstructionLinkCreation("Bash", tc.command, project, home, nil)
-			if !sameInstructionPath(got, tc.want) || unknown != tc.unknown {
-				t.Fatalf("InstructionLinkCreation(%q) = %q, unknown=%t; want %q, unknown=%t", tc.command, got, unknown, tc.want, tc.unknown)
-			}
-		})
-	}
-	if got, unknown := InstructionLinkCreation("apply_patch", "ln CLAUDE.md x", project, home, nil); got != "" || unknown {
-		t.Fatalf("a patch envelope is not shell: %q, %t", got, unknown)
-	}
-	// The session's loaded files name a source that no agent folder holds.
-	command := "ln '" + farAlias + "' again.txt"
-	want := ""
-	if runtime.GOOS == "windows" {
-		want = far
-	}
-	if got, unknown := InstructionLinkCreation("Bash", command, project, home, nil); !sameInstructionPath(got, want) || unknown {
-		t.Fatalf("link of an unloaded far alias = %q, unknown=%t; want %q", got, unknown, want)
-	}
-	if got, unknown := InstructionLinkCreation("Bash", command, project, home, []string{far}); !sameInstructionPath(got, far) || unknown {
-		t.Fatalf("link of a loaded file's alias = %q, unknown=%t; want %q", got, unknown, far)
-	}
-}
-
-// A protected file the caller cannot read (sshd's Windows administrators key
-// file) is matched by the names of a multiply linked target, not by its link
-// count: an ordinary hard-linked file whose every name is listed is written
-// as the release writes it. Where the names cannot all be listed, it stays
-// unresolvable.
-func TestProtectedTargetOfUnreadableKeysByLinkNames(t *testing.T) {
-	root := instructionIdentityRoot(t)
-	stored := instructionIdentityFile(t, filepath.Join(root, "store"), "index.js")
-	installed := instructionIdentityLink(t, stored, filepath.Join(root, "node_modules", "index.js"))
-	single := instructionIdentityFile(t, root, "plain.js")
-	keys := filepath.Join(root, "ProgramData", "ssh", "administrators_authorized_keys")
-	t.Cleanup(func() { protectedLinkNames = fileLinkNames })
-	for _, tc := range []struct {
-		name               string
-		renamed            bool
-		names              []string
-		complete, listable bool
-		target, want       string
-		ok                 bool
-	}{
-		{"ordinary file, every name listed", false, []string{stored, installed}, true, true, installed, installed, true},
-		{"single link", false, nil, false, false, single, single, true},
-		{"a name of the keys file", false, []string{installed, filepath.Join(root, "x", "Administrators_Authorized_Keys")}, true, true, installed, keys, true},
-		{"names stop early", false, []string{stored}, false, true, installed, "", false},
-		{"names not listable", false, nil, false, false, installed, "", false},
-		{"keys path is a symlink", true, []string{stored, installed}, true, true, installed, "", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			protectedLinkNames = func(string) ([]string, bool, bool) { return tc.names, tc.complete, tc.listable }
-			files := protectedFiles{{path: keys, unknown: true, renamed: tc.renamed}}
-			got, ok := files.target(tc.target)
-			if got != tc.want || ok != tc.ok {
-				t.Fatalf("target(%q) = %q, %t; want %q, %t", tc.target, got, ok, tc.want, tc.ok)
-			}
-		})
-	}
-}
-
-// A runner (sh -c, env, eval, find -exec, xargs) hides ln's options; an
-// instruction name in its text is enough to refuse it.
-func TestInstructionLinkCreationThroughRunners(t *testing.T) {
-	root := instructionIdentityRoot(t)
-	project := filepath.Join(root, "project")
-	instructionIdentityFile(t, project, "AGENTS.md")
-	for _, command := range []string{
-		"printf 'AGENTS.md\\n' | xargs -I{} ln {} /tmp/x",
-		`find . -name AGENTS.md -execdir cp -l {} /tmp/x \;`,
-		"sh -c 'ln AGENTS.md x'",
-		"env ln AGENTS.md x",
-		"eval 'ln AGENTS.md x'",
-	} {
-		if got, _ := InstructionLinkCreation("Bash", command, project, root, nil); got != "AGENTS.md" {
-			t.Errorf("InstructionLinkCreation(%q) = %q, want AGENTS.md", command, got)
-		}
 	}
 }

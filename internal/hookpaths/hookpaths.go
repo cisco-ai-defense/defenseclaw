@@ -499,14 +499,7 @@ type protectedFile struct {
 	path    string
 	info    os.FileInfo
 	unknown bool
-	// renamed is an unreadable protected path that is a symlink: the file
-	// it names may have another name, so its link names cannot prove it.
-	renamed bool
 }
-
-// protectedLinkNames lists every name of a file (fileLinkNames). It is a
-// variable so a test can list the names a POSIX volume cannot.
-var protectedLinkNames = fileLinkNames
 
 type protectedFiles []protectedFile
 
@@ -520,9 +513,6 @@ func newProtectedFiles(home string) protectedFiles {
 			protected.info = info
 		case !os.IsNotExist(err):
 			protected.unknown = true
-			if link, err := os.Lstat(path); err == nil && link.Mode()&os.ModeSymlink != 0 {
-				protected.renamed = true
-			}
 		}
 		files = append(files, protected)
 	}
@@ -540,17 +530,10 @@ func (files protectedFiles) has(resolved string) bool {
 }
 
 // target maps a resolved write target to the protected path when both name
-// the same file. A protected file the caller cannot read (sshd's Windows
-// administrators key file under its folder's ACL) is matched by the names
-// of a multiply linked target instead: the protected file's own entry is one
-// of its names, so a full list of names (Windows) without that file name
-// proves an ordinary file, like a pnpm or uv store file. A link count proves
-// nothing. Where the names cannot all be listed (POSIX, a network share) the
-// target may be an alias and is reported as unresolvable.
+// the same file. When a protected file cannot be identified, a multiply
+// linked target may be an alias of it and is reported as unresolvable.
 func (files protectedFiles) target(resolved string) (string, bool) {
 	var info os.FileInfo
-	var names []string
-	listed, complete := false, false
 	for _, p := range files {
 		if p.info == nil && !p.unknown {
 			continue
@@ -567,22 +550,8 @@ func (files protectedFiles) target(resolved string) (string, bool) {
 			}
 			continue
 		}
-		if linkCount(resolved, info) <= 1 {
-			continue
-		}
-		if !listed {
-			listed = true
-			var listable bool
-			names, complete, listable = protectedLinkNames(resolved)
-			complete = complete && listable
-		}
-		if !complete || p.renamed {
+		if linkCount(resolved, info) > 1 {
 			return "", false
-		}
-		for _, name := range names {
-			if strings.EqualFold(filepath.Base(name), filepath.Base(p.path)) {
-				return p.path, true
-			}
 		}
 	}
 	return resolved, true
@@ -715,20 +684,13 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	var safeRedirects []RedirectOccurrence
 	opaqueFacts := map[string]string{}
 	var unprovenReason string
-	// identity is the file-identity evidence for InstructionIdentityKey: a
-	// known instruction file wins over an unknown multiply linked one.
+	// identity is the file-identity evidence for InstructionIdentityKey: the
+	// instruction file that a write target names under another name.
 	var identity string
-	// A bare instruction name from the command text needs no client walk:
-	// the gateway reads the same text.
-	noteIdentity := func(instruction string, unknown bool) {
-		if filepath.IsAbs(instruction) && len(instruction) <= MaxWriteTargetPathBytes {
-			if identity == "" || identity == InstructionIdentityUnknown {
-				identity = instruction
-			}
-			return
-		}
-		if (unknown || filepath.IsAbs(instruction)) && identity == "" {
-			identity = InstructionIdentityUnknown
+	instructions := NewInstructionFiles(cwd, home, nil)
+	noteIdentity := func(instruction string) {
+		if identity == "" && filepath.IsAbs(instruction) && len(instruction) <= MaxWriteTargetPathBytes {
+			identity = instruction
 		}
 	}
 	if toolArgs != nil {
@@ -738,9 +700,6 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
 					unprovenReason = ActionCommandDecision(command, cwd, home)
 				}
-				// A hard link the command creates is another name for its
-				// source; one to an instruction file is refused (GAP-0869).
-				noteIdentity(InstructionLinkCreation(tool, command, cwd, home, nil))
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)
@@ -825,9 +784,10 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		size += entry
 		targets[path] = resolved
 		if resolved != "" {
-			// Protection follows the file: a hard link, case or short-name
-			// variant of an instruction file writes it (GAP-0869).
-			noteIdentity(InstructionAlias(resolved, cwd, home, nil), false)
+			// Protection follows the file: a symlink, a hard link, a case or
+			// short-name variant of an instruction file, and the physical
+			// file a symlinked one reaches (GAP-0869, GAP-0971).
+			noteIdentity(instructions.Alias(resolved))
 		}
 	}
 	// Exact shell operands take precedence over a duplicate PathFact. Their
@@ -1081,7 +1041,7 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false
 	}
-	if identity, present := targets[InstructionIdentityKey]; present && identity != InstructionIdentityUnknown &&
+	if identity, present := targets[InstructionIdentityKey]; present &&
 		(!filepath.IsAbs(identity) || len(identity) > MaxWriteTargetPathBytes) {
 		return nil, false
 	}

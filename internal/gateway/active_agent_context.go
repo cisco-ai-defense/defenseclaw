@@ -363,7 +363,14 @@ func (cache *activeAgentContextCache) seedKey(key activeAgentContextKey, filePat
 	canonicalPath, caseInsensitive, valid := exactActiveAgentFile(filePath)
 	if !valid {
 		if syntacticActiveAgentFileCandidate(filePath) {
-			cache.markUncertain(key, cache.currentTime())
+			now := cache.currentTime()
+			cache.markUncertain(key, now)
+			// A symlinked instruction file is the file it reaches: keep the
+			// loaded name too, so a write to that file under another name is
+			// judged by its identity (GAP-0971, hookpaths.InstructionFiles).
+			if info, err := os.Stat(filePath); err == nil && info.Mode().IsRegular() {
+				cache.seedLoadedFile(key, filePath, false, now)
+			}
 		}
 		return
 	}

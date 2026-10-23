@@ -6,14 +6,9 @@ package hookpaths
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
-
-	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
-	"mvdan.cc/sh/v3/expand"
-	"mvdan.cc/sh/v3/syntax"
 )
 
 // InstructionFileNames are the agent instruction and identity files that the
@@ -26,17 +21,10 @@ var InstructionFileNames = [...]string{
 }
 
 // InstructionIdentityKey carries the hook client's file-identity check of a
-// call's write targets and hard-link sources. The value is the path of the
-// protected instruction file that one of them names under another name, or
-// InstructionIdentityUnknown for a new hard link whose source cannot be
-// read. A gateway that cannot read the user's files (ProtectHome) judges the
-// call from it.
+// call's write targets: the path of the protected instruction file that one
+// of them writes under another name. A gateway that cannot read the user's
+// files (ProtectHome) judges the call from it.
 const InstructionIdentityKey = "\x00instruction-identity"
-
-// InstructionIdentityUnknown is a hard link a command creates whose source
-// cannot be read: its operands are not static, it is an interpreter or
-// Windows hard-link call, or the source does not resolve.
-const InstructionIdentityUnknown = "?"
 
 // InstructionFileName returns the protected name that base spells: exactly,
 // or without case when foldCase (Windows, where the file system ignores it).
@@ -51,19 +39,69 @@ func InstructionFileName(base string, foldCase bool) (string, bool) {
 
 func instructionNameFold() bool { return runtime.GOOS == "windows" }
 
-// InstructionAlias reports the protected instruction file that an existing
-// write target names under another name: through a symlink, as a case,
-// short-name or stream variant of a file in its directory, or as a hard link.
-// A hard link is compared with the file identities of the instruction files
-// in the places agents load them from (instructionDirectories) and of the
-// files the session loaded (loaded, the gateway's load provenance); Windows
-// also lists every name of the file. POSIX cannot list a file's names, so a
-// multiply linked file that matches none of those identities is an ordinary
-// file, like the hard-linked files of a pnpm or uv store. A missing file, one
-// that is not regular, one the caller cannot read and one already spelled as
-// an instruction name report nothing: the name rules judge the last.
-func InstructionAlias(path, cwd, home string, loaded []string) string {
-	if !filepath.IsAbs(path) {
+// InstructionFiles are the protected instruction files of one call, each
+// identified once by its file identity: the instruction names in the places
+// agents load them from (instructionDirectories) and the instruction files
+// the session loaded (the gateway's load provenance). A symlinked
+// instruction file is identified by the file it reaches, so a write to that
+// physical file is a write to the instruction file (GAP-0971). Any other
+// file is ordinary, however many links it has: a link count proves nothing,
+// and pnpm and uv stores hard-link package files.
+type InstructionFiles struct {
+	cwd, home string
+	loaded    []string
+	files     []instructionFile
+	built     bool
+}
+
+type instructionFile struct {
+	path string
+	info os.FileInfo
+}
+
+// NewInstructionFiles returns the instruction files of a call in cwd for the
+// user's home. loaded are the paths the session loaded; only those with an
+// instruction name count. The files are identified on first use.
+func NewInstructionFiles(cwd, home string, loaded []string) *InstructionFiles {
+	return &InstructionFiles{cwd: cwd, home: home, loaded: loaded}
+}
+
+func (f *InstructionFiles) identify() {
+	if f.built {
+		return
+	}
+	f.built = true
+	seen := map[string]bool{}
+	add := func(path string) {
+		if seen[path] {
+			return
+		}
+		seen[path] = true
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			f.files = append(f.files, instructionFile{path: path, info: info})
+		}
+	}
+	for _, path := range f.loaded {
+		if _, named := InstructionFileName(filepath.Base(path), instructionNameFold()); named && filepath.IsAbs(path) {
+			add(filepath.Clean(path))
+		}
+	}
+	for _, directory := range instructionDirectories(f.cwd, f.home) {
+		for _, name := range InstructionFileNames {
+			add(filepath.Join(directory, name))
+		}
+	}
+}
+
+// Alias reports the protected instruction file that an existing write target
+// is under another name: a symlink to it, the physical file a symlinked
+// instruction file reaches, a case, short-name or stream variant of an
+// instruction file in its directory, or a hard link to one of the call's
+// instruction files. A missing file, one that is not regular and one already
+// spelled as an instruction name report nothing: the name rules judge the
+// last.
+func (f *InstructionFiles) Alias(path string) string {
+	if f == nil || !filepath.IsAbs(path) {
 		return ""
 	}
 	path = filepath.Clean(path)
@@ -81,42 +119,19 @@ func InstructionAlias(path, cwd, home string, loaded []string) string {
 		}
 		return real
 	}
-	same := func(candidate string) bool {
-		other, err := os.Stat(candidate)
-		return err == nil && other.Mode().IsRegular() && os.SameFile(info, other)
-	}
 	// A case variant on a case-insensitive volume, and a Windows short or
-	// stream name, open a file of the same directory with one link.
+	// stream name, open an instruction file of the same directory.
 	dir := filepath.Dir(real)
 	for _, name := range InstructionFileNames {
-		if candidate := filepath.Join(dir, name); same(candidate) {
+		candidate := filepath.Join(dir, name)
+		if other, err := os.Stat(candidate); err == nil && other.Mode().IsRegular() && os.SameFile(info, other) {
 			return candidate
 		}
 	}
-	if linkCount(real, info) <= 1 {
-		return ""
-	}
-	if names, complete, listed := fileLinkNames(real); listed {
-		for _, name := range names {
-			if _, named := InstructionFileName(filepath.Base(name), true); named {
-				return name
-			}
-		}
-		if complete {
-			return ""
-		}
-	}
-	for _, candidate := range loaded {
-		if _, named := InstructionFileName(filepath.Base(candidate), instructionNameFold()); named &&
-			filepath.IsAbs(candidate) && same(candidate) {
-			return candidate
-		}
-	}
-	for _, directory := range instructionDirectories(dir, cwd, home) {
-		for _, name := range InstructionFileNames {
-			if candidate := filepath.Join(directory, name); same(candidate) {
-				return candidate
-			}
+	f.identify()
+	for _, file := range f.files {
+		if os.SameFile(info, file.info) {
+			return file.path
 		}
 	}
 	return ""
@@ -129,13 +144,12 @@ var instructionHomeFolders = []string{
 	".config", filepath.Join(".config", "amp"), filepath.Join(".config", "opencode"),
 }
 
-// instructionDirectories are the places agents load instruction files from,
-// checked to name the file a hard link reaches: the target's directory, the
-// working directory and its parents with their .claude folders, the home and
-// agent folders, and the agents' configured homes (CLAUDE_CONFIG_DIR,
+// instructionDirectories are the places agents load instruction files from:
+// the working directory and its parents with their .claude folders, the home
+// and agent folders, and the agents' configured homes (CLAUDE_CONFIG_DIR,
 // CODEX_HOME) of the calling process.
-func instructionDirectories(dir, cwd, home string) []string {
-	directories := []string{dir}
+func instructionDirectories(cwd, home string) []string {
+	var directories []string
 	add := func(directory string) {
 		if filepath.IsAbs(directory) && !slices.Contains(directories, directory) {
 			directories = append(directories, directory)
@@ -163,202 +177,4 @@ func instructionDirectories(dir, cwd, home string) []string {
 		}
 	}
 	return directories
-}
-
-var (
-	// hardLinkCall is an interpreter, PowerShell or Windows tool call that
-	// creates a hard link from text this package does not evaluate.
-	hardLinkCall = regexp.MustCompile(`(?i)\.link(?:sync)?\s*\(|\.(?:hardlink_to|link_to)\s*\(|` +
-		`\bfileutils\.(?:ln|link)\s*\(|\bmklink(?:\.exe)?\s+(?:/[dj]\s+)*/h\b|` +
-		`\bfsutil(?:\.exe)?\s+hardlink\b|-(?:itemtype|type|it)[\s:]+['"]?hardlink\b|\bcreatehardlink`)
-	// instructionNameText names an instruction file in command text.
-	instructionNameText = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_.-])((?:agents|claude|soul|identity|memory|tools)\.md|(?:openclaw|gateway)\.json)(?:$|[^a-z0-9_-])`)
-)
-
-// InstructionLinkCreation reports a hard link that a shell command creates to
-// a protected instruction file: its path, the instruction name the command
-// text gives such a link when its operands cannot be read, or unknown for a
-// hard link whose source cannot be read. A source is checked by name and by
-// file identity (InstructionAlias, with the session's loaded files); an
-// ordinary multiply linked source is not an instruction file. A new hard link
-// is another name for the file, so creating one is refused like a write
-// (GAP-0869). Symbolic links are left to write resolution, which follows
-// them. The command of an apply_patch tool is a patch envelope, not shell.
-func InstructionLinkCreation(tool, command, cwd, home string, loaded []string) (instruction string, unknown bool) {
-	if command == "" || isApplyPatchToolName(tool) || !filepath.IsAbs(cwd) {
-		return "", false
-	}
-	sources, opaque, wrapped := hardLinkSources(command, cwd, home, 0)
-	for _, source := range sources {
-		literal := OperandPath(source, cwd)
-		if name, named := InstructionFileName(filepath.Base(literal), instructionNameFold()); named {
-			return filepath.Join(filepath.Dir(literal), name), false
-		}
-		resolved, ok := resolveWritePath(literal, 0)
-		if !ok {
-			unknown = true
-			continue
-		}
-		if name, named := InstructionFileName(filepath.Base(resolved), instructionNameFold()); named {
-			return filepath.Join(filepath.Dir(resolved), name), false
-		}
-		if alias := InstructionAlias(resolved, cwd, home, loaded); alias != "" {
-			return alias, false
-		}
-	}
-	if opaque || wrapped {
-		if match := instructionNameText.FindStringSubmatch(command); match != nil {
-			name, _ := InstructionFileName(match[1], true)
-			return name, false
-		}
-		// A wrapped ln without an instruction name is left to the write:
-		// a later write through the link meets InstructionAlias.
-		unknown = unknown || opaque
-	}
-	return "", unknown
-}
-
-// hardLinkSources lists the static source operands of the hard links a shell
-// command creates with ln, link or cp --link (also through busybox or
-// toybox). opaque reports a hard link whose operands are not static and an
-// interpreter or Windows hard-link call that may run (linkTextInert); wrapped
-// reports a wrapper (sudo, sh -c, find -exec, xargs) that may run a hard ln
-// or cp (wrappedHardLink). depth counts the shell bodies read so far.
-func hardLinkSources(command, cwd, home string, depth int) (sources []string, opaque, wrapped bool) {
-	file, parsed := parseShell(command)
-	if !parsed {
-		return nil, hardLinkCall.MatchString(command), tactics.RunsProgram(command, linkPrograms...)
-	}
-	if hardLinkCall.MatchString(command) {
-		for _, stmt := range file.Stmts {
-			if !linkTextInert(stmt, command, cwd, home, depth) {
-				opaque = true
-				break
-			}
-		}
-	}
-	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
-	boundPrograms := actionBoundProgramWords(file, home)
-	syntax.Walk(file, func(node syntax.Node) bool {
-		call, isCall := node.(*syntax.CallExpr)
-		if !isCall || len(call.Args) == 0 {
-			return true
-		}
-		args := call.Args
-		words := make([]string, len(args))
-		static := make([]bool, len(args))
-		for i, arg := range args {
-			words[i], static[i] = staticShellWord(arg, env, home != "")
-		}
-		if !static[0] {
-			words[0], static[0] = staticProgramWord(args[0], home)
-		}
-		if !static[0] {
-			words[0] = boundPrograms[call]
-			static[0] = words[0] != ""
-		}
-		program, start := "", call.Pos()
-		if static[0] {
-			program = programBase(words[0])
-		}
-		for slices.Contains(multicallPrograms, program) && len(args) > 1 {
-			args, words, static, start = args[1:], words[1:], static[1:], args[1].Pos()
-			program = ""
-			if static[0] {
-				program = programBase(words[0])
-			}
-		}
-		switch {
-		case slices.Contains(linkPrograms, program):
-			if symbolicLinkCall(program, words[1:], static[1:]) {
-				return true
-			}
-			if slices.Contains(static, false) {
-				opaque = true
-				return true
-			}
-			var links shellLinks
-			if !links.add(program, words[1:], cwd) {
-				opaque = true
-				return true
-			}
-			for _, alias := range links.aliases {
-				if !slices.Contains(sources, alias.target) {
-					sources = append(sources, alias.target)
-				}
-			}
-		case slices.Contains(copyPrograms, program):
-			option, dynamic := copyLinkOptions(args[1:], words[1:], static[1:])
-			if dynamic {
-				opaque = true
-				return true
-			}
-			if !option {
-				return true
-			}
-			parsed := cpOperands(words[1:], static[1:])
-			if !parsed.ok {
-				opaque = true
-				return true
-			}
-			if !parsed.hard {
-				return true
-			}
-			if slices.Contains(static, false) {
-				opaque = true
-				return true
-			}
-			for _, source := range parsed.sources {
-				if !slices.Contains(sources, source) {
-					sources = append(sources, source)
-				}
-			}
-		case program == "":
-			// A program named by a parameter or substitution may be ln.
-			if tactics.RunsProgram(command[start.Offset():call.End().Offset()], linkPrograms...) {
-				wrapped = true
-			}
-		default:
-			// A wrapper (sudo, env, nice, sh -c, eval, find -exec, xargs)
-			// may run one.
-			if wrappedHardLink(command[start.Offset():call.End().Offset()], words, static, cwd, home, depth) {
-				wrapped = true
-			}
-		}
-		return true
-	})
-	return sources, opaque, wrapped
-}
-
-// symbolicLinkCall reports an ln call with a static symbolic option. link
-// always creates a hard link.
-func symbolicLinkCall(program string, args []string, static []bool) bool {
-	if program == "link" || program == "glink" {
-		return false
-	}
-	for i, arg := range args {
-		if !static[i] || arg == "--" {
-			return false
-		}
-		if strings.HasPrefix(arg, "--") {
-			name, _, _ := strings.Cut(arg[2:], "=")
-			if option, ok := longOption(name, lnLongOptions); ok && option == "symbolic" {
-				return true
-			}
-			continue
-		}
-		if !strings.HasPrefix(arg, "-") {
-			continue
-		}
-		for j := 1; j < len(arg); j++ {
-			switch arg[j] {
-			case 's':
-				return true
-			case 't', 'S':
-				// The rest of the word is the option's value.
-				j = len(arg)
-			}
-		}
-	}
-	return false
 }

@@ -5,7 +5,6 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -30,11 +29,7 @@ var instructionRuleFiles = map[string]string{
 	"COG-GATEWAY-JSON":  "gateway.json",
 }
 
-const (
-	instructionAliasTitle     = " (written through another name of the file)"
-	instructionHardLinkTitle  = " (a new hard link to the file)"
-	instructionUnknownNewLink = "Hard link whose source cannot be checked against the protected instruction files"
-)
+const instructionAliasTitle = " (written through another name of the file)"
 
 // provedHighWriteFindings joins a native action's resolved write target to a
 // HIGH or CRITICAL catalog rule whose expression names a write access. The
@@ -44,12 +39,12 @@ const (
 //
 // An instruction file is protected by file identity, not by the spelling of
 // its name (GAP-0869): a write through a symlink, a hard link or a case,
-// short-name or stream variant is a write to the file, and a new hard link
-// to it is refused. Another name is matched by file identity against the
-// instruction files agents load and the files the session loaded
-// (hookpaths.InstructionAlias); an ordinary multiply linked file is not one.
-// A new hard link whose source cannot be read may name any instruction
-// file, so it is judged as the most severe of them.
+// short-name or stream variant, and a write to the physical file a
+// symlinked instruction file reaches (GAP-0971), is a write to the file.
+// Another name is matched by file identity against the instruction files
+// agents load and the files the session loaded (hookpaths.InstructionFiles).
+// Every other file is ordinary, however many links it has, and creating a
+// link writes nothing.
 func provedHighWriteFindings(
 	ctx context.Context,
 	request trustedActionRequest,
@@ -72,17 +67,6 @@ func provedHighWriteFindings(
 	exactProof := func(ruleID string) findingProof {
 		return newExactFallbackFindingProof(ruleID, true, true, true, true)
 	}
-	keep := func(rule PatternRule, proof findingProof, finding RuleFinding) {
-		index := slices.IndexFunc(proved, func(existing RuleFinding) bool {
-			return existing.RuleID == rule.ID
-		})
-		if index >= 0 {
-			proved[index].enforcement = findingEnforcementAllowed
-			proved[index].proof = proof
-			return
-		}
-		proved = append(proved, adjustConfidence(request.Input.Tool, finding))
-	}
 	addTarget := func(resolved string, flavor actionfacts.PathFlavor, proofForRule func(string) findingProof, note string) {
 		if _, seen := seenTargets[resolved]; seen {
 			return
@@ -97,63 +81,35 @@ func provedHighWriteFindings(
 				if !proof.authorizes(rule.ID) {
 					continue
 				}
-				keep(rule, proof, RuleFinding{
+				index := slices.IndexFunc(proved, func(finding RuleFinding) bool {
+					return finding.RuleID == rule.ID
+				})
+				if index >= 0 {
+					proved[index].enforcement = findingEnforcementAllowed
+					proved[index].proof = proof
+					continue
+				}
+				proved = append(proved, adjustConfidence(request.Input.Tool, RuleFinding{
 					RuleID: rule.ID, Title: rule.Title + note, Severity: rule.Severity,
 					Confidence: rule.Confidence, Evidence: path.Base(strings.ReplaceAll(resolved, `\`, "/")),
 					Tags:       append([]string(nil), rule.Tags...),
 					LineNumber: 1, enforcement: findingEnforcementAllowed,
 					proof: proof,
-				})
+				}))
 			}
 		}
-	}
-	addUnknown := func(title, evidence string) {
-		if _, seen := seenTargets["\x00unknown"]; seen {
-			return
-		}
-		seenTargets["\x00unknown"] = struct{}{}
-		var chosen *PatternRule
-		severity := ""
-		for _, category := range generation.categories {
-			for index := range category.Rules {
-				rule := category.Rules[index]
-				if _, instruction := instructionRuleFiles[rule.ID]; !instruction || !highWriteCatalogRule(rule) ||
-					!exactProof(rule.ID).authorizes(rule.ID) {
-					continue
-				}
-				if chosen == nil || rule.ID == "COG-AGENTS-MD" {
-					chosen = &rule
-				}
-				if guardrailSeverityRank(rule.Severity) > guardrailSeverityRank(severity) {
-					severity = rule.Severity
-				}
-			}
-		}
-		if chosen == nil {
-			return
-		}
-		proof := exactProof(chosen.ID)
-		keep(*chosen, proof, RuleFinding{
-			RuleID: chosen.ID, Title: title, Severity: strings.ToUpper(severity),
-			Confidence: chosen.Confidence, Evidence: evidence,
-			Tags:       append([]string(nil), chosen.Tags...),
-			LineNumber: 1, enforcement: findingEnforcementAllowed,
-			proof: proof,
-		})
 	}
 	// gatewayIdentity checks a write target on this host's file system. A
 	// managed gateway that cannot read the user's home sees no file and
 	// relies on the hook client's InstructionIdentityKey below.
+	instructions := hookpaths.NewInstructionFiles(request.Input.CWD, request.Input.ActiveHome, request.Input.ActiveAgentFiles)
 	gatewayIdentity := func(resolved string, flavor actionfacts.PathFlavor) {
 		// A sandboxed agent's paths name its own file system, not this
 		// host's; its hook client's evidence speaks for it.
 		if flavor != hostFlavor || isSandboxHookRequest(ctx) {
 			return
 		}
-		instruction := hookpaths.InstructionAlias(
-			filepath.FromSlash(resolved), request.Input.CWD, request.Input.ActiveHome, request.Input.ActiveAgentFiles,
-		)
-		if instruction != "" {
+		if instruction := instructions.Alias(filepath.FromSlash(resolved)); instruction != "" {
 			addTarget(instruction, flavor, exactProof, instructionAliasTitle)
 		}
 	}
@@ -200,26 +156,10 @@ func provedHighWriteFindings(
 		}
 		addClientTarget(resolved, "")
 	}
-	// The hook client's file-identity check of the same targets and of the
-	// command's hard-link sources (hookpaths.InstructionIdentityKey).
-	switch identity := request.ResolvedWriteTargets[hookpaths.InstructionIdentityKey]; {
-	case identity == hookpaths.InstructionIdentityUnknown:
-		addUnknown(instructionUnknownNewLink, "hard link")
-	case filepath.IsAbs(identity):
+	// The hook client's file-identity check of the same targets
+	// (hookpaths.InstructionIdentityKey).
+	if identity := request.ResolvedWriteTargets[hookpaths.InstructionIdentityKey]; filepath.IsAbs(identity) {
 		addClientTarget(identity, instructionAliasTitle)
-	}
-	// A shell command that creates a hard link to an instruction file gives
-	// it a name the name rules do not know.
-	if command := highWriteShellCommand(request.Input); command != "" {
-		instruction, unknown := hookpaths.InstructionLinkCreation(
-			request.Input.Tool, command, request.Input.CWD, request.Input.ActiveHome, request.Input.ActiveAgentFiles,
-		)
-		switch {
-		case instruction != "":
-			addTarget(instruction, hostFlavor, exactProof, instructionHardLinkTitle)
-		case unknown:
-			addUnknown(instructionUnknownNewLink, "hard link")
-		}
 	}
 	// A native apply_patch call or a shell invocation of apply_patch carries
 	// targets in its patch envelope. ActionFacts does not project those
@@ -247,33 +187,11 @@ func provedHighWriteFindings(
 	return proved
 }
 
-// highWriteShellCommand is the shell text of a call: the command field of a
-// shell tool, or the command or cmd argument (Codex exec_command).
-func highWriteShellCommand(input actionfacts.Input) string {
-	if input.Command != "" {
-		return input.Command
-	}
-	if command, ok := trustedBashCommandInput(input); ok && command != "" {
-		return command
-	}
-	var args map[string]json.RawMessage
-	if json.Unmarshal(input.Args, &args) != nil {
-		return ""
-	}
-	for _, key := range []string{"command", "cmd"} {
-		var command string
-		if json.Unmarshal(args[key], &command) == nil && command != "" {
-			return command
-		}
-	}
-	return ""
-}
-
 // An active instruction file may be loaded by a session that predates this
 // gateway process. Its in-memory load event is unavailable after a restart,
 // so a proved write to one of the catalog's instruction filenames must still
 // enforce that catalog rule. Another name of the same file reaches this
-// check as the file's own path (hookpaths.InstructionAlias).
+// check as the file's own path (hookpaths.InstructionFiles).
 func highWriteRuleMatchesTarget(rule PatternRule, resolved string, flavor actionfacts.PathFlavor) bool {
 	if instruction, ok := instructionRuleFiles[rule.ID]; ok {
 		name := path.Base(strings.ReplaceAll(resolved, `\`, "/"))
