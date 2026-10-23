@@ -143,7 +143,7 @@ if ($RunAsFile -and $PSVersionTable.PSEdition -ne "Core" -and $env:PSModulePath)
     $env:PSModulePath = $modulePath -join ";"
 }
 $RunByUpgrade = $RunAsFile -and (Split-Path -Leaf (Split-Path -Parent $PSCommandPath)) -match '^defenseclaw-(upgrade|rollback)-'
-$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false; UsageError = $false; UndoPending = $false; RestorePending = $false; UnprovenReplacement = $null; UnprovenReplacementUnchanged = $false; UnprovenGatewayWasRunning = $false; UnprovenAcceptedBins = $null; UnprovenCloserSha256 = "" }
+$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false; UsageError = $false; UndoPending = $false; RestorePending = $false; UnprovenReplacement = $null; UnprovenReplacementUnchanged = $false; UnprovenGatewayWasRunning = $false; UnprovenAcceptedBins = $null; UnprovenConnectors = @(); UnprovenCloserSha256 = "" }
 
 function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundColor Blue }
 function Write-Ok([string]$Message) { Write-Host "  + $Message" -ForegroundColor Green }
@@ -1688,9 +1688,9 @@ function Write-LifecycleManifest([string]$Operation, [string]$From, [string]$To,
         # hashed them). They are this step's rollback preimage: those hashes,
         # whether their gateway ran, and the live config. A failed or
         # interrupted step restores them, starts their gateway again when it
-        # ran (Start-AcceptedReplacement) and proves them like any record.
-        # Their gateway is not asked for its connectors here:
-        # Prepare-UnprovenReplacement stopped it without running it.
+        # ran (Start-AcceptedReplacement) and proves them like any record,
+        # with every connector that gateway guarded before its stop
+        # (Save-AcceptedConnectors): it is stopped by now, so it is not asked.
         $original = $Run.UnprovenReplacement
         $bins = Get-BinariesState $BinDir
         if (-not $Run.UnprovenAcceptedBins -or -not (Test-SameBinaries $bins $Run.UnprovenAcceptedBins)) {
@@ -1700,7 +1700,7 @@ function Write-LifecycleManifest([string]$Operation, [string]$From, [string]$To,
         $state = [ordered]@{
             Bins = $bins
             GatewayWasRunning = [bool]$Run.UnprovenGatewayWasRunning
-            Connectors = @()
+            Connectors = @(if ($Run.ContainsKey("UnprovenConnectors")) { $Run.UnprovenConnectors })
             Config = Get-OptionalSha256 (Join-Path $DataDir "config.yaml")
             ExternalConfig = $external
             ExternalConfigSha256 = Get-OptionalSha256 $external
@@ -2219,6 +2219,38 @@ function Save-HookCloser([string]$Slot, [string]$Gateway) {
     }
 }
 
+function Save-AcceptedConnectors([string]$Closer, $Running) {
+    # The connectors the gateway -AcceptCurrentInstall accepted guards. Its
+    # restore (the journal, Restore-AcceptedReplacement) must show each one
+    # guarded again before the record goes. Asked of the running gateway
+    # with the checked closer, so the accepted programs do not run before
+    # their stop. A gateway that does not report them is held to every
+    # connector the config names; so is one an earlier run stopped without
+    # recording them. Merged with what an earlier run recorded, and kept in
+    # the record before the stop, so a run interrupted after it still
+    # proves them.
+    $names = @(if ($Run.ContainsKey("UnprovenConnectors")) { $Run.UnprovenConnectors })
+    $record = Read-LifecycleManifest
+    $recorded = $record -and $record.PSObject.Properties["ReplacementConnectors"]
+    if ($recorded) { $names += @($record.ReplacementConnectors) }
+    if ($Running) {
+        $report = Get-GatewayHealthReport $Closer
+        if ($report -and (Get-Field $report "running")) { $names += @(Get-GuardedConnectors $report) }
+        else { $names += @(Get-ConfiguredConnectors) }
+    } elseif ($Run.ContainsKey("UnprovenGatewayWasRunning") -and $Run.UnprovenGatewayWasRunning -and -not $recorded) {
+        $names += @(Get-ConfiguredConnectors)
+    }
+    $Run.UnprovenConnectors = @($names | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+    if ($record) {
+        # Copied into a dictionary: Windows PowerShell 5.1 can write an array
+        # added with Add-Member as {"value": [...], "Count": n}.
+        $copy = [ordered]@{}
+        foreach ($property in $record.PSObject.Properties) { $copy[$property.Name] = $property.Value }
+        $copy["ReplacementConnectors"] = [string[]]@($Run.UnprovenConnectors)
+        Write-DurableText $LifecycleManifest ($copy | ConvertTo-Json -Depth 4)
+    }
+}
+
 function Prepare-UnprovenReplacement([string]$Gateway, $ExpectedBins) {
     # The empty first-install record remains the journal. Keep the checked
     # release gateway beside it before touching the older running install.
@@ -2238,6 +2270,7 @@ function Prepare-UnprovenReplacement([string]$Gateway, $ExpectedBins) {
     if ((Get-Sha256 $closer) -ne (Get-Sha256 $Gateway)) { throw "The published hook closer differs from the checked gateway" }
     $Run.UnprovenCloserSha256 = Get-Sha256 $closer
     $running = Get-GatewayProcess
+    Save-AcceptedConnectors $closer $running
     if ((Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container) -and -not (Close-AllHooks @($closer))) {
         throw "Could not close the older install's hooks with the checked gateway"
     }
@@ -2504,7 +2537,7 @@ function Restore-AcceptedReplacement {
     # to the error.
     if (-not ($Run.UnprovenReplacement -and $Run.UnprovenGatewayWasRunning) -or (Get-GatewayProcess)) { return "" }
     Start-AcceptedReplacement
-    $problems = @(Wait-LifecycleProof $Run.UnprovenAcceptedBins $true -RequireProtected $false)
+    $problems = @(Wait-LifecycleProof $Run.UnprovenAcceptedBins $true @(if ($Run.ContainsKey("UnprovenConnectors")) { $Run.UnprovenConnectors }) -RequireProtected $false)
     if ($problems.Count) { return " The accepted install's gateway is not proven running ($($problems -join '; '))." }
     return " The accepted install's gateway is running."
 }
