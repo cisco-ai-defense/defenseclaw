@@ -2126,8 +2126,8 @@ func (r *NSSResolver) passwdAbsent(service, key string, byUID bool) error {
 // answer (passwdAbsent).
 var errServiceUncheckable = errors.New("DefenseClaw has no check for this NSS service")
 
-// passwdOwnerWithRecordedUnsharedUID names the NSS passwd service that holds uid, asking the
-// services of the passwd line in order as glibc does (passwdProviders), with
+// passwdOwnerWithRecordedUnsharedUID names the NSS passwd service that holds
+// uid, asking the services of the passwd line in order as glibc does, with
 // its answer. A service's "no such account" passes the uid on only when it
 // is definitive (passwdAbsent): getent reports an nslcd, ypbind, winbindd or
 // SSSD that cannot answer the same way, and an account a later service
@@ -2162,8 +2162,7 @@ func (r *NSSResolver) passwdOwnerWithRecordedUnsharedUID(uid int, unsharedRecord
 			// account's facts (review of r104 W2B, loop round 3).
 			return "", Account{}, fmt.Errorf("unixidentity: NSS service %s did not answer whether it holds uid %d: %w: %w", service, uid, err, errDirectoryUnconfirmed)
 		}
-		if err := r.passwdAbsent(service, strconv.Itoa(uid), true); err != nil && !errors.Is(err, errServiceUncheckable) &&
-			(!unsharedRecorded || service != "sss" || !errors.Is(err, errSSSDOnlineNeedsRoot)) {
+		if err := r.uidPasswdAbsent(service, uid, unsharedRecorded); err != nil {
 			return "", Account{}, fmt.Errorf("unixidentity: NSS service %s holds no uid %d but cannot show that it answers: %w", service, uid, err)
 		}
 	}
@@ -2206,6 +2205,17 @@ func (r *NSSResolver) accountOwnerWithRecordedUnsharedUID(uid int, name string, 
 		}
 	}
 	return service, owner, nil
+}
+
+// uidPasswdAbsent accepts only the guardian's recorded root-only SSSD miss;
+// a found account, a stopped responder, or any other service still has to
+// answer for itself. NSS modules with no check retain their existing rule.
+func (r *NSSResolver) uidPasswdAbsent(service string, uid int, unsharedRecorded bool) error {
+	err := r.passwdAbsent(service, strconv.Itoa(uid), true)
+	if errors.Is(err, errServiceUncheckable) || unsharedRecorded && service == "sss" && errors.Is(err, errSSSDOnlineNeedsRoot) {
+		return nil
+	}
+	return err
 }
 
 // leadingPasswdService is the first service glibc asks for an account.
@@ -2321,8 +2331,7 @@ func (r *NSSResolver) checkUIDNotShared(uid int, owner string, account Account, 
 		switch {
 		case err == nil:
 		case IsNotFound(err):
-			if absentErr := r.passwdAbsent(service, strconv.Itoa(uid), true); absentErr != nil && !errors.Is(absentErr, errServiceUncheckable) &&
-				(!unsharedRecorded || service != "sss" || !errors.Is(absentErr, errSSSDOnlineNeedsRoot)) {
+			if absentErr := r.uidPasswdAbsent(service, uid, unsharedRecorded); absentErr != nil {
 				return fmt.Errorf("unixidentity: uid %d: NSS service %s cannot show that it holds no other account of the uid: %w", uid, service, absentErr)
 			}
 			continue
