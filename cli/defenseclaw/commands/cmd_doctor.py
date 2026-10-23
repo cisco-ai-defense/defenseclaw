@@ -5944,6 +5944,10 @@ def _managed_gateway_listener_evidence(
         listener = _linux_gateway_listener_evidence(port, host=host)
         if listener.status != "unavailable":
             return listener
+        fallback = _lsof_gateway_listener_evidence(port, host=host)
+        # lsof can omit another account's sockets. If /proc was unreadable,
+        # its absence is not proof that the port is free.
+        return listener if fallback.status == "missing" else fallback
     return _lsof_gateway_listener_evidence(port, host=host)
 
 

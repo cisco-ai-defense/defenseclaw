@@ -141,6 +141,12 @@ func resolveIdentity(subject *profileSubject, agentUnresolved func(string) bool)
 		if subject.upnUnproven {
 			res.UPN = proofUnknown
 		}
+		if subject.holderUnproven {
+			// The groups are the account's own (its process credentials);
+			// which account holds the uid, its names and UPN, are not
+			// known (GAP-0653).
+			res.Account, res.UPN = proofUnknown, proofUnknown
+		}
 		if subject.GroupsUnknown {
 			res.Groups = proofUnknown
 		} else if len(subject.unconfirmedGroups) > 0 {
@@ -441,7 +447,7 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	}
 	decision.Unproven = orderedFacts(needed)
 	decision.Candidates = candidates
-	decision.Refused = set.identityUncertaintyReason(subject, decision.Unproven, connectorName)
+	decision.Refused = set.identityUncertaintyReason(subject, decision.Unproven, connectorName, agent)
 	return decision
 }
 
@@ -464,7 +470,7 @@ func orderedFacts(facts []string) []string {
 // identityUncertaintyReason names each missing fact without naming a group,
 // another account or a candidate profile. The same text is used by hooks,
 // inspect, ACP, proxy, sandbox and the administrator's explain response.
-func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubject, facts []string, connectorName string) string {
+func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubject, facts []string, connectorName, agent string) string {
 	why := make([]string, 0, len(facts))
 	for _, fact := range facts {
 		switch fact {
@@ -488,12 +494,13 @@ func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubjec
 		why = append(why, subject.tokenGroupsCause)
 	}
 	return "DefenseClaw refused this request: " + strings.Join(why, "; ") +
-		"; run `" + set.profileExplainCommand(subject, connectorName) + "` to inspect the identity decision"
+		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "` to inspect the identity decision"
 }
 
 // profileExplainCommand names the installed administrator command for the
-// verified ID. Only a numeric uid or SID and a safe connector are included.
-func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, connectorName string) string {
+// verified ID. A missing agent ownership fact includes the current verified
+// agent ID so explain checks the same assignment as the refused hook.
+func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, connectorName, agent string, agentNeeded bool) string {
 	if subject == nil || subject.UserID != strings.TrimSpace(subject.UserID) || useridentity.KindForID(subject.UserID) == "" {
 		return "defenseclaw guardrail profile list"
 	}
@@ -510,6 +517,9 @@ func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, c
 	}
 	if profileCommandToken(connectorName) {
 		command += " --connector " + connectorName
+	}
+	if agentNeeded && profileCommandToken(agent) {
+		command += " --agent " + agent
 	}
 	return command
 }

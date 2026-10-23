@@ -21,9 +21,11 @@ Mirrors internal/cli/status.go.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import shutil
+import socket
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -496,7 +498,7 @@ def status(app: AppContext, as_json: bool) -> None:
             "Sidecar",
             ux._style("not checked while config.yaml is invalid; run defenseclaw config validate", fg="yellow"),
         )
-        _print_agents(cfg, sidecar_down=True)
+        _print_agents(cfg, sidecar_down=True, sidecar_unchecked=True)
     elif health is not None:
         from defenseclaw.commands.cmd_doctor import _gateway_runs_replaced_binary
 
@@ -526,12 +528,14 @@ def status(app: AppContext, as_json: bool) -> None:
             "Subsystems:    defenseclaw-gateway status",
         )
     else:
+        holder_failed = False
         try:
             from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder, _free_api_port_hint
 
             holder = _foreign_gateway_port_holder(cfg)
         except Exception:  # noqa: BLE001 - status stays best effort
             holder = ""
+            holder_failed = True
         # GAP-2081: a live gateway.pid with no /health answer is a gateway
         # that is still starting or hung, as defenseclaw-gateway status says;
         # "start it" was a dead end (start says it is already running).
@@ -543,6 +547,9 @@ def status(app: AppContext, as_json: bool) -> None:
             if hung_pid
             else ""
         )
+        listener_state, listener_reason = (None, "API listener inspection failed") if holder_failed else (None, "")
+        if not holder_failed and not holder and not hung_pid:
+            listener_state, listener_reason = _sidecar_listener_state(cfg.gateway.api_port, bind)
         if holder:
             _status_row(
                 "Sidecar",
@@ -561,15 +568,24 @@ def status(app: AppContext, as_json: bool) -> None:
                     fg="yellow",
                 ),
             )
-        else:
+        elif listener_state is False:
             _status_row(
                 "Sidecar",
                 ux._style("not running; start it: defenseclaw-gateway start", fg="yellow"),
             )
+        else:
+            _status_row("Sidecar", ux._style(listener_reason, fg="yellow"))
         _print_audit_log_health(cfg, None)
         # Even when the sidecar is down, show the *configured* agents
         # so operators know what `start` will spin up.
-        _print_agents(cfg, sidecar_down=True, sidecar_hung=bool(hung_pid), sidecar_unread=bool(unread))
+        unconfirmed = not holder and not hung_pid and listener_state is not False
+        _print_agents(
+            cfg,
+            sidecar_down=not unconfirmed,
+            sidecar_hung=bool(hung_pid),
+            sidecar_unread=bool(unread),
+            sidecar_unconfirmed=unconfirmed,
+        )
         _print_application_protection(cfg)
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
@@ -583,11 +599,53 @@ def status(app: AppContext, as_json: bool) -> None:
             first_hint = "Check access:   defenseclaw doctor"
         elif hung_pid:
             first_hint = "Check sidecar:  defenseclaw-gateway status (restart it if it stays this way)"
+        elif unconfirmed:
+            first_hint = "Check sidecar:  defenseclaw doctor"
         else:
             first_hint = "Start sidecar:  defenseclaw-gateway start"
         hint(first_hint, "Subsystems:    defenseclaw-gateway status")
     if config_problems:
         raise SystemExit(1)
+
+
+def _sidecar_listener_state(port: int, host: str) -> tuple[bool | None, str]:
+    """Confirm a stopped API only when listener evidence covers other accounts."""
+    from defenseclaw.commands.cmd_doctor import _managed_gateway_listener_evidence
+
+    try:
+        listener = _managed_gateway_listener_evidence(port, host=host)
+    except Exception:  # noqa: BLE001 - a failed probe cannot prove absence
+        return None, "API listener inspection failed"
+    if listener.status != "missing":
+        reason = listener.reason or (
+            f"API listener PID {listener.pid} has no live gateway PID file"
+            if listener.status == "ok"
+            else "API listener state is unconfirmed"
+        )
+        return None, reason
+
+    stopped_reason = "no gateway process or API listener; start it: defenseclaw-gateway start"
+    if sys.platform.startswith("linux") or sys.platform == "win32":
+        return False, stopped_reason
+
+    target = host.strip("[]")
+    try:
+        loopback = target.casefold() == "localhost" or ipaddress.ip_address(target).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback:
+        return None, "API listener state is unconfirmed at a non-loopback host"
+    try:
+        with socket.create_connection((target, port), timeout=0.25):
+            pass
+    except ConnectionRefusedError:
+        return False, stopped_reason
+    except OSError:
+        return None, "API listener state is unconfirmed; loopback connection could not be checked"
+    return None, (
+        f"the API port answers at {port} and is held by another account; "
+        "its owner is not visible to this account"
+    )
 
 
 def _status_refused_detail(cfg, client, public) -> str:
@@ -780,6 +838,8 @@ def _print_agents(
     sidecar_down: bool = False,
     sidecar_hung: bool = False,
     sidecar_unread: bool = False,
+    sidecar_unchecked: bool = False,
+    sidecar_unconfirmed: bool = False,
 ) -> None:
     """Render the "Agents" roster as one section, for ANY connector count.
 
@@ -879,10 +939,18 @@ def _print_agents(
     if sidecar_unread and enabled_count:
         # The gateway answers hooks; only this command cannot read its state.
         header = ux._style(f"{enabled_count} configured; live hook state not readable by this account", fg="yellow")
+    if sidecar_unchecked and enabled_count:
+        # Invalid local config prevented a runtime check. It says nothing
+        # about whether the gateway currently answers hook requests.
+        header = ux._style(
+            f"{enabled_count} configured; live hook state not checked while config.yaml is invalid", fg="yellow"
+        )
+    if sidecar_unconfirmed and enabled_count:
+        header = ux._style(f"{enabled_count} configured; live hook state is unconfirmed", fg="yellow")
     _status_row("Agents", header)
     if guardrail_off:
         ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
-    if sidecar_down and enabled_count and not sidecar_unread:
+    if sidecar_down and enabled_count and not sidecar_unread and not sidecar_unchecked:
         _echo_wrapped(
             " " * 16
             + ux.dim(
@@ -1970,32 +2038,22 @@ def _status_payload(app) -> dict:
 
         try:
             holder = _foreign_gateway_port_holder(cfg)
-        except Exception:  # noqa: BLE001 - an unreadable listener is not proof that the gateway stopped
-            holder = ""
-        pid = 0 if holder else _live_gateway_pid(cfg)
-        if pid:
-            public = OrchestratorClient(host=bind, port=cfg.gateway.api_port)
-            detail = _status_refused_detail(cfg, client, public)
-            payload["sidecar"] = {
-                "running": None,
-                "reason": detail
-                or f"PID file names a live process ({pid}), but authenticated gateway health did not answer",
-            }
-        elif holder:
-            payload["sidecar"] = {
-                "running": None,
-                "reason": (
-                    f"this account's gateway could not be confirmed; port {cfg.gateway.api_port} is held by {holder}"
-                ),
-            }
+        except Exception:  # noqa: BLE001 - a failed probe cannot prove the gateway stopped
+            payload["sidecar"] = {"running": None, "reason": "API listener inspection failed"}
         else:
-            payload["sidecar"] = {
-                "running": None,
-                "reason": (
-                    "authenticated gateway status is unavailable; "
-                    "process and listener state could not be confirmed"
-                ),
-            }
+            pid = 0 if holder else _live_gateway_pid(cfg)
+            if holder:
+                reason = f"port {cfg.gateway.api_port} is held by {holder}; this gateway's state is unconfirmed"
+                payload["sidecar"] = {"running": None, "reason": reason}
+            elif pid:
+                reason = (
+                    _status_refused_detail(cfg, client, OrchestratorClient(host=bind, port=cfg.gateway.api_port))
+                    or f"PID file names a live process ({pid}), but authenticated gateway status is unreadable"
+                )
+                payload["sidecar"] = {"running": None, "reason": reason}
+            else:
+                running, reason = _sidecar_listener_state(cfg.gateway.api_port, bind)
+                payload["sidecar"] = {"running": running, "reason": reason}
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)

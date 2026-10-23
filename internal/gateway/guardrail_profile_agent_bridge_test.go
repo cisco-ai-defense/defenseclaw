@@ -7,6 +7,7 @@ import (
 	"context"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,6 +75,37 @@ func TestSoleLegacyRowCannotGrantItsRecordedNamesakePolicy(t *testing.T) {
 	got, mode := hook(lab)
 	if got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
 		t.Fatalf("sole overwritten legacy row granted policy: %+v mode %q", got, mode)
+	}
+}
+
+func TestLegacyOwnerRefusalNamesAnExplainCommandForTheCurrentAgent(t *testing.T) {
+	legacy := agentidentity.LegacyAgentID(legacyBridgeInputs("alice@corp.example"))
+	current := agentidentity.AgentID(legacyBridgeInputs("alice@corp.example"))
+	records := []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, "alice@corp.example")}
+	legacyBridgeLedger(t, &records)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Mode: "action"}, "relaxed": {Mode: "observe"},
+	}
+	cfg.Guardrail.DefaultProfile = "strict"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{
+		Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}},
+	}}
+	set := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg).guardrailProfileSet()
+	subject := &profileSubject{UserID: "70001", UserName: "alice"}
+	hook := set.matchAgent(subject, profileSubjectLookup, "codex", current, func() (profileAgentClaim, bool) {
+		return profileAgentClaim{ID: legacy, UserID: "70001", Account: "alice@corp.example"}, true
+	})
+	if !strings.Contains(hook.Refused, "ownership of a pre-upgrade agent identity is unconfirmed") {
+		t.Fatalf("hook decision did not name the missing owner: %+v", hook)
+	}
+	if !strings.Contains(hook.Refused, " --agent "+current+"`") {
+		t.Fatalf("refusal's explain command omits the current agent: %q", hook.Refused)
+	}
+	explained := set.matchAgent(subject, profileSubjectLookup, "codex", current, nil)
+	if explained.Refused == "" || !slices.Contains(explained.Unproven, "agent:unknown") {
+		t.Fatalf("the named explain command lost the hook's missing fact: %+v", explained)
 	}
 }
 

@@ -35,6 +35,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -43,6 +44,7 @@ import click
 import pytest
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_status
+from defenseclaw.commands.cmd_doctor import _managed_gateway_listener_evidence as _native_listener_evidence
 from defenseclaw.commands.cmd_status import _print_agents
 from defenseclaw.commands.cmd_status import status as status_cmd
 from defenseclaw.config import AIDiscoveryConfig, ApplicationProtectionConfig, GuardrailConfig
@@ -796,6 +798,7 @@ class TestStatusHeaderAndConfigProblems(unittest.TestCase):
         self.assertIn("Sidecar", result.output)
         self.assertIn("not checked while config.yaml is invalid", result.output)
         self.assertNotIn("not running; start it", result.output)
+        self.assertNotIn("not enforced while the sidecar is stopped", result.output)
         self.assertIn("Enforcement", result.output)
         as_json = self._invoke(["--json"])
         self.assertEqual(as_json.exit_code, 1, msg=as_json.output)
@@ -858,6 +861,8 @@ class TestStatusJson(unittest.TestCase):
         ):
             self.assertIn(key, doc)
         self.assertFalse(doc["sidecar"]["running"])
+        self.assertIs(doc["sidecar"]["running"], False)
+        self.assertIn("no gateway process or API listener", doc["sidecar"]["reason"])
         self.assertEqual(doc["application_protection"]["guardrail_mode"], "observe")
         self.assertFalse(doc["application_protection"]["require_trusted_binary_paths"])
         self.assertEqual(doc["deployment_mode"], "managed_enterprise")
@@ -935,7 +940,7 @@ class TestStatusJson(unittest.TestCase):
         self.assertIsNone(doc["sidecar"]["running"])
         self.assertNotIn("policy", doc)
 
-    def test_json_sidecar_reports_live_process_when_authenticated_health_is_unreadable(self):
+    def test_json_does_not_report_a_live_gateway_stopped_when_status_is_unreadable(self):
         with (
             patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
             patch.object(cmd_status, "_live_gateway_pid", return_value=4242),
@@ -962,6 +967,82 @@ class TestStatusJson(unittest.TestCase):
         self.assertIsNone(sidecar["running"])
         self.assertIn("port", sidecar["reason"])
         self.assertIn("PID 4343 (python3)", sidecar["reason"])
+
+    def test_json_does_not_report_stopped_when_listener_probe_fails(self):
+        with (
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch.object(cmd_status, "_live_gateway_pid", return_value=0),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=""),
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_listener_evidence",
+                return_value=MagicMock(status="unavailable", pid=0, reason="listener probe failed"),
+            ),
+        ):
+            result = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            human = CliRunner().invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(human.exit_code, 0, msg=human.output)
+        sidecar = json.loads(result.output)["sidecar"]
+        self.assertIsNone(sidecar["running"])
+        self.assertIn("listener probe failed", sidecar["reason"])
+        self.assertIn("listener probe failed", human.output)
+        self.assertNotIn("not running; start it", human.output)
+
+        from defenseclaw.commands import cmd_doctor
+
+        native = MagicMock(status="unavailable", reason="Linux listener table unreadable")
+        with (
+            patch.object(cmd_doctor, "_linux_gateway_listener_evidence", return_value=native),
+            patch.object(cmd_doctor, "_lsof_gateway_listener_evidence", return_value=MagicMock(status="missing")),
+        ):
+            self.assertIs(
+                _native_listener_evidence(self.app.cfg.gateway.api_port, platform_name="linux"),
+                native,
+            )
+
+    def test_status_does_not_call_a_hidden_macos_listener_stopped(self):
+        with (
+            patch.object(cmd_status, "sys", SimpleNamespace(platform="darwin"), create=True),
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch.object(cmd_status, "_live_gateway_pid", return_value=0),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=""),
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_listener_evidence",
+                return_value=MagicMock(status="missing", pid=0, reason="no visible listener"),
+            ),
+            patch.object(cmd_status, "socket", create=True) as status_socket,
+        ):
+            connect = status_socket.create_connection
+            runner = CliRunner()
+            as_json = runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            as_text = runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+            self.assertEqual(as_json.exit_code, 0, msg=as_json.output)
+            self.assertIsNone(json.loads(as_json.output)["sidecar"]["running"])
+            self.assertIn("API port answers", json.loads(as_json.output)["sidecar"]["reason"])
+            self.assertIn("held by another account", json.loads(as_json.output)["sidecar"]["reason"])
+            self.assertIn("API port answers", as_text.output)
+            self.assertNotIn("not running; start it", as_text.output)
+            self.assertNotIn("not enforced while the sidecar is stopped", as_text.output)
+            self.assertEqual(connect.call_count, 2)
+
+            connect.reset_mock(side_effect=True)
+            connect.side_effect = ConnectionRefusedError("connection refused")
+            stopped_json = runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            stopped_text = runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+            self.assertEqual(stopped_json.exit_code, 0, msg=stopped_json.output)
+            self.assertIs(json.loads(stopped_json.output)["sidecar"]["running"], False)
+            self.assertIn("not running; start it", stopped_text.output)
+
+            connect.side_effect = TimeoutError("loopback probe timed out")
+            uncertain_json = runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            uncertain_text = runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+            self.assertIsNone(json.loads(uncertain_json.output)["sidecar"]["running"])
+            self.assertIn("state is unconfirmed", uncertain_text.output)
+            self.assertNotIn("not running; start it", uncertain_text.output)
 
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))
@@ -1035,6 +1116,7 @@ class TestStatusProfileIdentity(unittest.TestCase):
                 doc = json.loads(result.output)
                 rendered = json.dumps(doc)
                 self.assertFalse(doc["sidecar"]["running"])
+                self.assertIs(doc["sidecar"]["running"], False)
                 self.assertNotIn(foreign_marker, rendered)
                 self.assertNotIn(str(ambient_home), rendered)
                 self.assertEqual(

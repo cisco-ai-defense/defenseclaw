@@ -79,6 +79,10 @@ const (
 	SourceMacOSOpenDirectory   = "macos_opendirectory"
 	SourceMacOSPlatformSSO     = "macos_platform_sso"
 	SourceHookReported         = "hook_reported"
+	// SourceProcessCredentials is the per-user gateway's own kernel
+	// credentials (its supplementary groups), named through NSS: the facts
+	// of its own account when a proof of who holds the uid needs root.
+	SourceProcessCredentials = "process_credentials"
 )
 
 // DirectoryFacts are the directory attributes of one end-user account,
@@ -150,6 +154,11 @@ type DirectoryFacts struct {
 	// or the absence of one, is what the guardian reported, not a fact still
 	// to come. Never emitted or stored.
 	GuardianRecord bool `json:"-"`
+	// HolderUnproven says these facts do not show which account holds the
+	// uid (SourceProcessCredentials: the uid may be another account's too),
+	// so no users entry that names an account matches them for sure. Never
+	// emitted or stored.
+	HolderUnproven bool `json:"-"`
 	// SpoolSeenAt is when the guardian wrote the newest identity record or
 	// withdrawal of the account that the lookup of these facts read (Linux
 	// and macOS), zero for none. The gateway acts once on a record or a

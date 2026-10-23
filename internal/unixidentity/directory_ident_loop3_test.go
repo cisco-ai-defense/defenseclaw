@@ -394,3 +394,41 @@ func TestSameNameAccountsRefusesPastTheDomainBound(t *testing.T) {
 	})
 
 }
+
+// GAP-0653: only root can show that SSSD's "no such account" for a local
+// account's uid is definitive (sssctl). A lookup by any other account fails
+// with that reason alone, so the gateway can take the guardian's root record
+// of the proof; with it the facts resolve, and an SSSD account found under
+// the uid is still refused.
+func TestTheUnsharedUIDProofOfALocalAccountNeedsRootOnly(t *testing.T) {
+	const uid = 1020
+	localLine := "t7ar-u1:x:1020:1020::/home/t7ar-u1:/bin/bash\n"
+	adLine := "t7ar-u1:*:1020:1020:AD (CORP):/home/t7ar-u1:/bin/bash\n"
+	previousEUID, previousOnline := sssdEUID, sssdDomainsOnline
+	t.Cleanup(func() { sssdEUID, sssdDomainsOnline = previousEUID, previousOnline })
+	sssdEUID, sssdDomainsOnline = func() int { return uid }, sssctlDomainsOnline
+	run := func(sssHolds bool) *NSSResolver {
+		accountHost(t, localLine, "t7ar-u1:x:1020:\n", "passwd: files sss\n")
+		sssdConfiguredHost(t)
+		startFakeSSSD(t, nil)
+		results := map[string]commandResult{
+			"passwd 1020": {stdout: []byte(localLine)}, "-s files passwd 1020": {stdout: []byte(localLine)},
+		}
+		if sssHolds {
+			results["-s sss passwd 1020"] = commandResult{stdout: []byte(adLine)}
+		}
+		return newFakeNSS(&fakeRun{results: results})
+	}
+	_, err := run(false).DirectoryFactsForUID(uid, time.Now())
+	if !UnsharedUIDNeedsRoot(err) {
+		t.Fatalf("err = %v; want the lookup refused for the root-only proof alone", err)
+	}
+	facts, err := run(false).DirectoryFactsForRecordedUnsharedUID(uid, time.Now())
+	if err != nil || facts.Directory != useridentity.DirectoryLocal || len(facts.Groups) == 0 {
+		t.Fatalf("facts = %+v, %v; want the local account with the proof recorded", facts, err)
+	}
+	var shared *SharedUIDError
+	if _, err := run(true).DirectoryFactsForRecordedUnsharedUID(uid, time.Now()); !errors.As(err, &shared) {
+		t.Fatalf("err = %v; an SSSD account of the uid must still be refused", err)
+	}
+}

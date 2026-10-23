@@ -129,6 +129,17 @@ names the qualified group the host knows. An answer with a group that is only a
 number (a directory that did not answer for it) is kept 2 minutes instead of
 15, and the next request after that waits for a fresh lookup.
 
+On a host whose `passwd` line lists `sss` after `files`, a local account's uid
+may also be an SSSD account's, and only root can show that SSSD's "no such
+account" for it is final (`sssctl` answers root only). On standalone enterprise
+the root guardian makes that check for each enrolled account, and the gateway
+takes it from the guardian's current identity record. A per-user gateway takes
+its own account's groups from its kernel credentials (the groups its process
+holds, named through NSS), so group assignments decide as usual; which account
+holds the uid stays unconfirmed, and a users entry that names an account
+refuses the request with `the account holder is unconfirmed`. A users entry by
+uid (`"1020"`) still matches.
+
 The NSS, SSSD SID and realmd lookups run on every Linux install, without
 privilege. The root guardian adds the InfoPipe facts on
 the standalone enterprise profile only. SSSD serves AD, IPA and plain LDAP
