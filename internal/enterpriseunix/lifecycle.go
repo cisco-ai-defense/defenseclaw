@@ -511,8 +511,9 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.AddError(codeState, err.Error())
 		return 0
 	}
+	settlePending := false
 	if l.opts.Action != ActionUninstall {
-		l.settleBundles(ctx, record)
+		settlePending = l.settleBundles(ctx, record)
 	}
 	if record != nil {
 		r.Installed = true
@@ -520,6 +521,14 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		if l.opts.Action != ActionUninstall {
 			l.recoverInterruptedRotation(ctx, record)
 		}
+	}
+	if settlePending && l.opts.Bundle == "" {
+		// A plain ensure, repair or package upgrade would select the last
+		// confirmed bundle below. Do not replace an applied bundle while its
+		// receipt cannot be confirmed or disproved.
+		r.AddError(codeBundleNotConfirmed, "an applied policy bundle is still pending confirmation; restore the gateway or missing verification evidence and retry this command")
+		l.describe(ctx, record, false)
+		return enterprisestatus.BusyExitCode(env.GOOS)
 	}
 	if l.supersededApplyRun(record) {
 		// A transaction leaves a queued apply run alone. When that
@@ -2040,9 +2049,19 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		return failAndRollback(codeApply, err)
 	}
 	l.clearStaleHookSocket(account)
+	// Capture whether the host had a trusted, live restriction before this
+	// transaction wrote the sysctl file. A zero value alone cannot prove that
+	// a namespace created earlier in this boot has gone away.
+	uninstalledThisBoot, hasUninstallMarker := env.userNamespaceUninstallState()
+	priorUserNamespaceRestricted := env.userNamespaceBootProblem() == "" && env.ptraceBootProblem() == "" && env.ptraceProblem() == "" &&
+		(env.userNamespaceProblem() == "" || uninstalledThisBoot ||
+			record != nil && record.Files[userNamespacesConfigPath] == sha256Bytes(env.desiredPolicyViewConfig()) && !hasUninstallMarker)
 	changed, err := l.applyFilesRecorded(ctx, p, account)
 	if err != nil {
 		return failAndRollback(errorCode(err, codeApply), err)
+	}
+	if err := env.restrictManagedPolicyViews(priorUserNamespaceRestricted); err != nil {
+		return failAndRollback(codeUserNamespaces, err)
 	}
 	if record != nil {
 		// An edit made in place (the config-apply trigger) is never rewritten,
@@ -2344,6 +2363,11 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 	for _, file := range p.files {
 		if err := mkdirParents(env.P(filepath.Dir(file.Path))); err != nil {
 			return nil, err
+		}
+		if file.Kind == "host-security" {
+			if err := env.Trust(env.P(filepath.Dir(file.Path)), TrustAdminDir); err != nil {
+				return nil, fmt.Errorf("%s is not administrator-controlled: %w", filepath.Dir(file.Path), err)
+			}
 		}
 	}
 	return created, nil
@@ -3124,6 +3148,9 @@ func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *
 func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, string) {
 	env := l.env
 	l.noopPolicy, l.policyAssetsEdited, l.policyAssetRefusal = nil, false, ""
+	if env.userNamespaceProblem() != "" || env.ptraceProblem() != "" || env.userNamespaceBootProblem() != "" || env.ptraceBootProblem() != "" {
+		return false, ""
+	}
 	account, ok, err := env.Accounts.Lookup(ctx, env.Layout.ServiceUser)
 	if err != nil || !ok || account.UID != record.ServiceUID || account.GID != record.ServiceGID {
 		return false, ""
@@ -3369,6 +3396,12 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	removePerUser := gatewayPresent && (record != nil || exists(env.P(env.Layout.ManifestPath)))
 	if removePerUser && l.refuseUnresolvedPerUserRows(ctx) {
 		return 0
+	}
+	if record != nil && env.GOOS == "linux" {
+		if err := env.markUserNamespaceUninstall(); err != nil {
+			r.AddError(codeUninstall, err.Error())
+			return 0
+		}
 	}
 	// The guardian repairs any DefenseClaw registration that goes missing
 	// from a manifest target, the enumerator republishes the manifest, and

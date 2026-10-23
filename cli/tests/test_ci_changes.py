@@ -87,6 +87,11 @@ def classify(*files: str) -> dict:
     return ci_changes.classify(list(files), references=fake_references, read=FAKE_REPO.__getitem__)
 
 
+def test_postinstall_only_selects_reboot_regression() -> None:
+    selected = ci_changes.classify(["packaging/linux/postinstall.sh"])["py_select"]
+    assert "cli/tests/test_enterprise_install_lanes.py" in selected.split()
+
+
 def ran(outputs: dict) -> set[str]:
     groups = (
         "go",

@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -288,6 +290,69 @@ func TestWindowsStatusMarkerWriteOnAFullVolumeIsDiskFull(t *testing.T) {
 	if len(result.Errors) != 1 || result.Errors[0].Code != string(enterprisebundle.CodeDiskFull) ||
 		!strings.Contains(result.Errors[0].Message, "free space on that volume") {
 		t.Fatalf("status errors = %+v, want disk_full and recovery step", result.Errors)
+	}
+}
+
+// Status can be the first process to see an applied receipt after the
+// gateway upgrade. Its proof uses the stored bundle's current digest while
+// the receipt retains the old build's historical digest.
+func TestWindowsStatusConfirmsCarriedReceiptWithUpgradedDigest(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "carried.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	layout := stubWindowsBundleHost(t)
+	cmd, _ := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts); done || err != nil {
+		t.Fatalf("prepare: done=%t err=%v", done, err)
+	}
+	cleanupPreparedWindowsBundle(t, opts)
+	run := opts.bundle
+	rc := run.prepared.Receipt
+	generation := recordWindowsBundleTestCommit(t, layout, rc, run.prepared.Config)
+	oldDigest := run.prepared.EffectivePolicyDigest
+	if err := run.driver.Store.Advance(rc, enterprisebundle.StateApplied, func(r *enterprisebundle.Receipt) {
+		r.ConfigSHA256, r.ConfigGeneration, r.EffectivePolicyDigest = run.prepared.ConfigSHA256, generation, oldDigest
+	}); err != nil {
+		t.Fatal(err)
+	}
+	baseDigester := run.driver.Digester
+	run.driver.Digester = func(ctx context.Context, cfg *config.Config, raw []byte, platform, root string) (string, error) {
+		base, err := baseDigester(ctx, cfg, raw, platform, root)
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256([]byte(base + ":1.0.4"))
+		return fmt.Sprintf("sha256:%x", sum), nil
+	}
+	run.driver.ProductVersion = "1.0.4"
+	versionDir := run.driver.Store.VersionDir(rc.Dir)
+	stored, err := enterprisebundle.ReadDir(versionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, rendered, err := enterprisebundle.LoadConfigForDeviceLayout(stored, versionDir,
+		enterprisebundle.PlatformWindows, enterprisebundle.DeviceLayoutFromManaged(layout))
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentDigest, err := run.driver.Digester(t.Context(), cfg, rendered, enterprisebundle.PlatformWindows, versionDir)
+	if err != nil || currentDigest == oldDigest || !rc.DigestComparable {
+		t.Fatalf("upgraded digest=%q old=%q comparable=%t error=%v", currentDigest, oldDigest, rc.DigestComparable, err)
+	}
+	policy := &enterprisebundle.GatewayPolicy{EffectiveDigest: currentDigest, Digest: currentDigest,
+		Generation: generation, BundleID: rc.BundleID, BundleVersion: rc.Version, Applied: true}
+	confirmed, err := settleWindowsAppliedBundle(run.driver, run.prepared.Config, policy)
+	if err != nil || !confirmed {
+		t.Fatalf("status did not confirm the enforcing upgraded gateway: confirmed=%t error=%v", confirmed, err)
+	}
+	if got := windowsBundleReceiptState(t, layout, rc.ReceiptID); got.State != enterprisebundle.StateConfirmed ||
+		got.EffectivePolicyDigest != oldDigest {
+		t.Fatalf("historical receipt=%+v", got)
 	}
 }
 

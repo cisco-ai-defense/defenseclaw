@@ -121,7 +121,7 @@ class TestConnectorContractManifest(unittest.TestCase):
             self.assertTrue(compat.supported)
 
     def test_kiro_is_not_hook_gated(self) -> None:
-        compat = resolve_connector_contract("kiro", "kiro-cli 2.22.0")
+        compat = resolve_connector_contract("kiro", "kiro-cli 2.27.1")
         self.assertEqual(compat.status, STATUS_NOT_GATED)
         self.assertTrue(compat.supported)
         self.assertIsNone(compat.contract)

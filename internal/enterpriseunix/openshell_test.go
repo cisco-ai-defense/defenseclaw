@@ -995,6 +995,13 @@ func TestSandboxUninstallAndPurge(t *testing.T) {
 				rel, _ := filepath.Rel(h.env.Root, path)
 				lower := strings.ToLower(rel)
 				// The lifecycle's lock file outlives the deployment by design.
+				// The Linux host-security boot markers survive purge so a same-boot
+				// reinstall cannot forget a namespace or tracer that predates the restriction.
+				if rel == strings.TrimPrefix(userNamespaceBootMarker, "/") ||
+					rel == strings.TrimPrefix(ptraceBootMarker, "/") ||
+					rel == strings.TrimPrefix(userNamespaceUninstalled, "/") {
+					return nil
+				}
 				if strings.Contains(lower, "lifecycle") || strings.Contains(lower, "defenseclaw-enterprise") || rel == "opt/cisco/defenseclaw" {
 					return nil
 				}

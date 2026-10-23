@@ -15,6 +15,10 @@ contract or a rejected config as a warning. Pass --allow-warning for each
 warning code the step may report, and --complete to require coverage_complete
 and security_complete. A step that must fail (the upgrade gate's rollback
 drill) passes --expect-error for each error code it must report instead.
+Linux install and upgrade steps before the required reboot use
+--reboot-pending: the sole error code must be unprivileged_user_namespaces,
+with an installed deployment, coverage_complete=true and
+security_complete=false.
 --policy-applied and --config-generation-above check the effective policy the
 step reports (the result's optional policy object).
 
@@ -119,7 +123,21 @@ def check(document: Dict[str, Any], args: argparse.Namespace) -> List[str]:
     problems = structural_problems(document)
     if problems:
         return problems
-    if args.expect_error:
+    if args.reboot_pending:
+        if document["platform"] != "linux":
+            problems.append("a pending user namespace reboot is Linux-only")
+        if document["ok"] is not False or document["exit_code"] == 0:
+            problems.append("pending reboot must have ok false and a nonzero exit_code")
+        if document["installed"] is not True:
+            problems.append("pending reboot has no installed deployment")
+        if document["coverage_complete"] is not True:
+            problems.append("pending reboot has coverage_complete false")
+        if document["security_complete"] is not False:
+            problems.append("pending reboot has security_complete true")
+        codes = [message["code"] for message in document["errors"]]
+        if not codes or any(code != "unprivileged_user_namespaces" for code in codes):
+            problems.append(f"pending reboot has unexpected errors: {codes}")
+    elif args.expect_error:
         if document["ok"] is not False:
             problems.append("ok is true, want a failed step")
         if document["exit_code"] == 0:
@@ -276,6 +294,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="require a failed step (ok false, non-zero exit_code) that reports this error code (repeatable)",
     )
     parser.add_argument(
+        "--reboot-pending",
+        action="store_true",
+        help="require an installed Linux deployment with only unprivileged_user_namespaces errors and security_complete false",
+    )
+    parser.add_argument(
         "--policy-applied",
         action="store_true",
         help="require the result's policy with an effective_digest, a config_generation and applied true",
@@ -316,6 +339,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="require this connector's machine policy to report effective_lock 'enforce' (repeatable)",
     )
     args = parser.parse_args(argv)
+    if args.reboot_pending and (args.expect_error or args.complete or args.security_incomplete):
+        parser.error("--reboot-pending cannot be combined with --expect-error, --complete or --security-incomplete")
     label = args.label or args.result.name
     try:
         document = load_result(args.result)

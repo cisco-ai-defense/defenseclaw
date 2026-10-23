@@ -613,8 +613,10 @@ func TestHookPanicResponse_ActionProfileRequiresExplicitOpen(t *testing.T) {
 		{"per-user global open", "", "open", "block", false},
 		{"per-user connector open", "open", "", "block", false},
 		{"connector closed over global open", "closed", "open", "block", false},
-		{"managed administrator global open", "", "open", "allow", true},
-		{"managed administrator connector open", "open", "", "allow", true},
+		// A standalone administrator's open covers an outage, not a recovered
+		// panic (owner decision 2026-10-20, hookFailedCheckResponse).
+		{"managed administrator global open", "", "open", "block", true},
+		{"managed administrator connector open", "open", "", "block", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{}

@@ -3422,14 +3422,18 @@ func ValidateManagedEnterpriseListenerBindings(cfg *Config) error {
 		)
 	}
 
-	if cfg.Guardrail.Enabled {
-		proxyBind := strings.TrimSpace(cfg.Guardrail.EffectiveHost())
-		if !isLoopbackListenerHost(proxyBind) {
-			return fmt.Errorf(
-				"config: managed_enterprise guardrail proxy must bind to loopback, got %q",
-				proxyBind,
-			)
-		}
+	return ValidateManagedGuardrailProxyBind(cfg)
+}
+
+// ValidateManagedGuardrailProxyBind is the proxy listener check shared by
+// live gateway loads, managed lifecycle candidates and config validate.
+func ValidateManagedGuardrailProxyBind(cfg *Config) error {
+	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) || !cfg.Guardrail.Enabled {
+		return nil
+	}
+	proxyBind := strings.TrimSpace(cfg.Guardrail.EffectiveHost())
+	if !isLoopbackListenerHost(proxyBind) {
+		return fmt.Errorf("config: managed_enterprise guardrail proxy must bind to loopback, got %q", proxyBind)
 	}
 	return nil
 }
