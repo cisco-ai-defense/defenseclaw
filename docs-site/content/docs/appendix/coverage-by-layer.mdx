@@ -201,7 +201,7 @@ The layers divide the work so that two of them never make the same decision:
 | Layer and failure | What happens |
 | --- | --- |
 | A hook cannot reach the gateway | On a per-user install or under Secure Client, an invoked hook uses its effective fail mode and event mapping: `closed` (the default outside Secure Client) can deny a supported call; `open` can let it run. Connector limits and failure reporting vary; see [Fail modes](/docs/reference/configuration/fail-modes). Managed standalone behavior is in the next row |
-| Managed hooks on a standalone computer, every connector | Closed by default. The administrator's `open` covers a classified gateway outage only. With `foreign_hooks: remove`, guarded calls block during an outage: the guard needs the gateway's session record, except on Windows Amp, whose plugin blocks the outage independently. Rate limits, refusals and unusable answers block in every fail mode |
+| Managed hooks on a standalone computer, every connector | Closed by default, in observe and action mode alike. The administrator's `open` covers a classified gateway outage only. With `foreign_hooks: remove`, guarded calls block during an outage: the guard needs the gateway's session record, except on Windows Amp, whose plugin blocks the outage independently. Rate limits, refusals and unusable answers block in every fail mode |
 | Secure Client hooks | Open by default; an explicit `closed` is kept |
 | Sandbox hooks | Always closed; silence is detected and can stop the sandbox |
 | The judge is unavailable | Falls back to the local verdict |
