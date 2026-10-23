@@ -1475,9 +1475,8 @@ class RemovedConnectorLeftoversTests(unittest.TestCase):
         return data_dir, config
 
     def test_every_removal_goes_on_and_lists_what_is_left(self):
-        # Review loop round 1 (simplified teardown): a removed connector's
-        # manual steps held data and binary removal and reordered the
-        # teardown. Now every form runs in its usual order and lists them.
+        # Every form lists manual steps; a retired hook is safely torn down
+        # before the gateway stops, then supported connectors follow.
         for flags in ({}, {"remove_data_dir": True}, {"remove_binaries": True}, {"remove_data_dir": True, "remove_binaries": True}):
             for deferred in (False, True):
                 with (
@@ -1491,7 +1490,7 @@ class RemovedConnectorLeftoversTests(unittest.TestCase):
                     )
                     calls = self._run(plan, deferred=deferred)
                     self.assertNotIn("error", calls)
-                    self.assertEqual(calls.get("teardown"), [("codex", "openhands")])
+                    self.assertEqual(calls.get("teardown"), [("openhands",), ("codex",)])
                     self.assertTrue(calls.get("sandbox") and calls.get("gateway_stop"))
                     if flags.get("remove_data_dir"):
                         self.assertTrue(calls.get("data") or calls.get("deferred"))
@@ -2009,8 +2008,7 @@ class RemoveDataDirTests(unittest.TestCase):
 
 
 class ExecutePlanConnectorTests(unittest.TestCase):
-    """Lock down the polymorphic _execute_plan ordering: stop → teardown
-    → OpenClaw plugin sweep → wipe → binaries.
+    """Lock down teardown, gateway stop, and later cleanup ordering.
     """
 
     def _common_patches(self):
@@ -2021,6 +2019,81 @@ class ExecutePlanConnectorTests(unittest.TestCase):
             patch.object(cmd_uninstall, "_remove_data_dir"),
             patch.object(cmd_uninstall, "_remove_binaries"),
         ]
+
+    def test_refused_retired_teardown_keeps_gateway_running(self):
+        # A 1.0.3 OmniGent module can return ALLOW when its gateway is gone.
+        # Both removed connectors must finish before uninstall stops it.
+        for retired in ("omnigent", "openhands"):
+            with self.subTest(retired=retired), tempfile.TemporaryDirectory() as data_dir:
+                plan = cmd_uninstall.UninstallPlan(
+                    data_dir=data_dir,
+                    connectors=("codex", retired),
+                    stop_gateway=True,
+                    remove_data_dir=True,
+                    remove_binaries=True,
+                )
+                gateway_running = True
+                calls = []
+
+                def stop(_plan):
+                    nonlocal gateway_running
+                    gateway_running = False
+                    calls.append("stop")
+
+                def teardown(subplan):
+                    calls.append(tuple(subplan.connectors))
+                    if retired in subplan.connectors:
+                        raise click.ClickException("hard-linked retired module needs manual recovery")
+
+                with (
+                    patch.object(cmd_uninstall, "_validate_plan"),
+                    patch.object(cmd_uninstall, "_stop_gateway", side_effect=stop),
+                    patch.object(cmd_uninstall, "_connector_teardown", side_effect=teardown),
+                    patch.object(cmd_uninstall, "_render_execution_result"),
+                ):
+                    with self.assertRaises(click.ClickException):
+                        cmd_uninstall._execute_plan(plan)
+
+                self.assertTrue(gateway_running)
+                self.assertEqual(calls, [(retired,)])
+
+    def test_unknown_retired_gateway_connector_cannot_be_skipped(self):
+        plan = cmd_uninstall.UninstallPlan(
+            connectors=("omnigent",),
+            data_dir="/tmp/dc",
+            gateway_path="/opt/dc/defenseclaw-gateway",
+        )
+        with (
+            patch.object(cmd_uninstall, "_gateway_supports_connector_teardown", return_value=True),
+            patch.object(cmd_uninstall, "_run_gateway_connector_teardown", return_value=False),
+            patch.object(cmd_uninstall, "_gateway_connector_is_unknown", return_value=True),
+        ):
+            with self.assertRaisesRegex(click.ClickException, "aborting uninstall: omnigent teardown failed"):
+                cmd_uninstall._connector_teardown(plan)
+
+    def test_retired_teardown_finishes_before_gateway_stop(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=data_dir,
+                connectors=("codex", "omnigent", "openhands"),
+                stop_gateway=True,
+            )
+            calls = []
+            with (
+                patch.object(cmd_uninstall, "_validate_plan"),
+                patch.object(cmd_uninstall, "_stop_gateway", side_effect=lambda _: calls.append("stop")),
+                patch.object(
+                    cmd_uninstall, "_connector_teardown",
+                    side_effect=lambda part: calls.append(tuple(part.connectors)),
+                ),
+                patch.object(cmd_uninstall, "_turn_guardrail_off"),
+                patch.object(cmd_uninstall, "_remove_probe_created_state"),
+                patch.object(cmd_uninstall, "_remove_created_dirs"),
+                patch.object(cmd_uninstall, "_remove_empty_plugin_cache"),
+                patch.object(cmd_uninstall, "remove_own_api_port_claims"),
+            ):
+                cmd_uninstall._execute_plan(plan)
+            self.assertEqual(calls, [("omnigent", "openhands"), "stop", ("codex",)])
 
     def test_codex_plan_does_not_run_openclaw_plugin_sweep(self):
         plan = cmd_uninstall.UninstallPlan(

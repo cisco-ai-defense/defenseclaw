@@ -854,6 +854,7 @@ func runUninstallContext(ctx context.Context, opts options, installRoot, dataRoo
 		*transaction,
 		gatewayPath,
 		dataRoot,
+		preflightRetiredUninstallConnectors,
 		disableStableHookRuntime,
 		drainOwnedStableHookProcesses,
 		func(path, root string) (serviceState, error) {
@@ -890,6 +891,11 @@ func runUninstallContext(ctx context.Context, opts options, installRoot, dataRoo
 		},
 	)
 	if err != nil {
+		if errors.Is(err, errRetiredUninstallPreflight) {
+			// The module may still call the retired deny route. Keep this
+			// intent pending without a rollback that stops the old gateway.
+			return retryRequiredCode, setupOperationError(ctx, err)
+		}
 		return rollbackUninstall(setupOperationError(ctx, err))
 	}
 	if err := checkSetupContext(ctx); err != nil {

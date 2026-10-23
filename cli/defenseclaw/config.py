@@ -7224,7 +7224,7 @@ def _is_retired_connector_name(name: Any) -> bool:
     return isinstance(name, str) and name.strip().lower() in _RETIRED_CONNECTOR_NAMES
 
 
-def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
+def _drop_retired_connector_settings(raw: dict[str, Any], *, emit_warning: bool = True) -> None:
     """Until 1.1, accept old rosters and discard removed connector settings.
 
     Only connector fields are touched (mirrors ``dropRetiredConnectorSettings``
@@ -7336,7 +7336,7 @@ def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
     if isinstance(claw, dict) and _is_retired_connector_name(claw.get("mode")):
         claw["mode"] = ""
         changed = True
-    if changed:
+    if changed and emit_warning:
         logging.warning(
             "until 1.1: removed OpenHands/OmniGent connector settings from loaded config; "
             "run defenseclaw migrate"

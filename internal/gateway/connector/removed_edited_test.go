@@ -151,7 +151,7 @@ func TestRemovedTeardownSavesAnEditedOmnigentModule(t *testing.T) {
 	}
 
 	// OpenHands never had a post-setup record. Save every marked hook before
-	// writing its stub so an edit under another hard-linked name survives.
+	// writing its stub so operator edits remain recoverable.
 	t.Run("openhands", func(t *testing.T) {
 		h := newRemovedHost(t)
 		h.stage(t, removedOpenHands)
@@ -166,8 +166,7 @@ func TestRemovedTeardownSavesAnEditedOmnigentModule(t *testing.T) {
 }
 
 // An edited OmniGent module with hard links gets a separate saved copy,
-// then a refusal with its original bytes intact. An OpenHands hook saves
-// both the first read and a later edit seen after an in-place write fails.
+// then a refusal with its original bytes intact.
 func TestRemovedTeardownSavesTheEditBeforeEveryWrite(t *testing.T) {
 	c := removedOmnigent
 	t.Run("hard links", func(t *testing.T) {
@@ -562,11 +561,11 @@ func requireRemovedCopyOfItsOwn(t *testing.T, saved string, not os.FileInfo) {
 	}
 }
 
-// An OpenHands hook may have another name outside the hooks folder. Writing
-// the stub into its inode must not destroy edits at that other name.
-func TestRemovedOpenHandsHardLinkEditIsSavedBeforeInPlaceWrite(t *testing.T) {
+// An OpenHands hook with another name outside the hooks folder stays intact
+// for manual recovery, with its edited bytes and token still available.
+func TestRemovedOpenHandsHardLinkEditIsSavedBeforeRefusal(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows does not write the stub into a hard-linked script")
+		t.Skip("the old OpenHands shell hook ran on Unix")
 	}
 	c := removedOpenHands
 	for _, failSave := range []bool{false, true} {
@@ -599,11 +598,18 @@ func TestRemovedOpenHandsHardLinkEditIsSavedBeforeInPlaceWrite(t *testing.T) {
 				h.requireTokensKept(t, c)
 				return
 			}
-			if err != nil {
-				t.Fatal(err)
+			if err == nil || !strings.Contains(err.Error(), c.hardLinkStep(h.script(c))) {
+				t.Fatalf("Teardown = %v, want hard-link refusal", err)
 			}
-			h.requireStub(t, c)
-			h.requireStubUnderEveryName(t, c, oldInfo, []string{outside})
+			for _, name := range []string{h.script(c), outside} {
+				if got, readErr := os.ReadFile(name); readErr != nil || string(got) != body {
+					t.Fatalf("linked script %s = %q, %v; want original bytes", name, got, readErr)
+				}
+				if info, statErr := os.Stat(name); statErr != nil || !os.SameFile(oldInfo, info) {
+					t.Fatalf("linked script %s changed identity: %v", name, statErr)
+				}
+			}
+			h.requireTokensKept(t, c)
 			h.requireEditedSaved(t, c, body)
 		})
 	}

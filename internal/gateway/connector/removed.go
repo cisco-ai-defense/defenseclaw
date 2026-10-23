@@ -26,11 +26,12 @@ package connector
 //     DefenseClaw marker, with a static deny stub. A stub an older teardown
 //     left that allowed every call is replaced the same way. The stub blocks
 //     every call and says that support was removed in 1.0.4 and how to
-//     remove the hook. For OpenHands, the stub is written into the verified
-//     file itself first (the same file, so every other name of it, a hard
-//     link, gets it too; the whole stub, synced and read back), and then a
-//     copy is published through an identity-bound compare-and-swap. An
-//     OmniGent module is never written in place: a single-link module gets
+//     remove the hook. For a single-name OpenHands hook, the stub is written
+//     into the verified file first to block an already running shell, then a
+//     copy is published through an identity-bound compare-and-swap. A hook
+//     with hard links is left intact for manual recovery, since another name
+//     can receive an edit after the old bytes were saved. An OmniGent module
+//     is never written in place: a single-link module gets
 //     the complete stub through the recoverable compare-and-swap, and a
 //     module with other names is left for manual cleanup with its tokens.
 //     An OmniGent module whose bytes are not the ones the older setup
@@ -42,7 +43,7 @@ package connector
 //     are saved before any in-place write too.
 //  2. It revokes the DefenseClaw tokens issued for the connector, but only
 //     once nothing but the stub is left at the script path. An old hook that
-//     may still run (a hard-linked file the stub could not be written into;
+//     may still run (a hard-linked file the stub could not safely replace;
 //     a link, or a file DefenseClaw cannot prove it wrote) keeps its tokens:
 //     without them the old hook allows every call in fail mode open, with
 //     them it reaches the retired gateway route, which blocks every call
@@ -213,7 +214,7 @@ var (
 	removedOpenHands = removedOnlyConnector{
 		name: removedOpenHandsID, label: "OpenHands",
 		script: removedOpenHandsHookScript, marker: "# defenseclaw-managed-hook v",
-		// A process already reading a longer, hard-linked old script can
+		// A process already reading a longer old script can
 		// reach only the tail. `command` bypasses an exit function; a final
 		// syntax error still exits nonzero if command was overridden too.
 		tombstone: removedOpenHandsTombstone, inPlaceTail: "command exit 2\n)\n", mode: 0o700,
@@ -446,11 +447,11 @@ func (c removedOnlyConnector) preflightTokens(dataDir string) error {
 }
 
 // replaceScript publishes the deny stub over a script an older release
-// wrote. OpenHands first writes the stub into the verified file itself, so
-// every hard-linked name blocks, then publishes a distinct copy at the
-// path. OmniGent only publishes a complete copy, and refuses an old module
-// with hard links. A refusal keeps the tokens and leaves the old path for
-// a later retry or manual cleanup.
+// wrote. A hard-linked script of either connector is left for manual
+// cleanup. A single-name OpenHands hook first gets an in-place stub for
+// already running shells, then a distinct copy at the path. OmniGent only
+// publishes a complete copy. A refusal keeps the tokens and leaves the old
+// path for a later retry or manual cleanup.
 func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	path := c.scriptPath(dataDir)
 	// The CAS may have detached the verified script before a process stopped.
@@ -479,11 +480,14 @@ func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	if err := keep(data, nil); err != nil {
 		return fmt.Errorf("%w; nothing was changed", err)
 	}
+	// No snapshot can protect an edit made through another name after the
+	// snapshot and before the in-place OpenHands write. A single-name hook
+	// still needs that write to block a shell already reading its old bytes.
+	if links > 1 {
+		return fmt.Errorf("%s is the script an older DefenseClaw wrote and has %d names (hard links); refusing to replace it. To finish: %s",
+			path, links, c.hardLinkStep(path))
+	}
 	if c.name == removedOmnigentID {
-		if links > 1 {
-			return fmt.Errorf("%s is the module an older DefenseClaw wrote and has %d names (hard links); refusing to replace it. To finish: %s",
-				path, links, c.hardLinkStep(path))
-		}
 		if err := c.publishVerifiedStub(dataDir, path, original, false, keep); err != nil {
 			return fmt.Errorf("publish the complete deny stub for %s: %w", path, err)
 		}
@@ -555,8 +559,7 @@ func (c removedOnlyConnector) pendingStubPublication(dataDir string) (string, st
 // publishVerifiedStub binds the final publication to the file verified by
 // the in-place write or the second read. The compare-and-swap engine retains
 // a raced replacement for recovery instead of renaming over it. Force gives
-// the path a separate stub file after a successful in-place write, while all
-// hard links of the original keep the in-place stub.
+// the path a separate stub file after a successful in-place write.
 func (c removedOnlyConnector) publishVerifiedStub(
 	dataDir, path string, verified os.FileInfo, writtenInPlace bool,
 	keep func([]byte, os.FileInfo) error,
@@ -745,8 +748,8 @@ var (
 	removedInPlaceTruncate = func(file *os.File, size int64) error { return file.Truncate(size) }
 )
 
-// writeStubInPlace writes the OpenHands stub into the verified file at path,
-// which every one of its names shares. It checks the file again through the
+// writeStubInPlace writes the OpenHands stub into the verified file at path
+// only while it has one name. It checks the file again through the
 // handle it writes:
 // one that is no longer an older release's script, or that another account
 // than the hooks folder's owner owns (removedInPlaceRefusal), is not
@@ -756,7 +759,8 @@ var (
 // every name runs it to its exit 2 whatever follows, and the rest (the tail
 // of inPlaceStub, the cut, the mode) only finishes the file, which is synced
 // and read back. keep saves the old bytes it read through the handle, with
-// the handle's file (keepEdited), before anything is written.
+// the handle's file (keepEdited), before anything is written. A file that
+// gained another hard-link name while the copy was saved is refused.
 func (c removedOnlyConnector) writeStubInPlace(path string, verified os.FileInfo, keep func([]byte, os.FileInfo) error) (os.FileInfo, error) {
 	if c.name != removedOpenHandsID {
 		return nil, fmt.Errorf("%s modules must use complete stub publication", c.label)
@@ -793,6 +797,13 @@ func (c removedOnlyConnector) writeStubInPlace(path string, verified os.FileInfo
 	named, err := os.Lstat(path)
 	if err != nil || !named.Mode().IsRegular() || !os.SameFile(named, info) {
 		return nil, fmt.Errorf("%s changed identity before the in-place stub write: %w", path, errAtomicTransformConflict)
+	}
+	links, err := atomicTransformBoundLinkCountPlatform(file)
+	if err != nil {
+		return nil, fmt.Errorf("count names of %s before the in-place stub write: %w", path, err)
+	}
+	if links > 1 {
+		return nil, fmt.Errorf("%s gained %d names (hard links) before the in-place stub write: %s", path, links, c.hardLinkStep(path))
 	}
 	stub := c.inPlaceStub(len(old))
 	head := len(c.tombstone)
@@ -842,8 +853,8 @@ func removedPutBack(file *os.File, old []byte, n int, cause error) error {
 }
 
 // hookLeft returns why an old hook may still run at the script path, with
-// the step that resolves it by hand; nil when the path holds the stub (under
-// every name) or nothing. While it fails, the tokens stay and VerifyClean
+// the step that resolves it by hand; nil when the path holds the stub or
+// nothing. While it fails, the tokens stay and VerifyClean
 // fails.
 func (c removedOnlyConnector) hookLeft(dataDir string) error {
 	path := c.scriptPath(dataDir)

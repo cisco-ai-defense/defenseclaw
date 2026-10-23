@@ -3078,6 +3078,7 @@ func TestUninstallMutationRevokesHookBeforeRuntimeReleaseAndTreeRename(t *testin
 		transaction,
 		"gateway.exe",
 		"data",
+		func(setupTransaction) error { return nil },
 		func(transactionID string) error {
 			if transactionID != testCurrentTransactionID {
 				t.Fatalf("disable transaction = %q", transactionID)
@@ -3127,6 +3128,109 @@ func TestUninstallMutationRevokesHookBeforeRuntimeReleaseAndTreeRename(t *testin
 	want := "hook:disable,hook:drain,runtime:stop,runtime:verify-release,tree:rename"
 	if got := strings.Join(calls, ","); got != want {
 		t.Fatalf("uninstall mutation calls = %q, want %q", got, want)
+	}
+}
+
+func TestRetiredUninstallPreflightKeepsGatewayUntilVerified(t *testing.T) {
+	t.Run("refusal before runtime release", checkRetiredUninstallRefusalBeforeRuntimeRelease)
+	t.Run("verified teardown required", checkRetiredUninstallVerifiedTeardown)
+}
+
+func checkRetiredUninstallRefusalBeforeRuntimeRelease(t *testing.T) {
+	t.Helper()
+	transaction := setupTransaction{
+		ID: testCurrentTransactionID, Action: "uninstall",
+		PreviousConnectors: []string{"omnigent"},
+		PreviousServices:   serviceState{Gateway: true},
+	}
+	var calls []string
+	preflight := func(got setupTransaction) error {
+		if len(got.PreviousConnectors) != 1 || got.PreviousConnectors[0] != "omnigent" {
+			t.Fatalf("preflight got connectors %v", got.PreviousConnectors)
+		}
+		calls = append(calls, "retired teardown")
+		return errors.New("hard-linked module requires manual recovery")
+	}
+	err := mutateUninstallTreeWithQuiescedRuntime(
+		transaction, "gateway.exe", "data",
+		preflight,
+		func(string) error { calls = append(calls, "disable hook"); return nil },
+		func(string, string) error { calls = append(calls, "drain hooks"); return nil },
+		func(string, string) (serviceState, error) {
+			calls = append(calls, "stop gateway")
+			return serviceState{}, nil
+		},
+		func(string, string) error { calls = append(calls, "verify stop"); return nil },
+		func() error { calls = append(calls, "rename install tree"); return nil },
+	)
+	if err == nil || !strings.Contains(err.Error(), "hard-linked module") || strings.Join(calls, ",") != "retired teardown" {
+		t.Fatalf("uninstall = %v, calls = %v; want refusal before stopping gateway", err, calls)
+	}
+	if !errors.Is(err, errRetiredUninstallPreflight) {
+		t.Fatalf("uninstall refusal %v did not preserve the pending-intent error", err)
+	}
+	calls = nil
+	err = resumeUninstallIntentWithoutActivationWith(
+		transaction,
+		preflight,
+		func(string) error { calls = append(calls, "disable hook"); return nil },
+		func(_, _ string, want serviceState) (serviceState, error) {
+			if !want.Gateway {
+				t.Fatal("resumed uninstall did not restore the recorded gateway")
+			}
+			calls = append(calls, "restore gateway")
+			return want, nil
+		},
+	)
+	if !errors.Is(err, errRetiredUninstallPreflight) || strings.Join(calls, ",") != "retired teardown,restore gateway" {
+		t.Fatalf("resumed uninstall = %v, calls = %v; want refusal before runtime quiescence", err, calls)
+	}
+}
+
+func checkRetiredUninstallVerifiedTeardown(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	transaction := setupTransaction{
+		ID: strings.Repeat("a", 32), Action: "uninstall",
+		DataRoot:                   filepath.Join(root, "data"),
+		PreviousConnectors:         []string{"codex", "omnigent"},
+		PreviousOmnigentConfigHome: filepath.Join(root, "omnigent"),
+	}
+	for _, refuse := range []bool{true, false} {
+		t.Run(map[bool]string{true: "refused", false: "completed"}[refuse], func(t *testing.T) {
+			var operations []string
+			persisted := false
+			err := preflightRetiredUninstallConnectorsWith(
+				transaction,
+				func() (connectorMaintenanceGateway, error) {
+					return connectorMaintenanceGateway{path: filepath.Join(root, "maintenance.exe")}, nil
+				},
+				func(_, _, connector, action string, _ []string) error {
+					if connector != "omnigent" {
+						t.Fatalf("preflight ran supported connector %q", connector)
+					}
+					operations = append(operations, action)
+					if refuse && action == "teardown" {
+						return errors.New("hard-linked module requires manual recovery")
+					}
+					return nil
+				},
+				func(recorder connectorReconciliationRecorder) error {
+					persisted = true
+					if len(recorder.failures) != 0 || len(recorder.attempts) == 0 {
+						t.Fatalf("successful preflight recorder = %+v", recorder)
+					}
+					return nil
+				},
+			)
+			if refuse {
+				if err == nil || !strings.Contains(err.Error(), "hard-linked module") || persisted || len(operations) != 1 {
+					t.Fatalf("refused preflight = %v, persisted=%t, operations=%v", err, persisted, operations)
+				}
+			} else if err != nil || !persisted || len(operations) < 2 || operations[0] != "teardown" || operations[1] != "verify" {
+				t.Fatalf("completed preflight = %v, persisted=%t, operations=%v", err, persisted, operations)
+			}
+		})
 	}
 }
 

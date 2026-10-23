@@ -2548,12 +2548,19 @@ func quiesceSetupRuntimeForMutation(
 func mutateUninstallTreeWithQuiescedRuntime(
 	transaction setupTransaction,
 	gatewayPath, dataRoot string,
+	preflightRetired func(setupTransaction) error,
 	disableStableHook func(string) error,
 	drainStableHookProcesses stableHookProcessDrainer,
 	stopServices func(string, string) (serviceState, error),
 	verifyStopped func(string, string) error,
 	mutate func() error,
 ) error {
+	// A 1.0.x OmniGent module can return ALLOW when its gateway is down.
+	// Complete and verify retired teardown while the old service can still
+	// answer its deny route; a refusal leaves the runtime and install tree up.
+	if err := preflightRetired(transaction); err != nil {
+		return fmt.Errorf("%w: %w", errRetiredUninstallPreflight, err)
+	}
 	if err := quiesceSetupRuntimeForMutation(
 		transaction,
 		gatewayPath,
@@ -2566,6 +2573,53 @@ func mutateUninstallTreeWithQuiescedRuntime(
 		return err
 	}
 	return mutate()
+}
+
+// A refused retired cleanup leaves an old module able to call the gateway.
+// The uninstall intent stays pending on refusal; rolling it back would stop
+// that gateway before the operator has completed the manual recovery step.
+var errRetiredUninstallPreflight = errors.New("retired connector teardown refused before gateway stop")
+
+func preflightRetiredUninstallConnectors(transaction setupTransaction) error {
+	return preflightRetiredUninstallConnectorsWith(
+		transaction,
+		prepareConnectorMaintenanceGateway,
+		runConnectorLifecycleWithEnv,
+		func(recorder connectorReconciliationRecorder) error { return recorder.persist() },
+	)
+}
+
+func preflightRetiredUninstallConnectorsWith(
+	transaction setupTransaction,
+	provide connectorMaintenanceGatewayProvider,
+	run connectorLifecycleRunner,
+	persist func(connectorReconciliationRecorder) error,
+) error {
+	var retired []string
+	for _, name := range transaction.PreviousConnectors {
+		if isRetiredNativeConnector(name) {
+			retired = append(retired, name)
+		}
+	}
+	if len(retired) == 0 {
+		return nil
+	}
+	preflight := transaction
+	preflight.PreviousConnectors = retired
+	reconciliation := reconcileRemovedConnectorsWithMaintenance(
+		preflight,
+		transactionPreviousChildEnv(transaction),
+		provide,
+		run,
+	)
+	if len(reconciliation.failures) > 0 {
+		failure := reconciliation.failures[0]
+		return fmt.Errorf("%s %s refused at %s: %s", failure.Connector, failure.Operation, failure.ConfigHome, failure.Message)
+	}
+	if len(reconciliation.attempts) == 0 {
+		return errors.New("retired connector teardown made no verified attempt")
+	}
+	return persist(reconciliation)
 }
 
 func rollbackSetupTransactionWithRuntime(
@@ -2810,10 +2864,39 @@ func rollbackInstallForUninstallHandoff(transaction setupTransaction) error {
 }
 
 func resumeUninstallIntentWithoutActivation(transaction setupTransaction) error {
+	return resumeUninstallIntentWithoutActivationWith(
+		transaction,
+		preflightRetiredUninstallConnectors,
+		disableStableHookRuntime,
+		startMissingServicesForRecovery,
+	)
+}
+
+func resumeUninstallIntentWithoutActivationWith(
+	transaction setupTransaction,
+	preflightRetired func(setupTransaction) error,
+	disableStableHook func(string) error,
+	restoreServices func(string, string, serviceState) (serviceState, error),
+) error {
 	if transaction.Action != "uninstall" {
 		return errors.New("resume target is not an uninstall transaction")
 	}
-	if err := disableStableHookRuntime(transaction.ID); err != nil {
+	// A prior invocation can have left an intent after retired teardown
+	// refused. Verify it again before the recovery path quiesces the gateway.
+	if err := preflightRetired(transaction); err != nil {
+		refusal := fmt.Errorf("%w: %w", errRetiredUninstallPreflight, err)
+		// A previous Setup could have stopped the service before leaving this
+		// intent. Restore its recorded running state while the old module still
+		// needs the retired route to deny calls.
+		if transaction.PreviousServices.Gateway || transaction.PreviousServices.Watchdog {
+			gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
+			if _, restoreErr := restoreServices(gatewayPath, transaction.DataRoot, transaction.PreviousServices); restoreErr != nil {
+				return errors.Join(refusal, fmt.Errorf("restore owned gateway after retired teardown refusal: %w", restoreErr))
+			}
+		}
+		return refusal
+	}
+	if err := disableStableHook(transaction.ID); err != nil {
 		return fmt.Errorf("disable stable hook runtime: %w", err)
 	}
 	trashGateway := filepath.Join(transaction.TrashPath, "bin", "defenseclaw-gateway.exe")
@@ -3007,8 +3090,18 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		// embedded in the executing Setup binary. The installed/trash copy is
 		// retained above only as the process-ownership identity used to stop a
 		// previously running service; it is never trusted to edit agent config.
+		// Retired connectors were completed before runtime quiescence. Repeating
+		// them after the gateway stops could strand an old fail-open module if
+		// a later refusal occurs, so only supported connectors remain here.
+		remaining := transaction
+		remaining.PreviousConnectors = nil
+		for _, name := range transaction.PreviousConnectors {
+			if !isRetiredNativeConnector(name) {
+				remaining.PreviousConnectors = append(remaining.PreviousConnectors, name)
+			}
+		}
 		reconciliation := reconcileRemovedConnectorsWithMaintenance(
-			transaction,
+			remaining,
 			transactionPreviousChildEnv(transaction),
 			prepareConnectorMaintenanceGateway,
 			runConnectorLifecycleWithEnv,

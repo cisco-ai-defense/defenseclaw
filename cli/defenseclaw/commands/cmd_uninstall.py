@@ -2207,16 +2207,26 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
     if plan.sandbox_teardown:
         # Before the sidecar stops: the daemon deletes its own sandboxes.
         run_phase("sandbox teardown", lambda: _sandbox_teardown(plan))
+    # A refused retired teardown leaves a live 1.0.x hook or module. Keep the
+    # gateway serving its deny route until those scripts are safely replaced.
+    from defenseclaw.removed_connectors import backup_dirs, is_removed, leftovers
+
+    retired = tuple(name for name in plan.connectors if is_removed(name))
+    remaining = tuple(name for name in plan.connectors if not is_removed(name))
+    if retired:
+        run_phase(
+            "retired connector teardown",
+            lambda: _connector_teardown(replace(plan, connectors=retired)),
+        )
     if plan.stop_gateway:
         run_phase("gateway stop", lambda: _stop_gateway(plan))
+    if remaining:
+        run_phase("connector teardown", lambda: _connector_teardown(replace(plan, connectors=remaining)))
     if plan.connectors:
-        run_phase("connector teardown", lambda: _connector_teardown(plan))
         if not plan.remove_data_dir:
             _turn_guardrail_off(plan.data_dir)
     # until 1.1: read what a removed connector left before its backups move:
     # their records name the agent configs outside the data folder.
-    from defenseclaw.removed_connectors import backup_dirs, leftovers
-
     removed_left = leftovers(plan.data_dir) if plan.data_dir else []
     moved: dict[str, str] = {}
     if plan.remove_data_dir and plan.data_dir and backup_dirs(plan.data_dir):
@@ -3388,6 +3398,8 @@ def _connector_teardown(plan: UninstallPlan) -> None:
     would corrupt it — so we hard-fail in that case with a clear
     remediation pointing at the gateway upgrade path.
     """
+    from defenseclaw.removed_connectors import is_removed
+
     connectors = plan.connectors
     gateway_supported = _gateway_supports_connector_teardown(plan.gateway_path or None)
     for name in connectors:
@@ -3400,7 +3412,7 @@ def _connector_teardown(plan: UninstallPlan) -> None:
             )
             if teardown_ok:
                 continue
-            if name != "openclaw" and _gateway_connector_is_unknown(name, plan=plan):
+            if name != "openclaw" and not is_removed(name) and _gateway_connector_is_unknown(name, plan=plan):
                 # An older release registered this connector and this build no
                 # longer ships it, so nothing can tear it down. Its leftover
                 # agent-side hook entries are documented for manual removal;
