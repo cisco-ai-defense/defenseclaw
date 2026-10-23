@@ -21,14 +21,6 @@ var nativeGatewayForHookTests struct {
 	err  error
 }
 
-func TestMain(m *testing.M) {
-	code := m.Run()
-	if nativeGatewayForHookTests.dir != "" {
-		_ = os.RemoveAll(nativeGatewayForHookTests.dir)
-	}
-	os.Exit(code)
-}
-
 // installNativeGatewayForHookTest runs the same account-bound hook-post
 // command as a shipped per-user shell hook. A curl stub bypasses that command
 // and cannot exercise the connected listener proof.

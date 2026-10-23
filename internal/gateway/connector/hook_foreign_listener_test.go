@@ -98,6 +98,33 @@ func TestHostHooksCheckTheListenerBeforeSending(t *testing.T) {
 	}
 }
 
+// A hook that detects a peer holding this account's port must name the
+// per-user port setup command. Starting again on the occupied port cannot
+// restore protection.
+func TestForeignListenerHintNamesGatewayPortSetup(t *testing.T) {
+	entries, err := hookFS.ReadDir("hooks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".sh") || strings.HasPrefix(name, "_") {
+			continue
+		}
+		body, err := hookFS.ReadFile("hooks/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(body)
+		if !strings.Contains(text, `defenseclaw_api_listener_unproven "$API_ADDR"`) {
+			continue
+		}
+		if !strings.Contains(text, "defenseclaw setup gateway --api-port") {
+			t.Errorf("%s gives no gateway port setup command for a foreign listener", name)
+		}
+	}
+}
+
 func TestHostHookGatewayPostRechecksListenerBeforeEverySend(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hooks are not used on Windows")
