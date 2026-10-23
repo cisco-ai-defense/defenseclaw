@@ -67,6 +67,15 @@ func (c *identityCache[T]) getFresh(key string, wait time.Duration) (T, bool) {
 	case <-timer.C:
 		timedOut = true
 	}
+	return c.freshAfterWait(key, entry, done, before, timedOut)
+}
+
+// freshAfterWait is getFresh's outcome once its wait for the lookup done
+// ends, read under the cache lock rather than from which select case won:
+// a lookup still in flight is marked for the next hook (pendingFresh), and
+// one that has finished returns its answer if it is newer than before.
+func (c *identityCache[T]) freshAfterWait(key string, entry *identityCacheEntry[T], done chan struct{}, before uint64, timedOut bool) (T, bool) {
+	var zero T
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if timedOut && entry.inflight == done {

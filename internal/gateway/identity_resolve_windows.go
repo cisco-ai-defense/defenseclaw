@@ -100,7 +100,8 @@ func verifiedIdentityDirectory(identity string, block bool) (useridentity.Direct
 
 // exemptIdentityDirectory returns the directory facts exempt matches a hook
 // caller's names with. Windows reads them as a blocking hook call does;
-// cached returns none, so no cached answer rejects an exemption early.
+// cached returns no facts and not settled, so no cached answer decides an
+// exemption early.
 func exemptIdentityDirectory(uid int, cached bool) (useridentity.DirectoryFacts, bool) {
 	if cached {
 		return useridentity.DirectoryFacts{}, false

@@ -532,14 +532,9 @@ func forgetOnSpoolAccountChange(cache *identityDirectoryCache, key string, now t
 }
 
 // directory returns uid's verified directory facts from the cache, waiting
-// for a cold lookup up to its budget only when block is set.
+// for a cold lookup up to its budget only when block is set. A blocking read
+// on a managed Mac waits up to the budget for a current answer (getFresh).
 func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.DirectoryFacts, bool) {
-	return c.directoryWithin(uid, block, identityDirectoryBudget)
-}
-
-// directoryWithin is directory with freshWait bounding a managed Mac's wait
-// for a current answer.
-func (c *managedHookPeerHomeCache) directoryWithin(uid int, block bool, freshWait time.Duration) (useridentity.DirectoryFacts, bool) {
 	cache, key, ok := c.directoryOf(uid)
 	if !ok {
 		return useridentity.DirectoryFacts{}, false
@@ -548,25 +543,25 @@ func (c *managedHookPeerHomeCache) directoryWithin(uid int, block bool, freshWai
 		if !block {
 			return cache.getNonblocking(key)
 		}
-		return cache.getFresh(key, freshWait)
+		return cache.getFresh(key, identityDirectoryBudget)
 	}
 	return cache.get(key, block)
 }
 
-// settledDirectory returns uid's cached directory facts without waiting or
-// starting more than a background refresh, and only when they are settled:
-// an incomplete or settling answer (a UPN or a group not given yet) may miss
-// a name that a current answer has, so it binds nothing.
-func (c *managedHookPeerHomeCache) settledDirectory(uid int) (useridentity.DirectoryFacts, bool) {
+// cachedDirectory returns uid's cached directory facts without waiting (a
+// cold or expired entry starts one background lookup), and whether they are
+// settled: an incomplete or settling answer (a UPN or a group not given yet)
+// may miss a name that a current answer has.
+func (c *managedHookPeerHomeCache) cachedDirectory(uid int) (useridentity.DirectoryFacts, bool) {
 	cache, key, ok := c.directoryOf(uid)
 	if !ok {
 		return useridentity.DirectoryFacts{}, false
 	}
 	facts, ok := cache.getNonblocking(key)
-	if !ok || facts.ResolvedAt.IsZero() || cache.unsettled(facts) {
+	if !ok || facts.ResolvedAt.IsZero() {
 		return useridentity.DirectoryFacts{}, false
 	}
-	return facts, true
+	return facts, !cache.unsettled(facts)
 }
 
 // directoryOf returns the cache and key of uid's directory facts after the
@@ -591,24 +586,17 @@ func (c *managedHookPeerHomeCache) directoryOf(uid int) (*identityDirectoryCache
 	return cache, key, true
 }
 
-// managedHookExemptFreshWait bounds how long a managed Mac hook call waits
-// for a current directory answer that confirms a possible named exemption
-// (managedHookAuthorizer.exempt). It stays well inside the 2 s some hook
-// clients allow a whole call (Codex SessionEnd): a slow or unavailable Open
-// Directory costs the call its exemption, which then needs enrollment, not
-// the call. A lookup that finishes after the wait serves the next hook
-// (identityCache.getFresh).
-const managedHookExemptFreshWait = 750 * time.Millisecond
-
 // exemptIdentityDirectory returns the directory facts exempt matches uid's
-// names with. cached returns settled facts already cached (settledDirectory);
-// otherwise a managed Mac waits at most managedHookExemptFreshWait for a
-// current answer, and other hosts read the cache as a blocking hook call does.
+// names with. cached returns the facts already cached and whether they are
+// settled (cachedDirectory); otherwise they are read as a blocking hook read
+// gets them (directory): a cold lookup is waited for up to
+// identityDirectoryBudget, and a managed Mac waits that long for a current
+// answer. A lookup that finishes after the wait serves the next hook.
 func exemptIdentityDirectory(uid int, cached bool) (useridentity.DirectoryFacts, bool) {
 	if cached {
-		return managedHookPeerHomes.settledDirectory(uid)
+		return managedHookPeerHomes.cachedDirectory(uid)
 	}
-	return managedHookPeerHomes.directoryWithin(uid, true, managedHookExemptFreshWait)
+	return managedHookPeerHomes.directory(uid, true)
 }
 
 // explainDirectory is directory for `guardrail profile explain`: the facts a
