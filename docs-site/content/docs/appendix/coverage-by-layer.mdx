@@ -60,9 +60,6 @@ standalone computer, the administrator may choose `hook_fail_mode: open`, an
 outage-only exception for a gateway service that is stopped, restarting or gives
 no answer in time. With `foreign_hooks: remove`, a guarded call needs fresh,
 trusted records for its agent process and session to follow that outage mode.
-Windows Amp keeps its guard record locally, but its managed plugin blocks
-gateway outages in every fail mode; see
-[Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#session-records-and-gateway-outages).
 A missing or invalid administrator-owned runtime, an unverified gateway peer,
 missing or refused credentials, rate limits (HTTP 429, also when the resends
 run out) and unusable responses still block. Secure Client keeps its separate open default and honors an explicit

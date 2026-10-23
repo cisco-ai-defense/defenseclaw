@@ -63,7 +63,7 @@ Under the Secure Client integration only, hooks fail open: an unset `guardrail.h
 
 A GitHub Copilot hook whose registered command names no event DefenseClaw reviewed is refused in fail mode `closed`, and a managed one in every fail mode. Copilot can block only `preToolUse` and `permissionRequest`, and its payload does not name the event, so the hook answers with both of Copilot's deny fields. An Antigravity hook registered without its event denies a tool call in fail mode `closed` and gives anything else its no-op answer. `verify` reports a DefenseClaw hook registered for an event DefenseClaw does not publish, and `ensure` rewrites the drop-in. On a per-user install `defenseclaw doctor` names the entry, and `defenseclaw setup <connector>` registers it again.
 
-On a managed standalone host the administrator-owned hooks of GitHub Copilot CLI and Hermes block guarded tool calls the gateway cannot check, including an outage under `hook_fail_mode: open`. Other hooks allow only a classified gateway outage under that setting; unusable answers and calls too large to inspect still block. With `foreign_hooks: remove` (the default) the guard checks the session of Copilot calls on every OS and of Hermes calls on Linux and macOS with the gateway, so an outage blocks those calls too ([Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#session-records-and-gateway-outages)).
+On a managed standalone host, `hook_fail_mode: open` allows at most a classified gateway outage; each connector's answer is in the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage). Unusable answers and calls too large to inspect still block. With `foreign_hooks: remove` (the default) the guard checks the session of Copilot calls on every OS and of Hermes calls on Linux and macOS with the gateway, so an outage blocks those calls too ([Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#session-records-and-gateway-outages)).
 
 ## Effective behavior
 
@@ -122,7 +122,7 @@ defenseclaw guardrail fail-mode
 defenseclaw guardrail fail-mode closed --connector codex --yes
 ```
 
-Run bare, `guardrail fail-mode` prints the effective closed value for each active per-user connector, including an upgraded install that saved `open` before 1.0.4:
+Run bare, `guardrail fail-mode` prints the effective closed value for each active per-user connector, including an upgraded install that saved `open` before 1.0.4. On a Claude Code and Codex install with `guardrail.hook_fail_mode: open`, after the second command:
 
 ```text
   guardrail.hook_fail_mode: closed
