@@ -169,7 +169,9 @@ func TestManagedHookConfirmedAnswerSurvivesGatewayExitBeforeFinalization(t *test
 	runDone := make(chan error, 1)
 	go func() { runDone <- restarted.RunSandboxIngressOn(ctx, listener) }()
 	deadline := time.Now().Add(10 * time.Second)
-	for f.audited(t, session)[session] == "" && time.Now().Before(deadline) {
+	// The train writes the audit row before the hook_decision record, so
+	// wait for both before the restarted gateway stops.
+	for (f.audited(t, session)[session] == "" || len(f.decisions(t)) == 0) && time.Now().Before(deadline) {
 		select {
 		case err := <-runDone:
 			t.Fatalf("restarted gateway stopped before recovery: %v", err)
