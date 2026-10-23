@@ -519,7 +519,7 @@ func TestWriteTargetsManifestAtomicRejectsHardLinkedDestination(t *testing.T) {
 // per-user CLI is present.
 func TestApplyPreviousRowStateRefreshesVersionAndPreservesAuthorization(t *testing.T) {
 	// Secure Client follows the discovered version (#1163).
-	setStandaloneProfileForTest(t, false)
+	useWindowsSecureClientForTest(t)
 	enabled := true
 	previous := map[string]ManifestTarget{
 		previousManifestKey("S-1-5-21-1000-2000-3000-1001", "codex"): {
@@ -615,7 +615,7 @@ func TestApplyPreviousRowStateAutoAuthorizesNewRowWithDiscoverableCLI(t *testing
 
 func TestApplyPreviousRowStateCursorHomeStateWithoutVersion(t *testing.T) {
 	// Presence-only admission is the Secure Client fallback (#1163).
-	setStandaloneProfileForTest(t, false)
+	useWindowsSecureClientForTest(t)
 	isolateWindowsCursorMachineVersion(t)
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".cursor", "extensions"), 0o700); err != nil {

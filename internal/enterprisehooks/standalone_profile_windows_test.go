@@ -16,3 +16,15 @@ func setStandaloneProfileForTest(t *testing.T, standalone bool) {
 	windowsEnterpriseStandaloneProcess = func() bool { return standalone }
 	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
 }
+
+// useWindowsSecureClientForTest runs a test as a verified Secure Client host
+// (#1163): the process carries no standalone profile pin and the trusted
+// Secure Client install marker is present. The shipped binaries set
+// connector.SecureClientDeploymentVerified from the host; this package's test
+// binary links no host check, so without this a Secure Client test saw an
+// unverified host and its standalone defaults (GAP-0921).
+func useWindowsSecureClientForTest(t *testing.T) {
+	t.Helper()
+	setStandaloneProfileForTest(t, false)
+	useSecureClientHookDelivery(t)
+}

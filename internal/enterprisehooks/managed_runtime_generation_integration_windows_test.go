@@ -45,6 +45,8 @@ func TestWindowsManagedHookRuntimeFormattingRedactsScopedToken(t *testing.T) {
 }
 
 func TestVerifyWindowsManagedRuntimeGenerationForInstallDoesNotImpersonate(t *testing.T) {
+	// An unset mode opens only under Secure Client (#1163).
+	useWindowsSecureClientForTest(t)
 	t.Setenv(connector.WindowsGatewayServiceNameEnv, "DefenseClawGateway-Test")
 	targetSID, err := windows.StringToSid("S-1-5-21-1000-1000-1000-1001")
 	if err != nil {
