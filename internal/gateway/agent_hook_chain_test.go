@@ -2447,6 +2447,7 @@ func TestSafeApplyAgentHookToolChainsPanicBeforeCommitUsesFailMode(t *testing.T)
 		name       string
 		original   agentHookResponse
 		failMode   string
+		managed    bool
 		want       string
 		wouldBlock bool
 	}{
@@ -2461,7 +2462,12 @@ func TestSafeApplyAgentHookToolChainsPanicBeforeCommitUsesFailMode(t *testing.T)
 		{name: "open original allow", original: agentHookResponse{
 			Action: "allow", RawAction: "allow", Severity: "NONE",
 			Reason: "standalone allow", Mode: "action", SuppressNotification: true,
-		}, failMode: "open", want: "allow", wouldBlock: true},
+		}, failMode: "open", managed: true, want: "allow", wouldBlock: true},
+		// A per-user install is always closed (sa-port-peer).
+		{name: "per-user open original allow", original: agentHookResponse{
+			Action: "allow", RawAction: "allow", Severity: "NONE",
+			Reason: "standalone allow", Mode: "action", SuppressNotification: true,
+		}, failMode: "open", want: "block"},
 		{name: "closed original block", original: agentHookResponse{
 			Action: "block", RawAction: "block", Severity: "CRITICAL",
 			Reason: "standalone block", Findings: []string{"standalone"},
@@ -2471,6 +2477,10 @@ func TestSafeApplyAgentHookToolChainsPanicBeforeCommitUsesFailMode(t *testing.T)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{}
+			if tc.managed {
+				// An administrator's explicit open covers a panic on a managed host.
+				cfg.DeploymentMode = "managed_enterprise"
+			}
 			cfg.Guardrail.Mode = "action"
 			cfg.Guardrail.HookFailMode = tc.failMode
 			api := &APIServer{scannerCfg: cfg}

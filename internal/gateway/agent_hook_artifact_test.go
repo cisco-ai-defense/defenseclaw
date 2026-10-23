@@ -942,12 +942,19 @@ func TestExperimentalArtifactPromotionPanicUsesFailMode(t *testing.T) {
 	for _, tc := range []struct {
 		name, failMode, wantAction string
 		wantWouldBlock             bool
+		perUser                    bool
 	}{
 		{name: "closed", failMode: "closed", wantAction: "block"},
+		// A per-user install is always closed (sa-port-peer).
+		{name: "per-user explicit open", failMode: "open", perUser: true, wantAction: "block"},
 		{name: "explicit open", failMode: "open", wantAction: "allow", wantWouldBlock: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{}
+			if !tc.perUser {
+				// An administrator's explicit open covers a panic on a managed host.
+				cfg.DeploymentMode = "managed_enterprise"
+			}
 			cfg.Guardrail.Mode = "action"
 			cfg.Guardrail.Connector = "claudecode"
 			cfg.Guardrail.HookFailMode = tc.failMode
