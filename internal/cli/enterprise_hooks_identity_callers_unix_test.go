@@ -167,3 +167,73 @@ func TestExcludedUnlistedKiroCallerFollowsCurrentAuthorization(t *testing.T) {
 		t.Fatalf("excluded B is not accepted but retains its record: accounts %+v", accounts)
 	}
 }
+
+// GAP-0881: an exempt_users entry spells the caller by its UPN, its
+// principal, DOMAIN\name, or, where SSSD names accounts fully qualified, its
+// bare name. The account database does not resolve that spelling (not
+// found, or no answer), and neither the rows nor the eligible accounts list
+// the caller. The identity record that spells it by its verified facts
+// keeps its uid listed while that account still holds the uid, so the
+// record does not age out while the gateway exempts the caller. A spelling
+// the facts do not give, or a uid another account holds now, lists nothing.
+func TestExemptSpellingTheDirectoryCannotResolveKeepsItsRecord(t *testing.T) {
+	const uid = 94408811
+	short := enterprisehooks.IdentitySpoolRecord{Version: enterprisehooks.IdentitySpoolRecordVersion, Key: "94408811", User: "bob",
+		AccountDomain: "CORP", AccountIncarnation: "sid:S-1-5-21-1-2-3-1111", SSSDDomain: "corp.example.com",
+		Facts: useridentity.DirectoryFacts{UPN: "bob.smith@corp.example.com", Principal: "bob@CORP.EXAMPLE.COM", Domain: "corp.example.com"}}
+	qualified := short
+	qualified.User = "bob@corp.example.com"
+	local := enterprisehooks.IdentitySpoolRecord{Version: enterprisehooks.IdentitySpoolRecordVersion, Key: "94408811",
+		User: "bob@corp.example.com", AccountIncarnation: "files"}
+	plainLocal := local
+	plainLocal.User = "bob"
+	for _, tc := range []struct {
+		name, entry, holder string
+		record              enterprisehooks.IdentitySpoolRecord
+		transient, want     bool
+	}{
+		{name: "UPN not found", entry: "bob.smith@corp.example.com", record: short, want: true},
+		{name: "UPN in another case", entry: "BOB.SMITH@Corp.Example.com", record: short, want: true},
+		{name: "principal", entry: "bob@CORP.EXAMPLE.COM", record: short, want: true},
+		{name: "NetBIOS domain", entry: `CORP\bob`, record: short, want: true},
+		{name: "DNS domain", entry: `corp.example.com\bob`, record: short, want: true},
+		{name: "UPN lookup does not answer", entry: "bob.smith@corp.example.com", record: short, transient: true, want: true},
+		{name: "DOMAIN form does not answer", entry: `CORP\bob`, record: short, transient: true, want: true},
+		{name: "bare name of a fully qualified account", entry: "bob", record: qualified, want: true},
+		{name: "another domain", entry: `OTHER\bob`, record: short},
+		{name: "another UPN", entry: "bob@other.example.com", record: short},
+		{name: "bare name of a local account", entry: "bob", record: local},
+		{name: "local account as .\\name", entry: `.\bob`, record: plainLocal, want: true},
+		{name: "directory account as .\\name", entry: `.\bob`, record: short},
+		{name: "uid held by another account now", entry: "bob.smith@corp.example.com", holder: "mallory", record: short},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			identityCallerTestConfig(t)
+			holder := tc.holder
+			if holder == "" {
+				holder = tc.record.User
+			}
+			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{holder: {Name: holder, UID: uid, GID: uid}}}
+			if tc.transient {
+				resolver.transient = map[string]bool{tc.entry: true}
+			}
+			enterprisehooks.SetStandaloneResolver(resolver)
+			cfg.Enterprise.Enrollment.ExemptUsers = []string{tc.entry}
+			dir := t.TempDir()
+			record := tc.record
+			record.UpdatedAt = time.Now().UTC()
+			data, err := enterprisehooks.MarshalIdentitySpoolRecord(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "94408811.json"), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			accounts, _, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, enterpriseHookReconcileRun{})
+			listed, _ := listedUIDs(accounts)
+			if got := slices.Contains(listed, uid); got != tc.want {
+				t.Fatalf("exempt_users %q, record %q, holder %q: listed %v; want listed=%v", tc.entry, record.User, holder, listed, tc.want)
+			}
+		})
+	}
+}
