@@ -42,7 +42,7 @@ var legacyAgentOwnerBound = func(identity, account string) bool {
 	if err != nil || uid < 0 {
 		return false
 	}
-	owner, ok := legacyAgentOwners.get(uid)
+	owner, _, ok := legacyAgentOwners.get(uid)
 	if !ok || !legacyAgentOwnerSameAccount(owner.User, account) {
 		return false
 	}
@@ -83,7 +83,10 @@ func legacyAgentOwnerSameAccount(recorded, account string) bool {
 // legacyAgentOwnerTokenNow is the LegacyAgentOwnerToken of the account that
 // holds uid now: its SID from the guardian's identity record of the uid when
 // that record names account, else from the gateway's own lookup; or its home
-// directory's. Tests replace it.
+// directory's, which the gateway reads itself only without such a record
+// (enterprisehooks.LegacyAgentOwnerTokenFor: the token the map recorded for a
+// symlinked home before the GAP-0939 fix, as the guardian gives it). Tests
+// replace it.
 var legacyAgentOwnerTokenNow = func(uid int, account string) string {
 	incarnation := ""
 	if dir := currentIdentitySpoolDir(); dir != "" {
@@ -101,7 +104,13 @@ var legacyAgentOwnerTokenNow = func(uid int, account string) string {
 	if incarnation == "" {
 		incarnation, _ = managedHookPeerHomes.incarnation(uid)
 	}
-	return enterprisehooks.LegacyAgentOwnerToken(incarnation, managedHookPeerHome(uid))
+	return enterprisehooks.LegacyAgentOwnerTokenFor(incarnation, managedHookPeerHome(uid), func() (string, time.Time) {
+		owner, writtenAt, ok := legacyAgentOwners.get(uid)
+		if !ok || !legacyAgentOwnerSameAccount(owner.User, account) {
+			return "", time.Time{}
+		}
+		return owner.Token, writtenAt
+	})
 }
 
 // legacyAgentOwners is the migration map the gateway read. It is read until
@@ -115,13 +124,14 @@ var legacyAgentOwners = &legacyAgentOwnerCache{}
 const legacyAgentOwnersRetry = 30 * time.Second
 
 type legacyAgentOwnerCache struct {
-	mu      sync.Mutex
-	dir     string
-	owners  map[int]enterprisehooks.LegacyAgentOwner
-	loaded  bool
-	open    bool
-	stamp   string
-	nextTry time.Time
+	mu        sync.Mutex
+	dir       string
+	owners    map[int]enterprisehooks.LegacyAgentOwner
+	writtenAt time.Time
+	loaded    bool
+	open      bool
+	stamp     string
+	nextTry   time.Time
 }
 
 // legacyAgentOwnersStamp names the version of the map's main file in dir,
@@ -139,26 +149,28 @@ func legacyAgentOwnersStamp(dir string) string {
 	return stamp
 }
 
-func (c *legacyAgentOwnerCache) get(uid int) (enterprisehooks.LegacyAgentOwner, bool) {
+// get returns the owner the map records for uid, and when the map was
+// written.
+func (c *legacyAgentOwnerCache) get(uid int) (enterprisehooks.LegacyAgentOwner, time.Time, bool) {
 	dir := currentIdentitySpoolDir()
 	if dir == "" {
-		return enterprisehooks.LegacyAgentOwner{}, false
+		return enterprisehooks.LegacyAgentOwner{}, time.Time{}, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if dir != c.dir {
-		c.dir, c.owners, c.loaded, c.open, c.stamp, c.nextTry = dir, nil, false, false, "", time.Time{}
+		c.dir, c.owners, c.writtenAt, c.loaded, c.open, c.stamp, c.nextTry = dir, nil, time.Time{}, false, false, "", time.Time{}
 	}
 	if (!c.loaded || c.open) && !time.Now().Before(c.nextTry) {
 		c.nextTry = time.Now().Add(legacyAgentOwnersRetry)
 		if stamp := legacyAgentOwnersStamp(dir); !c.loaded || stamp != c.stamp {
 			// A map that cannot be read now (a shard being written, a
 			// transient error) keeps the owners read before.
-			if owners, open, ok := enterprisehooks.ReadLegacyAgentOwners(dir, validateManagedGuardianAuthorization); ok {
-				c.owners, c.open, c.loaded, c.stamp = owners, open, true, stamp
+			if owners, open, writtenAt, ok := enterprisehooks.ReadLegacyAgentOwners(dir, validateManagedGuardianAuthorization); ok {
+				c.owners, c.open, c.writtenAt, c.loaded, c.stamp = owners, open, writtenAt, true, stamp
 			}
 		}
 	}
 	owner, ok := c.owners[uid]
-	return owner, ok
+	return owner, c.writtenAt, ok
 }

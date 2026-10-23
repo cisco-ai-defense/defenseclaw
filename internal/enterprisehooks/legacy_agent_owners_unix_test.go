@@ -64,11 +64,11 @@ func TestLegacyAgentOwnersAreWrittenOnce(t *testing.T) {
 	if written, _ := WriteLegacyAgentOwners(dir, map[int]LegacyAgentOwner{501: {User: "mallory", Token: "home:9:9"}}, time.Now(), nil); written {
 		t.Fatal("the map was written twice")
 	}
-	got, _, ok := ReadLegacyAgentOwners(dir, nil)
+	got, _, _, ok := ReadLegacyAgentOwners(dir, nil)
 	if !ok || got[501] != first[501] || got[94401] != first[94401] || len(got) != 2 {
 		t.Fatalf("read %+v, %v", got, ok)
 	}
-	if _, _, ok := ReadLegacyAgentOwners(dir, func(string, string) error { return errors.New("not root-owned") }); ok {
+	if _, _, _, ok := ReadLegacyAgentOwners(dir, func(string, string) error { return errors.New("not root-owned") }); ok {
 		t.Fatal("an untrusted map was read")
 	}
 }
@@ -84,13 +84,13 @@ func TestLegacyAgentOwnersSurviveRollbackWithoutAStaleIdentityRecord(t *testing.
 	if _, err := os.Stat(filepath.Join(dir, "legacy-agent-owners.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("1.0.2 sees a non-uid JSON identity record: %v", err)
 	}
-	if got, _, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[501] != owners[501] {
+	if got, _, _, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[501] != owners[501] {
 		t.Fatalf("1.0.4 cannot read its migration map after rollback: %+v, %t", got, ok)
 	}
 	if err := os.Rename(filepath.Join(dir, LegacyAgentOwnersFile), filepath.Join(dir, oldLegacyAgentOwnersFile)); err != nil {
 		t.Fatal(err)
 	}
-	if got, _, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[501] != owners[501] {
+	if got, _, _, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[501] != owners[501] {
 		t.Fatalf("the gateway lost the earlier map before guardian migration: %+v, %t", got, ok)
 	}
 	if err := WriteIdentitySpool(context.Background(), dir, nil, nil, nil, nil); err != nil {
@@ -99,7 +99,7 @@ func TestLegacyAgentOwnersSurviveRollbackWithoutAStaleIdentityRecord(t *testing.
 	if _, err := os.Stat(filepath.Join(dir, oldLegacyAgentOwnersFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("old map remains visible on rollback: %v", err)
 	}
-	if got, _, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[501] != owners[501] {
+	if got, _, _, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[501] != owners[501] {
 		t.Fatalf("migration changed the account binding: %+v, %t", got, ok)
 	}
 }
@@ -194,7 +194,7 @@ func TestTransientLegacyAgentOwnersReadErrorKeepsValidMap(t *testing.T) {
 	if err := WriteIdentitySpool(context.Background(), dir, nil, nil, nil, nil); err != nil {
 		t.Fatalf("retry migration: %v", err)
 	}
-	if got, _, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[501] != owners[501] {
+	if got, _, _, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[501] != owners[501] {
 		t.Fatalf("retry changed the binding: %+v, ok=%t", got, ok)
 	}
 }
@@ -214,7 +214,7 @@ func TestIdentitySpoolPassRecordsTheMigrationMap(t *testing.T) {
 	if err := WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: 501, User: "alice"}}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	owners, _, ok := ReadLegacyAgentOwners(dir, nil)
+	owners, _, _, ok := ReadLegacyAgentOwners(dir, nil)
 	if !ok || owners[501].User != "alice" || owners[501].Token != LegacyAgentOwnerToken("files", home) {
 		t.Fatalf("map %+v, %v", owners, ok)
 	}
@@ -271,7 +271,7 @@ func TestLegacyAgentOwnersMapOver4MiBIsRead(t *testing.T) {
 	if err != nil || info.Size() <= 4<<20 {
 		t.Fatalf("map stat %v; want a map over 4 MiB", err)
 	}
-	got, _, ok := ReadLegacyAgentOwners(dir, nil)
+	got, _, _, ok := ReadLegacyAgentOwners(dir, nil)
 	if !ok {
 		t.Fatalf("the reader refused the %d-byte map the guardian wrote", info.Size())
 	}
@@ -315,7 +315,7 @@ func TestExistingLegacyAgentOwnersMapOver4MiBKeepsBindings(t *testing.T) {
 			if contents, err := os.ReadFile(filepath.Join(dir, LegacyAgentOwnersFile)); err != nil || !bytes.Equal(contents, data) {
 				t.Fatalf("published map changed: %d bytes, err %v", len(contents), err)
 			}
-			got, _, ok := ReadLegacyAgentOwners(dir, nil)
+			got, _, _, ok := ReadLegacyAgentOwners(dir, nil)
 			if !ok {
 				t.Fatal("the reader refused the published map")
 			}
@@ -368,7 +368,7 @@ func TestLegacyAgentOwnersBoundIsTheLargestWritableMap(t *testing.T) {
 		if written, err := WriteLegacyAgentOwners(dir, map[int]LegacyAgentOwner{math.MaxInt: owner}, at, nil); err != nil || !written {
 			t.Fatalf("write: written=%t err=%v", written, err)
 		}
-		if got, _, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[math.MaxInt] != owner {
+		if got, _, _, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[math.MaxInt] != owner {
 			t.Fatalf("worst-case map not read back: %t", ok)
 		}
 	}
@@ -391,7 +391,7 @@ func TestLegacyAgentOwnersMapKeepsEveryOwnerPastOneFile(t *testing.T) {
 	if written, err := WriteLegacyAgentOwners(dir, owners, time.Now(), nil); err != nil || !written {
 		t.Fatalf("write: written=%t err=%v", written, err)
 	}
-	got, open, ok := ReadLegacyAgentOwners(dir, nil)
+	got, open, _, ok := ReadLegacyAgentOwners(dir, nil)
 	if !ok || open {
 		t.Fatalf("read: ok=%t open=%t", ok, open)
 	}
@@ -412,13 +412,13 @@ func TestLegacyAgentOwnersMapKeepsEveryOwnerPastOneFile(t *testing.T) {
 	if err := WriteIdentitySpool(context.Background(), dir, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got, _, ok := ReadLegacyAgentOwners(dir, nil); !ok || len(got) != len(owners) {
+	if got, _, _, ok := ReadLegacyAgentOwners(dir, nil); !ok || len(got) != len(owners) {
 		t.Fatalf("after a pass: %d owners, ok=%t; want %d", len(got), ok, len(owners))
 	}
 	if err := os.Remove(filepath.Join(dir, legacyAgentOwnersShardFile(2))); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := ReadLegacyAgentOwners(dir, nil); ok {
+	if _, _, _, ok := ReadLegacyAgentOwners(dir, nil); ok {
 		t.Fatal("a map missing a shard was read")
 	}
 	for name, want := range map[string]bool{LegacyAgentOwnersFile: true, legacyAgentOwnersShardFile(1): true,
@@ -474,7 +474,7 @@ func TestLegacyOwnerWithoutProofAtUpgradeIsAddedLater(t *testing.T) {
 			}
 			bobToken := LegacyAgentOwnerToken("files", homes[502])
 			run(listed)
-			got, open, ok := ReadLegacyAgentOwners(dir, nil)
+			got, open, _, ok := ReadLegacyAgentOwners(dir, nil)
 			if !ok || !open || got[502].Token != bobToken {
 				t.Fatalf("first pass: %+v ok=%t open=%t; want bob proven and alice pending", got, ok, open)
 			}
@@ -494,7 +494,7 @@ func TestLegacyOwnerWithoutProofAtUpgradeIsAddedLater(t *testing.T) {
 			for pass < 6 {
 				run(append(slices.Clone(listed), IdentitySpoolAccount{UID: 503, User: "carol"}))
 			}
-			got, open, ok = ReadLegacyAgentOwners(dir, nil)
+			got, open, _, ok = ReadLegacyAgentOwners(dir, nil)
 			if !ok || got[501].User != "alice" || got[501].Token != LegacyAgentOwnerToken("files", homes[501]) {
 				t.Fatalf("alice was not added once proven: %+v ok=%t", got[501], ok)
 			}
@@ -527,21 +527,21 @@ func TestPendingLegacyOwnerInAShardIsFilled(t *testing.T) {
 	if written, err := WriteLegacyAgentOwners(dir, owners, time.Now(), nil); err != nil || !written {
 		t.Fatalf("write: written=%t err=%v", written, err)
 	}
-	if got, open, ok := ReadLegacyAgentOwners(dir, nil); !ok || !open || len(got) != maxLegacyAgentOwners {
+	if got, open, _, ok := ReadLegacyAgentOwners(dir, nil); !ok || !open || len(got) != maxLegacyAgentOwners {
 		t.Fatalf("read: %d owners ok=%t open=%t", len(got), ok, open)
 	}
 	alice := LegacyAgentOwner{User: "ALICE", Token: "home:1:2:3"}
 	if written, err := WriteLegacyAgentOwners(dir, map[int]LegacyAgentOwner{1_000_000: alice}, time.Now(), nil); err != nil || !written {
 		t.Fatalf("fill alice: written=%t err=%v", written, err)
 	}
-	got, open, ok := ReadLegacyAgentOwners(dir, nil)
+	got, open, _, ok := ReadLegacyAgentOwners(dir, nil)
 	if !ok || !open || got[1_000_000] != (LegacyAgentOwner{User: "ALICE", Token: "home:1:2:3"}) {
 		t.Fatalf("after alice: %+v ok=%t open=%t; want alice bound, bob still pending", got[1_000_000], ok, open)
 	}
 	if written, err := WriteLegacyAgentOwners(dir, map[int]LegacyAgentOwner{1: {User: "bob", Token: "sid:S-1-5-21-1-2-3-4"}}, time.Now(), nil); err != nil || !written {
 		t.Fatalf("fill bob: written=%t err=%v", written, err)
 	}
-	if got, open, ok := ReadLegacyAgentOwners(dir, nil); !ok || open || len(got) != maxLegacyAgentOwners+2 {
+	if got, open, _, ok := ReadLegacyAgentOwners(dir, nil); !ok || open || len(got) != maxLegacyAgentOwners+2 {
 		t.Fatalf("after bob: %d owners ok=%t open=%t; want all and closed", len(got), ok, open)
 	}
 	if written, err := WriteLegacyAgentOwners(dir, map[int]LegacyAgentOwner{1: {User: "bob", Token: "sid:S-1-5-21-9"}}, time.Now(), nil); err != nil || written {
@@ -584,7 +584,7 @@ func TestLegacyAgentOwnersRoundTripExactly(t *testing.T) {
 	if written, err := WriteLegacyAgentOwners(dir, all, time.Now(), nil); err != nil || !written {
 		t.Fatalf("write: written=%t err=%v", written, err)
 	}
-	got, _, ok := ReadLegacyAgentOwners(dir, nil)
+	got, _, _, ok := ReadLegacyAgentOwners(dir, nil)
 	if !ok {
 		t.Fatal("map not read")
 	}

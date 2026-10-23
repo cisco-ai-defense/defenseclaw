@@ -331,3 +331,56 @@ func TestLegacyAgentOwnerBound(t *testing.T) {
 		}
 	}
 }
+
+// Review of r104 Q-identity (continuation 3, loop round 2): a migration map
+// the 1.0.4 builds before the GAP-0939 fix wrote holds, for a symlinked
+// home, the symlink's own creation time. Without a current guardian record
+// (a managed Mac whose guardian has not rewritten it), the gateway reads
+// the home itself, and this build's token named the directory's creation
+// time, so the account's 1.0.x agents entry was refused. The gateway now
+// takes the earlier proof of this same home, unless the directory behind
+// the symlink was created after the map.
+func TestUpgradeFromAMapWithTheSymlinkProofBeforeTheFix(t *testing.T) {
+	for _, after := range []bool{false, true} {
+		t.Run(fmt.Sprintf("directory created after the map=%t", after), func(t *testing.T) {
+			b := newUpgradeBridge(t, "alice")
+			root := t.TempDir()
+			at := time.Now()
+			if after {
+				time.Sleep(50 * time.Millisecond)
+			}
+			target, link := filepath.Join(root, "real-alice"), filepath.Join(root, "alice")
+			if err := os.Mkdir(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(20 * time.Millisecond)
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			if !after {
+				at = time.Now()
+			}
+			b.homes[70001] = link
+			before := ownerTokenBeforeSymlinkFix(t, link)
+			if now := enterprisehooks.LegacyAgentOwnerToken("files", link); strings.Count(before, ":") < 3 || before == now {
+				t.Skipf("the file system of %s keeps no creation time (tokens %q, %q)", root, before, now)
+			}
+			legacy := agentidentity.LegacyAgentID(b.inputs(70001, "alice"))
+			if _, err := enterprisehooks.WriteLegacyAgentOwners(b.dir, map[int]enterprisehooks.LegacyAgentOwner{70001: {User: "alice", Token: before}},
+				at, nil); err != nil {
+				t.Fatal(err)
+			}
+			legacyAgentOwners = &legacyAgentOwnerCache{}
+			if got := legacyAgentOwnerBound("70001", "alice"); got == after {
+				t.Fatalf("bound=%t; want %t", got, !after)
+			}
+			got, mode := b.hook(legacyConfig(legacy, upgradeProfiles), 70001, profileSubject{UserID: "70001", UserName: "alice"})
+			if !after && (got.Name != "relaxed" || got.Match != profileMatchAgent || mode != "observe" || got.Refused != "") {
+				t.Fatalf("%+v, mode %q; want the prior agents assignment", got, mode)
+			}
+			if after && (got.Match != profileMatchDefaultLookupFailed || got.Refused == "") {
+				t.Fatalf("%+v, mode %q; want the unbound entry refused", got, mode)
+			}
+		})
+	}
+}

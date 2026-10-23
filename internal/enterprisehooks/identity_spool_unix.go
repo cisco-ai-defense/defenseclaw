@@ -125,6 +125,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	// Until the migration map is recorded, every listed account must be in
 	// it by name (unnamedLegacyAgentOwners).
 	ownersUnrecorded := !LegacyAgentOwnersRecorded(dir)
+	ownerOfRecord := legacyAgentOwnerOfRecord(dir)
 	var unnamed []int
 	var passErr error
 	answeredDirectories := map[string]bool{}
@@ -194,7 +195,9 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 				}
 			}
 			if record.User != "" {
-				record.LegacyOwnerToken = LegacyAgentOwnerToken(record.AccountIncarnation, identitySpoolAccountHome(account.UID))
+				uid, user := account.UID, record.User
+				record.LegacyOwnerToken = LegacyAgentOwnerTokenFor(record.AccountIncarnation, identitySpoolAccountHome(uid),
+					func() (string, time.Time) { return ownerOfRecord(uid, user) })
 			}
 			err = writeIdentitySpoolFile(dir, name, record, setOwnership)
 			if err == nil && record.LegacyOwnerToken != "" {
