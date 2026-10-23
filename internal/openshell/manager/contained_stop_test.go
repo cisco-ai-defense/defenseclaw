@@ -27,6 +27,7 @@ import (
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -257,4 +258,124 @@ func TestAFailedStartThatCannotSyncKeepsItsVMContained(t *testing.T) {
 		failSync.Store(false)
 		wantReleased(t, e, "vmstart")
 	})
+}
+
+// GAP-0902 review (loop round 3): a contained VM counted as live only when
+// ready or when its workload ended with its VM held. A start whose check
+// failed and whose sync failed is contained, but when OpenShell could not
+// be asked for its phase after it (restorePhase's lookup failed) the box
+// kept the start's own phase, starting: the status left the VM out, a new
+// sandbox was created beside it and reconcile never retried the withdrawal
+// of its network. A contained VM now stays unprotected in every phase that
+// may hold its VM (holdsCompute), and only OpenShell's account of it gone
+// releases it.
+func TestAContainedVMStaysUnprotectedInEveryPhaseThatMayHoldIt(t *testing.T) {
+	vm := string(openshell.DriverVM)
+	for _, c := range []struct {
+		phase  audit.SandboxPhase
+		reason string
+		live   bool
+		stop   string
+	}{
+		{phase: audit.SandboxPhaseReady, live: true, stop: "stop"},
+		{phase: audit.SandboxPhaseStarting, live: true, stop: "stop"},
+		{phase: audit.SandboxPhaseProvisioning, live: true, stop: "stop"},
+		{phase: audit.SandboxPhaseStopping, live: true, stop: "stop"},
+		{phase: audit.SandboxPhaseUnknown, live: true, stop: "stop"},
+		{phase: "", live: true, stop: "stop"},
+		{phase: "suspended", live: true, stop: "stop"},
+		{phase: audit.SandboxPhaseCompleted, live: true, stop: "delete"},
+		{phase: audit.SandboxPhaseError, reason: "MainProcessFailed: exit 1", live: true, stop: "delete"},
+		{phase: audit.SandboxPhaseError, reason: "ProcessExited: the VM exited"},
+		{phase: audit.SandboxPhaseStopped},
+		{phase: audit.SandboxPhaseDeleting},
+		{phase: audit.SandboxPhaseDeleted},
+		{phase: phaseMissing},
+	} {
+		rec := record{Name: "vm", Driver: vm, Contained: "its start failed", PhaseReason: c.reason}
+		if got := containedLive(c.phase, rec); got != c.live {
+			t.Errorf("containedLive(%q, %q) = %v, want %v", c.phase, c.reason, got, c.live)
+		}
+		if got := unprotectedLive(c.phase, rec); got != c.live {
+			t.Errorf("unprotectedLive(%q, %q) = %v, want %v", c.phase, c.reason, got, c.live)
+		}
+		if containedLive(c.phase, record{Name: "vm", Driver: vm, PhaseReason: c.reason}) {
+			t.Errorf("an uncontained MicroVM in %q is contained", c.phase)
+		}
+		if c.live {
+			if got, want := legacyStopCommand("vm", c.phase), "defenseclaw sandbox "+c.stop+" vm"; got != want {
+				t.Errorf("legacyStopCommand(%q) = %q, want %q", c.phase, got, want)
+			}
+			if way := legacyWayOn("vm", c.phase, vm); !strings.Contains(way, "`defenseclaw sandbox "+c.stop+" vm") {
+				t.Errorf("legacyWayOn(%q) = %q", c.phase, way)
+			}
+		}
+	}
+
+	// The start whose check fails, then its sync, then OpenShell's lookup
+	// of its phase and the first withdrawal of its network.
+	var failSync, syncFailed atomic.Bool
+	var lookups atomic.Int32
+	e := newVMEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "vmstart", Copy: true})
+	e.addNetworkRule("vmstart", "hostport", "host.openshell.internal", 8080)
+	e.stopBox("vmstart")
+	e.fake.HandleExec(e.workloadChecks(func(_ string, a *workloadAnswer) { a.uid = 0 },
+		func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+			if len(call.Command) == 1 && call.Command[0] == "/bin/sync" && failSync.Load() {
+				syncFailed.Store(true)
+				return openshelltest.ExecResponse{Err: context.DeadlineExceeded}
+			}
+			return openshelltest.DefaultExec(call)
+		}))
+	e.fake.Intercept(func(method string) error {
+		if method == openshelltest.MethodGetSandbox && syncFailed.Load() && lookups.Add(1) <= 2 {
+			return &types.StatusError{Code: types.ErrorInternal, Message: "the gateway is busy"}
+		}
+		return nil
+	})
+	failSync.Store(true)
+	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+	_, err := e.m.Start(t.Context(), "vmstart", sandboxapi.StartRequest{})
+	if apiErr := wantCode(t, err, sandboxapi.CodePolicyRejected); !strings.Contains(apiErr.Message, "so it is still running") {
+		t.Fatalf("the failed start = %+v", apiErr)
+	}
+	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
+		t.Fatalf("stopped a MicroVM whose sync failed: %d stop calls", got-stops)
+	}
+	b := e.boxOf("vmstart")
+	e.m.mu.Lock()
+	phase, contained := b.phase, b.rec.Contained
+	e.m.mu.Unlock()
+	if phase != audit.SandboxPhaseStarting || contained != "its start failed" {
+		t.Fatalf("the scenario was not reached: phase %q, contained %q", phase, contained)
+	}
+	st, err := e.m.Status(t.Context())
+	must(t, err)
+	if len(st.Unprotected) != 1 || st.Unprotected[0] != (sandboxapi.UnprotectedSandbox{Name: "vmstart", Phase: "starting",
+		Stop: "defenseclaw sandbox stop vmstart", Reason: sandboxapi.UnprotectedContained}) {
+		t.Fatalf("unprotected = %+v", st.Unprotected)
+	}
+	_, err = e.tryCreate(sandboxapi.CreateRequest{Name: "beside", Copy: true, Project: e.otherProject("beside")})
+	if apiErr := wantCode(t, err, sandboxapi.CodeConflict); !strings.Contains(apiErr.Message, "while vmstart runs ("+containedUnprotected+")") ||
+		!strings.Contains(apiErr.Detail, "`defenseclaw sandbox stop vmstart`") {
+		t.Fatalf("create beside a contained MicroVM = %+v", apiErr)
+	}
+	warned := false
+	for _, w := range e.get("vmstart").Warnings {
+		warned = warned || strings.HasPrefix(w, containedUnprotected) && strings.Contains(w, "`defenseclaw sandbox stop vmstart`")
+	}
+	if !warned {
+		t.Fatal("the view does not say the MicroVM is contained")
+	}
+	// Its network withdrawal failed with the lookup: reconcile retries it.
+	if !e.hasRule("vmstart", "hostport") {
+		t.Fatal("the scenario was not reached: the first withdrawal did not fail")
+	}
+	e.m.reconcileOldSupervisor(t.Context(), b)
+	if e.hasRule("vmstart", "hostport") || e.hasRule("vmstart", "defenseclaw_egress") {
+		t.Fatal("reconcile did not retry the withdrawal of the contained MicroVM's network")
+	}
+	failSync.Store(false)
+	wantReleased(t, e, "vmstart")
 }

@@ -546,16 +546,25 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		m.containOldSupervisorNetwork(ctx, b)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
 			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorMessage(rec.Name, rec.SessionRelease, phase, rec.Driver, m.upgradeWayOn(release))})
-	} else if containedLive(phase, rec) {
+	} else if containedLive(phase, rec) && !ownTransition(phase, trigger) {
 		// A contained VM (containUnsynced, which said so when it contained
 		// it) is named again for a restarted daemon that finds it, and when
 		// its workload ends with its VM still held; reconcile withdraws its
-		// network again (reconcileOldSupervisor).
+		// network again (reconcileOldSupervisor). Not for the phase a
+		// start or stop of it passes through, whose outcome says where it
+		// stands.
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
 			Reason: sandboxapi.ReasonContained, Message: truncate("⚠ "+rec.Name+": "+containedWords(rec.Name, rec.Contained, phase, rec.Driver), 2048)})
 	}
 	m.syncGuard(b, phase)
 	m.syncObserve(b, phase)
+}
+
+// ownTransition reports the phase a DefenseClaw start or stop (trigger)
+// passes through on its way to its outcome.
+func ownTransition(phase audit.SandboxPhase, trigger audit.SandboxLifecycleTrigger) bool {
+	return (trigger == audit.SandboxTriggerStart || trigger == audit.SandboxTriggerStop) &&
+		(phase == audit.SandboxPhaseProvisioning || phase == audit.SandboxPhaseStarting || phase == audit.SandboxPhaseStopping)
 }
 
 // phaseMissing is the phase of the view of a sandbox OpenShell no longer
@@ -778,10 +787,16 @@ func oldSupervisorLive(phase audit.SandboxPhase, rec record) bool {
 }
 
 // containedLive reports a contained MicroVM (record.Contained) whose VM may
-// still run: ready, or its workload ended with the VM still held.
+// still run: every phase in which it may still hold its compute
+// (holdsCompute), not only ready and an ended workload with the VM still
+// held. A start whose check failed keeps its own phase, starting, when
+// OpenShell cannot be asked for the one after it (restorePhase), and a
+// restarted daemon that has not reached the gateway knows none: neither
+// proves the VM gone, so it stays unprotected, its network withdrawal is
+// retried and no new sandbox runs. Only OpenShell's own account of the VM
+// stopped, deleted, missing or gone releases it.
 func containedLive(phase audit.SandboxPhase, rec record) bool {
-	return rec.Contained != "" && (phase == audit.SandboxPhaseReady ||
-		(phase == audit.SandboxPhaseCompleted || phase == audit.SandboxPhaseError) && holdsCompute(phase, rec.Driver, rec.PhaseReason))
+	return rec.Contained != "" && holdsCompute(phase, rec.Driver, rec.PhaseReason)
 }
 
 // unprotectedLive reports a guest DefenseClaw cannot show protected while
@@ -813,13 +828,15 @@ func containedWords(name, why string, phase audit.SandboxPhase, driver string) s
 		"running rather than lose what its guest has not written to its disk. " + containedContainment + ": " + legacyWayOn(name, phase, driver)
 }
 
-// legacyWayOn is how the user ends the live legacy guest name in phase on
-// compute driver driver ("" is docker): the stop of a ready one, which on
-// a MicroVM syncs its disk first because that release's stop does not, and
-// the delete of a MicroVM whose workload ended, which OpenShell does not
-// stop (or, on OpenShell SupportedMin or later, its start with --end-vm).
+// legacyWayOn is how the user ends the live legacy or contained guest name
+// in phase on compute driver driver ("" is docker): the stop of one whose
+// workload has not ended (workloadEnded: a ready one, and a contained one
+// in another phase that may hold its VM), which on a MicroVM syncs its disk
+// first because that release's stop does not, and the delete of a MicroVM
+// whose workload ended, which OpenShell does not stop (or, on OpenShell
+// SupportedMin or later, its start with --end-vm).
 func legacyWayOn(name string, phase audit.SandboxPhase, driver string) string {
-	if phase == audit.SandboxPhaseReady {
+	if !workloadEnded(phase) {
 		way := "save the work you need, then run `" + legacyStopCommand(name, phase) + "`"
 		if stopLosesWrites(driver) {
 			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost) " +
@@ -831,14 +848,21 @@ func legacyWayOn(name string, phase audit.SandboxPhase, driver string) string {
 		openshell.SupportedMin + " or later `defenseclaw sandbox start " + name + " --end-vm` ends the VM, losing what it has not written to its disk"
 }
 
-// legacyStopCommand is the command that ends the live legacy guest name in
-// phase: the stop of a ready one, else the delete of a MicroVM whose
-// workload ended (legacyWayOn says what each costs).
+// legacyStopCommand is the command that ends the live legacy or contained
+// guest name in phase: its stop, else the delete of a MicroVM whose
+// workload ended (workloadEnded; legacyWayOn says what each costs).
 func legacyStopCommand(name string, phase audit.SandboxPhase) string {
-	if phase == audit.SandboxPhaseReady {
+	if !workloadEnded(phase) {
 		return "defenseclaw sandbox stop " + name
 	}
 	return "defenseclaw sandbox delete " + name
+}
+
+// workloadEnded reports a phase in which a sandbox's workload ended
+// (completed, error): OpenShell returns the stop of a MicroVM in it as it
+// is, so only its delete, or a start with --end-vm, ends that VM.
+func workloadEnded(phase audit.SandboxPhase) bool {
+	return phase == audit.SandboxPhaseCompleted || phase == audit.SandboxPhaseError
 }
 
 // oldSupervisorWarning is the view's warning about the live legacy guest
