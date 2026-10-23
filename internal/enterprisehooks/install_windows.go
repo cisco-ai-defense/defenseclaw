@@ -372,6 +372,9 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err != nil {
 		return InstallResult{}, err
 	}
+	if err := windowsManagedUserNativeOTLPAbsent(conn.Name(), home, dataDir, targetSID); err != nil {
+		return InstallResult{}, err
+	}
 	lockUpdatedAt, entryUpdatedAt, err := connector.ManagedHookContractTimestamps(
 		dataDir,
 		conn.Name(),

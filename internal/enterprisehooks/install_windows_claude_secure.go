@@ -374,6 +374,11 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 	}); err != nil {
 		return InstallResult{}, rollbackAll(fmt.Errorf("enterprise hooks: clean repaired runtime obstructions: %w", err))
 	}
+	// The row is protected; now take back the native exporter an earlier
+	// per-user install left in the account's own settings (GAP-0836).
+	if err := removeWindowsManagedUserNativeOTLP(conn.Name(), home, setup.DataDir, targetSID); err != nil {
+		return InstallResult{}, err
+	}
 
 	_ = ctx
 	return InstallResult{

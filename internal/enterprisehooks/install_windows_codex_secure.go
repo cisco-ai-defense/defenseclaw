@@ -273,6 +273,11 @@ func installWindowsCodexManagedResult(
 			rollbackErr,
 		)
 	}
+	// The row is protected; now take back the native exporter an earlier
+	// per-user install left in the account's own config (GAP-0836).
+	if err := removeWindowsManagedUserNativeOTLP("codex", target.home, target.dataDir, target.sid); err != nil {
+		return InstallResult{}, err
+	}
 	return InstallResult{
 		Connector:                  "codex",
 		UserHome:                   target.home,
@@ -321,6 +326,9 @@ func verifyWindowsCodexManagedResult(
 		)
 	}
 	if err := verifyWindowsCodexUserRuntime(target, machineOpts.RequirementsPath); err != nil {
+		return InstallResult{}, err
+	}
+	if err := windowsManagedUserNativeOTLPAbsent("codex", target.home, target.dataDir, target.sid); err != nil {
 		return InstallResult{}, err
 	}
 	lock, err := connector.LoadHookContractLockEntryForMode(
