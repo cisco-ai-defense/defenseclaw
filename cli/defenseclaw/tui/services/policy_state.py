@@ -222,16 +222,23 @@ def _severity_span(severities: list[str]) -> str:
     return LEVEL_FOR_RANK[SEVERITY_RANK[severities[-1]]] if severities else ""
 
 
-def posture_summary(scope: str, mode: str, block_at: str, alert_at: str, hilt: str) -> str:
+def posture_summary(
+    scope: str, mode: str, block_at: str, alert_at: str, hilt: str, *, confirm_action: str = "ask"
+) -> str:
     """One plain sentence: what ``scope``'s tool calls get at each severity."""
     groups: dict[str, list[str]] = {"block": [], "ask": [], "alert": [], "allow": []}
     for severity, action in severity_actions(block_at, alert_at, hilt):
         groups[action].append(severity)
     observe = mode != "action"
+    ask_verb = "deny confirmations at" if confirm_action == "deny" else "ask a human for"
     verbs = (
-        {"block": "block", "ask": "ask a human for", "alert": "alert on"}
+        {"block": "block", "ask": ask_verb, "alert": "alert on"}
         if observe
-        else {"block": "blocks", "ask": "asks a human for", "alert": "alerts on"}
+        else {
+            "block": "blocks",
+            "ask": "denies confirmations at" if confirm_action == "deny" else "asks a human for",
+            "alert": "alerts on",
+        }
     )
     parts = [
         f"{verbs[action]} {_severity_span(groups[action])}" for action in ("block", "ask", "alert") if groups[action]

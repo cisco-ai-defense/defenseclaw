@@ -642,10 +642,8 @@ func TestTamperedClaudeDropInIsFoundAndPutBackByEnsure(t *testing.T) {
 	}
 }
 
-// GAP-1348: a Copilot drop-in whose hook command kept DefenseClaw's prefix
-// but gained a redirection and a successful fallback discarded the deny,
-// while verify reported coverage and the guardian checked only Claude's
-// drop-in. Verify fails, the guardian finds it, and ensure puts it back.
+// A Copilot handler with a shell suffix can discard the deny. Verify must
+// fail, and Ensure must restore DefenseClaw's own single-field handler.
 func TestTamperedCopilotDropInFailsVerifyAndIsPutBack(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "copilot")}))
@@ -667,7 +665,9 @@ func TestTamperedCopilotDropInFailsVerifyAndIsPutBack(t *testing.T) {
 	}
 	verify := h.run(Options{Action: ActionVerify})
 	requireError(t, verify, codeVerify)
-	if !strings.Contains(messagesOf(verify.Errors, codeVerify), "not the command DefenseClaw publishes") {
+	if !strings.Contains(messagesOf(verify.Errors, codeVerify), "not the command DefenseClaw publishes") ||
+		!strings.Contains(messagesOf(verify.Errors, codeVerify), "next lifecycle run") ||
+		strings.Contains(messagesOf(verify.Errors, codeVerify), "move independent content to a separate handler") {
 		t.Fatalf("verify must report the modified Copilot hook: %+v", verify.Errors)
 	}
 	if got := h.env.TamperedFiles(); !reflect.DeepEqual(got, []string{dropIn}) {
@@ -677,6 +677,75 @@ func TestTamperedCopilotDropInFailsVerifyAndIsPutBack(t *testing.T) {
 	requireOK(t, ensure)
 	if h.read(dropIn) != want || len(h.env.TamperedFiles()) != 0 {
 		t.Fatalf("ensure did not put the Copilot drop-in back: changes=%v", ensure.Changes)
+	}
+}
+
+func TestTamperedCopilotDropInWithCWDIsPutBackByEnsure(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "copilot")}))
+	writeFreshLedger(t, h)
+	dropIn := "/etc/github-copilot/policy.d/" + enterprisepolicy.DefenseClawDropInName
+	want := h.read(dropIn)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(want), &doc); err != nil {
+		t.Fatal(err)
+	}
+	pre := doc["hooks"].(map[string]any)["preToolUse"].([]any)[0].(map[string]any)
+	pre["bash"] = pre["bash"].(string) + " >/dev/null 2>&1 || true"
+	pre["cwd"] = "/tmp"
+	edited, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(dropIn), edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	verify := h.run(Options{Action: ActionVerify})
+	requireError(t, verify, codeVerify)
+	if !strings.Contains(messagesOf(verify.Errors, codeVerify), "not the command DefenseClaw publishes") {
+		t.Fatalf("verify did not report the fail-open command: %+v", verify.Errors)
+	}
+	if got := h.env.TamperedFiles(); !reflect.DeepEqual(got, []string{dropIn}) {
+		t.Fatalf("the guardian check found %v", got)
+	}
+	ensure := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	requireOK(t, ensure)
+	if h.read(dropIn) != want || len(h.env.TamperedFiles()) != 0 {
+		t.Fatalf("ensure did not restore the Copilot drop-in: changes=%v", ensure.Changes)
+	}
+}
+
+func TestCombinedCopilotDropInEnsureRefusesIndependentContent(t *testing.T) {
+	for _, field := range []string{"command", "operator"} {
+		t.Run(field, func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "copilot")}))
+			writeFreshLedger(t, h)
+			dropIn := "/etc/github-copilot/policy.d/" + enterprisepolicy.DefenseClawDropInName
+			var doc map[string]any
+			if err := json.Unmarshal([]byte(h.read(dropIn)), &doc); err != nil {
+				t.Fatal(err)
+			}
+			pre := doc["hooks"].(map[string]any)["preToolUse"].([]any)[0].(map[string]any)
+			pre[field] = "operator-tool"
+			combined, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.env.P(dropIn), combined, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			verify := h.run(Options{Action: ActionVerify})
+			requireError(t, verify, codeVerify)
+			if !strings.Contains(messagesOf(verify.Errors, codeVerify), "move independent content to a separate handler") {
+				t.Fatalf("verify did not identify the combined handler: %+v", verify.Errors)
+			}
+			ensure := h.run(Options{Action: ActionEnsure, Reason: "path"})
+			if ensure.OK || ensure.SecurityComplete || h.read(dropIn) != string(combined) ||
+				!strings.Contains(fmt.Sprint(ensure.Errors), "move independent content to a separate handler") {
+				t.Fatalf("ensure changed or claimed the combined handler: %+v", ensure)
+			}
+		})
 	}
 }
 
@@ -1063,6 +1132,21 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 			t.Fatalf("%s must warn that the Local hook file is pending: %+v", action, got.Warnings)
 		}
 	}
+	// An independent handler at DefenseClaw's Local path is retained by
+	// the guardian. Even without a guardian record it is not pending work.
+	writeHostFile(t, h, hookFile, `{"hooks":{"PreToolUse":[{"type":"command","command":"operator-tool"}]}}`)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		got := h.run(Options{Action: action})
+		requireError(t, got, codeVerify)
+		if got.SecurityComplete || hasWarning(got, codeGuardianUserFilePending) ||
+			!strings.Contains(messagesOf(got.Errors, codeVerify), hookFile) ||
+			!strings.Contains(messagesOf(got.Errors, codeVerify), "move the independent handlers aside") {
+			t.Fatalf("%s claimed a retained Local hook file would be rewritten: %+v", action, got)
+		}
+	}
+	if err := os.Remove(h.env.P(hookFile)); err != nil {
+		t.Fatal(err)
+	}
 	// The guardian records alice in its data directory, where it writes
 	// the record (GAP-1761).
 	writeHostFile(t, h, filepath.Join(h.env.Layout.GuardianAuthDir, "copilot-vscode-accounts.json"),
@@ -1086,6 +1170,14 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 	}
 	requireOK(t, h.run(Options{Action: ActionStatus}))
 	requireOK(t, h.run(Options{Action: ActionVerify}))
+	writeHostFile(t, h, hookFile, `{"hooks":{"PreToolUse":[{"type":"command","command":"operator-tool"}]}}`)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		got := h.run(Options{Action: action})
+		requireError(t, got, codeVerify)
+		if got.SecurityComplete || !strings.Contains(messagesOf(got.Errors, codeVerify), hookFile) {
+			t.Fatalf("%s accepted a retained Local file after guardian enrollment: %+v", action, got)
+		}
+	}
 	// A deleted account's home is gone: nothing to rewrite, no failure
 	// (GAP-1209).
 	if err := os.RemoveAll(h.env.P("/home/alice")); err != nil {
