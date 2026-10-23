@@ -6,7 +6,9 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,7 +118,7 @@ func DiscoverWindowsPrivateAgentInstalls(home string, names []string) []PrivateA
 	if containsPrivateConnector(wanted, "claudecode") {
 		local := filepath.Join(home, ".claude", "local")
 		packageDir := filepath.Join(local, "node_modules", "@anthropic-ai", "claude-code")
-		if runnable, readable := windowsClaudePackageRunnable(packageDir); !readable {
+		if runnable, known := windowsNPMPackageRunnable("claudecode", packageDir); !known {
 			scan.skip("claudecode", PrivateInstallSkippedLocation)
 		} else if !runnable {
 			for _, base := range []string{"claude", "claude.cmd", "claude.exe"} {
@@ -145,28 +147,31 @@ func windowsCopyIdentity(path string) string {
 	return strings.ToLower(filepath.Clean(path))
 }
 
-// windowsClaudePackageRunnable reports whether a Claude Code npm package
-// holds an entry point: cli.js up to 2.1.112, the native bin\claude.exe
-// from 2.1.113. readable is false when a reparse point or an error leaves
-// the answer unknown.
-func windowsClaudePackageRunnable(dir string) (runnable, readable bool) {
-	for _, entry := range []string{"cli.js", filepath.Join("bin", "claude.exe")} {
-		path := filepath.Join(dir, entry)
-		info, err := os.Lstat(path)
-		if err != nil {
-			if !os.IsNotExist(err) {
-				return false, false
-			}
+// windowsNPMPackageRunnable reports whether an agent's npm package holds an
+// entry point (privateNPMEntries): a package record without one is a
+// leftover, not a copy. known is false when a reparse point or a read error
+// leaves the answer unknown.
+func windowsNPMPackageRunnable(connector, dir string) (runnable, known bool) {
+	known = true
+	manifest, err := readBoundedWindowsAgentPackageJSON(filepath.Join(dir, "package.json"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		known = false
+	}
+	for _, entry := range privateNPMEntries(connector, manifest) {
+		path := filepath.Join(dir, filepath.FromSlash(entry))
+		if winpath.RejectReparseChain(path) != nil {
+			known = false
 			continue
 		}
-		if winpath.RejectReparseChain(path) != nil {
-			return false, false
-		}
-		if info.Mode().IsRegular() {
+		info, err := os.Lstat(path)
+		switch {
+		case err == nil && info.Mode().IsRegular():
 			return true, true
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			known = false
 		}
 	}
-	return false, true
+	return false, known
 }
 
 func scanWindowsNPMPackage(scan *privateInstallScan, name, packageDir string) {
@@ -182,21 +187,15 @@ func scanWindowsNPMPackage(scan *privateInstallScan, name, packageDir string) {
 		return
 	}
 	scan.judge(identity)
-	if name == "claudecode" {
-		runnable, readable := windowsClaudePackageRunnable(packageDir)
-		if !readable {
-			scan.skip(name, PrivateInstallSkippedLocation)
-			return
-		}
-		if !runnable {
-			return
-		}
-	}
-	path := filepath.Join(packageDir, "package.json")
-	if info, err := os.Lstat(path); (err != nil || !info.Mode().IsRegular()) && name != "claudecode" {
+	runnable, known := windowsNPMPackageRunnable(name, packageDir)
+	if !known {
+		scan.skip(name, PrivateInstallSkippedLocation)
 		return
 	}
-	version, ok := readWindowsAgentVersionCandidate(path)
+	if !runnable {
+		return // a leftover package record without an entry point
+	}
+	version, ok := readWindowsAgentVersionCandidate(filepath.Join(packageDir, "package.json"))
 	if ok && privateInstallReason(name, version) == "" {
 		return
 	}

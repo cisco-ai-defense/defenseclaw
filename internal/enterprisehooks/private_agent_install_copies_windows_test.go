@@ -165,6 +165,84 @@ func TestDiscoverWindowsPrivateInstallsCoverEveryCopyLayout(t *testing.T) {
 	}
 }
 
+// A Codex or Copilot package folder counts as a copy only when it holds a
+// file the profile can start: the vendor's entry point or a target of its
+// package.json "bin". Metadata alone is a leftover; a runnable copy without
+// metadata is reported; an entry point behind a reparse point leaves the
+// scan incomplete.
+func TestDiscoverWindowsPrivateNPMCopiesNeedAnEntryPoint(t *testing.T) {
+	packages := map[string]string{"codex": "@openai/codex", "copilot": "@github/copilot"}
+	// The vendors' entry points: Codex bin/codex.js, Copilot npm-loader.js
+	// (index.js in early releases).
+	entries := map[string][]string{"codex": {"bin/codex.js"}, "copilot": {"npm-loader.js", "index.js"}}
+	manifest := func(t *testing.T, dir, body string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		build    func(t *testing.T, dir, connector string)
+		reported bool
+		skipped  string
+	}{
+		{name: "metadata only", build: func(t *testing.T, dir, _ string) {
+			windowsClaudeCopy(t, dir, "0.0.1", "")
+		}},
+		{name: "bin names a missing file", build: func(t *testing.T, dir, connector string) {
+			manifest(t, dir, `{"version":"0.0.1","bin":{"`+connector+`":"bin/missing.js"}}`)
+		}},
+		{name: "vendor entry point", build: func(t *testing.T, dir, connector string) {
+			windowsClaudeCopy(t, dir, "0.0.1", filepath.FromSlash(entries[connector][0]))
+		}, reported: true},
+		{name: "bin target the package names", build: func(t *testing.T, dir, connector string) {
+			windowsClaudeCopy(t, dir, "0.0.1", `dist\main.js`)
+			manifest(t, dir, `{"version":"0.0.1","bin":{"`+connector+`":"dist/main.js"}}`)
+		}, reported: true},
+		{name: "entry point without metadata", build: func(t *testing.T, dir, connector string) {
+			windowsClaudeCopy(t, dir, "0.0.1", filepath.FromSlash(entries[connector][0]))
+			if err := os.Remove(filepath.Join(dir, "package.json")); err != nil {
+				t.Fatal(err)
+			}
+		}, reported: true},
+		{name: "entry point behind a junction", build: func(t *testing.T, dir, connector string) {
+			target := filepath.Join(filepath.Dir(dir), "elsewhere")
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			manifest(t, dir, `{"version":"0.0.1","bin":"dist/main.js"}`)
+			if out, err := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(dir, "dist"), target).CombinedOutput(); err != nil {
+				t.Fatalf("mklink /J: %v: %s", err, out)
+			}
+		}, skipped: PrivateInstallSkippedLocation},
+	} {
+		for connector, pkg := range packages {
+			t.Run(tc.name+"/"+connector, func(t *testing.T) {
+				home := t.TempDir()
+				dir := filepath.Join(home, "private", "node_modules", filepath.FromSlash(pkg))
+				tc.build(t, dir, connector)
+				found := DiscoverWindowsPrivateAgentInstalls(home, []string{connector})
+				switch {
+				case tc.skipped != "":
+					if len(found) != 1 || !found[0].Incomplete || found[0].Skipped != tc.skipped {
+						t.Fatalf("findings = %+v, want one incomplete %s", found, tc.skipped)
+					}
+				case tc.reported:
+					if len(found) != 1 || found[0].Incomplete || found[0].Path != dir {
+						t.Fatalf("findings = %+v, want the copy at %s", found, dir)
+					}
+				case len(found) != 0:
+					t.Fatalf("leftover package reported: %+v", found)
+				}
+			})
+		}
+	}
+}
+
 // A supported npm copy must not hide an old WinGet install the version
 // probe never reaches.
 func TestManagedWindowsReportsOldWinGetCopyBesideSupportedInstall(t *testing.T) {

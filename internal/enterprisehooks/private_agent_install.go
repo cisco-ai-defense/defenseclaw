@@ -3,7 +3,12 @@
 
 package enterprisehooks
 
-import "strings"
+import (
+	"encoding/json"
+	"path"
+	"sort"
+	"strings"
+)
 
 // PrivateAgentInstall is static evidence of one agent copy an enrolled
 // account can run: in its home, in a version manager, in a machine npm
@@ -183,4 +188,64 @@ func privateInstallConnectors(names []string, known func(string) bool) []string 
 		}
 	}
 	return out
+}
+
+// privateNPMEntryPoints are the files each agent's npm package starts from,
+// relative to the package: Claude Code's cli.js (to 2.1.112) or native
+// bin/claude.exe (from 2.1.113), Codex's bin/codex.js, and Copilot's
+// npm-loader.js (index.js in early releases). The targets of the package's
+// own "bin" field count too: npm links those. A package folder with none of
+// them is leftover metadata, not a copy the account can run.
+var privateNPMEntryPoints = map[string][]string{
+	"claudecode": {"cli.js", "bin/claude.exe"},
+	"codex":      {"bin/codex.js"},
+	"copilot":    {"npm-loader.js", "index.js"},
+}
+
+// privateNPMMaxBinTargets bounds the "bin" targets read from one package.
+const privateNPMMaxBinTargets = 16
+
+// privateNPMEntries lists the entry points to look for in a connector's
+// package whose package.json holds manifest (nil when it has none): the
+// known ones, then each "bin" target (a string, or a map of command names
+// to files) that stays inside the package, slash-separated.
+func privateNPMEntries(connector string, manifest []byte) []string {
+	entries := append([]string(nil), privateNPMEntryPoints[connector]...)
+	var parsed struct {
+		Bin json.RawMessage `json:"bin"`
+	}
+	if len(manifest) == 0 || json.Unmarshal(manifest, &parsed) != nil || len(parsed.Bin) == 0 {
+		return entries
+	}
+	var targets []string
+	var one string
+	var named map[string]string
+	switch {
+	case json.Unmarshal(parsed.Bin, &one) == nil:
+		targets = []string{one}
+	case json.Unmarshal(parsed.Bin, &named) == nil:
+		for _, target := range named {
+			targets = append(targets, target)
+		}
+		sort.Strings(targets)
+	}
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		seen[entry] = true
+	}
+	added := 0
+	for _, target := range targets {
+		clean := path.Clean(strings.ReplaceAll(strings.TrimSpace(target), `\`, "/"))
+		if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) ||
+			strings.ContainsAny(clean, ":\x00") || seen[clean] {
+			continue
+		}
+		if added == privateNPMMaxBinTargets {
+			break
+		}
+		seen[clean] = true
+		entries = append(entries, clean)
+		added++
+	}
+	return entries
 }

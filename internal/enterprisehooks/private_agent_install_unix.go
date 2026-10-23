@@ -7,7 +7,9 @@ package enterprisehooks
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -90,7 +92,10 @@ func DiscoverUnixPrivateAgentInstalls(home string, connectors []string) []Privat
 	if connectorListed(wanted, "claudecode") {
 		local := filepath.Join(home, ".claude", "local")
 		wrapper := filepath.Join(local, "claude")
-		if !unixClaudePackageRunnable(filepath.Join(local, "node_modules", "@anthropic-ai", "claude-code")) && unixAgentExecutablePresent(wrapper) {
+		runnable, known := unixNPMPackageRunnable("claudecode", filepath.Join(local, "node_modules", "@anthropic-ai", "claude-code"))
+		if !known {
+			scan.skip("claudecode", PrivateInstallSkippedLocation)
+		} else if !runnable && unixAgentExecutablePresent(wrapper) {
 			if identity, ok := unixCopyIdentity(wrapper); ok && scan.judge(identity) {
 				scan.add(PrivateAgentInstall{Connector: "claudecode", Path: wrapper})
 			}
@@ -117,17 +122,61 @@ func unixCopyIdentity(path string) (string, bool) {
 	return filepath.Clean(resolved), true
 }
 
-// unixClaudePackageRunnable reports whether a Claude Code npm package holds
-// an entry point: cli.js up to 2.1.112, the native bin/claude.exe (or the
-// wrapper that starts the platform package) from 2.1.113. A package record
-// without either may be a leftover cache.
-func unixClaudePackageRunnable(dir string) bool {
-	for _, entry := range []string{"cli.js", filepath.Join("bin", "claude.exe")} {
-		if info, err := os.Stat(filepath.Join(dir, entry)); err == nil && info.Mode().IsRegular() {
-			return true
+// unixNPMPackageRunnable reports whether an agent's npm package holds an
+// entry point (privateNPMEntries): a package record without one is a
+// leftover, not a copy. known is false when the package.json or an entry
+// point could not be read for another reason than being absent or out of
+// the account's reach, so whether the copy runs is unknown.
+func unixNPMPackageRunnable(connector, dir string) (runnable, known bool) {
+	known = true
+	manifest, err := readBoundedUnixFile(filepath.Join(dir, "package.json"))
+	if err != nil && !unixEntryAbsent(err) {
+		known = false
+	}
+	for _, entry := range privateNPMEntries(connector, manifest) {
+		info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(entry)))
+		switch {
+		case err == nil && info.Mode().IsRegular():
+			return true, true
+		case err != nil && !unixEntryAbsent(err):
+			known = false
 		}
 	}
-	return false
+	return false, known
+}
+
+// unixEntryAbsent reports a lookup error that means the account cannot run
+// the file: it does not exist, a parent is not a directory, a link loops,
+// or the account may not reach it. The scan runs with the account's own
+// credentials.
+func unixEntryAbsent(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) ||
+		errors.Is(err, syscall.ELOOP) || errors.Is(err, fs.ErrPermission)
+}
+
+// readBoundedUnixFile reads a regular file of at most
+// unixAgentVersionMaxBytes. It never blocks on a FIFO planted in its place.
+func readBoundedUnixFile(path string) ([]byte, error) {
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, unixAgentVersionMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > unixAgentVersionMaxBytes {
+		return nil, fmt.Errorf("%s exceeds %d bytes", path, unixAgentVersionMaxBytes)
+	}
+	return data, nil
 }
 
 func scanUnixNPMPackage(scan *privateInstallScan, home, connector, pkg, dir string) {
@@ -139,14 +188,15 @@ func scanUnixNPMPackage(scan *privateInstallScan, home, connector, pkg, dir stri
 	if !ok || !scan.judge(identity) {
 		return
 	}
-	manifest := filepath.Join(dir, "package.json")
-	if connector == "claudecode" {
-		if !unixClaudePackageRunnable(dir) {
-			return
-		}
-	} else if _, err := os.Lstat(manifest); err != nil {
+	runnable, known := unixNPMPackageRunnable(connector, dir)
+	if !known {
+		scan.skip(connector, PrivateInstallSkippedLocation)
 		return
 	}
+	if !runnable {
+		return // a leftover package record without an entry point
+	}
+	manifest := filepath.Join(dir, "package.json")
 	if !unixDiscoveryCandidateTrusted(home, dir) || !unixDiscoveryCandidateTrusted(home, manifest) {
 		scan.add(PrivateAgentInstall{Connector: connector, Path: dir, Untrusted: true})
 		return

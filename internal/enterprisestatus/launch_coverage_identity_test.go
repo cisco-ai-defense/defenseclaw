@@ -97,6 +97,18 @@ func TestPluginLaunchCoverageResolvesEquivalentDirectories(t *testing.T) {
 		if got := PluginLaunchCoverage("amp", []string{"amp"}, map[string]string{"HOME": unc}, true, home); got != "amp_plugin_config_relocated" {
 			t.Fatalf("network HOME coverage = %q, want amp_plugin_config_relocated", got)
 		}
+		// A local link to that share is not resolved either: following it
+		// would contact the server just the same. A local junction still is.
+		shareLink := filepath.Join(root, "share-link")
+		if err := os.Symlink(unc, shareLink); err != nil {
+			t.Logf("no symlink privilege for the share link case: %v", err)
+		} else {
+			for _, env := range []map[string]string{{"HOME": shareLink}, {"HOME": home, "XDG_CONFIG_HOME": filepath.Join(shareLink, ".config")}} {
+				if got := PluginLaunchCoverage("amp", []string{"amp"}, env, true, home); got != "amp_plugin_config_relocated" {
+					t.Fatalf("HOME through a link to a share (%v) coverage = %q, want amp_plugin_config_relocated", env, got)
+				}
+			}
+		}
 	}
 }
 

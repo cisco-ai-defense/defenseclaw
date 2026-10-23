@@ -288,6 +288,90 @@ func TestDiscoverUnixPrivateInstallsCoverEveryCopyLayout(t *testing.T) {
 	}
 }
 
+// A Codex or Copilot package folder counts as a copy only when it holds a
+// file the account can start: the vendor's entry point or a target of its
+// package.json "bin". Metadata alone is a leftover and keeps a healthy
+// install healthy; a runnable copy without metadata is still reported, and
+// an entry point that cannot be read leaves the scan incomplete.
+func TestDiscoverUnixPrivateNPMCopiesNeedAnEntryPoint(t *testing.T) {
+	packages := map[string]string{"codex": "@openai/codex", "copilot": "@github/copilot"}
+	// The vendors' entry points: Codex bin/codex.js, Copilot npm-loader.js
+	// (index.js in early releases).
+	entries := map[string][]string{"codex": {"bin/codex.js"}, "copilot": {"npm-loader.js", "index.js"}}
+	for _, tc := range []struct {
+		name     string
+		build    func(t *testing.T, dir, connector, pkg string)
+		reported bool
+		skipped  string
+	}{
+		{name: "metadata only", build: func(t *testing.T, dir, _, pkg string) {
+			npmCopy(t, dir, pkg, "0.0.1", "")
+		}},
+		{name: "bin names a missing file", build: func(t *testing.T, dir, connector, pkg string) {
+			writeNPMManifest(t, dir, `{"name":"`+pkg+`","version":"0.0.1","bin":{"`+connector+`":"bin/missing.js"}}`)
+		}},
+		{name: "bin escapes the package", build: func(t *testing.T, dir, connector, pkg string) {
+			npmCopy(t, filepath.Join(filepath.Dir(dir), "outside"), "outside", "1.0.0", "run.js")
+			writeNPMManifest(t, dir, `{"name":"`+pkg+`","version":"0.0.1","bin":"../outside/run.js"}`)
+		}},
+		{name: "vendor entry point", build: func(t *testing.T, dir, connector, pkg string) {
+			npmCopy(t, dir, pkg, "0.0.1", entries[connector][0])
+		}, reported: true},
+		{name: "early entry point", build: func(t *testing.T, dir, connector, pkg string) {
+			npmCopy(t, dir, pkg, "0.0.1", entries[connector][len(entries[connector])-1])
+		}, reported: true},
+		{name: "bin target the package names", build: func(t *testing.T, dir, connector, pkg string) {
+			npmCopy(t, dir, pkg, "0.0.1", "dist/main.js")
+			writeNPMManifest(t, dir, `{"name":"`+pkg+`","version":"0.0.1","bin":{"`+connector+`":"./dist/main.js"}}`)
+		}, reported: true},
+		{name: "entry point without metadata", build: func(t *testing.T, dir, connector, pkg string) {
+			npmCopy(t, dir, pkg, "0.0.1", entries[connector][0])
+			if err := os.Remove(filepath.Join(dir, "package.json")); err != nil {
+				t.Fatal(err)
+			}
+		}, reported: true},
+		{name: "unreadable entry point", build: func(t *testing.T, dir, connector, pkg string) {
+			writeNPMManifest(t, dir, `{"name":"`+pkg+`","version":"0.0.1","bin":"`+strings.Repeat("x", 300)+`.js"}`)
+		}, skipped: PrivateInstallSkippedLocation},
+		{name: "unreadable metadata", build: func(t *testing.T, dir, _, _ string) {
+			if err := os.MkdirAll(filepath.Join(dir, "package.json"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, skipped: PrivateInstallSkippedLocation},
+	} {
+		for connector, pkg := range packages {
+			t.Run(tc.name+"/"+connector, func(t *testing.T) {
+				home := makeHome(t, trustedTestDir(t), "alice")
+				dir := filepath.Join(home, "private", "node_modules", filepath.FromSlash(pkg))
+				tc.build(t, dir, connector, pkg)
+				found := DiscoverUnixPrivateAgentInstalls(home, []string{connector})
+				switch {
+				case tc.skipped != "":
+					if len(found) != 1 || !found[0].Incomplete || found[0].Skipped != tc.skipped {
+						t.Fatalf("findings = %+v, want one incomplete %s", found, tc.skipped)
+					}
+				case tc.reported:
+					if len(found) != 1 || found[0].Incomplete || found[0].Path != dir {
+						t.Fatalf("findings = %+v, want the copy at %s", found, dir)
+					}
+				case len(found) != 0:
+					t.Fatalf("leftover package reported: %+v", found)
+				}
+			})
+		}
+	}
+}
+
+func writeNPMManifest(t *testing.T, dir, body string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // More copies than the record holds marks the scan incomplete.
 func TestDiscoverUnixPrivateInstallsReportsTheFindingLimit(t *testing.T) {
 	home := makeHome(t, trustedTestDir(t), "alice")
