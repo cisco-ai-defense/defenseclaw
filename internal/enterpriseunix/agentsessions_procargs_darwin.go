@@ -12,3 +12,11 @@ func readProcessArgv(pid int) ([]string, error) {
 	}
 	return parseProcArgs2(data)
 }
+
+func readProcessEnv(pid int) (map[string]string, error) {
+	data, err := unix.SysctlRaw("kern.procargs2", pid)
+	if err != nil {
+		return nil, err
+	}
+	return parseProcArgs2Environment(data)
+}

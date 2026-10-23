@@ -222,6 +222,9 @@ type Env struct {
 	// HookSocketPeer connects to the hook socket and returns the kernel
 	// credentials of the process serving it.
 	HookSocketPeer func(ctx context.Context) (peercred.Credentials, error)
+	// ReportLaunchCoverage sends a root-only, content-free observation to the
+	// gateway audit when a running agent can omit its managed plugin.
+	ReportLaunchCoverage func(context.Context, managed.LaunchCoverageReport) error
 	// ListenerProof asks the gateway's loopback API to prove it accepts the
 	// per-user hook credential named by keyID (its SHA-256) for
 	// connectorName, over the route the standalone plugins use, and returns
@@ -379,6 +382,12 @@ func (e *Env) fillDefaults() {
 	if e.HookSocketPeer == nil {
 		path := e.P(e.Layout.HookSocketPath)
 		e.HookSocketPeer = func(ctx context.Context) (peercred.Credentials, error) { return hookSocketPeer(ctx, path) }
+	}
+	if e.ReportLaunchCoverage == nil {
+		path := e.P(e.Layout.HookSocketPath)
+		e.ReportLaunchCoverage = func(ctx context.Context, report managed.LaunchCoverageReport) error {
+			return managed.ReportLaunchCoverage(ctx, path, report)
+		}
 	}
 	if e.ListenerProof == nil {
 		addr := e.Layout.APIAddr

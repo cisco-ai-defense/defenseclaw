@@ -1,0 +1,75 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+)
+
+var managedLaunchReasons = map[string]map[string]bool{
+	"opencode": {"opencode_pure": true, "opencode_managed_config_relocated": true,
+		"opencode_user_config_relocated": true,
+		"launch_arguments_unverified":    true, "launch_environment_unverified": true},
+	"amp": {"amp_plugin_config_relocated": true, "launch_arguments_unverified": true,
+		"launch_environment_unverified": true},
+	"kiro": {"kiro_hook_config_relocated": true, "kiro_alternate_agent": true,
+		"kiro_cloud_session": true, "launch_arguments_unverified": true,
+		"launch_environment_unverified": true},
+	"devin": {"devin_config_override": true, "user_config_relocated": true,
+		"launch_arguments_unverified": true, "launch_environment_unverified": true},
+	"hermes": {"hermes_safe_mode": true, "hermes_config_relocated": true,
+		"user_config_relocated": true, "launch_arguments_unverified": true,
+		"launch_environment_unverified": true},
+	"antigravity": {"user_config_relocated": true, "launch_arguments_unverified": true,
+		"launch_environment_unverified": true},
+}
+
+// The root lifecycle reports what it saw in the OS process table. The
+// skipped plugin can emit neither a tool event nor a load heartbeat itself.
+func (a *APIServer) handleManagedLaunchCoverageAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	peer, ok := managedHookPeerFromContext(r.Context())
+	if !ok || peer.UID != 0 {
+		writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonGuardianOnly)
+		return
+	}
+	if a.logger == nil {
+		http.Error(w, "audit unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+	decoder.DisallowUnknownFields()
+	var report managed.LaunchCoverageReport
+	var extra any
+	if decoder.Decode(&report) != nil || decoder.Decode(&extra) != io.EOF ||
+		report.PID <= 0 || report.UID < 0 || uint64(report.UID) > uint64(^uint32(0)) ||
+		!managedLaunchReasons[report.Connector][report.Reason] {
+		http.Error(w, "invalid launch coverage report", http.StatusBadRequest)
+		return
+	}
+	started, err := time.Parse(time.RFC3339Nano, report.StartedAt)
+	if err != nil || started.IsZero() {
+		http.Error(w, "invalid process start", http.StatusBadRequest)
+		return
+	}
+	details := map[string]any{"connector": report.Connector, "process_pid": report.PID,
+		"process_started_at": report.StartedAt, "coverage_reason": report.Reason,
+		"coverage_state": "incomplete", "actor_id_kind": string(useridentity.KindPOSIXUID),
+		"actor_id": report.UID}
+	if err := a.logger.LogAlert("managed-launch-coverage", "HIGH", "managed_launch_uninspected", details); err != nil {
+		http.Error(w, "audit emission failed", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

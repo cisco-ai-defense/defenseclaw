@@ -82,8 +82,9 @@ How far the hook reaches depends on the connector. Claude Code, Codex, Cursor, G
 Copilot and OpenCode load DefenseClaw's hooks from administrator-owned machine policy,
 so a supported client starts with them. Per-user connectors (Devin, Antigravity, Hermes,
 Amp, Kiro) are registered only in the agent's default config: a session started with
-another config home, `devin --config <file>` or Hermes `--safe-mode` is not inspected or
-logged. The [threat model](/docs/enterprise/plan/threat-model#disable-hooks) lists each case.
+another config home, `devin --config <file>` or Hermes `--safe-mode` has no hook
+inspection for its tool calls. Managed status and verify report a running bypass and
+write an audit alert. The [threat model](/docs/enterprise/plan/threat-model#disable-hooks) lists each case.
 
 The gateway listens on `127.0.0.1:18970`; the guardian reconciles every minute and the
 enumerator runs every five. Service names per OS are in
