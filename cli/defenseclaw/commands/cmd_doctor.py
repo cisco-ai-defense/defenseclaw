@@ -3810,6 +3810,13 @@ def _foreign_gateway_port_holder(cfg) -> str:
     """Name the API port holder when it is not this account's verified gateway."""
     holder = _gateway_port_holder(cfg)
     if not holder:
+        # macOS lsof sees only this account's sockets. A peer listener can
+        # answer on the port while lsof gives us no PID; use the same
+        # loopback holder check that protects token-bearing CLI calls.
+        from defenseclaw.gateway import foreign_loopback_listener
+
+        if foreign_loopback_listener(_gateway_api_host(cfg), cfg.gateway.api_port):
+            return "a process of another account"
         return ""
     try:
         if _trusted_gateway_listener(cfg).trusted:

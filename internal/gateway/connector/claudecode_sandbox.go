@@ -231,7 +231,7 @@ func renderClaudeCodeSandboxDropIn(rt resolvedSandboxTarget) ([]byte, error) {
 // otelHeadersHelper supplies them per export. Content-capture gates stay
 // pinned off exactly as on the host.
 func claudeCodeSandboxManagedEnv(rt resolvedSandboxTarget) (map[string]string, error) {
-	spec := (&ClaudeCodeConnector{}).HookProfile(SetupOpts{APIAddr: rt.ingressAddr}).NativeOTLP
+	spec := (&ClaudeCodeConnector{}).HookProfile(SetupOpts{APIAddr: rt.ingressAddr, sandboxNativeOTLP: true}).NativeOTLP
 	if spec == nil {
 		return nil, fmt.Errorf("claudecode: nil NativeOTLPSpec")
 	}

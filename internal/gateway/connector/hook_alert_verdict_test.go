@@ -21,6 +21,7 @@ package connector
 import (
 	"bytes"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,7 +54,12 @@ func TestHostHooksTreatAlertAsAdvisory(t *testing.T) {
 		t.Skip("jq is required")
 	}
 	dir := t.TempDir()
-	if err := WriteHookScriptsWithToken(dir, freeAPIAddr(t), "tok-test"); err != nil {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := WriteHookScriptsWithToken(dir, listener.Addr().String(), "tok-test"); err != nil {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 	stubDir := t.TempDir()

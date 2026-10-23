@@ -255,6 +255,10 @@ func connectedManagedGatewayPID(conn net.Conn) (uint32, error) {
 	if err != nil {
 		return 0, fmt.Errorf("parse server endpoint: %w", err)
 	}
+	return connectedManagedGatewayPIDForEndpoints(client, server)
+}
+
+func connectedManagedGatewayPIDForEndpoints(client, server managedIPv4Endpoint) (uint32, error) {
 	rows, err := readTCP4OwnerPIDTable()
 	if err != nil {
 		return 0, err

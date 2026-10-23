@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,7 +70,16 @@ type coldStartHookRun struct {
 func runHookForColdStart(t *testing.T, c Connector, script string, args []string, prepare func(dataDir string), extraEnv ...string) coldStartHookRun {
 	t.Helper()
 	hooksDir := t.TempDir()
-	if err := writePerUserHooksForTestFailMode(hooksDir, freeAPIAddr(t), "cold-start-scoped-token", c, extraEnv); err != nil {
+	apiAddr := freeAPIAddr(t)
+	// curl is stubbed below, so it never creates a connection. Bind the
+	// endpoint as this account to let these retry tests reach their transport
+	// stub; free and foreign listeners are covered by separate security tests.
+	listener, err := net.Listen("tcp", apiAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	if err := writePerUserHooksForTestFailMode(hooksDir, apiAddr, "cold-start-scoped-token", c, extraEnv); err != nil {
 		t.Fatalf("write hooks: %v", err)
 	}
 	stubDir := t.TempDir()
@@ -118,7 +128,7 @@ func runHookForColdStart(t *testing.T, c Connector, script string, args []string
 	// The hook's registered timeout starts with the process, after fixture
 	// directories and script snapshots have been written.
 	started := time.Now()
-	err := cmd.Run()
+	err = cmd.Run()
 	return coldStartHookRun{capDir: capDir, dataDir: dataDir, home: home, stdout: stdout.String(), stderr: stderr.String(), err: err, elapsed: time.Since(started)}
 }
 

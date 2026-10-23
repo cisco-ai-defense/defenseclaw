@@ -95,6 +95,9 @@ type SetupOpts struct {
 	// disable-sentinel overrides and derive their data directory from the
 	// verified script location instead.
 	ManagedEnterprise bool
+	// sandboxNativeOTLP selects the isolated OpenShell artifact renderer. It
+	// cannot be set by a host setup caller or a configuration file.
+	sandboxNativeOTLP bool
 	// ManagedHookSocket is the standalone gateway's peer-authorized unix
 	// hook socket (from the root-owned runtime descriptor). When set on a
 	// unix host, in-agent plugins (OpenCode, Amp) and connector shell hooks
@@ -583,8 +586,9 @@ func (e ContentEnvelope) clone() ContentEnvelope {
 //     context vs. mint a fresh root span. v6-managed hooks set this true.
 //   - NativeOTLP: optional descriptor for the connector's native OTLP
 //     emission. nil when the connector does not emit native OTLP (cursor,
-//     hermes, copilot today). Non-nil for codex (TOML),
-//     claudecode (env).
+//     hermes, copilot today), and for per-user Codex or Claude Code because
+//     their native exporters cannot verify the loopback listener's owner.
+//     Managed Codex (TOML) and Claude Code (env) retain their descriptors.
 //   - Decode: optional decoder for connector-specific event/content/tool
 //     wire shape. Identity fields returned by Decode are advisory only and
 //     MUST NOT override Correlation bindings; the gateway accepts correlation

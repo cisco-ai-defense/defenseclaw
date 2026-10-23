@@ -25,8 +25,10 @@ The rule on Windows: only a hook or plugin that waits for DefenseClaw's answer
 can block. OTLP and other telemetry add detail to the audit log and
 dashboards, but cannot block an action after the fact.
 
-When a connector supports native OTLP, DefenseClaw gives it a separate scoped
-credential and pins the source identity to that connector. Hook and plugin
+On managed hosts, a connector with native OTLP gets a separate scoped
+credential and pins the source identity to that connector. Per-user Codex and
+Claude Code host setup disables native OTLP because their exporters cannot
+verify who holds the stopped gateway's port. Hook and plugin
 credentials are also connector-scoped and remain distinct from the gateway
 master token. Connector pages identify which channels exist and where their
 managed settings live.

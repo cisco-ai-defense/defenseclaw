@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -212,6 +213,201 @@ func TestPluginListenerProofKeepsTheCredentialFromAnImpostor(t *testing.T) {
 				t.Fatalf("control without the proof: verdict %q, requests %+v", verdict, requests)
 			}
 
+		})
+	}
+}
+
+// The per-user plugin must consult the native account check before posting a
+// bearer or an event. A stopped gateway lets a peer bind the same port; a
+// failed check must keep that peer from seeing either value.
+func TestPerUserPluginsCheckPeerBeforeSending(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Node harness uses a POSIX stub binary; Windows ownership is covered by hookexec")
+	}
+	node := nodeForTest(t)
+	for _, tc := range []struct{ asset, connector string }{
+		{"opencode-plugin.js", "opencode"},
+		{"amp-plugin.ts", "amp"},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			const credential = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+			root := testenv.PrivateTempDir(t)
+			binary := filepath.Join(root, ".local", "bin", "defenseclaw-gateway")
+			marker := filepath.Join(root, "peer-check-args")
+			if err := os.MkdirAll(filepath.Dir(binary), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$DC_PEER_MARKER\"\nexit 1\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tokenPath := filepath.Join(root, ".hook-"+tc.connector+".token")
+			if err := os.WriteFile(tokenPath, []byte(credential+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			recorder := &listenerProofRecorder{}
+			impostor := newImpostorListener(t, recorder)
+			addr := strings.TrimPrefix(impostor.URL, "http://")
+			harness, name := openCodeListenerProofHarness, "opencode-plugin.mjs"
+			if tc.connector == "amp" {
+				harness, name = ampListenerProofHarness, "amp-plugin.mts"
+			}
+			plugin := filepath.Join(testenv.PrivateTempDir(t), name)
+			body := renderPluginAssetForTest(t, tc.asset, templateData{
+				APIAddr: addr, TokenFileJS: javaScriptStringContent(tokenPath), FailMode: "closed",
+			})
+			if err := os.WriteFile(plugin, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", harness, plugin)
+			cmd.Env = append(os.Environ(), "HOME="+root, "DC_PEER_MARKER="+marker)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("node: %v: %s", err, output)
+			}
+			if !strings.Contains(string(output), "block:") {
+				t.Fatalf("peer check did not fail closed: %s", output)
+			}
+			if got := recorder.snapshot(); len(got) != 0 {
+				t.Fatalf("unproven peer received a request: %+v", got)
+			}
+			if data, err := os.ReadFile(marker); err != nil || string(data) != "hook-post --api-addr "+addr+"\n" {
+				t.Fatalf("native post was not invoked for %s: %q, %v", addr, data, err)
+			}
+			openPlugin := filepath.Join(testenv.PrivateTempDir(t), name)
+			openBody := renderPluginAssetForTest(t, tc.asset, templateData{
+				APIAddr: addr, TokenFileJS: javaScriptStringContent(tokenPath), FailMode: "open",
+			})
+			if err := os.WriteFile(openPlugin, []byte(openBody), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd = exec.CommandContext(ctx, node, "--input-type=module", "-e", harness, openPlugin)
+			cmd.Env = append(os.Environ(), "HOME="+root, "DC_PEER_MARKER="+marker)
+			output, err = cmd.CombinedOutput()
+			if err != nil || !strings.Contains(string(output), "block:") {
+				t.Fatalf("unproven peer in open mode did not fail closed: %v: %s", err, output)
+			}
+			if got := recorder.snapshot(); len(got) != 0 {
+				t.Fatalf("open mode sent data to unproven peer: %+v", got)
+			}
+		})
+	}
+}
+
+// A successful check on one socket says nothing about the next connection:
+// the gateway can stop and a peer account can bind before JavaScript posts.
+// The native helper must own the post and verify its very own connected socket.
+func TestPerUserPluginsDoNotPostAfterTheCheckedListenerChanges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Node harness uses a POSIX stub binary; Windows socket ownership is covered by hookexec")
+	}
+	node := nodeForTest(t)
+	for _, tc := range []struct{ asset, connector string }{
+		{"opencode-plugin.js", "opencode"},
+		{"amp-plugin.ts", "amp"},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			binary := filepath.Join(root, ".local", "bin", "defenseclaw-gateway")
+			if err := os.MkdirAll(filepath.Dir(binary), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			// A separate preflight would pass; a post owned by the native
+			// helper fails because the destination changed before it dialed.
+			if err := os.WriteFile(binary, []byte("#!/bin/sh\n[ \"$1\" = hook-verify-peer ] && exit 0\nexit 1\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tokenPath := filepath.Join(root, ".hook-"+tc.connector+".token")
+			if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			recorder := &listenerProofRecorder{}
+			peer := newImpostorListener(t, recorder)
+			addr := strings.TrimPrefix(peer.URL, "http://")
+			harness, name := openCodeListenerProofHarness, "opencode-plugin.mjs"
+			if tc.connector == "amp" {
+				harness, name = ampListenerProofHarness, "amp-plugin.mts"
+			}
+			plugin := filepath.Join(testenv.PrivateTempDir(t), name)
+			body := renderPluginAssetForTest(t, tc.asset, templateData{
+				APIAddr: addr, TokenFileJS: javaScriptStringContent(tokenPath), FailMode: "closed",
+			})
+			if err := os.WriteFile(plugin, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", harness, plugin)
+			cmd.Env = append(os.Environ(), "HOME="+root)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("node: %v: %s", err, output)
+			}
+			if !strings.Contains(string(output), "block:") {
+				t.Fatalf("peer replacement was trusted: %s", output)
+			}
+			if seen := recorder.snapshot(); len(seen) != 0 {
+				t.Fatalf("peer replacement received credential or event: %+v", seen)
+			}
+		})
+	}
+}
+
+// The native helper receives the bearer on stdin. A peer-writable indirection
+// to another executable must be rejected before execFileSync gets that input.
+func TestPerUserPluginsRejectSymlinkedNativePostBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Node harness uses a POSIX stub binary")
+	}
+	node := nodeForTest(t)
+	for _, tc := range []struct{ asset, connector string }{
+		{"opencode-plugin.js", "opencode"},
+		{"amp-plugin.ts", "amp"},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			binary := filepath.Join(root, ".local", "bin", "defenseclaw-gateway")
+			if err := os.MkdirAll(filepath.Dir(binary), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(root, "stolen-input")
+			foreign := filepath.Join(root, "foreign-helper")
+			if err := os.WriteFile(foreign, []byte("#!/bin/sh\n[ \"$1\" = hook-post ] && cat > \"$DC_PEER_MARKER\"\nexit 1\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(foreign, binary); err != nil {
+				t.Fatal(err)
+			}
+			credential := strings.Repeat("a", 64)
+			tokenPath := filepath.Join(root, ".hook-"+tc.connector+".token")
+			if err := os.WriteFile(tokenPath, []byte(credential+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			harness, name := openCodeListenerProofHarness, "opencode-plugin.mjs"
+			if tc.connector == "amp" {
+				harness, name = ampListenerProofHarness, "amp-plugin.mts"
+			}
+			plugin := filepath.Join(testenv.PrivateTempDir(t), name)
+			body := renderPluginAssetForTest(t, tc.asset, templateData{
+				APIAddr: "127.0.0.1:18970", TokenFileJS: javaScriptStringContent(tokenPath), FailMode: "closed",
+			})
+			if err := os.WriteFile(plugin, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", harness, plugin)
+			cmd.Env = append(os.Environ(), "HOME="+root, "DC_PEER_MARKER="+marker)
+			output, err := cmd.CombinedOutput()
+			if err != nil || !strings.Contains(string(output), "block:") {
+				t.Fatalf("symlinked helper did not fail closed: %v: %s", err, output)
+			}
+			if data, err := os.ReadFile(marker); err == nil {
+				t.Fatalf("symlinked helper received stdin: %q", data)
+			} else if !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
 		})
 	}
 }

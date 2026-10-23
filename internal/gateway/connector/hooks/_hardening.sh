@@ -173,6 +173,13 @@ defenseclaw_harden_env() {
   # process (curl, jq, the cold-started gateway), so drop inherited ones first.
   unset -v API_TOKEN PAYLOAD CONTENT TOOL_INPUT TOOL_OUTPUT INSPECT_BODY RESPONSE RESULT OUTPUT
 
+  # Only a rendered managed hook may select the managed socket transport.
+  # Per-user scripts clear the managed marker before sourcing this helper;
+  # an agent's inherited socket path must not bypass the API owner check.
+  if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" != "1" ]; then
+    unset DEFENSECLAW_HOOK_SOCKET DEFENSECLAW_HOOK_SOCKET_UID
+  fi
+
   # Per-hook ephemeral HOME so any tool that stores state under $HOME
   # (gh, gcloud, openssl rand state, etc.) writes to a sandbox the
   # hook tears down on exit. Fall back to the gateway data dir if
@@ -1254,25 +1261,23 @@ defenseclaw_own_gateway_stopped() {
   return 0
 }
 
-# defenseclaw_api_listener_foreign HOST:PORT returns 0 when this account's
-# per-user gateway is not running and the loopback listener on PORT belongs to
-# another account (GAP-1260). The hook then sends it no token or payload: an
-# account that holds this account's port, or its old port after a move, would
-# otherwise collect the connector's credential. A running gateway rendered the
-# current API_ADDR itself, so the check costs only the PID test then. Linux
-# reads the owner from /proc/net/tcp*; macOS lsof lists only this account's
-# sockets, so a listener it does not show that still accepts is another's.
-defenseclaw_api_listener_foreign() {
+# defenseclaw_api_listener_unproven HOST:PORT returns 0 for a foreign or
+# unknown listener, 1 for this account's listener, and 2 for a proven free
+# port. A stopped gateway, a stale PID record,
+# and unreadable socket tables must never send a token or hook payload to an
+# unverified endpoint. Linux reads /proc/net/tcp*; macOS lsof lists this
+# account's listeners. Managed hooks use their separate verified transport.
+defenseclaw_api_listener_unproven() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
-  defenseclaw_own_gateway_stopped || return 1
-  # The second argument (tests only) replaces /proc/net.
-  local port="${1##*:}" net="${2:-/proc/net}" uid="${EUID:-}" hex="" table="" owner=""
+  # The second and third arguments (tests only) replace /proc/net and lsof.
+  local port="${1##*:}" host="${1%:*}" net="${2:-/proc/net}" lsof="${3:-/usr/sbin/lsof}"
+  local uid="${EUID:-}" hex="" table="" owner="" own=""
   local _sl="" addr="" _rem="" st="" _q="" _t="" _r="" u="" _rest=""
-  case "$port" in ''|*[!0-9]*) return 1 ;; esac
-  [ -n "$uid" ] || return 1
+  case "$port" in ''|*[!0-9]*) return 0 ;; esac
+  [ -n "$uid" ] || return 0
   if [ -r "${net}/tcp" ]; then
     hex="$(printf '%04X' "$port")"
     for table in "${net}/tcp" "${net}/tcp6"; do
@@ -1284,18 +1289,24 @@ defenseclaw_api_listener_foreign() {
           ??????7F:"$hex"|00000000:"$hex"|00000000000000000000000000000000:"$hex"|00000000000000000000000001000000:"$hex"|0000000000000000FFFF0000??????7F:"$hex") ;;
           *) continue ;;
         esac
-        [ "$u" = "$uid" ] && return 1
-        owner="$u"
+        if [ "$u" = "$uid" ]; then own=1; else owner="$u"; fi
       done < "$table"
     done
-    [ -n "$owner" ]
-    return
+    [ -n "$owner" ] && return 0
+    [ -n "$own" ] && return 1
+    # No listener: the caller may cold-start this account's gateway, then
+    # retry ownership proof before it sends. Never send on this status.
+    return 2
   fi
-  if [ -x /usr/sbin/lsof ]; then
-    /usr/sbin/lsof -nP -a -u "$uid" -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1 && return 1
+  if [ -x "$lsof" ]; then
+    # A socket this account owns on another address is not proof for the
+    # configured destination. Require the exact local address in lsof.
+    case "$host" in 127.*) ;; *) return 0 ;; esac
+    "$lsof" -nP -a -u "$uid" -iTCP@"$host":"$port" -sTCP:LISTEN -t >/dev/null 2>&1 && return 1
     (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null && return 0
+    return 2
   fi
-  return 1
+  return 0
 }
 
 defenseclaw_response_failure_reason() {
@@ -2152,7 +2163,8 @@ defenseclaw_payload_tool_gate_max_time() {
 # POSTs BODY to the gateway at URL and prints "<response body>\n<http code>"
 # (curl -w), returning curl's exit status so the caller can tell a refused
 # connection (7) from other failures. Every host hook request to the gateway
-# goes through here.
+# goes through here. A per-user request uses the native helper, which verifies
+# the owner of the same connected socket that carries the bearer and event.
 #
 # Neither the bearer nor the body ever reaches curl's command line: any local
 # account can read a process's arguments (ps, /proc/<pid>/cmdline), and exec
@@ -2171,8 +2183,27 @@ defenseclaw_payload_tool_gate_max_time() {
 # into a transport failure. Bash 3.2 compatible.
 defenseclaw_gateway_post() {
   local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
-  local _dc_post_auth="" _dc_post_arg
+  local _dc_post_auth="" _dc_post_arg _dc_listener_status=0
+  local _dc_native_post=0 _dc_post_bin _dc_post_prefix _dc_post_path
+  local _dc_post_headers="" _dc_post_sep="" _dc_header_name _dc_header_value _dc_post_output
   local -a _dc_post_args _dc_post_auth_args
+  # This probe still distinguishes a free port for cold start. The native
+  # helper proves the actual connection again before it sends any data.
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) ;;
+    *)
+      if [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ]; then
+        [ -n "${API_ADDR:-}" ] || return 1
+        case "$_dc_post_url" in "http://""${API_ADDR}/"*) ;; *) return 1 ;; esac
+        defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?
+        case "$_dc_listener_status" in
+          1) _dc_native_post=1 ;; # This account owns the listener now.
+          2) return 7 ;; # No listener: let the existing cold-start retry run.
+          *) return 1 ;; # Foreign or unknown owner: fail closed.
+        esac
+      fi
+      ;;
+  esac
   shift 3
   _dc_post_args=()
   _dc_post_auth_args=()
@@ -2197,6 +2228,56 @@ defenseclaw_gateway_post() {
   case "$_dc_post_auth" in
     *$'\n'*|*$'\r'*) return 1 ;;
   esac
+  if [ "$_dc_native_post" -eq 1 ]; then
+    _dc_post_bin="${HOME}/.local/bin/defenseclaw-gateway"
+    # This binary receives the bearer on stdin. A stale PID record, PATH
+    # entry, writable path, or symlink cannot select a different executable.
+    local _dc_secure_path _dc_secure_mode
+    for _dc_secure_path in "$HOME" "$HOME/.local" "$HOME/.local/bin"; do
+      [ -d "$_dc_secure_path" ] && [ -O "$_dc_secure_path" ] && [ ! -L "$_dc_secure_path" ] || return 1
+      _dc_secure_mode="$(stat -c %a "$_dc_secure_path" 2>/dev/null || stat -f %Lp "$_dc_secure_path" 2>/dev/null)" || return 1
+      [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
+    done
+    [ -f "$_dc_post_bin" ] && [ -x "$_dc_post_bin" ] && [ -O "$_dc_post_bin" ] && [ ! -L "$_dc_post_bin" ] || return 1
+    _dc_secure_mode="$(stat -c %a "$_dc_post_bin" 2>/dev/null || stat -f %Lp "$_dc_post_bin" 2>/dev/null)" || return 1
+    [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
+    _dc_post_prefix="http://${API_ADDR}"
+    _dc_post_path="${_dc_post_url:${#_dc_post_prefix}}"
+    set -- "${_dc_post_args[@]+"${_dc_post_args[@]}"}"
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -H|--header) [ "$#" -ge 2 ] || return 1; shift ;;
+        *) return 1 ;;
+      esac
+      _dc_post_arg="$1"
+      shift
+      case "$_dc_post_arg" in *:*) ;; *) return 1 ;; esac
+      _dc_header_name="${_dc_post_arg%%:*}"
+      _dc_header_value="${_dc_post_arg#*:}"
+      _dc_header_value="${_dc_header_value# }"
+      case "$_dc_header_name" in ""|*[!A-Za-z0-9-]*) return 1 ;; esac
+      case "$_dc_header_value" in *$'\n'*|*$'\r'*) return 1 ;; esac
+      _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"$(defenseclaw_json_escape "$_dc_header_name")\":\"$(defenseclaw_json_escape "$_dc_header_value")\""
+      _dc_post_sep=,
+    done
+    if [ -n "$_dc_post_auth" ]; then
+      _dc_header_value="${_dc_post_auth#*:}"
+      _dc_header_value="${_dc_header_value# }"
+      _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"Authorization\":\"$(defenseclaw_json_escape "$_dc_header_value")\""
+    fi
+    _dc_post_output="$(
+      printf '{"path":"%s","headers":{%s},"body":"%s"}' \
+        "$(defenseclaw_json_escape "$_dc_post_path")" "$_dc_post_headers" "$(defenseclaw_json_escape "$_dc_post_body")" |
+        "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_max_time" --curl-output 2>/dev/null
+    )" || {
+      _dc_listener_status=0
+      defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?
+      [ "$_dc_listener_status" -eq 2 ] && return 7
+      return 1
+    }
+    printf '%s' "$_dc_post_output"
+    return 0
+  fi
   if [ -n "$_dc_post_auth" ]; then
     # The two characters a quoted curl config value escapes.
     _dc_post_auth="${_dc_post_auth//\\/\\\\}"

@@ -5,6 +5,7 @@ package connector
 
 import (
 	"bytes"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,9 +28,15 @@ func TestCodexHookKeepsCredentialsAndPayloadOutOfCurlArgv(t *testing.T) {
 	)
 
 	hooksDir := t.TempDir()
+	apiAddr := freeAPIAddr(t)
+	listener, err := net.Listen("tcp", apiAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
 	if err := WriteHookScriptsForConnectorObject(
 		hooksDir,
-		freeAPIAddr(t),
+		apiAddr,
 		scopedToken,
 		NewCodexConnector(),
 	); err != nil {

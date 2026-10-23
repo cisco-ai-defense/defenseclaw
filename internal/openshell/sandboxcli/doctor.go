@@ -108,7 +108,7 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	if a.Cfg != nil || managed {
 		st = a.probeDaemon(ctx, managed)
 		for i := range d.Ports {
-			// The running daemon holds its own listeners.
+			// An advertised address is not proof that this daemon bound it.
 			d.Ports[i].ServedByDaemon = st.listening
 		}
 		// The uid the daemon reports (an older one reports none, and the
@@ -475,7 +475,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			// starts it, installing OpenShell first in setup mode. Nothing
 			// failed (GAP-0439, GAP-0441). Another account's sandboxes
 			// holding the port are the busy row below (GAP-0461).
-			p.listening = st.IngressAddr != ""
+			p.listening = st.Available
 			if st.DockerGroupMissing {
 				// Nothing has failed yet, but the first run's image build will
 				// (GAP-0556): the daemon cannot reach Docker.
@@ -484,7 +484,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			}
 			c.Status, c.Detail = openshell.StatusPass, "running; "+a.managedFirstRunText(st.Managed)
 		case !st.Available:
-			p.listening, p.unavailable = st.IngressAddr != "", true
+			p.listening, p.unavailable = false, true
 			c.Status, c.Detail = openshell.StatusFail, "running, but sandboxes are unavailable: "+sandboxapi.DisplayText(firstNonEmpty(st.Reason, "not connected to OpenShell"))
 			switch {
 			case st.Managed != nil && st.GatewayElsewhere != "":

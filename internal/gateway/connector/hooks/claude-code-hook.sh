@@ -312,8 +312,8 @@ RESOLVED_HEADER_ARGS=()
 if [ -n "${_DC_RESOLVED_WRITES}" ]; then
   RESOLVED_HEADER_ARGS=(-H "X-DefenseClaw-Resolved-Writes: ${_DC_RESOLVED_WRITES}")
 fi
-{{end}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
-  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+{{end}}if defenseclaw_api_listener_unproven "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Run \`defenseclaw-gateway start\` for the fix"
 fi
 # A refused or dropped connection means this account's gateway is
 # restarting or not running (after a reboot, for example): send the call

@@ -69,9 +69,10 @@ func TestHookProfileMatrix(t *testing.T) {
 
 	reg := NewDefaultRegistry()
 	opts := SetupOpts{
-		APIAddr:  "127.0.0.1:18970",
-		APIToken: "tok-test",
-		DataDir:  t.TempDir(),
+		APIAddr:           "127.0.0.1:18970",
+		APIToken:          "tok-test",
+		DataDir:           t.TempDir(),
+		ManagedEnterprise: true,
 	}
 
 	for _, tc := range cases {

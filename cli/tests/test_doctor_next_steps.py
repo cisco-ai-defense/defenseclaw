@@ -18,7 +18,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import io
 import json
 import os
@@ -942,9 +941,12 @@ def test_unattributed_otlp_credentials_name_window_and_age() -> None:
 
     recent = row("2026-10-03T06:10:00Z")
     assert "last 12 min ago" in recent["detail"]
-    assert "defenseclaw setup <connector>" in recent["remediation"]
-    # GAP-0313: setup cannot change a running agent, such as Codex's
-    # background app-server that still sends the token it started with.
+    # A rejected route can be a peer's probe; it cannot identify a broken
+    # exporter or justify rewriting verified agent configuration (GAP-0803).
+    assert "defenseclaw setup <connector>" not in recent["remediation"]
+    assert "does not prove" in recent["remediation"]
+    # A genuinely stale agent still needs a restart, including Codex's
+    # background app-server that outlives its sessions (GAP-0313).
     assert "keeps sending the old token until it restarts" in recent["remediation"]
     assert "codex app-server daemon restart" in recent["remediation"]
 

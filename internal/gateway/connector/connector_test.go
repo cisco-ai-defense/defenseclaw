@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,6 +45,13 @@ import (
 )
 
 var testStderrMu sync.Mutex
+
+// Render historical native settings for restoration fixtures without making
+// a per-user host setup eligible to write them again.
+func renderManagedCodexOtelBlockForTest(opts SetupOpts, token string) (map[string]interface{}, error) {
+	opts.ManagedEnterprise = true
+	return buildCodexOtelBlockWithPathToken(opts, token)
+}
 
 // --- Helper tests ---
 
@@ -800,7 +808,7 @@ func TestClaudeCode_ComponentAndWatchTargetsIncludeEffectiveAutoMemory(t *testin
 }
 
 func TestClaudeCode_ContentTelemetryGatesAreExplicitlyOffAndManaged(t *testing.T) {
-	spec := NewClaudeCodeConnector().HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970"}).NativeOTLP
+	spec := NewClaudeCodeConnector().HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970", ManagedEnterprise: true}).NativeOTLP
 	if spec == nil {
 		t.Fatal("Claude Code native OTLP specification is missing")
 	}
@@ -4297,10 +4305,11 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 
 	c := NewCodexConnector()
 	opts := SetupOpts{
-		DataDir:   dir,
-		ProxyAddr: "127.0.0.1:4000",
-		APIAddr:   "127.0.0.1:18970",
-		APIToken:  "test-token-codex-otel",
+		DataDir:           dir,
+		ProxyAddr:         "127.0.0.1:4000",
+		APIAddr:           "127.0.0.1:18970",
+		APIToken:          "test-token-codex-otel",
+		ManagedEnterprise: true,
 	}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
@@ -4423,10 +4432,11 @@ log_user_prompt = false
 
 	c := NewCodexConnector()
 	opts := SetupOpts{
-		DataDir:   dir,
-		ProxyAddr: "127.0.0.1:4000",
-		APIAddr:   "127.0.0.1:18970",
-		APIToken:  "test-token-codex-raw",
+		DataDir:           dir,
+		ProxyAddr:         "127.0.0.1:4000",
+		APIAddr:           "127.0.0.1:18970",
+		APIToken:          "test-token-codex-raw",
+		ManagedEnterprise: true,
 	}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
@@ -5670,7 +5680,7 @@ func TestCodexExactRestoreSanitizesStaleManagedTelemetry(t *testing.T) {
 	}
 
 	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
-	otel, err := buildCodexOtelBlockWithPathToken(opts, strings.Repeat("a", 64))
+	otel, err := renderManagedCodexOtelBlockForTest(opts, strings.Repeat("a", 64))
 	if err != nil {
 		t.Fatalf("build stale managed Codex OTel block: %v", err)
 	}
@@ -5800,7 +5810,7 @@ func TestCodexSurgicalRestoreRejectsStaleManagedTelemetryBackup(t *testing.T) {
 		setHookBinaryOverride(t, filepath.Join(dir, "DefenseClaw", windowsHookBinaryName))
 	}
 	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
-	currentOtel, err := buildCodexOtelBlockWithPathToken(opts, strings.Repeat("b", 64))
+	currentOtel, err := renderManagedCodexOtelBlockForTest(opts, strings.Repeat("b", 64))
 	if err != nil {
 		t.Fatalf("build managed Codex OTel block: %v", err)
 	}
@@ -5852,7 +5862,7 @@ func TestCodexSurgicalRestorePreservesOperatorTelemetryBackup(t *testing.T) {
 		CodexOtelEnvironment: "windows",
 		APIAddr:              "127.0.0.1:18970",
 	}
-	managedOtel, err := buildCodexOtelBlockWithPathToken(opts, strings.Repeat("c", 64))
+	managedOtel, err := renderManagedCodexOtelBlockForTest(opts, strings.Repeat("c", 64))
 	if err != nil {
 		t.Fatalf("build managed Codex OTel block: %v", err)
 	}
@@ -5902,7 +5912,7 @@ func TestCodexSurgicalRestorePreservesOperatorTelemetryBackup(t *testing.T) {
 
 func TestCodexSurgicalRestorePreservesEditedTelemetryEnvironment(t *testing.T) {
 	opts := SetupOpts{CodexOtelEnvironment: "windows", APIAddr: "127.0.0.1:18970"}
-	managedOtel, err := buildCodexOtelBlockWithPathToken(opts, strings.Repeat("d", 64))
+	managedOtel, err := renderManagedCodexOtelBlockForTest(opts, strings.Repeat("d", 64))
 	if err != nil {
 		t.Fatalf("build managed Codex OTel block: %v", err)
 	}
@@ -5929,7 +5939,7 @@ func TestCodex_TeardownKeepsScopedOTLPTokenWhenConfigCleanupFails(t *testing.T) 
 	defer func() { CodexConfigPathOverride = "" }()
 
 	conn := NewCodexConnector()
-	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-token"}
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-token", ManagedEnterprise: true}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -5965,8 +5975,8 @@ func TestCodex_VerifyCleanDetectsConfigResidue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint Codex OTLP token: %v", err)
 	}
-	otelBlock, err := buildCodexOtelBlockWithPathToken(
-		SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test"},
+	otelBlock, err := renderManagedCodexOtelBlockForTest(
+		SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", ManagedEnterprise: true},
 		pathToken,
 	)
 	if err != nil {
@@ -6289,7 +6299,7 @@ func TestRestoreOwnedCodexConfigFromTOMLCleansStaleManagedSnapshot(t *testing.T)
 		APIAddr:       "127.0.0.1:43189",
 		OTLPPathToken: strings.Repeat("a", 48),
 	}
-	otel, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
+	otel, err := renderManagedCodexOtelBlockForTest(opts, opts.OTLPPathToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6354,7 +6364,7 @@ func TestRestoreOwnedCodexConfigFromTOMLRejectsContaminatedLegacyOriginals(t *te
 		APIAddr:       "127.0.0.1:43189",
 		OTLPPathToken: strings.Repeat("b", 48),
 	}
-	managedOtel, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
+	managedOtel, err := renderManagedCodexOtelBlockForTest(opts, opts.OTLPPathToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6473,7 +6483,7 @@ func TestRestoreOwnedCodexConfigFromTOMLRejectsDriftedMarkerResidueInLegacyOrigi
 		APIAddr:       "127.0.0.1:43189",
 		OTLPPathToken: strings.Repeat("c", 48),
 	}
-	managedOtel, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
+	managedOtel, err := renderManagedCodexOtelBlockForTest(opts, opts.OTLPPathToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7387,6 +7397,31 @@ func runHookAndCaptureCurlTransport(t *testing.T, scriptPath string, extraEnv ma
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell-hook runtime is covered by native defenseclaw-hook.exe tests on Windows")
 	}
+	// The curl stub captures bytes without making a connection. Bind the
+	// rendered gateway address here so the hook's independent listener proof
+	// still sees a same-account destination before it invokes the stub.
+	script, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiAddr := ""
+	for _, line := range strings.Split(string(script), "\n") {
+		if raw, ok := strings.CutPrefix(line, "API_ADDR="); ok {
+			apiAddr, err = strconv.Unquote(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	if apiAddr == "" {
+		t.Fatal("rendered hook has no API_ADDR")
+	}
+	listener, err := net.Listen("tcp", apiAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
 	stubDir := t.TempDir()
 	argFile := filepath.Join(stubDir, "curl-args.txt")
 	headerFile := filepath.Join(stubDir, "curl-headers.txt")
@@ -8242,10 +8277,11 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 
 	c := NewClaudeCodeConnector()
 	opts := SetupOpts{
-		DataDir:   dir,
-		ProxyAddr: "127.0.0.1:4000",
-		APIAddr:   "127.0.0.1:18970",
-		APIToken:  "test-token-claude-otel",
+		DataDir:           dir,
+		ProxyAddr:         "127.0.0.1:4000",
+		APIAddr:           "127.0.0.1:18970",
+		APIToken:          "test-token-claude-otel",
+		ManagedEnterprise: true,
 	}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
@@ -8267,8 +8303,8 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
 		t.Errorf("CLAUDE_CODE_ENABLE_TELEMETRY = %v, want \"1\"", env["CLAUDE_CODE_ENABLE_TELEMETRY"])
 	}
-	if env["DEFENSECLAW_FAIL_MODE"] != "open" {
-		t.Errorf("DEFENSECLAW_FAIL_MODE = %v, want \"open\" for observability-only installs", env["DEFENSECLAW_FAIL_MODE"])
+	if env["DEFENSECLAW_FAIL_MODE"] != "closed" {
+		t.Errorf("DEFENSECLAW_FAIL_MODE = %v, want \"closed\" by default", env["DEFENSECLAW_FAIL_MODE"])
 	}
 	if env["OTEL_LOGS_EXPORTER"] != "otlp" {
 		t.Errorf("OTEL_LOGS_EXPORTER = %v, want \"otlp\"", env["OTEL_LOGS_EXPORTER"])
@@ -8305,9 +8341,8 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if !strings.Contains(headers, "x-defenseclaw-source=claudecode") {
 		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing source attribution; got %q", headers)
 	}
-	// Windows writes the bearer as a literal header; a per-user Linux or
-	// macOS install gets it from the otelHeadersHelper (GAP-1421).
-	staticBearer := runtime.GOOS == "windows"
+	// Managed installs keep the static scoped bearer on every platform.
+	staticBearer := true
 	if slices.Contains(splitOTelHeader(headers), "authorization=Bearer "+scoped) != staticBearer {
 		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS Authorization (static %v) got %q", staticBearer, headers)
 	}
@@ -8379,9 +8414,10 @@ func TestApplyClaudeCodeManagedOtelEnvMigratesPercentEncodedNativeOTLPBearer(t *
 		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL":  "http/json",
 	}
 	opts := SetupOpts{
-		DataDir:       dir,
-		APIAddr:       "127.0.0.1:18970",
-		OTLPPathToken: scopedToken,
+		DataDir:           dir,
+		APIAddr:           "127.0.0.1:18970",
+		OTLPPathToken:     scopedToken,
+		ManagedEnterprise: true,
 		// The static bearer contract (Windows and managed installs).
 		GOOS: "windows",
 	}
@@ -8578,11 +8614,12 @@ func TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv(t *
 	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
 
 	oldOpts := SetupOpts{
-		DataDir:       dir,
-		ProxyAddr:     "127.0.0.1:4000",
-		APIAddr:       "127.0.0.1:18970",
-		APIToken:      "old-api-token",
-		OTLPPathToken: strings.Repeat("a", 64),
+		DataDir:           dir,
+		ProxyAddr:         "127.0.0.1:4000",
+		APIAddr:           "127.0.0.1:18970",
+		APIToken:          "old-api-token",
+		OTLPPathToken:     strings.Repeat("a", 64),
+		ManagedEnterprise: true,
 	}
 	oldManaged := buildClaudeCodeOtelEnv(oldOpts)
 	oldDefenseClawHeaders := "x-defenseclaw-client=claudecode-otel%2F0.9," +
@@ -8612,6 +8649,7 @@ func TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv(t *
 	// its restore metadata: the new Setup captures the old DefenseClaw env as
 	// pristine, then writes a new connector-scoped endpoint over it.
 	newOpts := oldOpts
+	newOpts.ManagedEnterprise = false
 	newOpts.APIToken = "new-api-token"
 	newOpts.OTLPPathToken = strings.Repeat("b", 64)
 	c := NewClaudeCodeConnector()
@@ -8788,6 +8826,7 @@ func TestClaudeCode_TeardownWithoutBackup_RemovesManagedHooksAndOtel(t *testing.
 	env := settings["env"].(map[string]interface{})
 	staleOpts := opts
 	staleOpts.OTLPPathToken = strings.Repeat("b", 64)
+	staleOpts.ManagedEnterprise = true
 	staleEnv := buildClaudeCodeOtelEnv(staleOpts)
 	for _, key := range []string{
 		"OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -8851,7 +8890,9 @@ func TestClaudeCode_VerifyCleanChecksManagedEnvWithoutHooks(t *testing.T) {
 		APIAddr:       "127.0.0.1:18970",
 		OTLPPathToken: "verify-clean-token",
 	}
-	managed := buildClaudeCodeOtelEnv(opts)
+	managedOpts := opts
+	managedOpts.ManagedEnterprise = true
+	managed := buildClaudeCodeOtelEnv(managedOpts)
 	settings := map[string]interface{}{
 		"env": map[string]interface{}{
 			"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": managed["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"],
@@ -9008,10 +9049,10 @@ func TestClaudeCode_Setup_PreservesNonOtelEnvKeys(t *testing.T) {
 	if env["PATH"] != "/custom/bin:/usr/bin" {
 		t.Errorf("PATH clobbered: got %v, want pristine value", env["PATH"])
 	}
-	if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
+	if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "0" {
 		t.Errorf("OTel keys not merged in alongside operator keys (got CLAUDE_CODE_ENABLE_TELEMETRY=%v)", env["CLAUDE_CODE_ENABLE_TELEMETRY"])
 	}
-	if env["DEFENSECLAW_FAIL_MODE"] != "open" {
+	if env["DEFENSECLAW_FAIL_MODE"] != "closed" {
 		t.Errorf("DEFENSECLAW_FAIL_MODE not merged: got %v", env["DEFENSECLAW_FAIL_MODE"])
 	}
 }
@@ -9151,10 +9192,11 @@ func TestClaudeCode_Teardown_PreservesManagedEnvChangedAfterSetup(t *testing.T) 
 
 	c := NewClaudeCodeConnector()
 	opts := SetupOpts{
-		DataDir:   dir,
-		ProxyAddr: "127.0.0.1:4000",
-		APIAddr:   "127.0.0.1:18970",
-		APIToken:  "test-token",
+		DataDir:           dir,
+		ProxyAddr:         "127.0.0.1:4000",
+		APIAddr:           "127.0.0.1:18970",
+		APIToken:          "test-token",
+		ManagedEnterprise: true,
 	}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
@@ -9177,6 +9219,9 @@ func TestClaudeCode_Teardown_PreservesManagedEnvChangedAfterSetup(t *testing.T) 
 	// keys whose current value is still the exact value DefenseClaw wrote.
 	operatorValues := map[string]string{}
 	for _, key := range claudeCodeOtelEnvKeys {
+		if key == "CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS" {
+			continue // obsolete per-user helper is removed during setup
+		}
 		if _, present := env[key]; !present {
 			t.Fatalf("Setup did not write managed env %s: %v", key, env)
 		}
@@ -9364,14 +9409,15 @@ func TestClaudeCode_VerifyCleanChecksEveryManagedEnvKeyWithoutValidHooks(t *test
 	ClaudeCodeSettingsPathOverride = settingsPath
 	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
 	opts := SetupOpts{
-		DataDir:       dir,
-		APIAddr:       "127.0.0.1:18970",
-		OTLPPathToken: strings.Repeat("a", 64),
-		HookFailMode:  "closed",
+		DataDir:           dir,
+		APIAddr:           "127.0.0.1:18970",
+		OTLPPathToken:     strings.Repeat("a", 64),
+		HookFailMode:      "closed",
+		ManagedEnterprise: true,
 	}
 	managed := buildClaudeCodeOtelEnv(opts)
-	if len(managed) != len(claudeCodeOtelEnvKeys) {
-		t.Fatalf("managed env has %d keys, canonical ownership list has %d: %v", len(managed), len(claudeCodeOtelEnvKeys), managed)
+	if len(managed) != len(claudeCodeOtelEnvKeys)-1 {
+		t.Fatalf("managed env has %d keys, want all current keys but the obsolete helper debounce: %v", len(managed), managed)
 	}
 	if err := NewClaudeCodeConnector().saveBackup(dir, claudeCodeBackup{
 		EnvBackupCaptured: true,
@@ -10335,6 +10381,13 @@ func TestCodexHookScriptBindsEventWithoutJQOrPython(t *testing.T) {
 		APIToken:     "scoped-token",
 		HookFailMode: "closed",
 	}
+	// The curl stub does not open TCP, but a per-user hook now requires proof
+	// that this account owns its configured gateway listener before invoking it.
+	listener, err := net.Listen("tcp", opts.APIAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
 	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
@@ -11233,9 +11286,6 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		cursorScripts = append(cursorScripts, "cursor-hook.ps1")
 	}
 	claudeScripts := withVendor("claude-code-hook.sh")
-	if runtime.GOOS != "windows" {
-		claudeScripts = append(claudeScripts, claudeCodeOTLPHeadersHelperScript)
-	}
 	copilotScripts := withVendor("copilot-hook.sh")
 	if runtime.GOOS == "windows" {
 		copilotScripts = append(copilotScripts, "copilot-hook.ps1")
@@ -11577,9 +11627,6 @@ func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
 //   - zeptoclaw  owns no vendor template (config-only)
 func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 	claudeHooks := []string{"claude-code-hook.sh"}
-	if runtime.GOOS != "windows" {
-		claudeHooks = append(claudeHooks, claudeCodeOTLPHeadersHelperScript)
-	}
 	cursorHooks := []string{"cursor-hook.sh"}
 	copilotHooks := []string{"copilot-hook.sh"}
 	if runtime.GOOS == "windows" {

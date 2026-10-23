@@ -7,6 +7,7 @@ package connector
 
 import (
 	"bytes"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -161,8 +162,13 @@ type stopHookRun struct {
 // reply, with automatic gateway start off.
 func runPerUserHookForStop(t *testing.T, c Connector, script string, args []string, stdin, reply string, extraEnv ...string) stopHookRun {
 	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
 	hooksDir := t.TempDir()
-	if err := writePerUserHooksForTestFailMode(hooksDir, freeAPIAddr(t), "stop-scoped-token", c, extraEnv); err != nil {
+	if err := writePerUserHooksForTestFailMode(hooksDir, listener.Addr().String(), "stop-scoped-token", c, extraEnv); err != nil {
 		t.Fatalf("write hooks: %v", err)
 	}
 	stubDir := t.TempDir()
@@ -196,7 +202,7 @@ func runPerUserHookForStop(t *testing.T, c Connector, script string, args []stri
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err := cmd.Run()
+	err = cmd.Run()
 	log, _ := os.ReadFile(filepath.Join(dataDir, "logs", "hook-failures.jsonl"))
 	return stopHookRun{code: exitCodeOf(err), stdout: stdout.String(), stderr: stderr.String(), log: string(log)}
 }

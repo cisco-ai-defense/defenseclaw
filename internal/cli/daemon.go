@@ -331,7 +331,10 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		}
 	}
 	var cfgErr error
-	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
+	client, err := gatewayPeerClientForURL(cfg, sidecarStatusURL(cfg), defaultReadinessHTTPTimeout)
+	if err != nil {
+		return fmt.Errorf("gateway start listener: %w", err)
+	}
 
 	alreadyRunning, pid, err := inspectConfiguredListener(d, cfg, client)
 	if err != nil {
@@ -573,7 +576,10 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		if cfgErr != nil {
 			return fmt.Errorf("rotation stop requires valid configuration: %w", cfgErr)
 		}
-		client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
+		client, clientErr := gatewayPeerClientForURL(cfg, sidecarStatusURL(cfg), defaultReadinessHTTPTimeout)
+		if clientErr != nil {
+			return fmt.Errorf("rotation stop listener: %w", clientErr)
+		}
 		running, pid, err = inspectRotationStopTarget(
 			d,
 			cfg,
@@ -798,7 +804,10 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	var cfgErr error
-	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
+	client, err := gatewayPeerClientForURL(cfg, sidecarStatusURL(cfg), defaultReadinessHTTPTimeout)
+	if err != nil {
+		return fmt.Errorf("gateway restart listener: %w", err)
+	}
 
 	running, pid, err := inspectRestartTarget(d, cfg, client)
 	if err != nil {
@@ -886,18 +895,25 @@ type gracefulGatewayStopper interface {
 }
 
 func stopGatewayGracefully(d gracefulGatewayStopper, cfg *config.Config, timeout time.Duration) error {
-	client := &http.Client{Timeout: gracefulShutdownHTTPTimeout}
+	client, err := gatewayPeerClientForURL(cfg, sidecarStatusURL(cfg), gracefulShutdownHTTPTimeout)
+	if err != nil {
+		return fmt.Errorf("gateway shutdown listener: %w", err)
+	}
 	return d.StopGracefully(timeout, func(pid int) error {
 		return requestGatewayShutdown(client, cfg, daemonGatewayToken(cfg), pid)
 	})
 }
 
 func requestGatewayShutdown(client *http.Client, cfg *config.Config, token string, pid int) error {
-	if client == nil {
-		client = &http.Client{Timeout: gracefulShutdownHTTPTimeout}
-	}
 	if cfg == nil {
 		return errors.New("gateway shutdown configuration is unavailable")
+	}
+	if client == nil {
+		var err error
+		client, err = gatewayPeerClientForURL(cfg, sidecarStatusURL(cfg), gracefulShutdownHTTPTimeout)
+		if err != nil {
+			return fmt.Errorf("gateway shutdown listener: %w", err)
+		}
 	}
 	if strings.TrimSpace(token) == "" {
 		return errors.New("gateway shutdown token is unavailable")
@@ -1564,13 +1580,19 @@ const (
 // before start or restart act on it. It allows a loaded host's gateway
 // longer than a readiness poll and retries only timeouts.
 func fetchListenerIdentityStatus(client *http.Client, addr, token string) (gatewayStatusEnvelope, error) {
-	probe := &http.Client{Timeout: listenerIdentityHTTPTimeout}
+	var probe *http.Client
 	if client != nil {
 		copied := *client
 		if copied.Timeout > 0 && copied.Timeout < listenerIdentityHTTPTimeout {
 			copied.Timeout = listenerIdentityHTTPTimeout
 		}
 		probe = &copied
+	} else {
+		var err error
+		probe, err = gatewayPeerClientForURL(cfg, addr, listenerIdentityHTTPTimeout)
+		if err != nil {
+			return gatewayStatusEnvelope{}, err
+		}
 	}
 	var status gatewayStatusEnvelope
 	var err error
@@ -1681,7 +1703,10 @@ func fetchSidecarStatus(client *http.Client, addr, token string) (gatewayStatusE
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-DefenseClaw-Token", token)
 	if client == nil {
-		client = &http.Client{Timeout: defaultReadinessHTTPTimeout}
+		client, err = gatewayPeerClientForURL(cfg, addr, defaultReadinessHTTPTimeout)
+		if err != nil {
+			return status, err
+		}
 	}
 	requestClient := *client
 	requestClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {

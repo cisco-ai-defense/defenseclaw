@@ -1965,6 +1965,15 @@ def _status_payload(app) -> dict:
         payload["sidecar"] = {"running": None, "reason": "not checked while config.yaml is invalid"}
     else:
         payload["sidecar"] = {"running": health is not None}
+        if health is None:
+            try:
+                from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder
+
+                holder = _foreign_gateway_port_holder(cfg)
+                if holder:
+                    payload["sidecar"]["reason"] = f"port {cfg.gateway.api_port} is held by {holder}"
+            except Exception:  # noqa: BLE001 - status remains useful if holder inspection fails.
+                pass
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)

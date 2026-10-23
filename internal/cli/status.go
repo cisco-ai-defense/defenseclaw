@@ -241,11 +241,15 @@ func runSidecarStatusJSON(w io.Writer) error {
 	addr := sidecarHealthURL(cfg)
 	doc := gatewayStatusDocument{Endpoint: addr}
 	var failure error
+	client, clientErr := gatewayPeerClientForURL(cfg, addr, 5*time.Second)
 	if problem := foreignGatewayListener(cfg); problem != "" {
 		doc.Error = problem
 		doc.Hint = foreignGatewayListenerFix(cfg)
 		failure = errors.New("the gateway port is held by another process")
-	} else if snap, err := fetchSidecarHealth(&http.Client{Timeout: 5 * time.Second}, addr); err != nil {
+	} else if clientErr != nil {
+		doc.Error = clientErr.Error()
+		failure = clientErr
+	} else if snap, err := fetchSidecarHealth(client, addr); err != nil {
 		doc.Error = err.Error()
 		doc.Hint = sidecarNotRunningHint(cfg)
 		failure = errors.New("sidecar unreachable")
@@ -439,9 +443,20 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("the gateway port is held by another process")
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client, clientErr := gatewayPeerClientForURL(cfg, addr, 5*time.Second)
+	if clientErr != nil {
+		return fmt.Errorf("sidecar status: %w", clientErr)
+	}
 	snap, err := fetchSidecarHealth(client, addr)
 	if err != nil {
+		if problem := foreignGatewayListener(cfg); problem != "" {
+			fmt.Println()
+			Warn("Sidecar Status: NOT THIS ACCOUNT'S GATEWAY")
+			printGatewayKV("Endpoint", addr)
+			Subhead(problem + ". Its status is not shown.")
+			Subhead(foreignGatewayListenerFix(cfg))
+			return fmt.Errorf("the gateway port is held by another process")
+		}
 		var requestErr *url.Error
 		if errors.As(err, &requestErr) {
 			if running, pid := gatewayManagedState(); running && cfg != nil && !cfg.StandaloneEnterprise() {
