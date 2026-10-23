@@ -175,7 +175,7 @@ func TestReconcileWindowsCodexRequirementsReplacesTheOneZeroHookSet(t *testing.T
 			t.Fatalf("hooks.%s has %d groups, want %d", expected.eventType, len(groups), want)
 		}
 		for _, group := range groups {
-			if windowsCodexOwnedHookGroup(group, opts.HookBinary) {
+			if windowsCodexOwnedHookGroup(group, expected.eventType, opts.HookBinary) {
 				commands++
 			}
 		}

@@ -55,39 +55,64 @@ func windowsCodexAdministratorLookalikes(t *testing.T, opts WindowsCodexMachineR
 	}
 }
 
-// Ownership of a Windows Codex machine group is a command DefenseClaw
-// renders, byte for byte: every release form for every event and hook
-// contract is DefenseClaw's, and no administrator script that only names the
-// launcher or the managed flags is.
+// Ownership of a Windows Codex machine group is a group DefenseClaw renders
+// around a command DefenseClaw renders, byte for byte: every group any
+// release writes (standalone on every hook contract, Secure Client, the
+// unbound command, the 1.0.0 form) is DefenseClaw's under its event, and no
+// administrator script that only names the launcher or the managed flags is.
 func TestWindowsCodexOwnedHookCommandIsOnlyARenderedCommand(t *testing.T) {
 	opts := testWindowsCodexMachineOptions()
 	contracts := KnownHookContracts("codex")
 	opts.HookContractID = contracts[len(contracts)-1].ContractID
-	owned := []string{windowsCodexManagedHookCommand(opts.HookBinary)}
-	for _, contract := range contracts {
-		for _, group := range windowsCodexMachineRemovableGroups(opts) {
-			owned = append(owned,
-				windowsCodexBoundManagedHookCommand(opts.HookBinary, group.eventType, contract.ContractID),
-				legacyStartProcessWindowsCodexBoundManagedHookCommand(opts.HookBinary, group.eventType, contract.ContractID),
-			)
-		}
+	type rendered struct {
+		name string
+		opts WindowsCodexMachineRequirementsOptions
+		form func(event, contract string) string
 	}
-	for _, command := range owned {
-		if !windowsCodexOwnedHookCommand(command, opts.HookBinary) {
-			t.Errorf("a DefenseClaw command is not recognized: %s", windowsCodexTestScript(t, command))
+	forms := []rendered{{name: "unbound", opts: testWindowsCodexMachineOptions()}}
+	for _, contract := range contracts {
+		for _, secureClient := range []bool{false, true} {
+			variant := testWindowsCodexMachineOptions()
+			variant.HookContractID = contract.ContractID
+			variant.SecureClient = secureClient
+			forms = append(forms, rendered{name: contract.ContractID, opts: variant})
 		}
-		group := map[string]interface{}{"hooks": []interface{}{windowsCodexMachineHandler(command, 30)}}
-		if !windowsCodexOwnedHookGroup(group, opts.HookBinary) {
-			t.Errorf("a DefenseClaw group is not recognized: %s", windowsCodexTestScript(t, command))
+		legacy := testWindowsCodexMachineOptions()
+		legacy.HookContractID = contract.ContractID
+		forms = append(forms, rendered{name: contract.ContractID + " 1.0.0", opts: legacy, form: func(event, contract string) string {
+			return legacyStartProcessWindowsCodexBoundManagedHookCommand(legacy.HookBinary, event, contract)
+		}})
+	}
+	for _, form := range forms {
+		layout := windowsCodexMachineLayout(form.opts)
+		if form.form != nil {
+			layout.handler = func(group codexHookGroup) map[string]interface{} {
+				return windowsCodexMachineHandler(form.form(group.eventType, form.opts.HookContractID), group.timeout)
+			}
+		}
+		for _, group := range layout.groups {
+			raw := windowsCodexTestNormalized(t, layout.expectedGroup(group))
+			if !windowsCodexOwnedHookGroup(raw, group.eventType, opts.HookBinary) {
+				t.Errorf("%s: DefenseClaw's %s group is not recognized: %v", form.name, group.eventType, raw)
+			}
+			command := layout.handler(group)["command"].(string)
+			event, contract, ok := windowsCodexRenderedHookCommand(command, opts.HookBinary)
+			if !ok || form.opts.HookContractID != "" && (event != group.eventType || contract != form.opts.HookContractID) {
+				t.Errorf("%s: DefenseClaw's %s command reads as %q %q %t", form.name, group.eventType, event, contract, ok)
+			}
 		}
 	}
 	for name, command := range windowsCodexAdministratorLookalikes(t, opts) {
-		if windowsCodexOwnedHookCommand(command, opts.HookBinary) {
+		if _, _, ok := windowsCodexRenderedHookCommand(command, opts.HookBinary); ok {
 			t.Errorf("%s: an administrator command counts as DefenseClaw's", name)
 		}
 	}
-	if windowsCodexOwnedHookCommand(owned[1], "") || windowsCodexOwnedHookCommand("", opts.HookBinary) {
-		t.Error("an empty launcher or command counts as DefenseClaw's")
+	current := windowsCodexBoundManagedHookCommand(opts.HookBinary, "PreToolUse", opts.HookContractID)
+	if _, _, ok := windowsCodexRenderedHookCommand(current, ""); ok {
+		t.Error("a command counts as DefenseClaw's for an empty launcher")
+	}
+	if _, _, ok := windowsCodexRenderedHookCommand("", opts.HookBinary); ok {
+		t.Error("an empty command counts as DefenseClaw's")
 	}
 }
 

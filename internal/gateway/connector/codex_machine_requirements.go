@@ -250,9 +250,9 @@ type codexMachineRequirementsLayout struct {
 	// GAP-0015); TrustStrictAncestors restores the refusal.
 	reclaimStaleManagedDir bool
 	// owned, when set, recognizes a DefenseClaw group of any release that
-	// is not the exact one, so reconcile replaces it instead of adding the
-	// exact group next to it.
-	owned func(raw interface{}) bool
+	// is not the exact one under hooks.<event>, so reconcile replaces it
+	// instead of adding the exact group next to it.
+	owned func(event string, raw interface{}) bool
 }
 
 // windowsCodexBoundManagedHookCommand is the standalone command of one
@@ -344,27 +344,31 @@ func windowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptions) code
 	}
 	if strings.TrimSpace(opts.HookContractID) != "" {
 		// Standalone only; Secure Client keeps its exact-group merge.
-		layout.owned = func(raw interface{}) bool { return windowsCodexOwnedHookGroup(raw, opts.HookBinary) }
+		layout.owned = func(event string, raw interface{}) bool {
+			return windowsCodexOwnedHookGroup(raw, event, opts.HookBinary)
+		}
 	}
 	return layout
 }
 
-// windowsCodexOwnedHookGroup reports whether raw is a DefenseClaw managed
-// group of any release: one command handler whose command (and
-// command_windows) is, byte for byte, a managed Codex command DefenseClaw
-// renders for hookBinary (windowsCodexOwnedHookCommand). An upgrade from
-// 1.0.0 kept the 1.0.0 group (its Start-Process form) next to the current
-// one, so every Codex event ran, was audited and was judged twice
-// (GAP-1025). A group whose script only names hookBinary or the managed
-// flags (in diagnostic text, with an extra statement or an extra argument)
-// is the administrator's: reconcile, removal and stale-layout inference
-// leave it alone.
-func windowsCodexOwnedHookGroup(raw interface{}, hookBinary string) bool {
+// windowsCodexOwnedHookGroup reports whether raw, listed under
+// hooks.<event>, is a DefenseClaw managed group of any release: the complete
+// group DefenseClaw renders for event (windowsCodexRenderedGroupShapes: its
+// matcher, one command handler with its timeout and no other key) around a
+// command that is, byte for byte, a managed Codex command DefenseClaw
+// renders for hookBinary and event (windowsCodexRenderedHookCommand). An
+// upgrade from 1.0.0 kept the 1.0.0 group (its Start-Process form) next to
+// the current one, so every Codex event ran, was audited and was judged
+// twice (GAP-1025). Any other group is the administrator's, even one that
+// runs DefenseClaw's own command: a script that only names hookBinary or the
+// managed flags (in diagnostic text, with an extra statement or an extra
+// argument), or DefenseClaw's group edited with another matcher, timeout or
+// handler key, or moved under another event. Reconcile, removal, the
+// stale-layout strip and inference leave it alone, and its reference to the
+// launcher keeps the binary removal unsafe.
+func windowsCodexOwnedHookGroup(raw interface{}, event, hookBinary string) bool {
 	group, ok := raw.(map[string]interface{})
-	if !ok || len(group) == 0 || len(group) > 2 {
-		return false
-	}
-	if _, hasMatcher := group["matcher"]; len(group) == 2 && !hasMatcher {
+	if !ok {
 		return false
 	}
 	handlers, ok := group["hooks"].([]interface{})
@@ -372,14 +376,35 @@ func windowsCodexOwnedHookGroup(raw interface{}, hookBinary string) bool {
 		return false
 	}
 	handler, ok := handlers[0].(map[string]interface{})
-	if !ok || handler["type"] != "command" {
+	if !ok {
 		return false
 	}
 	command, _ := handler["command"].(string)
-	if windows, _ := handler["command_windows"].(string); windows != command {
+	boundEvent, contract, ok := windowsCodexRenderedHookCommand(command, hookBinary)
+	if !ok || boundEvent != "" && boundEvent != event {
 		return false
 	}
-	return windowsCodexOwnedHookCommand(command, hookBinary)
+	for _, shape := range windowsCodexRenderedGroupShapes(event, contract) {
+		if windowsCodexMachineGroupHasCommand(raw, shape, command) {
+			return true
+		}
+	}
+	return false
+}
+
+// windowsCodexRenderedGroupShapes is every group shape (matcher and timeout)
+// a release renders for event with commands bound to contractID (empty for
+// the unbound command): the shared matrix every release and Secure Client
+// write, and the compact SessionStart matcher of the contracts that certify
+// it (windowsCodexMachineGroups). An event no release hooks has none.
+func windowsCodexRenderedGroupShapes(event, contractID string) []codexHookGroup {
+	var shapes []codexHookGroup
+	for _, group := range append(append([]codexHookGroup(nil), codexHookGroups...), windowsCodexMachineGroups(contractID)...) {
+		if group.eventType == event && !slices.Contains(shapes, group) {
+			shapes = append(shapes, group)
+		}
+	}
+	return shapes
 }
 
 // windowsCodexBoundArgumentsPattern finds the event and hook contract in the
@@ -389,39 +414,40 @@ var windowsCodexBoundArgumentsPattern = regexp.MustCompile(
 	`'--event'[ ,]'((?:[^']|'')*)'[ ,]'--hook-contract'[ ,]'((?:[^']|'')*)'`,
 )
 
-// windowsCodexOwnedHookCommand reports whether command is exactly a managed
-// Codex command DefenseClaw renders for hookBinary: the unbound form
-// (windowsCodexManagedHookCommand), or the bound form for the event and hook
-// contract the command names, current (windowsCodexBoundManagedHookCommand)
-// or of the 1.0.0 certification builds
+// windowsCodexRenderedHookCommand reports whether command is exactly a
+// managed Codex command DefenseClaw renders for hookBinary, and for which
+// event and hook contract: the unbound form (windowsCodexManagedHookCommand,
+// no event or contract), or the bound form for the event and hook contract
+// the command names, current (windowsCodexBoundManagedHookCommand) or of the
+// 1.0.0 certification builds
 // (legacyStartProcessWindowsCodexBoundManagedHookCommand). The event and the
 // contract are read from the script only to render the candidate; ownership
 // is the byte-for-byte equality, so no script that merely mentions the
 // launcher is DefenseClaw's.
-func windowsCodexOwnedHookCommand(command, hookBinary string) bool {
+func windowsCodexRenderedHookCommand(command, hookBinary string) (event, contract string, ok bool) {
 	if strings.TrimSpace(hookBinary) == "" || strings.TrimSpace(command) == "" {
-		return false
+		return "", "", false
 	}
 	if command == windowsCodexManagedHookCommand(hookBinary) {
-		return true
+		return "", "", true
 	}
 	prefix := windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand "
 	if !strings.HasPrefix(command, prefix) {
-		return false
+		return "", "", false
 	}
-	script, ok := powershellDecodedCommand(strings.TrimPrefix(command, prefix))
-	if !ok {
-		return false
+	script, decoded := powershellDecodedCommand(strings.TrimPrefix(command, prefix))
+	if !decoded {
+		return "", "", false
 	}
 	for _, match := range windowsCodexBoundArgumentsPattern.FindAllStringSubmatch(script, -1) {
 		event := strings.ReplaceAll(match[1], "''", "'")
 		contract := strings.ReplaceAll(match[2], "''", "'")
 		if command == windowsCodexBoundManagedHookCommand(hookBinary, event, contract) ||
 			command == legacyStartProcessWindowsCodexBoundManagedHookCommand(hookBinary, event, contract) {
-			return true
+			return event, contract, true
 		}
 	}
-	return false
+	return "", "", false
 }
 
 // legacyStartProcessWindowsCodexBoundManagedHookCommand reconstructs the
@@ -584,7 +610,7 @@ func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) er
 					continue
 				}
 				found = true
-			} else if l.owned != nil && l.owned(candidate) {
+			} else if l.owned != nil && l.owned(expected.eventType, candidate) {
 				continue
 			}
 			kept = append(kept, candidate)
@@ -909,7 +935,7 @@ func removeWindowsCodexOwnedGroups(hooks map[string]interface{}, opts WindowsCod
 		}
 		kept := make([]interface{}, 0, len(groups))
 		for _, group := range groups {
-			if !windowsCodexOwnedHookGroup(group, opts.HookBinary) {
+			if !windowsCodexOwnedHookGroup(group, key, opts.HookBinary) {
 				kept = append(kept, group)
 			}
 		}
@@ -946,7 +972,7 @@ func windowsCodexRequirementsHoldOwnedLeftovers(raw []byte, opts WindowsCodexMac
 			continue
 		}
 		for _, group := range groups {
-			if windowsCodexOwnedHookGroup(group, opts.HookBinary) {
+			if windowsCodexOwnedHookGroup(group, key, opts.HookBinary) {
 				return true, nil
 			}
 		}
@@ -1227,10 +1253,10 @@ func windowsCodexUnrecordedStaleLayout(raw []byte, opts WindowsCodexMachineRequi
 		return "", ""
 	}
 	staleBinary := strings.TrimRight(dir, `\/`) + `\` + launcher
-	for _, rawGroups := range hooks {
+	for key, rawGroups := range hooks {
 		groups, _ := rawGroups.([]interface{})
 		for _, group := range groups {
-			if windowsCodexOwnedHookGroup(group, staleBinary) {
+			if windowsCodexOwnedHookGroup(group, key, staleBinary) {
 				return dir, staleBinary
 			}
 		}
@@ -1286,7 +1312,7 @@ func stripWindowsCodexLayout(raw []byte, hookBinary, managedDir string) ([]byte,
 			}
 			kept := make([]interface{}, 0, len(groups))
 			for _, candidate := range groups {
-				if windowsCodexOwnedHookGroup(candidate, hookBinary) {
+				if windowsCodexOwnedHookGroup(candidate, key, hookBinary) {
 					stripped = true
 					continue
 				}
