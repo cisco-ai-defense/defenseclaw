@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import click
+import pytest
 from click.testing import CliRunner
 
 from tests.helpers import cleanup_app, make_app_context
@@ -125,30 +127,75 @@ def test_non_interactive_guardrail_refuses_legacy_config_without_claw_or_agent()
         cleanup_app(app, db_path, tmp_dir)
 
 
-def test_non_interactive_guardrail_refuses_stale_openclaw_selection() -> None:
+def test_non_interactive_guardrail_refuses_stale_openclaw_selection(tmp_path) -> None:
     from unittest.mock import patch
 
+    from defenseclaw import config as config_module
     from defenseclaw.commands import cmd_setup
+    from defenseclaw.context import AppContext
 
-    app, tmp_dir, db_path = make_app_context()
-    try:
-        app.cfg.claw.mode = "openclaw"
-        app.cfg.guardrail.connector = "openclaw"
-        app.cfg.guardrail.connectors = {}
-        argv = ["guardrail", "--non-interactive", "--no-restart", "--cisco-api-key-env", "ASIA_PACIFIC_KEY"]
-        with (
-            patch.object(cmd_setup, "_detect_installed_connectors", return_value=[]),
-            patch.object(cmd_setup, "_installed_picked_connector", return_value=None),
-            patch.object(cmd_setup, "_ensure_connector_available") as check,
-        ):
-            result = CliRunner().invoke(cmd_setup.setup, argv, obj=app)
-        assert result.exit_code == 1, result.output
-        assert "no agent connector is configured" in result.output
-        check.assert_not_called()
-        assert app.cfg.guardrail.connector == "openclaw"
-        assert app.cfg.cisco_ai_defense.api_key_env != "ASIA_PACIFIC_KEY"
-    finally:
-        cleanup_app(app, db_path, tmp_dir)
+    # An older init wrote claw.mode without setting guardrail.connector.
+    # An absent local OpenClaw cannot turn that default into a selection.
+    (tmp_path / "config.yaml").write_text("config_version: 9\nclaw:\n  mode: openclaw\n", encoding="utf-8")
+    app = AppContext()
+    with patch("defenseclaw.openclaw_presence.openclaw_installed", return_value=False):
+        app.cfg = config_module.load(data_dir=str(tmp_path))
+    argv = ["guardrail", "--non-interactive", "--no-restart", "--cisco-api-key-env", "ASIA_PACIFIC_KEY"]
+    with (
+        patch.object(cmd_setup, "_detect_installed_connectors", return_value=[]),
+        patch.object(cmd_setup, "_installed_picked_connector", return_value=None),
+        patch.object(cmd_setup, "_ensure_connector_available") as check,
+    ):
+        result = CliRunner().invoke(cmd_setup.setup, argv, obj=app)
+    assert result.exit_code == 1, result.output
+    assert "no agent connector is configured" in result.output
+    check.assert_not_called()
+    assert app.cfg.guardrail.connector == ""
+    assert app.cfg.cisco_ai_defense.api_key_env != "ASIA_PACIFIC_KEY"
+
+
+@pytest.mark.parametrize("claw_block", ["", "claw:\n  mode: openclaw\n"], ids=["no-claw-block", "saved-claw-mode"])
+@pytest.mark.parametrize(
+    ("host", "fleet_mode"),
+    [
+        ("10.0.0.5", "auto"),
+        ("10.0.0.5", "enabled"),
+        ("127.0.0.1", "enabled"),
+        ("127.0.0.1", "auto"),
+    ],
+)
+def test_non_interactive_guardrail_keeps_saved_openclaw_without_local_install(
+    tmp_path, claw_block: str, host: str, fleet_mode: str
+) -> None:
+    from unittest.mock import patch
+
+    from defenseclaw import config as config_module
+    from defenseclaw.commands import cmd_setup
+    from defenseclaw.context import AppContext
+
+    config_text = (
+        "config_version: 9\n"
+        f"{claw_block}"
+        "guardrail:\n  connector: openclaw\n"
+        f"gateway:\n  host: {host}\n  fleet_mode: {fleet_mode}\n"
+    )
+    (tmp_path / "config.yaml").write_text(config_text, encoding="utf-8")
+    app = AppContext()
+    with patch("defenseclaw.openclaw_presence.openclaw_installed", return_value=False):
+        app.cfg = config_module.load(data_dir=str(tmp_path))
+    assert app.cfg.active_connector() == "openclaw"
+    argv = ["guardrail", "--yes", "--no-restart", "--cisco-api-key-env", "ASIA_PACIFIC_KEY"]
+    with (
+        patch.object(cmd_setup, "_detect_installed_connectors", return_value=[]),
+        patch.object(cmd_setup, "_installed_picked_connector", return_value=None),
+        patch.object(cmd_setup, "_capture_setup_config_snapshot", return_value=object()),
+        patch.object(cmd_setup, "_ensure_connector_available", side_effect=click.ClickException("connector selected")) as selected,
+    ):
+        result = CliRunner().invoke(cmd_setup.setup, argv, obj=app)
+    assert "connector selected" in result.output, result.output
+    assert "no agent connector is configured" not in result.output
+    selected.assert_called_once_with("openclaw")
+    assert app.cfg.guardrail.connector == "openclaw"
 
 
 def test_restart_without_a_connector_does_not_start_openclaw(tmp_path) -> None:

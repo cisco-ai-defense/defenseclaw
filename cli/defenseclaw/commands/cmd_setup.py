@@ -6867,7 +6867,7 @@ def setup_guardrail(
         #   1. explicit --connector / --agent flag
         #   2. configured primary, roster, or non-default claw.mode
         #   3. <data_dir>/picked_connector, only when that agent is installed
-        #   4. the installed OpenClaw implied by an older claw.mode
+        #   4. an older implied OpenClaw kept by the loader (installation or fleet link)
         # There is no connector fallback on an unconfigured host.
         # We deliberately do NOT run filesystem auto-detect (the
         # ``~/.claude`` / ``~/.codex`` heuristic) in non-interactive mode:
@@ -6878,18 +6878,10 @@ def setup_guardrail(
         # confirm the suggested default.
         if explicit_connector:
             target_connector = explicit_connector
-        elif gc.connector == "openclaw" and not gc.connectors:
-            installed = _detect_installed_connectors()
-            # Older configs pinned OpenClaw before the operator picked an
-            # installed agent. Keep a real OpenClaw installation, but let a
-            # verified picked_connector supersede that stale default.
-            target_connector = (
-                "openclaw"
-                if "openclaw" in installed
-                else _installed_picked_connector(getattr(app.cfg, "data_dir", None), installed)
-                or ""
-            )
         elif gc.connector or gc.connectors:
+            # These are saved selections, including a legacy remote OpenClaw
+            # fleet. A local installation probe applies only to an implied
+            # claw.mode default, not to a connector the operator configured.
             target_connector = app.cfg.active_connector()
         elif app.cfg.has_connector_configured() and app.cfg.active_connector() != "openclaw":
             target_connector = app.cfg.active_connector()
