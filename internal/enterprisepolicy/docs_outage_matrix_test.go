@@ -83,18 +83,18 @@ func codeOutage(conn connector.Connector) documentedOutage {
 			managedOpen = managedOpenPerUserRouteBlocksLM
 		}
 	}
-	if conn.Name() == ConnectorOpenCode {
-		// The managed OpenCode plugin runs the foreign-hook check before the
-		// native machine-policy hook. The default guard blocks an outage on
-		// every OS even when the administrator selected open.
-		policy := config.EnterpriseMachinePolicyConfig{}.PolicyFor(conn.Name())
-		guardAllOS := true
-		for _, goos := range []string{"linux", "darwin", "windows"} {
-			guardAllOS = guardAllOS && GuardApplies(conn.Name(), goos, policy)
-		}
-		if guardAllOS {
-			managedOpen = connector.OutageBlocks
-		}
+	// Under the default foreign_hooks: remove, a guarded tool call needs a
+	// gateway answer for its session even when the native hook's installed
+	// mode is open. Windows Amp alone keeps that session locally.
+	policy := config.EnterpriseMachinePolicyConfig{}.PolicyFor(conn.Name())
+	guardLinux := GuardApplies(conn.Name(), "linux", policy)
+	guardDarwin := GuardApplies(conn.Name(), "darwin", policy)
+	guardWindows := GuardApplies(conn.Name(), "windows", policy) && conn.Name() != "amp"
+	switch {
+	case guardLinux && guardDarwin && guardWindows:
+		managedOpen = connector.OutageBlocks
+	case guardLinux && guardDarwin && managedOpen == connector.OutageRuns:
+		managedOpen = managedOpenBlocksLinuxMacOS
 	}
 	env := "no"
 	if outage.SecureClientEnvFailMode {
@@ -132,9 +132,41 @@ func TestDocsCapabilityMatrixOutageMatchesTheHooks(t *testing.T) {
 	}
 }
 
-// Machine policy is the managed route for the connectors that have it: the
-// managed Copilot and OpenCode hooks that the table says follow the mode are
-// the --enterprise-managed command, on Linux and macOS as on Windows.
+func TestDefaultForeignHookGuardOutageCoversEveryManagedConnector(t *testing.T) {
+	rows := map[string]documentedOutage{}
+	for _, row := range documentedConnectorRows(t) {
+		if row.Outage != nil {
+			rows[row.ID] = *row.Outage
+		}
+	}
+	for name := range guardConnectors {
+		policy := config.EnterpriseMachinePolicyConfig{}.PolicyFor(name)
+		for _, goos := range []string{"linux", "darwin", "windows"} {
+			if !GuardApplies(name, goos, policy) {
+				t.Errorf("%s: default foreign-hook guard absent on %s", name, goos)
+			}
+		}
+		want := connector.OutageBlocks
+		if name == "amp" {
+			// The Windows Amp plugin keeps its foreign session locally.
+			want = managedOpenBlocksLinuxMacOS
+		}
+		if got := rows[name].ManagedOpen; got != want {
+			t.Errorf("%s: managed open outage = %q, want %q under the default guard", name, got, want)
+		}
+	}
+	policy := config.EnterpriseMachinePolicyConfig{}.PolicyFor(ConnectorHermes)
+	if !GuardApplies(ConnectorHermes, "linux", policy) || !GuardApplies(ConnectorHermes, "darwin", policy) || GuardApplies(ConnectorHermes, "windows", policy) {
+		t.Error("Hermes foreign-hook guard must apply on Linux and macOS only")
+	}
+	if got := rows[ConnectorHermes].ManagedOpen; got != managedOpenBlocksLinuxMacOS {
+		t.Errorf("Hermes: managed open outage = %q, want %q", got, managedOpenBlocksLinuxMacOS)
+	}
+}
+
+// Machine policy is the managed route for the connectors that have it. After
+// the foreign-hook guard, Copilot and OpenCode use the --enterprise-managed
+// hook on Linux and macOS as on Windows.
 func TestOutageTableMachinePolicyRouteRunsTheManagedHook(t *testing.T) {
 	for name, target := range targets {
 		if target.Name() != name {

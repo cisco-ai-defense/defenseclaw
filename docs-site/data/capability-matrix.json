@@ -117,7 +117,7 @@
     },
     {
       "id": "cursor",
-      "outage": {"perUserClosed": "blocks", "perUserOpen": "guardrail-mode", "managedOpen": "runs", "secureClientClosed": "blocks", "strictAvailability": "yes", "envFailMode": "no"},
+      "outage": {"perUserClosed": "blocks", "perUserOpen": "guardrail-mode", "managedOpen": "blocks", "secureClientClosed": "blocks", "strictAvailability": "yes", "envFailMode": "no"},
       "label": "Cursor",
       "windowsSupport": "supported",
       "windowsNote": "Native Windows x64 uses the managed PowerShell adapter and packaged hook executable.",
@@ -158,7 +158,7 @@
     },
     {
       "id": "hermes",
-      "outage": {"perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "runs", "secureClientClosed": "runs", "strictAvailability": "yes", "envFailMode": "secure-client"},
+      "outage": {"perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks-linux-macos", "secureClientClosed": "runs", "strictAvailability": "yes", "envFailMode": "secure-client"},
       "label": "Hermes",
       "windowsSupport": "supported",
       "windowsNote": "Native Windows x64 uses a direct, shell-free hook executable invocation.",
@@ -261,7 +261,7 @@
     },
     {
       "id": "copilot",
-      "outage": {"perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "per-user-route-blocks-linux-macos", "secureClientClosed": "runs", "strictAvailability": "yes", "envFailMode": "no"},
+      "outage": {"perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "secureClientClosed": "runs", "strictAvailability": "yes", "envFailMode": "no"},
       "label": "GitHub Copilot CLI",
       "windowsSupport": "supported",
       "windowsNote": "Native Windows x64 uses Copilot CLI's PowerShell hook field.",
@@ -336,7 +336,7 @@
     },
     {
       "id": "devin",
-      "outage": {"perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "runs", "secureClientClosed": "blocks", "strictAvailability": "yes", "envFailMode": "secure-client"},
+      "outage": {"perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "secureClientClosed": "blocks", "strictAvailability": "yes", "envFailMode": "secure-client"},
       "label": "Devin",
       "windowsSupport": "supported",
       "windowsNote": "Native Windows x64 supports the admitted same-user Devin CLI and system-PowerShell bridge.",

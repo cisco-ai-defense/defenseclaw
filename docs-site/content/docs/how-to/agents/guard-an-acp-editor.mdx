@@ -67,7 +67,7 @@ Wrap the direct launches:
 defenseclaw setup acp
 ```
 
-This runs setup for each pair and points your direct agent entry at the guard, keeping its key and `env` without adding a duplicate for that adopted key on Linux, macOS or Windows. Later `acp setup` updates that same entry when its profile or mode changes. Run `acp verify` and inspect the editor's picker for extra entries that launch the agent directly or through a copied guard; remove those entries in the editor. If a reserved entry name is already taken, inspect both entries before selecting one in the picker. It starts in observe mode; add `--activate` for action mode. Remove a client-registry entry in the editor once the guarded entry exists, or the agent can still start without the guard.
+This runs setup for each pair and points your direct agent entry at the guard, keeping its key and `env` without adding a duplicate for that adopted key on Linux, macOS or Windows. Later `acp setup` updates that same entry when its profile or mode changes. Run `acp verify` and inspect the editor's picker for extra entries that launch the agent directly or through a copied guard; remove those entries in the editor. If setup needs to create a reserved entry and another entry it cannot identify as DefenseClaw-owned already uses that name, setup refuses before writing another entry. Rename that entry in the editor settings, then run the same command again. It starts in observe mode; add `--activate` for action mode. Remove a client-registry entry in the editor once the guarded entry exists, or the agent can still start without the guard.
 
 ## Guard several agents in one editor
 
