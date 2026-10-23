@@ -146,6 +146,11 @@ type EnumerateOptions struct {
 	// names: an install discovery cannot read is then never a silent gap
 	// while status and verify say security_complete (GAP-0226).
 	RunningAgents map[string]map[string]string
+	// ManifestSubjects, under enterprise.enrollment.mode: manifest, are the
+	// administrator's enrolled accounts by canonical SID. Only they are
+	// inspected, group filters do not apply to them, and one ProfileList
+	// does not list is inspected at its authored home. Nil in auto mode.
+	ManifestSubjects map[string]WindowsManifestSubject
 }
 
 // EnumerateWindows walks the local user profile registry (ProfileList),
@@ -282,6 +287,8 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	// alone by the admin's choice). A running agent of any other account is
 	// reported after the loop, so it never drops out of the record.
 	judged := map[string]bool{}
+	// visited holds the manifest subjects ProfileList listed.
+	visited := map[string]bool{}
 	signedIn := windowsSignedInCheck(opts.Logger)
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
 	for _, profile := range profiles {
@@ -296,6 +303,16 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			logfSafely(opts.Logger, profile.SID, "excluded by caller (targeted uninstall)")
 			judged[canonicalManifestTargetSID(profile.SID)] = true
 			continue
+		}
+		if opts.ManifestSubjects != nil {
+			sid := canonicalManifestTargetSID(profile.SID)
+			if _, enrolled := opts.ManifestSubjects[sid]; !enrolled {
+				// Manifest enrollment: only the administrator's enabled
+				// targets are enrolled, so no one else's installs count.
+				judged[sid] = true
+				continue
+			}
+			visited[sid] = true
 		}
 		if standalone && windowsDeletedLocalAccount(profile.SID, lookupAccount) {
 			// A deleted local account whose profile folder could not be
@@ -321,7 +338,9 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			continue
 		}
 		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
-		if (decision == windowsEnrollmentEnrolled || decision == windowsEnrollmentExempt) && groups.active() {
+		// An administrator-authored target is enrolled whatever the group
+		// filters say; only exclude_users and exempt_users still apply.
+		if (decision == windowsEnrollmentEnrolled || decision == windowsEnrollmentExempt) && groups.active() && opts.ManifestSubjects == nil {
 			sid := canonicalManifestTargetSID(profile.SID)
 			groupDecision, groupReason, inDoubt := groups.evaluate(sid)
 			if inDoubt && (groupDecision != windowsEnrollmentExcluded || windowsHasPreviousRows(previous, sid)) {
@@ -378,17 +397,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		if standalone && rowContext.report != nil {
 			// A selected, supported CLI is not evidence that every copy
 			// this account can launch reads the machine policy.
-			for _, install := range DiscoverWindowsPrivateAgentInstalls(profile.Home, connectors) {
-				if install.Incomplete {
-					rowContext.report(UnprotectedAgent{User: rowContext.user, SID: profile.SID, Connector: install.Connector,
-						Code:   UnprotectedCodeInstallScanIncomplete,
-						Reason: "the bounded scan of this account's private agent installs was incomplete; use application control to exclude unapproved agent binaries"})
-					continue
-				}
-				rowContext.report(UnprotectedAgent{User: rowContext.user, SID: profile.SID, Connector: install.Connector,
-					Version: install.Version, InstallPath: install.Path, Code: UnprotectedCodeHookContractUnverified,
-					Reason: privateInstallReason(install.Connector, install.Version)})
-			}
+			reportWindowsPrivateInstalls(rowContext.report, rowContext.user, profile.SID, profile.Home, connectors)
 		}
 		for _, conn := range connectors {
 			_, known := previous[previousManifestKey(profile.SID, conn)]
@@ -447,6 +456,32 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		return targets[i].Connector < targets[j].Connector
 	})
 
+	// A manifest subject ProfileList does not list as an interactive
+	// profile is still enrolled: its authored home is inspected directly,
+	// and an unreadable one is reported incomplete (GAP-0906).
+	if opts.ReportUnprotected != nil {
+		for _, sid := range sortedManifestSubjects(opts.ManifestSubjects) {
+			if visited[sid] || windowsEnrollmentListMatches(opts.ExcludeUsers, []string{sid}) || windowsEnrollmentListMatches(opts.ExemptUsers, []string{sid}) {
+				continue
+			}
+			subject := opts.ManifestSubjects[sid]
+			user := filepath.Base(subject.Home)
+			if windowsEnrollmentListMatches(opts.ExcludeUsers, []string{user}) || windowsEnrollmentListMatches(opts.ExemptUsers, []string{user}) {
+				continue
+			}
+			judged[sid] = true
+			if info, err := os.Lstat(subject.Home); err != nil || !info.IsDir() {
+				if err == nil || !os.IsNotExist(err) {
+					for _, conn := range subject.Connectors {
+						opts.ReportUnprotected(UnprotectedAgent{User: user, SID: sid, Connector: conn, Code: UnprotectedCodeInstallScanIncomplete,
+							Reason: privateInstallIncompleteReason(PrivateInstallSkippedHome)})
+					}
+				}
+				continue // no profile folder yet: nothing the account could run
+			}
+			reportWindowsPrivateInstalls(opts.ReportUnprotected, user, sid, subject.Home, subject.Connectors)
+		}
+	}
 	return Manifest{Version: 1, Targets: targets}, nil
 }
 
@@ -1537,4 +1572,81 @@ func logfSafely(logf EnumerationLogger, subject, reason string) {
 	if logf != nil {
 		logf(subject, reason)
 	}
+}
+
+// WindowsManifestSubject is one account the administrator's manifest
+// enrolls: its authored profile folder and the connectors of its enabled
+// rows.
+type WindowsManifestSubject struct {
+	Home       string
+	Connectors []string
+}
+
+// WindowsManifestSubjects maps each canonical SID with an enabled row in
+// manifest to its subject.
+func WindowsManifestSubjects(manifest Manifest) map[string]WindowsManifestSubject {
+	out := map[string]WindowsManifestSubject{}
+	for _, target := range manifest.Targets {
+		sid := canonicalManifestTargetSID(target.SID)
+		if sid == "" || !target.IsEnabled() {
+			continue
+		}
+		subject := out[sid]
+		if subject.Home == "" {
+			subject.Home = filepath.Clean(strings.TrimSpace(target.UserHome))
+		}
+		if conn := strings.ToLower(strings.TrimSpace(target.Connector)); conn != "" && !containsPrivateConnector(subject.Connectors, conn) {
+			subject.Connectors = append(subject.Connectors, conn)
+		}
+		out[sid] = subject
+	}
+	return out
+}
+
+func sortedManifestSubjects(subjects map[string]WindowsManifestSubject) []string {
+	out := make([]string, 0, len(subjects))
+	for sid := range subjects {
+		out = append(out, sid)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// reportWindowsPrivateInstalls reports each unsupported, unversioned or
+// uninspected agent copy the profile at home can run.
+func reportWindowsPrivateInstalls(report func(UnprotectedAgent), user, sid, home string, connectors []string) {
+	installs := append(DiscoverWindowsPrivateAgentInstalls(home, connectors), discoverWindowsWinGetCopies(sid, connectors)...)
+	for _, install := range installs {
+		if agent, ok := privateInstallUnprotected(install); ok {
+			agent.User, agent.SID = user, sid
+			report(agent)
+		}
+	}
+}
+
+// discoverWindowsWinGetCopies lists the unsupported WinGet installs of the
+// connectors the account can run, machine-scope and its own: the version
+// probe may select another copy first, so an old WinGet copy would
+// otherwise be hidden by a supported npm one.
+func discoverWindowsWinGetCopies(sid string, connectors []string) []PrivateAgentInstall {
+	var out []PrivateAgentInstall
+	for _, name := range connectors {
+		if name != "claudecode" && name != "codex" && name != "copilot" {
+			continue
+		}
+		for _, packageID := range windowsWinGetPackageIDs[name] {
+			machine, _ := windowsMachineWinGetPackageVersion(packageID)
+			own := ""
+			if strings.TrimSpace(sid) != "" {
+				own, _ = windowsUserWinGetPackageVersion(sid, packageID)
+			}
+			for scope, version := range map[string]string{"machine": machine, "user": own} {
+				if version != "" && privateInstallReason(name, version) != "" {
+					out = append(out, PrivateAgentInstall{Connector: name, Version: version, Path: "WinGet " + packageID + " (" + scope + " scope)"})
+				}
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
 }

@@ -491,34 +491,40 @@ func enterpriseHooksEnumerateDiscoverAll(ctx context.Context, account unixidenti
 		}
 	}
 	var privateInstalls []enterprisehooks.PrivateAgentInstall
-	for _, install := range response.PrivateInstalls {
-		if len(privateInstalls) >= enterprisehooks.PrivateAgentInstallMaxFindings {
-			privateInstalls = append(privateInstalls, enterprisehooks.PrivateAgentInstall{Connector: install.Connector, Incomplete: true})
-			break
+	incompleteSeen := map[string]bool{}
+	var incompletes []enterprisehooks.PrivateAgentInstall
+	addIncomplete := func(connector, skipped string) {
+		if !incompleteSeen[connector] {
+			incompleteSeen[connector] = true
+			incompletes = append(incompletes, enterprisehooks.PrivateAgentInstall{Connector: connector, Incomplete: true, Skipped: enterprisehooks.KnownPrivateInstallSkipped(skipped)})
 		}
-		if install.Incomplete {
-			if wanted[install.Connector] {
-				privateInstalls = append(privateInstalls, enterprisehooks.PrivateAgentInstall{Connector: install.Connector, Incomplete: true})
-			}
+	}
+	for _, install := range response.PrivateInstalls {
+		if !wanted[install.Connector] {
 			continue
 		}
-		if !wanted[install.Connector] {
+		// The record keeps every incomplete connector, but at most the bound
+		// of copies: one more copy marks the scan incomplete.
+		if install.Incomplete {
+			addIncomplete(install.Connector, install.Skipped)
+			continue
+		}
+		if len(privateInstalls) >= enterprisehooks.PrivateAgentInstallMaxFindings {
+			addIncomplete(install.Connector, enterprisehooks.PrivateInstallSkippedFindings)
 			continue
 		}
 		if install.Version != "" && !enterprisehooks.ValidUnixAgentVersion(install.Version) {
 			install.Version = ""
 		}
-		if len(install.Path) > 512 || !filepath.IsAbs(install.Path) {
-			privateInstalls = append(privateInstalls, enterprisehooks.PrivateAgentInstall{Connector: install.Connector, Incomplete: true})
-			continue
-		}
-		rel, err := filepath.Rel(account.Home, install.Path)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			privateInstalls = append(privateInstalls, enterprisehooks.PrivateAgentInstall{Connector: install.Connector, Incomplete: true})
+		install.Skipped = ""
+		if len(install.Path) > 512 || !filepath.IsAbs(install.Path) || filepath.Clean(install.Path) != install.Path ||
+			!enterprisehooks.UnixPrivateInstallPathAllowed(account.Home, install.Path) {
+			addIncomplete(install.Connector, enterprisehooks.PrivateInstallSkippedOutsideRoots)
 			continue
 		}
 		privateInstalls = append(privateInstalls, install)
 	}
+	privateInstalls = append(privateInstalls, incompletes...)
 	return enterprisehooks.UnixDiscovery{Versions: versions, Reasons: reasons, Surfaces: surfaces, PrivateInstalls: privateInstalls}, nil
 }
 

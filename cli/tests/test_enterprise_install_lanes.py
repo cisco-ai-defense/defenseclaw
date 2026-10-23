@@ -264,6 +264,44 @@ def test_unix_upgrade_lane_checks_a_stored_credential_survives(tmp_path: Path) -
     assert (secrets / "ci-upgrade-lane").read_text().startswith("ci-upgrade-lane-")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
+def test_unix_upgrade_lane_secret_check_needs_no_cmp(tmp_path: Path) -> None:
+    # GAP-0886: the pinned UBI 9 init image of the rpm-el9 lane has no
+    # diffutils, so a cmp-based check failed after a good secret set.
+    lane = UNIX_LANE.read_text(encoding="utf-8")
+    helpers = re.search(r"^upgrade_secret_name=.*?^upgrade_secret_kept\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
+    assert helpers, "the upgrade lane has no protected-credential fixture"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("od", "tr", "python3", "cat"):
+        found = subprocess.run(["bash", "-c", f"command -v {tool}"], capture_output=True, text=True, check=False).stdout.strip()
+        if found:
+            (bin_dir / tool).symlink_to(found)
+    assert not (bin_dir / "cmp").exists()
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    gateway = tmp_path / "gateway"
+    gateway.write_text(
+        '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = --name ] && n=$2; shift; done\n'
+        'IFS= read -r v; printf %s "$v" >"$FAKE_SECRETS/$n"\n',
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    (tmp_path / "results").mkdir()
+    script = helpers.group(0) + (
+        '\ndie() { echo "FAIL: $*" >&2; exit 1; }\n'
+        "seed_upgrade_secret 02-previous-secret\n"
+        "upgrade_secret_kept || exit 3\n"
+        'printf x >>"$secrets_dir/$upgrade_secret_name"\n'
+        "! upgrade_secret_kept || exit 4\n"
+    )
+    env = {"PATH": str(bin_dir), "gateway": str(gateway), "secrets_dir": str(secrets), "results": str(tmp_path / "results"),
+           "FAKE_SECRETS": str(secrets)}
+    bash = subprocess.run(["bash", "-c", "command -v bash"], capture_output=True, text=True, check=True).stdout.strip()
+    result = subprocess.run([bash, "-c", script], env=env, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
 def test_windows_upgrade_lane_checks_a_stored_credential_survives() -> None:
     lane = (SCRIPTS / "test-enterprise-windows-install.ps1").read_text(encoding="utf-8")
     upgrade = lane[lane.index("if ($UpgradeFrom) {"):lane.index("Step 'Setup /ensure with an administrator config")]

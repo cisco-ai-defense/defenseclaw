@@ -101,7 +101,16 @@ func TestManifestModePublishesPrivateInstallScanWithoutRewritingTargets(t *testi
 	f := newStandaloneFixture(t, resolver)
 	alice := f.home(t, "alice", 0o700)
 	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
-	original := []byte("version: 1\ntargets: []\n")
+	// Under manifest enrollment the administrator's enabled targets are the
+	// accounts inspected (GAP-0906).
+	enabledRow := true
+	original, err := enterprisehooks.MarshalUnixTargetsManifest(enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{{
+		User: "alice", UserHome: alice, UID: &uid, GID: &gid, Connector: "claudecode",
+		DataDir: filepath.Join(alice, ".defenseclaw"), AgentVersion: "2.1.230", Enabled: &enabledRow,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(f.manifest, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -172,9 +181,10 @@ func TestEnumerateDiscoverPrivateInstallsKeepsPathsInsideAccountHome(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Copies first, then one incomplete entry per connector.
 	if len(found.PrivateInstalls) != 3 || found.PrivateInstalls[0].Version != "2.0.77" ||
 		found.PrivateInstalls[0].Path != filepath.Join(home, "old", "node_modules", "@anthropic-ai", "claude-code") ||
-		!found.PrivateInstalls[1].Incomplete || found.PrivateInstalls[2].Version != "" {
+		found.PrivateInstalls[1].Version != "" || found.PrivateInstalls[1].Incomplete || !found.PrivateInstalls[2].Incomplete {
 		t.Fatalf("untrusted worker install claims = %+v", found.PrivateInstalls)
 	}
 }
