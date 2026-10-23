@@ -877,7 +877,7 @@ func curlArgvViolations(script string) []string {
 			out = append(out, "the hook payload as a program argument: "+strings.TrimSpace(line))
 		}
 		if authArgsUse.MatchString(line) && !authArgsCaller.MatchString(line) {
-			out = append(out, "Authorization header array expanded outside a descriptor-backed post: "+strings.TrimSpace(line))
+			out = append(out, "Authorization header array expanded outside defenseclaw_gateway_post/defenseclaw_sandbox_post: "+strings.TrimSpace(line))
 		}
 		loc := curlCommand.FindStringIndex(line)
 		if loc == nil {
@@ -918,10 +918,8 @@ var (
 	curlRequest         = regexp.MustCompile(`--data-binary|-X\s+POST|https?://`)
 	curlNoRC            = regexp.MustCompile(`^(?:[\s;|&(])?(?:curl|"\$_DC_SHIM_CURL")\s+-q\s`)
 	authArgsUse         = regexp.MustCompile(`"\$\{AUTH_HEADER_ARGS\[@\]`)
-	// The receipt helper forwards its arguments to defenseclaw_sandbox_post;
-	// the hook keeps the token in shell memory until that descriptor-backed call.
-	authArgsCaller = regexp.MustCompile(`^\s*(?:(?:RESPONSE="?\$\()?(?:defenseclaw_gateway_post|defenseclaw_sandbox_post)|if\s+!\s+defenseclaw_sandbox_confirm_receipt)\s`)
-	curlArgvRules  = []struct {
+	authArgsCaller      = regexp.MustCompile(`^\s*(?:RESPONSE="?\$\()?(?:defenseclaw_gateway_post|defenseclaw_sandbox_post)\s`)
+	curlArgvRules       = []struct {
 		re   *regexp.Regexp
 		what string
 	}{
@@ -974,7 +972,6 @@ func TestCurlArgvCheckCatchesTheOldHookTransport(t *testing.T) {
 		`curl -q -s -w '\n%{http_code}' -X POST "$_dc_post_url" "${_dc_post_args[@]+"${_dc_post_args[@]}"}" --config /dev/fd/8 --data-binary @/dev/fd/9 2>/dev/null 8< <(printf 'header = "%s"\n' "$_dc_post_auth") 9< <(printf '%s' "$_dc_post_body")`,
 		`printf '%s' "$JSON" | curl -q -s -X POST "http://x" --config /dev/fd/7 --data-binary @- 7< <(printf 'header = "Authorization: Bearer %s"\n' "$TOKEN") || true`,
 		`RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/x" 5 "$CONTENT" -H "Content-Type: application/json" "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}") || {`,
-		`if ! defenseclaw_sandbox_confirm_receipt "/api/v1/codex/hook" "$RESULT" "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}"; then`,
 		`INSPECT_BODY="$(printf '%s' "$TOOL_OUTPUT" | jq -Rs --arg tool "$TOOL_NAME" '{tool: $tool, output: .}')" || {`,
 	} {
 		if v := curlArgvViolations(script); len(v) != 0 {
