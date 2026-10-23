@@ -433,7 +433,11 @@ class DoctorTests(_Host):
         _write(
             config,
             json.dumps(
-                {"pre_tool_use": [{"hooks": [{"type": "command", "command": "defenseclaw-hook --connector openhands"}]}]}
+                {
+                    "pre_tool_use": [
+                        {"hooks": [{"type": "command", "command": "defenseclaw-hook --connector openhands"}]}
+                    ]
+                }
             ),
         )
         items = self.items("openhands")

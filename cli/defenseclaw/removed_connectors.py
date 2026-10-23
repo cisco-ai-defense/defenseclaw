@@ -44,7 +44,9 @@ _POLICY_KEY = "defenseclaw_guardrail"
 # A removed connector's script that is gone while an agent config still runs
 # or imports it: that agent does not block its calls (removed.go
 # RemovedScriptGoneWhat). doctor fails on it.
-SCRIPT_GONE_WHAT = "gone, while an agent config above still runs or imports it, so DefenseClaw does not block those calls"
+SCRIPT_GONE_WHAT = (
+    "gone, while an agent config above still runs or imports it, so DefenseClaw does not block those calls"
+)
 
 
 @dataclass(frozen=True)
