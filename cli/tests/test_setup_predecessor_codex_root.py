@@ -150,7 +150,15 @@ def test_single_codex_root_upgrade_clears_selected_root_before_rollback(
     tmp_path: Path,
     predecessor: str,
 ) -> None:
-    app, profile, db_path = make_app_context()
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    if os.name == "nt":
+        # Elevated Windows test tokens can create scratch directories owned
+        # by Administrators instead of the current user.
+        from tests.permissions import set_known_windows_directory_acl
+
+        set_known_windows_directory_acl(profile_dir)
+    app, profile, db_path = make_app_context(str(profile_dir))
     try:
         old_root = tmp_path / "old-codex"
         new_root = tmp_path / "new-codex"
@@ -174,6 +182,7 @@ def test_single_codex_root_upgrade_clears_selected_root_before_rollback(
         monkeypatch.setattr(cmd_setup, "_agent_settings_refusal", lambda *_args, **_kwargs: "")
         monkeypatch.setattr(cmd_setup, "_record_windows_setup_agent_selections", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(cmd_setup, "_maybe_bring_up_local_stack", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(app.cfg, "save", lambda: None)
 
         def restart(*_args: object, **_kwargs: object) -> None:
             forward.append(os.environ.get("DEFENSECLAW_EXPLICIT_CODEX_SETUP"))
