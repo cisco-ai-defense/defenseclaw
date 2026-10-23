@@ -242,6 +242,12 @@ func armHookAnswerWatchdog(connectorName, event, failMode, surface string, manag
 		StartedAt:         startedAt,
 		Exit:              exit,
 	}
+	if !managed {
+		// The data directory whose install lock closes the call's early
+		// answer (GAP-0862); Run's own home replaces it when Run adopts the
+		// watchdog. DEFENSECLAW_HOME counts, as for Run.
+		opts.Home = config.DefaultDataPath()
+	}
 	if managed {
 		// The watchdog starts this account lookup in the background before
 		// it can fire, and Run's rows reuse it: a deadline that passed
@@ -336,7 +342,8 @@ func hookFailureExitCode(failure hookFailureContext) int {
 
 // hookPreRunFailsClosed reports whether the failed invocation's policy is to
 // fail closed, with buildHookOptionsForRuntime's precedence: a managed hook
-// always does; otherwise --fail-mode, else the sidecar.
+// always does, and so does any hook while its account's installer holds the
+// data directory; otherwise --fail-mode, else the sidecar.
 func hookPreRunFailsClosed(failure hookFailureContext) bool {
 	if failure.managed || implicitEnterpriseManagedHook() {
 		return true
@@ -344,6 +351,11 @@ func hookPreRunFailsClosed(failure hookFailureContext) bool {
 	home, trusted := trustedNativeHookHome()
 	if !trusted {
 		home = config.DefaultDataPath()
+	}
+	if hookexec.InstallLockHeld(home) {
+		// During an install or upgrade every hook answers closed, the
+		// failures before Run included (GAP-0862).
+		return true
 	}
 	mode := strings.TrimSpace(failure.failMode)
 	if mode == "" {

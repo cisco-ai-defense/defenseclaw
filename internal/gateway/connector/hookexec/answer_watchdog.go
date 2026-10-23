@@ -17,6 +17,12 @@ import (
 // background from the moment the watchdog is armed (failureLogHomeLookup).
 var answerWatchdogLogWait = 100 * time.Millisecond
 
+// installLockCheckWait bounds the watchdog's look at the account's install
+// lock before it gives an answer that is not closed (GAP-0862): a stalled
+// disk must not hold the answer, and a lock it could not read in time counts
+// as held, so the answer is closed.
+var installLockCheckWait = 100 * time.Millisecond
+
 // answerWatchdog makes the answer budget of a tool call hold when the hook
 // process itself runs late. On a host that lifecycle work saturates (the
 // Windows attestation repair of GAP-0155 and GAP-0167) the call's own
@@ -37,7 +43,10 @@ var answerWatchdogLogWait = 100 * time.Millisecond
 // allows a call: its answer is the one the call gives when its gateway does
 // not answer in time, and once the call logged a closed failure (an
 // unverified gateway peer, an invalid runtime) it is that call's closed
-// answer in every fail mode (claimFailureLog).
+// answer in every fail mode (claimFailureLog). While this account's
+// installer holds its data directory (.install.lock) the answer is closed
+// too: a per-user hook in fail mode open checks the lock when the watchdog
+// is armed and again at the deadline, before it answers (GAP-0862).
 type answerWatchdog struct {
 	mu             sync.Mutex
 	finished       bool
@@ -65,6 +74,15 @@ type answerWatchdog struct {
 	logFailure               func()
 	exit                     func(int)
 	deliveryReceipt          func(bool, bool)
+
+	// installHome is the data directory of a per-user call whose fallback
+	// is not closed; at the deadline the watchdog gives the install answer
+	// below instead when that directory's .install.lock is held or cannot
+	// be read (GAP-0862). Empty when the fallback is closed already.
+	installHome            string
+	installOut, installErr []byte
+	installCode            int
+	installLogFailure      func()
 
 	ceiling time.Time
 	waiter  *answerDeadlineWaiter
@@ -115,6 +133,11 @@ func ArmAnswerWatchdog(opts Options, payload []byte) *AnswerWatchdog {
 		// that dropped that resolver answered a deadline before Run with no
 		// row at all (G-small loop 4).
 		opts.Home = ""
+	} else if !opts.SecureClient && opts.Home != "" && installLockHeldWithin(opts.Home, installLockCheckWait) {
+		// Run would close this call (runHook): so does its early answer.
+		// The look is bounded: arming must not wait on a stalled disk.
+		opts.FailMode = "closed"
+		opts.StrictAvailability = true
 	} else if strings.EqualFold(strings.TrimSpace(opts.FailMode), "open") {
 		failMode = "open"
 	}
@@ -128,6 +151,7 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 	w := &answerWatchdog{stdout: opts.Stdout, stderr: opts.Stderr, exit: opts.Exit, ceiling: ceiling, waiter: newAnswerDeadlineWaiter()}
 	w.cacheFailureLogHome(opts)
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = renderNoAnswer(*opts, sp, failMode)
+	w.installHome, w.installOut, w.installErr, w.installCode, w.installLogFailure = renderInstallAnswer(*opts, sp, failMode)
 	opts.Stdout, opts.Stderr = &w.out, &w.err
 	opts.answerWatch = w
 	go w.watch(deadline)
@@ -168,6 +192,23 @@ func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []by
 	return out.Bytes(), errb.Bytes(), code, logFailure
 }
 
+// renderInstallAnswer renders the closed answer a per-user call whose
+// fallback is not closed gets when, at the deadline, its installer holds the
+// data directory: the answer Run gives it then (runHook closes the call and
+// sets strict availability). It returns an empty home, and nothing to give,
+// when the fallback is closed already or the call is not a per-user one.
+func renderInstallAnswer(opts Options, sp spec, failMode string) (home string, stdout, stderr []byte, code int, logFailure func()) {
+	if opts.ManagedEnterprise || opts.SecureClient || opts.Home == "" ||
+		opts.answerSpentLocally || normalizeFailMode(failMode) == "closed" {
+		return "", nil, nil, 0, nil
+	}
+	closed := opts
+	closed.FailMode = "closed"
+	closed.StrictAvailability = true
+	stdout, stderr, code, logFailure = renderNoAnswer(closed, sp, "closed")
+	return opts.Home, stdout, stderr, code, logFailure
+}
+
 // adopt renders the watchdog's answer again for the call Run resolved (its
 // event, fail mode and runtime), unless it was already given. A call that
 // already logged a closed failure keeps a closed answer.
@@ -179,12 +220,15 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 		failMode = "closed"
 	}
 	stdout, stderr, code, logFailure := renderNoAnswer(*opts, sp, failMode)
+	installHome, installOut, installErr, installCode, installLogFailure := renderInstallAnswer(*opts, sp, failMode)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.fired || (w.closedKnown && !closed) {
 		return
 	}
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
+	w.installHome, w.installOut, w.installErr, w.installCode, w.installLogFailure =
+		installHome, installOut, installErr, installCode, installLogFailure
 }
 
 // closeForAnsweredError makes the watchdog's answer the closed response of a
@@ -302,9 +346,18 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		return
 	}
 	w.mu.Lock()
+	installHome := w.installHome
+	w.mu.Unlock()
+	// Outside the lock: Run must still be able to finish meanwhile.
+	installing := installHome != "" && installLockHeldWithin(installHome, installLockCheckWait)
+	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.finished {
 		return
+	}
+	if installing && !w.closedKnown && w.installHome != "" {
+		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure =
+			w.installOut, w.installErr, w.installCode, w.installLogFailure
 	}
 	w.fired = true
 	_, _ = w.stderr.Write(w.fallbackErr)
@@ -362,6 +415,24 @@ func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec) {
 	}
 	w.closedKnown = true
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out, errb, code, logFailure
+}
+
+// installLockHeldWithin is installLockHeld bounded by wait: a look that
+// takes longer counts as a held lock.
+func installLockHeldWithin(home string, wait time.Duration) bool {
+	held := make(chan bool, 1)
+	// The read is taken now: a look still held on a stalled disk after the
+	// answer touches nothing of the call's.
+	lstat := installLockLstat
+	go func() { held <- installLockHeldBy(lstat, home) }()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case h := <-held:
+		return h
+	case <-timer.C:
+		return true
+	}
 }
 
 // answered stands the watchdog down: the gateway's decision is in. Safe on

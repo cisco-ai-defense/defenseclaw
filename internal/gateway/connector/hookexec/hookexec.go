@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -2525,14 +2526,35 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 }
 
 // perUserInstallInProgress forces closed while the account's installer owns
-// its data directory. Treat a symlink marker as present too, so changing its
-// type cannot open a hook during install or upgrade.
+// its data directory (installLockHeld).
 func perUserInstallInProgress(opts Options) bool {
 	if opts.ManagedEnterprise || opts.SecureClient || opts.Home == "" {
 		return false
 	}
-	_, err := os.Lstat(filepath.Join(opts.Home, ".install.lock"))
-	return err == nil
+	return installLockHeld(opts.Home)
+}
+
+// installLockLstat reads the install lock; a variable for tests.
+var installLockLstat = os.Lstat
+
+// installLockHeld reports whether the installer holds the per-user data
+// directory home: its .install.lock exists, as any file type (a symlink
+// marker too, so changing its type cannot open a hook during install or
+// upgrade), or it cannot be read for any reason but its absence. A lock
+// whose state cannot be verified is held (GAP-0862).
+func installLockHeld(home string) bool {
+	return installLockHeldBy(installLockLstat, home)
+}
+
+func installLockHeldBy(lstat func(string) (fs.FileInfo, error), home string) bool {
+	_, err := lstat(filepath.Join(home, ".install.lock"))
+	return err == nil || !errors.Is(err, fs.ErrNotExist)
+}
+
+// InstallLockHeld is installLockHeld for the hook command, which answers
+// some failures before Run (hookPreRunFailsClosed).
+func InstallLockHeld(home string) bool {
+	return strings.TrimSpace(home) != "" && installLockHeld(home)
 }
 
 func responseFailureReason(reason string) string {

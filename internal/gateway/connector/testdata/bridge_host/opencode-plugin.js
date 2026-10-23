@@ -636,6 +636,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
       // is an outage, as in the shell hooks, so strict availability closes it.
       if ((res.status >= 500 ? transportFailMode : failMode) === "closed") {
+        if (res.status >= 500) return { reason: await defenseclawPerUserGatewayDownText(null, res.status) };
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
       if (actionable) await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
@@ -664,13 +665,54 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     if (await defenseclawDeploymentRemoved()) return null;
     if (transportFailMode === "closed") {
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
-      return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
+      return { reason: await defenseclawPerUserGatewayDownText(err, 0) };
     }
     if (actionable) await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");
     return null;
   } finally {
     clearTimeout(timer);
   }
+}
+
+// defenseclawPerUserGatewayDownText is what a per-user install that fails
+// closed says when its gateway gave no usable answer: why (an install or
+// upgrade, a `defenseclaw-gateway stop`, a stopped, busy or failing gateway)
+// and what brings it back, in the words of the native and shell hooks.
+// OpenCode shows only this reason, and the runtime's network error ("fetch
+// failed", "Unable to connect") named neither the gateway nor the fix
+// (GAP-0850). The runtime's own error stays at the end for diagnosis.
+async function defenseclawPerUserGatewayDownText(err, status) {
+  const data = dirname(dirname(DC_TOKEN_FILE));
+  const present = async (name) => {
+    try {
+      await lstat(join(data, name));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+  let text;
+  if (await present(".install.lock")) {
+    text = "DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done (fail mode closed). " +
+      "Try again in a moment; if it does not come back, run `defenseclaw-gateway start`.";
+  } else if (await present("gateway.stopped")) {
+    text = "the DefenseClaw gateway was stopped with `defenseclaw-gateway stop` (fail mode closed). " +
+      "Start it with `defenseclaw-gateway start`, then try again.";
+  } else if (status) {
+    text = "this account's DefenseClaw gateway answered HTTP " + status + " (fail mode closed); it may be starting or overloaded. " +
+      "Try again in a moment.";
+  } else if (defenseclawGatewayStopped(err)) {
+    text = "this account's DefenseClaw gateway is not running (fail mode closed). " +
+      "Start it with `defenseclaw-gateway start`, then try again.";
+  } else if (err && (err.name === "AbortError" || err.name === "TimeoutError")) {
+    text = "this account's DefenseClaw gateway did not answer in time (fail mode closed); it may be restarting or busy. " +
+      "Try again in a moment.";
+  } else {
+    text = "the DefenseClaw gateway is not running or not answering (fail mode closed). " +
+      "Start it with `defenseclaw-gateway start`, then try again.";
+  }
+  const detail = status ? "HTTP " + status : (err && err.message ? err.message : String(err));
+  return "DefenseClaw blocked this tool call: " + text + " `defenseclaw-gateway status` shows its state. (" + detail + ")";
 }
 
 // DC_GATEWAY_STOPPED_TEXT is what a managed install says when its gateway

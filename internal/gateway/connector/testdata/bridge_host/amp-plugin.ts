@@ -455,6 +455,46 @@ function gatewayStopped(error: unknown): boolean {
 	return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused")
 }
 
+// perUserGatewayDownText is what a per-user install that fails closed says
+// when its gateway gave no usable answer: why (an install or upgrade, a
+// `defenseclaw-gateway stop`, a stopped, busy or failing gateway) and what
+// brings it back, in the words of the native and shell hooks, instead of the
+// runtime's network error alone (GAP-0850).
+async function perUserGatewayDownText(error: unknown, status: number): Promise<string> {
+	const data = dirname(dirname(DC_TOKEN_FILE))
+	const present = async (name: string) => {
+		try {
+			await lstat(join(data, name))
+			return true
+		} catch {
+			return false
+		}
+	}
+	const failure = error as { name?: unknown } | null
+	let text: string
+	if (await present(".install.lock")) {
+		text = "DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done (fail mode closed). " +
+			"Try again in a moment; if it does not come back, run `defenseclaw-gateway start`."
+	} else if (await present("gateway.stopped")) {
+		text = "the DefenseClaw gateway was stopped with `defenseclaw-gateway stop` (fail mode closed). " +
+			"Start it with `defenseclaw-gateway start`, then try again."
+	} else if (status) {
+		text = `this account's DefenseClaw gateway answered HTTP ${status} (fail mode closed); it may be starting or overloaded. ` +
+			"Try again in a moment."
+	} else if (gatewayStopped(error)) {
+		text = "this account's DefenseClaw gateway is not running (fail mode closed). " +
+			"Start it with `defenseclaw-gateway start`, then try again."
+	} else if (failure?.name === "AbortError" || failure?.name === "TimeoutError") {
+		text = "this account's DefenseClaw gateway did not answer in time (fail mode closed); it may be restarting or busy. " +
+			"Try again in a moment."
+	} else {
+		text = "the DefenseClaw gateway is not running or not answering (fail mode closed). " +
+			"Start it with `defenseclaw-gateway start`, then try again."
+	}
+	const detail = status ? `HTTP ${status}` : safeError(error)
+	return `DefenseClaw blocked this tool call: ${text} \`defenseclaw-gateway status\` shows its state. (${detail})`
+}
+
 async function perUserInstallInProgress(): Promise<boolean> {
 	if (DC_FAIL_MODE !== "open") return false
 	try {
@@ -644,7 +684,12 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				body,
 				signal: controller.signal,
 			}, token), controller.signal)
-			if (!response.ok) return failureResponse(`HTTP ${response.status}`)
+			if (!response.ok) {
+				if (response.status >= 500 && (DC_FAIL_MODE === "closed" || await perUserInstallInProgress())) {
+					return { action: "block", reason: await perUserGatewayDownText(null, response.status) }
+				}
+				return failureResponse(`HTTP ${response.status}`)
+			}
 
 			const data = await response.json() as GatewayResponse
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
@@ -655,6 +700,9 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			if (await deploymentRemoved()) return { action: "allow" }
 			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
 				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
+			}
+			if (DC_FAIL_MODE === "closed" || await perUserInstallInProgress()) {
+				return { action: "block", reason: await perUserGatewayDownText(error, 0) }
 			}
 			return failureResponse(safeError(error))
 		} finally {
