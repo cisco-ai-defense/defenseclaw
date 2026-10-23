@@ -198,10 +198,11 @@ func normalizeUnprotectedAgents(agents []UnprotectedAgent) []UnprotectedAgent {
 			agent.Code = UnprotectedCodeForReason(agent.Reason)
 		}
 		key := strings.ToLower(agent.SID) + "\x00" + agent.User + "\x00" + agent.Connector + "\x00" + agent.Surface + "\x00" + agent.Host
-		if agent.Connector == "kiro" && (agent.Code == UnprotectedCodeKiroCLIBelowHookFloor ||
-			agent.Code == UnprotectedCodeKiroIDEBelowGlobalHooksFloor) {
-			// One Kiro row can describe two installed products. Both need
-			// their own uncovered finding when neither loads the global hook.
+		if agent.Connector == "kiro" {
+			// One Kiro row can describe two installed products (kiro-cli and
+			// the IDE), each with its own reason, such as a kiro-cli below
+			// its floor or without a readable version next to an IDE below
+			// its floor or in an untrusted home. Each keeps its finding.
 			key += "\x00" + agent.Code
 		}
 		byKey[key] = agent

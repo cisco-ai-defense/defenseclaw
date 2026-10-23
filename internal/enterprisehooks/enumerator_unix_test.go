@@ -1455,3 +1455,109 @@ func TestEnumerateUnixKeepsRefusedSurfacesWhenDiscoveryFails(t *testing.T) {
 		t.Fatalf("a failed discovery must keep the previous refusal: %+v", report.RefusedSurfaces)
 	}
 }
+
+// A kiro-cli installed without a readable version is not known to be at its
+// hook floor. A supported Kiro IDE next to it gets the row, but must not hide
+// the CLI from status and verify: it is reported for a new row, a kept CLI
+// row and a kept IDE row alike, in a trusted and an untrusted home, and the
+// report survives the status record next to the IDE's own finding.
+func TestEnumerateUnixKiroIDEDoesNotHideAnUnversionedCLI(t *testing.T) {
+	for _, tc := range []struct {
+		name, previous, ide, cliReason string
+		untrusted                      bool
+		wantRow                        string
+		wantCLI                        bool
+		wantOther                      string // code of another Kiro finding that must survive
+	}{
+		{name: "new row", ide: "1.0.182", cliReason: "unversioned", wantRow: "1.0.182" + KiroIDEVersionSuffix, wantCLI: true},
+		{name: "kept CLI row", previous: "2.27.1", ide: "1.0.190", cliReason: "unversioned", wantRow: "1.0.190" + KiroIDEVersionSuffix, wantCLI: true},
+		{name: "kept IDE row", previous: "1.0.182" + KiroIDEVersionSuffix, ide: "1.0.182", cliReason: "unversioned", wantRow: "1.0.182" + KiroIDEVersionSuffix, wantCLI: true},
+		{name: "IDE below its floor", ide: "1.0.181", cliReason: "unversioned", wantCLI: true, wantOther: UnprotectedCodeKiroIDEBelowGlobalHooksFloor},
+		{name: "untrusted home", ide: "1.0.182", cliReason: "unversioned", untrusted: true, wantCLI: true, wantOther: UnprotectedCodeAgentUnprotected},
+		{name: "IDE only", ide: "1.0.182", cliReason: "no kiro installation found for this user", wantRow: "1.0.182" + KiroIDEVersionSuffix},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := trustedTestDir(t)
+			homes := filepath.Join(root, "home")
+			if err := os.MkdirAll(homes, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			home := makeHome(t, homes, "alice")
+			uid, gid := os.Getuid(), os.Getgid()
+			if tc.untrusted {
+				if err := os.Chmod(home, 0o775); err != nil {
+					t.Fatal(err)
+				}
+			}
+			launcher := filepath.Join(home, ".local", "bin", "kiro-cli")
+			reason := tc.cliReason
+			if reason == "unversioned" {
+				reason = UnixAgentUnversionedReasonPrefix + launcher
+			}
+			discover := func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+				return map[string]string{KiroIDEDiscoveryKey: tc.ide}, map[string]string{"kiro": reason}, nil
+			}
+			opts := UnixEnumerateOptions{
+				Resolver: &fakeResolver{accounts: map[string]unixidentity.Account{
+					"alice": {Name: "alice", UID: uid, GID: gid, Home: home, Shell: "/bin/bash"},
+				}, listed: []string{"alice"}},
+				HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid,
+				Discover: discover, DiscoverStatic: discover,
+			}
+			if tc.previous != "" {
+				info, err := os.Stat(home)
+				if err != nil {
+					t.Fatal(err)
+				}
+				enabled := true
+				opts.ExistingManifestPath = filepath.Join(root, "targets.yaml")
+				previous, err := MarshalUnixTargetsManifest(Manifest{Version: 1, Targets: []ManifestTarget{{
+					User: "alice", UserHome: home, UID: intPointer(uid), GID: intPointer(gid), Connector: "kiro",
+					DataDir: filepath.Join(home, ".defenseclaw"), AgentVersion: tc.previous, Enabled: &enabled, HomeInode: statInode(t, info),
+				}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(opts.ExistingManifestPath, previous, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			manifest, report, err := EnumerateUnix(context.Background(), enumeratorConfig("kiro"), connector.NewDefaultRegistry(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantRow == "" {
+				if len(manifest.Targets) != 0 {
+					t.Fatalf("Kiro rows = %+v, want none", manifest.Targets)
+				}
+			} else if len(manifest.Targets) != 1 || manifest.Targets[0].AgentVersion != tc.wantRow || !manifest.Targets[0].IsEnabled() {
+				t.Fatalf("Kiro rows = %+v, want one enabled at %s", manifest.Targets, tc.wantRow)
+			}
+			data, err := MarshalUnprotectedAgents(report.Unprotected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorded, err := ParseUnprotectedAgents(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cli, other int
+			for _, agent := range recorded {
+				switch {
+				case agent.Connector == "kiro" && agent.Code == UnprotectedCodeHookContractUnverified && strings.Contains(agent.Reason, launcher):
+					cli++
+				case agent.Connector == "kiro" && agent.Code == tc.wantOther:
+					other++
+				default:
+					t.Fatalf("unexpected finding %+v in %+v", agent, recorded)
+				}
+			}
+			if wantCLI := map[bool]int{true: 1}[tc.wantCLI]; cli != wantCLI {
+				t.Fatalf("unversioned kiro-cli findings = %d, want %d: %+v", cli, wantCLI, recorded)
+			}
+			if wantOther := map[bool]int{true: 1}[tc.wantOther != ""]; other != wantOther {
+				t.Fatalf("other Kiro findings = %d, want %d: %+v", other, wantOther, recorded)
+			}
+		})
+	}
+}

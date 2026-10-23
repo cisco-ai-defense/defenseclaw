@@ -107,7 +107,10 @@ func readKiroIDEProductVersion(path string) string {
 // KiroIDEDiscoveryKey into the kiro result for user. An IDE at or above
 // KiroIDEGlobalHooksFloor enrolls a user without an admitted kiro-cli
 // version: the row's version is the IDE's, marked with KiroIDEVersionSuffix
-// so the standalone floor applies the IDE's floor. An older IDE reads only
+// so the standalone floor applies the IDE's floor. The IDE row does not cover
+// a kiro-cli that is not admitted: one below connector.KiroCLIHookFloor, or
+// one installed without a readable version (it is not known to be at the
+// floor), is reported, as it is without the IDE. An older IDE reads only
 // workspace hooks, so it is reported independently of the kiro-cli.
 func applyKiroIDESurface(user string, uid int, versions, reasons map[string]string) []UnprotectedAgent {
 	ide := strings.TrimSpace(versions[KiroIDEDiscoveryKey])
@@ -148,7 +151,18 @@ func applyKiroIDESurface(user string, uid int, versions, reasons map[string]stri
 	}
 	if versions["kiro"] == "" {
 		versions["kiro"] = ide + KiroIDEVersionSuffix
+		unversioned := reasons["kiro"]
 		delete(reasons, "kiro")
+		if UnixAgentInstalledWithoutVersion(unversioned) {
+			return []UnprotectedAgent{{
+				User:      user,
+				UID:       intPointer(uid),
+				Connector: "kiro",
+				Code:      UnprotectedCodeHookContractUnverified,
+				Reason: unversioned + "; without a version DefenseClaw cannot check this kiro-cli against its hook floor, so it is not counted as protected; Kiro IDE " +
+					ide + " is separately eligible for global hooks",
+			}}
+		}
 	}
 	return nil
 }
