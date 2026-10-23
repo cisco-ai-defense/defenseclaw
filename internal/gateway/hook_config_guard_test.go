@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
@@ -29,26 +30,19 @@ const guardTestDebounce = 40 * time.Millisecond
 
 // Exercise the real rendered Amp artifact and the live policy resolver, not a
 // mock that can conceal installation/repair policy drift. Both boot paths use
-// connectorSetupOptsChecked; repair must reproduce those same bytes. This is
-// an OSS install: an unset policy is closed in action mode and an
-// unoverridden observe connector keeps the historical fail-open behavior.
+// connectorSetupOptsChecked; repair must reproduce those same bytes. On a
+// per-user install, saved open values and observe mode still render closed.
 func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 	for _, mode := range []string{"observe", "action"} {
 		for _, tc := range []struct {
-			name, global, override, wantObserve, wantAction string
+			name, global, override string
 		}{
-			// A per-user fail mode that is not set is closed in observe mode
-			// too; only an explicit open opens (rel-1-0-3 resolver).
-			{"default", "", "", "closed", "closed"},
-			{"explicit-open", "open", "", "open", "open"},
-			{"global-closed", "closed", "", "closed", "closed"},
-			{"override-open", "closed", "open", "open", "open"},
-			{"override-closed", "open", "closed", "closed", "closed"},
+			{"default", "", ""},
+			{"saved-global-open", "open", ""},
+			{"global-closed", "closed", ""},
+			{"saved-connector-open", "closed", "open"},
+			{"override-closed", "open", "closed"},
 		} {
-			want := tc.wantAction
-			if mode == "observe" {
-				want = tc.wantObserve
-			}
 			t.Run(mode+"/"+tc.name, func(t *testing.T) {
 				root := t.TempDir()
 				pluginPath := filepath.Join(root, "amp", "plugins", "defenseclaw.ts")
@@ -65,8 +59,8 @@ func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 				s := &Sidecar{cfg: cfg}
 				conn := connector.NewAMPConnector()
 				opts := mustConnectorSetupOpts(t, s, conn, "", "127.0.0.1:4000", "127.0.0.1:18970")
-				if opts.HookFailMode != want {
-					t.Fatalf("initial delivery mode = %q, want %q", opts.HookFailMode, want)
+				if opts.HookFailMode != "closed" {
+					t.Fatalf("initial delivery mode = %q, want closed", opts.HookFailMode)
 				}
 				// Native Windows Amp setup admits only a protected,
 				// setup-selected executable; seed that evidence (no-op elsewhere).
@@ -80,7 +74,7 @@ func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !bytes.Contains(original, []byte(fmt.Sprintf(`const DC_FAIL_MODE: string = "%s"`, want))) {
+				if !bytes.Contains(original, []byte(`const DC_FAIL_MODE: string = "closed"`)) {
 					t.Fatal("initial plugin does not contain the selected delivery mode")
 				}
 				guard := NewHookConfigGuard(nil, nil, time.Hour)
@@ -426,9 +420,8 @@ func (*failModeBakedConnector) HookConfigReferenceNeedles(connector.SetupOpts) [
 }
 
 // TestHookConfigGuardRefreshPolicyRerendersStaleFailMode pins GAP-0029:
-// guardrail.mode action implies the global (closed) hook fail mode, and the
-// rendered hooks follow it without a restart; nothing re-renders when the
-// effective fail mode is unchanged.
+// a managed administrator can change outage-open to closed without a
+// restart; nothing re-renders when the effective fail mode is unchanged.
 func TestHookConfigGuardRefreshPolicyRerendersStaleFailMode(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "hooks.json")
@@ -436,7 +429,7 @@ func TestHookConfigGuardRefreshPolicyRerendersStaleFailMode(t *testing.T) {
 		stubConnector: stubConnector{name: "baked-mode"},
 		configPath:    configPath,
 	}}
-	cached := connector.SetupOpts{DataDir: root, HookFailMode: "open"}
+	cached := connector.SetupOpts{DataDir: root, HookFailMode: "open", ManagedEnterprise: true}
 	if err := conn.Setup(context.Background(), cached); err != nil {
 		t.Fatalf("initial Setup: %v", err)
 	}
@@ -457,6 +450,8 @@ func TestHookConfigGuardRefreshPolicyRerendersStaleFailMode(t *testing.T) {
 
 	live := config.DefaultConfig()
 	live.DataDir = root
+	live.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	live.Enterprise.Profile = managed.ProfileStandalone
 	live.Guardrail.Mode = "observe"
 	live.Guardrail.HookFailMode = "open"
 	sidecar.publishConfig(live)

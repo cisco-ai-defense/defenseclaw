@@ -693,10 +693,10 @@ func TestHandleAgentHook_PostEvaluationRecoveryUsesFailMode(t *testing.T) {
 // for every registered connector that can block, in every guardrail mode and
 // for each place hook_fail_mode: open can come from. Closed installs, per-user
 // and standalone managed alike, deny failed blockable checks even in observe
-// mode and answer a stop or session-end event neutrally; an explicit open
-// (on a standalone managed device the administrator's, owner decision
-// 2026-10-20) and Secure Client's unset default keep their open failure
-// behavior; an explicit closed denies under Secure Client too.
+// mode and answer a stop or session-end event neutrally. Saved per-user open
+// and managed outage-open do not apply to local evaluation failures. Secure
+// Client's unset default and explicit open retain their failure behavior;
+// an explicit closed denies under Secure Client too.
 func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 	type deployment int
 	const (
@@ -763,10 +763,10 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 				for _, failSource := range failSources {
 					cfg := newConfig(t, d, mode, failSource, connectorName)
 					api := &APIServer{scannerCfg: cfg}
-					// Per-user Cursor fails closed in action mode whatever
-					// hook_fail_mode says; a managed Cursor takes the
-					// administrator's mode.
-					open := failSource != "closed" && (connectorName != "cursor" || d != perUser)
+					// Only Secure Client can open a local evaluation failure.
+					// The managed administrator's open choice is for a verified
+					// gateway connection outage, which this panic is not.
+					open := failSource != "closed" && d == secureClient
 					for _, event := range append(append([]string{}, blocking...), lifecycle...) {
 						name := strings.Join([]string{dName, connectorName, event, mode, failSource}, "/")
 						req := agentHookRequest{ConnectorName: connectorName, HookEventName: event}

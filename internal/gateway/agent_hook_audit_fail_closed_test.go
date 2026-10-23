@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -168,11 +169,29 @@ func TestHookAuditWriteFailureDeniesTheCall(t *testing.T) {
 			t.Fatalf("busy store: action %v, want block", out["action"])
 		}
 	})
-	t.Run("explicit open keeps the verdict", func(t *testing.T) {
+	t.Run("saved per-user open still blocks an unaudited call", func(t *testing.T) {
 		fixture := newAuditFailureHookFixture(t, "open")
 		fixture.emitter.fail = true
-		if out := fixture.preToolUse(t, "toolu-open"); out["action"] != "allow" {
-			t.Fatalf("open fail mode: action %v, want allow", out["action"])
+		if out := fixture.preToolUse(t, "toolu-open"); out["action"] != "block" {
+			t.Fatalf("saved per-user open: action %v, want block", out["action"])
+		}
+	})
+	t.Run("managed outage-open still blocks an unaudited call", func(t *testing.T) {
+		fixture := newAuditFailureHookFixture(t, "open")
+		fixture.api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+		fixture.api.scannerCfg.Enterprise.Profile = managed.ProfileStandalone
+		fixture.emitter.fail = true
+		if out := fixture.preToolUse(t, "toolu-managed-open"); out["action"] != "block" {
+			t.Fatalf("managed outage-open: action %v, want block", out["action"])
+		}
+	})
+	t.Run("Secure Client explicit open keeps the verdict", func(t *testing.T) {
+		fixture := newAuditFailureHookFixture(t, "open")
+		fixture.api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+		fixture.api.scannerCfg.Enterprise.Profile = managed.ProfileSecureClient
+		fixture.emitter.fail = true
+		if out := fixture.preToolUse(t, "toolu-secure-open"); out["action"] != "allow" {
+			t.Fatalf("Secure Client open: action %v, want allow", out["action"])
 		}
 	})
 }

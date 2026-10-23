@@ -1013,11 +1013,12 @@ func (a *APIServer) finalizeAgentHook(
 // could not be written: the disk is full, or the audit store stayed busy
 // through its busy timeout and retries. Every call DefenseClaw lets go ahead
 // has a durable audit row, so a failed write is a failed check: it follows the
-// connector's resolved fail mode, like a recovered evaluator error. Closed
+// local failure policy, like a recovered evaluator error. Closed
 // (the default everywhere but Secure Client) denies a blockable tool or
-// prompt event; open (Secure Client's unset default, or an explicit open)
-// keeps the verdict, as do a block, a session-ending event and an event the
-// agent cannot block. It reports whether it changed the verdict. rawBody is
+// prompt event. Secure Client's unset default or explicit open keeps the
+// verdict, as do a block, a session-ending event and an event the agent
+// cannot block. A managed outage-open choice does not apply to an audit
+// failure. It reports whether it changed the verdict. rawBody is
 // the hook's request body: Claude Code's native denial
 // (hookSpecificOutput.permissionDecision) is rendered from the event it
 // names, and without it the denial fell back to a generic decision:block.
@@ -1714,9 +1715,9 @@ type hookCheckFailure struct {
 //
 // A failed check produced no usable policy verdict. A closed hook denies a
 // blockable tool or prompt event even when policy verdicts are observed.
-// Stop and session-end events keep their neutral allow; a resolved open
-// (explicit, or Secure Client's unset default) keeps its open failure
-// behavior.
+// Stop and session-end events keep their neutral allow. Only Secure Client
+// can use an open verdict for a local evaluation or audit failure; a managed
+// outage-open choice applies solely to gateway connection outages.
 func (a *APIServer) hookFailedCheckResponse(
 	ctx context.Context,
 	connectorName string,
@@ -1741,11 +1742,12 @@ func (a *APIServer) hookFailedCheckResponse(
 	}
 	cfg := a.decisionConfig(ctx)
 	lifecycle := hookexec.NeutralLifecycleEvent(connectorName, req.HookEventName)
-	// A failed check follows the connector's resolved fail mode, the
-	// administrator's on a managed computer (owner decision 2026-10-20): an
-	// explicit closed wins everywhere, Secure Client included, whose unset
-	// value resolves to open (#1163).
-	failOpen := cfg != nil && cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open"
+	// A local evaluation or audit failure is not a gateway connection outage.
+	// Secure Client retains its configured failure contract, including its
+	// unset open default (#1163). Every other deployment closes this failure,
+	// even with a saved per-user open or managed outage-open preference.
+	failOpen := cfg != nil && cfg.SecureClientIntegration() &&
+		cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open"
 	if !failOpen && action == "block" && !lifecycle {
 		// Observe mode applies to policy verdicts, not failed checks.
 		mode = "action"
