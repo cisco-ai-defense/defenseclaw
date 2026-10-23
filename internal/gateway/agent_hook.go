@@ -597,7 +597,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				if !finalized {
 					persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 					defer cancelPersist()
-					finalization := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, true, sandboxHookAuditExtra(ctx))
+					finalization := a.finalizeAgentHook(a.pendingHookDecidedContext(persistCtx, pending, resp),
+						connectorName, req, resp, rawEventIDs, b, elapsed, true, sandboxHookAuditExtra(ctx))
 					if finalization.AuditPersisted {
 						if err := a.finalizeHookCorrelationReceipt(persistCtx, req.CorrelationReceipt); err != nil {
 							fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
@@ -779,8 +780,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				// audit records the block it enforces.
 				resp = pendingFailureHookDecision(resp)
 				persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
-				finalization := a.finalizeAgentHook(persistCtx, connectorName, req, resp,
-					rawEventIDs, b, time.Since(t0), panicked, auditExtra)
+				finalization := a.finalizeAgentHook(a.pendingHookDecidedContext(persistCtx, pending, resp),
+					connectorName, req, resp, rawEventIDs, b, time.Since(t0), panicked, auditExtra)
 				a.settlePendingHook(persistCtx, pending, finalization)
 				cancelPersist()
 				finalized = true
@@ -818,7 +819,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// unconfirmed); a hang-up after it is not a missed answer.
 			persistCtx = context.WithValue(persistCtx, hookDeliveryReceiptContextKey{}, true)
 		}
-		finalization := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, auditExtra)
+		finalization := a.finalizeAgentHook(a.pendingHookDecidedContext(persistCtx, pending, resp),
+			connectorName, req, resp, rawEventIDs, b, elapsed, panicked, auditExtra)
 		// A verdict whose audit row could not be written comes back as the
 		// fail-mode verdict (finalizeAgentHook); the agent, a second Copilot
 		// delivery and the AID accounting all get that one.
