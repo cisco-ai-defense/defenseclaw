@@ -1725,6 +1725,148 @@ func TestMultiConnectorPublicationFailureRestoresSuccessfullyRemovedConnector(t 
 	}
 }
 
+// A removed per-user connector whose revoked credential cannot be published
+// again must not get its hook back: the revived hook could not authenticate,
+// and one configured to fail open would allow every call uninspected. Its
+// lock and roster entries stay as pending removal state, and the next start's
+// removal of it succeeds.
+func TestMultiConnectorPublicationRollbackKeepsConnectorRemovedWhenItsCredentialCannotBeRestored(t *testing.T) {
+	s := multiBootSidecar(t)
+	s.cfg.DataDir = testenv.PrivateTempDir(t)
+	s.cfg.Guardrail.Enabled = true
+	s.cfg.Guardrail.Mode = "observe"
+	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {Mode: "observe"},
+	}
+	s.health = NewSidecarHealth()
+	removedArtifact := filepath.Join(testenv.PrivateTempDir(t), "removed-cursor-posture")
+	removed := &revokingRegistrationPostureConnector{registrationPostureConnector: &registrationPostureConnector{bootStubConnector: bootStubConnector{
+		stubConnector: stubConnector{name: "cursor"},
+		artifactPath:  removedArtifact,
+	}}}
+	survivor := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
+	registry := connector.NewRegistry()
+	registry.RegisterBuiltin(removed)
+	registry.RegisterBuiltin(survivor)
+
+	priorOpts := connector.SetupOpts{
+		DataDir:        s.cfg.DataDir,
+		GuardrailMode:  "action",
+		HILTEnabled:    true,
+		HookFailMode:   "open",
+		AgentVersion:   "cursor-agent 2026.07.23-e383d2b",
+		HookContractID: "cursor-hooks-v1",
+	}
+	if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, connector.NewHookContractLockEntry(priorOpts, removed, "prior-test-build")); err != nil {
+		t.Fatal(err)
+	}
+	if err := connector.SaveActiveConnectors(s.cfg.DataDir, []string{"cursor"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(removedArtifact, []byte("action|hilt=true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	priorToken, err := connector.EnsureHookAPIToken(s.cfg.DataDir, "cursor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenPath, err := connector.HookAPITokenFilePath(s.cfg.DataDir, "cursor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{scannerCfg: &config.Config{DataDir: s.cfg.DataDir}}
+	api.SetHookAPITokens(map[string]string{"cursor": priorToken})
+	priorLockBytes, err := os.ReadFile(filepath.Join(s.cfg.DataDir, "hook_contract_lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorActiveBytes, err := os.ReadFile(filepath.Join(s.cfg.DataDir, "active_connector.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeState, err := connector.CaptureActiveConnectorStateSnapshot(s.cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookLockState, err := connector.CaptureHookContractLockSnapshot(s.cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := multiConnectorSetupTransaction{activeState: activeState, hookLockState: hookLockState}
+	candidates, unavailable := s.removedConnectorRollbackCandidates(
+		registry, []string{"cursor"}, []string{"claudecode"},
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		hookLockState,
+	)
+	if len(unavailable) != 0 || len(candidates) != 1 {
+		t.Fatalf("removal candidates=%v unavailable=%v, want one rollback-authorized Cursor", candidates, unavailable)
+	}
+	seed.removed, unavailable = teardownRemovedConnectorCandidates(candidates, context.Background())
+	if len(unavailable) != 0 || len(seed.removed) != 1 {
+		t.Fatalf("removed=%v failed=%v, want successful transactional removal", seed.removed, unavailable)
+	}
+	// The revoked credential cannot be published again: its path is taken.
+	if err := os.Mkdir(tokenPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	transaction, err := s.setupConnectorsIsolatedTransaction(
+		context.Background(), []connector.Connector{survivor},
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		guardrail.NewRulePackCache(), seed,
+	)
+	if err != nil {
+		t.Fatalf("survivor setup transaction: %v", err)
+	}
+	makeActiveConnectorPublicationUnsafe(t, s.cfg.DataDir)
+	err = s.publishMultiConnectorReadyState(context.Background(), transaction, []string{"claudecode"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "rollback incomplete") ||
+		!strings.Contains(err.Error(), "restore removed connector cursor hook credential") {
+		t.Fatalf("publication error = %v, want an incomplete rollback naming the Cursor credential", err)
+	}
+	if removed.setupCalls != 0 {
+		t.Fatalf("Cursor hook registration was revived %d time(s) without its credential", removed.setupCalls)
+	}
+	if _, statErr := os.Stat(removedArtifact); !os.IsNotExist(statErr) {
+		t.Fatalf("Cursor hook registration is back without its credential: %v", statErr)
+	}
+	if api.hookAPITokenMatches("cursor", priorToken) {
+		t.Fatal("the unrestored Cursor credential authenticates")
+	}
+	if body, readErr := os.ReadFile(filepath.Join(s.cfg.DataDir, "hook_contract_lock.json")); readErr != nil || !reflect.DeepEqual(body, priorLockBytes) {
+		t.Fatalf("pending Cursor lock = %q, %v; want the prior bytes kept as rollback authority", body, readErr)
+	}
+	if body, readErr := os.ReadFile(filepath.Join(s.cfg.DataDir, "active_connector.json")); readErr != nil || !reflect.DeepEqual(body, priorActiveBytes) {
+		t.Fatalf("pending roster = %q, %v; want Cursor kept for the next start's removal", body, readErr)
+	}
+
+	// Next start: the pending state still authorizes Cursor's removal.
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(s.cfg.DataDir, "active_connector.json.lock")); err != nil {
+		t.Fatal(err)
+	}
+	retryLock, err := connector.CaptureHookContractLockSnapshot(s.cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates, unavailable = s.removedConnectorRollbackCandidates(
+		registry, connector.LoadActiveConnectors(s.cfg.DataDir), []string{"claudecode"},
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		retryLock,
+	)
+	if len(unavailable) != 0 || len(candidates) != 1 {
+		t.Fatalf("retry candidates=%v unavailable=%v, want Cursor's removal still authorized", candidates, unavailable)
+	}
+	if again, failed := teardownRemovedConnectorCandidates(candidates, context.Background()); len(failed) != 0 || len(again) != 1 {
+		t.Fatalf("retry removed=%v failed=%v, want Cursor removed cleanly", again, failed)
+	}
+	if lock := connector.LoadHookContractLockEntry(s.cfg.DataDir, "cursor"); lock.Connector != "" {
+		t.Fatalf("retried removal left Cursor lock: %+v", lock)
+	}
+}
+
 func TestSingleConnectorSwitchFailureRestoresExactPriorConnector(t *testing.T) {
 	s := multiBootSidecar(t)
 	s.cfg.DataDir = testenv.PrivateTempDir(t)

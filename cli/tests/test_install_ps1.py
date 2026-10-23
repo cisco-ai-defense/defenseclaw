@@ -161,9 +161,13 @@ def test_effective_config_fallback_reads_old_external_connector_roster(tmp_path:
     # status --json does not erase a multi-connector external deployment.
     config = tmp_path / "external.yaml"
     config.write_text(
-        "guardrail:\n  connectors:\n    codex: {}\n    claude-code: {}\n    cursor:\n      enabled: false\n",
+        "guardrail:\n  enabled: true\n  connectors:\n    codex: {}\n    claude-code: {}\n    cursor:\n      enabled: false\n",
         encoding="utf-8",
     )
+    assert _effective_config_roster(config) == ["claudecode", "codex"]
+
+
+def _effective_config_roster(config: Path) -> list[str]:
     helper = _ps1_function("Get-EffectiveConfigConnectors")
     match = re.search(r"\$code = '((?:''|[^'])*)'", helper)
     assert match is not None
@@ -176,7 +180,77 @@ def test_effective_config_fallback_reads_old_external_connector_roster(tmp_path:
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == ["claudecode", "codex"]
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize(
+    "guardrail",
+    [
+        # 'uninstall' and 'setup guardrail --disable' write enabled: false.
+        "guardrail:\n  enabled: false\n  connectors:\n    codex: {}\n    claude-code: {}\n",
+        # Every release (0.8.10 through 1.0.4) defaults guardrail.enabled to false.
+        "guardrail:\n  connectors:\n    codex: {}\n",
+        "guardrail:\n  enabled: null\n  connectors:\n    codex: {}\n",
+        "guardrail:\n  enabled: \"false\"\n  connectors:\n    codex: {}\n",
+        # The single-connector and claw.mode forms are disabled the same way.
+        "guardrail:\n  enabled: false\n  connector: codex\n",
+        "claw:\n  mode: codex\nguardrail:\n  enabled: false\n",
+        "claw:\n  mode: codex\n",
+    ],
+)
+def test_effective_config_roster_is_empty_when_the_guardrail_is_disabled(tmp_path: Path, guardrail: str) -> None:
+    # rel-1-0-4 review: a disabled guardrail tears every connector down, so the
+    # old gateway guards none of the configured connectors. Recording them made
+    # the new install demand hooks that never existed and roll back.
+    config = tmp_path / "config.yaml"
+    config.write_text(guardrail, encoding="utf-8")
+    assert _effective_config_roster(config) == []
+
+
+@pytest.mark.parametrize("enabled", ["true", "True", "\"true\"", "1"])
+def test_effective_config_roster_reads_an_enabled_guardrail_as_the_gateway_does(tmp_path: Path, enabled: str) -> None:
+    # The gateway reads guardrail.enabled with strconv.ParseBool semantics.
+    config = tmp_path / "config.yaml"
+    config.write_text(f"guardrail:\n  enabled: {enabled}\n  connector: codex\n", encoding="utf-8")
+    assert _effective_config_roster(config) == ["codex"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("reported", [[], ["codex"]])
+def test_lifecycle_record_with_a_disabled_guardrail_keeps_only_running_connectors(
+    tmp_path: Path, reported: list[str],
+) -> None:
+    # A disabled guardrail leaves the effective config roster empty. The proof
+    # roster is then exactly what the old gateway reports running, and the new
+    # install can prove it.
+    entries = ", ".join(f"[pscustomobject]@{{ name = '{n}'; state = 'running' }}" for n in reported)
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{tmp_path}'
+$BinDir = '{tmp_path}'
+$ManagedBinaries = @()
+function Get-GatewayProcess {{ return [pscustomobject]@{{ Id = 1; Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }} }}
+function Get-GatewayHealthReport {{ return [pscustomobject]@{{ running = $true; health = [pscustomobject]@{{ connectors = @({entries}) }} }} }}
+function Get-ConfiguredConnectors {{ return @('codex', 'cursor') }}
+function Get-EffectiveConfigConnectors {{ return @() }}
+function Get-ExternalConfig {{ return '' }}
+function Get-BinariesState {{ return @{{}} }}
+function Get-OptionalSha256 {{ return '' }}
+function Test-BinDirProtected {{ return $true }}
+function Get-GatewayDigestProblem {{ return '' }}
+{_ps1_function('Get-Field')}
+{_ps1_function('Get-GuardedConnectors')}
+{_ps1_function('ConvertTo-Map')}
+{_ps1_function('Get-LifecycleState')}
+{_ps1_function('Test-LifecycleProof')}
+$state = Get-LifecycleState
+if ((@($state.Connectors) -join ',') -ne '{",".join(reported)}') {{ throw "proof roster: $(@($state.Connectors) -join ',')" }}
+$problems = @(Test-LifecycleProof @{{}} $true ([string[]]@($state.Connectors)) -RequireProtected $false)
+if ($problems.Count) {{ throw "upgrade could not prove its old guarded set: $($problems -join '; ')" }}
+'OK'
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
 
 
 @pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="native Windows PowerShell required")
@@ -185,7 +259,7 @@ def test_effective_config_reader_works_through_native_windows_powershell(tmp_pat
     # native argument quoting during a live local upgrade.
     config = tmp_path / "config.yaml"
     config.write_text(
-        "guardrail:\n  connectors:\n    codex: {}\n    claude-code: {}\n    cursor:\n      enabled: false\n",
+        "guardrail:\n  enabled: true\n  connectors:\n    codex: {}\n    claude-code: {}\n    cursor:\n      enabled: false\n",
         encoding="utf-8",
     )
     quoted_data_dir = str(tmp_path).replace("'", "''")
