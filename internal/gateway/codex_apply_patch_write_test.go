@@ -126,7 +126,7 @@ func TestCodexApplyPatchWriteTargets(t *testing.T) {
 			}
 			if !strings.HasPrefix(got, `{"action":"block"`) ||
 				!strings.Contains(got, `"severity":"CRITICAL"`) ||
-				!strings.Contains(got, "rule persistence.ssh_authorized_keys_command: SSH authorized keys mutation") {
+				!strings.Contains(got, "persistence.ssh_authorized_keys_command: SSH authorized keys mutation") {
 				t.Fatalf("protected edit = %.600s", got)
 			}
 

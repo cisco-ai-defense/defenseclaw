@@ -76,7 +76,9 @@ func simpleCommands(input Input, facts Facts, depth int) []SimpleCommand {
 	if source == "" {
 		return nil
 	}
-	if !strings.ContainsAny(source, ";&|(){}<>\n`$=!") && !strings.Contains(source, "eval") {
+	if !strings.ContainsAny(source, ";&|(){}<>\n`$=!") &&
+		!strings.Contains(source, "eval") && !strings.Contains(source, "trap") &&
+		!strings.Contains(source, " -") {
 		return nil
 	}
 	parts, reduced, ok := sequenceStatementDetails(source, true, true)
@@ -226,7 +228,7 @@ func simpleCommands(input Input, facts Facts, depth int) []SimpleCommand {
 					}
 					innerFacts := Analyze(innerInput)
 					inner := simpleCommands(innerInput, innerFacts, depth+1)
-					if len(inner) == 0 && shared {
+					if len(inner) == 0 && shared && strings.TrimSpace(innerInput.Command) != "" {
 						inner = []SimpleCommand{{Text: innerInput.Command, CWD: state.cwd}}
 					}
 					changed = changed || len(inner) != 0
@@ -252,6 +254,17 @@ func simpleCommands(input Input, facts Facts, depth int) []SimpleCommand {
 				}
 			}
 			nextCWD, changedDirectory := simpleCommandNextCWD(text, &state, effective)
+			if !changedDirectory {
+				// An unmodeled shell builtin or dynamic program may move the
+				// caller's directory. Later relative operands cannot use the
+				// original hook directory as an authoritative base.
+				if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) != 0 {
+					program, known := simpleStaticWord(call.Args[0], effective)
+					if !known || ChangesShellDirectory(CommandFact{Dialect: DialectPOSIX, Program: program}) {
+						nextCWD, changedDirectory = "", true
+					}
+				}
+			}
 			if changedDirectory {
 				if state.cwd != "" {
 					state.vars["OLDPWD"] = state.cwd
@@ -292,7 +305,7 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 	if source == "" && argsExecutionTool(input.Tool) {
 		source = extractArgsForTool(input.Args, input.Tool).command
 	}
-	if source == "" || !strings.ContainsAny(source, ";&|\n\r") {
+	if source == "" {
 		return nil
 	}
 	if len(source) > maxCommandBytes {
@@ -302,6 +315,14 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 	if facts.Parse.Dialect == DialectCMD {
 		dialect = windowsCMD
 	}
+	if !strings.ContainsAny(source, ";&|\n\r") && !windowsSimplePotentialGroup(source, dialect) {
+		return nil
+	}
+	var groupEvents []windowsSimpleGroupEvent
+	source, groupEvents, ok := windowsSimpleGroupSource(source, dialect)
+	if !ok {
+		return []SimpleCommand{{EvaluationFailure: "parse"}}
+	}
 	out := newParseOutput(facts.Parse.Dialect, 1)
 	lexemes, ok := windowsLex(source, dialect, &out)
 	if !ok || out.status == StatusInvalid {
@@ -310,21 +331,58 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 	if out.status == StatusLimitExceeded {
 		return []SimpleCommand{{EvaluationFailure: "limit"}}
 	}
+	lexemes = windowsSimpleContinuedLexemes(lexemes)
 	if _, _, ok = windowsBuildCommands(lexemes, &out); !ok {
 		return []SimpleCommand{{EvaluationFailure: "parse"}}
+	}
+	if len(groupEvents) != 0 && strings.TrimSpace(source) == "" {
+		return nil
 	}
 	runes := []rune(source)
 	begin := 0
 	result := make([]SimpleCommand, 0, 2)
 	variables := make(map[string]string)
-	appendPart := func(part string) {
+	state := simpleWindowsState{cwd: input.CWD}
+	failed := false
+	groupIndex := 0
+	var groups []simpleWindowsGroupSnapshot
+	processGroupEvents := func(before int) {
+		for groupIndex < len(groupEvents) && groupEvents[groupIndex].offset < before {
+			if groupEvents[groupIndex].open {
+				groups = append(groups, state.groupSnapshot(variables))
+			} else if len(groups) == 0 {
+				failed = true
+			} else {
+				state.mergeGroup(groups[len(groups)-1], variables)
+				groups = groups[:len(groups)-1]
+			}
+			groupIndex++
+		}
+	}
+	appendPart := func(part string, start, end int) {
+		childStart := start
+		for childStart < end && unicode.IsSpace(runes[childStart]) {
+			childStart++
+		}
+		processGroupEvents(childStart)
+		childInput := input
+		childInput.CWD = state.cwd
 		text := part
 		if dialect == windowsPowerShell {
-			if !windowsSimpleAssignment(part, input, variables) {
+			if !windowsSimpleAssignment(part, childInput, variables) {
 				text = windowsSimpleResolvedVariables(part, variables)
 			}
 		}
-		result = append(result, SimpleCommand{Text: text, CWD: input.CWD})
+		state.forgetKnownVariables(variables)
+		if state.referencesUncertainVariable(part) {
+			failed = true
+		}
+		if state.cwdUnknown && windowsSimpleRelativePathOperand(text, facts.Parse.Dialect) {
+			failed = true
+		}
+		result = append(result, SimpleCommand{Text: text, CWD: state.cwd})
+		state.next(part, dialect, childInput, variables)
+		processGroupEvents(end)
 	}
 	for _, lexeme := range lexemes {
 		if lexeme.kind != windowsSeparatorLexeme && lexeme.kind != windowsPipeLexeme {
@@ -337,7 +395,7 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		if part == "" {
 			return []SimpleCommand{{EvaluationFailure: "parse"}}
 		}
-		appendPart(part)
+		appendPart(part, begin, lexeme.start)
 		begin = lexeme.end
 		if lexeme.kind == windowsPipeLexeme || lexeme.operator == "&&" || lexeme.operator == "||" {
 			// A pipeline stage has a separate scope; conditional assignments
@@ -348,7 +406,7 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 			return []SimpleCommand{{EvaluationFailure: "limit"}}
 		}
 	}
-	if len(result) == 0 {
+	if len(result) == 0 && len(groupEvents) == 0 {
 		return nil
 	}
 	last := strings.TrimSpace(string(runes[begin:]))
@@ -356,11 +414,17 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		if dialect == windowsPowerShell && len(lexemes) != 0 &&
 			lexemes[len(lexemes)-1].kind == windowsSeparatorLexeme &&
 			lexemes[len(lexemes)-1].operator == ";" {
+			if failed {
+				return append(result, SimpleCommand{EvaluationFailure: "parse"})
+			}
 			return result
 		}
 		return []SimpleCommand{{EvaluationFailure: "parse"}}
 	}
-	appendPart(last)
+	appendPart(last, begin, len(runes))
+	if failed {
+		return append(result, SimpleCommand{EvaluationFailure: "parse"})
+	}
 	return result
 }
 
@@ -567,6 +631,16 @@ func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) {
 }
 
 func simpleStaticWord(word *syntax.Word, vars map[string]string) (string, bool) {
+	return simpleStaticWordWithNewline(word, vars, false)
+}
+
+// A quoted -c or trap action can contain physical lines. Other shell words
+// still require one line so they cannot silently become a different command.
+func simpleStaticScriptWord(word *syntax.Word, vars map[string]string) (string, bool) {
+	return simpleStaticWordWithNewline(word, vars, true)
+}
+
+func simpleStaticWordWithNewline(word *syntax.Word, vars map[string]string, allowNewline bool) (string, bool) {
 	if word == nil {
 		return "", false
 	}
@@ -606,7 +680,8 @@ func simpleStaticWord(word *syntax.Word, vars map[string]string) (string, bool) 
 		env = append(env, name+"="+vars[name])
 	}
 	fields, err := expand.Fields(&expand.Config{Env: expand.ListEnviron(env...)}, word)
-	if err != nil || len(fields) != 1 || strings.ContainsAny(fields[0], "\x00\r\n") {
+	if err != nil || len(fields) != 1 || strings.ContainsRune(fields[0], 0) ||
+		!allowNewline && strings.ContainsAny(fields[0], "\r\n") {
 		return "", false
 	}
 	return fields[0], true
@@ -674,14 +749,21 @@ func simpleNestedScript(call *syntax.CallExpr, vars map[string]string) (script s
 	if call == nil || len(call.Args) == 0 {
 		return "", false, false, false
 	}
-	program, ok := simpleStaticWord(call.Args[0], vars)
+	return simpleNestedScriptArgs(call.Args, vars, 0)
+}
+
+func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth int) (script string, shared, nested, static bool) {
+	if depth >= 8 || len(args) == 0 {
+		return "", false, true, false
+	}
+	program, ok := simpleStaticWord(args[0], vars)
 	if !ok {
 		return "", false, false, false
 	}
 	if program == "eval" {
-		words := make([]string, 0, len(call.Args)-1)
-		for _, arg := range call.Args[1:] {
-			value, known := simpleStaticWord(arg, vars)
+		words := make([]string, 0, len(args)-1)
+		for _, arg := range args[1:] {
+			value, known := simpleStaticScriptWord(arg, vars)
 			if !known {
 				// The command substitution itself is exposed by the outer
 				// statement walk. Runtime eval text has no static child to
@@ -695,28 +777,156 @@ func simpleNestedScript(call *syntax.CallExpr, vars map[string]string) (script s
 		}
 		return strings.Join(words, " "), true, true, true
 	}
-	switch filepath.Base(program) {
-	case "sh", "bash", "zsh":
+	if program == "trap" {
+		index := 1
+		if index < len(args) && args[index].Lit() == "--" {
+			index++
+		}
+		if index >= len(args) || args[index].Lit() == "-p" {
+			return "", true, false, false
+		}
+		value, known := simpleStaticScriptWord(args[index], vars)
+		return value, true, true, known
+	}
+	if program == "su" && simplePotentialShellScript(args) {
+		// The target account can change both startup files and directory.
+		return "", false, true, false
+	}
+	if simpleNestedWrapper(program) {
+		argv := make([]string, len(args))
+		for index, arg := range args {
+			value, known := simpleStaticScriptWord(arg, vars)
+			if !known {
+				if simplePotentialShellScript(args) {
+					return "", false, true, false
+				}
+				return "", false, false, false
+			}
+			argv[index] = value
+		}
+		var childIndex int
+		switch program {
+		case "nohup":
+			childIndex = 1
+			if len(argv) > 1 && argv[1] == "--" {
+				childIndex++
+			}
+		case "timeout":
+			childIndex = simpleTimeoutChildIndex(argv)
+		default:
+			child, found, uncertain := staticPOSIXWrapperArgv(argv, program)
+			if uncertain {
+				if simplePotentialShellScript(args) {
+					return "", false, true, false
+				}
+				return "", false, false, false
+			}
+			if !found {
+				return "", false, false, false
+			}
+			childIndex = len(argv) - len(child)
+		}
+		if childIndex <= 0 || childIndex >= len(args) {
+			return "", false, true, false
+		}
+		return simpleNestedScriptArgs(args[childIndex:], vars, depth+1)
+	}
+	shellProgram := filepath.Base(program)
+	switch shellProgram {
+	case "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash":
 	default:
 		return "", false, false, false
 	}
-	for index := 1; index < len(call.Args); index++ {
-		option := call.Args[index].Lit()
+	if simpleShellNoExec(args, vars, shellProgram) {
+		// Syntax-check mode does not execute the -c body. Use the same
+		// invocation grammar as Analyze so option order and +n are honored.
+		return "", false, false, false
+	}
+	for index := 1; index < len(args); index++ {
+		option := args[index].Lit()
 		if option == "--" {
-			return "", false, false, false
+			continue
+		}
+		if option == "-o" || option == "+o" {
+			index++
+			if index >= len(args) {
+				return "", false, true, false
+			}
+			name, known := simpleStaticWord(args[index], vars)
+			if !known || name == "" {
+				return "", false, true, false
+			}
+			continue
 		}
 		if !simpleShellSafeOption(option) {
+			if simplePotentialShellScript(args) {
+				return "", false, true, false
+			}
 			return "", false, false, false
 		}
 		if simpleShellCOption(option) {
-			if index+1 == len(call.Args) {
+			if index+1 == len(args) {
 				return "", false, true, false
 			}
-			value, known := simpleStaticWord(call.Args[index+1], vars)
+			value, known := simpleStaticScriptWord(args[index+1], vars)
 			return value, false, true, known
 		}
 	}
 	return "", false, false, false
+}
+
+func simpleShellNoExec(args []*syntax.Word, vars map[string]string, program string) bool {
+	argv := make([]string, len(args))
+	for index, arg := range args {
+		value, known := simpleStaticScriptWord(arg, vars)
+		if !known {
+			return false
+		}
+		argv[index] = value
+	}
+	return parsePOSIXShellInvocation(program, argv).noExec
+}
+
+func simpleNestedWrapper(program string) bool {
+	switch program {
+	case "env", "sudo", "exec", "command", "nohup", "timeout", "nsenter", "chroot":
+		return true
+	default:
+		return false
+	}
+}
+
+func simplePotentialShellScript(args []*syntax.Word) bool {
+	for _, arg := range args {
+		option := arg.Lit()
+		if option == "-c" || len(option) > 2 && strings.HasPrefix(option, "-") && option[1] != '-' &&
+			strings.ContainsRune(option[1:], 'c') {
+			return true
+		}
+	}
+	return false
+}
+
+func simpleTimeoutChildIndex(argv []string) int {
+	index := 1
+	for index < len(argv) && strings.HasPrefix(argv[index], "-") {
+		if argv[index] == "--" {
+			index++
+			break
+		}
+		switch argv[index] {
+		case "-s", "--signal", "-k", "--kill-after":
+			index += 2
+		case "--preserve-status", "--foreground":
+			index++
+		default:
+			return -1
+		}
+	}
+	if index >= len(argv) || !boundedTimeoutDuration(argv[index]) {
+		return -1
+	}
+	return index + 1
 }
 
 func simpleShellCOption(option string) bool {
@@ -789,8 +999,25 @@ func simpleCommandNextCWD(source string, state *simpleShellState, vars map[strin
 	if !known {
 		return state.cwd, false
 	}
+	argStart := 1
+	if program == "builtin" || program == "command" {
+		if program == "command" && argStart < len(call.Args) && call.Args[argStart].Lit() == "-p" {
+			argStart++
+		}
+		if argStart < len(call.Args) && call.Args[argStart].Lit() == "--" {
+			argStart++
+		}
+		if argStart >= len(call.Args) {
+			return state.cwd, false
+		}
+		program, known = simpleStaticWord(call.Args[argStart], vars)
+		if !known {
+			return "", true
+		}
+		argStart++
+	}
 	if program == "popd" {
-		if len(call.Args) != 1 || len(state.dirStack) == 0 {
+		if len(call.Args) != argStart || len(state.dirStack) == 0 {
 			return "", true
 		}
 		dir := state.dirStack[len(state.dirStack)-1]
@@ -800,7 +1027,7 @@ func simpleCommandNextCWD(source string, state *simpleShellState, vars map[strin
 	if program != "cd" && program != "pushd" {
 		return state.cwd, false
 	}
-	arg := 1
+	arg := argStart
 	if program == "cd" {
 		for arg < len(call.Args) {
 			option := call.Args[arg].Lit()

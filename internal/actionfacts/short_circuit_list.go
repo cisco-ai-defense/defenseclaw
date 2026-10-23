@@ -454,6 +454,36 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			return false
 		}
 		if allSimple {
+			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok && decl.Variant.Value == "export" && len(functions) != 0 {
+				exported, known := simpleExportedFunctionNames(decl)
+				if !known {
+					return false
+				}
+				var bodies []*syntax.Stmt
+				for _, exportedName := range exported {
+					if body, found := functions[exportedName]; found && !slices.Contains(bodies, body) {
+						bodies = append(bodies, body)
+					}
+				}
+				if len(bodies) != 0 {
+					if functionDepth >= 8 || !keep(stmt.Cmd, stmt.Redirs...) {
+						return false
+					}
+					reduced = true
+					for _, body := range bodies {
+						if functionDepth >= 8 {
+							return false
+						}
+						functionDepth++
+						ok := flatten(body)
+						functionDepth--
+						if !ok {
+							return false
+						}
+					}
+					return true
+				}
+			}
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) != 0 {
 				name, known := simpleFunctionCallName(call)
 				if !known && len(functions) != 0 {
@@ -466,7 +496,8 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 					bodies = append(bodies, body)
 				}
 				program, _ := simpleStaticWord(call.Args[0], nil)
-				if program == "eval" && len(functions) != 0 {
+				_, _, trapAction, _ := simpleNestedScript(call, nil)
+				if (program == "eval" || program == "trap" && trapAction) && len(functions) != 0 {
 					called, ok := simpleEvalFunctionNames(call)
 					if !ok {
 						return false
@@ -548,6 +579,68 @@ func simpleEvalFunctionNames(call *syntax.CallExpr) ([]string, bool) {
 	return names, known
 }
 
+// An exported function is executable by a nested shell or later external
+// command. Judge the body at the export site, where its definition is known.
+func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
+	if decl == nil || len(decl.Args) == 0 {
+		return nil, true
+	}
+	values := make([]string, 0, len(decl.Args))
+	for _, arg := range decl.Args {
+		if arg == nil {
+			return nil, false
+		}
+		if arg.Name != nil && arg.Naked {
+			values = append(values, arg.Name.Value)
+			continue
+		}
+		if arg.Name == nil && arg.Value != nil {
+			value, known := simpleStaticWord(arg.Value, nil)
+			if !known {
+				return nil, false
+			}
+			values = append(values, value)
+			continue
+		}
+		return nil, false
+	}
+	index := 0
+	exportFunctions := false
+	unexport := false
+	for index < len(values) {
+		option := values[index]
+		if option == "--" {
+			index++
+			break
+		}
+		if len(option) < 2 || option[0] != '-' {
+			break
+		}
+		for _, flag := range option[1:] {
+			if flag == 'f' {
+				exportFunctions = true
+			} else if flag == 'n' {
+				unexport = true
+			} else if !strings.ContainsRune("npx", flag) {
+				return nil, false
+			}
+		}
+		index++
+	}
+	if !exportFunctions || unexport {
+		return nil, true
+	}
+	var names []string
+	for ; index < len(values); index++ {
+		name := values[index]
+		if name == "" || strings.ContainsRune(name, '=') {
+			return nil, false
+		}
+		names = append(names, name)
+	}
+	return names, true
+}
+
 // simpleFunctionCallName resolves literal spellings and the shell builtins
 // that can run a name supplied after them. Their interpretation can differ
 // among shells, so including the body is the conservative policy view.
@@ -566,11 +659,6 @@ func simpleFunctionCallName(call *syntax.CallExpr) (string, bool) {
 			return name, true
 		}
 		return simpleStaticWord(call.Args[index], nil)
-	case "trap":
-		if len(call.Args) < 2 {
-			return name, true
-		}
-		return simpleStaticWord(call.Args[1], nil)
 	}
 	return name, true
 }
