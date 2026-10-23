@@ -6193,8 +6193,11 @@ def _check_windows_native_hooks(
 
 _HERMES_EXECUTION_PROBE_RESPONSE = b"defenseclaw-execution-probe-ok\n"
 # One probe run, and the wait for stdout to close once the probe has exited or
-# been killed (a descendant can inherit it). Tests shorten both.
-_HERMES_EXECUTION_PROBE_TIMEOUT = 3.0
+# been killed (a descendant can inherit it). Tests shorten both. The first run
+# of a launcher an upgrade just replaced waits for its antivirus scan (2.8 s
+# for the Windows defenseclaw-hook.exe on an idle host); Verify uses the same
+# bound (GAP-0837).
+_HERMES_EXECUTION_PROBE_TIMEOUT = 10.0
 _HERMES_EXECUTION_PROBE_PIPE_WAIT = 1.0
 # The wait for a terminated Windows probe job to empty, or for the Linux
 # supervisor to end the probe's tree.

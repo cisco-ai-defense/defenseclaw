@@ -21,8 +21,13 @@ const hermesExecutionProbeResponse = "defenseclaw-execution-probe-ok\n"
 // hermesExecutionProbePipeWait bounds the wait for stdout to close after the
 // probe exits or is killed: a descendant that inherited stdout cannot hold
 // Verify open.
+//
+// The first run of a launcher an upgrade has just replaced waits for the
+// antivirus scan of its image: 2.8 s for the 130 MB Windows defenseclaw-hook.exe
+// on an idle host, so the earlier 3 s bound failed the upgrade's Verify on a
+// busy one (GAP-0837).
 var (
-	hermesExecutionProbeTimeout  = 3 * time.Second
+	hermesExecutionProbeTimeout  = 10 * time.Second
 	hermesExecutionProbePipeWait = time.Second
 )
 
@@ -30,7 +35,8 @@ var (
 // ownedHooksPresentInConfig has already read back the exact agent registration,
 // so an edited command cannot make Verify execute an arbitrary program.
 func hermesRegisteredCommandExecutable(opts SetupOpts, hookCommand string) bool {
-	target := hermesHookExecutablePath(hookCommand, opts.HookExecutable)
+	executable := hermesHookExecutable(runtime.GOOS, opts)
+	target := hermesHookExecutablePath(hookCommand, executable)
 	info, err := os.Lstat(target)
 	if err != nil || !info.Mode().IsRegular() {
 		return false
@@ -41,7 +47,7 @@ func hermesRegisteredCommandExecutable(opts SetupOpts, hookCommand string) bool 
 		// runtime. A disabled launcher can return success without delegating;
 		// only the active hook runtime emits the proof response.
 		if !strings.EqualFold(filepath.Ext(target), ".exe") ||
-			windowsHermesDirectHookCommand(opts.HookExecutable) != hookCommand {
+			windowsHermesDirectHookCommand(executable) != hookCommand {
 			return false
 		}
 		args = []string{"hook", "--connector", "hermes", "--defenseclaw-execution-probe"}

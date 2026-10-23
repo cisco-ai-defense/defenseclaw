@@ -1618,8 +1618,8 @@ func (c *hookOnlyConnector) hookCommand(opts SetupOpts) string {
 
 func (c *hookOnlyConnector) hookCommandForOS(goos string, opts SetupOpts) string {
 	unixCommand := filepath.Join(opts.DataDir, "hooks", c.scriptName)
-	if goos == "windows" && c.name == "hermes" && strings.TrimSpace(opts.HookExecutable) != "" {
-		return windowsHermesDirectHookCommand(opts.HookExecutable)
+	if goos == "windows" && c.name == "hermes" {
+		return windowsHermesDirectHookCommand(hermesHookExecutable(goos, opts))
 	}
 	if c.name == "devin" {
 		if command := devinManagedHookCommand(goos, opts); command != "" {
@@ -3848,7 +3848,7 @@ func setupHermesFiles(opts SetupOpts, configPath, hookScript string) (err error)
 	}
 
 	command := hermesConfiguredHookCommand(hookScript, opts.HookExecutable)
-	if err = patchHermesAllowlist(allowlistPath, command, hermesHookExecutablePath(hookScript, opts.HookExecutable)); err != nil {
+	if err = patchHermesAllowlist(allowlistPath, command, hermesHookExecutablePath(hookScript, hermesHookExecutable(runtime.GOOS, opts))); err != nil {
 		return err
 	}
 	if err = byPath[allowlistPath].markOwned(); err != nil {
@@ -3882,6 +3882,20 @@ func hermesConfiguredHookCommand(hookScript, hookExecutable string) string {
 		return hookScript
 	}
 	return shellWord(hookScript)
+}
+
+// hermesHookExecutable is the launcher the Windows Hermes command names: the
+// one SetupOpts pins (managed policy, native Setup maintenance) or, for an
+// ordinary per-user install, which leaves HookExecutable empty, the packaged
+// launcher hookInvocationCommandFor registers. Verify's execution probe and
+// the allowlist's script time read the same one, so a per-user install no
+// longer probes the whole command line as a file path and fails every Setup
+// and upgrade (GAP-0837). Unix Hermes runs the data-dir script; "" there.
+func hermesHookExecutable(goos string, opts SetupOpts) string {
+	if executable := strings.TrimSpace(opts.HookExecutable); executable != "" || goos != "windows" {
+		return executable
+	}
+	return defenseclawHookBinary()
 }
 
 func hermesHookExecutablePath(hookScript, hookExecutable string) string {

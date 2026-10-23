@@ -621,6 +621,8 @@ def test_windows_hermes_doctor_probe_ends_its_job(tmp_path, monkeypatch, case):
 @pytest.mark.skipif(os.name == "nt", reason="emulates the Windows branch on a POSIX shell stub")
 @pytest.mark.parametrize("fail", ["create", "terminate", "linger"])
 def test_windows_hermes_doctor_probe_fails_closed_without_job_cleanup(tmp_path, monkeypatch, fail):
+    # The hard deadline, not the probe's own bound, ends this run.
+    monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_TIMEOUT", 3.0)
     monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_PIPE_WAIT", 0.5)
     root_pid_file = tmp_path / "root.pid"
     target = _probe_stub(tmp_path, f"echo $$ > '{root_pid_file}'\n" + _PROOF + "exec sleep 60\n")

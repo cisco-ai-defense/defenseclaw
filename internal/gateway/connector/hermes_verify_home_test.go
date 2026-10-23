@@ -153,6 +153,7 @@ func TestManagedHermesVerifyFailsWhenTheAccountNamesAnotherHermesHome(t *testing
 		APIToken: "tok-test",
 	})
 	stubHermesAdmissionInstalledVersion(t)
+	answerHermesProbeForTest(t)
 	conn := NewHermesConnector()
 	evidence := []struct{ name, file, body string }{
 		{"recorded redirect", filepath.Join(home, ".defenseclaw", "foreign-hook-env.json"),
@@ -212,6 +213,7 @@ func TestManagedHermesVerifyIgnoresARedirectSetupSuperseded(t *testing.T) {
 		APIToken: "tok-test",
 	})
 	stubHermesAdmissionInstalledVersion(t)
+	answerHermesProbeForTest(t)
 	conn := NewHermesConnector()
 	writeRecord := func(seen time.Time) error {
 		body := `{"v":1,"connectors":{"hermes":[{"vars":{"HERMES_HOME":"` + strings.ReplaceAll(other, `\`, `\\`) + `"},"seen":"` + seen.UTC().Format(time.RFC3339) + `"}]}}`
@@ -271,6 +273,7 @@ func TestManagedHermesReleasesTheEarlierDefaultHome(t *testing.T) {
 		APIToken: "tok-test",
 	})
 	stubHermesAdmissionInstalledVersion(t)
+	answerHermesProbeForTest(t)
 	conn := NewHermesConnector()
 	// The hook command names the account's executable, so it is resolved
 	// for the account (WithUserHomeDir) as Setup and Teardown resolve it.
