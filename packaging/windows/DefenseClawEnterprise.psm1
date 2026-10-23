@@ -11339,8 +11339,12 @@ function New-DefenseClawDeploymentMetadata {
         [bool]$DeferredConfigPending = $false,
         $ManagedHooksActivation,
         [string]$InstallRootIdentity = '',
-        [string]$StateRootIdentity = ''
+        [string]$StateRootIdentity = '',
+        [bool]$UninstallPurgeRequested = $false
     )
+    if ($Installed -and $UninstallPurgeRequested) {
+        throw 'only an uninstall tombstone records an uninstall purge request'
+    }
     if (-not [string]::IsNullOrEmpty($InstallRootIdentity) -and
         ($Installed -or $InstallRootIdentity -cnotmatch
             '^[a-f0-9]{8}:[a-f0-9]{16}$')) {
@@ -11514,6 +11518,11 @@ function New-DefenseClawDeploymentMetadata {
         $productVersion = [string]$Layout.ProductVersion
         if (-not [string]::IsNullOrWhiteSpace($productVersion)) {
             $metadata['product_version'] = $productVersion
+        }
+        if (-not $Installed) {
+            # The uninstall mode commits with the tombstone. Recovery of an
+            # interrupted uninstall replays exactly this mode.
+            $metadata['uninstall_purge_requested'] = [bool]$UninstallPurgeRequested
         }
     }
     if (-not $Installed -and
@@ -31472,14 +31481,57 @@ function Get-DefenseClawUnfinishedLifecycleEvidence {
     return $found.ToArray()
 }
 
+function Get-DefenseClawTombstonePurgeRequested {
+    <#
+        The uninstall mode an authenticated standalone tombstone recorded at
+        its commit. Recovery replays exactly this mode. Tombstones written
+        before 1.0.4 record none and replay as the state-keeping uninstall,
+        so recovery never deletes state nobody asked to purge; an explicit
+        Uninstall -Purge still purges them. Keep the missing-field case while
+        1.0.0-1.0.3 tombstones can be upgraded.
+    #>
+    param([Parameter(Mandatory)]$Metadata)
+    $property = $Metadata.PSObject.Properties['uninstall_purge_requested']
+    if ($null -eq $property) {
+        return $false
+    }
+    if ($property.Value -isnot [bool]) {
+        throw 'uninstall tombstone has an invalid recorded purge mode'
+    }
+    return [bool]$property.Value
+}
+
+function Test-DefenseClawCommittedUninstallUnsettled {
+    <#
+        Whether a committed standalone uninstall still has postcommit work:
+        its recorded purge has not removed the tombstone (the tombstone goes
+        with StateRoot), or InstallRoot or the managed-hook teardown journal
+        remains. A settled state-keeping uninstall keeps its tombstone for
+        good and is not replayed. Setup's recovery watcher decides the same
+        way (standaloneCommittedUninstallUnsettled).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata
+    )
+    if (Get-DefenseClawTombstonePurgeRequested -Metadata $Metadata) {
+        return $true
+    }
+    return [bool](
+        (Test-DefenseClawPathPresentNoFollow -Path ([string]$Layout.InstallRoot)) -or
+        (Test-DefenseClawPathPresentNoFollow `
+            -Path ([string]$Layout.ManagedHooksTeardownJournalPath))
+    )
+}
+
 function Invoke-DefenseClawTimeoutRecovery {
     <#
         Setup's one bounded recovery after it stopped a lifecycle child at
         TIMEOUTSECONDS (GAP-0501). The interrupted request is gone, so it
-        replays pending.json and independently completes an authenticated
-        committed uninstall tombstone. It runs no new install. A recovery is
-        settled only after postcommit hook cleanup and every remaining
-        lifecycle record have been checked.
+        replays pending.json and independently completes an unsettled
+        authenticated committed uninstall in the mode its tombstone recorded.
+        It runs no new install. A recovery is settled only after postcommit
+        hook cleanup and every remaining lifecycle record have been checked.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -31492,6 +31544,7 @@ function Invoke-DefenseClawTimeoutRecovery {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName)
     }
+    $keptStateTombstone = $null
     if ((Test-DefenseClawStandaloneProfile) -and
         -not (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.PendingPath `
@@ -31503,15 +31556,25 @@ function Invoke-DefenseClawTimeoutRecovery {
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName
             if (-not (Test-DefenseClawMetadataInstalled -Metadata $metadata)) {
-                # The absent pending record is the commit point. The
-                # tombstone, installed artifact hashes, service absence and
-                # teardown journal are rechecked by this idempotent cleanup
-                # before any hook registration is removed.
-                [void](Invoke-DefenseClawCommittedUninstallCleanup `
-                    -Layout $Layout `
-                    -GatewayServiceName $GatewayServiceName `
-                    -GuardianServiceName $GuardianServiceName `
-                    -Purge)
+                $recordedPurge = Get-DefenseClawTombstonePurgeRequested `
+                    -Metadata $metadata
+                if (Test-DefenseClawCommittedUninstallUnsettled `
+                        -Layout $Layout `
+                        -Metadata $metadata) {
+                    # The absent pending record is the commit point. The
+                    # tombstone, installed artifact hashes, service absence
+                    # and teardown journal are rechecked by this idempotent
+                    # cleanup before any hook registration is removed. It
+                    # purges only when the uninstall asked for it.
+                    [void](Invoke-DefenseClawCommittedUninstallCleanup `
+                        -Layout $Layout `
+                        -GatewayServiceName $GatewayServiceName `
+                        -GuardianServiceName $GuardianServiceName `
+                        -Purge:$recordedPurge)
+                }
+                if (-not $recordedPurge) {
+                    $keptStateTombstone = $metadata
+                }
             }
         }
     }
@@ -31524,6 +31587,22 @@ function Invoke-DefenseClawTimeoutRecovery {
         throw 'the lifecycle recovery is still pending; the protected journal was kept'
     }
     $unfinished = @(Get-DefenseClawUnfinishedLifecycleEvidence -Layout $Layout)
+    if ($null -ne $keptStateTombstone -and
+        $unfinished -ccontains 'connector cleanup receipt') {
+        # A state-keeping uninstall keeps its connector cleanup receipt for
+        # the retained-state Install or a later purge. Bound to this
+        # tombstone it is the settled record of that uninstall, not work.
+        [void](Get-DefenseClawManagedHookContractCleanupReceipt `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -Metadata $keptStateTombstone `
+            -Required)
+        $unfinished = @($unfinished |
+            Microsoft.PowerShell.Core\Where-Object {
+                $_ -cne 'connector cleanup receipt'
+            })
+    }
     if ($unfinished.Count -gt 0) {
         throw (
             'Setup recovery did not settle the deployment: these lifecycle ' +
@@ -34996,7 +35075,8 @@ function Invoke-DefenseClawUninstallLifecycle {
             -Installed:$false `
             -ManagedHooksActivation $managedHooksActivation `
             -InstallRootIdentity $installRootIdentity `
-            -StateRootIdentity $stateRootIdentity
+            -StateRootIdentity $stateRootIdentity `
+            -UninstallPurgeRequested ([bool]$Purge)
         if ($tombstone -is [Collections.IDictionary] -and
             $tombstone.Contains('product_version')) {
             # The tombstone names the release that was removed, not the

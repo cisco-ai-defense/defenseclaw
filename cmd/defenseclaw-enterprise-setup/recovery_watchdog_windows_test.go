@@ -8,6 +8,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -79,30 +80,74 @@ func TestStandaloneUninstallRecoveryWatcher(t *testing.T) {
 	}
 }
 
-func TestStandaloneUninstallRecoveryNeedsPendingOrTrustedTombstone(t *testing.T) {
+// Only a pending record or an unsettled tombstone starts recovery. A settled
+// state-keeping uninstall keeps its tombstone; replaying it purged the state
+// the administrator kept.
+func TestStandaloneUninstallRecoveryNeedsPendingOrUnsettledTombstone(t *testing.T) {
 	oldLayout, oldDeployment := setupRecoveryLayout, standaloneSetupDeployment
 	t.Cleanup(func() { setupRecoveryLayout, standaloneSetupDeployment = oldLayout, oldDeployment })
-	lifecycleDir := filepath.Join(t.TempDir(), "install")
-	setupRecoveryLayout = func() (managed.StandaloneLayout, error) {
-		return managed.StandaloneLayout{LifecycleDir: lifecycleDir}, nil
+	base := t.TempDir()
+	layout := managed.StandaloneLayout{
+		InstallRoot:  filepath.Join(base, "Program Files", "Cisco", "DefenseClaw"),
+		LifecycleDir: filepath.Join(base, "ProgramData", "Cisco", "DefenseClaw", "install"),
 	}
+	if err := os.MkdirAll(layout.LifecycleDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setupRecoveryLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
+	metadata := filepath.Join(layout.LifecycleDir, "deployment.json")
 	for _, tc := range []struct {
-		state winpath.EnterpriseDeploymentState
-		need  bool
-		err   bool
+		name   string
+		state  winpath.EnterpriseDeploymentState
+		record string
+		root   bool
+		need   bool
+		err    bool
 	}{
-		{state: winpath.EnterpriseDeploymentAbsent},
-		{state: winpath.EnterpriseDeploymentInstalled},
-		{state: winpath.EnterpriseDeploymentTombstone, need: true},
-		{state: winpath.EnterpriseDeploymentUnknown, err: true},
+		{name: "absent", state: winpath.EnterpriseDeploymentAbsent},
+		{name: "installed", state: winpath.EnterpriseDeploymentInstalled},
+		{name: "settled state-keeping uninstall", state: winpath.EnterpriseDeploymentTombstone,
+			record: `{"installed":false,"uninstall_purge_requested":false}`},
+		{name: "settled pre-1.0.4 tombstone", state: winpath.EnterpriseDeploymentTombstone, record: `{"installed":false}`},
+		{name: "state-keeping uninstall left its install root", state: winpath.EnterpriseDeploymentTombstone,
+			record: `{"installed":false,"uninstall_purge_requested":false}`, root: true, need: true},
+		{name: "unfinished purge", state: winpath.EnterpriseDeploymentTombstone,
+			record: `{"installed":false,"uninstall_purge_requested":true}`, need: true},
+		{name: "invalid recorded mode", state: winpath.EnterpriseDeploymentTombstone,
+			record: `{"installed":false,"uninstall_purge_requested":"yes"}`, err: true},
+		{name: "unknown", state: winpath.EnterpriseDeploymentUnknown, err: true},
 	} {
-		standaloneSetupDeployment = func() (winpath.EnterpriseDeployment, error) {
-			return winpath.EnterpriseDeployment{State: tc.state}, nil
-		}
-		needed, err := standaloneUninstallRecoveryNeeded()
-		if needed != tc.need || (err != nil) != tc.err {
-			t.Fatalf("state %s: recovery needed=%t error=%v", tc.state, needed, err)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.RemoveAll(layout.InstallRoot); err != nil {
+				t.Fatal(err)
+			}
+			if tc.root {
+				if err := os.MkdirAll(layout.InstallRoot, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(metadata, []byte(tc.record), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			standaloneSetupDeployment = func() (winpath.EnterpriseDeployment, error) {
+				return winpath.EnterpriseDeployment{State: tc.state, MetadataPath: metadata}, nil
+			}
+			needed, err := standaloneUninstallRecoveryNeeded()
+			if needed != tc.need || (err != nil) != tc.err {
+				t.Fatalf("recovery needed=%t error=%v, want needed=%t error=%t", needed, err, tc.need, tc.err)
+			}
+		})
+	}
+	pending := filepath.Join(layout.LifecycleDir, "pending.json")
+	if err := os.WriteFile(pending, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	standaloneSetupDeployment = func() (winpath.EnterpriseDeployment, error) {
+		t.Fatal("a pending record must start recovery before the deployment record is read")
+		return winpath.EnterpriseDeployment{}, nil
+	}
+	if needed, err := standaloneUninstallRecoveryNeeded(); err == nil && !needed {
+		t.Fatal("a pending transaction did not start recovery")
 	}
 }
 

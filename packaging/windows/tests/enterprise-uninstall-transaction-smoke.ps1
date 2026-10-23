@@ -2440,12 +2440,17 @@ targets:
                 [bool]$DeferredConfigPending = $false,
                 [bool]$Installed = $true,
                 [string]$InstallRootIdentity = '',
-                [string]$StateRootIdentity = ''
+                [string]$StateRootIdentity = '',
+                [bool]$UninstallPurgeRequested = $false
             )
             if ($null -eq $ManagedHooksActivation) {
                 throw 'deployment metadata fixture lost managed-hook activation evidence'
             }
             $script:HarnessState.installed = [bool]$Installed
+            if (-not $Installed) {
+                $script:HarnessState.tombstone_purge_requested =
+                    [bool]$UninstallPurgeRequested
+            }
             if ($null -ne $ManagedHooksActivation) {
                 $script:HarnessState.managed_hooks_activation =
                     $ManagedHooksActivation
@@ -3535,6 +3540,16 @@ targets:
             Assert-Harness `
                 -Condition ($failed -ne $ExpectSuccess) `
                 -Message "$Name success result did not match expectation"
+            if ($ExpectSuccess -and
+                $script:HarnessState.ContainsKey('tombstone_purge_requested')) {
+                # Recovery of an interrupted uninstall replays the mode
+                # the tombstone this case wrote recorded at commit.
+                Assert-Harness `
+                    -Condition (
+                        [bool]$script:HarnessState.tombstone_purge_requested -eq [bool]$Purge
+                    ) `
+                    -Message "$Name tombstone did not record its uninstall mode"
+            }
 
             if ($ExpectSuccess) {
                 Assert-Harness `
