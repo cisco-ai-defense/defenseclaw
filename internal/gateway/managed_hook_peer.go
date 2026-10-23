@@ -266,29 +266,52 @@ func (z *managedHookAuthorizer) exempt(peer managedHookPeer) bool {
 		}, false)
 		return anyMatches(z.enrollment.ExemptUsers, func(entry string) bool { return userEntryMatches(&subject, entry) })
 	}
-	// The facts the cache holds now for the account that holds the uid decide
-	// without waiting: names they give that match an entry exempt the caller,
-	// and settled facts that match none reject it. Only missing or unsettled
-	// facts (an answer without its UPN or domain yet) that match no entry wait
-	// for a current answer, within identityDirectoryBudget, as a cold read did
-	// before. Entries select by account names (userEntryMatches), never by
-	// group, so a cached match needs none of the fresh Open Directory answer a
-	// managed Mac waits for on group decisions; the cache's own bounds
-	// (lifetime, maxAge, the account holding the uid now, the guardian's
-	// record) still apply. Waiting for a fresh answer on every hook, up to 2 s
-	// and then 750 ms, either held every caller or denied a named exemption
-	// whenever a healthy directory answered after the wait (review of r104
-	// Q-identity, loop rounds 1 and 2).
-	cached, settled := managedHookExemptFacts(peer.UID, true)
-	if matches(cached) {
-		return true
-	}
-	if settled {
+	// Current facts the cache holds for the account that holds the uid (within
+	// their lifetime and settled) decide without waiting, either way. Entries
+	// select by account names (userEntryMatches), never by group, so they
+	// need none of the fresh Open Directory answer a managed Mac waits for
+	// on every group decision; the cache's other bounds (maxAge, the account
+	// holding the uid now, the guardian's record) still apply. Settled facts
+	// past their lifetime that match no entry reject the caller without
+	// waiting (the refresh they started serves a later hook), so an enrolled
+	// caller is not held on every expiry. Every other case waits for the
+	// answer a blocking hook read gets, within identityDirectoryBudget (a
+	// managed Mac: a current answer): missing facts, unsettled ones (a UPN or
+	// domain not given yet, which may also still give one the directory has
+	// since dropped), and expired facts that match an entry, since the
+	// directory may have removed that name since. A name the facts gave
+	// before therefore never exempts a caller after the directory dropped it
+	// (review of r104 Q-identity, continuation 2, loop round 2), and waiting
+	// on every hook, which held every caller or denied a named exemption on a
+	// slow healthy directory, stays limited to the hooks that need a current
+	// answer (loop rounds 1 and 2).
+	cached, state := managedHookExemptFacts(peer.UID, true)
+	switch {
+	case state == exemptFactsCurrent:
+		return matches(cached)
+	case state == exemptFactsExpired && !matches(cached):
 		return false
 	}
-	facts, _ := managedHookExemptFacts(peer.UID, false)
-	return matches(facts)
+	facts, state := managedHookExemptFacts(peer.UID, false)
+	return state != exemptFactsNone && matches(facts)
 }
+
+// exemptFactsState is how far the directory facts managedHookExemptFacts
+// returns decide an exemption.
+type exemptFactsState int
+
+const (
+	// exemptFactsNone: no facts, or unsettled ones that may lack a name a
+	// current answer gives; a current answer decides.
+	exemptFactsNone exemptFactsState = iota
+	// exemptFactsExpired: settled facts past their lifetime. A name they
+	// give may be one the directory has since dropped, so a match waits for
+	// a current answer; a nonmatch rejects.
+	exemptFactsExpired
+	// exemptFactsCurrent: facts within their lifetime and settled, or the
+	// answer of a blocking read; they decide.
+	exemptFactsCurrent
+)
 
 // hostRunExempt reports whether the caller is exempt from enrollment as decide
 // marks a hook call exempt (managedHookDecision.Exempt), so the
@@ -302,9 +325,9 @@ func (z *managedHookAuthorizer) hostRunExempt(peer managedHookPeer) bool {
 // managedHookExemptFacts are the verified directory facts exempt matches a
 // caller's names with, from the cache the caller's hook requests use; tests
 // replace it. cached returns the facts the cache holds now, without waiting,
-// and whether they are settled (a nonmatch then rejects); otherwise the
-// facts are read as a blocking hook read gets them (exemptIdentityDirectory),
-// so the first hook after a restart can use a UPN or DOMAIN\name exemption.
+// and how far they decide (exemptFactsState); otherwise the facts are read
+// as a blocking hook read gets them (exemptIdentityDirectory), so the first
+// hook after a restart can use a UPN or DOMAIN\name exemption.
 var managedHookExemptFacts = exemptIdentityDirectory
 
 // decide authorizes one hook call. surface is the caller's

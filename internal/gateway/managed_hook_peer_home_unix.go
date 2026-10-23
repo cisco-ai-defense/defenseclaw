@@ -578,19 +578,27 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 }
 
 // cachedDirectory returns uid's cached directory facts without waiting (a
-// cold or expired entry starts one background lookup), and whether they are
-// settled: an incomplete or settling answer (a UPN or a group not given yet)
-// may miss a name that a current answer has.
-func (c *managedHookPeerHomeCache) cachedDirectory(uid int) (useridentity.DirectoryFacts, bool) {
+// cold or expired entry starts one background lookup), and how far they
+// decide an exemption (exemptFactsState): an incomplete or settling answer
+// (a UPN or a group not given yet) may miss a name that a current answer
+// has, and an answer past its lifetime may give a name the directory no
+// longer does.
+func (c *managedHookPeerHomeCache) cachedDirectory(uid int) (useridentity.DirectoryFacts, exemptFactsState) {
 	cache, key, ok := c.directoryOf(uid)
 	if !ok {
-		return useridentity.DirectoryFacts{}, false
+		return useridentity.DirectoryFacts{}, exemptFactsNone
 	}
-	facts, ok := cache.getNonblocking(key)
-	if !ok || facts.ResolvedAt.IsZero() {
-		return useridentity.DirectoryFacts{}, false
+	facts, current, ok := cache.getCached(key)
+	switch {
+	case !ok || facts.ResolvedAt.IsZero():
+		return useridentity.DirectoryFacts{}, exemptFactsNone
+	case current:
+		return facts, exemptFactsCurrent
+	case !cache.unsettled(facts):
+		return facts, exemptFactsExpired
+	default:
+		return facts, exemptFactsNone
 	}
-	return facts, !cache.unsettled(facts)
 }
 
 // directoryOf returns the cache and key of uid's directory facts after the
@@ -616,16 +624,20 @@ func (c *managedHookPeerHomeCache) directoryOf(uid int) (*identityDirectoryCache
 }
 
 // exemptIdentityDirectory returns the directory facts exempt matches uid's
-// names with. cached returns the facts already cached and whether they are
-// settled (cachedDirectory); otherwise they are read as a blocking hook read
+// names with. cached returns the facts already cached and how far they
+// decide (cachedDirectory); otherwise they are read as a blocking hook read
 // gets them (directory): a cold lookup is waited for up to
 // identityDirectoryBudget, and a managed Mac waits that long for a current
 // answer. A lookup that finishes after the wait serves the next hook.
-func exemptIdentityDirectory(uid int, cached bool) (useridentity.DirectoryFacts, bool) {
+func exemptIdentityDirectory(uid int, cached bool) (useridentity.DirectoryFacts, exemptFactsState) {
 	if cached {
 		return managedHookPeerHomes.cachedDirectory(uid)
 	}
-	return managedHookPeerHomes.directory(uid, true)
+	facts, ok := managedHookPeerHomes.directory(uid, true)
+	if !ok {
+		return useridentity.DirectoryFacts{}, exemptFactsNone
+	}
+	return facts, exemptFactsCurrent
 }
 
 // explainDirectory is directory for `guardrail profile explain`: the facts a
