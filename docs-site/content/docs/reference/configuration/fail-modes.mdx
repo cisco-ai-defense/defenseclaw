@@ -84,6 +84,8 @@ These outcomes apply to supported blocking events; a recovered evaluator panic a
 
 Observe mode never enforces a policy verdict. The failure blocks in the table above still apply on a standalone managed host in observe mode. A recovered evaluator error there gives no verdict, so it blocks every event whose native hook can block, except stop, session-end and idle events, in observe mode too, even when the administrator selected `hook_fail_mode: open`. That block is a fail-closed answer without a policy finding: alert on the `defenseclaw.panics.total` counter and on audit rows with result `panic`, and inspect gateway health.
 
+A panic recovered anywhere while DefenseClaw answers a hook gives that call's audit row result `panic`: in the evaluator, in a later check (artifact promotion, tool-call chains), in a reason or notice added to the verdict (the sandbox reason, the kernel-denial notice), or in the connector's response renderer. A later check that fails answers the recovered-panic verdict above; a reason or notice that fails keeps the verdict it would have explained. A block whose renderer fails keeps its native denial. Once an answer is delivered to a managed hook or finalized, a later panic does not change it, so the agent, the audit row and the exported decision agree.
+
 An exact unexpired deny receipt can replay its stable denial without duplicate finding telemetry.
 
 ### Stop and session-end events

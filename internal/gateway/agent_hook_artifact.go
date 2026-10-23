@@ -59,6 +59,7 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 			}
 		}
 	}()
+	hookStageForTest(ctx, "artifact")
 	if a == nil || ManagedEnterpriseActive() || req.toolChain == nil ||
 		original.Action == guardrailActionBlock ||
 		original.RawAction == guardrailActionBlock ||

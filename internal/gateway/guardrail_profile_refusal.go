@@ -54,7 +54,9 @@ func (a *APIServer) refuseProfileHook(
 	refused = true
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			// resp stays the bare block.
+			// resp keeps the block, with the callback-free native denial.
+			resp.Reason = reason
+			resp.HookOutput = blockFallbackOutput(profile, connectorName, req, reason)
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("profile refusal render panic: %v", recovered))
 		}
 	}()

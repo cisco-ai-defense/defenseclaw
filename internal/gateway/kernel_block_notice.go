@@ -118,6 +118,7 @@ func (a *APIServer) safeAddKernelBlockNotice(
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("kernel block notice panic: %v", r))
 		}
 	}()
+	hookStageForTest(ctx, "kernel_notice")
 	peer, ok := managedHookRequestPeer(ctx)
 	if !ok || peer.PID <= 0 || sandboxHookForConnector(ctx, connectorName) {
 		// OSS and unmanaged hosts, and sandbox hooks: nothing to tell.

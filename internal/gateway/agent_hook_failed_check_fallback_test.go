@@ -80,7 +80,7 @@ func TestFailedCheckFallbackCarriesTheHealthyNativeControl(t *testing.T) {
 			for _, tool := range tools {
 				req := agentHookRequest{ConnectorName: name, HookEventName: event, ToolName: tool}
 				actions := []string{"allow"}
-				if action, _ := failedCheckNativeAction(profile, name, req, true); !lifecycle && action != "allow" {
+				if action, _ := failedCheckNativeAction(t.Context(), profile, name, req, true); !lifecycle && action != "allow" {
 					actions = append(actions, action)
 				}
 				for _, action := range actions {
