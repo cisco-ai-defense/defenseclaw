@@ -496,7 +496,7 @@ func codexBackupTargetMatchingPostHash(recordPath, captured, postSHA256 string) 
 			continue
 		}
 		if match != "" && !sameManagedTargetPath(match, candidate) {
-			return "", fmt.Errorf("Codex managed backup matches multiple current-home configs after a home move")
+			return "", fmt.Errorf("codex managed backup matches multiple current-home configs after a home move")
 		}
 		match = candidate
 	}
