@@ -6,11 +6,8 @@ package gateway
 import (
 	"context"
 	"encoding/json"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -70,13 +67,12 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			if proposal.Action != "allow" || proposal.DeliveryReceipt == "" {
 				t.Fatalf("proposal = %+v, want allow and receipt id", proposal)
 			}
-			path := filepath.Join(f.api.pendingHookDir(), proposal.DeliveryReceipt+".json")
-			info, err := os.Lstat(path)
-			if err != nil {
-				t.Fatal(err)
+			entry, present, err := f.store.HookDelivery(t.Context(), proposal.DeliveryReceipt)
+			if err != nil || !present {
+				t.Fatalf("journaled proposal = %+v: %v", entry, err)
 			}
-			pending, err := readPendingHookOccurrence(path, proposal.DeliveryReceipt, fs.FileInfoToDirEntry(info))
-			if err != nil || pending.SandboxReceipt == nil || pending.SandboxReceipt.CallRef == "" {
+			var pending pendingHookOccurrence
+			if err := json.Unmarshal(entry.Occurrence, &pending); err != nil || pending.SandboxReceipt == nil || pending.SandboxReceipt.CallRef == "" {
 				t.Fatalf("pending relay reference = %+v: %v", pending, err)
 			}
 			callRef := pending.SandboxReceipt.CallRef
@@ -137,20 +133,24 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			if err := json.Unmarshal(unacknowledged.Body.Bytes(), &late); err != nil || late.DeliveryReceipt == "" {
 				t.Fatalf("unacknowledged proposal = %q: %v", unacknowledged.Body.String(), err)
 			}
-			path = filepath.Join(f.api.pendingHookDir(), late.DeliveryReceipt+".json")
-			info, err = os.Lstat(path)
-			if err != nil {
-				t.Fatal(err)
+			entry, present, err = f.store.HookDelivery(t.Context(), late.DeliveryReceipt)
+			if err != nil || !present {
+				t.Fatalf("unacknowledged journal = %+v: %v", entry, err)
 			}
-			pending, err = readPendingHookOccurrence(path, late.DeliveryReceipt, fs.FileInfoToDirEntry(info))
-			if err != nil {
+			if err := json.Unmarshal(entry.Occurrence, &pending); err != nil {
 				t.Fatal(err)
 			}
 			pending.SandboxReceipt.OfferedAt = time.Now().Add(-time.Minute)
-			if _, err := pending.publish(); err != nil {
+			entry.Occurrence, err = json.Marshal(&pending)
+			if err != nil {
 				t.Fatal(err)
 			}
-			f.api.recoverPendingHookOccurrences(t.Context(), nil)
+			if err := f.store.UpdateHookDelivery(t.Context(), pending.ID, entry.Occurrence); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.api.recoverPendingHook(t.Context(), entry); err != nil {
+				t.Fatal(err)
+			}
 			if got := f.audited(t, missing)[missing]; got != "unconfirmed/no_answer" {
 				t.Fatalf("unacknowledged verdict = %q, want unconfirmed/no_answer", got)
 			}
