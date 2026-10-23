@@ -8,10 +8,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -82,6 +84,15 @@ func TestWatchdogManagedLoopPollsThroughItsManagedTransport(t *testing.T) {
 		t.Fatal("managed watchdog loop selected the per-user peer transport")
 		return nil, errors.New("unexpected per-user transport")
 	}
+	// The managed listener check has its own tests; this one is about the
+	// loop polling through the transport the factory gives it.
+	previousManaged := managedGatewayClientFactory
+	t.Cleanup(func() { managedGatewayClientFactory = previousManaged })
+	var managedTransport atomic.Bool
+	managedGatewayClientFactory = func(timeout time.Duration, _ string, _ hookexec.ManagedGatewayPeer) (*http.Client, error) {
+		managedTransport.Store(true)
+		return &http.Client{Timeout: timeout}, nil
+	}
 	requests := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		select {
@@ -108,4 +119,7 @@ func TestWatchdogManagedLoopPollsThroughItsManagedTransport(t *testing.T) {
 		t.Fatal("managed watchdog did not poll its gateway")
 	}
 	<-done
+	if !managedTransport.Load() {
+		t.Fatal("managed watchdog did not poll through the managed transport")
+	}
 }

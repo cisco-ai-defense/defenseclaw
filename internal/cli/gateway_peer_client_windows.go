@@ -6,6 +6,9 @@
 package cli
 
 import (
+	"net/http"
+	"time"
+
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -14,4 +17,14 @@ import (
 // socket: the running DefenseClawGateway SCM service process.
 func managedGatewayPeer() hookexec.ManagedGatewayPeer {
 	return hookexec.ManagedGatewayPeer{ServiceName: managed.StandaloneWindowsGatewaySvc, ServiceUID: -1}
+}
+
+// managedGatewayClientForURL is managedGatewayClient for the endpoint of
+// rawURL.
+func managedGatewayClientForURL(rawURL string, timeout time.Duration) (*http.Client, error) {
+	host, port, err := localGatewayURLEndpoint(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	return managedGatewayClient(host, port, timeout)
 }

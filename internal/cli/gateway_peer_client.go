@@ -56,16 +56,6 @@ func gatewayPeerClientForURL(c *config.Config, rawURL string, timeout time.Durat
 	return gatewayPeerClient(c, host, port, timeout)
 }
 
-// managedGatewayClientForURL is managedGatewayClient for the endpoint of
-// rawURL.
-func managedGatewayClientForURL(rawURL string, timeout time.Duration) (*http.Client, error) {
-	host, port, err := localGatewayURLEndpoint(rawURL)
-	if err != nil {
-		return nil, err
-	}
-	return managedGatewayClient(host, port, timeout)
-}
-
 func localGatewayURLEndpoint(rawURL string) (string, int, error) {
 	target, err := url.Parse(rawURL)
 	if err != nil || target.Scheme != "http" || target.User != nil || target.Hostname() == "" {

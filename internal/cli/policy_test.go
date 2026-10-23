@@ -494,6 +494,11 @@ func TestPolicyReloadPreRunLeavesAuditStoreToGateway(t *testing.T) {
 // the HTTP status and body of a refused reload, not the GAP-0160 sentence.
 func TestSecureClientPolicyReloadKeepsTheOutputOfMain(t *testing.T) {
 	ownGatewayListener(t)
+	// A Secure Client host is one with the trusted Secure Client install; a
+	// secure_client profile alone gets the managed listener check (GAP-0962).
+	previousSecureClient := secureClientHost
+	t.Cleanup(func() { secureClientHost = previousSecureClient })
+	secureClientHost = func() bool { return true }
 	const token = "reload-fixture-value"
 	const body = `{"error":"reload failed: policy: read data.json: open /p/data.json: no such file or directory","status":"failed"}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

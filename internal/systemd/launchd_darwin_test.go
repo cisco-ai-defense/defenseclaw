@@ -36,7 +36,7 @@ func TestLaunchdActivationOutsideAJobIsNotActivated(t *testing.T) {
 	}
 }
 
-const launchdSocketHelperEnv = "DEFENSECLAW_LAUNCHD_SOCKET_HELPER"
+const launchdSocketHelperEnv = "DC_TEST_LAUNCHD_SOCKET_HELPER"
 
 // TestLaunchdSocketHelper is the daemon TestLaunchdHoldsTheGatewayPortAcrossRestarts
 // loads: it serves one request on the plist's "api" socket with its pid,
@@ -74,10 +74,10 @@ func TestLaunchdSocketHelper(t *testing.T) {
 // down, so no other process can bind the port, and a request sent then is
 // answered by the next gateway instead of by another account. Needs root
 // (launchctl bootstrap system); run it on a macOS host with
-// DEFENSECLAW_LAUNCHD_SOCKET_TEST=1.
+// DC_TEST_LAUNCHD_SOCKET=1.
 func TestLaunchdHoldsTheGatewayPortAcrossRestarts(t *testing.T) {
-	if os.Getenv("DEFENSECLAW_LAUNCHD_SOCKET_TEST") != "1" || os.Geteuid() != 0 {
-		t.Skip("set DEFENSECLAW_LAUNCHD_SOCKET_TEST=1 and run as root on macOS")
+	if os.Getenv("DC_TEST_LAUNCHD_SOCKET") != "1" || os.Geteuid() != 0 {
+		t.Skip("set DC_TEST_LAUNCHD_SOCKET=1 and run as root on macOS")
 	}
 	probe, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
