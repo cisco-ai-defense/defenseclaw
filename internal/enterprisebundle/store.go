@@ -1274,14 +1274,12 @@ type SettleReport struct {
 	// Unconfirmed are applied receipts the caller must re-check against the
 	// gateway and then confirm or roll back.
 	Unconfirmed []*Receipt
-	// Pending are receipts whose transaction is committed for the
-	// installed config but whose gateway could not be read (an outage), or
-	// whose state ref proves an apply but confirmation needs a missing
-	// prerequisite. They remain open and are never failed for that alone.
+	// Pending are receipts whose apply cannot yet be confirmed or disproved:
+	// the gateway is unavailable, or local confirmation evidence is missing.
+	// They remain open and are never failed for that alone.
 	Pending []string
-	// PendingReasons explains state-named receipts that could not be sealed
-	// because a confirmation prerequisite is missing. Gateway outages have
-	// no entry here.
+	// PendingReasons explains local evidence that could not be checked or
+	// a missing confirmation prerequisite. Gateway outages have no entry.
 	PendingReasons map[string]string
 }
 

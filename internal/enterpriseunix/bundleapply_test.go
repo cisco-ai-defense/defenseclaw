@@ -1664,10 +1664,10 @@ func TestBundleUnconfirmedFirstBundleKeepsItsVersionDirectory(t *testing.T) {
 	b.apply(b.dir(1, cfg))
 	b.env.bundleFault = nil
 	b.frozen = "sha256:" + strings.Repeat("0", 64)
-	b.run(Options{Action: ActionEnsure})
+	settled := b.run(Options{Action: ActionEnsure})
 	rc := b.receipt(bundleID(1))
 	if rc.State != enterprisebundle.StateFailed || rc.ErrorCode != enterprisebundle.CodeDigestMismatch {
-		t.Fatalf("receipt = %+v", rc)
+		t.Fatalf("receipt = %+v, settle warnings = %+v", rc, settled.Warnings)
 	}
 	b.run(Options{Action: ActionEnsure})
 	dir := b.env.bundleVersionDir(rc.Dir)

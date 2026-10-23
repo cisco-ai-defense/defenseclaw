@@ -63,3 +63,53 @@ func settleWarning(r *enterprisestatus.Result) bool {
 	}
 	return false
 }
+
+// A carried applied receipt stays pending through an outage, then confirms
+// from the upgraded gateway's digest of its verified stored bundle. The
+// receipt keeps the digest recorded by the old build.
+func TestBundleSettleAfterProductUpgradeKeepsAnEnforcedReceipt(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, sourceVersion := range []string{"1.0.2", "1.0.3"} {
+			t.Run(goos+"/"+sourceVersion, func(t *testing.T) {
+				b := newBundleHost(t, goos)
+				b.env.ProductVersion = sourceVersion
+				requireOK(t, b.run(Options{Action: ActionUpgrade, PayloadDir: b.payload(sourceVersion)}))
+				v1, v2, _ := bundleConfigs(b.testHost)
+				requireOK(t, b.apply(b.dir(1, v1)))
+				b.env.bundleFault = func(phase string) error {
+					if phase == enterprisebundle.StateApplied {
+						b.healthy = false
+					}
+					return nil
+				}
+				requireError(t, b.apply(b.dir(2, v2)), codeBundleNotConfirmed)
+				b.env.bundleFault = nil
+				before := b.receipt(bundleID(2))
+				installed := b.read(b.env.Layout.ConfigPath)
+				if before.State != enterprisebundle.StateApplied || before.EffectivePolicyDigest == "" || b.state().Current.BundleID != bundleID(1) {
+					t.Fatalf("outage did not leave B applied and A current: receipt=%+v state=%+v", before, b.state())
+				}
+				upgradeBundleHostDigest(b)
+				requireError(t, b.run(Options{Action: ActionEnsure}), codeBundleNotConfirmed)
+				if got := b.receipt(bundleID(2)); got.State != enterprisebundle.StateApplied ||
+					b.read(b.env.Layout.ConfigPath) != installed || b.state().Current.BundleID != bundleID(1) {
+					t.Fatalf("an outage after upgrade undid the applied bundle: receipt=%+v state=%+v", got, b.state())
+				}
+				b.healthy = true
+				b.frozen = before.EffectivePolicyDigest
+				requireError(t, b.run(Options{Action: ActionEnsure}), codeBundleNotConfirmed)
+				if got := b.receipt(bundleID(2)); got.State != enterprisebundle.StateApplied ||
+					b.read(b.env.Layout.ConfigPath) != installed {
+					t.Fatalf("the older gateway still enforces the pending bundle: receipt=%+v", got)
+				}
+				b.frozen = ""
+				requireOK(t, b.run(Options{Action: ActionEnsure}))
+				if got := b.receipt(bundleID(2)); got.State != enterprisebundle.StateConfirmed ||
+					got.EffectivePolicyDigest != before.EffectivePolicyDigest || b.state().Current.BundleID != bundleID(2) ||
+					b.read(b.env.Layout.ConfigPath) != installed {
+					t.Fatalf("the upgraded gateway did not confirm the historical receipt: receipt=%+v state=%+v", got, b.state())
+				}
+			})
+		}
+	}
+}
