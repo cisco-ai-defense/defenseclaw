@@ -43,6 +43,12 @@ def test_ci_and_scripts_do_not_start_the_retired_splunk_image() -> None:
     assert set(exported) == {image.group(1)}
 
 
+def test_unix_bridge_uses_only_bash_32_features() -> None:
+    bridge = (BUNDLE / "bin" / "splunk-claw-bridge").read_text(encoding="utf-8")
+    assert not re.search(r"\$\{[^}\n]*(?:,,|\^\^)[^}\n]*\}", bridge)
+    assert not re.search(r"(?m)^\s*(?:declare\s+-A|mapfile|readarray)\b", bridge)
+
+
 def test_local_splunk_image_resolves_or_reports_registry_outage(tmp_path: Path, monkeypatch) -> None:
     stack = tmp_path / "stack"
     shutil.copytree(BUNDLE, stack)
@@ -228,6 +234,47 @@ def test_local_splunk_uses_daemon_pull_only_for_uncached_image(tmp_path: Path, c
     if not cached:
         expected_native.append(("pull", image))
     assert [command[1:3] for command in daemon.calls] == expected_native
+
+
+def test_uncached_image_pull_allows_slow_links_and_shows_progress(tmp_path: Path) -> None:
+    image = "splunk/splunk:10.2.0"
+    if os.name != "nt":
+        bridge = (BUNDLE / "bin" / "splunk-claw-bridge").read_text(encoding="utf-8")
+        image_check = bridge[bridge.index("verify_splunk_image() {"):bridge.index("\ncleanup_stopped_service_containers() {")]
+        probe = (
+            'run_with_time_limit() { if [[ "$*" == *"docker pull"* ]]; then return 124; fi; shift; "$@"; }\n'
+            'fail() { printf "%s\\n" "$1" >&2; exit 1; }\n'
+            + image_check + "\n"
+            + 'docker() { case "$1 $2" in "info --format") echo x86_64 ;; '
+            + '"image inspect") return 1 ;; "pull splunk/splunk:10.2.0") '
+            + 'echo "Downloading layer" >&2; return 0 ;; *) return 99 ;; esac; }\n'
+            + f'SPLUNK_IMAGE={image}\nENV_FILE=unused\nverify_splunk_image\n'
+        )
+        result = subprocess.run(["bash"], input=probe, capture_output=True, text=True, timeout=10, check=False)
+        assert result.returncode == 0, result.stderr
+        assert "Downloading layer" in result.stderr
+
+    class SlowDocker:
+        def run(self, argv, *, timeout, capture=True, env=None):
+            command = tuple(argv)
+            if command[1:3] == ("info", "--format"):
+                return CommandResult(command, 0, stdout="x86_64")
+            if command[1:3] == ("image", "inspect"):
+                return CommandResult(command, 1)
+            if command[1] == "pull":
+                assert timeout >= 7200, "a first download can take longer than five minutes"
+                assert capture is False, "Docker pull progress must reach the operator"
+                return CommandResult(command, 0)
+            raise AssertionError(f"unexpected Docker call: {command}")
+
+    stack = tmp_path / "stack"
+    shutil.copytree(BUNDLE, stack)
+    env_file = stack / "env" / ".env"
+    env_file.write_text((stack / "env" / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+    env_file.chmod(0o600)
+    native_docker = tmp_path / "docker.exe"
+    native_docker.write_bytes(b"mock")
+    NativeLocalSplunkController(stack, docker_path=native_docker, runner=SlowDocker(), os_name="windows").verify_splunk_image()
 
 
 def _readiness_probe(path: Path, stubs: str, seconds: int) -> Path:

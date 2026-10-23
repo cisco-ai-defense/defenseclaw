@@ -10,6 +10,18 @@ keywords:
 
 Configuration for the [Edge Connector](/docs/features/edge-connector) engine on the device and the Fleet side on the gateway. To build and run it, see [Install the Edge Connector](/docs/how-to/install-the-edge-connector).
 
+## Fleet credential delivery
+
+Fleet refuses to return device keys over plain HTTP by default. When the gateway is behind an HTTPS proxy, run the proxy on the **same host** as the gateway, forward to `127.0.0.1:18970`, and set `X-Forwarded-Proto: https`. Keep the gateway API reachable only through loopback and that TLS proxy. Then enable the explicit proxy trust setting before registering devices:
+
+```bash
+defenseclaw config set fleet.trust_proxy_headers true
+```
+
+`fleet.trust_proxy_headers` defaults to `false`. The gateway accepts the forwarded HTTPS claim only from a loopback peer when this setting is `true`; a remote proxy or a missing header still gets `key_delivery_requires_tls`. For a dedicated loopback-only test gateway, run `defenseclaw config set fleet.allow_key_over_http true` to deliver a test key over HTTP, then set it back to `false` after the test. This key defaults to `false` and must stay `false` in production. Both settings are hot-reloadable. See the [installation steps](/docs/how-to/install-the-edge-connector#connect-a-device-to-fleet) for the HTTPS endpoint and remote install commands.
+
+For an internal Fleet certificate authority, set `REQUESTS_CA_BUNDLE` (or `CURL_CA_BUNDLE`) to its PEM bundle when running the `defenseclaw edge-connector` CLI. HTTPS Fleet calls also honor `HTTPS_PROXY` and the usual proxy bypass variables while retaining certificate verification. The CLI does not use a `.netrc` entry in place of the saved Fleet bearer token.
+
 ## Build profiles
 
 Set with `-DDCLAW_PROFILE=<profile>`; the default is `STANDARD`. These values come from `edge-connector/CMakeLists.txt`.
