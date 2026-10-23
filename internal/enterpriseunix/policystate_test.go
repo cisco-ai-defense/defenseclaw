@@ -49,7 +49,11 @@ func (r *policyDigestRunner) Run(ctx context.Context, name string, args ...strin
 // digest and last reload error the pointers hold at the time of the probe.
 func servePolicyHealth(h *testHost, reported, reloadError *string) {
 	h.env.HealthGet = func(context.Context) (int, []byte, error) {
-		if !h.healthy || !h.services.isActive(unitGateway) {
+		gateway := unitGateway
+		if h.env.GOOS == "darwin" {
+			gateway = labelGateway
+		}
+		if !h.healthy || !h.services.isActive(gateway) {
 			return 0, nil, errors.New("connection refused")
 		}
 		return 200, []byte(`{"api":{"state":"running"},"policy":{"effective_digest":"` + *reported + `","last_reload_error":"` + *reloadError + `"},"inspection":{"local":"active","ai_defense":"disabled"}}`), nil
@@ -104,6 +108,46 @@ func TestEnsureReportsTheAppliedPolicy(t *testing.T) {
 	}
 	if record, err := h.env.loadDeployment(); err != nil || record == nil {
 		t.Fatalf("loadDeployment with an unknown field = %v, %v", record, err)
+	}
+}
+
+// A rejected reload leaves the previously built policy enforcing, even when
+// its digest happens to match the installed config. Status must not certify
+// security coverage and verify must refuse with the gateway's cause.
+func TestRejectedGatewayPolicyReloadCannotVerifyComplete(t *testing.T) {
+	const digest = "sha256:" + "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			h.env.Runner = &policyDigestRunner{fakeRunner: h.runner, digest: digest}
+			reported, reloadError := digest, ""
+			servePolicyHealth(h, &reported, &reloadError)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			ledger, err := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.publishLedger(ledger)
+			if r := h.run(Options{Action: ActionVerify}); !r.SecurityComplete {
+				t.Fatalf("healthy verify incomplete: errors %+v warnings %+v", r.Errors, r.Warnings)
+			}
+
+			reloadError = "pack digest mismatch"
+			status := h.run(Options{Action: ActionStatus})
+			if status.SecurityComplete || status.Policy == nil || status.Policy.Applied ||
+				!strings.Contains(messagesOf(status.Warnings, codePolicyReloadRejected), reloadError) {
+				t.Fatalf("rejected reload status: complete %v policy %+v warnings %+v", status.SecurityComplete, status.Policy, status.Warnings)
+			}
+			verify := h.run(Options{Action: ActionVerify})
+			if verify.OK || verify.SecurityComplete || verify.Policy == nil || verify.Policy.Applied ||
+				!strings.Contains(messagesOf(verify.Errors, codePolicyReloadRejected), reloadError) {
+				t.Fatalf("rejected reload verify: exit %d complete %v policy %+v errors %+v", verify.ExitCode, verify.SecurityComplete, verify.Policy, verify.Errors)
+			}
+			reloadError = ""
+			if r := h.run(Options{Action: ActionVerify}); !r.OK || !r.SecurityComplete || r.Policy == nil || !r.Policy.Applied {
+				t.Fatalf("recovered verify: exit %d complete %v policy %+v errors %+v", r.ExitCode, r.SecurityComplete, r.Policy, r.Errors)
+			}
+		})
 	}
 }
 

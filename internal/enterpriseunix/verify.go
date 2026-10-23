@@ -1118,7 +1118,8 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.AddWarning(codeConfigRejected, problem)
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
-	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
+	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 &&
+		!machinePolicyIncomplete(r) && reloadError == ""
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeChangedGuardianFiles()

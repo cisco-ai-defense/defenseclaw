@@ -35,8 +35,8 @@ import (
 // effective policy than the committed config computes to.
 const codePolicyNotApplied = "policy_not_applied"
 
-// codePolicyReloadRejected warns, on every action, that the gateway rejected
-// its last policy reload and keeps enforcing the previous policy.
+// codePolicyReloadRejected reports that the gateway rejected its last policy
+// reload and keeps enforcing the previous policy. Verify treats this as an error.
 const codePolicyReloadRejected = "policy_reload_rejected"
 
 // codePolicyUnverified warns, on every action, that the installed gateway
@@ -156,8 +156,8 @@ func gatewayPolicyDigest(body []byte) string {
 // requires effective_digest to be a sha256 digest. A change action records
 // policy-state.json once the gateway reports the computed digest, and warns
 // when it reports another one. A reload the gateway rejected (reloadError)
-// is never "applied", and every action warns about it, with or without a
-// digest: the gateway keeps enforcing the previous policy.
+// is never "applied", and every action reports it, with or without a digest:
+// the gateway keeps enforcing the previous policy.
 func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError string) {
 	env, r := l.env, l.result
 	state := &enterprisestatus.PolicyState{GatewayReportedDigest: reported, LastReloadError: reloadError}
@@ -198,8 +198,13 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 		}
 	}
 	if reloadError != "" {
-		r.AddWarning(codePolicyReloadRejected, "the gateway reports a policy error and keeps enforcing the policy it last built: "+reloadError+
-			"; fix the asset or the config it names, and the gateway clears this when the next reload succeeds")
+		message := "the gateway reports a policy error and keeps enforcing the policy it last built: " + reloadError +
+			"; fix the asset or the config it names, and the gateway clears this when the next reload succeeds"
+		if l.opts.Action == ActionVerify {
+			r.AddError(codePolicyReloadRejected, message)
+		} else {
+			r.AddWarning(codePolicyReloadRejected, message)
+		}
 	}
 	if state.EffectiveDigest == "" {
 		// Name the check that did not run instead of omitting the policy
