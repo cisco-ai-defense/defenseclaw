@@ -15,7 +15,7 @@ Most agents run every hook they find, and several let any hook change a tool cal
 
 | Connector | Covered | Why |
 | --- | --- | --- |
-| Cursor, Copilot, Devin, OpenCode, Amp | Always, unless `foreign_hooks: allow` | These agents have no vendor lock. |
+| Cursor, Copilot, Devin, OpenCode, Amp | Every OS, unless `foreign_hooks: allow` | These agents have no vendor lock. Windows Amp keeps its guard's session record locally. |
 | Hermes | On Linux and macOS, unless `foreign_hooks: allow` | Hermes has no vendor lock and no way to order hooks. The Windows Hermes registration does not run the guard. |
 | Codex, Claude Code | Only with `managed_hooks_only: preserve` | By default the vendor lock already stops user and project hooks. |
 | Antigravity | Not covered | No vendor lock and no guard. Hooks a user or project adds run next to DefenseClaw's. |

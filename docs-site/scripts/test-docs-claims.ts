@@ -278,11 +278,11 @@ describe('1.0.4 audit flood and upgrade claims', () => {
     assert.doesNotMatch(enterprise, /audit\.db-wal.*20 GB|fix needs a change to how the audit store indexes hook records and is deferred/i);
   });
 
-  it('keeps one supervisor upgrade entry with automatic stop and failed-stop recovery', () => {
+  it('keeps one supervisor upgrade entry with manual stop and guarded restart', () => {
     const changelog = repoText('CHANGELOG.md');
     assert.equal((changelog.match(/\*\*Sandboxes run only on OpenShell 0\.1\.5 or later\.\*\*/g) ?? []).length, 1);
-    assert.match(changelog, /DefenseClaw stops it as soon as it sees it.*A stop that fails is a second finding/);
-    assert.doesNotMatch(changelog, /A sandbox that keeps running through the upgrade keeps the old supervisor: the feed/);
+    assert.match(changelog, /DefenseClaw never stops such a sandbox on its own.*Your own `sandbox stop` ends it/);
+    assert.doesNotMatch(changelog, /DefenseClaw stops it as soon as it sees it|A stop that fails is a second finding/);
   });
 });
 
@@ -413,6 +413,18 @@ describe('Hook connector setup and teardown', () => {
     const turnOff = page('connectors/claudecode.mdx').split('## Turn it off')[1]?.split('## Details')[0];
     assert.match(turnOff ?? '', /whole-guardrail disable.*`--no-restart`.*restart the gateway/i);
     assert.match(turnOff ?? '', /`--connector claudecode`.*`--no-restart`.*running gateway.*(?:at once|without a restart)/i);
+  });
+});
+
+describe('Amp rejected command display', () => {
+  it('explains the collapsed summary without treating an attempted call as execution', () => {
+    const plugin = source('internal/gateway/connector/hooks/amp-plugin.ts');
+    const amp = page('connectors/amp.mdx');
+    assert.match(plugin, /case "block":[\s\S]*?action: "reject-and-continue",\s*message: verdict\.reason/);
+    assert.match(amp, /Ran 1 command/);
+    assert.match(amp, /Tool rejected by plugin/);
+    assert.match(amp, /command did not execute/i);
+    assert.match(amp, /audit.*block/i);
   });
 });
 
@@ -625,6 +637,57 @@ describe('docs claim CI coverage', () => {
 });
 
 describe('1.0.4 operator routes and limits', () => {
+  it('derives the MCP-description YARA signature count from the shipped rules', () => {
+    const rules = readFileSync(join(repo, 'policies/yara/mcp-tools/description_injection.yara'), 'utf8');
+    const count = (rules.match(/^rule\s+\w+/gm) ?? []).length;
+    assert.ok(count > 0, 'no bundled MCP-description YARA rules found');
+    const words = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+      'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen'];
+    const expected = words[count] ?? String(count);
+    assert.match(page('reference/policy/detection.mdx'), new RegExp(`\\b${expected} MCP-description YARA signatures\\b`));
+  });
+
+  it('states that unknown connectors make profile explain fail with valid names', () => {
+    const thresholds = page('reference/policy/thresholds.mdx');
+    assert.match(thresholds, /profile explain.*unknown connector.*(?:HTTP 400|400 Bad Request).*valid connectors/i);
+    assert.doesNotMatch(thresholds, /unknown connector.*(?:uses|falls back to|resolves to) (?:the )?(?:default|global) (?:profile|threshold)/i);
+  });
+
+  it('limits proxy replacement to Linux and macOS', () => {
+    const agents = page('how-to/agents/add-or-remove-an-agent.mdx');
+    assert.match(agents, /setup openclaw --replace.*Linux and macOS.*native Windows.*(?:unsupported|no guardrail proxy)/i);
+  });
+
+  it('aligns the TUI footer and status Policy line with the applied config counter', () => {
+    const tui = page('reference/commands/tui.mdx');
+    const cli = page('reference/commands/cli.mdx').split('### Policy generation and digest')[1]?.split('### ')[0] ?? '';
+    assert.match(tui, /`gen`.*config\.generation\.json.*(?:survives|persists).*gateway restart/i);
+    assert.doesNotMatch(tui, /`gen` is the gateway's policy generation|restarts at 1 when the gateway starts/i);
+    assert.match(tui, /Policy line.*same.*policy\.config_generation.*config generation N/i);
+    assert.match(tui, /per-user.*applied hand edit.*(?:moves|increments).*counter/i);
+    assert.doesNotMatch(tui, /prints a different, gateway-local policy generation|hand edit can change the policy digest without moving/i);
+    assert.match(cli, /Policy:.*config generation 2/i);
+    assert.match(cli, /plain `defenseclaw status`.*policy\.config_generation.*TUI footer/i);
+    assert.match(cli, /separate `policy\.generation`.*restarts at 1/i);
+    assert.match(cli, /per-user.*hand edit.*(?:next|moves|increments).*config generation/i);
+    assert.doesNotMatch(cli, /The generation number is the gateway's own counter and restarts at 1/i);
+  });
+
+  it('does not promise enrollment for an extension without an engine version', () => {
+    const enrollment = page('enterprise/configure/enrollment.mdx');
+    assert.match(enrollment, /extension.*engine version.*(?:no engine version|without an engine version).*surface_unverified.*not enrolled/i);
+    assert.match(enrollment, /Codex.*Windows.*reported.*not enrolled/i);
+    const risk = repoText('docs/ENTERPRISE-THREAT-MODEL.md').split('| R25 |')[1]?.split('| R26 |')[0] ?? '';
+    assert.match(risk, /engine version.*surface_unverified.*not enrolled/i);
+    assert.doesNotMatch(risk, /enrollment finds an agent only through its CLI install/i);
+  });
+
+  it('does not advertise local files as MCP scan targets', () => {
+    const api = page('reference/apis/gateway-api.mdx');
+    assert.match(api, /`POST`\s*\|\s*`\/v1\/mcp\/scan`[^\n]*Path or JSON-file targets[^\n]*HTTP 400[^\n]*bare identifier without path or file syntax[^\n]*configured server name/i);
+    assert.doesNotMatch(api, /MCP scanner against a target URL or local path/i);
+  });
+
   it('keeps managed readers off per-user HITL commands', () => {
     const ask = page('how-to/guardrail/ask-before-risky-calls.mdx');
     assert.match(ask, /managed computer.*guardrail\.connectors\.<id>\.hilt/i);
@@ -654,9 +717,19 @@ describe('1.0.4 operator routes and limits', () => {
     assert.match(groupRow, /managed Windows.*defenseclaw\.exe.*enterprise windows profile-explain --user/);
   });
 
-  it('uses the managed Windows administrator route instead of a config-only shell', () => {
+  it('uses the installed standalone administrator route on every OS', () => {
     const hooks = page('reference/commands/cli.mdx').split('### Per-user hooks (`enterprise hooks`)')[1]?.split('### ACP')[0] ?? '';
     const envVars = page('reference/configuration/env-vars.mdx');
+    const policy = source('internal/cli/enterprise_policy.go');
+    const unixPin = source('internal/cli/enterprise_policy_platform_unix.go');
+    assert.match(policy, /pinStandaloneManagedEnv\(\)/);
+    assert.match(unixPin, /managedStandaloneAdminDeployment\(\)/);
+    assert.match(unixPin, /managed\.ConfigPathEnv:\s+layout\.ConfigPath/);
+    assert.match(unixPin, /"DEFENSECLAW_HOME":\s+layout\.DataDir/);
+    assert.match(envVars, /On standalone managed Linux and macOS.*without setting `DEFENSECLAW_CONFIG`/is);
+    assert.match(envVars, /sudo \/opt\/defenseclaw\/bin\/defenseclaw-gateway enterprise policy show --json/);
+    assert.match(envVars, /sudo \/opt\/cisco\/defenseclaw\/bin\/defenseclaw-gateway enterprise policy show --json/);
+    assert.doesNotMatch(envVars, /sudo DEFENSECLAW_CONFIG=.*enterprise policy show --json/);
     assert.match(hooks, /On managed Windows.*enterprise windows status.*enterprise windows verify/i);
     assert.match(hooks, /DEFENSECLAW_CONFIG.*alone.*does not.*guardian/i);
     assert.match(envVars, /On managed Windows.*elevated.*enterprise policy show --json.*without setting `DEFENSECLAW_CONFIG`/i);

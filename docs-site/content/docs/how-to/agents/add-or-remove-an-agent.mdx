@@ -124,7 +124,7 @@ Replace tears down the old agent's files and leaves only the new one.
 defenseclaw setup claude-code --replace --mode action
 ```
 
-Setup names the agents it removes and asks first (`--yes` skips the question). The same flag switches between a hook agent and a proxy agent (`defenseclaw setup openclaw --replace`). Without it, setup refuses and changes nothing.
+Setup names the agents it removes and asks first (`--yes` skips the question). The same flag switches between a hook agent and a proxy agent (`defenseclaw setup openclaw --replace`) on Linux and macOS. Native Windows has no guardrail proxy, so OpenClaw and ZeptoClaw replacement is unsupported there. Without `--replace`, setup refuses and changes nothing.
 
 ## Remove an agent
 
