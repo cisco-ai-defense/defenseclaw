@@ -7,6 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -205,6 +206,154 @@ console.log(result.action + ":" + (result.message || ""));
 			}
 		})
 	}
+}
+
+// Windows standalone OpenCode uses the current plugin with a foreign-hook
+// guard and loopback listener proof. A 429 means the gateway has not judged
+// the call; a later failure cannot turn that answer into an outage allowance.
+func TestWindowsManagedOpenCodeOpenBlocksAfterRateLimit(t *testing.T) {
+	nodeForTest(t)
+	for _, tc := range []struct {
+		name         string
+		retryResult  string
+		wantRequests int32
+	}{
+		{name: "429 until retries end", wantRequests: 4},
+		{name: "429 then transport failure", retryResult: "drop", wantRequests: 2},
+		{name: "429 then HTTP 500", retryResult: "http500", wantRequests: 2},
+		{name: "429 then invalid verdict", retryResult: "invalid", wantRequests: 2},
+		{name: "429 then truncated JSON", retryResult: "truncated", wantRequests: 2},
+		{name: "429 then usable verdict", retryResult: "allow", wantRequests: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var posts atomic.Int32
+			server := windowsManagedOpenCodeGateway(t, func(w http.ResponseWriter, n int32) {
+				posts.Store(n)
+				if n == 2 {
+					switch tc.retryResult {
+					case "allow", "invalid", "truncated":
+						w.Header().Set("Content-Type", "application/json")
+						body := map[string]string{
+							"allow":     `{"action":"allow"}`,
+							"invalid":   `{"action":"unknown"}`,
+							"truncated": `{"action":`,
+						}[tc.retryResult]
+						_, _ = w.Write([]byte(body))
+						return
+					case "http500":
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					case "drop":
+						conn, _, err := w.(http.Hijacker).Hijack()
+						if err == nil {
+							_ = conn.Close()
+						}
+						return
+					}
+				}
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(http.StatusTooManyRequests)
+			})
+			lines := runWindowsManagedOpenCode(t, server, "open")
+			if tc.retryResult == "allow" {
+				if len(lines) != 1 || lines[0] != "allow" {
+					t.Fatalf("Windows OpenCode usable verdict after 429 = %q, want allow", lines)
+				}
+			} else if len(lines) != 1 || !strings.HasPrefix(lines[0], "block:") || !strings.Contains(lines[0], "429") {
+				t.Fatalf("Windows OpenCode open without a verdict after 429 = %q, want a rate-limit block", lines)
+			}
+			if got := posts.Load(); got != tc.wantRequests {
+				t.Fatalf("gateway received %d tool calls, want %d", got, tc.wantRequests)
+			}
+		})
+	}
+}
+
+// The Windows standalone layout has no hook socket or hook binary, but it
+// does have the foreign-hook guard. Its current plugin must reject a complete
+// unusable answer and a bare native block in either installed fail mode.
+func TestWindowsManagedOpenCodeRejectsUnusableAndBareBlockVerdicts(t *testing.T) {
+	nodeForTest(t)
+	for _, tc := range []struct {
+		name, answer, want string
+	}{
+		{name: "invalid verdict", answer: `{"action":"unknown"}`, want: "invalid gateway verdict"},
+		{name: "bare block", answer: `{"action":"block"}`, want: "missing native deny"},
+	} {
+		for _, mode := range []string{"open", "closed"} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				server := windowsManagedOpenCodeGateway(t, func(w http.ResponseWriter, _ int32) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(tc.answer))
+				})
+				lines := runWindowsManagedOpenCode(t, server, mode)
+				if len(lines) != 1 || !strings.HasPrefix(lines[0], "block:") || !strings.Contains(lines[0], tc.want) {
+					t.Fatalf("Windows OpenCode %s %s = %q, want a %s block", mode, tc.name, lines, tc.want)
+				}
+			})
+		}
+	}
+}
+
+func windowsManagedOpenCodeGateway(t *testing.T, answer func(http.ResponseWriter, int32)) *httptest.Server {
+	t.Helper()
+	const proofDomain = "defenseclaw.listener-proof.v1\x00opencode\x00"
+	token := strings.Repeat("a", 64)
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/hook-listener-proof":
+			mac := hmac.New(sha256.New, []byte(token))
+			_, _ = mac.Write([]byte(proofDomain + r.Header.Get("X-DefenseClaw-Listener-Nonce")))
+			w.Header().Set("X-DefenseClaw-Listener-Proof", hex.EncodeToString(mac.Sum(nil)))
+			w.WriteHeader(http.StatusNoContent)
+		case "/api/v1/opencode/hook":
+			var payload struct {
+				Event string `json:"hook_event_name"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode OpenCode hook request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if payload.Event != "tool.execute.before" {
+				_, _ = w.Write([]byte(`{"action":"allow"}`))
+				return
+			}
+			answer(w, posts.Add(1))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func runWindowsManagedOpenCode(t *testing.T, server *httptest.Server, mode string) []string {
+	t.Helper()
+	root := testenv.PrivateTempDir(t)
+	guard := filepath.Join(root, "defenseclaw-hook.exe")
+	opts := managedPluginOutageOpts(t, "opencode", "windows", mode, guard, strings.TrimPrefix(server.URL, "http://"))
+	opts.ManagedListenerProof = true
+	plugin, err := NewOpenCodeConnector().renderPluginArtifact(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(plugin)
+	if !strings.Contains(body, `const DC_FAIL_MODE = "`+mode+`"`) ||
+		!strings.Contains(body, `const DC_LISTENER_PROOF = "1"`) ||
+		!strings.Contains(body, `const DC_HOOK_SOCKET = ""`) {
+		t.Fatal("plugin is not the Windows standalone TCP render")
+	}
+	// Isolate HTTP delivery from the native guard executable on the test host.
+	// The installed render must still carry the administrator-owned guard.
+	guardDecl := `const DC_FOREIGN_GUARD = "` + javaScriptStringContent(guard) + `"`
+	if strings.Count(body, guardDecl) != 1 {
+		t.Fatal("Windows standalone render omitted the foreign-hook guard")
+	}
+	body = strings.Replace(body, guardDecl, `const DC_FOREIGN_GUARD = ""`, 1)
+	return runManagedPluginOutage(t, "opencode", root, []byte(body))
 }
 
 // managedPluginOutageOpts are the standalone Setup options of one layout:

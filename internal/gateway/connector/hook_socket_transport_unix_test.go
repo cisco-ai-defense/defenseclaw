@@ -73,4 +73,11 @@ func TestManagedStandaloneOpenRequiresTrustedDirectoryForMissingSocket(t *testin
 	if code != 0 || !strings.Contains(stderr, "enterprise_managed_gateway_not_running") {
 		t.Fatalf("missing socket in trusted directory: exit %d stdout=%q stderr=%q, want the selected outage mode", code, stdout, stderr)
 	}
+	if err := os.Remove(f.runDir); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = runStandaloneShellHookInMode(t, f, NewKiroConnector(), hook.script, hook.args, hook.stdin, "open")
+	if code != 2 || !strings.Contains(stderr, "hook socket directory is missing") || strings.Contains(stderr, "not owned") {
+		t.Fatalf("missing socket directory: exit %d stdout=%q stderr=%q, want an accurate closed failure", code, stdout, stderr)
+	}
 }

@@ -74,6 +74,9 @@ defenseclaw_hook_socket_trusted() {
 // cannot answer for, in every fail mode (GAP-0354).
 const shellHookSocketTransportBlock = shellHookSocketTrustFunctions + `@GUARD@if ! defenseclaw_hook_socket_directory_trusted; then
   FAIL_MODE=closed
+  if [ ! -e "${DEFENSECLAW_HOOK_SOCKET%/*}" ] && [ ! -L "${DEFENSECLAW_HOOK_SOCKET%/*}" ]; then
+    fail_unreachable "the DefenseClaw hook socket directory is missing (enterprise_managed_gateway_peer_unverified)"
+  fi
   fail_unreachable "the DefenseClaw hook socket directory is not owned by root or the gateway account (enterprise_managed_gateway_peer_unverified)"
 fi
 if [ ! -e "$DEFENSECLAW_HOOK_SOCKET" ] && [ ! -L "$DEFENSECLAW_HOOK_SOCKET" ]; then

@@ -46,7 +46,9 @@ def test_managed_hook_docs_distinguish_outages_from_refusals() -> None:
 
     fail_modes = _flat("reference/configuration/fail-modes.mdx")
     strict = fail_modes.split("## Strict availability", 1)[1].split("## ", 1)[0]
-    assert "classified outages" in strict
+    assert "Only a gateway proven not running can follow administrator `open`" in strict
+    assert "a restart or unanswered request blocks" in strict
+    assert "closes that stopped-gateway exception" in strict
     assert "force the unavailable-home and transport failures closed" not in strict
     assert "force the relevant unavailable-home and transport failures closed" not in strict
 

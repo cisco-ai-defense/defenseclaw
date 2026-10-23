@@ -412,15 +412,18 @@ async function defenseclawFetch(path, init, token) {
 // (GAP-0205); without it a short burst failed the tool call (GAP-0535).
 async function defenseclawRetryBusy(send, signal) {
   let res = await send();
+
   for (let retry = 0; retry < 3 && res && res.status === 429; retry++) {
     const asked = Number.parseInt(String((res.headers && res.headers.get("retry-after")) || ""), 10);
     const delay = Math.min(Math.max(Number.isFinite(asked) ? asked : 1, 1), 3) * 1000;
+
     await new Promise((resolve, reject) => {
       if (signal && signal.aborted) return reject(new Error("DefenseClaw gateway busy"));
       const timer = setTimeout(resolve, delay);
       if (signal) signal.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("DefenseClaw gateway busy")); }, { once: true });
     });
     res = await send();
+
   }
   return res;
 }
@@ -619,7 +622,10 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       return null;
     }
     const data = await res.json();
+    // Secure Client uses its separate pinned plugin asset. This current
+    // asset serves per-user and standalone installs, including Windows.
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+
       if (DC_FAIL_MODE === "open") {
         if (actionable) await defenseclawLogFailOpen("invalid gateway verdict", "response");
         return null;

@@ -472,17 +472,28 @@ async function defenseclawFetch(path, init, token) {
 // for (1 to 3 s) at most 3 times; the caller's abort signal keeps the whole
 // exchange inside the plugin timeout. The native hook runner does the same
 // (GAP-0205); without it a short burst failed the tool call (GAP-0535).
-async function defenseclawRetryBusy(send, signal) {
+async function defenseclawRetryBusy(send, signal{{if .Managed}}, onRateLimit{{end}}) {
   let res = await send();
+{{if .Managed}}  if (res.status === 429) onRateLimit();
+{{end}}
   for (let retry = 0; retry < 3 && res && res.status === 429; retry++) {
     const asked = Number.parseInt(String((res.headers && res.headers.get("retry-after")) || ""), 10);
     const delay = Math.min(Math.max(Number.isFinite(asked) ? asked : 1, 1), 3) * 1000;
+{{if .Managed}}    try {
+{{end}}
     await new Promise((resolve, reject) => {
       if (signal && signal.aborted) return reject(new Error("DefenseClaw gateway busy"));
       const timer = setTimeout(resolve, delay);
       if (signal) signal.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("DefenseClaw gateway busy")); }, { once: true });
     });
     res = await send();
+{{if .Managed}}      if (res.status === 429) onRateLimit();
+    } catch (_) {
+      // A previous 429 proves the gateway was busy. A failed wait or resend
+      // cannot turn it into a proven stopped-gateway outage.
+      return res;
+    }
+{{end}}
   }
   return res;
 }
@@ -628,6 +639,8 @@ async function defenseclawLogFailOpen(reason, category) {
   }
 }
 
+{{end}}{{if and .Managed (not .Sandbox)}}const DC_RATE_LIMIT_BLOCK = { reason: "DefenseClaw hook failed closed (HTTP 429 without a usable verdict)" };
+
 {{end}}async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
   let token;
   try {
@@ -644,7 +657,8 @@ async function defenseclawLogFailOpen(reason, category) {
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
   const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...(await defenseclawIdentityHeaders()) };
   if (token) headers["Authorization"] = "Bearer " + token;
-  try {
+{{if and .Managed (not .Sandbox)}}  let rateLimited = false;
+{{end}}  try {
     const payload = {
       hook_event_name: event,
       tool_name: toolName || "",
@@ -670,9 +684,10 @@ async function defenseclawLogFailOpen(reason, category) {
       headers,
       body: JSON.stringify(payload),
       signal: controller.signal,
-    }, token), controller.signal);{{end}}
+    }, token), controller.signal{{if .Managed}}, () => { rateLimited = true; }{{end}});{{end}}
     if (!res.ok) {
-      // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
+{{if and .Managed (not .Sandbox)}}      if (rateLimited) return DC_RATE_LIMIT_BLOCK;
+{{end}}      // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
       // is an outage, as in the shell hooks, so strict availability closes it.
       if ((res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE) === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
@@ -685,7 +700,11 @@ async function defenseclawLogFailOpen(reason, category) {
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
-{{else}}{{if not .SecureClient}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+{{else}}    // Secure Client uses its separate pinned plugin asset. This current
+    // asset serves per-user and standalone installs, including Windows.
+    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+{{if .Managed}}      if (rateLimited) return DC_RATE_LIMIT_BLOCK;
+{{end}}
 {{if not .Managed}}      if (DC_FAIL_MODE === "open") {
         if (actionable) await defenseclawLogFailOpen("invalid gateway verdict", "response");
         return null;
@@ -693,19 +712,20 @@ async function defenseclawLogFailOpen(reason, category) {
 {{end}}
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
-{{end}}{{end}}    const out = data && data.hook_output;
+{{end}}    const out = data && data.hook_output;
     if (out && (out.decision === "deny" || out.decision === "block")) {
       return { reason: out.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
     }
 {{if .Sandbox}}    if (data.action === "block") {
       return { reason: data.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
     }
-{{else}}{{if not .SecureClient}}    if (data.action === "block" || data.action === "confirm") {
+{{else}}    if (data.action === "block" || data.action === "confirm") {
       return { reason: data.reason || "DefenseClaw hook failed closed (missing native deny)", mode: data.mode || "" };
     }
-{{end}}{{end}}    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
+{{end}}    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
   } catch (err) {
-    // Transport failure (gateway unreachable / timeout). Honor fail mode:
+{{if and .Managed (not .Sandbox)}}    if (rateLimited) return DC_RATE_LIMIT_BLOCK;
+{{end}}    // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
     if (DC_TRANSPORT_FAIL_MODE === "closed") {
