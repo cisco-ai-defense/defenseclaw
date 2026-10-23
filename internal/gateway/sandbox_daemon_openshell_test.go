@@ -790,3 +790,58 @@ func TestSandboxDaemonStopsIdleOpenShell(t *testing.T) {
 		t.Fatal("stopped the gateway under a running sandbox")
 	}
 }
+
+// A ready does not say which agent the run is for, and profiles match per
+// connector. The first agent the organization runs being forbidden must not
+// refuse a run of an agent whose profile allows sandboxes, configured or
+// not: Ready readies (the create judges the run's own agent). It still
+// refuses before any install when no agent's profile allows a run, or when
+// the gateway answers none of them.
+func TestSandboxDaemonReadyReadiesForAnyAllowedAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		harnesses    []string
+		allowed      map[string]bool
+		down         map[string]bool
+		wantCode     string
+		wantPrepared int64
+	}{
+		{"first agent forbidden, second allowed", []string{"claudecode", "codex"}, map[string]bool{"codex": true}, nil, "", 1},
+		{"configured agent forbidden, another allowed", []string{"claudecode"}, map[string]bool{"codex": true}, nil, "", 1},
+		{"first agent unanswered, another allowed", []string{"claudecode", "codex"}, map[string]bool{"codex": true},
+			map[string]bool{"claudecode": true}, "", 1},
+		{"every agent forbidden", []string{"claudecode", "codex"}, nil, nil, sandboxapi.CodeAdminViolation, 0},
+		{"first agent forbidden, others unanswered", []string{"claudecode", "codex"}, nil, map[string]bool{"*": true},
+			sandboxapi.CodeUnavailable, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+				o.Settings.Operational.Harnesses = tc.harnesses
+			})
+			var mu sync.Mutex
+			var asked []string
+			f.relay.explain = func(req sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+				mu.Lock()
+				asked = append(asked, req.Connector)
+				first := len(asked) == 1
+				mu.Unlock()
+				if tc.down[req.Connector] || tc.down["*"] && !first {
+					return sandboxapi.ManagedExplain{}, sandboxrelay.ErrGatewayUnreachable
+				}
+				return sandboxapi.ManagedExplain{Allowed: tc.allowed[req.Connector]}, nil
+			}
+			f.run(t)
+			_, err := sandboxapi.NewUnixClient(f.socket).Ready(context.Background())
+			mu.Lock()
+			defer mu.Unlock()
+			if tc.wantCode == "" && err != nil || tc.wantCode != "" && !sandboxapi.IsCode(err, tc.wantCode) ||
+				f.os.prepared.Load() != tc.wantPrepared {
+				t.Fatalf("ready = %v (prepared %d, asked %v); want code %q, prepared %d",
+					err, f.os.prepared.Load(), asked, tc.wantCode, tc.wantPrepared)
+			}
+			if len(asked) == 0 || asked[0] != "claudecode" {
+				t.Fatalf("policy asked for %v, want the daemon's own agent claudecode first", asked)
+			}
+		})
+	}
+}

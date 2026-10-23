@@ -2100,13 +2100,65 @@ func managedSettingsRefusal(s sandboxrelay.DaemonSettings) error {
 	return nil
 }
 
+// readyHarnesses are the agents a ready may be for: it names none, and a
+// create may run any harness. The agent this daemon's managed configuration
+// runs (managedConnector) comes first, then every other harness.
+func (d *SandboxDaemon) readyHarnesses() []string {
+	first := d.managedConnector("")
+	out := []string{first}
+	for _, name := range harness.Names() {
+		if name != first {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// readyPolicyRefusal refuses a ready unless the managed gateway's current
+// policy allows sandboxes for one of the candidate agents. Ready has no run
+// registration yet, so it asks before it installs OpenShell or starts its
+// gateway: a forbidden profile must leave no runtime behind, including when
+// Ready is called directly (GAP-0534). Profiles match per connector, so each
+// candidate gets its own view: the first agent's profile forbidding
+// sandboxes does not refuse a run of an agent whose profile allows them,
+// whose create then judges that run. A view the gateway does not answer
+// fails the ready closed with its reason unless another candidate is
+// allowed; a view that times out ends the asking.
+func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []string) error {
+	var viewErr error
+	for _, name := range candidates {
+		viewCtx, cancel := context.WithTimeout(ctx, managedViewTimeout)
+		view, _, err := d.managedExplain(viewCtx, sandboxapi.ExplainRequest{Harness: name}, nil)
+		timedOut := viewCtx.Err() != nil
+		cancel()
+		if err != nil {
+			if viewErr == nil {
+				viewErr = err
+			}
+			if timedOut {
+				break
+			}
+			continue
+		}
+		if view.Allowed {
+			return nil
+		}
+	}
+	if viewErr != nil {
+		return viewErr
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
+		Message: "Your organization doesn't allow sandboxes for your account.", Detail: sandboxrelay.ReasonNotAllowed}
+}
+
 // Ready readies the account's OpenShell for a first run (readyOpenShell:
 // setup mode installs the pinned release; both modes start and register the
 // account's managed gateway) and answers the status. A run needs that before
 // its create: its preflight reads the gateway's driver and runs the
 // openshell CLI, and refused every run of an account whose OpenShell was not
 // installed or started yet, before the create that readies it ran
-// (GAP-0437, GAP-0441).
+// (GAP-0437, GAP-0441). The managed gateway's policy must allow sandboxes
+// for an agent the run may be for first (readyPolicyRefusal).
 func (c *managedSandboxController) Ready(ctx context.Context) (*sandboxapi.Status, error) {
 	d := c.d
 	if err := d.lockLifecycle(ctx); err != nil {
@@ -2121,20 +2173,10 @@ func (c *managedSandboxController) Ready(ctx context.Context) (*sandboxapi.Statu
 		if uid, held := d.openShell.PortHolder(s); held && uid != d.uid {
 			err = accountBusyError()
 		} else {
-			// Ready has no run registration yet. Ask the managed gateway for
-			// this account's current policy before installing OpenShell or
-			// starting its gateway. A forbidden profile must leave no runtime
-			// behind, including when Ready is called directly (GAP-0534).
-			viewCtx, cancel := context.WithTimeout(ctx, managedViewTimeout)
-			view, _, viewErr := d.managedExplain(viewCtx, sandboxapi.ExplainRequest{}, nil)
-			cancel()
-			switch {
-			case viewErr != nil:
-				err = viewErr
-			case !view.Allowed:
-				err = &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
-					Message: "Your organization doesn't allow sandboxes for your account.", Detail: sandboxrelay.ReasonNotAllowed}
-			default:
+			// The account's current policy, before installing OpenShell or
+			// starting its gateway (readyPolicyRefusal).
+			err = d.readyPolicyRefusal(ctx, d.readyHarnesses())
+			if err == nil {
 				// Status reports unavailable until this process holds both
 				// listeners. Bind them before setup installs anything, so a
 				// busy port refuses Ready without changing the account.
