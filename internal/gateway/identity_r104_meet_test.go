@@ -317,7 +317,7 @@ func TestProfileMeetKeepsHookActionAndInspectObserveSeparate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			name, single := set.meetOf([]string{"a", "b"}, "codex")
+			name, single := set.meetOf([]string{"a", "b"}, set.profileCoverConnectors("codex"))
 			if single || !config.IsProfileMeet(name) {
 				t.Fatalf("selection = %q, single %v; want a meet", name, single)
 			}
@@ -397,7 +397,7 @@ func TestProfileMeetTable(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			set := meetTestSet(t, tc.profiles)
-			name, single := set.meetOf([]string{"b", "a"}, tc.connector)
+			name, single := set.meetOf([]string{"b", "a"}, set.profileCoverConnectors(tc.connector))
 			if single {
 				// One covers the other: it applies under its own name, and
 				// enforces what the meet would.
@@ -446,7 +446,7 @@ func TestProfileMeetOfDifferentSandboxSections(t *testing.T) {
 		"a": {Mode: "action", BlockAt: "HIGH", Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"codex"}, EgressBlock: []string{"a.example"}}},
 		"b": {Mode: "action", BlockAt: "LOW", Sandbox: &config.OpenShellAdminConfig{EgressBlock: []string{"b.example"}, AllowedHarnesses: []string{"codex", "claudecode"}}},
 	})
-	name, single := set.meetOf([]string{"a", "b"}, "codex")
+	name, single := set.meetOf([]string{"a", "b"}, set.profileCoverConnectors("codex"))
 	if single || !config.IsProfileMeet(name) {
 		t.Fatalf("%q single %v; want the meet", name, single)
 	}
@@ -583,7 +583,7 @@ func TestUpgradeKeepsWindowsAgentsAssignments(t *testing.T) {
 	subject := profileSubjectFromVerified(VerifiedSubject{UserID: in.UserID, IDKind: useridentity.KindWindowsSID, UserName: `CORP\alice`,
 		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceWindowsLSA, Directory: useridentity.DirectoryActiveDirectory,
 			Assurance: useridentity.AssuranceVerified}}, true)
-	got := set.matchAgent(&subject, profileSubjectVerified, "codex", agent, func() (profileAgentClaim, bool) { return profileAgentClaim{}, true })
+	got := set.matchAgent(&subject, profileSubjectVerified, "codex", nil, agent, func() (profileAgentClaim, bool) { return profileAgentClaim{}, true })
 	if got.Name != "relaxed" || got.Match != profileMatchAgent {
 		t.Fatalf("Windows 1.0.x agents entry: %+v; want relaxed by agent", got)
 	}

@@ -120,7 +120,7 @@ type profileAgentLegacy func() (claim profileAgentClaim, known bool)
 // fact unproven (resolveIdentity): its assignment is a candidate and the
 // request is refused. An entry the upgrade bound
 // matches as agent does.
-func (set *guardrailProfileSet) matchAgent(subject *profileSubject, source, connectorName, agent string, legacy profileAgentLegacy) profileDecision {
+func (set *guardrailProfileSet) matchAgent(subject *profileSubject, source, connectorName string, scans []string, agent string, legacy profileAgentLegacy) profileDecision {
 	matched, unresolved, owned := set.profileAgent(agent, legacy)
 	if subject == nil || source == "" {
 		unresolved, owned = nil, nil
@@ -130,9 +130,9 @@ func (set *guardrailProfileSet) matchAgent(subject *profileSubject, source, conn
 		// The binding depends on the account holding the uid now, which
 		// the memo key does not carry: not memoised.
 		res.agentOwned = owned
-		return set.selectProfile(subject, res, source, connectorName, matched)
+		return set.selectProfile(subject, res, source, connectorName, scans, matched)
 	}
-	return set.matchResolved(subject, res, source, connectorName, matched)
+	return set.matchResolved(subject, res, source, connectorName, scans, matched)
 }
 
 // profileAgent is what the request's agent identity agent is matched as

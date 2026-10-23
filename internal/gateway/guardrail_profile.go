@@ -611,7 +611,7 @@ func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Ha
 		}
 		// The other inspect routes scan the authenticated connector or the
 		// global generation. An empty value is an explicit global scope.
-		ctx = context.WithValue(ctx, profileRuleScanConnectorKey{}, config.NormalizeConnectorName(scanConnector))
+		ctx = context.WithValue(ctx, profileRuleScanConnectorKey{}, canonicalConnectorRulePackKey(scanConnector))
 		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(ctx, "")))
 	})
 }
@@ -658,8 +658,9 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 		}
 	}
 	connectorName := profileAssignmentConnector(ctx)
-	decision := set.matchAgent(subject, source, connectorName, agent, legacy)
-	decision = set.refuseUncompiledMeet(ctx, decision, connectorName)
+	scans := set.requestScanScopes(ctx, connectorName)
+	decision := set.matchAgent(subject, source, connectorName, scans, agent, legacy)
+	decision = set.refuseUncompiledMeet(ctx, decision, scans)
 	resolved := &resolvedGuardrailProfile{decision: decision, set: set}
 	if decision.Name != "" {
 		if derived, ok := set.derivedProfile(decision.Name); ok {
@@ -988,17 +989,18 @@ func accountGroups(account *osuser.User) ([]string, error) {
 // match is selectProfile for a request without an unresolved agents entry
 // (matchAgent has the bridge's answer).
 func (set *guardrailProfileSet) match(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	return set.matchResolved(subject, resolveIdentity(subject, nil), source, connectorName, agent)
+	return set.matchResolved(subject, resolveIdentity(subject, nil), source, connectorName, nil, agent)
 }
 
 // matchResolved is selectProfile, memoised for repeated subjects whose
 // facts are all proven. An uncertain decision is never cached, including a
 // pending Windows assignment group SID lookup.
-func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res identityResolution, source, connectorName, agent string) profileDecision {
+func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res identityResolution, source, connectorName string, scans []string, agent string) profileDecision {
+	scans = set.scanScopes(connectorName, scans)
 	if set.matches == nil || !res.proven() {
-		return set.selectProfile(subject, res, source, connectorName, agent)
+		return set.selectProfile(subject, res, source, connectorName, scans, agent)
 	}
-	key := profileMatchKey(subject, source, connectorName, agent)
+	key := profileMatchKey(subject, source, connectorName, scans, agent)
 	if set.groupSIDs != nil {
 		waitForGroup := subject != nil && source != "" && !subject.LookupFailed && len(subject.Groups) > 0
 		set.groupSIDs.refresh(time.Now(), waitForGroup)
@@ -1007,7 +1009,7 @@ func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res ident
 	if decision, ok := set.matches.get(key); ok {
 		return decision
 	}
-	decision := set.selectProfile(subject, res, source, connectorName, agent)
+	decision := set.selectProfile(subject, res, source, connectorName, scans, agent)
 	if decision.Refused == "" {
 		set.matches.put(key, decision)
 	}
@@ -1017,7 +1019,7 @@ func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res ident
 // matchUncached is selectProfile without the memo, for a request without an
 // unresolved agents entry.
 func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	return set.selectProfile(subject, resolveIdentity(subject, nil), source, connectorName, agent)
+	return set.selectProfile(subject, resolveIdentity(subject, nil), source, connectorName, nil, agent)
 }
 
 func (set *guardrailProfileSet) decision(name, reason, group, source string) profileDecision {
@@ -1759,8 +1761,9 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if source == "" {
 		agent = ""
 	}
-	decision := set.matchAgent(subject, source, connectorName, agent, nil)
-	decision = set.refuseUncompiledMeet(r.Context(), decision, connectorName)
+	scans := set.requestScanScopes(r.Context(), connectorName)
+	decision := set.matchAgent(subject, source, connectorName, scans, agent, nil)
+	decision = set.refuseUncompiledMeet(r.Context(), decision, scans)
 	out["profile"] = decision.Name
 	out["digest"] = decision.Digest
 	out["match"] = decision.Match

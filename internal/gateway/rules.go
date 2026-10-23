@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 )
@@ -152,8 +153,13 @@ var allRuleCategories = allRuleGeneration.categories
 var connectorRuleCategories = map[string][]ruleCategory{}
 var connectorRuleGenerations = map[string]*compiledRulePackCategories{}
 
+// canonicalConnectorRulePackKey is the one name a connector's rule scope,
+// profile decision and scans use: the configuration's canonical connector
+// name, aliases included ("claude-code" and "claude_code" are
+// "claudecode"). A scope checked under one spelling and scanned under
+// another could validate one rule generation and scan another.
 func canonicalConnectorRulePackKey(connector string) string {
-	return strings.ToLower(strings.TrimSpace(connector))
+	return config.NormalizeConnectorName(connector)
 }
 
 // maxRegexCompileTime caps how long a single user-supplied regex may take to

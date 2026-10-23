@@ -343,7 +343,8 @@ func (set *guardrailProfileSet) groupsState(entries []string, subject *profileSu
 
 // selectProfile is the one profile selection rule (see the top of this
 // file) for subject, verified by source, on connectorName for agent.
-func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res identityResolution, source, connectorName, agent string) profileDecision {
+func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res identityResolution, source, connectorName string, scans []string, agent string) profileDecision {
+	scans = set.scanScopes(connectorName, scans)
 	verified := subject != nil && source != ""
 	type hit struct {
 		index         int
@@ -383,12 +384,11 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		for _, h := range yes {
 			matched = append(matched, h.profile)
 		}
-		proven, _ = set.meetOf(compactProfiles(matched), connectorName)
+		proven, _ = set.meetOf(compactProfiles(matched), scans)
 	}
-	connectors := set.profileCoverConnectors(connectorName)
 	var needed []string
 	for i, name := range maybe {
-		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && set.provenProfileCovers(proven, name, connectors) {
+		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && set.provenProfileCovers(proven, name, scans) {
 			continue
 		}
 		for _, fact := range maybeNeeds[i] {
@@ -418,7 +418,7 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 				matched = append(matched, h.profile)
 			}
 			matched = compactProfiles(matched)
-			name, single := set.meetOf(matched, connectorName)
+			name, single := set.meetOf(matched, scans)
 			var ok bool
 			if decision, ok = definite(name); !ok || !single {
 				// Overlapping assignments whose profiles enforce different
@@ -447,7 +447,7 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		candidates = append(candidates, last)
 	}
 	candidates = meetMembers(candidates)
-	name, single := set.meetOf(candidates, connectorName)
+	name, single := set.meetOf(candidates, scans)
 	decision, ok := definite(name)
 	if !ok || !single {
 		// A profile the proven facts select keeps its reason when it covers
@@ -557,24 +557,28 @@ func compactProfiles(names []string) []string {
 	return out
 }
 
-// strictestOf picks the strictest of candidates for connectorName: the
-// first that enforces at least what each of the others does
-// (profileCovers), with covers true; when none does, the strictest by hook
-// mode and block_at (profileStricter, the first of equals), with covers
-// false, which meetOf replaces with the candidates' meet.
-func (set *guardrailProfileSet) strictestOf(candidates []string, connectorName string) (name string, covers bool) {
+// strictestOf picks the strictest of candidates on the scopes a request
+// scans (scans): the first that enforces at least what each of the others
+// does there (profileCovers), with covers true; when none does, the
+// strictest by hook mode and block_at on the first scope (profileStricter,
+// the first of equals), with covers false, which meetOf replaces with the
+// candidates' meet.
+func (set *guardrailProfileSet) strictestOf(candidates, scans []string) (name string, covers bool) {
 	if len(candidates) == 0 {
 		return set.defaultProfile, true
 	}
-	connectors := set.profileCoverConnectors(connectorName)
 	for _, candidate := range candidates {
-		if !slices.ContainsFunc(candidates, func(other string) bool { return !set.profileCovers(candidate, other, connectors) }) {
+		if !slices.ContainsFunc(candidates, func(other string) bool { return !set.profileCovers(candidate, other, scans) }) {
 			return candidate, true
 		}
 	}
+	first := ""
+	if len(scans) > 0 {
+		first = scans[0]
+	}
 	strictest := candidates[0]
 	for _, candidate := range candidates[1:] {
-		if set.profileStricter(candidate, strictest, connectorName) {
+		if set.profileStricter(candidate, strictest, first) {
 			strictest = candidate
 		}
 	}
@@ -678,13 +682,29 @@ func (s *provenProfileStore) forgetLocked(key string) {
 	s.order = slices.DeleteFunc(s.order, func(k string) bool { return k == key })
 }
 
-// profileCoverConnectors includes the gateway connector for an unscoped
-// inspect request: its profile is selected before the scan uses that scope.
+// profileCoverConnectors are the scopes a decision on connectorName may
+// scan when no inspect route recorded its scope (requestScanScopes). A
+// connector's request scans that connector's rules and settings, which
+// already inherit the global ones, so the global scope is not compared:
+// a profile that blocks only globally does not apply to it. An unscoped
+// decision may scan the global scope or the gateway connector's.
 func (set *guardrailProfileSet) profileCoverConnectors(connectorName string) []string {
-	if connectorName == "" {
-		return []string{"", config.NormalizeConnectorName(connectorNameForConfig(set.base))}
+	if connectorName = canonicalConnectorRulePackKey(connectorName); connectorName != "" {
+		return []string{connectorName}
 	}
-	return []string{connectorName, ""}
+	if gateway := canonicalConnectorRulePackKey(connectorNameForConfig(set.base)); gateway != "" {
+		return []string{"", gateway}
+	}
+	return []string{""}
+}
+
+// scanScopes is scans, or profileCoverConnectors(connectorName) when the
+// caller recorded none.
+func (set *guardrailProfileSet) scanScopes(connectorName string, scans []string) []string {
+	if scans != nil {
+		return scans
+	}
+	return set.profileCoverConnectors(connectorName)
 }
 
 // profileCovers compares candidates when choosing a profile. Equal sandbox

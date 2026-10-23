@@ -205,7 +205,7 @@ func TestProfileMeetModesPerConnector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	name, single := set.meetOf([]string{"a", "b"}, "codex")
+	name, single := set.meetOf([]string{"a", "b"}, set.profileCoverConnectors("codex"))
 	if single || !config.IsProfileMeet(name) {
 		t.Fatalf("selection = %q, single %v; want a meet", name, single)
 	}

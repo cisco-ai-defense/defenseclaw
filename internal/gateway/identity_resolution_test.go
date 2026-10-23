@@ -158,7 +158,7 @@ func TestGAP0522UncertainIdentityNamesTheMissingFact(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			set := identityTestSet(t, p, "watch", config.ProfileAssignment{Profile: "strict", Match: tc.assignment})
-			got := set.selectProfile(&tc.subject, resolveIdentity(&tc.subject, tc.unresolved), profileSubjectVerified, "hermes", "agt-00000000000000bb")
+			got := set.selectProfile(&tc.subject, resolveIdentity(&tc.subject, tc.unresolved), profileSubjectVerified, "hermes", nil, "agt-00000000000000bb")
 			if got.Refused == "" || !strings.Contains(got.Refused, tc.fact) ||
 				strings.Contains(got.Refused, ": ,") || !strings.Contains(got.Refused, "explain --user 501 --connector hermes") {
 				t.Fatalf("uncertain %s decision: %+v", tc.name, got)
@@ -222,7 +222,7 @@ func TestGAP0522UncertainIdentityNamesTheMissingFact(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			set := identityTestSet(t, p, tc.def, tc.assignments...)
-			got := set.selectProfile(&unknownGroups, resolveIdentity(&unknownGroups, nil), profileSubjectVerified, "hermes", "")
+			got := set.selectProfile(&unknownGroups, resolveIdentity(&unknownGroups, nil), profileSubjectVerified, "hermes", nil, "")
 			if tc.refused {
 				if got.Refused == "" || !strings.Contains(got.Refused, "group membership is unconfirmed") {
 					t.Fatalf("%+v; want a refusal naming the group fact", got)
@@ -472,7 +472,7 @@ func TestResolveIdentityProofStatesAcrossProvidersAndPlatforms(t *testing.T) {
 					}
 					set := identityTestSet(t, p, "watch",
 						config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{p.group}}})
-					got := set.selectProfile(&subject, res, profileSubjectVerified, "codex", "")
+					got := set.selectProfile(&subject, res, profileSubjectVerified, "codex", nil, "")
 					if got.Name != tc.want.profile || got.Match != tc.want.match {
 						t.Fatalf("decision %+v; want %s (%s)", got, tc.want.profile, tc.want.match)
 					}
@@ -632,7 +632,7 @@ func TestUnresolvedLegacyAgentEntryIsStrictestInEitherOrder(t *testing.T) {
 				assignments = []config.ProfileAssignment{legacyAssignment, general}
 			}
 			set := identityTestSet(t, p, "strict", assignments...)
-			got := set.selectProfile(&subject, resolveIdentity(&subject, unresolved), profileSubjectVerified, "codex", "agt-00000000000000bb")
+			got := set.selectProfile(&subject, resolveIdentity(&subject, unresolved), profileSubjectVerified, "codex", nil, "agt-00000000000000bb")
 			if entryProfile == "watch" && (got.Name != "watch" || got.Match != profileMatchConnector || got.Refused != "") {
 				t.Fatalf("legacyFirst=%v, entry watch: %+v; want watch by connector, not refused", legacyFirst, got)
 			}
