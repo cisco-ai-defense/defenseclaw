@@ -78,7 +78,7 @@ func TestCompletedLegacyMicroVMKeepsComputeButLosesNetwork(t *testing.T) {
 	if len(old.Spec.Providers) != 0 || !slices.Equal(b.rec.OldSupervisorProviders, providers) {
 		t.Fatalf("legacy provider routes remained attached: active %v, saved %v, want %v", old.Spec.Providers, b.rec.OldSupervisorProviders, providers)
 	}
-	if got := e.get("legacy"); got.Phase != "completed" || !got.OldSupervisor || !slices.Contains(got.Warnings, oldSupervisorLingeringWarning) {
+	if got := e.get("legacy"); got.Phase != "completed" || !got.OldSupervisor || !legacyWarned(got, "`defenseclaw sandbox delete legacy`") {
 		t.Fatalf("completed legacy VM view = %+v", got)
 	}
 	if found := e.events("legacy", sandboxapi.ActivityFinding, sandboxapi.ReasonOldSupervisor); len(found) != 1 || !strings.Contains(found[0].Message, "network") {
@@ -138,7 +138,7 @@ func TestLegacyMicroVMErrorStatesCloseNetworkWhileComputeLives(t *testing.T) {
 				t.Fatalf("%s busy = %d", tc.name, got)
 			}
 			got := e.get("legacy")
-			if got.OldSupervisor != tc.live || slices.Contains(got.Warnings, oldSupervisorLingeringWarning) != tc.live {
+			if got.OldSupervisor != tc.live || legacyWarned(got, "`defenseclaw sandbox delete legacy`") != tc.live {
 				t.Fatalf("%s view = %+v", tc.name, got)
 			}
 			if e.hasRule("legacy", "background_direct") == tc.live {
@@ -642,5 +642,33 @@ func TestAStartOfAnEndedMicroVMLosesNothingUnasked(t *testing.T) {
 	endIn(t, d, "dockerdone", openshell.PhaseCompleted)
 	if _, err := d.m.Start(t.Context(), "dockerdone", sandboxapi.StartRequest{}); err != nil {
 		t.Fatalf("a start of a completed docker sandbox: %v", err)
+	}
+}
+
+// TestAFailedWaitForAnErrorMicroVMSaysTheWayOn (GAP-0871): OpenShell before
+// 0.1.5 takes the stop of a MicroVM in its error state and then fails the
+// wait ("sandbox is in error state"). The stop's error names the sandbox,
+// why OpenShell holds it and its way on (on that OpenShell, its delete),
+// not OpenShell's words alone.
+func TestAFailedWaitForAnErrorMicroVMSaysTheWayOn(t *testing.T) {
+	e, _ := newEndedVM(t, "box")
+	connectAtFakeRelease(e)
+	e.fake.SetRelease("0.1.3")
+	if _, err := e.tryCreate(sandboxapi.CreateRequest{Name: "fresh", Harness: "opencode", Copy: true, Project: e.otherProject("other")}); err == nil {
+		t.Fatal("a create on 0.1.3 succeeded")
+	}
+	endIn(t, e, "box", openshell.PhaseProvisioning)
+	endIn(t, e, "box", openshell.PhaseError, vmUnpolled)
+	e.fake.Intercept(func(method string) error {
+		if method != openshelltest.MethodWaitStopped {
+			return nil
+		}
+		must(t, e.fake.SetPhase(openshell.DefaultWorkspace, "box", openshell.PhaseError))
+		return &types.StatusError{Code: types.ErrorInternal, Message: `sandbox "box" is in error state`}
+	})
+	_, err := e.m.Stop(t.Context(), "box")
+	apiErr := wantCode(t, err, sandboxapi.CodeConflict)
+	if !strings.Contains(apiErr.Message, "box is in OpenShell's error state") || !strings.Contains(apiErr.Detail, "`defenseclaw sandbox delete box` deletes it and its work") {
+		t.Fatalf("the stop whose wait OpenShell failed = %+v", apiErr)
 	}
 }

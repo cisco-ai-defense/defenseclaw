@@ -152,7 +152,7 @@ func parseHarnessEnd(out []byte) harnessEnd {
 // else from a look at the run of its own (probeRun). The second result is
 // why a flush that was tried was not confirmed (nil when none was tried or
 // it was). It publishes nothing: only the stop knows whether it went ahead
-// (stopWithFlush), which it does without the flush and says so.
+// (Manager.stop), which it does without the flush and says so.
 func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) (harness.DetachedRun, error) {
 	none := harness.DetachedRun{State: sandboxapi.RunNone}
 	m.mu.Lock()

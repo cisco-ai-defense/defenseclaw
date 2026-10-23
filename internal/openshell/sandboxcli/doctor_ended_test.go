@@ -105,7 +105,7 @@ func TestStopOfAnEndedMicroVMSaysHowToStopIt(t *testing.T) {
 				"its VM still runs what its workload left running, and its start ends that VM with no flush first, so what the VM has not written to its disk is lost: " +
 				"`defenseclaw sandbox start box --end-vm` ends the VM that way, then `defenseclaw sandbox stop box` once it is ready; or `defenseclaw sandbox delete box`, which deletes it and its work"},
 		{"failed", "error", "MainProcessFailed: Canonical main process exited with status 1", openshell.SupportedMin,
-			"⚠ box is in OpenShell's error state: OpenShell does not stop it, so its MicroVM may still run"},
+			"⚠ box is in OpenShell's error state (MainProcessFailed: Canonical main process exited with status 1): OpenShell does not stop it, so its MicroVM may still run"},
 		{"completed, old gateway", "completed", "", "0.1.3",
 			"until OpenShell reports it stopped: `defenseclaw sandbox delete box`, which deletes it and its work (this OpenShell neither stops nor starts a completed MicroVM)"},
 	} {

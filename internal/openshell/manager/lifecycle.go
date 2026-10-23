@@ -332,26 +332,15 @@ func (m *Manager) refuseRetained(b *box) error {
 		"sandbox %s was deleted; only its undo point is kept (undo, review or delete it)", name)
 }
 
-// stop stops the sandbox of b. One whose main process completed or failed
-// OpenShell returns as it is: it keeps its phase, and with it the
-// OpenShell gateway (HoldsCompute), until OpenShell reports another.
-func (m *Manager) stop(ctx context.Context, b *box) error {
-	return m.stopWithFlush(ctx, b, nil)
-}
-
-// stopWithFlush stops the sandbox of b once its harness has exited and, on
-// a driver whose stop does not flush (the MicroVM driver), after sync(1) in
-// the guest. A flush that fails does not hold the stop back: once OpenShell
+// stop stops the sandbox of b once its harness has exited and, on a driver
+// whose stop does not flush (the MicroVM driver), after sync(1) in the
+// guest. A flush that fails does not hold the stop back: once OpenShell
 // takes the stop, the feed says what it may have lost (flushFailed), never
-// for a stop that was refused or not made. uncontained, when set, is why
-// DefenseClaw could not close the network of b, a ready legacy MicroVM that
-// it stops for that reason only (stopOldSupervisor): a legacy supervisor
-// never keeps running with open egress. Its release stops the VM without
-// a flush, and nothing holds back what the guest writes after DefenseClaw's
-// sync (a process an exec starts then, for one), so once OpenShell takes
-// that stop the feed's HIGH finding says what it may have lost, flushed or
-// not.
-func (m *Manager) stopWithFlush(ctx context.Context, b *box, uncontained error) error {
+// for a stop that was refused or not made. One whose main process
+// completed or failed OpenShell returns as it is: it keeps its phase, and
+// with it the OpenShell gateway (HoldsCompute), until OpenShell reports
+// another.
+func (m *Manager) stop(ctx context.Context, b *box) error {
 	gw, err := m.gateway(ctx)
 	if err != nil {
 		return err
@@ -359,7 +348,7 @@ func (m *Manager) stopWithFlush(ctx context.Context, b *box, uncontained error) 
 	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 	m.mu.Lock()
-	name, reason, driver, release := b.rec.Name, b.rec.PhaseReason, b.rec.Driver, b.rec.SessionRelease
+	name, reason, driver := b.rec.Name, b.rec.PhaseReason, b.rec.Driver
 	// OpenShell stops nothing of a sandbox whose workload ended: its phase
 	// stays until OpenShell reports another.
 	ended := b.phase == audit.SandboxPhaseCompleted ||
@@ -428,10 +417,6 @@ func (m *Manager) stopWithFlush(ctx context.Context, b *box, uncontained error) 
 	if flushErr != nil {
 		m.flushFailed(name, flushErr)
 	}
-	if uncontained != nil {
-		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
-			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorUnflushedStop(name, release, uncontained)})
-	}
 	sb, err := gw.Client.WaitStopped(ctx, name)
 	if err != nil && transientGatewayError(err) {
 		if cur, ok := m.reconnect(ctx, gw, err); ok {
@@ -441,6 +426,13 @@ func (m *Manager) stopWithFlush(ctx context.Context, b *box, uncontained error) 
 	}
 	if err != nil {
 		m.stopFailed(ctx, gw, b)
+		// OpenShell before 0.1.5 takes the stop of a MicroVM in its error
+		// state and then fails the wait ("sandbox is in error state"): the
+		// sandbox, why and the way on, not OpenShell's words alone
+		// (GAP-0871).
+		if e := m.errorPhaseNow(b); e != nil {
+			return e
+		}
 		return upstream("wait for sandbox "+name+" to stop", err)
 	}
 	m.mu.Lock()
@@ -797,6 +789,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	// A MicroVM whose workload ended still runs its VM, which OpenShell's
 	// start ends with no flush: only one the user asked to end goes on.
 	if err := lingeringStartRefusal(rec.Name, gw.Driver, sb, rec.PhaseReason, req.EndVM); err != nil {
+		return err
+	}
+	// No new session while a legacy guest runs unprotected; this one's
+	// start ends it when it is an ended legacy MicroVM (--end-vm).
+	if err := m.legacyRunRefusal(rec.Name); err != nil {
 		return err
 	}
 	// Containment may have detached providers or removed rules before an

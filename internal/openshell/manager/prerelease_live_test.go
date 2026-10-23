@@ -75,18 +75,21 @@ func TestAPrereleaseOfSandboxMinRunsNoSandbox(t *testing.T) {
 		}
 	}
 	// A session that starts on a prerelease (outside DefenseClaw) runs its
-	// supervisor, is named and stopped (the gateway the manager last reached
-	// runs 0.1.5-pre.7, which has the broker fix but is still a prerelease).
+	// supervisor, and is named unprotected and kept until its user stops it
+	// (the gateway the manager last reached runs 0.1.5-pre.7, which has the
+	// broker fix but is still a prerelease).
+	must(t, e.fake.SetPhase(openshell.DefaultWorkspace, "kept", openshell.PhaseReady))
 	e.m.statusEvent(t.Context(), e.boxOf("kept"), &stream.Status{Phase: openshell.PhaseProvisioning})
 	e.m.statusEvent(t.Context(), e.boxOf("kept"), &stream.Status{Phase: openshell.PhaseReady})
 	e.m.tamperStops.Wait()
 	if found := e.events("kept", sandboxapi.ActivityFinding, sandboxapi.ReasonOldSupervisor); len(found) != 1 ||
-		!strings.Contains(found[0].Message, "kept's session started on OpenShell 0.1.5-pre.7") {
+		!strings.Contains(found[0].Message, "kept: "+legacyUnprotected+": its session started on OpenShell 0.1.5-pre.7") {
 		t.Fatalf("old-supervisor findings on a prerelease = %+v", found)
 	}
-	if got := e.get("kept").Phase; got != "stopped" {
-		t.Fatalf("a session on the 0.1.5-pre.7 supervisor is %s, want stopped", got)
+	if got := e.get("kept"); got.Phase != "ready" || !got.OldSupervisor {
+		t.Fatalf("a session on the 0.1.5-pre.7 supervisor is %s (old supervisor %v), want kept ready", got.Phase, got.OldSupervisor)
 	}
+	e.stopBox("kept")
 	e.fake.SetRelease("0.1.6-pre.1")
 	e.startBox("kept", sandboxapi.StartRequest{})
 	if got := e.boxOf("kept").rec.SessionRelease; got != "0.1.6-pre.1" || !openshell.RunsSandboxes(got) {

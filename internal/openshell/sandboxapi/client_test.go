@@ -308,3 +308,69 @@ func TestReadyAcrossDaemonVersions(t *testing.T) {
 		})
 	}
 }
+
+// startRequest103 is StartRequest as DefenseClaw 1.0.3 decodes it: every
+// field but end_vm, which 1.0.4 added.
+type startRequest103 struct {
+	NoSnapshot  bool           `json:"no_snapshot,omitempty"`
+	NewSnapshot bool           `json:"new_snapshot,omitempty"`
+	LLM         *LLMCredential `json:"llm,omitempty"`
+	Snapshot    time.Time      `json:"snapshot_created_at,omitzero"`
+}
+
+// Start works across daemon versions as Ready does: a daemon of DefenseClaw
+// 1.0.3 or older decodes POST start strictly and refuses end_vm, the field
+// of `start --end-vm`; it refuses no start of an ended MicroVM either, so
+// on that refusal only the start goes again without the field. A current
+// daemon gets one request, a start without end_vm is sent once anywhere,
+// and any other refusal is the answer.
+func TestStartAcrossDaemonVersions(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		strict bool
+		endVM  bool
+		refuse string
+		want   []string
+		ok     bool
+	}{
+		{name: "1.0.3 daemon, --end-vm", strict: true, endVM: true, want: []string{`{"new_snapshot":true,"end_vm":true}`, `{"new_snapshot":true}`}, ok: true},
+		{name: "1.0.3 daemon, plain start", strict: true, want: []string{`{"new_snapshot":true}`}, ok: true},
+		{name: "current daemon, --end-vm", endVM: true, want: []string{`{"new_snapshot":true,"end_vm":true}`}, ok: true},
+		{name: "current daemon refuses", endVM: true, refuse: "sandbox box was not started", want: []string{`{"new_snapshot":true,"end_vm":true}`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var bodies []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				bodies = append(bodies, strings.TrimSpace(string(raw)))
+				fail := func(e *Error) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(e.HTTPStatus())
+					_ = json.NewEncoder(w).Encode(e)
+				}
+				if tc.strict {
+					dec := json.NewDecoder(bytes.NewReader(raw))
+					dec.DisallowUnknownFields()
+					var req startRequest103
+					if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+						fail(Errorf(CodeInvalid, "invalid JSON body: %v", err))
+						return
+					}
+				}
+				if tc.refuse != "" {
+					fail(Errorf(CodeConflict, "%s", tc.refuse))
+					return
+				}
+				_ = json.NewEncoder(w).Encode(Sandbox{Name: "box", Phase: "ready"})
+			}))
+			defer srv.Close()
+			sb, err := NewClient(srv.URL, "t").Start(context.Background(), "box", StartRequest{NewSnapshot: true, EndVM: tc.endVM})
+			if tc.ok != (err == nil) || (err == nil && (sb == nil || sb.Phase != "ready")) {
+				t.Fatalf("Start = %+v, %v", sb, err)
+			}
+			if !reflect.DeepEqual(bodies, tc.want) {
+				t.Fatalf("requests = %q, want %q", bodies, tc.want)
+			}
+		})
+	}
+}

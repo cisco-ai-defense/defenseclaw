@@ -2002,16 +2002,22 @@ with whatever its workload left running. OpenShell 0.1.3 neither stops nor
 starts it, so the upgrade is refused until you delete it
 (`defenseclaw sandbox delete <name>`). Setup names each such sandbox and the
 command to run. A sandbox that keeps running through the upgrade still runs
-the old release's supervisor, with its network broker, until it stops. So
-DefenseClaw stops it as soon as it sees it, as `defenseclaw sandbox stop
-<name>` does, and says so in the activity feed
-(``⚠ <name>'s session started on OpenShell 0.1.3``). The same goes for a
-sandbox DefenseClaw 1.0.3 or older started, whose record names no release.
-`defenseclaw sandbox start <name>` or `connect <name>` then starts it on the
-gateway's own supervisor, with its work. If that stop fails, the sandbox
-keeps running and `defenseclaw sandbox status <name>` names it.
-`defenseclaw sandbox exec` runs nothing in it, and `connect` stops it and
-starts it again before it attaches.
+the old release's supervisor, with its network broker, until it stops, and
+DefenseClaw cannot contain that broker. DefenseClaw never stops it for you,
+since only you can save its work first. It closes its egress proxy and
+withdraws the network rules it added, and says the sandbox is not protected
+in the activity feed, in `defenseclaw sandbox status <name>` and in the
+doctor's failed **Legacy sandboxes** row (``<name>: legacy sandbox running,
+not protected by the 1.0.4 egress policy``), with the command that ends it.
+The same goes for a sandbox DefenseClaw 1.0.3 or older started, whose record
+names no release. Until it is gone, DefenseClaw creates and starts no
+sandbox, and `exec` and `connect` run nothing in it. Save your work, then run
+`defenseclaw sandbox stop <name>` (on a MicroVM it syncs the disk first,
+because 0.1.3 does not flush it on a stop, so what the guest writes after
+that may be lost). `defenseclaw sandbox start <name>` or `connect <name>`
+then starts it on the gateway's own supervisor, with its work. A MicroVM
+whose workload ended is not stopped by OpenShell: delete it, or on 0.1.5
+start it with `--end-vm`.
 
 What the upgrade does:
 

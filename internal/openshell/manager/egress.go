@@ -226,7 +226,7 @@ func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 		}
 	}
 	m.mu.Unlock()
-	if rec.OldSupervisorNetworkClosed || oldSupervisorVMNeedsContainment(phase, rec) {
+	if rec.OldSupervisorNetworkClosed || oldSupervisorLive(phase, rec) {
 		m.suspendOldSupervisorEgress(b)
 		return
 	}
@@ -250,11 +250,12 @@ func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 	m.recheckEgress(rec.BindingID)
 }
 
-const oldSupervisorEgressOff = "the MicroVM may still run a supervisor from OpenShell before " + openshell.SupportedMin + "; DefenseClaw's egress proxy is closed while its compute and disk are kept"
+const oldSupervisorEgressOff = legacyUnprotected + ": it may run the supervisor of an OpenShell release older than " + openshell.SupportedMin +
+	", so DefenseClaw's egress proxy is closed to it until it stops"
 
 // suspendOldSupervisorEgress closes the DefenseClaw proxy route, including
-// tunnels already open. Called again on policy refresh so an older session
-// is never re-registered while its ended VM is kept.
+// tunnels already open. Called again on policy refresh so a legacy guest
+// (oldSupervisorLive) is never registered again while it lives.
 func (m *Manager) suspendOldSupervisorEgress(b *box) {
 	m.mu.Lock()
 	cred, rec := b.cred, b.rec
@@ -270,12 +271,16 @@ func (m *Manager) suspendOldSupervisorEgress(b *box) {
 	m.noteEgressOff(b, oldSupervisorEgressOff)
 }
 
-// containOldSupervisorNetwork withdraws every direct OpenShell rule from a
-// legacy MicroVM, including one whose ready session cannot be safely
-// stopped before sync. The proxy suspension runs first even if the gateway
-// cannot be reached. A rule update is conditional on the current resource
-// version, so a concurrent new session cannot have its rules stripped.
-// Reconcile retries failed or not-yet-loaded updates.
+// containOldSupervisorNetwork closes DefenseClaw's egress proxy to a live
+// legacy guest (oldSupervisorLive) and withdraws every OpenShell network
+// rule and provider of it. That is what DefenseClaw added to its network,
+// not a containment of the old broker, which passes a socket it cannot
+// inspect to the native call (GAP-0831): the guest stays reported
+// unprotected, and no new sandbox runs while it lives (legacyRunRefusal).
+// The proxy suspension runs first even if the gateway cannot be reached. A
+// rule update is conditional on the current resource version, so a
+// concurrent new session cannot have its rules stripped. Reconcile retries
+// failed or not-yet-loaded updates.
 func (m *Manager) containOldSupervisorNetwork(ctx context.Context, b *box) {
 	m.suspendOldSupervisorEgress(b)
 	if !b.op.TryLock() {
@@ -321,7 +326,7 @@ func (m *Manager) containOldSupervisorNetworkLocked(ctx context.Context, b *box)
 	m.mu.Lock()
 	rec, phase := b.rec, b.phase
 	m.mu.Unlock()
-	if !oldSupervisorVMNeedsContainment(phase, rec) {
+	if !oldSupervisorLive(phase, rec) {
 		m.mu.Lock()
 		b.oldSupervisorNetworkErr = ""
 		m.mu.Unlock()
@@ -353,27 +358,9 @@ func (m *Manager) containOldSupervisorNetworkLocked(ctx context.Context, b *box)
 	if err != nil && changed {
 		m.logf("old supervisor: cannot close the network of %s: %v", rec.Name, err)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
-			Reason: sandboxapi.ReasonOldSupervisor, Message: "⚠ " + rec.Name + " still has a legacy MicroVM: its proxy is closed, but DefenseClaw could not finish withdrawing its direct OpenShell network rules: " + err.Error()})
+			Reason: sandboxapi.ReasonOldSupervisor, Message: "⚠ " + rec.Name + ": " + legacyUnprotected + ": " + legacyRulesKept + err.Error() + "; " +
+				legacyWayOn(rec.Name, phase, rec.Driver)})
 	}
-}
-
-// proveOldSupervisorNetworkClosed closes a ready legacy MicroVM's proxy
-// route and withdraws its direct OpenShell rules once more, confirmed
-// loaded, under the operation lock its caller holds (a containment queued
-// behind the caller has not run yet, and an earlier one may be stale). It
-// returns nil only when both are closed now, else why not.
-func (m *Manager) proveOldSupervisorNetworkClosed(ctx context.Context, b *box) error {
-	m.suspendOldSupervisorEgress(b)
-	m.containOldSupervisorNetworkLocked(ctx, b)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	switch {
-	case b.oldSupervisorNetworkErr != "":
-		return errors.New(b.oldSupervisorNetworkErr)
-	case !b.rec.OldSupervisorNetworkClosed:
-		return errors.New("DefenseClaw could not confirm that its direct OpenShell network rules are withdrawn")
-	}
-	return nil
 }
 
 func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error {
@@ -397,7 +384,7 @@ func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error 
 		return err
 	}
 	if sb == nil || (sb.Status.Phase != openshell.PhaseReady && sb.Status.Phase != openshell.PhaseCompleted && sb.Status.Phase != openshell.PhaseError) {
-		return fmt.Errorf("OpenShell no longer reports a live legacy MicroVM")
+		return fmt.Errorf("OpenShell no longer reports this legacy sandbox live")
 	}
 	// OpenShell composes attached providers' direct endpoints into the
 	// effective policy. Removing their generated rule names from the base
@@ -449,7 +436,7 @@ func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error 
 			return err
 		}
 		if sb == nil || (sb.Status.Phase != openshell.PhaseReady && sb.Status.Phase != openshell.PhaseCompleted && sb.Status.Phase != openshell.PhaseError) {
-			return fmt.Errorf("OpenShell no longer reports a live legacy MicroVM")
+			return fmt.Errorf("OpenShell no longer reports this legacy sandbox live")
 		}
 		names := make([]string, 0, len(cfg.Policy.NetworkPolicies))
 		for rule := range cfg.Policy.NetworkPolicies {

@@ -1803,63 +1803,6 @@ func TestStartTakesAFreshSnapshotWhenNothingIsOnTop(t *testing.T) {
 	}
 }
 
-// TestAnOldSupervisorRunsNothing (GAP-0415): a ready sandbox the daemon
-// names as running the supervisor of an OpenShell older than SupportedMin
-// gets no exec, and a connect stops it and starts it again (on the
-// gateway's own supervisor) before it attaches; one it cannot stop is
-// refused with the way on.
-func TestAnOldSupervisorRunsNothing(t *testing.T) {
-	ta := newTestApp(t, "y\n")
-	sb := sampleSandbox("m1-b")
-	sb.Phase, sb.OldSupervisor = "ready", true
-	ta.daemon.add(sb)
-	err := ta.Exec(bg, ExecOptions{Name: "m1-b", Command: []string{"ls"}})
-	if err == nil || !strings.Contains(err.Error(), "m1-b runs the supervisor of an OpenShell release older than "+openshell.SupportedMin) ||
-		!strings.Contains(err.Error(), "`defenseclaw sandbox connect m1-b` stops and starts it") {
-		t.Fatalf("exec = %v", err)
-	}
-	if len(ta.stream.runs) != 0 {
-		t.Fatalf("exec ran in the sandbox: %v", ta.stream.runs)
-	}
-
-	ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/m1-b/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "OpenShell: stop failed"}
-	err = ta.Connect(bg, ConnectOptions{Name: "m1-b"})
-	if err == nil || !strings.Contains(err.Error(), "DefenseClaw runs nothing in it, and it could not stop it") || ta.calls("POST", "m1-b/start") != 0 || len(ta.stream.runs) != 0 {
-		t.Fatalf("connect with a failing stop = %v (starts %d, runs %d)", err, ta.calls("POST", "m1-b/start"), len(ta.stream.runs))
-	}
-
-	delete(ta.daemon.errors, "POST "+sandboxapi.PathSandboxes+"/m1-b/stop")
-	runAnswers(ta, "", "")
-	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "m1-b"}))
-	var order []string
-	for _, c := range ta.daemon.calls {
-		if c.Method == "POST" && (strings.HasSuffix(c.Path, "/m1-b/stop") || strings.HasSuffix(c.Path, "/m1-b/start")) {
-			order = append(order, c.Path[strings.LastIndex(c.Path, "/")+1:])
-		}
-	}
-	if len(order) < 3 || order[1] != "stop" || order[2] != "start" {
-		t.Fatalf("connect: stop and start calls %v, want the stop before the start", order)
-	}
-	has(t, ta.output(), "m1-b still runs the supervisor of an OpenShell release older than "+openshell.SupportedMin)
-}
-
-// Connect is not an explicit choice to discard MicroVM writes. A legacy
-// MicroVM session stays contained until the user chooses a loss-aware stop.
-func TestConnectDoesNotStopALegacyMicroVMWithoutALossDecision(t *testing.T) {
-	ta := newTestApp(t, "")
-	sb := sampleSandbox("legacy-vm")
-	sb.Phase, sb.OldSupervisor, sb.Driver = "ready", true, "vm"
-	ta.daemon.add(sb)
-	err := ta.Connect(bg, ConnectOptions{Name: sb.Name})
-	if err == nil || !strings.Contains(err.Error(), "unsynced writes") ||
-		!strings.Contains(err.Error(), "explicitly run `defenseclaw sandbox stop legacy-vm`") {
-		t.Fatalf("legacy MicroVM connect did not explain the loss decision: %v", err)
-	}
-	if ta.calls("POST", "legacy-vm/stop") != 0 || ta.calls("POST", "legacy-vm/start") != 0 {
-		t.Fatalf("connect stopped an unflushed legacy MicroVM")
-	}
-}
-
 // A headless session in an existing sandbox runs without a terminal:
 // `connect NAME --prompt TEXT` or the harness's own print flag (manual
 // test M6).

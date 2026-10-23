@@ -159,12 +159,14 @@ const (
 	StopGateway
 	// StopSocket stops the daemon's socket (Linux).
 	StopSocket
-	// StopKill, with StopDaemon or StopSocket, first ends the daemon's
-	// main process with SIGKILL: the exit of a daemon before DefenseClaw
-	// 1.0.4 (SandboxStatus.Legacy), which a stop's SIGTERM runs, stops the
-	// account's OpenShell gateway under a MicroVM that completed, with no
-	// flush. A killed daemon runs nothing on its way out, and the unit's
-	// ExecStop, which then runs with no main process, stops nothing.
+	// StopKill first ends the daemon's main process with SIGKILL: the exit
+	// of a daemon before DefenseClaw 1.0.4 (SandboxStatus.Legacy), which a
+	// stop's SIGTERM runs, stops the account's OpenShell gateway under a
+	// MicroVM that completed, with no flush. A killed daemon runs nothing on
+	// its way out, and the unit's ExecStop, which then runs with no main
+	// process, stops nothing. Alone it stops no unit: the service manager
+	// starts the installed daemon again (systemd's Restart=, the launcher
+	// on the next command).
 	StopKill
 )
 
@@ -339,13 +341,15 @@ func (e *Env) longRunner(timeout time.Duration) Runner {
 	return e.Runner
 }
 
-// domain is the launchd domain of the account's sandbox agent.
+// domain is the launchd domain of the account's sandbox agent
+// (openshell.LaunchDomain): the one its job is loaded in, so a stop or a
+// kill finds it, else the graphical session, else the background one.
 func (o *commandUserOps) domain(ctx context.Context, a SandboxAccount) string {
-	gui := "gui/" + strconv.Itoa(a.UID)
-	if _, err := o.env.Runner.Run(ctx, "launchctl", "print", gui); err == nil {
-		return gui
-	}
-	return "user/" + strconv.Itoa(a.UID)
+	domain, _ := openshell.LaunchDomain(a.UID, labelSandbox, o.env.launchAgentLabel(labelSandbox), func(domain string) (string, error) {
+		res, err := o.env.Runner.Run(ctx, "launchctl", "print", domain)
+		return string(res.Stdout), err
+	})
+	return domain
 }
 
 // usableSandboxAccount reports whether a is an account the lifecycle acts in:
@@ -520,7 +524,7 @@ func (o *commandUserOps) agentLabels(ctx context.Context, domain, base string) [
 
 func (o *commandUserOps) Stop(ctx context.Context, a SandboxAccount, scope StopScope) error {
 	e := o.env
-	if scope&StopKill != 0 && scope&(StopDaemon|StopSocket) != 0 {
+	if scope&StopKill != 0 {
 		if err := o.killDaemon(ctx, a); err != nil {
 			return err
 		}
@@ -925,6 +929,9 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 			// completed or is in OpenShell's error state (until OpenShell
 			// reports it stopped: openshell.HoldsGateway) or a sandbox
 			// still starting too.
+			if status.Legacy {
+				status = l.replaceLegacyDaemon(ctx, ops, account, status)
+			}
 			entry.Sandboxes = status.busy()
 			state.Pending[key] = entry
 			continue
@@ -946,6 +953,40 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 		}
 		delete(state.Pending, key)
 	}
+}
+
+// replaceLegacyDaemon puts the installed sandbox daemon in place of one
+// that DefenseClaw before 1.0.4 started (SandboxStatus.Legacy, st) in the
+// account a, whose sandboxes may hold compute, and returns the account's
+// status after it. That daemon exits by itself once a package upgrade
+// replaced its program or its settings changed (its pending restart), as
+// soon as no sandbox of the account is ready, provisioning or starting, and
+// its exit stops the account's OpenShell gateway: under a MicroVM that
+// completed or is in OpenShell's error state, which it does not count, the
+// VM ends with no flush (GAP-0868). The installed daemon counts those
+// (sandboxapi.Status.Live) and keeps the gateway while they hold it. The
+// old one is killed, so its exit runs nothing (StopKill alone: no unit is
+// stopped, so neither the gateway nor any sandbox is), and the status
+// starts the installed one. Its sandboxes' hooks fail closed in between.
+func (l *lifecycle) replaceLegacyDaemon(ctx context.Context, ops SandboxUserOps, a SandboxAccount, st SandboxStatus) SandboxStatus {
+	if err := ops.Stop(ctx, a, StopKill); err != nil {
+		l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("could not end the sandbox daemon of %s that an earlier DefenseClaw started: once no sandbox of %s runs, "+
+			"it stops the account's OpenShell gateway, also under a MicroVM that completed or is in OpenShell's error state, which loses what that VM has not written: %v; "+
+			"the next run tries again", a.Name, a.Name, err))
+		return st
+	}
+	next, err := ops.Status(ctx, a)
+	switch {
+	case err != nil:
+		l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("ended the sandbox daemon of %s that an earlier DefenseClaw started, but could not ask the installed one: %v; "+
+			"the account's next sandbox command starts it", a.Name, err))
+		return st
+	case next.Legacy:
+		l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("the sandbox daemon of %s still runs the earlier DefenseClaw after it was ended; the next run tries again", a.Name))
+		return next
+	}
+	l.openshellChange("replaced the sandbox daemon of %s, which an earlier DefenseClaw started, with this version's: its OpenShell gateway and its sandboxes keep running", a.Name)
+	return next
 }
 
 // reasonBase is the reason without the retry detail settlePending appends.

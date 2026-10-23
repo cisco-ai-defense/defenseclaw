@@ -278,19 +278,17 @@ func launcherAwaitWithRecovery(ctx context.Context, client launcherStatusClient,
 	return launcherAwait(ctx, client)
 }
 
-// launcherLaunchDomain is the launchd domain of the caller's sandbox agent:
-// the graphical session when the caller has one (the agent allows Aqua and
+// launcherLaunchDomain is the launchd domain of the caller's sandbox agent
+// (openshell.LaunchDomain): the one its job is loaded in, else the
+// graphical session when the caller has one (the agent allows Aqua and
 // Background sessions), else the background session of an ssh login. It
 // also returns what `launchctl print` said of the domain, which lists the
 // jobs loaded there.
 func launcherLaunchDomain(ctx context.Context, uid int) (domain, listing string) {
-	gui := "gui/" + strconv.Itoa(uid)
-	if out, err := launcherRun(ctx, launcherLaunchctl, "print", gui); err == nil {
-		return gui, out
-	}
-	user := "user/" + strconv.Itoa(uid)
-	out, _ := launcherRun(ctx, launcherLaunchctl, "print", user)
-	return user, out
+	label, _ := launcherAgent()
+	return openshell.LaunchDomain(uid, openshell.SandboxAgentBase, label, func(domain string) (string, error) {
+		return launcherRun(ctx, launcherLaunchctl, "print", domain)
+	})
 }
 
 // launcherRunChecked runs a service-manager command and folds its output
