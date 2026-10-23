@@ -27,7 +27,8 @@ func TestCodexTeardownRevokesCachedOTLPTokenAndReinstallRotates(t *testing.T) {
 	defer func() { connector.CodexConfigPathOverride = "" }()
 
 	conn := connector.NewCodexConnector()
-	opts := connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-token"}
+	// Only a managed profile still installs native Codex OTLP credentials.
+	opts := connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-token", ManagedEnterprise: true}
 	prepareCodexSetupPolicyFixture(t, dir, &opts)
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("initial Setup: %v", err)

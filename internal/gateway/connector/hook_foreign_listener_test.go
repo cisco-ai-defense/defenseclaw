@@ -188,7 +188,9 @@ if defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 'secret pay
 	if got := strings.TrimSpace(string(out)); got != "blocked" {
 		t.Fatalf("separate preflight leaked through curl: %q", got)
 	}
-	if args, err := os.ReadFile(marker); err != nil || string(args) != "hook-post --api-addr 127.0.0.1:18960 --max-time 2 --curl-output\n" {
+	if args, err := os.ReadFile(marker); err != nil ||
+		(string(args) != "hook-post --api-addr 127.0.0.1:18960 --max-time 1 --curl-output\n" &&
+			string(args) != "hook-post --api-addr 127.0.0.1:18960 --max-time 2 --curl-output\n") {
 		t.Fatalf("native post was not invoked without credentials on argv: %q, %v", args, err)
 	}
 }

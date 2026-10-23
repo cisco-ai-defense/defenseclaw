@@ -45,7 +45,7 @@ def test_managed_hook_docs_distinguish_outages_from_refusals() -> None:
     assert "outage-only" in rate_limit and "outage-only" in coverage
 
     fail_modes = _flat("reference/configuration/fail-modes.mdx")
-    strict = fail_modes.split("## Strict availability", 1)[1].split("## ", 1)[0]
+    strict = fail_modes.split("## Set a closed posture", 1)[1].split("## ", 1)[0]
     assert "classified outages" in strict
     assert "force the unavailable-home and transport failures closed" not in strict
     assert "force the relevant unavailable-home and transport failures closed" not in strict

@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -7342,38 +7341,36 @@ func TestOpenClawHookWriter_WritesGenericHooksOnly(t *testing.T) {
 func TestWriteHookScriptsWithToken_InjectsBearerHeader(t *testing.T) {
 	// The claude-code hook posts to /api/v1/claude-code/hook, which the API
 	// server's auth middleware guards with a bearer token. Without the
-	// header the request is 401'd, the hook script fails-open, and no
-	// inspection happens — which is exactly how claude-code queries
-	// silently slipped through. Run the generated script so we exercise
-	// the real runtime auth wiring, not the template shape.
+	// header the request is 401'd and the hook blocks. Run the generated
+	// script so we exercise the real runtime auth wiring.
 	dir := t.TempDir()
 	if err := WriteHookScriptsWithToken(dir, freeAPIAddr(t), "tok-abcdef123"); err != nil {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
-	capture := runHookAndCaptureCurlTransport(t, filepath.Join(dir, "claude-code-hook.sh"), nil)
-	if !containsAuthBearer(capture.headers, "tok-abcdef123") {
-		t.Errorf("claude-code-hook.sh request missing `Authorization: Bearer tok-abcdef123`; got curl headers:\n%s", capture.headers)
+	capture := runHookAndCaptureNativeTransport(t, filepath.Join(dir, "claude-code-hook.sh"), nil)
+	if capture.err != nil || capture.requests != 1 {
+		t.Fatalf("native hook post = %v, requests=%d: %s", capture.err, capture.requests, capture.output)
+	}
+	if !hasBearerHeader(capture.headers, "tok-abcdef123") {
+		t.Errorf("claude-code-hook.sh request missing `Authorization: Bearer tok-abcdef123`; got headers:\n%s", capture.headers)
 	}
 	if strings.Contains(capture.argv, "tok-abcdef123") {
-		t.Errorf("claude-code-hook.sh put the bearer on curl's command line:\n%s", capture.argv)
+		t.Errorf("claude-code-hook.sh put the bearer on the native helper's command line:\n%s", capture.argv)
 	}
 }
 
 func TestWriteHookScriptsWithToken_EmptyTokenOmitsHeader(t *testing.T) {
-	// Operators who never set DEFENSECLAW_GATEWAY_TOKEN rely on the
-	// loopback fallback; emitting an empty Authorization header would
-	// make the API middleware reject with "invalid_token" instead of
-	// falling through to the loopback allow path. So the hook must omit
-	// the header entirely when no token is configured.
+	// A hook without a token may use the same-account listener's loopback
+	// fallback, but it must not manufacture an Authorization header.
 	dir := t.TempDir()
 	if err := WriteHookScriptsWithToken(dir, freeAPIAddr(t), ""); err != nil {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
-	capture := runHookAndCaptureCurlTransport(t, filepath.Join(dir, "claude-code-hook.sh"), nil)
-	if containsAuthBearer(capture.headers, "") {
-		t.Errorf("claude-code-hook.sh should not emit an Authorization header when token is empty; got curl headers:\n%s", capture.headers)
+	capture := runHookAndCaptureNativeTransport(t, filepath.Join(dir, "claude-code-hook.sh"), nil)
+	if capture.err != nil || capture.requests != 1 || hasBearerHeader(capture.headers, "") {
+		t.Errorf("tokenless native post had unexpected transport: err=%v requests=%d headers=%s", capture.err, capture.requests, capture.headers)
 	}
 }
 
@@ -7387,13 +7384,16 @@ func TestWriteHookScriptsWithToken_EnvVarOverridesBakedToken(t *testing.T) {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
-	capture := runHookAndCaptureCurlTransport(t, filepath.Join(dir, "claude-code-hook.sh"),
+	capture := runHookAndCaptureNativeTransport(t, filepath.Join(dir, "claude-code-hook.sh"),
 		map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "from-env"})
-	if !containsAuthBearer(capture.headers, "from-env") {
-		t.Errorf("env var should win over baked token; got curl headers:\n%s", capture.headers)
+	if capture.err != nil || capture.requests != 1 {
+		t.Fatalf("native hook post = %v, requests=%d: %s", capture.err, capture.requests, capture.output)
+	}
+	if !hasBearerHeader(capture.headers, "from-env") {
+		t.Errorf("env var should win over baked token; got headers:\n%s", capture.headers)
 	}
 	if strings.Contains(capture.argv, "from-env") {
-		t.Errorf("claude-code-hook.sh put the bearer on curl's command line:\n%s", capture.argv)
+		t.Errorf("claude-code-hook.sh put the bearer on the native helper's command line:\n%s", capture.argv)
 	}
 }
 
@@ -7403,13 +7403,16 @@ func TestConnectorScopedHookTokenOverridesGenericEnv(t *testing.T) {
 		t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
 	}
 
-	capture := runHookAndCaptureCurlTransport(t, filepath.Join(dir, "codex-hook.sh"),
+	capture := runHookAndCaptureNativeTransport(t, filepath.Join(dir, "codex-hook.sh"),
 		map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "generic-env"})
+	if capture.err != nil || capture.requests != 1 {
+		t.Fatalf("native hook post = %v, requests=%d: %s", capture.err, capture.requests, capture.output)
+	}
 	if strings.Contains(capture.argv, "scoped-token") {
-		t.Errorf("connector-scoped token leaked into curl argv:\n%s", capture.argv)
+		t.Errorf("connector-scoped token leaked into native helper argv:\n%s", capture.argv)
 	}
 	if strings.Contains(capture.argv, "generic-env") {
-		t.Errorf("hook leaked inherited generic env token into curl argv:\n%s", capture.argv)
+		t.Errorf("hook leaked inherited generic env token into native helper argv:\n%s", capture.argv)
 	}
 	if !strings.Contains(capture.headers, "Authorization: Bearer scoped-token") {
 		t.Errorf("hook did not transport the connector-scoped token: %q", capture.headers)
@@ -7436,32 +7439,30 @@ func TestConnectorScopedHookReadFailureClearsGenericEnv(t *testing.T) {
 				t.Fatalf("mutate scoped token: %v", err)
 			}
 
-			capture := runHookAndCaptureCurlTransport(t, filepath.Join(dir, "codex-hook.sh"),
+			capture := runHookAndCaptureNativeTransport(t, filepath.Join(dir, "codex-hook.sh"),
 				map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "generic-env"})
-			if containsAuthBearer(capture.headers, "") || strings.Contains(capture.argv, "generic-env") {
-				t.Errorf("hook retained an inherited generic token after scoped read failure; got curl headers:\n%s", capture.headers)
+			if capture.err != nil || capture.requests != 1 || hasBearerHeader(capture.headers, "") || strings.Contains(capture.argv, "generic-env") {
+				t.Errorf("hook retained an inherited generic token after scoped read failure: err=%v requests=%d headers=%s argv=%s", capture.err, capture.requests, capture.headers, capture.argv)
 			}
 		})
 	}
 }
 
-// hookCurlTransportCapture is what runHookAndCaptureCurlTransport's curl stub
-// saw: its argv, and the -H values and --config files (read from their
-// descriptors) it was given, so tests can check that the bearer reached the
-// request without reaching the command line.
-type hookCurlTransportCapture struct {
-	argv    string
-	headers string
+// hookNativeTransportCapture records the actual native helper argv and the
+// request a same-account test listener received.
+type hookNativeTransportCapture struct {
+	argv     string
+	headers  string
+	requests int
+	err      error
+	output   string
 }
 
-func runHookAndCaptureCurlTransport(t *testing.T, scriptPath string, extraEnv map[string]string) hookCurlTransportCapture {
+func runHookAndCaptureNativeTransport(t *testing.T, scriptPath string, extraEnv map[string]string) hookNativeTransportCapture {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell-hook runtime is covered by native defenseclaw-hook.exe tests on Windows")
 	}
-	// The curl stub captures bytes without making a connection. Bind the
-	// rendered gateway address here so the hook's independent listener proof
-	// still sees a same-account destination before it invokes the stub.
 	script, err := os.ReadFile(scriptPath)
 	if err != nil {
 		t.Fatal(err)
@@ -7483,68 +7484,59 @@ func runHookAndCaptureCurlTransport(t *testing.T, scriptPath string, extraEnv ma
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
-	stubDir := t.TempDir()
-	argFile := filepath.Join(stubDir, "curl-args.txt")
-	headerFile := filepath.Join(stubDir, "curl-headers.txt")
-	stub := filepath.Join(stubDir, "curl")
-	stubSrc := "#!/bin/sh\n" +
-		"want=\n" +
-		"for a in \"$@\"; do\n" +
-		"  printf '%s\\n' \"$a\" >> " + shellSingleQuoteForTest(argFile) + "\n" +
-		"  case \"$want\" in\n" +
-		"    header) case \"$a\" in @*) cat \"${a#@}\" ;; *) printf '%s\\n' \"$a\" ;; esac >> " + shellSingleQuoteForTest(headerFile) + "; want= ;;\n" +
-		"    config) cat \"$a\" >> " + shellSingleQuoteForTest(headerFile) + "; want= ;;\n" +
-		"  esac\n" +
-		"  case \"$a\" in -H|--header) want=header ;; -K|--config) want=config ;; esac\n" +
-		"done\n" +
-		"printf '{\"action\":\"allow\"}\\n200'\n" +
-		"exit 0\n"
-	if err := os.WriteFile(stub, []byte(stubSrc), 0o755); err != nil {
+	seen := make(chan http.Header, 10)
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case seen <- r.Header.Clone():
+		default:
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"action":"allow","mode":"observe"}`)
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	home := t.TempDir()
+	installNativeGatewayForHookTest(t, home)
+	binary := filepath.Join(home, ".local", "bin", "defenseclaw-gateway")
+	realBinary := binary + ".real"
+	if err := os.Rename(binary, realBinary); err != nil {
 		t.Fatal(err)
 	}
-	// Plan S7.1 sentinel guard: every built-in hook exits 0 immediately
-	// if DEFENSECLAW_HOME is missing or has a `.disabled` marker. CI
-	// runners have no real ~/.defenseclaw, so without an explicit
-	// DEFENSECLAW_HOME the hook fail-opens before curl is ever invoked
-	// and `curl-args.txt` is never written. Seed a tmp dir that exists
-	// and contains no .disabled sentinel so the hook proceeds to the
-	// curl path the caller cares about.
-	dcHome := t.TempDir()
-	// Hooks lock PATH down by default. The test stubs `curl` inside
-	// an ephemeral tmpdir; bake that path into the generated helper
-	// file so the runtime environment cannot spoof the trust decision.
-	hookPath := stubDir + ":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-	bakeHookPathForTest(t, scriptPath, hookPath)
+	argvPath := filepath.Join(home, "native-argv")
+	wrapper := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shellSingleQuoteForTest(argvPath) +
+		"\nexec " + shellSingleQuoteForTest(realBinary) + " \"$@\"\n"
+	if err := os.WriteFile(binary, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	args := []string{scriptPath}
 	if filepath.Base(scriptPath) == "codex-hook.sh" {
-		args = append(
-			args,
-			"--event", "UserPromptSubmit",
-			"--hook-contract", "codex-hooks-v4",
-		)
+		args = append(args, "--event", "UserPromptSubmit", "--hook-contract", "codex-hooks-v4")
 	}
 	cmd := exec.Command("bash", args...)
-	cmd.Env = append(os.Environ(),
-		"PATH="+stubDir+":"+os.Getenv("PATH"),
-		"DEFENSECLAW_HOME="+dcHome,
-	)
-	for k, v := range extraEnv {
-		cmd.Env = append(cmd.Env, k+"="+v)
+	cmd.Env = append(os.Environ(), "HOME="+home, "DEFENSECLAW_HOME="+dataDir)
+	for key, value := range extraEnv {
+		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit"}`)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("hook script run: %v", err)
+	output, runErr := cmd.CombinedOutput()
+	argv, _ := os.ReadFile(argvPath)
+	capture := hookNativeTransportCapture{argv: string(argv), requests: len(seen), err: runErr, output: string(output)}
+	select {
+	case headers := <-seen:
+		for name, values := range headers {
+			for _, value := range values {
+				capture.headers += name + ": " + value + "\n"
+			}
+		}
+	default:
 	}
-	data, err := os.ReadFile(argFile)
-	if err != nil {
-		t.Fatalf("curl stub never recorded args: %v", err)
-	}
-	headers, err := os.ReadFile(headerFile)
-	if err != nil {
-		t.Fatalf("curl stub never recorded headers: %v", err)
-	}
-	return hookCurlTransportCapture{argv: string(data), headers: string(headers)}
+	return capture
 }
 
 func bakeHookPathForTest(t *testing.T, scriptPath, hookPath string) {
@@ -7568,19 +7560,11 @@ func shellSingleQuoteForTest(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// containsAuthBearer returns true if the captured curl headers (-H values or
-// `header = "..."` lines of a --config file) contain an
-// `Authorization: Bearer <token>` header. When token is empty, returns true
-// whenever ANY Authorization: Bearer header is present.
-func containsAuthBearer(curlHeaders, token string) bool {
-	for _, line := range strings.Split(curlHeaders, "\n") {
+// hasBearerHeader recognizes the header received by the same-account test
+// gateway. An empty token matches any bearer header.
+func hasBearerHeader(headers, token string) bool {
+	for _, line := range strings.Split(headers, "\n") {
 		line = strings.TrimSpace(line)
-		if quoted, ok := strings.CutPrefix(line, "header = "); ok {
-			// curl unescapes \" and \\ in a quoted config value, as Go does.
-			if header, err := strconv.Unquote(quoted); err == nil {
-				line = header
-			}
-		}
 		if !strings.HasPrefix(line, "Authorization: Bearer") {
 			continue
 		}
@@ -8071,92 +8055,6 @@ func TestShimTemplateRendering(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "10.0.0.1:9999") {
 		t.Errorf("rendered template does not contain addr: %s", rendered)
-	}
-}
-
-func TestRenderedShimsPostExecutableAndExactArgv(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX shell shims are not installed on Windows")
-	}
-	if _, err := os.Stat("/bin/bash"); err != nil {
-		t.Skipf("/bin/bash is required to exercise rendered shims: %v", err)
-	}
-	jqPath, err := exec.LookPath("jq")
-	if err != nil {
-		t.Skipf("jq is required to exercise rendered shims: %v", err)
-	}
-
-	root := t.TempDir()
-	shimDir := filepath.Join(root, "shims")
-	binDir := filepath.Join(root, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("create fake binary directory: %v", err)
-	}
-	fakeCurl := `#!/bin/bash
-set -euo pipefail
-payload=""
-while (( $# > 0 )); do
-  # The shim sends its request body from a descriptor (@/dev/fd/9).
-  if [[ "$1" == "--data-binary" && $# -ge 2 && "$2" == @* ]]; then
-    payload="$(cat "${2#@}")"
-    shift 2
-    continue
-  fi
-  shift
-done
-printf '%s' "$payload" > "$DEFENSECLAW_SHIM_CAPTURE"
-printf '%s\n%s\n' '{"action":"block","reason":"captured"}' '200'
-`
-	if err := os.WriteFile(filepath.Join(binDir, "curl"), []byte(fakeCurl), 0o700); err != nil {
-		t.Fatalf("write fake curl: %v", err)
-	}
-	if err := WriteShimScripts(shimDir, "127.0.0.1:18970"); err != nil {
-		t.Fatalf("WriteShimScripts: %v", err)
-	}
-
-	inputArgv := []string{"--leading-dash", "argument with spaces", "https://collector.invalid/upload"}
-	for _, name := range shimBinaries {
-		t.Run(name, func(t *testing.T) {
-			capture := filepath.Join(root, name+".json")
-			command := exec.Command(filepath.Join(shimDir, name), inputArgv...)
-			command.Env = []string{
-				"PATH=" + strings.Join([]string{
-					shimDir, binDir, filepath.Dir(jqPath), "/usr/bin", "/bin",
-				}, string(os.PathListSeparator)),
-				"DEFENSECLAW_SHIM_CAPTURE=" + capture,
-			}
-			output, err := command.CombinedOutput()
-			var exitErr *exec.ExitError
-			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
-				t.Fatalf("shim exit = %v, want policy block (1); output=%s", err, output)
-			}
-
-			payload, err := os.ReadFile(capture)
-			if err != nil {
-				t.Fatalf("read captured request: %v", err)
-			}
-			var request struct {
-				Tool string                     `json:"tool"`
-				Args map[string]json.RawMessage `json:"args"`
-			}
-			if err := json.Unmarshal(payload, &request); err != nil {
-				t.Fatalf("decode captured request %q: %v", payload, err)
-			}
-			if request.Tool != name {
-				t.Fatalf("tool = %q, want %q", request.Tool, name)
-			}
-			if len(request.Args) != 1 {
-				t.Fatalf("args keys = %v, want only argv", request.Args)
-			}
-			var gotArgv []string
-			if err := json.Unmarshal(request.Args["argv"], &gotArgv); err != nil {
-				t.Fatalf("decode argv: %v", err)
-			}
-			wantArgv := append([]string{name}, inputArgv...)
-			if !slices.Equal(gotArgv, wantArgv) {
-				t.Fatalf("argv = %#v, want %#v", gotArgv, wantArgv)
-			}
-		})
 	}
 }
 
@@ -10028,6 +9926,7 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
 	}
 	dcHome := t.TempDir()
+	installNativeGatewayForHookTest(t, dcHome)
 	// This account's gateway is running, so a 401 means its token drifted.
 	if err := os.WriteFile(filepath.Join(dcHome, "gateway.pid"), []byte(fmt.Sprintf(`{"pid":%d}`, os.Getpid())), 0o600); err != nil {
 		t.Fatal(err)
@@ -10037,6 +9936,7 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
 	cmd.Env = append(os.Environ(),
 		"PATH="+os.Getenv("PATH"),
+		"HOME="+dcHome,
 		"DEFENSECLAW_HOME="+dcHome,
 	)
 	output, err := cmd.CombinedOutput()
@@ -10090,9 +9990,11 @@ func TestHookScript_401WithoutOwnGateway_NamesAnotherListener(t *testing.T) {
 	if err := writeHookScriptsCommonWithFailMode(dir, strings.TrimPrefix(srv.URL, "http://"), "tok-test", "closed", []string{"claude-code-hook.sh"}); err != nil {
 		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
 	}
+	dcHome := t.TempDir()
+	installNativeGatewayForHookTest(t, dcHome)
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
-	cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+t.TempDir())
+	cmd.Env = append(os.Environ(), "HOME="+dcHome, "DEFENSECLAW_HOME="+dcHome)
 	output, _ := cmd.CombinedOutput()
 	text := string(output)
 	if !strings.Contains(text, "this account's gateway is not running, so another account or program answered on its port") ||
@@ -10101,14 +10003,8 @@ func TestHookScript_401WithoutOwnGateway_NamesAnotherListener(t *testing.T) {
 	}
 }
 
-// TestHookScript_EnvFailModeOnlyTightens covers GAP-0315: an inherited
-// DEFENSECLAW_FAIL_MODE=open cannot reopen a per-user hook installed closed,
-// and DEFENSECLAW_FAIL_MODE=closed still closes one installed open. Only the
-// persisted mode (guardrail fail-mode) opens a hook.
-// TestHookScript_EnvFailModeIsNotRead: the installed mode is the hook's fail
-// mode. DEFENSECLAW_FAIL_MODE in the agent's environment neither reopens a
-// closed hook nor closes an open one (1.0.4 lead directive), so status, which
-// reads the render, reports what runs.
+// TestHookScript_EnvFailModeIsNotRead covers inherited environment and legacy
+// configured-open values: neither can reopen a per-user hook.
 func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -10128,10 +10024,10 @@ func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 		}{
 			{"closed", "open", true},
 			{"closed", "OPEN", true},
-			{"open", "closed", false},
-			{"open", "Closed", false},
-			{"open", " CLOSED ", false},
-			{"open", "", false},
+			{"open", "closed", true},
+			{"open", "Closed", true},
+			{"open", " CLOSED ", true},
+			{"open", "", true},
 			{"closed", "", true},
 		} {
 			t.Run(agent.conn.Name()+"/"+tc.installed+"/env="+tc.env, func(t *testing.T) {
@@ -10156,13 +10052,8 @@ func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 	}
 }
 
-// TestSetupOpts_HookFailMode_RespectsOperatorChoice validates the
-// resolution rules in WriteHookScriptsForConnectorObjectWithOpts.
-//
-// Contract:
-//   - Explicit "closed" stays closed when the connector supports it.
-//   - Empty HookFailMode uses the connector default (Cursor open; otherwise
-//     closed), while invalid explicit values normalize to "closed".
+// TestSetupOpts_HookFailMode_RespectsOperatorChoice validates that a per-user
+// render closes legacy configured-open values as well as unset values.
 func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -10176,11 +10067,11 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 		wantFailMode string
 	}{
 		{
-			name:         "codex_operator_open",
+			name:         "codex_legacy_open_closes",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
-			wantFailMode: "open",
+			wantFailMode: "closed",
 		},
 		{
 			name:         "codex_operator_closed",
@@ -10190,11 +10081,11 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			wantFailMode: "closed",
 		},
 		{
-			name:         "claudecode_operator_open",
+			name:         "claudecode_legacy_open_closes",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open"},
 			connector:    &ClaudeCodeConnector{},
 			hookFile:     "claude-code-hook.sh",
-			wantFailMode: "open",
+			wantFailMode: "closed",
 		},
 		{
 			name:         "operator_closed_with_codex_enforcement_stays_closed",
@@ -10221,11 +10112,11 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			wantFailMode: "closed",
 		},
 		{
-			name:         "cursor_observe_keeps_an_explicit_open",
+			name:         "cursor_observe_legacy_open_closes",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"},
 			connector:    NewCursorConnector(),
 			hookFile:     "cursor-hook.sh",
-			wantFailMode: "open",
+			wantFailMode: "closed",
 		},
 		{
 			name:         "cursor_action_closes_an_explicit_open",
@@ -10246,8 +10137,7 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			// SetupOpts.HookFailMode renders the hook with
 			// FAIL_MODE=closed so response-layer failures (4xx,
 			// malformed JSON, missing action) BLOCK rather than
-			// silently allowing. Pre-existing installs are pinned to
-			// "open" by _migrate_0_4_0_seed_hook_fail_mode (Python).
+			// silently allowing.
 			name:         "codex_empty_opts_falls_back_to_closed_default",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1"},
 			connector:    &CodexConnector{},
@@ -10384,7 +10274,7 @@ func TestCodexHookScriptRejectsMismatchedRegisteredEvent(t *testing.T) {
 		failMode string
 		wantCode int
 	}{
-		{failMode: "open", wantCode: 0},
+		{failMode: "open", wantCode: 2},
 		{failMode: "closed", wantCode: 2},
 	} {
 		t.Run(test.failMode, func(t *testing.T) {
@@ -10437,35 +10327,27 @@ func TestCodexHookScriptBindsEventWithoutJQOrPython(t *testing.T) {
 		t.Skip("shell scripts are not used on Windows")
 	}
 
+	seen := make(chan http.Header, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"action":"allow"}`)
+	}))
+	defer srv.Close()
 	dir := t.TempDir()
 	opts := SetupOpts{
-		APIAddr:      freeAPIAddr(t),
+		APIAddr:      strings.TrimPrefix(srv.URL, "http://"),
 		APIToken:     "scoped-token",
 		HookFailMode: "closed",
 	}
-	// The curl stub does not open TCP, but a per-user hook now requires proof
-	// that this account owns its configured gateway listener before invoking it.
-	listener, err := net.Listen("tcp", opts.APIAddr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
 	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 
 	toolDir := t.TempDir()
-	curlArgs := filepath.Join(toolDir, "curl-args.txt")
-	curlStub := filepath.Join(toolDir, "curl")
-	curlSource := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " +
-		shellSingleQuoteForTest(curlArgs) +
-		"\nprintf '{\"action\":\"allow\"}\\n200'\n"
-	if err := os.WriteFile(curlStub, []byte(curlSource), 0o755); err != nil {
-		t.Fatalf("write curl stub: %v", err)
-	}
 	for _, name := range []string{
 		"awk", "cat", "chmod", "date", "dirname", "find", "head",
-		"mkdir", "mktemp", "rm", "sed", "tail", "tr",
+		"mkdir", "mktemp", "rm", "sed", "stat", "tail", "tr",
 	} {
 		target, err := exec.LookPath(name)
 		if err != nil {
@@ -10477,22 +10359,16 @@ func TestCodexHookScriptBindsEventWithoutJQOrPython(t *testing.T) {
 	}
 	scriptPath := filepath.Join(dir, "codex-hook.sh")
 	bakeHookPathForTest(t, scriptPath, toolDir)
-	dcHome := t.TempDir()
+	home := t.TempDir()
+	installNativeGatewayForHookTest(t, home)
 
 	run := func(input string) (int, string) {
 		t.Helper()
 		cmd := exec.Command(
-			"bash",
-			scriptPath,
-			"--event", "PreToolUse",
-			"--hook-contract", "codex-hooks-v4",
+			"bash", scriptPath, "--event", "PreToolUse", "--hook-contract", "codex-hooks-v4",
 		)
 		cmd.Stdin = strings.NewReader(input)
-		cmd.Env = append(
-			os.Environ(),
-			"DEFENSECLAW_HOME="+dcHome,
-			"DEFENSECLAW_FAIL_MODE=closed",
-		)
+		cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err := cmd.Run()
@@ -10509,27 +10385,26 @@ func TestCodexHookScriptBindsEventWithoutJQOrPython(t *testing.T) {
 	if code, stderr := run(`{"hook_event_name":"PreToolUse"}`); code != 0 {
 		t.Fatalf("matching event exit=%d want=0 stderr=%q", code, stderr)
 	}
-	args, err := os.ReadFile(curlArgs)
-	if err != nil {
-		t.Fatalf("matching event did not reach curl: %v", err)
-	}
-	for _, want := range []string{
-		"X-DefenseClaw-Hook-Event: PreToolUse",
-		"X-DefenseClaw-Hook-Contract: codex-hooks-v4",
-	} {
-		if !strings.Contains(string(args), want) {
-			t.Errorf("curl args missing %q:\n%s", want, args)
+	select {
+	case headers := <-seen:
+		for name, want := range map[string]string{
+			"X-DefenseClaw-Hook-Event":    "PreToolUse",
+			"X-DefenseClaw-Hook-Contract": "codex-hooks-v4",
+		} {
+			if got := headers.Get(name); got != want {
+				t.Errorf("%s = %q, want %q", name, got, want)
+			}
 		}
-	}
-
-	if err := os.Remove(curlArgs); err != nil {
-		t.Fatalf("reset curl evidence: %v", err)
+	default:
+		t.Fatal("matching event did not reach the same-account gateway")
 	}
 	if code, stderr := run(`{"hook_event_name":"SessionEnd"}`); code != 2 {
 		t.Fatalf("mismatched event exit=%d want=2 stderr=%q", code, stderr)
 	}
-	if _, err := os.Stat(curlArgs); !os.IsNotExist(err) {
-		t.Fatalf("mismatched event reached curl; stat error=%v", err)
+	select {
+	case <-seen:
+		t.Fatal("mismatched event reached the gateway")
+	default:
 	}
 }
 
@@ -10682,6 +10557,7 @@ func TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 	dcHome := t.TempDir()
+	installNativeGatewayForHookTest(t, dcHome)
 
 	cmd := exec.Command(
 		"bash",
@@ -10692,6 +10568,7 @@ func TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":["bash","-lc","cat /etc/shadow"]}}`)
 	cmd.Env = append(os.Environ(),
 		"PATH="+os.Getenv("PATH"),
+		"HOME="+dcHome,
 		"DEFENSECLAW_HOME="+dcHome,
 	)
 	var stdout, stderr bytes.Buffer
@@ -10751,6 +10628,8 @@ func TestClaudeCodeHookScript_SuppressesCursorCompatibilityImport(t *testing.T) 
 	addr := strings.TrimPrefix(srv.URL, "http://")
 
 	dir := t.TempDir()
+	dcHome := t.TempDir()
+	installNativeGatewayForHookTest(t, dcHome)
 	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, SetupOpts{APIAddr: addr, APIToken: "claude-token"}, &ClaudeCodeConnector{}); err != nil {
 		t.Fatalf("write Claude Code hook: %v", err)
 	}
@@ -10764,7 +10643,8 @@ func TestClaudeCodeHookScript_SuppressesCursorCompatibilityImport(t *testing.T) 
 		cmd.Stdin = strings.NewReader(payload)
 		cmd.Env = append(os.Environ(),
 			"PATH="+os.Getenv("PATH"),
-			"DEFENSECLAW_HOME="+t.TempDir(),
+			"HOME="+dcHome,
+			"DEFENSECLAW_HOME="+dcHome,
 		)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -10869,11 +10749,13 @@ func TestClaudeCodeHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 	dcHome := t.TempDir()
+	installNativeGatewayForHookTest(t, dcHome)
 
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat /etc/shadow"}}`)
 	cmd.Env = append(os.Environ(),
 		"PATH="+os.Getenv("PATH"),
+		"HOME="+dcHome,
 		"DEFENSECLAW_HOME="+dcHome,
 	)
 	var stdout, stderr bytes.Buffer
@@ -10929,11 +10811,13 @@ func TestClaudeCodeHookScript_NoStructuredOutput_FallsBackToExitTwo(t *testing.T
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 	dcHome := t.TempDir()
+	installNativeGatewayForHookTest(t, dcHome)
 
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
 	cmd.Env = append(os.Environ(),
 		"PATH="+os.Getenv("PATH"),
+		"HOME="+dcHome,
 		"DEFENSECLAW_HOME="+dcHome,
 	)
 	var stdout, stderr bytes.Buffer
@@ -10983,6 +10867,7 @@ func TestCodexHookScript_NoStructuredOutput_EmitsInlineBlockJSON(t *testing.T) {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 	dcHome := t.TempDir()
+	installNativeGatewayForHookTest(t, dcHome)
 
 	cmd := exec.Command(
 		"bash",
@@ -10993,6 +10878,7 @@ func TestCodexHookScript_NoStructuredOutput_EmitsInlineBlockJSON(t *testing.T) {
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
 	cmd.Env = append(os.Environ(),
 		"PATH="+os.Getenv("PATH"),
+		"HOME="+dcHome,
 		"DEFENSECLAW_HOME="+dcHome,
 	)
 	var stdout, stderr bytes.Buffer

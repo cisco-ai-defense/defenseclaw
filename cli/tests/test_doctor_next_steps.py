@@ -173,6 +173,33 @@ def test_partial_drop_only_names_signals_and_next_step() -> None:
     assert "defenseclaw setup claude-code" in check["remediation"]
 
 
+def test_per_user_upgrade_does_not_recommend_restoring_removed_native_exporter() -> None:
+    report = ConnectorCustodyReport(
+        state="available",
+        reason="",
+        observation_window_hours=24,
+        instances=(
+            ConnectorCustodyStatus(
+                connector_instance_id="019b0000-0000-7000-8000-000000000001",
+                connector="codex",
+                custody="defenseclaw",
+                profile_version="codex-v1",
+                default=True,
+                managed_config_state="drifted",
+                normalized_batches=1,
+            ),
+        ),
+    )
+    result = _DoctorResult()
+    cmd_doctor._check_connector_export_custody(
+        report, result, configured={"codex"}, native_export_expected=False,
+    )
+    (row,) = result.checks
+    assert row["status"] == "pass"
+    assert "no DefenseClaw native exporter is expected" in row["detail"]
+    assert "defenseclaw setup" not in row["remediation"]
+
+
 def _custody_report(**overrides) -> ConnectorCustodyReport:
     fields = dict(
         connector_instance_id="019b0000-0000-7000-8000-000000000001",
@@ -193,6 +220,21 @@ def _custody_report(**overrides) -> ConnectorCustodyReport:
         observation_window_hours=24,
         instances=(ConnectorCustodyStatus(**fields),),
     )
+
+
+def test_per_user_current_hook_only_is_not_called_historical() -> None:
+    report = _custody_report(
+        connector="codex", custody="hook_only", normalized_batches=0,
+        drop_only_batches=0, drop_only_signals=(), managed_config_files=0,
+    )
+    result = _DoctorResult()
+    cmd_doctor._check_connector_export_custody(
+        report, result, configured={"codex"}, native_export_expected=False,
+    )
+    (row,) = result.checks
+    assert row["status"] == "pass"
+    assert row["detail"].startswith("custody=hook_only;")
+    assert "historical" not in row["detail"]
 
 
 def test_unmapped_only_drops_are_healthy_delivery() -> None:
@@ -254,7 +296,8 @@ def test_untracked_exporter_and_unattributed_credentials_read_plainly() -> None:
     assert "managed-exporter=untracked" not in rows["Connector OTLP: claudecode"]["detail"]
     credentials = rows["Native OTLP credentials"]
     assert credentials["status"] == "warn"
-    assert "defenseclaw setup <connector>" in credentials["remediation"]
+    assert "defenseclaw setup <connector>" not in credentials["remediation"]
+    assert "does not prove" in credentials["remediation"]
 
 
 def test_drop_reason_class_is_read_from_the_drop_record() -> None:
@@ -915,7 +958,7 @@ def test_pre_first_start_token_and_codex_hook_rows_are_pending(tmp_path) -> None
 
 def test_unattributed_otlp_credentials_name_window_and_age() -> None:
     # GAP-2294: the count covers a rolling window; old attempts clear on
-    # their own, so setup is only suggested while attempts are recent.
+    # their own. A recent rejected route still does not identify its sender.
     from datetime import datetime, timezone
 
     now = datetime(2026, 10, 3, 6, 22, tzinfo=timezone.utc)

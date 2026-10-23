@@ -531,9 +531,9 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 		{"claudecode", "PreToolUse", "action", "closed", "block"},
 		{"codex", "PreToolUse", "action", "closed", "block"},
 		{"hermes", "pre_tool_call", "action", "closed", "block"},
-		{"claudecode", "PreToolUse", "action", "open", "allow"},
-		{"codex", "PreToolUse", "action", "open", "allow"},
-		{"hermes", "pre_tool_call", "action", "open", "allow"},
+		{"claudecode", "PreToolUse", "action", "open", "block"},
+		{"codex", "PreToolUse", "action", "open", "block"},
+		{"hermes", "pre_tool_call", "action", "open", "block"},
 		{"claudecode", "PreToolUse", "observe", "closed", "block"},
 		{"codex", "PreToolUse", "observe", "closed", "block"},
 		{"hermes", "pre_tool_call", "observe", "closed", "block"},
@@ -602,14 +602,21 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 func TestHookPanicResponse_ActionProfileRequiresExplicitOpen(t *testing.T) {
 	for _, tc := range []struct {
 		name, connectorFail, globalFail, want string
+		managedStandalone                     bool
 	}{
-		{"observe connector default", "", "", "block"},
-		{"global open", "", "open", "allow"},
-		{"connector open", "open", "", "allow"},
-		{"connector closed over global open", "closed", "open", "block"},
+		{"observe connector default", "", "", "block", false},
+		{"per-user global open", "", "open", "block", false},
+		{"per-user connector open", "open", "", "block", false},
+		{"connector closed over global open", "closed", "open", "block", false},
+		{"managed administrator global open", "", "open", "allow", true},
+		{"managed administrator connector open", "open", "", "allow", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{}
+			if tc.managedStandalone {
+				cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+				cfg.Enterprise.Profile = managed.ProfileStandalone
+			}
 			cfg.Guardrail.Mode = "observe"
 			cfg.Codex.Mode = "action"
 			cfg.Guardrail.HookFailMode = tc.globalFail
@@ -693,7 +700,7 @@ func TestHandleAgentHook_PostEvaluationRecoveryUsesFailMode(t *testing.T) {
 // for every registered connector that can block, in every guardrail mode and
 // for each place hook_fail_mode: open can come from. Closed installs, per-user
 // and standalone managed alike, deny failed blockable checks even in observe
-// mode and answer a stop or session-end event neutrally; an explicit open
+// mode and answer a stop or session-end event neutrally; a managed explicit open
 // (on a standalone managed device the administrator's, owner decision
 // 2026-10-20) and Secure Client's unset default keep their open failure
 // behavior; an explicit closed denies under Secure Client too.
@@ -757,10 +764,9 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 				for _, failSource := range failSources {
 					cfg := newConfig(t, d, mode, failSource, connectorName)
 					api := &APIServer{scannerCfg: cfg}
-					// Per-user Cursor fails closed in action mode whatever
-					// hook_fail_mode says; a managed Cursor takes the
-					// administrator's mode.
-					open := failSource != "closed" && (connectorName != "cursor" || d != perUser)
+					// Every per-user connector closes on a failed check;
+					// managed profiles keep their explicit outage choice.
+					open := failSource != "closed" && d != perUser
 					for _, event := range append(append([]string{}, blocking...), lifecycle...) {
 						name := strings.Join([]string{dName, connectorName, event, mode, failSource}, "/")
 						req := agentHookRequest{ConnectorName: connectorName, HookEventName: event}
@@ -770,10 +776,12 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 							continue
 						}
 						isLifecycle := hookexec.NeutralLifecycleEvent(connectorName, event)
+						// Claude's batch result is advisory after the tool ran.
+						isAdvisory := connectorName == "claudecode" && event == "PostToolBatch"
 						capable, _ := mapHookActionForProfile("block", "action", event, profile.Capabilities, profile, nil)
 						wantAction, wantMode := "allow", mode
 						switch {
-						case isLifecycle:
+						case isLifecycle || isAdvisory:
 						case open:
 						case capable == "block":
 							wantAction, wantMode = "block", "action"

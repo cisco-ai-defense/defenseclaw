@@ -5178,15 +5178,15 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
     ),
     "claudecode": (
         "~/.claude/settings.json hooks",
-        "~/.claude/settings.json env OTEL_* / CLAUDE_CODE_ENABLE_TELEMETRY",
+        "~/.claude/settings.json cleanup of older DefenseClaw OTEL_* env entries",
         "Optional CodeGuard native plugin only when explicitly installed",
         "~/.defenseclaw/hooks/",
     ),
     "codex": (
         "~/.codex/config.toml hooks / features.hooks / hook trust state",
-        "~/.codex/config.toml otel",
+        "~/.codex/config.toml cleanup of older DefenseClaw otel entries",
         "Optional CodeGuard native skill only when explicitly installed",
-        "~/.defenseclaw/hooks/ (including owner-only scoped OTLP credential)",
+        "~/.defenseclaw/hooks/ (including owner-only scoped hook credential)",
     ),
     "hermes": (
         (
@@ -5285,7 +5285,9 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
 }
 
 
-def _print_connector_mutation_notice(connector: str, *, switching_from: str | None = None) -> None:
+def _print_connector_mutation_notice(
+    connector: str, *, switching_from: str | None = None, native_export_expected: bool = False
+) -> None:
     """Tell operators which agent-owned files DefenseClaw will edit.
 
     The Go connector setup stores hash-checked snapshots before touching
@@ -5300,6 +5302,8 @@ def _print_connector_mutation_notice(connector: str, *, switching_from: str | No
         prefix = f"  Switching from {old} first tears down its DefenseClaw integration, then updates {label}"
     click.echo(prefix + ":")
     surfaces = _CONNECTOR_CHANGE_SURFACES.get(connector, ())
+    if native_export_expected and connector in {"codex", "claudecode"}:
+        surfaces = (*surfaces, "managed native OTel exporter configuration and scoped credential")
     if connector == "devin":
         hook_surface = (
             "the protected native defenseclaw-hook.exe boundary on Windows"
@@ -10341,7 +10345,9 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
         _echo_saved_without_restart(plural=True)
 
 
-def _print_connector_observability_banner(connector: str, *, mode: str = "observe") -> None:
+def _print_connector_observability_banner(
+    connector: str, *, mode: str = "observe", native_export_expected: bool = False
+) -> None:
     setup_slug = "claude-code" if connector == "claudecode" else connector
     label = _CONNECTOR_META[connector]["label"]
     click.echo()
@@ -10355,7 +10361,7 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
             click.echo("  waits for synchronous tool.call allow, confirm, or reject")
             click.echo("  verdicts before the requested tool can execute.")
         else:
-            click.echo("  tool activity is recorded but never blocked.")
+            click.echo("  observes policy findings; an unavailable hook can still block.")
     else:
         click.echo(f"  This wires {label} into DefenseClaw via the agent's")
         click.echo("  native hook bus. No proxy is inserted in the LLM data")
@@ -10375,7 +10381,7 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
             click.echo("  path; supported actions flagged by policy are blocked")
             click.echo("  by the connector's native lifecycle verdict.")
         else:
-            click.echo("  path; activity is recorded but never blocked.")
+            click.echo("  path; policy findings are observed, but a failed hook can block.")
     click.echo()
     click.echo("  Telemetry channels:")
     if connector == "amp":
@@ -10392,12 +10398,13 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
         click.echo("                   only PreToolUse carries documented ask/deny output")
     else:
         ux.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → {_hook_api_path(connector)}")
-    native_otel_connectors = {"codex", "claudecode"}
-    if connector in native_otel_connectors:
+    if native_export_expected and connector in {"codex", "claudecode"}:
         if connector == "codex":
             ux.echo("    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>")
         else:
             ux.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
+    elif connector in {"codex", "claudecode"}:
+        click.echo("    Restart agents and background servers after setup to discard older native telemetry settings.")
     if connector == "amp":
         ux.echo("    • Headless   — use `amp -x ... --plugin-ready-timeout 30` for complete lifecycle telemetry")
     click.echo()
@@ -10408,7 +10415,7 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
         click.echo("  To revert to observe-only:")
         click.echo(f"    defenseclaw setup {setup_slug} --mode observe")
     click.echo()
-    _print_connector_mutation_notice(connector)
+    _print_connector_mutation_notice(connector, native_export_expected=native_export_expected)
     click.echo()
 
 
@@ -10834,7 +10841,11 @@ def _setup_observability_alias(
     if interactive and not mode_from_flag:
         normalized_mode = _prompt_connector_mode(connector, default_mode=normalized_mode)
 
-    _print_connector_observability_banner(connector, mode=normalized_mode)
+    _print_connector_observability_banner(
+        connector,
+        mode=normalized_mode,
+        native_export_expected=str(getattr(app.cfg, "deployment_mode", "")).strip().lower() == "managed_enterprise",
+    )
     # WU7: resolve add-vs-replace. Only HOOK-ENFORCED peers count as valid
     # multi-connector neighbors (D4=A) — proxy-backed connectors
     # (openclaw/zeptoclaw) bind the proxy and cannot coexist, so an existing

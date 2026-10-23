@@ -10987,6 +10987,7 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
         r,
         configured=_otlp_configured_connectors(cfg),
         gateway_addr=gateway_api_addr(cfg),
+        native_export_expected=_enterprise_profile(cfg) in {"standalone", "secure_client"},
     )
     _check_galileo_trace_canaries(
         status,
@@ -11045,7 +11046,8 @@ def _claude_exporter_reaches_gateway(gateway_addr: str) -> bool:
 
 
 def _check_connector_export_custody(
-    report, r: _DoctorResult, *, configured: set[str] | None = None, gateway_addr: str = ""
+    report, r: _DoctorResult, *, configured: set[str] | None = None, gateway_addr: str = "",
+    native_export_expected: bool = True,
 ) -> None:
     """Render per-instance custody and bounded native-ingest evidence.
 
@@ -11096,6 +11098,29 @@ def _check_connector_export_custody(
             # fold it into one line per connector, as status does (GAP-2097).
             # Hook-only ones fold too: they are the same past runs (GAP-2104).
             idle[item.connector] = idle.get(item.connector, 0) + 1
+            continue
+        if (
+            not native_export_expected
+            and item.default
+            and item.connector in {"codex", "claudecode"}
+            and item.custody in {"defenseclaw", "external"}
+        ):
+            # Upgrades retain native-exporter receipts already in the audit
+            # ledger. Per-user setup removes that unsafe TCP exporter, so a
+            # historical row cannot justify reinstalling it (GAP-0775).
+            credential_problem = item.credential_state == "invalid"
+            _emit(
+                "warn" if credential_problem else "pass",
+                label,
+                f"historical custody={item.custody}; no DefenseClaw native exporter is expected "
+                "in this per-user profile; hook telemetry remains active",
+                r=r,
+                remediation=(
+                    "restart agents and background servers launched before the upgrade to discard their "
+                    "in-memory exporter"
+                    if credential_problem else ""
+                ),
+            )
             continue
         if item.custody == "external":
             if item.connector == "claudecode" and _claude_exporter_reaches_gateway(gateway_addr):
@@ -11260,8 +11285,8 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
     """Rejected OTLP attempts no trusted connector owns (GAP-2294).
 
     The count covers a rolling window, so the row names the window and the
-    age of the last attempt. Re-running setup cannot clear old attempts; it
-    is only suggested while attempts are still arriving.
+    age of the last attempt. A rejected request has no trusted sender identity,
+    so it cannot show that a configured exporter needs to be rewritten.
     """
     from defenseclaw.observability.custody_status import _format_time, _parse_time
 
@@ -11288,17 +11313,17 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
             "OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config"
         )
     else:
-        # A running agent keeps the token it started with, so setup alone
-        # cannot stop a background server's attempts (GAP-0313).
+        # A running agent keeps the token it started with, but a rejected
+        # route might also be a peer probe (GAP-0803). Neither proves that
+        # the installed exporter is wrong.
         remediation = (
-            "attempts are recent. An agent that was already running when its DefenseClaw token "
+            "attempts are recent, but a rejected route does not prove an installed exporter is broken. "
+            "An agent that was already running when its DefenseClaw token "
             "changed (an upgrade, a rollback, 'defenseclaw setup' or 'setup rotate-token') keeps sending the old "
             "token until it restarts: restart your agents and their background servers (Codex's "
             "app-server outlives its sessions: run 'codex app-server daemon restart'). "
-            "Otherwise a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config "
-            "usually causes this: re-run 'defenseclaw setup <connector>' for each agent that "
-            "exports telemetry, then restart it; if the count keeps growing, look for other OTLP "
-            "senders pointed at the gateway port"
+            "If the count keeps growing, inspect which process sends OTLP to the gateway port and "
+            "check any stale OTEL_EXPORTER_OTLP_* setting before changing agent configuration"
         )
     _emit("warn", "Native OTLP credentials", detail, r=r, remediation=remediation)
 

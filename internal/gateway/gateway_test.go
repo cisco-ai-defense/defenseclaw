@@ -5938,8 +5938,9 @@ func TestTokenAuth_OTLPScopedTokensCannotCrossConnectorNamespaces(t *testing.T) 
 func TestTokenAuth_AcceptsClaudeRenderedOTLPAuthorization(t *testing.T) {
 	const scopedToken = "claude-scoped-token"
 	profile := connector.NewClaudeCodeConnector().HookProfile(connector.SetupOpts{
-		APIAddr:       "127.0.0.1:18970",
-		OTLPPathToken: scopedToken,
+		APIAddr:           "127.0.0.1:18970",
+		OTLPPathToken:     scopedToken,
+		ManagedEnterprise: true,
 	})
 	if profile.NativeOTLP == nil {
 		t.Fatal("Claude profile has no native OTLP configuration")

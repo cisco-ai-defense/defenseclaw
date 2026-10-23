@@ -23,9 +23,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// renderListenerProofPlugin fills the plugin template's placeholders the way
-// the Windows standalone guardian does: loopback TCP, the per-user
-// credential file, closed fail mode, and the listener proof on.
+// renderListenerProofPlugin adapts the host bridge golden to the Windows
+// managed listener-proof profile: loopback TCP, a scoped credential, closed
+// fail mode, and no per-user native post helper.
 func renderListenerProofPlugin(t *testing.T, asset, addr, tokenPath string) []byte {
 	t.Helper()
 	// The bridge host template: the source template with its OpenShell
@@ -44,6 +44,8 @@ func renderListenerProofPlugin(t *testing.T, asset, addr, tokenPath string) []by
 		"{{.ForeignHookGuardJS}}", "",
 		"{{.InstallMarkerJS}}", "",
 		"{{.ListenerProofJS}}", "1",
+		"const DC_PER_USER_NATIVE_POST = \"1\"", "const DC_PER_USER_NATIVE_POST = \"\"",
+		"const DC_PER_USER_NATIVE_POST: string = \"1\"", "const DC_PER_USER_NATIVE_POST: string = \"\"",
 	).Replace(string(body))
 	if strings.Contains(rendered, "{{.") {
 		t.Fatalf("%s rendered with a placeholder left", asset)

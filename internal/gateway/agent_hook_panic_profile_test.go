@@ -249,10 +249,8 @@ func TestRecoveredHookFailModeByDeployment(t *testing.T) {
 						} else if deployment.name == "standalone" && failMode == "open" {
 							// The administrator's explicit open (owner decision 2026-10-20).
 							want, wantMode, reason = "allow", mode, "the administrator's open is effective on a managed standalone host"
-						} else if failMode == "open" && name != "cursor" {
-							want, wantMode, reason = "allow", mode, "explicit open is effective for this connector"
-						} else if failMode == "open" && name == "cursor" {
-							reason = "the cursor accessor keeps this connector closed"
+						} else if deployment.name == "oss" && failMode == "open" {
+							reason = "a legacy per-user open remains closed on evaluator failure"
 						}
 						wantWouldBlock := want == "allow"
 						if response["action"] != want || response["raw_action"] != "block" || response["would_block"] != wantWouldBlock || response["mode"] != wantMode {

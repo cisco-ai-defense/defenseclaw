@@ -199,8 +199,9 @@ func TestCursorHook_DisabledMarkerKeepsPerUserHookClosed(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); exitCodeOf(err) != 2 {
-		t.Fatalf("disabled per-user hook exited %d, want closed (2); stdout=%s stderr=%s", exitCodeOf(err), stdout.String(), stderr.String())
+	err := cmd.Run()
+	if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 2 {
+		t.Fatalf("disabled per-user hook exited %v, want closed (2); run error=%v stdout=%s stderr=%s", cmd.ProcessState, err, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "fail mode closed") {
 		t.Fatalf("closed hook did not explain the disabled home: %s", stderr.String())
