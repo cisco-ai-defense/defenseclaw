@@ -363,7 +363,7 @@ func TestWindowsEnterpriseRepairRefusesInvalidSuppliedConfigBeforeSnapshot(t *te
 	windowsEnterpriseStandaloneRulePackTrust = func(string, string, string) error { return nil }
 	standaloneServiceCanReadTree = func(string, string, string) error { return nil }
 
-	kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+	kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath, nil)
 	if err == nil || !strings.Contains(err.Error(), "does not match guardrail.custom_packs.acme.digest") || kept != "" {
 		t.Fatalf("repair preflight = (%q, %v), want the bad pin refused before copying", kept, err)
 	}

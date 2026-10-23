@@ -765,8 +765,10 @@ func windowsEnterpriseConfigParses(body []byte) bool {
 // "" when there is nothing to do: no supplied config, an installed config
 // that parses, a pending transaction (its recovery restores its own
 // preimage), a source a standard user can write (the transaction refuses
-// it), or a busy lifecycle lock.
-func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string) (string, error) {
+// it), or a busy lifecycle lock. beforeChange, when set, runs right before
+// the first write (a lifecycle action removes the session keys there): a
+// supplied config refused before it changed nothing.
+func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string, beforeChange func() error) (string, error) {
 	supplied := strings.TrimSpace(configPath)
 	if supplied == "" || !windowsEnterpriseIsElevated() {
 		return "", nil
@@ -814,6 +816,11 @@ func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string) (s
 	current, err = readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
 	if err != nil || windowsEnterpriseConfigParses(current) || windowsBundleInstallTransactionPending(layout) {
 		return "", nil
+	}
+	if beforeChange != nil {
+		if err := beforeChange(); err != nil {
+			return "", err
+		}
 	}
 	kept := keepWindowsEnterpriseRejectedConfig(layout, current)
 	if kept == "" {

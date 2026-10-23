@@ -945,7 +945,7 @@ func TestWindowsEnterpriseConfigRefusalRecoversAPendingTransaction(t *testing.T)
 	}{
 		{"ensure", true, "Repair Status"},
 		{"upgrade", true, "Repair Status"},
-		{"repair", true, "Repair Status"},
+		{"repair", true, "Recover Status"},
 		{"ensure", false, "Status"},
 		{"repair", false, "Status"},
 	} {
@@ -3738,6 +3738,96 @@ func TestWindowsCursorRepairPlannerRefusesALinkedRecord(t *testing.T) {
 		pending, err := windowsEnterpriseCursorMigrationRepairPending()
 		if pending || err == nil || !strings.Contains(err.Error(), config.MigrationV9RecordFile) {
 			t.Fatalf("live=%v: pending = %v, %v; want an error naming %s", live, pending, err, config.MigrationV9RecordFile)
+		}
+	}
+}
+
+// Review P2 (q-win-lifecycle loop round 3): a repair whose supplied config is
+// refused recovers a pending transaction with the transaction recovery alone
+// (Recover, the one Setup runs after a timeout), never with the full
+// source-free repair, which went on past the recovery and changed services,
+// access lists and hooks for a request it then refused. The recovery takes
+// none of the repair's own switches, and the result reports what it
+// changed: on the refusal, and for the repair that goes on once its config
+// passes after the recovery.
+func TestWindowsRepairConfigRefusalRunsOnlyTheTransactionRecovery(t *testing.T) {
+	pending := true
+	configPath, _ := stubWindowsEnterpriseRulePackPreflight(t, func(string, string, string) error {
+		return errors.New("a standard user can write to the pack")
+	})
+	originalPending := windowsEnterpriseStandaloneTransactionPending
+	t.Cleanup(func() { windowsEnterpriseStandaloneTransactionPending = originalPending })
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return pending }
+	const recovered = "recovered the interrupted lifecycle transaction before checking the supplied config"
+	for _, tc := range []struct {
+		name             string
+		settles, passes  bool
+		replies          []map[string]any
+		refused          bool
+		changes, actions string
+	}{
+		{name: "recovered, config still refused", settles: true, refused: true, actions: "Recover Status",
+			replies: []map[string]any{installedStatus("recover"), installedStatus("status")}, changes: recovered},
+		{name: "recovery left the transaction pending", refused: true, actions: "Recover Status",
+			replies: []map[string]any{{"schema_version": 1, "ok": false, "action": "recover", "error": "the lifecycle recovery is still pending"}, installedStatus("status")}},
+		{name: "recovered, config passes", settles: true, passes: true, actions: "Recover",
+			replies: []map[string]any{installedStatus("recover")}, changes: recovered},
+	} {
+		pending = true
+		passes := tc.passes
+		// The supplied config is refused until the recovery settles the
+		// transaction; a config that passes then needs no compile here.
+		windowsEnterpriseStandaloneConfigSource = func(string) error {
+			if passes && !pending {
+				return nil
+			}
+			return errors.New("a standard user can write to the config")
+		}
+		windowsEnterpriseStandaloneLayoutForPreflight = func() (managed.StandaloneLayout, error) {
+			return managed.StandaloneLayout{}, errors.New("the test compiles no config")
+		}
+		stub := &ensureStub{t: t, replies: tc.replies}
+		stub.install(t)
+		recorded := windowsEnterpriseStandaloneRunner
+		settles := tc.settles
+		windowsEnterpriseStandaloneRunner = func(ctx context.Context, cmd *cobra.Command, script string, args []string) (windowsEnterpriseStandaloneRun, error) {
+			run, err := recorded(ctx, cmd, script, args)
+			if settles && windowsEnterpriseInstallerAction(args) == "Recover" {
+				pending = false
+			}
+			return run, err
+		}
+		command := &cobra.Command{}
+		var stdout bytes.Buffer
+		command.SetOut(&stdout)
+		opts := ensureTestOptions()
+		opts.configPath, opts.noStart, opts.attestClaudeEffectivePolicy = configPath, true, true
+		refused, err := refuseWindowsEnterpriseStandaloneSuppliedConfig(context.Background(), command, "repair", opts, `C:\stage\install-enterprise.ps1`)
+		var actions []string
+		for _, call := range stub.calls {
+			actions = append(actions, windowsEnterpriseInstallerAction(call))
+		}
+		recovery := strings.Join(stub.calls[0], " ")
+		if refused != tc.refused || strings.Join(actions, " ") != tc.actions ||
+			strings.Contains(recovery, configPath) || strings.Contains(recovery, "-NoStart") || strings.Contains(recovery, "-AttestClaudeEffectivePolicy") {
+			t.Fatalf("%s: refused=%v (%v), installer runs %q", tc.name, refused, err, stub.calls)
+		}
+		if got := strings.Join(opts.recoveryChanges, " | "); (tc.changes == "") != (got == "") || !strings.HasPrefix(got, tc.changes) ||
+			strings.Contains(got, "without new sources") {
+			t.Fatalf("%s: recovery changes %q", tc.name, got)
+		}
+		if !tc.refused {
+			continue
+		}
+		var result enterprisestatus.Result
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if commandExitCode(err) != 1639 || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" {
+			t.Fatalf("%s: exit %d, result %+v", tc.name, commandExitCode(err), result)
+		}
+		if reported := strings.Join(result.Changes, " | "); (tc.changes == "") != (reported == "") || !strings.HasPrefix(reported, tc.changes) {
+			t.Fatalf("%s: the refusal reports changes %q", tc.name, reported)
 		}
 	}
 }

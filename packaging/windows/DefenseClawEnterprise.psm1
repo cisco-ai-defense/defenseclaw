@@ -11138,10 +11138,15 @@ function New-DefenseClawDeploymentMetadata {
         $ManagedHooksActivation,
         [string]$InstallRootIdentity = '',
         [string]$StateRootIdentity = '',
-        [bool]$UninstallPurgeRequested = $false
+        [bool]$UninstallPurgeRequested = $false,
+        [bool]$UninstallPurgeUserStateRequested = $false
     )
-    if ($Installed -and $UninstallPurgeRequested) {
+    if ($Installed -and
+        ($UninstallPurgeRequested -or $UninstallPurgeUserStateRequested)) {
         throw 'only an uninstall tombstone records an uninstall purge request'
+    }
+    if ($UninstallPurgeUserStateRequested -and -not $UninstallPurgeRequested) {
+        throw 'an uninstall per-user purge request requires the uninstall purge'
     }
     if (-not [string]::IsNullOrEmpty($InstallRootIdentity) -and
         ($Installed -or $InstallRootIdentity -cnotmatch
@@ -11318,10 +11323,17 @@ function New-DefenseClawDeploymentMetadata {
             $metadata['product_version'] = $productVersion
         }
         if (-not $Installed) {
-            # The uninstall mode commits with the tombstone. Recovery of an
-            # interrupted uninstall replays exactly this mode.
+            # The uninstall mode commits with the tombstone: the purge, and
+            # whether it also removes each enrolled account's per-user data
+            # and binaries (Setup PURGE=1). Recovery of an interrupted
+            # uninstall replays exactly this mode.
             $metadata['uninstall_purge_requested'] = [bool]$UninstallPurgeRequested
+            $metadata['uninstall_purge_user_state_requested'] =
+                [bool]$UninstallPurgeUserStateRequested
         }
+    }
+    elseif ($UninstallPurgeUserStateRequested) {
+        throw 'only a standalone uninstall tombstone records a per-user purge'
     }
     if (-not $Installed -and
         -not [string]::IsNullOrEmpty($InstallRootIdentity)) {
@@ -26355,6 +26367,17 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
     if (Test-DefenseClawMetadataInstalled -Metadata $metadata) {
         throw 'managed-hook finalization requires an uninstall tombstone'
     }
+    # The finalize removes the enrolled accounts' per-user data and binaries
+    # when the uninstall asked for it. A recovery or retry replays the request
+    # the tombstone recorded, whether or not it asked again (an explicit purge
+    # of this run still counts), so the tombstone outlives that removal.
+    $purgeUserState = [bool]$script:DefenseClawUninstallPurgeUserState
+    if (Test-DefenseClawStandaloneProfile) {
+        $purgeUserState = (
+            $purgeUserState -or
+            (Get-DefenseClawTombstonePurgeUserStateRequested -Metadata $metadata)
+        )
+    }
     foreach ($name in @(
         Get-DefenseClawManagedServiceNames `
             -GatewayServiceName $GatewayServiceName `
@@ -26451,12 +26474,19 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
         $teardownPhase -cne 'finalized') {
         throw "managed-hook finalization requires a prepared or finalized journal: $teardownPhase"
     }
-    return Invoke-DefenseClawManagedHooksTeardownCommand `
-        -Layout $Layout `
-        -GatewayServiceName $GatewayServiceName `
-        -GuardianServiceName $GuardianServiceName `
-        -Action finalize `
-        -PurgeContractLocks:$Purge
+    $callerPurgeUserState = $script:DefenseClawUninstallPurgeUserState
+    $script:DefenseClawUninstallPurgeUserState = $purgeUserState
+    try {
+        return Invoke-DefenseClawManagedHooksTeardownCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -Action finalize `
+            -PurgeContractLocks:$Purge
+    }
+    finally {
+        $script:DefenseClawUninstallPurgeUserState = $callerPurgeUserState
+    }
 }
 
 function Write-DefenseClawProtectedTextAtomic {
@@ -31134,20 +31164,48 @@ function Get-DefenseClawTombstonePurgeRequested {
     return [bool]$property.Value
 }
 
+function Get-DefenseClawTombstonePurgeUserStateRequested {
+    <#
+        Whether the uninstall an authenticated standalone tombstone recorded
+        also removes each enrolled account's per-user data and binaries
+        (Setup /uninstall PURGE=1). The managed-hook finalize does that
+        removal, so its replay by a recovery or a retry that did not ask for
+        it still does it. Tombstones written before 1.0.4 record none and
+        replay without it; keep the missing-field case while 1.0.0-1.0.3
+        tombstones can be upgraded. A malformed mode, or a per-user purge
+        without the uninstall purge it is part of, is refused.
+    #>
+    param([Parameter(Mandatory)]$Metadata)
+    $property = $Metadata.PSObject.Properties['uninstall_purge_user_state_requested']
+    if ($null -eq $property) {
+        return $false
+    }
+    if ($property.Value -isnot [bool]) {
+        throw 'uninstall tombstone has an invalid recorded per-user purge mode'
+    }
+    if ([bool]$property.Value -and
+        -not (Get-DefenseClawTombstonePurgeRequested -Metadata $Metadata)) {
+        throw 'uninstall tombstone records a per-user purge without its uninstall purge'
+    }
+    return [bool]$property.Value
+}
+
 function Test-DefenseClawCommittedUninstallUnsettled {
     <#
         Whether a committed standalone uninstall still has postcommit work:
         its recorded purge has not removed the tombstone (the tombstone goes
         with StateRoot), or InstallRoot or the managed-hook teardown journal
         remains. A settled state-keeping uninstall keeps its tombstone for
-        good and is not replayed. Setup's recovery watcher decides the same
-        way (standaloneCommittedUninstallUnsettled).
+        good and is not replayed. A malformed recorded mode is refused before
+        any cleanup. Setup's recovery watcher decides the same way
+        (standaloneCommittedUninstallUnsettled).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)]$Metadata
     )
-    if (Get-DefenseClawTombstonePurgeRequested -Metadata $Metadata) {
+    if ((Get-DefenseClawTombstonePurgeUserStateRequested -Metadata $Metadata) -or
+        (Get-DefenseClawTombstonePurgeRequested -Metadata $Metadata)) {
         return $true
     }
     return [bool](
@@ -34419,6 +34477,54 @@ function Invoke-DefenseClawNuclearUninstall {
     }
 }
 
+function Invoke-DefenseClawStandaloneUninstallPrecheck {
+    <#
+        The read-only refusals of a standalone Uninstall, which the CLI reads
+        before it removes the protected session record keys: a refused
+        uninstall changed nothing, so every published allow keeps proving
+        its session during a gateway outage (q-win-lifecycle review, loop
+        round 3). It takes no lock and changes nothing. A pending transaction
+        and a deployment that is not installed pass: the uninstall recovers
+        or finishes them first, which changes the host, and checks after
+        that. Otherwise it throws what Invoke-DefenseClawUninstallLifecycle
+        throws, before any change, when a program runs from or holds a file
+        in the install folder (GAP-0942) or holds a data file the uninstall
+        deletes (GAP-0136): uninstall_in_use.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [int]$SelfUninstallCallerPID
+    )
+    Assert-DefenseClawAdministrator
+    $report = [pscustomobject]@{
+        schema_version     = 1
+        ok                 = $true
+        action             = 'status'
+        uninstall_precheck = $true
+    }
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf) {
+        return $report
+    }
+    $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+    if ($null -eq $metadata -or -not (Test-DefenseClawMetadataInstalled -Metadata $metadata)) {
+        return $report
+    }
+    Assert-DefenseClawStandaloneInstallTreeNotInUse `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -SelfUninstallCallerPID $SelfUninstallCallerPID
+    # A standalone uninstall always removes the machine state (-Purge).
+    Assert-DefenseClawStandaloneStateFilesNotInUse `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -SelfUninstallCallerPID $SelfUninstallCallerPID
+    return $report
+}
+
 function Invoke-DefenseClawUninstallLifecycle {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -34681,7 +34787,10 @@ function Invoke-DefenseClawUninstallLifecycle {
             -ManagedHooksActivation $managedHooksActivation `
             -InstallRootIdentity $installRootIdentity `
             -StateRootIdentity $stateRootIdentity `
-            -UninstallPurgeRequested ([bool]$Purge)
+            -UninstallPurgeRequested ([bool]$Purge) `
+            -UninstallPurgeUserStateRequested (
+                [bool]$script:DefenseClawUninstallPurgeUserState
+            )
         if ($tombstone -is [Collections.IDictionary] -and
             $tombstone.Contains('product_version')) {
             # The tombstone names the release that was removed, not the
@@ -35711,7 +35820,12 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # Standalone Verify only: the Verify of an ensure that found the
         # deployment compliant also collects old managed runtime generations
         # (Invoke-DefenseClawStandaloneRuntimeGenerationCollect, GAP-0211).
-        [switch]$CollectRuntimeGenerations
+        [switch]$CollectRuntimeGenerations,
+        # Standalone Status only: answer, instead, the read-only refusals of
+        # an Uninstall (Invoke-DefenseClawStandaloneUninstallPrecheck), which
+        # the CLI reads before an uninstall removes the protected session
+        # record keys.
+        [switch]$UninstallPrecheck
     )
     Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
     if ($Action -eq 'Recover' -and -not (Test-DefenseClawStandaloneProfile)) {
@@ -35861,8 +35975,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     if ($CollectRuntimeGenerations -and ($Action -ne 'Verify' -or -not (Test-DefenseClawStandaloneProfile))) {
         throw '-CollectRuntimeGenerations is valid only with a standalone Verify'
     }
+    if ($UninstallPrecheck -and ($Action -ne 'Status' -or -not (Test-DefenseClawStandaloneProfile))) {
+        throw '-UninstallPrecheck is valid only with a standalone Status'
+    }
     if ($SelfUninstallCallerPID -lt 0 -or
-        ($SelfUninstallCallerPID -gt 0 -and $Action -ne 'Uninstall')) {
+        ($SelfUninstallCallerPID -gt 0 -and $Action -ne 'Uninstall' -and -not $UninstallPrecheck)) {
         throw '-SelfUninstallCallerPID is valid only as a positive PID with Uninstall'
     }
     if ($NoStart -and $Action -notin @('Install', 'Upgrade', 'Repair')) {
@@ -36030,6 +36147,13 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -AllowMissingCertificationCodexHome
+        if ($UninstallPrecheck) {
+            return Invoke-DefenseClawStandaloneUninstallPrecheck `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName `
+                -SelfUninstallCallerPID $SelfUninstallCallerPID
+        }
         return Get-DefenseClawLifecycleStatus `
             -Action $Action `
             -Layout $layout `

@@ -52,9 +52,12 @@ func standaloneCommittedUninstallUnsettled(layout managed.StandaloneLayout, meta
 }
 
 // standaloneTombstonePurgeRequested reads the uninstall mode the tombstone
-// recorded at its commit. A tombstone from before 1.0.4 records none and is
-// a state-keeping uninstall for recovery; a malformed mode is refused, never
-// guessed.
+// recorded at its commit: the purge, and the per-user purge (Setup PURGE=1)
+// that is part of it. A tombstone from before 1.0.4 records none and is a
+// state-keeping uninstall for recovery; a malformed mode, or a per-user purge
+// without its purge, is refused, never guessed. The lifecycle module reads
+// the same fields (Get-DefenseClawTombstonePurgeRequested,
+// Get-DefenseClawTombstonePurgeUserStateRequested).
 func standaloneTombstonePurgeRequested(path string) (bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -71,6 +74,7 @@ func standaloneTombstonePurgeRequested(path string) (bool, error) {
 	var record struct {
 		Installed *bool           `json:"installed"`
 		Purge     json.RawMessage `json:"uninstall_purge_requested"`
+		UserState json.RawMessage `json:"uninstall_purge_user_state_requested"`
 	}
 	if err := json.Unmarshal(bytes.TrimPrefix(body, []byte{0xef, 0xbb, 0xbf}), &record); err != nil {
 		return false, fmt.Errorf("cannot read the recorded uninstall mode: %w", err)
@@ -78,12 +82,29 @@ func standaloneTombstonePurgeRequested(path string) (bool, error) {
 	if record.Installed == nil || *record.Installed {
 		return false, errors.New("cannot read the recorded uninstall mode: the deployment record is not an uninstall tombstone")
 	}
-	if record.Purge == nil {
-		return false, nil
+	purge, err := standaloneTombstoneMode(record.Purge, "purge")
+	if err != nil {
+		return false, err
 	}
-	var purge bool
-	if bytes.Equal(bytes.TrimSpace(record.Purge), []byte("null")) || json.Unmarshal(record.Purge, &purge) != nil {
-		return false, errors.New("uninstall tombstone has an invalid recorded purge mode")
+	userState, err := standaloneTombstoneMode(record.UserState, "per-user purge")
+	if err != nil {
+		return false, err
+	}
+	if userState && !purge {
+		return false, errors.New("uninstall tombstone records a per-user purge without its uninstall purge")
 	}
 	return purge, nil
+}
+
+// standaloneTombstoneMode decodes one recorded uninstall mode field: absent
+// is false, anything but a JSON boolean is refused.
+func standaloneTombstoneMode(raw json.RawMessage, name string) (bool, error) {
+	if raw == nil {
+		return false, nil
+	}
+	var mode bool
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &mode) != nil {
+		return false, fmt.Errorf("uninstall tombstone has an invalid recorded %s mode", name)
+	}
+	return mode, nil
 }

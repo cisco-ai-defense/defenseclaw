@@ -3651,6 +3651,17 @@ try {
         if ($Action -eq 'Verify' -and $collectRequest -ceq '1') {
             $arguments['CollectRuntimeGenerations'] = $true
         }
+        # Before an uninstall removes the protected session record keys, the
+        # CLI asks a Status, the same way, for the uninstall's read-only
+        # refusals (Invoke-DefenseClawStandaloneUninstallPrecheck). The value
+        # is the self-uninstall caller's pid, or 0.
+        $uninstallPrecheckRequest = [Environment]::GetEnvironmentVariable('DEFENSECLAW_STANDALONE_UNINSTALL_PRECHECK', 'Process')
+        [Environment]::SetEnvironmentVariable('DEFENSECLAW_STANDALONE_UNINSTALL_PRECHECK', $null, 'Process')
+        if ($Action -eq 'Status' -and $null -ne $uninstallPrecheckRequest -and
+            $uninstallPrecheckRequest -cmatch '^[0-9]{1,9}$') {
+            $arguments['UninstallPrecheck'] = $true
+            $arguments['SelfUninstallCallerPID'] = [int]$uninstallPrecheckRequest
+        }
     }
     $result = DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle @arguments
     if ($null -ne $result.PSObject.Properties['ok'] -and -not [bool]$result.ok) {

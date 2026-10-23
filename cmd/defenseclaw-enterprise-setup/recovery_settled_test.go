@@ -32,6 +32,15 @@ func TestStandaloneCommittedUninstallUnsettled(t *testing.T) {
 		{name: "string purge mode", record: `{"installed":false,"uninstall_purge_requested":"false"}`, err: true},
 		{name: "null purge mode", record: `{"installed":false,"uninstall_purge_requested":null}`, err: true},
 		{name: "invalid mode is refused before the folders", record: `{"installed":false,"uninstall_purge_requested":1}`, root: true, err: true},
+		// The per-user purge (Setup PURGE=1) is part of the purge: its
+		// tombstone is unsettled until that purge removed it, and a malformed
+		// or orphaned per-user mode is refused.
+		{name: "recorded per-user purge not finished", record: `{"installed":false,"uninstall_purge_requested":true,"uninstall_purge_user_state_requested":true}`, unsettled: true},
+		{name: "recorded purge without the per-user purge", record: `{"installed":false,"uninstall_purge_requested":true,"uninstall_purge_user_state_requested":false}`, unsettled: true},
+		{name: "string per-user purge mode", record: `{"installed":false,"uninstall_purge_requested":true,"uninstall_purge_user_state_requested":"true"}`, err: true},
+		{name: "null per-user purge mode", record: `{"installed":false,"uninstall_purge_requested":true,"uninstall_purge_user_state_requested":null}`, err: true},
+		{name: "per-user purge without its purge", record: `{"installed":false,"uninstall_purge_requested":false,"uninstall_purge_user_state_requested":true}`, err: true},
+		{name: "per-user purge with no recorded purge", record: `{"installed":false,"uninstall_purge_user_state_requested":true}`, err: true},
 		{name: "record turned installed", record: `{"installed":true}`, err: true},
 		{name: "record without installed", record: `{}`, err: true},
 		{name: "unparseable record", record: `{`, err: true},

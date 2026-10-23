@@ -251,14 +251,10 @@ func runWindowsEnterprisePowerShell7(
 	}
 	environment := func(temp string) ([]string, error) {
 		env, err := trustedWindowsEnterprisePowerShell7Environment(temp, engine)
-		if err == nil && windowsEnterpriseForcedUninstallRequested(ctx) {
-			env = append(env, windowsEnterpriseForcedUninstallVariable+"=1")
+		if err != nil {
+			return env, err
 		}
-		if err == nil && windowsEnterpriseCollectGenerationsRequested(ctx) &&
-			windowsEnterpriseInstallerAction(args) == "Verify" {
-			env = append(env, windowsEnterpriseCollectGenerationsVariable+"=1")
-		}
-		return env, err
+		return append(env, windowsEnterpriseInstallerRequestEnvironment(ctx, args)...), nil
 	}
 	stderr := &windowsEnterpriseOutputCapture{}
 	console := &windowsEnterprisePhaseFilter{writer: cmd.ErrOrStderr()}
@@ -464,6 +460,128 @@ func windowsEnterpriseCollectGenerationsRequested(ctx context.Context) bool {
 	return requested
 }
 
+// windowsEnterpriseUninstallPrecheckVariable asks the standalone installer's
+// Status to run, instead, the read-only refusals of an uninstall
+// (Invoke-DefenseClawStandaloneUninstallPrecheck): its value is the pid of
+// the self-uninstall caller, or 0. Like the forced uninstall it is not an
+// installer parameter. An installer that does not know it answers a plain
+// status, which refuses nothing, so the uninstall goes on as it did.
+const windowsEnterpriseUninstallPrecheckVariable = "DEFENSECLAW_STANDALONE_UNINSTALL_PRECHECK"
+
+type windowsEnterpriseUninstallPrecheckKey struct{}
+
+// windowsEnterpriseInstallerRequestEnvironment is what a run asks the
+// standalone installer for in its environment: a forced uninstall, the
+// generation collect of a Verify, the uninstall precheck of a Status.
+func windowsEnterpriseInstallerRequestEnvironment(ctx context.Context, args []string) []string {
+	var env []string
+	if windowsEnterpriseForcedUninstallRequested(ctx) {
+		env = append(env, windowsEnterpriseForcedUninstallVariable+"=1")
+	}
+	action := windowsEnterpriseInstallerAction(args)
+	if windowsEnterpriseCollectGenerationsRequested(ctx) && action == "Verify" {
+		env = append(env, windowsEnterpriseCollectGenerationsVariable+"=1")
+	}
+	if caller, ok := ctx.Value(windowsEnterpriseUninstallPrecheckKey{}).(string); ok && action == "Status" {
+		env = append(env, windowsEnterpriseUninstallPrecheckVariable+"="+caller)
+	}
+	return env
+}
+
+// windowsEnterpriseUninstallPrecheckRefusals are the codes of the uninstall
+// refusals the precheck reads with nothing changed: a program that runs from
+// or holds a file in the install folder, or holds a data file the uninstall
+// deletes (uninstall_in_use), and a root an account other than an
+// administrator owns (root_squatted).
+var windowsEnterpriseUninstallPrecheckRefusals = map[string]bool{"uninstall_in_use": true, "root_squatted": true}
+
+// precheckWindowsEnterpriseStandaloneUninstall runs the installer's
+// read-only uninstall refusals before the uninstall removes the protected
+// session keys, so a refused uninstall leaves every published allow proving
+// its session during a gateway outage (q-win-lifecycle review, loop round
+// 3). refused is true, with the report or launch error that is then the
+// run's answer, only for such a refusal or for a PowerShell 7 no uninstall
+// could run on. Any other outcome, an installer that cannot run the precheck
+// included, lets the uninstall go on as it did, with its own checks. A
+// forced uninstall, a deployment that is not installed (its pending
+// recovery or committed cleanup changes the host first) and a run that is
+// not elevated skip it.
+func precheckWindowsEnterpriseStandaloneUninstall(
+	ctx context.Context,
+	cmd *cobra.Command,
+	opts *windowsEnterpriseLifecycleOptions,
+	script string,
+	args []string,
+) (*windowsEnterpriseInstallerReport, windowsEnterpriseStandaloneRun, bool, error) {
+	if opts == nil || opts.force || !windowsEnterpriseIsElevated() {
+		return nil, windowsEnterpriseStandaloneRun{}, false, nil
+	}
+	if deployment, err := windowsEnterpriseTargetDeployment(opts); err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled {
+		return nil, windowsEnterpriseStandaloneRun{}, false, nil
+	}
+	caller := "0"
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-SelfUninstallCallerPID" {
+			caller = args[i+1]
+		}
+	}
+	probe := windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts))
+	run, err := windowsEnterpriseStandaloneRunner(context.WithValue(ctx, windowsEnterpriseUninstallPrecheckKey{}, caller), cmd, script, probe)
+	if err != nil {
+		if errors.Is(err, errPowerShell7Required) || errors.Is(err, errPowerShell7Untrusted) {
+			return nil, run, true, err
+		}
+		return nil, windowsEnterpriseStandaloneRun{}, false, nil
+	}
+	if run.Truncated {
+		return nil, windowsEnterpriseStandaloneRun{}, false, nil
+	}
+	report, err := parseWindowsEnterpriseInstallerReport(run.Output)
+	if err != nil || report.OK || !windowsEnterpriseUninstallPrecheckRefusals[windowsEnterpriseMessageCode(strings.TrimSpace(report.Error), "")] {
+		return nil, windowsEnterpriseStandaloneRun{}, false, nil
+	}
+	report.Action = "uninstall"
+	return report, run, true, nil
+}
+
+// refuseWindowsEnterpriseStandaloneDeferredState refuses the install,
+// upgrade and repair requests the installer refuses for the recorded
+// deployment before it changes anything (Assert-DefenseClawDeferredInstallIsFresh
+// and the deferred-configuration checks of Invoke-DefenseClawInstallLikeLifecycle),
+// so they come before the session keys go (q-win-lifecycle review, loop
+// round 3): a deferred install over an installed deployment and, while the
+// deployment waits for its deferred configuration, an install or upgrade,
+// or a repair without both --config and --manifest or with --no-start. With
+// a pending transaction the installer recovers it first, which can change
+// the record, so the installer decides; so it does for a record this cannot
+// read.
+func refuseWindowsEnterpriseStandaloneDeferredState(action string, opts *windowsEnterpriseLifecycleOptions) error {
+	if opts == nil || (action != "install" && action != "upgrade" && action != "repair") {
+		return nil
+	}
+	deployment, err := windowsEnterpriseTargetDeployment(opts)
+	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled {
+		return nil
+	}
+	if action == "install" && opts.deferredConfig {
+		return windowsEnterpriseInvalidArguments("deferred Install without Config and Manifest requires an empty deployment; " +
+			"use Repair or Ensure for the installed deployment (nothing was changed)")
+	}
+	if !deployment.DeferredConfigPending || windowsEnterpriseStandaloneTransactionPending() {
+		return nil
+	}
+	switch {
+	case action != "repair":
+		return windowsEnterpriseInvalidArguments("this deployment waits for its deferred configuration, which only a repair with "+
+			"--config and --manifest completes; the %s was refused (nothing was changed)", action)
+	case strings.TrimSpace(opts.configPath) == "" || strings.TrimSpace(opts.manifestPath) == "":
+		return windowsEnterpriseInvalidArguments("the repair that completes a deferred configuration needs both --config and --manifest (nothing was changed)")
+	case opts.noStart:
+		return windowsEnterpriseInvalidArguments("the repair that completes a deferred configuration starts the services and cannot use --no-start (nothing was changed)")
+	}
+	return nil
+}
+
 // windowsEnterpriseInstallerAction is the -Action value of installer args.
 func windowsEnterpriseInstallerAction(args []string) string {
 	for i := 0; i+1 < len(args); i++ {
@@ -517,12 +635,13 @@ func runWindowsEnterpriseStandaloneAction(
 	script string,
 	args []string,
 ) error {
-	// Before the action changes anything, held to its end (GAP-0352).
-	releaseHookSessionKeys, err := beginWindowsHookSessionKeyChange(ctx, action, opts)
+	// The key lock before anything, held to its end; the keys go before the
+	// first change (GAP-0352), after the refusals that only read the request.
+	hookSessionKeys, err := beginWindowsHookSessionKeyChange(ctx, action, opts)
 	if err != nil {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
-	defer releaseHookSessionKeys()
+	defer hookSessionKeys.release()
 	var unsettledBundles []*enterprisebundle.Receipt
 	if action == "status" && windowsEnterpriseIsElevated() && windowsEnterpriseStandaloneInstalled() {
 		var err error
@@ -538,6 +657,15 @@ func runWindowsEnterpriseStandaloneAction(
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 		}
 	}
+	// The installer refuses these for the recorded deployment, or for an
+	// untrusted scanner runtime it cannot remove, before it changes
+	// anything: refused here, they come before the session keys go too.
+	if err := refuseWindowsEnterpriseStandaloneDeferredState(action, opts); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+	}
+	if err := refuseUntrustedWindowsScannerRuntimeBeforeChange(canonicalWindowsEnterpriseAction(action), opts); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+	}
 	if action == "uninstall" {
 		present, err := windowsEnterpriseStandaloneFootprint()
 		if err == nil && !present {
@@ -551,25 +679,24 @@ func runWindowsEnterpriseStandaloneAction(
 	// Repair without CONFIG= on a bundle-mode device keeps the confirmed
 	// bundle config, not an edit made outside the lifecycle (GAP-0114). The
 	// restore comes before anything else this run changes: when it fails,
-	// repair stops with bundle_restore_failed and has changed nothing.
+	// repair stops with bundle_restore_failed and has changed nothing. It
+	// removes the session keys only right before it writes.
 	var bundleRestore windowsBundleRestore
 	if windowsBundleRestoreRequested(action, opts) {
-		if bundleRestore = restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts)); bundleRestore.failed() {
+		if bundleRestore = restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts), hookSessionKeys.kill); bundleRestore.failed() {
 			result := newWindowsEnterpriseStandaloneResult(action, opts)
 			bundleRestore.apply(result)
 			applyWindowsEnterpriseRecordedDeployment(result)
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 	}
-	hookRuntimeRepaired := ""
-	if action == "repair" && windowsEnterpriseIsElevated() {
-		hookRuntimeRepaired = repairWindowsEnterpriseHookRuntimeAccess()
-	}
 	configReplaced := ""
 	if action == "repair" || action == "upgrade" {
 		// As ensure does: never load an installed config.yaml that does not
-		// parse before the supplied one (GAP-0948).
-		kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+		// parse before the supplied one (GAP-0948), and check the supplied
+		// one before the hook runtime repair. A supplied config it refuses
+		// changed nothing; the session keys go right before it writes.
+		kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath, hookSessionKeys.kill)
 		if err != nil {
 			result := newWindowsEnterpriseStandaloneResult(action, opts)
 			result.AddError("preflight_failed", err.Error())
@@ -579,7 +706,31 @@ func runWindowsEnterpriseStandaloneAction(
 			configReplaced = windowsEnterpriseUnparseableConfigChange(kept, action)
 		}
 	}
-	report, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, args)
+	// An uninstall's own refusals (a program runs from or holds a file in
+	// the install folder, or holds a data file: GAP-0942, GAP-0136) change
+	// nothing either. The installer reads them first, and such a refusal is
+	// the run's answer, with every session key kept.
+	var (
+		report  *windowsEnterpriseInstallerReport
+		run     windowsEnterpriseStandaloneRun
+		refused bool
+	)
+	if action == "uninstall" {
+		report, run, refused, err = precheckWindowsEnterpriseStandaloneUninstall(ctx, cmd, opts, script, args)
+	}
+	hookRuntimeRepaired := ""
+	if !refused {
+		// Everything from here changes the deployment: every account's
+		// session key goes first, and a key that cannot be shown dead stops
+		// the run.
+		if err := hookSessionKeys.kill(); err != nil {
+			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+		}
+		if action == "repair" && windowsEnterpriseIsElevated() {
+			hookRuntimeRepaired = repairWindowsEnterpriseHookRuntimeAccess()
+		}
+		report, run, err = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, args)
+	}
 	result := newWindowsEnterpriseStandaloneResult(action, opts)
 	bundleRestore.apply(result)
 	if hookRuntimeRepaired != "" {
@@ -2408,6 +2559,12 @@ func finishWindowsEnterpriseStandalone(
 	result *enterprisestatus.Result,
 	failureCode int,
 ) error {
+	if len(opts.recoveryChanges) != 0 {
+		// The recovery before the config check changed the host: not a
+		// no-op, whatever the run decided after it.
+		result.Changes = append(append([]string{}, opts.recoveryChanges...), result.Changes...)
+		result.Noop, result.NoopReason = false, ""
+	}
 	if windowsBundleHasCode(result.Errors, "powershell7_untrusted") {
 		for i := range result.Warnings {
 			if result.Warnings[i].Code == windowsEnterpriseHealthNotChecked {
@@ -2584,11 +2741,17 @@ func writeWindowsEnterpriseStandaloneConfigRefusal(
 // when the config passes. An interrupted upgrade leaves a pending
 // transaction with the services stopped, and only a lifecycle run recovers
 // it: refusing a supplied config before that run left the host stopped on
-// every MDM retry (GAP-1433, GAP-0705). Each action first runs a source-free
-// repair to recover a pending transaction, which restores the previous
-// deployment and its services, and check the config again: the restored
-// rule packs can make it load. A config still refused is refused, and the
-// refusal reports the restored host.
+// every MDM retry (GAP-1433, GAP-0705). Each action first recovers a pending
+// transaction, which restores the previous deployment and its services, and
+// checks the config again: the restored rule packs can make it load. Ensure
+// and upgrade recover with the source-free repair GAP-1433 gave them. A
+// repair recovers with the transaction recovery alone (Recover): the full
+// repair went on past the recovery and changed services, access lists and
+// hooks for a request it then refused, which the 1.0.3 lifecycle never did
+// for a repair; the requested repair runs only once its config passes. A
+// config still refused is refused, and the refusal reports the restored
+// host. The result reports what the recovery changed, whichever way the run
+// goes on (noteWindowsEnterpriseRefusalRecovery).
 func refuseWindowsEnterpriseStandaloneSuppliedConfig(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -2603,13 +2766,17 @@ func refuseWindowsEnterpriseStandaloneSuppliedConfig(
 		err = windowsEnterpriseStandaloneConfigPreflight(opts.configPath)
 	}
 	if err != nil && (action == "ensure" || action == "upgrade" || action == "repair") && windowsEnterpriseStandaloneTransactionPending() {
-		recovery := *opts
-		recovery.jsonOutput = true
-		clearWindowsEnterpriseSources(&recovery)
-		// The refusal below probes the host, so the recovery report adds
-		// nothing: a recovery that failed leaves transaction_pending there.
-		_, _, _ = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
-			windowsEnterprisePowerShellArgs("repair", windowsEnterpriseRepairRecordingOptions("repair", &recovery)))
+		recoveryArgs := windowsEnterprisePowerShellArgs("recover", windowsEnterpriseEnsureProbeOptions(opts))
+		if action != "repair" {
+			recovery := *opts
+			recovery.jsonOutput = true
+			clearWindowsEnterpriseSources(&recovery)
+			recoveryArgs = windowsEnterprisePowerShellArgs("repair", windowsEnterpriseRepairRecordingOptions("repair", &recovery))
+		}
+		// A recovery that failed leaves transaction_pending, which the
+		// refusal's probe of the host reports.
+		_, _, _ = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, recoveryArgs)
+		noteWindowsEnterpriseRefusalRecovery(opts, windowsEnterpriseInstallerAction(recoveryArgs))
 		if opts.suppliedConfigRefusal == nil {
 			err = windowsEnterpriseStandaloneConfigPreflight(opts.configPath)
 		}
@@ -2621,6 +2788,22 @@ func refuseWindowsEnterpriseStandaloneSuppliedConfig(
 		err = fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err)
 	}
 	return true, writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
+}
+
+// noteWindowsEnterpriseRefusalRecovery records, for the result of the run
+// (finishWindowsEnterpriseStandalone), that the recovery before a config
+// check settled the pending transaction, whether the run then refuses the
+// config or goes on with it. A recovery that left the transaction pending
+// changed nothing this can name; the result reports transaction_pending.
+func noteWindowsEnterpriseRefusalRecovery(opts *windowsEnterpriseLifecycleOptions, moduleAction string) {
+	if windowsEnterpriseStandaloneTransactionPending() {
+		return
+	}
+	change := "recovered the interrupted lifecycle transaction before checking the supplied config, which restored the previous deployment and its services"
+	if moduleAction == "Repair" {
+		change += ", and repaired it without new sources"
+	}
+	opts.recoveryChanges = append(opts.recoveryChanges, change)
 }
 
 // writeWindowsEnterpriseStandaloneRefusal writes the schema-2 result of a
@@ -3010,7 +3193,7 @@ func runWindowsEnterpriseStandaloneEnsure(
 	// starts the gateway on the installed config (GAP-0114). A restore that
 	// fails stops here, before any service starts on the edited file.
 	if windowsBundleRestoreRequested("ensure", opts) {
-		restore := restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts))
+		restore := restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts), nil)
 		restore.apply(result)
 		if restore.failed() {
 			applyWindowsEnterpriseRecordedDeployment(result)
@@ -3438,7 +3621,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	if (plan.Action == "upgrade" || plan.Action == "repair") && !statusReport.TransactionPending {
 		// The transaction must not load an installed config.yaml that does
 		// not parse before it uses the supplied one (GAP-0948).
-		kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+		kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath, nil)
 		if err != nil {
 			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
 			result.Errors = []enterprisestatus.Message{}

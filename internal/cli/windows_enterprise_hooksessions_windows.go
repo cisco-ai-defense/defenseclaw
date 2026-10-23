@@ -41,12 +41,15 @@ import (
 // blocks when they are missing, untrusted, or were not written under the
 // current key.
 //
-// The kill switch (1.0.4 guard loop): install, upgrade, repair, ensure and
-// uninstall take the key lock and remove every key before they change
-// anything (beginWindowsHookSessionKeyChange), and hold the lock to their
-// end, so the hook guardian makes no key meanwhile. An install, upgrade,
-// repair or ensure stops when the lock cannot be taken or a key cannot be
-// shown dead. Those that finish without an error put the folder's owner and
+// The kill switch (1.0.4 guard loop): install, upgrade, repair and ensure
+// take the key lock (beginWindowsHookSessionKeyChange) and, with uninstall,
+// remove every key before their first change, and hold the lock to their
+// end, so the hook guardian makes no key meanwhile. A refusal that only read
+// the request or the recorded deployment, an uninstall's own refusals
+// included (precheckWindowsEnterpriseStandaloneUninstall), comes before the
+// keys go and leaves every record as it was. An
+// install, upgrade, repair or ensure stops when the lock cannot be taken or
+// a key cannot be shown dead. Those that finish without an error put the folder's owner and
 // DACL back and only then give every account a new key; uninstall removes
 // the folder and the key. No record
 // written before the run proves anything after it, whatever an account
@@ -123,29 +126,62 @@ func windowsHookSessionKeyChange(action string) bool {
 	return false
 }
 
+// windowsHookSessionKeyChangeRun is the key step of one lifecycle action:
+// kill removes every account's key once, before the action's first change,
+// and release ends the action's hold on the key lock.
+type windowsHookSessionKeyChangeRun struct {
+	action  string
+	release func()
+	// bestEffort is an uninstall's: it goes on when a key cannot be shown
+	// dead, and removes the record folder and the keys at its end.
+	bestEffort bool
+	killed     bool
+	killErr    error
+}
+
+// kill removes every account's key (killWindowsHookSessionKey) the first
+// time it is called and returns that result each time: the action calls it
+// right before its first change, and stops when it fails. It is a no-op for
+// an action that keeps the keys.
+func (run *windowsHookSessionKeyChangeRun) kill() error {
+	if run == nil || run.action == "" {
+		return nil
+	}
+	if !run.killed {
+		run.killed = true
+		run.killErr = killWindowsHookSessionKey(run.action)
+		if run.bestEffort {
+			run.killErr = nil
+		}
+	}
+	return run.killErr
+}
+
 // beginWindowsHookSessionKeyChange takes the key lock of the protected
-// session records for an elevated action that changes the deployment and
-// removes every account's key (killWindowsHookSessionKey), before the
-// action changes anything (GAP-0352): no hook guardian makes a key until
-// the action released the lock at its end, after it made new ones, and no
-// record written before the action proves anything once it started, not
-// even one written under a key an action it waited for made at its end. An
-// install, upgrade, repair or ensure stops with an error when the lock
-// cannot be taken or a key cannot be shown dead: it would put the record
-// folder's trust back while an earlier allow could still prove itself. An
-// uninstall only removes the keys and goes on; it removes the folder and
-// the keys at its end. The caller releases the lock once the action
-// finished.
-func beginWindowsHookSessionKeyChange(ctx context.Context, action string, opts *windowsEnterpriseLifecycleOptions) (release func(), err error) {
-	release = func() {}
+// session records for an elevated action that changes the deployment
+// (GAP-0352), and the action removes every account's key with the run's
+// kill before its first change: no hook guardian makes a key until the
+// action released the lock at its end, after it made new ones, and no
+// record written before the action changed anything proves anything after
+// it, not even one written under a key an action it waited for made at its
+// end. A refusal before the kill (a check that only reads the request, such
+// as a config that moves gateway.api_port) leaves every key and record as
+// it was. An install, upgrade, repair or ensure stops with an error when the
+// lock cannot be taken or a key cannot be shown dead: it would put the
+// record folder's trust back while an earlier allow could still prove
+// itself. An uninstall takes no lock, and its kill, after its read-only
+// refusals, only tries and goes on; it removes the folder and the keys at
+// its end. The caller releases the lock once the action finished.
+func beginWindowsHookSessionKeyChange(ctx context.Context, action string, opts *windowsEnterpriseLifecycleOptions) (*windowsHookSessionKeyChangeRun, error) {
+	run := &windowsHookSessionKeyChangeRun{release: func() {}}
 	if !windowsHookSessionKeyChange(action) || !windowsEnterpriseIsElevated() {
-		return release, nil
+		return run, nil
 	}
 	if action == "uninstall" {
 		// It removes the record folder and the keys at its end; a lock held
 		// across it would only keep the installer from removing its state.
-		_ = killWindowsHookSessionKey(action)
-		return release, nil
+		run.action, run.bestEffort = action, true
+		return run, nil
 	}
 	lockPath, err := windowsHookSessionKeyLock()
 	if err == nil {
@@ -158,25 +194,22 @@ func beginWindowsHookSessionKeyChange(ctx context.Context, action string, opts *
 		held, err = windowsHookSessionLockKeys(lockCtx, lockPath)
 		cancel()
 		if err == nil {
-			release = held
+			run.release = held
 		} else if errors.Is(err, context.DeadlineExceeded) {
 			err = fmt.Errorf("another DefenseClaw lifecycle action %s of the protected session record keys (waited %s): %w", windowsEnterpriseLifecycleBusyMarker, wait, err)
 		}
 	}
 	if err != nil {
-		return func() {}, fmt.Errorf("hook_session_records_unavailable: the protected foreign-hook session record key lock could not be taken, so nothing was changed: %w", err)
+		return &windowsHookSessionKeyChangeRun{release: func() {}}, fmt.Errorf("hook_session_records_unavailable: the protected foreign-hook session record key lock could not be taken, so nothing was changed: %w", err)
 	}
-	if err := killWindowsHookSessionKey(action); err != nil {
-		release()
-		return func() {}, err
-	}
-	return release, nil
+	run.action = action
+	return run, nil
 }
 
 // killWindowsHookSessionKey removes the key of the protected session
 // records, of every account, before an elevated install, upgrade, repair,
 // ensure or uninstall changes anything (GAP-0352): no record written before
-// the action proves anything once it started. A key that could not be
+// the action changed anything proves anything after it. A key that could not be
 // removed but is shadowed or marked revoked is enough. It returns an error
 // when the record folder cannot be located or a key cannot be shown dead
 // (enterprisepolicy.ErrPublishedSessionKeyAlive). The end of the action,
