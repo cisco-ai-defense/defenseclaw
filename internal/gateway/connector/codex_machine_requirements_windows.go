@@ -507,6 +507,9 @@ func VerifyWindowsCodexMachineRequirements(
 		if err := verifyWindowsCodexRequirementsBytes(requirements.data, opts); err != nil {
 			return err
 		}
+		if err := verifyWindowsCodexRequirementsUsersCanRead(opts.RequirementsPath); err != nil {
+			return err
+		}
 		if state.Pending {
 			return errors.New("Codex requirements ownership contains an incomplete transaction")
 		}
@@ -1087,10 +1090,8 @@ func verifyWindowsCodexMachineRequirementsLocked(
 	if err := verifyWindowsCodexRequirementsBytes(requirements.data, opts); err != nil {
 		return err
 	}
-	// The elevated read above proves nothing for the users: Codex reads the
-	// requirements with each user's own token.
-	if err := windowsCodexRequirementsUsersCanRead(opts.RequirementsPath); err != nil {
-		return fmt.Errorf("ordinary users cannot read the Codex machine requirements: %w", err)
+	if err := verifyWindowsCodexRequirementsUsersCanRead(opts.RequirementsPath); err != nil {
+		return err
 	}
 	ownership, err := readWindowsCodexMachineFile(
 		opts.OwnershipPath,
@@ -1722,6 +1723,17 @@ func windowsCodexRequirementsUsersCanRead(path string) error {
 		return err
 	}
 	return safefile.UsersCanRead(metadata)
+}
+
+// verifyWindowsCodexRequirementsUsersCanRead is the verification's check
+// that ordinary users can read the requirements. Verification reads the file
+// elevated, which proves nothing for the users: Codex reads it with each
+// user's own token.
+func verifyWindowsCodexRequirementsUsersCanRead(path string) error {
+	if err := windowsCodexRequirementsUsersCanRead(path); err != nil {
+		return fmt.Errorf("ordinary users cannot read the Codex machine requirements: %w", err)
+	}
+	return nil
 }
 
 // protectWindowsCodexSharedRequirements gives a requirements.toml about to

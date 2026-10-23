@@ -59,9 +59,11 @@ type SwapResult struct {
 	// Replaced reports that an existing file was replaced.
 	Replaced bool
 	// ReplacedMetadata is the metadata the replaced file had when it was
-	// replaced, read through the swap's handle after the rename; nil when it
-	// could not be read. Share modes do not stop an owner, access list or
-	// attribute change, so it can differ from what the comparison saw.
+	// replaced, read through the swap's handle just before the rename; nil
+	// when it could not be read. Share modes do not stop an owner, access
+	// list or attribute change, so it can differ from what the comparison
+	// saw. It is not read after the rename: the replaced file is then out of
+	// its folder, and its inherited entries read back as explicit ones.
 	ReplacedMetadata *FileMetadata
 }
 
@@ -133,15 +135,18 @@ func CompareAndSwapFile(
 	}
 	defer held.Close()
 	swapBeforeReplace(destination)
-	if err := replaceHeldFile(source, destination, held); err != nil {
+	result := SwapResult{Swapped: true, Replaced: true}
+	readReplaced := func() {
+		result.ReplacedMetadata = nil
+		if metadata, err := ReadFileMetadata(held); err == nil {
+			result.ReplacedMetadata = &metadata
+		}
+	}
+	if err := replaceHeldFile(source, destination, held, readReplaced); err != nil {
 		if errors.Is(err, ErrSwapRaced) {
 			return SwapResult{}, err
 		}
 		return SwapResult{}, fmt.Errorf("safefile: publish %s: %w", destination, err)
-	}
-	result := SwapResult{Swapped: true, Replaced: true}
-	if metadata, err := ReadFileMetadata(held); err == nil {
-		result.ReplacedMetadata = &metadata
 	}
 	return result, nil
 }
@@ -261,7 +266,10 @@ func holdMatchedFileForReplace(
 // deletion, so the swap never tries the rename while such a handle is open.
 // It waits a short while for a reader that has destination open without
 // sharing deletion.
-func replaceHeldFile(source, destination string, held *os.File) error {
+//
+// beforeRename runs just before each rename attempt, while held still names
+// the file at destination.
+func replaceHeldFile(source, destination string, held *os.File, beforeRename func()) error {
 	deadline := time.Now().Add(swapLockTimeout)
 	for {
 		target, err := openFileForReplace(destination)
@@ -274,6 +282,7 @@ func replaceHeldFile(source, destination string, held *os.File) error {
 				err = swapRaced(destination)
 			}
 			if err == nil {
+				beforeRename()
 				err = swapRenameReplace(source, destination, windows.FileRenameInfoEx,
 					fileRenameReplaceIfExists|fileRenamePOSIXSemantics|fileRenameIgnoreReadOnlyAttribute)
 			}
@@ -288,7 +297,7 @@ func replaceHeldFile(source, destination string, held *os.File) error {
 			errors.Is(err, windows.ERROR_INVALID_FUNCTION):
 			// A volume without POSIX renames replaces only a file nobody
 			// has open: release the hold and replace in one step.
-			return replaceReleasedFile(source, destination, held, deadline)
+			return replaceReleasedFile(source, destination, held, deadline, beforeRename)
 		case !swapBusy(err) || !time.Now().Before(deadline):
 			return err
 		}
@@ -297,11 +306,13 @@ func replaceHeldFile(source, destination string, held *os.File) error {
 }
 
 // replaceReleasedFile is replaceHeldFile for a volume without POSIX renames.
-func replaceReleasedFile(source, destination string, held *os.File, deadline time.Time) error {
+// beforeRename runs once, before the hold is released.
+func replaceReleasedFile(source, destination string, held *os.File, deadline time.Time, beforeRename func()) error {
 	identity, err := fileIdentity(held)
 	if err != nil {
 		return err
 	}
+	beforeRename()
 	if err := held.Close(); err != nil {
 		return err
 	}
