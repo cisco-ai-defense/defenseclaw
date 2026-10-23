@@ -181,16 +181,20 @@ func toolGateEvent(connector, event string) bool {
 }
 
 // awaitAnswerBy returns ctx for the hook request of a tool call, ended with
-// errGatewayNoAnswer at deadline unless the gateway answered (stop) by then.
+// errGatewayNoAnswer at deadline unless the gateway answered (stopResponse)
+// by then.
 // A report that the gateway waits on a remote scanner (a 102 response) moves
-// the deadline to ceiling, never further (GAP-0255). Call stop once the final
-// response headers are in, before reading the body, and release when the
-// request is done. watch, when set, follows both: it stands down at the
-// first stop and takes the ceiling at the 102. A zero deadline returns ctx
-// unchanged.
-func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answerWatchdog) (watched context.Context, stop, release func()) {
+// the deadline to ceiling, never further (GAP-0255). Call stop after an
+// ordinary answer is read. For an answer that needs a receipt, call
+// stopResponse after reading it and stop after writing it to the agent; the
+// watchdog stays armed until then. Release when the request is done. This
+// lets the hook send its receipt after the answer deadline without the
+// deadline canceling the HTTP request. watch, when set, takes the ceiling
+// at the 102. A zero deadline returns ctx unchanged.
+func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answerWatchdog) (watched context.Context, stop, stopResponse, release func()) {
 	if deadline.IsZero() {
-		return ctx, func() {}, func() {}
+		noop := func() {}
+		return ctx, noop, noop, noop
 	}
 	if ceiling.Before(deadline) {
 		ceiling = deadline
@@ -198,11 +202,14 @@ func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answ
 	answered := make(chan struct{})
 	progressed := make(chan struct{})
 	var answerOnce, progressOnce sync.Once
-	stop = func() {
+	stopResponse = func() {
 		answerOnce.Do(func() {
 			close(answered)
-			watch.answered()
 		})
+	}
+	stop = func() {
+		stopResponse()
+		watch.answered()
 	}
 	trace := &httptrace.ClientTrace{Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
 		if code == HookProgressStatus {
@@ -238,7 +245,7 @@ func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answ
 			}
 		}
 	}()
-	return watched, stop, func() { stop(); cancel(nil) }
+	return watched, stop, stopResponse, func() { stop(); cancel(nil) }
 }
 
 // gatewayNoAnswer reports a request ctx that awaitAnswerBy ended.

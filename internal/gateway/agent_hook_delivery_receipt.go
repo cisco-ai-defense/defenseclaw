@@ -15,8 +15,8 @@ import (
 
 // hookDeliveryReceipt keeps the managed hook's request open until the hook
 // commits its answer to the agent. The response is a proposal; only the
-// receipt proves which proposal the hook gave. The hook's timeout closes its
-// request and the gateway records the fail-closed result instead.
+// receipt proves which proposal the hook gave. Without a receipt the gateway
+// records only the result it can establish from the proposal and connection.
 type hookDeliveryReceipt struct {
 	reader *bufio.Reader
 	length string
@@ -91,24 +91,29 @@ const hookActionUnconfirmed = "unconfirmed"
 
 // deliveredHookDecision is the decision of a call that asked for a delivery
 // receipt: the offered answer once the hook acknowledged it, and the hook's
-// own block when it refused it. Without a receipt the hook's answer watchdog
-// won or the connection was lost: a closed hook blocked the call, and an
-// administrator-selected open outage leaves it unconfirmed.
-func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookResponse, receipt string) agentHookResponse {
+// own block when it refused it. A missing receipt after the answer was offered
+// cannot prove whether the hook emitted that answer. A hang-up observed before
+// the offer proves the hook took its fallback; a policy block remains a block
+// either way.
+func (a *APIServer) deliveredHookDecision(hungUpBeforeAnswer bool, connectorName string, resp agentHookResponse, receipt string) agentHookResponse {
 	switch receipt {
 	case hookexec.HookDeliveryReceiptAck:
 		return resp
 	case hookexec.HookDeliveryReceiptBlock:
 		return failedClosedHookDelivery(resp, "managed hook rejected the proposed answer")
 	}
-	switch {
-	case a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) == "open":
+	if a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) == "open" {
+		// An outage can allow even if the offered policy answer blocked.
 		return unconfirmedHookDelivery(resp)
-	case resp.Action == "block":
-		// The policy block and the fallback have the same result.
+	}
+	if resp.Action == "block" {
+		// The policy block and the closed fallback have the same result.
 		return resp
 	}
-	return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
+	if hungUpBeforeAnswer {
+		return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
+	}
+	return unconfirmedHookDelivery(resp)
 }
 
 // unreceiptedHookDecision is the decision of a standalone managed call that

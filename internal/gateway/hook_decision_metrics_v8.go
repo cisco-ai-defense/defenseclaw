@@ -29,16 +29,17 @@ func (a *APIServer) emitHookDecisionObservabilityV8(
 	resp agentHookResponse,
 	env HookAuditEnvelope,
 	panicked bool,
-) {
+) bool {
 	if a == nil || ctx == nil {
-		return
+		return false
 	}
 	meta, connectorName, ok := a.hookDecisionMeta(ctx, req)
 	if !ok {
-		return
+		return false
 	}
-	a.emitHookDecisionLogV8(ctx, req, resp, env, panicked, meta, connectorName)
+	persisted := a.emitHookDecisionLogV8(ctx, req, resp, env, panicked, meta, connectorName)
 	a.recordHookDecisionMetricsV8(ctx, req, resp, env, panicked, meta, connectorName)
+	return persisted
 }
 
 func (a *APIServer) emitHookDecisionLogV8(
@@ -49,15 +50,15 @@ func (a *APIServer) emitHookDecisionLogV8(
 	panicked bool,
 	meta llmEventMeta,
 	connectorName string,
-) {
+) bool {
 	emitter := a.observabilityV8RuntimeEmitter()
 	if emitter == nil {
-		return
+		return false
 	}
 	connectorName = hookDecisionMetricConnector(connectorName)
 	severity := observability.NormalizeSeverity(firstNonEmpty(resp.Severity, "NONE"))
 	if !severity.Valid || !severity.Present {
-		return
+		return false
 	}
 	// A clean or INFO decision logs at INFO. A finding severity (LOW..CRITICAL)
 	// has no log level, so the record's severity_text follows the security
@@ -91,18 +92,25 @@ func (a *APIServer) emitHookDecisionLogV8(
 		observability.ProducerKey(gatewaylog.EventHookDecision),
 	)
 	if err != nil {
-		return
+		return false
 	}
-	_, _ = emitter.Emit(ctx, metadata, func(
+	outcome, emitErr := emitter.Emit(ctx, metadata, func(
 		snapshot observabilityruntime.EmitContext,
 		admission router.Admission,
 	) (observability.Record, error) {
 		if admission != router.AdmissionOrdinary || snapshot.Generation() > math.MaxInt64 {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 		}
+		// A pending occurrence's decision record has the ID recovery checks;
+		// every other record takes the train's time-ordered IDs.
+		ids := observability.TimeOrderedOccurrenceIDs
+		if req.pendingOccurrenceID != "" {
+			id := req.pendingOccurrenceID + "-decision"
+			ids = observability.OccurrenceIDGeneratorFunc(func() (string, error) { return id, nil })
+		}
 		builder, buildErr := observability.NewFamilyBuilder(
 			observability.ClockFunc(func() time.Time { return time.Now().UTC() }),
-			observability.TimeOrderedOccurrenceIDs,
+			ids,
 		)
 		if buildErr != nil {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
@@ -191,6 +199,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 		meta.Identity.applyTo(&identityInput)
 		return builder.BuildLogCompatHookDecision(identityInput)
 	})
+	return emitErr == nil && outcome.LocalPersisted()
 }
 
 func (a *APIServer) recordHookDecisionMetricsV8(

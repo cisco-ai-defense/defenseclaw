@@ -4,12 +4,15 @@
 package hookexec
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -69,6 +72,172 @@ func TestManagedHookAcknowledgesItsCommittedAnswerOnTheSameRequest(t *testing.T)
 				}
 			})
 		}
+	}
+}
+
+// The hook has received a complete gateway answer and committed an explicit
+// allow to the agent. A slow return from its output writer must not let the
+// answer timer cancel the HTTP request before the receipt reaches the gateway.
+func TestManagedHookReceiptSurvivesAnswerDeadlineAfterAllowIsWritten(t *testing.T) {
+	const budget = 1500 * time.Millisecond
+	shortAnswerBudget(t, budget)
+	received := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		controller := http.NewResponseController(w)
+		if err := controller.EnableFullDuplex(); err != nil {
+			received <- err.Error()
+			return
+		}
+		w.Header().Set("Connection", "close")
+		w.WriteHeader(http.StatusEarlyHints)
+		length, _ := strconv.Atoi(r.Header.Get(HookDeliveryPayloadBytesHeader))
+		if _, err := io.ReadFull(r.Body, make([]byte, length)); err != nil {
+			received <- err.Error()
+			return
+		}
+		w.Header().Set(HookDeliveryRequiredHeader, "1")
+		_, _ = io.WriteString(w, `{"action":"allow","codex_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}}`+"\n")
+		if err := controller.Flush(); err != nil {
+			received <- err.Error()
+			return
+		}
+		ack := make([]byte, len(HookDeliveryReceiptAck))
+		_, err := io.ReadFull(r.Body, ack)
+		if err != nil {
+			received <- err.Error()
+			return
+		}
+		received <- string(ack)
+		_, _ = io.WriteString(w, HookDeliveryConfirmed)
+		_ = controller.Flush()
+	}))
+	defer server.Close()
+
+	output := &pauseAfterExplicitAllow{wrote: make(chan struct{}), resume: make(chan struct{})}
+	defer output.unblock()
+	home := t.TempDir()
+	token := "authenticated-generation-token"
+	var stderr bytes.Buffer
+	started := time.Now()
+	ctx := t.Context()
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			Connector:                 "codex",
+			Event:                     "PreToolUse",
+			HookContractID:            "codex-hooks-v4",
+			APIAddr:                   server.Listener.Addr().String(),
+			FailMode:                  "closed",
+			ManagedEnterprise:         true,
+			AuthenticatedManagedToken: &token,
+			Home:                      home,
+			HookDir:                   filepath.Join(home, "hooks"),
+			Stdin:                     strings.NewReader(`{"hook_event_name":"PreToolUse"}`),
+			Stdout:                    output,
+			Stderr:                    &stderr,
+			HTTPClient:                &http.Client{},
+			StartedAt:                 started,
+		})
+	}()
+	select {
+	case <-output.wrote:
+	case <-time.After(budget):
+		t.Fatal("the hook did not write the gateway's allow before its answer deadline")
+	}
+	time.Sleep(max(0, time.Until(started.Add(budget))+100*time.Millisecond))
+	output.unblock()
+	select {
+	case code := <-done:
+		if code != 0 || !strings.Contains(output.String(), `"permissionDecision":"allow"`) {
+			t.Fatalf("agent answer code=%d stdout=%q stderr=%q, want explicit allow", code, output.String(), stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the hook did not finish its receipt")
+	}
+	select {
+	case got := <-received:
+		if got != HookDeliveryReceiptAck {
+			t.Fatalf("gateway receipt = %q, want %q after the agent accepted allow", got, HookDeliveryReceiptAck)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the gateway did not receive the hook's receipt")
+	}
+}
+
+type pauseAfterExplicitAllow struct {
+	bytes.Buffer
+	wrote  chan struct{}
+	resume chan struct{}
+	once   sync.Once
+}
+
+func (w *pauseAfterExplicitAllow) Write(p []byte) (int, error) {
+	n, err := w.Buffer.Write(p)
+	if bytes.Contains(p, []byte(`"permissionDecision":"allow"`)) {
+		w.once.Do(func() { close(w.wrote) })
+		<-w.resume
+	}
+	return n, err
+}
+
+func (w *pauseAfterExplicitAllow) unblock() {
+	select {
+	case <-w.resume:
+	default:
+		close(w.resume)
+	}
+}
+
+// A gateway that receives the receipt but never finishes the HTTP response
+// cannot hold the agent's hook to the longer request timeout.
+func TestManagedHookReceiptWaitHasItsOwnDeadline(t *testing.T) {
+	shortAnswerBudget(t, 500*time.Millisecond)
+	release := make(chan struct{})
+	received := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		controller := http.NewResponseController(w)
+		if err := controller.EnableFullDuplex(); err != nil {
+			received <- err.Error()
+			return
+		}
+		w.Header().Set("Connection", "close")
+		w.WriteHeader(http.StatusEarlyHints)
+		length, _ := strconv.Atoi(r.Header.Get(HookDeliveryPayloadBytesHeader))
+		if _, err := io.ReadFull(r.Body, make([]byte, length)); err != nil {
+			received <- err.Error()
+			return
+		}
+		w.Header().Set(HookDeliveryRequiredHeader, "1")
+		_, _ = io.WriteString(w, `{"action":"allow","codex_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}}`+"\n")
+		if err := controller.Flush(); err != nil {
+			received <- err.Error()
+			return
+		}
+		ack := make([]byte, len(HookDeliveryReceiptAck))
+		_, err := io.ReadFull(r.Body, ack)
+		if err != nil {
+			received <- err.Error()
+			return
+		}
+		received <- string(ack)
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+	result, elapsed := runAgainstGateway(t, "codex", server.Listener.Addr().String(), managedCodex)
+	if result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"allow"`) {
+		t.Fatalf("agent answer code=%d stdout=%q stderr=%q, want allow", result.code, result.stdout, result.stderr)
+	}
+	select {
+	case got := <-received:
+		if got != HookDeliveryReceiptAck {
+			t.Fatalf("gateway receipt = %q, want %q", got, HookDeliveryReceiptAck)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("gateway did not receive the hook receipt")
+	}
+	if elapsed > 4*time.Second {
+		t.Fatalf("hook waited %s for a missing receipt confirmation, want the separate %s deadline", elapsed, hookDeliveryReceiptTimeout)
 	}
 }
 

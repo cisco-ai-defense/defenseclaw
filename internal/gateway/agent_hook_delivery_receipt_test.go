@@ -8,9 +8,12 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,13 +25,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
 type managedHookAuditFixture struct {
-	api    *APIServer
-	server *httptest.Server
-	path   string
-	store  *audit.Store
+	api     *APIServer
+	server  *httptest.Server
+	path    string
+	store   *audit.Store
+	runtime sidecarRuntimeEmitter
 }
 
 // newManagedHookAuditFixture serves the claudecode hook of a standalone
@@ -46,6 +52,7 @@ func newManagedHookAuditFixture(t *testing.T, wrap func(http.ResponseWriter) htt
 	logger := audit.NewLogger(fixture.store)
 	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints})
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
+	cfg.DataDir = filepath.Dir(fixture.path)
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
@@ -59,7 +66,159 @@ func newManagedHookAuditFixture(t *testing.T, wrap func(http.ResponseWriter) htt
 		hook.ServeHTTP(rw, r)
 	}), apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes))
 	t.Cleanup(server.Close)
-	return managedHookAuditFixture{api: api, server: server, path: fixture.path, store: fixture.store}
+	return managedHookAuditFixture{api: api, server: server, path: fixture.path, store: fixture.store, runtime: fixture.runtime}
+}
+
+// Stop the handler after it has confirmed the hook's receipt, exactly where
+// an abrupt gateway exit used to lose both terminal records.
+type exitAfterHookConfirmationWriter struct{ *httptest.ResponseRecorder }
+
+func (w *exitAfterHookConfirmationWriter) EnableFullDuplex() error         { return nil }
+func (w *exitAfterHookConfirmationWriter) SetReadDeadline(time.Time) error { return nil }
+func (w *exitAfterHookConfirmationWriter) Flush() {
+	w.ResponseRecorder.Flush()
+	if strings.Contains(w.Body.String(), hookexec.HookDeliveryConfirmed) {
+		runtime.Goexit()
+	}
+}
+
+type recordFullDuplexStatusWriter struct {
+	*httptest.ResponseRecorder
+	finalStatus int
+}
+
+type pendingHookRejectBindings struct{}
+
+func (pendingHookRejectBindings) Match(string) (sandboxauth.Binding, error) {
+	return sandboxauth.Binding{}, sandboxauth.ErrUnauthenticated
+}
+
+func (w *recordFullDuplexStatusWriter) EnableFullDuplex() error         { return nil }
+func (w *recordFullDuplexStatusWriter) SetReadDeadline(time.Time) error { return nil }
+func (w *recordFullDuplexStatusWriter) WriteHeader(status int) {
+	if status >= http.StatusOK {
+		w.finalStatus = status
+	}
+	w.ResponseRecorder.WriteHeader(status)
+}
+
+func TestManagedHookConfirmedAnswerSurvivesGatewayExitBeforeFinalization(t *testing.T) {
+	f := newManagedHookAuditFixture(t, nil)
+	const session = "confirmed-before-exit"
+	body := managedHookBody(session, "PreToolUse")
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook",
+		strings.NewReader(body+hookexec.HookDeliveryReceiptAck))
+	request.Header.Set(hookexec.HookDeliveryReceiptHeader, "1")
+	request.Header.Set(hookexec.HookDeliveryPayloadBytesHeader, strconv.Itoa(len(body)))
+	request.Header.Set("Content-Type", "application/json")
+	reply := &exitAfterHookConfirmationWriter{ResponseRecorder: httptest.NewRecorder()}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.api.handleAgentHook("claudecode").ServeHTTP(reply, request)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("gateway did not confirm the receipt")
+	}
+	if !strings.Contains(reply.Body.String(), hookexec.HookDeliveryConfirmed) {
+		t.Fatalf("gateway response = %q, want receipt confirmation", reply.Body.String())
+	}
+	if got := f.audited(t, session)[session]; got != "" {
+		t.Fatalf("audit before recovery = %q, want no finalized row", got)
+	}
+	dir := filepath.Join(f.api.scannerCfg.DataDir, "pending-hook-decisions")
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("pending occurrences before recovery = %v (%v), want one", entries, err)
+	}
+	pendingPath := filepath.Join(dir, entries[0].Name())
+	pendingBytes, err := os.ReadFile(pendingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".safefile-interrupted-write"), []byte("unpublished"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The sandbox ingress can start before the main API. It must recover
+	// before it accepts a hook on its own listener.
+	restarted := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, f.store, f.api.logger, f.api.scannerCfg)
+	bindHookLifecycleV8(t, restarted, f.runtime)
+	if err := restarted.SetSandboxIngress(SandboxIngressConfig{
+		Addr: "127.0.0.1:18971", Bindings: pendingHookRejectBindings{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- restarted.RunSandboxIngressOn(ctx, listener) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for f.audited(t, session)[session] == "" && time.Now().Before(deadline) {
+		select {
+		case err := <-runDone:
+			t.Fatalf("restarted gateway stopped before recovery: %v", err)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	cancel()
+	<-runDone
+	if got := f.audited(t, session)[session]; got != "unconfirmed/no_answer" {
+		t.Fatalf("audit after recovery = %q, want unconfirmed/no_answer", got)
+	}
+	if got := f.decisions(t); strings.Join(got, ",") != "unconfirmed/ok" {
+		t.Fatalf("hook_decision after recovery = %v, want [unconfirmed/ok]", got)
+	}
+	// A crash after finalization but before pending-file cleanup must not
+	// produce a second row for this occurrence on the next restart.
+	if err := safefile.WritePrivate(pendingPath, pendingBytes); err != nil {
+		t.Fatal(err)
+	}
+	// The main API startup must also finish a replay without duplicating a
+	// terminal row if the prior process audited and then died during cleanup.
+	replayed := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, f.store, f.api.logger, f.api.scannerCfg)
+	bindHookLifecycleV8(t, replayed, f.runtime)
+	replayCtx, stopReplay := context.WithCancel(t.Context())
+	defer stopReplay()
+	replayDone := make(chan error, 1)
+	go func() { replayDone <- replayed.Run(replayCtx) }()
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(pendingPath); os.IsNotExist(err) {
+			break
+		}
+		select {
+		case err := <-replayDone:
+			t.Fatalf("replayed gateway stopped before cleanup: %v", err)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	stopReplay()
+	<-replayDone
+	if _, err := os.Stat(pendingPath); !os.IsNotExist(err) {
+		t.Fatalf("pending occurrence after replay: %v, want removed", err)
+	}
+	if got := f.decisions(t); strings.Join(got, ",") != "unconfirmed/ok" {
+		t.Fatalf("hook_decision records after replay = %v, want one", got)
+	}
+	rows, err := f.store.ListEvents(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, row := range rows {
+		if row.Action == string(audit.ActionConnectorHook) && row.SessionID == session {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("connector audit rows after replay = %d, want one", count)
+	}
 }
 
 // audited returns the audited action of each session's hook call.
@@ -117,9 +276,9 @@ func managedHookBody(session, event string) string {
 	return `{"hook_event_name":"PreToolUse","session_id":"` + session + `","cwd":"/tmp","tool_name":"Bash","tool_use_id":"` + session + `-tool","tool_input":{"command":"echo ok"}}`
 }
 
-// GAP-0286: a managed hook can receive a proposed allow, then have its
-// answer watchdog block before it gives the answer to the agent. Audit and
-// hook_decision record the decision the agent was given, never the proposal.
+// GAP-0286: a managed hook can receive a proposed allow, then give no receipt.
+// Audit and hook_decision record a known block or an unconfirmed result, never
+// an allow the gateway cannot prove the hook gave to the agent.
 func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 	f := newManagedHookAuditFixture(t, nil)
 	call := func(session, receipt string) {
@@ -197,7 +356,7 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 
 	sessions := []string{"timeout", "delivered", "rejected", "disconnected", "legacy-no-receipt", "prompt", "open-timeout"}
 	want := map[string]string{
-		"timeout":           "block/no_answer",
+		"timeout":           "unconfirmed/no_answer",
 		"delivered":         "allow",
 		"rejected":          "block/rejected",
 		"disconnected":      "block/no_answer",
@@ -213,9 +372,32 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 	}
 	// Every call has its hook_decision, an unconfirmed one included: the
 	// hook result stays a technical ok (schema enum ok|panic).
-	wantDecisions := []string{"allow/ok", "allow/ok", "block/ok", "block/ok", "block/ok", "unconfirmed/ok", "unconfirmed/ok"}
+	wantDecisions := []string{"allow/ok", "allow/ok", "block/ok", "block/ok", "unconfirmed/ok", "unconfirmed/ok", "unconfirmed/ok"}
 	if got := f.decisions(t); strings.Join(got, ",") != strings.Join(wantDecisions, ",") {
 		t.Errorf("hook_decision records = %v, want %v", got, wantDecisions)
+	}
+	// If the pending audit cannot be made durable, the gateway never offers
+	// the evaluated allow. The closed hook gets an outage response.
+	blockedDir := filepath.Join(f.api.scannerCfg.DataDir, "not-a-directory")
+	if err := os.WriteFile(blockedDir, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.api.scannerCfg.Guardrail.HookFailMode = "closed"
+	f.api.scannerCfg.DataDir = blockedDir
+	const pendingFailureSession = "pending-write-failed"
+	body := managedHookBody(pendingFailureSession, "PreToolUse")
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook",
+		strings.NewReader(body+hookexec.HookDeliveryReceiptAck))
+	request.Header.Set(hookexec.HookDeliveryReceiptHeader, "1")
+	request.Header.Set(hookexec.HookDeliveryPayloadBytesHeader, strconv.Itoa(len(body)))
+	request.Header.Set("Content-Type", "application/json")
+	reply := &recordFullDuplexStatusWriter{ResponseRecorder: httptest.NewRecorder()}
+	f.api.handleAgentHook("claudecode").ServeHTTP(reply, request)
+	if reply.finalStatus != http.StatusServiceUnavailable || strings.Contains(reply.Body.String(), `"action":"allow"`) {
+		t.Fatalf("offered response = status %d body %q, want no answer", reply.finalStatus, reply.Body.String())
+	}
+	if got := f.audited(t, pendingFailureSession)[pendingFailureSession]; got != "block/no_answer" {
+		t.Fatalf("audited outage = %q, want block/no_answer", got)
 	}
 }
 
@@ -260,8 +442,9 @@ func (w *cancelOnHookAnswerFlushWriter) Flush() {
 }
 
 // The real managed hook and the real gateway: an answer given in time is
-// confirmed and audited as given, and an allow the gateway sends after the
-// hook's answer budget is audited as the block the agent got.
+// confirmed and audited as given. A late answer is blocked by the hook; the
+// gateway has no receipt proving whether that proposal reached the hook, so
+// it records an unconfirmed result rather than the proposed allow.
 func TestManagedHookAndGatewayAuditTheAnswerTheAgentGot(t *testing.T) {
 	var late atomic.Bool
 	f := newManagedHookAuditFixture(t, func(w http.ResponseWriter) http.ResponseWriter {
@@ -296,7 +479,7 @@ func TestManagedHookAndGatewayAuditTheAnswerTheAgentGot(t *testing.T) {
 	if code, out := run("hook-late"); code == 0 && !strings.Contains(out, "deny") {
 		t.Fatalf("late answer was taken: code=%d output=%q", code, out)
 	}
-	want := map[string]string{"hook-in-time": "allow", "hook-late": "block/no_answer"}
+	want := map[string]string{"hook-in-time": "allow", "hook-late": "unconfirmed/no_answer"}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		got := f.audited(t, "hook-in-time", "hook-late")
@@ -419,5 +602,42 @@ func TestUnreceiptedManagedHookDecisions(t *testing.T) {
 	secureClient := &APIServer{scannerCfg: &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "secure_client"}}}
 	if got := secureClient.unreceiptedHookDecision(true, "codex", "PreToolUse", allow).Action; got != "allow" {
 		t.Errorf("Secure Client = %q, want its response contract unchanged", got)
+	}
+}
+
+func TestManagedHookMissingReceiptRecordsOnlyKnownEnforcement(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
+	api := &APIServer{scannerCfg: cfg}
+	allow := agentHookResponse{Action: "allow"}
+	block := agentHookResponse{Action: "block", Reason: "policy"}
+	for _, tc := range []struct {
+		name    string
+		mode    string
+		hungUp  bool
+		offered agentHookResponse
+		receipt string
+		want    string
+	}{
+		{name: "allow without receipt", offered: allow, want: "unconfirmed"},
+		{name: "pre-answer hang-up", hungUp: true, offered: allow, want: "block"},
+		{name: "policy block without receipt", offered: block, want: "block"},
+		{name: "open outage cannot confirm policy block", mode: "open", offered: block, want: "unconfirmed"},
+		{name: "open outage before answer", mode: "open", hungUp: true, offered: allow, want: "unconfirmed"},
+		{name: "acknowledged allow", offered: allow, receipt: hookexec.HookDeliveryReceiptAck, want: "allow"},
+		{name: "hook rejected allow", offered: allow, receipt: hookexec.HookDeliveryReceiptBlock, want: "block"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg.Guardrail.HookFailMode = tc.mode
+			got := api.deliveredHookDecision(tc.hungUp, "codex", tc.offered, tc.receipt)
+			if got.Action != tc.want {
+				t.Fatalf("audited action = %q, want %q", got.Action, tc.want)
+			}
+			if tc.want == "unconfirmed" && (got.RawAction != tc.offered.Action || got.Reason != hookexec.ManagedGatewayNoAnswerReason) {
+				t.Fatalf("unconfirmed answer = %+v, want raw %s and no-answer reason", got, tc.offered.Action)
+			}
+			if tc.offered.Action == "block" && tc.want == "block" && got.Reason != "policy" {
+				t.Fatalf("policy block reason = %q, want policy", got.Reason)
+			}
+		})
 	}
 }

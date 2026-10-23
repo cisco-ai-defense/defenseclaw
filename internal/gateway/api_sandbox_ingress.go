@@ -416,6 +416,10 @@ func (a *APIServer) RunSandboxIngressOn(ctx context.Context, ln net.Listener) er
 		_ = ln.Close()
 		return errors.New("sandbox ingress is not configured")
 	}
+	if err := a.ensurePendingHookRecovery(ctx); err != nil {
+		_ = ln.Close()
+		return fmt.Errorf("sandbox ingress: recover pending hook decisions: %w", err)
+	}
 	handler, err := a.SandboxIngressHandler()
 	if err != nil {
 		_ = ln.Close()

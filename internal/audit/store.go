@@ -2116,6 +2116,21 @@ func (s *Store) DatabasePath() string {
 	return s.dbPath
 }
 
+// HasAuditEventID reports whether a durable event-history row already owns id.
+// Spool replay uses this before re-offering an occurrence after a crash.
+func (s *Store) HasAuditEventID(ctx context.Context, id string) (bool, error) {
+	if s == nil || !s.Ready() || id == "" {
+		return false, errors.New("audit: event lookup requires a ready store and id")
+	}
+	var one int
+	err := s.scanRow(ctx, "audit", s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM audit_events WHERE id = ?`, id), &one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return one == 1, err
+}
+
 // DatabaseFileReplaced reports whether the database path no longer names
 // the file this store opened: it was deleted or replaced while the gateway
 // ran. SQLite keeps writing to the open, unlinked file, so every new audit
