@@ -878,6 +878,17 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("held by PID 4343 (python3), not by this account's gateway", result.checks[0]["detail"])
         self.assertEqual(result.gateway_down, "foreign")
 
+        # A probe refused to connect can still be caused by a port held by
+        # another account; the holder is stronger evidence than probe text.
+        result = _DoctorResult()
+        with (
+            patch.object(cmd_doctor, "_http_probe", return_value=(0, "connection refused")),
+            patch.object(cmd_doctor, "_foreign_gateway_port_holder", return_value="PID 4343 (python3)"),
+        ):
+            _check_sidecar(self._sidecar_alignment_cfg(), result)
+        self.assertIn("held by PID 4343 (python3)", result.checks[0]["detail"])
+        self.assertEqual(result.gateway_down, "foreign")
+
     def test_foreign_port_fix_does_not_ask_to_stop_another_accounts_process(self):
         # GAP-1706: the same command form as defenseclaw-gateway status/start,
         # and another account's process is not this account's to stop.

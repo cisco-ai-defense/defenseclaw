@@ -1068,6 +1068,20 @@ class TestStatusJson(unittest.TestCase):
             self.assertIn("state is unconfirmed", uncertain_text.output)
             self.assertNotIn("not running; start it", uncertain_text.output)
 
+    def test_json_sidecar_names_foreign_port_holder_without_claiming_gateway_stopped(self):
+        with (
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch.object(cmd_status, "_live_gateway_pid", return_value=0),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value="PID 4343 (python3)"),
+        ):
+            result = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        sidecar = json.loads(result.output)["sidecar"]
+        self.assertIsNone(sidecar["running"])
+        self.assertIn("port", sidecar["reason"])
+        self.assertIn("PID 4343 (python3)", sidecar["reason"])
+
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))
         result = self._invoke_json()

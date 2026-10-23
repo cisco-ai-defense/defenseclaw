@@ -258,6 +258,9 @@ func TestLifecycleGuardHonorsThePinOnlyForTheServiceAccount(t *testing.T) {
 	if err := refuseGatewayLifecycleOnManagedHost(); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
 		t.Fatalf("standard user with a hand-set pin = %v, want the managed-host refusal", err)
 	}
+	if err := watchdogCmd.PersistentPreRunE(watchdogCmd, nil); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
+		t.Fatalf("per-user watchdog on a managed host = %v, want the managed-host refusal", err)
+	}
 	withManagedHostCallerUID(t, 0)
 	if err := refuseGatewayLifecycleOnManagedHost(); err == nil || !strings.Contains(err.Error(), "restart it with") {
 		t.Fatalf("administrator with a hand-set pin = %v, want the administrator refusal", err)

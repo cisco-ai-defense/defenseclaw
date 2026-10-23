@@ -46,7 +46,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -1919,25 +1918,6 @@ const managedShutdownRefusal = "this gateway is managed by the computer's admini
 // standalone computer that takes its policy from signed bundles.
 const managedBundlePolicyReloadRefusal = "this computer takes its policy from signed policy bundles; deliver a new signed bundle instead of reloading the policy over the API"
 
-// bundleAnchorsPath is where a standalone managed computer keeps the bundle
-// trust anchors (tests replace it).
-var bundleAnchorsPath = func() (string, error) { return enterprisebundle.AnchorsPath(runtime.GOOS) }
-
-// signedBundleMode reports whether a managed standalone computer takes its
-// policy from signed bundles: its trust anchors are installed. An anchors
-// path the gateway cannot check counts as installed.
-func signedBundleMode(cfg *config.Config) bool {
-	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return false
-	}
-	path, err := bundleAnchorsPath()
-	if err != nil {
-		return true
-	}
-	_, err = os.Lstat(path)
-	return err == nil || !errors.Is(err, fs.ErrNotExist)
-}
-
 func sameRuntimeDataDir(left, right string) bool {
 	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
 		return false
@@ -2403,6 +2383,11 @@ func (a *APIServer) handleScanResult(w http.ResponseWriter, r *http.Request) {
 
 	var result scanner.ScanResult
 	if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			a.writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
@@ -3245,7 +3230,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /v1/mcp/scan — run MCP scanner on a target (URL or local path)
+// POST /v1/mcp/scan — run MCP scanner on a URL or configured server name
 // ---------------------------------------------------------------------------
 
 type mcpScanRequest struct {
@@ -3268,9 +3253,10 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if (filepath.IsAbs(req.Target) || strings.ContainsAny(req.Target, `/\`) ||
-		strings.HasSuffix(strings.ToLower(req.Target), ".json")) &&
-		!strings.Contains(req.Target, "://") && a.rejectWindowsGatewayPath(w, req.Target) {
+	if mcpScanLocalPathTarget(req.Target) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "local path MCP scan targets are not supported; use a configured MCP server name or its URL",
+		})
 		return
 	}
 
@@ -3310,6 +3296,26 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "mcp", scanAPIResponseEnvelope(result)))
+}
+
+func mcpScanLocalPathTarget(target string) bool {
+	lower := strings.ToLower(target)
+	if strings.HasPrefix(lower, "file:") {
+		return true
+	}
+	for _, scheme := range []string{"http://", "https://", "ws://", "wss://", "sse://"} {
+		if strings.HasPrefix(lower, scheme) {
+			return false
+		}
+	}
+	// A drive-relative path has no slash, and filepath cannot recognize it
+	// when a Linux gateway validates a Windows target.
+	if len(target) >= 2 && target[1] == ':' &&
+		(target[0] >= 'a' && target[0] <= 'z' || target[0] >= 'A' && target[0] <= 'Z') {
+		return true
+	}
+	return target == "." || target == ".." || filepath.IsAbs(target) || strings.ContainsAny(target, `/\`) ||
+		strings.HasSuffix(lower, ".json") || strings.HasPrefix(target, "~")
 }
 
 // ---------------------------------------------------------------------------
@@ -4536,7 +4542,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	}
 	// With signed bundles, a policy becomes active only through a verified
 	// bundle apply, which the lifecycle confirms against the running gateway.
-	if signedBundleMode(a.runtimeConfigSnapshot()) {
+	if cfg := a.runtimeConfigSnapshot(); policyCfg.StandaloneEnterprise() || cfg != nil && cfg.StandaloneEnterprise() {
 		recordFailure(managedBundlePolicyReloadRefusal)
 		a.writeJSON(w, http.StatusForbidden, map[string]string{
 			"error":  managedBundlePolicyReloadRefusal,

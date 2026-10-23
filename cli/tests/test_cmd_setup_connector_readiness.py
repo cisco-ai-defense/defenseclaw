@@ -1260,6 +1260,17 @@ class TestUnconvergeablePeersAreSkipped:
         assert tolerated == frozenset({"devin"})
         assert "skipping devin" in capsys.readouterr().out
 
+    def test_removed_peer_is_skipped_without_rerun_advice(self, tmp_path: Path, capsys) -> None:
+        lock = self._lock(tmp_path, {"omnigent": self._ungated_entry("omnigent")})
+        keep, tolerated = cmd_setup._partition_unconvergeable_peers(
+            lock, {"codex", "omnigent"}, required={"codex"}
+        )
+        output = capsys.readouterr().out
+        assert keep == {"codex"} and tolerated == frozenset({"omnigent"})
+        assert "removed in DefenseClaw 1.0.4" in output
+        assert "guardrail disable --connector omnigent" not in output
+        assert "Re-run setup for omnigent" not in output
+
     def test_the_setup_target_is_never_skipped(self, tmp_path: Path) -> None:
         # If the connector being configured cannot converge, that is a real
         # failure. Skipping it would report success for an unenforced agent.

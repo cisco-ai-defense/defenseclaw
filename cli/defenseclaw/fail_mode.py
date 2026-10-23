@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -1651,6 +1652,15 @@ def reconcile_connector_registration(cfg: Any, connector: str) -> ConnectorFailM
         detail = (result.stderr or result.stdout or "connector reconcile failed").splitlines()[0]
         raise OSError(detail[:240])
     state = resolve_connector_fail_mode(cfg, name)
+    if _is_windows() and name == "codex":
+        # A Codex app-server can briefly hold a just-reconciled registration
+        # file. Retry only that read refusal; every attempt still validates
+        # the complete live registration before reporting success.
+        for _ in range(2):
+            if state.current or "registration-access-denied" not in state.drift:
+                break
+            time.sleep(0.15)
+            state = resolve_connector_fail_mode(cfg, name)
     if not state.current:
         raise OSError(f"connector runtime verification failed for {state.connector}: " + ", ".join(state.drift))
     return state

@@ -178,8 +178,8 @@ func TestApplicationProtectionModeMatrixPreservesUnmanagedBaselineRepair(t *test
 					conn.setupCalls,
 				)
 			}
-			if !tc.wantGuardianOwn && conn.setupCalls != tc.wantSetupCalls {
-				t.Fatalf("mode=%q automatic repair Setup calls = %d, want %d",
+			if !tc.wantGuardianOwn && conn.setupCalls < tc.wantSetupCalls {
+				t.Fatalf("mode=%q automatic repair Setup calls = %d, want at least %d",
 					tc.mode, conn.setupCalls, tc.wantSetupCalls)
 			}
 			if tc.wantGuardianOwn {

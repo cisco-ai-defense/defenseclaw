@@ -36,6 +36,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import yaml from 'js-yaml';
 
 import {
@@ -54,6 +56,7 @@ import { highlightJsonToHtml, tokenizeJson } from '../components/policy-creator/
 import { filterIndex } from '../components/policy-creator/playground/cmdk-filter.js';
 import { policyFromPreset } from '../components/policy-creator/lib/presets.js';
 import { lintRegex, testRegex, validatePolicy } from '../components/policy-creator/lib/validators.js';
+import { Playground } from '../components/policy-creator/playground.js';
 import {
   ALLOW_CARDS,
   BLOCK_CARDS,
@@ -69,6 +72,20 @@ import {
   YARA_RULES,
 } from '../components/policy-creator/deterministic-coverage-catalog.js';
 import type { CorrelationPattern, Policy, UseCasePacksFile } from '../components/policy-creator/types.js';
+
+test('Playground expands every finding, including warnings after informational rows', () => {
+  const policy = policyFromPreset('default');
+  policy.suppressions.pre_judge_strips.push({
+    id: 'blanket',
+    pattern: '.*',
+    context: '',
+    applies_to: ['pii'],
+  });
+  const findings = validatePolicy(policy);
+  assert.ok(findings.findIndex((finding) => finding.code === 'SUPP_OVER_BROAD') >= 6);
+  const html = renderToStaticMarkup(createElement(Playground, { policy, onPolicyChange: () => {} }));
+  assert.ok(html.includes('Pre-judge strip &quot;blanket&quot; matches every input'));
+});
 
 // ── fixtures ────────────────────────────────────────────────────────
 

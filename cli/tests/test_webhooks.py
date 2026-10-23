@@ -358,6 +358,45 @@ class SSRFValidationTests(unittest.TestCase):
     def test_accepts_public_https(self):
         validate_webhook_url("https://hooks.slack.com/services/X/Y/Z")
 
+    def test_rejects_nonnumeric_and_out_of_range_url_ports_before_write(self):
+        from defenseclaw.webhooks.writer import redact_webhook_url
+
+        for bad in ("https://example.com:bad/private", "https://example.com:65536/private"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "[Pp]ort"):
+                validate_webhook_url(bad)
+            with tempfile.TemporaryDirectory() as td:
+                _write_cfg(td)
+                with open(os.path.join(td, "config.yaml"), "rb") as handle:
+                    before = handle.read()
+                with self.assertRaisesRegex(ValueError, "[Pp]ort"):
+                    apply_webhook(data_dir=td, name="badport", type_="generic", url=bad, enabled=False)
+                with open(os.path.join(td, "config.yaml"), "rb") as handle:
+                    self.assertEqual(handle.read(), before)
+            # A pre-upgrade config may already contain an invalid value. All
+            # list/show/config views share this helper and must redact safely.
+            self.assertEqual(redact_webhook_url(bad), "***")
+        self.assertEqual(redact_webhook_url("https://user:secret@host.example:bad/private?token=abc"), "***")
+
+        from types import SimpleNamespace
+
+        from click.testing import CliRunner
+        from defenseclaw.commands.cmd_setup_webhook import webhook
+        from defenseclaw.context import AppContext
+
+        with tempfile.TemporaryDirectory() as td:
+            _write_cfg(td, webhooks=[{
+                "name": "badport", "type": "generic", "enabled": False,
+                "url": "https://user:secret@host.example:bad/private?token=abc",
+            }])
+            app = AppContext()
+            app.cfg = SimpleNamespace(data_dir=td)
+            for args in (["list"], ["list", "--json"], ["show", "badport", "--json"]):
+                result = CliRunner().invoke(webhook, args, obj=app)
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn("badport", result.output)
+                self.assertNotIn("user:secret", result.output)
+                self.assertNotIn("/private", result.output)
+
     def test_rejects_empty(self):
         with self.assertRaises(ValueError):
             validate_webhook_url("")

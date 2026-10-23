@@ -18787,6 +18787,7 @@ def _disable_splunk(
 
     native_controller = None
     native_was_running = False
+    native_absent_without_docker = False
     native_s3_export = False
     native_s3_overrides: dict[str, str] = {}
     failed_hec_disable: list[str] = []
@@ -18824,7 +18825,7 @@ def _disable_splunk(
         # Prove Docker, assets, volumes, ports, and exact Compose ownership
         # before either configuration or runtime changes.
         from defenseclaw.observability.local_splunk import prepare_native_local_splunk_stop
-        from defenseclaw.observability.local_stack import LocalStackError
+        from defenseclaw.observability.local_stack import LocalStackError, resolve_native_docker_executable
 
         try:
             native_controller, native_was_running = prepare_native_local_splunk_stop(
@@ -18834,7 +18835,27 @@ def _disable_splunk(
             if native_controller is not None and native_was_running:
                 native_s3_export, native_s3_overrides = native_controller.s3_runtime_state()
         except LocalStackError as exc:
-            raise click.ClickException(f"could not validate owned Local Splunk stack: {exc}") from exc
+            # An older config can still name the local HEC sink on a Windows
+            # host that never had Docker. With no managed assets and neither
+            # published port listening, there is no local stack to stop; the
+            # sink can be disabled without requiring Docker just to prove a
+            # negative. Keep the full ownership preflight for every other
+            # case, including a missing CLI with assets or listeners present.
+            try:
+                docker_missing = (
+                    "Docker CLI was not found on PATH" in str(exc)
+                    and not resolve_native_docker_executable(os_name="windows")
+                )
+            except LocalStackError as resolve_exc:
+                raise click.ClickException(
+                    f"could not validate owned Local Splunk stack: {resolve_exc}"
+                ) from resolve_exc
+            if docker_missing and not os.path.lexists(managed_assets_path) and not any(
+                _port_in_use(port) for port in (8000, 8088)
+            ):
+                native_absent_without_docker = True
+            else:
+                raise click.ClickException(f"could not validate owned Local Splunk stack: {exc}") from exc
         config_snapshot = _snapshot_regular_file(config_path, what="DefenseClaw config")
 
     try:
@@ -18900,6 +18921,8 @@ def _disable_splunk(
         if native_disable:
             if native_controller is not None and native_was_running and not failed_hec_disable:
                 native_controller.down()
+            elif native_absent_without_docker:
+                click.echo("    Local Splunk stack was not running (Docker absent; no managed assets or listeners)")
         elif (
             (disable_both or logs_only)
             and manage_local

@@ -94,13 +94,30 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 	<-written
 	reloaded := make(chan error, 1)
 	go func() { reloaded <- mgr.ReloadAssets(context.Background(), "api:policy_reload") }()
-	<-applied
+	select {
+	case err := <-reloaded:
+		if err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+			t.Fatalf("reload before the bundle generation receipt = %v; want signed-bundle refusal", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("reload while the bundle writer is paused did not refuse")
+	}
+	select {
+	case <-applied:
+		t.Fatal("unreceipted bundle bytes became active")
+	default:
+	}
 	close(release)
 	if err := <-writer; err != nil {
 		t.Fatal(err)
 	}
-	if err := <-reloaded; err != nil {
+	if err := mgr.ReloadAssets(context.Background(), "signed bundle generation ready"); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case <-applied:
+	default:
+		t.Fatal("receipted bundle bytes were not applied")
 	}
 	if current := mgr.Current(); current.Guardrail.BlockAt != "MEDIUM" || mgr.gen.Load() != 1 {
 		t.Fatalf("synchronous policy reload = generation %d, block_at %q", mgr.gen.Load(), current.Guardrail.BlockAt)
@@ -183,8 +200,9 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(3, assetID, false, configDiffAssets)
-	if err := mgr.ReloadAssets(context.Background(), "bundle asset changed"); err != nil {
-		t.Fatal(err)
+	if err := mgr.ReloadAssets(context.Background(), "asset event after the bundle was applied"); err == nil ||
+		!strings.Contains(err.Error(), "signed policy bundle") {
+		t.Fatalf("unsigned asset reload after the bundle was applied = %v; want signed-bundle refusal", err)
 	}
 	check(3, assetID, false, configDiffAssets)
 	if err := logger.LogPolicyBundleReceipt("operator:manual-r3", audit.PolicyBundle{ID: hotID, Version: 2},
