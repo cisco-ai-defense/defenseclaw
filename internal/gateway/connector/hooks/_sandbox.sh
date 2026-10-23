@@ -288,13 +288,19 @@ defenseclaw_sandbox_post() {
 # the hook. The receipt ID is an opaque UUID, never shell syntax or a path.
 defenseclaw_sandbox_confirm_receipt() {
   local path="$1" result="$2" receipt="" body="" reply="" code="" received=""
-  shift 2
+  # Use the same baked sandbox binding token as the first request. The post
+  # helper moves this header into curl's descriptor-backed config, keeping
+  # the bearer off every external process command line.
+  case "${DEFENSECLAW_SANDBOX_TOKEN:-}" in
+    ''|*$'\n'*|*$'\r'*) return 1 ;;
+  esac
   receipt="$(printf '%s' "$result" | _dc_jq -r '.delivery_receipt // empty' 2>/dev/null)" || return 1
   [ -n "$receipt" ] || return 0
   [[ "$receipt" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 1
   body="$(printf '{"delivery_receipt":"%s","result":"ack"}' "$receipt")"
   reply="$(defenseclaw_sandbox_post "$path" "$body" 3 3 \
-    -H "Content-Type: application/json" "$@")" || return 1
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${DEFENSECLAW_SANDBOX_TOKEN}")" || return 1
   code="${reply##*$'\n'}"
   [ "$code" = 200 ] || return 1
   received="$(printf '%s' "${reply%$'\n'*}" | _dc_jq -r '.received // false' 2>/dev/null)" || return 1
