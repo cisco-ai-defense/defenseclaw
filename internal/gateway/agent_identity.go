@@ -168,8 +168,10 @@ func agentIdentityAccountDomains(userID string) string {
 // as. A current Windows guardian record wins before profile lookup refreshes
 // the gateway cache. Otherwise only current cached directory facts may name
 // it. A kept UPN (the last good answer profile matching keeps through an
-// outage, GAP-0129 and GAP-0284) is not current, so the row leaves it out.
-// known is false when no current answer or directory UPN is available.
+// outage, GAP-0129 and GAP-0284) is not current, so the row leaves it out;
+// a managed Unix uid's current guardian record decides that mark
+// (unixSpoolUPNState). known is false when no current answer or directory
+// UPN is available.
 // This never looks the account up, so the hook path does not wait for it.
 func agentIdentityAccountUPN(userID string) (upn string, known bool) {
 	userID = agentidentity.NormalizeUserID(userID)
@@ -194,6 +196,13 @@ func agentIdentityAccountUPN(userID string) (upn string, known bool) {
 	if !ok {
 		return "", false
 	}
+	if !agentidentity.IsSID(userID) && facts.GuardianRecord && currentIdentitySpoolDir() != "" {
+		kept, current := unixSpoolUPNState(userID, facts, time.Now())
+		if !current {
+			return "", false
+		}
+		facts.UPNKept = kept
+	}
 	if facts.UPNKept {
 		return "", false
 	}
@@ -205,6 +214,30 @@ func agentIdentityAccountUPN(userID string) (upn string, known bool) {
 		return "", false
 	}
 	return upn, upn != "" || facts.Directory == useridentity.DirectoryLocal || facts.GuardianRecord
+}
+
+// unixSpoolUPNState checks a managed Linux or macOS uid's cached facts,
+// which merged the guardian's record as it was when they were resolved,
+// against the guardian's record now. The policy cache acts only on a record
+// that contradicts or adds to the facts (forgetOnSpoolChange), so a later
+// pass that marked the same UPN kept (infopipe_kept) changes no profile
+// match, but an agent identity row lists current facts only. current is
+// false when the guardian has since withdrawn the identity or its current
+// record names another UPN or none; kept is the current record's mark for
+// the same UPN, or the cached one when no current record can be read (a
+// missing or unreadable record withdraws nothing on Linux and macOS).
+func unixSpoolUPNState(userID string, facts useridentity.DirectoryFacts, now time.Time) (kept, current bool) {
+	if identitySpoolWithdrawnAt(userID, now).After(facts.SpoolSeenAt) {
+		return false, false
+	}
+	record, ok := readIdentitySpoolFacts(userID, now)
+	if !ok {
+		return facts.UPNKept, true
+	}
+	if !strings.EqualFold(strings.TrimSpace(record.Facts.UPN), strings.TrimSpace(facts.UPN)) {
+		return false, false
+	}
+	return record.UPNKept(), true
 }
 
 // hookAgentIdentityUser picks the user an agent identity belongs to, most
