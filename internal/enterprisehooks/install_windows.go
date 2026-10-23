@@ -1318,7 +1318,7 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 		return fmt.Errorf("enterprise hooks: connector %s fail mode %q does not match configured mode %q", target.conn.Name(), lock.HookFailMode, current.HookFailMode)
 	}
 	if attestSession {
-		if err := managedHermesSessionHomeAttestation("windows", target.conn.Name(), target.setup.ManagedEnterprise, target.setup.SecureClientHookDelivery); err != nil {
+		if err := ManagedHermesSessionHomeAttestation("windows", target.conn.Name(), target.setup.ManagedEnterprise, target.setup.SecureClientHookDelivery); err != nil {
 			return fmt.Errorf("enterprise hooks: connector %s cannot be verified: %w", target.conn.Name(), err)
 		}
 	}
