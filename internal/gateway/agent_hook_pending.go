@@ -4,35 +4,44 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/google/uuid"
 )
 
 // A receipt-capable managed hook can act on an answer before the gateway's
-// terminal audit write. This private spool is durable before the answer is
-// offered. It contains only the facts needed to recover an unconfirmed
-// occurrence; no raw hook body, tool arguments, or response output is stored.
-const (
-	pendingHookDirName         = "pending-hook-decisions"
-	maxPendingHookBytes        = 128 << 10
-	pendingHookRecoveredReason = "managed hook receipt recovered after gateway restart"
-)
+// audit write, which waits for the hook's receipt. So the occurrence is
+// journaled in the audit store before the answer is offered
+// (audit.Store.JournalHookDelivery): one power-loss durable row with only
+// the facts needed to audit the call without its receipt, no raw hook body,
+// tool arguments or response output. The handler deletes the row once its
+// records are settled. A row whose gateway process died first is audited by
+// the next process, as the decision the call has without a receipt.
+const pendingHookRecoveredReason = "managed hook receipt recovered after gateway restart"
+
+// hookDeliveryProcessID tells this process's journal rows from those of a
+// gateway process that has stopped. Rows of this process belong to its live
+// handlers, also those of a server a config reload replaced, so recovery
+// never takes them over.
+var hookDeliveryProcessID = uuid.NewString()
+
+func (a *APIServer) deliveryProcessID() string {
+	if a.hookDeliveryProcessID != "" {
+		return a.hookDeliveryProcessID
+	}
+	return hookDeliveryProcessID
+}
 
 type pendingHookRequest struct {
 	ConnectorName          string
@@ -101,11 +110,16 @@ func (p pendingHookResponse) response() agentHookResponse {
 	}
 }
 
+// pendingHookOccurrence is a journaled hook call. Its connector audit row
+// has its ID and its hook_decision ID+"-decision".
 type pendingHookOccurrence struct {
-	ID           string
-	Request      pendingHookRequest
-	Unconfirmed  pendingHookResponse
-	Final        *pendingHookResponse
+	ID      string
+	Request pendingHookRequest
+	// Proposed is the evaluated answer the gateway offers. NoReceipt is the
+	// decision the call has if no receipt arrives: a policy block under a
+	// closed hook stays a block, anything else is unconfirmed.
+	Proposed     pendingHookResponse
+	NoReceipt    pendingHookResponse
 	Envelope     audit.CorrelationEnvelope
 	Identity     AgentIdentity
 	RawEventIDs  []string
@@ -113,489 +127,201 @@ type pendingHookOccurrence struct {
 	BodyBytes    int64
 	ElapsedNanos int64
 	Panicked     bool
-	path         string
+	// SandboxReceipt binds a buffered relay acknowledgement to the original
+	// sandbox and audit identity. It contains no hook body or tool arguments.
+	SandboxReceipt *sandboxPendingHookReceipt
+	// Final is set before a failed acknowledgement is answered closed, when
+	// the journal remains writable. Recovery uses it to audit that block.
+	Final *pendingHookResponse
 }
 
-func (a *APIServer) pendingHookDir() string {
-	dir := a.configDataDir()
-	if dir == "" && a != nil && a.store != nil {
-		dir = filepath.Dir(a.store.DatabasePath())
-	}
-	if dir == "" {
-		return ""
-	}
-	return filepath.Join(dir, pendingHookDirName)
+type sandboxPendingHookReceipt struct {
+	BindingID        string
+	RegistrationID   string
+	OfferedAt        time.Time
+	Reason           string
+	SourceReason     string
+	EnvelopeIdentity pendingHookEnvelopeIdentity
+	CallRef          string
 }
 
-// beginPendingHookOccurrence makes the occurrence durable before its answer
-// is offered. With an error it also returns the occurrence when a failed
-// write could not be undone durably: the caller still owns it and audits the
-// call under its IDs.
-func (a *APIServer) beginPendingHookOccurrence(
-	ctx context.Context, req agentHookRequest, proposed agentHookResponse,
+// The receipt arrives on another HTTP request. Preserve the first request's
+// lifecycle and policy fields for its final audit row.
+type pendingHookEnvelopeIdentity struct {
+	StepIdx            int
+	RulePackDir        string
+	AgentPhase         string
+	AgentPreviousPhase string
+	AgentSequence      int64
+	AgentLifecycleID   string
+	AgentExecutionID   string
+	AgentOperationID   string
+}
+
+func pendingEnvelopeIdentity(env HookAuditEnvelope) pendingHookEnvelopeIdentity {
+	return pendingHookEnvelopeIdentity{
+		StepIdx: env.StepIdx, RulePackDir: env.RulePackDir,
+		AgentPhase: env.AgentPhase, AgentPreviousPhase: env.AgentPreviousPhase,
+		AgentSequence: env.AgentSequence, AgentLifecycleID: env.AgentLifecycleID,
+		AgentExecutionID: env.AgentExecutionID, AgentOperationID: env.AgentOperationID,
+	}
+}
+
+func (p pendingHookEnvelopeIdentity) stamp(env *HookAuditEnvelope, resp agentHookResponse) {
+	env.StepIdx, env.RulePackDir = p.StepIdx, p.RulePackDir
+	env.Enforced = resp.Action == "block"
+	env.AgentPhase, env.AgentPreviousPhase = p.AgentPhase, p.AgentPreviousPhase
+	env.AgentSequence, env.AgentLifecycleID = p.AgentSequence, p.AgentLifecycleID
+	env.AgentExecutionID, env.AgentOperationID = p.AgentExecutionID, p.AgentOperationID
+}
+
+func (s sandboxPendingHookReceipt) response(proposed pendingHookResponse) agentHookResponse {
+	resp := proposed.response()
+	resp.Reason, resp.SourceReason = s.Reason, s.SourceReason
+	return resp
+}
+
+// journalHookDelivery journals a receipt-capable call before its answer is
+// offered, and gives req the occurrence IDs its records carry. On an error
+// the answer must not be offered. The IDs are set even then: if the row
+// landed anyway, recovery completes the records the caller writes instead
+// of auditing the call a second time.
+func (a *APIServer) journalHookDelivery(
+	ctx context.Context, req *agentHookRequest, proposed agentHookResponse,
 	rawEventIDs []string, bodyBytes int64, elapsed time.Duration,
-	panicked bool, extra map[string]string,
+	panicked bool, extra map[string]string, sandboxReceipt ...bool,
 ) (*pendingHookOccurrence, error) {
-	if a == nil || a.store == nil || a.logger == nil || !a.store.Ready() {
-		return nil, errors.New("hook audit store is unavailable")
-	}
-	dir := a.pendingHookDir()
-	if dir == "" {
-		return nil, errors.New("hook pending state directory is unavailable")
-	}
-	id := uuid.NewString()
 	p := &pendingHookOccurrence{
-		ID: id, Request: pendingRequest(req),
-		Unconfirmed: pendingResponse(unconfirmedHookDelivery(proposed)),
-		Envelope:    audit.EnvelopeFromContext(ctx), Identity: AgentIdentityFromContext(ctx),
+		ID: uuid.NewString(), Request: pendingRequest(*req),
+		Proposed:    pendingResponse(proposed),
+		NoReceipt:   pendingResponse(a.deliveredHookDecision(false, req.ConnectorName, proposed, "")),
+		Envelope:    audit.EnvelopeFromContext(ctx),
+		Identity:    AgentIdentityFromContext(ctx),
 		RawEventIDs: rawEventIDs, Extra: extra, BodyBytes: bodyBytes,
 		ElapsedNanos: int64(elapsed), Panicked: panicked,
-		path: filepath.Join(dir, id+".json"),
 	}
-	// The handler owns its occurrence from before it is published until it
-	// returns; recovery in this process leaves it alone.
-	livePendingHooks.claim(p.path)
-	if _, err := p.publish(); err != nil {
-		// A write that failed late can still have published the file. This
-		// call is answered 503 and audited by the caller, so the removal is
-		// made durable: a file a crash brings back would be audited again.
-		if removeErr := p.remove(); removeErr != nil {
-			// The file can outlive this process. The caller keeps the
-			// occurrence and audits the call under its IDs.
-			return p, errors.Join(err, removeErr)
+	if len(sandboxReceipt) > 0 && sandboxReceipt[0] {
+		binding, ok := sandboxauth.FromContext(ctx)
+		if !ok || binding.ID == "" {
+			return p, errors.New("sandbox hook receipt has no authenticated binding")
 		}
-		livePendingHooks.release(p.path)
-		return nil, err
+		p.SandboxReceipt = &sandboxPendingHookReceipt{
+			BindingID: binding.ID, RegistrationID: binding.RegistrationID,
+			OfferedAt: time.Now(), Reason: proposed.Reason,
+			SourceReason: hookSourceReason(proposed),
+			CallRef:      manager.ContentRef(req.SessionID, req.ToolName, sandboxDecisionToolInput(*req)),
+		}
+		if p.Proposed.RawAction == "" {
+			p.Proposed.RawAction = proposed.Action
+		}
+		var identity HookAuditEnvelope
+		a.stampHookEnvelopeIdentity(ctx, req.ConnectorName, &identity, *req, proposed)
+		p.SandboxReceipt.EnvelopeIdentity = pendingEnvelopeIdentity(identity)
 	}
-	return p, nil
-}
-
-// pendingHookPublish is how far a publish got.
-type pendingHookPublish int
-
-const (
-	// pendingHookNotWritten: the file on disk does not carry this version,
-	// or it could not be read back.
-	pendingHookNotWritten pendingHookPublish = iota
-	// pendingHookWritten: the file carries this version, but a crash can
-	// still bring back the earlier one or lose the file.
-	pendingHookWritten
-	// pendingHookDurable: this version survives a crash.
-	pendingHookDurable
-)
-
-// publish writes the occurrence and makes it durable: the file, its
-// directory entry, and the entry of each directory the write created. A
-// failed write can still have replaced the file, so the file is read back.
-// The error is set whenever a step failed, also when the result is durable.
-func (p *pendingHookOccurrence) publish() (pendingHookPublish, error) {
+	req.pendingOccurrenceID, req.pendingBodyBytes = p.ID, bodyBytes
+	if a.store == nil {
+		return p, errors.New("hook audit store is unavailable")
+	}
 	data, err := json.Marshal(p)
 	if err != nil {
-		return pendingHookNotWritten, err
+		return p, err
 	}
-	if len(data) > maxPendingHookBytes {
-		return pendingHookNotWritten, fmt.Errorf("hook pending occurrence exceeds %d bytes", maxPendingHookBytes)
-	}
-	dir := filepath.Dir(p.path)
-	created := missingPendingHookDirs(dir)
-	writeErr := safefile.WritePrivate(p.path, data)
-	if writeErr != nil && !p.carries(data) {
-		return pendingHookNotWritten, writeErr
-	}
-	if err := makePendingHookDirDurable(dir, created); err != nil {
-		return pendingHookWritten, errors.Join(writeErr, err)
-	}
-	return pendingHookDurable, writeErr
+	return p, a.store.JournalHookDelivery(ctx, p.ID, a.deliveryProcessID(), data)
 }
 
-// carries reports whether the occurrence file on disk holds data.
-func (p *pendingHookOccurrence) carries(data []byte) bool {
-	got, err := pendingHookFS().read(p.path, maxPendingHookBytes)
-	return err == nil && bytes.Equal(got, data)
-}
-
-// setFinal records the answer the hook took and reports whether the
-// occurrence carries it durably, which is what recovery will audit. A final
-// answer that is on disk but not synced is not durable: a crash can bring
-// back the unconfirmed one.
-func (p *pendingHookOccurrence) setFinal(resp agentHookResponse, elapsed time.Duration) (bool, error) {
-	next := *p
-	final := pendingResponse(resp)
-	next.Final = &final
-	next.ElapsedNanos = int64(elapsed)
-	state, err := next.publish()
-	if state == pendingHookDurable {
-		*p = next
-		return true, err
+// settlePendingHook deletes the journal row once both records of the call
+// are settled. Otherwise the row stays for the next gateway process.
+func (a *APIServer) settlePendingHook(ctx context.Context, p *pendingHookOccurrence, result hookFinalizationResult) {
+	if p == nil || !result.AuditPersisted || !result.DecisionSettled {
+		return
 	}
-	return false, err
-}
-
-// publishedResponse is the answer this process can stand behind for the
-// occurrence: its durable final answer, else the unconfirmed one.
-func (p *pendingHookOccurrence) publishedResponse() agentHookResponse {
-	if p.Final != nil {
-		return p.Final.response()
-	}
-	return p.Unconfirmed.response()
-}
-
-// responseMatching is the occurrence's answer whose decision is action, the
-// decision a terminal record of this occurrence already holds: its final
-// answer, its unconfirmed answer, or the closed fallback of a call answered
-// 503. ok is false for an action no record states (none, other).
-func (p *pendingHookOccurrence) responseMatching(action string) (agentHookResponse, bool) {
-	want := normalizeHookActionLabel(action)
-	if want == "none" || want == "other" {
-		return agentHookResponse{}, false
-	}
-	if p.Final != nil && normalizeHookActionLabel(p.Final.Action) == want {
-		return p.Final.response(), true
-	}
-	resp := p.Unconfirmed.response()
-	switch {
-	case normalizeHookActionLabel(resp.Action) == want:
-		return resp, true
-	case want == "block" && normalizeHookActionLabel(resp.RawAction) != "block":
-		// The closed fallback the hook took when the gateway answered 503.
-		return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason), true
-	}
-	// A final answer whose rewrite a crash undid.
-	resp.Action = want
-	resp.Reason, resp.SourceReason = pendingHookRecoveredReason, pendingHookRecoveredReason
-	return resp, true
-}
-
-// remove deletes the occurrence and makes the removal durable. A file or
-// directory that is not there is already removed.
-func (p *pendingHookOccurrence) remove() error {
-	if err := os.Remove(p.path); err != nil && !pendingHookPathAbsent(err) {
-		return err
-	}
-	if err := pendingHookFS().syncDir(filepath.Dir(p.path)); err != nil && !pendingHookPathAbsent(err) {
-		return err
-	}
-	return nil
-}
-
-func pendingHookPathAbsent(err error) bool {
-	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
-}
-
-// missingPendingHookDirs is dir and each of its ancestors that does not
-// exist yet, deepest first: the directories a write into dir creates.
-func missingPendingHookDirs(dir string) []string {
-	var missing []string
-	current := dir
-	for {
-		if _, err := os.Lstat(current); !errors.Is(err, fs.ErrNotExist) {
-			return missing
-		}
-		missing = append(missing, current)
-		parent := filepath.Dir(current)
-		if parent == current {
-			return missing
-		}
-		current = parent
+	if err := a.store.ForgetHookDelivery(ctx, p.ID); err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] hook delivery journal cleanup failed id=%s: %v\n", p.ID, err)
 	}
 }
 
-// pendingHookDurableDirs holds, per pending directory, the directory whose
-// entry in its parent this process has made durable. A directory removed
-// and created again while the gateway runs is a different directory.
-var pendingHookDurableDirs = struct {
-	mu   sync.Mutex
-	dirs map[string]os.FileInfo
-}{dirs: map[string]os.FileInfo{}}
+// pendingHookRecovery runs one recovery pass at a time in this process: a
+// config reload starts a new server beside the old one.
+var pendingHookRecovery sync.Mutex
 
-// makePendingHookDirDurable syncs dir, so a file renamed into it survives a
-// crash, and the parent of each directory the write created, so the
-// directories themselves survive. The first publish of a process also syncs
-// the parent of dir: an earlier process can have created it and stopped
-// before its parent was synced.
-func makePendingHookDirDurable(dir string, created []string) error {
-	ops := pendingHookFS()
-	if err := ops.syncDir(dir); err != nil {
-		return err
+// startPendingHookRecovery audits, in the background, the journal rows
+// earlier gateway processes left. Listeners never wait for it, and nothing
+// it meets stops the gateway: a row it cannot audit yet stays for the next
+// start.
+func (a *APIServer) startPendingHookRecovery(ctx context.Context) {
+	a.pendingHookRecoveryOnce.Do(func() { go a.recoverPendingHooks(ctx) })
+}
+
+func (a *APIServer) recoverPendingHooks(ctx context.Context) {
+	if a == nil || a.store == nil || a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() {
+		return
 	}
-	info, err := os.Lstat(dir)
+	pendingHookRecovery.Lock()
+	defer pendingHookRecovery.Unlock()
+	entries, err := a.store.UnauditedHookDeliveries(ctx, a.deliveryProcessID())
 	if err != nil {
-		return err
-	}
-	pendingHookDurableDirs.mu.Lock()
-	known := pendingHookDurableDirs.dirs[dir]
-	pendingHookDurableDirs.mu.Unlock()
-	if len(created) == 0 && known != nil && os.SameFile(known, info) {
-		return nil
-	}
-	parents := []string{filepath.Dir(dir)}
-	for _, made := range created {
-		if parent := filepath.Dir(made); parent != parents[len(parents)-1] {
-			parents = append(parents, parent)
-		}
-	}
-	for _, parent := range parents {
-		if err := ops.syncDir(parent); err != nil {
-			return err
-		}
-	}
-	pendingHookDurableDirs.mu.Lock()
-	pendingHookDurableDirs.dirs[dir] = info
-	pendingHookDurableDirs.mu.Unlock()
-	return nil
-}
-
-// pendingHookFileOps are the file operations of the pending spool that can
-// fail for reasons outside the gateway. Tests replace them to inject those
-// failures.
-type pendingHookFileOps struct {
-	syncDir  func(string) error
-	validate func(string) error
-	read     func(string, int64) ([]byte, error)
-}
-
-var (
-	defaultPendingHookFileOps = pendingHookFileOps{
-		syncDir: syncDaemonDir, validate: safefile.ValidatePrivateFile, read: safefile.ReadRegularFileBounded,
-	}
-	pendingHookFileOpsOverride atomic.Pointer[pendingHookFileOps]
-)
-
-func pendingHookFS() *pendingHookFileOps {
-	if ops := pendingHookFileOpsOverride.Load(); ops != nil {
-		return ops
-	}
-	return &defaultPendingHookFileOps
-}
-
-// release ends the handler's ownership. An occurrence it could not audit
-// stays on disk for recovery.
-func (p *pendingHookOccurrence) release() {
-	if p != nil {
-		livePendingHooks.release(p.path)
-	}
-}
-
-// pendingHookOwners is the set of pending occurrences a goroutine of this
-// process is working on: a live handler between its offer and its terminal
-// audit, or a recovery pass. A config reload builds a new APIServer while
-// the old server's handlers can still be running, so ownership is per
-// process, not per server.
-type pendingHookOwners struct {
-	mu    sync.Mutex
-	paths map[string]struct{}
-}
-
-var livePendingHooks = pendingHookOwners{paths: map[string]struct{}{}}
-
-func (o *pendingHookOwners) claim(path string) bool {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if _, owned := o.paths[path]; owned {
-		return false
-	}
-	o.paths[path] = struct{}{}
-	return true
-}
-
-func (o *pendingHookOwners) release(path string) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	delete(o.paths, path)
-}
-
-const (
-	// defaultPendingHookRetryInterval is how often recovery looks again for
-	// occurrences nobody could audit yet: the audit store was not ready or
-	// not writable, at startup or for a live handler.
-	defaultPendingHookRetryInterval = 30 * time.Second
-	// A listener waits for the first recovery pass at most this long, and
-	// only until the pass has handled this many entries. The rest is
-	// recovered while the gateway serves.
-	defaultPendingHookStartupBudget  = 2 * time.Second
-	defaultPendingHookStartupEntries = 64
-)
-
-// pendingHookQuarantineSuffix marks an occurrence file recovery refused. It
-// is kept for inspection and no longer read.
-const pendingHookQuarantineSuffix = ".invalid"
-
-// pendingHookReported keeps one finding per problem per process, so a retry
-// loop or an API restart does not repeat the same alert.
-var pendingHookReported = struct {
-	mu   sync.Mutex
-	seen map[string]struct{}
-}{seen: map[string]struct{}{}}
-
-// ensurePendingHookRecovery starts this server's recovery and gives its
-// first pass a bounded head start before the listener serves: until the pass
-// has handled defaultPendingHookStartupEntries entries or
-// defaultPendingHookStartupBudget has passed, whichever is first. A large
-// backlog or a busy audit store never holds a listener longer. Recovery never
-// stops the gateway: a foreign entry is skipped and one proven invalid or
-// untrusted is quarantined, each with a finding, and an entry it cannot read
-// or audit yet stays on disk for a later pass.
-func (a *APIServer) ensurePendingHookRecovery(ctx context.Context) {
-	a.pendingHookRecoveryOnce.Do(func() {
-		budget := a.pendingHookStartupBudget
-		if budget <= 0 {
-			budget = defaultPendingHookStartupBudget
-		}
-		a.pendingHookStartup = make(chan struct{})
-		a.pendingHookStartupDeadline = time.Now().Add(budget)
-		go a.runPendingHookRecovery(ctx, a.pendingHookStartup)
-	})
-	wait := time.NewTimer(time.Until(a.pendingHookStartupDeadline))
-	defer wait.Stop()
-	select {
-	case <-a.pendingHookStartup:
-	case <-wait.C:
-	case <-ctx.Done():
-	}
-}
-
-// runPendingHookRecovery runs the first pass, opening startup after its
-// startup share of entries, then looks again every retry interval while the
-// server runs: an occurrence a live handler could not audit (the store was
-// busy or not writable) is recovered then, without a restart.
-func (a *APIServer) runPendingHookRecovery(ctx context.Context, startup chan struct{}) {
-	var opened sync.Once
-	open := func() { opened.Do(func() { close(startup) }) }
-	defer open()
-	limit := a.pendingHookStartupEntries
-	if limit <= 0 {
-		limit = defaultPendingHookStartupEntries
-	}
-	handled := 0
-	a.recoverPendingHookOccurrences(ctx, func() {
-		if handled++; handled >= limit {
-			open()
-		}
-	})
-	open()
-	if a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() {
-		return
-	}
-	interval := a.pendingHookRetryInterval
-	if interval <= 0 {
-		interval = defaultPendingHookRetryInterval
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		a.recoverPendingHookOccurrences(ctx, nil)
-	}
-}
-
-// reportPendingHookProblem records a recovery finding once per process: a
-// gateway error line and a HIGH alert row when the audit store accepts it.
-func (a *APIServer) reportPendingHookProblem(kind, entry string, err error) {
-	key := kind + "\x00" + entry + "\x00" + err.Error()
-	pendingHookReported.mu.Lock()
-	_, seen := pendingHookReported.seen[key]
-	pendingHookReported.seen[key] = struct{}{}
-	pendingHookReported.mu.Unlock()
-	if seen {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "[gateway] hook pending recovery %s entry=%q: %v\n", kind, entry, err)
-	if a.logger != nil {
-		_ = a.logger.LogAlert("hook-audit", "HIGH",
-			"managed hook pending decision recovery: "+kind,
-			map[string]any{"entry": entry, "problem": kind, "error": err.Error()})
-	}
-}
-
-// recoverPendingHookOccurrences audits the occurrences an earlier process,
-// an earlier server of this process or a handler that could not finish left
-// behind. A pending entry with no durable receipt outcome is deliberately
-// unconfirmed: a restart cannot infer what the previous process's
-// confirmation reached. entryDone, when set, runs after each entry. An entry
-// that is not audited yet stays on disk for the next pass.
-func (a *APIServer) recoverPendingHookOccurrences(ctx context.Context, entryDone func()) {
-	if a == nil || a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() {
-		return
-	}
-	dir := a.pendingHookDir()
-	if dir == "" {
-		return
-	}
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return
-	}
-	if err != nil {
-		a.reportPendingHookProblem("unreadable directory", pendingHookDirName, err)
-		return
-	}
-	if err := safefile.ValidatePrivateDirectory(dir); err != nil {
-		// Nothing in a directory that is not private is trusted. Its
-		// entries wait until the directory is repaired.
-		a.reportPendingHookProblem("directory protection drift", pendingHookDirName, err)
+		fmt.Fprintf(os.Stderr, "[gateway] hook delivery journal unreadable; kept for the next start: %v\n", err)
 		return
 	}
 	for _, entry := range entries {
 		if ctx.Err() != nil {
 			return
 		}
-		a.recoverPendingHookEntry(ctx, dir, entry)
-		if entryDone != nil {
-			entryDone()
+		if err := a.recoverPendingHook(ctx, entry); err != nil {
+			fmt.Fprintf(os.Stderr, "[gateway] hook delivery id=%s not recovered; kept for the next start: %v\n", entry.ID, err)
 		}
 	}
 }
 
-// recoverPendingHookEntry handles one directory entry. A panic in one entry
-// is a finding, never a gateway exit.
-func (a *APIServer) recoverPendingHookEntry(ctx context.Context, dir string, entry fs.DirEntry) {
-	name := entry.Name()
-	// An interrupted atomic rewrite can leave its unpublished temp. The last
-	// published JSON file is still the recovery authority.
-	if strings.HasPrefix(name, ".safefile-") || strings.HasSuffix(name, pendingHookQuarantineSuffix) {
-		return
-	}
-	id, ok := strings.CutSuffix(name, ".json")
-	if !ok || uuid.Validate(id) != nil {
-		// Not ours (a Finder or editor file, a subdirectory): left alone.
-		a.reportPendingHookProblem("foreign entry skipped", name, errors.New("not a pending occurrence"))
-		return
-	}
-	path := filepath.Join(dir, name)
-	if !livePendingHooks.claim(path) {
-		// A handler of this process still owns it, or another recovery
-		// pass is replaying it.
-		return
-	}
-	defer livePendingHooks.release(path)
+// recoverPendingHook audits one journal row and deletes it. A panic is an
+// error, never a gateway exit.
+func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeliveryJournalEntry) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.reportPendingHookProblem("recovery panic", name, fmt.Errorf("%v", recovered))
+			err = fmt.Errorf("recovery panic: %v", recovered)
 		}
 	}()
-	p, err := readPendingHookOccurrence(path, id, entry)
-	var unreadable *pendingHookUnreadableError
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		// Finalized and removed after this pass listed the directory.
-		return
-	case errors.As(err, &unreadable):
-		// Valid as far as anyone knows: kept for the next pass.
-		a.reportPendingHookProblem("unreadable occurrence kept for retry", name, err)
-		return
-	case err != nil:
-		a.quarantinePendingHookOccurrence(path, name, err)
-		return
+	var p pendingHookOccurrence
+	if err := json.Unmarshal(entry.Occurrence, &p); err != nil {
+		return err
+	}
+	if p.ID != entry.ID || p.Request.ConnectorName == "" || p.Request.HookEventName == "" {
+		return errors.New("journal row fields are invalid")
+	}
+	if p.SandboxReceipt != nil {
+		remaining := time.Until(p.SandboxReceipt.OfferedAt.Add(sandboxHookReceiptWindow))
+		if remaining > 0 {
+			wait := time.NewTimer(remaining)
+			defer wait.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-wait.C:
+			}
+		}
+		sandboxHookReceiptLock(p.ID).Lock()
+		defer sandboxHookReceiptLock(p.ID).Unlock()
+		// An acknowledgement can update the journal while startup recovery
+		// waits for the receipt window. Reload after taking the same lock.
+		latest, found, err := a.store.HookDelivery(ctx, p.ID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return nil
+		}
+		if err := json.Unmarshal(latest.Occurrence, &p); err != nil {
+			return err
+		}
+	}
+	resp, err := a.pendingHookRecoveryResponse(ctx, &p)
+	if err != nil {
+		return err
 	}
 	req := p.Request.request(p.ID, p.BodyBytes)
-	resp, err := a.pendingHookRecoveryResponse(ctx, p)
-	if err != nil {
-		a.reportPendingHookProblem("audit lookup failed", name, err)
-		return
+	if p.SandboxReceipt != nil {
+		req.pendingEnvelopeIdentity = &p.SandboxReceipt.EnvelopeIdentity
+		req.pendingSandboxCallRef = p.SandboxReceipt.CallRef
 	}
 	persistCtx := audit.ContextWithEnvelope(ctx, p.Envelope)
 	persistCtx = ContextWithAgentIdentity(persistCtx, p.Identity)
@@ -604,94 +330,52 @@ func (a *APIServer) recoverPendingHookEntry(ctx context.Context, dir string, ent
 	result := a.finalizeAgentHook(persistCtx, req.ConnectorName, req, resp,
 		p.RawEventIDs, nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra)
 	if !result.AuditPersisted || !result.DecisionSettled {
-		// Kept on disk: stable IDs make a later pass skip whichever
-		// record already landed.
-		a.reportPendingHookProblem("audit not persisted yet", name,
-			fmt.Errorf("audit=%t hook_decision=%t", result.AuditPersisted, result.DecisionSettled))
-		return
+		// Stable IDs make the next pass skip whichever record landed.
+		return fmt.Errorf("audit=%t hook_decision=%t", result.AuditPersisted, result.DecisionSettled)
 	}
-	if err := p.remove(); err != nil {
-		a.reportPendingHookProblem("cleanup failed", name, err)
-	}
+	return a.store.ForgetHookDelivery(ctx, p.ID)
 }
 
-// pendingHookRecoveryResponse is the answer recovery audits. A terminal
-// record of the occurrence that is already stored is the authority for its
-// missing companion: the file can be older than that record (a final
-// rewrite a crash undid), and the two records of one call never disagree.
-// With neither record stored, the occurrence file is the authority.
+// pendingHookRecoveryResponse is the answer recovery audits. A record of
+// the occurrence that is already stored decides its missing companion, so
+// the two records of one call never disagree. With neither stored, the
+// call has its no-receipt decision.
 func (a *APIServer) pendingHookRecoveryResponse(ctx context.Context, p *pendingHookOccurrence) (agentHookResponse, error) {
-	if a.store == nil {
-		return p.publishedResponse(), nil
-	}
 	for _, id := range []string{p.ID, p.ID + "-decision"} {
 		action, found, err := a.store.StoredHookDecisionAction(ctx, id)
 		if err != nil {
 			return agentHookResponse{}, err
 		}
-		if !found {
-			continue
-		}
-		if resp, ok := p.responseMatching(action); ok {
-			return resp, nil
+		if found {
+			return p.responseFor(action), nil
 		}
 	}
-	return p.publishedResponse(), nil
+	if p.Final != nil {
+		return p.Final.response(), nil
+	}
+	return p.NoReceipt.response(), nil
 }
 
-// pendingHookUnreadableError is an occurrence recovery could not read for
-// an operating-system reason (too many open files, an I/O error, a sharing
-// violation, a replace during the read). Nothing proves it invalid, so it
-// is kept and read again by a later pass.
-type pendingHookUnreadableError struct{ err error }
-
-func (e *pendingHookUnreadableError) Error() string { return e.err.Error() }
-func (e *pendingHookUnreadableError) Unwrap() error { return e.err }
-
-// readPendingHookOccurrence reads one occurrence. Only a file proven
-// invalid (not a regular file, too large, not an occurrence) or untrusted
-// (its protection drifted) is refused; any other failure is a
-// *pendingHookUnreadableError.
-func readPendingHookOccurrence(path, id string, entry fs.DirEntry) (*pendingHookOccurrence, error) {
-	if !entry.Type().IsRegular() {
-		return nil, fmt.Errorf("entry type %s is not a regular file", entry.Type())
-	}
-	ops := pendingHookFS()
-	if err := ops.validate(path); err != nil {
-		var errno syscall.Errno
-		if errors.As(err, &errno) {
-			return nil, &pendingHookUnreadableError{err: err}
+// responseFor is the occurrence's answer whose decision is action, the
+// decision a stored record holds. A live handler records the acknowledged
+// proposal, the no-receipt decision, or a block: the hook refused the
+// answer, or the gateway answered 503 and the hook took its closed
+// fallback.
+func (p *pendingHookOccurrence) responseFor(action string) agentHookResponse {
+	switch {
+	case strings.EqualFold(action, p.NoReceipt.Action):
+		return p.NoReceipt.response()
+	case strings.EqualFold(action, p.Proposed.Action):
+		if p.SandboxReceipt != nil {
+			return p.SandboxReceipt.response(p.Proposed)
 		}
-		return nil, err
+		return p.Proposed.response()
+	case strings.EqualFold(action, "block"):
+		return failedClosedHookDelivery(p.Proposed.response(), hookexec.ManagedGatewayNoAnswerReason)
 	}
-	data, err := ops.read(path, maxPendingHookBytes)
-	if err != nil {
-		if info, statErr := os.Lstat(path); statErr == nil &&
-			(!info.Mode().IsRegular() || info.Size() > maxPendingHookBytes) {
-			return nil, err
-		}
-		return nil, &pendingHookUnreadableError{err: err}
+	resp := p.NoReceipt.response()
+	if action != "" {
+		resp.Action = action
 	}
-	var p pendingHookOccurrence
-	if err := json.Unmarshal(data, &p); err != nil {
-		return nil, err
-	}
-	if p.ID != id || p.Request.ConnectorName == "" || p.Request.HookEventName == "" ||
-		p.BodyBytes < 0 || p.BodyBytes > apiRequestBodyMaxBytes {
-		return nil, errors.New("occurrence fields are invalid")
-	}
-	p.path = path
-	return &p, nil
-}
-
-// quarantinePendingHookOccurrence renames an occurrence recovery refused, so
-// later passes skip it, and records the finding. A failed rename is tried
-// again by the next pass.
-func (a *APIServer) quarantinePendingHookOccurrence(path, name string, cause error) {
-	a.reportPendingHookProblem("invalid occurrence quarantined", name, cause)
-	if err := os.Rename(path, path+pendingHookQuarantineSuffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		a.reportPendingHookProblem("quarantine failed", name, err)
-		return
-	}
-	_ = pendingHookFS().syncDir(filepath.Dir(path))
+	return resp
 }
