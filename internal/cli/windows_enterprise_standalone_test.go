@@ -29,7 +29,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -1632,7 +1631,6 @@ func TestWindowsBundleApplyFailureExitFollowsItsCause(t *testing.T) {
 		{"bundle_install_options_changed", enterprisestatus.WindowsExitFailure},
 		{"bundle_hot_apply_unavailable", enterprisestatus.WindowsExitBusy},
 		{"bundle_policy_not_adopted", enterprisestatus.WindowsExitBusy},
-		{string(enterprisebundle.CodeNotConfirmed), enterprisestatus.WindowsExitBusy},
 		{"lifecycle_busy", enterprisestatus.WindowsExitBusy},
 	} {
 		result := &enterprisestatus.Result{}

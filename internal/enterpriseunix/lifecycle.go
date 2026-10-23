@@ -272,9 +272,6 @@ type lifecycle struct {
 	osPlan *openshellPlan
 	// bundle is the signed policy bundle this run applies (nil for none).
 	bundle *bundleRun
-	// currentBundleGeneration attributes a plain ensure or repeat that
-	// applies the current confirmed bundle's config.
-	currentBundleGeneration *configwrite.Options
 	// confirmedLate are the manifest SHA-256s of the bundles this run's
 	// settle confirmed late (bundle_confirmed_after_interrupt).
 	confirmedLate map[string]bool
@@ -2357,19 +2354,16 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 func (l *lifecycle) applyFilesRecorded(ctx context.Context, p *plan, account Account) (map[string]bool, error) {
 	env := l.env
 	configPath := env.P(env.Layout.ConfigPath)
-	writeOptions := l.configWriteOptions()
 	var changed map[string]bool
-	_, err := configwrite.Locked(ctx, configPath, writeOptions, func() (bool, error) {
+	_, err := configwrite.Locked(ctx, configPath, l.configWriteOptions(), func() (bool, error) {
 		var err error
 		if changed, err = l.applyFiles(p); err != nil {
 			return false, err
 		}
 		state, stateErr := configwrite.ReadGenerationState(configPath)
-		// Equal bytes still need a generation naming the current signed
-		// bundle. This also repairs records left by older lifecycle builds.
-		bundleUnrecorded := writeOptions.Bundle.ID != "" &&
-			(state.BundleID != writeOptions.Bundle.ID || state.BundleVersion != writeOptions.Bundle.Version ||
-				state.SignerKeyID != writeOptions.Bundle.SignerKeyID || state.Actor != writeOptions.Actor)
+		// A bundle whose config is already installed is still recorded as
+		// the generation its principal installed.
+		bundleUnrecorded := l.bundle != nil && (state.BundleID != l.bundle.receipt.BundleID || state.BundleVersion != l.bundle.receipt.Version)
 		return changed[env.Layout.ConfigPath] || stateErr != nil || state.ConfigSHA256 != p.config.SHA || bundleUnrecorded || l.policyAssetsEdited, nil
 	})
 	if err != nil {
@@ -2957,9 +2951,19 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 			if err != nil || !bytes.Equal(restored, raw) {
 				return fmt.Errorf("restored config does not match confirmed bundle %s version %d: %v", ref.BundleID, ref.Version, err)
 			}
-			opt, err = currentBundleGenerationOptions(env.bundleStore(), ref)
+			receipts, err := env.bundleStore().Receipts()
 			if err != nil {
-				return fmt.Errorf("read confirmed bundle attribution: %w", err)
+				return fmt.Errorf("read confirmed bundle receipt: %w", err)
+			}
+			found := false
+			for _, rc := range receipts {
+				if rc.State == enterprisebundle.StateConfirmed && rc.BundleID == ref.BundleID && rc.Version == ref.Version && rc.ManifestSHA256 == ref.ManifestSHA256 {
+					opt, found = enterprisebundle.GenerationOptions(rc)
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("no confirmed receipt can attribute bundle %s version %d", ref.BundleID, ref.Version)
 			}
 		}
 	}
