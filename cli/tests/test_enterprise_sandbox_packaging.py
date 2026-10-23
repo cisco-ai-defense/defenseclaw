@@ -147,6 +147,10 @@ def _build_fixture(
     (repo / "scripts").mkdir(parents=True)
     shutil.copy(BUILDER, repo / "scripts" / BUILDER.name)
     shutil.copy(PACKAGE_CHECK, repo / "scripts" / PACKAGE_CHECK.name)
+    # The preinstall is stamped with the legacy sandbox guard.
+    shutil.copy(ROOT / "scripts" / "stamp-package-script.sh", repo / "scripts" / "stamp-package-script.sh")
+    (repo / "packaging" / "scripts" / "lib").mkdir(parents=True)
+    shutil.copy(ROOT / "packaging" / "scripts" / "lib" / "legacy-sandbox-guard.sh", repo / "packaging" / "scripts" / "lib" / "legacy-sandbox-guard.sh")
     e2fs_builder = repo / "scripts" / "build-macos-e2fsprogs.sh"
     e2fs_builder.write_text(
         "#!/bin/sh\n"

@@ -84,7 +84,7 @@ func TestDoctorIsNotReadyWhileALegacySandboxRuns(t *testing.T) {
 	ta.daemon.add(ended)
 	c := row(ta)
 	if c == nil || c.Status != openshell.StatusFail || c.Fix == nil ||
-		!strings.Contains(c.Detail, "old-ready, old-ended: "+sandboxapi.LegacyUnprotected) ||
+		!strings.Contains(c.Detail, "old-ended, old-ready: "+sandboxapi.LegacyUnprotected) ||
 		!strings.Contains(c.Detail, "creates and starts no sandbox until they are gone") ||
 		!strings.Contains(c.Fix.Summary, "save the work you need in old-ready, then run `defenseclaw sandbox stop old-ready`, which syncs the VM's disk first") ||
 		!strings.Contains(c.Fix.Summary, "`defenseclaw sandbox delete old-ended` deletes old-ended and its work") {

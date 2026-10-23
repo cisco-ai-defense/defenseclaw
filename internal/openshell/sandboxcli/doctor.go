@@ -301,6 +301,8 @@ func (a *App) legacySandboxCheck(ctx context.Context) *openshell.Check {
 	if err != nil {
 		return nil
 	}
+	// In name order, whatever order the daemon lists them in.
+	slices.SortFunc(list, func(a, b sandboxapi.Sandbox) int { return strings.Compare(a.Name, b.Name) })
 	var names, ways []string
 	for i := range list {
 		if sb := &list[i]; sb.OldSupervisor {
