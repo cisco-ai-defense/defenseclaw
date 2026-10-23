@@ -482,6 +482,31 @@ func (c *identityCache[T]) peek(key string) (T, time.Time, bool) {
 	return entry.facts, entry.fetchedAt, true
 }
 
+// peekCurrent returns only a completed, unexpired lookup whose latest
+// refresh has not failed. Agent identity fields describe what the directory
+// currently verifies; the policy cache may separately retain an older
+// answer during an outage to make its fail-closed decision.
+func (c *identityCache[T]) peekCurrent(key string) (T, bool) {
+	var zero T
+	if c == nil {
+		return zero, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[key]
+	if entry == nil {
+		return zero, false
+	}
+	now := c.now()
+	c.dropAgedLocked(key, entry, now)
+	if !entry.ok || !entry.failedSince.IsZero() || entry.fetchedAt.IsZero() ||
+		entry.fetchedAt.Before(c.staleBefore) || entry.fetchedAt.Before(entry.staleBefore) ||
+		!now.Before(entry.fetchedAt.Add(c.lifetime(entry.facts))) {
+		return zero, false
+	}
+	return entry.facts, true
+}
+
 // invalidate makes every cached answer due for a refresh. A pushed profile
 // assignment that selects by group applied only once the facts cached before
 // the push expired, up to 15 minutes later, while profile-explain already

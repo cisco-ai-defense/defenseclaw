@@ -2130,6 +2130,10 @@ func TestAuthenticatedHookToolChainResetsOnlyAtSessionBoundary(t *testing.T) {
 		{name: "Claude SessionEnd clears state", connector: "claudecode", boundary: "SessionEnd", clears: true},
 		{name: "OpenCode idle preserves cross-turn state", connector: "opencode", boundary: "session.idle"},
 		{name: "OpenCode deletion clears state", connector: "opencode", boundary: "session.deleted", clears: true},
+		// rel-1-0-4 GAP-0599: Hermes sends on_session_end after every turn.
+		{name: "Hermes per-turn session end preserves cross-turn state", connector: "hermes", boundary: "on_session_end"},
+		{name: "Hermes finalize clears state", connector: "hermes", boundary: "on_session_finalize", clears: true},
+		{name: "Hermes reset clears state", connector: "hermes", boundary: "on_session_reset", clears: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			installToolCallCorpusProfileConnector(t, test.connector, "strict")
@@ -2142,14 +2146,18 @@ func TestAuthenticatedHookToolChainResetsOnlyAtSessionBoundary(t *testing.T) {
 			handler := http.HandlerFunc(api.handleAgentHook(test.connector))
 			session := "session-boundary-" + test.connector + "-" + test.boundary
 
-			if test.connector == "opencode" {
+			switch test.connector {
+			case "opencode":
 				callAgentHookForTest(t, handler, openCodeToolEvent(
 					"tool.execute.before", session, "discover", "sudo -l",
 				))
 				callAgentHookForTest(t, handler, openCodeToolResult(
 					session, "discover", "sudo -l",
 				))
-			} else {
+			case "hermes":
+				callAgentHookForTest(t, handler, hermesToolCall(session, "discover", "sudo -l"))
+				callAgentHookForTest(t, handler, hermesToolResult(session, "discover", "sudo -l", "ok"))
+			default:
 				callAgentHookForTest(t, handler, claudeToolEvent(
 					"PreToolUse", session, "discover", "sudo -l",
 				))
@@ -2163,11 +2171,14 @@ func TestAuthenticatedHookToolChainResetsOnlyAtSessionBoundary(t *testing.T) {
 			})
 
 			var got agentHookResponse
-			if test.connector == "opencode" {
+			switch test.connector {
+			case "opencode":
 				got = callAgentHookForTest(t, handler, openCodeToolEvent(
 					"tool.execute.before", session, "elevate", "sudo -u root /bin/sh",
 				))
-			} else {
+			case "hermes":
+				got = callAgentHookForTest(t, handler, hermesToolCall(session, "elevate", "sudo -u root /bin/sh"))
+			default:
 				got = callAgentHookForTest(t, handler, claudeToolEvent(
 					"PreToolUse", session, "elevate", "sudo -u root /bin/sh",
 				))
@@ -2318,6 +2329,34 @@ func openCodeToolResult(session, invocation, command string) map[string]interfac
 		"output":   "",
 		"metadata": map[string]interface{}{"exit": 0},
 	}
+	return payload
+}
+
+// hermesToolCall is a Hermes 0.21 terminal pre_tool_call as shell_hooks.py
+// sends it: hook_event_name, tool_name, tool_input, session_id, cwd and
+// profile at the top, every other field under extra.
+func hermesToolCall(session, invocation, command string) map[string]interface{} {
+	return map[string]interface{}{
+		"hook_event_name": "pre_tool_call",
+		"tool_name":       "terminal",
+		"tool_input":      map[string]interface{}{"command": command},
+		"session_id":      session,
+		"cwd":             "/tmp",
+		"profile":         "default",
+		"extra": map[string]interface{}{
+			"task_id": "", "tool_call_id": invocation, "turn_id": "", "api_request_id": "",
+		},
+	}
+}
+
+// hermesToolResult is the post_tool_call of hermesToolCall with its status.
+func hermesToolResult(session, invocation, command, status string) map[string]interface{} {
+	payload := hermesToolCall(session, invocation, command)
+	payload["hook_event_name"] = "post_tool_call"
+	extra := payload["extra"].(map[string]interface{})
+	extra["result"] = `{"output": "", "exit_code": 0, "error": null}`
+	extra["duration_ms"] = 12
+	extra["status"] = status
 	return payload
 }
 

@@ -5,10 +5,57 @@ package inventory
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestAgentIdentityUPNDistinguishesUnavailableFromAbsent(t *testing.T) {
+	st, err := NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	first := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	rec := AgentIdentityRecord{AgentID: "agt-upn", UserID: "S-1-5-21-1-2-3-1104", Connector: "codex", MachineHash: "m", FirstSeen: first, LastSeen: first, UPN: "carol@corp.example.com"}
+	write := func() {
+		t.Helper()
+		if err := st.UpsertAgentIdentities(ctx, []AgentIdentityRecord{rec}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(want sql.NullString) {
+		t.Helper()
+		var raw sql.NullString
+		if err := st.db.QueryRowContext(ctx, `SELECT user_upn FROM agent_identities WHERE agent_id = ?`, rec.AgentID).Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		rows, _, err := st.ListAgentIdentities(ctx, AgentIdentityFilter{})
+		if err != nil || len(rows) != 1 || raw != want || rows[0].UPN != want.String || rows[0].UPNUnavailable != !want.Valid {
+			t.Fatalf("raw UPN = %+v, rows = %+v, err %v; want %+v", raw, rows, err, want)
+		}
+	}
+	write()
+	check(sql.NullString{String: "carol@corp.example.com", Valid: true})
+
+	// A cold lookup is unknown (NULL), not a verified empty UPN. A clock
+	// rollback after a restart must not preserve the previous value.
+	rec.LastSeen, rec.UPN, rec.UPNUnavailable = first.Add(-time.Minute), "", true
+	write()
+	check(sql.NullString{})
+
+	// A verified local or guardian answer without a UPN is an empty value.
+	rec.LastSeen, rec.UPNUnavailable = first.Add(2*time.Minute), false
+	write()
+	check(sql.NullString{Valid: true})
+
+	// A later resolved directory answer records the new UPN.
+	rec.LastSeen, rec.UPN = first.Add(3*time.Minute), "carol.renamed@corp.example.com"
+	write()
+	check(sql.NullString{String: rec.UPN, Valid: true})
+}
 
 func TestAgentIdentitiesUpsertMergesBatchesAndFilters(t *testing.T) {
 	st, err := NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))

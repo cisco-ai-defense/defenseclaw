@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -53,8 +54,14 @@ type agentIdentityFacts struct {
 	// (agentIdentityAccountToken).
 	UserDomain      string
 	UserIncarnation string
-	Connector       string
-	InstallFP       string
+	// UserUPN is the account's UPN in the directory facts the gateway
+	// cached for the uid or SID (agentIdentityAccountUPN). UPNUnavailable
+	// distinguishes an absent, expired or failed cache answer from a
+	// verified account with no UPN.
+	UserUPN        string
+	UPNUnavailable bool
+	Connector      string
+	InstallFP      string
 	// InstallHint is a config root the agent claimed (a CLAUDE_CONFIG_DIR or
 	// CODEX_HOME style override seen in the payload) that differs from
 	// InstallFP. It is recorded for operators and never moves the ID.
@@ -104,6 +111,7 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 	}
 	machine, machineVerified := agentidentity.HostMachineHash()
 	account := agentIdentityAccount(user)
+	upn, upnKnown := agentIdentityAccountUPN(user.ID)
 	facts := agentIdentityFacts{
 		MachineHash: machine,
 		UserID:      agentidentity.NormalizeUserID(user.ID),
@@ -115,6 +123,8 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		UserName:        firstNonEmpty(account, user.Name),
 		UserDomain:      agentIdentityAccountDomains(user.ID),
 		UserIncarnation: agentIdentityAccountToken(agentidentity.NormalizeUserID(user.ID)),
+		UserUPN:         upn,
+		UPNUnavailable:  !upnKnown,
 		Connector:       connectorName,
 		InstallFP:       agentIdentityInstallFP(connectorName, user),
 	}
@@ -152,6 +162,41 @@ func agentIdentityAccountDomains(userID string) string {
 		return ""
 	}
 	return useridentity.AccountDomains(facts)
+}
+
+// agentIdentityAccountUPN is the UPN of the account a uid or SID's hooks ran
+// as. A current Windows guardian record wins before profile lookup refreshes
+// the gateway cache. Otherwise only current cached directory facts may name
+// it. known is false when no current answer or directory UPN is available.
+// This never looks the account up, so the hook path does not wait for it.
+func agentIdentityAccountUPN(userID string) (upn string, known bool) {
+	userID = agentidentity.NormalizeUserID(userID)
+	if userID == "" {
+		return "", false
+	}
+	facts, ok := peerDirectoryCache().peekCurrent(userID)
+	if agentidentity.IsSID(userID) && currentIdentitySpoolDir() != "" {
+		if record, current := readIdentitySpoolFacts(userID, time.Now()); current {
+			upn := strings.TrimSpace(record.Facts.UPN)
+			return upn, upn != "" || record.Facts.Directory == useridentity.DirectoryLocal
+		}
+		// A withdrawn or unreadable guardian record cannot keep proving the
+		// UPN that the gateway cached from an earlier guardian pass.
+		if !ok || facts.GuardianRecord {
+			return "", false
+		}
+	}
+	if !ok {
+		return "", false
+	}
+	upn = strings.TrimSpace(facts.UPN)
+	if upn == "" && agentidentity.IsSID(userID) &&
+		(facts.Directory == useridentity.DirectoryActiveDirectory || facts.Directory == useridentity.DirectoryEntraID) {
+		// An unavailable directory UPN does not prove that this account
+		// has none, even when the guardian has a current record.
+		return "", false
+	}
+	return upn, upn != "" || facts.Directory == useridentity.DirectoryLocal || facts.GuardianRecord
 }
 
 // hookAgentIdentityUser picks the user an agent identity belongs to, most

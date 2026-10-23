@@ -38,6 +38,9 @@ const (
 	windowsIdentityGroupNameLimit = 128
 	// windowsIdentityGroupNameBudget bounds the time spent naming them.
 	windowsIdentityGroupNameBudget = 2 * time.Second
+	// windowsIdentityUPNWait lets an expired AD translation finish during a
+	// guardian pass, within the per-account lookup deadline.
+	windowsIdentityUPNWait = 2 * time.Second
 )
 
 // WriteWindowsIdentitySpool replaces dir's records with one per user in the
@@ -145,7 +148,7 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 		}
 	}
 	// publishTokenGroups publishes this cycle's token groups of an account
-	// whose lookups did not answer in time, when its record names others.
+	// whose lookups did not answer in time, when its groups or UPN need updating.
 	publishTokenGroups := func(entry account) {
 		if record, changed := IdentitySpoolTokenGroupRecord(entry.previous, entry.previousErr, entry.key, cache.Users[entry.sid],
 			cache.SignedIn[entry.sid], time.Now().UTC()); changed {
@@ -166,7 +169,7 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 		// others.
 		accountCtx, cancel := context.WithTimeout(ctx, windowsIdentityAccountWait)
 		resolved, err := windowsIdentityBounded(accountCtx, key, func(ctx context.Context) windowsIdentityResolved {
-			facts := lookups.facts(key, 0)
+			facts := lookups.facts(key, windowsIdentityLookupBudget(ctx, windowsIdentityUPNWait))
 			facts.GroupsPartial = !signedIn
 			if signedIn {
 				names := lookups.groupNames(groupSIDs, windowsIdentityGroupNameLimit, windowsIdentityLookupBudget(ctx, windowsIdentityGroupNameBudget))
@@ -206,9 +209,6 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 			record.UPNSource = UPNSourceIdentityStore
 		case facts.UPN != "":
 			record.UPNSource = UPNSourceTranslateName
-		}
-		if entry.previousErr == nil {
-			record = KeepLastKnownUPN(record, entry.previous)
 		}
 		publish(entry, record)
 	}

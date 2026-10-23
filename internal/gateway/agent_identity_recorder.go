@@ -55,6 +55,11 @@ type agentIdentityRecorder struct {
 	// bound loses its exclusion too, so a write that keeps failing cannot
 	// grow them past agentIdentityRecorderMaxPending (GAP-1128).
 	exclusions map[string]inventory.AgentIdentitySession
+	// subagents are the sub-agent instances (ais-) seen since the last
+	// write, per agent identity and instance: a sub-agent that shares its
+	// parent's session, or one in a child session. Past
+	// agentIdentityRecorderMaxPending new ones wait for the next window.
+	subagents map[string]inventory.AgentIdentitySubagent
 
 	// persistErr is why the last write to inventory.db failed, "" after
 	// one succeeded: the ledger then runs from memory, and its counts and
@@ -111,6 +116,8 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	if facts.UserIncarnation != "" {
 		rec.UserIncarnation = facts.UserIncarnation
 	}
+	rec.UPN = facts.UserUPN
+	rec.UPNUnavailable = facts.UPNUnavailable
 	sessionID = strings.TrimSpace(sessionID)
 	if _, sub := r.subSessions[subSessionKey(facts.ID, sessionID)]; sub {
 		sessionID = ""
@@ -128,6 +135,49 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 }
 
 func subSessionKey(agentID, sessionID string) string { return agentID + "\x00" + sessionID }
+
+// observeSubagent records the sub-agent instance (ais-) a hook of agentID
+// in sessionID ran as, the one its records carry: subagentInstance for a
+// sub-agent that shares its parent's session, else sessionInstance when
+// sessionID is a child session (markSubagentSession). A hook of the main
+// agent records none.
+func (r *agentIdentityRecorder) observeSubagent(agentID, sessionID, subagentInstance, sessionInstance string) {
+	if r == nil || agentID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	instance := subagentInstance
+	if _, child := r.subSessions[subSessionKey(agentID, strings.TrimSpace(sessionID))]; instance == "" && child {
+		instance = sessionInstance
+	}
+	if instance == "" {
+		return
+	}
+	seen := time.Now().UTC()
+	r.noteSubagentLocked(inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: instance, FirstSeen: seen, LastSeen: seen})
+}
+
+func (r *agentIdentityRecorder) noteSubagentLocked(sub inventory.AgentIdentitySubagent) {
+	key := subSessionKey(sub.AgentID, sub.InstanceID)
+	if known, ok := r.subagents[key]; ok {
+		if sub.FirstSeen.Before(known.FirstSeen) {
+			known.FirstSeen = sub.FirstSeen
+		}
+		if sub.LastSeen.After(known.LastSeen) {
+			known.LastSeen = sub.LastSeen
+		}
+		r.subagents[key] = known
+		return
+	}
+	if len(r.subagents) >= agentIdentityRecorderMaxPending {
+		return
+	}
+	if r.subagents == nil {
+		r.subagents = make(map[string]inventory.AgentIdentitySubagent)
+	}
+	r.subagents[key] = sub
+}
 
 // markSubagentSession records that sessionID belongs to a sub-agent of
 // agentID, which may have counted it already: the link to the parent can be
@@ -161,8 +211,9 @@ func (r *agentIdentityRecorder) markSubagentSession(agentID, sessionID string) {
 	}
 }
 
-// take removes and returns the buffered sightings and child exclusions.
-func (r *agentIdentityRecorder) take() ([]inventory.AgentIdentityRecord, []inventory.AgentIdentitySession) {
+// take removes and returns the buffered sightings, child exclusions and
+// sub-agent sightings.
+func (r *agentIdentityRecorder) take() ([]inventory.AgentIdentityRecord, []inventory.AgentIdentitySession, []inventory.AgentIdentitySubagent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	batch := make([]inventory.AgentIdentityRecord, 0, len(r.pending))
@@ -173,16 +224,26 @@ func (r *agentIdentityRecorder) take() ([]inventory.AgentIdentityRecord, []inven
 	for _, child := range r.exclusions {
 		excluded = append(excluded, child)
 	}
+	subagents := make([]inventory.AgentIdentitySubagent, 0, len(r.subagents))
+	for _, sub := range r.subagents {
+		subagents = append(subagents, sub)
+	}
 	r.pending = make(map[string]*inventory.AgentIdentityRecord)
 	r.exclusions = nil
-	return batch, excluded
+	r.subagents = nil
+	return batch, excluded, subagents
 }
 
 // restore puts back a failed write, merging it with hooks and child links
 // buffered while the write was in flight.
-func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord, excluded []inventory.AgentIdentitySession) {
+func (r *agentIdentityRecorder) restore(
+	batch []inventory.AgentIdentityRecord, excluded []inventory.AgentIdentitySession, subagents []inventory.AgentIdentitySubagent,
+) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	for _, sub := range subagents {
+		r.noteSubagentLocked(sub)
+	}
 	if r.exclusions == nil {
 		r.exclusions = make(map[string]inventory.AgentIdentitySession)
 	}
@@ -225,19 +286,36 @@ func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord, e
 	}
 }
 
-// snapshot copies the buffered rows and hints for the API.
-func (r *agentIdentityRecorder) snapshot() (map[string]inventory.AgentIdentityRecord, map[string]string) {
+// snapshot copies buffered rows, hints and distinct sub-agent sightings for
+// the API. A buffered row counts its sub-agents until the store reconciles
+// those sightings with instances already persisted there.
+func (r *agentIdentityRecorder) snapshot() (map[string]inventory.AgentIdentityRecord, map[string]string, []inventory.AgentIdentitySubagent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	pending := make(map[string]inventory.AgentIdentityRecord, len(r.pending))
 	for id, rec := range r.pending {
 		pending[id] = *rec
 	}
+	newest := map[string]time.Time{}
+	subagents := make([]inventory.AgentIdentitySubagent, 0, len(r.subagents))
+	for _, sub := range r.subagents {
+		subagents = append(subagents, sub)
+		rec, ok := pending[sub.AgentID]
+		if !ok {
+			continue
+		}
+		rec.SubagentsSeen++
+		if sub.FirstSeen.After(newest[sub.AgentID]) {
+			newest[sub.AgentID] = sub.FirstSeen
+			rec.LastSubagentID = sub.InstanceID
+		}
+		pending[sub.AgentID] = rec
+	}
 	hints := make(map[string]string, len(r.hints))
 	for id, hint := range r.hints {
 		hints[id] = hint
 	}
-	return pending, hints
+	return pending, hints, subagents
 }
 
 // flush writes the buffered batch to store.
@@ -247,12 +325,12 @@ func (r *agentIdentityRecorder) flush(ctx context.Context, store *inventory.Inve
 	if store == nil {
 		return nil
 	}
-	batch, excluded := r.take()
-	if len(batch) == 0 && len(excluded) == 0 {
+	batch, excluded, subagents := r.take()
+	if len(batch) == 0 && len(excluded) == 0 && len(subagents) == 0 {
 		return nil
 	}
-	if err := store.UpsertAgentIdentitiesAndExclude(ctx, batch, excluded); err != nil {
-		r.restore(batch, excluded)
+	if err := store.UpsertAgentIdentityBatch(ctx, batch, excluded, subagents); err != nil {
+		r.restore(batch, excluded, subagents)
 		r.notePersist(err)
 		return err
 	}
@@ -446,7 +524,7 @@ func (r *agentIdentityRecorder) sweepOwnStore(ctx context.Context) {
 func (r *agentIdentityRecorder) pendingCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.pending) + len(r.exclusions)
+	return len(r.pending) + len(r.exclusions) + len(r.subagents)
 }
 
 // agentIdentityRow is one row of GET /api/v1/agents/identities.
@@ -520,12 +598,29 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 			fmt.Fprintf(os.Stderr, "[sidecar] agent identity flush failed: %v\n", err)
 		}
 	}
-	pending, hints := sharedAgentIdentities.snapshot()
+	// Keep a successful ticker flush from moving the buffered sightings into
+	// the store between this snapshot and the reconciliation below.
+	sharedAgentIdentities.flushMu.Lock()
+	pending, hints, bufferedSubagents := sharedAgentIdentities.snapshot()
 	var stored []inventory.AgentIdentityRecord
 	start, total, persisted := 0, 0, false
 	if store := sharedAgentIdentities.store(); store != nil {
 		var err error
+		var overlays map[string]inventory.AgentIdentitySubagentOverlay
+		if overlays, err = store.ReconcileAgentIdentitySubagents(r.Context(), bufferedSubagents); err != nil {
+			sharedAgentIdentities.flushMu.Unlock()
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "agent identities unavailable"})
+			return
+		}
+		for id, overlay := range overlays {
+			if rec, ok := pending[id]; ok {
+				rec.SubagentsSeen = overlay.NewCount
+				rec.LastSubagentID = overlay.LastSubagentID
+				pending[id] = rec
+			}
+		}
 		if stored, start, total, err = storedAgentIdentityWindow(r.Context(), store, filter, offset, limit, pending); err != nil {
+			sharedAgentIdentities.flushMu.Unlock()
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "agent identities unavailable"})
 			return
 		}
@@ -539,6 +634,7 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 	}
 	// rows begins at merged row start.
 	rows := mergeAgentIdentityRows(stored, pending, hints, filter)
+	sharedAgentIdentities.flushMu.Unlock()
 	from := offset - start
 	page := rows[min(from, len(rows)):min(from+limit, len(rows))]
 	next := ""
@@ -656,6 +752,14 @@ func mergeAgentIdentityRows(
 		}
 		if buffered.UserIncarnation != "" {
 			rec.UserIncarnation = buffered.UserIncarnation
+		}
+		rec.UPN = buffered.UPN
+		rec.UPNUnavailable = buffered.UPNUnavailable
+		// With a store, buffered.SubagentsSeen contains only instance IDs
+		// absent from it and LastSubagentID was ordered against its keys.
+		rec.SubagentsSeen += buffered.SubagentsSeen
+		if buffered.LastSubagentID != "" {
+			rec.LastSubagentID = buffered.LastSubagentID
 		}
 	}
 	rows := make([]agentIdentityRow, 0, len(order))

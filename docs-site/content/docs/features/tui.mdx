@@ -18,6 +18,15 @@ defenseclaw tui
 
 Use a terminal of at least 80×24. Run `defenseclaw init` first so the panels have data.
 
+This page is for a DefenseClaw you installed yourself. A managed computer (an
+enterprise package, MDM or Setup) has no TUI and no `defenseclaw init`. On
+Linux and macOS the user's `defenseclaw` offers only `sandbox` commands,
+`help` and `--version`, and answers `tui`, `init` and anything else with
+`This computer is managed; only `defenseclaw sandbox` commands are available
+here.` and exit `2`. On Windows the managed `defenseclaw.exe` is the
+administrator CLI. An administrator checks a managed computer as shown in
+[On a managed device](/docs/reference/commands/tui#on-a-managed-device).
+
 ![DefenseClaw TUI Overview panel: the tab bar, hook call, block, finding and guardrail cards, the connector scope, services and enforcement summaries, and the Restart Gateway, Run Doctor and Scan AI Agents buttons](/images/tui/overview.png)
 
 ## Panels

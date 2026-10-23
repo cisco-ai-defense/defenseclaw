@@ -611,11 +611,11 @@ func TestACPEvaluationContextNamesTheSessionInstance(t *testing.T) {
 	// The agent and its ACP session are in the agent identity ledger, as a
 	// hook session is (GAP-0315).
 	if agent := resolveHookAgentIdentity(t.Context(), agentHookRequest{ConnectorName: "kiro"}).ID; agent != "" {
-		pending, _ := sharedAgentIdentities.snapshot()
+		pending, _, _ := sharedAgentIdentities.snapshot()
 		before := pending[agent].SessionsSeen
 		instance(`{"sessionId":"acp-session-ledger"}`)
 		instance(`{"sessionId":"acp-session-ledger"}`)
-		pending, _ = sharedAgentIdentities.snapshot()
+		pending, _, _ = sharedAgentIdentities.snapshot()
 		if got := pending[agent]; got.AgentID != agent || got.SessionsSeen != before+1 || got.LastSessionID != "acp-session-ledger" {
 			t.Fatalf("agent identity ledger row = %+v, want %s with one more session (acp-session-ledger)", got, agent)
 		}

@@ -309,31 +309,14 @@ func ParseIdentitySpoolRecord(data []byte, key string) (IdentitySpoolRecord, err
 	return record, nil
 }
 
-// KeepLastKnownUPN carries the UPN of the account's previous record into a
-// fresh record that resolved none, with the principal it gave. Windows
-// resolves a UPN only while the user is signed in, so without it a signed-out
-// account's record fell back to account@REALM and the account showed two
-// principals (GAP-0284). The SID or uid is the record key, so the previous
-// record is the same account.
-func KeepLastKnownUPN(record, previous IdentitySpoolRecord) IdentitySpoolRecord {
-	if record.Facts.UPN != "" || previous.Facts.UPN == "" || !strings.EqualFold(record.Key, previous.Key) {
-		return record
-	}
-	record.Facts.UPN = previous.Facts.UPN
-	record.Facts.Principal = previous.Facts.UPN
-	record.UPNSource = previous.UPNSource
-	if record.Facts.Domain == "" {
-		record.Facts.Domain = previous.Facts.Domain
-	}
-	return record
-}
-
 // IdentitySpoolRecordStillProves reports whether previous, the record an
 // account has, still proves what current, the record a pass resolved for
 // the same account and could not publish, says, so a failed publication
 // need not withdraw it. The group SIDs (a Windows record's token groups;
 // the names a pass could not resolve this time are not compared) and
-// whether they are known (GroupsPartial) must be the same. A name, UPN,
+// whether they are known (GroupsPartial) must be the same. The UPN must
+// agree even when the new pass found none: keeping the old record after a
+// failed write would otherwise present an earlier UPN as current. A name,
 // principal, domain, realm, directory, tenant or SID that both name must
 // agree; one the pass did not resolve this time contradicts nothing.
 // Connector addresses and timestamps decide no profile and are not
@@ -345,9 +328,11 @@ func IdentitySpoolRecordStillProves(previous, current IdentitySpoolRecord) bool 
 	if !current.Facts.GroupsPartial && !sameGroupSIDs(previous.Facts.Groups, current.Facts.Groups) {
 		return false
 	}
+	if previous.Facts.UPN != current.Facts.UPN {
+		return false
+	}
 	for _, pair := range [][2]string{
 		{previous.User, current.User},
-		{previous.Facts.UPN, current.Facts.UPN},
 		{previous.Facts.Principal, current.Facts.Principal},
 		{previous.Facts.Domain, current.Facts.Domain},
 		{previous.Facts.Realm, current.Facts.Realm},
@@ -394,21 +379,22 @@ func IdentitySpoolWithdrawnByFailedWrite(previous IdentitySpoolRecord, previousE
 // windowsIdentityAccountWait, still running from an earlier pass, or cut by
 // the end of the cycle): the token groups the enumerator holds for the
 // account this cycle (groupSIDs; known only while signedIn), which need no
-// lookup, over the facts of its previous record. Kept as it was, the
+// lookup, over the previous record's non-UPN account facts. Kept as it was, the
 // previous record went on naming an earlier sign-in's groups, so a user who
 // had gained a strict group kept the weaker profile of the old ones until a
 // lookup answered in time or the record aged out (loop round 3). The
 // groups are their SIDs, which the gateway matches assignments by, each
 // followed by the name the previous record gave it. publish is false when
 // the previous record already says this (the same SIDs, or groups unknown
-// in both), and when it could not be read: an unknown record is neither
-// replaced nor withdrawn here. An account without a record gets one only
-// for a signed-in session, the only one with groups to publish.
+// in both) and has no UPN, principal or UPN metadata to clear. An unreadable
+// record is neither replaced nor withdrawn here. An account without a record
+// gets one only for a signed-in session, whose token supplies groups.
 func IdentitySpoolTokenGroupRecord(previous IdentitySpoolRecord, previousErr error, key string, groupSIDs []string, signedIn bool,
 	now time.Time) (record IdentitySpoolRecord, publish bool) {
 	switch {
 	case previousErr == nil:
-		if previous.Facts.GroupsPartial == !signedIn && (!signedIn || sameGroupSIDs(previous.Facts.Groups, groupSIDs)) {
+		if previous.Facts.GroupsPartial == !signedIn && (!signedIn || sameGroupSIDs(previous.Facts.Groups, groupSIDs)) &&
+			previous.Facts.UPN == "" && previous.Facts.Principal == "" && previous.UPNSource == "" && previous.UPNKeptSince.IsZero() {
 			return previous, false
 		}
 	case errors.Is(previousErr, os.ErrNotExist) && signedIn:
@@ -418,6 +404,10 @@ func IdentitySpoolTokenGroupRecord(previous IdentitySpoolRecord, previousErr err
 	}
 	record = previous
 	record.Key, record.UpdatedAt = key, now
+	// Only token groups were verified in this pass. Do not republish an
+	// earlier UPN with the new record's timestamp as if it were current.
+	record.Facts.UPN, record.Facts.Principal, record.UPNSource = "", "", ""
+	record.UPNKeptSince = time.Time{}
 	record.Facts.GroupsPartial = !signedIn
 	record.Facts.Groups = nil
 	if signedIn {

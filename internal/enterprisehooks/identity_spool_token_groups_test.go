@@ -34,19 +34,23 @@ func tokenGroupsPrevious() IdentitySpoolRecord {
 func TestIdentitySpoolWithdrawnByFailedWrite(t *testing.T) {
 	current := tokenGroupsPrevious()
 	current.Facts.Groups = []string{tokenGroupsWeak, tokenGroupsStrict}
+	withoutUPN := tokenGroupsPrevious()
+	withoutUPN.Facts.UPN = ""
 	for _, tc := range []struct {
 		name        string
 		previous    IdentitySpoolRecord
 		previousErr error
+		current     IdentitySpoolRecord
 		want        bool
 	}{
-		{"no previous record", IdentitySpoolRecord{}, os.ErrNotExist, false},
-		{"an unreadable previous record", IdentitySpoolRecord{}, errors.New("parse identity spool record: unexpected EOF"), false},
-		{"an untrusted previous record", IdentitySpoolRecord{}, os.ErrPermission, false},
-		{"a previous record the pass disproved", tokenGroupsPrevious(), nil, true},
-		{"a previous record the pass confirmed", current, nil, false},
+		{"no previous record", IdentitySpoolRecord{}, os.ErrNotExist, current, false},
+		{"an unreadable previous record", IdentitySpoolRecord{}, errors.New("parse identity spool record: unexpected EOF"), current, false},
+		{"an untrusted previous record", IdentitySpoolRecord{}, os.ErrPermission, current, false},
+		{"a previous record the pass disproved", tokenGroupsPrevious(), nil, current, true},
+		{"a previous UPN is unconfirmed", tokenGroupsPrevious(), nil, withoutUPN, true},
+		{"a previous record the pass confirmed", current, nil, current, false},
 	} {
-		if got := IdentitySpoolWithdrawnByFailedWrite(tc.previous, tc.previousErr, current); got != tc.want {
+		if got := IdentitySpoolWithdrawnByFailedWrite(tc.previous, tc.previousErr, tc.current); got != tc.want {
 			t.Errorf("%s: withdrawn = %v, want %v", tc.name, got, tc.want)
 		}
 	}
@@ -70,9 +74,9 @@ func TestIdentitySpoolTokenGroupRecord(t *testing.T) {
 		if record.Facts.GroupsPartial || !record.UpdatedAt.Equal(now) || record.Key != tokenGroupsAccount {
 			t.Fatalf("record = %+v, want current token groups dated now", record)
 		}
-		if record.User != previous.User || record.Facts.UPN != previous.Facts.UPN || record.Facts.Directory != previous.Facts.Directory ||
-			record.UPNSource != previous.UPNSource {
-			t.Fatalf("record = %+v, want the previous record's identity facts kept", record)
+		if record.User != previous.User || record.Facts.UPN != "" || record.Facts.Principal != "" ||
+			record.Facts.Directory != previous.Facts.Directory || record.UPNSource != "" {
+			t.Fatalf("record = %+v, want current groups without a carried UPN", record)
 		}
 		if !slices.Equal(previous.Facts.Groups, []string{tokenGroupsWeak, `CORP\weak`}) {
 			t.Fatalf("the previous record was changed: %v", previous.Facts.Groups)
@@ -88,8 +92,15 @@ func TestIdentitySpoolTokenGroupRecord(t *testing.T) {
 	})
 	t.Run("a sign-out is published as unknown groups", func(t *testing.T) {
 		record, publish := IdentitySpoolTokenGroupRecord(tokenGroupsPrevious(), nil, tokenGroupsAccount, []string{tokenGroupsWeak}, false, now)
-		if !publish || !record.Facts.GroupsPartial || len(record.Facts.Groups) != 0 {
-			t.Fatalf("record = %+v, publish %v; want groups unknown", record.Facts, publish)
+		if !publish || !record.Facts.GroupsPartial || len(record.Facts.Groups) != 0 || record.Facts.UPN != "" {
+			t.Fatalf("record = %+v, publish %v; want groups and UPN unknown", record.Facts, publish)
+		}
+	})
+	t.Run("unchanged groups do not keep an earlier UPN after timeout", func(t *testing.T) {
+		record, publish := IdentitySpoolTokenGroupRecord(tokenGroupsPrevious(), nil, tokenGroupsAccount, []string{tokenGroupsWeak}, true, now)
+		if !publish || record.Facts.UPN != "" || record.Facts.Principal != "" || record.UPNSource != "" ||
+			!record.UpdatedAt.Equal(now) || !slices.Equal(record.Facts.Groups, []string{tokenGroupsWeak, `CORP\weak`}) {
+			t.Fatalf("record = %+v, publish %v; want the same current groups with no old UPN", record, publish)
 		}
 	})
 	t.Run("no previous record and a signed-in session", func(t *testing.T) {
@@ -106,7 +117,8 @@ func TestIdentitySpoolTokenGroupRecord(t *testing.T) {
 		groups      []string
 		signedIn    bool
 	}{
-		{"the same token groups", tokenGroupsPrevious(), nil, []string{tokenGroupsWeak}, true},
+		{"the same token groups and no previous UPN", IdentitySpoolRecord{Key: tokenGroupsAccount,
+			Facts: useridentity.DirectoryFacts{Groups: []string{tokenGroupsWeak}}}, nil, []string{tokenGroupsWeak}, true},
 		{"still signed out", IdentitySpoolRecord{Key: tokenGroupsAccount, Facts: useridentity.DirectoryFacts{GroupsPartial: true}}, nil,
 			[]string{tokenGroupsWeak}, false},
 		{"an unreadable previous record", IdentitySpoolRecord{}, errors.New("sharing violation"), []string{tokenGroupsStrict}, true},

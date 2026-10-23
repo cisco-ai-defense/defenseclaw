@@ -1002,9 +1002,10 @@
             "authoritative_denial_events": [
               "post_tool_call"
             ],
-            "authoritative_pending_discard_events": [],
+            "authoritative_pending_discard_events": [
+              "on_session_end"
+            ],
             "authoritative_terminal_events": [
-              "on_session_end",
               "on_session_finalize",
               "on_session_reset"
             ],
@@ -1043,7 +1044,7 @@
             ],
             "limitations": [
               "Only pre_tool_call can block, and hook subprocess errors, timeouts, or malformed output fail open upstream.",
-              "A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state."
+              "A post_tool_call commits success only when its documented extra.status is ok; error and blocked statuses must not advance state."
             ]
           },
           "content_envelope": {
@@ -1142,9 +1143,10 @@
             "authoritative_denial_events": [
               "post_tool_call"
             ],
-            "authoritative_pending_discard_events": [],
+            "authoritative_pending_discard_events": [
+              "on_session_end"
+            ],
             "authoritative_terminal_events": [
-              "on_session_end",
               "on_session_finalize",
               "on_session_reset"
             ],
@@ -1183,7 +1185,7 @@
             ],
             "limitations": [
               "Only pre_tool_call can block. Exit code 2 blocks pre_tool_call; Setup sets fail_closed on its v2 pre_tool_call entry outside Secure Client, so timeouts and spawn errors block. A killed hook can still fail open with a non-2 exit and empty stdout. Other events cannot block.",
-              "A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state."
+              "A post_tool_call commits success only when its documented extra.status is ok; error and blocked statuses must not advance state."
             ]
           },
           "content_envelope": {

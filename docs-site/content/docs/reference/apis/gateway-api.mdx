@@ -591,12 +591,15 @@ that lacks `cache.refused`.
       "agent_id": "agt-3f9c0a1b2c3d4e5f",
       "user_id": "94401103",
       "user_name": "alice@corp.example.com",
+      "upn": "alice@corp.example.com",
       "connector": "codex",
       "machine_hash": "…",
       "first_seen": "2026-10-05T16:41:09Z",
       "last_seen": "2026-10-06T10:32:15Z",
       "last_session_id": "3034b58b-38bc-48da-bd70-efffc86bff40",
-      "sessions_seen": 4
+      "sessions_seen": 4,
+      "subagents_seen": 2,
+      "last_subagent_id": "ais-8c41d07e2b9f3a65"
     }
   ],
   "total": 1,
@@ -622,7 +625,26 @@ restart. `/health` reports the same under `agent_identities`, and
 saved on the next write that succeeds, without a restart.
 `sessions_seen` counts each chat once, however many are open and also when one
 resumes after a gateway restart. A sub-agent that runs in a session of its own,
-as a Codex 0.160 thread does, is not a chat and is not counted. `total` counts every matching identity; while
+as a Codex 0.160 thread does, is not a chat and is not counted.
+`subagents_seen` counts the sub-agents the agent ran, each once, also when one
+hooks again after a gateway restart: a sub-agent that shares its parent's
+session (a Claude Code task, a Codex sub-agent), and one in a session of its own
+from its first hook after the gateway linked that session to the parent.
+`last_subagent_id` is the `ais-`
+instance of the newest one, the one its own records carry. `upn` is the
+account's UPN in the current verified directory facts or Windows guardian
+record when the agent was last seen. Each later hook replaces that value. A
+current Windows guardian record takes precedence over an earlier cached
+answer. Without one, an expired or failed directory answer, or a completed
+answer without a UPN, omits `upn`; an earlier value is not carried into the
+row. On Windows, a cold Active
+Directory lookup can still be running when a hook records the row, so `upn`
+may be absent. A completed background lookup does not update the row by
+itself; another hook must run. Rows also keep their last snapshot until the
+next hook. Linux, macOS and Windows rows carry the
+same fields, and rows written before 1.0.4 gain the new fields when their
+agent is seen again, subject to that `upn` timing. `total` counts every
+matching identity; while
 `next_cursor` is not empty, pass it as `cursor` for the next page.
 `defenseclaw agent identities` reads every page.
 

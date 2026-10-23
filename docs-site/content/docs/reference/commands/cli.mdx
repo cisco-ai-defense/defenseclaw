@@ -1222,6 +1222,7 @@ its transaction on PowerShell 7, which must be installed.
 | `reconcile` | Secure Client, standalone | Restart the guardian and wait for a fresh reconcile |
 | `status`, `verify` | Secure Client, standalone | Read-only state, and the full check |
 | `profile-explain`, `agent-identities`, `ide-plugins` | Standalone | Read-only views of the managed gateway's guardrail profile resolution, agent identities and IDE plugin inventory, as JSON. Flags as on Linux and macOS: `--user`, `--connector`, `--agent`, `--ide`, `--ai-only`, `--cursor` |
+| `events` | Standalone | Check the `DefenseClaw` event log entries (or, with `--application`, the Application log copies) against the lifecycle log; exits `1` on a forged entry or a missing record. `--max N`, `--json`. See [Logs and events](/docs/enterprise/operate/operations#logs-and-events) |
 | `uninstall` | Secure Client, standalone | Remove the services and every account's hooks. Standalone also removes the machine state; Secure Client keeps it unless `--purge`. Each account keeps `%USERPROFILE%\.defenseclaw` unless `--purge` |
 
 | Flag | Meaning |
