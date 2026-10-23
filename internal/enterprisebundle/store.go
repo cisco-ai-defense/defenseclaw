@@ -1275,9 +1275,14 @@ type SettleReport struct {
 	// gateway and then confirm or roll back.
 	Unconfirmed []*Receipt
 	// Pending are receipts whose transaction is committed for the
-	// installed config but whose gateway could not be read (an outage):
-	// left open for the next run to confirm, never failed for it.
+	// installed config but whose gateway could not be read (an outage), or
+	// whose state ref proves an apply but confirmation needs a missing
+	// prerequisite. They remain open and are never failed for that alone.
 	Pending []string
+	// PendingReasons explains state-named receipts that could not be sealed
+	// because a confirmation prerequisite is missing. Gateway outages have
+	// no entry here.
+	PendingReasons map[string]string
 }
 
 // Settle finishes what an interrupted run left, at the start of every
@@ -1338,30 +1343,35 @@ func (s *Store) SettleOpen(open map[string]bool, keep ...string) (SettleReport, 
 			report.Interrupted = append(report.Interrupted, r.ReceiptID)
 		case StateApplied:
 			if st.names(r) {
-				var prerequisiteErr error
 				if s.BeforeConfirm != nil {
-					prerequisiteErr = s.BeforeConfirm(r)
-				}
-				if prerequisiteErr != nil {
-					if !errors.Is(prerequisiteErr, ErrConfirmationPrerequisiteMissing) {
-						return report, prerequisiteErr
+					if prerequisiteErr := s.BeforeConfirm(r); prerequisiteErr != nil {
+						if !errors.Is(prerequisiteErr, ErrConfirmationPrerequisiteMissing) {
+							return report, prerequisiteErr
+						}
+						// The state ref is durable proof of a previously confirmed
+						// apply. A missing prerequisite prevents sealing the
+						// receipt; later live evidence cannot disprove that apply
+						// or make this receipt a rollback target.
+						kept[r.Dir] = true
+						report.Pending = append(report.Pending, r.ReceiptID)
+						if report.PendingReasons == nil {
+							report.PendingReasons = map[string]string{}
+						}
+						report.PendingReasons[r.ReceiptID] = prerequisiteErr.Error()
+						continue
 					}
-					// The state ref proves the config, but it cannot supply a
-					// missing confirmation prerequisite. Leave the receipt open
-					// for a later delivery or gateway check.
-				} else {
-					markConfirmed(r)
-					if err := s.Advance(r, StateConfirmed, func(r *Receipt) { r.ConfirmedAt = st.Current.ConfirmedAt }); err != nil {
+				}
+				markConfirmed(r)
+				if err := s.Advance(r, StateConfirmed, func(r *Receipt) { r.ConfirmedAt = st.Current.ConfirmedAt }); err != nil {
+					return report, err
+				}
+				if s.AfterConfirm != nil {
+					if err := s.AfterConfirm(r); err != nil {
 						return report, err
 					}
-					if s.AfterConfirm != nil {
-						if err := s.AfterConfirm(r); err != nil {
-							return report, err
-						}
-					}
-					report.Completed = append(report.Completed, r.ReceiptID)
-					continue
 				}
+				report.Completed = append(report.Completed, r.ReceiptID)
+				continue
 			}
 			kept[r.Dir] = true
 			report.Unconfirmed = append(report.Unconfirmed, r)
