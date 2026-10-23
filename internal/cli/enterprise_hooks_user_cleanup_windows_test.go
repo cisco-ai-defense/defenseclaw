@@ -9,12 +9,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
@@ -116,6 +118,59 @@ func TestAttemptWindowsStandaloneUserCleanupRunsAsTheSignedInUser(t *testing.T) 
 	if outcome, err = attemptWindowsStandaloneUserCleanup(context.Background(), gone); outcome != enterpriseHookUserCleanupDone ||
 		err != nil || len(removed) != 0 {
 		t.Fatalf("deleted profile: outcome=%d err=%v removals=%d", outcome, err, len(removed))
+	}
+}
+
+// A removed Copilot row must flow through the Windows per-user cleanup
+// planner and the removal callback, which takes out its VS Code Local file.
+func TestWindowsRemovedCopilotManifestRowRemovesVSCodeLocalHook(t *testing.T) {
+	dataDir := useUserCleanupStateDir(t)
+	home := t.TempDir()
+	previousCfg, previousOptions := cfg, enterpriseHookWindowsGuardianOptions
+	t.Cleanup(func() { cfg, enterpriseHookWindowsGuardianOptions = previousCfg, previousOptions })
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, DataDir: dataDir,
+		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileStandalone}}
+	const binary = `C:\Program Files\Cisco\DefenseClaw\defenseclaw-hook.exe`
+	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
+		return enterprisepolicy.Options{HookBinary: binary}, []string{"copilot"}, true, nil
+	}
+	if err := windowsCopilotVSCodeUser(home, false, false); err != nil {
+		t.Fatal(err)
+	}
+	hookFile := enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)
+	writeUserCleanupAuthorization(t, dataDir, userCleanupRow("copilot", userCleanupSIDA, home))
+	stubWindowsUserCleanupSeams(t,
+		func(sid, gotHome string) error {
+			if sid != userCleanupSIDA || gotHome != home {
+				t.Fatalf("cleanup used %s %s, want the protected Copilot account", sid, gotHome)
+			}
+			return nil
+		},
+		func(_ context.Context, opts enterprisehooks.InstallOptions) error {
+			if opts.ConnectorName != "copilot" || opts.OwnerSID != userCleanupSIDA || opts.UserHome != home {
+				t.Fatalf("wrong Windows runtime removal: %+v", opts)
+			}
+			// This is the user-file step in removeWindowsRuntimeOnlyManagedRuntime.
+			return windowsCopilotVSCodeUser(opts.UserHome, false, true)
+		},
+	)
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	var log bytes.Buffer
+	if err := enterpriseHookStandalonePlatformRevokeUsers(context.Background(), &log,
+		userCleanupManifest([2]string{"copilot", userCleanupSIDA})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(hookFile); err != nil {
+		t.Fatalf("admitted Copilot hook file was removed: %v", err)
+	}
+	if err := enterpriseHookStandalonePlatformRevokeUsers(context.Background(), &log, enterprisehooks.Manifest{Version: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(hookFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removed Copilot row left the VS Code Local hook file: %v; %s", err, log.String())
+	}
+	if pending, err := loadEnterpriseHookUserCleanups(dataDir); err != nil || len(pending) != 0 {
+		t.Fatalf("completed cleanup remained pending: %+v %v", pending, err)
 	}
 }
 

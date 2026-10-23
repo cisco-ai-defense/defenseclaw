@@ -198,7 +198,13 @@ def test_windows_launcher_registrations_are_registered(tmp_path, monkeypatch, co
     command = _LAYOUTS["windows_commands"][connector]
     assert "defenseclaw" not in command.lower()
     cfg, config = _install(tmp_path, connector, _windows_document(connector, command))
-    assert hook_registration_problems(cfg, connector) == []
+    if connector == "copilot":
+        # This fixture pins presence detection, but has only one event and no
+        # native contract evidence, so it is not a healthy Copilot install.
+        assert hook_integrity._registers_defenseclaw_hooks(cfg, connector, config, strict=False)
+        assert hook_registration_problems(cfg, connector)
+    else:
+        assert hook_registration_problems(cfg, connector) == []
 
     removed = {"codex": "[otel.exporter.otlp-http.headers]\nx-defenseclaw-source = 'codex'\n"}.get(
         connector, json.dumps({"hooks": {}, "env": {"OTEL_RESOURCE_ATTRIBUTES": "defenseclaw.connector=x"}})
@@ -284,6 +290,7 @@ def test_windows_copilot_adapter_in_a_data_dir_not_named_defenseclaw_is_register
     entry = {"type": "command", "powershell": command, "timeoutSec": 30}
     document = json.dumps({"version": 1, "hooks": {"preToolUse": [entry]}})
     cfg, config = _install(tmp_path, "copilot", document, data_dir=data_dir)
-    assert hook_registration_problems(cfg, "copilot") == []
+    assert hook_integrity._registers_defenseclaw_hooks(cfg, "copilot", config, strict=False)
+    assert hook_registration_problems(cfg, "copilot")  # one event and an incomplete native lock
     config.write_text(json.dumps({"version": 1, "hooks": {}}), encoding="utf-8")
     assert hook_registration_problems(cfg, "copilot") == [f"no DefenseClaw hooks are registered in {config}"]

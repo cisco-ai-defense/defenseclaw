@@ -37,7 +37,8 @@ var windowsOpenCodeMachinePolicy struct {
 // VS Code Local hook file and Copilot plugin in a Copilot row's home, as
 // the target user. enterprisepolicy owns the files and the CLI resolves
 // what the administrator's config wants, so the CLI installs it with
-// SetWindowsCopilotVSCodeUser. Unset, Copilot rows leave the home alone.
+// SetWindowsCopilotVSCodeUser. Unset, Copilot user operations fail rather
+// than silently leaving a managed hook file behind.
 var windowsCopilotVSCodeUser struct {
 	sync.Mutex
 	apply func(home string, verify, remove bool) error
@@ -58,7 +59,7 @@ func applyWindowsCopilotVSCodeUser(connectorName, home string, verify, remove bo
 	apply := windowsCopilotVSCodeUser.apply
 	windowsCopilotVSCodeUser.Unlock()
 	if apply == nil {
-		return nil
+		return errors.New("enterprise hooks: copilot VS Code Local user-file callback is not registered")
 	}
 	if err := apply(home, verify, remove); err != nil {
 		return fmt.Errorf("enterprise hooks: copilot VS Code Local hooks: %w", err)

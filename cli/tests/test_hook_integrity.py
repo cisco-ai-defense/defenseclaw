@@ -386,7 +386,7 @@ def test_codex_hooks_turned_off_or_left_without_command_fail_doctor(tmp_path):
     cfg, config = _agent_config(tmp_path, "codex", "config.toml")
     (tmp_path / "hooks").mkdir()
     (tmp_path / "hooks" / "codex-hook.sh").write_text("#!/bin/bash\n")
-    command = "/home/u/.defenseclaw/hooks/codex-hook.sh --event PreToolUse"
+    command = f"{tmp_path}/hooks/codex-hook.sh --event PreToolUse"
     entry = "[[hooks.PreToolUse]]\nmatcher = '*'\n[[hooks.PreToolUse.hooks]]\ntype = 'command'\ntimeout = 30\n"
     config.write_text("[features]\nhooks = false\n" + entry + f"command = '{command}'\n")
 

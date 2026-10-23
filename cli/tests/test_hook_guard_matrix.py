@@ -67,7 +67,13 @@ def _edits(connector: str) -> list[str]:
 
 
 _EDIT_CASES = [
-    pytest.param(case, event, edit, id=f"{_case_id(case)}-{event}-{edit}")
+    pytest.param(
+        case,
+        event,
+        edit,
+        id=f"{_case_id(case)}-{event}-{edit}",
+        marks=pytest.mark.skipif(sys.platform == "win32" and case["os"] == "posix", reason="POSIX hook layouts"),
+    )
     for case in _GUARDED
     for event in TOOL_GUARD_HOOKS[case["connector"]].events
     for edit in _edits(case["connector"])
@@ -179,7 +185,17 @@ def test_the_table_covers_every_hook_connector_setup_writes():
     assert hook_connectors == set(TOOL_GUARD_HOOKS)
 
 
-@pytest.mark.parametrize("case", _GUARDED, ids=_case_id)
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            case,
+            id=_case_id(case),
+            marks=pytest.mark.skipif(sys.platform == "win32" and case["os"] == "posix", reason="POSIX hook layouts"),
+        )
+        for case in _GUARDED
+    ],
+)
 def test_the_files_setup_writes_keep_tool_calls_guarded(tmp_path, monkeypatch, case):
     _windows(monkeypatch, case)
     cfg, paths = _install(tmp_path, monkeypatch, case)

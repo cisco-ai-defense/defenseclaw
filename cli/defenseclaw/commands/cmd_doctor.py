@@ -15779,10 +15779,13 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
     # with the repair doctor --fix applies (GAP-1436).
     problems = [problem for problem in hook_runtime_problems(cfg, connector) if not problem.startswith("hook token ")]
     if problems:
+        # A hook file another account can change carries its own repair
+        # (rel-1-0-4 GAP-0600); doctor --fix re-renders the others.
+        own_repair = next(filter(None, (getattr(problem, "repair", "") for problem in problems)), "")
         _emit(
             "fail",
             "Hook runtime files",
-            f"{'; '.join(problems)}; run `defenseclaw doctor --fix`",
+            f"{'; '.join(problems)}; {own_repair or 'run `defenseclaw doctor --fix`'}",
             r=r,
         )
     from defenseclaw.hook_integrity import hook_command_problems, setup_command

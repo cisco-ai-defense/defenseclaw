@@ -31,6 +31,7 @@ Each case starts from the files Setup writes
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,14 @@ from defenseclaw.commands import cmd_doctor, cmd_status
 from tests.test_hook_registration_every_connector import _CASES, _case_id, _install
 
 _COPILOT = [case for case in _CASES if case["connector"] == "copilot"]
+_COPILOT_PARAMS = [
+    pytest.param(
+        case,
+        id=_case_id(case),
+        marks=pytest.mark.skipif(sys.platform == "win32" and case["os"] == "posix", reason="POSIX hook layouts"),
+    )
+    for case in _COPILOT
+]
 
 # Every layer of the Copilot settings cascade (connector_paths.copilot_settings_paths).
 _USER_LAYERS = ["{home}/.copilot/config.json", "{home}/.copilot/settings.json"]
@@ -57,7 +66,13 @@ def _layers(case: dict[str, Any]) -> list[str]:
 
 
 _SWITCH_CASES = [
-    pytest.param(case, layer, platform, id=f"{_case_id(case)}-{Path(layer).parent.name}-{Path(layer).name}-{platform}")
+    pytest.param(
+        case,
+        layer,
+        platform,
+        id=f"{_case_id(case)}-{Path(layer).parent.name}-{Path(layer).name}-{platform}",
+        marks=pytest.mark.skipif(sys.platform == "win32" and case["os"] == "posix", reason="POSIX hook layouts"),
+    )
     for case in _COPILOT
     for layer in _layers(case)
     for platform in ("posix", "windows")
@@ -89,7 +104,7 @@ def _doctor_rows(cfg, monkeypatch) -> list[dict[str, Any]]:
     return [row for row in r.checks if row["label"] == "Copilot hooks"]
 
 
-@pytest.mark.parametrize("case", _COPILOT, ids=_case_id)
+@pytest.mark.parametrize("case", _COPILOT_PARAMS)
 def test_the_files_setup_writes_are_guarded(tmp_path, monkeypatch, case):
     cfg, _paths = _copilot(tmp_path, monkeypatch, case)
     _write(tmp_path, "{home}/.copilot/settings.json", json.dumps({"disableAllHooks": False}))
@@ -118,7 +133,7 @@ def test_disable_all_hooks_is_reported_by_every_check(tmp_path, monkeypatch, cas
         assert rows and all(row["status"] == "fail" for row in rows), rows
 
 
-@pytest.mark.parametrize("case", _COPILOT, ids=_case_id)
+@pytest.mark.parametrize("case", _COPILOT_PARAMS)
 def test_a_later_settings_layer_turns_the_hooks_back_on(tmp_path, monkeypatch, case):
     cfg, _paths = _copilot(tmp_path, monkeypatch, case)
     layers = _layers(case)
@@ -128,6 +143,7 @@ def test_a_later_settings_layer_turns_the_hooks_back_on(tmp_path, monkeypatch, c
 
 
 @pytest.mark.parametrize("content", ['{"disableAllHooks": "yes"}', "{not json", "[]"])
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook layouts")
 def test_unreadable_copilot_settings_fail_closed(tmp_path, monkeypatch, content):
     case = next(c for c in _COPILOT if c["scope"] == "user")
     cfg, _paths = _copilot(tmp_path, monkeypatch, case)
@@ -147,6 +163,7 @@ def test_unreadable_copilot_settings_fail_closed(tmp_path, monkeypatch, content)
         ("codex", "{home}/.codex/config.toml", "\n[features]\nhooks = false\n"),
     ],
 )
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook layouts")
 def test_every_agent_hook_switch_fails_the_setup_read_back(tmp_path, monkeypatch, connector, path, content):
     case = next(c for c in _CASES if c["connector"] == connector and c["os"] == "posix" and c["scope"] == "user")
     cfg, paths = _install(tmp_path, monkeypatch, case)
@@ -166,7 +183,7 @@ def test_every_agent_hook_switch_fails_the_setup_read_back(tmp_path, monkeypatch
 @pytest.mark.parametrize("value", [True, "yes"], ids=["true", "not-boolean"])
 @pytest.mark.parametrize("platform", ["posix", "windows"])
 @pytest.mark.parametrize("recorded", [True, False], ids=["recorded", "lock-without-paths"])
-@pytest.mark.parametrize("case", _COPILOT, ids=_case_id)
+@pytest.mark.parametrize("case", _COPILOT_PARAMS)
 def test_disable_all_hooks_in_the_hook_registration_file(tmp_path, monkeypatch, case, recorded, platform, value):
     """Copilot also reads disableAllHooks from the DefenseClaw hook file itself, as setup and the Windows doctor do."""
 
@@ -193,7 +210,7 @@ def test_disable_all_hooks_in_the_hook_registration_file(tmp_path, monkeypatch, 
         assert any(str(registration) in row["detail"] for row in rows), rows
 
 
-@pytest.mark.parametrize("case", _COPILOT, ids=_case_id)
+@pytest.mark.parametrize("case", _COPILOT_PARAMS)
 def test_disable_all_hooks_false_in_the_hook_registration_file_is_guarded(tmp_path, monkeypatch, case):
     cfg, paths = _copilot(tmp_path, monkeypatch, case)
     registration = Path(paths[0])
@@ -208,6 +225,7 @@ def test_disable_all_hooks_false_in_the_hook_registration_file_is_guarded(tmp_pa
     [("timeout", 1, "timeout is 1"), ("matcher", "NoSuchTool", "")],
     ids=["timeout", "matcher"],
 )
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook layouts")
 def test_a_hook_entry_that_lets_tool_calls_run_unchecked_fails_the_setup_read_back(
     tmp_path, monkeypatch, field, value, why
 ):

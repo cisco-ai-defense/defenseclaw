@@ -17,6 +17,7 @@
 package connector
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
@@ -307,10 +308,86 @@ func editedDefenseClawHookScript(command, scriptName string) (string, bool) {
 
 // editedDefenseClawHookCommand is editedDefenseClawHookScript for a command
 // that is the script alone or the script with DefenseClaw's --event or
-// --hook-surface binding (Kiro v3 registers "kiro-hook.sh --hook-surface v3").
+// --hook-surface binding (Kiro v3 registers "kiro-hook.sh --hook-surface v3"),
+// or a command that runs a copy of a DefenseClaw hook script
+// (copiedDefenseClawHookCommand).
 func editedDefenseClawHookCommand(command, scriptName string) bool {
-	rest, ok := editedDefenseClawHookScript(command, scriptName)
-	return ok && (rest == "" || strings.HasPrefix(rest, " --event ") || strings.HasPrefix(rest, " --hook-surface "))
+	if rest, ok := editedDefenseClawHookScript(command, scriptName); ok {
+		return rest == "" || defenseClawHookBinding(rest)
+	}
+	return copiedDefenseClawHookCommand(command, scriptName)
+}
+
+// defenseClawHookBinding reports whether rest, the text after a hook
+// command's script word, starts with DefenseClaw's --event or
+// --hook-surface binding.
+func defenseClawHookBinding(rest string) bool {
+	return strings.HasPrefix(rest, " --event ") || strings.HasPrefix(rest, " --hook-surface ")
+}
+
+// copiedDefenseClawHookCommand reports whether a Unix hook command runs a copy
+// of a DefenseClaw hook script in any folder: the first shell word is an
+// absolute, clean path to a file that carries the generated-hook marker of
+// any release (whatever follows it: Antigravity passes the event bare, Claude
+// Code appends its missing-script guard), or a path with the connector's
+// script name followed by DefenseClaw's binding (the copy may have been
+// deleted since). A shell or env wrapper in front of the script word
+// (hookScriptWordAfterWrapper) is looked through. A Copilot preToolUse entry
+// repointed at an old copy was kept next to the entry Setup added back, so
+// the agent still ran the old hook while doctor and fail-mode passed
+// (rel-1-0-4 GAP-0600). Only DefenseClaw's current hook is a working
+// registration: Setup replaces such an entry and teardown removes it.
+// Windows registers native launcher commands, which are never absolute POSIX
+// paths, and their files are not read.
+func copiedDefenseClawHookCommand(command, scriptName string) bool {
+	word, rest, ok := hookScriptWordAfterWrapper(strings.TrimSpace(command))
+	if !ok || strings.ContainsAny(word, "\x00\r\n") || !strings.HasPrefix(word, "/") ||
+		strings.HasPrefix(word, "//") || path.Clean(word) != word {
+		return false
+	}
+	return (defenseClawHookBinding(rest) && path.Base(word) == scriptName) || defenseClawHookFile(word)
+}
+
+// hookShellWrappers are the programs a hook command can run a script through
+// (bash /path/hook.sh, /usr/bin/env /path/hook.sh).
+var hookShellWrappers = map[string]bool{"sh": true, "bash": true, "dash": true, "zsh": true, "ksh": true, "env": true}
+
+// hookScriptWordAfterWrapper splits a hook command like posixHookCommandSplit,
+// after one shell or env wrapper word (bare or an absolute path) and, after
+// env, its NAME=value words. "bash /old/copilot-hook.sh --event preToolUse"
+// ran an old copy that the first-word check did not see (rel-1-0-4
+// GAP-0600).
+func hookScriptWordAfterWrapper(command string) (word, rest string, ok bool) {
+	word, rest, ok = posixHookCommandSplit(command)
+	if !ok || !hookShellWrappers[path.Base(word)] || (strings.Contains(word, "/") && !path.IsAbs(word)) {
+		return word, rest, ok
+	}
+	env := path.Base(word) == "env"
+	for {
+		word, rest, ok = posixHookCommandSplit(strings.TrimLeft(rest, " \t"))
+		if !ok || !env || !strings.Contains(word, "=") || strings.HasPrefix(word, "/") {
+			return word, rest, ok
+		}
+	}
+}
+
+// defenseClawHookFile reports whether name is a regular file whose first
+// bytes hold the generated-hook marker (hookSchemaVersionMarker).
+func defenseClawHookFile(name string) bool {
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	file, err := openHookConfigForRead(name)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(file, head)
+	return bytes.Contains(head[:n], []byte(hookSchemaVersionMarker))
 }
 
 // editedDefenseClawHookHandler applies editedDefenseClawHookCommand to one
