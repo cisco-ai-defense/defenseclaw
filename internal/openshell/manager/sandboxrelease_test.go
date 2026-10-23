@@ -21,9 +21,6 @@ package manager
 import (
 	"context"
 	"errors"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -40,14 +37,17 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 )
 
-// A 0.1.3 MicroVM does not flush on stop. An automatic legacy-supervisor
-// stop must keep its disk when sync fails, even though the network broker
-// needs to be isolated immediately.
-func TestLegacyMicroVMAutoStopRequiresAConfirmedFlush(t *testing.T) {
+// A 0.1.3 MicroVM does not flush on stop, so DefenseClaw does not stop a
+// ready one itself while its network is closed, however its guest sync
+// went: it keeps the VM contained, says so once however often reconcile
+// looks again, and the user's own stop ends it. The next session restores
+// its create-time network.
+func TestLegacyMicroVMIsKeptContainedUntilTheUsersStop(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		answer openshelltest.ExecResponse
 	}{
+		{"guest synced", openshelltest.ExecResponse{Stdout: []byte("exited\nsynced\n")}},
 		{"no sync confirmation", openshelltest.ExecResponse{Stdout: []byte("exited\n")}},
 		{"sync exec failed", openshelltest.ExecResponse{Err: errors.New("sync failed")}},
 	} {
@@ -68,8 +68,12 @@ func TestLegacyMicroVMAutoStopRequiresAConfirmedFlush(t *testing.T) {
 			stops := e.fake.Calls(openshelltest.MethodStopSandbox)
 			e.m.lifecycle(t.Context(), b, audit.SandboxPhaseReady, audit.SandboxTriggerWatch, true, nil, nil)
 			e.m.tamperStops.Wait()
+			for range 2 {
+				must(t, e.m.Reconcile(t.Context()))
+				e.m.tamperStops.Wait()
+			}
 			if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
-				t.Fatalf("stopped an unflushed MicroVM: %d stop calls", got-stops)
+				t.Fatalf("stopped a contained legacy MicroVM by itself: %d stop calls", got-stops)
 			}
 			if got := e.get("kept"); got.Phase != "ready" || !got.OldSupervisor {
 				t.Fatalf("legacy MicroVM was not retained: %+v", got)
@@ -77,26 +81,23 @@ func TestLegacyMicroVMAutoStopRequiresAConfirmedFlush(t *testing.T) {
 			if e.hasRule("kept", "direct") || !b.rec.OldSupervisorNetworkClosed {
 				t.Fatalf("legacy MicroVM still has network access: %+v", b.rec)
 			}
-			if found := e.events("kept", sandboxapi.ActivityFinding, sandboxapi.ReasonOldSupervisor); len(found) < 2 ||
-				!strings.Contains(found[len(found)-1].Message, "explicitly run `defenseclaw sandbox stop kept`") ||
-				!strings.Contains(found[len(found)-1].Message, "loss of unsynced writes") {
-				t.Fatalf("no loss-aware stop decision: %+v", found)
+			if found := findingsSaying(e, "kept", "DefenseClaw kept kept's legacy MicroVM"); len(found) != 1 || found[0].Severity != "HIGH" ||
+				!strings.Contains(found[0].Message, "explicitly run `defenseclaw sandbox stop kept`") ||
+				!strings.Contains(found[0].Message, "may lose unsynced writes") {
+				t.Fatalf("no single loss-aware keep decision: %+v", e.events("kept", sandboxapi.ActivityFinding, sandboxapi.ReasonOldSupervisor))
 			}
-			if tc.name == "no sync confirmation" {
-				// A later confirmed flush lets the automatic stop finish. The
-				// next session restores only its create-time policy.
-				e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, _ openshelltest.ExecCall) openshelltest.ExecResponse {
-					return openshelltest.ExecResponse{Stdout: []byte("exited\nquiesced\nsynced\n")}
-				}))
-				must(t, e.m.Reconcile(t.Context()))
-				e.m.tamperStops.Wait()
-				if got := e.get("kept"); got.Phase != "stopped" || got.OldSupervisor {
-					t.Fatalf("confirmed flush did not stop the old session: %+v", got)
-				}
-				e.startBox("kept", sandboxapi.StartRequest{})
-				if !e.hasRule("kept", "defenseclaw_egress") || e.hasRule("kept", "direct") || b.rec.OldSupervisorNetworkClosed {
-					t.Fatalf("new session did not restore its create-time network: %+v", b.rec)
-				}
+			if got := e.events("kept", sandboxapi.ActivityLifecycle, "stop_unflushed"); len(got) != 0 {
+				t.Fatalf("a VM that was not stopped was reported as an unflushed stop: %+v", got)
+			}
+			// The user's stop ends it; the next session restores only its
+			// create-time policy.
+			e.stopBox("kept")
+			if got := e.get("kept"); got.Phase != "stopped" || got.OldSupervisor {
+				t.Fatalf("the explicit stop did not stop the old session: %+v", got)
+			}
+			e.startBox("kept", sandboxapi.StartRequest{})
+			if !e.hasRule("kept", "defenseclaw_egress") || e.hasRule("kept", "direct") || b.rec.OldSupervisorNetworkClosed {
+				t.Fatalf("new session did not restore its create-time network: %+v", b.rec)
 			}
 		})
 	}
@@ -151,7 +152,7 @@ func TestAHostLeftOnAnOlderOpenShellUpgradesInPlace(t *testing.T) {
 	e.m.tamperStops.Wait()
 	found := oldSupervisor()
 	if len(found) != 1 || found[0].Severity != "HIGH" || !strings.Contains(found[0].Message, "kept's session started on OpenShell 0.1.3") ||
-		!strings.Contains(found[0].Message, "DefenseClaw closes a legacy MicroVM's network and stops it after a confirmed disk flush; if sync fails, it keeps the VM and an explicit `defenseclaw sandbox stop kept` may lose unsynced writes; upgrade OpenShell 0.1.3 to "+openshell.InstallerVersion) ||
+		!strings.Contains(found[0].Message, "DefenseClaw closes a legacy MicroVM's network and keeps the VM until an explicit `defenseclaw sandbox stop kept`, which may lose unsynced writes (it stops the VM itself only if its network cannot be closed); upgrade OpenShell 0.1.3 to "+openshell.InstallerVersion) ||
 		!strings.HasSuffix(found[0].Message, "then `defenseclaw sandbox start kept` starts it on that release's supervisor") {
 		t.Fatalf("old-supervisor findings = %+v", found)
 	}
@@ -179,7 +180,7 @@ func TestAHostLeftOnAnOlderOpenShellUpgradesInPlace(t *testing.T) {
 func TestOldSupervisorWordsForARecordWithoutARelease(t *testing.T) {
 	msg := oldSupervisorMessage("box", "", "")
 	if !strings.Contains(msg, "box's session started before DefenseClaw kept the OpenShell release a session starts on, so it may run a supervisor older than "+openshell.SupportedMin) ||
-		!strings.HasSuffix(msg, "DefenseClaw closes a legacy MicroVM's network and stops it after a confirmed disk flush; if sync fails, it keeps the VM and an explicit `defenseclaw sandbox stop box` may lose unsynced writes; `defenseclaw sandbox start box` (or `connect`) starts it again on this gateway's supervisor") {
+		!strings.HasSuffix(msg, "DefenseClaw closes a legacy MicroVM's network and keeps the VM until an explicit `defenseclaw sandbox stop box`, which may lose unsynced writes (it stops the VM itself only if its network cannot be closed); `defenseclaw sandbox start box` (or `connect`) starts it again on this gateway's supervisor") {
 		t.Fatalf("message = %q", msg)
 	}
 	e := newEnv(t, nil)
@@ -307,13 +308,14 @@ func findingsSaying(e *harnessEnv, name, text string) []sandboxapi.ActivityEvent
 	return out
 }
 
-// A legacy MicroVM whose sync fails is kept only while its network is
-// proven closed. When its containment fails too (a gateway-global policy,
-// under which DefenseClaw cannot change the sandbox's rules; OpenShell
-// refusing the policy update; a refusal that only comes after the first
-// containment succeeded), the automatic stop goes ahead without the flush
-// and the feed says what that may have lost: a legacy supervisor never
-// keeps running with open egress (fail closed).
+// A ready legacy MicroVM is kept only while its network is proven closed.
+// When its containment fails (a gateway-global policy, under which
+// DefenseClaw cannot change the sandbox's rules; OpenShell refusing the
+// policy update; a refusal that only comes after the first containment
+// succeeded), the automatic stop goes ahead and the feed says what that may
+// have lost, whether the guest's sync went through or not (what the guest
+// writes after it is not flushed): a legacy supervisor never keeps running
+// with open egress (fail closed).
 func TestLegacyMicroVMWhoseNetworkStaysOpenIsStoppedWithoutAFlush(t *testing.T) {
 	refuseUpdates := func(e *harnessEnv) {
 		e.fake.Intercept(func(method string) error {
@@ -329,15 +331,25 @@ func TestLegacyMicroVMWhoseNetworkStaysOpenIsStoppedWithoutAFlush(t *testing.T) 
 		// later, when set, only after a first containment kept the VM.
 		before, later func(e *harnessEnv)
 		cause         string
+		// syncs: the guest's sync works, so only the HIGH finding speaks
+		// of a loss, not stop_unflushed.
+		syncs bool
 	}{
 		{name: "gateway-global policy", before: func(e *harnessEnv) { e.fake.SetGlobalPolicy(&openshell.SandboxPolicy{Version: 1}) },
 			cause: "gateway-global policy"},
 		{name: "policy update refused", before: refuseUpdates, cause: "policy update refused"},
 		{name: "global policy after the VM was kept", later: func(e *harnessEnv) { e.fake.SetGlobalPolicy(&openshell.SandboxPolicy{Version: 1}) },
 			cause: "gateway-global policy"},
+		{name: "gateway-global policy, guest synced", before: func(e *harnessEnv) { e.fake.SetGlobalPolicy(&openshell.SandboxPolicy{Version: 1}) },
+			cause: "gateway-global policy", syncs: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e, b := legacyMicroVMWithBrokenSync(t, "leaky")
+			if tc.syncs {
+				e.fake.HandleExec(e.workloadChecks(nil, func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
+					return openshelltest.ExecResponse{Stdout: []byte("exited\nsynced\n")}
+				}))
+			}
 			if tc.before != nil {
 				tc.before(e)
 			}
@@ -358,10 +370,10 @@ func TestLegacyMicroVMWhoseNetworkStaysOpenIsStoppedWithoutAFlush(t *testing.T) 
 			if got := e.get("leaky"); got.Phase != "stopped" {
 				t.Fatalf("legacy MicroVM with an open network = %+v", got)
 			}
-			if got := e.events("leaky", sandboxapi.ActivityLifecycle, "stop_unflushed"); len(got) != 1 {
-				t.Fatalf("the unflushed stop was not reported once: %+v", got)
+			if got, want := len(e.events("leaky", sandboxapi.ActivityLifecycle, "stop_unflushed")), map[bool]int{false: 1, true: 0}[tc.syncs]; got != want {
+				t.Fatalf("stop_unflushed reported %d times, want %d", got, want)
 			}
-			if got := findingsSaying(e, "leaky", "stopped leaky's legacy MicroVM without a confirmed disk flush"); len(got) != 1 ||
+			if got := findingsSaying(e, "leaky", "stopped leaky's legacy MicroVM because its network could not be closed"); len(got) != 1 ||
 				!strings.Contains(got[0].Message, tc.cause) || got[0].Severity != "HIGH" {
 				t.Fatalf("no loss-aware finding naming %q: %+v", tc.cause, got)
 			}
@@ -374,10 +386,10 @@ func TestLegacyMicroVMWhoseNetworkStaysOpenIsStoppedWithoutAFlush(t *testing.T) 
 	}
 }
 
-// An automatic legacy stop that the unconfirmed flush aborted stopped
-// nothing: the feed says once that the VM was kept, however often reconcile
-// retries, and never that a stop lost its writes. A manual stop that
-// OpenShell refused lost nothing either; one it took says so.
+// A contained legacy MicroVM whose guest sync is broken is not stopped by
+// DefenseClaw: the feed says once that the VM was kept, however often
+// reconcile looks again, and never that a stop lost its writes. A manual
+// stop that OpenShell refused lost nothing either; one it took says so.
 func TestAnAbortedLegacyAutoStopSaysItKeptTheVMOnce(t *testing.T) {
 	e, b := legacyMicroVMWithBrokenSync(t, "kept")
 	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
@@ -412,59 +424,42 @@ func TestAnAbortedLegacyAutoStopSaysItKeptTheVMOnce(t *testing.T) {
 	}
 }
 
-// pausedGuest is a legacy MicroVM's guest with a background process outside
-// the harness's install root that goes on writing until it is paused: a
-// stop that finds it running loses what it wrote after the flush.
-type pausedGuest struct {
-	mu sync.Mutex
-	// pausable: quiesce can pause the writer; failHarnessExec fails the
-	// harness's exit exec, so the stop flushes on its own.
-	pausable, failHarnessExec bool
-	paused, lostWrite         bool
-	stops                     int
-	thawed                    [][]string
+// lateWriterGuest is a legacy MicroVM's guest in which a process starts
+// after the stop's exec has looked at the guest, paused what it found and
+// synced (an exec OpenShell let in while the VM was ready, for one), and
+// writes: a stop OpenShell takes then, which 0.1.3 makes without a flush,
+// loses that write, whatever the exec answered. failHarnessExec fails the
+// harness's exit exec, so a stop flushes on its own.
+type lateWriterGuest struct {
+	mu              sync.Mutex
+	failHarnessExec bool
+	flushes         int
 }
 
-func (g *pausedGuest) exec(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+func (g *lateWriterGuest) exec(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	cmd := call.Command
-	if len(cmd) < 4 || cmd[0] != "/bin/sh" {
-		// sync(1) on its own: the writer goes on.
-		return openshelltest.ExecResponse{}
-	}
-	switch cmd[3] {
-	case "defenseclaw-thaw":
-		g.thawed = append(g.thawed, slices.Clone(cmd[4:]))
-		g.paused = false
-	case "defenseclaw-end-harness":
+	switch {
+	case len(cmd) == 1 && cmd[0] == "/bin/sync":
+		g.flushes++
+	case len(cmd) >= 4 && cmd[0] == "/bin/sh" && cmd[3] == "defenseclaw-end-harness":
 		if g.failHarnessExec {
 			return openshelltest.ExecResponse{Err: errors.New("exec relay closed")}
 		}
-		return openshelltest.ExecResponse{Stdout: g.flush("exited\n", cmd[2])}
-	case "defenseclaw-flush":
-		return openshelltest.ExecResponse{Stdout: g.flush("", cmd[2])}
+		g.flushes++
+		return openshelltest.ExecResponse{Stdout: []byte("exited\nquiesced\nsynced\n")}
+	case len(cmd) >= 4 && cmd[0] == "/bin/sh" && cmd[3] == "defenseclaw-flush":
+		g.flushes++
+		return openshelltest.ExecResponse{Stdout: []byte("quiesced\nsynced\n")}
 	}
 	return openshelltest.ExecResponse{}
 }
 
-// flush is what the guest prints for a script that flushes, and pauses the
-// writer for one that quiesces.
-func (g *pausedGuest) flush(prefix, script string) []byte {
-	switch {
-	case !strings.Contains(script, "quiesce()"):
-		return []byte(prefix + "synced\n")
-	case !g.pausable:
-		return []byte(prefix + "unquiesced\nsynced\n")
-	}
-	g.paused = true
-	return []byte(prefix + "frozen=4242\nquiesced\nsynced\n")
-}
-
-// legacyMicroVMWithAWriter is a ready 0.1.3 MicroVM named name, with a
-// direct network rule, whose guest is g; refuse makes OpenShell refuse its
-// stops, edit changes the daemon's configuration.
-func legacyMicroVMWithAWriter(t *testing.T, name string, g *pausedGuest, refuse *atomic.Bool, edit func(*config.Config)) (*harnessEnv, *box) {
+// legacyMicroVMWithALateWriter is a ready 0.1.3 MicroVM named name, with a
+// direct network rule, whose guest is g; edit changes the daemon's
+// configuration. Its record is saved, so a restarted daemon finds it.
+func legacyMicroVMWithALateWriter(t *testing.T, name string, g *lateWriterGuest, edit func(*config.Config)) (*harnessEnv, *box) {
 	t.Helper()
 	e := newVMEnv(t, edit)
 	e.create(sandboxapi.CreateRequest{Name: name, Copy: true})
@@ -473,188 +468,76 @@ func legacyMicroVMWithAWriter(t *testing.T, name string, g *pausedGuest, refuse 
 	e.m.mu.Lock()
 	b.rec.SessionRelease = "0.1.3"
 	e.m.mu.Unlock()
+	must(t, e.m.saveRecord(b))
 	e.fake.HandleExec(e.workloadChecks(nil, g.exec))
-	e.fake.Intercept(func(method string) error {
-		if method != openshelltest.MethodStopSandbox {
-			return nil
-		}
-		g.mu.Lock()
-		g.stops++
-		if !g.paused {
-			g.lostWrite = true
-		}
-		g.mu.Unlock()
-		if refuse != nil && refuse.Load() {
-			return &types.StatusError{Code: types.ErrorInternal, Message: "stop refused"}
-		}
-		return nil
-	})
 	return e, b
 }
 
-// The automatic stop of a legacy MicroVM takes the VM down only with its
-// guest's processes paused from before the flush through the stop: a sync
-// on its own is no proof, since a background process outside the harness
-// goes on writing until 0.1.3 kills the VM without a flush. A writer that
-// can't be paused keeps the VM (its network closed); a stop that doesn't go
-// ahead lets the paused processes run again; a failed harness exec pauses
-// them in the flush it retries.
-func TestLegacyAutoStopPausesTheGuestThroughTheStop(t *testing.T) {
+// No automatic stop of a contained legacy MicroVM can lose a guest write
+// silently: whatever the stop's exec can prove about the guest (its
+// processes paused, its disk synced), a process an exec starts after it
+// still writes before 0.1.3 stops the VM without a flush. So DefenseClaw
+// stops no such VM itself while its network is closed, whichever way the
+// flush would go (the harness's exit exec, the flush on its own after that
+// exec failed, a sandbox with no known harness) and after a daemon restart
+// too; the user's own stop, which the feed told them may lose unsynced
+// writes, goes ahead.
+func TestNoAutomaticStopOfAContainedLegacyMicroVM(t *testing.T) {
 	for _, tc := range []struct {
-		name                       string
-		pausable, failExec, refuse bool
-		wantPhase                  string
-		wantStops                  int
-		wantThawed                 [][]string
+		name              string
+		failExec, unknown bool
+		restart           bool
 	}{
-		{name: "pausable writer", pausable: true, wantPhase: "stopped", wantStops: 1},
-		{name: "harness exec failed", pausable: true, failExec: true, wantPhase: "stopped", wantStops: 1},
-		{name: "writer that can't be paused", wantPhase: "ready"},
-		{name: "stop refused after the pause", pausable: true, refuse: true, wantPhase: "ready", wantStops: 1,
-			wantThawed: [][]string{{"4242"}}},
+		{name: "the harness exits and the guest syncs"},
+		{name: "harness exec failed, flush on its own", failExec: true},
+		{name: "no known harness", unknown: true},
+		{name: "after a daemon restart", restart: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			g := &pausedGuest{pausable: tc.pausable, failHarnessExec: tc.failExec}
-			var refuse atomic.Bool
-			refuse.Store(tc.refuse)
-			e, b := legacyMicroVMWithAWriter(t, "busy", g, &refuse, nil)
-			e.m.lifecycle(t.Context(), b, audit.SandboxPhaseReady, audit.SandboxTriggerWatch, true, nil, nil)
+			g := &lateWriterGuest{failHarnessExec: tc.failExec}
+			e, b := legacyMicroVMWithALateWriter(t, "busy", g, nil)
+			if tc.unknown {
+				e.m.mu.Lock()
+				b.rec.Harness = "retired-agent"
+				e.m.mu.Unlock()
+				must(t, e.m.saveRecord(b))
+			}
+			stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+			if tc.restart {
+				e.restartDaemon()
+				b = e.boxOf("busy")
+			} else {
+				e.m.lifecycle(t.Context(), b, audit.SandboxPhaseReady, audit.SandboxTriggerWatch, true, nil, nil)
+			}
 			e.m.tamperStops.Wait()
+			for range 2 {
+				must(t, e.m.Reconcile(t.Context()))
+				e.m.tamperStops.Wait()
+			}
+			if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
+				t.Fatal("the automatic stop took the VM down while a process an exec started after its flush could still write")
+			}
+			if got := e.get("busy"); got.Phase != "ready" || !got.OldSupervisor {
+				t.Fatalf("the contained VM was not kept: %+v", got)
+			}
+			e.m.mu.Lock()
+			closed := b.rec.OldSupervisorNetworkClosed
+			e.m.mu.Unlock()
+			if !closed || e.hasRule("busy", "direct") {
+				t.Fatalf("the kept VM's network is open: %+v", b.rec)
+			}
+			if got := findingsSaying(e, "busy", "DefenseClaw kept busy's legacy MicroVM"); len(got) != 1 {
+				t.Fatalf("the kept VM was not reported once: %+v", e.events("busy", sandboxapi.ActivityFinding, sandboxapi.ReasonOldSupervisor))
+			}
+			e.stopBox("busy")
+			if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops+1 || e.get("busy").Phase != "stopped" {
+				t.Fatalf("the user's stop: %d stop calls, phase %s", got-stops, e.get("busy").Phase)
+			}
 			g.mu.Lock()
-			lost, stops, thawed, paused := g.lostWrite, g.stops, slices.Clone(g.thawed), g.paused
+			flushes := g.flushes
 			g.mu.Unlock()
-			if lost {
-				t.Fatal("the automatic stop took the VM down while a guest process could still write after the flush")
-			}
-			if got := e.get("busy"); got.Phase != tc.wantPhase || stops != tc.wantStops {
-				t.Fatalf("phase %s after %d stop calls, want %s after %d", got.Phase, stops, tc.wantPhase, tc.wantStops)
-			}
-			if !slices.EqualFunc(thawed, tc.wantThawed, slices.Equal[[]string]) || (tc.wantPhase == "ready" && paused) {
-				t.Fatalf("thawed %v (paused %v), want %v", thawed, paused, tc.wantThawed)
-			}
-			if got := e.events("busy", sandboxapi.ActivityLifecycle, "stop_unflushed"); len(got) != 0 {
-				t.Fatalf("a stop with the guest paused and flushed was reported as unflushed: %+v", got)
-			}
-			if tc.name == "writer that can't be paused" {
-				if !b.rec.OldSupervisorNetworkClosed || e.hasRule("busy", "direct") {
-					t.Fatalf("the kept VM's network is open: %+v", b.rec)
-				}
-				if got := findingsSaying(e, "busy", "DefenseClaw kept busy's legacy MicroVM"); len(got) != 1 {
-					t.Fatalf("the kept VM was not reported once: %+v", got)
-				}
-			}
-		})
-	}
-}
-
-// quiesceFixture writes a guest's proc file system under dir: OpenShell's
-// init and supervisor (root), the workload's processes (uid 1000, the
-// exec's), and processes quiesce must leave alone. The shell that runs the
-// test script adds itself and a child of its own (quiesceShellPrelude).
-func quiesceFixture(t *testing.T, dir string) {
-	t.Helper()
-	write := func(pid, state, ppid, uid string, vm bool, marks ...string) {
-		must(t, os.MkdirAll(filepath.Join(dir, pid), 0o755))
-		status := func(state string) []byte {
-			s := "Name:\tp" + pid + "\nState:\t" + state + "\nPPid:\t" + ppid + "\nUid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid + "\n"
-			if vm {
-				s += "VmSize:\t   2048 kB\n"
-			}
-			return []byte(s)
-		}
-		must(t, os.WriteFile(filepath.Join(dir, pid, "status"), status(state), 0o644))
-		must(t, os.WriteFile(filepath.Join(dir, pid, "status.T"), status("T (stopped)"), 0o644))
-		must(t, os.WriteFile(filepath.Join(dir, pid, "status.R"), status(state), 0o644))
-		for _, m := range marks {
-			must(t, os.WriteFile(filepath.Join(dir, pid, m), nil, 0o644))
-		}
-	}
-	write("1", "S (sleeping)", "0", "0", true)
-	write("100", "S (sleeping)", "1", "0", true)     // the supervisor's exec relay, the shell's parent
-	write("200", "S (sleeping)", "1", "1000", true)  // the background writer
-	write("201", "R (running)", "200", "1000", true) // its child
-	write("202", "T (stopped)", "200", "1000", true) // already stopped
-	write("300", "S (sleeping)", "1", "0", true)     // OpenShell's own
-	write("400", "Z (zombie)", "200", "1000", false) // writes nothing
-	write("600", "S (sleeping)", "2", "1000", false) // no memory of its own: a kernel thread
-}
-
-// quiesceShellPrelude adds the shell itself and a child of its own to the
-// fixture at $QPROC, and replaces kill with one that changes the fixture
-// and logs to $QLOG: STOP stops a process unless it is marked stubborn
-// (stays running) or eperm (not the exec's to signal); CONT runs it again.
-const quiesceShellPrelude = `mkdir -p "$QPROC/$$" "$QPROC/500"
-printf 'Name:\tsh\nState:\tR (running)\nPPid:\t100\nUid:\t1000\t1000\t1000\t1000\nVmSize:\t1 kB\n' > "$QPROC/$$/status"
-printf 'Name:\tchild\nState:\tS (sleeping)\nPPid:\t%s\nUid:\t1000\t1000\t1000\t1000\nVmSize:\t1 kB\n' "$$" > "$QPROC/500/status"
-kill() {
-  sig=$1; shift; rc=0
-  for p in "$@"; do
-    [ -f "$QPROC/$p/status" ] || { rc=1; continue; }
-    [ -f "$QPROC/$p/eperm" ] && { rc=1; continue; }
-    echo "$sig $p" >> "$QLOG"
-    case $sig in
-      -STOP) [ -f "$QPROC/$p/stubborn" ] || cp "$QPROC/$p/status.T" "$QPROC/$p/status" ;;
-      -CONT) cp "$QPROC/$p/status.R" "$QPROC/$p/status" ;;
-    esac
-  done
-  return $rc
-}
-`
-
-// The guest side of the pause, on a fixture proc file system (it must
-// never signal this machine's processes): quiesce stops every running
-// process of the exec's user other than PID 1, its ancestors, its own
-// children, kernel threads and zombies, and waits until they are stopped;
-// one that does not stop, or that it may not signal, makes it let them all
-// run again and say unquiesced. The whole stop script still ends with the
-// flush.
-func TestQuiesceScriptPausesEveryWorkloadProcess(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		mark      map[string]string
-		flushOnly bool
-		want      string
-		kills     []string
-	}{
-		{name: "pauses the workload", want: "none frozen=200 frozen=201 quiesced synced", kills: []string{"-STOP 200", "-STOP 201"}},
-		{name: "flush on its own", flushOnly: true, want: "frozen=200 frozen=201 quiesced synced", kills: []string{"-STOP 200", "-STOP 201"}},
-		{name: "a process that does not stop", mark: map[string]string{"201": "stubborn"},
-			want: "none frozen=200 frozen=201 unquiesced synced", kills: []string{"-STOP 200", "-STOP 201", "-CONT 200", "-CONT 201"}},
-		{name: "a process it may not signal", mark: map[string]string{"201": "eperm"},
-			want: "none frozen=200 unquiesced synced", kills: []string{"-STOP 200", "-CONT 200"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			proc := filepath.Join(dir, "proc")
-			quiesceFixture(t, proc)
-			for pid, m := range tc.mark {
-				must(t, os.WriteFile(filepath.Join(proc, pid, m), nil, 0o644))
-			}
-			log := filepath.Join(dir, "kills")
-			args := []string{"-c", quiesceShellPrelude + quiesceFunc + quiesceTrap + endHarnessScript, "defenseclaw-end-harness",
-				"/nonexistent/harness", "1", "", proc, "3"}
-			if tc.flushOnly {
-				args = []string{"-c", quiesceShellPrelude + quiesceFlushScript, "defenseclaw-flush", proc, "3"}
-			}
-			cmd := exec.Command("/bin/sh", args...)
-			cmd.Env = append(os.Environ(), "QPROC="+proc, "QLOG="+log)
-			out, err := cmd.Output()
-			if err != nil || strings.Join(strings.Fields(string(out)), " ") != tc.want {
-				t.Fatalf("script = %q, %v; want %q", out, err, tc.want)
-			}
-			data, _ := os.ReadFile(log)
-			var kills []string
-			for _, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-				if l != "" && !slices.Contains(kills, l) {
-					kills = append(kills, l)
-				}
-			}
-			if !slices.Equal(kills, tc.kills) {
-				t.Fatalf("signals = %v, want %v", kills, tc.kills)
-			}
-			end := parseHarnessEnd(out)
-			if end.Quiesced != strings.Contains(tc.want, " quiesced") || !end.Synced {
-				t.Fatalf("parsed %+v from %q", end, out)
+			if flushes == 0 {
+				t.Fatal("the user's stop of a MicroVM did not flush first")
 			}
 		})
 	}
@@ -663,18 +546,17 @@ func TestQuiesceScriptPausesEveryWorkloadProcess(t *testing.T) {
 // A containment of a legacy MicroVM can remove every network rule and then
 // fail to confirm it (OpenShell does not report the closed policy loaded)
 // on a sandbox with no provider whose detach would be recorded,
-// so the closed-network checkpoint is never reached; with its flush
-// confirmed, the automatic stop still goes ahead. The record said before
+// so the closed-network checkpoint is never reached, and the automatic
+// stop of a VM whose network is not proven closed goes ahead. The record said before
 // the first change that the next session must get its create-time network
 // back, so the next start restores it before the session counts as ready,
 // across a daemon restart too.
 func TestAContainmentCutShortStillRestoresTheNextSessionsNetwork(t *testing.T) {
 	for _, restart := range []bool{false, true} {
 		t.Run(map[bool]string{false: "same daemon", true: "after a daemon restart"}[restart], func(t *testing.T) {
-			g := &pausedGuest{pausable: true}
 			// token_delivery env: no provider, so no detached provider can
 			// stand in for the record of what to restore.
-			e, b := legacyMicroVMWithAWriter(t, "cut", g, nil, func(c *config.Config) { c.OpenShell.TokenDelivery = config.OpenShellTokenDeliveryEnv })
+			e, b := legacyMicroVMWithALateWriter(t, "cut", &lateWriterGuest{}, func(c *config.Config) { c.OpenShell.TokenDelivery = config.OpenShellTokenDeliveryEnv })
 			if len(b.rec.Providers) != 0 {
 				t.Fatalf("precondition: a sandbox without providers; got %v", b.rec.Providers)
 			}
@@ -683,12 +565,7 @@ func TestAContainmentCutShortStillRestoresTheNextSessionsNetwork(t *testing.T) {
 			var failStatus, merged atomic.Bool
 			failStatus.Store(true)
 			e.fake.Intercept(func(method string) error {
-				switch method {
-				case openshelltest.MethodStopSandbox:
-					g.mu.Lock()
-					g.stops++
-					g.mu.Unlock()
-				case openshelltest.MethodUpdateConfig:
+				if method == openshelltest.MethodUpdateConfig {
 					merged.Store(true)
 				}
 				if method == openshelltest.MethodPolicyStatus && merged.Load() && failStatus.Load() {

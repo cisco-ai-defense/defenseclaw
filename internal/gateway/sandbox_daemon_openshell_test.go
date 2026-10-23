@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -734,19 +735,68 @@ func TestSandboxDaemonReadyRespectsAllowedHarnessesBeforeInstall(t *testing.T) {
 	}
 }
 
-func TestSandboxDaemonReadyRequiresHarness(t *testing.T) {
+// A CLI of DefenseClaw 1.0.3 or older readies with an empty object (or no
+// body): the daemon judges the agent its own managed configuration runs,
+// against both sandbox.allowed and the agent allowlist, before it installs
+// anything, never no agent at all.
+func TestSandboxDaemonReadyFromAnOlderCLIJudgesTheDaemonsAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name, body   string
+		allowed      bool
+		harnesses    []string
+		wantCode     int
+		wantPrepared int64
+	}{
+		{"empty object, codex allowed", `{}`, true, []string{"codex"}, http.StatusOK, 1},
+		{"no body, codex allowed", ``, true, nil, http.StatusOK, 1},
+		{"codex not in the allowlist", `{}`, true, []string{"claudecode"}, http.StatusForbidden, 0},
+		{"sandboxes forbidden", `{}`, false, nil, http.StatusForbidden, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+				o.Settings.Operational.Harnesses = []string{"codex", "claudecode"}
+			})
+			var asked []string
+			f.relay.explain = func(req sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+				asked = append(asked, req.Connector+"/"+req.Harness)
+				return sandboxapi.ManagedExplain{Allowed: tc.allowed, AllowedHarnesses: tc.harnesses}, nil
+			}
+			f.run(t)
+			client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", f.socket)
+			}}}
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+				"http://sandbox-daemon"+sandboxapi.PathReady, bytes.NewBufferString(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set(sandboxapi.ClientHeader, sandboxapi.ClientName)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantCode || f.os.prepared.Load() != tc.wantPrepared {
+				t.Fatalf("older CLI ready: HTTP %d, prepared %d; want HTTP %d, prepared %d",
+					resp.StatusCode, f.os.prepared.Load(), tc.wantCode, tc.wantPrepared)
+			}
+			if !slices.Contains(asked, "codex/codex") {
+				t.Fatalf("policy asked for %v, want the daemon's own agent codex", asked)
+			}
+		})
+	}
+}
+
+func TestSandboxDaemonReadyRefusesAConnectorWithoutASandboxHarness(t *testing.T) {
 	f := newSandboxDaemonFixture(t)
 	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
 		return sandboxapi.ManagedExplain{Allowed: true}, nil
 	}
 	f.run(t)
-	_, err := sandboxapi.NewUnixClient(f.socket).Ready(context.Background(), sandboxapi.ReadyRequest{})
-	if !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) || f.os.prepared.Load() != 0 {
-		t.Fatalf("ready without a harness = %v (prepared %d)", err, f.os.prepared.Load())
-	}
 	// OpenClaw is a known connector, but it is not an agent this sandbox
 	// command can run. Its profile must not authorize an OpenShell install.
-	_, err = sandboxapi.NewUnixClient(f.socket).Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "openclaw"})
+	_, err := sandboxapi.NewUnixClient(f.socket).Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "openclaw"})
 	if !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) || f.os.prepared.Load() != 0 {
 		t.Fatalf("ready for a connector without a sandbox harness = %v (prepared %d)", err, f.os.prepared.Load())
 	}

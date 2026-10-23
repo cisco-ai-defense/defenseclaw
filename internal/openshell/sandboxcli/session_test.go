@@ -1428,8 +1428,7 @@ func TestAnOldSupervisorRunsNothing(t *testing.T) {
 }
 
 // Connect is not an explicit choice to discard MicroVM writes. A legacy
-// session whose guest sync may be broken stays isolated until the automatic
-// stop confirms a flush or the user chooses a loss-aware stop.
+// MicroVM session stays contained until the user chooses a loss-aware stop.
 func TestConnectDoesNotStopALegacyMicroVMWithoutALossDecision(t *testing.T) {
 	ta := newTestApp(t, "")
 	sb := sampleSandbox("legacy-vm")

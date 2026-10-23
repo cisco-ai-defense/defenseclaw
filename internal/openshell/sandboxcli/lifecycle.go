@@ -528,8 +528,9 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	if sb.Phase == "ready" && sb.OldSupervisor {
 		// Its session runs a supervisor whose network broker can let its
 		// connections bypass its policy. A MicroVM must not be stopped by
-		// connect: only a confirmed automatic flush or a separate,
-		// loss-aware user stop may end it.
+		// connect: that release's stop may lose unsynced writes, so only a
+		// separate, loss-aware user stop ends it (or the daemon, once it
+		// cannot keep the VM's network closed).
 		if d, ok := openshell.LookupDriver(sb.Driver); !ok || !d.StopFlushes {
 			return oldSupervisorRefusal(sb, nil)
 		}
@@ -662,14 +663,14 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 // (sandboxapi.Sandbox.OldSupervisor), whose network broker can let its
 // connections bypass its policy (NVIDIA/OpenShell#4494): stopErr is why a
 // connect could not stop it, nil for an exec, which does not try. Connect
-// refuses a legacy MicroVM until an automatic flush succeeds or the user
-// explicitly chooses a potentially lossy stop.
+// refuses a legacy MicroVM, which the daemon keeps with its network closed,
+// until the user explicitly chooses a potentially lossy stop.
 func oldSupervisorRefusal(sb *sandboxapi.Sandbox, stopErr error) error {
 	name := sb.Name
 	msg := name + " runs the supervisor of an OpenShell release older than " + openshell.SupportedMin +
 		", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494), so DefenseClaw runs nothing in it"
 	if d, ok := openshell.LookupDriver(sb.Driver); !ok || !d.StopFlushes {
-		return fmt.Errorf("%s. Its MicroVM stays isolated while DefenseClaw retries a confirmed disk flush; if you accept possible loss of unsynced writes, explicitly run `%s stop %s`, then start or connect again",
+		return fmt.Errorf("%s. Its MicroVM is kept with its network closed until you stop it, and that release's stop may lose unsynced writes: save the work you need, then explicitly run `%s stop %s`, then start or connect again",
 			msg, CommandName, name)
 	}
 	if stopErr != nil {

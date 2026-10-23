@@ -358,10 +358,6 @@ func (a *APIServer) handleSandboxReady(w http.ResponseWriter, r *http.Request) {
 		writeSandboxError(w, err)
 		return
 	}
-	if strings.TrimSpace(req.Harness) == "" {
-		writeSandboxError(w, sandboxapi.Errorf(sandboxapi.CodeInvalid, "a harness is required to ready OpenShell"))
-		return
-	}
 	var (
 		st  *sandboxapi.Status
 		err error

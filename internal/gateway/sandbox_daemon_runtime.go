@@ -2122,9 +2122,15 @@ func managedSettingsRefusal(s sandboxrelay.DaemonSettings) error {
 // its create: its preflight reads the gateway's driver and runs the
 // openshell CLI, and refused every run of an account whose OpenShell was not
 // installed or started yet, before the create that readies it ran
-// (GAP-0437, GAP-0441).
+// (GAP-0437, GAP-0441). A request that names no agent, from a CLI of
+// DefenseClaw 1.0.3 or older, is judged for the agent this daemon's managed
+// configuration runs (managedConnector), never for none; kept through the
+// 1.0.4 upgrade window.
 func (c *managedSandboxController) Ready(ctx context.Context, req sandboxapi.ReadyRequest) (*sandboxapi.Status, error) {
 	d := c.d
+	if strings.TrimSpace(req.Harness) == "" {
+		req.Harness = d.managedConnector("")
+	}
 	if _, ok := harness.Get(config.NormalizeConnectorName(req.Harness)); !ok {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "a supported sandbox harness is required to ready OpenShell")
 	}

@@ -50,9 +50,11 @@ const (
 )
 
 // ReadyRequest names the agent whose policy must allow a first run before
-// the managed daemon installs or starts the account's OpenShell.
+// the managed daemon installs or starts the account's OpenShell. A request
+// that names none (a CLI of DefenseClaw 1.0.3 or older sends an empty
+// object) is judged for the agent the daemon's managed configuration runs.
 type ReadyRequest struct {
-	Harness string `json:"harness"`
+	Harness string `json:"harness,omitempty"`
 }
 
 // PolicyDecisionRequest records one managed user's lasting host decision

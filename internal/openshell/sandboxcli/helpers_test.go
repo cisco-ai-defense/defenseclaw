@@ -125,6 +125,9 @@ type fakeDaemon struct {
 	// onReady is what POST /ready does to the status (a managed daemon
 	// readies OpenShell).
 	onReady func(st *sandboxapi.Status)
+	// strictReady models a managed daemon of DefenseClaw 1.0.3 or older,
+	// whose POST /ready decodes an empty object and refuses any field.
+	strictReady bool
 	// explainErr, when set, may refuse an explain request.
 	explainErr func(req sandboxapi.ExplainRequest) *sandboxapi.Error
 }
@@ -276,6 +279,15 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(ex)
 	case path == sandboxapi.PathReady && r.Method == http.MethodPost:
+		if d.strictReady {
+			dec := json.NewDecoder(bytes.NewReader(body))
+			dec.DisallowUnknownFields()
+			var none struct{}
+			if err := dec.Decode(&none); err != nil && !errors.Is(err, io.EOF) {
+				fail(sandboxapi.CodeInvalid, "invalid JSON body: "+err.Error())
+				return
+			}
+		}
 		if d.onReady != nil {
 			d.onReady(&d.status)
 		}

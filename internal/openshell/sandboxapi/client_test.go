@@ -251,3 +251,60 @@ func TestClientForConfig(t *testing.T) {
 		t.Fatal("client without a token")
 	}
 }
+
+// Ready works across daemon versions: a daemon of DefenseClaw 1.0.3 or
+// older decodes POST ready as an empty object and refuses any field, so the
+// client sends the harness first and, on that refusal only, the empty
+// object it takes. A current daemon gets the harness once, and any other
+// refusal is the answer.
+func TestReadyAcrossDaemonVersions(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		strict bool
+		refuse string
+		want   []string
+		ok     bool
+	}{
+		{name: "1.0.3 daemon", strict: true, want: []string{`{"harness":"codex"}`, `{}`}, ok: true},
+		{name: "current daemon", want: []string{`{"harness":"codex"}`}, ok: true},
+		{name: "current daemon refuses the agent", refuse: "a supported sandbox harness is required to ready OpenShell",
+			want: []string{`{"harness":"codex"}`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var bodies []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				bodies = append(bodies, string(raw))
+				fail := func(e *Error) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(e.HTTPStatus())
+					_ = json.NewEncoder(w).Encode(e)
+				}
+				if tc.strict {
+					// The 1.0.3 handler: var req struct{} decoded with
+					// DisallowUnknownFields (decodeSandboxBody).
+					dec := json.NewDecoder(bytes.NewReader(raw))
+					dec.DisallowUnknownFields()
+					var none struct{}
+					if err := dec.Decode(&none); err != nil && !errors.Is(err, io.EOF) {
+						fail(Errorf(CodeInvalid, "invalid JSON body: %v", err))
+						return
+					}
+				}
+				if tc.refuse != "" {
+					fail(Errorf(CodeInvalid, "%s", tc.refuse))
+					return
+				}
+				_ = json.NewEncoder(w).Encode(Status{Enabled: true, Available: true})
+			}))
+			defer srv.Close()
+			st, err := NewClient(srv.URL, "t").Ready(context.Background(), ReadyRequest{Harness: "codex"})
+			if tc.ok != (err == nil) || (err == nil && (st == nil || !st.Available)) {
+				t.Fatalf("Ready = %+v, %v", st, err)
+			}
+			if !reflect.DeepEqual(bodies, tc.want) {
+				t.Fatalf("requests = %q, want %q", bodies, tc.want)
+			}
+		})
+	}
+}

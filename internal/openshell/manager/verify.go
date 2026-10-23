@@ -449,7 +449,7 @@ func (m *Manager) stopUnverified(ctx context.Context, gw *Gateway, b *box) error
 	m.mu.Unlock()
 	var flushErr error
 	if !gw.Driver.StopFlushes {
-		flushErr = m.flushSandbox(ctx, gw, name, false).err
+		flushErr = m.flushSandbox(ctx, gw, name)
 	}
 	_, err := gw.Client.StopSandbox(ctx, name)
 	if err == nil {

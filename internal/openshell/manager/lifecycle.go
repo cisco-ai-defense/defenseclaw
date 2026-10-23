@@ -351,24 +351,22 @@ func (m *Manager) refuseRetained(b *box) error {
 // OpenShell returns as it is: it keeps its phase, and with it the
 // OpenShell gateway (HoldsCompute), until OpenShell reports another.
 func (m *Manager) stop(ctx context.Context, b *box) error {
-	return m.stopWithFlush(ctx, b, false)
+	return m.stopWithFlush(ctx, b, nil)
 }
 
-var errLegacyFlushUnconfirmed = errors.New("the MicroVM's disk flush could not be confirmed")
-
-// stopWithFlush requires a confirmed in-guest sync only for an automatic
-// stop of a legacy MicroVM, and only while that VM's network is proven
-// closed: a legacy supervisor never keeps running with open egress, so a
-// VM whose containment failed is stopped without the flush, and the feed
-// says what that may have lost (fail closed). That flush counts only with
-// the guest's processes paused (quiesceFunc), and they stay paused through
-// the stop, so nothing they write after the sync is lost without a word; a
-// VM that keeps running (the stop was refused, not made, or returned it as
-// it was) gets them back. An explicit user stop keeps its existing
-// loss-aware behavior when the guest cannot flush. The loss is published
-// once OpenShell takes the stop, never for a stop that was refused or not
-// made.
-func (m *Manager) stopWithFlush(ctx context.Context, b *box, requireFlush bool) error {
+// stopWithFlush stops the sandbox of b once its harness has exited and, on
+// a driver whose stop does not flush (the MicroVM driver), after sync(1) in
+// the guest. A flush that fails does not hold the stop back: once OpenShell
+// takes the stop, the feed says what it may have lost (flushFailed), never
+// for a stop that was refused or not made. uncontained, when set, is why
+// DefenseClaw could not close the network of b, a ready legacy MicroVM that
+// it stops for that reason only (stopOldSupervisor): a legacy supervisor
+// never keeps running with open egress. Its release stops the VM without
+// a flush, and nothing holds back what the guest writes after DefenseClaw's
+// sync (a process an exec starts then, for one), so once OpenShell takes
+// that stop the feed's HIGH finding says what it may have lost, flushed or
+// not.
+func (m *Manager) stopWithFlush(ctx context.Context, b *box, uncontained error) error {
 	gw, err := m.gateway(ctx)
 	if err != nil {
 		return err
@@ -389,29 +387,7 @@ func (m *Manager) stopWithFlush(ctx context.Context, b *box, requireFlush bool) 
 	// and its terminal ends as after /exit (graceful.go); a detached run
 	// the stop ends is marked interrupted, and once the stop is published
 	// its log is kept for `sandbox logs` of the stopped sandbox (runlog.go).
-	quiesce := requireFlush && stopLosesWrites(driver)
-	run, fl := m.endHarness(ctx, gw, b, quiesce)
-	taken := false
-	if len(fl.frozen) > 0 {
-		defer func() {
-			if !taken {
-				m.thawGuest(ctx, gw, name, fl.frozen)
-			}
-		}()
-	}
-	flushErr := fl.err
-	var uncontained error
-	if quiesce && !fl.confirmed {
-		// The VM, whose unsynced writes a stop would lose, is kept only
-		// while its network is closed now.
-		if uncontained = m.proveOldSupervisorNetworkClosed(ctx, b); uncontained == nil {
-			if flushErr != nil {
-				return fmt.Errorf("%w: %v", errLegacyFlushUnconfirmed, flushErr)
-			}
-			return errLegacyFlushUnconfirmed
-		}
-		m.logf("old supervisor: stop %s without a confirmed flush: its network is not closed: %v", name, uncontained)
-	}
+	run, flushErr := m.endHarness(ctx, gw, b)
 	if !ended {
 		m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
 	}
@@ -463,9 +439,7 @@ func (m *Manager) stopWithFlush(ctx context.Context, b *box, requireFlush bool) 
 		m.lifecycle(ctx, b, ph, audit.SandboxTriggerStop, false, cond, stopped.Status.ExitCode)
 		return nil
 	}
-	// OpenShell took the stop: the paused processes go down with the VM, and
-	// what the flush did not confirm is lost now.
-	taken = true
+	// OpenShell took the stop: what the flush did not confirm is lost now.
 	if flushErr != nil {
 		m.flushFailed(name, flushErr)
 	}
