@@ -131,6 +131,7 @@ func agentCLIOf(argv []string) string {
 // agentSession is a running agent CLI process.
 type agentSession struct {
 	PID       int
+	PPID      int // the parent process; 0 when unknown
 	UID       int
 	Agent     string
 	Started   time.Time
@@ -244,7 +245,8 @@ func (e *Env) linuxAgentSessionsWithError() ([]agentSession, error) {
 		}
 		started := time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100)
 		executable, _ := os.Readlink(filepath.Join(dir, "exe"))
-		session := agentSession{PID: pid, UID: int(owner.Uid), Agent: agent, Started: started, Args: argv, Executable: executable,
+		ppid, _ := strconv.Atoi(fields[1])
+		session := agentSession{PID: pid, PPID: ppid, UID: int(owner.Uid), Agent: agent, Started: started, Args: argv, Executable: executable,
 			ArgsKnown: argvKnown, CodexServer: codexBackgroundServer(argv)}
 		if pluginLaunchConnector(agent) {
 			raw, err := readBounded(filepath.Join(dir, "environ"), 64<<10)
@@ -286,8 +288,13 @@ func (e *Env) darwinAgentSessionsWithError(ctx context.Context) ([]agentSession,
 			argv = psArgv(fields[3:])
 		}
 		if agent := agentCLIOf(argv); agent != "" {
-			executable, _ := processExecPath(pid)
-			session := agentSession{PID: pid, UID: uid, Agent: agent, Started: now.Add(-elapsed), Args: argv, Executable: executable,
+			execPath := e.ProcessExecPath
+			if execPath == nil {
+				execPath = processExecPath
+			}
+			executable, _ := execPath(pid)
+			ppid, _ := darwinProcessParent(pid)
+			session := agentSession{PID: pid, PPID: ppid, UID: uid, Agent: agent, Started: now.Add(-elapsed), Args: argv, Executable: executable,
 				ArgsKnown: argvErr == nil, CodexServer: codexBackgroundServer(argv)}
 			if pluginLaunchConnector(agent) {
 				if raw, err := darwinProcessEnv(pid); err == nil {

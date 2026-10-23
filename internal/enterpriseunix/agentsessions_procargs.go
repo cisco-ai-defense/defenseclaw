@@ -16,6 +16,7 @@ const maxProcArgs2Bytes = 256 << 10
 // darwinProcessArgv is replaceable by tests that run a macOS environment on Linux.
 var darwinProcessArgv = readProcessArgv
 var darwinProcessEnv = readProcessEnv
+var darwinProcessParent = readProcessParent
 
 // parseProcArgs2 reads argc, the NUL-terminated executable path, padding,
 // then argc NUL-terminated arguments from kern.procargs2.
