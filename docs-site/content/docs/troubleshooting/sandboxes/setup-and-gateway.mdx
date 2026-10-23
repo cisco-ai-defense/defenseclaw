@@ -54,6 +54,21 @@ The upgrade restarts the gateway, which affects every sandbox on it, of every ow
 
 A Docker sandbox created on OpenShell 0.1.1 to 0.1.4 keeps its work, but OpenShell 0.1.5 cannot read the older bootstrap under `~/.local/state/openshell/docker-sandbox-tokens`. After the upgrade, use `defenseclaw sandbox start NAME`: DefenseClaw moves the bootstrap to 0.1.5's format before starting it. If the gateway already left the sandbox in an error state, run `defenseclaw sandbox stop NAME` and then `defenseclaw sandbox start NAME`. A raw `openshell sandbox start` does not perform this migration.
 
+### Before a 1.0.4 package upgrade
+
+A sandbox daemon from DefenseClaw 1.0.3 or older can stop its user's
+OpenShell gateway after replacement, even under a MicroVM whose workload
+ended. The 1.0.4 rpm, deb and macOS pkg refuses before it changes any files
+when such a daemon has a sandbox running, starting or stopping, a completed
+MicroVM or one in an error state, or the daemon does not answer. The refusal
+names each user and sandbox. Ask that user to save work and run
+`defenseclaw sandbox stop <name>` for a running guest or
+`defenseclaw sandbox delete <name>` for an ended MicroVM, then install the
+package again. DefenseClaw stops none of them. On macOS,
+`last-package-result.json` records `sandboxes_running`; an idle older daemon
+is ended before the package replaces files. A daemon already on 1.0.4 waits
+for its sandboxes itself.
+
 ### A live legacy guest after upgrade
 
 A ready Docker sandbox started on OpenShell 0.1.3 can keep its old
@@ -61,9 +76,9 @@ supervisor through a gateway upgrade. An unversioned record from
 DefenseClaw 1.0.3 or earlier is also legacy. For a MicroVM, DefenseClaw
 refuses its own gateway upgrade while the VM is live; an ended MicroVM can
 still keep running background work. DefenseClaw never stops
-these guests itself. It reports them as unprotected: "legacy sandbox running, not
-protected by the 1.0.4 egress policy" in the activity feed, `sandbox status`
-and the doctor's failed **Legacy sandboxes** row. The old network broker
+these guests itself. It reports them as "running unprotected: legacy sandbox"
+in the activity feed, `sandbox status` and the doctor's failed **Legacy
+sandboxes** row; `sandbox status` lists each on an **Unprotected** row. The old network broker
 can still use its native fallback, so the guest is not contained.
 
 DefenseClaw closes its egress proxy and withdraws the network rules it
@@ -75,7 +90,12 @@ lives, DefenseClaw refuses every new sandbox create or start, and
 
 If the guest is ready, save its work, then run `defenseclaw sandbox stop <name>`
 yourself. On a MicroVM this syncs its disk first because the old release's
-stop does not flush it; writes after the sync may be lost. If the stop
+stop does not flush it; writes after the sync may be lost. If sync fails, the
+MicroVM keeps running. You can run `defenseclaw sandbox stop <name>
+--discard-unsynced` to accept losing writes since the last successful sync;
+`--yes` does not accept that loss, and a terminal stop asks first. A stop
+DefenseClaw initiates for a hook alarm or policy change never proceeds after
+a failed sync. If the stop
 fails, the guest stays live and reconciliation never retries the stop for
 you. For an ended MicroVM that OpenShell does not stop, use
 `defenseclaw sandbox delete <name>`, which deletes its work; on OpenShell

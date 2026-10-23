@@ -164,6 +164,35 @@ describe('1.0.4 managed outage and upgrade claims', () => {
     assert.match(legacy, /restor(?:e|ation) fails.*attempts to stop.*new session.*refuses the run/i);
     assert.doesNotMatch(legacy, /automatically stops|reconciliation retries (?:a|the) stop/i);
   });
+
+  it('refuses an earlier daemon package upgrade before a live sandbox is changed', () => {
+    const troubleshooting = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
+    const enterprise = page('enterprise/runtime/sandboxes.mdx');
+    for (const text of [troubleshooting, enterprise]) {
+      assert.match(text, /1\.0\.3 or older.*rpm.*deb.*macOS pkg.*refuses before.*changes/i);
+      assert.match(text, /running.*starting.*stopping.*completed.*error state.*does not answer/i);
+      assert.match(text, /sandbox stop.*sandbox delete.*install.*again/i);
+      assert.match(text, /last-package-result\.json.*sandboxes_running/i);
+    }
+  });
+
+  it('keeps an unsynced MicroVM live until its user accepts the loss', () => {
+    const troubleshooting = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
+    const cli = page('reference/sandboxes/cli.mdx');
+    assert.match(troubleshooting, /sync fails.*keeps running.*--discard-unsynced.*--yes.*does not/i);
+    assert.match(cli, /sync fails.*keeps running.*--yes.*does not.*--discard-unsynced.*never stops a MicroVM/i);
+    assert.match(cli, /\| `--discard-unsynced` \| switch \|.*Stop a MicroVM whose disk could not be synced first/i);
+  });
+
+  it('uses the current legacy-unprotected status and managed verify row', () => {
+    const troubleshooting = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
+    const enterprise = page('enterprise/runtime/sandboxes.mdx');
+    const changelog = repoText('CHANGELOG.md');
+    assert.match(troubleshooting, /running unprotected: legacy sandbox.*Unprotected.*row/i);
+    assert.match(enterprise, /sandbox_legacy_unprotected.*security_complete.*false.*verify.*fails/i);
+    assert.match(changelog, /running unprotected: legacy sandbox.*sandbox status.*sandbox doctor.*managed.*status.*verify/i);
+    assert.doesNotMatch(troubleshooting, /legacy sandbox running, not protected by the 1\.0\.4 egress policy/i);
+  });
 });
 
 describe('Intune base config versus the signed bundle', () => {
