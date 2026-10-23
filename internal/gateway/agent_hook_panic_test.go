@@ -531,9 +531,9 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 		{"claudecode", "PreToolUse", "action", "closed", "block"},
 		{"codex", "PreToolUse", "action", "closed", "block"},
 		{"hermes", "pre_tool_call", "action", "closed", "block"},
-		{"claudecode", "PreToolUse", "action", "open", "allow"},
-		{"codex", "PreToolUse", "action", "open", "allow"},
-		{"hermes", "pre_tool_call", "action", "open", "allow"},
+		{"claudecode", "PreToolUse", "action", "open", "block"},
+		{"codex", "PreToolUse", "action", "open", "block"},
+		{"hermes", "pre_tool_call", "action", "open", "block"},
 		{"claudecode", "PreToolUse", "observe", "closed", "block"},
 		{"codex", "PreToolUse", "observe", "closed", "block"},
 		{"hermes", "pre_tool_call", "observe", "closed", "block"},
@@ -599,13 +599,13 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 	}
 }
 
-func TestHookPanicResponse_ActionProfileRequiresExplicitOpen(t *testing.T) {
+func TestHookPanicResponse_PerUserOpenStillCloses(t *testing.T) {
 	for _, tc := range []struct {
 		name, connectorFail, globalFail, want string
 	}{
 		{"observe connector default", "", "", "block"},
-		{"global open", "", "open", "allow"},
-		{"connector open", "open", "", "allow"},
+		{"global open", "", "open", "block"},
+		{"connector open", "open", "", "block"},
 		{"connector closed over global open", "closed", "open", "block"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
