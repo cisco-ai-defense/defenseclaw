@@ -37,6 +37,7 @@ from defenseclaw.connector_contracts import (
     STATUS_UNKNOWN,
     STATUS_UNVERSIONED,
     _load_contracts_from_manifest,
+    known_broken_entry,
     openclaw_needs_interception_advisory,
     resolve_connector_contract,
 )
@@ -484,26 +485,23 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertEqual(installed_but_unsupported.status, STATUS_UNKNOWN)
         self.assertFalse(installed_but_unsupported.supported)
 
-        audited = resolve_connector_contract("hermes", "Hermes Agent v0.19.0")
-        self.assertEqual(audited.status, STATUS_KNOWN)
-        self.assertTrue(audited.supported)
-        self.assertEqual(audited.contract.contract_id, "hermes-hooks-v1")
+        # 0.19.0-0.21.0 are in the reviewed ranges but known broken on the
+        # host: their TUI runs tools without the shell hooks (GAP-0978).
+        for raw in (
+            "Hermes Agent v0.19.0",
+            "Hermes Agent v0.19.1",
+            "Hermes Agent v0.20.0 (2026.8.3)",
+            "Hermes Agent v0.21.0",
+        ):
+            broken = resolve_connector_contract("hermes", raw)
+            self.assertEqual(broken.status, STATUS_UNKNOWN, raw)
+            self.assertFalse(broken.supported, raw)
+            self.assertIn("known broken", broken.reason, raw)
 
-        latest_rechecked = resolve_connector_contract("hermes", "Hermes Agent v0.19.1")
-        self.assertEqual(latest_rechecked.status, STATUS_KNOWN)
-        self.assertTrue(latest_rechecked.supported)
-        self.assertEqual(latest_rechecked.contract.contract_id, "hermes-hooks-v1")
-
-        v020 = resolve_connector_contract("hermes", "Hermes Agent v0.20.0 (2026.8.3)")
-        self.assertEqual(v020.normalized_version, "0.20.0")
-        self.assertEqual(v020.status, STATUS_KNOWN)
-        self.assertTrue(v020.supported)
-        self.assertEqual(v020.contract.contract_id, "hermes-hooks-v1")
-
-        v021 = resolve_connector_contract("hermes", "Hermes Agent v0.21.0")
-        self.assertEqual(v021.status, STATUS_KNOWN)
-        self.assertTrue(v021.supported)
-        self.assertEqual(v021.contract.contract_id, "hermes-hooks-v2")
+        v0211 = resolve_connector_contract("hermes", "Hermes Agent v0.21.1 (2026.9.7)")
+        self.assertEqual(v0211.status, STATUS_KNOWN)
+        self.assertTrue(v0211.supported)
+        self.assertEqual(v0211.contract.contract_id, "hermes-hooks-v2")
 
         current = resolve_connector_contract("hermes", "Hermes Agent v0.21.3 (2026.9.14)")
         self.assertEqual(current.status, STATUS_KNOWN)
@@ -512,6 +510,49 @@ class TestConnectorContractManifest(unittest.TestCase):
         unreviewed = resolve_connector_contract("hermes", "Hermes Agent v0.22.0")
         self.assertEqual((unreviewed.status, unreviewed.untested), (STATUS_KNOWN, True))
         self.assertEqual(unreviewed.contract.contract_id, "hermes-hooks-v2")
+
+    def test_hermes_before_its_tui_runs_shell_hooks_is_known_broken(self) -> None:
+        # GAP-0978: Hermes' TUI (hermes --tui) and dashboard chat built their
+        # agent without registering config.yaml shell hooks before 0.21.1
+        # (v2026.9.7), so a terminal call ran with no pre_tool_call. Every
+        # spelling of those releases is refused on the host, with the cause
+        # and the fix; 0.21.1 and later, by release or release date, are not.
+        refused = (
+            "0.19.0",
+            "Hermes Agent v0.19.0 (2026.7.20)",
+            "Hermes Agent v0.20.6 (2026.8.27)",
+            "0.21.0",
+            "2026.7.20",
+            "2026.8.16.2",
+            "2026.8.31",
+            "2026.9.6",
+            "Hermes Agent vunknown (2026.8.27)",
+            "Hermes Agent vgit.5bba024 (2026.8.27)",
+            "Hermes Agent vgit.5bba024 (2026.8.31)",
+        )
+        for raw in refused:
+            compat = resolve_connector_contract("hermes", raw)
+            self.assertEqual(compat.status, STATUS_UNKNOWN, raw)
+            self.assertIsNone(compat.contract, raw)
+            self.assertIn("known broken", compat.reason, raw)
+            self.assertIn("hermes --tui", compat.reason, raw)
+            self.assertIn("0.21.1", compat.reason, raw)
+            entry, _ = known_broken_entry("hermes", raw)
+            self.assertIsNotNone(entry, raw)
+        for raw in (
+            "0.21.1",
+            "Hermes Agent v0.21.5 (2026.10.1)",
+            "2026.9.7",
+            "2026.9.24",
+            "Hermes Agent vgit.5bba024 (2026.9.24)",
+            "Hermes Agent vgit.5bba024",
+        ):
+            compat = resolve_connector_contract("hermes", raw)
+            self.assertEqual(compat.status, STATUS_KNOWN, raw)
+            self.assertEqual(compat.contract.contract_id, "hermes-hooks-v2", raw)
+            self.assertEqual(known_broken_entry("hermes", raw), (None, ""), raw)
+        # Below the first reviewed release keeps its own "upgrade" answer.
+        self.assertNotIn("known broken", resolve_connector_contract("hermes", "0.18.2").reason)
 
     def test_manifest_loader_preserves_unversioned_default_marker(self) -> None:
         _, contracts = _load_contracts_from_manifest(

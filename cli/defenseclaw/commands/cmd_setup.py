@@ -94,6 +94,7 @@ from defenseclaw.connector_contracts import (
     STATUS_UNVERSIONED,
     compare_agent_versions,
     connector_lock_contract_invariant,
+    known_broken_entry,
     normalize_agent_version,
     normalize_connector,
     openclaw_needs_interception_advisory,
@@ -5492,6 +5493,9 @@ def _connector_contract_upgrade_guidance(
 
     key = normalize_connector(connector)
     rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
+    broken, _ = known_broken_entry(key, normalized_version)
+    if broken is not None:
+        return f"Install a {label} release that is not known broken ({broken['issue']}), then run: {rerun}."
     contracts = HOOK_CONTRACTS.get(key, ())
     if not contracts:
         return f"Use a {label} version covered by a DefenseClaw hook contract, then run: {rerun}."

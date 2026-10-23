@@ -767,6 +767,44 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertEqual(self.app.cfg.guardrail, before)
 
 
+    def test_direct_hermes_whose_tui_skips_shell_hooks_is_refused_in_every_mode(self):
+        # GAP-0978: Hermes 0.19.0 (the newest on PyPI) through 0.21.0 runs
+        # tools in its TUI without the shell hooks setup registers. Setup
+        # refuses it in observe and action mode, says why and what to install,
+        # and changes nothing.
+        for mode in ("observe", "action"):
+            with self.subTest(mode=mode):
+                before = copy.deepcopy(self.app.cfg.guardrail)
+                signal = SimpleNamespace(
+                    version="Hermes Agent v0.19.0 (2026.7.20)",
+                    installed=True,
+                    error="",
+                    binary_path="/home/tester/.local/bin/hermes",
+                )
+                disc = SimpleNamespace(agents={"hermes": signal})
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None))
+                    stack.enter_context(
+                        patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
+                    )
+                    stack.enter_context(
+                        patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None)
+                    )
+                    stack.enter_context(
+                        patch("defenseclaw.commands.cmd_setup.agent_discovery.discover_agents", return_value=disc)
+                    )
+                    res = _invoke(["hermes", "--yes", "--no-restart", "--mode", mode], self.app)
+
+                self.assertEqual(res.exit_code, 1, msg=res.output)
+                output = " ".join(res.output.split())
+                self.assertIn("detected-but-unsupported-version", output)
+                self.assertIn("is known broken", output)
+                self.assertIn("hermes --tui", output)
+                self.assertIn("Hermes 0.21.1 (v2026.9.7)", output)
+                self.assertIn("Install a Hermes release that is not known broken", output)
+                self.assertNotIn("hermes-hooks-v1 requires", output)
+                self.assertEqual(self.app.cfg.guardrail, before)
+
     def test_windows_opencode_admission_scan_preserves_prior_connector_discovery(self):
         signal = SimpleNamespace(
             version="opencode 1.18.11",

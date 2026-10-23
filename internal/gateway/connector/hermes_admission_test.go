@@ -28,10 +28,10 @@ import (
 	"time"
 )
 
-const hermesAdmissionTestRawVersion = "Hermes Agent v0.20.0 (2026.8.3)"
+const hermesAdmissionTestRawVersion = "Hermes Agent v0.21.5 (2026.9.24)"
 
 func TestFirstHermesVersionLineAcceptsCurrentMultilineBanner(t *testing.T) {
-	output := "\r\nHermes Agent v0.20.0 (2026.8.3)\r\n" +
+	output := "\r\nHermes Agent v0.21.5 (2026.9.24)\r\n" +
 		"Install directory: C:\\Users\\tester\\AppData\\Local\\hermes\\hermes-agent\r\n" +
 		"Python: 3.11.15\r\nOpenAI SDK: 2.24.0\r\n"
 
@@ -105,7 +105,7 @@ func prepareHermesSetupAdmissionFixture(t *testing.T, opts SetupOpts) SetupOpts 
 				Source:            "setup-selected",
 				Executable:        stablePath,
 				RawVersion:        hermesAdmissionTestRawVersion,
-				NormalizedVersion: "0.20.0",
+				NormalizedVersion: "0.21.5",
 				SHA256:            digest,
 				SelectedAt:        now.Add(-time.Second).Format(time.RFC3339),
 				ExpiresAt:         now.Add(10 * time.Minute).Format(time.RFC3339),
@@ -137,7 +137,7 @@ func prepareHermesSetupAdmissionFixture(t *testing.T, opts SetupOpts) SetupOpts 
 	})
 	opts.AgentExecutable = stablePath
 	opts.AgentVersion = hermesAdmissionTestRawVersion
-	opts.HookContractID = "hermes-hooks-v1"
+	opts.HookContractID = "hermes-hooks-v2"
 	return opts
 }
 

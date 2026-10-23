@@ -177,10 +177,9 @@ This is the selected-connector setup primitive used by transactional policy
 mutations. It does not restart the gateway and does not setup peer connectors.
 
 With --every-connector (run by the installers after an upgrade or repair of a
-gateway that is not running) it refreshes every connector the config guards
-and reads each registration back; a connector it cannot refresh is only read
-back. It exits 3 and names each connector that is not on its current hook,
-with the cause.`,
+gateway that is not running) it refreshes every connector the config guards,
+as the gateway's start does, and reads each registration back. It exits 3 and
+names each connector that is not on its current hook, with the cause.`,
 	RunE: runConnectorReconcile,
 }
 
@@ -533,7 +532,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 		return runConnectorReconcileEvery(cmd, dataDir)
 	}
 	name := resolveActiveConnectorName(dataDir)
-	return reconcileConnectorRuntime(cmd, dataDir, name, func(_ connector.Connector, opts connector.SetupOpts) error {
+	return reconcileConnectorRuntime(cmd, dataDir, name, false, func(_ connector.Connector, opts connector.SetupOpts) error {
 		if connectorFlagJSON {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
 				"connector": name,
@@ -552,9 +551,9 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 // rendered this release's hooks: a Hermes hook an earlier release wrote
 // cannot answer this release's execution probe, and the install exited 0
 // with Hermes unprotected. This refreshes every connector the config guards,
-// as the gateway's boot does, and reads each registration back (a connector
-// reconcile cannot refresh is only read back). Exit 3 names each connector
-// that is not on its current hook, with the cause.
+// as the gateway's boot does (Setup for each one, not only the connectors a
+// selected policy refresh supports), and reads each registration back. Exit 3
+// names each connector that is not on its current hook, with the cause.
 func runConnectorReconcileEvery(cmd *cobra.Command, dataDir string) error {
 	if strings.TrimSpace(connectorFlagName) != "" || connectorFlagJSON {
 		return errors.New("connector reconcile: --every-connector takes neither --connector nor --json")
@@ -587,14 +586,13 @@ func reconcileOrReadBackConnector(cmd *cobra.Command, dataDir, name string) erro
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s is on its current hook\n", Style(glyph("✓", "OK"), "fg=green", "bold"), name)
 		return nil
 	}
-	if reconcileSupportedConnector(name) {
-		return reconcileConnectorRuntime(cmd, dataDir, name, readBack)
-	}
-	conn, ok := newConnectorRegistryWithPlugins().Get(name)
-	if !ok {
+	// A Kiro, OpenClaw, ZeptoClaw or plugin connector kept the hook an
+	// earlier release rendered, and a read-back of its registration passed
+	// with it: refresh every connector, as the gateway's start does.
+	if _, ok := newConnectorRegistryWithPlugins().Get(name); !ok {
 		return errors.New("this DefenseClaw build does not ship it")
 	}
-	return readBack(conn, reconcileConnectorOpts(dataDir, name))
+	return reconcileConnectorRuntime(cmd, dataDir, name, true, readBack)
 }
 
 // reconcileConnectorOpts is the Setup input reconcile renders name with.
@@ -616,10 +614,13 @@ func reconcileConnectorOpts(dataDir, name string) connector.SetupOpts {
 
 // reconcileConnectorRuntime refreshes name's runtime registration and calls
 // done with the connector and the options it rendered, while the config
-// home binding is still in place.
+// home binding is still in place. A selected policy refresh (every false)
+// takes only reconcileSupportedConnectors; --every-connector takes any
+// connector this build or its plugins ship.
 func reconcileConnectorRuntime(
 	cmd *cobra.Command,
 	dataDir, name string,
+	every bool,
 	done func(connector.Connector, connector.SetupOpts) error,
 ) error {
 	if name == "codex" && connectorFlagConfigHome == "" {
@@ -635,7 +636,7 @@ func reconcileConnectorRuntime(
 	if !ok {
 		return fmt.Errorf("connector reconcile: unknown connector %q", name)
 	}
-	if !reconcileSupportedConnector(name) {
+	if !every && !reconcileSupportedConnector(name) {
 		return fmt.Errorf("connector reconcile: selected refresh is supported only for %s", strings.Join(reconcileSupportedConnectors, ", "))
 	}
 	if warning, supportErr := connector.CheckPlatformSupportOnHost(name); supportErr != nil {

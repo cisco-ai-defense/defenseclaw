@@ -33,6 +33,11 @@ STATUS_UNKNOWN = "unknown"
 STATUS_NOT_GATED = "not-gated"
 
 _VERSION_RE = re.compile(r"(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?")
+# A source build ("Hermes Agent vgit.5bba024 (2026.9.24)") and the release
+# date it prints after the commit; mirrors Go gitBuildVersionRE and
+# gitBuildReleaseDateRE.
+_GIT_BUILD_RE = re.compile(r"(?i)(?:^|[^a-z0-9])v?git[.+-]?[0-9a-f]{7,40}(?:[^a-z0-9]|$)")
+_GIT_BUILD_RELEASE_DATE_RE = re.compile(r"\(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})(?:\.[0-9]+)?\)")
 _CONTRACT_PLATFORMS = frozenset({"darwin", "linux", "windows"})
 _PLATFORM_OVERRIDE_FIELDS = frozenset(
     {
@@ -430,19 +435,16 @@ def resolve_connector_contract(
             reason="could not normalize agent version",
             contract=None,
         )
-    for entry in KNOWN_BROKEN_VERSIONS.get(name, ()):
-        if (entry["exact"] and _exact_agent_version_match(raw, (entry["exact"],))) or (
-            not entry["exact"]
-            and _version_in_range(normalized, entry["min_inclusive"], entry["max_exclusive"])
-        ):
-            return ConnectorCompatibility(
-                connector=name,
-                raw_version=raw,
-                normalized_version=normalized,
-                status=STATUS_UNKNOWN,
-                reason=f"agent version {normalized} is known broken: {entry['reason']} ({entry['issue']})",
-                contract=None,
-            )
+    broken, broken_version = known_broken_entry(name, raw)
+    if broken is not None:
+        return ConnectorCompatibility(
+            connector=name,
+            raw_version=raw,
+            normalized_version=broken_version,
+            status=STATUS_UNKNOWN,
+            reason=f"agent version {broken_version} is known broken: {broken['reason']} ({broken['issue']})",
+            contract=None,
+        )
     for contract in contracts:
         if _contract_matches_agent_version(contract, raw, normalized):
             return ConnectorCompatibility(
@@ -607,6 +609,28 @@ def _contract_matches_agent_version(
             contract.max_agent_version,
         )
     return False
+
+
+def known_broken_entry(connector: str, raw_version: str | None) -> tuple[dict[str, str] | None, str]:
+    """The known_broken_versions entry raw_version falls in, and the version
+    it was matched as; mirrors Go knownBrokenAgentVersion for the agent on
+    the host. A source build is matched by the release date it prints."""
+
+    name = normalize_connector(connector)
+    raw = (raw_version or "").strip()
+    normalized = normalize_agent_version(raw)
+    if raw and _GIT_BUILD_RE.search(raw):
+        date = _GIT_BUILD_RELEASE_DATE_RE.search(raw)
+        normalized = normalize_agent_version(date.group(1)) if date else ""
+    if not normalized:
+        return None, ""
+    for entry in KNOWN_BROKEN_VERSIONS.get(name, ()):
+        if (entry["exact"] and _exact_agent_version_match(raw, (entry["exact"],))) or (
+            not entry["exact"]
+            and _version_in_range(normalized, entry["min_inclusive"], entry["max_exclusive"])
+        ):
+            return entry, normalized
+    return None, ""
 
 
 def _exact_agent_version_match(raw: str, expected: tuple[str, ...]) -> bool:

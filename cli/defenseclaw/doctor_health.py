@@ -42,6 +42,7 @@ from defenseclaw.connector_contracts import (
     STATUS_NOT_GATED,
     STATUS_UNVERSIONED,
     ConnectorContract,
+    known_broken_entry,
     normalize_agent_version,
     normalize_connector,
     resolve_connector_contract,
@@ -536,20 +537,28 @@ def assess_connector_health(
             continue
 
         normalized = _safe_semver_from_agent(raw_version)
-        if normalized:
+        broken, _ = known_broken_entry(connector, raw_version)
+        if normalized or broken is not None:
+            # A known-broken version (Hermes 0.19.0-0.21.0, whose TUI runs
+            # tools without the hooks) says why, and points past the broken
+            # releases instead of at a range that holds them.
             findings.append(
                 ConnectorHealthFinding(
                     connector=public_name,
                     status=HealthStatus.UNSUPPORTED,
                     reason_code="connector-version-outside-contract",
                     summary=(
-                        f"{public_name} agent version is on the known-broken list"
-                        if "known broken" in (compatibility.reason or "")
+                        f"{public_name} agent version is on the known-broken list: {broken['reason']}"
+                        if broken is not None
                         else f"{public_name} agent version is not covered by a tested connector contract"
                     ),
                     installed_version=normalized,
                     supported_agent_ranges=ranges,
-                    remediations=_unsupported_connector_remediations(public_name, ranges),
+                    remediations=(
+                        _known_broken_connector_remediations(public_name, broken)
+                        if broken is not None
+                        else _unsupported_connector_remediations(public_name, ranges)
+                    ),
                 )
             )
         else:
@@ -917,6 +926,21 @@ def _unsupported_connector_remediations(
         RemediationChoice(
             choice_id="install-supported-connector-version",
             summary=f"Install {connector} {range_text} from its trusted vendor distribution",
+            kind=RemediationKind.MANUAL,
+            changes_state=True,
+            requires_confirmation=True,
+            unattended_allowed=False,
+        ),
+        _refresh_discovery_choice(),
+    )
+
+
+def _known_broken_connector_remediations(connector: str, broken: dict[str, str]) -> tuple[RemediationChoice, ...]:
+    return (
+        RemediationChoice(
+            choice_id="install-supported-connector-version",
+            summary=f"Install a {connector} release that is not known broken ({broken['issue']}), "
+            f"then run: defenseclaw setup {connector}",
             kind=RemediationKind.MANUAL,
             changes_state=True,
             requires_confirmation=True,

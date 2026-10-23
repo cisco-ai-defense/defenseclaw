@@ -118,11 +118,11 @@ func TestConnectorReconcileEveryPutsEachGuardedConnectorOnItsCurrentHook(t *test
 
 func TestConnectorReconcileEveryNamesEachConnectorNotOnItsCurrentHook(t *testing.T) {
 	// A connector whose hook does not answer after the refresh (the Hermes
-	// execution probe), and one reconcile cannot refresh and finds without
-	// its hook (Kiro, read back only), are each named with the cause and
-	// the command exits 3; the connectors after a failure are still done.
+	// execution probe), and one this build does not ship, are each named with
+	// the cause and the command exits 3; the connectors after a failure are
+	// still done.
 	_, _, _ = reconcileEveryFixture(t)
-	cfg.Guardrail.Connectors["kiro"] = config.PerConnectorGuardrailConfig{}
+	cfg.Guardrail.Connectors["acme"] = config.PerConnectorGuardrailConfig{}
 	connectorReconcileReadBack = func(conn connector.Connector, opts connector.SetupOpts) (bool, error) {
 		if conn.Name() == "claudecode" {
 			return false, nil
@@ -141,7 +141,7 @@ func TestConnectorReconcileEveryNamesEachConnectorNotOnItsCurrentHook(t *testing
 	for _, want := range []string{
 		"not every connector is on its current hook",
 		"claudecode: its current hook is not in place",
-		"kiro: its ",
+		"acme: this DefenseClaw build does not ship it",
 	} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("error %q does not contain %q", message, want)

@@ -6264,7 +6264,12 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 					})
 				}
 				rollbackErr := rollbackMultiConnectorPublication(context.WithoutCancel(ctx), transaction)
-				failed := fmt.Errorf("connector %s refresh failed: %w; close the agent holding its settings, then run: defenseclaw upgrade", registration.conn.Name(), err)
+				failed := fmt.Errorf("connector %s refresh failed: %w", registration.conn.Name(), err)
+				if !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
+					// A Setup refusal (a known-broken agent, an unsupported
+					// profile topology) names its own next step.
+					failed = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", failed)
+				}
 				if rollbackErr != nil {
 					failed = fmt.Errorf("%w; connector setup rollback incomplete: %v", failed, rollbackErr)
 				}
@@ -7743,7 +7748,7 @@ func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s %s failed: %v\n", conn.Name(), surface, err)
 	previouslyActive := !opts.ManagedEnterprise && len(authority) > 0 && len(authority[0].applied) > 0 && authority[0].applied[0].previouslyActive
-	if previouslyActive {
+	if previouslyActive && !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
 		err = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", err)
 	}
 	if !previouslyActive && !errors.Is(err, connector.ErrSetupRefusedUnchanged) {

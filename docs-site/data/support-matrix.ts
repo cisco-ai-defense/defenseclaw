@@ -281,8 +281,8 @@ const connectorSources: ConnectorSource[] = [
   {
     id: 'hermes',
     integration: 'Native hooks',
-    minVersion: '0.19.0',
-    versionNote: 'Contract covers 0.19.0 up to 0.22.0.',
+    minVersion: '0.21.1',
+    versionNote: 'Contract covers 0.21.1 up to 0.22.0. 0.19.0 to 0.21.0 are refused: their TUI runs tools without the hooks.',
     notes: { windows: "Hermes' own terminal tool needs its bundled Git Bash." },
     route: PER_USER,
   },

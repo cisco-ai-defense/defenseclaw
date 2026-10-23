@@ -178,14 +178,14 @@ type SandboxArtifactProvider interface {
 func ResolveSandboxHookContract(connectorName, agentVersion string) HookContractResolution {
 	name := normalizeConnectorName(connectorName)
 	if contracts := sandboxOnlyHookContracts(name); len(contracts) > 0 {
-		resolution := strictHookContractResolutionOf(resolveHookContractAgainst(name, agentVersion, contracts))
+		resolution := strictHookContractResolutionOf(resolveHookContractAgainstIn(name, agentVersion, contracts, true))
 		if why := sandboxOnlyRefusals[name]; why != "" && resolution.Status == HookCompatibilityUnknown &&
-			resolveHookContractForOSMode(name, agentVersion, "linux", true).Status == HookCompatibilityKnown {
+			resolveHookContractForOSModeIn(name, agentVersion, "linux", true, true).Status == HookCompatibilityKnown {
 			resolution.Reason = why
 		}
 		return resolution
 	}
-	return resolveHookContractForOSMode(connectorName, agentVersion, "linux", true)
+	return resolveHookContractForOSModeIn(connectorName, agentVersion, "linux", true, true)
 }
 
 // sandboxOnlyHookContractsByConnector are reviewed hook contracts that apply

@@ -1043,6 +1043,13 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		}
 	}
 	if c.name == "hermes" {
+		// A Hermes whose TUI runs tools without the shell hooks is refused in
+		// every guardrail mode, before anything is written: the hooks would
+		// look registered while that interface ran unguarded (GAP-0978). The
+		// contract-drift override does not apply; it is no unknown version.
+		if resolution := ResolveHookContract(c.name, opts.AgentVersion); resolution.KnownBroken {
+			return setupRefusedUnchanged{err: fmt.Errorf("hermes %s is not supported: %s; no changes made", resolution.NormalizedVersion, resolution.Reason)}
+		}
 		configPath, err := hermesResolvedConfigPath(opts)
 		if err != nil {
 			return fmt.Errorf("%w; no changes made", err)

@@ -98,6 +98,10 @@ type HookContractResolution struct {
 	// contract applies. NewestTestedVersion names the bound it passed.
 	UntestedVersion     bool
 	NewestTestedVersion string
+	// KnownBroken marks an Unknown resolution for a version on the
+	// known-broken list: its hooks are known not to guard the agent, in any
+	// guardrail mode.
+	KnownBroken bool
 }
 
 // UntestedNewerVersionReasonPrefix starts the Reason of an untested newer
@@ -106,21 +110,47 @@ type HookContractResolution struct {
 const UntestedNewerVersionReasonPrefix = "untested newer version"
 
 // KnownBrokenAgentVersion is one agent version (Exact) or half-open range
-// [Min, Max) that DefenseClaw refuses even when it is newer than every
-// tested range. Reason and Issue are required so the refusal explains
-// itself.
+// [Min, Max) that DefenseClaw refuses, inside a contract's range or newer
+// than every tested one. Reason and Issue are required so the refusal
+// explains itself. A HostOnly entry applies to the agent on the host, not to
+// the pinned build an OpenShell sandbox image runs.
 type KnownBrokenAgentVersion struct {
-	Exact  string
-	Min    string
-	Max    string
-	Reason string
-	Issue  string
+	Exact    string
+	Min      string
+	Max      string
+	Reason   string
+	Issue    string
+	HostOnly bool
 }
+
+// hermesTUIWithoutShellHooks is why Hermes before 0.21.1 is refused: its
+// TUI (hermes --tui, a separate tui_gateway process) and dashboard chat
+// build their agent without registering the config.yaml shell hooks, so a
+// terminal call ran with no pre_tool_call and was neither blocked nor
+// audited (GAP-0978). Hermes 0.21.1 (v2026.9.7) registers them where every
+// agent is built.
+const hermesTUIWithoutShellHooks = "its TUI (hermes --tui) and dashboard chat run tools without the shell hooks DefenseClaw registers; " +
+	"Hermes 0.21.1 (v2026.9.7) is the first release that runs them there, so update Hermes (hermes update)"
+
+const hermesTUIShellHooksFix = "https://github.com/NousResearch/hermes-agent/commit/3094cde5138bd2bc28134d060345081ab5099d25"
 
 // knownBrokenAgentVersions lists agent versions whose hook surface is known
 // not to work with DefenseClaw. It must match the known_broken_versions
-// lists in cli/defenseclaw/inventory/hook_contracts.json.
-var knownBrokenAgentVersions = map[string][]KnownBrokenAgentVersion{}
+// lists in cli/defenseclaw/inventory/hook_contracts.json. A version is
+// release-style (0.19.0) or a release date (2026.7.20, what a Hermes git
+// install reports); each scheme needs its own range.
+var knownBrokenAgentVersions = map[string][]KnownBrokenAgentVersion{
+	// The OpenShell image pins Hermes 0.19.0 (the newest on PyPI) and is
+	// not changed here; its TUI is GAP-0978's sandbox follow-up.
+	"hermes": {
+		{Min: "0.19.0", Max: "0.21.1", Reason: hermesTUIWithoutShellHooks, Issue: hermesTUIShellHooksFix, HostOnly: true},
+		{Min: "2026.7.20", Max: "2026.9.7", Reason: hermesTUIWithoutShellHooks, Issue: hermesTUIShellHooksFix, HostOnly: true},
+	},
+}
+
+// gitBuildReleaseDateRE reads the release date a source build prints after
+// its commit ("Hermes Agent vgit.5bba024 (2026.9.24)").
+var gitBuildReleaseDateRE = regexp.MustCompile(`\(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})(?:\.[0-9]+)?\)`)
 
 // strictHookContractResolution restores exact-range matching: a version
 // outside every tested range stays unknown. The Secure Client profile sets
@@ -1046,6 +1076,12 @@ func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContra
 }
 
 func resolveHookContractForOSMode(connectorName, rawVersion, goos string, strict bool) HookContractResolution {
+	return resolveHookContractForOSModeIn(connectorName, rawVersion, goos, strict, false)
+}
+
+// resolveHookContractForOSModeIn is resolveHookContractForOSMode for the agent
+// on the host (sandbox false) or the pinned build of an OpenShell image.
+func resolveHookContractForOSModeIn(connectorName, rawVersion, goos string, strict, sandbox bool) HookContractResolution {
 	name := normalizeConnectorName(connectorName)
 	if proxyConnectorsWithoutHookGate[name] {
 		raw := strings.TrimSpace(rawVersion)
@@ -1067,7 +1103,7 @@ func resolveHookContractForOSMode(connectorName, rawVersion, goos string, strict
 			Reason:            "connector has no hook contract gate",
 		}
 	}
-	resolution := resolveHookContractAgainst(name, rawVersion, hookContractsForOS(name, goos))
+	resolution := resolveHookContractAgainstIn(name, rawVersion, hookContractsForOS(name, goos), sandbox)
 	if strict {
 		return strictHookContractResolutionOf(resolution)
 	}
@@ -1095,6 +1131,13 @@ func strictHookContractResolutionOf(resolution HookContractResolution) HookContr
 // exact pins of one contract; versions below a floor, between ranges or next
 // to an exact pin of the same build stay unknown.
 func resolveHookContractAgainst(name, rawVersion string, contracts []HookContract) HookContractResolution {
+	return resolveHookContractAgainstIn(name, rawVersion, contracts, false)
+}
+
+// resolveHookContractAgainstIn is resolveHookContractAgainst for the agent on
+// the host (sandbox false) or in an OpenShell image, which skips the
+// HostOnly known-broken entries.
+func resolveHookContractAgainstIn(name, rawVersion string, contracts []HookContract, sandbox bool) HookContractResolution {
 	if len(contracts) == 0 {
 		return HookContractResolution{
 			Connector:  name,
@@ -1118,7 +1161,21 @@ func resolveHookContractAgainst(name, rawVersion string, contracts []HookContrac
 	if gitBuildVersionRE.MatchString(raw) {
 		// A source build (Hermes "vgit.5bba024 (2026.9.24)") has no release
 		// version: its digits are a commit hash or a date. Treat it as newer
-		// than every tested range instead of reading a version out of the hash.
+		// than every tested range instead of reading a version out of the hash,
+		// unless the release date it prints is known broken.
+		if match := gitBuildReleaseDateRE.FindStringSubmatch(raw); match != nil {
+			date := NormalizeAgentVersion(name, match[1])
+			if broken, ok := knownBrokenAgentVersion(name, raw, date, sandbox); ok {
+				return HookContractResolution{
+					Connector:         name,
+					RawVersion:        raw,
+					NormalizedVersion: date,
+					Status:            HookCompatibilityUnknown,
+					Reason:            fmt.Sprintf("agent version %s is known broken: %s (%s)", date, broken.Reason, broken.Issue),
+					KnownBroken:       true,
+				}
+			}
+		}
 		if contract, newest, ok := newestContractBelow(contracts, gitBuildCompareVersion); ok {
 			return HookContractResolution{
 				Connector:           name,
@@ -1140,13 +1197,14 @@ func resolveHookContractAgainst(name, rawVersion string, contracts []HookContrac
 			Reason:            "could not normalize agent version",
 		}
 	}
-	if broken, ok := knownBrokenAgentVersion(name, raw, normalized); ok {
+	if broken, ok := knownBrokenAgentVersion(name, raw, normalized, sandbox); ok {
 		return HookContractResolution{
 			Connector:         name,
 			RawVersion:        raw,
 			NormalizedVersion: normalized,
 			Status:            HookCompatibilityUnknown,
 			Reason:            fmt.Sprintf("agent version %s is known broken: %s (%s)", normalized, broken.Reason, broken.Issue),
+			KnownBroken:       true,
 		}
 	}
 	for _, contract := range contracts {
@@ -1247,8 +1305,11 @@ func newestContractBelow(contracts []HookContract, normalized string) (HookContr
 	return best, label, true
 }
 
-func knownBrokenAgentVersion(name, raw, normalized string) (KnownBrokenAgentVersion, bool) {
+func knownBrokenAgentVersion(name, raw, normalized string, sandbox bool) (KnownBrokenAgentVersion, bool) {
 	for _, entry := range knownBrokenAgentVersions[name] {
+		if sandbox && entry.HostOnly {
+			continue
+		}
 		if entry.Exact != "" {
 			if exactAgentVersionMatch(raw, []string{entry.Exact}) {
 				return entry, true
