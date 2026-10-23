@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -2355,5 +2356,66 @@ func TestVerifyRotationConnectorHookAuthenticationRequiresRemovedConnectorRefusa
 	}
 	if probes := seen(); len(probes) != 0 {
 		t.Fatalf("probes after a fingerprint or file failure = %v, want none", probes)
+	}
+}
+
+// Review (loop round 3): rotation now rotates the credential of an
+// unconfigured connector whose hook may still run. Gateway B's own start can
+// finish removing that connector and revoke the credential after VerifyClean;
+// readiness must accept that instead of failing every such rotation, while a
+// present orphan credential and every configured one stay fully checked.
+func TestRotationHookTokensStillPresentedDropsOnlyRevokedOrphans(t *testing.T) {
+	dataDir := t.TempDir()
+	present := map[string]string{}
+	for _, name := range []string{"claudecode", "cursor"} {
+		token, err := connector.EnsureHookAPIToken(dataDir, name)
+		if err != nil {
+			t.Fatalf("EnsureHookAPIToken(%s): %v", name, err)
+		}
+		present[name] = rotationHookTokenFingerprint(token)
+	}
+	missing := strings.Repeat("a", 64)
+
+	expected := rotationHookTokenFingerprints{
+		"claudecode": present["claudecode"],
+		"codex":      missing,
+		"cursor":     present["cursor"],
+	}
+	got, revokedAll, err := rotationHookTokensStillPresented(dataDir, expected, rotationHookTokenFingerprints{
+		"codex": missing, "cursor": present["cursor"],
+	})
+	if err != nil || revokedAll {
+		t.Fatalf("rotationHookTokensStillPresented() = %v, %v, %v", got, revokedAll, err)
+	}
+	want := rotationHookTokenFingerprints{"claudecode": present["claudecode"], "cursor": present["cursor"]}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("presented = %v, want %v (only the revoked orphan dropped)", got, want)
+	}
+
+	// A configured credential that is missing is never dropped: readiness
+	// still fails closed on it.
+	got, revokedAll, err = rotationHookTokensStillPresented(dataDir,
+		rotationHookTokenFingerprints{"codex": missing}, rotationHookTokenFingerprints{"thirdparty": missing})
+	if err != nil || revokedAll || !reflect.DeepEqual(got, rotationHookTokenFingerprints{"codex": missing}) {
+		t.Fatalf("configured missing credential = %v, %v, %v; want kept", got, revokedAll, err)
+	}
+	if err := verifyRotationConnectorHookAuthentication(
+		&http.Client{}, "http://127.0.0.1:18970/status", dataDir, got,
+	); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("missing configured credential error = %v, want fail-closed rejection", err)
+	}
+
+	// Every expectation a revoked orphan: nothing is left to present.
+	got, revokedAll, err = rotationHookTokensStillPresented(dataDir,
+		rotationHookTokenFingerprints{"codex": missing}, rotationHookTokenFingerprints{"codex": missing})
+	if err != nil || !revokedAll || len(got) != 0 {
+		t.Fatalf("all-revoked orphans = %v, %v, %v; want revokedAll", got, revokedAll, err)
+	}
+
+	// Without orphans the expectations pass through unchanged, including an
+	// explicit empty set that readiness rejects.
+	got, revokedAll, err = rotationHookTokensStillPresented(dataDir, rotationHookTokenFingerprints{}, nil)
+	if err != nil || revokedAll || got == nil || len(got) != 0 {
+		t.Fatalf("empty expectations = %v, %v, %v; want unchanged", got, revokedAll, err)
 	}
 }

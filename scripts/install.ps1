@@ -1994,23 +1994,26 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped, [switch]$Outl
         $drift += "$external is not the config the previous install ran with"; $configChanged = $true
     }
     # Changes only -AcceptCurrentInstall keeps: a recorded connector that is
-    # not guarded although the gateway still lists it or the config still
-    # names it was not removed, and the live config's digest says nothing
-    # about its hooks.
+    # not guarded although the live effective config still enables it, or
+    # the running gateway still lists it, was not turned off, and the live
+    # config's digest says nothing about its hooks. One the effective config
+    # no longer enables (removed, disabled with its own enabled: false, or
+    # under a disabled guardrail) was changed on purpose: the gateway's proof
+    # that it enforces the live config accepts it. Its name left in the YAML
+    # or in a restored active_connector.json says nothing about that. A
+    # roster that cannot be read keeps every connector.
     $unguarded = @()
     if ($Outlived -and $problems.Count -and
         -not @(Test-LifecycleProof $bins $running @() -RequireProtected $protected -SetupRoot $setupRoot -AllowLegacyStatus:$allowLegacyStatus).Count) {
         # Only connectors the record names are not guarded.
         $report = if ($setupRoot) { $null } else { Get-GatewayHealthReport (Join-Path $BinDir "defenseclaw-gateway.exe") }
-        $kept = @(@(Get-Field (Get-Field $report "health") "connectors") | ForEach-Object { [string](Get-Field $_ "name") }) +
-            @(Get-ConfiguredConnectors)
-        $configPath = Get-ExternalConfig
-        if (-not $configPath) { $configPath = Join-Path $DataDir "config.yaml" }
-        $configText = if (Test-Path -LiteralPath $configPath -PathType Leaf) { [IO.File]::ReadAllText($configPath) } else { "" }
+        $listed = @(@(Get-Field (Get-Field $report "health") "connectors") | ForEach-Object { [string](Get-Field $_ "name") })
+        $enabled = $null
+        try { $enabled = @(Get-EffectiveConfigConnectors) } catch { $enabled = $null }
         foreach ($problem in $problems) {
             $name = if ($problem -match '^connector (\S+) is not guarded again') { $Matches[1] } else { "" }
-            $named = $name -and ($kept -contains $name -or $configText -match "(?<![\w-])$([regex]::Escape($name))(?![\w-])")
-            if ($name -and -not $named) { $drift += $problem } else { $unguarded += $problem }
+            $kept = -not $name -or $null -eq $enabled -or $enabled -contains $name -or $listed -contains $name
+            if ($kept) { $unguarded += $problem } else { $drift += $problem }
         }
         $problems = @()
     }

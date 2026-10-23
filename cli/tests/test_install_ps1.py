@@ -326,7 +326,8 @@ if ((Get-Field $readback 'Bins').'defenseclaw-hook.exe' -ne 'old-sha') { throw '
 def test_outlived_recovery_keeps_connector_named_by_external_config(tmp_path: Path) -> None:
     # rel-1-0-4:GAP-0679: a changed external config can still require the hook.
     external = tmp_path / "external.yaml"
-    external.write_text("guardrail:\n  connectors:\n    codex: {}\n", encoding="utf-8")
+    external.write_text("guardrail:\n  enabled: true\n  connectors:\n    codex: {}\n", encoding="utf-8")
+    roster = ", ".join(f"'{name}'" for name in _effective_config_roster(external))
     script = f"""
 $ErrorActionPreference = 'Stop'
 $DataDir = '{tmp_path / 'data'}'
@@ -338,7 +339,7 @@ $AcceptCurrentInstall = $false
 function Wait-LifecycleProof {{ return @('connector codex is not guarded again: the gateway does not report its hooks running') }}
 function Test-LifecycleProof {{ return @() }}
 function Get-GatewayHealthReport {{ return [pscustomobject]@{{ health = [pscustomobject]@{{ connectors = @() }} }} }}
-function Get-ConfiguredConnectors {{ return @() }}
+function Get-EffectiveConfigConnectors {{ return @({roster}) }}
 function Get-OptionalSha256 {{ param($Path) return 'new' }}
 function Get-GatewayDigestProblem {{ return '' }}
 function Set-RecoveryPending {{ $Run.RestorePending = $true }}
@@ -346,7 +347,6 @@ function Get-LifecycleNextStep {{ return 'retry' }}
 function Remove-LifecycleManifest {{ }}
 function Write-Warn {{ param($Message) }}
 {_ps1_function('Get-Field')}
-{_ps1_function('Get-ExternalConfig')}
 {_ps1_function('Assert-LifecycleRestored')}
 $manifest = [pscustomobject]@{{ Bins = @{{}}; GatewayWasRunning = $true; Connectors = @('codex'); Config = ''; ExternalConfig = '{external}'; ExternalConfigSha256 = 'old'; HookFailModes = ''; BinDirProtected = $false; SetupRoot = '' }}
 try {{ Assert-LifecycleRestored $manifest -Outlived; throw 'external configured connector was accepted unguarded' }}
@@ -1428,10 +1428,18 @@ Write-Output "STARTS=$script:starts"
         # A guarded connector is gone while the config still names it.
         ("connector-removed", False, True, True),
         # The config edit (a new port) proves nothing about a connector the
-        # gateway still lists, or the config still names, but does not guard.
+        # gateway still lists, or the live config still enables, but does
+        # not guard.
         ("config-edited-connector-error", False, True, True),
-        ("config-edited-connector-still-active", False, True, True),
         ("config-edited-connector-in-config", False, True, True),
+        # Review (loop round 3): a connector the live config turned off on
+        # purpose is accepted once the gateway enforces that config, though
+        # its name is still in the YAML or in a restored active_connector.json.
+        ("config-edited-connector-disabled", True, True, False),
+        ("config-edited-guardrail-disabled", True, True, False),
+        ("config-edited-connector-still-active", True, True, False),
+        # An effective roster that cannot be read keeps every connector.
+        ("config-edited-roster-unreadable", False, True, True),
         # Trust and health checks are never waived.
         ("config-edited-gateway-rejects-config", False, False, False),
         ("config-edited-gateway-down", False, False, False),
@@ -1465,14 +1473,37 @@ def test_a_lifecycle_record_that_outlived_its_restore_accepts_later_changes_only
     if "config-edited" in case:
         config.write_text("gateway:\n  port: 18971\n", encoding="utf-8")
     if "in-config" in case:
-        config.write_text("gateway:\n  port: 18971\nguardrail:\n  connectors:\n    codex: {mode: observe}\n", encoding="utf-8")
+        config.write_text(
+            "gateway:\n  port: 18971\nguardrail:\n  enabled: true\n  connectors:\n    claudecode: {}\n"
+            "    codex: {mode: observe}\n",
+            encoding="utf-8",
+        )
+    if "connector-disabled" in case:
+        config.write_text(
+            "gateway:\n  port: 18971\nguardrail:\n  enabled: true\n  connectors:\n    claudecode: {}\n"
+            "    codex: {enabled: false}\n",
+            encoding="utf-8",
+        )
+    if "guardrail-disabled" in case:
+        config.write_text(
+            "gateway:\n  port: 18971\nguardrail:\n  enabled: false\n  connectors:\n    claudecode: {}\n"
+            "    codex: {}\n",
+            encoding="utf-8",
+        )
     if "still-active" in case:
         (data / "active_connector.json").write_text(json.dumps({"names": ["claudecode", "codex"]}), encoding="utf-8")
     states = {"claudecode": "running", "codex": "running"}
-    if "connector-removed" in case or "still-active" in case or "in-config" in case:
+    if any(part in case for part in ("connector-removed", "still-active", "in-config", "connector-disabled", "roster-unreadable")):
         del states["codex"]
+    if "guardrail-disabled" in case:
+        states = {}
     if "connector-error" in case:
         states["codex"] = "error"
+    if "roster-unreadable" in case:
+        roster_function = "function Get-EffectiveConfigConnectors { throw 'no checked Python environment' }"
+    else:
+        roster = ", ".join(f"'{name}'" for name in _effective_config_roster(config))
+        roster_function = f"function Get-EffectiveConfigConnectors {{ return @({roster}) }}"
     digest = {"old-gateway": "unsupported", "rejects-config": "the gateway rejected the live config"}
     digest_result = next((v for k, v in digest.items() if k in case), "")
     results = []
@@ -1509,6 +1540,7 @@ function Get-GatewayHealthReport {{
 }}
 function Get-GatewayDigestProblem {{ return '{digest_result}' }}
 function Test-BinDirProtected {{ return -not ('{case}' -like '*bin-dir-open') }}
+{roster_function}
 try {{ Resume-InterruptedRun; Write-Output 'ACCEPTED' }} catch {{ Write-Output "REFUSED: $($_.Exception.Message)" }}
 Write-Output "RECORD=$(Test-Path -LiteralPath $LifecycleManifest)"
 """
