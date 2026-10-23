@@ -37,13 +37,16 @@ from typing import Any
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACTS,
     KIRO_CLI_HOOK_FLOOR,
+    KIRO_FORM_IDE,
+    KIRO_IDE_GLOBAL_HOOKS_FLOOR,
     PROXY_CONNECTORS,
     REGISTERED_CONNECTORS,
     STATUS_KNOWN,
     STATUS_NOT_GATED,
     STATUS_UNVERSIONED,
     ConnectorContract,
-    kiro_cli_below_hook_floor,
+    KiroFormVerdict,
+    assess_kiro_signal,
     kiro_cli_below_hook_floor_reason,
     normalize_agent_version,
     normalize_connector,
@@ -428,6 +431,74 @@ def _kiro_floor_finding(
     )
 
 
+def _kiro_form_finding(form: KiroFormVerdict, ranges: tuple[str, ...], *, auxiliary: bool) -> ConnectorHealthFinding:
+    """The finding of one Kiro form assess_kiro does not protect.
+
+    An auxiliary form sits beside the protected form setup covers: it is
+    reported, but it does not block repairing that form.
+    """
+
+    if form.below_floor and form.kind != KIRO_FORM_IDE:
+        return _kiro_floor_finding(form.normalized, ranges, auxiliary=auxiliary)
+    if form.below_floor:
+        return ConnectorHealthFinding(
+            connector="kiro",
+            status=HealthStatus.UNSUPPORTED,
+            reason_code="kiro-ide-below-global-hooks-floor" + ("-auxiliary" if auxiliary else ""),
+            summary=(
+                f"Kiro IDE {form.normalized} is below {KIRO_IDE_GLOBAL_HOOKS_FLOOR}, the first build that reads "
+                "the global ~/.kiro/hooks file, so its agent sessions run without DefenseClaw hooks"
+            ),
+            installed_version=form.normalized,
+            supported_agent_ranges=ranges,
+            remediations=(
+                RemediationChoice(
+                    choice_id="install-supported-connector-version",
+                    summary=f"Update Kiro IDE to {KIRO_IDE_GLOBAL_HOOKS_FLOOR} or later, then rerun setup",
+                    kind=RemediationKind.MANUAL,
+                    changes_state=True,
+                    requires_confirmation=True,
+                    unattended_allowed=False,
+                ),
+                _refresh_discovery_choice(),
+            ),
+        )
+    product = "a Kiro IDE install" if form.kind == KIRO_FORM_IDE else "kiro-cli"
+    return ConnectorHealthFinding(
+        connector="kiro",
+        status=HealthStatus.UNTESTED,
+        reason_code="kiro-version-unknown-auxiliary" if auxiliary else "connector-version-not-observed",
+        summary=(
+            f"{product} is installed, but its version could not be read, so DefenseClaw cannot check it "
+            "against its hook floor and does not count it as protected"
+        ),
+        supported_agent_ranges=ranges,
+        remediations=_untested_connector_remediations("kiro"),
+    )
+
+
+def _kiro_health_findings(signal: Any, ranges: tuple[str, ...]) -> list[ConnectorHealthFinding]:
+    """Kiro's findings from assess_kiro: the protected form setup covers is
+    supported, and every other installed form gets its own finding, so a
+    supported IDE never hides an old or unreadable kiro-cli (or the reverse)."""
+
+    kiro = assess_kiro_signal(signal)
+    if kiro.selected is None:
+        return [_kiro_form_finding(form, ranges, auxiliary=False) for form in kiro.forms]
+    findings = [
+        ConnectorHealthFinding(
+            connector="kiro",
+            status=HealthStatus.SUPPORTED,
+            reason_code="connector-not-version-gated",
+            summary="kiro is not agent-version gated",
+            installed_version=_safe_semver_from_agent(kiro.selected.normalized),
+            capabilities=ConnectorCapabilities(connection_kind="hook"),
+        )
+    ]
+    findings.extend(_kiro_form_finding(form, ranges, auxiliary=True) for form in kiro.unprotected())
+    return findings
+
+
 def assess_connector_health(
     active_connectors: Iterable[str],
     discovery: Any | None,
@@ -487,14 +558,13 @@ def assess_connector_health(
             )
             continue
 
+        if connector == "kiro":
+            findings.extend(_kiro_health_findings(signal, ranges))
+            continue
+
         raw_version = getattr(signal, "version", "")
         raw_version = raw_version if isinstance(raw_version, str) else ""
         compatibility = resolve_connector_contract(connector, raw_version)
-
-        if connector == "kiro":
-            cli = getattr(signal, "kiro_cli_version", "")
-            if isinstance(cli, str) and cli != raw_version and (below := kiro_cli_below_hook_floor(cli)):
-                findings.append(_kiro_floor_finding(below, ranges, auxiliary=True))
 
         if compatibility.status == STATUS_NOT_GATED:
             proxy = connector in PROXY_CONNECTORS
@@ -568,12 +638,7 @@ def assess_connector_health(
             continue
 
         normalized = _safe_semver_from_agent(raw_version)
-        kiro_below_floor = kiro_cli_below_hook_floor(raw_version) if connector == "kiro" else ""
-        if kiro_below_floor:
-            # Kiro has no contract range to install: say why this kiro-cli
-            # is refused and which version to update to (GAP-0227).
-            findings.append(_kiro_floor_finding(kiro_below_floor, ranges))
-        elif normalized:
+        if normalized:
             findings.append(
                 ConnectorHealthFinding(
                     connector=public_name,

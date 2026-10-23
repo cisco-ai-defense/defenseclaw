@@ -202,8 +202,11 @@ func normalizeUnprotectedAgents(agents []UnprotectedAgent) []UnprotectedAgent {
 			// One Kiro row can describe two installed products (kiro-cli and
 			// the IDE), each with its own reason, such as a kiro-cli below
 			// its floor or without a readable version next to an IDE below
-			// its floor or in an untrusted home. Each keeps its finding.
-			key += "\x00" + agent.Code
+			// its floor or in an untrusted home. Each keeps its finding, and
+			// so does each IDE install (AssessKiro): forms are told apart by
+			// code, version and the install their reason names first.
+			form, _, _ := strings.Cut(agent.Reason, ";")
+			key += "\x00" + agent.Code + "\x00" + agent.Version + "\x00" + form
 		}
 		byKey[key] = agent
 	}

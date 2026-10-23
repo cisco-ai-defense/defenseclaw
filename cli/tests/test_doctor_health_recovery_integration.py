@@ -526,7 +526,7 @@ def test_supported_kiro_ide_keeps_old_cli_finding_without_blocking_gateway_repai
         )
         assert gate.state == expected_gate
         if expected_gate == "noop":
-            assert "selected Kiro IDE surface can be repaired" in gate.detail
+            assert "selected Kiro surface can be repaired" in gate.detail
 
 
 def test_positive_unsupported_compatibility_blocks_gateway_lifecycle(tmp_path) -> None:

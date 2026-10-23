@@ -34,7 +34,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from io import StringIO
@@ -813,6 +813,27 @@ class AgentSignal:
     mode: str = ""
     kiro_cli_version: str = ""
     kiro_ide_version: str = ""
+    #: Every Kiro install the probe found (connector_contracts.assess_kiro):
+    #: ``{"kind": "cli"|"ide", "version": ..., "unread": ..., "path": ...}``.
+    #: ``version`` is empty and ``unread`` says why when the probe failed.
+    kiro_forms: list[dict[str, str]] = field(default_factory=list)
+
+
+#: The most Kiro forms one signal records.
+_KIRO_FORMS_MAX = 16
+
+
+def _kiro_forms_from_cache(raw: Any) -> list[dict[str, str]]:
+    """Validated ``kiro_forms`` from a cache entry (bounded, strings only)."""
+
+    if not isinstance(raw, list):
+        return []
+    forms: list[dict[str, str]] = []
+    for item in raw[:_KIRO_FORMS_MAX]:
+        if not isinstance(item, dict) or item.get("kind") not in ("cli", "ide"):
+            continue
+        forms.append({key: str(item.get(key) or "")[:512] for key in ("kind", "version", "unread", "path")})
+    return forms
 
 
 @dataclass
@@ -1325,6 +1346,9 @@ def _keep_versions_of_slow_unchanged_agents(
             else:
                 signal.kiro_cli_version = str(previous.get("kiro_cli_version") or "")
                 signal.kiro_ide_version = str(previous.get("kiro_ide_version") or "")
+            # The forms of the scan whose version is kept; an earlier schema
+            # has none, so assess_kiro reads the versions above.
+            signal.kiro_forms = _kiro_forms_from_cache(previous.get("kiro_forms"))
         signal.error = ""
         signal.installed = True
 
@@ -1531,6 +1555,20 @@ def _scan_agent(
     probe_errors: list[str] = []
     timed_out = ""
     kiro_versions: dict[str, tuple[str, str]] = {}
+    # Every Kiro install probed, read or not (assess_kiro judges each one; a
+    # failed probe is an installed form whose version is unknown, GAP-0895).
+    kiro_forms: list[dict[str, str]] = []
+
+    def kiro_unread(candidate: str, why: str) -> None:
+        kiro_forms.append(
+            {
+                "kind": "ide" if _kiro_binary_surface(candidate, "") == "ide" else "cli",
+                "version": "",
+                "unread": f"{candidate} is installed, but its version could not be read ({why})",
+                "path": candidate,
+            }
+        )
+
     missing_state = _missing_probe_state(name) if binary_candidates else ([], [])
     for candidate in binary_candidates:
         candidate_version, candidate_error = _version_for_agent_binary(
@@ -1546,10 +1584,12 @@ def _scan_agent(
                 normalized = normalize_agent_version(candidate_version)
                 if not surface or not normalized:
                     probe_errors.append(f"{candidate}: Kiro surface or version could not be identified")
+                    kiro_unread(candidate, "Kiro surface or version could not be identified")
                     continue
+                version_for_surface = f"kiro-cli {normalized}" if surface == "cli" else normalized
                 if surface not in kiro_versions:
-                    version_for_surface = f"kiro-cli {normalized}" if surface == "cli" else normalized
                     kiro_versions[surface] = (candidate, version_for_surface)
+                kiro_forms.append({"kind": surface, "version": version_for_surface, "unread": "", "path": candidate})
                 continue
             binary_path = candidate
             version = candidate_version
@@ -1560,6 +1600,9 @@ def _scan_agent(
             probe_errors.append(f"{candidate}: {candidate_error}")
             if candidate_error == VERSION_PROBE_TIMED_OUT and not timed_out:
                 timed_out = candidate
+            elif name == "kiro":
+                kiro_unread(candidate, candidate_error)
+    timed_out_read = False
     kiro_supported = bool(
         (cli := kiro_versions.get("cli")) and not kiro_cli_below_hook_floor(cli[1])
     ) or bool((ide := kiro_versions.get("ide")) and not kiro_ide_below_hook_floor(ide[1]))
@@ -1581,8 +1624,14 @@ def _scan_agent(
                 if surface and normalized:
                     canonical = f"kiro-cli {normalized}" if surface == "cli" else normalized
                     kiro_versions[surface] = (timed_out, canonical)
+                    kiro_forms.append({"kind": surface, "version": canonical, "unread": "", "path": timed_out})
+                    timed_out_read = True
             else:
                 binary_path, version, version_ok = timed_out, candidate_version, True
+    if name == "kiro" and timed_out and not timed_out_read:
+        # A supported surface skips the retry; the slow install is still a
+        # form whose version is unknown, never hidden by the supported one.
+        kiro_unread(timed_out, VERSION_PROBE_TIMED_OUT)
     if name == "kiro" and kiro_versions:
         cli = kiro_versions.get("cli")
         ide = kiro_versions.get("ide")
@@ -1603,7 +1652,12 @@ def _scan_agent(
         # unknown, so action mode still refuses it until a probe answers.
         binary_path = timed_out
 
-    installed = bool(binary_path) and (version_ok or bool(timed_out))
+    if name == "kiro" and not version_ok and not timed_out and kiro_forms:
+        # A Kiro whose every probe failed is installed with an unknown
+        # version (GAP-0895): setup refuses action mode for it instead of
+        # treating it as not installed.
+        binary_path = kiro_forms[0]["path"]
+    installed = bool(binary_path) and (version_ok or bool(timed_out) or (name == "kiro" and bool(kiro_forms)))
     return AgentSignal(
         name=name,
         installed=installed,
@@ -1614,6 +1668,7 @@ def _scan_agent(
         configured=bool(config_path),
         kiro_cli_version=kiro_versions.get("cli", ("", ""))[1],
         kiro_ide_version=kiro_versions.get("ide", ("", ""))[1],
+        kiro_forms=kiro_forms[:_KIRO_FORMS_MAX],
     )
 
 
@@ -2919,6 +2974,7 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
                 configured=bool(raw.get("configured")),
                 kiro_cli_version=str(raw.get("kiro_cli_version") or ""),
                 kiro_ide_version=str(raw.get("kiro_ide_version") or ""),
+                kiro_forms=_kiro_forms_from_cache(raw.get("kiro_forms")),
             )
     except Exception:
         return None

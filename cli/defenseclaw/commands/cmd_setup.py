@@ -93,10 +93,9 @@ from defenseclaw.connector_contracts import (
     STATUS_NOT_GATED,
     STATUS_UNKNOWN,
     STATUS_UNVERSIONED,
+    assess_kiro_signal,
     compare_agent_versions,
     connector_lock_contract_invariant,
-    kiro_cli_below_hook_floor,
-    kiro_cli_below_hook_floor_reason,
     normalize_agent_version,
     normalize_connector,
     openclaw_needs_interception_advisory,
@@ -5694,26 +5693,40 @@ def _check_connector_version_supported_for_setup(
                 return False
 
     compatibility = resolve_connector_contract(connector, raw_version)
-    if (
-        connector == "kiro"
-        and installed
-        and compatibility.status == STATUS_NOT_GATED
-        and not compatibility.normalized_version
-    ):
-        # GAP-0829: an installed Kiro whose version was not read is not assumed
-        # to be at the kiro-cli hook floor. Action refuses it like any
-        # unverified version; observe warns that it is not counted as protected.
-        compatibility = replace(compatibility, status=STATUS_UNVERSIONED)
-    if connector == "kiro" and signal is not None and emit:
-        cli = getattr(signal, "kiro_cli_version", "") or ""
-        if cli != raw_version and (below := kiro_cli_below_hook_floor(cli)):
-            ux.warn(kiro_cli_below_hook_floor_reason(below))
+    if connector == "kiro":
+        # Every installed Kiro form is judged on its own (assess_kiro, the
+        # table Go's AssessKiro holds too): setup covers a protected form,
+        # and each other form is named as not protected. An installed form
+        # whose version could not be read is unknown, and unknown is not
+        # protected (GAP-0895, GAP-0829).
+        kiro = assess_kiro_signal(signal)
+        installed = installed or bool(kiro.forms)
+        if kiro.selected is not None:
+            raw_version = kiro.selected.version
+            compatibility = resolve_connector_contract(connector, raw_version)
+            if emit:
+                for form in kiro.unprotected():
+                    ux.warn(f"{label}: {form.reason}; it is not counted as protected.")
+        elif kiro.every_mode_refusal and compatibility.status != STATUS_UNKNOWN and not allow_drift:
+            # A Kiro IDE below its floor reads no global hooks; with no
+            # protected form, observe setup would stage hooks it never runs.
+            if emit:
+                ux.err(f"{label}: {kiro.every_mode_refusal}")
+                ux.subhead("Refusing Kiro setup in observe and action mode before activation.")
+                ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
+            _refuse_in_every_mode(_refusal_scope, kiro.every_mode_refusal)
+            return False
+        elif kiro.forms and not kiro.every_mode_refusal and compatibility.status == STATUS_NOT_GATED:
+            # Only unknown forms: action refuses, observe warns.
+            compatibility = replace(compatibility, status=STATUS_UNVERSIONED)
     # Some CLIs end their version banner with a period ("... 1.0.90.").
     version_display = raw_version.rstrip(".") or "(not probed)"
     contract = compatibility.contract.contract_id if compatibility.contract else "none"
 
     if not installed:
-        if action_mode and compatibility.status != STATUS_NOT_GATED and not allow_drift:
+        # Kiro is not version-gated, but nothing proves a protected Kiro form
+        # on this host, so action mode refuses it like a gated connector.
+        if action_mode and (compatibility.status != STATUS_NOT_GATED or connector == "kiro") and not allow_drift:
             # F9: no agent on this host is not the same as no verified hook
             # surface. In the layout the sandbox documentation recommends the
             # agent lives inside the harness image, and that image carries a

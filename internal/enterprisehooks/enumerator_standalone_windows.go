@@ -177,7 +177,7 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		return false
 	}
 	if prev, known := previous[previousManifestKey(row.SID, row.Connector)]; !known || prev.IsEnabled() {
-		rowContext.reportKiroIDEBelowFloor(row)
+		rowContext.reportKiroIDENotProtected(row)
 		rowContext.reportKiroCLIBesideIDE(row)
 	}
 	if prev, known := previous[previousManifestKey(row.SID, row.Connector)]; known {
@@ -262,6 +262,11 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 			// (GAP-0829).
 			if launcher := windowsKiroCLIVersionUnknown(row.UserHome); launcher != "" {
 				rowContext.unprotected(row, "", windowsKiroCLIVersionUnknownReason(launcher))
+				return false
+			}
+			// An IDE install that is not protected was reported by
+			// reportKiroIDENotProtected above.
+			if filepath.IsAbs(row.UserHome) && len(windowsKiroIDEForms(filepath.Clean(row.UserHome))) != 0 {
 				return false
 			}
 		}

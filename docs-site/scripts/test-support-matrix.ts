@@ -14,15 +14,15 @@ test('Kiro support matrix gives the hook floors and uncovered upgrade state', ()
   assert.match(kiro.versionNote ?? '', /earlier managed CLI enrollments keep their interactive hooks/i);
 });
 
-test('Kiro IDE floor describes managed refusal and per-user workspace hooks consistently', () => {
+test('Kiro IDE floor and unknown Kiro versions read the same on every page', () => {
   const kiro = connectorById('kiro');
   assert.ok(kiro);
   const connectorPage = readFileSync(new URL('../content/docs/connectors/kiro.mdx', import.meta.url), 'utf8');
   const compatibilityPage = readFileSync(new URL('../content/docs/connectors/compatibility.mdx', import.meta.url), 'utf8');
 
   for (const source of [kiro.versionNote ?? '', connectorPage, compatibilityPage]) {
-    assert.match(source, /managed setup[^.]*refus[^.]*older IDE/i);
-    assert.match(source, /per-user setup[\s\S]{0,240}older IDE[\s\S]{0,240}claw\.workspace_dir/i);
-    assert.doesNotMatch(source, /older IDE in every profile|below either floor is refused in every mode and profile/i);
+    assert.match(source, /refuse[^.]*older IDE/i);
+    assert.match(source, /unknown\s+and\s+not\s+protected/i);
+    assert.doesNotMatch(source, /per-user setup (still )?accepts an older IDE|older IDE in every profile/i);
   }
 });

@@ -58,11 +58,10 @@ rollout holds. Existing policy defaults are unchanged.
 agent config. Per-user installs have no hook contract, but kiro-cli must be
 2.27.1 or later: before it, a non-interactive `kiro-cli chat --v3` run loads
 no hooks, so setup refuses an older kiro-cli in both modes when no supported
-IDE is present. An IDE before 1.0.182 cannot read global hooks. Per-user setup
-still accepts an older IDE, but needs `claw.workspace_dir` set to the project
-root so setup writes hooks that IDE can load; without it, doctor warns that
-the IDE runs without DefenseClaw hooks. Managed setup refuses an older IDE
-when it is the only Kiro installation. With Kiro IDE 1.0.182 or later, setup
+IDE is present. An IDE before 1.0.182 cannot read global hooks: per-user and
+managed setup refuse an older IDE in both modes when it is the only Kiro
+installation. A Kiro form whose version could not be read is unknown and not
+protected: action setup refuses it unless a supported form is installed. With Kiro IDE 1.0.182 or later, setup
 installs the shared global hooks for the IDE and reports the CLI separately as
 unsupported.
 Managed Windows pins `kiro-cli-windows-managed-hooks-v1`

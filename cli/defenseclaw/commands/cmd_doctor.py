@@ -6726,9 +6726,8 @@ _HOOK_HEALTH_LABELS = {
 
 
 # Kiro IDE 1.0.182 is the first build that reads the global ~/.kiro/hooks
-# (kiro.dev/changelog/ide/1-0-182, "adds user-level global hooks"). Keep in
-# parity with KiroIDEGlobalHooksFloor in internal/enterprisehooks.
-_KIRO_IDE_GLOBAL_HOOKS_FLOOR = (1, 0, 182)
+# (kiro.dev/changelog/ide/1-0-182, "adds user-level global hooks"); the floor
+# is judged by connector_contracts.judge_kiro_form, like setup and Go.
 _KIRO_IDE_PRODUCT_MAX_BYTES = 256 << 10
 
 
@@ -6754,24 +6753,32 @@ def _kiro_ide_product_candidates() -> list[str]:
     return [os.path.join(home, "Kiro", app), os.path.join("/usr/share/kiro", app), os.path.join("/opt/Kiro", app)]
 
 
-def _installed_kiro_ide_version() -> tuple[str, tuple[int, int, int]] | None:
-    """Return the installed Kiro IDE version, read from product.json, never run."""
+def _installed_kiro_ide_forms() -> list:
+    """Judge every installed Kiro IDE, read from product.json, never run.
+
+    A product.json that exists but cannot be read, or that does not name the
+    Kiro IDE and a version, is an install whose version is unknown, and
+    unknown is not protected (judge_kiro_form).
+    """
+    from defenseclaw.connector_contracts import KIRO_FORM_IDE, judge_kiro_form
+
+    forms = []
     for path in _kiro_ide_product_candidates():
+        if not os.path.lexists(path):
+            continue
+        version = ""
         try:
             with open(path, "rb") as fh:
                 data = fh.read(_KIRO_IDE_PRODUCT_MAX_BYTES + 1)
             product = json.loads(data) if len(data) <= _KIRO_IDE_PRODUCT_MAX_BYTES else None
         except (OSError, ValueError):
-            continue
-        if not isinstance(product, dict):
-            continue
-        if product.get("nameShort") != "Kiro" or product.get("applicationName") != "kiro":
-            continue
-        version = str(product.get("version") or "").strip()
-        match = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?", version)
-        if match:
-            return version, (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
-    return None
+            product = None
+        named = isinstance(product, dict) and product.get("nameShort") == "Kiro"
+        if named and product.get("applicationName") == "kiro":
+            version = str(product.get("version") or "").strip()
+        unread = f"Kiro IDE at {path} is installed, but its version could not be read"
+        forms.append(judge_kiro_form(KIRO_FORM_IDE, version, unread=unread, path=path))
+    return forms
 
 
 def _check_kiro_global_scope(r: _DoctorResult) -> None:
@@ -6789,28 +6796,38 @@ def _check_kiro_global_scope(r: _DoctorResult) -> None:
     """
     global_hooks = os.path.join(connector_home("kiro"), "hooks", "defenseclaw.json")
     if _file_references_marker(global_hooks, _HOOK_HEALTH_FALLBACK["kiro"][1]):
-        ide = _installed_kiro_ide_version()
-        if ide is not None and ide[1] < _KIRO_IDE_GLOBAL_HOOKS_FLOOR:
-            _emit(
-                "warn",
-                "Connector scope",
-                f"Kiro IDE {ide[0]} reads only the project's .kiro/hooks, so its agent sessions run "
-                f"without DefenseClaw hooks; {global_hooks} covers kiro-cli --v3",
-                r=r,
-                reason_code="kiro_ide_below_global_hooks_floor",
-                remediation=(
-                    "Update Kiro IDE to 1.0.182 or later, or set claw.workspace_dir to the "
-                    "project root and run `defenseclaw setup kiro`"
-                ),
-            )
+        ides = _installed_kiro_ide_forms()
+        unprotected = [form for form in ides if not form.protected]
+        for form in unprotected:
+            if form.below_floor:
+                _emit(
+                    "warn",
+                    "Connector scope",
+                    f"Kiro IDE {form.version} reads only the project's .kiro/hooks, so its agent sessions run "
+                    f"without DefenseClaw hooks; {global_hooks} covers kiro-cli --v3",
+                    r=r,
+                    reason_code="kiro_ide_below_global_hooks_floor",
+                    remediation="Update Kiro IDE to 1.0.182 or later, then run `defenseclaw setup kiro`",
+                )
+            else:
+                _emit(
+                    "warn",
+                    "Connector scope",
+                    f"Kiro IDE at {form.path} is installed, but its version could not be read, so it is not "
+                    "counted as protected; Kiro IDE reads the global hooks file from 1.0.182",
+                    r=r,
+                    reason_code="kiro_ide_version_unknown",
+                    remediation="Reinstall or update Kiro IDE so its product.json names its version",
+                )
+        if unprotected:
             return
-        if ide is not None:
-            detail = f"global user config ({global_hooks}); Kiro IDE {ide[0]} and kiro-cli --v3 load it"
+        if ides:
+            detail = f"global user config ({global_hooks}); Kiro IDE {ides[0].version} and kiro-cli --v3 load it"
         else:
             detail = (
                 f"global user config ({global_hooks}); Kiro IDE 1.0.182+ and kiro-cli --v3 "
                 "load it. Kiro IDE builds before 1.0.182 read only the project's "
-                ".kiro/hooks: set claw.workspace_dir for them"
+                ".kiro/hooks, so they are not covered"
             )
         _emit("pass", "Connector scope", detail, r=r)
         return
@@ -6823,8 +6840,7 @@ def _check_kiro_global_scope(r: _DoctorResult) -> None:
         reason_code="kiro_hooks_not_workspace_scoped",
         remediation=(
             "Run `defenseclaw setup kiro`, which writes ~/.kiro/hooks/defenseclaw.json "
-            "(read by Kiro IDE 1.0.182+ and kiro-cli --v3); for older Kiro IDE builds also "
-            "set claw.workspace_dir to the project root"
+            "(read by Kiro IDE 1.0.182+ and kiro-cli --v3); update an older Kiro IDE first"
         ),
     )
 
@@ -13190,15 +13206,16 @@ def _plan_connector_compatibility_gate(cfg) -> RepairDecision:
             f"{type(exc).__name__}: connector compatibility evidence is unavailable; "
             "no unsupported version decision was inferred",
         )
-    auxiliary_kiro_cli = tuple(
+    # A Kiro form beside the protected one setup covers (assess_kiro) is
+    # reported, but it does not block repairing that form.
+    auxiliary_kiro = tuple(
         finding for finding in problems
-        if finding.reason_code == "kiro-cli-below-hook-floor-auxiliary"
+        if finding.connector == "kiro" and finding.reason_code.endswith("-auxiliary")
     )
     unsupported = tuple(
         finding
         for finding in problems
-        if finding.status is HealthStatus.UNSUPPORTED
-        and finding.reason_code != "kiro-cli-below-hook-floor-auxiliary"
+        if finding.status is HealthStatus.UNSUPPORTED and finding not in auxiliary_kiro
     )
     if unsupported:
         summary = ", ".join(
@@ -13211,11 +13228,11 @@ def _plan_connector_compatibility_gate(cfg) -> RepairDecision:
             f"connector compatibility evidence ({summary})",
             blockers=("unsupported connector compatibility",),
         )
-    if auxiliary_kiro_cli and len(auxiliary_kiro_cli) == len(problems):
+    if auxiliary_kiro and len(auxiliary_kiro) == len(problems):
         return RepairDecision(
             "noop",
-            "the selected Kiro IDE surface can be repaired; an older auxiliary Kiro CLI "
-            "is reported separately for update",
+            "the selected Kiro surface can be repaired; each Kiro form that is not protected "
+            "(an older or unreadable kiro-cli or Kiro IDE) is reported separately",
         )
     if problems:
         return RepairDecision(

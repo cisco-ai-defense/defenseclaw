@@ -45,13 +45,23 @@ the CLI separately as unsupported: its non-interactive runs still send no
 hooks until it is updated. The managed guardian enrolls the IDE version and
 reports the older CLI as unprotected.
 
-Kiro IDE has its own floor, 1.0.182, for the global hook file. Managed setup
-refuses an older IDE in every guardrail mode when it is the only Kiro
-installation. Per-user setup still accepts an older IDE, but it needs
-`claw.workspace_dir` set to the project root to install an enforcing workspace
-hook copy. Without it, that IDE does not load DefenseClaw's global hooks and
-doctor warns. Managed `status` reports an installed older IDE as uncovered,
-and `verify` fails.
+Kiro IDE has its own floor, 1.0.182, for the global hook file. Every setup
+refuses an older IDE, in observe and action mode, when no supported kiro-cli
+or Kiro IDE is installed beside it: that IDE reads only workspace hooks, so
+DefenseClaw's global hooks never run in it. Managed `status` reports an
+installed older IDE as uncovered, and `verify` fails.
+
+DefenseClaw judges each installed Kiro form on its own: kiro-cli, a Kiro IDE
+installed for the user, and a Kiro IDE installed for the machine. A form whose
+version could not be read is unknown and not protected. That covers a version
+probe that failed or timed out, a Windows kiro-cli that has never run, and a
+`product.json` that names no version.
+
+- With no supported form, `defenseclaw setup kiro --mode action` and a managed
+  action-mode install refuse it. Observe setup warns.
+- Beside a supported form, setup installs the hooks for that form and names the
+  unknown one. Doctor reports it, and the guardian reports it as
+  `hook_contract_unverified` in `status` and `verify`.
 
 ## Setup
 
@@ -137,15 +147,16 @@ marker, so one host can run both surfaces with the correct veto on each.
 Which Kiro builds read the global hook file. Kiro documents a global scope,
 `~/.kiro/hooks/`, that it merges with the project's `.kiro/hooks/` ("Hooks:
 All scopes merged"), for Kiro IDE 1.0.182 and later and for `kiro-cli --v3`.
-Older Kiro IDE builds read only `<workspace>/.kiro/hooks/*.json`, so for them
-the enforcing file is the workspace copy. For those builds, set
-`claw.workspace_dir` to the project root before running setup. `defenseclaw
+Older Kiro IDE builds read only `<workspace>/.kiro/hooks/*.json`, so
+DefenseClaw does not count them as protected: update Kiro IDE to 1.0.182 or
+later. `defenseclaw
 doctor`'s `Connector scope [kiro]` check passes when the global
 `~/.kiro/hooks/defenseclaw.json` holds DefenseClaw's hooks. Doctor reads the
 installed Kiro IDE's version from its `resources/app/product.json` (it never
 starts the IDE) and warns (`kiro_ide_below_global_hooks_floor`) when that IDE
-is older than 1.0.182; when it finds no IDE, the pass detail says that older
-builds also need `claw.workspace_dir`. It fails
+is older than 1.0.182, or (`kiro_ide_version_unknown`) when its
+`product.json` names no version; when it finds no IDE, the pass detail says
+that older builds are not covered. It fails
 (`kiro_hooks_not_workspace_scoped`) only when neither the global
 registration nor a workspace copy is present; run `defenseclaw setup kiro`
 to fix that.
