@@ -5,11 +5,10 @@ keywords:
   - DefenseClaw fail open
   - DefenseClaw fail closed
   - guardrail.hook_fail_mode
-  - DEFENSECLAW_STRICT_AVAILABILITY
   - DEFENSECLAW_FAIL_MODE
 ---
 
-One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows (`open`) or blocks (`closed`) when the gateway cannot give a usable answer. Per-user and Secure Client hooks apply it to transport failures and invalid responses; managed standalone hooks allow only the specific outages described below. The mode is the one installed with the hooks: the environment does not set it, and one variable, `DEFENSECLAW_STRICT_AVAILABILITY`, can only make an outage stricter ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
+One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows (`open`) or blocks (`closed`) when the gateway cannot give a usable answer. Managed standalone `open` applies only to a named outage; an unusable answer blocks, and a guarded connector blocks during an outage too. The mode is the one installed with the hooks; set it in config so the gateway, hooks, status and doctor agree ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
 
 ## Controls
 
@@ -45,7 +44,7 @@ These are not an outage, so they block in every fail mode on a managed computer:
 - The account is not enrolled.
 - A foreign hook the guard finds.
 
-The foreign-hook guard (GitHub Copilot CLI, Cursor, Devin, OpenCode, Amp and Hermes on a standalone host with `foreign_hooks: remove`) checks each call against the session's hook record, which the gateway keeps. After every check the gateway also writes its answer into a protected record that only that account can read and only the gateway service can change. During an outage under `open`, a guarded call runs only when that record shows the gateway did not block the agent process and the gateway renewed it at most 90 seconds ago (it renews the records of every session it still allows every 30 seconds, only while each listener the hooks call answers within 5 seconds, and for each session only after that session received a complete in-time 200 guard decision following the account's latest unanswered call; a 400, 403 or 429 refusal or another session's decision cannot restore its renewal, and it stops at once for a session it denies). These stay blocked: every guarded call once the gateway has not renewed its records for 90 seconds (it stopped, crashed, was killed or does not answer); a session the gateway blocked (it may still run the hook it loaded); an account the gateway closed because a revocation write failed; an agent that started while the gateway was down, or an agent process DefenseClaw cannot name; a record that is missing, cannot be read, is dated after now, was written under an earlier key of the account or under one marked revoked (every block, hook removal, repair and upgrade ends the key first), or that a user account could change, also through a folder above it; and every guarded call under `closed` or an unset fail mode. On Windows Amp keeps its record under the account's home, so this does not apply to it. This lifts the 1.0.3 limit, under which guarded connectors blocked every call during an outage. Details: [Foreign hook guard](/docs/enterprise/configure/foreign-hook-guard#session-records-and-gateway-outages).
+The foreign-hook guard (GitHub Copilot CLI, Cursor, Devin, OpenCode, Amp and Hermes on a standalone host with `foreign_hooks: remove`) requires a current gateway answer for each guarded call. If the gateway is stopped or gives no answer in time, the call blocks even under administrator `open`. An earlier online allow does not authorize a later call during an outage. This keeps the 1.0.3 limit (GAP-0352). See [Foreign hook guard](/docs/enterprise/configure/foreign-hook-guard#session-records-and-gateway-outages).
 
 On a managed standalone host `open` applies only to an outage: the gateway service is not running, is restarting, or gives no answer in time. Every other failure blocks in `open` too: input over the hook's 1 MiB limit, a gateway error status (4xx or 5xx, also when the body after it is cut off, and a 429 the gateway is still too busy to answer within the hook's answer budget), an unusable answer and any other transport error. Per-user and Secure Client hooks are unchanged.
 
@@ -65,7 +64,7 @@ Under the Secure Client integration only, hooks fail open: an unset `guardrail.h
 
 A GitHub Copilot hook whose registered command names no event DefenseClaw reviewed is refused in fail mode `closed`, and a managed one in every fail mode. Copilot can block only `preToolUse` and `permissionRequest`, and its payload does not name the event, so the hook answers with both of Copilot's deny fields. An Antigravity hook registered without its event denies a tool call in fail mode `closed` and gives anything else its no-op answer. `verify` reports a DefenseClaw hook registered for an event DefenseClaw does not publish, and `ensure` rewrites the drop-in. On a per-user install `defenseclaw doctor` names the entry, and `defenseclaw setup <connector>` registers it again.
 
-On a managed standalone host the administrator-owned hooks of GitHub Copilot CLI and Hermes follow the effective mode on every OS: `closed` blocks a tool call DefenseClaw cannot check, and the agent shows why. The administrator's `hook_fail_mode: open` allows only a classified gateway outage; unusable answers and calls too large to inspect still block. With `foreign_hooks: remove` (the default) the guard checks the session of Copilot calls on every OS and of Hermes calls on Linux and macOS with the gateway, so an outage blocks those calls too ([Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#session-records-and-gateway-outages)).
+On a managed standalone host the administrator-owned hooks of GitHub Copilot CLI and Hermes block guarded tool calls the gateway cannot check, including an outage under `hook_fail_mode: open`. Other hooks allow only a classified gateway outage under that setting; unusable answers and calls too large to inspect still block. With `foreign_hooks: remove` (the default) the guard checks the session of Copilot calls on every OS and of Hermes calls on Linux and macOS with the gateway, so an outage blocks those calls too ([Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#session-records-and-gateway-outages)).
 
 ## Effective behavior
 
@@ -160,7 +159,9 @@ Fail mode can block only where the agent protocol has a block shape. A closed fa
 
 An already-completed result event cannot undo its side effect, and an observation-only event stays observation-only when fail mode is closed. See the [capability matrix](/docs/reference/apis/capability-matrix) before relying on an event.
 
-## Strict availability
+## Set a closed posture
+
+Set `guardrail.hook_fail_mode: closed` in `config.yaml`, or run `defenseclaw guardrail fail-mode closed`. On a managed host, an administrator sets the corresponding managed config key and applies it. This persisted setting is the reliable way to make Codex TUI and other agent hooks fail closed: a TUI or app server may outlive the shell that launched it and may not inherit that shell's environment.
 
 `DEFENSECLAW_STRICT_AVAILABILITY=1` is an unconditional closed override for transport and missing-token failures, for managed or compatibility deployments that must never open during a gateway outage. It does not add a missing hook, turn native OTLP into enforcement, or make an unsupported connector block-capable. A strict outage can make the agent unavailable, so use status, gateway monitoring and a tested restart path before applying it broadly. On native Windows, set normal posture with `guardrail fail-mode` so setup, doctor and status can reconcile and report it.
 

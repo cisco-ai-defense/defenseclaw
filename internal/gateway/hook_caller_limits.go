@@ -237,9 +237,6 @@ func hookCallerBudgetKey(identity, path string) string {
 // function is nil after answering 429 or when the client went away while it
 // waited.
 func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, identity, route string) (*http.Request, func()) {
-	// A session exchange that waits here for a run slot counts against its
-	// account's outage proofs (answerForeignHooks).
-	a.noteForeignHookExchangeAccount(r.Context(), identity)
 	release, run, refusal, logNow := a.hookCallerLimits.acquire(hookCallerBudgetKey(identity, r.URL.Path))
 	if refusal == "" {
 		if r.Context().Err() != nil {

@@ -44,8 +44,8 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 100948,
-      "sha256": "6b847be9eda802f8ad404f27ecfa36836be93d2d854aaeee8ddfa7365062fc24"
+      "size": 105143,
+      "sha256": "2957fe89ae63b8518af8c9c0d0619709fa103c30b31801e7f5ccc025916a094c"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
@@ -56,8 +56,8 @@
     "/usr/local/lib/defenseclaw/hooks/antigravity-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 12791,
-      "sha256": "a3987e8136e4ab9dc38488b29f283c8435c1ecfa39d28deb8efcf229675b9c7a"
+      "size": 12793,
+      "sha256": "969d81842f27dc87af3d40589d9deb995e51d86da5ea96bbeb0abfe3e7c6d0ba"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",

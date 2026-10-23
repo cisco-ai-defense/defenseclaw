@@ -99,6 +99,8 @@ hermes_sandbox_block() {
 }{{else}}FAIL_MODE="{{.FailMode}}"
 # The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
 # environment is not read, so status and doctor report what runs (GAP-0461).{{end}}
+{{if and (not .Managed) (not .Sandbox)}}defenseclaw_close_during_install
+{{end}}
 
 # Bail early on missing token via the shared helper so the bypass is
 # logged to hook-failures.jsonl AND honors strict availability — the
@@ -181,6 +183,8 @@ hermes_block() {
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
 # fail mode: the administrator's open covers a gateway outage only.
 {{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{end}}
   echo "defenseclaw: hermes hook refusing oversized payload" >&2
   if [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" != "open" ]; then
     hermes_block oversized "stdin body exceeded cap"
@@ -270,7 +274,7 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/hermes/hook" "$PAYLOAD" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
   fail_unreachable "$(defenseclaw_sandbox_unreachable_reason "$RESPONSE")"
 }{{else}}if defenseclaw_api_listener_unproven "$API_ADDR"; then
-  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Run \`defenseclaw-gateway start\` for the fix"
+  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Another account may hold the port. Run \`defenseclaw setup gateway --api-port <free-port>\` to choose a free port"
 fi
 # A refused or dropped connection means this account's gateway is
 # restarting or not running (after a reboot, for example): send the call

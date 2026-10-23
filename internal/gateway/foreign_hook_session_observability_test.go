@@ -31,7 +31,7 @@ func TestForeignHookSessionDenialExportsAConnectorHookBlock(t *testing.T) {
 	api.auditForeignHookSessionDenial(ctx, "cursor", enterprisepolicy.SessionExchange{
 		Key:          enterprisepolicy.SessionKey{Connector: "cursor", Session: "session-fh-1", Process: "process-1"},
 		SessionStart: true, Decision: decision,
-	}, decision, foreignHookDenialRevocation{})
+	}, decision)
 
 	var points []hookModelV8MetricPoint
 	deadline := time.Now().Add(5 * time.Second)
@@ -115,10 +115,10 @@ func TestForeignHookSessionDenialNamesWhatWasDenied(t *testing.T) {
 	key := enterprisepolicy.SessionKey{Connector: "cursor", Session: "session-fh-2", Process: "process-1"}
 	api.auditForeignHookSessionDenial(ctx, "cursor", enterprisepolicy.SessionExchange{
 		Key: key, SessionStart: true, Event: "sessionStart", Decision: decision,
-	}, decision, foreignHookDenialRevocation{})
+	}, decision)
 	api.auditForeignHookSessionDenial(ctx, "cursor", enterprisepolicy.SessionExchange{
 		Key: key, Event: "preToolUse", Tool: "Write", Decision: decision,
-	}, decision, foreignHookDenialRevocation{})
+	}, decision)
 
 	var spans []*tracepb.Span
 	deadline := time.Now().Add(5 * time.Second)

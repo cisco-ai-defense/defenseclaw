@@ -105,6 +105,8 @@ readonly FAIL_MODE{{else if .Managed}}# Managed hooks use the installer-owned de
 FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="{{.FailMode}}"
 # The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
 # environment is not read, so status and doctor report what runs (GAP-0315).{{end}}
+{{if and (not .Managed) (not .Sandbox)}}defenseclaw_close_during_install
+{{end}}
 
 # Bail early on missing token: see codex-hook.sh +
 # defenseclaw_handle_missing_token in _hardening.sh for rationale.
@@ -112,7 +114,9 @@ DEFENSECLAW_HOOK_CONNECTOR="claudecode"
 DEFENSECLAW_HOOK_NAME="claude-code-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{end}}
   echo "defenseclaw: claudecode hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" != "open" ]; then
     printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
@@ -199,7 +203,9 @@ claude_fail_closed_decision() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
-  if [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.stopped" ]; then
+  if [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/.install.lock" ] && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
+    reason="DefenseClaw blocked this: ${next//\`/}."
+  elif [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.stopped" ]; then
     reason="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection."
   elif [ "$1" = "gateway unreachable" ] && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
     reason="DefenseClaw blocked this: ${next//\`/}."
@@ -255,7 +261,8 @@ claude_fail_closed_decision() {
 }
 
 fail_response() {
-  local reason
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{end}}  local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
   [ "$FAIL_MODE" = "open" ] ||
     defenseclaw_allow_failed_stop_event claudecode claude-code-hook "" "${PAYLOAD:-}" "$reason" response
@@ -313,7 +320,7 @@ if [ -n "${_DC_RESOLVED_WRITES}" ]; then
   RESOLVED_HEADER_ARGS=(-H "X-DefenseClaw-Resolved-Writes: ${_DC_RESOLVED_WRITES}")
 fi
 {{end}}if defenseclaw_api_listener_unproven "$API_ADDR"; then
-  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Run \`defenseclaw-gateway start\` for the fix"
+  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Another account may hold the port. Run \`defenseclaw setup gateway --api-port <free-port>\` to choose a free port"
 fi
 # A refused or dropped connection means this account's gateway is
 # restarting or not running (after a reboot, for example): send the call
@@ -345,7 +352,9 @@ defenseclaw_split_response
 if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  fail_response "gateway returned HTTP ${HTTP_CODE}"
+{{else}}  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{end}}
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi

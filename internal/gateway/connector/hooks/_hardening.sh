@@ -159,6 +159,10 @@ _DC_GATEWAY_RESTART_WAITED=""
 # / mmap failure when crossed, which is what we want.
 defenseclaw_harden_resources() {
   ulimit -S -t 5     2>/dev/null || true
+  # Go reserves more virtual address space than this shell budget even when
+  # its resident memory is small. Keep the hook capped, and restore this
+  # account's original soft limit only in the verified native POST child.
+  _DC_HOOK_NATIVE_VMEM_LIMIT="$(ulimit -S -v 2>/dev/null)"
   ulimit -S -v 524288 2>/dev/null || true
   ulimit -S -n 32    2>/dev/null || true
 }
@@ -984,6 +988,20 @@ defenseclaw_hook_delivery_outcome() {
   printf '%s' "$outcome"
 }
 
+# While this account is being installed or upgraded, no failure may approve
+# a hook call. Call after the installed mode is selected so both transport
+# and response failures see the closed mode. Managed and Secure Client hooks
+# use administrator-owned delivery policy instead of this per-user marker.
+defenseclaw_close_during_install() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+  esac
+  local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    FAIL_MODE=closed
+  fi
+}
+
 # defenseclaw_gateway_binary DATA_DIR HOME prints the per-user gateway binary
 # a cold start runs: the one that last ran this data directory, then the
 # installer's ~/.local/bin, then the hardened PATH.
@@ -1344,9 +1362,8 @@ defenseclaw_response_failure_reason() {
 # enabled. A guardian-installed managed hook's FAIL_MODE is the one the
 # administrator's config resolved, baked at render time (owner decision
 # 2026-10-20; under Secure Client #1163), and never DEFENSECLAW_FAIL_MODE.
-# Fail mode therefore has one consistent meaning across malformed responses,
-# auth failures, and transport failures instead of silently opening only the
-# latter class.
+# Managed standalone hooks still close malformed and error responses; the
+# administrator's open choice applies only to an outage.
 defenseclaw_should_fail_closed_on_unreachable() {
   # Only an explicit open opens: an unset, empty or unknown FAIL_MODE closes.
   case "${FAIL_MODE:-}" in
@@ -2229,11 +2246,15 @@ defenseclaw_gateway_post() {
     *$'\n'*|*$'\r'*) return 1 ;;
   esac
   if [ "$_dc_native_post" -eq 1 ]; then
-    _dc_post_bin="${HOME}/.local/bin/defenseclaw-gateway"
+    # harden_env moved HOME to a private scratch directory. Use the account
+    # home it retained before that move, then verify every path component.
+    local _dc_agent_home="${DEFENSECLAW_AGENT_HOME:-}"
+    case "$_dc_agent_home" in /*) ;; *) return 1 ;; esac
+    _dc_post_bin="${_dc_agent_home}/.local/bin/defenseclaw-gateway"
     # This binary receives the bearer on stdin. A stale PID record, PATH
     # entry, writable path, or symlink cannot select a different executable.
     local _dc_secure_path _dc_secure_mode
-    for _dc_secure_path in "$HOME" "$HOME/.local" "$HOME/.local/bin"; do
+    for _dc_secure_path in "$_dc_agent_home" "$_dc_agent_home/.local" "$_dc_agent_home/.local/bin"; do
       [ -d "$_dc_secure_path" ] && [ -O "$_dc_secure_path" ] && [ ! -L "$_dc_secure_path" ] || return 1
       _dc_secure_mode="$(stat -c %a "$_dc_secure_path" 2>/dev/null || stat -f %Lp "$_dc_secure_path" 2>/dev/null)" || return 1
       [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
@@ -2268,7 +2289,12 @@ defenseclaw_gateway_post() {
     _dc_post_output="$(
       printf '{"path":"%s","headers":{%s},"body":"%s"}' \
         "$(defenseclaw_json_escape "$_dc_post_path")" "$_dc_post_headers" "$(defenseclaw_json_escape "$_dc_post_body")" |
-        "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_max_time" --curl-output 2>/dev/null
+        (
+          if [ -n "${_DC_HOOK_NATIVE_VMEM_LIMIT:-}" ]; then
+            ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 1
+          fi
+          exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_max_time" --curl-output
+        ) 2>/dev/null
     )" || {
       _dc_listener_status=0
       defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?

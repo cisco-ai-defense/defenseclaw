@@ -8,13 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,15 +86,13 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	// are serialized; another account's exchange never waits on this one.
 	unlock := sync.OnceFunc(a.foreignHookSessionLocks.lock(stateDir))
 	defer unlock()
-	places := a.foreignHookSessionPlaces(dataDir)
+	removalsDir := managed.HookGuardianAuthorizationDir(dataDir)
 	// The deadline of an allow is set before the account's lock is asked
 	// for, not once it is held. This exchange takes the gate before any
 	// removal of the account that it holds the lock against, and a removal
 	// gives up waiting for it only ForeignHookRemovalDrainWait (longer than
 	// the hold) after it took the gate: so a removal goes on past this
-	// exchange only once answerBy passed, and a key this exchange reads after
-	// a removal rotated it (a pause between taking the lock and reading the
-	// key) can never carry an allow (GAP-0414).
+	// exchange only once answerBy passed.
 	answerBy := time.Now().Add(foreignHookExchangeHold)
 	// Only a standalone gateway gets here (userScopedCredentialsRequired),
 	// so every exchange takes its account's removal lock.
@@ -110,24 +106,10 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	}
 	cancel()
 	defer release()
-	// The record key first, then the guardian's removals, both under the
-	// account's lock: a removal rotates the key and records itself while it
-	// holds the lock exclusively, so an allow made with the key read here was
-	// decided from removals at least as new as that key, and one made with a
-	// key read before a removal proves nothing during an outage.
-	// A revocation of the account that the operating system refused before
-	// is owed: it is tried again first, and while it is still owed no allow
-	// carries a key, so none passes an outage (foreign_hook_revocation_owed.go).
-	paid := a.payForeignHookRevocation(places, identity, connector)
-	recordKey := places.key(identity)
-	if !paid {
-		recordKey = enterprisepolicy.SessionRecordKey{}
-	}
-	removals, ledgerErr := a.foreignHookRemovals.forIdentity(places.removalsDir, identity)
+	removals, ledgerErr := a.foreignHookRemovals.forIdentity(removalsDir, identity)
 	// A removal in progress keeps its own reason through the join
 	// (ApplyForeignHookRemovals checks it first).
 	removalsErr := errors.Join(lockErr, ledgerErr)
-	var revocation foreignHookDenialRevocation
 	decision := enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
 		StateDir:     stateDir,
 		Key:          exchange.Key,
@@ -136,42 +118,21 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		Removals:     removals,
 		RemovalsErr:  removalsErr,
 		Now:          time.Now(),
-		// A block is recorded in the private store only after the account's
-		// key is gone: the block is published only after that write, and a
-		// gateway that stops in between, or whose publication fails, must
-		// not leave an allow the hook honors during the outage (the kill
-		// switch, GAP-0352).
-		BeforeBlock: func() { revocation.revoke(a, places, identity, exchange.Key.Connector) },
 	})
-	if decision.Deny {
-		// Every denial is published only after the key is gone.
-		revocation.revoke(a, places, identity, exchange.Key.Connector)
-	}
 	if !decision.Deny && !time.Now().Before(answerBy) {
 		// Too late to answer allow: a removal of the account may already
-		// have stopped waiting for this exchange. Nothing is published.
+		// have stopped waiting for this exchange.
 		decision = enterprisepolicy.ApplyForeignHookRemovals(decision, exchange.Key, nil, errForeignHookExchangeExpired, time.Now())
-		revocation.revoke(a, places, identity, exchange.Key.Connector)
 	}
 	if decision.Deny {
-		// The session's proof is no longer renewed, from now on.
-		a.dropForeignHookSessionProof(identity, exchange.Key)
-	}
-	// Under the same locks, so the protected record follows the store's
-	// order: the hook reads it when the gateway is down.
-	publishErr := a.publishForeignHookSessionDecision(places.recordRoot, identity, exchange.Key, decision, recordKey)
-	if decision.Deny {
-		decision = revocation.settle(a, places, identity, exchange.Key.Connector, publishErr, decision)
 		// A denial cannot become an allow when the guardian commits a
 		// removal, so neither lock is held through the audit export or the
 		// response write.
 		release()
 		unlock()
-		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision, revocation)
+		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision)
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(decision); err == nil {
-			noteForeignHookSessionDecision(r.Context())
-		}
+		_ = json.NewEncoder(w).Encode(decision)
 		return
 	}
 	refusal, delivered := writeFencedForeignHookAllow(w, decision, answerBy)
@@ -183,12 +144,6 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	}
 	if !delivered {
 		return
-	}
-	noteForeignHookSessionDecision(r.Context())
-	if publishErr == nil && !recordKey.IsZero() && places.recordRoot != "" {
-		// Answered allow with the account's key: the proof is renewed while
-		// the session stays allowed (foreign_hook_session_proof.go).
-		a.keepForeignHookSessionProof(r.Context(), identity, exchange.Key)
 	}
 }
 
@@ -218,9 +173,8 @@ var (
 // It returns a refusal reason, having written nothing, when the connection
 // cannot bound the write or answerBy has passed: the caller then refuses the
 // call instead of answering an allow that a removal no longer waits for.
-// delivered is false if a started write or flush failed, so no such response
-// counts as an answered exchange or keeps an outage proof. A write cut at
-// the deadline leaves the expired deadline in place, so the server's own
+// delivered is false if a started write or flush failed. A write cut at the
+// deadline leaves the expired deadline in place, so the server's own
 // finishing writes fail at once too.
 func writeFencedForeignHookAllow(w http.ResponseWriter, decision enterprisepolicy.GuardDecision, answerBy time.Time) (refusal string, delivered bool) {
 	var body bytes.Buffer
@@ -251,216 +205,6 @@ func writeFencedForeignHookAllow(w http.ResponseWriter, decision enterprisepolic
 	// deadline only after the whole allow has reached it.
 	_ = controller.SetWriteDeadline(time.Time{})
 	return "", true
-}
-
-// foreignHookSessionRootForDataDir is the folder of the protected session
-// records that the gateway's data directory names on a standalone host
-// (managed.StandaloneHookSessionDirForDataDir), foreignHookSessionKey
-// reads an account's key (enterprisepolicy.ReadPublishedSessionKey),
-// foreignHookSessionPublish writes the protected record and
-// foreignHookSessionKill revokes an account's key
-// (enterprisepolicy.RevokePublishedSessionKey; replaceable in tests).
-var (
-	foreignHookSessionRootForDataDir = func(dataDir string) (string, bool) {
-		return managed.StandaloneHookSessionDirForDataDir(runtime.GOOS, dataDir)
-	}
-	foreignHookSessionKey     = enterprisepolicy.ReadPublishedSessionKey
-	foreignHookSessionPublish = enterprisepolicy.PublishForeignHookSessionDecision
-	foreignHookSessionKill    = enterprisepolicy.RevokePublishedSessionKey
-	// foreignHookSessionClose closes an account, foreignHookSessionOpen
-	// clears its closed mark, and foreignHookSessionAllowsEnd says when its
-	// last allow ends (enterprisepolicy; replaceable in tests).
-	foreignHookSessionClose     = enterprisepolicy.MarkPublishedSessionAccountClosed
-	foreignHookSessionOpen      = enterprisepolicy.ClearPublishedSessionAccountClosed
-	foreignHookSessionAllowsEnd = enterprisepolicy.PublishedSessionAllowWindowEnd
-)
-
-// foreignHookSessionPlaces are where one exchange reads the guardian's
-// removals and writes its protected session record: the guardian's ledger
-// folder (managed.HookGuardianAuthorizationDir), the protected session
-// record root ("" where this gateway publishes none,
-// foreignHookSessionRecordRoot), and the gateway's data directory, which
-// keeps the owed revocations (foreignHookRevocationOwedPath).
-type foreignHookSessionPlaces struct {
-	removalsDir string
-	recordRoot  string
-	dataDir     string
-}
-
-func (a *APIServer) foreignHookSessionPlaces(dataDir string) foreignHookSessionPlaces {
-	return foreignHookSessionPlaces{
-		removalsDir: managed.HookGuardianAuthorizationDir(dataDir),
-		recordRoot:  a.foreignHookSessionRecordRoot(dataDir),
-		dataDir:     dataDir,
-	}
-}
-
-// key is the account's current record key, or none where there is no record
-// folder or the key cannot be read: an allow published without a key proves
-// nothing during an outage.
-func (p foreignHookSessionPlaces) key(identity string) enterprisepolicy.SessionRecordKey {
-	if p.recordRoot == "" {
-		return enterprisepolicy.SessionRecordKey{}
-	}
-	key, err := foreignHookSessionKey(p.recordRoot, identity)
-	if err != nil {
-		return enterprisepolicy.SessionRecordKey{}
-	}
-	return key
-}
-
-// foreignHookSessionRecordRoot is the protected session record folder of a
-// standalone gateway, or "" for Secure Client and per-user gateways, which
-// have none. It is the folder the gateway's data directory names
-// (foreignHookSessionRootForDataDir), a function of its configuration
-// alone: the gateway finds every folder it ever published an allow to
-// again, with no lookup that can fail when it must revoke one (on Windows
-// the protected ProgramData registration, which the hook reads, may not be
-// readable for a moment). A data directory that names none (not the
-// standard one) has no folder: such a gateway publishes nothing, so no
-// allow of it can pass an outage, and the hook blocks there. Its data
-// directory changes only with its managed configuration, which a lifecycle
-// run applies after it removed every key.
-func (a *APIServer) foreignHookSessionRecordRoot(dataDir string) string {
-	cfg := a.scannerCfg
-	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
-		return ""
-	}
-	if root, ok := foreignHookSessionRootForDataDir(dataDir); ok {
-		return strings.TrimSpace(root)
-	}
-	return ""
-}
-
-// publishForeignHookSessionDecision writes the answer of one session
-// exchange into the caller's protected session records under root, which
-// the hook reads during a gateway outage under fail mode open (GAP-0352):
-// an allow with a MAC made with recordKey, a denial without one. A failure
-// is logged and returned: a denial whose block record was not written
-// closes the account (foreignHookDenialRevocation). Without a root nothing
-// is published.
-func (a *APIServer) publishForeignHookSessionDecision(root, identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, recordKey enterprisepolicy.SessionRecordKey) error {
-	if root == "" {
-		return nil
-	}
-	if decision.Deny {
-		recordKey = enterprisepolicy.SessionRecordKey{}
-	}
-	err := foreignHookSessionPublish(root, identity, key, decision, recordKey, time.Now())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record for %s was not written (the hook blocks during a gateway outage): %v\n",
-			clipForeignHookAuditField(key.Connector, 64), err)
-	}
-	return err
-}
-
-// killForeignHookSessionKey revokes the account's record key before the
-// exchange records a block, and before it publishes any denial (the kill
-// switch, GAP-0352): it removes the key, or marks it revoked when the
-// operating system refuses the removal
-// (enterprisepolicy.RevokePublishedSessionKey). Every allow of the account
-// written before proves nothing during an outage from then on, until the
-// hook guardian makes a new key (it does at every pass). Other accounts
-// keep theirs. A revocation that took neither way (an error wrapping
-// enterprisepolicy.ErrPublishedSessionKeyAlive) is owed
-// (oweForeignHookRevocation): it is tried again until it takes, and until
-// then no allow of the account carries a key and none of its proofs is
-// renewed; the block is still recorded and published. A revocation that
-// took settles one owed before. It returns the revocation's error: nil when
-// every key is gone (or there is no record folder), another error when a
-// mark ends the key the removal left.
-func (a *APIServer) killForeignHookSessionKey(places foreignHookSessionPlaces, identity, connectorName string) error {
-	if places.recordRoot == "" {
-		return nil
-	}
-	err := foreignHookSessionKill(places.recordRoot, identity)
-	connectorName = clipForeignHookAuditField(connectorName, 64)
-	if err == nil || !errors.Is(err, enterprisepolicy.ErrPublishedSessionKeyAlive) {
-		a.settleForeignHookRevocation(places, identity)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record key for %s could not be removed, so it was marked revoked: %v\n", connectorName, err)
-		}
-		return err
-	}
-	a.oweForeignHookRevocation(places, identity)
-	fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record key for %s could be neither removed nor marked revoked; the revocation is owed and tried again until it takes, and until then no allow of the account carries a key and none of its proofs is renewed: %v\n",
-		connectorName, err)
-	return err
-}
-
-// foreignHookDenialRevocation is how a denial's revocation went: whether
-// the key's revocation was tried and its error, and, when a revocation
-// write failed, whether the account could be closed. FAILED is a denial
-// whose earlier allows may still pass an outage: the key could be neither
-// removed nor marked revoked, and the account could not be closed either;
-// until says when the last of them ends (exact: read from the account's
-// records; otherwise the latest it can be).
-type foreignHookDenialRevocation struct {
-	tried    bool
-	keyErr   error
-	closed   bool
-	closeErr error
-	failed   bool
-	until    time.Time
-	exact    bool
-}
-
-// revoke revokes the account's key, once per exchange when it took: one
-// that did not is tried again before the denial is published.
-func (r *foreignHookDenialRevocation) revoke(a *APIServer, places foreignHookSessionPlaces, identity, connectorName string) {
-	if r.tried && !errors.Is(r.keyErr, enterprisepolicy.ErrPublishedSessionKeyAlive) {
-		return
-	}
-	r.tried = true
-	r.keyErr = a.killForeignHookSessionKey(places, identity, connectorName)
-}
-
-// settle escalates a denial any of whose revocation writes failed (the
-// key's revocation, publishErr of its block record): the session's proof
-// is no longer renewed (the caller dropped it), and the account is closed
-// in a second folder (foreignHookSessionClose). When that fails too and
-// the key is still alive, the denial is reported FAILED, to the caller in
-// its reason and to the administrator in the gateway's log and audit, with
-// the exact time the account's last allow ends; the owed revocation, and
-// the account's closing with it, is retried until it takes
-// (payForeignHookRevocation).
-func (r *foreignHookDenialRevocation) settle(a *APIServer, places foreignHookSessionPlaces, identity, connectorName string, publishErr error, decision enterprisepolicy.GuardDecision) enterprisepolicy.GuardDecision {
-	if places.recordRoot == "" || (r.keyErr == nil && publishErr == nil) {
-		return decision
-	}
-	connectorName = clipForeignHookAuditField(connectorName, 64)
-	r.closeErr = foreignHookSessionClose(places.recordRoot, identity)
-	if r.closeErr == nil {
-		r.closed = true
-		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: a revocation write of a %s denial failed, so the account was closed: none of its allows passes a gateway outage until the revocation takes (key: %v; block record: %v)\n",
-			connectorName, r.keyErr, publishErr)
-		return decision
-	}
-	if r.keyErr == nil || !errors.Is(r.keyErr, enterprisepolicy.ErrPublishedSessionKeyAlive) {
-		// The key is gone or marked revoked: no earlier allow verifies.
-		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the block record of a %s denial was not written and the account could not be closed; its key is ended, so no earlier allow passes an outage: %v\n",
-			connectorName, r.closeErr)
-		return decision
-	}
-	now := time.Now()
-	r.failed = true
-	r.until, r.exact = now.Add(enterprisepolicy.PublishedSessionProofLifetime), false
-	if until, err := foreignHookSessionAllowsEnd(places.recordRoot, identity); err == nil {
-		r.until, r.exact = until, true
-	}
-	window := "no earlier allow of this account is left"
-	if remaining := r.until.Sub(now); remaining > 0 {
-		bound := "until"
-		if !r.exact {
-			bound = "at most until"
-		}
-		window = fmt.Sprintf("an earlier allow of this account may still pass a gateway outage %s %s (%ds from now)", bound, r.until.UTC().Format(time.RFC3339), int((remaining+time.Second-1)/time.Second))
-	}
-	note := "DefenseClaw revocation FAILED: the account's earlier outage allows could not be revoked or closed; " + window + ". DefenseClaw retries until the revocation takes."
-	fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: %s connector %s (key: %v; block record: %v; closed mark: %v)\n", note, connectorName, r.keyErr, publishErr, r.closeErr)
-	decision.Reason = strings.TrimSpace(decision.Reason) + " " + note
-	decision.Findings = append([]enterprisepolicy.Finding{{Connector: connectorName, Reason: "revocation FAILED: " + window}}, decision.Findings...)
-	return decision
 }
 
 // foreignHookAuditReasonLimit bounds the reason an audit row repeats, and
@@ -503,7 +247,6 @@ func (a *APIServer) auditForeignHookSessionDenial(
 	connectorName string,
 	exchange enterprisepolicy.SessionExchange,
 	decision enterprisepolicy.GuardDecision,
-	revocation foreignHookDenialRevocation,
 ) {
 	if a == nil {
 		return
@@ -531,15 +274,6 @@ func (a *APIServer) auditForeignHookSessionDenial(
 		"guard":         "foreign_hook_session",
 		"session_block": block,
 		"findings":      strconv.Itoa(len(decision.Findings)),
-	}
-	switch {
-	case revocation.failed:
-		// The administrator sees the deny as FAILED, with the exact window.
-		extra["revocation"] = "FAILED"
-		extra["outage_allow_until"] = revocation.until.UTC().Format(time.RFC3339)
-		extra["outage_allow_until_exact"] = strconv.FormatBool(revocation.exact)
-	case revocation.closed:
-		extra["revocation"] = "account_closed"
 	}
 	for _, finding := range decision.Findings {
 		if finding.Allowed || finding.Path == "" {

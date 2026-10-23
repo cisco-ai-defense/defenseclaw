@@ -17,9 +17,9 @@ import (
 
 // Owner decision 2026-10-20: a standalone managed hook follows the fail mode
 // its administrator-owned runtime records. In fail mode open a call
-// DefenseClaw cannot check because the gateway is down, did not answer or
-// gave an unusable answer goes ahead and is logged fail-open, as on a
-// per-user install. Refusals that are not an outage stay closed: a gateway
+// DefenseClaw cannot check because the gateway is down or did not answer
+// goes ahead and is logged fail-open. Refusals that are not an outage stay
+// closed: a gateway
 // peer DefenseClaw cannot verify, an invalid managed runtime and a missing
 // token, an authentication refusal (401/403, also after the 401 retries) and
 // a local event binding or contract mismatch. Strict availability still

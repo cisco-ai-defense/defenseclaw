@@ -126,6 +126,7 @@ async function defenseclawIdentityHeaders() {
 // variables alone follow.
 const DC_SESSION_FACTS_TTL_MS = 300000;
 const DC_SESSION_FACTS_RETRY_MS = 30000;
+const DC_SESSION_FACTS_READ_MS = 250;
 let DC_SESSION_FACTS = { key: "", value: "", until: 0 };
 
 // The modification time of this login's FILE or DIR Kerberos credential
@@ -180,9 +181,18 @@ async function defenseclawFullSessionFacts() {
     const binary = DC_FOREIGN_GUARD || (DC_PER_USER_NATIVE_POST
       ? defenseclawPerUserNativePostBinary()
       : join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway"));
-    const out = String(execFileSync(binary, ["hook", "session-facts"], {
-      timeout: 3000, maxBuffer: 4096, windowsHide: true, stdio: ["ignore", "pipe", "ignore"],
-    })).trim();
+    let child;
+    let timer;
+    const read = new Promise((resolve) => {
+      child = execFile(binary, ["hook", "session-facts"], {
+        timeout: DC_SESSION_FACTS_READ_MS, maxBuffer: 4096, windowsHide: true,
+      }, (err, stdout) => resolve(err ? "" : String(stdout).trim()));
+    });
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => { if (child) child.kill(); resolve(""); }, DC_SESSION_FACTS_READ_MS);
+    });
+    const out = await Promise.race([read, deadline]);
+    clearTimeout(timer);
     if (out.startsWith("v1;") && out.length <= 1024 && /^[A-Za-z0-9._@\/:;=-]+$/.test(out)) value = out;
   } catch (_) {
     // No binary or no answer: the caller falls back to the SSH variables.
@@ -607,7 +617,14 @@ async function defenseclawLogFailOpen(reason, category) {
   }
 }
 
+async function defenseclawPerUserInstallInProgress() {
+  return false;
+}
+
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
+  const installClosed = actionable && await defenseclawPerUserInstallInProgress();
+  const failMode = installClosed ? "closed" : DC_FAIL_MODE;
+  const transportFailMode = installClosed ? "closed" : DC_TRANSPORT_FAIL_MODE;
   let token;
   try {
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
@@ -653,7 +670,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     if (!res.ok) {
       // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
       // is an outage, as in the shell hooks, so strict availability closes it.
-      if ((res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE) === "closed") {
+      if ((res.status >= 500 ? transportFailMode : failMode) === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
       if (actionable) await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
@@ -677,7 +694,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
-    if (DC_TRANSPORT_FAIL_MODE === "closed") {
+    if (transportFailMode === "closed") {
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }

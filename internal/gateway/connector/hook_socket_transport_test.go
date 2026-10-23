@@ -435,6 +435,11 @@ func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
 	if code, stdout, stderr := run(); code != 2 || !strings.Contains(stderr, "peer_unverified") {
 		t.Fatalf("open mode with untrusted socket directory: exit %d stdout=%q stderr=%q, want a peer refusal", code, stdout, stderr)
 	}
+	opts.HookFailMode = "closed"
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewDevinConnector()); err != nil {
+		t.Fatal(err)
+	}
+	bakeHookPathForTest(t, hookPath, filepath.Dir(curlPath)+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 	// GAP-0581: a stopped gateway (no socket) is named as such, not as a
 	// socket ownership problem.
 	if err := os.Chmod(f.runDir, 0o755); err != nil {

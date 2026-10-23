@@ -24,46 +24,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// The guardian side of the foreign-hook guard (1.0.4 consolidation): every
-// removal of an account's hook file takes the account's removal lock,
-// rotates the account's protected session record key, records the removal
-// in the ledger with a mark ahead of now, and only then changes the file;
-// it then records the removal again with the mark of now and lets go of the
-// lock. These tests hold every removal entry point to that order and to the
-// refusals that keep a hook in place (the scan keeps blocking) when a step
-// cannot be done.
+// foreignHookGuardian holds the temporary removal ledger used by the
+// account removal tests.
+type foreignHookGuardian struct{ ledger string }
 
-// foreignHookGuardian is a standalone guardian whose data directory, ledger
-// folder and protected session record folder are temporary folders it
-// trusts. Key files the test account makes count as root's.
-type foreignHookGuardian struct {
-	ledger  string // the removal ledger
-	root    string // the protected session record folder
-	keyLock string // the key lock of the lifecycle folder
-}
-
-// useForeignHookRemovalRecords gives the standalone cfg the caller set a
-// temporary data directory, a trusted guardian folder with the removal
-// ledger, and a protected session record folder, and restores every seam it
-// changes.
 func useForeignHookRemovalRecords(t *testing.T) *foreignHookGuardian {
 	t.Helper()
 	if cfg == nil {
 		t.Fatal("set cfg before the foreign-hook guardian fixture")
 	}
 	previousOwner, previousDirTrust, previousFileTrust := enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck
-	previousRoot, previousLayout, previousForDataDir := enterpriseForeignHookSessionRoot, enterpriseForeignHookSessionLayoutRoot, enterpriseForeignHookSessionRootForDataDir
-	previousLock, previousRotate, previousEnsure, previousCan := enterpriseForeignHookLockAccount, enterpriseForeignHookRotateSessionKey, enterpriseForeignHookEnsureSessionKeys, enterpriseForeignHookCanCreateSessionKey
-	previousRevoke, previousKeyCreation := enterpriseForeignHookRevokeSessionKey, enterpriseForeignHookWithKeyCreation
-	restoreOwner := enterprisepolicy.OverridePublishedSessionKeyOwnerForTest(func(string) (bool, error) { return true, nil })
-	forgetForeignHookSessionRoot()
 	t.Cleanup(func() {
 		enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck = previousOwner, previousDirTrust, previousFileTrust
-		enterpriseForeignHookSessionRoot, enterpriseForeignHookSessionLayoutRoot, enterpriseForeignHookSessionRootForDataDir = previousRoot, previousLayout, previousForDataDir
-		enterpriseForeignHookLockAccount, enterpriseForeignHookRotateSessionKey, enterpriseForeignHookEnsureSessionKeys, enterpriseForeignHookCanCreateSessionKey = previousLock, previousRotate, previousEnsure, previousCan
-		enterpriseForeignHookRevokeSessionKey, enterpriseForeignHookWithKeyCreation = previousRevoke, previousKeyCreation
-		restoreOwner()
-		forgetForeignHookSessionRoot()
 	})
 	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
 	enterpriseHookAuthorizationDirTrustCheck = func(string) error { return nil }
@@ -74,20 +46,7 @@ func useForeignHookRemovalRecords(t *testing.T) *foreignHookGuardian {
 	if _, err := prepareEnterpriseHookAuthorizationDir(cfg.DataDir); err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(t.TempDir(), "sessions")
-	if err := os.Mkdir(root, 0o711); err != nil {
-		t.Fatal(err)
-	}
-	enterpriseForeignHookSessionRoot = func() (string, error) { return root, nil }
-	// A lifecycle folder whose key lock a lifecycle run made and let go.
-	keyLock := enterprisepolicy.PublishedSessionKeysLockPath(t.TempDir())
-	if err := os.WriteFile(keyLock, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	enterpriseForeignHookWithKeyCreation = func(create func() error) (bool, error) {
-		return enterprisepolicy.WithPublishedSessionKeyCreation(keyLock, create)
-	}
-	return &foreignHookGuardian{ledger: filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFile), root: root, keyLock: keyLock}
+	return &foreignHookGuardian{ledger: filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFile)}
 }
 
 // useForeignHookGuardian makes cfg a standalone enterprise config with the
@@ -105,12 +64,6 @@ func useForeignHookGuardian(t *testing.T, policy map[string]config.EnterpriseCon
 		},
 	}
 	return useForeignHookRemovalRecords(t)
-}
-
-func forgetForeignHookSessionRoot() {
-	enterpriseForeignHookSessionRootSeen.Lock()
-	enterpriseForeignHookSessionRootSeen.root = ""
-	enterpriseForeignHookSessionRootSeen.Unlock()
 }
 
 // skipForeignHookLedgerOnWindows skips a test that writes the removal
@@ -146,43 +99,6 @@ func (g *foreignHookGuardian) entry(t *testing.T, identity, connectorName, path 
 func (g *foreignHookGuardian) ledgerExists() bool {
 	_, err := os.Lstat(g.ledger)
 	return err == nil
-}
-
-func foreignHookTestSessionKey(process string) enterprisepolicy.SessionKey {
-	return enterprisepolicy.SessionKey{Connector: "copilot", Session: "s-1", Process: process}
-}
-
-// allow publishes the gateway's outage allow of process for identity under
-// the account's current key (made first when it has none) and checks that
-// it proves the process.
-func (g *foreignHookGuardian) allow(t *testing.T, identity, process string) {
-	t.Helper()
-	if err := enterprisepolicy.EnsurePublishedSessionKey(g.root, identity, enterpriseForeignHookSessionKeyTrust()); err != nil {
-		t.Fatal(err)
-	}
-	if err := enterprisepolicy.WritePublishedSessionRecordsForTest(g.root, identity, foreignHookTestSessionKey(process), enterprisepolicy.GuardDecision{}, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if !g.proves(identity, process) {
-		t.Fatal("a fresh allow under the account's key must prove its process")
-	}
-}
-
-// proves reports whether identity's published records prove process where
-// the hook reads them during an outage.
-func (g *foreignHookGuardian) proves(identity, process string) bool {
-	_, err := enterprisepolicy.CheckPublishedForeignHookSession(g.root, identity, foreignHookTestSessionKey(process),
-		enterprisepolicy.GuardDecision{}, func(string) error { return nil })
-	return err == nil
-}
-
-// key is the ID of identity's one key, or "".
-func (g *foreignHookGuardian) key(identity string) string {
-	key, err := enterprisepolicy.ReadPublishedSessionKey(g.root, identity)
-	if err != nil {
-		return ""
-	}
-	return key.ID()
 }
 
 // accountRemovalLockFree reports whether a gateway exchange of identity could
@@ -292,27 +208,20 @@ func requireForeignHookMarkCommitted(t *testing.T, removal enterprisepolicy.Fore
 	}
 }
 
-// foreignHookRemovalTrace logs, in order, the steps of every removal commit:
-// lock (the account's removal lock taken), rotate (the record key rotation
-// asked for), ledger (a ledger write about to be published), release (the
-// lock let go), and the change of the hook file, which the test logs itself
-// or observe notices.
+// foreignHookRemovalTrace logs the account lock, each ledger write, the
+// file change and the release in one removal commit.
 type foreignHookRemovalTrace struct {
-	mu     sync.Mutex
-	events []string
-	// observe, when set, runs before each event is logged and may return an
-	// event that happened before it ("change").
+	mu      sync.Mutex
+	events  []string
 	observe func(event string) string
 }
 
-// traceForeignHookRemovals wraps the lock, rotation and ledger-write seams
-// as they are now (set a failing seam before calling it) with the trace.
 func traceForeignHookRemovals(t *testing.T) *foreignHookRemovalTrace {
 	t.Helper()
 	trace := &foreignHookRemovalTrace{}
-	lock, rotate, owner := enterpriseForeignHookLockAccount, enterpriseForeignHookRotateSessionKey, enterpriseHookAuthorizationOwnershipSetter
+	lock, owner := enterpriseForeignHookLockAccount, enterpriseHookAuthorizationOwnershipSetter
 	t.Cleanup(func() {
-		enterpriseForeignHookLockAccount, enterpriseForeignHookRotateSessionKey, enterpriseHookAuthorizationOwnershipSetter = lock, rotate, owner
+		enterpriseForeignHookLockAccount, enterpriseHookAuthorizationOwnershipSetter = lock, owner
 	})
 	enterpriseForeignHookLockAccount = func(ctx context.Context, dataDir, identity string) (func(), bool, error) {
 		release, drained, err := lock(ctx, dataDir, identity)
@@ -322,16 +231,7 @@ func traceForeignHookRemovals(t *testing.T) *foreignHookRemovalTrace {
 		}
 		trace.add("lock")
 		var once sync.Once
-		return func() {
-			once.Do(func() {
-				trace.add("release")
-				release()
-			})
-		}, drained, nil
-	}
-	enterpriseForeignHookRotateSessionKey = func(root, identity string, trust enterprisepolicy.PublishedSessionTrust) error {
-		trace.add("rotate")
-		return rotate(root, identity, trust)
+		return func() { once.Do(func() { trace.add("release"); release() }) }, drained, nil
 	}
 	enterpriseHookAuthorizationOwnershipSetter = func(path string) error {
 		if strings.Contains(filepath.Base(path), enterprisepolicy.ForeignHookRemovalsFile) {
@@ -539,22 +439,14 @@ type foreignHookRemovalOrderCase struct {
 	run       func(t *testing.T, trace *foreignHookRemovalTrace, home, path string)
 }
 
-// runForeignHookRemovalOrderCases holds each entry point to the commit
-// order (item 1, "no path publishes a removal before the rotation"): the
-// account's lock, the key rotation, the first record (its mark ahead of
-// now while the file changes, GAP-0381 and GAP-0457), the change, the
-// second record (its mark now), the release. At the first ledger write the
-// account's earlier outage allow already proves nothing; another account's
-// allow still does after the commit.
+// runForeignHookRemovalOrderCases keeps every removal entry point behind
+// its account lock and a ledger write before changing the hook file.
 func runForeignHookRemovalOrderCases(t *testing.T, cases []foreignHookRemovalOrderCase) {
 	t.Helper()
-	const identity, other = "1001", "1002"
-	process := runtime.GOOS + ":b:1:100"
+	const identity = "1001"
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := useForeignHookGuardian(t, nil)
-			g.allow(t, identity, process)
-			g.allow(t, other, process)
 			home := t.TempDir()
 			if tc.home != nil {
 				home = tc.home(t)
@@ -572,14 +464,7 @@ func runForeignHookRemovalOrderCases(t *testing.T, cases []foreignHookRemovalOrd
 				}
 				if event == "ledger" {
 					ledgers++
-					if g.proves(identity, process) {
-						t.Errorf("ledger write %d published while the account's earlier outage allow still proves its process", ledgers)
-					}
 					if ledgers == 2 && changed && !tc.markAtEnd {
-						// The ledger on disk is the first record: it held the
-						// file's entry, ahead of now, while the file changed.
-						// (This may run on the fence session's goroutine: no
-						// t.Fatal here.)
 						removals, err := loadEnterpriseForeignHookRemovals(g.ledger)
 						found := false
 						for _, removal := range removals {
@@ -591,7 +476,7 @@ func runForeignHookRemovalOrderCases(t *testing.T, cases []foreignHookRemovalOrd
 							}
 						}
 						if err != nil || !found {
-							t.Errorf("the file changed before the ledger held its removal: %+v %v", removals, err)
+							t.Errorf("file changed before its pending denial: %+v %v", removals, err)
 						}
 					}
 				}
@@ -609,17 +494,8 @@ func runForeignHookRemovalOrderCases(t *testing.T, cases []foreignHookRemovalOrd
 				t.Fatalf("the removal is not in the ledger: %+v", g.removals(t))
 			}
 			requireForeignHookMarkCommitted(t, removal)
-			if g.proves(identity, process) {
-				t.Fatal("the account's earlier outage allow must prove nothing after the removal")
-			}
-			if g.key(identity) == "" {
-				t.Fatal("the rotation must leave the account one new key")
-			}
-			if !g.proves(other, process) {
-				t.Fatal("one account's removal must not end another account's allows")
-			}
 			if !accountRemovalLockFree(t, identity, time.Second) {
-				t.Fatal("the account's removal lock is still held after the commit")
+				t.Fatal("the account lock is still held")
 			}
 		})
 	}
@@ -629,15 +505,15 @@ func runForeignHookRemovalOrderCases(t *testing.T, cases []foreignHookRemovalOrd
 // reconcile loop's cleanup and the Windows machine-policy pass), the
 // in-process cleanup of a real hook file, and the fallback that records a
 // removal no commit recorded (a worker that changed a file and ended before
-// its commit: the change came first, and the fallback still rotates before
-// it records). The worker's pipe protocol and the real worker process are in
+// its commit: the change came first, and the fallback still records it).
+// The worker's pipe protocol and the real worker process are in
 // the Unix file.
-func TestForeignHookRemovalRotatesTheKeyBeforeItPublishes(t *testing.T) {
+func TestForeignHookRemovalRecordsBeforeTheFileChanges(t *testing.T) {
 	skipForeignHookLedgerOnWindows(t)
 	runForeignHookRemovalOrderCases(t, []foreignHookRemovalOrderCase{
 		{
 			name:       "the in-process guard",
-			want:       "lock,rotate,ledger,change,ledger,release",
+			want:       "lock,ledger,change,ledger,release",
 			logsChange: true,
 			run: func(t *testing.T, trace *foreignHookRemovalTrace, home, path string) {
 				guard := enterpriseForeignHookRemovalGuard("cursor", newEnterpriseForeignHookInProcessFence("1001", home))
@@ -651,7 +527,7 @@ func TestForeignHookRemovalRotatesTheKeyBeforeItPublishes(t *testing.T) {
 		},
 		{
 			name: "the in-process cleanup of the user's hook file",
-			want: "lock,rotate,ledger,change,ledger,release",
+			want: "lock,ledger,change,ledger,release",
 			run: func(t *testing.T, trace *foreignHookRemovalTrace, home, path string) {
 				useInProcessCleanupAsSelf(t)
 				result, err := cleanEnterpriseForeignHooksFenced(foreignHookTestTarget(home), foreignHookTestInProcessRequest("cursor", home), time.Now())
@@ -662,7 +538,7 @@ func TestForeignHookRemovalRotatesTheKeyBeforeItPublishes(t *testing.T) {
 		},
 		{
 			name:      "the fallback for a removal no commit recorded",
-			want:      "change,lock,rotate,ledger,ledger,release",
+			want:      "change,lock,ledger,ledger,release",
 			markAtEnd: true,
 			run: func(t *testing.T, trace *foreignHookRemovalTrace, home, path string) {
 				if err := foreignHookTestRemoveHook(path); err != nil {
@@ -676,111 +552,6 @@ func TestForeignHookRemovalRotatesTheKeyBeforeItPublishes(t *testing.T) {
 			},
 		},
 	})
-}
-
-// Item 2: a rotation that could not end the account's key
-// (ErrPublishedSessionKeyAlive) refuses the removal: nothing is recorded, the
-// hook file stays as it was, the cleanup reports it, and the pass's later
-// removals are refused without asking again. A rotation that ended the key
-// but could not make a new one only warns: the removal goes on, and no
-// outage allow of the account proves anything until a later pass makes a
-// key.
-func TestForeignHookRemovalRefusedWhileTheKeyIsAlive(t *testing.T) {
-	skipForeignHookLedgerOnWindows(t)
-	g := useForeignHookGuardian(t, nil)
-	useInProcessCleanupAsSelf(t)
-	process := runtime.GOOS + ":b:1:100"
-	g.allow(t, "1001", process)
-	rotations := 0
-	enterpriseForeignHookRotateSessionKey = func(string, string, enterprisepolicy.PublishedSessionTrust) error {
-		rotations++
-		return fmt.Errorf("%w: the key file is in use", enterprisepolicy.ErrPublishedSessionKeyAlive)
-	}
-	trace := traceForeignHookRemovals(t)
-	home := t.TempDir()
-	plugins := foreignHookTestOpenCodePlugins(t, home)
-	result, err := cleanEnterpriseForeignHooksFenced(foreignHookTestTarget(home), foreignHookTestInProcessRequest("opencode", home), time.Now())
-	if !errors.Is(err, enterprisepolicy.ErrPublishedSessionKeyAlive) {
-		t.Fatalf("the cleanup must report the refused rotation, got %v", err)
-	}
-	if len(result.Removed) != 0 || len(result.Reported) < len(plugins) {
-		t.Fatalf("every plugin must stay reported: %+v", result)
-	}
-	for _, path := range plugins {
-		if _, err := os.Lstat(path); err != nil {
-			t.Fatalf("%s changed although the key could not be rotated: %v", path, err)
-		}
-	}
-	if rotations != 1 {
-		t.Fatalf("the pass's later removals must be refused without asking again (rotations %d)", rotations)
-	}
-	if trace.count("ledger") != 0 || g.ledgerExists() {
-		t.Fatalf("nothing may be recorded without the rotation: %s", trace)
-	}
-	if got := trace.String(); got != "lock,rotate,release" {
-		t.Fatalf("trace %s", got)
-	}
-	if !g.proves("1001", process) {
-		t.Fatal("the test rotation changed nothing, so the allow still proves: the hook stays and the scan keeps blocking")
-	}
-	if !accountRemovalLockFree(t, "1001", time.Second) {
-		t.Fatal("a refused removal must let go of the account's lock")
-	}
-}
-
-func TestForeignHookRemovalWithoutANewKeyStillRemoves(t *testing.T) {
-	skipForeignHookLedgerOnWindows(t)
-	g := useForeignHookGuardian(t, nil)
-	process := runtime.GOOS + ":b:1:100"
-	g.allow(t, "1001", process)
-	// The rotation ended the key but could not make a new one.
-	enterpriseForeignHookRotateSessionKey = func(root, identity string, _ enterprisepolicy.PublishedSessionTrust) error {
-		if err := enterprisepolicy.RevokePublishedSessionKey(root, identity); err != nil {
-			return fmt.Errorf("%w: %v", enterprisepolicy.ErrPublishedSessionKeyAlive, err)
-		}
-		return errors.New("create the protected session record key: no space left on device")
-	}
-	home := t.TempDir()
-	path := foreignHookTestCursorHook(t, home)
-	var stderr bytes.Buffer
-	tx, err := beginEnterpriseForeignHookRemoval(context.Background(), &stderr, "1001", home, "cursor", []string{path})
-	if err != nil {
-		t.Fatalf("a rotation that ended the key must not refuse the removal: %v", err)
-	}
-	if !strings.Contains(stderr.String(), "guarded calls block during a gateway outage until a later pass makes one") {
-		t.Fatalf("the missing key must be reported: %q", stderr.String())
-	}
-	if err := foreignHookTestRemoveHook(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := tx.commit([]string{path}); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := g.entry(t, "1001", "cursor", path); !ok {
-		t.Fatal("the removal must be recorded")
-	}
-	if g.key("1001") != "" || g.proves("1001", process) {
-		t.Fatal("without a key no outage allow of the account may prove anything")
-	}
-	if err := enterprisepolicy.WritePublishedSessionRecordsForTest(g.root, "1001", foreignHookTestSessionKey(process), enterprisepolicy.GuardDecision{}, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if g.proves("1001", process) {
-		t.Fatal("an allow written without a key must prove nothing")
-	}
-
-	// The same through the in-process cleanup: the plugins go.
-	useInProcessCleanupAsSelf(t)
-	plugins := foreignHookTestOpenCodePlugins(t, home)
-	result, err := cleanEnterpriseForeignHooksFenced(foreignHookTestTarget(home), foreignHookTestInProcessRequest("opencode", home), time.Now())
-	if err != nil || len(result.Removed) != len(plugins) {
-		t.Fatalf("cleanup %+v: %v", result, err)
-	}
-	for _, plugin := range plugins {
-		if _, ok := g.entry(t, "1001", "opencode", plugin); !ok {
-			t.Fatalf("%s is not recorded", plugin)
-		}
-	}
 }
 
 // foreignHookTestOpenCodePlugins writes two unapproved OpenCode plugins into
@@ -915,7 +686,7 @@ func TestForeignHookRemovalRefusedWhenTheLedgerCannotTakeIt(t *testing.T) {
 			if after, _ := os.ReadFile(g.ledger); !bytes.Equal(before, after) {
 				t.Fatal("a refused record must leave the ledger as it was")
 			}
-			if trace.count("lock") != 1 || trace.count("release") != 1 || trace.count("rotate") != 1 {
+			if trace.count("lock") != 1 || trace.count("release") != 1 {
 				t.Fatalf("one refused commit, the later removals refused without asking: %s", trace)
 			}
 			if !accountRemovalLockFree(t, "1001", time.Second) {
@@ -925,107 +696,10 @@ func TestForeignHookRemovalRefusedWhenTheLedgerCannotTakeIt(t *testing.T) {
 	}
 }
 
-// Item 5 (round 3 P1 #3): without a record folder to rotate the key in, a
-// removal is refused, so a guardian removal is never published while the
-// account's old outage allow may still prove its process: nothing is
-// recorded, the hook stays. The guardian does find the folder its layout
-// named last in this process, or the one its data directory names, when the
-// layout lookup fails for a moment; those removals rotate that folder's key
-// and go on.
-func TestForeignHookRemovalNeedsTheRecordFolder(t *testing.T) {
-	skipForeignHookLedgerOnWindows(t)
-	process := runtime.GOOS + ":b:1:100"
-	for _, tc := range []struct {
-		name            string
-		located, forDir bool
-		refused         bool
-	}{
-		{name: "no folder named", refused: true},
-		{name: "the folder the layout named last", located: true},
-		{name: "the folder its data directory names", forDir: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			g := useForeignHookGuardian(t, nil)
-			g.allow(t, "1001", process)
-			enterpriseForeignHookSessionRoot = previousForeignHookSessionRoot(t)
-			lookupErr := error(nil)
-			enterpriseForeignHookSessionLayoutRoot = func() (string, error) {
-				if lookupErr != nil {
-					return "", lookupErr
-				}
-				return g.root, nil
-			}
-			enterpriseForeignHookSessionRootForDataDir = func(dataDir string) (string, bool) {
-				return g.root, tc.forDir && dataDir == cfg.DataDir
-			}
-			if tc.located {
-				if root, err := enterpriseForeignHookSessionRoot(); err != nil || root != g.root {
-					t.Fatalf("the layout must name the folder first: %q %v", root, err)
-				}
-			}
-			lookupErr = errors.New("RegGetValue(ProgramData): the RPC server is unavailable")
-			trace := traceForeignHookRemovals(t)
-			home := t.TempDir()
-			path := foreignHookTestCursorHook(t, home)
-			guard := enterpriseForeignHookRemovalGuard("cursor", newEnterpriseForeignHookInProcessFence("1001", home))
-			err := guard([]string{path}, func() error {
-				trace.add("change")
-				return foreignHookTestRemoveHook(path)
-			})
-			if tc.refused {
-				if err == nil || !strings.Contains(err.Error(), "RPC server is unavailable") {
-					t.Fatalf("a removal without a record folder must be refused with the reason: %v", err)
-				}
-				if got := trace.String(); got != "lock,release" {
-					t.Fatalf("nothing may be published without the rotation: %s", got)
-				}
-				if g.ledgerExists() || !foreignHookTestHookPresent(path) {
-					t.Fatal("a refused removal must record nothing and leave the hook in place")
-				}
-				if !g.proves("1001", process) {
-					t.Fatal("the test made no rotation, so the allow still proves: which is why nothing may be published")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := trace.String(); got != "lock,rotate,ledger,change,ledger,release" {
-				t.Fatalf("commit order %s", got)
-			}
-			if g.proves("1001", process) {
-				t.Fatal("the old allow must prove nothing")
-			}
-		})
-	}
-}
-
-// previousForeignHookSessionRoot is the production record folder lookup, as
-// the fixture found it.
-func previousForeignHookSessionRoot(t *testing.T) func() (string, error) {
-	t.Helper()
-	return func() (string, error) {
-		root, err := enterpriseForeignHookSessionLayoutRoot()
-		enterpriseForeignHookSessionRootSeen.Lock()
-		defer enterpriseForeignHookSessionRootSeen.Unlock()
-		if err == nil {
-			enterpriseForeignHookSessionRootSeen.root = root
-			return root, nil
-		}
-		if seen := enterpriseForeignHookSessionRootSeen.root; seen != "" {
-			return seen, nil
-		}
-		if fallback, ok := enterpriseForeignHookSessionRootForDataDir(cfg.DataDir); ok {
-			return fallback, nil
-		}
-		return "", err
-	}
-}
-
 // A removal waits for the account's online answer in progress (the gateway
 // exchange holds the account's lock shared): it publishes nothing until that
-// answer let go of the lock, or until the drain bound, after which it goes
-// on (the answer is cut and its record proves nothing). Another account's
+// answer lets go of the lock, or until the drain bound, after which it goes
+// on (the answer is cut). Another account's
 // removal never waits.
 func TestForeignHookRemovalWaitsForTheAccountsOnlineAnswer(t *testing.T) {
 	skipForeignHookLedgerOnWindows(t)
@@ -1066,17 +740,11 @@ func TestForeignHookRemovalWaitsForTheAccountsOnlineAnswer(t *testing.T) {
 			}
 			done := tc.start(t, home, path)
 			time.Sleep(enterprisepolicy.ForeignHookRemovalDrainWait / 3)
-			if g.ledgerExists() || (tc.name == "the in-process guard" && !foreignHookTestHookPresent(path)) {
-				exchange()
-				t.Fatal("the removal went on while the account's online answer was inside its bound")
-			}
+			wentEarly := g.ledgerExists() || (tc.name == "the in-process guard" && !foreignHookTestHookPresent(path))
 			// Another account's removal does not wait for this account.
-			start := time.Now()
 			var stderr bytes.Buffer
-			recordEnterpriseForeignHookRemovals(&stderr, "1002", t.TempDir(), "cursor", []string{"/home/bob/.cursor/hooks.json"})
-			if elapsed := time.Since(start); elapsed > enterprisepolicy.ForeignHookRemovalDrainWait/2 || stderr.Len() != 0 {
-				exchange()
-				t.Fatalf("another account's removal waited %v: %s", elapsed, stderr.String())
+			if !wentEarly {
+				recordEnterpriseForeignHookRemovals(&stderr, "1002", t.TempDir(), "cursor", []string{"/home/bob/.cursor/hooks.json"})
 			}
 			exchange()
 			select {
@@ -1086,6 +754,12 @@ func TestForeignHookRemovalWaitsForTheAccountsOnlineAnswer(t *testing.T) {
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("the removal did not go on once the answer let go of the lock")
+			}
+			if wentEarly {
+				t.Fatal("the removal went on while the account's online answer was inside its bound")
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("another account's removal waited: %s", stderr.String())
 			}
 			if _, ok := g.entry(t, "1001", "cursor", path); !ok {
 				t.Fatal("the removal is not recorded")
@@ -1099,7 +773,7 @@ func TestForeignHookRemovalWaitsForTheAccountsOnlineAnswer(t *testing.T) {
 			}
 			defer exchange()
 			path = foreignHookTestCursorHook(t, t.TempDir())
-			start = time.Now()
+			start := time.Now()
 			done = tc.start(t, filepath.Dir(filepath.Dir(path)), path)
 			select {
 			case err := <-done:
@@ -1174,112 +848,5 @@ func TestInProcessForeignCleanupLocksOnlyToRemove(t *testing.T) {
 	}
 	if removals := g.removals(t); len(removals) != 1 {
 		t.Fatalf("a clean config changed the ledger: %+v", removals)
-	}
-}
-
-// Every guardian pass that runs as root or SYSTEM gives each account folder
-// under the record folder exactly one key: it makes one for an account
-// whose key the gateway removed before a block, keeps one that is there, and
-// leaves accounts alone otherwise; any other account makes none.
-func TestEnsureEnterpriseForeignHookSessionKeyAtEveryPass(t *testing.T) {
-	g := useForeignHookGuardian(t, nil)
-	process := runtime.GOOS + ":b:1:100"
-	for _, identity := range []string{"1001", "1002"} {
-		// The gateway made the account folders.
-		if err := enterprisepolicy.WritePublishedSessionRecordsForTest(g.root, identity, foreignHookTestSessionKey(process), enterprisepolicy.GuardDecision{}, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var stderr bytes.Buffer
-	enterpriseForeignHookCanCreateSessionKey = func() bool { return false }
-	ensureEnterpriseForeignHookSessionKey(&stderr)
-	if g.key("1001") != "" || g.key("1002") != "" {
-		t.Fatal("an account that is not root or SYSTEM must make no key")
-	}
-	enterpriseForeignHookCanCreateSessionKey = func() bool { return true }
-	ensureEnterpriseForeignHookSessionKey(&stderr)
-	first, other := g.key("1001"), g.key("1002")
-	if first == "" || other == "" || first == other || stderr.Len() != 0 {
-		t.Fatalf("each account folder must get its own key: %q %q %q", first, other, stderr.String())
-	}
-	ensureEnterpriseForeignHookSessionKey(&stderr)
-	if g.key("1001") != first || g.key("1002") != other || stderr.Len() != 0 {
-		t.Fatalf("keys that are there must be kept: %q", stderr.String())
-	}
-	if err := enterprisepolicy.RevokePublishedSessionKey(g.root, "1001"); err != nil {
-		t.Fatal(err)
-	}
-	ensureEnterpriseForeignHookSessionKey(&stderr)
-	if next := g.key("1001"); next == "" || next == first || g.key("1002") != other || stderr.Len() != 0 {
-		t.Fatalf("a pass must make a new key only for the account without one: %q %q", next, stderr.String())
-	}
-	// A record folder that cannot be located is reported.
-	enterpriseForeignHookSessionRoot = func() (string, error) { return "", errors.New("the RPC server is unavailable") }
-	ensureEnterpriseForeignHookSessionKey(&stderr)
-	if !strings.Contains(stderr.String(), "the RPC server is unavailable") {
-		t.Fatalf("stderr %q", stderr.String())
-	}
-}
-
-// Review P1 (1.0.4 guard loop round 1, finding 6): while a lifecycle run
-// holds the key lock, the guardian makes no key: its pass makes none for an
-// account without one, and a removal only revokes the account's key, with
-// no new one, and goes on (the run makes new keys at its end). Once the run
-// let the lock go, the next pass makes the keys.
-func TestForeignHookGuardianMakesNoKeyWhileALifecycleRunHoldsTheKeyLock(t *testing.T) {
-	skipForeignHookLedgerOnWindows(t)
-	g := useForeignHookGuardian(t, nil)
-	enterpriseForeignHookCanCreateSessionKey = func() bool { return true }
-	process := runtime.GOOS + ":b:1:100"
-	g.allow(t, "1001", process)
-	if err := enterprisepolicy.WritePublishedSessionRecordsForTest(g.root, "1002", foreignHookTestSessionKey(process), enterprisepolicy.GuardDecision{}, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	release, err := enterprisepolicy.LockPublishedSessionKeysForLifecycle(context.Background(), g.keyLock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-	var stderr bytes.Buffer
-	ensureEnterpriseForeignHookSessionKey(&stderr)
-	if g.key("1002") != "" {
-		t.Fatal("the guardian must make no key while a lifecycle run holds the key lock")
-	}
-	if !strings.Contains(stderr.String(), "a lifecycle run holds the protected session record key lock") {
-		t.Fatalf("the pass must say why it made no key: %q", stderr.String())
-	}
-	rotations := 0
-	previousRotate := enterpriseForeignHookRotateSessionKey
-	enterpriseForeignHookRotateSessionKey = func(root, identity string, trust enterprisepolicy.PublishedSessionTrust) error {
-		rotations++
-		return previousRotate(root, identity, trust)
-	}
-	home := t.TempDir()
-	path := foreignHookTestCursorHook(t, home)
-	stderr.Reset()
-	tx, err := beginEnterpriseForeignHookRemoval(context.Background(), &stderr, "1001", home, "cursor", []string{path})
-	if err != nil {
-		t.Fatalf("a removal during a lifecycle run must go on with the key revoked: %v", err)
-	}
-	if rotations != 0 || g.key("1001") != "" || g.proves("1001", process) {
-		t.Fatalf("the removal must only revoke the key, with no new one (rotations %d, key %q)", rotations, g.key("1001"))
-	}
-	if err := foreignHookTestRemoveHook(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := tx.commit([]string{path}); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := g.entry(t, "1001", "cursor", path); !ok {
-		t.Fatal("the removal must be recorded")
-	}
-	release()
-	stderr.Reset()
-	ensureEnterpriseForeignHookSessionKey(&stderr)
-	if g.key("1001") == "" || g.key("1002") == "" || stderr.Len() != 0 {
-		t.Fatalf("once the run let the lock go the pass makes the keys: %q", stderr.String())
-	}
-	if g.proves("1001", process) {
-		t.Fatal("the new key must not bring the earlier allow back")
 	}
 }

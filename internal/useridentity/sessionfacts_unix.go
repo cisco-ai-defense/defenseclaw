@@ -34,9 +34,10 @@ const (
 	klistTimeout   = kcmCallTimeout
 	maxKlistOutput = 64 << 10
 	klistWaitDelay = 100 * time.Millisecond
-	// sessionFactsDeadline bounds the whole read; the KCM call and klist
-	// finish well inside it.
-	sessionFactsDeadline = kcmCallTimeout + time.Second
+	// A managed hook may read facts for its session check and again for the
+	// gateway request. Leave most of its 3.5 s answer budget for those calls;
+	// an idle KCM normally wakes within 0.4 s. Omit the principal if slower.
+	sessionFactsDeadline = 750 * time.Millisecond
 )
 
 // currentSessionFactsHeader gives up after sessionFactsDeadline and sends the

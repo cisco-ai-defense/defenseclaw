@@ -495,8 +495,18 @@ function gatewayStopped(error: unknown): boolean {
 	return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused")
 }
 
-function failureResponse(reason: string): GatewayResponse {
-	if (DC_FAIL_MODE === "closed") {
+async function perUserInstallInProgress(): Promise<boolean> {
+	if (DC_FAIL_MODE !== "open") return false
+	try {
+		await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"))
+		return true
+	} catch (error) {
+		return (error as { code?: unknown } | null)?.code !== "ENOENT"
+	}
+}
+
+async function failureResponse(reason: string): Promise<GatewayResponse> {
+	if (DC_FAIL_MODE === "closed" || await perUserInstallInProgress()) {
 		return { action: "block", reason: `DefenseClaw hook failed closed (${reason})` }
 	}
 	return { action: "allow" }

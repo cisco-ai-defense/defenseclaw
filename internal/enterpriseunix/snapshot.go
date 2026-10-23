@@ -426,7 +426,7 @@ func (e *Env) removeCreatedDirs(snap *snapshot) error {
 	l := e.Layout
 	state := map[string]bool{
 		l.DataDir: true, l.GuardianAuthDir: true, l.LogDir: true, filepath.Join(l.LogDir, "gateway"): true,
-		l.HookSocketDir: true, l.HookSessionDir: true, l.VendorPolicyDir: true,
+		l.HookSocketDir: true, l.VendorPolicyDir: true,
 	}
 	created := []string{}
 	for _, entry := range snap.Entries {

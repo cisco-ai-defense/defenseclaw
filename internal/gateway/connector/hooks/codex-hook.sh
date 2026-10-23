@@ -99,6 +99,8 @@ readonly FAIL_MODE{{else if .Managed}}# Managed hooks use the installer-owned de
 FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="{{.FailMode}}"
 # The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
 # environment is not read, so status and doctor report what runs (GAP-0315).{{end}}
+{{if and (not .Managed) (not .Sandbox)}}defenseclaw_close_during_install
+{{end}}
 
 # Setup binds each handler to one finite vendor event and hook contract. Keep
 # those values out of environment variables so the registered command remains
@@ -153,7 +155,9 @@ DEFENSECLAW_HOOK_CONNECTOR="codex"
 DEFENSECLAW_HOOK_NAME="codex-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{end}}
   [ "$FAIL_MODE" = "open" ] ||
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "stdin body exceeded cap" transport
   echo "defenseclaw: codex hook refusing oversized payload" >&2
@@ -236,11 +240,11 @@ fail_unreachable() {
 }
 
 # Response-layer failure: gateway answered but the answer was bad
-# (auth failure, malformed JSON, missing action). These usually
-# indicate misconfiguration — respect FAIL_MODE so an operator who
-# explicitly set FAIL_MODE=closed is told about a real problem.
+# (auth failure, malformed JSON, missing action). A managed standalone
+# administrator's open choice covers an outage only.
 fail_response() {
-  local reason
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{end}}  local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
   [ "$FAIL_MODE" = "open" ] ||
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "$reason" response
@@ -330,7 +334,7 @@ if [ -n "${_DC_RESOLVED_WRITES}" ]; then
 fi
 {{end}}
 if defenseclaw_api_listener_unproven "$API_ADDR"; then
-  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Run \`defenseclaw-gateway start\` for the fix"
+  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Another account may hold the port. Run \`defenseclaw setup gateway --api-port <free-port>\` to choose a free port"
 fi
 
 # defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the hook
@@ -380,13 +384,14 @@ fi{{end}}
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
 
-# 5xx (server error) is treated as transport — the gateway hit an
-# infrastructure problem, not a policy verdict. 4xx falls through to
-# response-layer handling so auth/payload bugs surface loudly.
+# A managed standalone hook treats any HTTP error status as an unusable
+# answer. Other deliveries keep their 5xx transport failure handling.
 if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  fail_response "gateway returned HTTP ${HTTP_CODE}"
+{{else}}  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{end}}
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
