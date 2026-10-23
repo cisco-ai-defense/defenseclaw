@@ -562,14 +562,14 @@ func withGuardrailProfile(ctx context.Context, set *guardrailProfileSet, routeCo
 // requestAgentIdentity is the agent identity an agents assignment matches
 // for ctx: the one the hook path, ACP or the LLM proxy put on ctx, else the
 // one the hook path derives for the connector the request authenticated for
-// or reached (profileRequestConnector) and its verified user. The derivation
+// or reached (profileAssignmentConnector) and its verified user. The derivation
 // covers the inspect endpoints, which carry no agent identity, and the
 // resolution at authentication, before the hook path has derived one.
 func requestAgentIdentity(ctx context.Context) (id string, verified bool) {
 	if id, verified = agentIdentityFromContext(ctx); id != "" {
 		return id, verified
 	}
-	connectorName := profileRequestConnector(ctx)
+	connectorName := profileAssignmentConnector(ctx)
 	if connectorName == "" {
 		return "", false
 	}
@@ -585,7 +585,7 @@ func requestAgentIdentity(ctx context.Context) (id string, verified bool) {
 // returns false when that derivation is not agent. Every request derives
 // its own: no state is kept, so none can be dropped.
 func requestLegacyAgentIdentity(ctx context.Context, agent string) (profileAgentClaim, bool) {
-	connectorName := profileRequestConnector(ctx)
+	connectorName := profileAssignmentConnector(ctx)
 	if connectorName == "" || agent == "" {
 		return profileAgentClaim{}, false
 	}
@@ -601,20 +601,18 @@ func requestLegacyAgentIdentity(ctx context.Context, agent string) (profileAgent
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		scanConnector := profileRequestConnector(ctx)
-		routeConnector := ""
-		if r.URL.Path == "/api/v1/inspect/tool" {
-			// This route scans the authenticated connector, or the
-			// gateway's configured connector for an unscoped credential.
-			routeConnector = a.connectorName()
-			if scanConnector == "" {
-				scanConnector = routeConnector
-			}
+		scanConnector := profileAssignmentConnector(ctx)
+		if scanConnector == "" && r.URL.Path == "/api/v1/inspect/tool" {
+			// An unscoped tool inspect scans the gateway's configured
+			// connector. That is the scope of its scans, not a connector
+			// the request authenticated for: connector and agent
+			// assignments do not match it (profileAssignmentConnector).
+			scanConnector = a.connectorName()
 		}
 		// The other inspect routes scan the authenticated connector or the
 		// global generation. An empty value is an explicit global scope.
 		ctx = context.WithValue(ctx, profileRuleScanConnectorKey{}, config.NormalizeConnectorName(scanConnector))
-		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(ctx, routeConnector)))
+		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(ctx, "")))
 	})
 }
 
@@ -659,7 +657,7 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 			legacy = func() (profileAgentClaim, bool) { return profileAgentLegacySource(ctx, agent) }
 		}
 	}
-	connectorName := profileRequestConnector(ctx)
+	connectorName := profileAssignmentConnector(ctx)
 	decision := set.matchAgent(subject, source, connectorName, agent, legacy)
 	decision = set.refuseUncompiledMeet(ctx, decision, connectorName)
 	resolved := &resolvedGuardrailProfile{decision: decision, set: set}
@@ -700,10 +698,27 @@ func profileRequestSubject(ctx context.Context) (*profileSubject, string) {
 	return nil, ""
 }
 
-// profileRequestConnector returns the connector the request authenticated
-// for (hook-scoped credential or inspect scope) or the route it reached.
+// profileRequestConnector returns the connector the request's scans and
+// settings read: the one it authenticated for or reached
+// (profileAssignmentConnector), else the scan scope the inspect middleware
+// recorded (the gateway's connector for an unscoped tool inspect).
 // Payload and header connector names are never consulted.
 func profileRequestConnector(ctx context.Context) string {
+	if name := profileAssignmentConnector(ctx); name != "" {
+		return name
+	}
+	if ctx != nil {
+		if name, _ := ctx.Value(profileRuleScanConnectorKey{}).(string); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+// profileAssignmentConnector returns the connector the request authenticated
+// for (hook-scoped credential or inspect scope) or the hook route it
+// reached: the recorded connector connector and agent assignments match.
+func profileAssignmentConnector(ctx context.Context) string {
 	if name := authenticatedHookConnector(ctx); name != "" {
 		return config.NormalizeConnectorName(name)
 	}

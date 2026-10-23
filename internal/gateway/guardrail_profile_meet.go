@@ -162,6 +162,11 @@ func (set *guardrailProfileSet) meetConnectors() []string {
 	for _, name := range thresholdConnectorNamesWith(set.base, profileConnectorNames(set.base)) {
 		add(name)
 	}
+	// The meet's explicit mode clears inherited hook modes, so a
+	// connector whose hook mode only connector_hooks sets is listed too.
+	for name := range set.base.ConnectorHooks {
+		add(name)
+	}
 	names := make([]string, 0, len(seen))
 	for name := range seen {
 		names = append(names, name)
@@ -309,10 +314,13 @@ func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileS
 	return result.generation, result.err
 }
 
-// refuseUncompiledMeet checks the rule generation this request can scan.
-// Unscoped tool inspect uses the gateway's configured connector; the other
-// unscoped inspect routes scan the global generation. A different
-// connector's failed merge cannot refuse a valid request here.
+// refuseUncompiledMeet checks every rule generation this request can scan.
+// The inspect middleware records the one scope an inspect route scans
+// (profileRuleScanConnectorKey). Otherwise a request for a connector scans
+// that connector's generation, and an unscoped one may scan the global
+// generation or the gateway connector's (profileCoverConnectors). Another
+// connector's failed merge never refuses the request; a failed merge of a
+// scope it scans always does, so no scan substitutes the base pack.
 // The member names and compiler error remain in the administrator's log.
 func (set *guardrailProfileSet) refuseUncompiledMeet(ctx context.Context, decision profileDecision, connectorName string) profileDecision {
 	if decision.Refused != "" {
@@ -322,14 +330,17 @@ func (set *guardrailProfileSet) refuseUncompiledMeet(ctx context.Context, decisi
 	if meet == nil {
 		return decision
 	}
-	connectorName = config.NormalizeConnectorName(connectorName)
+	scopes := []string{config.NormalizeConnectorName(connectorName)}
 	if scanConnector, scoped := ctx.Value(profileRuleScanConnectorKey{}).(string); scoped {
-		connectorName = scanConnector
-	} else if connectorName == "" {
-		connectorName = config.NormalizeConnectorName(connectorNameForConfig(set.base))
+		scopes = []string{scanConnector}
+	} else if scopes[0] == "" {
+		scopes = set.profileCoverConnectors("")
 	}
-	if _, err := meet.ruleGeneration(ctx, set, connectorName); err != nil {
-		decision.Refused = "DefenseClaw refused this request: the strictest combination of rule packs could not be compiled; ask an administrator to check the profile rule packs"
+	for _, scope := range scopes {
+		if _, err := meet.ruleGeneration(ctx, set, scope); err != nil {
+			decision.Refused = "DefenseClaw refused this request: the strictest combination of rule packs could not be compiled; ask an administrator to check the profile rule packs"
+			return decision
+		}
 	}
 	return decision
 }
