@@ -358,7 +358,7 @@ def edge_connector(
     ux.echo(
         "  1. Start (or restart) the DefenseClaw gateway that hosts Fleet.\n"
         f"     Device registration will use {endpoint}\n"
-        "     Health and policy commands use this host's gateway.\n"
+        "     Fleet CLI commands use this endpoint.\n"
         "  2. Configure the Linux devices with broker TLS and per-device keys.\n"
         "  3. Verify the fleet is running:\n"
         "\n"
@@ -377,6 +377,14 @@ def edge_connector(
         "    DCLAW_EMERGENCY_KEY    — Separate emergency-command HMAC secret\n"
         "    DCLAW_BROKER_URL       — MQTT broker URL for cloud escalation\n"
     )
+    if urlsplit(endpoint).scheme == "https":
+        ux.echo("  The CLI uses the saved HTTPS Fleet endpoint for registration and key delivery.")
+    else:
+        ux.echo(
+            "  This loopback command is for loopback-only test mode when Fleet explicitly\n"
+            "  permits HTTP key delivery. Production registration requires an HTTPS\n"
+            "  endpoint or a configured trusted TLS proxy."
+        )
 
 def _persist_svc_env_var(svc_env_path: Path, key: str, value: str) -> bool:
     """Atomically replace the root-owned service env file using sudo."""

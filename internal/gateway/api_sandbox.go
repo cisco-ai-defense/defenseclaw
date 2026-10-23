@@ -340,7 +340,7 @@ func (a *APIServer) writeSandboxStatus(w http.ResponseWriter, st *sandboxapi.Sta
 // sandboxReadier is a controller that readies OpenShell for a first run: a
 // managed computer's sandbox daemon (managedSandboxController.Ready).
 type sandboxReadier interface {
-	Ready(ctx context.Context) (*sandboxapi.Status, error)
+	Ready(ctx context.Context, req sandboxapi.ReadyRequest) (*sandboxapi.Status, error)
 }
 
 // handleSandboxReady serves POST ready: the controller readies OpenShell and
@@ -353,7 +353,7 @@ func (a *APIServer) handleSandboxReady(w http.ResponseWriter, r *http.Request) {
 		writeSandboxError(w, a.sandboxDisabledError())
 		return
 	}
-	var req struct{}
+	var req sandboxapi.ReadyRequest
 	if err := decodeSandboxBody(r, &req, true); err != nil {
 		writeSandboxError(w, err)
 		return
@@ -363,7 +363,7 @@ func (a *APIServer) handleSandboxReady(w http.ResponseWriter, r *http.Request) {
 		err error
 	)
 	if rc, ok := c.(sandboxReadier); ok {
-		st, err = rc.Ready(r.Context())
+		st, err = rc.Ready(r.Context(), req)
 	} else {
 		st, err = c.Status(r.Context())
 	}

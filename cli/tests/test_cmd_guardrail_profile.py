@@ -249,7 +249,7 @@ def test_explain_prints_the_refusal_and_its_missing_fact(monkeypatch):
 
 
 def test_explain_match_line_names_default_lookup_failed(monkeypatch):
-    """GAP-0275: "match: default" while requests get default_lookup_failed."""
+    """GAP-0275: explain names the live default when no assignment needs missing facts."""
     result = _explain(
         monkeypatch,
         {
@@ -257,11 +257,55 @@ def test_explain_match_line_names_default_lookup_failed(monkeypatch):
             "profile": "",
             "match": "default",
             "subject": {"user_name": "alice@corp.example.com", "group_count": 1},
-            "cache": {"match": "default_lookup_failed", "profile": "", "age_seconds": 0, "refresh_after_seconds": 0},
+            "cache": {"match": "default_lookup_failed", "profile": "", "refused": False, "age_seconds": 0, "refresh_after_seconds": 0},
         },
     )
     match_line = next(line for line in result.output.splitlines() if line.strip().startswith("match:"))
     assert "default_lookup_failed" in match_line
+
+
+def test_explain_legacy_cache_match_does_not_infer_a_settled_default(monkeypatch):
+    """A gateway without an explicit refusal state gives no proof of a default decision."""
+    result = _explain(
+        monkeypatch,
+        {
+            "profiles_configured": True,
+            "profile": "strict",
+            "match": "user",
+            "subject": {"user_name": "alice", "group_count": 1},
+            "cache": {"profile": "candidate-only", "match": "default_lookup_failed", "failing_since": "2026-10-22T12:00:00Z"},
+        },
+    )
+    assert result.exit_code == 0
+    assert "refusal state not supplied" in result.output
+    assert "no assignment needs the missing fact" not in result.output
+    assert "candidate-only" not in result.output
+
+
+def test_explain_cache_refusal_names_the_missing_fact(monkeypatch):
+    reason = "DefenseClaw refused this request: group membership is unconfirmed"
+    result = _explain(
+        monkeypatch,
+        {
+            "profiles_configured": True,
+            "profile": "strict",
+            "match": "user",
+            "subject": {"user_name": "alice", "group_count": 1},
+            "cache": {
+                "failing_since": "2026-10-22T12:00:00Z",
+                "profile": "candidate-only",
+                "match": "default_lookup_failed",
+                "refused_reason": reason,
+            },
+        },
+    )
+    assert result.exit_code == 0
+    match_line = next(line for line in result.output.splitlines() if line.strip().startswith("match:"))
+    cache_line = next(line for line in result.output.splitlines() if line.strip().startswith("cache:"))
+    assert "requests are refused" in match_line
+    assert "group membership is unconfirmed" in match_line
+    assert "refused: " + reason in cache_line
+    assert "candidate-only" not in cache_line
 
 
 def test_explain_failed_gateway_lookup_has_no_cached_facts(monkeypatch):
@@ -406,9 +450,15 @@ def test_reload_notice_says_when_the_running_gateway_has_not_applied_the_file(mo
     monkeypatch.setattr(gateway, "foreign_loopback_listener", lambda host, port: "")
     monkeypatch.setattr(gateway.OrchestratorClient, "health", lambda self: health)
 
-    health["policy"] = {"generation": 4, "last_reload_error": "guardrail profile strict rule pack: directory_not_found"}
+    # GAP-0642: the notice names the config generation, which survives a
+    # restart, not the gateway's rebuild counter.
+    health["policy"] = {"generation": 1, "config_generation": 4,
+                        "last_reload_error": "guardrail profile strict rule pack: directory_not_found"}
     notice = gateway.gateway_reload_notice(cfg)
-    assert "has NOT applied" in notice and "directory_not_found" in notice and "generation 4" in notice
+    assert "has NOT applied" in notice and "directory_not_found" in notice
+    assert "still enforces config generation 4" in notice
+    health["policy"] = {"generation": 4, "last_reload_error": "guardrail profile strict rule pack: directory_not_found"}
+    assert "still enforces the previous policy" in gateway.gateway_reload_notice(cfg)
     health["policy"] = {"generation": 5, "pending_restart": ["gateway"]}
     assert "except gateway" in gateway.gateway_reload_notice(cfg)
     health["policy"] = {"generation": 6}

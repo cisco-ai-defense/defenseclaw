@@ -179,6 +179,9 @@ func hermesSandboxHookEntries(rt resolvedSandboxTarget) (map[string]interface{},
 			"command": hermesSandboxHookCommand(),
 			"timeout": hermesSandboxHookTimeoutSecond,
 		}
+		if event == "pre_tool_call" && rt.contract.ContractID == "hermes-hooks-v2" {
+			entry["fail_closed"] = true
+		}
 		if matcher != "" {
 			entry["matcher"] = matcher
 		}

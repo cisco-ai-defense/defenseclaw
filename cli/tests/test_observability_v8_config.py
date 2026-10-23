@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from defenseclaw.config import CURRENT_CONFIG_VERSION
 from defenseclaw.observability.v8_config import (
     BUCKETS,
     DESTINATION_BATCH_MODES,
@@ -109,8 +110,8 @@ def test_reference_source_validates_against_canonical_schema(tmp_path: Path) -> 
         )
     validated = load_validate_v8(source, source_name=str(reference))
 
-    assert validated.source["config_version"] == 8
-    assert len(validated.source["observability"]["destinations"]) == 9
+    assert validated.source["config_version"] == CURRENT_CONFIG_VERSION
+    assert len(validated.source["observability"]["destinations"]) == 10
 
 
 @pytest.mark.parametrize("enabled", [False, True])

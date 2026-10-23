@@ -534,6 +534,156 @@ observability: {}
 	}
 }
 
+func TestStandaloneConfigManagerRejectsUnbundledConfigAndAssetReload(t *testing.T) {
+	setPendingRestart(nil)
+	t.Cleanup(func() { setPendingRestart(nil) })
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	asset := filepath.Join(dir, "asset.rego")
+	if err := os.WriteFile(asset, []byte("package original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.DeploymentMode = "managed_enterprise"
+	initial.Enterprise.Profile = "standalone"
+	if !initial.StandaloneEnterprise() {
+		t.Fatal("fixture is not standalone enterprise")
+	}
+	applied := 0
+	boot := true
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, _ ConfigDiff, source configReloadSource) error {
+		if boot {
+			boot = false
+			return errGenerationUnchanged
+		}
+		if source.proveUnchanged {
+			contents, err := os.ReadFile(asset)
+			if err != nil {
+				return err
+			}
+			if string(contents) != "package original" {
+				return fmt.Errorf("config reload refused: referenced asset %s differs; apply a new signed policy bundle", asset)
+			}
+			return errGenerationUnchanged
+		}
+		applied++
+		return nil
+	})
+	mgr.assetFiles = func() []string { return []string{asset} }
+	loadSnapshot := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, snapshot []byte) (*config.Config, error) {
+		candidate, loadErr := loadSnapshot(source, snapshot)
+		if loadErr == nil {
+			candidate.DeploymentMode = "managed_enterprise"
+			candidate.Enterprise.Profile = "standalone"
+		}
+		return candidate, loadErr
+	}
+	compiled, err := config.ParseCompileObservabilityV8(path, raw,
+		config.ObservabilityV8CompileOptions{DefaultDataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.bindInitialObservabilityV8Plan(compiled.Plan)
+	mgr.setStartupSource(path, raw)
+	if err := mgr.Reload(context.Background(), "startup_reconcile"); err != nil {
+		t.Fatalf("startup reconcile of boot bytes: %v", err)
+	}
+	unbundled := []byte(fmt.Sprintf("config_version: 8\ndata_dir: %q\ngateway:\n  api_port: %d\nobservability: {}\n",
+		dir, initial.Gateway.APIPort+1))
+	if err := os.WriteFile(path, unbundled, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(context.Background(), "watch"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+		t.Fatalf("unbundled config reload = %v, want named refusal", err)
+	}
+	if pending, _ := livePendingRestart.Load().([]string); len(pending) != 0 {
+		t.Fatalf("unbundled gateway port edit advertised a pending restart: %v", pending)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadAssets(context.Background(), "asset_watch"); err != nil || mgr.rejected {
+		t.Fatalf("restored config recovery = %v, rejected=%t", err, mgr.rejected)
+	}
+	if err := mgr.ReloadAssets(context.Background(), "unchanged_asset_watch"); err != nil || mgr.rejected {
+		t.Fatalf("unchanged later asset reload = %v, rejected=%t", err, mgr.rejected)
+	}
+	if err := os.WriteFile(asset, []byte("package changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadAssets(context.Background(), "unsigned_asset_watch"); err == nil || !strings.Contains(err.Error(), asset) {
+		t.Fatalf("unbundled changed asset reload = %v, want named refusal", err)
+	}
+	if applied != 0 {
+		t.Fatalf("unbundled reload applied %d times", applied)
+	}
+}
+
+func TestStandaloneConfigManagerProvesStartupAssetReload(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	asset := filepath.Join(dir, "asset.rego")
+	if err := os.WriteFile(asset, []byte("package original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.DeploymentMode = "managed_enterprise"
+	initial.Enterprise.Profile = "standalone"
+	called := 0
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+		called++
+		contents, err := os.ReadFile(asset)
+		if err != nil {
+			return err
+		}
+		if string(contents) != "package original" {
+			return fmt.Errorf("config reload refused: referenced asset %s differs; apply a new signed policy bundle", asset)
+		}
+		return errGenerationUnchanged
+	})
+	mgr.assetFiles = func() []string { return []string{asset} }
+	loadSnapshot := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, snapshot []byte) (*config.Config, error) {
+		candidate, loadErr := loadSnapshot(source, snapshot)
+		if loadErr == nil {
+			candidate.DeploymentMode = "managed_enterprise"
+			candidate.Enterprise.Profile = "standalone"
+		}
+		return candidate, loadErr
+	}
+	mgr.setStartupSource(path, raw)
+	if err := mgr.ReloadAssets(context.Background(), "startup_reconcile"); err != nil {
+		t.Fatalf("unchanged startup asset reload = %v", err)
+	}
+	if called != 1 || mgr.gen.Load() != 0 || mgr.rejected {
+		t.Fatalf("startup asset proof: builds=%d gen=%d rejected=%t", called, mgr.gen.Load(), mgr.rejected)
+	}
+	if err := os.WriteFile(asset, []byte("package changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadAssets(context.Background(), "asset_watch"); err == nil || !strings.Contains(err.Error(), asset) {
+		t.Fatalf("changed asset after startup = %v, want named refusal", err)
+	}
+	if called != 2 || mgr.gen.Load() != 0 || !mgr.rejected {
+		t.Fatalf("changed asset proof: builds=%d gen=%d rejected=%t", called, mgr.gen.Load(), mgr.rejected)
+	}
+}
+
 func TestConfigManagerDetectsSecretOnlyObservabilityReload(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
@@ -1140,7 +1290,8 @@ func TestAPIServerHookPostureUsesPublishedRuntimeConfig(t *testing.T) {
 		}
 	}
 	if boot.EffectiveGuardrailModeForConnector("codex") != "observe" ||
-		boot.EffectiveHookFailModeForConnector("codex") != "open" {
+		boot.Guardrail.HookFailMode != "open" || boot.Guardrail.Connectors["codex"].HookFailMode != "open" ||
+		boot.EffectiveHookFailModeForConnector("codex") != "closed" {
 		t.Fatal("API posture read mutated the immutable boot snapshot")
 	}
 }
@@ -1212,10 +1363,9 @@ func TestConnectorSetChangeIsHotOffSecureClient(t *testing.T) {
 	}
 }
 
-// The CLI no longer restarts the gateway for a hook fail mode change
-// (GAP-0184): with hook self-heal off, no hook guard rewrites the hooks, so the
-// reload re-runs the connector setup; with it on the guards do.
-func TestHookFailModeChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
+// A legacy per-user open-to-closed edit cannot change the already-closed
+// runtime or the set of connectors that setup must install.
+func TestLegacyPerUserOpenEditDoesNotChangeConnectorSetup(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	oldCfg.Guardrail.Enabled = true
 	oldCfg.Guardrail.Connector = "codex"
@@ -1224,12 +1374,10 @@ func TestHookFailModeChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
 	oldCfg.Guardrail.HookFailMode = "open"
 	newCfg := cloneConfig(oldCfg)
 	newCfg.Guardrail.HookFailMode = "closed"
-	if !hookFailModeNeedsSetup(oldCfg, newCfg) {
-		t.Fatal("hook fail mode change with self-heal off did not re-run the connector setup")
-	}
-	oldCfg.Guardrail.HookSelfHeal, newCfg.Guardrail.HookSelfHeal = true, true
-	if hookFailModeNeedsSetup(oldCfg, newCfg) {
-		t.Fatal("hook fail mode change with self-heal on re-ran the setup; the hook guards apply it")
+	if oldCfg.EffectiveHookFailModeForConnector("codex") != "closed" ||
+		newCfg.EffectiveHookFailModeForConnector("codex") != "closed" ||
+		connectorSetChanged(oldCfg, newCfg) {
+		t.Fatal("legacy per-user open edit changed effective setup posture")
 	}
 }
 

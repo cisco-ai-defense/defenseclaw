@@ -127,11 +127,11 @@ func TestSubagentExclusionsStayBoundedAcrossFailedWrites(t *testing.T) {
 		t.Fatalf("%d exclusions buffered, past the bound %d", n, agentIdentityRecorderMaxPending)
 	}
 	for round := 0; round < 3; round++ {
-		batch, excluded := r.take()
+		batch, excluded, subagents := r.take()
 		for i := 0; i < 100; i++ {
 			r.markSubagentSession(agent, fmt.Sprintf("child-%d-%d", round, i))
 		}
-		r.restore(batch, excluded) // the write failed
+		r.restore(batch, excluded, subagents) // the write failed
 	}
 	if n := len(r.exclusions); n > agentIdentityRecorderMaxPending {
 		t.Fatalf("%d exclusions after failed writes, past the bound %d", n, agentIdentityRecorderMaxPending)

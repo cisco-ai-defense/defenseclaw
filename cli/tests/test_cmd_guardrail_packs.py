@@ -28,6 +28,7 @@ from defenseclaw import config as config_mod
 from defenseclaw import config_writer, policy_catalog, rulepack_validation
 from defenseclaw.commands import cmd_guardrail
 from defenseclaw.config import (
+    ApplicationProtectionConnectorConfig,
     CustomRulePack,
     GuardrailProfile,
     GuardrailRulesConfig,
@@ -684,6 +685,64 @@ def test_repin_refuses_presets_and_clear(env):
     assert writes == []
 
 
+def test_directory_selection_preserves_registered_identity_and_digest(env, tmp_path):
+    app, _root, custom, writes = env
+    gc = app.cfg.guardrail
+    gc.rule_pack = "alias"
+    gc.custom_packs = {"alias": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64)}
+    # A different spelling of the same directory must not mint a fresh pin.
+    directory = str(custom / ".." / custom.name)
+    refused = _run(app, ["use-pack", directory, "--json"])
+    assert refused.exit_code == 1, refused.output
+    assert "config set guardrail.custom_packs.alias.digest" in json.loads(refused.output)["message"]
+    assert writes == []
+
+    gc.custom_packs["alias"].digest = "sha256:" + "a" * 64
+    selected = _run(app, ["use-pack", directory, "--json"])
+    assert selected.exit_code == 0, selected.output
+    assert json.loads(selected.output)["pack"] == "alias"
+    assert writes == [[config_writer.Change("guardrail.rule_pack", "alias")]]
+    link = tmp_path / "linked-pack"
+    try:
+        link.symlink_to(custom, target_is_directory=True)
+    except OSError:
+        pass  # Windows users may not have symlink creation rights.
+    else:
+        gc.custom_packs["alias"].digest = "sha256:" + "b" * 64
+        refused = _run(app, ["use-pack", str(link), "--json"])
+        assert refused.exit_code == 1, refused.output
+        assert len(writes) == 1
+    # Another name for the directory must not hide a conflicting stale pin.
+    gc.custom_packs["alias"].digest = "sha256:" + "a" * 64
+    gc.custom_packs["other"] = CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64)
+    refused = _run(app, ["use-pack", "alias", "--json"])
+    assert refused.exit_code == 1, refused.output
+    assert "config set guardrail.custom_packs.other.digest" in json.loads(refused.output)["message"]
+    assert len(writes) == 1
+
+
+def test_pack_switch_keeps_application_protection_pins(env):
+    app, _root, custom, writes = env
+    gc = app.cfg.guardrail
+    gc.rule_pack = "team"
+    gc.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "a" * 64)}
+    application = app.cfg.application_protection
+    application.guardrail.rule_pack = "team"
+    result = _run(app, ["use-pack", "strict", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["dropped_pins"] == []
+    assert writes[-1] == [config_writer.Change("guardrail.rule_pack", "strict")]
+
+    application.guardrail.rule_pack = ""
+    application.connectors["codex"] = ApplicationProtectionConnectorConfig(
+        guardrail=PerConnectorGuardrailConfig(rule_pack="team"),
+    )
+    result = _run(app, ["use-pack", "strict", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["dropped_pins"] == []
+    assert writes[-1] == [config_writer.Change("guardrail.rule_pack", "strict")]
+
+
 def test_bare_name_selects_installed_pack_over_cwd_folder(env, tmp_path, monkeypatch):
     """GAP-1576: an unrelated ./vsg2 folder does not shadow the installed vsg2 pack."""
     app, root, _custom, writes = env
@@ -761,7 +820,7 @@ def test_clear_connector_pack_drops_stale_rule_overrides(env, monkeypatch):
     assert result.exit_code == 0, result.output
     assert writes[-1] == [
         config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True),
-        config_writer.Change("guardrail.connectors.codex.rules.disable", unset=True),
+        config_writer.Change("guardrail.connectors.codex.rules.disable", unset=True, prune_empty_to="guardrail.connectors.codex"),
     ]
     assert json.loads(result.output)["dropped_rule_references"] == [
         "guardrail.connectors.codex.rules.disable: SEC-ENV-DUMP-REQUEST"

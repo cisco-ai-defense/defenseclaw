@@ -34,7 +34,11 @@ func TestQualifiedNameMatchNeedsTheResolvedAccount(t *testing.T) {
 		// GAP-0325: a filter resolved to a live account never takes a
 		// tokenless row of another uid by its recorded name.
 		{"no token, a deleted account's other uid", `CORP\alice`, true, otherUID, `CORP\alice`, "", false},
-		{"bare filter names every alice", "alice", true, uid, `CORP\alice`, oldToken, true},
+		// GAP-0422: given the uid it names now, a bare filter does not take
+		// the former holder's rows of that uid; another uid's alice stays.
+		{"bare filter, former holder of its uid", "alice", true, uid, `CORP\alice`, oldToken, false},
+		{"bare filter, another uid's alice", "alice", true, otherUID, `CORP\alice`, oldToken, true},
+		{"bare filter, its own row", "alice", true, uid, `CORP\alice`, newToken, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := NewAccountFilter(tc.filter, uid).WithAccountDomains(domains).WithAccountIncarnation(newToken, tc.holderChanged)

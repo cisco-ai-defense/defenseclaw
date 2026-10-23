@@ -361,7 +361,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 			// what lets broad roots eventually move past thousands of unrelated
 			// files instead of retrying the same prefix forever.
 			lastCompleted = path
-			if d.Type()&os.ModeSymlink != 0 && s.modelLinkPrivacySkipped(path) {
+			if d.Type()&os.ModeSymlink != 0 && s.macOSPrivacyPathSkipped(path) {
 				return nil
 			}
 			modelID, isManifest := ollamaManifestModelID(path)
@@ -854,28 +854,6 @@ func (s *ContinuousDiscoveryService) resetModelFileCycle(root string) {
 	delete(s.modelFileCycles, root)
 }
 
-// modelLinkPrivacySkipped checks each lexical link target before any Stat or
-// EvalSymlinks call can access a macOS privacy-protected folder.
-func (s *ContinuousDiscoveryService) modelLinkPrivacySkipped(path string) bool {
-	if s == nil || s.opts.SecureClient || discoveryGOOS != "darwin" || macOSFullDiskAccess() {
-		return false
-	}
-	for i := 0; i < 40; i++ {
-		target, err := os.Readlink(path)
-		if err != nil {
-			return false
-		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(filepath.Dir(path), target)
-		}
-		path = filepath.Clean(target)
-		if s.macOSTCCSkipped(path) {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *ContinuousDiscoveryService) modelFileScanRoots() []modelScanRoot {
 	roots, _ := s.modelFileScanRootsWithErrors()
 	return roots
@@ -897,7 +875,7 @@ func (s *ContinuousDiscoveryService) modelFileScanRootsWithErrors() ([]modelScan
 			return
 		}
 		path = filepath.Clean(path)
-		if s.macOSTCCSkipped(path) || s.modelLinkPrivacySkipped(path) || s.profileLinkRefused(path) {
+		if s.macOSPrivacyPathSkipped(path) || s.profileLinkRefused(path) {
 			return
 		}
 		resolved, err := filepath.EvalSymlinks(path)

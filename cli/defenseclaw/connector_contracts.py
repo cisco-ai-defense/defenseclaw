@@ -109,9 +109,10 @@ def normalize_connector(name: str | None) -> str:
     return value
 
 
-# Connectors whose hook answers a confirm verdict with the agent's own approval
-# prompt. The others turn confirm into an alert (raw_action=confirm kept).
-NATIVE_APPROVAL_CONNECTORS = frozenset({"claudecode", "openclaw", "copilot", "antigravity", "amp"})
+# Connectors whose ordinary hook answers a confirm verdict with the agent's
+# own approval prompt. Other connectors use their own fallback; Copilot CLI
+# blocks an action-mode confirm because its hook cannot prove prompt availability.
+NATIVE_APPROVAL_CONNECTORS = frozenset({"claudecode", "openclaw", "antigravity", "amp"})
 
 
 def has_native_approval_prompt(name: str | None) -> bool:

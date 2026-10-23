@@ -84,7 +84,7 @@ def test_statuses_follow_the_config(config) -> None:
 
     guardrail = _status(SetupWizard.GUARDRAIL, config)
     assert guardrail.state == "ok" and "action" in guardrail.text
-    assert "open" in _status(SetupWizard.GUARDRAIL_ACTIONS, config).text
+    assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail closed"
     assert "strict" in _status(SetupWizard.SKILL_SCANNER, config).text
     assert _status(SetupWizard.ACP_GUARD, config).state == "ok"
 
@@ -93,9 +93,8 @@ def test_statuses_follow_the_config(config) -> None:
 
 
 def test_fail_mode_status_is_the_effective_value_per_connector(config) -> None:
-    # GAP-0152: the status is each connector's effective value. An
-    # observe-mode connector follows the global value; under Secure Client an
-    # unset global is open (#1163).
+    # GAP-0152: the status is each connector's effective value. Per-user
+    # connectors stay closed; under Secure Client an unset global is open.
     from defenseclaw.config import PerConnectorGuardrailConfig
 
     config.guardrail.enabled = True

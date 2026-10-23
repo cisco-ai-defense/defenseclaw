@@ -57,7 +57,13 @@ func (e *SettingError) Detail() string {
 	if e == nil || e.cause == nil {
 		return ""
 	}
-	lines := strings.Split(strings.TrimSpace(e.cause.Error()), "\n")
+	detail := strings.TrimSpace(e.cause.Error())
+	if e.bare {
+		// settingErrorAt preserves the loader's path in Error(), while the
+		// structured diagnostic carries it separately from its rule text.
+		detail = strings.TrimPrefix(detail, e.Path+": ")
+	}
+	lines := strings.Split(detail, "\n")
 	for i := range lines {
 		lines[i] = strings.TrimSpace(lines[i])
 	}

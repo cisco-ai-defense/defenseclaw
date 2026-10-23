@@ -37,6 +37,7 @@ from defenseclaw.connector_contracts import (
     STATUS_UNKNOWN,
     STATUS_UNVERSIONED,
     _load_contracts_from_manifest,
+    has_native_approval_prompt,
     openclaw_needs_interception_advisory,
     resolve_connector_contract,
 )
@@ -46,6 +47,11 @@ from defenseclaw.platform_support import ACP_ONLY_CONNECTORS
 from tests.helpers import cleanup_app, make_app_context
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_copilot_cli_does_not_claim_a_native_approval_prompt():
+    assert has_native_approval_prompt("claudecode")
+    assert not has_native_approval_prompt("copilot")
 
 
 def _discovery(connector: str, *, installed: bool, version: str, error: str = ""):
@@ -300,13 +306,23 @@ class TestConnectorContractManifest(unittest.TestCase):
 
     def test_codex_setup_banner_describes_scoped_otlp_routes(self) -> None:
         with patch("defenseclaw.commands.cmd_setup.click.echo") as echo:
-            _print_connector_observability_banner("codex")
+            _print_connector_observability_banner("codex", native_export_expected=True)
         rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
         self.assertIn("scoped bearer + source header on /v1/<signal>", rendered)
         self.assertNotIn("/otlp/codex/<token>", rendered)
         self.assertNotIn("/api/v1/codex/notify", rendered)
         self.assertNotIn("otel / notify", rendered)
         self.assertNotIn("notify bridge", rendered)
+
+    def test_per_user_setup_banner_describes_hook_only_telemetry(self) -> None:
+        for connector in ("codex", "claudecode"):
+            with self.subTest(connector=connector):
+                with patch("defenseclaw.commands.cmd_setup.click.echo") as echo:
+                    _print_connector_observability_banner(connector)
+                rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
+                self.assertIn("Restart agents and background servers", rendered)
+                self.assertNotIn("Native OTel", rendered)
+                self.assertIn("cleanup of older DefenseClaw", rendered)
 
     def test_setup_banner_prints_the_gateway_hook_route(self) -> None:
         # GAP-1611: the gateway serves Claude Code on /api/v1/claude-code/hook.

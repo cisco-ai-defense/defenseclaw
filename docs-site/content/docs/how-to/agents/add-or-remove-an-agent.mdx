@@ -15,6 +15,62 @@ One gateway guards several agents at once, each with its own mode. Adding, repla
 - DefenseClaw is set up for one agent.
 - The new agent is a hook agent. OpenClaw and ZeptoClaw run through a proxy and cannot sit next to hook agents (see Replace below).
 
+## The questions setup asks
+
+`defenseclaw setup <agent>` asks these questions in this order. The first one is the enforcement mode,
+answered with a number:
+
+```text
+  Enforcement mode for Codex
+  ──────────────────────────
+    [1] observe — scan and report findings, never block (recommended to start)
+    [2] action  — scan and block/confirm when policy requires (PreToolUse deny)
+  Select mode (1, 2) [1]:
+```
+
+Type `1` (observe) or `2` (action), or press Enter for the default. Letters are
+rejected here. Passing `--mode observe` or `--mode action` answers this question,
+so setup does not ask it.
+
+If another connector is already wired (here, `claudecode`), setup prints what it
+will change and then asks how to combine them:
+
+```text
+  DefenseClaw is already configured for: claudecode
+  You are setting up: codex
+    [a] Add     — run it alongside the existing connector(s) (multi-connector)
+    [r] Replace — switch to only this connector
+    [c] Cancel  — make no changes
+  Choose (a, r, c) [a]:
+```
+
+Type `a` to keep both active. Type `r` only when you want DefenseClaw to tear
+down the previous connector's agent-side files before wiring the new one. `c`
+makes no changes.
+
+If you chose action mode, setup then offers the LLM judge:
+
+```text
+  Add LLM judge on top of rule scanning? [y/N]:
+```
+
+Press Enter or type `n` to keep rule scanning only, or `y` to add the judge
+(configure its model with `defenseclaw setup llm`). Observe mode skips this
+question. `--enable-judge` or `--no-enable-judge` answers it.
+
+To replace instead of add, pass `--replace`. Setup then asks a yes/no question
+in place of the Add/Replace/Cancel choice, followed by the judge question in
+action mode:
+
+```bash
+defenseclaw setup claude-code --replace --mode action
+```
+
+```text
+  Replace codex with claudecode? This removes the other connector(s). [y/N]: y
+  Add LLM judge on top of rule scanning? [y/N]: n
+```
+
 ## Add an agent
 
 1. Run the agent's setup command. If another agent is already guarded, setup asks.
@@ -68,7 +124,7 @@ Replace tears down the old agent's files and leaves only the new one.
 defenseclaw setup claude-code --replace --mode action
 ```
 
-Setup names the agents it removes and asks first (`--yes` skips the question). The same flag switches between a hook agent and a proxy agent (`defenseclaw setup openclaw --replace`). Without it, setup refuses and changes nothing.
+Setup names the agents it removes and asks first (`--yes` skips the question). The same flag switches between a hook agent and a proxy agent (`defenseclaw setup openclaw --replace`) on Linux and macOS. Native Windows has no guardrail proxy, so OpenClaw and ZeptoClaw replacement is unsupported there. Without `--replace`, setup refuses and changes nothing.
 
 ## Remove an agent
 

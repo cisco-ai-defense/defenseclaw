@@ -26,8 +26,8 @@ import (
 // connectors without a fail-closed hook contract of their own. Secure Client
 // keeps its rules. The per-user Hermes, Copilot and Antigravity hooks block
 // their own failures, so they keep closed (GAP-0150, GAP-0269, r104 W3
-// G3-upg), and a per-user Cursor in observe closes its outages unless the
-// config opens them.
+// G3-upg), and a per-user Cursor in observe closes its outages even if an
+// older config opened them.
 func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 	useVerifiedSecureClientDeployment(t)
 	standalone := SetupOpts{ManagedEnterprise: true, ManagedHookSocket: "/run/defenseclaw/hook.sock", HookFailMode: "closed", GuardrailMode: "observe"}
@@ -43,9 +43,9 @@ func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 		{"standalone hermes", NewHermesConnector(), standalone, "closed"},
 		{"standalone copilot", NewCopilotConnector(), standalone, "closed"},
 		{"secure client hermes", NewHermesConnector(), secureClient, "open"},
-		{"secure client cursor observe", NewCursorConnector(), secureClient, "open"},
+		{"secure client cursor observe", NewCursorConnector(), secureClient, "closed"},
 		{"per-user cursor observe", NewCursorConnector(), perUser, "closed"},
-		{"per-user cursor observe, explicit open", NewCursorConnector(), SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open", GuardrailMode: "observe"}, "open"},
+		{"per-user cursor observe, explicit open", NewCursorConnector(), SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open", GuardrailMode: "observe"}, "closed"},
 		{"per-user hermes", NewHermesConnector(), perUser, "closed"},
 		{"per-user copilot", NewCopilotConnector(), perUser, "closed"},
 		{"per-user antigravity", NewAntigravityConnector(), perUser, "closed"},

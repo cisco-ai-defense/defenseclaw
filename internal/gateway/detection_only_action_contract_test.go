@@ -306,11 +306,11 @@ func TestArtifactPromotion_AllDetectionOnlyAllows(t *testing.T) {
 	installDefaultProfileConnector(t, connectorName)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "unreachable.sh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nrm -rf /\n"), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\nrm -rf /\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	facts := actionfacts.Analyze(actionfacts.Input{
-		Tool: "shell", Command: fmt.Sprintf("false && bash %q", path), CWD: dir,
+		Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: dir,
 	})
 	capture := &toolChainHookCapture{}
 	capture.recordTrustedAction(facts, nil)

@@ -104,6 +104,12 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 				if value, ok := yamlScalarAt(raw, schemaErr.Line, schemaErr.Column); ok {
 					reason = fmt.Sprintf("is %q; it must be %s", value, schemaErr.Expected)
 				}
+			case strings.HasSuffix(field, "openshell.trusted_ca_bundle"):
+				// The managed rule (config.validateManagedTrustedCABundle),
+				// not the per-user ~/ form the schema also allows (rel-1-0-4 GAP-0590).
+				reason = "must be an absolute path: a managed configuration needs an absolute path to an administrator-owned file"
+			case schemaErr.Expected != "" && schemaErr.Expected != "a value matching the schema-declared pattern":
+				reason = "must be " + schemaErr.Expected
 			default:
 				reason = "does not match the setting's required format"
 			}

@@ -49,7 +49,7 @@ The trees below describe the per-user shell installers, including native Windows
   </Folder>
 </Files>
 
-`config.yaml`, `config.generation.json`, `audit.db` and `device.key` are created by `defenseclaw init` or `quickstart`, and the hook scripts by setting up an agent. Only `config.yaml` is policy; the hook scripts are derived from it. `installer/` is the installer that performed the current install (`defenseclaw rollback` uses it), and `previous/` is the install the last upgrade replaced. On Linux, `~/.local/bin` also holds `defenseclaw-sensor-helper` for the opt-in sandbox kernel feed. When the installer installs `uv` for you, `uv` and `uvx` are in `~/.local/bin` too.
+`config.yaml`, `config.generation.json`, `audit.db` and `device.key` are created by `defenseclaw init` or `quickstart`, and the hook scripts by setting up an agent. Only `config.yaml` is policy; the hook scripts are derived from it. `installer/` is the installer that performed the current install (`defenseclaw rollback` uses it); its `binaries.sha256` lists the SHA-256 of each installed binary as it runs (`cd ~/.local/bin && shasum -a 256 -c ~/.defenseclaw/installer/binaries.sha256`). On macOS these differ from the binaries in the release archive, which the installer checks against `checksums.txt` and then signs ad hoc for this Mac. `previous/` is the install the last upgrade replaced. On Linux, `~/.local/bin` also holds `defenseclaw-sensor-helper` for the opt-in sandbox kernel feed. When the installer installs `uv` for you, `uv` and `uvx` are in `~/.local/bin` too.
 
 On macOS and Linux the installer does not change `PATH`. If `~/.local/bin` is not on it, the installer prints the line to add to your shell profile.
 
@@ -133,7 +133,7 @@ set "CLAUDE_CONFIG_DIR=D:\Agent Profiles\Claude"
   </Tab>
 </Tabs>
 
-Changing a variable later does not move DefenseClaw's entries. To move an agent's folder, run its setup again. The default data root is the current profile's `.defenseclaw`; `DEFENSECLAW_HOME` overrides it. Use the same value for every command, including `defenseclaw upgrade`. `DEFENSECLAW_FAIL_MODE` is not a path setting and no 1.0.4 hook reads it; `DEFENSECLAW_STRICT_AVAILABILITY` can only make an outage block. Set the fail mode with `defenseclaw guardrail fail-mode open|closed`; setup writes it into the hooks and the OpenCode plugin, and `defenseclaw status` and `defenseclaw doctor` report it.
+Changing a variable later does not move DefenseClaw's entries. To move an agent's folder, run its setup again. The default data root is the current profile's `.defenseclaw`; `DEFENSECLAW_HOME` overrides it. Use the same value for every command, including `defenseclaw upgrade`. `DEFENSECLAW_FAIL_MODE` is not a path setting and no 1.0.4 hook reads it. Set the fail mode with `defenseclaw guardrail fail-mode open|closed`; setup writes it into the hooks and the OpenCode plugin, and `defenseclaw status` and `defenseclaw doctor` report it.
 
 DefenseClaw restricts its private files to the current user, Administrators and SYSTEM on Windows ([security model](/docs/appendix/windows-security-model#ownership-and-filesystem-boundary)).
 

@@ -48,7 +48,60 @@ func withWindowsEnterpriseTargetImpersonation(
 	expectedHome string,
 	fn func() error,
 ) error {
-	return withWindowsEnterpriseTargetTokenImpersonation(target, expectedHome, windowsEnterpriseTargetTokenResolver, fn)
+	resolve := windowsEnterpriseTargetTokenResolver
+	if windowsEnterpriseInstallLogon(target) == WindowsTargetLogonAnyWithS4U {
+		resolve = resolveWindowsEnterpriseAnyTargetToken
+	}
+	return withWindowsEnterpriseTargetTokenImpersonation(target, expectedHome, resolve, fn)
+}
+
+// windowsEnterpriseInstallLogons holds, per target SID, the
+// InstallOptions.WindowsTargetLogon of the install that holds that user's
+// runtime transaction (platformInstall), so every step of it impersonates
+// the same logon.
+var windowsEnterpriseInstallLogons = struct {
+	sync.Mutex
+	bySID map[string]WindowsTargetLogon
+}{bySID: map[string]WindowsTargetLogon{}}
+
+// useWindowsEnterpriseInstallLogon records logon for sid until the returned
+// release runs. The caller holds sid's runtime transaction.
+func useWindowsEnterpriseInstallLogon(sid string, logon WindowsTargetLogon) func() {
+	if logon == WindowsTargetLogonActive {
+		return func() {}
+	}
+	windowsEnterpriseInstallLogons.Lock()
+	windowsEnterpriseInstallLogons.bySID[sid] = logon
+	windowsEnterpriseInstallLogons.Unlock()
+	return func() {
+		windowsEnterpriseInstallLogons.Lock()
+		delete(windowsEnterpriseInstallLogons.bySID, sid)
+		windowsEnterpriseInstallLogons.Unlock()
+	}
+}
+
+func windowsEnterpriseInstallLogon(target *windows.SID) WindowsTargetLogon {
+	if target == nil {
+		return WindowsTargetLogonActive
+	}
+	windowsEnterpriseInstallLogons.Lock()
+	defer windowsEnterpriseInstallLogons.Unlock()
+	return windowsEnterpriseInstallLogons.bySID[target.String()]
+}
+
+// resolveWindowsEnterpriseAnyTargetToken is the WindowsTargetLogonAnyWithS4U
+// token: the user's active or disconnected session, else an S4U logon. A
+// refused S4U logon is ErrEnrolledUserSignedOut.
+func resolveWindowsEnterpriseAnyTargetToken(target *windows.SID) (windows.Token, error) {
+	token, err := windowsEnterpriseSignedInTargetTokenResolver(target)
+	if err == nil || !IsWindowsTargetSessionUnavailable(err) {
+		return token, err
+	}
+	token, err = windowsEnterpriseS4UTargetTokenResolver(target)
+	if err != nil {
+		return 0, &enrolledUserSignedOutError{s4u: err}
+	}
+	return token, nil
 }
 
 // withWindowsEnterpriseS4UTargetImpersonation is
@@ -558,6 +611,14 @@ func resolveWindowsEnterpriseSessionToken(target *windows.SID, allowDisconnected
 // profile mutation; callers must still re-resolve the token inside the actual
 // impersonated operation so logout/session-reuse races fail closed.
 func RequireWindowsEnterpriseTargetSession(ownerSID, expectedHome string) error {
+	return RequireWindowsEnterpriseTargetLogon(ownerSID, expectedHome, WindowsTargetLogonActive)
+}
+
+// RequireWindowsEnterpriseTargetLogon is RequireWindowsEnterpriseTargetSession
+// for the logon an install under logon would act as the user with
+// (InstallOptions.WindowsTargetLogon). A refused S4U logon is
+// ErrEnrolledUserSignedOut.
+func RequireWindowsEnterpriseTargetLogon(ownerSID, expectedHome string, logon WindowsTargetLogon) error {
 	target, err := validateWindowsEnterpriseTargetSID(ownerSID)
 	if err != nil {
 		return err
@@ -565,7 +626,11 @@ func RequireWindowsEnterpriseTargetSession(ownerSID, expectedHome string) error 
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err
 	}
-	token, err := windowsEnterpriseTargetTokenResolver(target)
+	resolve := windowsEnterpriseTargetTokenResolver
+	if logon == WindowsTargetLogonAnyWithS4U {
+		resolve = resolveWindowsEnterpriseAnyTargetToken
+	}
+	token, err := resolve(target)
 	if err != nil {
 		return err
 	}

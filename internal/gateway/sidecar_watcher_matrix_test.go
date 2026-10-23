@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestKiroOnlyWatcherRunsWithNoAssetDirectories(t *testing.T) {
@@ -653,6 +654,30 @@ func TestWatcherUsesConnectorDirsSkipsManagedServiceHome(t *testing.T) {
 	cfg.Guardrail.Connector = ""
 	if !watcherStartupEnabled(cfg) {
 		t.Fatal("Secure Client startup must report the enabled watcher switch")
+	}
+}
+
+// GAP-0568: a config.yaml without a claw block, upgraded on an account
+// without OpenClaw, resolves no connector, so the watcher watches no OpenClaw
+// folders and never creates ~/.openclaw.
+func TestWatcherWatchesNoOpenClawFoldersForAnImpliedOpenClawThatIsNotInstalled(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	stubOpenClawBinary(t, false)
+	path := filepath.Join(t.TempDir(), config.DefaultConfigName)
+	raw := "config_version: 9\ngateway:\n  watcher:\n    enabled: true\n    skill:\n      enabled: true\n    plugin:\n      enabled: true\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if watcherUsesConnectorDirs(cfg) || WatcherWatchesDirs(cfg) {
+		t.Fatal("the watcher must not watch the folders of an OpenClaw that is not installed")
+	}
+	if _, err := os.Stat(filepath.Join(home, ".openclaw")); !os.IsNotExist(err) {
+		t.Fatalf("~/.openclaw must not exist, stat err = %v", err)
 	}
 }
 

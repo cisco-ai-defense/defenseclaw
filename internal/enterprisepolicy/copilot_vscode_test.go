@@ -100,6 +100,52 @@ func TestCopilotVSCodeLocalAndManagedSettings(t *testing.T) {
 	}
 }
 
+func TestCopilotVSCodeStatusRejectsHookOutsideEnrollment(t *testing.T) {
+	home := t.TempDir()
+	if _, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+		Home: home, GOOS: "linux", HookBinary: testHookBinary, HookFile: true, Plugin: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	opts := testOptions(t)
+	opts.CopilotOutOfScopeHomes = []string{home}
+	state := State{}
+	copilotVSCodeStatus(opts, &state)
+	if len(state.Conflicts) == 0 || !strings.Contains(strings.Join(state.Conflicts, " "), CopilotVSCodeLocalHookFilePath(home)) {
+		t.Fatalf("active hook for an unenrolled account must be a conflict: %+v", state)
+	}
+	if _, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+		Home: home, GOOS: "linux", HookBinary: testHookBinary,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state = State{}
+	copilotVSCodeStatus(opts, &state)
+	if len(state.Conflicts) != 0 {
+		t.Fatalf("cleaned unenrolled account is still a conflict: %+v", state)
+	}
+	released, err := os.ReadFile(filepath.Join("testdata", "copilot-vscode-1.0.0", "linux-hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, CopilotVSCodeLocalHookFilePath(home), string(released))
+	state = State{}
+	copilotVSCodeStatus(opts, &state)
+	if len(state.Conflicts) == 0 {
+		t.Fatal("released Copilot Local hook in an unenrolled home was reported healthy")
+	}
+	if _, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+		Home: home, GOOS: "linux", HookBinary: testHookBinary,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state = State{}
+	copilotVSCodeStatus(opts, &state)
+	if len(state.Conflicts) != 0 {
+		t.Fatalf("removed released Local hook is still a conflict: %+v", state)
+	}
+}
+
 // A managed 1.0.0 install wrote the Local hook file and plugin without the
 // removed-deployment guard; testdata holds the bytes 1.0.0 (06b1c9e68)
 // rendered. After the upgrade both are DefenseClaw's: the guard allows the
@@ -171,9 +217,9 @@ func TestCopilotVSCodeUpgradeFromTheReleasedRender(t *testing.T) {
 	}
 }
 
-// The Local hook file is the guardian's (WIN-R1-25): verify reports a
-// deleted or edited copy as drift, setup rewrites it and uninstall removes
-// it, whatever the user left at its name.
+// The Local hook file is the guardian's path (WIN-R1-25): a deleted copy is
+// repaired. An independent handler added at that path is kept and reported;
+// non-file entries at the dedicated path are still replaced or removed.
 func TestCopilotVSCodeRepairsATamperedHookFile(t *testing.T) {
 	home := t.TempDir()
 	run := func(keep, dryRun bool) CopilotVSCodeUserResult {
@@ -200,13 +246,19 @@ func TestCopilotVSCodeRepairsATamperedHookFile(t *testing.T) {
 	if err := os.WriteFile(hookFile, edited, 0o400); err != nil {
 		t.Fatal(err)
 	}
-	if result := run(true, true); len(result.Changed) != 1 || len(result.Kept) != 0 {
-		t.Fatalf("verify must report the edited hook file as drift: %+v", result)
+	if result := run(true, true); len(result.Kept) != 1 || result.HookFileOK {
+		t.Fatalf("verify must report the independent hook: %+v", result)
 	}
-	if result := run(true, false); !result.HookFileOK {
-		t.Fatalf("setup must repair the edited hook file: %+v", result)
+	if result := run(true, false); len(result.Kept) != 1 || result.HookFileOK {
+		t.Fatalf("setup must leave the independent hook alone: %+v", result)
+	}
+	if got := readFile(t, hookFile); got != string(edited) {
+		t.Fatalf("setup changed the independent hook: %s", got)
 	}
 	// A directory (or link) a user puts at the name is replaced too.
+	if err := os.Chmod(hookFile, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(hookFile); err != nil {
 		t.Fatal(err)
 	}

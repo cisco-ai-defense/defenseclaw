@@ -361,8 +361,7 @@ export function Playground({
         </div>
         <FindingsBar
           counts={counts}
-          findings={findings.slice(0, 6)}
-          totalFindings={findings.length}
+          findings={findings}
         />
       </div>
       {/*
@@ -545,13 +544,11 @@ function DiffVsPresetBanner({
 function FindingsBar({
   counts,
   findings,
-  totalFindings,
 }: {
   counts: { errors: number; warnings: number; info: number };
   findings: ReturnType<typeof validatePolicy>;
-  totalFindings: number;
 }) {
-  if (totalFindings === 0) {
+  if (findings.length === 0) {
     return (
       <div className="flex items-center gap-2 border-t border-fd-border bg-emerald-500/10 px-4 py-2 text-[11px] text-emerald-700 dark:text-emerald-300">
         <span aria-hidden="true">✓</span>
@@ -580,7 +577,7 @@ function FindingsBar({
         </span>
         <span className="ml-auto text-fd-muted-foreground">click to expand</span>
       </summary>
-      <ul className="divide-y divide-fd-border">
+      <ul className="max-h-80 divide-y divide-fd-border overflow-y-auto">
         {findings.map((f, i) => (
           <li key={i} className="px-4 py-2 text-[11px]">
             <div className="flex items-baseline gap-2">
@@ -601,11 +598,6 @@ function FindingsBar({
             {f.fix && <div className="text-[10px] text-fd-muted-foreground">Fix: {f.fix}</div>}
           </li>
         ))}
-        {totalFindings > findings.length && (
-          <li className="px-4 py-2 text-[11px] text-fd-muted-foreground">
-            …and {totalFindings - findings.length} more.
-          </li>
-        )}
       </ul>
     </details>
   );

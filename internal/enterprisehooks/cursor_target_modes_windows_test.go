@@ -58,6 +58,30 @@ func TestWindowsCursorTargetModesPreservePeersAndLegacyPolicy(t *testing.T) {
 	}
 }
 
+func TestWindowsStandaloneCursorEmptyEnrollmentKeepsDenyingAdapter(t *testing.T) {
+	state := windowsCursorManagedPolicyState{
+		SchemaVersion:      1,
+		HookExecutable:     `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
+		GatewayAddr:        "127.0.0.1:32109",
+		GatewayServiceName: "DefenseClawGateway",
+		HookFailMode:       "open",
+		Targets: []WindowsCursorManagedRuntimeTarget{{
+			SID: "S-1-5-21-1000-1000-1000-1001", DataDir: `C:\Users\alice\.defenseclaw`,
+		}},
+		TargetFailModes: map[string]string{"S-1-5-21-1000-1000-1000-1001": "open"},
+	}
+	empty, err := cursorManagedNarrowState(state, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty.Targets) != 0 || len(empty.TargetFailModes) != 0 || empty.HookFailMode != "closed" {
+		t.Fatalf("zero-target Cursor policy = %+v, want active closed adapter with no enrolled SID", empty)
+	}
+	if _, err := renderWindowsCursorManagedAdapter(empty); err != nil {
+		t.Fatalf("zero-target Cursor policy cannot render its guarded adapter: %v", err)
+	}
+}
+
 func TestWindowsCursorTargetModeVerificationRejectsMismatch(t *testing.T) {
 	for _, pair := range [][2]string{{"open", "open"}, {"closed", "closed"}, {"", "closed"}} {
 		if err := verifyWindowsCursorRuntimeDeliveryMode(pair[0], pair[1]); err != nil {
@@ -97,6 +121,8 @@ func TestWindowsCursorTargetModeVerificationRejectsMismatch(t *testing.T) {
 }
 
 func TestDeferredWindowsCursorModeUsesConfiguredPolicyAndVersionFallback(t *testing.T) {
+	// The Secure Client profile of a verified install (GAP-0606).
+	setStandaloneProfileForTest(t, false)
 	for _, tc := range []struct{ version, configured, want string }{
 		{"3.21.16", "", "open"}, {"3.21.16", "open", "open"}, {"3.21.16", "closed", "closed"},
 		{"", "closed", "open"}, {"not-a-version", "closed", "open"}, {"0.0.1", "closed", "open"},

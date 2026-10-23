@@ -96,7 +96,25 @@ type InstallOptions struct {
 	// WindowsStandaloneClaudeMachinePolicyContract). Empty, and every
 	// Secure Client process, render the row's own contract.
 	MachinePolicyContractID string
+
+	// WindowsTargetLogon selects the logon a Windows install acts under for
+	// the target's user. The zero value is the user's active session.
+	WindowsTargetLogon WindowsTargetLogon
 }
+
+// WindowsTargetLogon is the logon whose token a Windows install impersonates.
+type WindowsTargetLogon int
+
+const (
+	// WindowsTargetLogonActive is the user's active session only.
+	WindowsTargetLogonActive WindowsTargetLogon = iota
+	// WindowsTargetLogonAnyWithS4U is the user's active session, else a
+	// disconnected one (the user is still signed in), else an S4U logon for
+	// a signed-out user. Without any of them the install fails with
+	// ErrEnrolledUserSignedOut before it acts as the user. Only a change
+	// that closes the hook fail mode uses it (rel-1-0-4 GAP-0585).
+	WindowsTargetLogonAnyWithS4U
+)
 
 var publishEnterpriseHookAPIToken = connector.PublishHookAPIToken
 
@@ -223,6 +241,9 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 		ManagedHookBinary:      strings.TrimSpace(opts.ManagedHookBinary),
 	}
+	if runtime.GOOS == "darwin" && secureClientHookDelivery() {
+		setupOpts.HookExecutable = "/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway"
+	}
 	if standalonePerUserRepair(uid) {
 		// Install renders some hooks for the guardrail mode (Cursor's action
 		// command differs from its observe command). Without the mode here
@@ -263,12 +284,26 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			return err
 		}
 		return withOwnerCredentials(uid, gid, func() error {
-			present, err := connector.OwnedHooksPresent(conn, setupOpts)
-			if err != nil {
-				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err)
+			verifyOwnedHooks := func() error {
+				present, err := connector.OwnedHooksPresent(conn, setupOpts)
+				if err != nil {
+					return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err)
+				}
+				if !present {
+					return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", conn.Name(), ownedHookAbsentDetail(conn, setupOpts))
+				}
+				return nil
 			}
-			if !present {
-				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", conn.Name(), ownedHookAbsentDetail(conn, setupOpts))
+			if !standalonePerUserRepair(uid) {
+				// Preserve the Secure Client check order.
+				if err := verifyOwnedHooks(); err != nil {
+					return err
+				}
+			}
+			if path, driftErr := connector.ManagedPluginArtifactDrift(conn, setupOpts); driftErr != nil {
+				return fmt.Errorf("enterprise hooks: inspect connector %s plugin %s: %w", conn.Name(), path, driftErr)
+			} else if path != "" {
+				return fmt.Errorf("enterprise hooks: connector %s plugin differs from the current template: %s", conn.Name(), path)
 			}
 			// Match validateHookContract's mode selection so Verify does not
 			// load and re-hash the lock in bounded/managed mode on Unix
@@ -336,6 +371,15 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			// and guardrail modes the hooks were rendered for.
 			if err := verifyStandaloneHookRuntime(conn, setupOpts, opts.GuardrailMode, lock, uid); err != nil {
 				return err
+			}
+			// The standalone runtime check above names a missing or changed
+			// script directly. OwnedHooksPresent also treats that condition as
+			// an absent registration, which obscures the file the guardian
+			// must repair. Keep the registration check after runtime integrity.
+			if standalonePerUserRepair(uid) {
+				if err := verifyOwnedHooks(); err != nil {
+					return err
+				}
 			}
 			result = InstallResult{
 				Connector:       conn.Name(),
@@ -453,6 +497,9 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		// Only the standalone guardian sets this, for Amp and OpenCode.
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 		ManagedHookBinary:      strings.TrimSpace(opts.ManagedHookBinary),
+	}
+	if runtime.GOOS == "darwin" && secureClientHookDelivery() {
+		setupOpts.HookExecutable = "/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway"
 	}
 	requiresScopedHookToken := connector.RequiresScopedHookToken(conn)
 	if requiresScopedHookToken {
@@ -644,6 +691,11 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			}
 			if !present {
 				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", conn.Name(), ownedHookAbsentDetail(conn, setupOpts)))
+			}
+			if path, driftErr := connector.ManagedPluginArtifactDrift(conn, setupOpts); driftErr != nil {
+				return rollback(fmt.Errorf("enterprise hooks: inspect connector %s plugin %s: %w", conn.Name(), path, driftErr))
+			} else if path != "" {
+				return rollback(fmt.Errorf("enterprise hooks: connector %s plugin differs from the current template: %s", conn.Name(), path))
 			}
 			// See Verify for the rationale: keep Install's persistence
 			// mode consistent with validateHookContract's drift check.

@@ -13,12 +13,20 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 func TestStandaloneGuardianReportsRepairedHookToAuditSocket(t *testing.T) {
+	previousFactory := guardianAuditClientFactory
+	guardianAuditClientFactory = func(_ time.Duration, socket string, _ int) (*http.Client, error) {
+		return &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		}}}, nil
+	}
+	t.Cleanup(func() { guardianAuditClientFactory = previousFactory })
 	uid, gid := os.Getuid(), os.Getgid()
 	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 	f := newStandaloneFixture(t, resolver)
@@ -44,7 +52,12 @@ func TestStandaloneGuardianReportsRepairedHookToAuditSocket(t *testing.T) {
 		}
 		return response, nil
 	}
-	socket := filepath.Join(f.root, "audit.sock")
+	socketDir, err := os.MkdirTemp("/tmp", "guard-audit-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socket := filepath.Join(socketDir, "audit.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)

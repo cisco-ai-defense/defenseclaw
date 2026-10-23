@@ -88,11 +88,13 @@ class ActionMenu(Vertical):
         actions: tuple[MenuAction, ...],
         *,
         selected_index: int | None = None,
+        allow_unselected: bool = False,
         show_descriptions: bool = False,
         **kwargs: object,
     ) -> None:
         super().__init__(**kwargs)
         self.actions = actions
+        self.allow_unselected = allow_unselected
         self.selected_index = self._initial_selected_index(selected_index)
         self.set_class(show_descriptions, "-descriptions")
 
@@ -134,7 +136,16 @@ class ActionMenu(Vertical):
         self.activate_selected()
 
     def _move_selection(self, direction: int) -> None:
-        if self.selected_index is None or not self.actions:
+        if not self.actions:
+            return
+
+        if self.selected_index is None:
+            indexes = range(len(self.actions)) if direction > 0 else range(len(self.actions) - 1, -1, -1)
+            for index in indexes:
+                if not self.actions[index].disabled:
+                    self.selected_index = index
+                    self._sync_selection()
+                    return
             return
 
         index = self.selected_index
@@ -158,6 +169,8 @@ class ActionMenu(Vertical):
         return None
 
     def _initial_selected_index(self, selected_index: int | None) -> int | None:
+        if selected_index is None and self.allow_unselected:
+            return None
         if selected_index is not None and 0 <= selected_index < len(self.actions):
             if not self.actions[selected_index].disabled:
                 return selected_index

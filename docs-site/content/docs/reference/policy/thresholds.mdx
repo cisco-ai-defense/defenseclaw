@@ -31,7 +31,7 @@ With `block_at: HIGH` and `alert_at: MEDIUM`:
 | `LOW` | Allowed | Allowed |
 
 - **Anything that blocks also alerts.** An `alert_at` that sits above `block_at` on the severity scale (for example `block_at: LOW` with `alert_at: MEDIUM`) alerts from the block level instead. `defenseclaw config get guardrail.alert_at --effective` labels that case `(clamped to block_at)`.
-- **Observe mode never blocks.** Findings at or above the alert level are logged as alerts and nothing is stopped. The levels take effect when the connector runs in action mode.
+- **Observe mode does not enforce policy findings.** Findings at or above the alert level are logged as alerts; fail mode and proxy availability can still stop a call. The levels take effect when the connector runs in action mode.
 - **Human approval sits below the block level.** When [HITL](/docs/features/guardrail) is on, a finding at or above `guardrail.hilt.min_severity` but below `block_at` becomes a `confirm` on a connector event that can ask. Findings at or above `block_at` block without asking.
 
 ## Where the levels apply
@@ -167,6 +167,11 @@ The source is `config:guardrail.<key>` for the global scope, `config:guardrail.c
 ```bash
 defenseclaw guardrail profile explain --connector codex
 ```
+
+An unknown connector does not fall back to the global or default thresholds.
+The gateway returns HTTP 400 with `unknown connector` and the valid connectors;
+`profile explain` exits with an error. Use a built-in connector name or a
+configured custom connector name.
 
 ```text title="Terminal output (abridged)"
 Guardrail profile resolution

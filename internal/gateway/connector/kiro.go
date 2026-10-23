@@ -186,7 +186,15 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	if strings.TrimSpace(opts.DataDir) != "" {
 		removeCreatedDirs(filepath.Join(opts.DataDir, kiroCreatedDirsFile), filepath.Dir(kiroHomeDir()))
 	}
-	return errors.Join(errs...)
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	if !opts.ManagedEnterprise && opts.DataDir != "" {
+		if err := c.VerifyClean(opts); err != nil {
+			return fmt.Errorf("kiro verify clean before token revocation: %w", err)
+		}
+	}
+	return revokePerUserHookAPIToken(opts, c.Name())
 }
 
 // kiroCreatedDirsFile, in the DefenseClaw data directory, lists the Kiro

@@ -20,6 +20,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // Per-session foreign-hook state.
@@ -159,18 +161,21 @@ type SessionUpdate struct {
 	Removals    []ForeignHookRemoval
 	RemovalsErr error
 	Now         time.Time
-	// BeforeBlock (gateway only) runs once, right before the first write
-	// that records a block in StateDir: the gateway removes the account's key
-	// of the protected session records (RevokePublishedSessionKey), so that a gateway
-	// that stops between that write and the publication of the block, or
-	// whose publication fails, leaves no allow behind that the hook would
-	// honor during the outage (GAP-0352, 1.0.4 guard loop).
-	BeforeBlock func()
 }
 
 // SessionPath is the record for one key kind and ID under accountHome.
 func SessionPath(accountHome, connector, kind, id string) string {
 	return sessionPathInDir(filepath.Join(accountHome, ".defenseclaw", sessionDirName), connector, kind, id)
+}
+
+// ForeignHookSessionStoreDir is the gateway's private session store of one
+// caller under its data directory. The digest keeps the 1.0.3 store path
+// stable across upgrades.
+func ForeignHookSessionStoreDir(dataDir, identity string) string {
+	if canonical, ok := connector.CanonicalUserScopedIdentity(identity); ok {
+		identity = canonical
+	}
+	return filepath.Join(dataDir, sessionDirName, sha256Hex([]byte(identity))[:40])
 }
 
 func sessionPathInDir(dir, connector, kind, id string) string {
@@ -228,11 +233,10 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 		return removed
 	}
 	// Removals that cannot be read (a ledger that fails its check, a removal
-	// of the account in progress, a record folder the gateway cannot locate)
+	// of the account in progress)
 	// deny the call, but they do not skip the session state: a session
-	// start that found an unapproved hook still records its block, after
-	// BeforeBlock took the records it overrules out of use, and a block is
-	// still carried to the other key. Before, the block was never recorded,
+	// start that found an unapproved hook still records its block, and a
+	// block is still carried to the other key. Before, the block was never recorded,
 	// so an earlier allow outlived it once the removals could be read again
 	// (GAP-0352, 1.0.4 guard loop round 3). Nothing else is written.
 	removalsDeny := update.RemovalsErr != nil
@@ -284,12 +288,7 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 			return sessionUnavailableDecision(decision)
 		}
 	}
-	beforeBlock := update.BeforeBlock
 	write := func(path string, record SessionRecord) bool {
-		if record.Blocked && beforeBlock != nil {
-			beforeBlock()
-			beforeBlock = nil
-		}
 		if err := writeSessionRecord(path, record); err != nil {
 			return !strict
 		}

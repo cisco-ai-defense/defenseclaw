@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -493,6 +494,9 @@ func TestPolicyReloadPreRunLeavesAuditStoreToGateway(t *testing.T) {
 // A Secure Client host keeps the policy reload output of main (issue #1092):
 // the HTTP status and body of a refused reload, not the GAP-0160 sentence.
 func TestSecureClientPolicyReloadKeepsTheOutputOfMain(t *testing.T) {
+	previousFactory := managedGatewayClientFactory
+	managedGatewayClientFactory = func(time.Duration, string, string) (*http.Client, error) { return &http.Client{}, nil }
+	t.Cleanup(func() { managedGatewayClientFactory = previousFactory })
 	ownGatewayListener(t)
 	const token = "reload-fixture-value"
 	const body = `{"error":"reload failed: policy: read data.json: open /p/data.json: no such file or directory","status":"failed"}`
@@ -523,17 +527,27 @@ func TestSecureClientPolicyReloadKeepsTheOutputOfMain(t *testing.T) {
 	}
 }
 
-// TestPolicyReloadErrorIsPlain pins GAP-0160: a failed rebuild shows words, not
-// the HTTP status, the JSON body or the internal stage names. GAP-0183: so does a
-// successful one.
-func TestPolicyReloadErrorIsPlain(t *testing.T) {
-	ok := policyReloadMessage([]byte(`{"status":"reloaded","policy_dir":"/p","generation":7,"digest":"sha256:ab"}`))
-	if ok != "Policy reloaded (generation 7, digest sha256:ab)." {
-		t.Fatalf("success sentence = %q", ok)
+// The response's generation is an in-process rebuild count, which restarts
+// with the gateway. It must not be named like the persisted config generation.
+func TestPolicyReloadMessageNamesRebuildCounter(t *testing.T) {
+	for _, tc := range []struct {
+		body, want string
+	}{
+		{`{"status":"reloaded","policy_dir":"/p","generation":7,"digest":"sha256:ab"}`, "Policy reloaded (rebuild 7, digest sha256:ab)."},
+		{`{"status":"reloaded","generation":7}`, "Policy reloaded (rebuild 7)."},
+	} {
+		if got := policyReloadMessage([]byte(tc.body)); got != tc.want {
+			t.Fatalf("success sentence = %q, want %q", got, tc.want)
+		}
 	}
 	if got := policyReloadMessage([]byte(`{"status":"reloaded","policy_dir":"/p"}`)); got != "Policy reloaded." {
 		t.Fatalf("success without a generation = %q", got)
 	}
+}
+
+// TestPolicyReloadErrorIsPlain pins GAP-0160: a failed rebuild shows words, not
+// the HTTP status, the JSON body or the internal stage names.
+func TestPolicyReloadErrorIsPlain(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("ab", 32)
 	pin := `{"error":"reload failed: config reload rule pack preflight: global rule pack \"p0m\": digest ` + digest +
 		` does not match guardrail.custom_packs.p0m.digest","status":"failed"}`

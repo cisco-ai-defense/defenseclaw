@@ -202,6 +202,30 @@ func TestEffectiveWindowsHookConnectorsFiltersUnsupported(t *testing.T) {
 	}
 }
 
+// Standalone preflight accepts Claude Code's established aliases, so the
+// enumerator must produce the canonical row for each spelling. An explicit
+// map disable still wins over a differently spelled scalar.
+func TestEffectiveWindowsStandaloneHookConnectorsCanonicalizeClaudeAliases(t *testing.T) {
+	disabled := false
+	for _, alias := range []string{"claude-code", "claude_code", "Claude-Code"} {
+		t.Run(alias, func(t *testing.T) {
+			cfg := &config.Config{Guardrail: config.GuardrailConfig{Connector: alias}}
+			if got := EffectiveWindowsStandaloneHookConnectors(cfg); len(got) != 1 || got[0] != "claudecode" {
+				t.Fatalf("%s enrollment = %v", alias, got)
+			}
+		})
+	}
+	cfg := &config.Config{Guardrail: config.GuardrailConfig{
+		Connector: "claude-code",
+		Connectors: map[string]config.PerConnectorGuardrailConfig{
+			"claudecode": {Enabled: &disabled},
+		},
+	}}
+	if got := EffectiveWindowsStandaloneHookConnectors(cfg); len(got) != 0 {
+		t.Fatalf("disabled canonical entry was re-enabled by alias: %v", got)
+	}
+}
+
 func prepareWindowsTargetsManifestTestDirectory(t *testing.T) string {
 	t.Helper()
 	originalAncestorTrust := windowsTargetsManifestAncestorTrust
@@ -1326,7 +1350,6 @@ func TestEnumerateWindowsDisabledAccountKeepsItsWarningWhenASessionIsUnidentifie
 	})
 	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
 	windowsLocalAccountDisabled = func(string) (bool, error) { return true, nil }
-	windowsSignedInSessionUsers = readWindowsSignedInSessionUsers
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o700); err != nil {
 		t.Fatal(err)
@@ -1336,6 +1359,9 @@ func TestEnumerateWindowsDisabledAccountKeepsItsWarningWhenASessionIsUnidentifie
 	}
 	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
 	stubActiveSessions(t, map[string][]string{})
+	// After stubActiveSessions, which stubs the signed-in reader too: the
+	// sessions are read from the stubbed session API (GAP-0606).
+	windowsSignedInSessionUsers = readWindowsSignedInSessionUsers
 	for _, tc := range []struct {
 		name     string
 		tokenErr error

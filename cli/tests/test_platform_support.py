@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -267,7 +268,7 @@ def test_non_windows_views_are_unfiltered() -> None:
 
 
 def test_discovery_default_preserves_non_windows_and_avoids_unsupported_windows() -> None:
-    discovery = object()
+    discovery = SimpleNamespace(agents={"openclaw": SimpleNamespace(installed=True)})
     with (
         patch(
             "defenseclaw.commands.cmd_init.agent_discovery.discover_agents",

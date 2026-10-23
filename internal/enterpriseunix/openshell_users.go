@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,6 +37,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
 // Per-account sandbox lifecycle. The sandbox daemon, the account's OpenShell
@@ -158,12 +160,14 @@ const (
 	StopGateway
 	// StopSocket stops the daemon's socket (Linux).
 	StopSocket
-	// StopKill, with StopDaemon or StopSocket, first ends the daemon's
-	// main process with SIGKILL: the exit of a daemon before DefenseClaw
-	// 1.0.4 (SandboxStatus.Legacy), which a stop's SIGTERM runs, stops the
-	// account's OpenShell gateway under a MicroVM that completed, with no
-	// flush. A killed daemon runs nothing on its way out, and the unit's
-	// ExecStop, which then runs with no main process, stops nothing.
+	// StopKill first ends the daemon's main process with SIGKILL: the exit
+	// of a daemon before DefenseClaw 1.0.4 (SandboxStatus.Legacy), which a
+	// stop's SIGTERM runs, stops the account's OpenShell gateway under a
+	// MicroVM that completed, with no flush. A killed daemon runs nothing on
+	// its way out, and the unit's ExecStop, which then runs with no main
+	// process, stops nothing. Alone it stops no unit: the service manager
+	// starts the installed daemon again (systemd's Restart=, the launcher
+	// on the next command).
 	StopKill
 )
 
@@ -338,13 +342,15 @@ func (e *Env) longRunner(timeout time.Duration) Runner {
 	return e.Runner
 }
 
-// domain is the launchd domain of the account's sandbox agent.
+// domain is the launchd domain of the account's sandbox agent
+// (openshell.LaunchDomain): the one its job is loaded in, so a stop or a
+// kill finds it, else the graphical session, else the background one.
 func (o *commandUserOps) domain(ctx context.Context, a SandboxAccount) string {
-	gui := "gui/" + strconv.Itoa(a.UID)
-	if _, err := o.env.Runner.Run(ctx, "launchctl", "print", gui); err == nil {
-		return gui
-	}
-	return "user/" + strconv.Itoa(a.UID)
+	domain, _ := openshell.LaunchDomain(a.UID, labelSandbox, o.env.launchAgentLabel(labelSandbox), func(domain string) (string, error) {
+		res, err := o.env.Runner.Run(ctx, "launchctl", "print", domain)
+		return string(res.Stdout), err
+	})
+	return domain
 }
 
 // usableSandboxAccount reports whether a is an account the lifecycle acts in:
@@ -456,9 +462,10 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 		// crashed, was killed or (macOS) left when idle, and the account's
 		// OpenShell gateway unit (setup mode) keeps hosting its sandboxes.
 		// The launcher starts the daemon on demand and the daemon counts what
-		// the gateway runs, so ask it; only an account with neither is idle.
+		// the gateway runs, so ask it. When neither service runs, durable
+		// guest records still need checking before calling the account idle.
 		if !o.unitRunning(ctx, a, userUnitGatewayService, labelOpenShellGateway) {
-			return st, nil
+			return st, e.retainedComputeRefusal(a)
 		}
 	}
 	res, err := o.runAs(ctx, a, userCommandTimeout, e.launcherPath(), "sandbox", "status", "--output", "json")
@@ -490,23 +497,137 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 	}
 	st.StartedAt = reply.StartedAt
 	st.PendingRestart = reply.Managed != nil && reply.Managed.PendingRestart
+	if st.busy() == 0 {
+		// A daemon restarted on new inputs may no longer see a guest left by
+		// the old gateway. Its zero count is not a disposition of that guest.
+		if err := e.retainedComputeRefusal(a); err != nil {
+			return st, err
+		}
+	}
 	return st, nil
 }
 
+// retainedComputeRefusal checks the daemon's durable records when runtime
+// status would let an account switch. A package upgrade can stop both old
+// services while an OpenShell 0.1.3 MicroVM remains in Error: the new
+// daemon's zero count cannot prove that its VM has stopped. Read only the
+// account's own records through owned directory descriptors and refuse a
+// record whose last observed OpenShell state may still hold compute.
+func (e *Env) retainedComputeRefusal(a SandboxAccount) error {
+	home, err := e.openHome(a)
+	if err != nil || home < 0 {
+		return err
+	}
+	defer unix.Close(home)
+	rel := filepath.Join(e.daemonStateRel(), "sandboxes", "manager")
+	parent, name, err := walkDirs(home, rel, a.UID)
+	if err != nil || parent < 0 {
+		return err
+	}
+	defer unix.Close(parent)
+	fd, err := openOwnedDir(parent, name, a.UID)
+	if err != nil || fd < 0 {
+		return err
+	}
+	dir := os.NewFile(uintptr(fd), name)
+	defer dir.Close()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return fmt.Errorf("inspect retained sandboxes of %s: %w", a.Name, err)
+	}
+	for _, entry := range entries {
+		sandboxName, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !openshell.ValidSandboxName(sandboxName) {
+			continue
+		}
+		data, present, err := e.readBelowHome(a, filepath.Join(rel, entry.Name()), 8<<20)
+		if err != nil {
+			return fmt.Errorf("inspect retained sandbox %s of %s: %w; repair its account state, then retry", sandboxName, a.Name, err)
+		}
+		if !present {
+			return fmt.Errorf("retained sandbox %s of %s changed while inspected; retry", sandboxName, a.Name)
+		}
+		var rec struct {
+			Name           string `json:"name"`
+			Driver         string `json:"driver"`
+			Phase          string `json:"phase"`
+			PhaseReason    string `json:"phase_reason"`
+			SessionRelease string `json:"session_release"`
+		}
+		if err := json.Unmarshal(data, &rec); err != nil || rec.Name != sandboxName {
+			return fmt.Errorf("retained sandbox %s of %s has an unreadable record; repair its account state, then retry", sandboxName, a.Name)
+		}
+		driver, known := openshell.LookupDriver(rec.Driver)
+		if known && driver.StopFlushes {
+			continue
+		}
+		phase := openshell.PhaseUnknown
+		switch strings.ToLower(rec.Phase) {
+		case "ready":
+			phase = openshell.PhaseReady
+		case "provisioning":
+			phase = openshell.PhaseProvisioning
+		case "starting":
+			phase = openshell.PhaseStarting
+		case "stopping":
+			phase = openshell.PhaseStopping
+		case "stopped":
+			phase = openshell.PhaseStopped
+		case "deleting":
+			phase = openshell.PhaseDeleting
+		case "completed":
+			phase = openshell.PhaseCompleted
+		case "error":
+			phase = openshell.PhaseError
+		}
+		if !openshell.HoldsGateway(phase, rec.PhaseReason, false) {
+			continue
+		}
+		runs := false
+		if release, err := openshell.ParseVersion(rec.SessionRelease); err == nil {
+			minimum, _ := openshell.ParseVersion(openshell.SupportedMin)
+			runs = release.Compare(minimum) >= 0
+		}
+		detail := sandboxapi.DisplayText(rec.PhaseReason)
+		if runes := []rune(detail); len(runes) > 160 {
+			detail = string(runes[:160]) + "…"
+		}
+		if detail != "" {
+			detail = ": " + detail
+		}
+		return fmt.Errorf("retained MicroVM %s of %s is %s%s and may still hold compute; %s; then rerun `%s`",
+			sandboxName, a.Name, phase, detail, openshell.StopWayOn(sandboxName, phase, rec.PhaseReason, runs), e.lifecycleCommand(ActionEnsure))
+	}
+	return nil
+}
+
 // unitRunning reports whether the account's user unit (systemd) or agent
-// (launchd) is running.
-func (o *commandUserOps) unitRunning(ctx context.Context, a SandboxAccount, unit, label string) bool {
+// (launchd: a job of any label of base) is running.
+func (o *commandUserOps) unitRunning(ctx context.Context, a SandboxAccount, unit, base string) bool {
 	if o.env.GOOS == "darwin" {
-		res, err := o.env.Runner.Run(ctx, "launchctl", "print", o.domain(ctx, a)+"/"+label)
-		return err == nil && strings.Contains(string(res.Stdout), "state = running")
+		domain := o.domain(ctx, a)
+		for _, label := range o.agentLabels(ctx, domain, base) {
+			res, err := o.env.Runner.Run(ctx, "launchctl", "print", domain+"/"+label)
+			if err == nil && strings.Contains(string(res.Stdout), "state = running") {
+				return true
+			}
+		}
+		return false
 	}
 	res, err := o.runAs(ctx, a, userCommandTimeout, "/usr/bin/systemctl", "--user", "is-active", unit)
 	return err == nil && strings.TrimSpace(string(res.Stdout)) == "active"
 }
 
+// agentLabels are the labels of base to act on in an account's domain: the
+// installed one and each earlier one the domain still lists (GAP-0206).
+func (o *commandUserOps) agentLabels(ctx context.Context, domain, base string) []string {
+	res, _ := o.env.Runner.Run(ctx, "launchctl", "print", domain)
+	return domainAgentLabels(res.Stdout, base, o.env.launchAgentLabel(base))
+}
+
 func (o *commandUserOps) Stop(ctx context.Context, a SandboxAccount, scope StopScope) error {
 	e := o.env
-	if scope&StopKill != 0 && scope&(StopDaemon|StopSocket) != 0 {
+	if scope&StopKill != 0 {
 		if err := o.killDaemon(ctx, a); err != nil {
 			return err
 		}
@@ -521,9 +642,11 @@ func (o *commandUserOps) Stop(ctx context.Context, a SandboxAccount, scope StopS
 			if scope&item.scope == 0 {
 				continue
 			}
-			res, err := e.Runner.Run(ctx, "launchctl", "bootout", domain+"/"+item.label)
-			if err != nil && !bootoutNotLoaded(res, err) {
-				errs = append(errs, err)
+			for _, label := range o.agentLabels(ctx, domain, item.label) {
+				res, err := e.Runner.Run(ctx, "launchctl", "bootout", domain+"/"+label)
+				if err != nil && !bootoutNotLoaded(res, err) {
+					errs = append(errs, err)
+				}
 			}
 		}
 		return errors.Join(errs...)
@@ -569,9 +692,15 @@ var (
 func (o *commandUserOps) killDaemon(ctx context.Context, a SandboxAccount) error {
 	e := o.env
 	if e.GOOS == "darwin" {
-		res, err := e.Runner.Run(ctx, "launchctl", "kill", "SIGKILL", o.domain(ctx, a)+"/"+labelSandbox)
-		if err != nil && !bootoutNotLoaded(res, err) && o.unitRunning(ctx, a, userUnitSandboxService, labelSandbox) {
-			return fmt.Errorf("end the sandbox daemon of %s, which an earlier DefenseClaw started, before its stop: %w", a.Name, err)
+		domain := o.domain(ctx, a)
+		var failed error
+		for _, label := range o.agentLabels(ctx, domain, labelSandbox) {
+			if res, err := e.Runner.Run(ctx, "launchctl", "kill", "SIGKILL", domain+"/"+label); err != nil && !bootoutNotLoaded(res, err) {
+				failed = err
+			}
+		}
+		if failed != nil && o.unitRunning(ctx, a, userUnitSandboxService, labelSandbox) {
+			return fmt.Errorf("end the sandbox daemon of %s, which an earlier DefenseClaw started, before its stop: %w", a.Name, failed)
 		}
 		return nil
 	}
@@ -776,7 +905,7 @@ func (l *lifecycle) settleOpenShell(ctx context.Context, op *openshellPlan) {
 	l.settlePending(ctx, state, cur)
 	l.reconcileMacOSAgents(ctx, state)
 	if err := env.saveOpenShellState(state); err != nil {
-		l.result.AddWarning(codeState, "could not record the applied sandbox configuration: "+err.Error())
+		l.result.AddWarning(stateWriteCode(err, codeState), "could not record the applied sandbox configuration: "+err.Error())
 	}
 }
 
@@ -831,7 +960,7 @@ func (l *lifecycle) retryOpenShell(ctx context.Context) {
 	l.settlePending(ctx, state, state.Applied)
 	l.reconcileMacOSAgents(ctx, state)
 	if err := l.env.saveOpenShellState(state); err != nil {
-		l.result.AddWarning(codeState, "could not record the sandbox changes still waiting: "+err.Error())
+		l.result.AddWarning(stateWriteCode(err, codeState), "could not record the sandbox changes still waiting: "+err.Error())
 	}
 	if len(l.result.Changes) > before {
 		l.result.Noop = false
@@ -894,20 +1023,26 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 			continue
 		case err != nil:
 			entry.Sandboxes = -1
+			entry.Hold = err.Error()
 			entry.Reason = entry.reasonBase() + " (the lifecycle could not tell whether a sandbox of this account runs: " + err.Error() + ")"
 			state.Pending[key] = entry
 			continue
 		case status.Active && status.busy() > 0:
+			entry.Hold = ""
 			// Not only the running ones: a switch or stop takes the
 			// account's OpenShell gateway down, under a MicroVM that
 			// completed or is in OpenShell's error state (until OpenShell
 			// reports it stopped: openshell.HoldsGateway) or a sandbox
 			// still starting too.
+			if status.Legacy {
+				status = l.replaceLegacyDaemon(ctx, ops, account, status)
+			}
 			entry.Sandboxes = status.busy()
 			state.Pending[key] = entry
 			continue
 		}
 		if err := l.performAccountChange(ctx, ops, account, entry, status, cur); err != nil {
+			entry.Hold = err.Error()
 			entry.Reason = entry.reasonBase() + " (" + err.Error() + ")"
 			state.Pending[key] = entry
 			var held *drainHeld
@@ -924,6 +1059,40 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 		}
 		delete(state.Pending, key)
 	}
+}
+
+// replaceLegacyDaemon puts the installed sandbox daemon in place of one
+// that DefenseClaw before 1.0.4 started (SandboxStatus.Legacy, st) in the
+// account a, whose sandboxes may hold compute, and returns the account's
+// status after it. That daemon exits by itself once a package upgrade
+// replaced its program or its settings changed (its pending restart), as
+// soon as no sandbox of the account is ready, provisioning or starting, and
+// its exit stops the account's OpenShell gateway: under a MicroVM that
+// completed or is in OpenShell's error state, which it does not count, the
+// VM ends with no flush (GAP-0868). The installed daemon counts those
+// (sandboxapi.Status.Live) and keeps the gateway while they hold it. The
+// old one is killed, so its exit runs nothing (StopKill alone: no unit is
+// stopped, so neither the gateway nor any sandbox is), and the status
+// starts the installed one. Its sandboxes' hooks fail closed in between.
+func (l *lifecycle) replaceLegacyDaemon(ctx context.Context, ops SandboxUserOps, a SandboxAccount, st SandboxStatus) SandboxStatus {
+	if err := ops.Stop(ctx, a, StopKill); err != nil {
+		l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("could not end the sandbox daemon of %s that an earlier DefenseClaw started: once no sandbox of %s runs, "+
+			"it stops the account's OpenShell gateway, also under a MicroVM that completed or is in OpenShell's error state, which loses what that VM has not written: %v; "+
+			"the next run tries again", a.Name, a.Name, err))
+		return st
+	}
+	next, err := ops.Status(ctx, a)
+	switch {
+	case err != nil:
+		l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("ended the sandbox daemon of %s that an earlier DefenseClaw started, but could not ask the installed one: %v; "+
+			"the account's next sandbox command starts it", a.Name, err))
+		return st
+	case next.Legacy:
+		l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("the sandbox daemon of %s still runs the earlier DefenseClaw after it was ended; the next run tries again", a.Name))
+		return next
+	}
+	l.openshellChange("replaced the sandbox daemon of %s, which an earlier DefenseClaw started, with this version's: its OpenShell gateway and its sandboxes keep running", a.Name)
+	return next
 }
 
 // reasonBase is the reason without the retry detail settlePending appends.
@@ -996,6 +1165,13 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 			defer release()
 		}
 		for _, job := range jobs {
+			if job.old() {
+				if err := l.env.migrateMacOSAgent(ctx, job, jobs); err != nil {
+					return err
+				}
+				l.openshellChange("replaced %s of %s with %s, the label of this DefenseClaw's LaunchAgent, after its sandboxes stopped", job.domain+"/"+job.label, a.Name, job.current)
+				continue
+			}
 			if err := l.env.reloadMacOSAgent(ctx, job, job.state.Failure(false) != ""); err != nil {
 				return err
 			}
@@ -1510,8 +1686,17 @@ func (l *lifecycle) macOSAgentJobs(ctx context.Context) ([]string, error) {
 	var jobs []string
 	for _, uid := range uids {
 		for _, domain := range []string{"gui/" + strconv.Itoa(uid), "user/" + strconv.Itoa(uid)} {
-			for _, label := range []string{labelSandbox, labelOpenShellGateway} {
-				jobs = append(jobs, domain+"/"+label)
+			// The installed label, the bare one of 1.0.0 to 1.0.3, and any
+			// earlier one the domain still lists (GAP-0206).
+			listing, _ := l.env.Runner.Run(ctx, "launchctl", "print", domain)
+			for _, base := range openshell.LaunchAgentBases {
+				labels := domainAgentLabels(listing.Stdout, base, l.env.launchAgentLabel(base))
+				if !slices.Contains(labels, base) {
+					labels = append(labels, base)
+				}
+				for _, label := range labels {
+					jobs = append(jobs, domain+"/"+label)
+				}
 			}
 		}
 	}

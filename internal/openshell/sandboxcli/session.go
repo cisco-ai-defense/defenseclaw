@@ -157,9 +157,11 @@ type session struct {
 	unmasked []string
 	// pulled is the result of the pull a copy-mode session's end took, and
 	// handedOver is set once nothing of it is left to bring back: finish
-	// records both for a sandbox it stops (markStoppedCopy).
+	// records both for a sandbox it stops (markStoppedCopy), when nothing
+	// could have changed the copy since pullBase was read.
 	pulled     string
 	handedOver bool
+	pullBase   copyBase
 
 	// hooksWarned is set once the live warning that the session's hooks do
 	// not reach DefenseClaw went out (hooks.go); noHooks once the session
@@ -172,7 +174,10 @@ type session struct {
 	// stopFailed marks a session whose sandbox the end of the session could
 	// not stop; its exit status is not success.
 	stopFailed bool
-	sawHooks   atomic.Bool
+	// errorPhaseReason is OpenShell's reason when the sandbox entered its
+	// error state during the session, for the recovery step in finish.
+	errorPhaseReason string
+	sawHooks         atomic.Bool
 	// hooksUnknown is set once the summary said a daemon restart during
 	// the session left it unable to tell whether a hook reached DefenseClaw
 	// (hookReachUnknown).
@@ -351,7 +356,8 @@ func (s *session) printCLIErr(explained bool) {
 // relayClosed reports whether the OpenShell CLI's error is its exec relay
 // that closed under the session (the gateway restarted or went away).
 func relayClosed(text string) bool {
-	return strings.Contains(text, "exec relay closed") || strings.Contains(text, "The service is currently unavailable")
+	return strings.Contains(text, "exec relay closed") || strings.Contains(text, "The service is currently unavailable") ||
+		(strings.Contains(text, "h2 protocol error") && strings.Contains(text, "hyper::Error"))
 }
 
 // loginShell starts the sandbox user's login shell (bash where the image
@@ -1047,7 +1053,12 @@ func (s *session) end(ctx context.Context) error {
 	if after.WorkdirMode != config.OpenShellWorkdirCopy && after.Phase == "ready" && !s.lost && s.started && !s.liveRun {
 		s.others, release, err = a.lockForStop(ctx, s.sb.Name)
 	} else {
+		// A copy's pull below covers what changed it only if no session
+		// is attached now and none attaches before its stop (pullBase,
+		// read before this count).
+		s.pullBase = a.copyBaseOf(after)
 		s.others, err = a.attachedSessions(s.sb.Name)
+		s.pullBase.ok = s.pullBase.ok && s.others == 0
 	}
 	if err != nil {
 		return attachedUnknown(s.sb.Name, err)
@@ -1168,8 +1179,25 @@ func (s *session) end(ctx context.Context) error {
 	}
 	switch {
 	case decision == "u":
+		// Undo stops the sandbox and puts the folder back: a session that
+		// attached while the question was open would be ended and lose its
+		// work. It is counted, and the undo made, under the sandbox's
+		// exclusive gate; one attached keeps the sandbox and the changes.
+		others, unlock, err := a.lockForStop(ctx, s.sb.Name)
+		if err != nil {
+			return attachedUnknown(s.sb.Name, err)
+		}
+		if others > 0 {
+			unlock()
+			s.others = others
+			a.warn("not undone: " + s.othersText() + " now (undo stops " + s.sb.Name + ", which ends " + them(others) + ") → undo once " +
+				map[bool]string{true: "it ends", false: "they end"}[others == 1] + ": `" + CommandName + " undo " + s.sb.Name + "`")
+			s.keepSnapshot, s.keepWhy = true, "it was not undone: "+s.othersText()
+			return s.finish(ctx, false)
+		}
 		wasRunning := after.Phase == "ready"
 		res, err := s.api.Undo(ctx, s.sb.Name, sandboxapi.UndoRequest{Stop: true})
+		unlock()
 		if err != nil {
 			return fmt.Errorf("undo: %w", apiError(err))
 		}
@@ -1246,6 +1274,7 @@ func (s *session) endedElsewhere(after *sandboxapi.Sandbox) string {
 	if after.Phase == "error" {
 		// Not a stop of anyone's: OpenShell lost the sandbox (GAP-0278).
 		s.errored = true
+		s.errorPhaseReason = after.PhaseReason
 		runtime, why := s.runtimeStopCause(after)
 		text := name + "'s " + runtime + " stopped under the session (" + why + "), which ended " + s.harnessName() +
 			"; OpenShell now holds it in its error state"
@@ -1555,8 +1584,8 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 			a.note("Sandbox " + name + " keeps running → reattach: " + CommandName + " connect " + name + "   stop: " + CommandName + " stop " + name)
 			return nil
 		case s.unanswered:
-			a.note("Sandbox " + name + " does not answer → `" + CommandName + " status " + name + "` shows its state; in OpenShell's error state `" +
-				CommandName + " stop " + name + "` and `" + CommandName + " start " + name + "` bring it back with its work")
+			a.note("Sandbox " + name + " does not answer → `" + CommandName + " status " + name +
+				"` shows its state; if it enters OpenShell's error state, `" + CommandName + " doctor` shows its recovery steps")
 			return nil
 		case !s.started:
 			if now, err := s.api.Get(ctx, name); err == nil && now.Phase != "ready" {
@@ -1569,7 +1598,8 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 			s.continueHint()
 			return nil
 		}
-		if _, err := s.api.Stop(ctx, name); err != nil {
+		sb, err := s.api.Stop(ctx, name)
+		if err != nil {
 			if sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
 				// OpenShell's error state: nothing runs in it (GAP-0333).
 				a.warn("could not stop " + name + ": " + apiError(err).Error())
@@ -1581,11 +1611,26 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 				CommandName + " status " + name + "` shows where it stands, `" + CommandName + " stop " + name + "` stops it")
 			return nil
 		}
-		s.markStopped()
+		s.markStopped(sb)
 	}
 	if s.errored {
-		// Every gateway DefenseClaw starts a session on stops a sandbox in
-		// that state and starts it again (openshell.SupportedMin).
+		// A failed MicroVM's main process can leave its VM running. Its
+		// stop is refused; only an explicit end with the loss explained by
+		// StopWayOn, or deletion, lets OpenShell release it.
+		if runtime, _ := s.runtimeStopCause(s.sb); runtime == "MicroVM" {
+			if openshell.LingeringVM(openshell.PhaseError, s.errorPhaseReason, false) {
+				way := openshell.StopWayOn(name, openshell.PhaseError, s.errorPhaseReason, true)
+				if !openshell.MainProcessFailed(s.errorPhaseReason) {
+					way += "; its MicroVM work is kept only through the last successful disk sync"
+				}
+				a.note("Sandbox " + name + " is in OpenShell's error state → " +
+					way)
+				return nil
+			}
+			a.note("Sandbox " + name + " is in OpenShell's error state → fix why its MicroVM failed, then `" + CommandName + " stop " + name +
+				"` and `" + CommandName + " start " + name + "`; the sandbox remains, but its MicroVM work is kept only through the last successful disk sync")
+			return nil
+		}
 		a.note("Sandbox " + name + " is in OpenShell's error state → fix what stopped it, then `" + CommandName + " stop " + name +
 			"` and `" + CommandName + " start " + name + "`, which keep the sandbox and its work")
 		return nil
@@ -2115,9 +2160,14 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 // bring back when the pull found nothing new or went to the folder, a
 // branch or a patch, so `delete` of it stopped need not warn about work it
 // cannot check; and that pull, which the next pull is made from. A sandbox
-// that keeps running can still change, so it is not marked.
-func (s *session) markStopped() {
-	if s.pulled != "" || s.handedOver {
+// that keeps running can still change, so it is not marked; nor is one
+// another session may have changed since the pull (it attached while the
+// apply question was open and has ended, or a hook came: pullBase), which
+// a delete must still warn about and the next pull must read. It runs
+// under the sandbox's exclusive gate (finish), stopped being what
+// OpenShell's stop returned.
+func (s *session) markStopped(stopped *sandboxapi.Sandbox) {
+	if (s.pulled != "" || s.handedOver) && s.pullBase.unchanged(s.app, s.sb.Name, stopped) {
 		s.app.markStoppedCopy(s.sb, s.handedOver, s.pulled)
 	}
 }

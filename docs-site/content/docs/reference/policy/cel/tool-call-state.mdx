@@ -192,7 +192,9 @@ fixed chains can't complete on Kiro events. Agents reached through the
 [ACP guard](/docs/features/acp-guard), such as Zed, are outside this contract too.
 
 Turn-completion events such as Codex, Claude Code, or Cursor `Stop`, OpenCode
-`session.idle`, and Amp `agent.end` discard only unfinished proposals. They
+`session.idle`, Amp `agent.end`, and Hermes `on_session_end` (which Hermes
+sends at the end of every turn, not only when the session ends) discard only
+unfinished proposals. They
 deliberately preserve successful predecessor history so a reviewed chain can
 span user turns; a late result cannot promote work left pending when the turn
 ended. True session-end, deletion, or reset events atomically discard pending

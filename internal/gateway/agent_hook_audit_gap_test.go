@@ -173,6 +173,9 @@ func TestHookVerdictIsRecordedAfterTheClientDisconnects(t *testing.T) {
 	if decisions != 1 || audited != 1 {
 		t.Fatalf("hook_decision rows = %d, connector-hook rows = %d, want 1 and 1", decisions, audited)
 	}
+	if got := lastHookDecisionAction(t, fixture.path); got != "block" {
+		t.Fatalf("disconnected closed hook audited as %q, want its fail-closed block", got)
+	}
 
 	// Once the disconnect grace has run out the hook's remaining work is
 	// cancelled, but the verdict it returns still gets its audit row.

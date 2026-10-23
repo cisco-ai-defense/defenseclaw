@@ -17,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -247,8 +248,9 @@ func TestRecoveredHookFailModeByDeployment(t *testing.T) {
 						} else if deployment.name == "secure_client" {
 							want, wantMode, reason = "allow", mode, "Secure Client's unset or open fail mode allows recovered errors"
 						} else if deployment.name == "standalone" && failMode == "open" {
-							// The administrator's explicit open (owner decision 2026-10-20).
-							want, wantMode, reason = "allow", mode, "the administrator's open is effective on a managed standalone host"
+							reason = "the administrator's open applies to outages, not recovered evaluator errors"
+						} else if deployment.name == "oss" && failMode == "open" {
+							reason = "a legacy per-user open remains closed on evaluator failure"
 						} else if failMode == "open" && name != "cursor" {
 							want, wantMode, reason = "allow", mode, "explicit open is effective for this connector"
 						} else if failMode == "open" && name == "cursor" {
@@ -294,14 +296,32 @@ func TestRecoveredHookVerdictUsesRegisteredProfiles(t *testing.T) {
 				cfg.Guardrail.Mode, cfg.Guardrail.HookFailMode, cfg.Guardrail.Connector = "action", "closed", name
 				server := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 				response, req := postPanicTestHook(t, server, name, tc.event)
-				mappedAction, mappedWouldBlock := mapHookActionForProfile("block", "action", tc.event, profile.Capabilities, profile, req.Payload)
-				if response["action"] != mappedAction || response["raw_action"] != "block" || response["would_block"] != mappedWouldBlock {
-					t.Fatalf("mapped response=%v, want %s/block/%v", response, mappedAction, mappedWouldBlock)
+				output := panicTestOutput(name, response)
+				if hookexec.LifecycleEvent(name, tc.event) && !terminalLifecycleEvent(name, tc.event) {
+					wire, _ := output.(map[string]interface{})
+					if response["action"] != "allow" || response["raw_action"] != "block" || response["would_block"] != true || lifecycleAnswerRepeats(wire) {
+						t.Fatalf("lifecycle panic response=%v, want a neutral allow", response)
+					}
+					if row := soleHookDecisionForTest(t, store); row.Structured["result"] != "panic" {
+						t.Fatalf("audit result=%v, want one panic row", row.Structured["result"])
+					}
+					return
 				}
-				expected := agentHookResponseForProfile(profile, req, mappedAction, "block", "WARN", "comparison reason for recovered hook evaluation error", nil, "action", mappedWouldBlock, profile.Capabilities)
-				if got, want := normalizedPanicOutput(panicTestOutput(name, response)), normalizedPanicOutput(expected.HookOutput); !reflect.DeepEqual(got, want) {
-					t.Fatalf("hook output=%v, normal verdict output=%v", got, want)
+				if response["action"] != "block" || response["raw_action"] != "block" || response["would_block"] != false || response["mode"] != "action" {
+					t.Fatalf("panic response=%v, want closed block/action", response)
 				}
+				expected := agentHookResponseForProfile(profile, req, "block", "block", "WARN", "comparison reason for recovered hook evaluation error", nil, "action", false, profile.Capabilities)
+				switch {
+				case terminalLifecycleEvent(name, tc.event):
+					if wire, ok := output.(map[string]interface{}); !ok || wire["continue"] != false || wire["stopReason"] == "" {
+						t.Fatalf("Claude lifecycle panic output=%v, want terminal closed failure", output)
+					}
+				default:
+					if got, want := normalizedPanicOutput(output), normalizedPanicOutput(expected.HookOutput); !reflect.DeepEqual(got, want) {
+						t.Fatalf("hook output=%v, normal verdict output=%v", got, want)
+					}
+				}
+				mappedAction, _ := mapHookActionForProfile("block", "action", tc.event, profile.Capabilities, profile, req.Payload)
 				if mappedAction == "block" {
 					denies := panicWireDenies(panicTestOutput(name, response))
 					if name == "amp" {
@@ -317,5 +337,65 @@ func TestRecoveredHookVerdictUsesRegisteredProfiles(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+type panickingResponderConnector struct {
+	connector.Connector
+	provider connector.HookProfileProvider
+	panicked *bool
+}
+
+func (c panickingResponderConnector) HookProfile(opts connector.SetupOpts) connector.HookProfile {
+	profile := c.provider.HookProfile(opts)
+	profile.Respond = func(connector.HookRespondInput) connector.HookRespondOutput {
+		*c.panicked = true
+		panic("injected native response shaper panic")
+	}
+	return profile
+}
+
+func TestHookPanicResponseNativeFallbackAfterResponderPanic(t *testing.T) {
+	for _, tc := range []struct{ name, event string }{
+		{"antigravity", "PreToolUse"},
+		{"antigravity", "Stop"},
+		{"kiro", "PreToolUse"},
+	} {
+		t.Run(tc.name+"/"+tc.event, func(t *testing.T) {
+			name := tc.name
+			original, ok := sharedDefaultRegistry().Get(name)
+			if !ok {
+				t.Fatalf("missing registered %s connector", name)
+			}
+			provider, ok := original.(connector.HookProfileProvider)
+			if !ok {
+				t.Fatalf("%s has no hook profile", name)
+			}
+			panicked := false
+			registry := connector.NewRegistry()
+			registry.RegisterBuiltin(panickingResponderConnector{
+				Connector: original, provider: provider, panicked: &panicked,
+			})
+			cfg := config.DefaultConfig()
+			cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+			cfg.Enterprise.Profile = managed.ProfileSecureClient
+			cfg.Guardrail.Mode = "observe"
+			cfg.Guardrail.HookFailMode = "closed"
+			api := &APIServer{scannerCfg: cfg, connectorRegistry: registry}
+			req := agentHookRequest{ConnectorName: name, HookEventName: tc.event}
+			resp := api.hookPanicResponse(t.Context(), name, req, nil, nil)
+			if hookexec.LifecycleEvent(name, tc.event) {
+				// The lifecycle answer survives a second responder panic
+				// without turning into a veto that repeats the hook.
+				if !panicked || resp.Action != "allow" || !resp.WouldBlock || lifecycleAnswerRepeats(resp.HookOutput) {
+					t.Fatalf("%s responder panic response=%+v, panicked=%t", name, resp, panicked)
+				}
+				return
+			}
+			if !panicked || resp.Action != "block" || resp.Mode != "action" || resp.WouldBlock ||
+				!panicWireDenies(resp.HookOutput) {
+				t.Fatalf("%s responder panic response=%+v, panicked=%t", name, resp, panicked)
+			}
+		})
 	}
 }

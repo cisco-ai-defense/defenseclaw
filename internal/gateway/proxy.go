@@ -618,7 +618,7 @@ func (p *GuardrailProxy) profileModeFor(ctx context.Context, mode, blockMessage 
 	if profileMessage != "" {
 		blockMessage = profileMessage
 	}
-	return normalizeAgentHookMode(profileMode), blockMessage
+	return config.NormalizeHookMode(profileMode), blockMessage
 }
 
 // ApplyGuardrailConfig applies a validated config.yaml guardrail snapshot to

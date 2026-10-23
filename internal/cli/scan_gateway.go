@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,15 +73,11 @@ var scanGatewayEndpoint = func() (string, string, error) {
 	if cfg == nil {
 		return "", "", errors.New("no DefenseClaw config is loaded")
 	}
-	bind := strings.TrimSpace(cfg.Gateway.APIBind)
-	if bind == "" {
-		bind = "127.0.0.1"
-	}
 	token := strings.TrimSpace(cfg.Gateway.ResolvedToken())
 	if token == "" {
 		return "", "", errors.New("no gateway token is configured")
 	}
-	return fmt.Sprintf("http://%s:%d", bind, cfg.Gateway.APIPort), token, nil
+	return "http://" + net.JoinHostPort(gatewayClientHost(cfg), strconv.Itoa(cfg.Gateway.APIPort)), token, nil
 }
 
 type gatewayScanResponse struct {
@@ -126,10 +124,11 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 	request.Header.Set("X-DefenseClaw-Client", "cli")
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("X-DefenseClaw-Token", token)
-	response, err := (&http.Client{
-		Timeout:       5 * time.Minute,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
-	}).Do(request)
+	client, err := gatewayPeerClientForURL(cfg, base, 5*time.Minute)
+	if err != nil {
+		return fmt.Errorf("scan %s: %w", kind, err)
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		return fmt.Errorf("scan %s: the gateway at %s did not answer: %w", kind, base, err)
 	}

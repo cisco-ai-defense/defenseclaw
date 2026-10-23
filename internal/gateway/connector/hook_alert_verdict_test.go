@@ -21,6 +21,8 @@ package connector
 import (
 	"bytes"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,15 +55,16 @@ func TestHostHooksTreatAlertAsAdvisory(t *testing.T) {
 		t.Skip("jq is required")
 	}
 	dir := t.TempDir()
-	if err := WriteHookScriptsWithToken(dir, freeAPIAddr(t), "tok-test"); err != nil {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tok-test" {
+			t.Errorf("unexpected hook authorization")
+		}
+		_, _ = w.Write([]byte(alertVerdict))
+	}))
+	defer server.Close()
+	if err := WriteHookScriptsWithToken(dir, strings.TrimPrefix(server.URL, "http://"), "tok-test"); err != nil {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
-	stubDir := t.TempDir()
-	stub := "#!/bin/sh\nprintf '%s\\n200' " + shellSingleQuoteForTest(alertVerdict) + "\n"
-	if err := os.WriteFile(filepath.Join(stubDir, "curl"), []byte(stub), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	bakeHookPathForTest(t, filepath.Join(dir, "claude-code-hook.sh"), stubDir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 
 	for _, tc := range []struct {
 		script string
@@ -74,8 +77,9 @@ func TestHostHooksTreatAlertAsAdvisory(t *testing.T) {
 		for _, mode := range []string{"closed", "open"} {
 			t.Run(tc.script+"/"+mode, func(t *testing.T) {
 				dcHome := t.TempDir()
+				installNativeGatewayForHookTest(t, dcHome)
 				cmd := exec.Command("bash", append([]string{filepath.Join(dir, tc.script)}, tc.args...)...)
-				cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+dcHome, "DEFENSECLAW_FAIL_MODE="+mode)
+				cmd.Env = append(os.Environ(), "HOME="+dcHome, "DEFENSECLAW_HOME="+dcHome, "DEFENSECLAW_FAIL_MODE="+mode)
 				cmd.Stdin = strings.NewReader(tc.stdin)
 				var stdout, stderr bytes.Buffer
 				cmd.Stdout, cmd.Stderr = &stdout, &stderr

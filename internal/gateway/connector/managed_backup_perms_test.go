@@ -45,12 +45,12 @@ func TestWriteManagedFileBackup_DirIs0o700(t *testing.T) {
 }
 
 func TestCodexExplicitSetupMovesRememberedRoot(t *testing.T) {
-	home := t.TempDir()
+	home := testenv.PrivateTempDir(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	oldRoot := filepath.Join(home, ".codex")
-	newRoot := filepath.Join(home, "dotfiles", "codex")
-	dataDir := filepath.Join(home, ".defenseclaw")
+	oldRoot := home
+	newRoot := testenv.PrivateTempDir(t)
+	dataDir := testenv.PrivateTempDir(t)
 	t.Setenv("CODEX_HOME", oldRoot)
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
@@ -90,6 +90,32 @@ func TestCodexExplicitSetupMovesRememberedRoot(t *testing.T) {
 	}
 	if got := codexHomeDir(); got != newRoot {
 		t.Fatalf("gateway root = %q, want %q", got, newRoot)
+	}
+	// A failed batch after the forward move asks Setup to move this same
+	// registration back. The old backup must again name the enforcing root.
+	t.Setenv("CODEX_HOME", oldRoot)
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", oldRoot)
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("restore previous Codex root: %v", err)
+	}
+	for _, root := range []struct {
+		path     string
+		wantHook bool
+	}{{oldRoot, true}, {newRoot, false}} {
+		raw, err := os.ReadFile(filepath.Join(root.path, "config.toml"))
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if got := bytes.Contains(raw, hookMarker); got != root.wantHook {
+			t.Fatalf("%s hook presence after rollback = %t, want %t", root.path, got, root.wantHook)
+		}
+	}
+	backup, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, "codex", "config.toml"))
+	if err != nil {
+		t.Fatalf("read restored Codex backup: %v", err)
+	}
+	if backup.Path != filepath.Join(oldRoot, "config.toml") {
+		t.Fatalf("rollback backup path = %q, want old root", backup.Path)
 	}
 }
 

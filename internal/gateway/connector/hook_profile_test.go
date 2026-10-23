@@ -50,7 +50,7 @@ func TestHookProfileMatrix(t *testing.T) {
 		// via defenseclaw_extract_trace_context.
 		{"codex", true, NativeOTLPTOMLBlock, true, false, true, true},
 		{"claudecode", true, NativeOTLPEnvBlock, true, true, true, true},
-		{"copilot", true, "", true, true, false, true},
+		{"copilot", true, "", true, false, false, true},
 		// Cursor's native beforeShellExecution and preToolUse events can deny
 		// synchronously. The client has no native ask/HITL response, but action
 		// mode can block and fail closed on the reviewed event contract.
@@ -69,10 +69,14 @@ func TestHookProfileMatrix(t *testing.T) {
 
 	reg := NewDefaultRegistry()
 	opts := SetupOpts{
-		APIAddr:  "127.0.0.1:18970",
-		APIToken: "tok-test",
-		DataDir:  t.TempDir(),
+		APIAddr:           "127.0.0.1:18970",
+		APIToken:          "tok-test",
+		DataDir:           t.TempDir(),
+		ManagedEnterprise: true,
 	}
+	// Native exporter specs are rendered only inside the isolated OpenShell
+	// artifact. Host profiles cannot verify a replaced loopback listener.
+	opts.sandboxNativeOTLP = true
 
 	for _, tc := range cases {
 		tc := tc

@@ -167,6 +167,131 @@ def migrate_config_v9(
     return payload
 
 
+HILT_PREVIEW_WIRE_VERSION: Final = 1
+_HOOK_MODES: Final = frozenset({"action", "observe"})
+_MAX_PREVIEW_PROFILES: Final = 100_000
+_PREVIEW_TEXT = re.compile(r"^[^\x00-\x1f\x7f]{0,256}$")
+
+
+@dataclass(frozen=True)
+class HILTPreviewScope:
+    """The hook mode and HILT block one set of accounts gets for a connector.
+
+    *profile* is "" for the accounts no guardrail profile matches.
+    *follows_connector_hilt* is False when the profile's own HILT block
+    replaces the connector's.
+    """
+
+    profile: str
+    mode: str
+    enabled: bool
+    min_severity: str
+    follows_connector_hilt: bool
+
+
+@dataclass(frozen=True)
+class ConnectorHILTPreview:
+    connector: str
+    base: HILTPreviewScope
+    profiles: tuple[HILTPreviewScope, ...]
+
+
+def connector_hilt_preview(
+    connector: str,
+    *,
+    enabled: bool,
+    min_severity: str,
+    config_path: str,
+    gateway_binary: str | None = None,
+) -> ConnectorHILTPreview:
+    """What saving a connector HILT block does, as the gateway resolves it.
+
+    Runs ``defenseclaw-gateway connector hilt-preview``: it loads config.yaml
+    as the gateway does and resolves the hook mode and HILT of the accounts no
+    guardrail profile matches, and of each profile, with the hook path's own
+    resolvers (the legacy claude_code, codex and connector_hooks modes and the
+    profile overrides included). There is no Python fallback: callers say the
+    preview is unavailable instead.
+    """
+
+    try:
+        binary = gateway_binary if gateway_binary is not None else resolve_trusted_gateway_binary()
+    except UnsafePathError as exc:
+        raise ConfigInspectError(unsafe_gateway_remedy(exc)) from exc
+    if not binary:
+        raise ConfigInspectError("defenseclaw-gateway is not installed; run defenseclaw upgrade")
+    argv = [
+        binary,
+        "connector",
+        "hilt-preview",
+        "--connector",
+        connector,
+        "--enabled=" + ("true" if enabled else "false"),
+        "--min-severity",
+        min_severity,
+        "--config",
+        config_path,
+    ]
+    completed = _run(argv)
+    if completed.returncode != 0:
+        lines = _safe_detail(completed.stderr).splitlines()
+        raise ConfigInspectError(
+            (lines[0].removeprefix("Error: ").strip() if lines else "")
+            or "defenseclaw-gateway could not resolve the preview; run defenseclaw upgrade"
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        # An older gateway has no hilt-preview and prints its help instead.
+        raise ConfigInspectError(
+            "this defenseclaw-gateway cannot resolve the preview; run defenseclaw upgrade"
+        ) from exc
+    return _decode_hilt_preview(payload)
+
+
+def _decode_hilt_preview(payload: Any) -> ConnectorHILTPreview:
+    def incompatible() -> ConfigInspectError:
+        return ConfigInspectError("defenseclaw-gateway returned an incompatible preview; run defenseclaw upgrade")
+
+    def text(value: Any) -> str:
+        if not isinstance(value, str) or _PREVIEW_TEXT.fullmatch(value) is None:
+            raise incompatible()
+        return value
+
+    def scope(value: Any, *, profile: bool) -> HILTPreviewScope:
+        if not isinstance(value, dict):
+            raise incompatible()
+        hilt = value.get("hilt")
+        mode = value.get("mode")
+        follows = value.get("follows_connector_hilt")
+        if not isinstance(hilt, dict) or mode not in _HOOK_MODES or not isinstance(follows, bool):
+            raise incompatible()
+        enabled = hilt.get("enabled")
+        if not isinstance(enabled, bool):
+            raise incompatible()
+        name = text(value.get("profile")) if profile else ""
+        if profile and not name:
+            raise incompatible()
+        return HILTPreviewScope(
+            profile=name,
+            mode=mode,
+            enabled=enabled,
+            min_severity=text(hilt.get("min_severity")).strip().upper(),
+            follows_connector_hilt=follows,
+        )
+
+    if not isinstance(payload, dict) or payload.get("wire_version") != HILT_PREVIEW_WIRE_VERSION:
+        raise ConfigInspectError("defenseclaw-gateway preview protocol is incompatible; run defenseclaw upgrade")
+    profiles = payload.get("profiles")
+    if not isinstance(profiles, list) or len(profiles) > _MAX_PREVIEW_PROFILES:
+        raise incompatible()
+    return ConnectorHILTPreview(
+        connector=text(payload.get("connector")),
+        base=scope(payload.get("base"), profile=False),
+        profiles=tuple(scope(item, profile=True) for item in profiles),
+    )
+
+
 def config_v8_schema() -> str:
     """Return the exact embedded canonical JSON Schema from the Go binary."""
 

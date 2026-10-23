@@ -105,6 +105,9 @@ func TestGatewayV8LoaderStrictParsesBeforeCanonicalActivation(t *testing.T) {
 	if startup == nil || loaded.AuditDB != filepath.Join(directory, config.DefaultAuditDBName) {
 		t.Fatalf("activation startup/path = %+v/%q", startup, loaded.AuditDB)
 	}
+	if string(startup.raw) != raw {
+		t.Fatalf("startup passed migrated bytes instead of the v8 file snapshot: %q", startup.raw)
+	}
 }
 
 // A config_version 8 file that still holds a key the migration moves

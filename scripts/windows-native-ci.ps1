@@ -3905,7 +3905,7 @@ function Assert-PackagedAntigravitySupportedAvailability(
     $result = Invoke-Installed $Launcher @(
         'setup', 'antigravity', '--mode', 'action', '--yes', '--no-restart'
     ) `
-        @(0) 300 $LogPath
+        @(1) 300 $LogPath
     $combined = $result.StdOut + "`n" + $result.StdErr
     if ($combined -match '(?i)not_certified|preview') {
         throw "packaged Antigravity setup emitted a stale support gate or warning: $combined"

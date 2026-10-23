@@ -226,6 +226,73 @@ func (h *osHost) ensure(cfg []byte) *enterprisestatus.Result {
 	return h.run(Options{Action: ActionEnsure, PayloadDir: h.payloadOnce(), ConfigFile: writeTempConfig(h.t, cfg)})
 }
 
+// GAP-0754: a rejected candidate cannot publish its own prerequisite result.
+// Users continue under the previously applied sandbox settings.
+func TestRefusedOpenShellSetupPinKeepsAppliedPrerequisites(t *testing.T) {
+	h := newOSHost(t, "darwin")
+	h.writeExecutables(t, openshell.PackageE2fsprogsDir+"/sbin/mke2fs", openshell.PackageE2fsprogsDir+"/sbin/debugfs", "/usr/local/bin/docker")
+	h.env.Trust = func(string, TrustKind) error { return nil }
+	valid := sandboxConfig(t, "darwin", true, map[string]any{"install": "setup", "driver": "vm", "version": "0.1.5"})
+	requireOK(t, h.ensure(valid))
+	before := h.read(h.env.prerequisitesPath())
+	var record openshell.PrerequisitesRecord
+	if err := json.Unmarshal([]byte(before), &record); err != nil || !record.Ready {
+		t.Fatalf("applied prerequisites = %+v, %v", record, err)
+	}
+	r := h.ensure(sandboxConfig(t, "darwin", true, map[string]any{"install": "setup", "driver": "vm"}))
+	if r.OK || !strings.Contains(fmt.Sprint(r.Errors), "enterprise.openshell.version") {
+		t.Fatalf("missing pin was accepted: %+v", r)
+	}
+	if after := h.read(h.env.prerequisitesPath()); after != before {
+		t.Errorf("refused ensure changed prerequisites.json:\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+// Releases through 1.0.3 refused an enabled unpinned setup config, so no
+// genuine deployment record can authorize one. Even a manually altered
+// record must not make the missing install pin acceptable.
+func TestUnpinnedSetupCannotUseMatchingDeploymentRecord(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newOSHost(t, goos)
+			pinned := sandboxConfig(t, goos, true, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5"})
+			requireOK(t, h.ensure(pinned))
+			beforePrerequisites := h.read(h.env.prerequisitesPath())
+			beforeApplied := h.env.loadOpenShellState().Applied
+			if beforeApplied == nil || beforeApplied.Version != "0.1.5" {
+				t.Fatalf("initial setup state = %+v", beforeApplied)
+			}
+
+			unpinned := sandboxConfig(t, goos, true, map[string]any{"install": "setup", "driver": "docker"})
+			if err := os.WriteFile(h.env.P(h.env.Layout.ConfigPath), unpinned, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			record, err := h.env.loadDeployment()
+			if err != nil {
+				t.Fatal(err)
+			}
+			record.ConfigSHA256 = sha256Bytes(unpinned)
+			if err := h.env.saveDeployment(record); err != nil {
+				t.Fatal(err)
+			}
+
+			r := h.run(Options{Action: ActionEnsure, PayloadDir: h.payloadOnce()})
+			if r.OK || !strings.Contains(fmt.Sprint(r.Errors), "enterprise.openshell.version") {
+				t.Fatalf("matched record bypassed setup pin refusal: errors %+v, warnings %+v", r.Errors, r.Warnings)
+			}
+			if got := h.read(h.env.Layout.ConfigPath); got != string(unpinned) {
+				t.Errorf("refusal changed installed config")
+			}
+			if got := h.env.loadOpenShellState().Applied; got == nil || got.Version != beforeApplied.Version {
+				t.Errorf("refusal changed applied setup: %+v", got)
+			}
+			if got := h.read(h.env.prerequisitesPath()); got != beforePrerequisites {
+				t.Errorf("refusal changed prerequisites")
+			}
+		})
+	}
+}
+
 // payloadOnce stages one payload per host, so repeated ensures see the same
 // binaries.
 func (h *osHost) payloadOnce() string {
@@ -1114,9 +1181,13 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 		old := map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3"}
 		r := h.ensure(sandboxConfig(t, "linux", true, old))
 		requireOK(t, r)
-		if state, _ := rowState(r, "sandbox openshell pin"); !strings.HasPrefix(state, "ok: "+openshell.InstallerVersion) ||
-			!strings.Contains(state, "enterprise.openshell.version pins 0.1.3, which runs no sandbox") || !strings.HasSuffix(state, "set the pin to "+openshell.InstallerVersion) {
-			t.Errorf("pin row = %q", state)
+		// status and verify describe what ensure applied, raised pin
+		// included (GAP-0621).
+		for _, r := range []*enterprisestatus.Result{r, h.run(Options{Action: ActionStatus}), h.run(Options{Action: ActionVerify})} {
+			if state, _ := rowState(r, "sandbox openshell pin"); !strings.HasPrefix(state, "ok: "+openshell.InstallerVersion) ||
+				!strings.Contains(state, "enterprise.openshell.version pins 0.1.3, which runs no sandbox") || !strings.HasSuffix(state, "set the pin to "+openshell.InstallerVersion) {
+				t.Errorf("%s: pin row = %q", r.Action, state)
+			}
 		}
 		if v := h.env.loadOpenShellState().Applied.Version; v != openshell.InstallerVersion {
 			t.Fatalf("applied version = %q", v)

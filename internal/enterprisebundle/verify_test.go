@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 var (
@@ -150,6 +151,38 @@ func TestBundleVerifyRejectsSignedUnknownConfigSetting(t *testing.T) {
 	_, err = enterprisebundle.Verify(context.Background(), f.input(t, b, a))
 	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid || !strings.Contains(err.Error(), "guardrail.rules.definitions") {
 		t.Fatalf("verify accepted a signed unknown setting: %v", err)
+	}
+}
+
+func TestVerifyNamesUnreadableRulePackAsAccountLimit(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	a := anchors(t, "acme", nil, 0, activeKey("k1", f.key.Public()))
+	for _, tc := range []struct {
+		name, code, reason string
+		want               enterprisebundle.Code
+	}{
+		{name: "directory access denied", code: "directory_unreadable", reason: "rule-pack directory cannot be inspected (access denied)", want: enterprisebundle.CodeNotAdmin},
+		{name: "inventory access denied", code: "inventory_unreadable", reason: "rule-pack inventory cannot be read by this account (permission denied)", want: enterprisebundle.CodeNotAdmin},
+		{name: "file access denied", code: "file_unreadable", reason: "component cannot be read by this account (access denied)", want: enterprisebundle.CodeNotAdmin},
+		{name: "other unreadable", code: "directory_unreadable", reason: "rule-pack directory cannot be inspected (I/O error)", want: enterprisebundle.CodeConfigInvalid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := f.input(t, f.bundle, a)
+			in.Digester = func(context.Context, *config.Config, []byte, string, string) (string, error) {
+				return "", fmt.Errorf("global rule pack: %w", &guardrail.RulePackError{Code: tc.code, Path: ".", Reason: tc.reason})
+			}
+			_, err := enterprisebundle.Verify(context.Background(), in)
+			if enterprisebundle.CodeOf(err) != tc.want {
+				t.Fatalf("got %v, want %s", err, tc.want)
+			}
+			if tc.want == enterprisebundle.CodeNotAdmin {
+				for _, part := range []string{"this account", "rule pack", "enterprise bundle verify", "root"} {
+					if !strings.Contains(err.Error(), part) {
+						t.Fatalf("refusal %q lacks %q", err, part)
+					}
+				}
+			}
+		})
 	}
 }
 

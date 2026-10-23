@@ -1042,13 +1042,6 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 	if validated.DataDir == "" {
 		return 0, errors.New("enterprise hooks: managed runtime generation GC requires an exact data directory")
 	}
-	preserve := make(map[string]struct{}, len(opts.ProtectedPreserveGenerationIDs)+1)
-	for _, generationID := range opts.ProtectedPreserveGenerationIDs {
-		if !validWindowsManagedRuntimeGenerationID(generationID) {
-			return 0, errors.New("enterprise hooks: protected managed runtime GC pin is invalid")
-		}
-		preserve[generationID] = struct{}{}
-	}
 	if err := windowsManagedRuntimeSelectorMutationAuthorize(); err != nil {
 		return 0, err
 	}
@@ -1086,13 +1079,14 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 			return err
 		}
 		selected := false
+		selectedGenerationID := ""
 		if exists {
 			if current, ok := windowsManagedRuntimeSelectorTargetForSID(selector, validated.TargetSID); ok {
 				if err := validateWindowsManagedRuntimeSelectorTargetAgainstSnapshot(current, validated); err != nil {
 					return err
 				}
 				selected = true
-				preserve[current.GenerationID] = struct{}{}
+				selectedGenerationID = current.GenerationID
 			}
 		}
 
@@ -1145,6 +1139,14 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 		if err != nil {
 			return err
 		}
+		// Classify every bundle of this target before deleting any. One
+		// refused bundle, the selected one included, leaves the folder as it
+		// was, whatever order the names sort in.
+		type collectable struct {
+			entry windowsManagedRuntimeSelectorTarget
+			data  []byte
+		}
+		var collect []collectable
 		candidates := 0
 		for _, directoryEntry := range entries {
 			connectorName, generationID, ok := parseWindowsManagedRuntimeBundleLeaf(
@@ -1157,9 +1159,11 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 			if candidates > windowsManagedRuntimeGenerationGCMaxCandidates {
 				return errors.New("enterprise hooks: managed runtime generation GC candidate limit exceeded")
 			}
-			if _, keep := preserve[generationID]; keep {
-				continue
-			}
+			// The selected bundle is classified with the rules this GC will
+			// apply once a later publication unselects it, so a retire before
+			// a transaction refuses what that transaction's retire would
+			// refuse after its commit. The hook may still read it, so it is
+			// never deleted here.
 			entry, data, err := loadUnselectedWindowsManagedRuntimeBundle(
 				validated,
 				target,
@@ -1168,7 +1172,13 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 			if err != nil {
 				return err
 			}
-			if err := deleteWindowsManagedRuntimeBundle(entry, target, data); err != nil {
+			if generationID == selectedGenerationID {
+				continue
+			}
+			collect = append(collect, collectable{entry: entry, data: data})
+		}
+		for _, bundle := range collect {
+			if err := deleteWindowsManagedRuntimeBundle(bundle.entry, target, bundle.data); err != nil {
 				return err
 			}
 			removed++
@@ -1206,25 +1216,27 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 			path,
 		)
 	}
+	if bundle.SchemaVersion != windowsManagedRuntimeGenerationSchema {
+		return entry, nil, fmt.Errorf(
+			"enterprise hooks: refusing to collect managed runtime bundle %s: unsupported schema version %d",
+			path, bundle.SchemaVersion,
+		)
+	}
+	if bundle.FailMode != "closed" && bundle.FailMode != "open" {
+		return entry, nil, fmt.Errorf(
+			"enterprise hooks: refusing to collect managed runtime bundle %s: invalid fail mode",
+			path,
+		)
+	}
 	if bundle.DataDir != opts.DataDir ||
 		!sameWindowsEnterprisePath(bundle.DataDir, opts.DataDir) ||
 		bundle.HookExecutable != opts.HookExecutable ||
 		!sameWindowsEnterprisePath(bundle.HookExecutable, opts.HookExecutable) {
-		// Strict mode preserves refuse-on-drift at the GC path too: a
-		// hardened deployment must NOT silently retire an unselected
-		// bundle whose paths do not match the current install. This
-		// path (loadUnselectedWindowsManagedRuntimeBundle, called by
-		// GC) is separate from the selector-removal validator, so the
-		// strict-mode gate added there needs its mirror here.
-		if windowsEnterpriseStandaloneProcess() {
-			// The standalone profile keeps main's refusal: the bulldoze
-			// reclaim below (#1068) is a Secure Client recovery.
-			return entry, nil, fmt.Errorf(
-				"enterprise hooks: refusing to collect a managed runtime bundle with a foreign identity: %s: "+
-					"it names another connector, account, data folder or hook binary than its file name and this deployment do",
-				path,
-			)
-		}
+		// GC reads and deletes only the canonical bundle path under this
+		// authenticated target's data root. A previous install can have named
+		// another data directory or hook binary in that unselected bundle;
+		// neither old path is followed or used as deletion authority. The
+		// connector, SID and generation must still match this owned file.
 		if managed.TrustStrictAncestors() {
 			return entry, nil, fmt.Errorf(
 				"enterprise hooks: refusing to collect managed runtime "+
@@ -1235,16 +1247,9 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 				opts.DataDir, opts.HookExecutable,
 			)
 		}
-		// Bulldoze: a bundle whose Connector + TargetSID + GenerationID
-		// identify it as ours but whose DataDir / HookExecutable point at
-		// a prior scoped install's layout is an orphan from an unsigned
-		// certification cycle. Log a diagnostic and overwrite the in-
-		// memory bundle fields with the current install's canonical
-		// values. The caller is loadUnselectedWindowsManagedRuntimeBundle,
-		// used by GC: once the corrected-identity bundle is validated,
-		// the GC flow DELETES the on-disk bundle at the current DataDir
-		// (no on-disk rewrite). Install's regenerate path writes a fresh
-		// bundle separately when it next publishes a selector entry.
+		// Validate against the current install's paths in memory, then delete
+		// the original file at the authenticated current DataDir. No old path
+		// is read or written, and publication makes a new bundle separately.
 		fmt.Fprintf(os.Stderr,
 			"[enterprise-hooks] reclaiming identity-drifted managed runtime bundle "+
 				"for %s/%s/%s: bundle DataDir=%q HookExecutable=%q, current "+

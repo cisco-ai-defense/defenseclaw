@@ -125,8 +125,8 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 	// old groups at its next spool check instead of for another hour. A
 	// record that still says what this pass found stays: withdrawing it
 	// dropped the cached groups of a user whose strict groups had not
-	// changed, and the request took a possibly weaker default
-	// (default_lookup_failed). So does one the pass could not read
+	// changed, so requests needing them were refused with the missing
+	// group fact named. So does one the pass could not read
 	// (IdentitySpoolWithdrawnByFailedWrite).
 	publish := func(entry account, record IdentitySpoolRecord) {
 		name := entry.key + ".json"
@@ -149,6 +149,8 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 	publishTokenGroups := func(entry account) {
 		if record, changed := IdentitySpoolTokenGroupRecord(entry.previous, entry.previousErr, entry.key, cache.Users[entry.sid],
 			cache.SignedIn[entry.sid], time.Now().UTC()); changed {
+			// Only the token groups are this pass's answer.
+			record = MarkWindowsKeptUPN(record, entry.previous, true)
 			record.ConnectorEmails = emails[entry.key]
 			publish(entry, record)
 		}
@@ -207,9 +209,12 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 		case facts.UPN != "":
 			record.UPNSource = UPNSourceTranslateName
 		}
+		carried := false
 		if entry.previousErr == nil {
 			record = KeepLastKnownUPN(record, entry.previous)
+			carried = facts.UPN == "" && record.Facts.UPN != ""
 		}
+		record = MarkWindowsKeptUPN(record, entry.previous, facts.UPNKept || carried)
 		publish(entry, record)
 	}
 	if entries, err := os.ReadDir(dir); err == nil {

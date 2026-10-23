@@ -21,15 +21,13 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // credentialBundleEnv is a managed test device whose bundle config names
 // the credential ai-defense-api-key.
 func credentialBundleEnv(t *testing.T) (*bundleCLIEnv, *enterprisebundle.Store) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("the Windows device layout needs a registered install; checkSecretBinding is shared with Linux and macOS")
-	}
 	e := newBundleCLIEnv(t)
 	path := filepath.Join(e.in, "config.yaml")
 	raw, err := os.ReadFile(path)
@@ -133,12 +131,12 @@ func TestBundleSignBindsEveryCredentialValue(t *testing.T) {
 		{"--secret-file", "ai-defense-api-key=" + filepath.Join(e.dir, "absent")},
 	} {
 		out, code := runBundle(t, e.signArgs(append([]string{"--out", filepath.Join(e.dir, "bad.dcbundle"), "--key", key, "--key-id", "k1"}, args...)...)...)
-		if code != 2 {
+		if code != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
 			t.Fatalf("sign %v: exit %d, want invalid arguments\n%s", args, code, out)
 		}
 	}
 	if out, code := runBundle(t, "sign", "--attach-sig", signed, "--in", signed, "--out", filepath.Join(e.dir, "x.dcbundle"), "--key-id", "k1",
-		"--public-key", key, "--secret-file", "ai-defense-api-key="+e.secretSource(t, "c")); code != 2 {
+		"--public-key", key, "--secret-file", "ai-defense-api-key="+e.secretSource(t, "c")); code != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
 		t.Fatalf("attach-sig with --secret-file: exit %d\n%s", code, out)
 	}
 }

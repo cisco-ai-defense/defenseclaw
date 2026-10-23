@@ -464,9 +464,23 @@ func (t claudeTarget) Verify(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := newClaudeState(policy, paths)
-	if policy.Ownership == config.MachinePolicyOwnershipOff {
+	if policy.Ownership == config.MachinePolicyOwnershipOff && opts.goos() != "windows" {
 		state.Route = RouteUnsupported
 		return state, nil
+	}
+	if opts.goos() == "windows" {
+		path, err := claudeDropInPath(opts)
+		if err != nil {
+			return state, err
+		}
+		_, exists, err := readPolicyFile(opts, path)
+		if err != nil {
+			return state, err
+		}
+		if !exists {
+			state.conflict("%s does not exist: %s", path, windowsMissingMachineHookDiagnostic("Claude Code"))
+		}
+		verifyWindowsHookExecutable(opts, "Claude Code", &state)
 	}
 	if err := inspectClaude(opts, policy, &state); err != nil {
 		return state, err

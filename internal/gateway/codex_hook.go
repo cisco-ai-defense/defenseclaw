@@ -551,7 +551,7 @@ func (a *APIServer) codexEnabled() bool {
 func (a *APIServer) codexMode(ctx context.Context) string {
 	// The request's guardrail profile, when one applies, replaces the live
 	// configuration (see guardrail_profile.go).
-	return hookModeForConfig(a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()), "codex")
+	return a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()).HookModeForConnector("codex")
 }
 
 func codexResponseFor(event, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) codexHookResponse {

@@ -7,23 +7,17 @@ package connector
 
 import (
 	"bytes"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
-
-// stopCurlStub answers every request with DC_STOP_REPLY: "exit:N" fails the
-// transfer with curl exit N, "STATUS|BODY" answers that status and body.
-const stopCurlStub = `#!/bin/sh
-case "$DC_STOP_REPLY" in
-  exit:*) exit "${DC_STOP_REPLY#exit:}" ;;
-esac
-printf '%s\n%s\n' "${DC_STOP_REPLY#*|}" "${DC_STOP_REPLY%%|*}"
-`
 
 const stopEventNotBlockedLead = "DefenseClaw is not blocking the "
 
@@ -161,17 +155,37 @@ type stopHookRun struct {
 // reply, with automatic gateway start off.
 func runPerUserHookForStop(t *testing.T, c Connector, script string, args []string, stdin, reply string, extraEnv ...string) stopHookRun {
 	t.Helper()
-	hooksDir := t.TempDir()
-	if err := writePerUserHooksForTestFailMode(hooksDir, freeAPIAddr(t), "stop-scoped-token", c, extraEnv); err != nil {
-		t.Fatalf("write hooks: %v", err)
-	}
-	stubDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stubDir, "curl"), []byte(stopCurlStub), 0o755); err != nil {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
 		t.Fatal(err)
 	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if strings.HasPrefix(reply, "exit:") {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
+		statusText, body, ok := strings.Cut(reply, "|")
+		status, err := strconv.Atoi(statusText)
+		if !ok || err != nil || status < 100 || status > 599 {
+			t.Errorf("invalid test gateway reply %q", reply)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	})}
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
+	hooksDir := t.TempDir()
+	if err := writePerUserHooksForTestFailMode(hooksDir, listener.Addr().String(), "stop-scoped-token", c, extraEnv); err != nil {
+		t.Fatalf("write hooks: %v", err)
+	}
 	hookPath := filepath.Join(hooksDir, script)
-	bakeHookPathForTest(t, hookPath, stubDir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 	home := t.TempDir()
+	installNativeGatewayForHookTest(t, home)
 	dataDir := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -182,7 +196,7 @@ func runPerUserHookForStop(t *testing.T, c Connector, script string, args []stri
 			env = append(env, entry)
 		}
 	}
-	env = append(env, "HOME="+home, "DEFENSECLAW_HOME="+dataDir, "DEFENSECLAW_GATEWAY_AUTOSTART=0", "DC_STOP_REPLY="+reply)
+	env = append(env, "HOME="+home, "DEFENSECLAW_HOME="+dataDir, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 	env = append(env, extraEnv...)
 	if strings.Contains(strings.Join(extraEnv, " "), "DC_TEST_NO_TOKEN=1") {
 		tokens, _ := filepath.Glob(filepath.Join(hooksDir, "*.token"))
@@ -196,7 +210,7 @@ func runPerUserHookForStop(t *testing.T, c Connector, script string, args []stri
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err := cmd.Run()
+	err = cmd.Run()
 	log, _ := os.ReadFile(filepath.Join(dataDir, "logs", "hook-failures.jsonl"))
 	return stopHookRun{code: exitCodeOf(err), stdout: stdout.String(), stderr: stderr.String(), log: string(log)}
 }
@@ -243,17 +257,17 @@ func TestPerUserShellHooksLetAFailedStopEventThrough(t *testing.T) {
 			}
 		}
 		open := runPerUserHookForStop(t, tc.c, tc.script, tc.args, tc.stdin, "exit:7", "DEFENSECLAW_FAIL_MODE=open")
-		if open.code != 0 || strings.Contains(open.stderr, stopEventNotBlockedLead) {
-			t.Errorf("%s, fail mode open: exit %d stderr=%q, want the unchanged fail-open allow", tc.name, open.code, open.stderr)
+		if open.code != 0 || !strings.Contains(open.stderr, stopEventNotBlockedLead) {
+			t.Errorf("%s, per-user open request: exit %d stderr=%q, want the neutral stop outcome with closed posture", tc.name, open.code, open.stderr)
 		}
 	}
 
 	codexTool := runPerUserHookForStop(t, NewCodexConnector(), "codex-hook.sh", codexArgs("PreToolUse"), codexPreToolUse, "exit:7", "DEFENSECLAW_FAIL_MODE=closed")
-	if codexTool.code != 2 || strings.Contains(codexTool.stderr, stopEventNotBlockedLead) {
+	if !codexBlockAnswer("PreToolUse", codexTool.code, codexTool.stdout) || strings.Contains(codexTool.stderr, stopEventNotBlockedLead) {
 		t.Errorf("codex PreToolUse: exit %d stderr=%q, want the fail-closed block", codexTool.code, codexTool.stderr)
 	}
 	codexPrompt := runPerUserHookForStop(t, NewCodexConnector(), "codex-hook.sh", codexArgs("UserPromptSubmit"), `{"hook_event_name":"UserPromptSubmit","prompt":"hi"}`, `502|{}`, "DEFENSECLAW_FAIL_MODE=closed")
-	if codexPrompt.code != 2 {
+	if !codexBlockAnswer("UserPromptSubmit", codexPrompt.code, codexPrompt.stdout) {
 		t.Errorf("codex UserPromptSubmit: exit %d stderr=%q, want the fail-closed block", codexPrompt.code, codexPrompt.stderr)
 	}
 	// A per-user Claude Code hook blocks a tool call with its own JSON deny

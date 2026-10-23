@@ -134,6 +134,49 @@ func (rt *sandboxRuntime) listenersReady() error {
 	return nil
 }
 
+// statusListenerAddresses reports only ports this process actually holds.
+// A configured address alone is not proof: another account may have bound it.
+// A managed daemon deliberately releases both ports while idle; its next
+// create binds them, so that release does not make its gateway unavailable.
+func (rt *sandboxRuntime) statusListenerAddresses(st *sandboxapi.Status) {
+	if st == nil {
+		return
+	}
+	rt.listenMu.Lock()
+	defer rt.listenMu.Unlock()
+	var missing, keys []string
+	if !rt.listening["ingress"] {
+		st.IngressAddr = ""
+		missing = append(missing, "ingress")
+		keys = append(keys, "openshell.ingress_port")
+	}
+	if !rt.listening["egress"] {
+		st.EgressAddr = ""
+		missing = append(missing, "egress")
+		keys = append(keys, "openshell.egress_port")
+	}
+	managedIdle := st.Managed != nil && st.Live != nil && *st.Live == 0
+	if st.Enabled && st.Available && len(missing) > 0 && !managedIdle {
+		st.Available = false
+		if st.Reason != "" {
+			st.Reason += "; "
+		}
+		st.Reason += "the sandbox " + strings.Join(missing, " and ") + " listener is not running in this process; check " +
+			strings.Join(keys, " and ") + " for a busy port, free or move it, then restart the DefenseClaw daemon"
+	}
+}
+
+type sandboxStatusController struct {
+	SandboxController
+	runtime *sandboxRuntime
+}
+
+func (c *sandboxStatusController) Status(ctx context.Context) (*sandboxapi.Status, error) {
+	st, err := c.SandboxController.Status(ctx)
+	c.runtime.statusListenerAddresses(st)
+	return st, err
+}
+
 // gatewayState reports the OpenShell gateway connection as the "openshell"
 // part of the sandbox subsystem health.
 func (rt *sandboxRuntime) gatewayState(err error) {
@@ -374,7 +417,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 		return nil, fmt.Errorf("egress proxy: %w", err)
 	}
 	mgr.AttachProxy(proxy)
-	api.SetSandboxController(mgr)
+	api.SetSandboxController(&sandboxStatusController{SandboxController: mgr, runtime: rt})
 	rt.manager, rt.proxy = mgr, proxy
 	feed := mgr.Feed()
 	rt.fleet = mgr

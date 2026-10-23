@@ -168,11 +168,11 @@ func TestHookAuditWriteFailureDeniesTheCall(t *testing.T) {
 			t.Fatalf("busy store: action %v, want block", out["action"])
 		}
 	})
-	t.Run("explicit open keeps the verdict", func(t *testing.T) {
+	t.Run("legacy per-user open still denies", func(t *testing.T) {
 		fixture := newAuditFailureHookFixture(t, "open")
 		fixture.emitter.fail = true
-		if out := fixture.preToolUse(t, "toolu-open"); out["action"] != "allow" {
-			t.Fatalf("open fail mode: action %v, want allow", out["action"])
+		if out := fixture.preToolUse(t, "toolu-open"); out["action"] != "block" {
+			t.Fatalf("per-user open fail mode: action %v, want block", out["action"])
 		}
 	})
 }

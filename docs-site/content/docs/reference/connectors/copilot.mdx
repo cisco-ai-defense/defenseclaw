@@ -16,7 +16,7 @@ Reference for the [Copilot CLI connector](/docs/connectors/copilot). DefenseClaw
 | Platform | Status | Connector path |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | Global or workspace command hooks using the portable DefenseClaw hook. |
-| Native Windows x64 | **Supported** | Copilot's official `powershell` hook field synchronously invokes the protected `defenseclaw-hook.exe`. `preToolUse` supports native ask. You still sign in to GitHub as usual. |
+| Native Windows x64 | **Supported** | Copilot's official `powershell` hook field synchronously invokes the protected `defenseclaw-hook.exe`. You still sign in to GitHub as usual. |
 
 ### Setup details
 
@@ -138,13 +138,13 @@ Not covered yet:
 
 | Contract | Agent versions | Hook script | Events | Can block | Can ask |
 | --- | --- | --- | --- | --- | --- |
-| `copilot-hooks-v1` | `>=1.0.18, <1.0.76` | `v7` | 13 | 4 | 1 |
-| `copilot-hooks-v2` | `>=1.0.76` | `v7` | 14 | 4 | 1 |
+| `copilot-hooks-v1` | `>=1.0.18, <1.0.76` | `v7` | 13 | 4 | 0 |
+| `copilot-hooks-v2` | `>=1.0.76` | `v7` | 14 | 4 | 0 |
 
 | Contract | Events registered | Block events | Ask events |
 | --- | --- | --- | --- |
-| `copilot-hooks-v1` | `sessionStart`, `sessionEnd`, `userPromptSubmitted`, `preToolUse`, `postToolUse`, `permissionRequest`, `agentStop`, `subagentStart`, `subagentStop`, `postToolUseFailure`, `errorOccurred`, `preCompact`, `notification` | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` |
-| `copilot-hooks-v2` | As the previous contract, plus `userPromptTransformed` | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` |
+| `copilot-hooks-v1` | `sessionStart`, `sessionEnd`, `userPromptSubmitted`, `preToolUse`, `postToolUse`, `permissionRequest`, `agentStop`, `subagentStart`, `subagentStop`, `postToolUseFailure`, `errorOccurred`, `preCompact`, `notification` | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | none |
+| `copilot-hooks-v2` | As the previous contract, plus `userPromptTransformed` | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | none |
 
 | Fact | Value |
 | --- | --- |
@@ -159,14 +159,16 @@ Not covered yet:
 
 | Event | Behavior |
 | --- | --- |
-| `preToolUse` | Native ask when policy returns an eligible confirm verdict in action mode. Confirm findings on other events use a non-pausing audit and alert fallback. |
+| `preToolUse` | A policy confirm in action mode returns a native deny and records audit action `block`, with raw action `confirm`. Confirm findings on other events use a non-pausing audit and alert fallback. |
 | `permissionRequest`, `agentStop`, `subagentStop` | Return the official deny or block response. |
 | `postToolUseFailure` | Can add recovery `additionalContext`. Cannot block or reverse the failed tool. |
 | Prompt | No hook can stop a prompt. A matching prompt reaches the model in observe and action mode, and its alert reads `detected in the prompt (cannot block)`. |
 
-## Native ask
+## Confirmations and prompt availability
 
-Only `preToolUse` supports native ask. In action mode a confirm verdict that is eligible becomes Copilot's ask prompt. Copilot's own allow rules and `--allow-all-tools` do not answer it. Where Copilot cannot show a prompt (`copilot -p`) it denies the call. Its hook input does not say which case applies, so the audit log records `confirm` for both. Confirm findings on other events use a non-pausing audit and alert fallback.
+Copilot CLI can accept `ask` on `preToolUse`, but [GitHub's hook reference](https://docs.github.com/en/copilot/reference/hooks-reference) says autopilot denies it without showing a prompt. A `copilot -p` run cannot show a prompt either. The hook input does not prove whether the user can answer, so DefenseClaw denies action-mode confirmations at `preToolUse` and records `action=block`, `raw_action=confirm` with the reason. The separate VS Code Local harness retains its native `ask` response. Confirm findings on other CLI events use a non-pausing audit and alert fallback.
+
+If `disableAllHooks` appears in DefenseClaw's own Copilot hook file, status, doctor and verify fail because no handler in that file runs. Setup or repair removes that switch when it rewrites the owned file. A disabling setting in the user's Copilot settings remains the operator's choice and must be changed there before Setup can complete.
 
 ## Fail mode
 

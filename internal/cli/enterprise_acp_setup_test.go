@@ -87,6 +87,46 @@ func TestEnterpriseACPSetupStateRejectsChangedEditorCommand(t *testing.T) {
 	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); !done {
 		t.Fatalf("unmodified setup is stale: %s", note)
 	}
+	// The reserved entry remains valid, but the editor may launch the same
+	// agent directly through another entry with its own environment.
+	foreign := map[string]any{"agent_servers": map[string]any{
+		acpManagedEntryName("kiro"): map[string]any{
+			"command": guard,
+			"args":    []string{"--token-file", tokenPath, "--contract-lock", lockPath},
+		},
+		"Kiro without guard": map[string]any{
+			"command": "kiro-cli", "args": []string{"acp"},
+			"env": map[string]string{"LD_PRELOAD": "/tmp/operator-library.so"},
+		},
+	}}
+	body, err = json.Marshal(foreign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); done ||
+		!strings.Contains(note, "Kiro without guard") || !strings.Contains(note, "directly") {
+		t.Fatalf("direct same-agent entry reported as setup done: done=%v note=%q", done, note)
+	}
+	for _, entry := range []map[string]any{
+		{"command": "/usr/bin/env", "args": []string{"-S", "kiro-cli", "acp", "--verbose"}},
+		{"command": "/bin/sh", "args": []string{"-c", "LD_PRELOAD=/tmp/library.so kiro-cli acp"}},
+	} {
+		foreign["agent_servers"].(map[string]any)["Kiro without guard"] = entry
+		body, err = json.Marshal(foreign)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(settings, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); done ||
+			!strings.Contains(note, "Kiro without guard") {
+			t.Fatalf("wrapped same-agent entry reported as setup done: done=%v note=%q", done, note)
+		}
+	}
 	writeEntry(filepath.Join(home, "another-command"))
 	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); done || note == "" {
 		t.Fatalf("changed command reported as setup done: done=%v note=%q", done, note)
@@ -360,4 +400,41 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 		t.Fatal(err)
 	}
 	validate("kiro", kiroBinary, result.contractLock)
+}
+
+// A managed revoke leaves the editor entry and the contract lock, and the
+// per-user `defenseclaw acp remove` is refused on a managed computer: the
+// page names the files setup wrote, so the user can remove them (GAP-0657).
+func TestManagedACPPageNamesWhatRevokeLeaves(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the page gives the Unix paths with ~")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "apis", "acp-guard.mdx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := strings.Join(strings.Fields(string(data)), " ")
+	tilde := func(path string) string {
+		return "`~/" + filepath.ToSlash(strings.TrimPrefix(path, home+string(filepath.Separator))) + "`"
+	}
+	var want []string
+	for _, client := range []string{"zed", "jetbrains"} {
+		path, err := acpClientConfigPath(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, tilde(path))
+	}
+	lock := acpContractLockPath(filepath.Join(home, ".defenseclaw"), "zed", "kiro")
+	want = append(want, "`"+acp.ManagedEntryName("kiro")+"`", "`"+filepath.Base(lock)+"`",
+		tilde(filepath.Join(filepath.Dir(lock), "<client>-<agent>.contract-lock.json")),
+		"but not the editor entry or the contract lock", "`defenseclaw acp remove` is a per-user command and is refused on a managed computer")
+	for _, w := range want {
+		if !strings.Contains(page, w) {
+			t.Errorf("reference/apis/acp-guard.mdx does not name %s", w)
+		}
+	}
 }

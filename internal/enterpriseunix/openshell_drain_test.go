@@ -319,3 +319,41 @@ func TestCommandOpsDrain(t *testing.T) {
 		t.Fatalf("a drain that does not answer = %v after %s", err, time.Since(start))
 	}
 }
+
+// TestAnUpgradeReplacesABusyOldDaemonAndKeepsItsGateway (GAP-0868): a
+// sandbox daemon of DefenseClaw 1.0.2 or 1.0.3 that a package upgrade left
+// running exits by itself for its pending restart once none of its
+// sandboxes is ready, provisioning or starting, and its exit stops the
+// account's OpenShell gateway: under a MicroVM in OpenShell's error state,
+// which it does not count, that ended the VM before its user recovered it.
+// The lifecycle now ends that old daemon right away with SIGKILL, so its
+// exit runs nothing, stops no unit (the gateway and the sandboxes keep
+// running), and asks the installed daemon, which counts the MicroVM and
+// keeps the change waiting. An installed daemon is never replaced.
+func TestAnUpgradeReplacesABusyOldDaemonAndKeepsItsGateway(t *testing.T) {
+	h := newOSHost(t, "linux")
+	requireOK(t, h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "docker"})))
+	h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Live: 1, Legacy: true}
+	h.ops.order = nil
+	h.ops.onOp = func(a SandboxAccount, op string) {
+		if op == "stop kill" {
+			h.ops.status[a.UID] = SandboxStatus{Active: true, Live: 1}
+		}
+	}
+	r := h.ensure(sandboxConfigWithTelemetry(t, "linux"))
+	requireOK(t, r)
+	if !slices.Equal(h.ops.order, []string{"stop alice:kill"}) {
+		t.Fatalf("order = %v, want only the old daemon killed (no unit stopped)", h.ops.order)
+	}
+	if !containsLine(r.Changes, "replaced the sandbox daemon of alice") {
+		t.Fatalf("changes = %v", r.Changes)
+	}
+	if entry, waiting := h.env.loadOpenShellState().Pending[fmt.Sprint(h.alice.UID)]; !waiting || entry.Sandboxes != 1 {
+		t.Fatalf("pending = %+v (waiting %v), want the change to wait for the MicroVM", entry, waiting)
+	}
+	h.ops.order = nil
+	requireOK(t, h.ensure(sandboxConfigWithTelemetry(t, "linux")))
+	if len(h.ops.order) != 0 {
+		t.Fatalf("the installed daemon was stopped or killed: %v", h.ops.order)
+	}
+}

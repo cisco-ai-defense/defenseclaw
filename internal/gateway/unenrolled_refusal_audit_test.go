@@ -19,11 +19,15 @@ import (
 func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) {
 	sid := "S-1-5-21-1111-2222-3333-1042"
 	report := refusalpipe.Report{Connector: "claudecode", Reason: refusalpipe.ReasonSIDUnregistered, Tool: "Bash"}
+	codexReport := refusalpipe.Report{Connector: "codex", Reason: refusalpipe.ReasonSIDUnregistered}
 	ctx, cancel := context.WithCancel(context.Background())
 	release := make(chan struct{})
+	writerStarted := make(chan struct{})
+	var writerStart sync.Once
 	var mu sync.Mutex
 	var rows []unenrolledRefusalRow
 	write := func(ctx context.Context, row unenrolledRefusalRow) {
+		writerStart.Do(func() { close(writerStarted) })
 		<-release // a slow account lookup holds the writer past the stop
 		if ctx.Err() != nil {
 			t.Errorf("row written with a canceled context: %+v", row)
@@ -36,10 +40,20 @@ func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) 
 	go func() {
 		defer close(done)
 		runUnenrolledRefusalAudit(ctx, func(ctx context.Context, auditor *unenrolledRefusalAuditor) {
-			for range 50 {
+			auditor.record(sid, report)
+			// The first row must be in the stalled writer before the
+			// remaining rows can test the queued and open-window paths.
+			select {
+			case <-writerStarted:
+			case <-time.After(10 * time.Second):
+				t.Error("refusal writer did not start")
+				cancel()
+				return
+			}
+			for range 49 {
 				auditor.record(sid, report)
 			}
-			auditor.record(sid, refusalpipe.Report{Connector: "codex", Reason: refusalpipe.ReasonSIDUnregistered})
+			auditor.record(sid, codexReport)
 			cancel()
 			<-ctx.Done()
 		}, write)
@@ -53,12 +67,18 @@ func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) 
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	attempts := 0
+	// The first Claude row can join the same queued window as its repeats
+	// when the writer stalls. Either row count is valid; the per-report totals
+	// must survive the stop without loss or duplication.
+	counts := make(map[refusalpipe.Report]int)
 	for _, row := range rows {
-		attempts += row.Attempts
+		if row.SID != sid {
+			t.Fatalf("row has SID %q, want %q", row.SID, sid)
+		}
+		counts[row.Report] += row.Attempts
 	}
-	if len(rows) != 3 || attempts != 51 {
-		t.Fatalf("rows after the stop = %+v (attempts %d), want 3 rows covering all 51 refusals", rows, attempts)
+	if len(counts) != 2 || counts[report] != 50 || counts[codexReport] != 1 {
+		t.Fatalf("rows after the stop = %+v (counts %+v), want 50 Claude and 1 Codex refusal", rows, counts)
 	}
 }
 

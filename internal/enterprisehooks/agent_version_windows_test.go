@@ -72,6 +72,15 @@ func TestDiscoverWindowsAgentVersionClaudeCode(t *testing.T) {
 	}
 }
 
+func TestDiscoverWindowsAgentVersionClaudeLocal(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude", "local", "node_modules", "@anthropic-ai", "claude-code")
+	writeWindowsAgentPackageJSON(t, dir, "2.0.77")
+	if got := discoverWindowsAgentVersion(home, "claudecode"); got != "2.0.77" {
+		t.Fatalf("vendor local claudecode: got %q", got)
+	}
+}
+
 func TestDiscoverWindowsAgentVersionCodex(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@openai", "codex")

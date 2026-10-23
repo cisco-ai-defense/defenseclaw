@@ -285,6 +285,11 @@ func TestManagedCodexStopDuringAGatewayStallNamesTheEventAndTheStall(t *testing.
 	for _, failMode := range []string{"closed", "open"} {
 		t.Run(failMode, func(t *testing.T) {
 			logHome := filepath.Join(t.TempDir(), ".defenseclaw")
+			// A managed hook writes its row only into an existing account
+			// folder; it never creates one (GAP-0593).
+			if err := os.MkdirAll(logHome, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			result, _ := runAgainstGateway(t, "codex", hungGateway(t), func(opts *Options) {
 				managedCodex(opts)
 				opts.ManagedStandalone = true

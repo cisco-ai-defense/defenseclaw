@@ -145,7 +145,7 @@ not-found answers.
 | M-19 | W-58 | A Copilot agent chat in VS Code's Local harness runs without DefenseClaw policy or audit | Partly covered: `ChatHooks` and `ChatEditorPreferCopilotHarness` through an MDM profile (DefenseClaw reports the values but does not write them) send new editor chats to the SDK harness. A per-user Local hook file governs a Local chat. DefenseClaw reports the Copilot managed-settings keys to deploy through device management but does not write them ([R26](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#913](https://github.com/cisco-ai-defense/defenseclaw/issues/913)) | Tracked in #913 |
 | M-20 | W-60 | Devin Desktop runs without DefenseClaw hooks for a user without the `devin` CLI | Enrolled at the bundled Devin CLI version when it is 3000.4.25 or later and not known broken, otherwise reported in `unprotected-agents.json`; Cascade is refused through the machine-level Cascade hooks file ([R28](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#915](https://github.com/cisco-ai-defense/defenseclaw/issues/915)) | Tracked in #915 |
 | M-21 | W-61 | The Kiro IDE's reading of the global `~/.kiro/hooks` file is not live-verified | Partly covered: the IDE is discovered from its `product.json`, an IDE-only user is enrolled, and an IDE before 1.0.182 is reported as `kiro_ide_below_global_hooks_floor` ([R29](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#916](https://github.com/cisco-ai-defense/defenseclaw/issues/916)) | Tracked in #916 |
-| M-22 | — | A user kills, stops or starves their own `defenseclaw-hook` (or a per-user hook script) while an agent waits for it | Not closable from user space: the hook is a user process. Claude Code, Codex and Hermes (killed) then run the call with no DefenseClaw decision or audit row; Copilot stays closed unless every one of its hooks is stopped, and OpenCode and Amp stay closed (residual 8, enterprise R5 and R18). Application control or EDR process protection closes it | Kill and stop drill on the user's hook processes |
+| M-22 | — | A user kills, stops or starves their own `defenseclaw-hook` (or a per-user hook script) while an agent waits for it | Codex and Claude Code run a call after a killed hook or 30-second PreToolUse timeout; no gateway request means no pre-tool audit row. Hermes 0.19/0.20 can run after hook failure; reviewed 0.21 now gets `fail_closed: true` on `pre_tool_call` after setup and agent restart, closing timeout and spawn failure but not a killed hook. Copilot timeout can fail open at `preToolUse`, though a later permission hook may deny; OpenCode and Amp block in the reviewed paths; Kiro CLI 2.x timeout and Antigravity without a documented on-timeout deny setting remain at risk (enterprise R5, R6 and R18). Status and verify warn `hook_process_fail_open` and report `security_complete: false` for the affected enabled connectors. Application control or EDR process protection is the remaining prevention for Codex and Claude Code | Kill and stop drill on the user hook processes after upgrade and agent restart |
 | M-24 | — | A standard user kickstarts the on-demand `apply` or `verify` LaunchDaemon | Accepted: the jobs run fixed, idempotent root work from root-owned inputs; the lifecycle lock serializes them with administrator runs (residual 9) | `launchctl kickstart` as a standard user |
 | M-25 | — | A standard user hard-links root-owned DefenseClaw files into their home | Accepted: a link keeps the file's owner and mode, and the files DefenseClaw refuses with more than one link are in directories standard users cannot search (residual 10) | Hard-link attempts as a standard user; `verify` and `repair` |
 | M-26 | — | A user starts a per-user agent with another config root or a mode that skips user configuration (Amp with `XDG_CONFIG_HOME`, Hermes with `--safe-mode` or `HERMES_HOME`), so DefenseClaw's registration is never loaded | Not closable by DefenseClaw: the guardian repairs only the default location and cannot see a process's environment or command line, so the session is not inspected, logged or repaired, and status and verify keep the user's target ready (residual 1, enterprise R1). Application control over how users launch these agents closes it | Alternate config root and launch flag drill per connector |
@@ -209,11 +209,16 @@ not-found answers.
    ([R18](ENTERPRISE-THREAT-MODEL.md#residual-risks), M-22). With the
    user's own hook processes killed or stopped, Claude Code and Codex run
    the tool call (a killed hook is a non-2 exit; a stopped one times out
-   after 30 s), Hermes does for a killed
-   `pre_tool_call` hook (R5); Copilot stays closed unless every one of its
-   hooks is stopped, and OpenCode and Amp stay closed. Closing it needs the vendor
-   to treat a failed or timed-out hook as a deny, or application control or
-   EDR that stops users from signalling the hook.
+   after 30 s). Hermes 0.19/0.20 can also run after a killed
+   `pre_tool_call` hook; the reviewed 0.21 contract blocks timeout and
+   spawn failure after setup and agent restart, but a killed hook can
+   still fail open on its non-2 exit (R5). Copilot
+   `preToolUse` timeout is non-blocking, though a later permission hook may
+   deny. OpenCode and Amp block in the reviewed paths; Kiro CLI 2.x
+   timeout and Antigravity without a documented on-timeout deny setting
+   remain at risk. Application control or EDR that stops user signals remains
+   the Codex and Claude Code
+   prevention; `status` and `verify` expose the risk.
 9. A standard user can start the root on-demand LaunchDaemons
    `com.cisco.defenseclaw.apply` (runs `enterprise macos ensure`) and
    `com.cisco.defenseclaw.verify` with

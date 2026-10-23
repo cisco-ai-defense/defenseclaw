@@ -121,6 +121,7 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 			}
 			data, err = MarshalClaudeMCPSpoolUnreadable(key, ClaudeStateUnreadable{
 				User: strings.TrimSpace(target.User), Home: home, Path: unreadablePath, Reason: err.Error(),
+				SignedOut: IsWindowsTargetSessionUnavailable(err),
 			})
 		} else {
 			data, err = MarshalClaudeMCPSpoolRecord(key, servers)
@@ -230,7 +231,12 @@ func windowsClaudeStateServers(sid, home string, logf func(string, ...any)) ([]c
 		return nil
 	})
 	if err != nil {
-		// Token and profile failures must never look like a missing .claude.json.
+		// Token and profile failures must never look like a missing
+		// .claude.json; only a signed-out account stays recognizable.
+		var signedOut *WindowsTargetSessionUnavailableError
+		if errors.As(err, &signedOut) {
+			return nil, statePath, fmt.Errorf("read Claude Code projects as enrolled user: %w", signedOut)
+		}
 		return nil, statePath, fmt.Errorf("read Claude Code projects as enrolled user: %v", err)
 	}
 	if parseErr != nil {

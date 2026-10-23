@@ -9,6 +9,12 @@ keywords:
 
 `defenseclaw setup splunk` has three independent modes. Each adds its own destination, so you can run more than one.
 
+Each Splunk destination keeps its HEC token under its own reference in `~/.defenseclaw/.env`, so setting up one never changes another's token. Remote setup takes the token only from `--hec-token`, `DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN` or the prompt, never from a token saved for another destination.
+
+A destination is local Splunk only if local setup created it: setup records the container it started in that destination. Every other Splunk destination is remote, whatever its address, including a remote Splunk reached through an SSH tunnel on `127.0.0.1`. `setup splunk --disable --logs` disables only the recorded local destination, and `--disable --enterprise` disables the others.
+
+A local destination from DefenseClaw 1.0.3 or earlier has no record, so it counts as remote and keeps working unchanged. If local setup finds a destination it did not record under the name it uses, or one that uses the local token reference, it stops before starting the container and names the collision. Remove an older local destination with `defenseclaw setup observability remove <name> --yes` and run local setup again. Give a remote destination its own token reference by setting it up again with an independent token. Until local setup has recorded a destination, `setup splunk --disable --logs` leaves the local container running while any other Splunk destination is enabled, and names each one with the `setup observability disable <name>` command to run first.
+
 | Mode | Use it for | What it sends |
 | --- | --- | --- |
 | `--logs` | A local demo | Logs to a Splunk container in Docker, with the bundled app |
@@ -17,7 +23,7 @@ keywords:
 
 ## Before you start
 
-- For `--logs`: Docker running, and ports 8000 and 8088 free. On Windows, Docker Desktop with Linux containers.
+- For `--logs`: Docker running on a Linux x86-64 engine, and ports 8000 and 8088 free. On Windows, use Docker Desktop with Linux containers. The bundled `splunk/splunk:10.2.0` image is published for `linux/amd64`; use `--enterprise` with an existing Splunk server from another architecture.
 - For `--enterprise`: a HEC URL, a HEC token, and an index created ahead of time.
 - For `--o11y`: your realm (for example `us1`) and an access token.
 
@@ -31,9 +37,11 @@ keywords:
 
    {/* needs-live-capture: output of `setup splunk --logs` (Docker not run on the shared dev host) */}
 
-   Setup exits nonzero if Docker is missing, its daemon is stopped, or a required port is busy. Fix the reported prerequisite and run the command again.
+   Setup exits nonzero if Docker is missing, its daemon is stopped, a required port is busy, or the image registry cannot resolve the pinned tag. Fix the reported prerequisite and run the command again.
 
    Setup starts Splunk in Free mode, installs the **DefenseClaw Local Mode** app, and adds a `splunk_hec` destination for index `defenseclaw_local`. Open [http://localhost:8000](http://localhost:8000). The HEC token stays hidden unless you pass `--show-credentials`.
+
+   Setup reports ready only after the installed app, Web UI and HEC are available. If startup fails, repair the reported local stack problem and run the setup command again.
 
 ## Splunk Enterprise
 
@@ -98,7 +106,7 @@ defenseclaw setup splunk --disable --enterprise
 defenseclaw setup splunk --disable --o11y
 ```
 
-Each command disables its own destination and leaves the others alone. `--logs` also stops the local container.
+Each command disables its own destination and leaves the others alone. `--logs` also stops the local container once the relevant destinations are disabled. If a destination could not be disabled, the container keeps running and the command names the destination to resolve. An enabled destination that local setup did not record also keeps the container running with `--logs` (see above).
 
 ## If it fails
 

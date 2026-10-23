@@ -352,6 +352,35 @@ class TestPluginInstall(PluginCommandTestBase):
         hint.assert_not_called()
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_codex_install_refuses_undiscoverable_copy_and_default_skips_it(self, mock_scan):
+        mock_scan.return_value = self._clean_result()
+        roots = {
+            "codex": os.path.join(self.tmp_dir, ".codex", "plugins", "cache"),
+            "openclaw": os.path.join(self.tmp_dir, "openclaw", "extensions"),
+        }
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [roots[connector or "codex"]]  # type: ignore[method-assign]
+        src = os.path.join(self.tmp_dir, "source", "native-plugin")
+        os.makedirs(os.path.join(src, ".codex-plugin"))
+        with open(os.path.join(src, ".codex-plugin", "plugin.json"), "w", encoding="utf-8") as handle:
+            json.dump({"name": "native-plugin", "version": "0.0.1"}, handle)
+
+        explicit = self._invoke_install(["install", src, "--connector", "codex"])
+        self.assertEqual(explicit.exit_code, 1, explicit.output)
+        self.assertIn("Codex", explicit.output)
+        self.assertIn("marketplace", explicit.output)
+        self.assertFalse(os.path.exists(os.path.join(roots["codex"], "native-plugin")))
+        mock_scan.assert_not_called()
+
+        self.app.cfg.active_connectors = lambda: ["codex", "openclaw"]  # type: ignore[method-assign]
+        default = self._invoke_install(["install", src])
+        self.assertEqual(default.exit_code, 0, default.output)
+        self.assertIn("skipping connector=codex", default.output)
+        self.assertFalse(os.path.exists(os.path.join(roots["codex"], "native-plugin")))
+        self.assertTrue(os.path.isdir(os.path.join(roots["openclaw"], "native-plugin")))
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_remove_deletes_the_copy_install_put_in_the_claude_cache(self, mock_scan):
         # GAP-2152: remove found nothing at <cache>/<name>, yet a reinstall
         # refused because the copy was there.
@@ -379,11 +408,9 @@ class TestPluginInstall(PluginCommandTestBase):
         self.assertEqual(self.invoke(["remove", "mkt"]).exit_code, 1)
         self.assertTrue(os.path.isdir(os.path.join(cache, "mkt")))
 
-    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
-    def test_remove_deletes_the_codex_cache_copy_of_a_fanned_out_install(self, mock_scan):
-        # GAP-2152: a bare install also copies to Codex's cache; bare and
-        # --connector codex remove must find that copy too.
-        mock_scan.return_value = self._clean_result()
+    def test_remove_deletes_legacy_flat_codex_cache_copy(self):
+        # Older installs could leave an invisible flat cache copy. Both bare
+        # and scoped removal must still find it after new installs refuse it.
         roots = {
             "claudecode": os.path.join(self.tmp_dir, "claude-plugins", "cache"),
             "codex": os.path.join(self.tmp_dir, "codex-plugins", "cache"),
@@ -393,14 +420,15 @@ class TestPluginInstall(PluginCommandTestBase):
         self.app.cfg.plugin_dirs = lambda connector=None: [roots[connector or "claudecode"]]  # type: ignore[method-assign]
         src = self._create_plugin_dir("fan-plugin")
 
-        installed = self._invoke_install(["install", src])
-        self.assertEqual(installed.exit_code, 0, installed.output)
-        self.assertIn("Remove this copy: defenseclaw plugin remove fan-plugin\n", installed.output)
+        for root in roots.values():
+            os.makedirs(root, exist_ok=True)
+            shutil.copytree(src, os.path.join(root, "fan-plugin"))
         self.assertEqual(self.invoke(["remove", "fan-plugin"]).exit_code, 0)
         for root in roots.values():
             self.assertFalse(os.path.exists(os.path.join(root, "fan-plugin")))
 
-        self.assertEqual(self._invoke_install(["install", src]).exit_code, 0)
+        for root in roots.values():
+            shutil.copytree(src, os.path.join(root, "fan-plugin"))
         removed = self.invoke(["remove", "fan-plugin", "--connector", "codex"])
         self.assertEqual(removed.exit_code, 0, removed.output)
         self.assertFalse(os.path.exists(os.path.join(roots["codex"], "fan-plugin")))
@@ -483,7 +511,7 @@ class TestPluginInstallConnectorHelp(unittest.TestCase):
         normalized = " ".join(result.output.split())
         self.assertIn("Install into one configured connector", normalized)
         self.assertIn(
-            "Default: every configured connector that exposes a plugin directory",
+            "Default: every configured connector with a supported install directory",
             normalized,
         )
 
@@ -2216,16 +2244,17 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertIn("ambiguous", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
-    def test_bare_install_materializes_every_connector_dir(self, mock_scan):
+    def test_bare_install_skips_codex_and_installs_supported_connector(self, mock_scan):
         mock_scan.side_effect = lambda path, **_kwargs: self._clean_scan_result(path)
         src = self._create_plugin_dir("fresh")
 
         result = self.invoke(["install", src])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertTrue(os.path.isdir(os.path.join(self.codex_root, "fresh")))
+        self.assertIn("skipping connector=codex", result.output)
+        self.assertFalse(os.path.isdir(os.path.join(self.codex_root, "fresh")))
         self.assertTrue(os.path.isdir(os.path.join(self.hermes_root, "fresh")))
-        self.assertEqual(mock_scan.call_count, 2)
+        self.assertEqual(mock_scan.call_count, 1)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_install_connector_narrows_materialization(self, mock_scan):

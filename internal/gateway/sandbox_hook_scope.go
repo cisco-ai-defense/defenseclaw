@@ -122,7 +122,7 @@ func sandboxProfileHookMode(ctx context.Context, connectorName string) string {
 	if mode == "" {
 		return ""
 	}
-	return normalizeAgentHookMode(mode)
+	return config.NormalizeHookMode(mode)
 }
 
 // hookCWDForContext resolves a payload working directory: unchanged host

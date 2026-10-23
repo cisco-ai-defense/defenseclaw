@@ -190,3 +190,15 @@ func readAccountEnvironmentKey(root registry.Key, path string) ([]accountEnvValu
 	}
 	return out, nil
 }
+
+// accountEnvironmentEvidence names no other home on Windows: the account's
+// persistent environment is what accountHomeDir resolved the home from.
+func accountEnvironmentEvidence(string) ([]homeEvidence, error) {
+	return nil, nil
+}
+
+// OverrideAccountEnvironmentForTest is a no-op on Windows, where no
+// host-wide environment evidence is read.
+func OverrideAccountEnvironmentForTest(string) (restore func()) {
+	return func() {}
+}

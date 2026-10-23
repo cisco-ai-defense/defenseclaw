@@ -561,10 +561,10 @@ func TestIdentityRecordStaysForEveryCallerTheGatewayStillAccepts(t *testing.T) {
 			manifestMode: true, eligible: staleBob, kept: true, listed: true},
 		{name: "a machine-policy connector, excluded, an old row", exclude: []string{"bob"}, machine: claude,
 			rows: []enterpriseHookReconcileRow{bobRow}, kept: true, listed: true},
-		{name: "a machine-policy connector, excluded, an unlisted record", exclude: []string{"bob"}, machine: claude, kept: true},
+		{name: "a machine-policy connector, excluded, an unlisted record", exclude: []string{"bob"}, machine: claude, kept: true, listed: true},
 		{name: "a machine-policy connector under unenrolled_users inspect, excluded", exclude: []string{"bob"},
-			machine: claude, unenrolled: config.EnterpriseUnenrolledInspect, kept: true},
-		{name: "the runtime descriptor does not read, excluded", exclude: []string{"bob"}, machine: unreadable, kept: true},
+			machine: claude, unenrolled: config.EnterpriseUnenrolledInspect, kept: true, listed: true},
+		{name: "the runtime descriptor does not read, excluded", exclude: []string{"bob"}, machine: unreadable, kept: true, listed: true},
 		// The gateway refuses bob's hook calls.
 		{name: "out of the manifest, not exempt, no machine-policy connector",
 			manifestMode: true, eligible: staleBob},

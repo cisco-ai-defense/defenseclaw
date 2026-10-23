@@ -478,8 +478,11 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 			}
 		})
 	}
-	if got := proxyShouldBindForConfiguredConnector(nil); !got {
-		t.Errorf("proxyShouldBindForConfiguredConnector(nil) = %v, want true", got)
+	if got := proxyShouldBindForConfiguredConnector(nil); got {
+		t.Errorf("proxyShouldBindForConfiguredConnector(nil) = %v, want false", got)
+	}
+	if got := proxyShouldBindForConfiguredConnector(&config.Config{}); got {
+		t.Errorf("proxyShouldBindForConfiguredConnector(zero config) = %v, want false", got)
 	}
 }
 
@@ -3872,7 +3875,7 @@ func TestAPIPolicyDirHotReloadUsesLiveGeneration(t *testing.T) {
 	}
 }
 
-func TestAPIPolicyReloadWithoutPolicyDirAppliesManagedConfig(t *testing.T) {
+func TestAPIPolicyReloadWithoutPolicyDirRefusesManagedConfig(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	logger := audit.NewLogger(capture.store)
 	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: runtime})
@@ -3884,14 +3887,14 @@ func TestAPIPolicyReloadWithoutPolicyDirAppliesManagedConfig(t *testing.T) {
 	api.SetPolicyReloader(func() error { called++; return nil })
 	w := httptest.NewRecorder()
 	api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
-	if w.Code != http.StatusOK || called != 1 {
-		t.Fatalf("reload = %d %s, calls = %d; want successful synchronous reload", w.Code, w.Body.String(), called)
+	if w.Code != http.StatusForbidden || called != 0 || !strings.Contains(w.Body.String(), managedBundlePolicyReloadRefusal) {
+		t.Fatalf("reload = %d %s, calls = %d; want signed-bundle refusal without reload", w.Code, w.Body.String(), called)
 	}
 	api.SetPolicyReloader(func() error { return errors.New("guardrail generation rejected") })
 	w = httptest.NewRecorder()
 	api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
-	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "guardrail generation rejected") {
-		t.Fatalf("rejected reload = %d %s; want failure", w.Code, w.Body.String())
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), managedBundlePolicyReloadRefusal) {
+		t.Fatalf("rejected reload = %d %s; want signed-bundle refusal", w.Code, w.Body.String())
 	}
 }
 
@@ -4337,6 +4340,9 @@ func TestInspectToolHILTUnsupportedFailsClosed(t *testing.T) {
 	cfg.Guardrail.HILT.Enabled = true
 	cfg.Guardrail.HILT.MinSeverity = "HIGH"
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
+	// This test exercises approval delivery, not the generic endpoint's
+	// 200 ms scan deadline. Keep the scan alive under race/CI load.
+	api.inspectToolScanTimeout = 5 * time.Second
 
 	_, verdict := postInspect(t, api,
 		`{"tool":"shell","args":{"command":"systemctl enable backdoor.service"},"session_id":"sess-1"}`)
@@ -5934,16 +5940,14 @@ func TestTokenAuth_OTLPScopedTokensCannotCrossConnectorNamespaces(t *testing.T) 
 
 func TestTokenAuth_AcceptsClaudeRenderedOTLPAuthorization(t *testing.T) {
 	const scopedToken = "claude-scoped-token"
-	profile := connector.NewClaudeCodeConnector().HookProfile(connector.SetupOpts{
-		APIAddr:       "127.0.0.1:18970",
-		OTLPPathToken: scopedToken,
-	})
-	if profile.NativeOTLP == nil {
-		t.Fatal("Claude profile has no native OTLP configuration")
-	}
-	env, err := profile.NativeOTLP.EnvBlock()
-	if err != nil {
-		t.Fatalf("render Claude OTLP environment: %v", err)
+	// Host setup no longer renders a native exporter (it cannot verify the
+	// loopback listener), but a Claude Code process started under 0.8.10 to
+	// 1.0.3 keeps exporting with its persisted literal header block until it
+	// restarts. That released shape must still authenticate while its scoped
+	// credential exists.
+	env := map[string]string{
+		"OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer " + scopedToken +
+			",x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
 	}
 
 	// Claude Code consumes its persisted OTEL_EXPORTER_OTLP_HEADERS value as
@@ -6734,7 +6738,7 @@ func TestHookScopedTokenRevalidatesDeletionAndRotation(t *testing.T) {
 	}
 }
 
-func TestOrphanHookScopedTokenRotationInvalidatesOldValueAndRollbackRestoresIt(t *testing.T) {
+func TestOrphanHookScopedTokenRevocationInvalidatesOldValueAndRollbackRestoresIt(t *testing.T) {
 	dataDir := t.TempDir()
 	oldToken, err := connector.EnsureHookAPIToken(dataDir, "opencode")
 	if err != nil {
@@ -6750,25 +6754,15 @@ func TestOrphanHookScopedTokenRotationInvalidatesOldValueAndRollbackRestoresIt(t
 	if err != nil {
 		t.Fatalf("HookAPITokenFilePath(opencode): %v", err)
 	}
-	newToken := strings.Repeat("b", 64)
-	if newToken == oldToken {
-		t.Fatal("rotation fixture unexpectedly reused the old token")
-	}
-	if err := os.WriteFile(tokenPath, []byte(newToken+"\n"), 0o600); err != nil {
-		t.Fatalf("publish replacement orphan hook token: %v", err)
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatalf("revoke orphan hook token: %v", err)
 	}
 	if api.hookAPITokenMatches("opencode", oldToken) {
-		t.Fatal("old orphan hook token remained valid after successful rotation")
-	}
-	if !api.hookAPITokenMatches("opencode", newToken) {
-		t.Fatal("replacement orphan hook token was rejected")
+		t.Fatal("old orphan hook token remained valid after successful revocation")
 	}
 
 	if err := os.WriteFile(tokenPath, []byte(oldToken+"\n"), 0o600); err != nil {
 		t.Fatalf("restore prior orphan hook token: %v", err)
-	}
-	if api.hookAPITokenMatches("opencode", newToken) {
-		t.Fatal("replacement orphan hook token remained valid after rollback")
 	}
 	if !api.hookAPITokenMatches("opencode", oldToken) {
 		t.Fatal("exact prior orphan hook token was not accepted after rollback")

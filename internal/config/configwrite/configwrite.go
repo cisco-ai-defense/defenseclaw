@@ -204,6 +204,15 @@ func ReplaceDocument(ctx context.Context, path string, raw []byte, opt Options) 
 	})
 }
 
+// PublicationOccurred reports whether a failed write replaced config.yaml
+// before it returned. A gateway may have loaded those bytes even if the
+// writer restored the file itself; a prepublication error needs no undo.
+func PublicationOccurred(err error) bool { return cfgtxn.PublicationOccurred(err) }
+
+// AfterPublication preserves the phase of a failure after a caller-owned
+// config publication. ReplaceDocument marks its own postpublication errors.
+func AfterPublication(err error) error { return cfgtxn.AfterPublication(err) }
+
 // Locked runs install with config.yaml.lock held and then records the
 // bytes now at path in config.generation.json. It is for writers that
 // install the file themselves under their own transaction, such as the

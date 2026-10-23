@@ -2609,8 +2609,8 @@ def test_trust_check_codex_standalone_symlink_requires_opt_in(monkeypatch, tmp_p
 def test_first_installed_precedence():
     assert ad.first_installed(_discovery("claudecode"), "claudecode") == "claudecode"
     assert ad.first_installed(_discovery(*ad.DISCOVERABLE_CONNECTORS), "codex") == "codex"
-    assert ad.first_installed(_discovery(), "retired-example") == "codex"
-    assert ad.first_installed(_discovery(), "codex") == "codex"
+    assert ad.first_installed(_discovery(), "retired-example") == ""
+    assert ad.first_installed(_discovery(), "codex") == ""
     assert ad.first_installed(_discovery("openclaw"), "not-real") == "openclaw"
 
 

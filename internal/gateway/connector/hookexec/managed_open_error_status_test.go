@@ -81,7 +81,7 @@ func TestStandaloneManagedOpenBlocksErrorStatusesThatAreNotAnOutage(t *testing.T
 // The 429 half of the same review: a busy gateway whose Retry-After does not
 // fit the answer budget (or whose wait the budget cuts off) answered the
 // call, so an open standalone hook blocks it. A per-user hook in fail mode
-// open keeps its documented allow for a gateway that gave no answer.
+// open does not turn a missed tool-call deadline into an unaudited allow.
 func TestStandaloneManagedOpenBlocksABusyGatewayPastTheAnswerBudget(t *testing.T) {
 	for _, retryAfter := range []string{"3", "1"} {
 		t.Run("retry-after "+retryAfter, func(t *testing.T) {
@@ -99,8 +99,8 @@ func TestStandaloneManagedOpenBlocksABusyGatewayPastTheAnswerBudget(t *testing.T
 				t.Fatalf("open standalone hook and a busy gateway: code=%d stdout=%q stderr=%q", standalone.code, standalone.stdout, standalone.stderr)
 			}
 			perUser, _ := runAgainstGateway(t, "codex", addr, func(o *Options) { o.FailMode = "open" })
-			if blocked(perUser) {
-				t.Fatalf("per-user open hook changed: code=%d stdout=%q stderr=%q", perUser.code, perUser.stdout, perUser.stderr)
+			if !blocked(perUser) {
+				t.Fatalf("per-user open hook allowed an unanswered call: code=%d stdout=%q stderr=%q", perUser.code, perUser.stdout, perUser.stderr)
 			}
 		})
 	}

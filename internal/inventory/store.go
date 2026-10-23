@@ -622,6 +622,33 @@ var inventoryMigrations = []invMigration{
 			return nil
 		},
 	},
+	{
+		// v9 keeps the UPN of the account each agent identity was last seen
+		// for and counts its sub-agent instances, so agent-identities names
+		// both on every OS (rel-1-0-4 GAP-0596). Rows written before, and by
+		// a build rolled back to, keep no UPN and count no sub-agents.
+		description: "v9: record the UPN and the sub-agents of each agent identity",
+		apply: func(ex invDBExecer) error {
+			columns := []struct{ name, ddl string }{
+				{"user_upn", `ALTER TABLE agent_identities ADD COLUMN user_upn TEXT`},
+				{"subagents_seen", `ALTER TABLE agent_identities ADD COLUMN subagents_seen INTEGER NOT NULL DEFAULT 0`},
+				{"last_subagent_id", `ALTER TABLE agent_identities ADD COLUMN last_subagent_id TEXT`},
+			}
+			for _, column := range columns {
+				var present int
+				if err := ex.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('agent_identities') WHERE name = ?`, column.name).Scan(&present); err != nil {
+					return fmt.Errorf("ai inventory: v9 migration: %w", err)
+				}
+				if present > 0 {
+					continue
+				}
+				if _, err := ex.Exec(column.ddl); err != nil {
+					return fmt.Errorf("ai inventory: v9 migration: %w", err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 type invMigration struct {

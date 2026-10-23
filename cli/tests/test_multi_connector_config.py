@@ -165,20 +165,20 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertTrue(g.effective_hilt("codex").enabled)
         self.assertEqual(g.effective_hilt("codex").min_severity, "LOW")
 
-    def test_cursor_fail_mode_tracks_mode_despite_stored_open(self):
+    def test_cursor_fail_mode_stays_closed_despite_stored_open(self):
         g = GuardrailConfig(
             mode="observe",
             hook_fail_mode="open",
             connectors={"cursor": PerConnectorGuardrailConfig(hook_fail_mode="open")},
         )
-        self.assertEqual(g.effective_hook_fail_mode("cursor"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("cursor"), "closed")
         g.connectors["cursor"].mode = "action"
         self.assertEqual(g.effective_hook_fail_mode("cursor"), "closed")
 
     def test_empty_block_inherits_global(self):
         g = self._cfg()
         self.assertEqual(g.effective_mode("empty"), "observe")
-        self.assertEqual(g.effective_hook_fail_mode("empty"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("empty"), "closed")
         self.assertEqual(g.effective_block_message("empty"), "global-msg")
         self.assertEqual(g.effective_rule_pack("empty"), "strict")
         self.assertFalse(g.effective_hilt("empty").enabled)
@@ -187,7 +187,7 @@ class TestEffectiveResolvers(unittest.TestCase):
     def test_unknown_and_empty_connector_use_global(self):
         g = self._cfg()
         self.assertEqual(g.effective_mode("nope"), "observe")
-        self.assertEqual(g.effective_hook_fail_mode(""), "open")
+        self.assertEqual(g.effective_hook_fail_mode(""), "closed")
 
     def test_config_version_9_rule_pack_resolves_and_a_global_selection_clears_it(self):
         from defenseclaw.commands.cmd_setup import _apply_rule_pack_selection
@@ -237,10 +237,10 @@ class TestEffectiveResolvers(unittest.TestCase):
             },
         )
         self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
-        # The global value applies in observe mode outside Secure Client.
+        # A per-user hook stays closed in observe mode.
         self.assertEqual(g.effective_hook_fail_mode("claudecode"), "closed")
         g.hook_fail_mode = "open"
-        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "closed")
         self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
         # Under Secure Client an explicit value wins too: the global closed
         # closes a connector without its own value, and an unset global is

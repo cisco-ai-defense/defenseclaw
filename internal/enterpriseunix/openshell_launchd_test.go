@@ -81,7 +81,17 @@ func (f *fixtureLaunchdRunner) Run(ctx context.Context, name string, args ...str
 		return CommandResult{Stdout: []byte(body.String())}, nil
 	case "print":
 		if label == "" {
-			return CommandResult{Stdout: []byte(fmt.Sprintf("%s = {\n}\n", domain))}, nil
+			// The services launchd has loaded in the domain, as launchctl
+			// lists them.
+			var body strings.Builder
+			fmt.Fprintf(&body, "%s = {\n\tservices = {\n", domain)
+			for _, key := range sortedKeys(jobs) {
+				if jobs[key].loaded {
+					fmt.Fprintf(&body, "\t\t       0      -\t%s\n", key)
+				}
+			}
+			body.WriteString("\t}\n}\n")
+			return CommandResult{Stdout: []byte(body.String())}, nil
 		}
 		if job == nil || !job.loaded {
 			return CommandResult{Stderr: []byte("Could not find service \"" + label + "\" in domain for uid: " + uidText)}, errors.New("exit status 113: Could not find service")
@@ -113,7 +123,11 @@ func (f *fixtureLaunchdRunner) Run(ctx context.Context, name string, args ...str
 		label = strings.TrimSuffix(filepath.Base(args[2]), ".plist")
 		job = jobs[label]
 		if job == nil {
-			return CommandResult{}, errors.New("unrecognized label")
+			if _, err := os.Stat(args[2]); err != nil || jobs == nil {
+				return CommandResult{}, errors.New("unrecognized label")
+			}
+			job = &launchdJobFixture{}
+			jobs[label] = job
 		}
 		f.mutated = append(f.mutated, "launchctl "+strings.Join(args, " "))
 		job.loaded, job.state, job.reason, job.code, job.spawn, job.runs = true, "not running", "", "(never exited)", "", 0
@@ -244,7 +258,7 @@ func TestMacOSLaunchAgentRepairDecision(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, f, _ := newLaunchdTestHost(t)
 			f.domains[h.alice.UID] = tc.domain
-			f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: tc.loaded, state: tc.state, reason: tc.reason, code: tc.code, runs: 5, stubborn: tc.stubborn}
+			f.jobs[h.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: tc.loaded, state: tc.state, reason: tc.reason, code: tc.code, runs: 5, stubborn: tc.stubborn}
 			r := h.run(Options{Action: ActionRepair})
 			if (len(r.Errors) > 0) != tc.wantError {
 				t.Fatalf("repair errors = %+v, want error %v", r.Errors, tc.wantError)
@@ -253,9 +267,9 @@ func TestMacOSLaunchAgentRepairDecision(t *testing.T) {
 			if tc.wantReload {
 				uid := h.alice.UID
 				want = []string{
-					fmt.Sprintf("launchctl bootout gui/%d/%s", uid, labelOpenShellGateway),
-					fmt.Sprintf("launchctl bootstrap gui/%d %s", uid, h.env.P("/Library/LaunchAgents/"+labelOpenShellGateway+".plist")),
-					fmt.Sprintf("launchctl kickstart gui/%d/%s", uid, labelOpenShellGateway),
+					fmt.Sprintf("launchctl bootout gui/%d/%s", uid, h.env.launchAgentLabel(labelOpenShellGateway)),
+					fmt.Sprintf("launchctl bootstrap gui/%d %s", uid, h.env.P("/Library/LaunchAgents/"+h.env.launchAgentLabel(labelOpenShellGateway)+".plist")),
+					fmt.Sprintf("launchctl kickstart gui/%d/%s", uid, h.env.launchAgentLabel(labelOpenShellGateway)),
 				}
 			}
 			if !reflect.DeepEqual(f.mutated, want) {
@@ -273,13 +287,13 @@ func TestMacOSLaunchAgentRepairDecision(t *testing.T) {
 
 func TestMacOSDisabledLaunchAgentIsLeftAlone(t *testing.T) {
 	h, f, _ := newLaunchdTestHost(t)
-	f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, disabled: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 5}
-	f.jobs[h.alice.UID][labelSandbox] = &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 5}
+	f.jobs[h.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: true, disabled: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 5}
+	f.jobs[h.alice.UID][h.env.launchAgentLabel(labelSandbox)] = &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 5}
 	r := h.run(Options{Action: ActionRepair})
 	want := []string{
-		fmt.Sprintf("launchctl bootout gui/%d/%s", h.alice.UID, labelSandbox),
-		fmt.Sprintf("launchctl bootstrap gui/%d %s", h.alice.UID, h.env.P("/Library/LaunchAgents/"+labelSandbox+".plist")),
-		fmt.Sprintf("launchctl kickstart gui/%d/%s", h.alice.UID, labelSandbox),
+		fmt.Sprintf("launchctl bootout gui/%d/%s", h.alice.UID, h.env.launchAgentLabel(labelSandbox)),
+		fmt.Sprintf("launchctl bootstrap gui/%d %s", h.alice.UID, h.env.P("/Library/LaunchAgents/"+h.env.launchAgentLabel(labelSandbox)+".plist")),
+		fmt.Sprintf("launchctl kickstart gui/%d/%s", h.alice.UID, h.env.launchAgentLabel(labelSandbox)),
 	}
 	if len(r.Errors) != 0 || !reflect.DeepEqual(f.mutated, want) {
 		t.Fatalf("disabled job changed or failing sibling not repaired: errors %+v, calls %v, want %v", r.Errors, f.mutated, want)
@@ -288,7 +302,7 @@ func TestMacOSDisabledLaunchAgentIsLeftAlone(t *testing.T) {
 
 func TestMacOSIdleGatewayIsFailedWhileSandboxRuns(t *testing.T) {
 	h, f, _ := newLaunchdTestHost(t)
-	f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "not running", code: "0", runs: 2}
+	f.jobs[h.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: true, state: "not running", code: "0", runs: 2}
 	h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Running: 1}
 	r := h.run(Options{Action: ActionRepair})
 	if len(f.mutated) != 0 {
@@ -301,11 +315,11 @@ func TestMacOSIdleGatewayIsFailedWhileSandboxRuns(t *testing.T) {
 
 func TestMacOSLaunchAgentStatusAndVerifyReportCodeSigningFailure(t *testing.T) {
 	h, f, _ := newLaunchdTestHost(t)
-	f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 5}
+	f.jobs[h.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 5}
 	for _, action := range []string{ActionStatus, ActionVerify} {
 		r := h.run(Options{Action: action})
 		message := messagesOf(r.Errors, codeSandboxUserState)
-		if !strings.Contains(message, h.alice.Name) || !strings.Contains(message, labelOpenShellGateway) {
+		if !strings.Contains(message, h.alice.Name) || !strings.Contains(message, h.env.launchAgentLabel(labelOpenShellGateway)) {
 			t.Errorf("%s did not report the failed loaded job: %+v", action, r.Errors)
 		}
 		if r.SecurityComplete {
@@ -319,7 +333,7 @@ func TestMacOSLaunchAgentStatusAndVerifyReportCodeSigningFailure(t *testing.T) {
 
 func TestMacOSLaunchAgentStatusNamesCodeSigningStateAndRemedy(t *testing.T) {
 	h, f, _ := newLaunchdTestHost(t)
-	f.jobs[h.alice.UID][labelSandbox] = &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 3}
+	f.jobs[h.alice.UID][h.env.launchAgentLabel(labelSandbox)] = &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 3}
 	gateway := h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
 	before, err := os.Stat(gateway)
 	if err != nil {
@@ -370,7 +384,7 @@ func TestMacOSRepairGivesCodeSigningKilledGatewayANewFile(t *testing.T) {
 	gateway, program, data := launchAgentGatewayCopy(t, h)
 	f.domains[uid] = false
 	f.userDomains = map[int]bool{uid: true}
-	f.userJobs = map[int]map[string]*launchdJobFixture{uid: {labelSandbox: {loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 3}}}
+	f.userJobs = map[int]map[string]*launchdJobFixture{uid: {h.env.launchAgentLabel(labelSandbox): {loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 3}}}
 	before := map[string]os.FileInfo{}
 	for _, path := range []string{gateway, program} {
 		info, err := os.Stat(path)
@@ -385,9 +399,9 @@ func TestMacOSRepairGivesCodeSigningKilledGatewayANewFile(t *testing.T) {
 	}
 	domain := "user/" + strconv.Itoa(uid)
 	want := []string{
-		"launchctl bootout " + domain + "/" + labelSandbox,
-		"launchctl bootstrap " + domain + " " + h.env.P("/Library/LaunchAgents/"+labelSandbox+".plist"),
-		"launchctl kickstart " + domain + "/" + labelSandbox,
+		"launchctl bootout " + domain + "/" + h.env.launchAgentLabel(labelSandbox),
+		"launchctl bootstrap " + domain + " " + h.env.P("/Library/LaunchAgents/"+h.env.launchAgentLabel(labelSandbox)+".plist"),
+		"launchctl kickstart " + domain + "/" + h.env.launchAgentLabel(labelSandbox),
 	}
 	if !reflect.DeepEqual(f.mutated, want) {
 		t.Fatalf("repair mutations = %v, want %v", f.mutated, want)
@@ -424,7 +438,7 @@ func TestMacOSRepairKeepsTheGatewayFileForOtherFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "not running", spawn: "Input/output error", code: "(never exited)", runs: 2}
+	f.jobs[h.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: true, state: "not running", spawn: "Input/output error", code: "(never exited)", runs: 2}
 	r := h.run(Options{Action: ActionRepair})
 	if len(r.Errors) != 0 || len(f.mutated) != 3 {
 		t.Fatalf("repair of a spawn failure: errors %+v, calls %v", r.Errors, f.mutated)
@@ -447,7 +461,7 @@ func TestMacOSRepairRefusesAnUntrustedLaunchAgentProgram(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.jobs[h.alice.UID][labelSandbox] = &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 3}
+	f.jobs[h.alice.UID][h.env.launchAgentLabel(labelSandbox)] = &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 3}
 	r := h.run(Options{Action: ActionRepair})
 	if len(f.mutated) != 0 {
 		t.Fatalf("repair reloaded a job whose program it refused: %v", f.mutated)
@@ -471,9 +485,9 @@ func TestMacOSPackageGatewayIdentityReloadsOnlyLoadedJobsOnce(t *testing.T) {
 	f.domains[bob.UID], f.domains[carol.UID] = true, true
 	f.jobs[bob.UID] = map[string]*launchdJobFixture{}
 	f.jobs[carol.UID] = map[string]*launchdJobFixture{}
-	f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 5}
-	f.jobs[bob.UID][labelSandbox] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
-	f.jobs[carol.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: false}
+	f.jobs[h.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 5}
+	f.jobs[bob.UID][h.env.launchAgentLabel(labelSandbox)] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
+	f.jobs[carol.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: false}
 	f.jobs[bob.UID]["com.example.other-product"] = &launchdJobFixture{loaded: true, state: "running"}
 	path := h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
 	data, err := os.ReadFile(path)
@@ -489,11 +503,11 @@ func TestMacOSPackageGatewayIdentityReloadsOnlyLoadedJobsOnce(t *testing.T) {
 	}
 	requireOK(t, h.ensure(cfg))
 	want := []string{
-		fmt.Sprintf("launchctl bootout gui/%d/%s", h.alice.UID, labelOpenShellGateway),
-		fmt.Sprintf("launchctl bootstrap gui/%d %s", h.alice.UID, h.env.P("/Library/LaunchAgents/"+labelOpenShellGateway+".plist")),
-		fmt.Sprintf("launchctl kickstart gui/%d/%s", h.alice.UID, labelOpenShellGateway),
-		fmt.Sprintf("launchctl bootout gui/%d/%s", bob.UID, labelSandbox),
-		fmt.Sprintf("launchctl bootstrap gui/%d %s", bob.UID, h.env.P("/Library/LaunchAgents/"+labelSandbox+".plist")),
+		fmt.Sprintf("launchctl bootout gui/%d/%s", h.alice.UID, h.env.launchAgentLabel(labelOpenShellGateway)),
+		fmt.Sprintf("launchctl bootstrap gui/%d %s", h.alice.UID, h.env.P("/Library/LaunchAgents/"+h.env.launchAgentLabel(labelOpenShellGateway)+".plist")),
+		fmt.Sprintf("launchctl kickstart gui/%d/%s", h.alice.UID, h.env.launchAgentLabel(labelOpenShellGateway)),
+		fmt.Sprintf("launchctl bootout gui/%d/%s", bob.UID, h.env.launchAgentLabel(labelSandbox)),
+		fmt.Sprintf("launchctl bootstrap gui/%d %s", bob.UID, h.env.P("/Library/LaunchAgents/"+h.env.launchAgentLabel(labelSandbox)+".plist")),
 	}
 	if !reflect.DeepEqual(f.mutated, want) {
 		t.Fatalf("post-upgrade mutations = %v, want %v", f.mutated, want)
@@ -507,7 +521,7 @@ func TestMacOSPackageGatewayIdentityReloadsOnlyLoadedJobsOnce(t *testing.T) {
 
 func TestMacOSLaunchAgentReloadWaitsForRunningSandbox(t *testing.T) {
 	h, f, cfg := newLaunchdTestHost(t)
-	f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
+	f.jobs[h.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
 	h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Running: 1}
 	path := h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
 	data, err := os.ReadFile(path)
@@ -539,8 +553,9 @@ func TestMacOSLaunchAgentReloadWaitsForRunningSandbox(t *testing.T) {
 
 func TestMacOSPackageEnsureRecordsFailedUserReloadForRepair(t *testing.T) {
 	h, f := newMacOSPackageLaunchdHost(t)
-	f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 5, stubborn: true}
-	replaceMacOSPackageBinaries(t, h, "1.0.2")
+	f.jobs[h.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 5, stubborn: true}
+	// The same build again: a new gateway file, the same label.
+	replaceMacOSPackageBinaries(t, h, "1.0.1")
 	r := h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"})
 	if len(r.Errors) != 0 {
 		t.Fatalf("one user's reload failed the package ensure: %+v", r.Errors)
@@ -555,7 +570,7 @@ func TestMacOSPackageEnsureRecordsFailedUserReloadForRepair(t *testing.T) {
 
 func TestMacOSPackageEnsureRecordsUninspectableLoadedJob(t *testing.T) {
 	h, f := newMacOSPackageLaunchdHost(t)
-	f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
+	f.jobs[h.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
 	f.disabledError = true
 	replaceMacOSPackageBinaries(t, h, "1.0.2")
 	r := h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"})
@@ -569,15 +584,17 @@ func TestMacOSPackageEnsureRecordsUninspectableLoadedJob(t *testing.T) {
 
 func TestMacOSPackageUpgradeWithoutOldOpenShellStateReloadsOnce(t *testing.T) {
 	h, f := newMacOSPackageLaunchdHost(t)
-	f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
+	old := h.env.launchAgentLabel(labelOpenShellGateway)
+	f.jobs[h.alice.UID][old] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
 	if err := os.Remove(h.env.openshellStatePath()); err != nil {
 		t.Fatal(err)
 	}
 	replaceMacOSPackageBinaries(t, h, "1.0.2")
 	requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"}))
+	// The job of the earlier label goes; the new label is loaded idle.
 	want := []string{
-		fmt.Sprintf("launchctl bootout gui/%d/%s", h.alice.UID, labelOpenShellGateway),
-		fmt.Sprintf("launchctl bootstrap gui/%d %s", h.alice.UID, h.env.P("/Library/LaunchAgents/"+labelOpenShellGateway+".plist")),
+		fmt.Sprintf("launchctl bootout gui/%d/%s", h.alice.UID, old),
+		fmt.Sprintf("launchctl bootstrap gui/%d %s", h.alice.UID, h.env.P("/Library/LaunchAgents/"+h.env.launchAgentLabel(labelOpenShellGateway)+".plist")),
 	}
 	if !reflect.DeepEqual(f.mutated, want) {
 		t.Fatalf("1.0.1 to 1.0.2 upgrade without old state reloaded %v, want %v", f.mutated, want)
@@ -595,7 +612,7 @@ func TestMacOSPackageUpgradeWithoutOldOpenShellStateReloadsOnce(t *testing.T) {
 // an older DefenseClaw started takes no lifecycle lock).
 func TestMacOSLaunchAgentReloadStopsTheDaemonBeforeTheDrain(t *testing.T) {
 	h, f, cfg := newLaunchdTestHost(t)
-	f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
+	f.jobs[h.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
 	h.ops.status[h.alice.UID] = SandboxStatus{Active: true}
 	path := h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
 	data, err := os.ReadFile(path)
@@ -613,14 +630,14 @@ func TestMacOSLaunchAgentReloadStopsTheDaemonBeforeTheDrain(t *testing.T) {
 	if want := []string{"stop alice:daemon+socket", "drain alice", "release alice"}; !reflect.DeepEqual(h.ops.order, want) {
 		t.Fatalf("order = %v, want %v", h.ops.order, want)
 	}
-	if len(f.mutated) != 2 || !strings.Contains(f.mutated[0], "bootout gui/"+strconv.Itoa(h.alice.UID)+"/"+labelOpenShellGateway) {
+	if len(f.mutated) != 2 || !strings.Contains(f.mutated[0], "bootout gui/"+strconv.Itoa(h.alice.UID)+"/"+h.env.launchAgentLabel(labelOpenShellGateway)) {
 		t.Fatalf("mutations = %v", f.mutated)
 	}
 
 	// A daemon before 1.0.4 is killed, not booted out: its exit stopped the
 	// gateway under a MicroVM that completed before the drain could see it.
 	h2, f2, cfg2 := newLaunchdTestHost(t)
-	f2.jobs[h2.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
+	f2.jobs[h2.alice.UID][h.env.launchAgentLabel(labelOpenShellGateway)] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
 	h2.ops.status[h2.alice.UID] = SandboxStatus{Active: true, Legacy: true}
 	path2 := h2.env.P(filepath.Join(h2.env.Layout.BinDir, binGateway))
 	data2, err := os.ReadFile(path2)
@@ -661,7 +678,7 @@ func TestMacOSReloadOfAJobTheDrainBootedOut(t *testing.T) {
 	h, _, _ := newLaunchdTestHost(t)
 	r := &bootoutGoneRunner{}
 	h.env.Runner = r
-	job := loadedLaunchAgent{domain: "gui/" + strconv.Itoa(h.alice.UID), label: labelSandbox}
+	job := loadedLaunchAgent{domain: "gui/" + strconv.Itoa(h.alice.UID), label: h.env.launchAgentLabel(labelSandbox)}
 	if err := h.env.reloadMacOSAgent(context.Background(), job, false); err != nil {
 		t.Fatalf("reload = %v (calls %v)", err, r.calls)
 	}

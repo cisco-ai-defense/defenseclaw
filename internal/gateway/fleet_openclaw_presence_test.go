@@ -28,17 +28,104 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+// A pre-1.0.4 config can omit claw entirely. The gateway must not turn that
+// loader default into an OpenClaw connector when the agent is absent.
+func TestGatewayNoConnectorForLegacyConfigWithoutOpenClaw(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	stubOpenClawBinary(t, false)
+	path := filepath.Join(t.TempDir(), config.DefaultConfigName)
+	if err := os.WriteFile(path, []byte("config_version: 9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := configuredConnectorName(cfg); got != "" {
+		t.Errorf("configuredConnectorName() = %q, want none", got)
+	}
+	if got := watcherConnectors(connector.NewDefaultRegistry(), cfg); len(got) != 0 {
+		t.Errorf("watcherConnectors() = %v, want none", got)
+	}
+	if proxyShouldBindForConfiguredConnector(cfg) {
+		t.Error("unconfigured gateway binds an OpenClaw proxy")
+	}
+	if conn, err := resolveActiveConnector(connector.NewDefaultRegistry(), "", "test"); err == nil || conn != nil {
+		t.Errorf("empty connector resolved to %v, %v; want an error", conn, err)
+	}
+}
+
+// An older config can use OpenClaw through a remote fleet gateway or an
+// explicitly enabled loopback uplink, without a local OpenClaw installation.
+// Resolve the loaded config before checking the gateway's dial decision.
+func TestGatewayLegacyOpenClawWithoutLocalInstall(t *testing.T) {
+	for _, claw := range []struct {
+		name string
+		yaml string
+	}{
+		{"defaulted mode", ""},
+		{"older init mode", "claw:\n  mode: openclaw\n"},
+	} {
+		t.Run(claw.name, func(t *testing.T) {
+			for _, fleet := range []struct {
+				name string
+				host string
+				mode string
+			}{
+				{"remote auto", "10.0.0.5", "auto"},
+				{"loopback enabled", "127.0.0.1", "enabled"},
+				{"loopback typo", "127.0.0.1", "enabledd"},
+			} {
+				t.Run(fleet.name, func(t *testing.T) {
+					testenv.SetHome(t, t.TempDir())
+					stubOpenClawBinary(t, false)
+					path := filepath.Join(t.TempDir(), config.DefaultConfigName)
+					raw := "config_version: 9\ngateway:\n  host: " + fleet.host + "\n  fleet_mode: " + fleet.mode + "\n" + claw.yaml
+					if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					cfg, err := config.LoadFromFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got := cfg.ActiveConnectors(); len(got) != 1 || got[0] != "openclaw" {
+						t.Fatalf("loaded ActiveConnectors() = %v, want [openclaw]", got)
+					}
+					if got := configuredConnectorName(cfg); got != "openclaw" {
+						t.Errorf("configuredConnectorName() = %q, want openclaw", got)
+					}
+					if !gatewayShouldConnectForConfiguredConnector(cfg) || !RequiresFleetGateway(cfg) {
+						t.Error("loaded OpenClaw fleet config does not dial")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestGatewaySecureClientRosterDoesNotSelectStaleOpenClaw(t *testing.T) {
+	cfg := clawModeDefaultConfig()
+	cfg.DeploymentMode = "managed_enterprise"
+	cfg.Enterprise.Profile = "secure_client"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}}
+	if got := configuredConnectorName(cfg); got != "codex" {
+		t.Errorf("configuredConnectorName() = %q, want codex", got)
+	}
+}
 
 // stubOpenClawBinary makes the binary probe answer installed for the test so
 // results do not depend on whether this host has an openclaw executable.
 // Callers must not run in parallel: the probe is a package variable.
 func stubOpenClawBinary(t *testing.T, installed bool) {
 	t.Helper()
-	previous := openClawBinaryInstalled
-	openClawBinaryInstalled = func() bool { return installed }
-	t.Cleanup(func() { openClawBinaryInstalled = previous })
+	previous := config.OpenClawBinaryInstalled
+	config.OpenClawBinaryInstalled = func() bool { return installed }
+	t.Cleanup(func() { config.OpenClawBinaryInstalled = previous })
 }
 
 // withoutOpenClaw points the OpenClaw paths at an empty temp home and stubs
@@ -117,7 +204,7 @@ func TestGatewayShouldConnect_OpenClawNotInstalled(t *testing.T) {
 		// Hook connectors in guardrail.connectors do not name OpenClaw.
 		{"connectors_map_without_openclaw", func(t *testing.T, cfg *config.Config) {
 			cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}, "hermes": {}}
-		}, true, false},
+		}, false, false},
 
 		// Every other shape keeps today's behaviour.
 		{"openclaw_json_at_config_file", func(t *testing.T, cfg *config.Config) { withConfiguredOpenClaw(t, cfg) }, false, true},

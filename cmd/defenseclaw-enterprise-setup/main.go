@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
@@ -82,18 +83,6 @@ var standalonePayloadBinding string
 type enterpriseSetupInvalidArguments struct{ error }
 
 func (err enterpriseSetupInvalidArguments) Unwrap() error { return err.error }
-
-// setupCodeBundleRequired is enterprisebundle.CodeBundleRequired, the code
-// the lifecycle and the Unix kit report when a computer that takes signed
-// bundles is given a config. A test pins the two together.
-const setupCodeBundleRequired = "bundle_required"
-
-// enterpriseSetupBundleRequired is a command line that hands a config to a
-// run that installs bundle trust anchors. It is still a command line that
-// can never succeed (1639), reported with the bundle_required code.
-type enterpriseSetupBundleRequired struct{ error }
-
-func (err enterpriseSetupBundleRequired) Unwrap() error { return err.error }
 
 var sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -275,6 +264,9 @@ func embeddedEnterpriseSetupStandalone() bool {
 }
 
 func runEnterpriseSetup(arguments []string, stdout, stderr io.Writer) int {
+	if len(arguments) == 2 && arguments[0] == "--internal-recover-after-parent" {
+		return runStandaloneSetupRecoveryWatchdog(arguments[1], stdout, stderr)
+	}
 	standalone := enterpriseSetupStandaloneFlavor()
 	opts, help, err := parseEnterpriseSetupOptionsForFlavor(arguments, standalone)
 	if help {
@@ -496,20 +488,27 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 	if opts.Force && opts.Action != "uninstall" {
 		return opts, false, errors.New("FORCE=1 is valid only with /uninstall")
 	}
-	if (strings.TrimSpace(opts.Bundle) != "" || strings.TrimSpace(opts.TrustAnchors) != "" || opts.RefuseCapabilityLoss) && opts.Action != "ensure" {
-		return opts, false, errors.New("BUNDLE= and TRUSTANCHORS= are valid only with /ensure")
-	}
-	if strings.TrimSpace(opts.Bundle) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {
-		return opts, false, errors.New("BUNDLE= cannot be combined with CONFIG= (or --mode/--connector): the signed bundle carries the config")
-	}
-	if strings.TrimSpace(opts.TrustAnchors) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {
-		// Installing the anchors puts the computer in bundle mode, which takes
-		// its policy only from signed bundles: the same refusal, and code, as a
-		// CONFIG= on a computer in bundle mode (#1288).
-		return opts, false, enterpriseSetupBundleRequired{errors.New("TRUSTANCHORS= cannot be combined with CONFIG= (or --mode/--connector): with trust anchors installed the computer takes its policy only from signed bundles; deliver BUNDLE= with TRUSTANCHORS=")}
-	}
-	if opts.RefuseCapabilityLoss && strings.TrimSpace(opts.Bundle) == "" {
-		return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE=")
+	// With TRUSTANCHORS= on a mutation the lifecycle refuses each of these
+	// command lines itself, before it changes anything, and on an installed
+	// computer records the refused anchor install (config.trust_anchors.changed)
+	// as the defenseclaw.exe route does; Setup refusing first left no audit
+	// row (GAP-0608). Without anchors there is nothing to record.
+	if strings.TrimSpace(opts.TrustAnchors) == "" || !enterpriseSetupMutation(opts.Action, standalone) {
+		if opts.RefuseCapabilityLoss && opts.Action != "ensure" {
+			if strings.TrimSpace(opts.Bundle) == "" {
+				return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE= and is valid only with /ensure; nothing was changed: deliver both with Setup /ensure")
+			}
+			return opts, false, errors.New("REFUSECAPABILITYLOSS=1 is valid only with /ensure; nothing was changed: deliver BUNDLE= and REFUSECAPABILITYLOSS=1 with Setup /ensure")
+		}
+		if (strings.TrimSpace(opts.Bundle) != "" || strings.TrimSpace(opts.TrustAnchors) != "") && opts.Action != "ensure" {
+			return opts, false, errors.New("BUNDLE= and TRUSTANCHORS= are valid only with /ensure")
+		}
+		if strings.TrimSpace(opts.Bundle) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {
+			return opts, false, errors.New("BUNDLE= cannot be combined with CONFIG= (or --mode/--connector): the signed bundle carries the config")
+		}
+		if opts.RefuseCapabilityLoss && strings.TrimSpace(opts.Bundle) == "" {
+			return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE=; nothing was changed: deliver both with Setup /ensure")
+		}
 	}
 	if opts.AllowUnsigned && strings.TrimSpace(opts.CertificationCodexHome) == "" {
 		return opts, false, errors.New("--allow-unsigned requires --certification-codex-home")
@@ -565,6 +564,10 @@ func captureStandaloneSetupErrorIntent(arguments []string, opts *enterpriseSetup
 	}
 }
 
+// standalonePathNames are the standalone Setup's file properties, whose
+// values the path checks see as given.
+var standalonePathNames = map[string]bool{"config": true, "manifest": true, "bundle": true, "trustanchors": true}
+
 func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone bool) ([]string, bool, error) {
 	normalized := make([]string, 0, len(arguments))
 	valueNames := map[string]string{
@@ -617,6 +620,11 @@ func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone b
 		if separator := strings.IndexByte(trimmed, '='); separator > 0 && !strings.HasPrefix(trimmed, "--") {
 			name := strings.ToLower(strings.ReplaceAll(trimmed[:separator], "-", ""))
 			value := trimmed[separator+1:]
+			if standalone && standalonePathNames[name] {
+				// A path keeps its padding, so the path check refuses it as
+				// the refusal says (GAP-0632).
+				value = strings.TrimLeftFunc(argument, unicode.IsSpace)[separator+1:]
+			}
 			if canonical, ok := valueNames[name]; ok {
 				normalized = append(normalized, "--"+canonical+"="+value)
 				continue
@@ -872,12 +880,9 @@ func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, n
 	}
 	result := enterprisestatus.New(action, "standalone", "windows", opts.ProductVersion)
 	code := "setup_failed"
-	var bundleRequired enterpriseSetupBundleRequired
 	var invalid enterpriseSetupInvalidArguments
 	var timeout enterpriseSetupLifecycleTimeout
 	switch {
-	case errors.As(err, &bundleRequired):
-		code = setupCodeBundleRequired
 	case errors.As(err, &invalid):
 		code = "invalid_arguments"
 	case errors.As(err, &timeout):

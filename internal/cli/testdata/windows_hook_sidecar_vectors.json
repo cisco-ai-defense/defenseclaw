@@ -1,0 +1,728 @@
+{
+ "comment": "readHookSidecar (internal/cli/hook.go) and fail_mode.py _read_windows_hook_mode read these hooks/.hookcfg bodies alike: mode is what the native hook runs (nativeHookFailMode), legacy whether status reads it from the unscoped value. kind: missing, dir, link (a symlink to body), oversize (body padded past 64 KiB).",
+ "vectors": [
+  {
+   "name": "v2/own-open",
+   "connector": "codex",
+   "body": "{\"version\":2,\"gateway_addr\":\"127.0.0.1:18970\",\"fail_modes\":{\"codex\":\"open\",\"claudecode\":\"closed\"}}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "v2/own-closed",
+   "connector": "codex",
+   "body": "{\"version\":2,\"gateway_addr\":\"127.0.0.1:18970\",\"fail_modes\":{\"codex\":\"closed\",\"claudecode\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "v2/writer-shape",
+   "connector": "codex",
+   "body": "{\n  \"version\": 2,\n  \"gateway_addr\": \"127.0.0.1:18970\",\n  \"fail_modes\": {\n    \"codex\": \"open\"\n  },\n  \"managed_enterprise\": true\n}\n",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "v2/peer-entry-legacy-open",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"claudecode\":\"closed\"},\"legacy_fail_mode\":\"open\"}",
+   "mode": "open",
+   "legacy": true
+  },
+  {
+   "name": "v2/missing-map-legacy-open",
+   "connector": "codex",
+   "body": "{\"version\":2,\"legacy_fail_mode\":\"open\"}",
+   "mode": "open",
+   "legacy": true
+  },
+  {
+   "name": "v2/no-mode",
+   "connector": "codex",
+   "body": "{\"version\":2,\"gateway_addr\":\"127.0.0.1:18970\"}",
+   "mode": "closed"
+  },
+  {
+   "name": "v2/future-version",
+   "connector": "codex",
+   "body": "{\"version\":3,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "v2/unknown-fields-ignored",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"x\":{\"y\":[1,2,{\"z\":null}]},\"n\":1e400}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "v2/null-gateway-and-legacy",
+   "connector": "codex",
+   "body": "{\"version\":2,\"gateway_addr\":null,\"legacy_fail_mode\":null,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "v2/null-peer-entry",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\",\"claudecode\":null}}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "v2/null-own-entry",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":null},\"legacy_fail_mode\":\"open\"}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/v2-entry-twice",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"closed\",\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "review/gateway-addr-number",
+   "connector": "codex",
+   "body": "{\"version\":2,\"gateway_addr\":7,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "review/gateway-addr-object",
+   "connector": "codex",
+   "body": "{\"version\":2,\"gateway_addr\":{},\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "review/legacy-number",
+   "connector": "codex",
+   "body": "{\"version\":2,\"legacy_fail_mode\":1,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "review/peer-entry-number",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\",\"claudecode\":7}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "review/peer-entry-bool",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\",\"claudecode\":true}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "review/peer-entry-object",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\",\"claudecode\":{}}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "review/peer-entry-list",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\",\"claudecode\":[\"open\"]}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "review/key-mixed-case",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"CoDeX\":\"open\"},\"legacy_fail_mode\":\"closed\"}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "review/key-upper-closed",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"CODEX\":\"closed\"},\"legacy_fail_mode\":\"open\"}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "key/separators",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"co-d_e x\":\"open\"}}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "key/outer-space",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\" codex\\t\":\"open\"}}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "key/outer-nbsp",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"\\u00a0codex\\u3000\":\"closed\"},\"legacy_fail_mode\":\"open\"}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "key/inner-tab-kept",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"co\\tdex\":\"closed\"},\"legacy_fail_mode\":\"open\"}",
+   "mode": "open",
+   "legacy": true
+  },
+  {
+   "name": "key/go-upper-long-s",
+   "connector": "cursor",
+   "body": "{\"version\":2,\"fail_modes\":{\"cur\\u017for\":\"closed\"},\"legacy_fail_mode\":\"open\"}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "key/go-upper-dotless-i",
+   "connector": "kiro",
+   "body": "{\"version\":2,\"fail_modes\":{\"k\\u0131ro\":\"closed\"},\"legacy_fail_mode\":\"open\"}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "key/no-expansion",
+   "connector": "fi",
+   "body": "{\"version\":2,\"fail_modes\":{\"\\ufb01\":\"closed\"},\"legacy_fail_mode\":\"open\"}",
+   "mode": "open",
+   "legacy": true
+  },
+  {
+   "name": "key/cyrillic-lookalike",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"\\u0441odex\":\"closed\"},\"legacy_fail_mode\":\"open\"}",
+   "mode": "open",
+   "legacy": true
+  },
+  {
+   "name": "key/unit-separator-not-trimmed",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\\u001f\":\"closed\"},\"legacy_fail_mode\":\"open\"}",
+   "mode": "open",
+   "legacy": true
+  },
+  {
+   "name": "key/collision-one-closed",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\",\"CODEX\":\"closed\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "key/collision-reversed",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"CODEX\":\"closed\",\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "key/collision-all-open",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\",\"Codex\":\" OPEN \"}}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "key/collision-blank",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\",\"co-dex\":\"\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "value/upper-spaced",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\" OPEN \"}}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "value/nbsp-trimmed",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\\u00a0\"}}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "value/unit-separator",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\\u001f\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "value/bogus",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"bogus\"},\"legacy_fail_mode\":\"open\"}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "value/blank",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"  \"},\"legacy_fail_mode\":\"open\"}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "value/legacy-bogus",
+   "connector": "codex",
+   "body": "{\"version\":2,\"legacy_fail_mode\":\"bogus\"}",
+   "mode": "closed",
+   "legacy": true
+  },
+  {
+   "name": "value/legacy-upper",
+   "connector": "codex",
+   "body": "{\"version\":2,\"legacy_fail_mode\":\"Open\"}",
+   "mode": "open",
+   "legacy": true
+  },
+  {
+   "name": "fields/version-case-only",
+   "connector": "codex",
+   "body": "{\"Version\":2,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "fields/fail-modes-case-variant",
+   "connector": "codex",
+   "body": "{\"version\":2,\"FAIL_MODES\":{\"codex\":\"closed\"},\"legacy_fail_mode\":\"open\"}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "fields/legacy-case-variant",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"Legacy_Fail_Mode\":\"closed\"}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "fields/gateway-long-s-variant",
+   "connector": "codex",
+   "body": "{\"version\":2,\"gateway_addr\":\"127.0.0.1:1\",\"fail_modes\":{\"codex\":\"open\"},\"ver\\u017fion\":2}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "fields/unknown-ascii-field",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"version2\":1}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "malformed/fail-modes-null",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":null,\"legacy_fail_mode\":\"open\"}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/fail-modes-list",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":[\"open\"],\"legacy_fail_mode\":\"open\"}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/fail-modes-string",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":\"open\",\"legacy_fail_mode\":\"open\"}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/version-1",
+   "connector": "codex",
+   "body": "{\"version\":1,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/version-string",
+   "connector": "codex",
+   "body": "{\"version\":\"2\",\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/version-fraction",
+   "connector": "codex",
+   "body": "{\"version\":2.0,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/version-exponent",
+   "connector": "codex",
+   "body": "{\"version\":2e0,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/version-bool",
+   "connector": "codex",
+   "body": "{\"version\":true,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/version-null",
+   "connector": "codex",
+   "body": "{\"version\":null,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/version-overflow",
+   "connector": "codex",
+   "body": "{\"version\":9223372036854775808,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/version-int64-max",
+   "connector": "codex",
+   "body": "{\"version\":9223372036854775807,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "malformed/version-long-token",
+   "connector": "codex",
+   "body": "{\"version\":11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/long-int-in-unknown-field",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"n\":99999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "malformed/no-version",
+   "connector": "codex",
+   "body": "{\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/nan",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"x\":NaN}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/infinity",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"x\":-Infinity}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/trailing-garbage",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"}} x",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/unparseable-with-flat-line",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"}\nDEFENSECLAW_FAIL_MODE=open\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/brace-then-flat-line",
+   "connector": "codex",
+   "body": "  {\nDEFENSECLAW_FAIL_MODE=open\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/array",
+   "connector": "codex",
+   "body": "[\"DEFENSECLAW_FAIL_MODE=open\"]",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/scalar",
+   "connector": "codex",
+   "body": "\"open\"",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/null",
+   "connector": "codex",
+   "body": "null",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/deep-nesting",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/very-deep-nesting",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/nesting-at-bound",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "malformed/brackets-in-strings",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"x\":\"[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{[{\"}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "malformed/bom",
+   "connector": "codex",
+   "body_b64": "77u/eyJ2ZXJzaW9uIjoyLCJmYWlsX21vZGVzIjp7ImNvZGV4Ijoib3BlbiJ9fQ==",
+   "mode": "closed"
+  },
+  {
+   "name": "malformed/invalid-utf8-in-string",
+   "connector": "codex",
+   "body_b64": "eyJ2ZXJzaW9uIjoyLCJnYXRld2F5X2FkZHIiOiL//iIsImZhaWxfbW9kZXMiOnsiY29kZXgiOiJvcGVuIn19",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "malformed/invalid-utf8-outside-string",
+   "connector": "codex",
+   "body_b64": "eyJ2ZXJzaW9uIjoyLCJmYWlsX21vZGVzIjp7ImNvZGV4Ijoib3BlbiJ9ff8=",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/empty",
+   "connector": "codex",
+   "body": "",
+   "mode": "closed"
+  },
+  {
+   "name": "flat/open",
+   "connector": "codex",
+   "body": "DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:18970\nDEFENSECLAW_FAIL_MODE=open\n",
+   "mode": "open",
+   "legacy": true
+  },
+  {
+   "name": "flat/key-twice-open-first",
+   "connector": "codex",
+   "body": "DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_FAIL_MODE=closed\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "flat/key-twice-open-last",
+   "connector": "codex",
+   "body": "DEFENSECLAW_FAIL_MODE=closed\nDEFENSECLAW_FAIL_MODE=open\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "flat/scoped-key-twice",
+   "connector": "codex",
+   "body": "DEFENSECLAW_FAIL_MODE_CODEX=closed\nDEFENSECLAW_FAIL_MODE_CODEX=open\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/bom-broken-json-then-flat-open",
+   "connector": "codex",
+   "body_b64": "77u/eyJ2ZXJzaW9uIjoyLCJmYWlsX21vZGVzIjoKREVGRU5TRUNMQVdfRkFJTF9NT0RFPW9wZW4K",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/comment-broken-json-then-flat-open",
+   "connector": "codex",
+   "body": "# written by hand\n{\"version\":2,\"fail_modes\":{\"codex\":\nDEFENSECLAW_FAIL_MODE=open\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/bom-flat-open",
+   "connector": "codex",
+   "body_b64": "77u/REVGRU5TRUNMQVdfRkFJTF9NT0RFPW9wZW4K",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/text-line-then-flat-open",
+   "connector": "codex",
+   "body": "not a setting\nDEFENSECLAW_FAIL_MODE=open\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/bad-key-then-flat-open",
+   "connector": "codex",
+   "body": "DEFENSECLAW FAIL MODE=closed\nDEFENSECLAW_FAIL_MODE=open\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/json-array-line-then-flat-open",
+   "connector": "codex",
+   "body": "[\"x\",\nDEFENSECLAW_FAIL_MODE=open\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/v2-key-twice",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"closed\"},\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/v2-nested-key-twice",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"extra\":{\"a\":1,\"a\":2}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "v2/nested-unique-keys",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"extra\":{\"a\":{\"a\":1},\"b\":[{\"a\":1},{\"a\":2}]}}",
+   "mode": "open",
+   "legacy": false
+  },
+  {
+   "name": "flat/scoped-first",
+   "connector": "codex",
+   "body": "DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_FAIL_MODE_CODEX=closed\n",
+   "mode": "closed",
+   "legacy": true
+  },
+  {
+   "name": "flat/export-quoted",
+   "connector": "codex",
+   "body": "export DEFENSECLAW_FAIL_MODE_CODEX=\"open\"\nDEFENSECLAW_FAIL_MODE=closed\n",
+   "mode": "open",
+   "legacy": true
+  },
+  {
+   "name": "flat/single-quoted",
+   "connector": "codex",
+   "body": "DEFENSECLAW_FAIL_MODE='open'\n",
+   "mode": "open",
+   "legacy": true
+  },
+  {
+   "name": "flat/escaped-quoted-not-unquoted",
+   "connector": "codex",
+   "body": "DEFENSECLAW_FAIL_MODE=\"op\\x65n\"\n",
+   "mode": "closed",
+   "legacy": true
+  },
+  {
+   "name": "flat/backquoted",
+   "connector": "codex",
+   "body": "DEFENSECLAW_FAIL_MODE=`open`\n",
+   "mode": "closed",
+   "legacy": true
+  },
+  {
+   "name": "flat/crlf",
+   "connector": "codex",
+   "body": "DEFENSECLAW_FAIL_MODE=open\r\n",
+   "mode": "open",
+   "legacy": true
+  },
+  {
+   "name": "flat/cr-only-is-one-line",
+   "connector": "codex",
+   "body": "DEFENSECLAW_FAIL_MODE=closed\rDEFENSECLAW_FAIL_MODE=open\n",
+   "mode": "closed",
+   "legacy": true
+  },
+  {
+   "name": "flat/unit-separator-line-break-is-not",
+   "connector": "codex",
+   "body": "DEFENSECLAW_FAIL_MODE=open\u001eDEFENSECLAW_FAIL_MODE=closed\n",
+   "mode": "closed",
+   "legacy": true
+  },
+  {
+   "name": "flat/comment",
+   "connector": "codex",
+   "body": "# DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_FAIL_MODE=closed\n",
+   "mode": "closed",
+   "legacy": true
+  },
+  {
+   "name": "flat/bogus",
+   "connector": "codex",
+   "body": "DEFENSECLAW_FAIL_MODE=bogus\n",
+   "mode": "closed",
+   "legacy": true
+  },
+  {
+   "name": "flat/no-mode",
+   "connector": "codex",
+   "body": "DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:18970\n",
+   "mode": "closed",
+   "legacy": true
+  },
+  {
+   "name": "file/missing",
+   "connector": "codex",
+   "kind": "missing",
+   "mode": "closed"
+  },
+  {
+   "name": "file/directory",
+   "connector": "codex",
+   "kind": "dir",
+   "mode": "closed"
+  },
+  {
+   "name": "file/link-to-open",
+   "connector": "codex",
+   "kind": "link",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed"
+  },
+  {
+   "name": "file/oversize",
+   "connector": "codex",
+   "kind": "oversize",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed"
+  }
+ ]
+}

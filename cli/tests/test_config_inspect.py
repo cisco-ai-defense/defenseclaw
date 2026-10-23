@@ -410,3 +410,86 @@ def test_reference_decodes_utf8_and_never_crashes_on_missing_stdout() -> None:
 def test_helper_failure_drops_the_cobra_error_prefix() -> None:
     # click adds its own "Error: " to a ClickException, so the helper's would print twice.
     assert config_inspect._helper_failure("Error: config: bad rule pack\n", "migrate") == "config: bad rule pack"
+
+
+def _hilt_preview_wire(**overrides):
+    payload = {
+        "wire_version": 1,
+        "connector": "claudecode",
+        "base": {"mode": "action", "hilt": {"enabled": True, "min_severity": "MEDIUM"}, "follows_connector_hilt": True},
+        "profiles": [
+            {
+                "profile": "audit",
+                "mode": "observe",
+                "hilt": {"enabled": True, "min_severity": "MEDIUM"},
+                "follows_connector_hilt": True,
+            },
+            {
+                "profile": "own",
+                "mode": "action",
+                "hilt": {"enabled": False, "min_severity": ""},
+                "follows_connector_hilt": False,
+            },
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_hilt_preview_asks_the_gateway_resolver() -> None:
+    with (
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="/opt/bin/defenseclaw-gateway"),
+        patch.object(
+            config_inspect, "run_pinned_executable", return_value=_completed(stdout=json.dumps(_hilt_preview_wire()))
+        ) as run,
+    ):
+        preview = config_inspect.connector_hilt_preview(
+            "claudecode", enabled=True, min_severity="MEDIUM", config_path="/tmp/dc/config.yaml"
+        )
+    assert preview.connector == "claudecode"
+    assert preview.base == config_inspect.HILTPreviewScope("", "action", True, "MEDIUM", True)
+    assert preview.profiles == (
+        config_inspect.HILTPreviewScope("audit", "observe", True, "MEDIUM", True),
+        config_inspect.HILTPreviewScope("own", "action", False, "", False),
+    )
+    assert run.call_args.args[0] == [
+        "/opt/bin/defenseclaw-gateway",
+        "connector",
+        "hilt-preview",
+        "--connector",
+        "claudecode",
+        "--enabled=true",
+        "--min-severity",
+        "MEDIUM",
+        "--config",
+        "/tmp/dc/config.yaml",
+    ]
+
+
+def test_hilt_preview_refuses_what_it_cannot_trust() -> None:
+    bad_profile = _hilt_preview_wire()
+    bad_profile["profiles"][0]["profile"] = "evil\x1b[2J"
+    cases = [
+        (_completed(stdout="Usage:\n  defenseclaw-gateway connector [command]\n"), "cannot resolve the preview"),
+        (_completed(stdout=json.dumps(_hilt_preview_wire(wire_version=2))), "protocol is incompatible"),
+        (_completed(stdout=json.dumps(_hilt_preview_wire(base={"mode": "enforce"}))), "incompatible preview"),
+        (_completed(stdout=json.dumps(bad_profile)), "incompatible preview"),
+        (
+            _completed(returncode=1, stderr="Error: connector hilt-preview: failed to load config\nUsage: ..."),
+            "^connector hilt-preview: failed to load config$",
+        ),
+    ]
+    for completed, message in cases:
+        with (
+            patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="/opt/bin/defenseclaw-gateway"),
+            patch.object(config_inspect, "run_pinned_executable", return_value=completed),
+            pytest.raises(config_inspect.ConfigInspectError, match=message),
+        ):
+            config_inspect.connector_hilt_preview("claudecode", enabled=False, min_severity="HIGH", config_path="c")
+    with (
+        patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value=None),
+        patch.object(config_inspect, "run_pinned_executable") as run,
+        pytest.raises(config_inspect.ConfigInspectError, match="not installed"),
+    ):
+        config_inspect.connector_hilt_preview("claudecode", enabled=False, min_severity="HIGH", config_path="c")
+    run.assert_not_called()

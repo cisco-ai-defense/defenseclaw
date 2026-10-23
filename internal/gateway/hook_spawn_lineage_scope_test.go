@@ -58,7 +58,7 @@ func TestCodexThreadSpawnLinksOnlyTheReturnedThread(t *testing.T) {
 	if got := lineage(thread); got.AgentDepth != 1 || got.ParentAgentID != parentAgent || got.ParentSessionID != parentSession {
 		t.Fatalf("the returned thread = %+v, want depth 1 under %s", got, parentAgent)
 	}
-	if pending, _ := sharedAgentIdentities.snapshot(); pending[identity].SessionsSeen != 2 {
+	if pending, _, _ := sharedAgentIdentities.snapshot(); pending[identity].SessionsSeen != 2 {
 		t.Fatalf("agent identity counted %+v, want the parent and the chat, not the thread", pending[identity])
 	}
 }

@@ -475,8 +475,8 @@ func TestCheckSandboxesStoppedBeforeARestart(t *testing.T) {
 // once OpenShell reports it stopped. Apply's second restart, the one that
 // brings the previous files back after a restarted gateway that is not
 // healthy, makes the same check: under a sandbox started on the restarted
-// gateway it leaves the gateway on the new files, with the restart
-// pending, and does not stop it.
+// gateway it leaves the gateway on the new files it was restarted on, with
+// no restart pending, and does not stop it.
 func TestARestartChecksTheSandboxesRightBeforeItActs(t *testing.T) {
 	f := newGatewayFixture(t)
 	running := openshell.DriverVM

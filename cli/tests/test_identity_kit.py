@@ -452,6 +452,160 @@ def test_okta_group_verifier_uses_complete_case_insensitive_name(tmp_path: Path)
     assert full.returncode == 0 and "lists DC-KIT ml research" in full.stdout
 
 
+@pytest.fixture
+def okta_profile_verifier(tmp_path: Path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, source in {
+        "systemctl": "#!/bin/sh\nexit 0\n",
+        "id": "#!/bin/sh\necho dc-kit\n",
+        "getent": "#!/bin/sh\nprintf 'alice:x:2001:2001::/home/alice:/bin/bash\\n'\n",
+        "defenseclaw": "#!/bin/sh\ncat \"$OKTA_TEST_EXPLAIN\"\n",
+    }.items():
+        target = bin_dir / name
+        target.write_text(source, encoding="ascii")
+        target.chmod(0o755)
+    rules = tmp_path / "rules.ini"
+    rules.write_text("option = ldap_use_ppolicy\n", encoding="ascii")
+    explain = tmp_path / "explain.json"
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+           "OKTA_KIT_SSSD_CFG_RULES": str(rules), "OKTA_TEST_EXPLAIN": str(explain)}
+    script = OKTA.parent / "verify-okta-identity.sh"
+
+    def run(answer: dict, *extra: str) -> subprocess.CompletedProcess[str]:
+        explain.write_text(json.dumps(answer), encoding="ascii")
+        return subprocess.run(["bash", str(script), "--user", "alice", "--defenseclaw", str(bin_dir / "defenseclaw"),
+                               *extra], env=env, capture_output=True, text=True)
+
+    return run
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("bash"), reason="a Linux host script")
+def test_okta_profile_verifier_refuses_a_diagnostic_candidate(okta_profile_verifier) -> None:
+    answer = {"profiles_configured": True, "profile": "okta-strict", "match": "default_lookup_failed",
+              "refused": True, "refused_reason": "group membership is unconfirmed",
+              "warnings": ["directory warning | retry after recovery"]}
+    for extra in (["--expect-profile", "okta-strict"], []):
+        run = okta_profile_verifier(answer, *extra)
+        assert run.returncode == 1
+        assert "FAIL  DefenseClaw refuses requests for alice: group membership is unconfirmed" in run.stdout
+        assert "PASS  DefenseClaw picks profile okta-strict" not in run.stdout
+        assert "used the default profile" not in run.stdout
+
+    answer["lookup_error"] = "directory lookup timed out"
+    with_lookup_error = okta_profile_verifier(answer, "--expect-profile", "okta-strict")
+    assert with_lookup_error.returncode == 1
+    assert "FAIL  DefenseClaw refuses requests for alice: group membership is unconfirmed" in with_lookup_error.stdout
+
+    answer["refused"] = False
+    answer.pop("refused_reason")
+    answer.pop("lookup_error")
+    answer["match"] = "user"
+    for cache in (
+        {"refused": True, "refused_reason": "cached group membership is unconfirmed", "differs": True,
+         "age_seconds": 30, "refresh_after_seconds": 45},
+        {"refused": False, "refused_reason": "cached group membership is unconfirmed", "differs": True,
+         "age_seconds": 30, "refresh_after_seconds": 45},
+    ):
+        answer["cache"] = cache
+        for extra in (["--expect-profile", "okta-strict"], []):
+            run = okta_profile_verifier(answer, *extra)
+            assert run.returncode == 1
+            assert ("FAIL  DefenseClaw refuses requests for alice right now: cached group membership is unconfirmed "
+                    "(the gateway's cached directory facts, 30s old, refuse them; it refreshes within 45s)") in run.stdout
+            assert "the gateway's directory lookup is failing" not in run.stdout
+            assert "PASS  DefenseClaw picks profile okta-strict" not in run.stdout
+
+    answer["cache"] = {"refused": True, "differs": True, "stale": True,
+                       "failing_since": "2026-10-23T09:12:00Z", "last_error": "directory timed out"}
+    stale = okta_profile_verifier(answer, "--expect-profile", "okta-strict")
+    assert stale.returncode == 1
+    assert ("FAIL  DefenseClaw refuses requests for alice right now: "
+            "the gateway did not name the missing identity fact "
+            "(the gateway's directory lookup is failing since 2026-10-23T09:12:00Z: directory timed out)") in stale.stdout
+
+    answer["cache"] = {"refused": True, "differs": True}
+    without_reason = okta_profile_verifier(answer, "--expect-profile", "okta-strict")
+    assert without_reason.returncode == 1
+    assert ("FAIL  DefenseClaw refuses requests for alice right now: "
+            "the gateway did not name the missing identity fact "
+            "(the gateway did not report age_seconds and refresh_after_seconds for its cached directory facts)") in without_reason.stdout
+    assert "the gateway's directory lookup is failing" not in without_reason.stdout
+
+    answer["cache"] = {"refused": True, "differs": True, "stale": True,
+                       "last_error": "cached directory refresh timed out"}
+    stale_without_since = okta_profile_verifier(answer, "--expect-profile", "okta-strict")
+    assert stale_without_since.returncode == 1
+    assert ("the gateway reports a failing directory lookup: cached directory refresh timed out; "
+            "failing_since was not reported") in stale_without_since.stdout
+
+    answer["cache"] = {"refused": True, "differs": True, "age_seconds": None, "refresh_after_seconds": None}
+    unknown_age = okta_profile_verifier(answer, "--expect-profile", "okta-strict")
+    assert unknown_age.returncode == 1
+    assert "did not report age_seconds and refresh_after_seconds" in unknown_age.stdout
+    assert "Nones old" not in unknown_age.stdout
+
+    answer.pop("cache")
+    answer["match"] = "default_lookup_failed"
+    answer.pop("warnings")
+    settled = okta_profile_verifier(answer)
+    assert settled.returncode == 1  # The directory outage still fails kit verification.
+    assert "the default profile applies; no assignment needs the missing fact" in settled.stdout
+    settled_expected = okta_profile_verifier(answer, "--expect-profile", "okta-strict")
+    assert settled_expected.returncode == 1
+    assert "the default profile applies; no assignment needs the missing fact" in settled_expected.stdout
+    assert "PASS  DefenseClaw picks profile okta-strict" not in settled_expected.stdout
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("bash"), reason="a Linux host script")
+def test_okta_profile_verifier_reports_the_live_cached_profile(okta_profile_verifier) -> None:
+    answer = {"profiles_configured": True, "profile": "okta-strict", "match": "user", "refused": False,
+              "cache": {"profile": "", "match": "default_lookup_failed", "refused": False,
+                        "differs": True, "failing_since": "2026-10-23T09:12:00Z",
+                        "last_error": "directory timed out"}}
+    for extra in (["--expect-profile", "okta-strict"], []):
+        run = okta_profile_verifier(answer, *extra)
+        assert run.returncode == 1
+        assert "requests for alice use the default profile (default_lookup_failed)" in run.stdout
+        assert "no assignment needs the missing fact" in run.stdout
+        assert "PASS  DefenseClaw picks profile okta-strict" not in run.stdout
+        assert "PASS  DefenseClaw resolved alice" not in run.stdout
+
+    answer["cache"] = {"profile": "observe", "match": "group", "refused": False,
+                       "differs": True, "age_seconds": 30, "refresh_after_seconds": 45}
+    changed = okta_profile_verifier(answer, "--expect-profile", "okta-strict")
+    assert changed.returncode == 1
+    assert "requests for alice use profile observe (match group)" in changed.stdout
+    assert "fresh lookup reports profile okta-strict (match user)" in changed.stdout
+    assert "directory lookup is failing" not in changed.stdout
+
+    answer["cache"] = {"profile": "okta-strict", "match": "group", "refused": False, "differs": True}
+    match_only = okta_profile_verifier(answer, "--expect-profile", "okta-strict")
+    assert match_only.returncode == 1
+    assert "use profile okta-strict (match group)" in match_only.stdout
+    assert "fresh lookup reports profile okta-strict (match user)" in match_only.stdout
+
+    answer["cache"] = {"refused": False, "differs": True}
+    missing = okta_profile_verifier(answer, "--expect-profile", "okta-strict")
+    assert missing.returncode == 1
+    assert "gateway did not report cache.profile and cache.match" in missing.stdout
+
+    answer["cache"] = {"profile": None, "match": None, "refused": False, "differs": True}
+    null_fields = okta_profile_verifier(answer, "--expect-profile", "okta-strict")
+    assert null_fields.returncode == 1
+    assert "gateway did not report cache.profile and cache.match" in null_fields.stdout
+
+    answer["cache"] = {"profile": "okta-strict", "match": "user", "refused": False, "differs": True}
+    other_difference = okta_profile_verifier(answer, "--expect-profile", "okta-strict")
+    assert other_difference.returncode == 1
+    assert "gateway did not report which other decision field differs" in other_difference.stdout
+
+    answer["cache"]["differs"] = False
+    settled = okta_profile_verifier(answer, "--expect-profile", "okta-strict")
+    assert settled.returncode == 0
+    assert "PASS  DefenseClaw picks profile okta-strict for alice" in settled.stdout
+
+
 def test_entra_apply_validates_password_file_before_graph_write(tmp_path: Path) -> None:
     entra = _load(ENTRA)
     plan = tmp_path / "tenant.json"

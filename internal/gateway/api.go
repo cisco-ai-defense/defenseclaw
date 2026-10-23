@@ -46,7 +46,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -75,6 +74,13 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// Both API listeners start one background recovery of the hook delivery
+	// journal rows earlier gateway processes left (startPendingHookRecovery);
+	// neither waits for it.
+	pendingHookRecoveryOnce sync.Once
+	// hookDeliveryProcessID, when set, replaces this process's journal
+	// identity (deliveryProcessID): tests start a server as the next process.
+	hookDeliveryProcessID string
 	// sandboxAuthority is owned by this server and initialized on first use.
 	sandboxAuthority sandboxAuthorityHolder
 
@@ -93,9 +99,6 @@ type APIServer struct {
 	// foreignHookRemovals reads the hook guardian foreign-hook removal
 	// ledger on every session exchange.
 	foreignHookRemovals foreignHookRemovalSource
-	// foreignHookOwed are the revocations of protected session records the
-	// operating system refused, tried again until they take.
-	foreignHookOwed foreignHookRevocationsOwed
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
@@ -110,6 +113,9 @@ type APIServer struct {
 	// hermesTasks gives a Hermes hook that names only its task the session
 	// of that task.
 	hermesTasks hermesTaskSessions
+	// preToolDecisions pairs audited Claude Code/Codex PreToolUse decisions
+	// with later post-tool observations, without a background worker.
+	preToolDecisions preToolDecisionTracker
 
 	// mcpAdmissionPending names an MCP server the install watcher admits
 	// but has not admitted yet (GAP-0112). Set once before serving.
@@ -1162,6 +1168,7 @@ func (a *APIServer) apiPortHeld(hasHookSocket bool, err error) bool {
 }
 
 func (a *APIServer) Run(ctx context.Context) error {
+	a.startPendingHookRecovery(ctx)
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
 	mux.HandleFunc("/health", a.handleHealth)
@@ -1382,24 +1389,6 @@ func (a *APIServer) Run(ctx context.Context) error {
 	go func() {
 		defer close(refusalsDone)
 		a.serveUnenrolledRefusals(refusalCtx)
-	}()
-
-	// A revocation of an account's protected session records that the
-	// operating system refused is tried again until it takes, and once more
-	// as this run stops (foreign_hook_revocation_owed.go); a no-op where the
-	// gateway publishes no records.
-	revocationsCtx, stopRevocations := context.WithCancel(ctx)
-	revocationsDone := make(chan struct{})
-	defer func() {
-		stopRevocations()
-		select {
-		case <-revocationsDone:
-		case <-time.After(foreignHookRevocationStopTimeout):
-		}
-	}()
-	go func() {
-		defer close(revocationsDone)
-		a.retryOwedForeignHookRevocations(revocationsCtx, foreignHookRevocationRetryEvery)
 	}()
 
 	errCh := make(chan error, 2)
@@ -1937,25 +1926,6 @@ const managedShutdownRefusal = "this gateway is managed by the computer's admini
 // standalone computer that takes its policy from signed bundles.
 const managedBundlePolicyReloadRefusal = "this computer takes its policy from signed policy bundles; deliver a new signed bundle instead of reloading the policy over the API"
 
-// bundleAnchorsPath is where a standalone managed computer keeps the bundle
-// trust anchors (tests replace it).
-var bundleAnchorsPath = func() (string, error) { return enterprisebundle.AnchorsPath(runtime.GOOS) }
-
-// signedBundleMode reports whether a managed standalone computer takes its
-// policy from signed bundles: its trust anchors are installed. An anchors
-// path the gateway cannot check counts as installed.
-func signedBundleMode(cfg *config.Config) bool {
-	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return false
-	}
-	path, err := bundleAnchorsPath()
-	if err != nil {
-		return true
-	}
-	_, err = os.Lstat(path)
-	return err == nil || !errors.Is(err, fs.ErrNotExist)
-}
-
 func sameRuntimeDataDir(left, right string) bool {
 	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
 		return false
@@ -2421,6 +2391,11 @@ func (a *APIServer) handleScanResult(w http.ResponseWriter, r *http.Request) {
 
 	var result scanner.ScanResult
 	if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			a.writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
@@ -3263,12 +3238,26 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /v1/mcp/scan — run MCP scanner on a target (URL or local path)
+// POST /v1/mcp/scan — run MCP scanner on a URL or configured server name.
 // ---------------------------------------------------------------------------
 
 type mcpScanRequest struct {
 	Target string `json:"target"`
 	Name   string `json:"name"`
+}
+
+func mcpScanLocalPath(target string) bool {
+	lower := strings.ToLower(target)
+	windowsDrive := len(target) >= 2 && target[1] == ':' &&
+		(target[0] >= 'A' && target[0] <= 'Z' || target[0] >= 'a' && target[0] <= 'z')
+	if strings.HasPrefix(lower, "file:") || windowsDrive || filepath.IsAbs(target) {
+		return true
+	}
+	if strings.Contains(target, "://") {
+		return false
+	}
+	return target == "." || target == ".." || strings.ContainsAny(target, `/\`) ||
+		strings.HasPrefix(target, "~") || strings.HasSuffix(lower, ".json")
 }
 
 func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
@@ -3286,9 +3275,19 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if (filepath.IsAbs(req.Target) || strings.ContainsAny(req.Target, `/\`) ||
-		strings.HasSuffix(strings.ToLower(req.Target), ".json")) &&
-		!strings.Contains(req.Target, "://") && a.rejectWindowsGatewayPath(w, req.Target) {
+	if mcpScanLocalPath(req.Target) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "local path targets are not supported by the MCP scan API; use a configured MCP server name or an MCP URL",
+		})
+		return
+	}
+	lowerTarget := strings.ToLower(req.Target)
+	if strings.Contains(req.Target, "://") && !strings.HasPrefix(lowerTarget, "http://") &&
+		!strings.HasPrefix(lowerTarget, "https://") && !strings.HasPrefix(lowerTarget, "ws://") &&
+		!strings.HasPrefix(lowerTarget, "wss://") && !strings.HasPrefix(lowerTarget, "sse://") {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "unsupported MCP scan URL scheme; use http, https, ws, wss or sse",
+		})
 		return
 	}
 
@@ -4554,7 +4553,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	}
 	// With signed bundles, a policy becomes active only through a verified
 	// bundle apply, which the lifecycle confirms against the running gateway.
-	if signedBundleMode(a.runtimeConfigSnapshot()) {
+	if cfg := a.runtimeConfigSnapshot(); policyCfg.StandaloneEnterprise() || cfg != nil && cfg.StandaloneEnterprise() {
 		recordFailure(managedBundlePolicyReloadRefusal)
 		a.writeJSON(w, http.StatusForbidden, map[string]string{
 			"error":  managedBundlePolicyReloadRefusal,

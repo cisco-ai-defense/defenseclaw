@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -39,6 +40,7 @@ REFERENCE_DIR = ROOT / "schemas/config/v8/reference"
 CANONICAL_YAML = REFERENCE_DIR / "observability.yaml"
 CANONICAL_MARKDOWN = REFERENCE_DIR / "observability.md"
 PYTHON_DATA_DIR = ROOT / "cli/defenseclaw/_data/config/v8"
+CLI_CONFIG_PATH = ROOT / "cli/defenseclaw/config.py"
 
 BUCKETS = (
     "compliance.activity",
@@ -57,8 +59,8 @@ BUCKETS = (
     "diagnostic",
 )
 
-YAML_HEADER = """\
-# DEFENSECLAW CONFIGURATION v8 — OBSERVABILITY REFERENCE
+YAML_HEADER_TEMPLATE = """\
+# DEFENSECLAW CONFIGURATION v{version} — OBSERVABILITY REFERENCE
 #
 # GENERATED FILE. DO NOT EDIT.
 # Canonical schema: schemas/config/v8/defenseclaw-config.schema.json
@@ -98,10 +100,12 @@ YAML_HEADER = """\
 
 """
 
-YAML_ANNOTATIONS = {
-    "config_version: 8": ("# Selects the strict v8 configuration contract; unknown keys are errors.",),
+YAML_ANNOTATIONS_TEMPLATE = {
+    "config_version: {version}": (
+        "# Selects the strict v{version} configuration contract; unknown keys are errors.",
+    ),
     "  bucket_catalog_version: 1": (
-        "  # Optional in source. Version 8 currently resolves catalog 1; pin it only",
+        "  # Optional in source. Version {version} currently resolves catalog 1; pin it only",
         "  # when deliberately binding the file to this reviewed bucket taxonomy.",
     ),
     "  resource:": (
@@ -230,7 +234,7 @@ def _collect_all() -> dict[str, bool]:
     return {"logs": True, "traces": True, "metrics": True}
 
 
-def _reference_document() -> dict[str, Any]:
+def _reference_document(version: int) -> dict[str, Any]:
     """Return one exhaustive, valid source document.
 
     Values are illustrative and disabled destinations avoid accidental export
@@ -241,7 +245,7 @@ def _reference_document() -> dict[str, Any]:
 
     bucket_policies = {bucket: {"collect": _collect_all(), "redaction_profile": "none"} for bucket in BUCKETS}
     return {
-        "config_version": 8,
+        "config_version": version,
         "observability": {
             "bucket_catalog_version": 1,
             "resource": {
@@ -454,6 +458,18 @@ def _reference_document() -> dict[str, Any]:
                     "token_credential": "splunk-hec-token",
                 },
                 {
+                    "name": "local-splunk",
+                    "kind": "splunk_hec",
+                    "enabled": False,
+                    "endpoint": "http://127.0.0.1:8088/services/collector/event",
+                    "token_env": "DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN",
+                    "network_safety": {"allow_private_networks": True},
+                    "local_stack": {
+                        "marker": "defenseclaw-local-splunk",
+                        "container_id": "0123456789abcdef" * 4,
+                    },
+                },
+                {
                     "name": "http-standalone",
                     "kind": "http_jsonl",
                     "enabled": False,
@@ -659,15 +675,16 @@ def _destination_variants(schema: Mapping[str, Any]) -> list[tuple[str, Mapping[
     return variants
 
 
-def _render_markdown(schema: Mapping[str, Any]) -> str:
+def _render_markdown(schema: Mapping[str, Any], version: int) -> str:
     observability = _resolve(schema, schema["$defs"]["observability"])
     rows = _field_rows(schema, observability, "observability", set())
     variants = _destination_variants(schema)
     lines = [
-        "# DefenseClaw v8 observability configuration reference",
+        f"# DefenseClaw v{version} observability configuration reference",
         "",
         "<!-- GENERATED FILE. DO NOT EDIT. -->",
         "",
+        f"Current source files declare `config_version: {version}`.",
         "This reference is generated from `schemas/config/v8/defenseclaw-config.schema.json`.",
         "The JSON Schema is the source of truth; this document and the adjacent exhaustive",
         "YAML are presentation artifacts checked for drift in CI.",
@@ -739,7 +756,7 @@ def _render_markdown(schema: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_yaml(document: Mapping[str, Any]) -> str:
+def _render_yaml(document: Mapping[str, Any], version: int) -> str:
     body = yaml.safe_dump(
         dict(document),
         sort_keys=False,
@@ -747,11 +764,17 @@ def _render_yaml(document: Mapping[str, Any]) -> str:
         default_flow_style=False,
         width=100,
     )
+    # Plain replacement, not str.format: the templates contain literal braces.
+    marker = "{version}"
+    annotations = {
+        key.replace(marker, str(version)): tuple(text.replace(marker, str(version)) for text in lines)
+        for key, lines in YAML_ANNOTATIONS_TEMPLATE.items()
+    }
     annotated: list[str] = []
     for line in body.splitlines():
-        annotated.extend(YAML_ANNOTATIONS.get(line, ()))
+        annotated.extend(annotations.get(line, ()))
         annotated.append(line)
-    return YAML_HEADER + "\n".join(annotated) + "\n"
+    return YAML_HEADER_TEMPLATE.replace(marker, str(version)) + "\n".join(annotated) + "\n"
 
 
 def _schema_paths(schema: Mapping[str, Any], node: Mapping[str, Any], prefix: str) -> set[str]:
@@ -841,12 +864,34 @@ def _validate_reference(schema: Mapping[str, Any], document: Mapping[str, Any]) 
         )
 
 
+def current_config_version(schema: Mapping[str, Any]) -> int:
+    """Return the config_version this build writes.
+
+    The schema's ``config_version`` enum ends at the current version; the
+    Python CLI's ``CURRENT_CONFIG_VERSION`` (and the Go gateway's
+    ``MaxSupportedConfigVersion``) must agree, so a version bump cannot leave
+    the reference naming a stale contract (GAP-0617).
+    """
+
+    versions = schema["properties"]["config_version"]["enum"]
+    version = max(int(value) for value in versions)
+    match = re.search(r"^CURRENT_CONFIG_VERSION\s*=\s*(\d+)\s*$", CLI_CONFIG_PATH.read_text(encoding="utf-8"), re.M)
+    if match is None:
+        raise ValueError(f"CURRENT_CONFIG_VERSION not found in {CLI_CONFIG_PATH.relative_to(ROOT)}")
+    if int(match.group(1)) != version:
+        raise ValueError(
+            f"schema config_version enum ends at {version} but CURRENT_CONFIG_VERSION is {match.group(1)}"
+        )
+    return version
+
+
 def _outputs(schema_bytes: bytes) -> dict[Path, bytes]:
     schema = json.loads(schema_bytes)
-    document = _reference_document()
+    version = current_config_version(schema)
+    document = _reference_document(version)
     _validate_reference(schema, document)
-    yaml_bytes = _render_yaml(document).encode()
-    markdown_bytes = _render_markdown(schema).encode()
+    yaml_bytes = _render_yaml(document, version).encode()
+    markdown_bytes = _render_markdown(schema, version).encode()
     return {
         CANONICAL_YAML: yaml_bytes,
         CANONICAL_MARKDOWN: markdown_bytes,

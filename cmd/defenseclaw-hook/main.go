@@ -75,7 +75,7 @@ func main() {
 		os.Exit(0)
 	}
 	if !isHookEntrypoint(os.Args[1:]) {
-		fmt.Fprintln(os.Stderr, "defenseclaw-hook: expected hook or notify subcommand")
+		fmt.Fprintln(os.Stderr, "defenseclaw-hook: expected hook, hook-post or notify subcommand")
 		os.Exit(2)
 	}
 	cli.SetVersion(version)
@@ -84,7 +84,7 @@ func main() {
 }
 
 func isHookEntrypoint(args []string) bool {
-	return len(args) > 0 && (args[0] == "hook" || args[0] == "notify")
+	return len(args) > 0 && (args[0] == "hook" || args[0] == "hook-post" || args[0] == "notify")
 }
 
 func isIdentityEntrypoint(args []string) bool {

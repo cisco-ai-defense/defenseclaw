@@ -87,7 +87,9 @@ func TestConfigReloadHoldsTheProfileOracleUntilApplied(t *testing.T) {
 		if response.Code != http.StatusOK {
 			t.Fatalf("hook status during reload = %d: %s", response.Code, response.Body.String())
 		}
-	case <-time.After(500 * time.Millisecond):
+	// Leave room for a contended race runner while staying well below the
+	// oracle's reload wait. A hook that waits on that gate still fails here.
+	case <-time.After(configReloadExplainWait / 2):
 		t.Fatal("hook decision waited for the hot reload")
 	}
 	answered := make(chan struct{})

@@ -19,12 +19,46 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
+	"strings"
+
+	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
+
+// Profile validation runs before installedBeforeRun is populated and before
+// the bundle path can record its own refusal. Audit a requested anchor change
+// there only for an elevated caller on a verified installed standalone host.
+func recordWindowsAnchorsProfileRefusal(cmd *cobra.Command, opts *windowsEnterpriseLifecycleOptions, cause error) {
+	if opts == nil || strings.TrimSpace(opts.trustAnchors) == "" || !windowsEnterpriseIsElevated() {
+		return
+	}
+	installed, err := windowsEnterpriseDeploymentInspector(managed.ProfileStandalone)
+	if err != nil || installed.State != winpath.EnterpriseDeploymentInstalled {
+		return
+	}
+	secureClient, err := windowsEnterpriseDeploymentInspector(managed.ProfileSecureClient)
+	if err != nil || secureClient.State == winpath.EnterpriseDeploymentInstalled || secureClient.State == winpath.EnterpriseDeploymentUnknown {
+		return
+	}
+	layout, err := windowsBundleLayout()
+	if err == nil {
+		current, _ := safefile.ReadRegularFileBounded(newWindowsBundleDriver(layout).AnchorsPath, windowsBundleMaxAnchors)
+		code := "profile_preflight_refused"
+		if errors.Is(cause, errWindowsEnterpriseInvalidArguments) {
+			code = "invalid_arguments"
+		}
+		err = recordWindowsAnchorsFailure(layout, nil, code, false, current)
+	}
+	warnChangeUnrecorded(cmd.ErrOrStderr(), err)
+}
 
 // windowsChangeSpool is the change spool <ConfigDir>\bundles\change-events
 // of layout (the layout the command changes) with the bundle version
@@ -45,7 +79,12 @@ var windowsChangeSpool = func(layout managed.StandaloneLayout) (enterprisestatus
 		Prepare: func(dir string) error {
 			err := prepareChangeSpoolDirectory(dir,
 				func(parent string) error {
-					return createWindowsBundleDirectory(parent, windowsBundleDirectorySDDL(service.String()))
+					sddl, err := windowsChangeSpoolParentSDDL(parent,
+						enterprisestatus.ChangeEventsDir(layout.ConfigDir), service.String())
+					if err != nil {
+						return err
+					}
+					return createWindowsBundleDirectory(parent, sddl)
 				},
 				func(path string) error {
 					return createWindowsBundleDirectory(path, windowsBundleVersionSDDL(service.String(), true))
@@ -59,6 +98,20 @@ var windowsChangeSpool = func(layout managed.StandaloneLayout) (enterprisestatus
 			return applyWindowsBundleSDDL(path, windowsBundleVersionSDDL(service.String(), false))
 		},
 	}, nil
+}
+
+// The bundle root is public for traversal; the change spool and its
+// reservation folder are private to administrators and the gateway service.
+// Preparing reserved must preserve the already-protected spool parent.
+func windowsChangeSpoolParentSDDL(parent, spool, serviceSID string) (string, error) {
+	switch filepath.Clean(parent) {
+	case filepath.Clean(filepath.Dir(spool)):
+		return windowsBundleDirectorySDDL(serviceSID), nil
+	case filepath.Clean(spool):
+		return windowsBundleVersionSDDL(serviceSID, true), nil
+	default:
+		return "", fmt.Errorf("unexpected change spool parent: %s", parent)
+	}
 }
 
 // reserveWindowsChange reserves room in the change spool for the event of

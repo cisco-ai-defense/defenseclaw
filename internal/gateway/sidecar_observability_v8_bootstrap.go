@@ -142,10 +142,17 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 	if alreadyBound {
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapBinding, nil)
 	}
-	s.bootConfigSourceName, s.bootConfigSource = sourceName, raw
+	// Keep the exact on-disk bytes for startup reconciliation. The CLI may
+	// boot from an unmigrated v8 file; the config watcher reads that same
+	// file, while the runtime must compile its in-memory v9 normalization.
+	normalized, _, err := normalizeRuntimeConfigSource(sourceName, raw)
+	if err != nil {
+		return false, err
+	}
+	s.bootConfigSourceName, s.bootConfigSource = sourceName, append([]byte(nil), raw...)
 	compiled, err := config.ParseCompileObservabilityV8(
 		sourceName,
-		raw,
+		normalized,
 		config.ObservabilityV8CompileOptions{DefaultDataDir: cfg.DataDir},
 	)
 	if err != nil || compiled == nil || compiled.Plan == nil {

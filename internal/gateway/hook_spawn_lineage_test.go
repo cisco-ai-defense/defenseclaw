@@ -126,7 +126,7 @@ func TestCodexThreadSpawnLinksTheChildSessionToItsParent(t *testing.T) {
 	if !ok || stranger.AgentDepth != 0 || stranger.ParentSessionID != "" {
 		t.Fatalf("a session nobody spawned = %+v (retained %v), want a root", stranger, ok)
 	}
-	if pending, _ := sharedAgentIdentities.snapshot(); pending[identity].SessionsSeen != 2 || pending[identity].LastSessionID != other {
+	if pending, _, _ := sharedAgentIdentities.snapshot(); pending[identity].SessionsSeen != 2 || pending[identity].LastSessionID != other {
 		t.Fatalf("agent identity counted %+v, want the parent and the stranger, not the thread", pending[identity])
 	}
 
@@ -188,7 +188,7 @@ func TestCopilotSubagentSessionLinksToItsParent(t *testing.T) {
 		child.RootSessionID != parentSession || child.LifecycleEvent != "subagent_stop" {
 		t.Fatalf("Copilot sub-agent session lineage = %+v (retained %v), want depth 1 under %s", child, ok, parentAgent)
 	}
-	if pending, _ := sharedAgentIdentities.snapshot(); pending[identity].SessionsSeen != 1 ||
+	if pending, _, _ := sharedAgentIdentities.snapshot(); pending[identity].SessionsSeen != 1 ||
 		pending[identity].LastSessionID != parentSession {
 		t.Fatalf("agent identity counted %+v, want the parent chat only", pending[identity])
 	}

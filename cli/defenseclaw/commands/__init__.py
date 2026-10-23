@@ -57,7 +57,7 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
     active = (
         cfg.active_connector()
         if cfg is not None and hasattr(cfg, "active_connector")
-        else "openclaw"
+        else ""
     )
     requested = requested.strip() if requested else ""
     try:

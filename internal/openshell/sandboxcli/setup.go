@@ -1135,10 +1135,10 @@ func (a *App) manualRestartStops(ctx context.Context, microVM bool, gone []strin
 			"or what it wrote since its last sync is lost: " + strings.Join(held, "; ")
 	case known:
 		return "restarting it stops every sandbox on it (none runs now): stop a MicroVM sandbox you start before then first (" + stop +
-			", which flushes its disk), or what it wrote since its last sync is lost"
+			"; DefenseClaw's stop requests a disk sync; raw OpenShell stop on a gateway running 0.1.5 or later requests a guest flush before a planned stop, but on an older gateway save its work first); if a flush fails, changes after the last successful disk sync may be lost"
 	}
 	return "restarting it stops every sandbox on it: first stop the MicroVM sandboxes running on it with " + stop +
-		", which flushes their disks, or what they wrote since their last sync is lost"
+		"; DefenseClaw's stop requests a disk sync; raw OpenShell stop on a gateway running 0.1.5 or later requests a guest flush before a planned stop, but on an older gateway save its work first; if a flush fails, changes after the last successful disk sync may be lost"
 }
 
 // shortList names at most five of names.
@@ -1684,15 +1684,29 @@ func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) (r
 		if err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
 			drives = openshell.ComputeDriver(st.Gateway.Driver)
 		}
+		missingListeners := err == nil && st.Enabled &&
+			(st.Available || strings.Contains(st.Reason, "listener is not running in this process")) &&
+			(st.IngressAddr == "" || st.EgressAddr == "")
 		switch {
 		case err != nil:
 			return false, false, true
-		case st.Enabled && st.Available && (driver == "" || drives == driver):
+		case st.Enabled && st.Available && !missingListeners && (driver == "" || drives == driver):
 			a.ok("the daemon runs the sandbox subsystem (ingress " + st.IngressAddr + ", egress proxy " + st.EgressAddr + ")")
 			return true, st.DockerGroupMissing, false
 		}
 		// The polls bound the wait when the clock does not move.
 		if a.Now().After(deadline) || time.Duration(polls)*poll >= wait {
+			if missingListeners {
+				var missing []string
+				if st.IngressAddr == "" {
+					missing = append(missing, "ingress (openshell.ingress_port)")
+				}
+				if st.EgressAddr == "" {
+					missing = append(missing, "egress (openshell.egress_port)")
+				}
+				a.warn("the daemon does not hold its sandbox " + strings.Join(missing, " and ") + " listener; another process may hold the port. Free or move the port, then restart it with `defenseclaw-gateway restart` and rerun setup")
+				return false, false, false
+			}
 			if st.Enabled && st.Available {
 				a.warn(fmt.Sprintf("the daemon still drives the OpenShell gateway as the %s driver, not %s; restart it (`defenseclaw-gateway restart`) "+
 					"if `%s doctor` says the same", drives, driver, CommandName))

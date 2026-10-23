@@ -247,7 +247,10 @@ gateway is enforcing. It is omitted on a Secure Client device.
 ```
 
 `effective_digest` and `generation` identify the policy generation in force;
-`config_generation` is the writer's counter from `config.generation.json`;
+`generation` counts the rebuilds of the running gateway and starts again at 1
+when it restarts. `config_generation` is the writer's counter from
+`config.generation.json`, which survives a restart; `defenseclaw status`,
+`defenseclaw doctor` and the TUI name the applied policy by it and the digest.
 `component_count` is the number of inputs the digest covers (config, the Rego
 modules, the providers, every rule pack in use and each guardrail profile).
 Their digests are not on `/health`, so the object stays small with thousands
@@ -345,7 +348,7 @@ Chain state holds bounded masks and fingerprints, not raw commands, arguments, p
 | --- | --- | --- |
 | `POST` | `/v1/skill/scan` | Run the skill scanner against the local target directory named in the request. |
 | `POST` | `/v1/plugin/scan` | Run the plugin scanner against the local target directory named in the request. |
-| `POST` | `/v1/mcp/scan` | Run the MCP scanner against a target URL or local path. |
+| `POST` | `/v1/mcp/scan` | Run the MCP scanner against a supported MCP URL or a configured server name. Path or JSON-file targets (`/path`, `./path`, `own.json`, Windows paths and `file:` URIs) return HTTP 400 with the cause before scanning; a bare identifier without path or file syntax is interpreted as a configured server name. |
 | `POST` | `/v1/skill/fetch` | Stream a tar.gz of an existing local directory after resolving it beneath a configured skill or plugin root; this does not fetch from a registry. |
 | `POST` | `/scan/result` | Persist a scanner result through the canonical audit logger. |
 
@@ -393,7 +396,7 @@ deployment; elsewhere they return `404`.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/policy/evaluate` | Dry-run the admission policy with `{domain?: "admission", input: {target_type, target_name, path?, connector?, scan_result?}}`, where `target_type` is `skill`, `mcp` or `plugin` and `scan_result` is `{scanner_name, max_severity, total_findings, exit_code?, scan_error?}`. DefenseClaw adds the `admission:` block for the type and the `asset_policy` block and allow rules from the live generation, and returns `{ok: true, data: <AdmissionOutput>}` with `verdict`, `reason`, `file_action`, `install_action` and `runtime_action`. Rules scoped to a connector match only when the request names it in `input.connector` (the OpenClaw plugin sends `openclaw`). Arbitrary OPA domains and input are rejected. See [Admission](/docs/reference/scanning/admission). |
-| `POST` | `/policy/reload` | Rebuild the policy generation now and return `{"status":"reloaded","policy_dir":"...","generation":N,"digest":"sha256:..."}` (the generation and digest that are enforcing now); it also clears the judge cache. The gateway already watches `config.yaml`, the policy assets it names and the rule packs, and applies a valid change on its own, so this only forces a rebuild (for example from a script). A change that fails to build leaves the running generation in place; see [the `policy` object](#the-policy-object). |
+| `POST` | `/policy/reload` | Rebuild the policy generation now and return `{"status":"reloaded","policy_dir":"...","generation":N,"digest":"sha256:..."}` (the generation and digest that are enforcing now); it also clears the judge cache. The gateway already watches `config.yaml`, the policy assets it names and the rule packs, and applies a valid change on its own, so this only forces a rebuild (for example from a script). A change that fails to build leaves the running generation in place; see [the `policy` object](#the-policy-object). On a managed standalone host the endpoint returns `403`: apply a signed policy bundle through the enterprise lifecycle instead. |
 
 ### Guardrail control plane
 
@@ -574,6 +577,10 @@ failed, the answer adds `lookup_error`. If an assignment depends on the missing 
 profile with its digest. With no profiles configured the answer is
 `"profiles_configured": false` with an empty `profile` and the global
 settings under `effective`; `subject` is still resolved when `user` is given.
+When `cache` is present, its `refused` boolean states whether the gateway's
+cached decision refuses; `cache.refused_reason` names the missing fact on a
+refusal. Clients should not infer a settled decision from an older response
+that lacks `cache.refused`.
 
 ```json title="GET /api/v1/agents/identities?user=alice (trimmed)"
 {
@@ -584,12 +591,15 @@ settings under `effective`; `subject` is still resolved when `user` is given.
       "agent_id": "agt-3f9c0a1b2c3d4e5f",
       "user_id": "94401103",
       "user_name": "alice@corp.example.com",
+      "upn": "alice@corp.example.com",
       "connector": "codex",
       "machine_hash": "…",
       "first_seen": "2026-10-05T16:41:09Z",
       "last_seen": "2026-10-06T10:32:15Z",
       "last_session_id": "3034b58b-38bc-48da-bd70-efffc86bff40",
-      "sessions_seen": 4
+      "sessions_seen": 4,
+      "subagents_seen": 2,
+      "last_subagent_id": "ais-8c41d07e2b9f3a65"
     }
   ],
   "total": 1,
@@ -615,7 +625,28 @@ restart. `/health` reports the same under `agent_identities`, and
 saved on the next write that succeeds, without a restart.
 `sessions_seen` counts each chat once, however many are open and also when one
 resumes after a gateway restart. A sub-agent that runs in a session of its own,
-as a Codex 0.160 thread does, is not a chat and is not counted. `total` counts every matching identity; while
+as a Codex 0.160 thread does, is not a chat and is not counted.
+`subagents_seen` counts the sub-agents the agent ran, each once, also when one
+hooks again after a gateway restart: a sub-agent that shares its parent's
+session (a Claude Code task, a Codex sub-agent), and one in a session of its own
+from its first hook after the gateway linked that session to the parent.
+`last_subagent_id` is the `ais-`
+instance of the newest one, the one its own records carry. `upn` is the
+account's UPN in the current verified directory facts or Windows guardian
+record when the agent was last seen. Each later hook replaces that value. A
+current Windows guardian record takes precedence over an earlier cached
+answer. Without a current UPN, an expired or failed directory answer omits
+`upn` from the row. During a directory outage, profile matching still uses
+the last good UPN that the directory cache or guardian keeps; that kept UPN is
+not a current fact, so it is left out and an earlier value is not carried into
+the row. On Windows, a cold Active
+Directory lookup can still be running when a hook records the row, so `upn`
+may be absent. A completed background lookup does not update the row by
+itself; another hook must run. Rows also keep their last snapshot until the
+next hook. Linux, macOS and Windows rows carry the
+same fields, and rows written before 1.0.4 gain the new fields when their
+agent is seen again, subject to that `upn` timing. `total` counts every
+matching identity; while
 `next_cursor` is not empty, pass it as `cursor` for the next page.
 `defenseclaw agent identities` reads every page.
 

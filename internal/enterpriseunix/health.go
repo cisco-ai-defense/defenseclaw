@@ -38,7 +38,8 @@ func (e *apiPortHeldError) Error() string { return e.message }
 // own TCP API listener as running. The answer on 127.0.0.1:18970 is never
 // trusted: another local account can bind the port while the gateway's
 // listener is down, and answer there. A gateway from an earlier release
-// refuses /health on its socket; it is probed on the TCP API as before.
+// refuses /health on its socket; its TCP API fallback verifies the connected
+// socket against the protected gateway service before reading /health.
 func (l *lifecycle) gatewayHealth(ctx context.Context, gateway Unit, serviceUID int) ([]byte, error) {
 	env := l.env
 	code, body, err := env.HealthGet(ctx)

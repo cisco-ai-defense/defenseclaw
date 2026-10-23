@@ -28,8 +28,8 @@ import (
 // tool call DefenseClaw cannot check when its fail mode is closed or not set
 // (the gateway is down or does not answer in time, or its answer cannot be
 // used), with Hermes' block directive and a text that says why and what to
-// do, and logs the call as failed closed. Only an explicit "open" lets the
-// call run, and the log then says it ran fail-open.
+// do, and logs the call as failed closed. Only an explicit "open" lets an
+// outage call run; malformed oversized input stays closed.
 func TestPerUserHermesToolCallFailsClosedUnlessOpen(t *testing.T) {
 	waitForDeadline := func(_ *stubRT, req *http.Request) (*http.Response, error) {
 		<-req.Context().Done()
@@ -90,7 +90,7 @@ func TestPerUserHermesToolCallFailsClosedUnlessOpen(t *testing.T) {
 					t.Fatalf("code %d, want 0 (stderr %q)", result.code, result.stderr)
 				}
 				logged := lastHookFailure(t, home)["fail_mode"]
-				if failMode == "open" {
+				if failMode == "open" && tc.name != "oversized" && tc.name != "malformed answer" {
 					if strings.TrimSpace(result.stdout) != "" {
 						t.Fatalf("stdout %q, want the neutral result for an explicit open", result.stdout)
 					}

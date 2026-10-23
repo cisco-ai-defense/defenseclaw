@@ -65,7 +65,7 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
         False,
         "Devin CLI + Devin Desktop (Devin Local) hooks; MCP, skills, and rules discovery",
     ),
-    ModeChoice("copilot", "Copilot", "p", False, "workspace hooks + native pre-tool approval"),
+    ModeChoice("copilot", "Copilot", "p", False, "workspace hooks; action-mode confirmations block"),
     ModeChoice("antigravity", "Antigravity", "a", False, "PreToolUse hooks via ~/.gemini/config/hooks.json"),
     ModeChoice("opencode", "OpenCode", "e", False, "auto-loaded JS bridge plugin; tool.execute.before blocking"),
     ModeChoice("amp", "Amp", "i", False, "synchronous TypeScript policy plugin; native confirm/block"),
@@ -141,7 +141,7 @@ class ModePickerScreen(ModalScreen[str | None]):
     BINDINGS = [
         Binding("up,k", "cursor_up", "Previous", show=False),
         Binding("down,j", "cursor_down", "Next", show=False),
-        Binding("enter", "choose", "Choose", show=False),
+        Binding("enter", "choose", "Choose", show=False, priority=True),
         Binding("escape,q", "cancel", "Cancel", show=False),
     ]
 
@@ -155,33 +155,37 @@ class ModePickerScreen(ModalScreen[str | None]):
     def _resolve_current_wire(self, wire: str) -> str:
         """Pick the row to land on, never fabricating a hidden connector.
 
-        ``normalize_connector`` collapses an empty/unknown wire to the
-        ``"openclaw"`` sentinel; honoring that would surface a connector the
-        picker isn't even showing (openclaw on Windows, or a hook-only/empty
-        state). So resolve against the *visible* rows and fall back to the
-        first one instead of the hardcoded openclaw default.
+        Resolve against the visible rows. An empty, unknown, or hidden
+        connector is not marked active merely because the menu shows a
+        first row for navigation.
         """
         candidate = wire.strip().lower().replace("_", "-")
         if candidate in {"claude-code", "claudecode"}:
             candidate = "claudecode"
         if any(choice.wire == candidate for choice in self.choices):
             return candidate
-        return self.choices[0].wire if self.choices else candidate
+        return ""
 
     def compose(self) -> ComposeResult:
-        current = choice_for_wire(self.current_wire)
         actions = tuple(_choice_action(choice, current_wire=self.current_wire) for choice in self.choices)
-        selected = next(
-            (i for i, c in enumerate(self.choices) if c.wire == current.wire),
-            0,
+        selected = next((i for i, c in enumerate(self.choices) if c.wire == self.current_wire), None)
+        preview_text = (
+            preview_for_switch(self.current_wire, self.current_wire)
+            if selected is not None
+            else "Choose a connector to preview setup."
         )
         with Vertical(id="mode-picker-dialog"):
             yield Static("Switch active claw connector", id="mode-picker-title")
             # Preview and keys go above the (long) connector list so they are
             # on screen at 80x24; the list scrolls to the selection.
             yield Static(self._hint_text(), id="mode-picker-hint")
-            yield Static(preview_for_switch(self.current_wire, current.wire), id="mode-picker-preview")
-            yield ActionMenu(actions, selected_index=selected, id="mode-picker-menu")
+            yield Static(preview_text, id="mode-picker-preview")
+            yield ActionMenu(
+                actions,
+                selected_index=selected,
+                allow_unselected=selected is None,
+                id="mode-picker-menu",
+            )
 
     def _hint_text(self) -> str:
         # Built from the visible rows so the advertised jump keys match what
@@ -236,7 +240,10 @@ class ModePickerScreen(ModalScreen[str | None]):
 
     def _sync_preview(self) -> None:
         menu = self.query_one(ActionMenu)
-        index = menu.selected_index if menu.selected_index is not None else 0
+        if menu.selected_index is None:
+            self.query_one("#mode-picker-preview", Static).update("Choose a connector to preview setup.")
+            return
+        index = menu.selected_index
         choice = self.choices[index]
         self.query_one("#mode-picker-preview", Static).update(preview_for_switch(self.current_wire, choice.wire))
 
@@ -247,7 +254,7 @@ def normalize_connector(value: str) -> str:
         return "claudecode"
     if any(choice.wire == normalized for choice in MODE_PICKER_CHOICES):
         return normalized
-    return "openclaw"
+    return ""
 
 
 def choice_for_wire(wire: str) -> ModeChoice:
@@ -255,7 +262,7 @@ def choice_for_wire(wire: str) -> ModeChoice:
     for choice in MODE_PICKER_CHOICES:
         if choice.wire == normalized:
             return choice
-    return MODE_PICKER_CHOICES[0]
+    raise ValueError(f"unknown connector: {wire!r}")
 
 
 def choice_for_hotkey(hotkey: str) -> ModeChoice | None:
@@ -268,7 +275,10 @@ def choice_for_hotkey(hotkey: str) -> ModeChoice | None:
 def preview_for_switch(current_wire: str, dest_wire: str) -> str:
     current = normalize_connector(current_wire)
     dest = normalize_connector(dest_wire)
-    label = choice_for_wire(dest).label
+    if not dest:
+        return "Choose a connector to preview setup."
+    choice = choice_for_wire(dest)
+    label = choice.label
     if current == dest and dest == "amp":
         return (
             "Amp: setup will re-run to refresh the synchronous TypeScript policy plugin, "
@@ -276,7 +286,7 @@ def preview_for_switch(current_wire: str, dest_wire: str) -> str:
         )
     if current == dest:
         return f"{label}: setup will re-run to refresh hooks, config, and runtime files."
-    if choice_for_wire(dest).guardrail_ok:
+    if choice.guardrail_ok:
         return (
             f"{label}: runs proxy-backed connector setup and pins claw.mode plus guardrail.connector; "
             "preserves the existing guardrail.mode."

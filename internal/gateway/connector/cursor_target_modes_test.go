@@ -12,17 +12,14 @@ import (
 	"testing"
 )
 
-func TestWindowsCursorLegacyAdapterByteIdentity(t *testing.T) {
-	// Captured from main's preceding v9 renderer (closed was the only managed
-	// mode it accepted; open is this renderer's first managed open adapter).
-	// The release branch's v9 template differs, so its digests do not apply
-	// here. Protected legacy policies hash exact bytes; changing their template
-	// would break upgrade and rollback.
-	// Hash the actual adapter: normalizing it here would conceal CRLF embedded
-	// by a Windows checkout and permit an incompatible gateway build.
+func TestWindowsCursorAdapterByteIdentity(t *testing.T) {
+	// Pin the current canonical adapter bytes. Protected earlier adapters are
+	// upgrade-readable through the recorded digest in their ownership state;
+	// reconciliation writes this template before strict verify passes.
+	// Hash actual bytes so a CRLF checkout cannot silently change identity.
 	for mode, want := range map[string]string{
-		"open":   "fa8914cd67252264cf02e7311ea224d76f3d6e51e91010dcd0bca0510e783253",
-		"closed": "e461d759b0d53bc03e8daf8e82c9db470c823a86b715d3cf01103f5bb71231f2",
+		"open":   "fff3f22e19f5f22ff3a0c7f68c4d713e1e283b493f48d2e8059db36db064eda4",
+		"closed": "5135f7d863ec596641e7c10270409131c8a07c79b9d8ab89823194c92f8978c7",
 	} {
 		current, err := RenderWindowsCursorEnterpriseAdapter(testWindowsHookBinary, mode)
 		if err != nil {
@@ -30,7 +27,7 @@ func TestWindowsCursorLegacyAdapterByteIdentity(t *testing.T) {
 		}
 		digest := sha256.Sum256(current)
 		if got := hex.EncodeToString(digest[:]); got != want {
-			t.Fatalf("legacy %s adapter hash=%s want=%s", mode, got, want)
+			t.Fatalf("%s adapter hash=%s want=%s", mode, got, want)
 		}
 	}
 }
@@ -58,7 +55,7 @@ func TestWindowsCursorTargetModesCanonicalAdapter(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(decoded, modes) {
 		t.Fatalf("decoded=%v err=%v", decoded, err)
 	}
-	for _, marker := range []string{"$failMode = 'closed'", "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value", "$targetModes.PSObject.Properties[$currentSID]", "if ($failMode -ceq 'open')", "WARNING hook fail-open; inspection bypassed connector=cursor", `{"continue":true}`, `"permission":"deny"`} {
+	for _, marker := range []string{"$failMode = 'closed'", "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value", "$targetModes.PSObject.Properties[$currentSID]", "if ($failMode -ceq 'open')", "open gateway-outage mode does not apply to local Cursor adapter failure", `"permission":"deny"`} {
 		if !bytes.Contains(adapter, []byte(marker)) {
 			t.Errorf("missing %q", marker)
 		}

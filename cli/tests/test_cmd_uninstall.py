@@ -18,13 +18,16 @@ own tests elsewhere.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import errno
 import hashlib
 import io
 import json
 import os
+import re
 import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1564,6 +1567,115 @@ class RemovedConnectorLeftoversTests(unittest.TestCase):
             self.assertIn("remove defenseclaw_omnigent_policy from policy_modules", report)
 
 
+class RemovedConnectorBackupsKeptTests(unittest.TestCase):
+    """until 1.1 (rel-1-0-4 GAP-0651): a data removal never deletes what the leftover list tells the user to keep."""
+
+    def _stage(self, home: str) -> tuple[str, dict[str, str]]:
+        data_dir = os.path.join(home, ".defenseclaw")
+        backups = os.path.join(data_dir, "connector_backups")
+        kept = {
+            os.path.join("omnigent", "config.json"): json.dumps(
+                {"connector": "omnigent", "logical_name": "config", "path": os.path.join(home, "oc", "config.yaml")}
+            ),
+            os.path.join("omnigent", "defenseclaw_omnigent_policy.py.edited-0123"): "# my edit\n",
+            os.path.join("openhands", "config.json"): json.dumps({"connector": "openhands"}),
+        }
+        files = {
+            os.path.join(data_dir, "config.yaml"): "config_version: 9\n",
+            os.path.join(data_dir, "hooks", "defenseclaw_omnigent_policy.py"): (
+                "# defenseclaw-managed-policy v0\n# support was removed in DefenseClaw 1.0.4\n"
+            ),
+            os.path.join(backups, "codex", "config.toml.json"): "{}",
+            # A config only the backup record names (OMNIGENT_CONFIG_HOME at setup).
+            os.path.join(home, "oc", "config.yaml"): "policy_modules: [defenseclaw_omnigent_policy]\n",
+        }
+        files.update({os.path.join(backups, rel): body for rel, body in kept.items()})
+        for path, body in files.items():
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(body)
+        return data_dir, kept
+
+    def _run(self, plan: cmd_uninstall.UninstallPlan, teardown_stdout: str) -> tuple[list[str], str]:
+        echoed: list[str] = []
+        proc = subprocess.CompletedProcess([], 0, stdout=teardown_stdout, stderr="")
+        with (
+            patch.object(cmd_uninstall, "_validate_plan"),
+            patch.object(cmd_uninstall, "_stop_gateway"),
+            patch.object(cmd_uninstall, "_gateway_supports_connector_teardown", return_value=True),
+            patch.object(cmd_uninstall.subprocess, "run", return_value=proc),
+            patch.object(cmd_uninstall, "_remove_probe_created_state"),
+            patch.object(cmd_uninstall, "_remove_created_dirs"),
+            patch.object(cmd_uninstall, "_remove_orphan_copilot_plugin"),
+            patch.object(cmd_uninstall, "_remove_mcp_writer_backups"),
+            patch.object(cmd_uninstall, "_remove_legacy_codex_candidate"),
+            patch.object(cmd_uninstall, "_remove_empty_plugin_cache"),
+            patch.object(cmd_uninstall, "remove_own_api_port_claims"),
+            patch.object(cmd_uninstall, "_requires_deferred_cleanup", return_value=False),
+            patch.object(cmd_uninstall, "_render_execution_result"),
+            patch.object(cmd_uninstall.click, "echo", side_effect=lambda text="", **_: echoed.append(str(text))),
+            patch.object(cmd_uninstall.ux, "echo", side_effect=lambda text="", **_: echoed.append(str(text))),
+        ):
+            error = ""
+            try:
+                cmd_uninstall._execute_plan(plan)
+            except click.ClickException as exc:
+                error = exc.format_message()
+        return echoed, error
+
+    def test_uninstall_all_keeps_the_backups_it_tells_the_user_to_copy_back_from(self):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch("os.path.expanduser", side_effect=lambda p, home=home: p.replace("~", home, 1)),
+        ):
+            data_dir, kept = self._stage(home)
+            backups = os.path.join(data_dir, "connector_backups", "omnigent")
+            # What the gateway's removed-connector teardown prints (removed.go FormatRemovedLeftovers).
+            teardown_stdout = (
+                "OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:\n"
+                f"  - {backups}: the copies of your files DefenseClaw saved before its setup changed them "
+                "(pristine_bytes, base64). To remove: copy back what you need, then delete this folder.\n"
+            )
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=data_dir, connectors=("omnigent",), stop_gateway=True, remove_data_dir=True, gateway_path="gw"
+            )
+            echoed, error = self._run(plan, teardown_stdout)
+            self.assertEqual(error, "")
+            self.assertFalse(os.path.lexists(data_dir))
+            root = data_dir + "-removed-connector-backups"
+            for rel, body in kept.items():
+                with open(os.path.join(root, rel), encoding="utf-8") as fh:
+                    self.assertEqual(fh.read(), body, rel)
+            self.assertFalse(os.path.lexists(os.path.join(root, "codex")))
+            text = "\n".join(echoed)
+            self.assertIn(f"  - {os.path.join(root, 'omnigent')}: the copies of your files", text)
+            self.assertIn(os.path.join(root, "omnigent", "defenseclaw_omnigent_policy.py.edited-0123"), text)
+            # The config only the moved record names is still listed.
+            self.assertIn(os.path.join(home, "oc", "config.yaml"), text)
+            # Every path the uninstall tells the user about is still there.
+            named = re.findall(r"^\s*(?:·\s*)?- (\S.*?): ", text, flags=re.MULTILINE)
+            self.assertTrue(named)
+            for path in named:
+                self.assertTrue(os.path.lexists(path), f"the uninstall names {path}, which it removed:\n{text}")
+
+    def test_a_backup_that_cannot_move_stops_the_uninstall_before_any_removal(self):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch("os.path.expanduser", side_effect=lambda p, home=home: p.replace("~", home, 1)),
+        ):
+            data_dir, kept = self._stage(home)
+            with open(data_dir + "-removed-connector-backups", "w", encoding="utf-8") as fh:
+                fh.write("in the way")
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=data_dir, connectors=("omnigent",), stop_gateway=True, remove_data_dir=True, gateway_path="gw"
+            )
+            _echoed, error = self._run(plan, "")
+            self.assertIn("No data or binaries were removed", error)
+            for rel in kept:
+                self.assertTrue(os.path.isfile(os.path.join(data_dir, "connector_backups", rel)), rel)
+            self.assertTrue(os.path.isfile(os.path.join(data_dir, "config.yaml")))
+
+
 class ConnectorTeardownDispatchTests(unittest.TestCase):
     def _plan(self, connector: str) -> cmd_uninstall.UninstallPlan:
         return cmd_uninstall.UninstallPlan(
@@ -2062,7 +2174,7 @@ class OrphanCopilotPluginTests(unittest.TestCase):
             plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
             (plugin / "hooks").mkdir(parents=True)
             (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
-            command = "'/opt/dc/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse'"
+            command = "'/opt/dc/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse' --hook-surface vscode-local"
             hooks = {"hooks": {"PreToolUse": [{"type": "command", "command": command, "timeout": 30}]}}
             (plugin / "hooks" / "hooks.json").write_text(json.dumps(hooks))
             with (
@@ -2077,6 +2189,79 @@ class OrphanCopilotPluginTests(unittest.TestCase):
             ):
                 cmd_uninstall._remove_orphan_copilot_plugin()
             self.assertFalse(plugin.parent.exists())
+
+    def test_orphan_cleanup_preserves_independent_copilot_plugin_handler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+            (plugin / "hooks").mkdir(parents=True)
+            (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+            own = "'/opt/dc/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse' --hook-surface vscode-local"
+            independent = "'/opt/operator/copilot-audit' hook --enterprise-managed --event 'PreToolUse'"
+            hooks = {"hooks": {"PreToolUse": [
+                {"type": "command", "command": own, "timeout": 30},
+                {"type": "command", "command": independent, "timeout": 30},
+            ]}}
+            path = plugin / "hooks" / "hooks.json"
+            path.write_text(json.dumps(hooks))
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+            self.assertTrue(plugin.exists(), "cleanup must keep a plugin with an independent handler")
+            self.assertEqual(json.loads(path.read_text()), {"hooks": {"PreToolUse": [hooks["hooks"]["PreToolUse"][1]]}})
+            self.assertTrue((plugin / "plugin.json").exists())
+
+    def test_orphan_cleanup_keeps_independent_fields_in_a_shared_handler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+            (plugin / "hooks").mkdir(parents=True)
+            (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+            own = "'/opt/dc/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse' --hook-surface vscode-local"
+            hooks = {"hooks": {"PreToolUse": [{"type": "command", "command": own, "operator": {"command": "/opt/operator/audit"}}]}}
+            path = plugin / "hooks" / "hooks.json"
+            path.write_text(json.dumps(hooks))
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+            self.assertEqual(json.loads(path.read_text()), hooks)
+
+    def test_orphan_cleanup_recognizes_released_windows_plugin(self):
+        fixture = Path(__file__).resolve().parents[2] / "internal" / "enterprisepolicy" / "testdata" / "copilot-vscode-1.0.0" / "windows-hooks.json"
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+            (plugin / "hooks").mkdir(parents=True)
+            (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+            (plugin / "hooks" / "hooks.json").write_bytes(fixture.read_bytes())
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+            self.assertFalse(plugin.exists(), "the released Windows plugin was DefenseClaw's")
+
+    def test_orphan_cleanup_keeps_edited_windows_handler_with_operator_command(self):
+        fixture = Path(__file__).resolve().parents[2] / "internal" / "enterprisepolicy" / "testdata" / "copilot-vscode-1.0.0" / "windows-hooks.json"
+        hooks = json.loads(fixture.read_text())
+        command = hooks["hooks"]["SessionStart"][0]["command"]
+        prefix, encoded = command.split(" -EncodedCommand ", 1)
+        script = base64.b64decode(encoded).decode("utf-16le") + "; Write-Output operator"
+        hooks["hooks"]["SessionStart"][0]["command"] = prefix + " -EncodedCommand " + base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+            (plugin / "hooks").mkdir(parents=True)
+            (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+            path = plugin / "hooks" / "hooks.json"
+            path.write_text(json.dumps(hooks))
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+            self.assertTrue(plugin.exists(), "cleanup removed an independent PowerShell statement")
+            self.assertEqual(json.loads(path.read_text()), {"hooks": {"SessionStart": hooks["hooks"]["SessionStart"]}})
 
 
 class _BlockDefenseClawImports:

@@ -126,12 +126,12 @@ func TestEnterpriseHookVerifyAwaitingSignInTrustsTheGuardianRecordOutsideLocalSy
 	enterpriseHookReconcileSecureClient = func() bool { return secureClient }
 	row := enterpriseHookReconcileRow{SID: "S-1-5-21-1-2-3-1008", Connector: "codex"}
 	target := enterprisehooks.ManifestTarget{SID: row.SID, Connector: "codex", Deferred: true}
-	awaiting := map[string]struct{}{enterpriseHookProtectedTargetKey(row): {}}
+	awaiting := map[string]string{enterpriseHookProtectedTargetKey(row): enterpriseHookAwaitingSignInPrefix}
 
 	if !enterpriseHookVerifyAwaitingSignIn(awaiting, target, row) {
 		t.Fatal("Secure Client verify outside LocalSystem did not accept the guardian's wait record")
 	}
-	if enterpriseHookVerifyAwaitingSignIn(map[string]struct{}{}, target, row) {
+	if enterpriseHookVerifyAwaitingSignIn(map[string]string{}, target, row) {
 		t.Fatal("a row the guardian did not record as waiting was excused")
 	}
 	notDeferred := target

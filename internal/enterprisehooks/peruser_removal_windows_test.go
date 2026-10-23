@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"golang.org/x/sys/windows"
 )
 
 // Revoking a user whose connector has no machine directory (it never ran,
@@ -67,6 +68,68 @@ func TestRemoveWindowsGenericManagedRuntimeTearsDownWithTheInstalledHookBinary(t
 	if len(captured) != 1 || !captured[0].ManagedEnterprise ||
 		!sameWindowsEnterprisePath(captured[0].HookExecutable, want) {
 		t.Fatalf("teardown options = %+v, want managed teardown with hook executable %s", captured, want)
+	}
+}
+
+// Runtime-only removal must reach the registered user-file cleanup while
+// impersonating the target account. Other connectors must leave Copilot's
+// VS Code Local files alone.
+func TestRemoveWindowsRuntimeOnlyManagedRuntimeDispatchesCopilotVSCodeCleanup(t *testing.T) {
+	h := newPerUserManagedHarness(t)
+	home := newWindowsTargetOwnedTestHome(t, h.target)
+	previousHook := windowsEnterpriseHookExecutable
+	previousImpersonation := windowsEnterpriseTargetImpersonation
+	windowsCopilotVSCodeUser.Lock()
+	previousCopilot := windowsCopilotVSCodeUser.apply
+	windowsCopilotVSCodeUser.Unlock()
+	t.Cleanup(func() {
+		windowsEnterpriseHookExecutable = previousHook
+		windowsEnterpriseTargetImpersonation = previousImpersonation
+		SetWindowsCopilotVSCodeUser(previousCopilot)
+	})
+	windowsEnterpriseHookExecutable = func() (string, error) { return h.hookExecutable, nil }
+	impersonations := 0
+	inImpersonation := false
+	windowsEnterpriseTargetImpersonation = func(sid *windows.SID, gotHome string, fn func() error) error {
+		if !sid.Equals(h.target) || gotHome != home {
+			t.Fatalf("removal impersonation = %s %s, want %s %s", sid, gotHome, h.target, home)
+		}
+		impersonations++
+		inImpersonation = true
+		defer func() { inImpersonation = false }()
+		return runWindowsTestThreadImpersonatedAsSelf(fn)
+	}
+	type cleanupCall struct {
+		home           string
+		verify, remove bool
+	}
+	var calls []cleanupCall
+	SetWindowsCopilotVSCodeUser(func(gotHome string, verify, remove bool) error {
+		if !inImpersonation {
+			t.Fatal("Copilot user-file cleanup ran outside target impersonation")
+		}
+		calls = append(calls, cleanupCall{gotHome, verify, remove})
+		return nil
+	})
+
+	opts := InstallOptions{OwnerSID: h.target.String(), UserHome: home}
+	for _, conn := range []connector.Connector{connector.NewOpenCodeConnector(), connector.NewCopilotConnector()} {
+		if err := removeWindowsRuntimeOnlyManagedRuntime(context.Background(), opts, conn); err != nil {
+			t.Fatalf("remove %s: %v", conn.Name(), err)
+		}
+		if conn.Name() == "opencode" && len(calls) != 0 {
+			t.Fatalf("OpenCode removal invoked Copilot cleanup: %+v", calls)
+		}
+	}
+	if impersonations != 2 {
+		t.Fatalf("runtime removals used impersonation %d times, want 2", impersonations)
+	}
+	if len(calls) != 1 || calls[0] != (cleanupCall{home: home, verify: false, remove: true}) {
+		t.Fatalf("Copilot removal callbacks = %+v, want one removal for %s", calls, home)
+	}
+	SetWindowsCopilotVSCodeUser(nil)
+	if err := removeWindowsRuntimeOnlyManagedRuntime(context.Background(), opts, connector.NewCopilotConnector()); err == nil {
+		t.Fatal("Copilot removal succeeded without the registered user-file callback")
 	}
 }
 

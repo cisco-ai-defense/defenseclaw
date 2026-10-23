@@ -95,9 +95,16 @@ type profileSubject struct {
 	// LookupError is why the lookup failed, when `explain` knows (the live
 	// path only records default_lookup_failed).
 	LookupError string
+	// accountUnresolved marks a numeric explain subject whose uid has no
+	// account database holder now. Its uid still describes a hook caller.
+	accountUnresolved bool
 	// viaProcessOwner marks a subject verified as the per-user gateway's own
 	// account, so explain and telemetry report it as process_owner.
 	viaProcessOwner bool
+	// holderUnproven marks facts that do not show which account holds the
+	// uid (useridentity.DirectoryFacts.HolderUnproven): the account and its
+	// UPN are unproven, its groups are not (resolveIdentity).
+	holderUnproven bool
 	// nameUnconfirmed marks a UserName that kept a domain the directory facts
 	// do not confirm (profileUserName): no users entry matches it by name.
 	nameUnconfirmed bool
@@ -109,6 +116,9 @@ type profileSubject struct {
 	// GAP-0418). Such an account is selected by its uid or SID, or as
 	// .\name (COMPUTER\name on Windows).
 	localAccount bool
+	// An SSSD qualified-name host may have this short name in several
+	// trusted domains. A bare users entry cannot bind either account.
+	qualifiedNamesMayCollide bool
 	// cachedFactsAge is set when explain serves an account the directory
 	// cannot name now from the facts its hooks still apply (GAP-0899).
 	cachedFactsAge time.Duration
@@ -181,7 +191,7 @@ type profileDecision struct {
 	Match         string
 	MatchedGroup  string
 	SubjectSource string
-	// Refused names an unproven identity fact the decision depends on.
+	// Refused names an unproven identity fact or an uncompiled profile meet.
 	// Enforcement surfaces block it; Name remains diagnostic context.
 	Refused string
 	// Assignment is the 1-based index of the assignment that matched, 0 for
@@ -514,6 +524,7 @@ type resolvedGuardrailProfile struct {
 
 type resolvedGuardrailProfileKey struct{}
 type profileRouteConnectorKey struct{}
+type profileRuleScanConnectorKey struct{}
 
 // withGuardrailProfileDecision resolves the request's profile once, right
 // after authentication, and stores it on ctx. routeConnector is the
@@ -595,7 +606,21 @@ func requestLegacyAgentIdentity(ctx context.Context, agent string) (profileAgent
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(r.Context(), "")))
+		ctx := r.Context()
+		scanConnector := profileRequestConnector(ctx)
+		routeConnector := ""
+		if r.URL.Path == "/api/v1/inspect/tool" {
+			// This route scans the authenticated connector, or the
+			// gateway's configured connector for an unscoped credential.
+			routeConnector = a.connectorName()
+			if scanConnector == "" {
+				scanConnector = routeConnector
+			}
+		}
+		// The other inspect routes scan the authenticated connector or the
+		// global generation. An empty value is an explicit global scope.
+		ctx = context.WithValue(ctx, profileRuleScanConnectorKey{}, config.NormalizeConnectorName(scanConnector))
+		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(ctx, routeConnector)))
 	})
 }
 
@@ -640,7 +665,9 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 			legacy = func() (profileAgentClaim, bool) { return profileAgentLegacySource(ctx, agent) }
 		}
 	}
-	decision := set.matchAgent(subject, source, profileRequestConnector(ctx), agent, legacy)
+	connectorName := profileRequestConnector(ctx)
+	decision := set.matchAgent(subject, source, connectorName, agent, legacy)
+	decision = set.refuseUncompiledMeet(ctx, decision, connectorName)
 	resolved := &resolvedGuardrailProfile{decision: decision, set: set}
 	if decision.Name != "" {
 		if derived, ok := set.derivedProfile(decision.Name); ok {
@@ -794,6 +821,12 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 		viaProcessOwner:  s.Source == subjectSourceProcessOwner,
 		nameUnconfirmed:  nameUnconfirmed,
 		localAccount:     s.Directory.Directory == useridentity.DirectoryLocal,
+		qualifiedNamesMayCollide: (s.Directory.Source == useridentity.SourceSSSD ||
+			s.Directory.Source == useridentity.SourceSSSDInfoPipe) &&
+			s.Directory.Directory == useridentity.DirectoryActiveDirectory &&
+			strings.ContainsAny(s.UserName, `@\`) &&
+			(s.Directory.QualifiedNamesMayCollide || len(useridentity.TrustedADChildDomains()) > 0),
+		holderUnproven: lookupAttempted && s.Directory.HolderUnproven,
 	}
 }
 
@@ -913,9 +946,9 @@ func localProfileSubject(account *osuser.User) profileSubject {
 	groups, err := accountGroups(account)
 	subject.Groups = groups
 	if err != nil {
-		// Groups that could not be listed are unknown, not empty: the subject
-		// selects as a failed lookup does for a request (default_lookup_failed)
-		// and explain names the reason.
+		// Groups that could not be listed are unknown, not empty. A request
+		// whose assignment needs them is refused (default_lookup_failed),
+		// and explain names the missing group fact and the lookup error.
 		subject.LookupFailed, subject.LookupError = true, err.Error()
 	}
 	return subject
@@ -1096,6 +1129,13 @@ func userEntryMatches(subject *profileSubject, entry string) bool {
 	}
 	domain, account, qualified := strings.Cut(strings.TrimSpace(entry), `\`)
 	return qualified && account != "" && useridentity.EqualFold(account, userName) && subjectInDomain(subject, domain)
+}
+
+func ambiguousBareUserEntry(subject *profileSubject, entry string) bool {
+	entry = strings.TrimSpace(entry)
+	return subject != nil && subject.qualifiedNamesMayCollide && entry != "" &&
+		!strings.ContainsAny(entry, `@\`) && useridentity.KindForID(entry) == "" &&
+		useridentity.EqualFold(entry, subject.UserName)
 }
 
 // subjectInDomain compares only verified account namespaces. Guessing a
@@ -1303,7 +1343,8 @@ func scanContentRulesForConnectorFor(ctx context.Context, connectorName, text, t
 func (r *resolvedGuardrailProfile) ruleGenerationFor(ctx context.Context, connectorName string) *compiledRulePackCategories {
 	if r != nil && r.set != nil {
 		if meet := r.set.meet(r.decision.Name); meet != nil {
-			return meet.ruleGeneration(ctx, r.set, connectorName)
+			generation, _ := meet.ruleGeneration(ctx, r.set, connectorName)
+			return generation
 		}
 	}
 	return r.ruleGeneration(connectorName)
@@ -1691,6 +1732,9 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 			// (GAP-0496, GAP-0517).
 			refreshedFacts = true
 		}
+		if found.accountUnresolved {
+			out["account_unresolved"] = true
+		}
 		subject, source = &found, profileSubjectLookup
 		// directory says where the account lives (local, active_directory,
 		// ...): a bare users entry selects a directory account only (GAP-0305).
@@ -1722,6 +1766,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		agent = ""
 	}
 	decision := set.matchAgent(subject, source, connectorName, agent, nil)
+	decision = set.refuseUncompiledMeet(r.Context(), decision, connectorName)
 	out["profile"] = decision.Name
 	out["digest"] = decision.Digest
 	out["match"] = decision.Match
@@ -1824,7 +1869,7 @@ func profileEffectiveView(cfg *config.Config, connectorName string) map[string]a
 	}
 	hilt := cfg.EffectiveHILTForConnector(connectorName)
 	view := map[string]any{
-		"mode":          hookModeForConfig(cfg, connectorName),
+		"mode":          cfg.HookModeForConnector(connectorName),
 		"block_at":      cfg.Guardrail.EffectiveBlockAt(connectorName),
 		"alert_at":      cfg.Guardrail.EffectiveAlertAt(connectorName),
 		"rule_pack_dir": cfg.EffectiveRulePackDirForConnector(connectorName),
