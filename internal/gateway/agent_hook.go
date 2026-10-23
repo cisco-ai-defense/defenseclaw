@@ -578,17 +578,18 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// finalizeAgentHook, doubling audit rows, hook-outcome metrics,
 		// and the connector telemetry log for a single request.
 		finalized := false
+		// pending is the journal row of a receipt-capable call
+		// (agent_hook_pending.go); its records carry its IDs.
 		var pending *pendingHookOccurrence
-		// Runs last: recovery in this process skips the occurrence until
-		// this handler has finished with it.
-		defer func() { pending.release() }()
 		var rawEventIDs []string
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				elapsed := time.Since(t0)
 				resp := a.hookPanicResponse(ctx, connectorName, req, b, payload)
-				if pending != nil {
-					resp = pending.publishedResponse()
+				if pending != nil && attemptedWrite {
+					// The proposal may have reached the hook; nothing
+					// proves which answer the hook gave.
+					resp = pending.NoReceipt.response()
 				}
 				a.handleHookPanic(ctx, connectorName, req.HookEventName, recovered)
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
@@ -603,9 +604,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 								connectorName, req.HookEventName, err)
 						}
 					}
-					if pending != nil && finalization.AuditPersisted && finalization.DecisionSettled {
-						_ = pending.remove()
-					}
+					a.settlePendingHook(persistCtx, pending, finalization)
 					finalized = true
 				}
 				if !attemptedWrite {
@@ -768,41 +767,27 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{kernelBlocksToldExtra: strings.Join(resp.KernelBlocksTold, ",")})
 		}
 		if delivery != nil && (!req.SuppressCorrelationEmit || req.CorrelationUnavailable) {
-			var pendingErr error
-			pending, pendingErr = a.beginPendingHookOccurrence(ctx, req, resp, rawEventIDs,
+			var journalErr error
+			pending, journalErr = a.journalHookDelivery(ctx, &req, resp, rawEventIDs,
 				int64(len(b)), time.Since(t0), panicked, auditExtra)
-			if pendingErr != nil {
-				fmt.Fprintf(os.Stderr, "[gateway] hook pending audit unavailable connector=%s: %v\n",
-					connectorName, pendingErr)
-				// The proposal never leaves this process without a durable
-				// occurrence. A receipt-capable managed hook resolves this
-				// 503 closed in every fail mode (only a transport outage can
-				// open), so the audit records the block it enforces.
+			if journalErr != nil {
+				fmt.Fprintf(os.Stderr, "[gateway] hook delivery journal unavailable connector=%s: %v\n",
+					connectorName, journalErr)
+				// No answer leaves this process unjournaled. A
+				// receipt-capable managed hook resolves this 503 closed in
+				// every fail mode (only a transport outage can open), so the
+				// audit records the block it enforces.
 				resp = pendingFailureHookDecision(resp)
-				if pending != nil {
-					// The failed write could not be undone durably, so
-					// the occurrence can outlive this process. Its records
-					// carry its IDs and its final answer is the closed
-					// fallback, so recovery completes these records and
-					// never audits a second decision.
-					req.pendingOccurrenceID = pending.ID
-					req.pendingBodyBytes = int64(len(b))
-					_, _ = pending.setFinal(resp, time.Since(t0))
-				}
 				persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 				finalization := a.finalizeAgentHook(persistCtx, connectorName, req, resp,
 					rawEventIDs, b, time.Since(t0), panicked, auditExtra)
-				if pending != nil && finalization.AuditPersisted && finalization.DecisionSettled {
-					_ = pending.remove()
-				}
+				a.settlePendingHook(persistCtx, pending, finalization)
 				cancelPersist()
 				finalized = true
 				attemptedWrite = true
 				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hook audit is unavailable"})
 				return
 			}
-			req.pendingOccurrenceID = pending.ID
-			req.pendingBodyBytes = int64(len(b))
 		}
 		// Reading or closing the answer can cancel the HTTP request before
 		// offer returns. Only a hang-up observed before the answer was sent
@@ -822,19 +807,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			resp = a.unreceiptedHookDecision(hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
 		}
 		elapsed := time.Since(t0)
-		if pending != nil {
-			published, err := pending.setFinal(resp, elapsed)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[gateway] hook receipt state was not persisted connector=%s: %v\n",
-					connectorName, err)
-			}
-			if !published {
-				// Recovery can stand only behind the published occurrence,
-				// so the terminal records carry its answer too: a record
-				// recovery completes later never contradicts one written here.
-				resp = pending.Unconfirmed.response()
-			}
-		}
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
 		if panicked {
 			enrichAgentHookSpanPanic(ctx)
@@ -871,12 +843,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					connectorName, req.HookEventName, err)
 			}
 		}
-		if pending != nil && finalization.AuditPersisted && finalization.DecisionSettled {
-			if err := pending.remove(); err != nil {
-				fmt.Fprintf(os.Stderr, "[gateway] hook pending occurrence cleanup failed connector=%s: %v\n",
-					connectorName, err)
-			}
-		}
+		a.settlePendingHook(persistCtx, pending, finalization)
 		a.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
 		finalized = true
 		a.recordManagedAIDFailOpenForSelectedNativeHookResult(

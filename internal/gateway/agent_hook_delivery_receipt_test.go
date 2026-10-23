@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -26,7 +25,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
@@ -138,23 +136,12 @@ func TestManagedHookConfirmedAnswerSurvivesGatewayExitBeforeFinalization(t *test
 	if got := f.audited(t, session)[session]; got != "" {
 		t.Fatalf("audit before recovery = %q, want no finalized row", got)
 	}
-	dir := filepath.Join(f.api.scannerCfg.DataDir, "pending-hook-decisions")
-	entries, err := os.ReadDir(dir)
+	entries, err := f.store.UnauditedHookDeliveries(t.Context(), "the next process")
 	if err != nil || len(entries) != 1 {
-		t.Fatalf("pending occurrences before recovery = %v (%v), want one", entries, err)
+		t.Fatalf("journal rows before recovery = %v (%v), want one", entries, err)
 	}
-	pendingPath := filepath.Join(dir, entries[0].Name())
-	pendingBytes, err := os.ReadFile(pendingPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".safefile-interrupted-write"), []byte("unpublished"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// The sandbox ingress can start before the main API. It must recover
-	// before it accepts a hook on its own listener.
-	restarted := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, f.store, f.api.logger, f.api.scannerCfg)
-	bindHookLifecycleV8(t, restarted, f.runtime)
+	// The sandbox ingress can start before the main API, and recovers too.
+	restarted := f.restartedAPI(t, true)
 	if err := restarted.SetSandboxIngress(SandboxIngressConfig{
 		Addr: "127.0.0.1:18971", Bindings: pendingHookRejectBindings{},
 	}); err != nil {
@@ -169,9 +156,7 @@ func TestManagedHookConfirmedAnswerSurvivesGatewayExitBeforeFinalization(t *test
 	runDone := make(chan error, 1)
 	go func() { runDone <- restarted.RunSandboxIngressOn(ctx, listener) }()
 	deadline := time.Now().Add(10 * time.Second)
-	// The train writes the audit row before the hook_decision record, so
-	// wait for both before the restarted gateway stops.
-	for (f.audited(t, session)[session] == "" || len(f.decisions(t)) == 0) && time.Now().Before(deadline) {
+	for len(pendingEntries(t, f)) != 0 && time.Now().Before(deadline) {
 		select {
 		case err := <-runDone:
 			t.Fatalf("restarted gateway stopped before recovery: %v", err)
@@ -186,35 +171,16 @@ func TestManagedHookConfirmedAnswerSurvivesGatewayExitBeforeFinalization(t *test
 	if got := f.decisions(t); strings.Join(got, ",") != "unconfirmed/ok" {
 		t.Fatalf("hook_decision after recovery = %v, want [unconfirmed/ok]", got)
 	}
-	// A crash after finalization but before pending-file cleanup must not
-	// produce a second row for this occurrence on the next restart.
-	if err := safefile.WritePrivate(pendingPath, pendingBytes); err != nil {
+	if left := pendingEntries(t, f); len(left) != 0 {
+		t.Fatalf("journal rows after recovery = %v, want none", left)
+	}
+	// A crash after the records but before the journal row was deleted
+	// must not produce a second record of this occurrence on the next
+	// start of the main API.
+	if err := f.store.JournalHookDelivery(t.Context(), entries[0].ID, "the restarted process", entries[0].Occurrence); err != nil {
 		t.Fatal(err)
 	}
-	// The main API startup must also finish a replay without duplicating a
-	// terminal row if the prior process audited and then died during cleanup.
-	replayed := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, f.store, f.api.logger, f.api.scannerCfg)
-	bindHookLifecycleV8(t, replayed, f.runtime)
-	replayCtx, stopReplay := context.WithCancel(t.Context())
-	defer stopReplay()
-	replayDone := make(chan error, 1)
-	go func() { replayDone <- replayed.Run(replayCtx) }()
-	deadline = time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(pendingPath); os.IsNotExist(err) {
-			break
-		}
-		select {
-		case err := <-replayDone:
-			t.Fatalf("replayed gateway stopped before cleanup: %v", err)
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
-	stopReplay()
-	<-replayDone
-	if _, err := os.Stat(pendingPath); !os.IsNotExist(err) {
-		t.Fatalf("pending occurrence after replay: %v, want removed", err)
-	}
+	runAPIUntil(t, f.restartedAPI(t, true), func() bool { return len(pendingEntries(t, f)) == 0 })
 	if got := f.decisions(t); strings.Join(got, ",") != "unconfirmed/ok" {
 		t.Fatalf("hook_decision records after replay = %v, want one", got)
 	}
@@ -388,14 +354,10 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 	if got := f.decisions(t); strings.Join(got, ",") != strings.Join(wantDecisions, ",") {
 		t.Errorf("hook_decision records = %v, want %v", got, wantDecisions)
 	}
-	// If the pending audit cannot be made durable, the gateway never offers
-	// the evaluated allow. A managed hook resolves the 503 closed in both
-	// fail modes (only a transport outage can open), so both audit a block.
-	blockedDir := filepath.Join(f.api.scannerCfg.DataDir, "not-a-directory")
-	if err := os.WriteFile(blockedDir, []byte("occupied"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	f.api.scannerCfg.DataDir = blockedDir
+	// If the call cannot be journaled, the gateway never offers the
+	// evaluated allow. A managed hook resolves the 503 closed in both fail
+	// modes (only a transport outage can open), so both audit a block.
+	defer refuseHookDeliveryJournal(t, f)()
 	for _, mode := range []string{"closed", "open"} {
 		f.api.scannerCfg.Guardrail.HookFailMode = mode
 		if got := f.api.scannerCfg.EffectiveHookFailModeForConnector("claudecode"); got != mode {
