@@ -349,6 +349,27 @@ def test_approval_modal_names_observe_mode_and_alert_only_connectors() -> None:
     assert not any("native approval" in line for line in off.details)
 
 
+def test_copilot_approval_modal_names_delivered_action() -> None:
+    model = protection_model()
+    model.postures = (Posture("global"), Posture("copilot", mode="action"))
+    row = model.scope_row("copilot")
+
+    action = hilt_change_modal(model, row, "HIGH+")
+    action_details = " ".join(action.details)
+    assert "confirm verdicts are denied" in action_details
+    assert "raise alerts" not in action_details
+    assert action.title.startswith("Set human approval")
+
+    observe = hilt_change_modal(model, replace(row, mode="observe"), "HIGH+")
+    assert "logs only; in action mode it would" in " ".join(observe.details)
+    assert "observe mode" in " ".join(observe.details)
+    assert "confirm verdicts are denied" not in " ".join(observe.details)
+
+    secure_client = hilt_change_modal(model, row, "HIGH+", secure_client=True)
+    assert "own approval prompt: copilot" in " ".join(secure_client.details)
+    assert "confirm verdicts are denied" not in " ".join(secure_client.details)
+
+
 def test_native_approval_prompt_set_is_shared_with_the_cli() -> None:
     from defenseclaw.commands.cmd_guardrail import _hilt_enable_notice
     from defenseclaw.connector_contracts import has_native_approval_prompt
