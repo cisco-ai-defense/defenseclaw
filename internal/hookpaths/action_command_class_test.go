@@ -10,6 +10,31 @@ import (
 	"time"
 )
 
+func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.Mkdir(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		"sudo -l", "sudo -ll", "sudo --list", "sudo -n -l",
+		"sudo -u root -l", "sudo -l /bin/sh", "sudo -l /bin/r*",
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
+			t.Errorf("%q: decision = %q, want allow", command, got)
+		}
+	}
+	for _, command := range []string{
+		`sudo -n sh -c 'echo marker >> "$destination"'`,
+		`sudo --future-option sh -c 'echo marker >> "$destination"'`,
+		`sudo -l $(sh -c 'echo marker >> "$destination"')`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got == "" {
+			t.Errorf("%q: decision = allow, want block", command)
+		}
+	}
+}
+
 func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
