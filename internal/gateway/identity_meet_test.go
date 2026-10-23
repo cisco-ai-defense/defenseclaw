@@ -325,7 +325,7 @@ func TestProfileMeetKeepsHookActionAndInspectObserveSeparate(t *testing.T) {
 			if !ok {
 				t.Fatal("meet did not derive")
 			}
-			if got := hookModeForConfig(derived.Config, "codex"); got != tc.hookMode {
+			if got := derived.Config.HookModeForConnector("codex"); got != tc.hookMode {
 				t.Errorf("Codex hook mode = %q, want %q", got, tc.hookMode)
 			}
 			if got := inspectMode(derived.Config, "codex"); got != tc.guardrailMode {
