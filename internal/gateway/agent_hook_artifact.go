@@ -52,7 +52,11 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 				req.HookEventName,
 				"experimental artifact promotion",
 			)
-			resp = original
+			if original.Action == guardrailActionBlock {
+				resp = original
+			} else {
+				resp = a.hookPanicResponse(ctx, req.ConnectorName, req, nil, req.Payload)
+			}
 		}
 	}()
 	if a == nil || ManagedEnterpriseActive() || req.toolChain == nil ||

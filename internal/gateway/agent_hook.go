@@ -1797,8 +1797,9 @@ func (a *APIServer) hookPanicResponse(
 	payload map[string]interface{},
 ) agentHookResponse {
 	return a.hookFailedCheckResponse(ctx, connectorName, req, rawBody, payload, hookCheckFailure{
-		base:  safeHookPanicResponse(connectorName, req.HookEventName),
-		cause: "because of an internal evaluator error",
+		base:           safeHookPanicResponse(connectorName, req.HookEventName),
+		cause:          "because of an internal evaluator error",
+		recoveredPanic: true,
 	})
 }
 
@@ -1806,19 +1807,22 @@ func (a *APIServer) hookPanicResponse(
 // audit source reason and the operator context, and cause ends the plain
 // sentence "DefenseClaw could not complete its hook check ...".
 type hookCheckFailure struct {
-	base  agentHookResponse
-	cause string
+	base           agentHookResponse
+	cause          string
+	recoveredPanic bool
 }
 
 // hookFailedCheckResponse renders the fail-mode verdict of a hook check that
 // could not complete. Sandbox ingress has its own mandatory closed verdict and
 // is rendered once.
 //
-// A failed check produced no usable policy verdict. A closed hook denies a
-// blockable tool or prompt event even when policy verdicts are observed.
-// Stop and session-end events keep their neutral allow; a resolved open
-// (explicit, or Secure Client's unset default) keeps its open failure
-// behavior.
+// A failed check produced no usable policy verdict. A recovered panic under
+// closed fail mode always answers block, including advisory and lifecycle
+// events. On a standalone managed host, an administrator's open applies to
+// eligible gateway outages, not a recovered panic. Other failed checks retain
+// the native event-capability mapping and neutral stop handling. Per-user
+// explicit open and Secure Client's unset-open default retain their open
+// failure verdict.
 func (a *APIServer) hookFailedCheckResponse(
 	ctx context.Context,
 	connectorName string,
@@ -1836,7 +1840,13 @@ func (a *APIServer) hookFailedCheckResponse(
 	base := failure.base
 	profile := a.hookProfileForRequest(ctx, connectorName)
 	mode := a.agentHookMode(ctx, connectorName)
-	action, wouldBlock := mapHookActionForProfile("block", "action", req.HookEventName, profile.Capabilities, profile, req.Payload)
+	// A panic is not a policy verdict. In particular, MapVerdict can itself
+	// be the panicking evaluator, and an advisory event's policy mapping may
+	// turn a closed failure into allow. Avoid that mapping during recovery.
+	action, wouldBlock := "block", false
+	if !failure.recoveredPanic {
+		action, wouldBlock = mapHookActionForProfile("block", "action", req.HookEventName, profile.Capabilities, profile, req.Payload)
+	}
 	if sandboxHookForConnector(ctx, connectorName) && action == "block" {
 		resp := agentHookResponse{Action: action, RawAction: "block", Severity: base.Severity, Mode: "action", WouldBlock: wouldBlock, Reason: base.Reason, AdditionalContext: base.AdditionalContext}
 		return a.failSandboxHookClosed(ctx, profile, connectorName, req, rawBody, payload, resp)
@@ -1846,13 +1856,15 @@ func (a *APIServer) hookFailedCheckResponse(
 	// A failed check follows the connector's resolved fail mode, the
 	// administrator's on a managed computer (owner decision 2026-10-20): an
 	// explicit closed wins everywhere, Secure Client included, whose unset
-	// value resolves to open (#1163).
-	failOpen := cfg != nil && cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open"
-	if !failOpen && action == "block" && !lifecycle {
+	// value resolves to open (#1163). A standalone administrator's open is
+	// outage-only; an evaluator panic is an internal failure, not an outage.
+	failOpen := cfg != nil && cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open" &&
+		(!failure.recoveredPanic || !cfg.StandaloneEnterprise())
+	if !failOpen && action == "block" && (!lifecycle || failure.recoveredPanic) {
 		// Observe mode applies to policy verdicts, not failed checks.
 		mode = "action"
 	}
-	if mode != "action" {
+	if mode != "action" && !failure.recoveredPanic {
 		action, wouldBlock = mapHookActionForProfile("block", mode, req.HookEventName, profile.Capabilities, profile, req.Payload)
 	}
 	plain := "DefenseClaw could not complete its hook check " + failure.cause + ". "
@@ -1860,6 +1872,8 @@ func (a *APIServer) hookFailedCheckResponse(
 	case failOpen:
 		action, wouldBlock = "allow", true
 		plain += "The call was allowed because the hook fails open. Ask your administrator to review the hook and audit log."
+	case failure.recoveredPanic:
+		plain += "The call was blocked because the hook fails closed. Retry the call; if this continues, contact your administrator."
 	case lifecycle:
 		// A denied stop or session-end event keeps the session running
 		// instead of stopping a tool call. Standalone managed hooks answer
@@ -3449,6 +3463,8 @@ func hookProfileRequestFromAgentHook(req agentHookRequest) connector.HookProfile
 
 func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional string, caps connector.HookCapability) map[string]interface{} {
 	reason = connectorReason(req.ConnectorName, action, req.ToolName, reason)
+	// Keep these native denial shapes independent of profile.Respond: this
+	// function is also the fallback when that callback panics.
 	switch req.ConnectorName {
 	case "hermes":
 		if action == "block" {
@@ -3476,6 +3492,14 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 	case "opencode":
 		if action == "block" {
 			return map[string]interface{}{"decision": "deny", "reason": reason}
+		}
+	case "antigravity":
+		if action == "block" && canonicalEvent(req.HookEventName) == "pretooluse" {
+			return map[string]interface{}{"decision": "deny", "reason": reason}
+		}
+	case "kiro":
+		if action == "block" {
+			return map[string]interface{}{"decision": "block", "reason": reason}
 		}
 	}
 	if rawAction == "confirm" && additional != "" && !caps.CanAskNative {

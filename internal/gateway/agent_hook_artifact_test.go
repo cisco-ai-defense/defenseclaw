@@ -792,6 +792,62 @@ func TestExperimentalArtifactPromotionRequiresReviewedStructuredRoute(t *testing
 	}
 }
 
+func TestExperimentalArtifactPromotionPanicUsesFailMode(t *testing.T) {
+	installDefaultProfileConnector(t, "claudecode")
+	dir := t.TempDir()
+	name, body := "assembled.sh", "#!/bin/sh\nrm -rf /\n"
+	if runtime.GOOS == "windows" {
+		name, body = "assembled.ps1", "Remove-Item -Recurse -Force C:\\\r\n"
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	input := actionfacts.Input{
+		Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: filepath.Dir(path),
+	}
+	if runtime.GOOS == "windows" {
+		quotedPath := strings.ReplaceAll(path, "'", "''")
+		input = actionfacts.Input{
+			Tool: "powershell", Command: "powershell -NoProfile -File '" + quotedPath + "'",
+			CWD: dir, DialectHint: actionfacts.DialectPowerShell,
+		}
+	}
+	facts := actionfacts.Analyze(input)
+	capture := &toolChainHookCapture{}
+	capture.recordTrustedAction(facts, nil)
+	req := agentHookRequest{
+		ConnectorName: "claudecode", HookEventName: "PreToolUse", toolChain: capture,
+	}
+	original := agentHookResponse{Action: "allow", RawAction: "allow", Severity: "NONE", Mode: "action"}
+	for _, tc := range []struct {
+		name, failMode, wantAction string
+		wantWouldBlock             bool
+	}{
+		{name: "closed", failMode: "closed", wantAction: "block"},
+		{name: "explicit open", failMode: "open", wantAction: "allow", wantWouldBlock: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "claudecode"
+			cfg.Guardrail.HookFailMode = tc.failMode
+			cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
+			api := &APIServer{scannerCfg: cfg}
+			profile := api.hookProfileForConnector("claudecode")
+			panicked := false
+			profile.Respond = func(connector.HookRespondInput) connector.HookRespondOutput {
+				panicked = true
+				panic("artifact response shaper panic")
+			}
+			got := api.safeApplyExperimentalArtifactPromotion(t.Context(), profile, req, original, 0)
+			if !panicked || got.Action != tc.wantAction || got.Mode != "action" || got.WouldBlock != tc.wantWouldBlock {
+				t.Fatalf("panicked=%t response=%+v, want %s", panicked, got, tc.wantAction)
+			}
+		})
+	}
+}
+
 func TestPromotedArtifactOuterControlFlowIsDetectionOnly(t *testing.T) {
 	requireNativePOSIXArtifactHost(t)
 	const connectorName = "artifact-outer-control-test"

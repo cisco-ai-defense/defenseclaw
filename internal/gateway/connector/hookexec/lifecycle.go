@@ -19,7 +19,8 @@ var neutralLifecycleSets = map[string][]string{
 // stopped session or cannot stop a tool. Kiro PostToolUse and OpenCode
 // tool.execute.after report tool results, so they are outside this stop set.
 // The set is shared by the foreign-hook guard, standalone hook failures, and
-// gateway panic recovery.
+// gateway failures other than recovered panics. A closed recovered panic
+// blocks these events too.
 func NeutralLifecycleEvents(connector string) []string {
 	return append([]string(nil), neutralLifecycleSets[connector]...)
 }

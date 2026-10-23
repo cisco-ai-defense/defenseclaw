@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -2376,52 +2377,73 @@ func callAgentHookForTest(
 	return decoded
 }
 
-func TestSafeApplyAgentHookToolChainsPreservesOriginalOnPanicBeforeCommit(t *testing.T) {
+type panicOnceHookContext struct {
+	context.Context
+	panicked bool
+}
+
+func (ctx *panicOnceHookContext) Value(key any) any {
+	if !ctx.panicked {
+		ctx.panicked = true
+		panic("injected hook context panic")
+	}
+	return ctx.Context.Value(key)
+}
+
+func TestSafeApplyAgentHookToolChainsPanicBeforeCommitUsesFailMode(t *testing.T) {
 	req := agentHookRequest{
-		ConnectorName: "test", HookEventName: "ConfigChange",
-		Payload: map[string]interface{}{
-			"kind": "guardrail_config_change", "effect": "execute",
-			"previous_state": map[string]interface{}{"enforcement_enabled": true},
-			"new_state":      map[string]interface{}{"enforcement_enabled": false},
-		},
+		ConnectorName: "claudecode", HookEventName: "PreToolUse",
 		toolChain: &toolChainHookCapture{},
 	}
-	profile := connector.HookProfile{
-		ToolCallLifecycle: connector.ResolveHookContract(
-			"claudecode",
-			"2.1.152",
-		).Contract.ToolCallLifecycle,
-		Respond: func(connector.HookRespondInput) connector.HookRespondOutput {
-			panic("chain response shaper panic")
-		},
-	}
-
-	for _, original := range []agentHookResponse{
-		{
+	for _, tc := range []struct {
+		name       string
+		original   agentHookResponse
+		failMode   string
+		want       string
+		wouldBlock bool
+	}{
+		{name: "closed original allow", original: agentHookResponse{
 			Action: "allow", RawAction: "allow", Severity: "NONE",
 			Reason: "standalone allow", Mode: "action", SuppressNotification: true,
-		},
-		{
+		}, want: "block"},
+		{name: "closed observed block", original: agentHookResponse{
+			Action: "allow", RawAction: "block", Severity: "HIGH",
+			Reason: "observed policy block", Mode: "observe", WouldBlock: true,
+		}, want: "block"},
+		{name: "open original allow", original: agentHookResponse{
+			Action: "allow", RawAction: "allow", Severity: "NONE",
+			Reason: "standalone allow", Mode: "action", SuppressNotification: true,
+		}, failMode: "open", want: "allow", wouldBlock: true},
+		{name: "closed original block", original: agentHookResponse{
 			Action: "block", RawAction: "block", Severity: "CRITICAL",
 			Reason: "standalone block", Findings: []string{"standalone"},
 			Mode: "action", EvaluationID: "existing-evaluation",
 			RuleIDs: []string{"existing.rule"},
-		},
+		}, want: "block"},
 	} {
-		t.Run(original.Action, func(t *testing.T) {
-			got, finalization := (&APIServer{}).safeApplyAgentHookToolChains(
-				t.Context(), profile, req, nil, original, 0,
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.HookFailMode = tc.failMode
+			api := &APIServer{scannerCfg: cfg}
+			profile := api.hookProfileForConnector("claudecode")
+			ctx := &panicOnceHookContext{Context: t.Context()}
+			got, finalization := api.safeApplyAgentHookToolChains(
+				ctx, profile, req, nil, tc.original, 0,
 			)
-			if got.Action != original.Action || got.RawAction != original.RawAction ||
-				got.Reason != original.Reason ||
-				got.EvaluationID != original.EvaluationID ||
-				got.SuppressNotification != original.SuppressNotification ||
-				!slices.Equal(got.Findings, original.Findings) ||
-				!slices.Equal(got.RuleIDs, original.RuleIDs) {
+			if !ctx.panicked || got.Action != tc.want || got.Mode != "action" || got.WouldBlock != tc.wouldBlock {
+				t.Fatalf("chain panic response=%+v, want %s", got, tc.want)
+			}
+			if tc.original.Action == "block" && (got.RawAction != tc.original.RawAction ||
+				got.Reason != tc.original.Reason ||
+				got.EvaluationID != tc.original.EvaluationID ||
+				got.SuppressNotification != tc.original.SuppressNotification ||
+				!slices.Equal(got.Findings, tc.original.Findings) ||
+				!slices.Equal(got.RuleIDs, tc.original.RuleIDs)) {
 				t.Fatalf(
-					"standalone response changed after chain panic: got=%+v want=%+v",
+					"standalone block changed after chain panic: got=%+v want=%+v",
 					got,
-					original,
+					tc.original,
 				)
 			}
 			if finalization.repository != nil ||
@@ -2435,7 +2457,7 @@ func TestSafeApplyAgentHookToolChainsPreservesOriginalOnPanicBeforeCommit(t *tes
 	}
 }
 
-func TestSafeApplyAgentHookToolChainsDoesNotInventDenyForDetectionOnlyChainOnPanic(t *testing.T) {
+func TestSafeApplyAgentHookToolChainsPanicAfterDetectionOnlyChainFailsClosed(t *testing.T) {
 	installCorrelationHMACForTest()
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
@@ -2535,13 +2557,13 @@ func TestSafeApplyAgentHookToolChainsDoesNotInventDenyForDetectionOnlyChainOnPan
 		original,
 		0,
 	)
-	if got.Action != "allow" || got.RawAction != "allow" || got.WouldBlock ||
-		len(got.RuleIDs) != 0 {
+	if got.Action != "block" || got.RawAction != "block" || got.Mode != "action" ||
+		got.WouldBlock || len(got.RuleIDs) != 0 {
 		t.Fatalf("post-commit panic response=%+v", got)
 	}
 	hookSpecific, ok := got.HookOutput["hookSpecificOutput"].(map[string]interface{})
-	if ok && hookSpecific["permissionDecision"] == "deny" {
-		t.Fatalf("post-commit panic unexpectedly denied: %+v", got.HookOutput)
+	if !ok || hookSpecific["permissionDecision"] != "deny" {
+		t.Fatalf("post-commit panic did not answer native denial: %+v", got.HookOutput)
 	}
 	if finalization.repository != nil || len(finalization.receiptIDs) != 0 {
 		t.Fatalf(

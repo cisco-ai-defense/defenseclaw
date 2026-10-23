@@ -247,8 +247,7 @@ func TestRecoveredHookFailModeByDeployment(t *testing.T) {
 						} else if deployment.name == "secure_client" {
 							want, wantMode, reason = "allow", mode, "Secure Client's unset or open fail mode allows recovered errors"
 						} else if deployment.name == "standalone" && failMode == "open" {
-							// The administrator's explicit open (owner decision 2026-10-20).
-							want, wantMode, reason = "allow", mode, "the administrator's open is effective on a managed standalone host"
+							reason = "the administrator's open applies to outages, not recovered evaluator errors"
 						} else if failMode == "open" && name != "cursor" {
 							want, wantMode, reason = "allow", mode, "explicit open is effective for this connector"
 						} else if failMode == "open" && name == "cursor" {
@@ -294,14 +293,14 @@ func TestRecoveredHookVerdictUsesRegisteredProfiles(t *testing.T) {
 				cfg.Guardrail.Mode, cfg.Guardrail.HookFailMode, cfg.Guardrail.Connector = "action", "closed", name
 				server := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 				response, req := postPanicTestHook(t, server, name, tc.event)
-				mappedAction, mappedWouldBlock := mapHookActionForProfile("block", "action", tc.event, profile.Capabilities, profile, req.Payload)
-				if response["action"] != mappedAction || response["raw_action"] != "block" || response["would_block"] != mappedWouldBlock {
-					t.Fatalf("mapped response=%v, want %s/block/%v", response, mappedAction, mappedWouldBlock)
+				if response["action"] != "block" || response["raw_action"] != "block" || response["would_block"] != false || response["mode"] != "action" {
+					t.Fatalf("panic response=%v, want closed block/action", response)
 				}
-				expected := agentHookResponseForProfile(profile, req, mappedAction, "block", "WARN", "comparison reason for recovered hook evaluation error", nil, "action", mappedWouldBlock, profile.Capabilities)
+				expected := agentHookResponseForProfile(profile, req, "block", "block", "WARN", "comparison reason for recovered hook evaluation error", nil, "action", false, profile.Capabilities)
 				if got, want := normalizedPanicOutput(panicTestOutput(name, response)), normalizedPanicOutput(expected.HookOutput); !reflect.DeepEqual(got, want) {
 					t.Fatalf("hook output=%v, normal verdict output=%v", got, want)
 				}
+				mappedAction, _ := mapHookActionForProfile("block", "action", tc.event, profile.Capabilities, profile, req.Payload)
 				if mappedAction == "block" {
 					denies := panicWireDenies(panicTestOutput(name, response))
 					if name == "amp" {
@@ -317,5 +316,52 @@ func TestRecoveredHookVerdictUsesRegisteredProfiles(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+type panickingResponderConnector struct {
+	connector.Connector
+	provider connector.HookProfileProvider
+	panicked *bool
+}
+
+func (c panickingResponderConnector) HookProfile(opts connector.SetupOpts) connector.HookProfile {
+	profile := c.provider.HookProfile(opts)
+	profile.Respond = func(connector.HookRespondInput) connector.HookRespondOutput {
+		*c.panicked = true
+		panic("injected native response shaper panic")
+	}
+	return profile
+}
+
+func TestHookPanicResponseNativeFallbackAfterResponderPanic(t *testing.T) {
+	for _, name := range []string{"antigravity", "kiro"} {
+		t.Run(name, func(t *testing.T) {
+			original, ok := sharedDefaultRegistry().Get(name)
+			if !ok {
+				t.Fatalf("missing registered %s connector", name)
+			}
+			provider, ok := original.(connector.HookProfileProvider)
+			if !ok {
+				t.Fatalf("%s has no hook profile", name)
+			}
+			panicked := false
+			registry := connector.NewRegistry()
+			registry.RegisterBuiltin(panickingResponderConnector{
+				Connector: original, provider: provider, panicked: &panicked,
+			})
+			cfg := config.DefaultConfig()
+			cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+			cfg.Enterprise.Profile = managed.ProfileSecureClient
+			cfg.Guardrail.Mode = "observe"
+			cfg.Guardrail.HookFailMode = "closed"
+			api := &APIServer{scannerCfg: cfg, connectorRegistry: registry}
+			req := agentHookRequest{ConnectorName: name, HookEventName: "PreToolUse"}
+			resp := api.hookPanicResponse(t.Context(), name, req, nil, nil)
+			if !panicked || resp.Action != "block" || resp.Mode != "action" || resp.WouldBlock ||
+				!panicWireDenies(resp.HookOutput) {
+				t.Fatalf("%s responder panic response=%+v, panicked=%t", name, resp, panicked)
+			}
+		})
 	}
 }
