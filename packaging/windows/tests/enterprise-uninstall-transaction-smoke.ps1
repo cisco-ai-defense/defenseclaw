@@ -2441,7 +2441,8 @@ targets:
                 [bool]$Installed = $true,
                 [string]$InstallRootIdentity = '',
                 [string]$StateRootIdentity = '',
-                [bool]$UninstallPurgeRequested = $false
+                [bool]$UninstallPurgeRequested = $false,
+                [bool]$UninstallPurgeUserStateRequested = $false
             )
             if ($null -eq $ManagedHooksActivation) {
                 throw 'deployment metadata fixture lost managed-hook activation evidence'
@@ -2450,6 +2451,8 @@ targets:
             if (-not $Installed) {
                 $script:HarnessState.tombstone_purge_requested =
                     [bool]$UninstallPurgeRequested
+                $script:HarnessState.tombstone_purge_user_state_requested =
+                    [bool]$UninstallPurgeUserStateRequested
             }
             if ($null -ne $ManagedHooksActivation) {
                 $script:HarnessState.managed_hooks_activation =
@@ -3549,6 +3552,13 @@ targets:
                         [bool]$script:HarnessState.tombstone_purge_requested -eq [bool]$Purge
                     ) `
                     -Message "$Name tombstone did not record its uninstall mode"
+                # The per-user purge request is the run's own (Setup PURGE=1).
+                Assert-Harness `
+                    -Condition (
+                        [bool]$script:HarnessState.tombstone_purge_user_state_requested -eq
+                            [bool]$script:DefenseClawUninstallPurgeUserState
+                    ) `
+                    -Message "$Name tombstone did not record its per-user purge request"
             }
 
             if ($ExpectSuccess) {

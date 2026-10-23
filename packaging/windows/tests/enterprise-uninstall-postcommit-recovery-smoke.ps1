@@ -29,7 +29,10 @@ foreach ($name in @(
         'Invoke-DefenseClawTimeoutRecovery',
         'Get-DefenseClawTombstonePurgeRequested',
         'Test-DefenseClawCommittedUninstallUnsettled',
-        'Test-DefenseClawPathPresentNoFollow'
+        'Test-DefenseClawPathPresentNoFollow',
+        'Get-DefenseClawTombstonePurgeUserStateRequested',
+        'Complete-DefenseClawCommittedManagedHooksFinalization',
+        'New-DefenseClawDeploymentMetadata'
     )) {
     $functionAst = @($moduleAst.FindAll(
         {
@@ -278,6 +281,253 @@ try {
         throw 'pending rollback was not replayed before settlement'
     }
     Assert-Modes 'pending rollback' @()
+}
+finally {
+    if ([IO.Directory]::Exists($root)) { [IO.Directory]::Delete($root, $true) }
+}
+
+
+# Setup /uninstall PURGE=1 also removes each enrolled account's per-user data
+# and binaries; the managed-hook finalize does that removal. The tombstone
+# records the request at commit, and every finalize of that tombstone (the
+# watcher's Recover, a timeout recovery, a plain retry) replays it, so the
+# tombstone, which the state purge removes only after the finalize, is the
+# retry evidence until that removal ran.
+$finalLayout = @{
+    PendingPath = $layout.PendingPath
+    InstallRoot = $layout.InstallRoot
+    ManagedHooksTeardownJournalPath = $layout.ManagedHooksTeardownJournalPath
+    CodexTargetEnabled = $false
+}
+function Get-DefenseClawManagedServiceNames {
+    param([string]$GatewayServiceName, [string]$GuardianServiceName)
+    return @($GatewayServiceName, $GuardianServiceName)
+}
+function Test-DefenseClawServiceExists { param([string]$Name) return $false }
+function Assert-DefenseClawRecordedArtifactHashes { param($Metadata, [hashtable]$Layout, [string]$Action) }
+function Assert-DefenseClawInstallTreeRetirementState {
+    param([hashtable]$Layout, [switch]$AllowUnretiredAcls, [switch]$NativeSealed)
+}
+function Get-DefenseClawManagedHooksTeardownJournalPhase {
+    param([hashtable]$Layout, $Metadata, [string]$GatewayServiceName, [switch]$AllowLegacyInactive)
+    return $script:journalPhase
+}
+function Remove-DefenseClawStandaloneOpenCodeManagedPlugin { param([hashtable]$Layout) }
+function Set-DefenseClawInstallTreeRetirementAcls { param([hashtable]$Layout, [switch]$Committed) }
+function Invoke-DefenseClawManagedHooksTeardownCommand {
+    param(
+        [hashtable]$Layout,
+        [string]$GatewayServiceName,
+        [string]$GuardianServiceName,
+        [string]$Action,
+        [switch]$PurgeContractLocks
+    )
+    $script:teardownCalls.Add(
+        "${Action}:$([bool]$script:DefenseClawUninstallPurgeUserState)")
+    if ($Action -ceq 'finalize' -and $script:finalizeFails) {
+        throw 'finalize helper failed'
+    }
+    return [pscustomobject]@{ phase = $Action }
+}
+function Reset-FinalizationCase {
+    param(
+        $RecordedPurge = $script:NoRecordedMode,
+        $RecordedUserState = $script:NoRecordedMode,
+        [bool]$CallerUserState = $false,
+        [string]$JournalPhase = 'prepared'
+    )
+    Reset-Case -RecordedPurge $RecordedPurge -WithInstallRoot $true -Journal $true
+    if (-not [object]::ReferenceEquals($RecordedUserState, $script:NoRecordedMode)) {
+        $script:metadata | Add-Member -MemberType NoteProperty `
+            -Name uninstall_purge_user_state_requested -Value $RecordedUserState
+    }
+    $script:journalPhase = $JournalPhase
+    $script:finalizeFails = $false
+    $script:teardownCalls = [Collections.Generic.List[string]]::new()
+    $script:DefenseClawUninstallPurgeUserState = $CallerUserState
+}
+function Invoke-Finalization {
+    return Complete-DefenseClawCommittedManagedHooksFinalization `
+        -Layout $finalLayout `
+        -GatewayServiceName 'DefenseClawGateway' `
+        -GuardianServiceName 'DefenseClawHookGuardian' `
+        -Purge:$true
+}
+function Assert-Finalize([string]$Case, [string[]]$Want, [bool]$CallerAfter) {
+    $got = @($script:teardownCalls.ToArray())
+    if (($got -join ',') -cne ($Want -join ',')) {
+        throw "${Case}: teardown calls [$($got -join ',')], want [$($Want -join ',')]"
+    }
+    if ([bool]$script:DefenseClawUninstallPurgeUserState -ne $CallerAfter) {
+        throw "${Case}: the run's own per-user purge request was not restored"
+    }
+}
+function Assert-FinalizationRefused([string]$Case, [string]$Message) {
+    try {
+        [void](Invoke-Finalization)
+    }
+    catch {
+        if (-not $_.Exception.Message.Contains($Message)) {
+            throw "${Case}: refused with '$($_.Exception.Message)', want '$Message'"
+        }
+        if ($script:teardownCalls.Count -ne 0) {
+            throw "${Case}: refused after the teardown ran: $($script:teardownCalls -join ',')"
+        }
+        return
+    }
+    throw "${Case}: finalization went on"
+}
+
+# The writer: the tombstone records the run's per-user purge request with
+# its purge, standalone only.
+$script:SchemaVersion = 2
+$script:AgentApplicationControlPrerequisite = 'test'
+$script:DefenseClawTrustMode = 'Authenticode'
+$script:brokerEnabled = $false
+function Assert-DefenseClawManagedHooksActivationRecord { param($Record) return $Record }
+function Get-DefenseClawOptionalLayoutValue { param([hashtable]$Layout, [string]$Name) return $null }
+function Get-DefenseClawGatewayServiceAccount { return 'NT SERVICE\DefenseClawGateway' }
+function Get-DefenseClawClaudeMinimumClientVersion { return '' }
+function Test-DefenseClawLayoutBrokerEnabled { param([hashtable]$Layout) return $script:brokerEnabled }
+# Every layout value the writer reads; no payload file exists, so it
+# records no hash.
+$writerLayout = @{ InstallRoot = $layout.InstallRoot; StateRoot = [IO.Path]::Combine($root, 'state') }
+foreach ($name in @(
+        'ACPPath', 'AgentApplicationControlAttestationPath', 'BrokerAuthKeyPath',
+        'BrokerPath', 'BrokerPipeName', 'BrokerServiceName', 'CLIPath',
+        'CertificationCodexHome', 'CodexMachinePolicyDirectory',
+        'CodexMachinePolicyPath', 'CodexManagedHooksDirectory',
+        'CodexManagedHooksStatePath', 'CodexRequirementsAclBackupPath',
+        'CodexRequirementsOwnershipPath', 'GatewayPath', 'HookPath',
+        'InstallerPath', 'ManagedHooksTeardownJournalPath', 'ModulePath',
+        'ProductVersion', 'ProviderLibraryPath', 'SensorHelperPath'
+    )) {
+    $writerLayout[$name] = ''
+}
+foreach ($name in @(
+        'AgentApplicationControlAttested', 'ClaudeEffectivePolicyVerified',
+        'ClaudeTargetEnabled', 'CodexTargetEnabled', 'CoreHardeningCertification',
+        'CursorTargetEnabled'
+    )) {
+    $writerLayout[$name] = $false
+}
+function New-Tombstone {
+    param([bool]$Installed = $false, [bool]$Purge, [bool]$UserState)
+    return New-DefenseClawDeploymentMetadata `
+        -Layout $writerLayout `
+        -GatewayServiceName 'DefenseClawGateway' `
+        -GuardianServiceName 'DefenseClawHookGuardian' `
+        -Installed $Installed `
+        -ManagedHooksActivation ([pscustomobject]@{ state = 'active' }) `
+        -UninstallPurgeRequested $Purge `
+        -UninstallPurgeUserStateRequested $UserState
+}
+function Assert-WriterRefused([string]$Case, [string]$Message, [scriptblock]$Write) {
+    try {
+        [void](& $Write)
+    }
+    catch {
+        if (-not $_.Exception.Message.Contains($Message)) {
+            throw "${Case}: refused with '$($_.Exception.Message)', want '$Message'"
+        }
+        return
+    }
+    throw "${Case}: the tombstone was written"
+}
+
+try {
+    foreach ($mode in @($true, $false)) {
+        $tombstone = New-Tombstone -Purge $true -UserState $mode
+        if ($tombstone['uninstall_purge_requested'] -isnot [bool] -or
+            -not $tombstone['uninstall_purge_requested'] -or
+            $tombstone['uninstall_purge_user_state_requested'] -isnot [bool] -or
+            $tombstone['uninstall_purge_user_state_requested'] -ne $mode) {
+            throw "writer: the tombstone did not record per-user purge $mode"
+        }
+    }
+    Assert-WriterRefused 'installed per-user purge' 'only an uninstall tombstone' {
+        New-Tombstone -Installed $true -Purge $false -UserState $true
+    }
+    Assert-WriterRefused 'per-user purge without purge' 'requires the uninstall purge' {
+        New-Tombstone -Purge $false -UserState $true
+    }
+    $script:brokerEnabled = $true
+    Assert-WriterRefused 'Secure Client per-user purge' 'only a standalone uninstall tombstone' {
+        New-Tombstone -Purge $true -UserState $true
+    }
+    if ((New-Tombstone -Purge $true -UserState $false).Contains(
+            'uninstall_purge_user_state_requested')) {
+        throw 'writer: a Secure Client tombstone gained a per-user purge field'
+    }
+    $script:brokerEnabled = $false
+
+    # The watcher's Recover (no PURGE=1 of its own) replays the recorded
+    # per-user purge; the run's own request is restored after it.
+    Reset-FinalizationCase -RecordedPurge $true -RecordedUserState $true
+    [void](Invoke-Finalization)
+    Assert-Finalize 'recorded per-user purge' @('finalize:True') $false
+    # Also when the interrupted run died before the hook teardown began.
+    Reset-FinalizationCase -RecordedPurge $true -RecordedUserState $true -JournalPhase ''
+    [void](Invoke-Finalization)
+    Assert-Finalize 'recorded per-user purge, before prepare' @(
+        'prepare:False', 'verify:False', 'finalize:True') $false
+    # An explicit PURGE=1 retry over a tombstone without the request purges.
+    Reset-FinalizationCase -RecordedPurge $true -RecordedUserState $false -CallerUserState $true
+    [void](Invoke-Finalization)
+    Assert-Finalize 'explicit per-user purge retry' @('finalize:True') $true
+    # Without either request nothing per-user is purged.
+    Reset-FinalizationCase -RecordedPurge $true -RecordedUserState $false
+    [void](Invoke-Finalization)
+    Assert-Finalize 'recorded purge without per-user purge' @('finalize:False') $false
+    # A 1.0.0-1.0.3 tombstone records no mode.
+    Reset-FinalizationCase
+    [void](Invoke-Finalization)
+    Assert-Finalize 'pre-1.0.4 tombstone' @('finalize:False') $false
+    # A finalize that fails keeps the tombstone for the next replay and the
+    # run's own request.
+    Reset-FinalizationCase -RecordedPurge $true -RecordedUserState $true
+    $script:finalizeFails = $true
+    try {
+        [void](Invoke-Finalization)
+        throw 'failed finalize: reported done'
+    }
+    catch {
+        if (-not $_.Exception.Message.Contains('finalize helper failed')) { throw }
+    }
+    Assert-Finalize 'failed finalize' @('finalize:True') $false
+    if ($null -eq $script:metadata) { throw 'failed finalize: the tombstone went' }
+    # A malformed or orphaned per-user mode is refused before any teardown.
+    foreach ($bad in @('true', 1, $null)) {
+        Reset-FinalizationCase -RecordedPurge $true -RecordedUserState $bad
+        Assert-FinalizationRefused "per-user mode '$bad'" 'invalid recorded per-user purge mode'
+    }
+    Reset-FinalizationCase -RecordedPurge $false -RecordedUserState $true
+    Assert-FinalizationRefused 'per-user purge without purge' 'without its uninstall purge'
+    Reset-FinalizationCase -RecordedUserState $true
+    Assert-FinalizationRefused 'per-user purge, no recorded purge' 'without its uninstall purge'
+    # Secure Client finalize is unchanged.
+    Reset-FinalizationCase -RecordedPurge $true -RecordedUserState $true
+    $script:standaloneProfile = $false
+    [void](Invoke-Finalization)
+    Assert-Finalize 'Secure Client' @('finalize:False') $false
+
+    # The recovery decision refuses a malformed per-user mode before any
+    # cleanup and treats a recorded per-user purge as unsettled work.
+    Reset-Case -RecordedPurge $true
+    $script:metadata | Add-Member -MemberType NoteProperty `
+        -Name uninstall_purge_user_state_requested -Value 'yes'
+    Assert-Refused 'recovery: per-user mode' 'invalid recorded per-user purge mode'
+    Assert-Modes 'recovery: per-user mode' @()
+    Reset-Case -RecordedPurge $false
+    $script:metadata | Add-Member -MemberType NoteProperty `
+        -Name uninstall_purge_user_state_requested -Value $true
+    Assert-Refused 'recovery: orphaned per-user purge' 'without its uninstall purge'
+    Assert-Modes 'recovery: orphaned per-user purge' @()
+    Reset-Case -RecordedPurge $true
+    $script:metadata | Add-Member -MemberType NoteProperty `
+        -Name uninstall_purge_user_state_requested -Value $true
+    [void](Invoke-Recovery)
+    Assert-Modes 'recovery: recorded per-user purge' @($true)
 }
 finally {
     if ([IO.Directory]::Exists($root)) { [IO.Directory]::Delete($root, $true) }
