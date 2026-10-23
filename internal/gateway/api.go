@@ -104,6 +104,9 @@ type APIServer struct {
 	// copilotDedupe answers the second delivery of one Copilot tool call
 	// with the first delivery's verdict.
 	copilotDedupe copilotHookDedupe
+	// sessionStartGate holds a session's calls until its start verdict
+	// (GAP-0806).
+	sessionStartGate sessionStartGate
 	// hermesTasks gives a Hermes hook that names only its task the session
 	// of that task.
 	hermesTasks hermesTaskSessions
