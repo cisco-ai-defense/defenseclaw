@@ -347,6 +347,7 @@ def _credential_values(
 ) -> dict[str, str]:
     values = dict(template)
     values.update(previous)
+    # Keep for 0.8.10 and 1.0.0-1.0.3 private env upgrades; remove after the 1.0.x upgrade bridge.
     if values.get("SPLUNK_IMAGE") == RETIRED_SPLUNK_IMAGE:
         values["SPLUNK_IMAGE"] = template.get("SPLUNK_IMAGE", "")
     previous_token = previous.get("SPLUNK_HEC_TOKEN", "")
@@ -627,20 +628,34 @@ class NativeLocalSplunkController:
         image = environment.get("SPLUNK_IMAGE", "")
         if not image:
             raise LocalStackError("Local Splunk credential contract is missing SPLUNK_IMAGE")
+        try:
+            architecture = self.runner.run(
+                [self.docker_path, "info", "--format", "{{.Architecture}}"], timeout=15, env=environment,
+            )
+        except CommandTimeoutError as exc:
+            raise LocalStackError("Docker engine architecture check timed out") from exc
+        if architecture.returncode != 0:
+            raise LocalStackError("cannot read Docker engine architecture; check that the Docker daemon is running")
+        engine_arch = architecture.stdout.strip().lower()
+        if engine_arch not in {"amd64", "x86_64"}:
+            raise LocalStackError(
+                "Local Splunk needs a linux/amd64 Docker engine; use setup splunk --enterprise "
+                f"with an existing Splunk server on {engine_arch or 'unknown'} hosts"
+            )
         if self.runner.run(
             [self.docker_path, "image", "inspect", image], timeout=10, env=environment,
         ).returncode == 0:
             return
         try:
-            manifest = self.runner.run(
-                [self.docker_path, "manifest", "inspect", image], timeout=30, env=environment,
+            pulled = self.runner.run(
+                [self.docker_path, "pull", image], timeout=300, env=environment,
             )
         except CommandTimeoutError as exc:
-            raise LocalStackError(f"Local Splunk image registry timed out while resolving {image}") from exc
-        if manifest.returncode != 0:
+            raise LocalStackError(f"Local Splunk image registry timed out while pulling {image}") from exc
+        if pulled.returncode != 0:
             raise LocalStackError(
-                f"cannot resolve Local Splunk image {image} from the registry; "
-                f"check registry connectivity, access, and the image tag with 'docker manifest inspect {image}'"
+                f"cannot resolve Local Splunk image from the registry through the Docker daemon: {image}; "
+                f"check daemon proxy, registry mirror, access, and the image tag with 'docker pull {image}'"
             )
 
     def _project_container_ids(self, *, running_only: bool = False) -> set[str]:

@@ -250,12 +250,19 @@ run_compose() {
 }
 
 verify_splunk_image() {
+  local architecture
   [[ -n "${SPLUNK_IMAGE:-}" ]] || fail "SPLUNK_IMAGE is missing from ${ENV_FILE}"
+  architecture="$(run_with_time_limit 15 docker info --format '{{.Architecture}}' 2>/dev/null)" \
+    || fail "cannot read Docker engine architecture; check that the Docker daemon is running"
+  case "${architecture,,}" in
+    amd64|x86_64) ;;
+    *) fail "Local Splunk needs a linux/amd64 Docker engine; use setup splunk --enterprise with an existing Splunk server on ${architecture:-unknown} hosts" ;;
+  esac
   if run_with_time_limit 10 docker image inspect "${SPLUNK_IMAGE}" >/dev/null 2>&1; then
     return
   fi
-  if ! run_with_time_limit 30 docker manifest inspect "${SPLUNK_IMAGE}" >/dev/null 2>&1; then
-    fail "cannot resolve Splunk image ${SPLUNK_IMAGE} from the registry; check registry connectivity, access, and the image tag with 'docker manifest inspect ${SPLUNK_IMAGE}'"
+  if ! run_with_time_limit 300 docker pull "${SPLUNK_IMAGE}" >/dev/null 2>&1; then
+    fail "cannot pull Splunk image ${SPLUNK_IMAGE} from the registry through the Docker daemon; check daemon proxy, registry mirror, access, and the image tag with 'docker pull ${SPLUNK_IMAGE}'"
   fi
 }
 

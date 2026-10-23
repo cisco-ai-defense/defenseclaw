@@ -29,6 +29,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = REPO_ROOT / "bundles" / "splunk_local_bridge"
 
 
+def test_ci_and_scripts_do_not_start_the_retired_splunk_image() -> None:
+    paths = [*REPO_ROOT.glob(".github/workflows/*"), *(REPO_ROOT / "scripts").rglob("*")]
+    offenders = [str(path.relative_to(REPO_ROOT)) for path in paths if path.is_file()
+                 and RETIRED_SPLUNK_IMAGE in path.read_text(encoding="utf-8", errors="replace")]
+    assert offenders == []
+    template = (BUNDLE / "env" / ".env.example").read_text(encoding="utf-8")
+    image = re.search(r"^SPLUNK_IMAGE=(.+)$", template, re.MULTILINE)
+    assert image is not None
+    workflow = (REPO_ROOT / ".github" / "workflows" / "e2e.yml").read_text(encoding="utf-8")
+    exported = re.findall(r"^\s+export SPLUNK_IMAGE=(\S+)$", workflow, re.MULTILINE)
+    assert len(exported) == 6
+    assert set(exported) == {image.group(1)}
+
+
 def test_local_splunk_image_resolves_or_reports_registry_outage(tmp_path: Path, monkeypatch) -> None:
     stack = tmp_path / "stack"
     shutil.copytree(BUNDLE, stack)
@@ -61,8 +75,9 @@ def test_local_splunk_image_resolves_or_reports_registry_outage(tmp_path: Path, 
             "#!/bin/sh\n"
             'printf "%s\\n" "$*" >> "$DOCKER_CALLS"\n'
             'case "$1 $2" in\n'
+            '  "info --format") echo "x86_64"; exit 0 ;;\n'
             '  "image inspect") exit 1 ;;\n'
-            '  "manifest inspect") echo "network unreachable" >&2; exit 1 ;;\n'
+            '  "pull splunk/splunk:10.2.0") echo "daemon registry unreachable" >&2; exit 1 ;;\n'
             '  *) echo "unexpected Docker call" >&2; exit 1 ;;\n'
             'esac\n',
             encoding="utf-8",
@@ -75,26 +90,144 @@ def test_local_splunk_image_resolves_or_reports_registry_outage(tmp_path: Path, 
         )
         assert shell.returncode != 0
         assert "registry" in shell.stderr.lower() and image.group(1) in shell.stderr
-        assert "compose" not in calls.read_text(encoding="utf-8")
+        recorded = calls.read_text(encoding="utf-8")
+        assert "pull " + image.group(1) in recorded
+        assert "manifest inspect" not in recorded
+        assert "compose" not in recorded
 
     class OfflineDocker:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
         def run(self, argv, *, timeout, capture=True, env=None):
             command = tuple(argv)
+            self.calls.append(command)
+            if command[1:3] == ("info", "--format"):
+                return CommandResult(command, 0, stdout="x86_64")
             if command[1:3] == ("image", "inspect"):
                 return CommandResult(command, 1)
-            if command[1:3] == ("manifest", "inspect"):
-                return CommandResult(command, 1, stderr="network unreachable")
+            if command[1] == "pull":
+                return CommandResult(command, 1, stderr="daemon registry unreachable")
             if command[1] == "ps":
                 return CommandResult(command, 0, stdout="")
             raise AssertionError(f"unexpected Docker call: {command[1]}")
 
     native_docker = tmp_path / "docker.exe"
     native_docker.write_bytes(b"mock")
-    controller = NativeLocalSplunkController(
-        stack, docker_path=native_docker, runner=OfflineDocker(), os_name="windows"
-    )
+    offline = OfflineDocker()
+    controller = NativeLocalSplunkController(stack, docker_path=native_docker, runner=offline, os_name="windows")
     with pytest.raises(LocalStackError, match=r"registry.*splunk/splunk:10\.2\.0"):
         controller.up()
+    assert any(command[1] == "pull" for command in offline.calls)
+    assert all(command[1:3] != ("manifest", "inspect") for command in offline.calls)
+
+
+@pytest.mark.parametrize("architecture", ["arm64", "aarch64"])
+def test_local_splunk_rejects_arm_engine_before_cached_image_or_compose(
+    tmp_path: Path, architecture: str,
+) -> None:
+    stack = tmp_path / "stack"
+    shutil.copytree(BUNDLE, stack)
+    env_file = stack / "env" / ".env"
+    env_file.write_text((stack / "env" / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+    env_file.chmod(0o600)
+
+    if os.name != "nt":
+        calls = tmp_path / "docker-calls"
+        docker = tmp_path / "docker"
+        docker.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$*" >> "$DOCKER_CALLS"\n'
+            f'echo "{architecture}"\n',
+            encoding="utf-8",
+        )
+        docker.chmod(0o755)
+        result = subprocess.run(
+            ["bash", str(stack / "bin" / "splunk-claw-bridge"), "up", "--env-file", str(env_file)],
+            env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "DOCKER_CALLS": str(calls)},
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert result.returncode != 0
+        assert "amd64" in result.stderr and "--enterprise" in result.stderr
+        assert calls.read_text(encoding="utf-8").splitlines() == ["info --format {{.Architecture}}"]
+
+    class ArmDocker:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def run(self, argv, *, timeout, capture=True, env=None):
+            command = tuple(argv)
+            self.calls.append(command)
+            if command[1:3] == ("info", "--format"):
+                return CommandResult(command, 0, stdout=architecture)
+            raise AssertionError(f"unexpected Docker call: {command[1]}")
+
+    native_docker = tmp_path / "docker.exe"
+    native_docker.write_bytes(b"mock")
+    arm = ArmDocker()
+    controller = NativeLocalSplunkController(stack, docker_path=native_docker, runner=arm, os_name="windows")
+    with pytest.raises(LocalStackError, match=r"amd64.*--enterprise"):
+        controller.verify_splunk_image()
+    assert len(arm.calls) == 1
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_local_splunk_uses_daemon_pull_only_for_uncached_image(tmp_path: Path, cached: bool) -> None:
+    image = "splunk/splunk:10.2.0"
+    if os.name != "nt":
+        bridge = (BUNDLE / "bin" / "splunk-claw-bridge").read_text(encoding="utf-8")
+        image_check = bridge[bridge.index("verify_splunk_image() {"):bridge.index("\ncleanup_stopped_service_containers() {")]
+        calls = tmp_path / "docker-calls"
+        probe = (
+            'run_with_time_limit() { shift; "$@"; }\n'
+            'fail() { printf "%s\\n" "$1" >&2; exit 1; }\n'
+            + image_check + "\n"
+            + 'docker() { printf "%s\\n" "$*" >> "$DOCKER_CALLS"; '
+            + 'case "$1 $2" in "info --format") echo x86_64 ;; '
+            + f'"image inspect") return {0 if cached else 1} ;; '
+            + '"pull splunk/splunk:10.2.0") return 0 ;; *) return 99 ;; esac; }\n'
+            + f'SPLUNK_IMAGE={image}\nENV_FILE=unused\nverify_splunk_image\n'
+        )
+        result = subprocess.run(
+            ["bash"], input=probe, capture_output=True, text=True,
+            env={**os.environ, "DOCKER_CALLS": str(calls)}, timeout=10, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        expected = ["info --format {{.Architecture}}", f"image inspect {image}"]
+        if not cached:
+            expected.append(f"pull {image}")
+        assert calls.read_text(encoding="utf-8").splitlines() == expected
+
+    stack = tmp_path / "stack"
+    shutil.copytree(BUNDLE, stack)
+    env_file = stack / "env" / ".env"
+    env_file.write_text((stack / "env" / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
+    env_file.chmod(0o600)
+
+    class DaemonDocker:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def run(self, argv, *, timeout, capture=True, env=None):
+            command = tuple(argv)
+            self.calls.append(command)
+            if command[1:3] == ("info", "--format"):
+                return CommandResult(command, 0, stdout="x86_64")
+            if command[1:3] == ("image", "inspect"):
+                return CommandResult(command, 0 if cached else 1)
+            if command[1] == "pull":
+                return CommandResult(command, 0)
+            raise AssertionError(f"unexpected Docker call: {command[1]}")
+
+    native_docker = tmp_path / "docker.exe"
+    native_docker.write_bytes(b"mock")
+    daemon = DaemonDocker()
+    controller = NativeLocalSplunkController(stack, docker_path=native_docker, runner=daemon, os_name="windows")
+    controller.verify_splunk_image()
+    expected_native = [("info", "--format"), ("image", "inspect")]
+    if not cached:
+        expected_native.append(("pull", image))
+    assert [command[1:3] for command in daemon.calls] == expected_native
 
 
 def _readiness_probe(path: Path, stubs: str, seconds: int) -> Path:
