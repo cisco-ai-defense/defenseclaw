@@ -14568,7 +14568,9 @@ function Restore-DefenseClawTransaction {
     # A standalone recovery whose staged gateway fails this cleanup may rerun
     # it with the running Setup's verified gateway (see
     # Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep).
-    $snapshot = Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep `
+    # A cleanup that fails in the standalone profile no longer stops the
+    # rollback (GAP-0856): see Invoke-DefenseClawTargetRuntimeRollbackCleanupOrKeep.
+    $snapshot = Invoke-DefenseClawTargetRuntimeRollbackCleanupOrKeep `
         -SnapshotPath $SnapshotPath `
         -Layout $Layout `
         -GatewayServiceName ([string]$snapshot.gateway_service) `
@@ -21314,6 +21316,78 @@ function Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep {
     }
     $run.outcome = 'succeeded'
     return $result
+}
+
+function Invoke-DefenseClawTargetRuntimeRollbackCleanupOrKeep {
+    <#
+        The rollback's per-user runtime cleanup
+        (Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep). It runs
+        after the managed-hook journal was restored and retired, so a cleanup
+        that failed with the staged gateway and with the Setup gateway ended
+        the rollback there: no file was restored, no service started, and the
+        transaction stayed pending with every service stopped; the next
+        recovery met the same cleanup (GAP-0856). In the standalone profile the
+        rollback now goes on, so the file rollback puts the previous release
+        back and its services start again. The cleanup removes only the
+        per-user DefenseClaw folders this transaction created (an absent
+        baseline in its plan), which the restored release does not use: each
+        is reported as a rollback leftover with the cleanup's error. With no
+        such folder in the plan nothing was created, and the failure is only
+        logged. Secure Client keeps the failure. Returns the snapshot the
+        rollback goes on with.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $failure = ''
+    try {
+        return (Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep `
+            -SnapshotPath $SnapshotPath `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName)
+    }
+    catch {
+        if (-not (Test-DefenseClawStandaloneProfile)) {
+            throw
+        }
+        $failure = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value $_.Exception.Message `
+            -MaxLength 512
+    }
+    $snapshot = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $SnapshotPath `
+        -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $created = [Collections.Generic.List[string]]::new()
+    $planProperty = $snapshot.PSObject.Properties['target_runtime_plan']
+    if ($null -ne $planProperty -and $null -ne $planProperty.Value) {
+        foreach ($root in @($planProperty.Value.roots)) {
+            if ($null -ne $root -and [string]$root.baseline -ceq 'absent') {
+                $created.Add([string]$root.data_dir + ' (account ' + [string]$root.sid + ')')
+            }
+        }
+    }
+    Write-DefenseClawLifecyclePhase -Stage ('rollback target runtime cleanup failed; the rollback goes on: ' + $failure)
+    if ($created.Count -eq 0) {
+        return $snapshot
+    }
+    $kept = [Collections.Generic.List[string]]::new()
+    foreach ($item in @($script:DefenseClawRollbackLeftovers)) {
+        $kept.Add([string]$item)
+    }
+    foreach ($folder in $created) {
+        if ($kept.Count -lt 256) {
+            $kept.Add(
+                $folder + ', if it exists: a per-user DefenseClaw folder this change created; the rollback could not remove it (' +
+                $failure + ')'
+            )
+        }
+    }
+    $script:DefenseClawRollbackLeftovers = @($kept)
+    return $snapshot
 }
 
 function Add-DefenseClawRecoveryEvidenceToError {
@@ -30987,10 +31061,43 @@ function Invoke-DefenseClawNamespaceRootCleanup {
         )
         throw (
             "native exact-root cleanup failed with exit $($probe.exit_code): " +
-            $detail
+            $detail +
+            (Get-DefenseClawNamespaceRootCleanupHolderText `
+                -Root ([string]$Request.root) `
+                -Failure ([string]$report.error))
         )
     }
     return $report
+}
+
+function Get-DefenseClawNamespaceRootCleanupHolderText {
+    <#
+        When the native exact-root cleanup refused a file another program
+        kept open, the programs that hold files in Root now, as
+        "; programs that hold files in <Root> now: ...". The printed next
+        step of a failed FORCE=1 uninstall says to end or close each program
+        the error names (GAP-0848); the native error names only the file.
+        When none is found any more, it says so: the program has closed the
+        file, and the same command can run again. '' for any other refusal.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [AllowEmptyString()][string]$Failure
+    )
+    if (-not $Failure.Contains('is held open by another program')) {
+        return ''
+    }
+    $holders = @(try {
+            Get-DefenseClawInstallRootHolders -InstallRoot $Root
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Verbose "could not list the programs that hold files in ${Root}: $($_.Exception.Message)"
+        })
+    if ($holders.Count -eq 0) {
+        return "; no program holds a file in $Root now, so the one that held it has closed it"
+    }
+    return '; programs that hold files in ' + $Root + ' now: ' +
+        (ConvertTo-DefenseClawBoundedDiagnostic -Value ($holders -join '; ') -MaxLength 1024)
 }
 
 function Test-DefenseClawExternalInstallCleanupSource {
