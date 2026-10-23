@@ -64,6 +64,7 @@ type PerUserHookReply struct {
 // NewPerUserGatewayHTTPClient verifies the accepted socket's account before
 // any HTTP request writes headers or a body. Go CLI management requests use
 // this same transport for every per-user gateway call, including retries.
+// A zero timeout leaves long operations bounded by their request context.
 func NewPerUserGatewayHTTPClient(timeout time.Duration, apiAddr string) (*http.Client, error) {
 	client, err := newPerUserHookHTTPClient(timeout, apiAddr)
 	if err != nil {

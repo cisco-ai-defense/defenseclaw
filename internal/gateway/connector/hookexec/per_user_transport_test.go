@@ -79,3 +79,13 @@ func TestConnectedSocketNameRequiresTheExactClientPort(t *testing.T) {
 		}
 	}
 }
+
+func TestPerUserGatewayClientCanUseARequestContextWithoutAnOverallTimeout(t *testing.T) {
+	client, err := NewPerUserGatewayHTTPClient(0, "127.0.0.1:18970")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.Timeout != 0 {
+		t.Fatalf("context-bound sandbox operation was limited to %s", client.Timeout)
+	}
+}

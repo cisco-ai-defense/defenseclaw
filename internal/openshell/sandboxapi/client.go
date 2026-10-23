@@ -36,8 +36,11 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+var sandboxPeerClientFactory = hookexec.NewPerUserGatewayHTTPClient
 
 // Client is a typed client of the daemon's sandbox API.
 type Client struct {
@@ -79,8 +82,27 @@ func ClientForConfig(cfg *config.Config) (*Client, error) {
 	if port <= 0 {
 		port = config.DefaultGatewayAPIPort
 	}
-	host := config.APIBindHost(cfg)
-	return NewClient("http://"+net.JoinHostPort(host, strconv.Itoa(port)), token), nil
+	host := strings.Trim(config.APIBindHost(cfg), "[]")
+	if host == "" || host == "*" {
+		host = "127.0.0.1"
+	} else if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		if ip.To4() != nil {
+			host = "127.0.0.1"
+		} else {
+			host = "::1"
+		}
+	}
+	address := net.JoinHostPort(host, strconv.Itoa(port))
+	// The sandbox CLI carries the gateway master token and may send a full
+	// sandbox request body. Prove the connected peer before sending either.
+	// A zero client timeout preserves context-bound image and create calls.
+	httpClient, err := sandboxPeerClientFactory(0, address)
+	if err != nil {
+		return nil, fmt.Errorf("sandboxapi: verify per-user gateway target: %w", err)
+	}
+	client := NewClient("http://"+address, token)
+	client.HTTP = httpClient
+	return client, nil
 }
 
 // ErrNotManagedHost is returned by ClientForHost on a computer without a

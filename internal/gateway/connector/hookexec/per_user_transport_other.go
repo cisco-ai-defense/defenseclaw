@@ -34,7 +34,7 @@ func newPerUserHookHTTPClient(timeout time.Duration, apiAddr string) (*http.Clie
 	if err != nil || port < 1 || port > 65535 {
 		return nil, errors.New("per-user gateway port is invalid")
 	}
-	if timeout <= 0 {
+	if timeout < 0 {
 		timeout = defaultHookRequestTimeout
 	}
 	dialer := &net.Dialer{Timeout: 2 * time.Second}
