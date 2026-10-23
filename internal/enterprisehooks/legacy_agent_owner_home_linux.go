@@ -14,30 +14,28 @@ package enterprisehooks
 
 import "golang.org/x/sys/unix"
 
-// homeIdentity stats the directory home, following symlinks, in one statx
-// call, so its device, inode and creation time are those of one object.
-// The inode came from the followed home and the creation time from the
-// symlink itself (AT_SYMLINK_NOFOLLOW), so a symlinked home recreated with
-// a reused inode kept its proof, and the account that got the uid next
-// inherited the earlier account's agent rows (GAP-0939). Without statx
-// (an old kernel, or a sandbox that refuses it) the home is proven by
-// device and inode alone.
+// homeIdentity stats the directory home, following symlinks, and proves
+// its device, inode and creation time are those of one object: the
+// creation time comes from a statx of the same followed path, taken only
+// when that statx names the same inode. The inode came from the followed
+// home and the creation time from the symlink itself (AT_SYMLINK_NOFOLLOW),
+// so a symlinked home recreated with a reused inode kept its proof, and the
+// account that got the uid next inherited the earlier account's agent rows
+// (GAP-0939). Without statx (an old kernel, or a sandbox that refuses it),
+// or when the home is replaced between the two calls, the home is proven
+// by device and inode alone, as on a file system that keeps no creation
+// time.
 func homeIdentity(home string) (homeProof, bool) {
-	const need = unix.STATX_TYPE | unix.STATX_INO
-	var stx unix.Statx_t
-	if err := unix.Statx(unix.AT_FDCWD, home, 0, need|unix.STATX_BTIME, &stx); err == nil && stx.Mask&need == need {
-		if uint32(stx.Mode)&unix.S_IFMT != unix.S_IFDIR {
-			return homeProof{}, false
-		}
-		proof := homeProof{dev: unix.Mkdev(stx.Dev_major, stx.Dev_minor), ino: stx.Ino}
-		if stx.Mask&unix.STATX_BTIME != 0 {
-			proof.birth, proof.hasBirth = stx.Btime.Sec*1_000_000_000+int64(stx.Btime.Nsec), true
-		}
-		return proof, true
-	}
 	var st unix.Stat_t
 	if err := unix.Stat(home, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return homeProof{}, false
 	}
-	return homeProof{dev: uint64(st.Dev), ino: st.Ino}, true
+	proof := homeProof{dev: st.Dev, ino: st.Ino}
+	var stx unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, home, 0, unix.STATX_INO|unix.STATX_BTIME, &stx); err == nil &&
+		stx.Mask&(unix.STATX_INO|unix.STATX_BTIME) == unix.STATX_INO|unix.STATX_BTIME && stx.Ino == st.Ino &&
+		unix.Mkdev(stx.Dev_major, stx.Dev_minor) == st.Dev {
+		proof.birth, proof.hasBirth = stx.Btime.Sec*1_000_000_000+int64(stx.Btime.Nsec), true
+	}
+	return proof, true
 }
