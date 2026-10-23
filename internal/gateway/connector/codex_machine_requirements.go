@@ -751,6 +751,16 @@ func removeWindowsCodexRequirementsOwnedChanges(
 				hooks[expected.eventType] = filtered
 			}
 		}
+		// A standalone removal also takes DefenseClaw's groups of any
+		// release or hook contract (windowsCodexOwnedHookGroup), whatever
+		// the baseline holds: a group that runs this install's hook binary
+		// is DefenseClaw's, and one left behind would run a removed binary.
+		// A baseline that an earlier release recorded with its own groups
+		// (a requirements file recovered to that release's bytes) no longer
+		// strands the uninstall on them (GAP-0907).
+		if windowsCodexOwnedGroupsRecognized(opts) {
+			removeWindowsCodexOwnedGroups(hooks, opts)
+		}
 
 		// The isolation booleans and managed directory are shared prerequisites
 		// for every managed hook. If an administrator added unrelated groups
@@ -761,7 +771,11 @@ func removeWindowsCodexRequirementsOwnedChanges(
 		// rehomes those hooks.
 		if !windowsCodexHooksHaveManagedEntries(hooks) {
 			_, baselineManagedDir := baseHooks["windows_managed_dir"]
-			if !baseHadHooks || !baselineManagedDir {
+			// With no hook left, a managed directory that names this
+			// install's own directory serves nothing and points into the
+			// tree the removal deletes: a standalone removal takes it even
+			// when the baseline holds it (GAP-0907).
+			if !baseHadHooks || !baselineManagedDir || windowsCodexOwnedGroupsRecognized(opts) {
 				if value, ok := hooks["windows_managed_dir"].(string); ok &&
 					sameWindowsCodexMachinePath(value, opts.ManagedDir) {
 					delete(hooks, "windows_managed_dir")
@@ -812,6 +826,69 @@ func removeWindowsCodexRequirementsOwnedChanges(
 		)
 	}
 	return rendered, !bytes.Equal(current, rendered), nil
+}
+
+// windowsCodexOwnedGroupsRecognized reports whether opts recognizes
+// DefenseClaw's managed groups of any release by their hook binary: a
+// standalone layout (bound to a hook contract), as reconcile does.
+func windowsCodexOwnedGroupsRecognized(opts WindowsCodexMachineRequirementsOptions) bool {
+	return strings.TrimSpace(opts.HookContractID) != "" && strings.TrimSpace(opts.HookBinary) != ""
+}
+
+// removeWindowsCodexOwnedGroups drops every DefenseClaw managed group of any
+// release from each event list of hooks.
+func removeWindowsCodexOwnedGroups(hooks map[string]interface{}, opts WindowsCodexMachineRequirementsOptions) {
+	for key, raw := range hooks {
+		groups, ok := raw.([]interface{})
+		if !ok || key == "windows_managed_dir" || key == "state" {
+			continue
+		}
+		kept := make([]interface{}, 0, len(groups))
+		for _, group := range groups {
+			if !windowsCodexOwnedHookGroup(group, opts.HookBinary) {
+				kept = append(kept, group)
+			}
+		}
+		if len(kept) == len(groups) {
+			continue
+		}
+		if len(kept) == 0 {
+			delete(hooks, key)
+		} else {
+			hooks[key] = kept
+		}
+	}
+}
+
+// windowsCodexRequirementsHoldOwnedLeftovers reports whether raw still holds
+// what a standalone removal takes: a DefenseClaw managed group of any
+// release, or, with no hook left, a managed directory that names this
+// install's own directory.
+func windowsCodexRequirementsHoldOwnedLeftovers(raw []byte, opts WindowsCodexMachineRequirementsOptions) (bool, error) {
+	if !windowsCodexOwnedGroupsRecognized(opts) {
+		return false, nil
+	}
+	cfg, err := parseWindowsCodexRequirements(raw)
+	if err != nil {
+		return false, err
+	}
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok {
+		return false, nil
+	}
+	for key, value := range hooks {
+		groups, ok := value.([]interface{})
+		if !ok || key == "windows_managed_dir" || key == "state" {
+			continue
+		}
+		for _, group := range groups {
+			if windowsCodexOwnedHookGroup(group, opts.HookBinary) {
+				return true, nil
+			}
+		}
+	}
+	dir, ok := hooks["windows_managed_dir"].(string)
+	return ok && !windowsCodexHooksHaveManagedEntries(hooks) && sameWindowsCodexMachinePath(dir, opts.ManagedDir), nil
 }
 
 func windowsCodexHooksHaveManagedEntries(hooks map[string]interface{}) bool {

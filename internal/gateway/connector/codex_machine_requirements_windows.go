@@ -642,7 +642,25 @@ func RemoveWindowsCodexMachineRequirements(
 		exactPostimage := requirements.existed && report.PostimageSHA256 == state.PostimageSHA256
 		var candidate []byte
 		var candidateExists bool
+		// A preimage an earlier release recorded with its own groups (or
+		// their managed directory alone) is DefenseClaw's in those parts:
+		// restoring it verbatim would strand the uninstall on them
+		// (GAP-0907), so it is cleaned as a surgical removal is.
+		preimageLeftovers := false
+		if exactPostimage && state.PreimageExisted {
+			if preimageLeftovers, err = windowsCodexRequirementsHoldOwnedLeftovers(state.Preimage, opts); err != nil {
+				return fmt.Errorf("inspect the recorded Codex requirements preimage: %w", err)
+			}
+		}
 		switch {
+		case exactPostimage && state.PreimageExisted && preimageLeftovers:
+			cleaned, _, cleanErr := removeWindowsCodexRequirementsOwnedChanges(state.Preimage, state.Preimage, opts)
+			if cleanErr != nil {
+				return cleanErr
+			}
+			candidate, candidateExists = cleaned, true
+			report.Changed = !bytes.Equal(requirements.data, cleaned)
+			report.Disposition = "restored_preimage"
 		case exactPostimage && state.PreimageExisted:
 			candidate = append([]byte(nil), state.Preimage...)
 			candidateExists = true
@@ -679,6 +697,11 @@ func RemoveWindowsCodexMachineRequirements(
 		contains, err := windowsCodexRequirementsContainExactManagedHook(candidate, opts)
 		if err != nil {
 			return err
+		}
+		if !contains {
+			if contains, err = windowsCodexRequirementsHoldOwnedLeftovers(candidate, opts); err != nil {
+				return err
+			}
 		}
 		if contains {
 			return errors.New("exact DefenseClaw Codex managed hooks would remain after removal")
