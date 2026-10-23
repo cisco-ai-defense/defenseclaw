@@ -1,4 +1,4 @@
-"""GAP-0619: the add/replace-a-connector page shows every prompt setup asks, in order.
+"""GAP-0619: the add-or-remove-an-agent page shows every prompt setup asks, in order.
 
 `defenseclaw setup <connector>` asks the enforcement mode first, then
 Add/Replace/Cancel (or the --replace confirm), then the LLM judge question in
@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-PAGE = ROOT / "docs-site/content/docs/stories/switch-connectors.mdx"
+PAGE = ROOT / "docs-site/content/docs/how-to/agents/add-or-remove-an-agent.mdx"
 SETUP_SOURCE = ROOT / "cli/defenseclaw/commands/cmd_setup.py"
 
 
