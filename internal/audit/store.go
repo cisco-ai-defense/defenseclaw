@@ -2120,6 +2120,33 @@ func (s *Store) HasAuditEventID(ctx context.Context, id string) (bool, error) {
 	return one == 1, err
 }
 
+// StoredHookDecisionAction returns the decision a stored hook record holds:
+// the action in a connector hook row's envelope, or the effective action of
+// a hook_decision record. found is false when no row owns id; action is
+// empty when the row holds neither.
+func (s *Store) StoredHookDecisionAction(ctx context.Context, id string) (action string, found bool, err error) {
+	if s == nil || !s.Ready() || id == "" {
+		return "", false, errors.New("audit: hook decision lookup requires a ready store and id")
+	}
+	var envelopeAction, decisionAction string
+	err = s.scanRow(ctx, "audit", s.db.QueryRowContext(ctx, `SELECT
+		CASE WHEN json_valid(COALESCE(structured_json,''))
+			THEN COALESCE(json_extract(structured_json,'$.action'),'') ELSE '' END,
+		CASE WHEN json_valid(COALESCE(projected_record_json,''))
+			THEN COALESCE(json_extract(projected_record_json,'$.body."defenseclaw.guardrail.effective_action"'),'') ELSE '' END
+		FROM audit_events WHERE id = ?`, id), &envelopeAction, &decisionAction)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if envelopeAction != "" {
+		return envelopeAction, true, nil
+	}
+	return decisionAction, true, nil
+}
+
 // DatabaseFileReplaced reports whether the database path no longer names
 // the file this store opened: it was deleted or replaced while the gateway
 // ran. SQLite keeps writing to the open, unlinked file, so every new audit

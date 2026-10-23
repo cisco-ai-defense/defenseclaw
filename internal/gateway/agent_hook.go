@@ -710,9 +710,22 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				// 503 closed in every fail mode (only a transport outage can
 				// open), so the audit records the block it enforces.
 				resp = pendingFailureHookDecision(resp)
+				if pending != nil {
+					// The failed write could not be undone durably, so
+					// the occurrence can outlive this process. Its records
+					// carry its IDs and its final answer is the closed
+					// fallback, so recovery completes these records and
+					// never audits a second decision.
+					req.pendingOccurrenceID = pending.ID
+					req.pendingBodyBytes = int64(len(b))
+					_, _ = pending.setFinal(resp, time.Since(t0))
+				}
 				persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
-				_ = a.finalizeAgentHook(persistCtx, connectorName, req, resp,
+				finalization := a.finalizeAgentHook(persistCtx, connectorName, req, resp,
 					rawEventIDs, b, time.Since(t0), panicked, auditExtra)
+				if pending != nil && finalization.AuditPersisted && finalization.DecisionSettled {
+					_ = pending.remove()
+				}
 				cancelPersist()
 				finalized = true
 				attemptedWrite = true
