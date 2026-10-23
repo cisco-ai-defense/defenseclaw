@@ -2738,9 +2738,9 @@ func lastNonEmptyLine(s string) string {
 
 // daemonVMProbe is the user's own MicroVM probe at sandbox start: the CPU's
 // virtualization flags, /dev/kvm opened read-write as the user (the test the
-// driver itself meets), and openshell-driver-vm where the user's OpenShell
-// gateway finds it (the rendered driver_dir, ~/.local/libexec/openshell, the
-// system directories).
+// driver itself meets), and openshell-driver-vm in the rendered driver_dir
+// when set, or in the user's and system directories otherwise. The probe
+// does not locate the running gateway's sibling fallback.
 func daemonVMProbe(s sandboxrelay.DaemonSettings) openshell.VMProbeResult {
 	home, _ := os.UserHomeDir()
 	dir := ""

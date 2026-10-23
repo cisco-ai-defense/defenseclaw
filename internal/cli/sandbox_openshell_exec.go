@@ -481,7 +481,8 @@ var openShellExecDefaultNamespaceSandboxIDs = func() (map[string]bool, error) {
 
 // sandboxOpenShellVMProbe is the account's MicroVM probe as the user: CPU
 // flags, /dev/kvm read-write, and openshell-driver-vm in the rendered
-// driver_dir, ~/.local/libexec/openshell or the system directories.
+// driver_dir when set, or in the user's and system directories otherwise.
+// The probe does not locate the running gateway's sibling fallback.
 func sandboxOpenShellVMProbe(home, configPath string) openshell.VMProbeResult {
 	dir := ""
 	if data, err := os.ReadFile(configPath); err == nil {

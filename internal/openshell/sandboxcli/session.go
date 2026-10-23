@@ -174,7 +174,10 @@ type session struct {
 	// stopFailed marks a session whose sandbox the end of the session could
 	// not stop; its exit status is not success.
 	stopFailed bool
-	sawHooks   atomic.Bool
+	// errorPhaseReason is OpenShell's reason when the sandbox entered its
+	// error state during the session, for the recovery step in finish.
+	errorPhaseReason string
+	sawHooks         atomic.Bool
 	// hooksUnknown is set once the summary said a daemon restart during
 	// the session left it unable to tell whether a hook reached DefenseClaw
 	// (hookReachUnknown).
@@ -1271,6 +1274,7 @@ func (s *session) endedElsewhere(after *sandboxapi.Sandbox) string {
 	if after.Phase == "error" {
 		// Not a stop of anyone's: OpenShell lost the sandbox (GAP-0278).
 		s.errored = true
+		s.errorPhaseReason = after.PhaseReason
 		runtime, why := s.runtimeStopCause(after)
 		text := name + "'s " + runtime + " stopped under the session (" + why + "), which ended " + s.harnessName() +
 			"; OpenShell now holds it in its error state"
@@ -1580,8 +1584,8 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 			a.note("Sandbox " + name + " keeps running → reattach: " + CommandName + " connect " + name + "   stop: " + CommandName + " stop " + name)
 			return nil
 		case s.unanswered:
-			a.note("Sandbox " + name + " does not answer → `" + CommandName + " status " + name + "` shows its state; in OpenShell's error state `" +
-				CommandName + " stop " + name + "` and `" + CommandName + " start " + name + "` bring it back with its work")
+			a.note("Sandbox " + name + " does not answer → `" + CommandName + " status " + name +
+				"` shows its state; if it enters OpenShell's error state, `" + CommandName + " doctor` shows its recovery steps")
 			return nil
 		case !s.started:
 			if now, err := s.api.Get(ctx, name); err == nil && now.Phase != "ready" {
@@ -1610,8 +1614,15 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		s.markStopped(sb)
 	}
 	if s.errored {
-		// Every gateway DefenseClaw starts a session on stops a sandbox in
-		// that state and starts it again (openshell.SupportedMin).
+		// A failed MicroVM's main process can leave its VM running. Its
+		// stop is refused; only an explicit end with the loss explained by
+		// StopWayOn, or deletion, lets OpenShell release it.
+		if runtime, _ := s.runtimeStopCause(s.sb); runtime == "MicroVM" &&
+			openshell.LingeringVM(openshell.PhaseError, s.errorPhaseReason, false) && openshell.MainProcessFailed(s.errorPhaseReason) {
+			a.note("Sandbox " + name + " is in OpenShell's error state → " +
+				openshell.StopWayOn(name, openshell.PhaseError, s.errorPhaseReason, true))
+			return nil
+		}
 		a.note("Sandbox " + name + " is in OpenShell's error state → fix what stopped it, then `" + CommandName + " stop " + name +
 			"` and `" + CommandName + " start " + name + "`, which keep the sandbox and its work")
 		return nil

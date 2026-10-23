@@ -784,12 +784,15 @@ func TestSessionDeletionFailureOffersRecovery(t *testing.T) {
 
 func TestSessionEndNamesRuntimeAndOtherGateway(t *testing.T) {
 	for _, tc := range []struct {
-		name, sandboxDriver, gatewayDriver, managedDriver string
-		others                                            []string
-		want, absent                                      []string
+		name, sandboxDriver, gatewayDriver, managedDriver, phaseReason string
+		others                                                         []string
+		want, absent                                                   []string
 	}{
 		{name: "MicroVM", sandboxDriver: "vm",
 			want: []string{"MicroVM stopped under the session", "its gateway restarted"}, absent: []string{"Docker", "container stopped", "likely took over"}},
+		{name: "failed MicroVM main process", sandboxDriver: "vm", phaseReason: "MainProcessFailed: Canonical main process exited with status 1",
+			want:   []string{"MicroVM stopped under the session", "sandbox start " + sbName + " --end-vm", "what the VM has not written to its disk is lost", "sandbox delete " + sbName + "`", "deletes it and its work"},
+			absent: []string{"which keep the sandbox and its work"}},
 		{name: "managed gateway took over", managedDriver: "vm", others: []string{"pid 520: gateway marker"},
 			want:   []string{"MicroVM stopped under the session", "likely took over its state", "pid 520: gateway marker", "Stop that process (`kill PID`"},
 			absent: []string{"Docker", "container stopped"}},
@@ -813,7 +816,7 @@ func TestSessionEndNamesRuntimeAndOtherGateway(t *testing.T) {
 				}
 				ta.term.during = func() {
 					ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) {
-						sb.Phase, sb.Driver = "error", tc.sandboxDriver
+						sb.Phase, sb.Driver, sb.PhaseReason = "error", tc.sandboxDriver, tc.phaseReason
 					})
 				}
 			}, want: tc.want, not: tc.absent}})
@@ -2400,7 +2403,7 @@ func TestSessionSummary(t *testing.T) {
 		{name: "a container that does not answer", input: "y\n", exit: 1, do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "box"}) },
 			setup: lateContainerStop(0), want: []string{"box does not answer, though OpenShell still reads it as running",
 				"the undo point stays, since box does not answer", "Sandbox box does not answer → `defenseclaw sandbox status box` shows its state"},
-			not: []string{"keeps running", "is still running"}},
+			not: []string{"keeps running", "is still running", "bring it back with its work"}},
 		// GAP-0077: the OpenShell gateway restarted under the session (an
 		// upgrade), which closed the harness's exec relay: the sandbox read
 		// as unknown for a moment, then ready, and the session said it was

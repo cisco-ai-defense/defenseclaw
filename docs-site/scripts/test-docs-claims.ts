@@ -170,6 +170,19 @@ function mdxPages(dir: string): string[] {
 }
 
 describe('recovery and repair advice', () => {
+  it('describes recovery and data loss for a failed MicroVM', () => {
+    const body = page('troubleshooting/sandboxes/runs-and-sessions.mdx');
+    const section = body.split('## A sandbox is in OpenShell\'s error state')[1]?.split('## ')[0];
+    assert.ok(section, 'error-state troubleshooting section is missing');
+    for (const text of ['Docker', 'MicroVM', 'MainProcessFailed', '--end-vm', 'has not written to its disk is lost',
+      'defenseclaw sandbox status NAME', 'defenseclaw sandbox stop NAME', 'defenseclaw sandbox delete NAME',
+      'deletes it and its work', 'process exited',
+      'stopped after ending and stopping a failed VM', 'absent after deletion']) {
+      assert.ok(section.includes(text), `error-state recovery must describe ${text}`);
+    }
+    assert.ok(!section.includes('which keep the sandbox and its work'), 'error-state recovery promises to keep unwritten VM work');
+  });
+
   it('keeps the saved guardrail mode', () => {
     const remediation = /recover|repair|restore|troubleshoot|turn it (?:off|back on)/i;
     const modeCommand = /defenseclaw\s+(?:setup\b[^\n`]*--mode(?:\s|=)|guardrail\s+mode\s+(?:observe|action)\b)/i;
