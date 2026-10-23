@@ -103,7 +103,7 @@ func TestAPrereleaseOfSandboxMinRunsNoSandbox(t *testing.T) {
 func TestOldGatewayTimeoutWayOnStartsWithoutAStop(t *testing.T) {
 	upgrade := "upgrade OpenShell 0.1.3 to " + openshell.InstallerVersion + " in place with `defenseclaw sandbox setup --install-openshell`"
 	deleteFirst := "this OpenShell can neither stop nor start a sandbox in its error state, and DefenseClaw stops no OpenShell gateway, so upgrades none, " +
-		"while OpenShell has not reported a MicroVM on it stopped: `defenseclaw sandbox delete box` deletes it and its work, after which " + upgrade
+		"while OpenShell has not reported a MicroVM on it stopped: save or sync any accessible work outside the guest first; `defenseclaw sandbox delete box` deletes it and its work, after which " + upgrade
 	timedOut := func(got string) bool {
 		return strings.Contains(got, "this OpenShell can neither stop nor start a sandbox in its error state: "+upgrade+", then wait a minute") &&
 			strings.Contains(got, "`defenseclaw sandbox start box` (no stop: OpenShell "+openshell.SupportedMin+" refuses to stop a sandbox whose provisioning timed out)") &&

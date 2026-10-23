@@ -386,14 +386,14 @@ func TestCheckSandboxesStoppedBeforeARestart(t *testing.T) {
 		}
 	}
 	phases := map[string]openshell.SandboxPhase{"dc-a": openshell.PhaseReady, "dc-b": openshell.PhaseStopped, "theirs": openshell.PhaseReady}
-	refused := func(runs bool) string {
-		return "; OpenShell has not reported these stopped: dc-a (ready): " + openshell.StopWayOn("dc-a", openshell.PhaseReady, "", runs) +
-			"; theirs (ready): " + openshell.StopWayOn("theirs", openshell.PhaseReady, "", runs) + "; then try again"
+	refused := func(release string) string {
+		return "; OpenShell has not reported these stopped: dc-a (ready): " + openshell.StopWayOn("dc-a", openshell.PhaseReady, "", release) +
+			"; theirs (ready): " + openshell.StopWayOn("theirs", openshell.PhaseReady, "", release) + "; then try again"
 	}
 	for _, release := range []string{openshell.SupportedMin, "0.1.3", "0.1.5-pre.3"} {
 		vm := gateway(t, openshell.DriverVM, release, phases)
 		c := vm.Client(openshell.ClientOptions{})
-		if err := openshell.CheckSandboxesStopped(context.Background(), c, noMicroVMs); !errors.Is(err, openshell.ErrUnflushed) || !strings.HasSuffix(err.Error(), refused(release == openshell.SupportedMin)) {
+		if err := openshell.CheckSandboxesStopped(context.Background(), c, noMicroVMs); !errors.Is(err, openshell.ErrUnflushed) || !strings.HasSuffix(err.Error(), refused(release)) {
 			t.Fatalf("OpenShell %s, ready MicroVMs: %v", release, err)
 		}
 		untouched(t, vm)
@@ -423,7 +423,7 @@ func TestCheckSandboxesStoppedBeforeARestart(t *testing.T) {
 	} {
 		busy := gateway(t, openshell.DriverVM, openshell.SupportedMin, phases)
 		busy.FailNext(openshelltest.MethodGatewayInfo, infoErr)
-		if err := openshell.CheckSandboxesStopped(context.Background(), busy.Client(openshell.ClientOptions{}), noMicroVMs); !errors.Is(err, openshell.ErrUnflushed) || !strings.HasSuffix(err.Error(), refused(true)) {
+		if err := openshell.CheckSandboxesStopped(context.Background(), busy.Client(openshell.ClientOptions{}), noMicroVMs); !errors.Is(err, openshell.ErrUnflushed) || !strings.HasSuffix(err.Error(), refused(openshell.SupportedMin)) {
 			t.Fatalf("GatewayInfo failed with %v: %v", infoErr, err)
 		}
 		untouched(t, busy)

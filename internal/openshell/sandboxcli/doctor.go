@@ -323,7 +323,7 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 			timedOut = append(timedOut, sb.Name)
 		case sb.Driver == "vm" && openshell.LingeringVM(openshell.PhaseError, sb.PhaseReason, false):
 			lingeringVMs = append(lingeringVMs, sb.Name)
-			way := openshell.StopWayOn(sb.Name, openshell.PhaseError, sb.PhaseReason, true)
+			way := openshell.StopWayOn(sb.Name, openshell.PhaseError, sb.PhaseReason, openshell.SupportedMin)
 			if !openshell.MainProcessFailed(sb.PhaseReason) {
 				way += "; its MicroVM work is kept only through the last successful disk sync"
 			}

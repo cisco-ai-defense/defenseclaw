@@ -209,7 +209,7 @@ func TestOldGatewayErrorMicroVMHoldsTheUpgradeUntilOpenShellReportsItGone(t *tes
 	}
 	upgrade := "upgrade OpenShell 0.1.3 to " + openshell.InstallerVersion + " in place with `defenseclaw sandbox setup --install-openshell`"
 	deleteFirst := "this OpenShell can neither stop nor start a sandbox in its error state, and DefenseClaw stops no OpenShell gateway, so upgrades none, " +
-		"while OpenShell has not reported a MicroVM on it stopped: `defenseclaw sandbox delete box` deletes it and its work, after which " + upgrade
+		"while OpenShell has not reported a MicroVM on it stopped: save or sync any accessible work outside the guest first; `defenseclaw sandbox delete box` deletes it and its work, after which " + upgrade
 	n := len(e.fake.ExecCalls())
 	feedLine := func() string {
 		var line string

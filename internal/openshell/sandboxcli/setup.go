@@ -1184,7 +1184,8 @@ func (a *App) restartSandboxes(ctx context.Context, microVM bool) (running, held
 			stopFlushes = d.StopFlushes
 		}
 	}
-	var runs *bool
+	var release string
+	checkedRelease := false
 	for _, sb := range list {
 		said := openshell.FailureReason(sb)
 		if !openshell.HoldsGateway(sb.Status.Phase, said, stopFlushes) {
@@ -1194,16 +1195,18 @@ func (a *App) restartSandboxes(ctx context.Context, microVM bool) (running, held
 		if stopFlushes {
 			continue
 		}
-		if runs == nil {
+		if !checkedRelease {
 			h, err := c.Health(ctx)
-			ok := err == nil && h != nil && openshell.RunsSandboxes(h.RawVersion)
-			runs = &ok
+			if err == nil && h != nil {
+				release = h.RawVersion
+			}
+			checkedRelease = true
 		}
 		phase := strings.ToLower(string(sb.Status.Phase))
 		if phase == "" {
 			phase = "unknown"
 		}
-		held = append(held, sb.Name+" ("+phase+"): "+openshell.StopWayOn(sb.Name, sb.Status.Phase, said, *runs))
+		held = append(held, sb.Name+" ("+phase+"): "+openshell.StopWayOn(sb.Name, sb.Status.Phase, said, release))
 	}
 	sort.Strings(running)
 	sort.Strings(held)

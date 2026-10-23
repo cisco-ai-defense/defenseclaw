@@ -94,7 +94,16 @@ describe('recovery and repair advice', () => {
     }
     assert.ok(!section.includes('one that is completed or in its error state: `openshell sandbox delete NAME`'),
       'a stoppable raw error state must not be sent directly to deletion');
-    const uncertain = section.split('\n').find((line) => line.includes('completed, or in its error state on an older or unknown'));
+    const recoverable = section.split('\n').find((line) => line.includes('completed, or has `MainProcessFailed` on OpenShell 0.1.5 or later'));
+    assert.ok(recoverable && recoverable.indexOf('save') < recoverable.indexOf('`openshell sandbox start NAME`') &&
+      recoverable.indexOf('`openshell sandbox start NAME`') < recoverable.indexOf('`openshell sandbox stop NAME`') &&
+      recoverable.indexOf('`openshell sandbox stop NAME`') < recoverable.indexOf('`openshell sandbox delete NAME`'),
+    'recoverable raw MicroVM needs save, start, stop before optional deletion');
+    const old = section.split('\n').find((line) => line.includes('completed, or in its error state with a VM still running on a gateway older than 0.1.5'));
+    assert.ok(old && old.indexOf('save') < old.indexOf('`openshell sandbox delete NAME`') &&
+      !old.includes('`openshell sandbox stop NAME`'),
+    'known old gateway must not suggest an impossible stop of an ended MicroVM');
+    const uncertain = section.split('\n').find((line) => line.includes('completed, or in its error state with a VM that may still run on an unknown gateway release'));
     assert.ok(uncertain && uncertain.includes('or still does not report the VM stopped') &&
       uncertain.indexOf('may not flush') >= 0 &&
       uncertain.indexOf('may not flush') < uncertain.indexOf('`openshell sandbox stop NAME`') &&
@@ -120,6 +129,8 @@ describe('recovery and repair advice', () => {
     }
     assert.ok(!page('troubleshooting/sandboxes/setup-and-gateway.mdx').includes('or `defenseclaw sandbox delete NAME` deletes it with its work'),
       'do not advise deleting a DefenseClaw guest with a stop recovery path');
+    assert.ok(page('troubleshooting/sandboxes/setup-and-gateway.mdx').includes('save accessible work outside a MicroVM whose VM still runs before deleting it for the upgrade'),
+      'legacy MicroVM upgrade summary must put saving work before deletion');
     assert.ok(!page('enterprise/runtime/sandboxes.mdx').includes('and stopped, or deleted'),
       'do not advise deleting a managed guest with a stop recovery path');
     assert.ok(page('reference/commands/tui.mdx').includes('| `U` | Save work you want to keep first, then undo:'),

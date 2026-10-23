@@ -1593,7 +1593,7 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		// StopWayOn, or deletion, lets OpenShell release it.
 		if runtime, _ := s.runtimeStopCause(s.sb); runtime == "MicroVM" {
 			if openshell.LingeringVM(openshell.PhaseError, s.errorPhaseReason, false) {
-				way := openshell.StopWayOn(name, openshell.PhaseError, s.errorPhaseReason, true)
+				way := openshell.StopWayOn(name, openshell.PhaseError, s.errorPhaseReason, openshell.SupportedMin)
 				if !openshell.MainProcessFailed(s.errorPhaseReason) {
 					way += "; its MicroVM work is kept only through the last successful disk sync"
 				}

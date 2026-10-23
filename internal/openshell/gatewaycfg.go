@@ -1973,7 +1973,7 @@ func CheckSandboxesStopped(ctx context.Context, c Client, vms VMCount) error {
 		}
 		return fmt.Errorf("%w (the sandboxes on it could not be listed: %v); try again", ErrUnflushed, err)
 	}
-	return stoppedRefusal(ErrUnflushed, list, func() bool { return gatewayRunsSandboxes(ctx, c) }, "try again")
+	return stoppedRefusal(ErrUnflushed, list, func() string { return restartGatewayRelease(ctx, c) }, "try again")
 }
 
 // checkGatewaySandboxesStopped is CheckSandboxesStopped on the gateway of

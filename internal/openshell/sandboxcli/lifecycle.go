@@ -925,13 +925,13 @@ func notStoppedNote(ctx context.Context, api API, sb *sandboxapi.Sandbox) string
 	if d, ok := openshell.LookupDriver(sb.Driver); ok && d.StopFlushes || !openshell.HoldsGateway(phase, sb.PhaseReason, false) {
 		return ""
 	}
-	runs := false
+	release := ""
 	if st, err := api.Status(ctx); err == nil && st.Gateway != nil {
-		runs = openshell.RunsSandboxes(st.Gateway.Version)
+		release = st.Gateway.Version
 	}
 	return sb.Name + " is " + is + ": OpenShell does not stop it, so its MicroVM may still run, and DefenseClaw stops, restarts and upgrades " +
 		"no OpenShell gateway under it, nor moves this account to another OpenShell setup, until OpenShell reports it stopped: " +
-		openshell.StopWayOn(sb.Name, phase, sb.PhaseReason, runs)
+		openshell.StopWayOn(sb.Name, phase, sb.PhaseReason, release)
 }
 
 // copyAtStop looks at the copy of sb, which is about to stop, within a

@@ -612,7 +612,7 @@ func errorPhaseWayOn(name, reason, upgrade string, microVM bool) string {
 		return overlayDiskWayOn(name)
 	case upgrade != "" && microVM && openshell.HoldsGateway(openshell.PhaseError, reason, false):
 		return "this OpenShell can neither stop nor start a sandbox in its error state, and DefenseClaw stops no OpenShell gateway, so upgrades none, " +
-			"while OpenShell has not reported a MicroVM on it stopped: `defenseclaw sandbox delete " + name + "` deletes it and its work, after which " + upgrade
+			"while OpenShell has not reported a MicroVM on it stopped: save or sync any accessible work outside the guest first; `defenseclaw sandbox delete " + name + "` deletes it and its work, after which " + upgrade
 	case upgrade != "" && openshell.ProvisioningTimedOut(reason):
 		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then wait a minute for OpenShell's cleanup of " +
 			"the provisioning that timed out and `defenseclaw sandbox start " + name + "` (no stop: OpenShell " + openshell.SupportedMin +
@@ -625,7 +625,7 @@ func errorPhaseWayOn(name, reason, upgrade string, microVM bool) string {
 	case microVM && openshell.LingeringVM(openshell.PhaseError, reason, false):
 		// OpenShell may still hold its VM. The main-process failure has an
 		// explicit lossy end path; other reasons get the phase's stop advice.
-		way := openshell.StopWayOn(name, openshell.PhaseError, reason, true)
+		way := openshell.StopWayOn(name, openshell.PhaseError, reason, openshell.SupportedMin)
 		if !openshell.MainProcessFailed(reason) {
 			way += "; its MicroVM work is kept only through the last successful disk sync"
 		}
@@ -657,8 +657,9 @@ func (m *Manager) upgradeWayOn(release string) string {
 	if m.managedMode() {
 		return "on this managed computer the OpenShell release is your administrator's (enterprise.openshell.version): ask IT for " +
 			openshell.InstallerVersion + " or later; where DefenseClaw installs OpenShell for you, your gateway moves to it once OpenShell reports each of " +
-			"your sandboxes stopped (`defenseclaw sandbox stop NAME` flushes and stops a running one; this OpenShell neither stops nor starts a MicroVM " +
-			"whose workload completed or that is in its error state, which only `defenseclaw sandbox delete NAME` ends, with its work)"
+			"your sandboxes stopped (save or sync any accessible work first; `defenseclaw sandbox stop NAME` requests a disk sync before stopping a running one, " +
+			"but a failed sync can lose later changes; this OpenShell neither stops nor starts a MicroVM whose workload completed or that is in its error state; " +
+			"after saving accessible work outside the guest, `defenseclaw sandbox delete NAME` ends it and deletes its work)"
 	}
 	return "upgrade OpenShell " + v.String() + " to " + openshell.InstallerVersion + " in place with `defenseclaw sandbox setup --install-openshell`"
 }
