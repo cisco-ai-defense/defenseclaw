@@ -78,13 +78,25 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 	}
 	previousLayout, previousInstalled, previousElevated, previousRestart, previousRecovery, previousConfigTrusted := windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway, windowsSecretSpawnRecovery, windowsSecretConfigTrusted
 	previousBundle, previousPath, previousLifecycle, previousWait, previousArgs := windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs
+	previousChangeSpool := windowsChangeSpool
 	previousManaged := managedHostWindowsStandalone
 	t.Cleanup(func() {
 		windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway, windowsSecretSpawnRecovery, windowsSecretConfigTrusted = previousLayout, previousInstalled, previousElevated, previousRestart, previousRecovery, previousConfigTrusted
 		windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs = previousBundle, previousPath, previousLifecycle, previousWait, previousArgs
+		windowsChangeSpool = previousChangeSpool
 		managedHostWindowsStandalone = previousManaged
 	})
 	host := &windowsSecretLockEvents{}
+	// Credential tests exercise real durable reservations while replacing
+	// the installer's protected spool layout with a disposable test root.
+	// A standalone command uses ConfigDir and LifecycleDir from the installed
+	// deployment; most fixture layouts intentionally omit those directories.
+	spoolRoot := t.TempDir()
+	windowsChangeSpool = func(managed.StandaloneLayout) (enterprisestatus.ChangeSpool, error) {
+		return enterprisestatus.ChangeSpool{
+			Dir: filepath.Join(spoolRoot, "change-events"), StateDir: spoolRoot,
+		}, nil
+	}
 	windowsSecretLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
 	windowsSecretDeploymentInstalled = func() (bool, error) { return true, nil }
 	windowsSecretIsElevated = func() bool { return true }

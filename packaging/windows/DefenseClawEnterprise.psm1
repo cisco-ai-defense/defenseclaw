@@ -6087,7 +6087,7 @@ function Install-DefenseClawFileAtomic {
                         # Retry the atomic operation only while both original
                         # names remain intact. Never rename the launcher away:
                         # agents can treat a missing hook as a non-blocking error.
-                        Start-Sleep -Milliseconds 10
+                        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 10
                     }
                 }
             }

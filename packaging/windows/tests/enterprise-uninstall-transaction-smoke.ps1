@@ -3299,6 +3299,20 @@ targets:
                 sha256 = ('a' * 64)
             }
         }
+        function script:Assert-DefenseClawInstallRootNameReserved {
+            param([Parameter(Mandatory)][string]$InstallRoot)
+            # The fixture's disposable parent has the runner's ordinary
+            # inherited ACL. Model the trusted parent boundary here; the
+            # production ACL guard has its own dedicated tests.
+            if (-not [string]::Equals(
+                    $InstallRoot,
+                    [string]$script:HarnessState.layout.InstallRoot,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw "install-root check crossed the fixture scope: $InstallRoot"
+            }
+            $script:HarnessState.events.Add('install-root-name-reserved')
+        }
         function script:Set-DefenseClawInstallTreeRetirementAcls {
             param([Parameter(Mandatory)][hashtable]$Layout)
             if ([bool]$script:HarnessState.active_references) {
@@ -3693,6 +3707,15 @@ targets:
                     -Message "$Name did not quiesce transactionally before prepare"
             }
             if ($SelfUninstall -and $ExpectSuccess) {
+                $rootGuardIndex = $script:HarnessState.events.IndexOf(
+                    'install-root-name-reserved'
+                )
+                Assert-Harness `
+                    -Condition (
+                        $rootGuardIndex -ge 0 -and
+                        $rootGuardIndex -lt $transactionIndex
+                    ) `
+                    -Message "$Name crossed the transaction boundary before the install-root name guard"
                 $verifyIndex = $script:HarnessState.events.IndexOf(
                     'teardown:verify'
                 )
