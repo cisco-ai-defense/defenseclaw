@@ -39,6 +39,7 @@ import (
 // to api.anthropic.com. The connector wires hooks into
 // ~/.claude/settings.json:
 //   - claude-code-hook.sh under hooks for tool-call inspection
+//
 // Managed hosts also install an OTel env block for native telemetry. Per-user
 // hosts omit it because the exporter cannot verify a loopback port's owner.
 //
