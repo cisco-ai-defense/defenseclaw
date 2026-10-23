@@ -383,11 +383,12 @@ describe('setup and rollback recovery guides', () => {
     const installer = readFileSync(join(repo, 'scripts/install.ps1'), 'utf8');
     const closeHooks = /function Close-UnfinishedInstallHooks \{([\s\S]*?)\n\}\n\nfunction Clear-SetupDataDir/.exec(installer)?.[1];
     assert.ok(closeHooks, 'Windows installer hook closure path not found');
-    assert.match(closeHooks, /\(-not \$unfinished\.Count -and -not \$pending\) -or \(Get-GatewayProcess\)/);
+    assert.match(closeHooks, /if \(-not \$unfinished\.Count -and -not \$pending\) \{ return \$false \}/);
+    assert.match(closeHooks, /if \(\(Get-InstallGatewayState\) -ne "down"\) \{ return \$false \}/);
     assert.match(closeHooks, /-not \(Test-Path -LiteralPath \(Join-Path \$DataDir "hooks"\) -PathType Container\)/);
     assert.match(closeHooks, /if \(Close-AllHooks \$gateways\)/);
     assert.match(closeHooks, /every agent hook blocks tool calls until the gateway runs again/);
-    assert.match(closeHooks, /agent hooks could not be closed: until the gateway runs, they follow the outage fail mode/);
+    assert.match(closeHooks, /The install is not finished and the agent hooks could not be closed\. Run the installer again to finish it/);
 
     const unixInstaller = readFileSync(join(repo, 'scripts/install.sh'), 'utf8');
     const unixRestore = /restore_snapshot\(\) \{([\s\S]*?)\n\}\n\nrestart_old\(\)/.exec(unixInstaller)?.[1];
