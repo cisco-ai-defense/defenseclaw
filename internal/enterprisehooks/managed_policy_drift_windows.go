@@ -8,6 +8,7 @@ package enterprisehooks
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -61,14 +62,35 @@ func RestoreWindowsClaudeManagedPolicyDrift() (bool, error) {
 			return errors.New("enterprise hooks: the Claude Code managed policy ownership record is from an earlier release; run Setup /ensure")
 		}
 		body, err := renderRecordedWindowsClaudeManagedPolicy(record)
+		setAside := false
+		if err != nil && policy.existed {
+			// Rendering reads every managed drop-in, so a changed drop-in that
+			// is not JSON, or that turns hooks off, blocks its own rebuild. It
+			// is DefenseClaw's own file and is replaced anyway: set it aside
+			// and render again, and put it back if that fails too.
+			if removeErr := os.Remove(path); removeErr != nil {
+				return errors.Join(err, removeErr)
+			}
+			setAside = true
+			body, err = renderRecordedWindowsClaudeManagedPolicy(record)
+		}
+		rollback := func(cause error) error {
+			if !setAside && !policy.existed {
+				return cause
+			}
+			if restoreErr := restoreWindowsManagedFile(policy); restoreErr != nil {
+				return errors.Join(cause, fmt.Errorf("enterprise hooks: put back the changed Claude Code drop-in: %w", restoreErr))
+			}
+			return cause
+		}
 		if err != nil {
-			return err
+			return rollback(err)
 		}
 		if err := windowsManagedPolicyWriter(path, body, true); err != nil {
-			return err
+			return rollback(err)
 		}
 		if err := verifyWindowsClaudeManagedPolicy(path, body); err != nil {
-			return err
+			return rollback(err)
 		}
 		restored = true
 		return nil

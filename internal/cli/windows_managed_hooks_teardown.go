@@ -563,18 +563,10 @@ func runWindowsManagedHooksTeardown(
 		codexTargets,
 		cursorTargets,
 	)
-	if action == "prepare" && identity.CodexPolicyActive && len(identity.CodexTargets) == 0 {
-		// The pre-1.0.4 zero-target state has no Codex requirements, even
-		// though Codex is configured. Capture the authenticated policy bit
-		// that rollback must restore; a new empty guard remains active.
-		registry, resolveErr := connector.ResolveWindowsCodexManagedRuntimeRegistry(opts.HookBinary)
-		if resolveErr != nil {
-			return fail(resolveErr)
+	if action == "prepare" {
+		if err := captureWindowsManagedHooksTeardownCodexPolicy(&identity); err != nil {
+			return fail(err)
 		}
-		if len(registry.Targets) != 0 {
-			return fail(errors.New("codex machine enrollment does not match the protected manifest"))
-		}
-		identity.CodexPolicyActive = registry.Active
 	}
 	var cleanupReceiptPath string
 	if strings.TrimSpace(contractCleanupReceipt) != "" ||
@@ -786,6 +778,32 @@ func runWindowsManagedHooksTeardown(
 	// future readback (audit dump, test) can see the observation trail.
 	report.OK = true
 	return report, nil
+}
+
+// windowsManagedHooksTeardownCodexRegistryReader reads the protected Codex
+// registry for a prepare; tests replace it.
+var windowsManagedHooksTeardownCodexRegistryReader = connector.ResolveWindowsCodexManagedRuntimeRegistry
+
+// captureWindowsManagedHooksTeardownCodexPolicy journals the Codex policy bit
+// a zero-target prepare finds. Configuration expects a configured connector's
+// guard to be active, but a 1.0.2 or 1.0.3 deployment with no enrolled account
+// has no Codex requirements. Prepare records the authenticated registry's
+// actual bit, so that preimage does not block teardown and rollback restores
+// what was installed; a 1.0.4 empty guard stays active. Enrolled targets, or a
+// connector that is not configured, keep the expected bit.
+func captureWindowsManagedHooksTeardownCodexPolicy(identity *windowsManagedHooksTeardownJournal) error {
+	if !identity.CodexPolicyActive || len(identity.CodexTargets) != 0 {
+		return nil
+	}
+	registry, err := windowsManagedHooksTeardownCodexRegistryReader(identity.HookBinary)
+	if err != nil {
+		return err
+	}
+	if len(registry.Targets) != 0 {
+		return errors.New("codex machine enrollment does not match the protected manifest")
+	}
+	identity.CodexPolicyActive = registry.Active
+	return nil
 }
 
 func prepareWindowsManagedHooksTeardown(

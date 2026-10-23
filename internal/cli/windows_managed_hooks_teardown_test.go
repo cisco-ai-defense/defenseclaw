@@ -1257,3 +1257,121 @@ func TestWindowsManagedHooksTeardownJournalWritesEmptyCodexTargets(t *testing.T)
 		}
 	}
 }
+
+// Prepare journals the Codex policy bit it finds when no Codex account is
+// enrolled. A 1.0.2 or 1.0.3 deployment with Codex configured and no enrolled
+// account has no Codex requirements. Journaling the configured bit instead
+// made prepare's installed-state check refuse that preimage and blocked
+// teardown; a 1.0.4 empty guard must stay journaled active.
+func TestWindowsManagedHooksTeardownPrepareCapturesZeroTargetCodexPolicy(t *testing.T) {
+	previous := windowsManagedHooksTeardownCodexRegistryReader
+	t.Cleanup(func() { windowsManagedHooksTeardownCodexRegistryReader = previous })
+	const hook = `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`
+	alice := connector.WindowsCodexManagedRuntimeTarget{
+		SID: "S-1-5-21-111-222-333-1001", DataDir: `C:\Users\alice\.defenseclaw`,
+	}
+	expected := func(configured bool, targets []connector.WindowsCodexManagedRuntimeTarget) windowsManagedHooksTeardownJournal {
+		claude, active, codex, cursor := windowsManagedHooksTeardownExpectedEnrollment(
+			windowsManagedHooksActivated, configured, nil, targets, nil,
+		)
+		identity := windowsManagedHooksTeardownJournal{
+			SchemaVersion:          windowsManagedHooksTeardownJournalSchema,
+			Phase:                  "prepared",
+			ManifestPath:           `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
+			ManifestSHA256:         strings.Repeat("a", 64),
+			ActivationState:        windowsManagedHooksActivated,
+			DeploymentGenerationID: strings.Repeat("b", 32),
+			HookBinary:             hook,
+			GatewayAddr:            "127.0.0.1:18970",
+			GatewayServiceName:     "DefenseClawGateway",
+			ClaudeTargetSIDs:       claude,
+			CodexPolicyActive:      active,
+			CodexTargets:           codex,
+			CursorTargets:          cursor,
+		}
+		var err error
+		identity.ManifestFingerprint, err = windowsManagedHooksTeardownFingerprint(identity.Targets)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return identity
+	}
+	for _, test := range []struct {
+		name     string
+		registry connector.WindowsCodexManagedRuntimeRegistry
+	}{
+		{name: "1.0.2 or 1.0.3 zero-target state without requirements"},
+		{name: "1.0.4 active empty guard", registry: connector.WindowsCodexManagedRuntimeRegistry{Active: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reads := 0
+			windowsManagedHooksTeardownCodexRegistryReader = func(binary string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+				reads++
+				if binary != hook {
+					t.Fatalf("prepare read the Codex registry for %s", binary)
+				}
+				return test.registry, nil
+			}
+			configured := expected(true, nil)
+			if !configured.CodexPolicyActive {
+				t.Fatal("fixture: configured Codex must expect an active guard")
+			}
+			if !test.registry.Active {
+				if err := validateWindowsManagedHooksTeardownEnrollment(configured, nil, false, test.registry, nil, false); err == nil {
+					t.Fatal("fixture: the configured bit no longer refuses the legacy preimage")
+				}
+			}
+			prepared := configured
+			if err := captureWindowsManagedHooksTeardownCodexPolicy(&prepared); err != nil {
+				t.Fatal(err)
+			}
+			if reads != 1 || prepared.CodexPolicyActive != test.registry.Active {
+				t.Fatalf("prepare journaled Codex active=%t after %d reads, want %t", prepared.CodexPolicyActive, reads, test.registry.Active)
+			}
+			if err := validateWindowsManagedHooksTeardownEnrollment(prepared, nil, false, test.registry, nil, false); err != nil {
+				t.Fatalf("prepare refused the installed zero-target Codex state: %v", err)
+			}
+			// Verify, rollback and finalize compare the journal with the
+			// configuration-derived identity.
+			if err := validateWindowsManagedHooksTeardownJournal(prepared, configured); err != nil {
+				t.Fatalf("journal of the captured Codex state rejected: %v", err)
+			}
+		})
+	}
+
+	readErr := errors.New("Codex managed runtime state exists without machine requirements")
+	for _, test := range []struct {
+		name     string
+		registry connector.WindowsCodexManagedRuntimeRegistry
+		err      error
+	}{
+		{name: "unreadable registry", err: readErr},
+		{name: "registry enrolls an account the manifest does not", registry: connector.WindowsCodexManagedRuntimeRegistry{
+			Active: true, Targets: []connector.WindowsCodexManagedRuntimeTarget{alice},
+		}},
+	} {
+		t.Run("refuses "+test.name, func(t *testing.T) {
+			windowsManagedHooksTeardownCodexRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+				return test.registry, test.err
+			}
+			prepared := expected(true, nil)
+			if err := captureWindowsManagedHooksTeardownCodexPolicy(&prepared); err == nil {
+				t.Fatal("prepare journaled an unauthenticated Codex state")
+			}
+		})
+	}
+
+	windowsManagedHooksTeardownCodexRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+		t.Fatal("prepare read the Codex registry although the manifest decides the bit")
+		return connector.WindowsCodexManagedRuntimeRegistry{}, nil
+	}
+	for name, identity := range map[string]windowsManagedHooksTeardownJournal{
+		"enrolled Codex account":  expected(true, []connector.WindowsCodexManagedRuntimeTarget{alice}),
+		"Codex is not configured": expected(false, nil),
+	} {
+		want := identity.CodexPolicyActive
+		if err := captureWindowsManagedHooksTeardownCodexPolicy(&identity); err != nil || identity.CodexPolicyActive != want {
+			t.Fatalf("%s: active=%t err=%v, want the manifest's bit %t", name, identity.CodexPolicyActive, err, want)
+		}
+	}
+}

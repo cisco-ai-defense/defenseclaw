@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -166,34 +167,54 @@ func TestWindowsConfiguredMachinePolicyRepairsLegacyEmptyEnrollment(t *testing.T
 	}
 }
 
-// A configured connector's guard is independent of enrollment. Reconcile
-// keeps a present guard, restores an absent one, and preserves only the
-// protected SIDs that the manifest still authorizes. The absent/enrolled
-// cells model recovery from authenticated ownership state.
+// The guard x enrollment x repair table for every configured machine-policy
+// connector. A guard is absent (nothing installed yet, or an earlier release's
+// zero-target state), present, or damaged: its machine-owned record survives
+// while an artifact it owns is missing or changed. Repair installs an absent
+// guard, rebuilds a damaged one from its record, keeps a present one, and
+// never publishes a target set smaller than the record through pre-sync or
+// exact publication. Each damaged row names the artifact; the real-artifact
+// rebuilds are TestWindowsClaudeMachineGuardArtifactRepairTable,
+// TestWindowsCodexMachineGuardArtifactRepairTable and
+// TestWindowsCursorMachineGuardRebuildsEveryOwnedArtifact.
 func TestWindowsMachineGuardRepairStateTable(t *testing.T) {
 	const sid = "S-1-5-21-111-222-333-1001"
 	const home = `C:\Users\alice`
-	for _, connectorName := range []string{"claudecode", "cursor"} {
-		for _, guardPresent := range []bool{false, true} {
+	const hookBinary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	guards := map[string][]string{
+		"claudecode": {"absent", "present", "drop-in missing", "drop-in changed"},
+		"codex":      {"absent", "present", "requirements missing", "requirements changed", "registry missing"},
+		"cursor": {
+			"absent", "present", "hooks.json missing", "hooks.json changed",
+			"adapter missing", "adapter changed", "hooks.json and adapter missing",
+		},
+	}
+	for _, connectorName := range []string{"claudecode", "codex", "cursor"} {
+		for _, guard := range guards[connectorName] {
 			for _, enrolled := range []bool{false, true} {
-				name := connectorName + "/guard=" + map[bool]string{false: "absent", true: "present"}[guardPresent] +
-					"/enrollment=" + map[bool]string{false: "empty", true: "Alice"}[enrolled]
+				name := connectorName + "/guard=" + guard + "/enrollment=" + map[bool]string{false: "empty", true: "Alice"}[enrolled]
 				t.Run(name, func(t *testing.T) {
 					previousCfg := cfg
 					previousClaudeReader, previousClaudePublisher := enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher
 					previousClaudeEnsurer, previousClaudeIdentity := enterpriseHookClaudePolicyEnsurer, enterpriseHookClaudePolicyIdentityVerifier
+					previousClaudeRestorer := enterpriseHookClaudePolicyRestorer
 					previousCursorReader, previousCursorPublisher := enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher
 					previousCursorEnsurer, previousCursorRestorer := enterpriseHookCursorPolicyEnsurer, enterpriseHookCursorPolicyRestorer
 					previousCursorIdentity := enterpriseHookCursorPolicyIdentityVerifier
 					previousCodexLayout, previousCodexReader := enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader
+					previousCodexReconciler, previousCodexPublisher := enterpriseHookCodexRequirementsReconciler, enterpriseHookCodexTargetsPublisher
+					previousCodexRemover := enterpriseHookCodexRequirementsRemover
 					t.Cleanup(func() {
 						cfg = previousCfg
 						enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher = previousClaudeReader, previousClaudePublisher
 						enterpriseHookClaudePolicyEnsurer, enterpriseHookClaudePolicyIdentityVerifier = previousClaudeEnsurer, previousClaudeIdentity
+						enterpriseHookClaudePolicyRestorer = previousClaudeRestorer
 						enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher = previousCursorReader, previousCursorPublisher
 						enterpriseHookCursorPolicyEnsurer, enterpriseHookCursorPolicyRestorer = previousCursorEnsurer, previousCursorRestorer
 						enterpriseHookCursorPolicyIdentityVerifier = previousCursorIdentity
 						enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader = previousCodexLayout, previousCodexReader
+						enterpriseHookCodexRequirementsReconciler, enterpriseHookCodexTargetsPublisher = previousCodexReconciler, previousCodexPublisher
+						enterpriseHookCodexRequirementsRemover = previousCodexRemover
 					})
 					cfg = &config.Config{
 						DeploymentMode: managed.DeploymentModeManagedEnterprise,
@@ -204,90 +225,177 @@ func TestWindowsMachineGuardRepairStateTable(t *testing.T) {
 					if enrolled {
 						manifest.Targets = []enterprisehooks.ManifestTarget{{SID: sid, UserHome: home, Connector: connectorName}}
 					}
-					active := guardPresent
-					claudeDamaged := connectorName == "claudecode" && !guardPresent && enrolled
-					cursorDamaged := connectorName == "cursor" && !guardPresent && enrolled
-					var claudeTargets []string
-					var cursorTargets []enterprisehooks.WindowsCursorManagedRuntimeTarget
-					restoreTargets := func() {
-						if !enrolled {
-							return
+					absent := guard == "absent"
+					damaged := !absent && guard != "present"
+					wantEnsures, wantRestores, wantReconciles := 0, 0, 0
+					switch {
+					case connectorName == "codex" && guard != "present":
+						wantReconciles = 1
+					case absent:
+						wantEnsures = 1
+					case damaged:
+						wantRestores = 1
+					}
+					active := guard == "present"
+					// The machine-owned record keeps Alice through damage. An
+					// absent guard has no record; per-target installation
+					// enrolls Alice before exact publication.
+					recordAlice := enrolled && !absent
+					var targets []string
+					if recordAlice {
+						targets = []string{sid}
+					}
+					var minimum []string
+					if recordAlice && guard != "registry missing" {
+						// Losing the Codex registry loses the record itself;
+						// exact publication restores Alice from the manifest
+						// and she stays refused until then.
+						minimum = []string{sid}
+					}
+					published := 0
+					publish := func(next []string) {
+						published++
+						for _, want := range minimum {
+							if !slices.Contains(next, want) {
+								t.Fatalf("published %v, dropping the record's %s", next, want)
+							}
 						}
-						claudeTargets = []string{sid}
-						cursorTargets = []enterprisehooks.WindowsCursorManagedRuntimeTarget{{SID: sid, DataDir: filepath.Join(home, ".defenseclaw")}}
+						targets = append([]string(nil), next...)
 					}
-					if guardPresent {
-						restoreTargets()
-					}
-					ensures := 0
+					ensures, restores, reconciles := 0, 0, 0
+					damageErr := errors.New(guard + "; the machine-owned record remains")
+
 					enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) {
 						if connectorName != "claudecode" {
 							return nil, false, nil
 						}
-						if claudeDamaged {
-							return nil, false, errors.New("Claude policy was deleted; owned state remains")
+						if damaged {
+							return nil, false, damageErr
 						}
-						return append([]string(nil), claudeTargets...), active, nil
+						return append([]string(nil), targets...), active, nil
+					}
+					enterpriseHookClaudePolicyRestorer = func() (bool, error) {
+						if connectorName != "claudecode" || !damaged {
+							t.Fatal("Claude drop-in restore called without a damaged guard")
+						}
+						restores++
+						damaged, active = false, true
+						return true, nil
 					}
 					enterpriseHookClaudePolicyEnsurer = func(opts connector.SetupOpts) error {
 						if connectorName != "claudecode" || opts.ManagedTargetSID != "" {
 							t.Fatalf("unexpected Claude ensurer call: %+v", opts)
 						}
+						if damaged && guard == "drop-in changed" {
+							// The install path refuses a drop-in changed
+							// outside DefenseClaw.
+							return errors.New("Claude Code managed policy was changed outside DefenseClaw")
+						}
+						// Missing-policy recovery restores the record's
+						// enrollment.
 						ensures++
-						claudeDamaged = false
-						active = true
-						restoreTargets()
+						damaged, active = false, true
 						return nil
 					}
-					enterpriseHookClaudePolicyTargetsPublisher = func(targets []string) error {
+					enterpriseHookClaudePolicyTargetsPublisher = func(next []string) error {
 						if connectorName == "claudecode" {
-							claudeTargets = append([]string(nil), targets...)
+							publish(next)
 						}
 						return nil
+					}
+
+					enterpriseHookCodexRequirementsLayoutResolver = func(string) (connector.WindowsCodexMachineRequirementsOptions, error) {
+						return connector.WindowsCodexMachineRequirementsOptions{
+							HookBinary:  hookBinary,
+							GatewayAddr: "127.0.0.1:32109", GatewayServiceName: "DefenseClawGateway",
+						}, nil
+					}
+					codexTargets := func() []connector.WindowsCodexManagedRuntimeTarget {
+						result := []connector.WindowsCodexManagedRuntimeTarget{}
+						for _, target := range targets {
+							result = append(result, connector.WindowsCodexManagedRuntimeTarget{SID: target, DataDir: filepath.Join(home, ".defenseclaw")})
+						}
+						return result
+					}
+					enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+						if connectorName != "codex" {
+							return connector.WindowsCodexManagedRuntimeRegistry{}, nil
+						}
+						if damaged {
+							return connector.WindowsCodexManagedRuntimeRegistry{}, damageErr
+						}
+						return connector.WindowsCodexManagedRuntimeRegistry{
+							Active: active, Targets: codexTargets(),
+							GatewayAddr: "127.0.0.1:32109", GatewayServiceName: "DefenseClawGateway",
+						}, nil
+					}
+					enterpriseHookCodexRequirementsReconciler = func(opts connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+						if connectorName != "codex" || !opts.CodexTargetEnabled {
+							t.Fatalf("unexpected Codex reconcile: %+v", opts)
+						}
+						reconciles++
+						if guard == "registry missing" {
+							targets = nil
+						}
+						damaged, active = false, true
+						return connector.WindowsCodexMachineRequirementsReport{OK: true}, nil
+					}
+					enterpriseHookCodexTargetsPublisher = func(_ connector.WindowsCodexMachineRequirementsOptions, next []connector.WindowsCodexManagedRuntimeTarget) error {
+						if connectorName == "codex" {
+							sids := []string{}
+							for _, target := range next {
+								sids = append(sids, target.SID)
+							}
+							publish(sids)
+						}
+						return nil
+					}
+					enterpriseHookCodexRequirementsRemover = func(connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+						t.Fatal("repair removed a configured Codex guard")
+						return connector.WindowsCodexMachineRequirementsReport{}, nil
+					}
+
+					cursorTargets := func() []enterprisehooks.WindowsCursorManagedRuntimeTarget {
+						result := []enterprisehooks.WindowsCursorManagedRuntimeTarget{}
+						for _, target := range targets {
+							result = append(result, enterprisehooks.WindowsCursorManagedRuntimeTarget{SID: target, DataDir: filepath.Join(home, ".defenseclaw")})
+						}
+						return result
 					}
 					enterpriseHookCursorPolicyTargetsReader = func() ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error) {
 						if connectorName != "cursor" {
 							return nil, false, nil
 						}
-						if cursorDamaged {
-							return nil, false, errors.New("Cursor adapter was deleted; owned state remains")
+						if damaged {
+							return nil, true, damageErr
 						}
-						return append([]enterprisehooks.WindowsCursorManagedRuntimeTarget(nil), cursorTargets...), active, nil
+						return cursorTargets(), active, nil
 					}
-					restores := 0
-					enterpriseHookCursorPolicyRestorer = func(string) (bool, error) {
-						if !cursorDamaged {
-							t.Fatal("Cursor restore called without authenticated adapter drift")
+					enterpriseHookCursorPolicyRestorer = func(binary string) (bool, error) {
+						if connectorName != "cursor" || !damaged || binary != hookBinary {
+							t.Fatal("Cursor rebuild called without a damaged guard")
 						}
 						restores++
-						cursorDamaged = false
-						active = true
-						restoreTargets()
+						damaged, active = false, true
 						return true, nil
 					}
 					enterpriseHookCursorPolicyEnsurer = func(opts connector.SetupOpts) error {
-						if connectorName != "cursor" || opts.ManagedTargetSID != "" {
+						if connectorName != "cursor" || opts.ManagedTargetSID != "" || damaged {
 							t.Fatalf("unexpected Cursor ensurer call: %+v", opts)
 						}
 						ensures++
 						active = true
-						restoreTargets()
 						return nil
 					}
-					enterpriseHookCursorPolicyTargetsPublisher = func(targets []enterprisehooks.WindowsCursorManagedRuntimeTarget) error {
+					enterpriseHookCursorPolicyTargetsPublisher = func(next []enterprisehooks.WindowsCursorManagedRuntimeTarget) error {
 						if connectorName == "cursor" {
-							cursorTargets = append([]enterprisehooks.WindowsCursorManagedRuntimeTarget(nil), targets...)
+							sids := []string{}
+							for _, target := range next {
+								sids = append(sids, target.SID)
+							}
+							publish(sids)
 						}
 						return nil
-					}
-					enterpriseHookCodexRequirementsLayoutResolver = func(string) (connector.WindowsCodexMachineRequirementsOptions, error) {
-						return connector.WindowsCodexMachineRequirementsOptions{
-							HookBinary:  `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
-							GatewayAddr: "127.0.0.1:32109", GatewayServiceName: "DefenseClawGateway",
-						}, nil
-					}
-					enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
-						return connector.WindowsCodexManagedRuntimeRegistry{}, nil
 					}
 					enterpriseHookClaudePolicyIdentityVerifier = func(string, string, string) error { return nil }
 					enterpriseHookCursorPolicyIdentityVerifier = func(string, string, string) error { return nil }
@@ -296,22 +404,21 @@ func TestWindowsMachineGuardRepairStateTable(t *testing.T) {
 						if err := syncEnterpriseHookManagedMachineEnrollments(manifest, "127.0.0.1:32109", exact); err != nil {
 							t.Fatalf("repair (exact=%t): %v", exact, err)
 						}
+						if exact && enrolled && !slices.Contains(targets, sid) {
+							t.Fatalf("exact publication left %v, want Alice enrolled", targets)
+						}
+						// Until exact publication an account the record lacks
+						// stays refused, and verify reports the difference.
+						if !exact && enrolled && len(minimum) == 0 {
+							continue
+						}
 						if err := verifyEnterpriseHookManagedEnrollments(manifest, "127.0.0.1:32109"); err != nil {
 							t.Fatalf("verify repaired guard (exact=%t): %v", exact, err)
 						}
 					}
-					wantRestores := 0
-					wantEnsures := 0
-					if !guardPresent {
-						if connectorName == "cursor" && enrolled {
-							wantRestores = 1
-						} else {
-							wantEnsures = 1
-						}
-					}
-					if !active || ensures != wantEnsures || restores != wantRestores {
-						t.Fatalf("repair action: active=%t ensures=%d restores=%d; want ensures=%d restores=%d",
-							active, ensures, restores, wantEnsures, wantRestores)
+					if !active || ensures != wantEnsures || restores != wantRestores || reconciles != wantReconciles || published != 2 {
+						t.Fatalf("repair action: active=%t ensures=%d restores=%d reconciles=%d publications=%d; want ensures=%d restores=%d reconciles=%d publications=2",
+							active, ensures, restores, reconciles, published, wantEnsures, wantRestores, wantReconciles)
 					}
 				})
 			}
@@ -422,6 +529,11 @@ func TestWindowsClaudeDeletedPolicyReconcileRetainsEnrolledTargets(t *testing.T)
 		policyPresent = true
 		return nil
 	}
+	// The drift restore finds no rendering of the record; the ensure's
+	// missing-policy recovery restores the guard instead.
+	previousClaudeRestorer := enterpriseHookClaudePolicyRestorer
+	t.Cleanup(func() { enterpriseHookClaudePolicyRestorer = previousClaudeRestorer })
+	enterpriseHookClaudePolicyRestorer = func() (bool, error) { return false, nil }
 	enterpriseHookClaudePolicyTargetsPublisher = func(targets []string) error {
 		published++
 		if len(targets) != 1 || targets[0] != aliceSID {

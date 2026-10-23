@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -3218,5 +3219,83 @@ func TestValidateWindowsEnterpriseHomeNamesAVanishedProfile(t *testing.T) {
 		!strings.Contains(err.Error(), "no longer exists: the account was deleted or its profile folder removed") ||
 		strings.Contains(err.Error(), "GetFileAttributesEx") {
 		t.Fatalf("vanished profile error = %v", err)
+	}
+}
+
+// DefenseClaw's Claude Code drop-in is the guard's only owned artifact; its
+// ownership record keeps the enrollment. Repair rebuilds a missing or changed
+// drop-in from that record, for an empty enrollment as for an enrolled one,
+// and leaves the record and its targets as they were.
+func TestWindowsClaudeMachineGuardArtifactRepairTable(t *testing.T) {
+	damages := []struct {
+		name  string
+		apply func(path string, original []byte) error
+	}{
+		{name: "drop-in missing", apply: func(path string, _ []byte) error { return os.Remove(path) }},
+		{name: "drop-in hook changed", apply: func(path string, original []byte) error {
+			return os.WriteFile(path, bytes.Replace(original, []byte("defenseclaw-hook.exe"), []byte("other-hook.exe"), 1), 0o600)
+		}},
+		{name: "drop-in replaced", apply: func(path string, _ []byte) error {
+			return os.WriteFile(path, []byte(`{"permissions":{"allow":["Bash"]}}`), 0o600)
+		}},
+		{name: "drop-in not JSON", apply: func(path string, _ []byte) error {
+			return os.WriteFile(path, []byte("{ not json"), 0o600)
+		}},
+		{name: "drop-in turns hooks off", apply: func(path string, _ []byte) error {
+			return os.WriteFile(path, []byte(`{"disableAllHooks":true}`), 0o600)
+		}},
+	}
+	for _, enrolled := range []bool{false, true} {
+		for _, damage := range damages {
+			t.Run(map[bool]string{false: "empty", true: "Alice"}[enrolled]+"/"+damage.name, func(t *testing.T) {
+				fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+				previousStandalone := windowsEnterpriseStandaloneProcess
+				windowsEnterpriseStandaloneProcess = func() bool { return true }
+				t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previousStandalone })
+				if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+					t.Fatal(err)
+				}
+				if !enrolled {
+					if err := PublishWindowsClaudeManagedPolicyTargets(nil); err != nil {
+						t.Fatal(err)
+					}
+				}
+				targetsBefore, active, err := ReadWindowsClaudeManagedPolicyTargets()
+				if err != nil || !active || (len(targetsBefore) == 1) != enrolled {
+					t.Fatalf("fixture guard: active=%t targets=%v err=%v", active, targetsBefore, err)
+				}
+				statePath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedStateFile)
+				original, err := os.ReadFile(fixture.policyPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				stateBefore, err := os.ReadFile(statePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := damage.apply(fixture.policyPath, original); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := ReadWindowsClaudeManagedPolicyTargets(); err == nil {
+					t.Fatal("the damaged drop-in appeared healthy")
+				}
+				if restored, err := RestoreWindowsClaudeManagedPolicyDrift(); err != nil || !restored {
+					t.Fatalf("rebuild: restored=%t err=%v", restored, err)
+				}
+				if policy, err := os.ReadFile(fixture.policyPath); err != nil || !bytes.Equal(policy, original) {
+					t.Fatalf("the rebuilt drop-in differs from the one DefenseClaw wrote: %v", err)
+				}
+				if state, err := os.ReadFile(statePath); err != nil || !bytes.Equal(state, stateBefore) {
+					t.Fatalf("the rebuild changed the ownership record: %v", err)
+				}
+				targets, active, err := ReadWindowsClaudeManagedPolicyTargets()
+				if err != nil || !active || !slices.Equal(targets, targetsBefore) {
+					t.Fatalf("rebuilt guard: active=%t targets=%v (want %v) err=%v", active, targets, targetsBefore, err)
+				}
+				if again, err := RestoreWindowsClaudeManagedPolicyDrift(); err != nil || again {
+					t.Fatalf("second repair of a healthy drop-in: restored=%t err=%v", again, err)
+				}
+			})
+		}
 	}
 }

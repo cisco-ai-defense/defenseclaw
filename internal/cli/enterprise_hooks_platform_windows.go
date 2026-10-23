@@ -42,6 +42,7 @@ var enterpriseHookCodexRequirementsRemover = connector.RemoveWindowsCodexMachine
 var enterpriseHookCodexRequirementsReconciler = connector.ReconcileWindowsCodexMachineRequirements
 var enterpriseHookCodexTargetsPublisher = connector.PublishWindowsCodexManagedRuntimeTargets
 var enterpriseHookClaudePolicyEnsurer = enterprisehooks.EnsureWindowsStandaloneClaudeManagedPolicy
+var enterpriseHookClaudePolicyRestorer = enterprisehooks.RestoreWindowsClaudeManagedPolicyDrift
 var enterpriseHookClaudePolicyDeactivator = enterprisehooks.DeactivateWindowsClaudeManagedPolicy
 var enterpriseHookCursorPolicyEnsurer = enterprisehooks.EnsureWindowsStandaloneCursorManagedPolicy
 var enterpriseHookCursorPolicyRestorer = enterprisehooks.RestoreWindowsCursorManagedAdapter
@@ -247,6 +248,18 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		return err
 	}
 	currentClaude, claudeActive, err := enterpriseHookClaudePolicyTargetsReader()
+	var claudeRestoreErr error
+	if err != nil && cfg.StandaloneEnterprise() && configured["claudecode"] {
+		// The ownership record can outlive a changed or deleted drop-in. Put
+		// the drop-in back from that record, then read its enrollment before
+		// pre-sync can publish a smaller target set. The ensure below still
+		// tries an unrestored guard and reports both failures.
+		restored, restoreErr := enterpriseHookClaudePolicyRestorer()
+		claudeRestoreErr = restoreErr
+		if restoreErr == nil && restored {
+			currentClaude, claudeActive, err = enterpriseHookClaudePolicyTargetsReader()
+		}
+	}
 	if err != nil {
 		if (!cfg.StandaloneEnterprise() || !configured["claudecode"]) &&
 			(publishExact || len(desiredClaude) == 0) {
@@ -266,7 +279,7 @@ func syncEnterpriseHookManagedMachineEnrollments(
 				APIAddr: apiAddr, HookExecutable: codexOpts.HookBinary,
 				HookContractID: enterpriseHookMachinePolicyContract(manifest),
 			}); err != nil {
-				return fmt.Errorf("ensure configured Claude machine policy: %w", err)
+				return fmt.Errorf("ensure configured Claude machine policy: %w", errors.Join(claudeRestoreErr, err))
 			}
 			currentClaude, claudeActive, err = enterpriseHookClaudePolicyTargetsReader()
 			if err != nil {
@@ -367,9 +380,9 @@ func syncEnterpriseHookManagedMachineEnrollments(
 
 	currentCursor, cursorActive, err := enterpriseHookCursorPolicyTargetsReader()
 	if err != nil && cfg.StandaloneEnterprise() && configured["cursor"] {
-		// The protected state can outlive a deleted adapter or hooks.json.
-		// Restore its registration from authenticated state, then read its
-		// enrollment before pre-sync can publish a smaller target set.
+		// The protected state can outlive a deleted or changed adapter or
+		// hooks.json. Rebuild both from that state, then read its enrollment
+		// before pre-sync can publish a smaller target set.
 		restored, restoreErr := enterpriseHookCursorPolicyRestorer(codexOpts.HookBinary)
 		if restoreErr != nil {
 			return fmt.Errorf("restore configured Cursor machine policy: %w", errors.Join(err, restoreErr))
