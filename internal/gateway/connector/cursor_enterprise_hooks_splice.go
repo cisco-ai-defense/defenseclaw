@@ -22,15 +22,39 @@ func SpliceWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 	if err != nil {
 		return nil, err
 	}
-	if len(bytes.TrimSpace(existing)) == 0 {
+	if trimmed := bytes.TrimSpace(existing); len(trimmed) == 0 || bytes.Equal(trimmed, []byte("{}")) {
+		// A new document: the merge's render.
 		return merged, nil
 	}
 	if WindowsCursorEnterpriseHooksSemanticallyEqual(existing, merged) {
 		return append([]byte(nil), existing...), nil
 	}
-	spliced, ok := spliceCursorEnterpriseHooks(existing, adapterPath, failMode)
+	spliced, ok := spliceCursorEnterpriseHooks(existing, adapterPath, failMode, false)
 	if !ok || !WindowsCursorEnterpriseHooksSemanticallyEqual(spliced, merged) {
 		return merged, nil
+	}
+	return spliced, nil
+}
+
+// SpliceRemoveWindowsCursorEnterpriseHooks returns the document
+// RemoveWindowsCursorEnterpriseHooks returns, but it edits only DefenseClaw's
+// own entries in existing: every other hook entry, key and value keeps its
+// exact bytes. Every DefenseClaw edit of the shared machine hooks.json that
+// takes the guard out (teardown, rollback, orphan reclaim) uses it. existing
+// is returned unchanged when it has no DefenseClaw entry. A document the
+// splice cannot edit in place gets the removal's render, which keeps the
+// same hooks.
+func SpliceRemoveWindowsCursorEnterpriseHooks(existing []byte, adapterPath string) ([]byte, error) {
+	removed, err := RemoveWindowsCursorEnterpriseHooks(existing, adapterPath)
+	if err != nil {
+		return nil, err
+	}
+	if bytes.Equal(removed, existing) {
+		return removed, nil
+	}
+	spliced, ok := spliceCursorEnterpriseHooks(existing, adapterPath, "", true)
+	if !ok || !WindowsCursorEnterpriseHooksSemanticallyEqual(spliced, removed) {
+		return removed, nil
 	}
 	return spliced, nil
 }
@@ -44,7 +68,9 @@ type cursorJSONMember struct {
 
 type cursorJSONSpan struct{ start, end int }
 
-func spliceCursorEnterpriseHooks(data []byte, adapterPath, failMode string) ([]byte, bool) {
+// spliceCursorEnterpriseHooks removes DefenseClaw's entries from data and,
+// unless remove is set, appends its entry to every managed event.
+func spliceCursorEnterpriseHooks(data []byte, adapterPath, failMode string, remove bool) ([]byte, bool) {
 	command, legacyCommand, err := windowsCursorEnterpriseHookCommands(adapterPath)
 	if err != nil {
 		return nil, false
@@ -54,9 +80,13 @@ func spliceCursorEnterpriseHooks(data []byte, adapterPath, failMode string) ([]b
 		legacyCommand: true,
 		previousWindowsCursorEnterpriseHookCommand(adapterPath): true,
 	}
-	entry, err := json.Marshal(windowsCursorEnterpriseHookEntry(command))
-	if err != nil {
-		return nil, false
+	entry := ""
+	if !remove {
+		encoded, err := json.Marshal(windowsCursorEnterpriseHookEntry(command))
+		if err != nil {
+			return nil, false
+		}
+		entry = string(encoded)
 	}
 	open := skipCursorJSONSpace(data, 0)
 	members, closing, ok := scanCursorJSONObject(data, open)
@@ -76,22 +106,22 @@ func spliceCursorEnterpriseHooks(data []byte, adapterPath, failMode string) ([]b
 		value := string(data[member.valueStart:member.end])
 		switch member.key {
 		case "version":
-			if value == "null" {
+			if value == "null" && !remove {
 				value = "1"
 			}
 		case "hooks":
-			value, ok = spliceCursorEnterpriseHookEvents(data, member, owned, string(entry))
+			value, ok = spliceCursorEnterpriseHookEvents(data, member, owned, entry)
 			if !ok {
 				return nil, false
 			}
 		}
 		items = append(items, prefix+value)
 	}
-	if !seen["version"] {
+	if !seen["version"] && !remove {
 		items = append([]string{`"version": 1`}, items...)
 	}
-	if !seen["hooks"] {
-		events, _ := spliceCursorEnterpriseHookEvents(nil, cursorJSONMember{}, owned, string(entry))
+	if !seen["hooks"] && !remove {
+		events, _ := spliceCursorEnterpriseHookEvents(nil, cursorJSONMember{}, owned, entry)
 		items = append(items, `"hooks": `+events)
 	}
 	var out bytes.Buffer
@@ -104,8 +134,10 @@ func spliceCursorEnterpriseHooks(data []byte, adapterPath, failMode string) ([]b
 // spliceCursorEnterpriseHookEvents renders the hooks object of member with
 // DefenseClaw's entries removed from every event and its entry appended to
 // each managed event. An event this release no longer registers that held
-// only DefenseClaw's entry is dropped, as the merge drops it. Every other
-// member and entry keeps its bytes. A nil data renders a new hooks object.
+// only DefenseClaw's entry is dropped, as the merge drops it. An empty entry
+// only removes: every event left without an entry is dropped, as the removal
+// drops it. Every other member and entry keeps its bytes. A nil data renders
+// a new hooks object.
 func spliceCursorEnterpriseHookEvents(
 	data []byte,
 	member cursorJSONMember,
@@ -133,7 +165,7 @@ func spliceCursorEnterpriseHookEvents(
 		spans = append(spans, cursorJSONSpan{event.start, event.end})
 		original := string(data[event.start:event.end])
 		prefix := string(data[event.start:event.valueStart])
-		managed := cursorHookEventManaged(event.key)
+		managed := entry != "" && cursorHookEventManaged(event.key)
 		switch data[event.valueStart] {
 		case 'n':
 			if managed {
@@ -182,7 +214,7 @@ func spliceCursorEnterpriseHookEvents(
 		items = append(items, prefix+renderCursorJSONContainer(data, event.valueStart, arrayClosing, elements, kept))
 	}
 	for _, event := range cursorEnterpriseHookEvents {
-		if !seen[event] {
+		if !seen[event] && entry != "" {
 			key, _ := json.Marshal(event)
 			items = append(items, string(key)+": ["+entry+"]")
 			changed = true

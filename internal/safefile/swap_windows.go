@@ -43,10 +43,12 @@ var swapBeforeReplace = func(string) {}
 var swapRenameReplace = renameReplace
 
 // SwapExpectation is the file a compare-and-swap may replace: absent, or
-// present with exactly Data.
+// present with exactly Data and, when Metadata is set, exactly that owner,
+// group, access list and attributes.
 type SwapExpectation struct {
-	Exists bool
-	Data   []byte
+	Exists   bool
+	Data     []byte
+	Metadata *FileMetadata
 }
 
 // SwapResult reports what a compare-and-swap changed.
@@ -56,6 +58,11 @@ type SwapResult struct {
 	Swapped bool
 	// Replaced reports that an existing file was replaced.
 	Replaced bool
+	// ReplacedMetadata is the metadata the replaced file had when it was
+	// replaced, read through the swap's handle after the rename; nil when it
+	// could not be read. Share modes do not stop an owner, access list or
+	// attribute change, so it can differ from what the comparison saw.
+	ReplacedMetadata *FileMetadata
 }
 
 // CompareAndSwapFile moves source to destination only while destination
@@ -84,6 +91,11 @@ type SwapResult struct {
 // replacement (ReplaceFileW included), and never during the comparison. A
 // reader that has the file open without sharing deletion makes the swap wait
 // for it, with the old file in place.
+//
+// expected.Metadata, when set, is compared too. Share modes do not stop an
+// owner, access list or attribute change, so SwapResult.ReplacedMetadata
+// reports what the replaced file had at the rename, for a caller to keep a
+// change that landed after the comparison (PublishSharedFile does).
 //
 // Any other file than expected returns ErrSwapRaced with destination
 // untouched and source left for the caller to remove. inspect, when set, runs
@@ -127,14 +139,18 @@ func CompareAndSwapFile(
 		}
 		return SwapResult{}, fmt.Errorf("safefile: publish %s: %w", destination, err)
 	}
-	return SwapResult{Swapped: true, Replaced: true}, nil
+	result := SwapResult{Swapped: true, Replaced: true}
+	if metadata, err := ReadFileMetadata(held); err == nil {
+		result.ReplacedMetadata = &metadata
+	}
+	return result, nil
 }
 
 // RemoveFileIfUnchanged deletes path only while it holds expected: it reads
 // and deletes the file through one handle no other process can write
 // through. A different or missing file returns ErrSwapRaced; a different file
 // is kept. inspect is as for CompareAndSwapFile.
-func RemoveFileIfUnchanged(path string, expected []byte, limit int, inspect func(*os.File) error) (SwapResult, error) {
+func RemoveFileIfUnchanged(path string, expected SwapExpectation, limit int, inspect func(*os.File) error) (SwapResult, error) {
 	current, err := lockFileForSwap(path, windows.GENERIC_READ|windows.DELETE|windows.READ_CONTROL)
 	if err != nil {
 		return SwapResult{}, err
@@ -143,7 +159,8 @@ func RemoveFileIfUnchanged(path string, expected []byte, limit int, inspect func
 		return SwapResult{}, swapRaced(path)
 	}
 	defer current.Close()
-	if err := matchLockedFile(current, SwapExpectation{Exists: true, Data: expected}, limit, inspect); err != nil {
+	expected.Exists = true
+	if err := matchLockedFile(current, expected, limit, inspect); err != nil {
 		return SwapResult{}, err
 	}
 	if err := deleteLockedFile(current); err != nil {
@@ -182,6 +199,15 @@ func matchLockedFile(file *os.File, expected SwapExpectation, limit int, inspect
 	}
 	if len(data) > limit || !bytes.Equal(data, expected.Data) {
 		return swapRaced(file.Name())
+	}
+	if expected.Metadata != nil {
+		metadata, err := ReadFileMetadata(file)
+		if err != nil {
+			return err
+		}
+		if metadata != *expected.Metadata {
+			return swapRaced(file.Name())
+		}
 	}
 	return nil
 }

@@ -159,9 +159,11 @@ func TestWindowsCursorMachineGuardRebuildUndoNeverReplacesANewerSave(t *testing.
 				if strings.EqualFold(request.path, paths.Hooks) {
 					switch {
 					case !wroteRebuild && !bytes.Equal(request.data, preimage):
-						// B: saved over the rebuilt file before it is validated.
+						// B: saved over the rebuilt file before it is
+						// validated, without the registration, so the
+						// rebuild rolls back.
 						wroteRebuild = true
-						addWindowsCursorAdminHookForTest(t, paths.Hooks, "admin-save-b")
+						saveWindowsCursorHooksWithoutGuardForTest(t, paths, "admin-save-b")
 					case wroteRebuild && !wrotePutBack && bytes.Equal(request.data, preimage):
 						// C: saved right after the undo's swap of the preimage.
 						wrotePutBack = true
