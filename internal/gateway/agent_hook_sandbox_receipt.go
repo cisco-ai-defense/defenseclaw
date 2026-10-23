@@ -94,7 +94,7 @@ func (a *APIServer) recordSandboxHookReceiptState(ctx context.Context, p *pendin
 	if err != nil {
 		return err
 	}
-	stored, err := a.store.RecordHookDeliveryVerdict(ctx, p.ID, encoded)
+	stored, err := a.store.RecordHookDeliveryVerdict(ctx, p.ID, encoded, pendingHookJournalLimits)
 	if err != nil {
 		return err
 	}
@@ -151,7 +151,7 @@ func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Requ
 			// first acknowledgement's response. No audit or metric is
 			// emitted a second time.
 			if sandboxRelayDecisionSinkFrom(r.Context()) != nil {
-				req := p.Request.request(p.ID, p.BodyBytes)
+				req := p.request()
 				req.pendingSandboxCallRef = p.SandboxReceipt.CallRef
 				a.observeSandboxHookDecision(r.Context(), req, p.SandboxReceipt.response(p.Proposed))
 			}
@@ -165,9 +165,8 @@ func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Requ
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "sandbox hook receipt expired or closed"})
 		return
 	}
-	req := p.Request.request(p.ID, p.BodyBytes)
+	req := p.request()
 	req.sandboxReceiptAcknowledgment = true
-	req.pendingEnvelopeIdentity = &p.SandboxReceipt.EnvelopeIdentity
 	req.pendingSandboxCallRef = p.SandboxReceipt.CallRef
 	resp := p.SandboxReceipt.response(p.Proposed)
 	ctx, cancel := agentHookPersistenceContext(r.Context())

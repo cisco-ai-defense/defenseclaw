@@ -59,6 +59,9 @@ func (a *APIServer) emitHookDecisionObservabilityV8(
 	if !ok {
 		return hookDecisionLogUnbuildable
 	}
+	if req.pendingProvenance != nil {
+		meta = req.pendingProvenance.decisionMeta(meta)
+	}
 	result := a.emitHookDecisionLogV8(ctx, req, resp, env, panicked, meta, connectorName)
 	a.recordHookDecisionMetricsV8(ctx, req, resp, env, panicked, meta, connectorName)
 	return result
@@ -154,10 +157,13 @@ func (a *APIServer) emitHookDecisionLogV8(
 				ConfigGeneration: int64(snapshot.Generation()), ConfigDigest: snapshot.Digest(),
 			},
 		}
-		profileTelemetry := guardrailProfileTelemetryFor(ctx)
+		profileTelemetry, policyDigest, policyGeneration := guardrailProfileTelemetryFor(ctx), policyDigestV8(ctx), policyGenerationV8(ctx)
+		if req.pendingProvenance != nil {
+			profileTelemetry, policyDigest, policyGeneration = req.pendingProvenance.decisionPolicy()
+		}
 		identityInput := observability.LogCompatHookDecisionInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
-			DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
+			DefenseClawPolicyEffectiveDigest: policyDigest, DefenseClawPolicyGeneration: policyGeneration,
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			DefenseClawUserEnrollment: enterpriseEnrollmentV8(ctx),
 			Envelope:                  envelope, Severity: observability.Present(severity.Severity),

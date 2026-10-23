@@ -32,14 +32,16 @@ func buildAuditDurablePragmas() string {
 	return strings.Replace(auditPragmas, normal, full, 1) + "&_pragma=fullfsync(1)"
 }
 
-// syncCommittedWrites makes every audit write committed before the call
+// SyncCommittedWrites makes every audit write committed before the call
 // survive a power loss: it commits one readiness write on the durable
 // connection (auditDurablePragmas), then flushes the database folder so a
 // WAL file created since the store opened keeps its entry. A producer that
 // marks an occurrence reported once it is stored (a trust anchor or
 // credential change event) calls it first, so the marker never outlives
-// the row. An in-memory store has nothing to flush.
-func (s *Store) syncCommittedWrites(ctx context.Context) error {
+// the row, and so does the runtime before it sends a record held for its
+// local write (observability.RemoteExportAfterLocalWrite). An in-memory
+// store has nothing to flush.
+func (s *Store) SyncCommittedWrites(ctx context.Context) error {
 	if s == nil || s.db == nil || s.dbPathGuard == nil || s.dbPathGuard.inMemory {
 		return nil
 	}

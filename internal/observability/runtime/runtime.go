@@ -516,6 +516,9 @@ func (runtime *Runtime) emitWithLeaseControls(
 	if localOnly || suppressAll {
 		return outcome, nil
 	}
+	if export == observability.RemoteExportAfterLocalWrite && (!outcome.LocalPersisted() || !local.flushed(ctx)) {
+		return outcome, nil
+	}
 	runtime.dispatchOptional(ctx, lease, graph, outcome)
 	return outcome, nil
 }
@@ -625,9 +628,13 @@ func (runtime *Runtime) EmitAtomicBatch(
 		batch[index] = pipeline.AtomicBatchItem{Metadata: items[index].Metadata, Builder: builders[index]}
 	}
 	outcomes, processErr := local.ProcessAtomicBatch(ctx, batch)
+	flushed := sync.OnceValue(func() bool { return local.flushed(ctx) })
 	for index := range outcomes {
 		export := observability.RemoteExportFrom(items[index].Context)
 		if export == observability.RemoteExportNone {
+			continue
+		}
+		if export == observability.RemoteExportAfterLocalWrite && (!outcomes[index].LocalPersisted() || !flushed()) {
 			continue
 		}
 		if outcomes[index].Admission() == router.AdmissionDrop {

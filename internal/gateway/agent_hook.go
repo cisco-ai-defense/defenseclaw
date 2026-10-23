@@ -85,8 +85,8 @@ type agentHookRequest struct {
 	pendingOccurrenceID          string
 	pendingBodyBytes             int64
 	pendingRecovery              bool
+	pendingProvenance            *pendingHookProvenance
 	sandboxReceiptAcknowledgment bool
-	pendingEnvelopeIdentity      *pendingHookEnvelopeIdentity
 	pendingSandboxCallRef        string
 	ConnectorName                string
 	AgentID                      string
@@ -946,8 +946,10 @@ func (a *APIServer) finalizeAgentHook(
 	}
 	env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
 	safeSection("identity", func() {
-		if req.pendingEnvelopeIdentity != nil {
-			req.pendingEnvelopeIdentity.stamp(&env, resp)
+		if req.pendingProvenance != nil {
+			// A journaled call was stamped before its answer was offered.
+			req.pendingProvenance.stamp(&env)
+			env.Enforced = resp.Action == "block"
 		} else {
 			a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
 		}
@@ -1217,17 +1219,6 @@ func (a *APIServer) hookDecisionMeta(
 		if snapshot.Sequence > 0 {
 			meta.Sequence = snapshot.Sequence
 		}
-	}
-	if saved := req.pendingEnvelopeIdentity; saved != nil {
-		// A buffered sandbox receipt arrives on a later HTTP request. Its
-		// decision belongs to the original hook transition, even if the
-		// agent has since advanced to another phase or policy generation.
-		meta.LifecycleID = saved.AgentLifecycleID
-		meta.ExecutionID = saved.AgentExecutionID
-		meta.Phase = saved.AgentPhase
-		meta.PreviousPhase = saved.AgentPreviousPhase
-		meta.OperationID = saved.AgentOperationID
-		meta.Sequence = saved.AgentSequence
 	}
 
 	// A request that did not create an LLM/lifecycle anchor (for example a

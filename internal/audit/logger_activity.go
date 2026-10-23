@@ -221,5 +221,5 @@ func (l *Logger) occurrenceDurable(ctx context.Context, occurrenceID string, loc
 	if localErr != nil {
 		return localErr
 	}
-	return l.store.syncCommittedWrites(ctx)
+	return l.store.SyncCommittedWrites(ctx)
 }
