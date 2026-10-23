@@ -149,24 +149,56 @@ function repoText(name: string): string {
   return readFileSync(join(repo, name), 'utf8').split(/\s+/).join(' ');
 }
 
+function docsText(): string {
+  const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return walk(path);
+    return /\.(?:md|mdx)$/.test(entry.name) ? [readFileSync(path, 'utf8')] : [];
+  });
+  return [...walk(join(repo, 'docs')), ...walk(join(site, 'content/docs')), repoText('CHANGELOG.md')]
+    .join(' ').split(/\s+/).join(' ');
+}
+
 describe('1.0.4 managed outage and upgrade claims', () => {
-  it('states the protected process-and-session record boundary everywhere operators see outage guidance', () => {
+  it('keeps the managed guarded outage limit across operator and threat-model pages', () => {
     const outagePages = [
+      'appendix/coverage-by-layer.mdx',
       'reference/configuration/fail-modes.mdx',
+      'reference/connectors/devin.mdx',
+      'enterprise/configure/foreign-hook-guard.mdx',
       'enterprise/configure/reference.mdx',
       'enterprise/operate/reference.mdx',
       'enterprise/operate/lifecycle.mdx',
+      'enterprise/plan/threat-model.mdx',
       'troubleshooting/enterprise/index.mdx',
     ];
     for (const name of outagePages) {
       const guidance = page(name);
-      assert.match(guidance, /foreign_hooks: remove.*(?:process.*session|session.*process).*15 minutes/i, name);
-      assert.doesNotMatch(guidance, /(?:guarded connectors|foreign-hook guard).*block outages too|outage blocks those calls too|Every call checked while the gateway is down is blocked/i, name);
+      assert.match(guidance, /foreign_hooks: remove/i, name);
+      assert.match(guidance, /(?:guarded|guard|session).*(?:outage.*block|block.*outage)/i, name);
     }
+    assert.match(repoText('docs/ENTERPRISE-THREAT-MODEL.md'), /R31.*foreign_hooks: remove.*blocks outages/i);
     const changelog = repoText('CHANGELOG.md');
-    assert.doesNotMatch(changelog, /guarded connectors .*still block every tool call during a gateway outage/i);
-    assert.doesNotMatch(changelog, /Every call checked while the gateway is down is blocked/i);
-    assert.match(changelog, /During an outage under `open`, a guarded call runs only when the records of its agent process and its session/);
+    assert.match(changelog, /Known limits.*foreign_hooks: remove.*guarded connectors.*block tool calls during a gateway outage.*hook_fail_mode: open/i);
+    assert.match(page('appendix/coverage-by-layer.mdx'), /On a per-user install or under Secure Client.*Connector limits and failure reporting vary.*Managed standalone behavior is in the next row/i);
+    const all = docsText();
+    assert.doesNotMatch(all, /(?:fresh|trusted|protected) (?:process and session |session |hook )?records?.{0,100}(?:allow|run).{0,70}(?:outage|gateway.*down)/i);
+    assert.doesNotMatch(all, /(?:outage|gateway.*down).{0,100}(?:fresh|trusted|protected) (?:process and session |session |hook )?records?.{0,100}(?:allow|run)/i);
+    assert.doesNotMatch(all, /(?:lifts?|lifted) the 1\.0\.3 (?:outage )?limit/i);
+    // An unconditional statement about every connector would hide the
+    // administrator's outage-only open for connectors without this guard.
+    assert.doesNotMatch(all, /(?:gateway )?outages? always block (?:all|every) (?:managed )?(?:hook|connector|call)/i);
+  });
+
+  it('distinguishes the Windows Amp local guard record from gateway-backed sessions', () => {
+    const guard = page('enterprise/configure/foreign-hook-guard.mdx');
+    assert.match(guard, /Windows Amp keeps its guard record locally.*managed plugin blocks gateway outages in every fail mode.*report.*allow/i);
+    assert.match(page('enterprise/configure/reference.mdx'), /Amp \(`amp`\).*gateway-backed foreign-hook guard.*local foreign-hook session record.*plugin itself blocks gateway outages/i);
+    assert.match(repoText('CHANGELOG.md'), /Windows Amp keeps its guard record locally.*managed plugin blocks outages independently/i);
+    const risk = repoText('docs/ENTERPRISE-THREAT-MODEL.md').split('| R13 |')[1]?.split('| R14 |')[0] ?? '';
+    assert.match(risk, /Windows Amp keeps its guard record locally.*managed plugin blocks gateway outages/i);
+    assert.doesNotMatch(docsText(), /guard checks each covered connector's session with the gateway/i);
+    assert.doesNotMatch(guard, /Calls of other unguarded connectors follow their effective fail mode/i);
   });
 
   it('describes bounded Windows WAL catch-up and the remaining hook delay', () => {
@@ -178,11 +210,11 @@ describe('1.0.4 managed outage and upgrade claims', () => {
     assert.doesNotMatch(enterprise, /audit\.db-wal.*20 GB|fix needs a change to how the audit store indexes hook records and is deferred/i);
   });
 
-  it('keeps one supervisor upgrade entry with automatic stop and failed-stop recovery', () => {
+  it('keeps one supervisor upgrade entry with manual stop and guarded restart', () => {
     const changelog = repoText('CHANGELOG.md');
     assert.equal((changelog.match(/\*\*Sandboxes run only on OpenShell 0\.1\.5 or later\.\*\*/g) ?? []).length, 1);
-    assert.match(changelog, /DefenseClaw stops it as soon as it sees it.*A stop that fails is a second finding/);
-    assert.doesNotMatch(changelog, /A sandbox that keeps running through the upgrade keeps the old supervisor: the feed/);
+    assert.match(changelog, /DefenseClaw never stops such a sandbox on its own.*Your own `sandbox stop` ends it/);
+    assert.doesNotMatch(changelog, /DefenseClaw stops it as soon as it sees it|A stop that fails is a second finding/);
   });
 });
 
@@ -243,6 +275,42 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
 });
 
 describe('1.0.4 operator routes and limits', () => {
+  it('derives the MCP-description YARA signature count from the shipped rules', () => {
+    const rules = readFileSync(join(repo, 'policies/yara/mcp-tools/description_injection.yara'), 'utf8');
+    const count = (rules.match(/^rule\s+\w+/gm) ?? []).length;
+    assert.ok(count > 0, 'no bundled MCP-description YARA rules found');
+    const words = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+      'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen'];
+    const expected = words[count] ?? String(count);
+    assert.match(page('reference/policy/detection.mdx'), new RegExp(`\\b${expected} MCP-description YARA signatures\\b`));
+  });
+
+  it('states that unknown connectors make profile explain fail with valid names', () => {
+    const thresholds = page('reference/policy/thresholds.mdx');
+    assert.match(thresholds, /profile explain.*unknown connector.*(?:HTTP 400|400 Bad Request).*valid connectors/i);
+    assert.doesNotMatch(thresholds, /unknown connector.*(?:uses|falls back to|resolves to) (?:the )?(?:default|global) (?:profile|threshold)/i);
+  });
+
+  it('limits proxy replacement to Linux and macOS', () => {
+    const agents = page('how-to/agents/add-or-remove-an-agent.mdx');
+    assert.match(agents, /setup openclaw --replace.*Linux and macOS.*native Windows.*(?:unsupported|no guardrail proxy)/i);
+  });
+
+  it('identifies the TUI footer generation as the persisted config counter', () => {
+    const tui = page('reference/commands/tui.mdx');
+    assert.match(tui, /`gen`.*config\.generation\.json.*(?:survives|persists).*gateway restart/i);
+    assert.doesNotMatch(tui, /`gen` is the gateway's policy generation|restarts at 1 when the gateway starts/i);
+  });
+
+  it('does not promise enrollment for an extension without an engine version', () => {
+    const enrollment = page('enterprise/configure/enrollment.mdx');
+    assert.match(enrollment, /extension.*engine version.*(?:no engine version|without an engine version).*surface_unverified.*not enrolled/i);
+    assert.match(enrollment, /Codex.*Windows.*reported.*not enrolled/i);
+    const risk = repoText('docs/ENTERPRISE-THREAT-MODEL.md').split('| R25 |')[1]?.split('| R26 |')[0] ?? '';
+    assert.match(risk, /engine version.*surface_unverified.*not enrolled/i);
+    assert.doesNotMatch(risk, /enrollment finds an agent only through its CLI install/i);
+  });
+
   it('keeps managed readers off per-user HITL commands', () => {
     const ask = page('how-to/guardrail/ask-before-risky-calls.mdx');
     assert.match(ask, /managed computer.*guardrail\.connectors\.<id>\.hilt/i);

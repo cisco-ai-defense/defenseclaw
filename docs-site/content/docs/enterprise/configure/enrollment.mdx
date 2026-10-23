@@ -77,7 +77,7 @@ A per-user agent in this state runs without DefenseClaw hooks. Lowest supported 
 
 ## Desktop apps and editor extensions
 
-Some agents also ship as a desktop app or editor extension that reads the same hook settings. A user who has only the app or extension is enrolled at the engine version it runs. `unverified_versions: report` (default) enrolls it; `refuse` does not enroll it and the gateway refuses its hook calls. See [Enrollment detail](/docs/enterprise/configure/reference#desktop-apps-and-editor-extensions).
+Some agents also ship as a desktop app or editor extension that reads the same hook settings. A user with only that surface is enrolled under `unverified_versions: report` (the default) only when discovery finds an admitted engine version and a hook contract for it. An extension with no engine version is reported as `surface_unverified`, not enrolled. For example, a Codex extension-only user on Windows is reported, not enrolled: Windows discovery has no static source for its bundled engine version. Under `unverified_versions: refuse`, an unverified surface-only user is not enrolled and the gateway refuses its hook calls. See [Enrollment detail](/docs/enterprise/configure/reference#desktop-apps-and-editor-extensions).
 
 ## Linux and macOS
 

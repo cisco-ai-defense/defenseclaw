@@ -168,6 +168,11 @@ The source is `config:guardrail.<key>` for the global scope, `config:guardrail.c
 defenseclaw guardrail profile explain --connector codex
 ```
 
+An unknown connector does not fall back to the global or default thresholds.
+The gateway returns HTTP 400 with `unknown connector` and the valid connectors;
+`profile explain` exits with an error. Use a built-in connector name or a
+configured custom connector name.
+
 ```text title="Terminal output (abridged)"
 Guardrail profile resolution
 profile: contractors

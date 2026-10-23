@@ -15,12 +15,12 @@ Most agents run every hook they find, and several let any hook change a tool cal
 
 | Connector | Covered | Why |
 | --- | --- | --- |
-| Cursor, Copilot, Devin, OpenCode, Amp | Always, unless `foreign_hooks: allow` | These agents have no vendor lock. |
+| Cursor, Copilot, Devin, OpenCode, Amp | Every OS, unless `foreign_hooks: allow` | These agents have no vendor lock. Windows Amp keeps its guard's session record locally. |
 | Hermes | On Linux and macOS, unless `foreign_hooks: allow` | Hermes has no vendor lock and no way to order hooks. The Windows Hermes registration does not run the guard. |
 | Codex, Claude Code | Only with `managed_hooks_only: preserve` | By default the vendor lock already stops user and project hooks. |
 | Antigravity | Not covered | No vendor lock and no guard. Hooks a user or project adds run next to DefenseClaw's. |
 
-This holds on every OS. `preserve` also removes the vendor lock, except Codex's on Windows, which DefenseClaw always sets; see [Machine policy](/docs/enterprise/configure/machine-policy#locks-on-linux-and-macos) and [Windows differences](/docs/enterprise/configure/machine-policy#windows-differences).
+`preserve` also removes the vendor lock, except Codex's on Windows, which DefenseClaw always sets; see [Machine policy](/docs/enterprise/configure/machine-policy#locks-on-linux-and-macos) and [Windows differences](/docs/enterprise/configure/machine-policy#windows-differences).
 
 ## What it does
 
@@ -46,19 +46,11 @@ removing the hook, restart the agent.
 
 The last sentence appears only when the hook was present at session start. With `foreign_hooks: report`, the agent runs; `enterprise policy show` lists the finding as `reported` with its file and digest. For Cursor, Copilot and Devin, `defenseclaw-hook` prints a warning that names the file and digest to stderr. Codex and Claude Code use that native-hook warning when `managed_hooks_only: preserve` makes the guard active. On Linux and macOS, Hermes prints a generic stderr warning without the file and digest; use `enterprise policy show` for those details. For OpenCode and Amp, use `enterprise policy show` to see the file and digest. An approval you add while a session is blocked applies to the next agent session.
 
-## Session records and gateway outages
+## Gateway outages
 
-The gateway keeps each agent session's hook record. After every check it also writes its answer (a block, or the allow that clears it) for the agent process into a protected record that only that account can read and only the gateway service can change:
+The [connector table](#which-connectors-it-covers) names where this guard runs on each OS. [Fail modes](/docs/reference/configuration/fail-modes#effective-behavior) describes the outage result when a connector has no guard.
 
-| OS | Folder |
-| --- | --- |
-| Linux | `/run/defenseclaw-hook/sessions/<account digest>/` |
-| macOS | `/opt/cisco/defenseclaw/run/sessions/<account digest>/` |
-| Windows | `%ProgramData%\Cisco\DefenseClaw-HookSessions\<account digest>\` |
-
-`ensure`, `repair` and Setup create the folder; uninstall removes it. Each account's folder has one access entry for that account (a POSIX ACL entry on Linux, a macOS ACL entry, a protected DACL on Windows).
-
-While the gateway cannot answer (it is stopped or restarting, or it ended without removing its hook socket), a guarded tool call runs only when the fail mode is `open` and the records of its agent process and its session show the gateway did not block them. Otherwise the call is blocked: under `closed` or an unset fail mode, for a session the gateway blocked (it gets the gateway's own block message), for an agent that started while the gateway was down or an agent process DefenseClaw cannot name, and for a record that is missing, older than 15 minutes, dated more than a minute in the future (the clock was ahead when it was written), written under an earlier key, or that the account could change. Other blocked calls get the outage message:
+With `foreign_hooks: remove` (the default), the guard checks the session with the gateway for every covered connector except Windows Amp. While the gateway cannot answer (it is stopped or restarting), those guarded tool calls are blocked whatever the fail mode, `open` included:
 
 ```text
 enterprise_foreign_hook_blocked: DefenseClaw could not check this agent
@@ -66,20 +58,7 @@ session's hook record with its gateway, so the call is blocked. Retry when
 the DefenseClaw gateway is running; if the block continues, restart the agent.
 ```
 
-The block applies to tool calls and, where the agent lets a hook block them, to prompts and session starts. Stop and session-end events get the agent's normal allow, so a blocked agent can still end its turn and exit.
-
-How the records stay trustworthy:
-
-- **One key per account.** Every allow record carries a MAC made with the account's key: the random name of one file next to the record folder that only root or SYSTEM creates. No user can create, rename or remove it. A record whose MAC does not match the account's current key proves nothing, wherever it came from, so a record an account saved or moved back later never counts again.
-- **Every revocation ends the key first.** The gateway removes the account's key before it records or sends any block. The hook guardian renames the key to a new random name (one step) before it records a hook removal. If the operating system refuses to remove or rename a key, it is marked revoked instead: an empty file next to it that only root, SYSTEM or the gateway service can add, and the hook refuses a marked key. `ensure`, `repair`, an upgrade, Setup and uninstall remove every account's key once they hold the lifecycle lock and before they change anything; when a key can be neither removed nor marked revoked, `ensure`, `repair`, an upgrade and Setup stop with `hook_session_records_unavailable` and change nothing. A lifecycle run that succeeded gives every account a new key as its last step, and the hook guardian makes no key while a lifecycle run is in progress; at every other pass it makes a key for each account that has none or a revoked one. Until then that account's guarded calls block during an outage. Other accounts keep their keys.
-- **A hook removal is recorded before the file changes.** For each hook file it removes, the guardian takes the account's removal lock, renames the account's key, records the removal, removes the hook, and records it again. If the key cannot be renamed or removed, or the removal ledger cannot be written (a full or unreadable ledger, or a full disk), the guardian leaves the hook where it is, so the scan keeps blocking, and tries again at its next pass.
-- **Online answers wait for a removal, per account.** While the guardian holds an account's removal lock, the gateway does not answer allow for that account: the call is denied with "DefenseClaw is removing an unapproved hook from your account", and the next call is decided from the recorded removal. An answer already in progress finishes within one second or is cut, and a cut answer blocks. Other accounts are not delayed.
-- On Windows the hook refuses a record when anyone but SYSTEM, Administrators or the gateway service can change the record, its folder, `DefenseClaw-HookSessions` or `C:\ProgramData\Cisco`. If other software loosens the permissions on `C:\ProgramData\Cisco`, guarded calls block during an outage. Windows `status` and `verify` use the same rule and warn `hook_session_records_untrusted`.
-- The gateway writes the records only in the folder its data directory names (the standard layout above). A gateway configured with another data directory writes none, so its guarded calls block during an outage.
-
-- **A revocation that might not take blocks.** A block ends an account's earlier allows through any one of three changes: removing the key, adding its revocation mark (next to the key on Linux and macOS, in the record folder on Windows), or publishing the block record in the account's folder. During an outage the hook allows a call only while the folder of the revocation marks still lets the gateway add a file. It blocks every guarded call when that folder belongs to another account, has lost the gateway's write right (its mode, or a macOS or Windows deny entry), is immutable or append-only, or is on a read-only volume. When the operating system refuses all three changes, the revocation is owed: the gateway saves it in its data directory, tries it again every second, at every call of that account, when it stops and after a restart, and until it takes, no allow of that account carries a key.
-
-Known limit: the hook cannot see a refusal that leaves the folder looking writable, such as an I/O error or a security module (SELinux, AppArmor) policy that denies only the gateway. If such a refusal lasts until the gateway stops, an allow the account had before the block can pass that outage, for at most 15 minutes, its age limit. No standard user can cause either.
+This is a known limit in 1.0.4: the guard keeps those session records in the gateway, so it cannot prove during an outage that a session is clean. Windows Amp keeps its guard record locally, but its managed plugin blocks gateway outages in every fail mode, even when `foreign_hooks` is `report` or `allow`. Calls without this guard follow their connector's hook or plugin route; an `open` setting alone does not guarantee that a call runs. Stop and session-end events get the agent's normal allow, so a blocked agent can still end its turn and exit.
 
 ## Approve a hook
 

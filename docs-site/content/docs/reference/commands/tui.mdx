@@ -49,7 +49,7 @@ to filter.
 
 | Key | Panel | What it shows |
 | --- | --- | --- |
-| `1` | Overview | Gateway status, the active connector roster (every wired connector on a multi-connector install), the active policy and its posture, the [applied policy generation and digest](#policy-generation-and-digest), at-a-glance health |
+| `1` | Overview | Gateway status, the active connector roster (every wired connector on a multi-connector install), the active policy and its posture, the [applied config generation and policy digest](#config-generation-and-policy-digest), at-a-glance health |
 | `2` | Alerts | Recent guardrail and hook alerts. A rule that matched a call it could not decide (a detection-only finding) is not an alert: the panel says how many the last 24 hours had, as `defenseclaw alerts` does, and `defenseclaw audit export --since 24h` lists them. The details of an alert raised in an OpenShell sandbox name it in a **Sandbox** fact |
 | `3` | Skills | Scanned skill inventory, with [block and allow actions](#block-and-allow-from-the-panels) |
 | `4` | MCPs | Scanned MCP servers, with block and allow actions |
@@ -137,7 +137,7 @@ without showing any values. See the
 [Doctor cache reference](/docs/reference/configuration#doctor-cache) for the
 file format.
 
-### Policy generation and digest
+### Config generation and policy digest
 
 The status line at the bottom of every panel ends with the policy the running
 gateway applies. With the guardrail off it reads:
@@ -148,16 +148,20 @@ gateway applies. With the guardrail off it reads:
 
 With the guardrail on, the first part is the active policy and mode, for
 example `policy strict · action · gen 10 · 8b19ede82344`. `gen` is the
-gateway's policy generation: it goes up each time the gateway applies a changed
-`config.yaml`, and it restarts at 1 when the gateway starts. The hex is the
-first 12 characters of the effective policy digest, a SHA-256 over the
-configuration and the policy assets it names. It is the same pair that
-`defenseclaw status` prints on its Policy line and that `defenseclaw-gateway
-policy digest` computes from disk, so you can compare the three.
+applied config writer counter from `config.generation.json`, reported as
+`policy.config_generation` by the gateway. It survives a gateway restart;
+when the counter is unknown or zero, the footer shows only the digest. The hex
+is the first 12 characters of the effective policy digest, a SHA-256 over the
+configuration and the policy assets it names. Compare the pair with
+`policy.config_generation` and `policy.effective_digest` in
+`defenseclaw status --json`. The Policy line in plain `defenseclaw status`
+prints a different, gateway-local policy generation, which restarts at 1;
+`defenseclaw-gateway policy digest` computes the digest from disk.
 
-A save from the TUI, a CLI command or a hand edit of `config.yaml` moves the
-number once the gateway has applied it. When the gateway rejects a change it
-keeps enforcing the previous generation, so the pair stays where it was; run
+A save through the TUI or CLI config writer moves the counter once the gateway
+has applied it. A hand edit can change the policy digest without moving that
+writer counter. When the gateway rejects a change it keeps enforcing the
+previous policy, so the footer stays where it was; run
 `defenseclaw doctor`, whose Policy row names the reason. The status line is cut
 from the right on a narrow terminal. See
 [Policy generation and digest](/docs/reference/commands/cli#policy-generation-and-digest)
@@ -263,7 +267,7 @@ block-at`); for any other policy it saves the preset until you activate it
 activates it, which copies its admission actions, levels and Cisco trust level
 into `config.yaml`. Overview's **Policy posture** reads, for example, `strict ·
 block MEDIUM+ · alert LOW+`, and the status line shows `policy <name> ·
-<mode>` followed by the [generation and digest](#policy-generation-and-digest).
+<mode>` followed by the [generation and digest](#config-generation-and-policy-digest).
 
 ## Setup panel
 
