@@ -961,26 +961,30 @@ def _configured_probe_names(data_dir: str | os.PathLike[str] | None) -> frozense
         guardrail = document.get("guardrail", {})
         connectors = guardrail.get("connectors", {})
         names = {
-            str(name).lower() for name, entry in connectors.items()
-            if isinstance(entry, dict) and entry.get("enabled") is not False
+            _normalize_connector(str(name)) for name, entry in connectors.items()
+            if entry is None or isinstance(entry, dict) and entry.get("enabled") is not False
         } if isinstance(connectors, dict) else set()
         primary = guardrail.get("connector")
         if guardrail.get("enabled") and isinstance(primary, str) and primary:
-            names.add(primary.lower())
+            primary_name = _normalize_connector(primary)
+            if not isinstance(connectors, dict) or not connectors or primary_name in names:
+                names.add(primary_name)
         return frozenset(names)
     except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
         return frozenset()
 
 
 def restrict_probes(connectors: list[str]) -> Any:
-    """Run only the CLIs of ``connectors`` in this command's discovery scans.
+    """Restrict version probes to selected and enrolled connectors.
 
     ``init --connector copilot`` ran every installed agent CLI as a version
     probe, and those CLIs wrote their own config and cache folders
     (~/.codex, ~/.cursor, ~/.config/opencode, ...) into the home of a user
-    who never started them (GAP-0901). The other agents are still found by
-    binary and config path; their version is the last one observed for the
-    same unchanged binary, else unknown. Returns the token for
+    who never started them (GAP-0901). A scan that publishes the shared cache
+    also probes enabled enrolled peers so a changed peer has current version
+    evidence. Other agents are still found by binary and config path; their
+    version is the last one observed for the same unchanged binary, else
+    unknown. Returns the token for
     :func:`end_probe_restriction`.
     """
     return _PROBE_ONLY.set(frozenset(connectors))
@@ -991,7 +995,7 @@ def end_probe_restriction(token: Any) -> None:
 
 
 def discover_with_probes(connectors: list[str], **kwargs: Any) -> AgentDiscovery:
-    """Probe only connectors explicitly selected by the current setup flow."""
+    """Probe selected connectors and, when publishing, their enrolled peers."""
     token = restrict_probes(connectors)
     try:
         return discover_agents(**kwargs)
@@ -1178,6 +1182,11 @@ def discover_agents(
     probe_only = _PROBE_ONLY.get()
     if probe_only is None:
         probe_only = _configured_probe_names(data_dir)
+    elif persist_cache:
+        # This scan replaces the gateway's shared version evidence. A setup
+        # restriction must still refresh every enabled enrolled peer, since
+        # an updated peer cannot inherit its old version from the cache.
+        probe_only = probe_only | _configured_probe_names(data_dir)
     shared = _FRESH_SCANS.get()
     shared_key = (
         str(config_path_for_data_dir(data_dir)),

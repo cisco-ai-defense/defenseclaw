@@ -154,6 +154,15 @@ def openclaw_fleet_link_configured(cfg: Any) -> bool:
     return fleet_mode not in {"", "auto"} or not _is_loopback_gateway_host(getattr(gateway, "host", ""))
 
 
+def openclaw_setup_fleet_link_configured(cfg: Any) -> bool:
+    """Whether setup should retain a saved OpenClaw as an active fleet link."""
+    gateway = getattr(cfg, "gateway", None)
+    fleet_mode = str(getattr(gateway, "fleet_mode", "") or "").strip().lower()
+    if fleet_mode in {"disabled", "off", "false"}:
+        return False
+    return openclaw_fleet_link_configured(cfg)
+
+
 def openclaw_implied_but_not_installed(cfg: Any) -> bool:
     """True when the gateway reports the OpenClaw fleet off as "not installed".
 

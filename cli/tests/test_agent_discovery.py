@@ -375,6 +375,68 @@ def test_read_only_refresh_returns_fresh_scan_without_replacing_cache(monkeypatc
     assert cache.read_bytes() == original
 
 
+@pytest.mark.parametrize(
+    ("primary", "peer_entry"),
+    [
+        ("claude-code", "claude-code: {enabled: true}"),
+        ("claudecode", "claudecode:"),
+        ("codex", "claudecode: {enabled: true}"),
+    ],
+)
+def test_a_scan_restricted_to_one_connector_still_probes_every_enrolled_one(
+    monkeypatch, tmp_path, primary, peer_entry
+):
+    """An enrolled peer updated since the last scan needs a new version at restart."""
+    if os.name == "nt":
+        set_known_windows_directory_acl(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "guardrail:\n"
+        "  enabled: true\n"
+        f"  connector: {primary}\n"
+        "  connectors:\n"
+        f"    {peer_entry}\n"
+        "    cursor: {enabled: true}\n"
+        "    codex: {enabled: false}\n",
+        encoding="utf-8",
+    )
+    binary = tmp_path / "claude"
+    binary.write_text("binary", encoding="utf-8")
+    version = "2.1.100"
+    probed: list[str] = []
+
+    def scan(name: str, *, probe: bool, **_kwargs) -> ad.AgentSignal:
+        if probe:
+            probed.append(name)
+        return ad.AgentSignal(
+            name=name,
+            installed=name in {"claudecode", "cursor"},
+            config_path="",
+            binary_path=str(binary) if name == "claudecode" else "",
+            version=version if name == "claudecode" and probe else "",
+            error=ad.VERSION_NOT_PROBED if name == "claudecode" and not probe else "",
+        )
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_scan_agent", scan)
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+
+    # The CLI was updated after its previous scan. The cache's older version
+    # cannot be carried across a changed executable.
+    os.utime(binary, None)
+    version = "2.1.286"
+    probed.clear()
+    refreshed = ad.discover_with_probes(["cursor"], use_cache=False, refresh=True, data_dir=tmp_path)
+    assert {"claudecode", "cursor"} <= set(probed)
+    assert "codex" not in probed
+    assert refreshed.agents["claudecode"].version == version
+    assert ad._read_cache(data_dir=tmp_path).agents["claudecode"].version == version
+
+    # Read-only admission scans still inspect only their selected connector.
+    probed.clear()
+    ad.discover_with_probes(["cursor"], use_cache=False, refresh=True, data_dir=tmp_path, persist_cache=False)
+    assert probed == ["cursor"]
+
+
 def test_cache_refuses_symlinked_parent_without_escape(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()

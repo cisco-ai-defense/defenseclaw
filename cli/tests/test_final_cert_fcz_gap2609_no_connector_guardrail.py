@@ -202,6 +202,10 @@ def test_non_interactive_guardrail_keeps_saved_openclaw_without_local_install(
     [
         ("127.0.0.1", "auto", True, "codex"),
         ("127.0.0.1", "auto", False, None),
+        ("127.0.0.1", "disabled", True, "codex"),
+        ("127.0.0.1", "off", True, "codex"),
+        ("127.0.0.1", "false", True, "codex"),
+        ("127.0.0.1", "disabled", False, None),
         ("10.0.0.5", "auto", True, "openclaw"),
         ("127.0.0.1", "enabled", True, "openclaw"),
     ],
@@ -220,7 +224,7 @@ def test_saved_openclaw_default_respects_installed_hint_and_fleet_link(
         "config_version: 9\n"
         "claw:\n  mode: openclaw\n"
         "guardrail:\n  connector: openclaw\n"
-        f"gateway:\n  host: {host}\n  fleet_mode: {fleet_mode}\n",
+        f"gateway:\n  host: {host}\n  fleet_mode: '{fleet_mode}'\n",
         encoding="utf-8",
     )
     if picked:
@@ -243,10 +247,62 @@ def test_saved_openclaw_default_respects_installed_hint_and_fleet_link(
     else:
         assert "connector selected" in result.output, result.output
         selected.assert_called_once_with(expected)
-    if host == "127.0.0.1" and fleet_mode == "auto" and platform_support.connector_supported_on_os("openclaw"):
+    if host == "127.0.0.1" and fleet_mode in {"auto", "disabled", "off", "false"} and platform_support.connector_supported_on_os("openclaw"):
         openclaw_installed.assert_called_once_with(app.cfg)
     else:
         openclaw_installed.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("installed", "picked", "roster_enabled", "expected"),
+    [
+        (["codex"], True, True, "codex"),
+        (["codex"], False, True, "codex"),
+        ([], True, True, None),
+        (["codex"], True, False, None),
+    ],
+)
+def test_stale_openclaw_primary_with_roster_uses_verified_connector(
+    tmp_path, installed: list[str], picked: bool, roster_enabled: bool, expected: str | None
+) -> None:
+    from unittest.mock import patch
+
+    from defenseclaw import config as config_module
+    from defenseclaw.commands import cmd_setup
+    from defenseclaw.context import AppContext
+
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 9\n"
+        "claw:\n  mode: openclaw\n"
+        "guardrail:\n  connector: openclaw\n  connectors:\n"
+        f"    codex: {{enabled: {'true' if roster_enabled else 'false'}}}\n"
+        "gateway:\n  host: 127.0.0.1\n  fleet_mode: auto\n",
+        encoding="utf-8",
+    )
+    if picked:
+        (tmp_path / "picked_connector").write_text("codex\n", encoding="utf-8")
+    app = AppContext()
+    with patch("defenseclaw.openclaw_presence.openclaw_installed", return_value=False):
+        app.cfg = config_module.load(data_dir=str(tmp_path))
+        with (
+            patch.object(cmd_setup, "_detect_installed_connectors", return_value=installed),
+            patch.object(cmd_setup, "_capture_setup_config_snapshot", return_value=object()),
+            patch.object(
+                cmd_setup, "_ensure_connector_available", side_effect=click.ClickException("connector selected")
+            ) as selected,
+        ):
+            result = CliRunner().invoke(
+                cmd_setup.setup,
+                ["guardrail", "--yes", "--no-restart", "--cisco-api-key-env", "ASIA_PACIFIC_KEY"],
+                obj=app,
+            )
+    if expected is None:
+        assert "no agent connector is configured" in result.output, result.output
+        selected.assert_not_called()
+    else:
+        assert "connector selected" in result.output, result.output
+        selected.assert_called_once_with(expected)
+    assert set(app.cfg.guardrail.connectors) == {"codex"}
 
 
 @pytest.mark.parametrize("picked", [False, True], ids=["without-hint", "with-unverified-codex-hint"])

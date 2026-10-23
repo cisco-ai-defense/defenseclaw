@@ -6866,7 +6866,7 @@ def setup_guardrail(
         # Connector resolution order in non-interactive mode:
         #   1. explicit --connector / --agent flag
         #   2. configured primary, roster, or non-default claw.mode; a saved
-        #      OpenClaw with no local installation keeps a remote/fleet link
+        #      local OpenClaw is checked for installation even with a roster
         #   3. <data_dir>/picked_connector, only when that agent is installed
         #   4. an older implied OpenClaw kept by the loader
         # There is no connector fallback on an unconfigured host.
@@ -6881,20 +6881,27 @@ def setup_guardrail(
             target_connector = explicit_connector
         elif (
             gc.connector == "openclaw"
-            and not gc.connectors
-            and not openclaw_presence.openclaw_fleet_link_configured(app.cfg)
+            and not openclaw_presence.openclaw_setup_fleet_link_configured(app.cfg)
         ):
             # An older local setup could pin OpenClaw before the operator
             # picked an agent. A remote host or explicit fleet mode above
             # remains authoritative even without a local OpenClaw binary.
             installed = _detect_installed_connectors()
-            target_connector = (
-                "openclaw"
-                if platform_support.connector_supported_on_os("openclaw")
-                and ("openclaw" in installed or openclaw_presence.openclaw_installed(app.cfg))
-                else _installed_picked_connector(getattr(app.cfg, "data_dir", None), installed)
-                or ""
-            )
+            if platform_support.connector_supported_on_os("openclaw") and (
+                "openclaw" in installed or openclaw_presence.openclaw_installed(app.cfg)
+            ):
+                target_connector = "openclaw"
+            else:
+                picked = _installed_picked_connector(getattr(app.cfg, "data_dir", None), installed)
+                if gc.connectors:
+                    enrolled = [
+                        name for name in app.cfg.active_connectors()
+                        if name in installed
+                        and getattr(_existing_connector_override(gc, name), "enabled", None) is not False
+                    ]
+                    target_connector = picked if picked in enrolled else next(iter(enrolled), "")
+                else:
+                    target_connector = picked or ""
         elif gc.connector or gc.connectors:
             target_connector = app.cfg.active_connector()
         elif app.cfg.has_connector_configured() and app.cfg.active_connector() != "openclaw":
@@ -9986,6 +9993,27 @@ def _apply_hook_connector_setup(
         desired_mode = "observe"
 
     exact_windows_opencode = _windows_opencode_requires_exact_selection(connector)
+    discovery_before_preflight = None
+    data_dir = getattr(app.cfg, "data_dir", None)
+    if not _version_preflighted and not exact_windows_opencode and data_dir:
+        # The version gate may publish a new shared cache. Keep the protected
+        # prior bytes for a failed setup's rollback, including an older
+        # owner-readable file that the ordinary snapshot used to see only
+        # after the version gate had replaced it with private permissions.
+        try:
+            discovery_before_preflight = _capture_protected_setup_file(
+                os.path.join(os.path.abspath(os.fspath(data_dir)), _AGENT_DISCOVERY_FILENAME),
+                _AGENT_DISCOVERY_MAX_BYTES,
+                "agent_discovery.json",
+                repair_owned_read_bits=True,
+            )
+        except OSError as exc:
+            ux.echo(
+                f"  ✗ Cannot establish connector setup rollback point: {exc}\n"
+                f"    {_SETUP_ROLLBACK_POINT_NEXT_STEP}",
+                err=True,
+            )
+            return False
     # Preserve the predecessor's ordering for every non-OpenCode connector:
     # generic version admission still precedes rule-pack validation and the
     # setup snapshot. Only native-Windows OpenCode takes the exact-selection
@@ -10031,6 +10059,14 @@ def _apply_hook_connector_setup(
             err=True,
         )
         return False
+    if discovery_before_preflight is not None:
+        existed, body, generation = discovery_before_preflight
+        setup_snapshot = replace(
+            setup_snapshot,
+            agent_discovery_existed=existed,
+            agent_discovery_bytes=body,
+            agent_discovery_generation=generation,
+        )
 
     verified = _protected_selection
     selection_roster = (connector,)
