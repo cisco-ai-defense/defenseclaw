@@ -141,9 +141,11 @@ func runStandaloneSetupRecoveryWatchdog(parentArgument string, stdout, stderr io
 }
 
 // A committed uninstall keeps its trusted tombstone until postcommit hook
-// cleanup and state purge finish. A completed uninstall has neither record;
-// an ordinary refusal still has installed metadata. Both are read-only exits
-// for the watcher, so they cannot recreate a lifecycle directory or hooks.
+// cleanup and any recorded purge finish; a settled state-keeping uninstall
+// keeps it for good, so only an unsettled tombstone is replayed. A completed
+// purge has no record; an ordinary refusal still has installed metadata.
+// These are read-only exits for the watcher, so they cannot recreate a
+// lifecycle directory or hooks.
 func standaloneUninstallRecoveryNeeded() (bool, error) {
 	layout, err := setupRecoveryLayout()
 	if err != nil {
@@ -165,7 +167,10 @@ func standaloneUninstallRecoveryNeeded() (bool, error) {
 	if deployment.State == winpath.EnterpriseDeploymentUnknown {
 		return false, errors.New("cannot prove standalone uninstall recovery is settled: deployment metadata is unreadable")
 	}
-	return deployment.State == winpath.EnterpriseDeploymentTombstone, nil
+	if deployment.State != winpath.EnterpriseDeploymentTombstone {
+		return false, nil
+	}
+	return standaloneCommittedUninstallUnsettled(layout, deployment.MetadataPath)
 }
 
 type standaloneSetupParent interface {

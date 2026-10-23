@@ -838,6 +838,9 @@ class FakeTimeoutNative {
     }
 }
 function Initialize-DefenseClawNativeSecurity { return [FakeTimeoutNative] }
+# These cases are the shared record checks. The standalone committed-uninstall
+# replay has its own smoke (enterprise-uninstall-postcommit-recovery-smoke.ps1).
+function Test-DefenseClawStandaloneProfile { return $false }
 $script:DefenseClawUnfinishedTransactionDirectory = 'unfinished transaction directory'
 $root = '__ROOT__'
 $layout = @{
@@ -947,7 +950,7 @@ def test_timeout_recovery_reports_settled_only_when_no_lifecycle_record_remains(
     assert cases["journals"]["outcome"].endswith(": managed-hook teardown journal, self-uninstall receipt")
     assert cases["transaction directory"]["outcome"].endswith(": unfinished transaction directory")
     for name in ("purge intent", "pending and rollback intent", "journals", "transaction directory"):
-        assert "is not reported settled" in cases[name]["outcome"], name
+        assert "did not settle the deployment" in cases[name]["outcome"], name
     for name in ("nothing left", "replayed"):
         assert cases[name]["purge"] == "purged", cases[name]
     assert "requires authenticated recovery of the existing state-purge intent" in cases["purge intent"]["purge"]
