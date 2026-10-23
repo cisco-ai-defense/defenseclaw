@@ -513,7 +513,7 @@ describe('managed-host enrollment protection', () => {
       const guide = page(name);
       const recovery = /missing hook executable.{0,700}/i.exec(guide)?.[0];
       assert.ok(recovery, `${name} needs missing hook executable recovery guidance`);
-      assert.match(recovery, /Claude Code.{0,100}Codex.{0,100}Copilot/i, `${name} must name every direct Windows hook executable consumer`);
+      assert.match(recovery, /Claude Code.{0,100}Codex.{0,100}Cursor.{0,100}Copilot/i, `${name} must name every Windows hook executable consumer`);
       assert.match(recovery, /enterprise windows verify --profile standalone --json/i, `${name} needs the full verify command`);
       assert.match(recovery, /(?:before allowing|before resuming) (?:Claude Code|agent) use/i, `${name} must keep agent use stopped until verification passes`);
     }
