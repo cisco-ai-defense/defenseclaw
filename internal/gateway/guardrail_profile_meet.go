@@ -26,9 +26,10 @@ import (
 // request is refused. When one candidate enforces at least what each of the
 // others does (profileCovers), it has its own name. Otherwise their meet
 // is config.ProfileMeetName, "strictest.<members>": for every
-// connector, action wherever a member blocks, the lowest block level and
-// the strictest HILT of the members that block, the lowest alert level, the
-// rules of every member's rule pack (a rule any member enforces is enforced),
+// connector, hook and inspect action wherever a member blocks on that path,
+// the lowest block level and strictest HILT of members that block, the lowest
+// alert level, and the rules of every member's rule pack (a rule any member
+// enforces is enforced),
 // the suppressions all members share (allows are the intersection), every
 // sensitive tool any member inspects, and the members' sandbox floors
 // tightened together (config.Config.SandboxFloor). hook_fail_mode and
@@ -97,7 +98,8 @@ func (set *guardrailProfileSet) meet(name string) *profileMeet {
 	value, _ := set.meets.LoadOrStore(name, &profileMeet{members: members})
 	meet := value.(*profileMeet)
 	meet.once.Do(func() {
-		derived, err := set.base.DeriveGuardrailProfileMeet(members, set.meetProfile(members))
+		profile, hookModes := set.meetProfile(members)
+		derived, err := set.base.DeriveGuardrailProfileMeet(members, profile, hookModes)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] strictest combination of profiles %s: %v\n", strings.Join(members, ", "), err)
 			return
@@ -168,23 +170,30 @@ func (set *guardrailProfileSet) meetConnectors() []string {
 	return names
 }
 
-// meetSettings are the guardrail settings of a meet for one connector.
+// meetSettings are the inspect and hook settings of a meet for one connector.
 type meetSettings struct {
-	mode, block, alert string
-	hilt               config.HILTConfig
+	inspectMode, hookMode string
+	block, alert          string
+	hilt                  config.HILTConfig
 }
 
 // meetSettingsFor is the meet of members' effective settings for
-// connectorName ("" for the global settings): action wherever a member
-// blocks (by its hook mode or its inspect mode), the lowest block level and
-// the strictest HILT of the members that block, and the lowest alert level.
+// connectorName ("" for the global settings). Hook and inspect action modes
+// are independent; thresholds and HILT cover every member that blocks on
+// either path.
 func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName string) meetSettings {
-	out := meetSettings{mode: "observe"}
+	out := meetSettings{inspectMode: "observe", hookMode: "observe"}
 	blockRank, alertRank, hiltRank := 0, 0, 0
 	for _, member := range members {
 		cfg := set.profileConfig(member)
 		hookBlock := cfg.HookModeForConnector(connectorName) == "action"
 		inspectBlock := inspectMode(cfg, connectorName) == "action"
+		if hookBlock {
+			out.hookMode = "action"
+		}
+		if inspectBlock {
+			out.inspectMode = "action"
+		}
 		_, alert := guardrailThresholdRanks(resolveThresholds(cfg, connectorName))
 		if alertRank == 0 || alert < alertRank {
 			alertRank = alert
@@ -192,7 +201,6 @@ func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName 
 		if !hookBlock && !inspectBlock {
 			continue
 		}
-		out.mode = "action"
 		block, _ := guardrailThresholdRanks(resolveThresholds(cfg, connectorName))
 		proxy, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&cfg.Guardrail, connectorName))
 		for _, rank := range []int{block, proxy} {
@@ -224,22 +232,24 @@ func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName 
 	return out
 }
 
-// meetProfile is the guardrail profile whose settings are the meet of
-// members for every connector (meetSettingsFor). Its rule pack is the base
-// configuration's: the meet's rules are merged from every member
-// (meetRuleGeneration), and its block levels are explicit, so no pack
-// posture decides them.
-func (set *guardrailProfileSet) meetProfile(members []string) config.GuardrailProfile {
+// meetProfile returns the inspect policy and the hook modes that differ from
+// it. Its rules are merged from every member (meetRuleGeneration); explicit
+// levels keep a pack posture from deciding them.
+func (set *guardrailProfileSet) meetProfile(members []string) (config.GuardrailProfile, map[string]string) {
 	global := set.meetSettingsFor(members, "")
 	hilt := global.hilt
-	profile := config.GuardrailProfile{Mode: global.mode, BlockAt: global.block, AlertAt: global.alert, HILT: &hilt,
+	profile := config.GuardrailProfile{Mode: global.inspectMode, BlockAt: global.block, AlertAt: global.alert, HILT: &hilt,
 		Connectors: map[string]config.PerConnectorGuardrailConfig{}}
+	hookModes := map[string]string{}
 	for _, name := range set.meetConnectors() {
 		s := set.meetSettingsFor(members, name)
 		connectorHILT := s.hilt
-		profile.Connectors[name] = config.PerConnectorGuardrailConfig{Mode: s.mode, BlockAt: s.block, AlertAt: s.alert, HILT: &connectorHILT}
+		profile.Connectors[name] = config.PerConnectorGuardrailConfig{Mode: s.inspectMode, BlockAt: s.block, AlertAt: s.alert, HILT: &connectorHILT}
+		if s.hookMode != s.inspectMode {
+			hookModes[name] = s.hookMode
+		}
 	}
-	return profile
+	return profile, hookModes
 }
 
 // memberRuleGeneration is the rule generation member scans connectorName
@@ -299,8 +309,10 @@ func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileS
 	return result.generation, result.err
 }
 
-// refuseUncompiledMeet makes a proven meet's pack merge part of the
-// decision, before any blocking surface can scan with an incomplete pack.
+// refuseUncompiledMeet checks the rule generation this request can scan.
+// Unscoped tool inspect uses the gateway's configured connector; the other
+// unscoped inspect routes scan the global generation. A different
+// connector's failed merge cannot refuse a valid request here.
 // The member names and compiler error remain in the administrator's log.
 func (set *guardrailProfileSet) refuseUncompiledMeet(ctx context.Context, decision profileDecision, connectorName string) profileDecision {
 	if decision.Refused != "" {
@@ -309,6 +321,12 @@ func (set *guardrailProfileSet) refuseUncompiledMeet(ctx context.Context, decisi
 	meet := set.meet(decision.Name)
 	if meet == nil {
 		return decision
+	}
+	connectorName = config.NormalizeConnectorName(connectorName)
+	if scanConnector, scoped := ctx.Value(profileRuleScanConnectorKey{}).(string); scoped {
+		connectorName = scanConnector
+	} else if connectorName == "" {
+		connectorName = config.NormalizeConnectorName(connectorNameForConfig(set.base))
 	}
 	if _, err := meet.ruleGeneration(ctx, set, connectorName); err != nil {
 		decision.Refused = "DefenseClaw refused this request: the strictest combination of rule packs could not be compiled; ask an administrator to check the profile rule packs"
