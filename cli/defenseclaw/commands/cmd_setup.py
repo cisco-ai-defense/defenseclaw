@@ -7651,12 +7651,46 @@ def _codex_registration_path(lock_body: bytes) -> str | None:
     return os.path.abspath(matches[0])
 
 
-def _effective_codex_rollback_path(record_path: str, captured: str) -> str:
-    """Apply the managed backup loader's home-move rule to rollback evidence.
+def _codex_config_matches_backup(path: str, expected_sha256: str | None) -> bool:
+    """Match a bounded regular config against the pre-setup installed hash."""
+    if not isinstance(expected_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+        return False
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+    except OSError:
+        return False
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > _SETUP_CODEX_BACKUP_MAX_BYTES:
+            return False
+        digest = hashlib.sha256()
+        remaining = _SETUP_CODEX_BACKUP_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(fd)
+        stable = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) == (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+        )
+        return stable and remaining > 0 and digest.hexdigest() == expected_sha256
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
 
-    A receipt copied into the current home may still name the previous home.
-    Match managedBackupTargetAfterHomeMove in Go: only an absent old root (or
-    an emptied old home) with the corresponding current file can be rebased.
+
+def _effective_codex_rollback_path(
+    record_path: str, captured: str, *, installed_sha256: str | None = None,
+) -> str:
+    """Resolve the installed Codex config before a failed root migration.
+
+    A copied backup can still name an obsolete home even if that home has
+    unrelated files or an empty .codex directory. Its installed hash proves
+    which file moved. Fall back to Go's narrower home-move rule for older
+    receipts and user-edited configs that no longer match the installed hash.
     """
     home = os.path.abspath(os.path.expanduser("~"))
     captured = os.path.normpath(captured)
@@ -7670,6 +7704,25 @@ def _effective_codex_rollback_path(record_path: str, captured: str) -> str:
 
     if not (within(os.path.abspath(record_path), home) and not within(captured, home)):
         return captured
+
+    if installed_sha256 and not _codex_config_matches_backup(captured, installed_sha256):
+        matches: set[str] = set()
+        ancestor = os.path.dirname(captured)
+        for _ in range(32):
+            parent = os.path.dirname(ancestor)
+            if parent == ancestor:
+                break
+            try:
+                candidate = os.path.join(home, os.path.relpath(captured, ancestor))
+            except ValueError:  # Different Windows volumes.
+                break
+            if within(candidate, home) and _codex_config_matches_backup(candidate, installed_sha256):
+                matches.add(os.path.normpath(candidate))
+            ancestor = parent
+        if len(matches) == 1:
+            return matches.pop()
+        if len(matches) > 1:
+            raise OSError("Codex rollback root is ambiguous after an account home move")
 
     def target_under(old_root: str) -> str | None:
         if within(home, old_root) or within(old_root, home):
@@ -8495,13 +8548,18 @@ def _capture_setup_desired_snapshot_once(cfg, *, capture_codex_backup: bool = Fa
             "Codex managed backup",
             trust_windows_administrators=True,
         )
+        backup = _codex_backup_identity(backup_body) if backup_existed else None
         backup_path = (
-            _effective_codex_rollback_path(backup_record, _codex_backup_identity(backup_body)["path"])
-            if backup_existed else None
+            _effective_codex_rollback_path(
+                backup_record, backup["path"], installed_sha256=backup.get("post_sha256")
+            ) if backup is not None else None
         )
         registration_path = _codex_registration_path(lock_body) if lock_existed else None
         if backup_existed and registration_path is not None:
-            registration_path = _effective_codex_rollback_path(backup_record, registration_path)
+            registration_path = _effective_codex_rollback_path(
+                backup_record, registration_path,
+                installed_sha256=backup.get("post_sha256") if registration_path == backup["path"] else None,
+            )
         prior_path = registration_path or backup_path
         codex_rollback = _SetupCodexRollbackPoint(
             backup_existed=backup_existed,
@@ -8904,6 +8962,9 @@ def _verify_restored_codex_root(cfg, snapshot: _SetupConfigSnapshot) -> list[str
             failures.append("Codex managed backup is missing after rollback")
         else:
             current = _codex_backup_identity(body)
+            # Verify using the Go loader's home-move rule. A hash-matched
+            # rollback root is a one-time snapshot proof, not permission to
+            # leave Go's persisted backup pointed at an obsolete home.
             current_root = os.path.dirname(_effective_codex_rollback_path(backup_record, current["path"]))
             if os.path.normcase(os.path.normpath(current_root)) != os.path.normcase(os.path.normpath(prior.root)):
                 failures.append("Codex managed backup still names the new root")
