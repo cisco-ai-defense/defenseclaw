@@ -36,12 +36,13 @@ type remoteDeliveryKey struct{}
 // (NewRecordedRemoteDelivery) does not send the occurrence again to those
 // destinations after a restart; otherwise the state is in memory only.
 type RemoteDelivery struct {
-	mu       sync.Mutex
-	attempt  uint64
-	open     bool
-	inFlight int
-	// failed is set when a destination of the current attempt did not
-	// get the occurrence.
+	mu   sync.Mutex
+	open bool
+	// outstanding holds each destination identity until its queue calls the
+	// completion callback, including while the queue retries it.
+	outstanding map[string]bool
+	// failed is set when a destination did not get the occurrence after
+	// the most recent BeginAttempt, including an older outstanding offer.
 	failed    bool
 	delivered map[string]bool
 	// localDurable records that the local store made the occurrence
@@ -55,7 +56,7 @@ type RemoteDelivery struct {
 
 // NewRemoteDelivery returns the delivery state of one occurrence.
 func NewRemoteDelivery() *RemoteDelivery {
-	return &RemoteDelivery{delivered: make(map[string]bool)}
+	return &RemoteDelivery{delivered: make(map[string]bool), outstanding: make(map[string]bool)}
 }
 
 // NewRecordedRemoteDelivery returns the delivery state of one durable
@@ -129,7 +130,6 @@ func (delivery *RemoteDelivery) BeginAttempt() {
 	}
 	delivery.mu.Lock()
 	defer delivery.mu.Unlock()
-	delivery.attempt++
 	delivery.open, delivery.failed = true, false
 }
 
@@ -167,17 +167,24 @@ func (delivery *RemoteDelivery) Fail(destination string) {
 	}
 }
 
-// Track records one delivery handed to destination and returns the function
-// its queue calls once with the terminal outcome: delivered when the
-// destination acknowledged it, false when it was refused, dropped or
-// abandoned. Later calls are ignored.
-func (delivery *RemoteDelivery) Track(destination string) func(delivered bool) {
+// TryTrack reserves a destination identity before queuing its payload. A
+// repeat offer cannot queue the same identity while its earlier payload is
+// pending or already acknowledged. A replacement identity is independent.
+// The queue calls the returned function once with its terminal outcome:
+// delivered when acknowledged, false when refused, dropped or abandoned.
+func (delivery *RemoteDelivery) TryTrack(destination string) (func(delivered bool), bool) {
 	if delivery == nil {
-		return func(bool) {}
+		return func(bool) {}, true
 	}
 	delivery.mu.Lock()
-	delivery.inFlight++
-	attempt := delivery.attempt
+	if delivery.delivered[destination] || delivery.outstanding[destination] {
+		delivery.mu.Unlock()
+		return nil, false
+	}
+	if delivery.outstanding == nil {
+		delivery.outstanding = make(map[string]bool)
+	}
+	delivery.outstanding[destination] = true
 	delivery.mu.Unlock()
 	var once sync.Once
 	return func(delivered bool) {
@@ -187,14 +194,17 @@ func (delivery *RemoteDelivery) Track(destination string) func(delivered bool) {
 			}
 			delivery.mu.Lock()
 			defer delivery.mu.Unlock()
-			delivery.inFlight--
+			delete(delivery.outstanding, destination)
 			if delivered {
 				delivery.delivered[destination] = true
-			} else if attempt == delivery.attempt && !delivery.delivered[destination] {
+			} else if !delivery.delivered[destination] {
+				// A timed-out offer may have begun another attempt while
+				// this identity was pending. Its eventual refusal must still
+				// keep the occurrence unreported for another offer.
 				delivery.failed = true
 			}
 		})
-	}
+	}, true
 }
 
 // Settled reports whether the last attempt has ended with nothing in
@@ -207,7 +217,7 @@ func (delivery *RemoteDelivery) Settled() (settled, delivered bool) {
 	}
 	delivery.mu.Lock()
 	defer delivery.mu.Unlock()
-	if delivery.open || delivery.inFlight > 0 {
+	if delivery.open || len(delivery.outstanding) > 0 {
 		return false, false
 	}
 	return true, !delivery.failed

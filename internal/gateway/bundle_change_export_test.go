@@ -53,10 +53,16 @@ type changeExportFixture struct {
 	tenantB         atomic.Int64
 	// slow delays the destination's answer to the change's exports.
 	slow     atomic.Bool
+	control  atomic.Pointer[changeExportControl]
 	logger   *audit.Logger
 	database *sql.DB
 	dir      string
 	ev       enterprisestatus.ChangeEvent
+}
+
+type changeExportControl struct {
+	release <-chan struct{}
+	started chan<- struct{}
 }
 
 func newChangeExportFixture(t *testing.T) *changeExportFixture {
@@ -65,7 +71,9 @@ func newChangeExportFixture(t *testing.T) *changeExportFixture {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Refuse only the change's exports: refusing every record would
 		// open the destination's circuit for 30 s.
-		if (f.refusing.Load() || f.slow.Load() || f.trackRecipients.Load()) && r.URL.Path == "/v1/logs" {
+		control := f.control.Load()
+		if (f.refusing.Load() || f.slow.Load() || f.trackRecipients.Load() || control != nil) &&
+			r.URL.Path == "/v1/logs" {
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, "read", http.StatusBadRequest)
@@ -77,6 +85,13 @@ func newChangeExportFixture(t *testing.T) *changeExportFixture {
 					f.tenantA.Add(1)
 				case "replacement recipient":
 					f.tenantB.Add(1)
+				}
+				if control != nil {
+					select {
+					case control.started <- struct{}{}:
+					default:
+					}
+					<-control.release
 				}
 			}
 			if f.slow.Load() && bytes.Contains(body, []byte(f.ev.EventID)) {
@@ -300,6 +315,88 @@ func TestBundleReceiptReporterDoesNotExportAnAcknowledgedChangeAgainAfterARestar
 	time.Sleep(300 * time.Millisecond)
 	if n := f.exported(); n != 1 {
 		t.Fatalf("the destination has the change %d times after a restart, want once", n)
+	}
+}
+
+// A timed-out offer can still be queued or retrying. Its destination must
+// receive the change only once, even if the reporter offers the stored row
+// again. A replacement identity can receive it before the old one settles.
+func TestBundleReceiptReporterDoesNotQueueAnOutstandingChangeAgain(t *testing.T) {
+	for _, replacement := range []bool{false, true} {
+		name := "same destination"
+		if replacement {
+			name = "replacement destination"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newChangeExportFixture(t)
+			release := make(chan struct{})
+			t.Cleanup(func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			})
+			started := make(chan struct{}, 2)
+			f.control.Store(&changeExportControl{release: release, started: started})
+			reporter := f.reporter()
+			reporter.poll(t.Context())
+			if reporter.changes[f.ev.EventID] == nil {
+				t.Fatalf("change not offered: id=%q listed=%v seen=%t", f.ev.EventID,
+					enterprisestatus.ListChangeEventIDs(reporter.changeDir()), reporter.hasSeen(f.ev.EventID))
+			}
+			select {
+			case <-started:
+			case <-time.After(20 * time.Second):
+				settled, delivered := reporter.changes[f.ev.EventID].delivery.Settled()
+				t.Fatalf("original destination did not start delivery: settled=%t delivered=%t exports=%d", settled, delivered, f.exported())
+			}
+
+			var replacementCapture *hookModelV8OTLPCapture
+			if replacement {
+				replacementCapture = &hookModelV8OTLPCapture{}
+				server := httptest.NewServer(http.HandlerFunc(replacementCapture.handler))
+				t.Cleanup(server.Close)
+				raw := hookModelV8BootstrapRaw(f.dataDir, server.URL, []string{"logs"})
+				result, err := f.sidecar.ReloadObservabilityRuntime(t.Context(), f.configPath, raw)
+				if err != nil || result.Status() != runtimegraph.ReloadApplied {
+					t.Fatalf("replace destination: status=%v error=%v", result.Status(), err)
+				}
+			}
+			// Force the reporter's ten-minute retry while the first payload
+			// is still in the destination queue.
+			reporter.changes[f.ev.EventID].offered = time.Now().Add(-bundleChangeDeliveryWait - time.Second)
+			reporter.poll(t.Context())
+			if replacement {
+				pollUntil(t, reporter, func() bool {
+					for _, record := range hookModelV8CapturedLogs(replacementCapture.logSnapshot()) {
+						if encoded, err := protojson.Marshal(record); err == nil && strings.Contains(string(encoded), f.ev.EventID) {
+							return true
+						}
+					}
+					return false
+				})
+				if reporter.hasSeen(f.ev.EventID) {
+					t.Fatal("change reported before original delivery settled")
+				}
+			}
+			close(release)
+			pollUntil(t, reporter, func() bool { return reporter.hasSeen(f.ev.EventID) })
+			if got := f.exported(); got != 1 {
+				t.Fatalf("original destination received change %d times, want once", got)
+			}
+			if replacement {
+				count := 0
+				for _, record := range hookModelV8CapturedLogs(replacementCapture.logSnapshot()) {
+					if encoded, err := protojson.Marshal(record); err == nil && strings.Contains(string(encoded), f.ev.EventID) {
+						count++
+					}
+				}
+				if count != 1 {
+					t.Fatalf("replacement destination received change %d times, want once", count)
+				}
+			}
+		})
 	}
 }
 

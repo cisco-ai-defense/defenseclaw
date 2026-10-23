@@ -412,7 +412,11 @@ func (component *destinationDispatchComponent) Enqueue(
 		return
 	}
 	if tracker != nil {
-		payload = payload.WithCompletion(tracker.Track(key))
+		complete, ok := tracker.TryTrack(key)
+		if !ok {
+			return
+		}
+		payload = payload.WithCompletion(complete)
 	}
 	result := entry.dispatcher.Enqueue(payload)
 	if result.Disposition == delivery.EnqueueRejected {
