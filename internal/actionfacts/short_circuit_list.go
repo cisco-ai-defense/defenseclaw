@@ -967,7 +967,7 @@ func simpleArgvMayCallExported(args []*syntax.Word, source string, exported []st
 		}
 		return simpleRunnerMayCallExported(args[1:], source, exported, depth+1)
 	case simpleCommandRunners[base]:
-		return simpleRunnerMayCallExported(args[1:], source, exported, depth+1)
+		return simpleCommandRunnerMayCallExported(base, args[1:], source, exported, depth+1)
 	case simpleInlineInterpreters[base]:
 		return simpleWordsNameShellOrFunction(args[1:], source, exported, 1)
 	}
@@ -997,6 +997,134 @@ func simpleScriptMayCallExported(script string, exported []string, depth int) bo
 		return !calls
 	})
 	return calls
+}
+
+// simpleCommandRunnerMayCallExported reads only the argv a runner executes.
+// find runs the argv of each -exec, -execdir, -ok and -okdir action; its
+// tests and search predicates (find . -name f) are data. xargs runs the
+// command after its options, and that command's arguments are data unless
+// it is a shell. Both runners exec the program directly, as env does, so an
+// exported name as the program runs no function. Any other runner, an
+// option this walk does not know, or a word it cannot read keeps the scan
+// of every word.
+func simpleCommandRunnerMayCallExported(base string, words []*syntax.Word, source string, exported []string, depth int) bool {
+	values := make([]string, len(words))
+	for index, word := range words {
+		value, static := simpleStaticScriptWord(word, nil)
+		if !static {
+			return simpleRunnerMayCallExported(words, source, exported, depth)
+		}
+		values[index] = value
+	}
+	switch base {
+	case "find":
+		for index := 0; index < len(values); index++ {
+			switch values[index] {
+			case "-exec", "-execdir", "-ok", "-okdir":
+			default:
+				continue
+			}
+			end := index + 1
+			for end < len(values) && values[end] != ";" && values[end] != "+" {
+				end++
+			}
+			if simpleExecChildMayCallExported(words[index+1:end], "{}", source, exported, depth) {
+				return true
+			}
+			index = end
+		}
+		return false
+	case "xargs":
+		index, placeholder, known := simpleXargsChild(values)
+		if !known {
+			return simpleRunnerMayCallExported(words, source, exported, depth)
+		}
+		// With no command, xargs runs echo.
+		return simpleExecChildMayCallExported(words[index:], placeholder, source, exported, depth)
+	}
+	return simpleRunnerMayCallExported(words, source, exported, depth)
+}
+
+// simpleXargsChild returns the index of the command in the arguments of
+// xargs (len(argv) when it has none) and the replace string of -I, -i,
+// --replace or -J. known is false for an option this walk does not know.
+func simpleXargsChild(argv []string) (index int, placeholder string, known bool) {
+	for index = 0; index < len(argv); index++ {
+		word := argv[index]
+		if word == "--" {
+			return index + 1, placeholder, true
+		}
+		if word == "-" || !strings.HasPrefix(word, "-") {
+			return index, placeholder, true
+		}
+		if strings.HasPrefix(word, "--") {
+			name, value, hasValue := strings.Cut(word[2:], "=")
+			switch name {
+			case "null", "open-tty", "interactive", "no-run-if-empty", "verbose", "exit", "show-limits", "eof", "max-lines":
+			case "replace":
+				placeholder = "{}"
+				if hasValue {
+					placeholder = value
+				}
+			case "arg-file", "delimiter", "max-args", "max-procs", "max-chars", "process-slot-var":
+				if !hasValue {
+					index++
+				}
+			default:
+				return 0, "", false
+			}
+			continue
+		}
+	letters:
+		for letter := 1; letter < len(word); letter++ {
+			option := word[letter]
+			value := word[letter+1:]
+			switch {
+			case strings.IndexByte("0oprtx", option) >= 0:
+				continue
+			case strings.IndexByte("adEILnPsJRS", option) >= 0:
+				if value == "" {
+					index++
+					if index >= len(argv) {
+						return 0, "", false
+					}
+					value = argv[index]
+				}
+			case option == 'e' || option == 'l':
+			case option == 'i':
+				if value == "" {
+					value = "{}"
+				}
+			default:
+				return 0, "", false
+			}
+			if option == 'I' || option == 'J' || option == 'i' {
+				placeholder = value
+			}
+			break letters
+		}
+	}
+	return len(argv), placeholder, true
+}
+
+// simpleExecChildMayCallExported judges an argv that a runner executes. The
+// runner puts input text in place of its placeholder, so a program or a
+// shell script that is only the placeholder is runtime text.
+func simpleExecChildMayCallExported(words []*syntax.Word, placeholder, source string, exported []string, depth int) bool {
+	if len(words) == 0 {
+		return false
+	}
+	program, static := simpleStaticScriptWord(words[0], nil)
+	if !static || placeholder != "" && strings.Contains(program, placeholder) {
+		return true
+	}
+	if placeholder != "" {
+		if script, _, nested, scriptStatic := simpleNestedScriptArgs(words, nil, 0, nil, nil); nested && scriptStatic &&
+			strings.TrimSpace(script) == placeholder {
+			return true
+		}
+	}
+	return simpleArgvMayCallExported(words, source, exported, depth)
 }
 
 // simpleRunnerMayCallExported reads the argv a command runner may hand to a

@@ -260,14 +260,23 @@ func windowsSimpleInertPipeline(runes []rune, from int) bool {
 				}
 				continue
 			}
-			if strings.ContainsRune("$(){}[]@`<>", char) {
-				return false
-			}
-			if quote != 0 {
+			if quote == '"' {
+				// In a double-quoted string only a variable or subexpression
+				// ($) and the escape character are special; brackets, @ and
+				// the rest are literal filename text.
+				if char == '$' || char == '`' {
+					return false
+				}
 				if char == quote {
 					quote = 0
 				}
 				continue
+			}
+			if char == '@' && from > start && windowsSimpleWordRune(runes[from-1]) {
+				continue // @ inside a bare word, as in report@2026.txt
+			}
+			if strings.ContainsRune("$(){}[]@`<>", char) {
+				return false
 			}
 			if char == '\'' || char == '"' {
 				quote = char
@@ -282,6 +291,12 @@ func windowsSimpleInertPipeline(runes []rune, from int) bool {
 		}
 		stages++
 	}
+}
+
+// windowsSimpleWordRune reports a letter, digit or one of ._- that
+// continues a bare PowerShell word.
+func windowsSimpleWordRune(char rune) bool {
+	return unicode.IsLetter(char) || unicode.IsDigit(char) || strings.ContainsRune("._-", char)
 }
 
 func windowsSimpleNeedsBoundary(runes []rune, from int) bool {

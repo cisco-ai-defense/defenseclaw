@@ -116,6 +116,34 @@ func TestSimpleCommandsInertDefinitionsRunNothing(t *testing.T) {
 		{"scriptblock assigned to a variable", `$sb = { Remove-Item -Recurse -Force C:\ }; Write-Output done`, DialectPowerShell, destructivePS, false},
 		{"scriptblock assigned to null", `$null = { Remove-Item -Recurse -Force C:\ }`, DialectPowerShell, destructivePS, false},
 		{"scriptblock cast to void", `[void]{ Remove-Item -Recurse -Force C:\ }`, DialectPowerShell, destructivePS, false},
+		// Loop round 2 of continuation 3: a runner executes only some of its
+		// words. find runs its -exec argv; search predicates are data. xargs
+		// runs the command after its options; that command's data is data.
+		{"find predicate names the function", "f() { rm -rf /; }; export -f f; find . -name f", DialectPOSIX, destructivePOSIX, false},
+		{"find predicates and an action", "f() { rm -rf /; }; export -f f; find . -type f -name f -print", DialectPOSIX, destructivePOSIX, false},
+		{"find path names the function", "f() { rm -rf /; }; export -f f; find f -maxdepth 1", DialectPOSIX, destructivePOSIX, false},
+		{"find exec of a program with data", `f() { rm -rf /; }; export -f f; find . -exec grep f {} \;`, DialectPOSIX, destructivePOSIX, false},
+		{"find exec of the name runs no function", `f() { rm -rf /; }; export -f f; find . -exec f \;`, DialectPOSIX, destructivePOSIX, false},
+		{"xargs program with data", "f() { rm -rf /; }; export -f f; printf x | xargs grep f", DialectPOSIX, destructivePOSIX, false},
+		{"xargs options then data", "f() { rm -rf /; }; export -f f; printf x | xargs -n1 -P4 ls f", DialectPOSIX, destructivePOSIX, false},
+		{"xargs placeholder as data", "f() { rm -rf /; }; export -f f; printf x | xargs -I{} cp {} f", DialectPOSIX, destructivePOSIX, false},
+		{"find predicate then a shell action", `f() { rm -rf /; }; export -f f; find . -name f -exec bash -c f \;`, DialectPOSIX, destructivePOSIX, true},
+		{"find shell action with input", `f() { rm -rf /; }; export -f f; find . -exec sh -c 'f "$1"' _ {} \;`, DialectPOSIX, destructivePOSIX, true},
+		{"find input as the program", `f() { rm -rf /; }; export -f f; find . -exec {} \;`, DialectPOSIX, destructivePOSIX, true},
+		{"find runtime word", `f() { rm -rf /; }; export -f f; find . "$opt" sh -c f`, DialectPOSIX, destructivePOSIX, true},
+		{"xargs option then a shell", "f() { rm -rf /; }; export -f f; printf x | xargs -0 bash -c f", DialectPOSIX, destructivePOSIX, true},
+		{"xargs custom placeholder script", "f() { rm -rf /; }; export -f f; printf f | xargs -I % sh -c %", DialectPOSIX, destructivePOSIX, true},
+		{"xargs -i placeholder script", "f() { rm -rf /; }; export -f f; printf f | xargs -i sh -c {}", DialectPOSIX, destructivePOSIX, true},
+		{"xargs unknown option", "f() { rm -rf /; }; export -f f; printf x | xargs --future f", DialectPOSIX, destructivePOSIX, true},
+		// Inert consumer arguments follow PowerShell quoting: brackets, @
+		// and parentheses inside a quoted or bare filename are text.
+		{"scriptblock to Out-File with @ in a quoted name", `{ Remove-Item -Recurse -Force C:\ } | Out-File -FilePath "report@2026.txt"`, DialectPowerShell, destructivePS, false},
+		{"scriptblock to Out-File with @ in a bare name", `{ Remove-Item -Recurse -Force C:\ } | Out-File report@2026.txt`, DialectPowerShell, destructivePS, false},
+		{"scriptblock to Out-File with brackets in a quoted name", `{ Remove-Item -Recurse -Force C:\ } | Out-File "out[1](2){3}.txt"`, DialectPowerShell, destructivePS, false},
+		{"scriptblock to Out-File with @ in a single-quoted name", `{ Remove-Item -Recurse -Force C:\ } | Out-File 'a@b.txt'`, DialectPowerShell, destructivePS, false},
+		{"scriptblock to Out-File with a subexpression name", `{ Remove-Item -Recurse -Force C:\ } | Out-File "r$(Get-Date).txt"`, DialectPowerShell, destructivePS, true},
+		{"scriptblock to Out-File with a variable name", `{ Remove-Item -Recurse -Force C:\ } | Out-File "r$x.txt"`, DialectPowerShell, destructivePS, true},
+		{"scriptblock to Out-File with a splat", `{ Remove-Item -Recurse -Force C:\ } | Out-File @params`, DialectPowerShell, destructivePS, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cwd, home := "/repo", "/home/alice"
