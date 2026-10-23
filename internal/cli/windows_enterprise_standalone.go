@@ -517,12 +517,13 @@ func runWindowsEnterpriseStandaloneAction(
 	script string,
 	args []string,
 ) error {
-	// Before the action changes anything, held to its end (GAP-0352).
-	releaseHookSessionKeys, err := beginWindowsHookSessionKeyChange(ctx, action, opts)
+	// The key lock before anything, held to its end; the keys go before the
+	// first change (GAP-0352), after the refusals that only read the request.
+	hookSessionKeys, err := beginWindowsHookSessionKeyChange(ctx, action, opts)
 	if err != nil {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
-	defer releaseHookSessionKeys()
+	defer hookSessionKeys.release()
 	var unsettledBundles []*enterprisebundle.Receipt
 	if action == "status" && windowsEnterpriseIsElevated() && windowsEnterpriseStandaloneInstalled() {
 		var err error
@@ -551,25 +552,24 @@ func runWindowsEnterpriseStandaloneAction(
 	// Repair without CONFIG= on a bundle-mode device keeps the confirmed
 	// bundle config, not an edit made outside the lifecycle (GAP-0114). The
 	// restore comes before anything else this run changes: when it fails,
-	// repair stops with bundle_restore_failed and has changed nothing.
+	// repair stops with bundle_restore_failed and has changed nothing. It
+	// removes the session keys only right before it writes.
 	var bundleRestore windowsBundleRestore
 	if windowsBundleRestoreRequested(action, opts) {
-		if bundleRestore = restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts)); bundleRestore.failed() {
+		if bundleRestore = restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts), hookSessionKeys.kill); bundleRestore.failed() {
 			result := newWindowsEnterpriseStandaloneResult(action, opts)
 			bundleRestore.apply(result)
 			applyWindowsEnterpriseRecordedDeployment(result)
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 	}
-	hookRuntimeRepaired := ""
-	if action == "repair" && windowsEnterpriseIsElevated() {
-		hookRuntimeRepaired = repairWindowsEnterpriseHookRuntimeAccess()
-	}
 	configReplaced := ""
 	if action == "repair" || action == "upgrade" {
 		// As ensure does: never load an installed config.yaml that does not
-		// parse before the supplied one (GAP-0948).
-		kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+		// parse before the supplied one (GAP-0948), and check the supplied
+		// one before the hook runtime repair. A supplied config it refuses
+		// changed nothing; the session keys go right before it writes.
+		kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath, hookSessionKeys.kill)
 		if err != nil {
 			result := newWindowsEnterpriseStandaloneResult(action, opts)
 			result.AddError("preflight_failed", err.Error())
@@ -578,6 +578,15 @@ func runWindowsEnterpriseStandaloneAction(
 		if kept != "" {
 			configReplaced = windowsEnterpriseUnparseableConfigChange(kept, action)
 		}
+	}
+	// Everything from here changes the deployment: every account's session
+	// key goes first, and a key that cannot be shown dead stops the run.
+	if err := hookSessionKeys.kill(); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+	}
+	hookRuntimeRepaired := ""
+	if action == "repair" && windowsEnterpriseIsElevated() {
+		hookRuntimeRepaired = repairWindowsEnterpriseHookRuntimeAccess()
 	}
 	report, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, args)
 	result := newWindowsEnterpriseStandaloneResult(action, opts)
@@ -3010,7 +3019,7 @@ func runWindowsEnterpriseStandaloneEnsure(
 	// starts the gateway on the installed config (GAP-0114). A restore that
 	// fails stops here, before any service starts on the edited file.
 	if windowsBundleRestoreRequested("ensure", opts) {
-		restore := restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts))
+		restore := restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts), nil)
 		restore.apply(result)
 		if restore.failed() {
 			applyWindowsEnterpriseRecordedDeployment(result)
@@ -3438,7 +3447,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	if (plan.Action == "upgrade" || plan.Action == "repair") && !statusReport.TransactionPending {
 		// The transaction must not load an installed config.yaml that does
 		// not parse before it uses the supplied one (GAP-0948).
-		kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+		kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath, nil)
 		if err != nil {
 			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
 			result.Errors = []enterprisestatus.Message{}

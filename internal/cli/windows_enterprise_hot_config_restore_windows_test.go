@@ -125,7 +125,7 @@ func TestWindowsEnterpriseUnparseableRescueKeepsAConcurrentCommit(t *testing.T) 
 	// Control: with no concurrent commit the supplied config replaces the
 	// broken one, which is kept.
 	host, opts := newHotConfigHost(t, broken, candidate)
-	kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+	kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath, nil)
 	if err != nil || kept == "" {
 		t.Fatalf("rescue = (%q, %v), want the broken config kept", kept, err)
 	}
@@ -141,7 +141,7 @@ func TestWindowsEnterpriseUnparseableRescueKeepsAConcurrentCommit(t *testing.T) 
 		}
 		return func() {}, nil
 	}
-	kept, err = installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+	kept, err = installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath, nil)
 	if err != nil || kept != "" {
 		t.Fatalf("rescue = (%q, %v), want nothing to do after the concurrent commit", kept, err)
 	}

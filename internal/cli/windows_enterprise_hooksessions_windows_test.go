@@ -7,7 +7,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -261,27 +264,207 @@ func TestWindowsLifecycleStopsWhenAKeyCannotBeShownDead(t *testing.T) {
 	}
 	opts := &windowsEnterpriseLifecycleOptions{}
 	for _, action := range []string{"install", "upgrade", "repair", "ensure"} {
-		release, err := beginWindowsHookSessionKeyChange(context.Background(), action, opts)
-		release()
-		if !errors.Is(err, enterprisepolicy.ErrPublishedSessionKeyAlive) || windowsEnterpriseMessageCode(err.Error(), "") != "hook_session_records_unavailable" {
-			t.Fatalf("%s must stop when a key cannot be shown dead: %v", action, err)
+		run, err := beginWindowsHookSessionKeyChange(context.Background(), action, opts)
+		if err != nil {
+			t.Fatalf("%s: the key lock: %v", action, err)
+		}
+		err = run.kill()
+		again := run.kill()
+		run.release()
+		if !errors.Is(err, enterprisepolicy.ErrPublishedSessionKeyAlive) || windowsEnterpriseMessageCode(err.Error(), "") != "hook_session_records_unavailable" ||
+			!errors.Is(again, enterprisepolicy.ErrPublishedSessionKeyAlive) {
+			t.Fatalf("%s must stop when a key cannot be shown dead: %v, then %v", action, err, again)
 		}
 	}
-	release, err := beginWindowsHookSessionKeyChange(context.Background(), "uninstall", opts)
-	if err != nil {
+	run, err := beginWindowsHookSessionKeyChange(context.Background(), "uninstall", opts)
+	if err != nil || run.kill() != nil {
 		t.Fatalf("an uninstall goes on: %v", err)
 	}
-	release()
+	run.release()
 	windowsHookSessionKillKeys = func(string) error { return errors.New("the file is in use; a second key stays next to it") }
-	release, err = beginWindowsHookSessionKeyChange(context.Background(), "repair", opts)
+	run, err = beginWindowsHookSessionKeyChange(context.Background(), "repair", opts)
+	if err == nil {
+		err = run.kill()
+	}
 	if err != nil {
 		t.Fatalf("a key that is shadowed is enough: %v", err)
 	}
 	if ran, err := enterprisepolicy.WithPublishedSessionKeyCreation(lockPath, func() error { return nil }); ran || err != nil {
 		t.Fatalf("the guardian must make no key while the action holds the key lock: %v %v", ran, err)
 	}
-	release()
+	run.release()
 	if ran, err := enterprisepolicy.WithPublishedSessionKeyCreation(lockPath, func() error { return nil }); !ran || err != nil {
 		t.Fatalf("the guardian makes keys once the action ended: %v %v", ran, err)
+	}
+}
+
+// windowsHookSessionKillCounter counts the lifecycle's key removals and
+// points the key lock at a temporary folder. With root "" it also points the
+// record folder at an empty temporary one, so no test removes a key of the
+// host it runs on.
+func windowsHookSessionKillCounter(t *testing.T, root string) *int {
+	t.Helper()
+	previousKill, previousLock, previousDir := windowsHookSessionKillKeys, windowsHookSessionKeyLock, windowsHookSessionDir
+	t.Cleanup(func() {
+		windowsHookSessionKillKeys, windowsHookSessionKeyLock, windowsHookSessionDir = previousKill, previousLock, previousDir
+	})
+	if root == "" {
+		root = filepath.Join(t.TempDir(), windowsHookSessionFolderName)
+		windowsHookSessionDir = func() (string, error) { return root, nil }
+	}
+	lockPath := enterprisepolicy.PublishedSessionKeysLockPath(t.TempDir())
+	windowsHookSessionKeyLock = func() (string, error) { return lockPath, nil }
+	kills := new(int)
+	windowsHookSessionKillKeys = func(path string) error {
+		*kills++
+		return previousKill(path)
+	}
+	return kills
+}
+
+// windowsHookSessionTestAllow gives the test account a key and publishes an
+// allow under it, as the hook guardian and the gateway do, and returns the
+// session the allow proves.
+func windowsHookSessionTestAllow(t *testing.T, root, identity string) enterprisepolicy.SessionKey {
+	t.Helper()
+	result := &enterprisestatus.Result{Action: "install"}
+	applyWindowsStandaloneHookSessionRecords(result, &windowsEnterpriseLifecycleOptions{})
+	if len(result.Warnings) != 0 {
+		t.Skipf("the record folder cannot get its owner here (an elevated test): %+v", result.Warnings)
+	}
+	key := enterprisepolicy.SessionKey{Connector: "copilot", Session: "s-1", Process: "windows:b:1:100"}
+	for i := 0; i < 2; i++ {
+		if err := enterprisepolicy.WritePublishedSessionRecordsForTest(root, identity, key, enterprisepolicy.GuardDecision{}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			if err := enterprisepolicy.EnsurePublishedSessionKeys(root, windowsHookSessionTrust()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !windowsHookSessionTestProves(root, identity, key) {
+		t.Fatal("the published allow must prove the process")
+	}
+	return key
+}
+
+// runWindowsHookSessionTestAction runs one standalone lifecycle action with
+// the installer stubbed (stubWindowsHookSessionTestInstaller) and returns
+// its schema-2 result.
+func runWindowsHookSessionTestAction(t *testing.T, action string, opts *windowsEnterpriseLifecycleOptions) (enterprisestatus.Result, error) {
+	t.Helper()
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	err := runWindowsEnterpriseStandaloneAction(context.Background(), command, action, opts, `C:\stage\install-enterprise.ps1`, nil)
+	var result enterprisestatus.Result
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+		t.Fatalf("%s: decode %q: %v", action, stdout.String(), decodeErr)
+	}
+	return result, err
+}
+
+// stubWindowsHookSessionTestInstaller fails every installer run and counts
+// the runs, and keeps the host's own deployment out of the result.
+func stubWindowsHookSessionTestInstaller(t *testing.T) *int {
+	t.Helper()
+	stubWindowsEnterpriseDeployments(t, nil)
+	originalRunner, originalObserver := windowsEnterpriseStandaloneRunner, windowsEnterpriseStandaloneObserver
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneRunner, windowsEnterpriseStandaloneObserver = originalRunner, originalObserver
+	})
+	runs := new(int)
+	windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
+		*runs++
+		return windowsEnterpriseStandaloneRun{}, errors.New("the test runs no installer")
+	}
+	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
+	return runs
+}
+
+// Review P2 (q-win-lifecycle loop round 2): a lifecycle refusal that only
+// read the request changed nothing, so it comes before the session keys go:
+// every account's published allow still proves its process during a
+// gateway outage, as before the run. Here an upgrade or repair whose config
+// moves gateway.api_port (GAP-0865) or enrols no connector (GAP-0602). The
+// run that goes on removes the keys before its first change, and one whose
+// key cannot be shown dead stops there, before the installer.
+func TestWindowsReadOnlyLifecycleRefusalsKeepTheSessionKeys(t *testing.T) {
+	root, identity := windowsHookSessionTestHost(t)
+	key := windowsHookSessionTestAllow(t, root, identity)
+	kills := windowsHookSessionKillCounter(t, root)
+	installerRuns := stubWindowsHookSessionTestInstaller(t)
+	originalPort, originalStaged, originalEnrolled := windowsEnterpriseConfigAPIPort, windowsEnterpriseStagedConnectors, windowsEnterpriseEnrolledConnectors
+	t.Cleanup(func() {
+		windowsEnterpriseConfigAPIPort, windowsEnterpriseStagedConnectors, windowsEnterpriseEnrolledConnectors = originalPort, originalStaged, originalEnrolled
+	})
+	stagedPort, staged := 18970, []string{"codex"}
+	windowsEnterpriseConfigAPIPort = func(path string) (int, error) {
+		if path == "" {
+			return 18970, nil
+		}
+		return stagedPort, nil
+	}
+	windowsEnterpriseStagedConnectors = func(string) ([]string, error) { return staged, nil }
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return []string{"codex"}, nil }
+	options := func() *windowsEnterpriseLifecycleOptions {
+		return &windowsEnterpriseLifecycleOptions{profile: "standalone", resolvedProfile: "standalone", configPath: `C:\stage\config.yaml`, jsonOutput: true}
+	}
+	for _, tc := range []struct {
+		name, action string
+		port         int
+		staged       []string
+	}{
+		{"upgrade that moves gateway.api_port", "upgrade", 18971, []string{"codex"}},
+		{"repair that moves gateway.api_port", "repair", 18971, []string{"codex"}},
+		{"upgrade that enrols no connector", "upgrade", 18970, nil},
+		{"repair that enrols no connector", "repair", 18970, nil},
+	} {
+		stagedPort, staged = tc.port, tc.staged
+		result, err := runWindowsHookSessionTestAction(t, tc.action, options())
+		if commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" {
+			t.Fatalf("%s: refusal %v, errors %+v", tc.name, err, result.Errors)
+		}
+		if *kills != 0 || *installerRuns != 0 {
+			t.Fatalf("%s: a refusal that changed nothing removed the session keys %d time(s), installer runs %d", tc.name, *kills, *installerRuns)
+		}
+		if !windowsHookSessionTestProves(root, identity, key) {
+			t.Fatalf("%s: the allow published before the refused run no longer proves the process", tc.name)
+		}
+	}
+	stagedPort, staged = 18970, []string{"codex"}
+	windowsHookSessionKillKeys = func(string) error {
+		*kills++
+		return fmt.Errorf("%w: the file is in use", enterprisepolicy.ErrPublishedSessionKeyAlive)
+	}
+	result, err := runWindowsHookSessionTestAction(t, "upgrade", options())
+	if err == nil || *kills != 1 || *installerRuns != 0 || !windowsBundleHasCode(result.Errors, "hook_session_records_unavailable") {
+		t.Fatalf("an upgrade that goes on must remove the keys before the installer: kills %d, installer runs %d, errors %+v (%v)", *kills, *installerRuns, result.Errors, err)
+	}
+}
+
+// The same for a repair whose supplied config cannot replace an installed
+// config.yaml that does not parse (GAP-0948): it is refused before the keys
+// go and before any other change.
+func TestWindowsRefusedConfigReplacementKeepsTheSessionKeys(t *testing.T) {
+	const installed = "invalid: [\n"
+	host, opts := newHotConfigHost(t, installed, "also invalid: [\n")
+	root, identity := windowsHookSessionTestHost(t)
+	key := windowsHookSessionTestAllow(t, root, identity)
+	kills := windowsHookSessionKillCounter(t, root)
+	installerRuns := stubWindowsHookSessionTestInstaller(t)
+	opts.jsonOutput = true
+	result, err := runWindowsHookSessionTestAction(t, "repair", opts)
+	if err == nil || len(result.Errors) != 1 || result.Errors[0].Code != "preflight_failed" ||
+		!strings.Contains(result.Errors[0].Message, "neither does the supplied config") {
+		t.Fatalf("repair with an unusable supplied config: %v, errors %+v", err, result.Errors)
+	}
+	if *kills != 0 || *installerRuns != 0 || !windowsHookSessionTestProves(root, identity, key) {
+		t.Fatalf("a refusal that changed nothing removed the session keys %d time(s), installer runs %d", *kills, *installerRuns)
+	}
+	if got, readErr := os.ReadFile(host.configPath); readErr != nil || string(got) != installed {
+		t.Fatalf("the refused repair changed config.yaml: %q, %v", got, readErr)
 	}
 }

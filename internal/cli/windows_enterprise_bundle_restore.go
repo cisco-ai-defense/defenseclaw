@@ -145,7 +145,10 @@ func windowsBundleRestoreRequested(action string, opts *windowsEnterpriseLifecyc
 // replacing names the bundle a killed run installed and the gateway never
 // confirmed, when this run settled it (windowsBundleSettle.replacing): the
 // change says that config is what the restore replaced, not an edit.
-func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBundleRestore {
+// beforeChange, when set, runs right before the first write (a lifecycle
+// action removes the session keys there); its error stops the restore,
+// which then changed nothing.
+func restoreWindowsBundleConfig(ctx context.Context, replacing string, beforeChange func() error) windowsBundleRestore {
 	var out windowsBundleRestore
 	fail := func(code, message string) windowsBundleRestore {
 		out.errors = append(out.errors, enterprisestatus.Message{Code: code, Message: message})
@@ -202,6 +205,11 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 	}
 	if !plan.Write {
 		return out
+	}
+	if beforeChange != nil {
+		if err := beforeChange(); err != nil {
+			return fail(windowsEnterpriseMessageCode(err.Error(), "bundle_restore_failed"), err.Error())
+		}
 	}
 	missing := plan.Missing
 	kept, was := "", "missing"

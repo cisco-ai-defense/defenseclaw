@@ -262,6 +262,7 @@ func TestWindowsBundleEnsureRestoresConfigChangedOutsideTheLifecycle(t *testing.
 
 func TestWindowsBundleRepairRestoresConfigChangedOutsideTheLifecycle(t *testing.T) {
 	host := newWindowsBundleRestoreHost(t)
+	kills := windowsHookSessionKillCounter(t, "")
 	edited := host.tamper(t, false)
 	stub := host.installer(t, installedStatus("repair"))
 	command := &cobra.Command{}
@@ -275,8 +276,8 @@ func TestWindowsBundleRepairRestoresConfigChangedOutsideTheLifecycle(t *testing.
 		t.Fatalf("repair: %v\n%s", err, stdout.String())
 	}
 	host.assertRestored(t, result, edited)
-	if len(stub.calls) != 1 {
-		t.Fatalf("installer runs %q", stub.calls)
+	if len(stub.calls) != 1 || *kills != 1 {
+		t.Fatalf("installer runs %q, session key removals %d (want once, before the restore wrote)", stub.calls, *kills)
 	}
 }
 
@@ -380,6 +381,7 @@ func (host *windowsBundleRestoreHost) damageCurrentVersion(t *testing.T) {
 // the permission repair and the installer, as bundle apply --help says.
 func TestWindowsBundleRepairChangesNothingWhenTheBundleStoreCannotRestore(t *testing.T) {
 	host := newWindowsBundleRestoreHost(t)
+	kills := windowsHookSessionKillCounter(t, "")
 	edited := host.tamper(t, false)
 	host.damageCurrentVersion(t)
 	// The installer stub clears the hook runtime seam, so the drift is set
@@ -409,8 +411,8 @@ func TestWindowsBundleRepairChangesNothingWhenTheBundleStoreCannotRestore(t *tes
 	if commandExitCode(err) != enterprisestatus.WindowsExitFailure || !windowsBundleHasCode(result.Errors, "bundle_restore_failed") || len(stub.calls) != 0 {
 		t.Fatalf("repair over a damaged bundle store: exit %d, errors %+v, installer runs %q", commandExitCode(err), result.Errors, stub.calls)
 	}
-	if len(repaired) != 0 || len(result.Changes) != 0 {
-		t.Fatalf("repair changed the host before it stopped: permission repairs %q, changes %q", repaired, result.Changes)
+	if len(repaired) != 0 || len(result.Changes) != 0 || *kills != 0 {
+		t.Fatalf("repair changed the host before it stopped: permission repairs %q, changes %q, session key removals %d", repaired, result.Changes, *kills)
 	}
 	if installed, err := os.ReadFile(host.layout.ConfigPath); err != nil || !bytes.Equal(installed, edited) {
 		t.Fatalf("the failed restore changed config.yaml (read %v)", err)
@@ -434,7 +436,7 @@ func TestWindowsBundleRestoreWaitsForAPendingTransaction(t *testing.T) {
 	if err := os.WriteFile(pending, []byte(`{"action":"upgrade"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	restore := restoreWindowsBundleConfig(context.Background(), "")
+	restore := restoreWindowsBundleConfig(context.Background(), "", nil)
 	if restore.failed() || len(restore.changes) != 0 || len(restore.warnings) != 1 || restore.warnings[0].Code != "bundle_restore_deferred" {
 		t.Fatalf("restore during a pending transaction: %+v", restore)
 	}
@@ -444,7 +446,7 @@ func TestWindowsBundleRestoreWaitsForAPendingTransaction(t *testing.T) {
 	if err := os.Remove(pending); err != nil {
 		t.Fatal(err)
 	}
-	if restore := restoreWindowsBundleConfig(context.Background(), ""); restore.failed() || len(restore.changes) != 1 {
+	if restore := restoreWindowsBundleConfig(context.Background(), "", nil); restore.failed() || len(restore.changes) != 1 {
 		t.Fatalf("restore after the transaction settled: %+v", restore)
 	}
 }
@@ -475,7 +477,7 @@ func TestWindowsBundleRollbackRecordsTheLastGoodBundleAgain(t *testing.T) {
 			host := newWindowsBundleRestoreHost(t)
 			ctx := context.Background()
 			host.tamper(t, false)
-			if restore := restoreWindowsBundleConfig(ctx, ""); restore.failed() {
+			if restore := restoreWindowsBundleConfig(ctx, "", nil); restore.failed() {
 				t.Fatalf("record the confirmed bundle: %+v", restore)
 			}
 			before, err := configwrite.ReadGenerationState(host.layout.ConfigPath)
