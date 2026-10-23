@@ -693,7 +693,8 @@ func TestEnterpriseOpenShellValidation(t *testing.T) {
 }
 
 // A 1.0.2/1.0.3 standalone config could retain install: setup without a pin
-// while sandboxes were off. Loading that unchanged config must survive 1.0.4.
+// while sandboxes were off. Loading it must survive 1.0.4; an enabled setup
+// still needs an installable pin when the lifecycle plans the change.
 func TestEnterpriseOpenShellUnpinnedSetupOffUpgradeConfig(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "windows"} {
 		t.Run(goos, func(t *testing.T) {
@@ -705,7 +706,7 @@ func TestEnterpriseOpenShellUnpinnedSetupOffUpgradeConfig(t *testing.T) {
 			}
 			cfg.OpenShell.Enabled = true
 			if err := resolveEnterpriseConfig(cfg, goos, "standalone"); err != nil {
-				t.Fatalf("enabled legacy setup config refused on load: %v", err)
+				t.Fatalf("enabled unpinned setup config refused on load: %v", err)
 			}
 		})
 	}
