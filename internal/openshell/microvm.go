@@ -935,12 +935,3 @@ func (r *doctorRun) microVMFix() *Fix {
 	}
 	return fix
 }
-
-// SetGatewayVersion records the release the answering gateway reports, for a
-// host report assembled outside the doctor's own gateway probe (setup's
-// injected host doctor). An empty version leaves the driver release unknown.
-func (m *MicroVMHost) SetGatewayVersion(version string) {
-	if m != nil {
-		m.gatewayVersion = version
-	}
-}

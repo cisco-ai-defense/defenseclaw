@@ -33,9 +33,6 @@ func linuxKVMReport(driver openshell.ComputeDriver, edit func(*openshell.DoctorR
 		r.MicroVM = &openshell.MicroVMHost{Linux: true, E2fsprogs: "/usr/sbin", DriverBinary: "/home/dev/.local/libexec/openshell/openshell-driver-vm",
 			ServiceUMask: "0022", StateDir: "/home/dev/.local/state/openshell/vm-driver", Identity: openshell.VMIdentity{UID: 1000, GID: 1000},
 			Recommended: openshell.VMResources{VCPUs: 4, MemMiB: 4096, OverlayDiskMiB: 16384}}
-		// The doctor names the answering gateway's release; the pinned one
-		// gets the install command for its matching driver (w25-docs).
-		r.MicroVM.SetGatewayVersion(openshell.InstallerVersion)
 		if driver == openshell.DriverVM {
 			*r.Get(openshell.CheckIDLandlock) = openshell.Check{ID: openshell.CheckIDLandlock, Title: "Landlock", Status: openshell.StatusPass,
 				Detail: "enforced by the MicroVM's own kernel; OpenShell refuses to start a sandbox without it (hard requirement)"}
