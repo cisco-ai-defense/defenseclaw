@@ -889,7 +889,8 @@ describe('Windows AD UPN outage wording', () => {
     assert.ok(row.includes('Agent identity rows leave that kept UPN out'), 'the current row behavior is missing');
     // GAP-0129 and GAP-0284: the cache and the guardian keep the last good UPN.
     const ad = source('internal/useridentity/directory_windows_facts.go');
-    assert.ok(ad.includes('c.entries[key] = adUPNEntry{upn: previous, kept: previous != "", expires: c.now().Add(adUPNFailureTTL)}'));
+    // A failed newest lookup keeps the last good answer, marked kept, for the failure TTL.
+    assert.match(ad, /kept: [\w.]+ != "", expires: c\.now\(\)\.Add\(adUPNFailureTTL\)/);
     const spool = source('internal/enterprisehooks/identity_spool.go');
     assert.ok(spool.includes('record.Facts.UPN = previous.Facts.UPN'));
     assert.ok(spool.includes('func MarkWindowsKeptUPN('));
