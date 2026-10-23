@@ -467,7 +467,6 @@ func (runtime *Runtime) emitWithLeaseControls(
 	export := observability.RemoteExportDefault
 	if !inbound {
 		export = observability.RemoteExportFrom(ctx)
-		localOnly = localOnly || export == observability.RemoteExportNone
 	}
 	var outcome pipeline.LocalLogOutcome
 	var processErr error
@@ -631,9 +630,6 @@ func (runtime *Runtime) EmitAtomicBatch(
 	flushed := sync.OnceValue(func() bool { return local.flushed(ctx) })
 	for index := range outcomes {
 		export := observability.RemoteExportFrom(items[index].Context)
-		if export == observability.RemoteExportNone {
-			continue
-		}
 		if export == observability.RemoteExportAfterLocalWrite && (!outcomes[index].LocalPersisted() || !flushed()) {
 			continue
 		}

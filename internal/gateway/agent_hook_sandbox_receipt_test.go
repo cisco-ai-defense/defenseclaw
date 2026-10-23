@@ -140,7 +140,7 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if stored, err := f.store.RecordHookDeliveryVerdict(t.Context(), pending.ID, entry.Occurrence, pendingHookJournalLimits); err != nil || !stored {
+			if stored, err := f.store.UpdateHookDelivery(t.Context(), pending.ID, entry.Occurrence, pendingHookJournalLimits); err != nil || !stored {
 				t.Fatalf("update sandbox journal = %t: %v", stored, err)
 			}
 			if err := f.api.recoverPendingHook(t.Context(), entry); err != nil {
@@ -173,7 +173,7 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if stored, err := f.store.RecordHookDeliveryVerdict(t.Context(), pending.ID, entry.Occurrence, pendingHookJournalLimits); err != nil || !stored {
+			if stored, err := f.store.UpdateHookDelivery(t.Context(), pending.ID, entry.Occurrence, pendingHookJournalLimits); err != nil || !stored {
 				t.Fatalf("update sandbox journal = %t: %v", stored, err)
 			}
 			if err := f.api.recoverPendingHook(t.Context(), entry); err != nil {
@@ -222,7 +222,7 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if stored, err := f.store.RecordHookDeliveryVerdict(t.Context(), pending.ID, entry.Occurrence, pendingHookJournalLimits); err != nil || !stored {
+			if stored, err := f.store.UpdateHookDelivery(t.Context(), pending.ID, entry.Occurrence, pendingHookJournalLimits); err != nil || !stored {
 				t.Fatalf("update sandbox journal = %t: %v", stored, err)
 			}
 			if err := f.api.recoverPendingHook(t.Context(), entry); err != nil {

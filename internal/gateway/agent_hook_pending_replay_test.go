@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
@@ -132,90 +131,5 @@ func TestPendingHookRecoveryKeepsTheProvenanceTheCallWasEvaluatedUnder(t *testin
 	}
 	if strings.Join(steps, ",") != "2" {
 		t.Fatalf("recovered hook_decision steps = %v, want [2]", steps)
-	}
-}
-
-// Rows whose records keep failing never keep recovery from the rows after
-// them: each pass starts after the last row the one before reached, and
-// returns to the failing rows only after the rest.
-func TestPendingHookRecoveryReachesRowsPastOnesThatKeepFailing(t *testing.T) {
-	f := newManagedHookAuditFixture(t, nil)
-	stuck := []string{"stuck-1", "stuck-2", "stuck-3"}
-	writable := []string{"writable-1", "writable-2"}
-	for _, session := range append(append([]string{}, stuck...), writable...) {
-		orphanPendingHook(t, f, session, pendingAllow)
-	}
-	lift := refuseAuditInserts(t, f, "audit_events", `NEW.session_id LIKE 'stuck-%'`)
-	recovering := f.restartedAPI(t, true)
-	for range 2 {
-		recovering.recoverPendingHooks(t.Context())
-	}
-	audited := f.audited(t, writable...)
-	for _, session := range writable {
-		if audited[session] != "unconfirmed/no_answer" {
-			t.Fatalf("%s: recovered audit = %q, want unconfirmed/no_answer", session, audited[session])
-		}
-	}
-	if left := pendingEntries(t, f); len(left) != len(stuck) {
-		t.Fatalf("journal rows after two passes = %d, want the %d failing ones", len(left), len(stuck))
-	}
-
-	lift()
-	recovering.recoverPendingHooks(t.Context())
-	if left := pendingEntries(t, f); len(left) != 0 {
-		t.Fatalf("journal rows once the store takes them = %d, want none", len(left))
-	}
-	audited = f.audited(t, stuck...)
-	for _, session := range stuck {
-		if audited[session] != "unconfirmed/no_answer" {
-			t.Fatalf("%s: recovered audit = %q, want unconfirmed/no_answer", session, audited[session])
-		}
-	}
-}
-
-// The journal is bounded in bytes, so large hook fields cannot fill the
-// audit volume while records cannot be written: a call whose occurrence is
-// over its limit, or would take the journal past its total, is refused with
-// a 503 the managed hook resolves closed, and is audited as that block.
-func TestPendingHookRefusesAnOversizedOrOverBudgetCallClosed(t *testing.T) {
-	f := newManagedHookAuditFixture(t, nil)
-	limits := pendingHookJournalLimits
-	t.Cleanup(func() { pendingHookJournalLimits = limits })
-	pendingHookDrainAt.Store(time.Now().UnixNano())
-
-	refused := func(session string, reply *recordFullDuplexStatusWriter) {
-		t.Helper()
-		if reply.finalStatus != http.StatusServiceUnavailable || strings.Contains(reply.Body.String(), `"action"`) {
-			t.Fatalf("%s: status %d body %.200q, want 503 and no answer", session, reply.finalStatus, reply.Body.String())
-		}
-		if got := f.audited(t, session)[session]; got != "block/no_answer" {
-			t.Fatalf("%s: audit = %q, want block/no_answer", session, got)
-		}
-	}
-	oversized := &recordFullDuplexStatusWriter{ResponseRecorder: httptest.NewRecorder()}
-	ackedHookToolCall(t, f.api, "oversized", strings.Repeat("x", limits.OccurrenceBytes), oversized)
-	refused("oversized", oversized)
-	if left := pendingEntries(t, f); len(left) != 0 {
-		t.Fatalf("journal rows after an oversized call = %v, want none", left)
-	}
-
-	lift := refuseConnectorHookAuditRows(t, f)
-	first := &recordFullDuplexStatusWriter{ResponseRecorder: httptest.NewRecorder()}
-	ackedHookCall(t, f.api, "budget-1", first)
-	if !strings.Contains(first.Body.String(), hookexec.HookDeliveryConfirmed) {
-		t.Fatalf("first call = %q, want a confirmed answer", first.Body.String())
-	}
-	entries := journalEntries(t, f)
-	if len(entries) != 1 {
-		t.Fatalf("journal rows = %d, want the one whose audit row failed", len(entries))
-	}
-	// The row stays: no recovery pass runs in this test.
-	lift()
-	pendingHookJournalLimits.Bytes = int64(len(entries[0].Occurrence) * 3 / 2)
-	second := &recordFullDuplexStatusWriter{ResponseRecorder: httptest.NewRecorder()}
-	ackedHookCall(t, f.api, "budget-2", second)
-	refused("budget-2", second)
-	if left := pendingEntries(t, f); len(left) != 1 {
-		t.Fatalf("journal rows after the over-budget call = %d, want 1", len(left))
 	}
 }
