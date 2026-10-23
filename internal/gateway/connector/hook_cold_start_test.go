@@ -642,7 +642,7 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 			if log := waitColdStartCapture(t, run.capDir, "gateway.log"); strings.Count(log, "start --hook-cold-start") > 1 {
 				t.Fatalf("the refused call started the gateway more than once: %q", log)
 			}
-			if code := exitCodeOf(run.err); code != 2 || !strings.Contains(run.stderr, "blocking codex tool") ||
+			if code := exitCodeOf(run.err); !codexBlockAnswer("PreToolUse", code, run.stdout) || !strings.Contains(run.stderr, "blocking codex tool") ||
 				(!strings.Contains(run.stderr, "this account's gateway is not running") &&
 					!strings.Contains(run.stderr, "restarting or not running")) {
 				t.Fatalf("exit %d stderr %q, want a block naming this account's unavailable gateway", code, run.stderr)

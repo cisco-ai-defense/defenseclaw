@@ -104,7 +104,11 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	}
 	if m.opts.Listeners != nil {
 		if err := m.opts.Listeners(); err != nil {
-			st.Available, st.Reason = false, err.Error()
+			// A gateway or host cause found above stays the primary reason.
+			st.Available = false
+			if st.Reason == "" {
+				st.Reason = err.Error()
+			}
 		}
 	}
 	if eff, err := m.baseEffective(cfg); err == nil {

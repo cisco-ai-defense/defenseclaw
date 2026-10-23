@@ -107,7 +107,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-acp-refresh source-restart-gateway \
         proto proto-check proto-tools \
-        dist dist-cli dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean
+        dist dist-cli dist-fleet-assets dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
 # Developer workflow help
@@ -1368,13 +1368,17 @@ _stage-extension-fingerprint: plugin
 		--source $(PLUGIN_DIR) \
 		--output $(EXTENSION_FINGERPRINT)
 
-dist-cli: _bundle-data _stage-extension-fingerprint
+dist-cli: _bundle-data _stage-extension-fingerprint dist-fleet-assets
 	@mkdir -p $(DIST_DIR)
 	@rm -rf build cli/*.egg-info
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv build --wheel --out-dir $(DIST_DIR)
+
+dist-fleet-assets:
+	@mkdir -p $(DIST_DIR)
 	tar -czf "$(DIST_DIR)/defenseclaw-fleet-assets.tar.gz" -C . \
-		edge-connector bundles/local_observability_stack/docker-compose.fleet.yml \
+		edge-connector docs-site/content/docs/reference/edge-connector/policies.mdx \
+		bundles/local_observability_stack/docker-compose.fleet.yml \
 		bundles/local_observability_stack/prometheus/examples/fleet.yml \
 		bundles/local_observability_stack/grafana/dashboards/defenseclaw-fleet.json
 

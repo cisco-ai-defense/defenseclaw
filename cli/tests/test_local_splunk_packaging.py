@@ -49,6 +49,46 @@ def test_unix_bridge_uses_only_bash_32_features() -> None:
     assert not re.search(r"(?m)^\s*(?:declare\s+-A|mapfile|readarray)\b", bridge)
 
 
+def test_local_splunk_preflight_runs_under_bash_32(tmp_path: Path) -> None:
+    if sys.platform == "darwin":
+        bash = "/bin/bash"
+    elif os.name != "nt" and os.environ.get("BASH32_TEST_BINARY"):
+        bash = os.environ["BASH32_TEST_BINARY"]
+    else:
+        pytest.skip("run on macOS /bin/bash or set BASH32_TEST_BINARY to Bash 3.2")
+    version = subprocess.run(
+        [bash, "-c", 'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'],
+        capture_output=True, text=True, timeout=10, check=True,
+    )
+    assert version.stdout == "3.2"
+
+    env_file = tmp_path / "private.env"
+    env_file.write_text("SPLUNK_IMAGE=splunk/splunk:10.2.0\n", encoding="utf-8")
+    docker_calls = tmp_path / "docker-calls"
+    docker = tmp_path / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$DOCKER_CALLS"\n'
+        'case "$1 $2" in\n'
+        '  "info --format") printf "ArM64\\n" ;;\n'
+        '  *) exit 2 ;;\n'
+        'esac\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    bridge = os.environ.get("SPLUNK_BRIDGE_TEST_BINARY") or str(BUNDLE / "bin" / "splunk-claw-bridge")
+    result = subprocess.run(
+        [bash, bridge, "up", "--env-file", str(env_file)],
+        env={**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+             "DOCKER_CALLS": str(docker_calls)},
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode != 0
+    assert "Local Splunk needs a linux/amd64 Docker engine" in result.stderr, result.stderr
+    assert "on arm64 hosts" in result.stderr
+    assert docker_calls.read_text(encoding="utf-8").splitlines() == ["info --format {{.Architecture}}"]
+
+
 def test_local_splunk_image_resolves_or_reports_registry_outage(tmp_path: Path, monkeypatch) -> None:
     stack = tmp_path / "stack"
     shutil.copytree(BUNDLE, stack)

@@ -825,7 +825,7 @@ def test_loaded_plugins_block_windows_install_before_gateway_stop() -> None:
     assert install.index("Assert-NoLoadedPluginAgents") < install.index("Stop-Gateway")
     # Wait-VenvFree and setup work can outlive the first scan. Recheck at
     # the gateway-stop boundary so a newly started old plugin is refused.
-    setup = install.index("Disable-SetupHooks")
+    setup = install.index("$Setup.ClaudeConfigDir")
     stop = install.index("Stop-Gateway", setup)
     assert install.index("Assert-NoLoadedPluginAgents", setup) < stop
     assert re.search(
@@ -3256,15 +3256,17 @@ def test_hook_fail_modes_are_held_from_before_the_gateway_stops_until_it_exits()
     # after it the old gateway comes back. With no gateway running, one
     # refresh.
     install = _ps1_function("Invoke-Install")
-    hold = install.index("if (-not (Start-HookFailModeHold $stagedGateway $gatewayProcess.Id))")
-    plain = install.index("} elseif (-not (Update-HookFailModes $stagedGateway))")
+    call = install.index("$gatewayProcess = Start-SwapHookFailModes $stagedGateway $gatewayProcess")
     swap = install.index("try { Save-BinarySnapshot }")
     stop = install.index("if (-not (Stop-Gateway))")
     finish = install.index("if (-not (Complete-HookFailModeHold))")
-    assert hold < plain < swap < stop < finish < install.index("$saved = Save-Snapshot"), install
-    assert install.index("$stagedGateway = Join-Path $Staging") < hold
-    before = install[hold:swap]
-    assert "Restore-SetupInstall" in before and "nothing was changed (see above)" in before, before
+    assert call < swap < stop < finish < install.index("$saved = Save-Snapshot"), install
+    assert install.index("$stagedGateway = Join-Path $Staging") < call
+    handoff = _ps1_function("Start-SwapHookFailModes")
+    plain = handoff.index("if (-not (Update-HookFailModes $StagedGateway))")
+    hold = handoff.index("if (-not (Start-HookFailModeHold $StagedGateway $GatewayProcess.Id))")
+    assert plain < hold, handoff
+    assert handoff.count("nothing was changed (see above)") == 2, handoff
     # A hook swap that fails lets go of the hold before it undoes the swap.
     failed_swap = install[swap : install.index("$stopRefused = $false", swap)]
     assert failed_swap.index("Stop-HookFailModeHold") < failed_swap.index("Undo-EarlySnapshot $Snap"), failed_swap
@@ -3287,6 +3289,136 @@ def test_hook_fail_modes_are_held_from_before_the_gateway_stops_until_it_exits()
     probe = _ps1_function("Test-HookFailModeRefresh")
     assert '-match "defenseclaw-gateway connector \\[command\\]") { return 1 }' in probe, probe
     assert probe.rstrip().endswith("return 2\n}"), probe
+
+
+def test_setup_hooks_are_disabled_only_once_the_fail_modes_are_ready() -> None:
+    # r104 Guard follow-up 4 (loop round 2): Disable-SetupHooks ran before the
+    # fail-mode refresh and its hold, so DefenseClaw Setup's hook launcher,
+    # which agents keep at its cached path, answered every call with exit 0
+    # and no decision while the staged gateway took up to a minute to hold the
+    # modes. Every refresh and the hold now run with the launcher enabled; it
+    # is disabled right before the stop, or, with no gateway running, right
+    # after the refresh, and put back when a gateway it started turns up.
+    handoff = _ps1_function("Start-SwapHookFailModes")
+    disables = [m.start() for m in re.finditer(r"^ +Disable-SetupHooks", handoff, re.M)]
+    assert len(disables) == 1, handoff
+    plain = handoff.index("if (-not (Update-HookFailModes $StagedGateway))")
+    hold = handoff.index("if (-not (Start-HookFailModeHold $StagedGateway $GatewayProcess.Id))")
+    assert plain < disables[0] < handoff.index("Enable-SetupHooks") < hold, handoff
+    install = _ps1_function("Invoke-Install")
+    call = install.index("$gatewayProcess = Start-SwapHookFailModes $stagedGateway $gatewayProcess")
+    quiet = install.index("            if ($Setup) { Disable-SetupHooks }\n            Write-Info \"Stopping the gateway")
+    assert call < install.index("try { Save-BinarySnapshot }") < quiet < install.index("if (-not (Stop-Gateway))"), install
+    assert "Start-HookFailModeHold" not in install and "Update-HookFailModes" not in install, install
+    assert "Enable-SetupHooks" in _ps1_function("Restore-SetupInstall")
+
+
+_HANDOFF_STUBS = """
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$Staging = '{staging}'
+$SetupHookState = '{state}'
+$Setup = {setup}
+$events = New-Object System.Collections.Generic.List[string]
+$script:looks = @({looks})
+$script:look = 0
+function Mark([string]$step) {{ $events.Add("$step=$(if (Test-Path -LiteralPath $SetupHookState) {{ 'enabled' }} else {{ 'disabled' }})") }}
+function Get-GatewayProcess {{
+    $i = [Math]::Min($script:look, $script:looks.Count - 1); $script:look++
+    if ($script:looks[$i]) {{ return [pscustomobject]@{{ Id = 4242 }} }}
+    return $null
+}}
+function Update-HookFailModes([string]$Gateway) {{ Mark 'refresh'; return {refresh} }}
+function Start-HookFailModeHold([string]$Gateway, [int]$GatewayId) {{ Mark "hold:$GatewayId"; return {hold} }}
+function Stop-HookFailModeHold {{ Mark 'release' }}
+function Complete-HookFailModeHold {{ Mark 'complete'; return {complete} }}
+function Stop-Gateway {{ Mark 'stop'; return {stop} }}
+function Clear-StagedRelease {{ Mark 'clear' }}
+function Restart-Old {{ if ($Setup) {{ Restore-SetupInstall }} }}
+function Start-SetupGateway([string]$Root) {{ Mark 'start-setup' }}
+function Get-RestoredNote {{ return 'restored' }}
+function Get-UtcClock {{ return 'T' }}
+function Write-Info([string]$m) {{ }}
+function Die([string]$m) {{ throw $m }}
+"""
+
+
+@pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
+@pytest.mark.parametrize("shell", _POWERSHELLS)
+@pytest.mark.parametrize(
+    ("case", "setup", "looks", "results", "want_events", "want_out"),
+    [
+        # A running Setup gateway: the launcher answers through it while the hold is taken.
+        ("running", True, ["1"], {}, ["hold:4242=enabled"], "was=True"),
+        # None running: enabled through the refresh, then disabled.
+        ("stopped", True, ["0", "0"], {}, ["refresh=enabled"], "was=False"),
+        # The enabled launcher started Setup's gateway during the refresh: held like a running one.
+        ("started-by-launcher", True, ["0", "1"], {}, ["refresh=enabled", "hold:4242=enabled"], "was=True"),
+        # Refusals leave the launcher enabled.
+        ("hold-fails", True, ["1"], {"hold": "$false"}, ["hold:4242=enabled"], "thrown=Could not set"),
+        ("refresh-fails", True, ["0"], {"refresh": "$false"}, ["refresh=enabled"], "thrown=Could not set"),
+        # No Setup install: its state is never touched.
+        ("plain-running", False, ["1"], {}, ["hold:4242=enabled"], "was=True"),
+        ("plain-stopped", False, ["0"], {}, ["refresh=enabled"], "was=False"),
+    ],
+)
+def test_setup_hook_launcher_answers_until_the_fail_mode_hold_is_ready(
+    tmp_path: Path,
+    shell: str,
+    case: str,
+    setup: bool,
+    looks: list[str],
+    results: dict[str, str],
+    want_events: list[str],
+    want_out: str,
+) -> None:
+    # The handoff of the shipped installer with its steps stubbed: each step
+    # records whether Setup's launcher state was in place when it ran.
+    staging, runtime = tmp_path / "staging", tmp_path / "HookRuntime"
+    staging.mkdir()
+    runtime.mkdir()
+    state = runtime / "hook-runtime-state.json"
+    state.write_text('{"status":"active"}', encoding="utf-8")
+    values = {"refresh": "$true", "hold": "$true", "complete": "$true", "stop": "$true", **results}
+    stubs = _HANDOFF_STUBS.format(
+        staging=staging,
+        state=state,
+        setup="[pscustomobject]@{ Root = 'C:\\Setup' }" if setup else "$null",
+        looks=", ".join(f"${'true' if look == '1' else 'false'}" for look in looks),
+        **values,
+    )
+    script = tmp_path / "handoff.ps1"
+    script.write_text(
+        stubs
+        + _ps1_function("Move-Path")
+        + _ps1_function("Disable-SetupHooks")
+        + _ps1_function("Enable-SetupHooks")
+        + _ps1_function("Restore-SetupInstall")
+        + _ps1_function("Start-SwapHookFailModes")
+        + "try { $was = [bool](Start-SwapHookFailModes 'staged-gateway.exe' (Get-GatewayProcess)); Write-Host \"was=$was\" } "
+        + "catch { Write-Host \"thrown=$($_.Exception.Message)\" }\n"
+        + "foreach ($e in $events) { Write-Host \"event $e\" }\n"
+        + "Write-Host \"end=$(if (Test-Path -LiteralPath $SetupHookState) { 'enabled' } else { 'disabled' })\"\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    lines = completed.stdout.splitlines()
+    assert [line[len("event ") :] for line in lines if line.startswith("event ")] == want_events, (case, completed.stdout)
+    assert any(line.startswith(want_out) for line in lines), (case, completed.stdout)
+    # The launcher is disabled here only when the swap goes on with Setup's
+    # gateway down; with one running Invoke-Install disables it right before the stop.
+    want_end = "disabled" if setup and want_out == "was=False" else "enabled"
+    assert f"end={want_end}" in lines, (case, completed.stdout)
+    assert not (staging / "hook-runtime-state.json").exists() or want_end == "disabled", (case, completed.stdout)
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
