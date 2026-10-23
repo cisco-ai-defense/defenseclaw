@@ -316,7 +316,6 @@ func windowsEnterpriseHotConfigApply(
 	restoreEnvironment := setTemporaryEnvironment(windowsEnterpriseServicePins(layout))
 	defer restoreEnvironment()
 
-	kept := keepWindowsEnterpriseEditedConfig(layout, previous)
 	generationPath := configwrite.GenerationPath(layout.ConfigPath)
 	_, generationErr := os.Stat(generationPath)
 	state, stateErr := configwrite.ReadGenerationState(layout.ConfigPath)
@@ -330,6 +329,20 @@ func windowsEnterpriseHotConfigApply(
 		failBundle("bundle_state_invalid", "cannot prove the signed config principal: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 		return false, nil
 	}
+	// Adoption and undo both depend on the installed CLI's policy report.
+	// Check that it can run and prove the policy currently enforced before
+	// changing config.yaml. A missing or untrusted CLI is then repaired by
+	// Setup's transaction, while a payload-less bundle is refused intact.
+	proof, err := windowsEnterprisePolicyDigest(ctx)
+	if err != nil {
+		return unavailable("the installed CLI cannot prove the running gateway's policy: " + err.Error())
+	}
+	var priorPolicy policyDigestReport
+	if json.Unmarshal(proof, &priorPolicy) != nil || priorPolicy.Digest == "" ||
+		priorPolicy.Digest != priorPolicy.GatewayReportedDigest {
+		return unavailable("the installed CLI did not prove that the gateway enforces the installed config")
+	}
+	kept := keepWindowsEnterpriseEditedConfig(layout, previous)
 	// Undoing puts the config back. A config the record named is recorded
 	// again as a new generation: the counter never goes back, because the
 	// gateway may already have reported the number the attempt took. A hand
@@ -441,6 +454,15 @@ func windowsEnterpriseHotConfigApply(
 		}
 	}
 	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, writeOptions); err != nil {
+		if errors.Is(err, configwrite.ErrConflict) {
+			// ReplaceDocument returns ErrConflict before candidate publication,
+			// including its final compare under the writer lock. Another writer
+			// owns the newer bytes: neither undo nor an SCM stop is warranted.
+			// Setup's transaction reads the current config again; a bundle
+			// reports a retryable conflict without transaction fallback.
+			failBundle("bundle_config_write_failed", "the installed config changed before the bundle write; retry with a fresh policy bundle: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
+			return false, nil
+		}
 		// Publication can precede a failed generation write and failed writer
 		// restore. Even unchanged bytes may have been restored after the gateway
 		// loaded the candidate. Inspect, undo, and prove the running policy on

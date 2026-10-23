@@ -167,6 +167,15 @@ func executeEnterpriseSetup(
 	opts.Standalone = standalone
 	opts.StandaloneUnsigned = standalone && payload.Manifest.Unsigned
 	opts.ProductVersion = payload.Manifest.Version
+	// A policy-less /install is only the first half of a fresh deployment.
+	// Refuse an existing or unproven deployment before staging a child: the
+	// lifecycle used to publish a fresh-install rollback receipt first, then
+	// reject DeferredConfig and strand all later repair/ensure runs.
+	if standalone && opts.Action == "install" && opts.DeferredConfig {
+		if err := requireStandaloneDeferredInstallAbsent(); err != nil {
+			return 0, err
+		}
+	}
 	for _, input := range []struct {
 		label string
 		value *string
@@ -230,6 +239,13 @@ func executeEnterpriseSetup(
 	childEnvironment, err := trustedEnterpriseSetupEnvironment(stageRoot)
 	if err != nil {
 		return 0, err
+	}
+	if opts.Standalone && opts.Action == "uninstall" {
+		// The worker can be killed after it removes managed hook wiring and
+		// before it commits. Arm an independent journal replay first.
+		if err := enterpriseSetupArmUninstallRecovery(); err != nil {
+			return 0, fmt.Errorf("cannot arm uninstall recovery before changing the installation: %w", err)
+		}
 	}
 	cliPath := filepath.Join(stageRoot, "defenseclaw.exe")
 	lifecycle := runEnterpriseLifecycleChild(parent, opts, func(ctx context.Context) ([]byte, error) {
@@ -322,6 +338,29 @@ func executeEnterpriseSetup(
 	// unexpected child status to the same fatal-install code so AVC never
 	// mistakes a partial transaction for reboot-required success.
 	return enterpriseFailureExitCode, nil
+}
+
+var standaloneSetupDeployment = func() (winpath.EnterpriseDeployment, error) {
+	deployment, err := winpath.InspectEnterpriseDeployment(managed.ProfileStandalone)
+	if err != nil || deployment.State == winpath.EnterpriseDeploymentAbsent {
+		return deployment, err
+	}
+	if err := managed.ValidateTrustedFilePath(deployment.MetadataPath, "standalone deployment record"); err != nil {
+		return deployment, err
+	}
+	return deployment, nil
+}
+
+func requireStandaloneDeferredInstallAbsent() error {
+	deployment, err := standaloneSetupDeployment()
+	if err != nil {
+		return fmt.Errorf("cannot establish whether a standalone deployment is already installed: %w", err)
+	}
+	if deployment.State != winpath.EnterpriseDeploymentAbsent &&
+		deployment.State != winpath.EnterpriseDeploymentTombstone {
+		return enterpriseSetupInvalidArguments{errors.New("/install without CONFIG and MANIFEST requires an empty standalone deployment; use /repair to complete a deferred install or /ensure to update an active install (nothing was changed)")}
+	}
+	return nil
 }
 
 // Recovery uses this seam so the timeout contract can be exercised without

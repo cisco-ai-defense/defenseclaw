@@ -37,7 +37,7 @@ $script:LocalExpectedFingerprintNames = @(
 $script:LocalExpectedRoster = @(
     'claudecode|action|closed|True|manual',
     'codex|observe|open|True|manual',
-    'cursor|action|closed|True|manual',
+    'cursor|action|closed|True|manual'
 )
 $script:LocalCapability = ''
 $script:LocalCapabilitySHA256 = ''

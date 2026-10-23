@@ -23,9 +23,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -72,8 +74,14 @@ var (
 		}
 		return deployment.State == winpath.EnterpriseDeploymentInstalled, nil
 	}
-	windowsSecretIsElevated     = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
-	windowsSecretRestartGateway = restartWindowsStandaloneGateway
+	windowsSecretIsElevated      = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
+	windowsSecretRestartGateway  = restartWindowsStandaloneGateway
+	windowsSecretSpawnRecovery   = spawnWindowsSecretGatewayRecovery
+	windowsSecretRecoveryFlags   = independentWindowsSecretRecoveryFlags
+	windowsSecretRecoveryCommand = func(executable string) *exec.Cmd {
+		return exec.Command(executable, "enterprise", "secret", "recover-gateway")
+	}
+	windowsSecretConfigTrusted = managed.ValidateTrustedConfigPath
 	// windowsSecretLockBundleStore, windowsSecretLifecycleLockPath and
 	// windowsSecretLifecycleLock are the two locks set and remove take.
 	windowsSecretLockBundleStore   = lockWindowsBundleStoreWithin
@@ -97,6 +105,12 @@ func init() {
 	enterpriseSecretArgumentRefusal = func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error {
 		return reportWindowsSecretFailure(cmd, action, opts, err, opts.json || secretArgsRequestJSON(secretRawArgs()))
 	}
+	enterpriseSecretCmd.AddCommand(&cobra.Command{
+		Use: "recover-gateway", Hidden: true, Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return recoverWindowsSecretGateway(cmd.Context(), cmd.OutOrStdout())
+		},
+	})
 }
 
 // windowsSecretStandardUserAnswer is a standard account's refusal of
@@ -286,6 +300,25 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	if err := requireWindowsSecretDeployment(); err != nil {
 		return windowsSecretChange{}, err
 	}
+	var installedConfig []byte
+	if action == "remove" {
+		installedConfig, err = readWindowsSecretInstalledConfig(layout)
+		if err != nil {
+			return windowsSecretChange{}, err
+		}
+		if at := config.InstalledCredentialReference(layout.ConfigPath, installedConfig, layout.DataDir, opts.name); at != "" {
+			return windowsSecretChange{}, secretFailed("credential_in_use", windowsSecretExitFailure,
+				fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", opts.name, at))
+		}
+	}
+	// Arm an independent, short-lived child while the old gateway still runs.
+	// It waits for these locks, then starts a stopped service if this process
+	// is killed during the stop/start interval. A launch failure refuses the
+	// change before any credential or audit state is written.
+	if err := windowsSecretSpawnRecovery(); err != nil {
+		return windowsSecretChange{}, secretFailed("change_failed", windowsSecretExitFailure,
+			fmt.Errorf("cannot arm gateway restart recovery; nothing was changed: %w", err))
+	}
 	// Pin the store before anything in it is read, written or deleted: a
 	// junction, mount point, symlink or file where the folder belongs is
 	// state_invalid. Remove deleted the credential a junction target held
@@ -319,7 +352,7 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		}
 	} else {
 		unchanged = !windowsSecretStored(layout.SecretsDir, opts.name)
-		if err := removeWindowsSecret(layout, store, opts.name); err != nil {
+		if err := removeWindowsSecret(store, opts.name); err != nil {
 			return change, err
 		}
 	}
@@ -381,25 +414,31 @@ func requireWindowsSecretDeployment() error {
 	return nil
 }
 
-// removeWindowsSecret deletes the credential unless the installed config
-// still references it. The restart that follows would start the gateway on a
-// config it cannot compile without this credential, or run the judge without
-// its key (GAP-0674). A config that exists but cannot be read may still
-// reference it, so nothing is removed (GAP-1507).
-func removeWindowsSecret(layout managed.StandaloneLayout, store *windowsSecretStore, name string) error {
-	if strings.TrimSpace(layout.ConfigPath) != "" {
-		raw, err := os.ReadFile(layout.ConfigPath)
-		switch {
-		case err == nil:
-			if at := config.InstalledCredentialReference(layout.ConfigPath, raw, layout.DataDir, name); at != "" {
-				return secretFailed("credential_in_use", windowsSecretExitFailure,
-					fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", name, at))
-			}
-		case !errors.Is(err, os.ErrNotExist):
-			return secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
-				fmt.Errorf("cannot read the installed config %s to check that it no longer references credential %s (%v); nothing was removed: restore read access to the config and run it again", layout.ConfigPath, name, err))
-		}
+// readWindowsSecretInstalledConfig proves the active config can be inspected
+// before remove changes the credential. A missing, unreadable, or malformed
+// config cannot prove that the key is unused (GAP-0674, GAP-1507).
+func readWindowsSecretInstalledConfig(layout managed.StandaloneLayout) ([]byte, error) {
+	if strings.TrimSpace(layout.ConfigPath) == "" {
+		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+			errors.New("cannot locate the installed config; nothing was removed"))
 	}
+	if err := windowsSecretConfigTrusted(layout.ConfigPath); err != nil {
+		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+			fmt.Errorf("cannot trust the installed config %s (%v); nothing was removed", layout.ConfigPath, err))
+	}
+	raw, err := os.ReadFile(layout.ConfigPath)
+	if err != nil {
+		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+			fmt.Errorf("cannot read the installed config %s (%v); nothing was removed: restore read access to the config and run it again", layout.ConfigPath, err))
+	}
+	if _, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, raw); err != nil {
+		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+			fmt.Errorf("cannot load the installed config %s (%v); nothing was removed", layout.ConfigPath, err))
+	}
+	return raw, nil
+}
+
+func removeWindowsSecret(store *windowsSecretStore, name string) error {
 	if err := store.remove(name); err != nil {
 		return secretFailed("change_failed", windowsSecretExitFailure, err)
 	}
@@ -884,6 +923,110 @@ func restartWindowsStandaloneGateway() (bool, error) {
 	}
 	defer service.Close()
 	return restartWindowsGatewayService(scmGatewayService{service}, managed.StandaloneWindowsGatewaySvc, 60*time.Second, 250*time.Millisecond)
+}
+
+// spawnWindowsSecretGatewayRecovery gives a killed secret command an
+// independent service starter. It carries no credential value or writable
+// state; the child rechecks the installed deployment under the same locks.
+func spawnWindowsSecretGatewayRecovery() error {
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	flags, err := windowsSecretRecoveryFlags()
+	if err != nil {
+		return err
+	}
+	child := windowsSecretRecoveryCommand(executable)
+	child.Dir = filepath.Dir(executable)
+	child.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags}
+	child.Stderr = io.Discard
+	ready, err := child.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("create gateway recovery readiness pipe: %w", err)
+	}
+	if err := child.Start(); err != nil {
+		return err
+	}
+	result := make(chan error, 1)
+	go func() {
+		marker := make([]byte, len("READY\n"))
+		_, readErr := io.ReadFull(ready, marker)
+		if readErr == nil && string(marker) != "READY\n" {
+			readErr = errors.New("gateway recovery sent an invalid readiness marker")
+		}
+		result <- readErr
+	}()
+	select {
+	case err = <-result:
+	case <-time.After(30 * time.Second):
+		err = errors.New("gateway recovery did not become ready within 30 seconds")
+	}
+	if err != nil {
+		_ = child.Process.Kill()
+		_ = ready.Close()
+		_ = child.Wait()
+		return fmt.Errorf("gateway recovery was not armed: %w", err)
+	}
+	_ = ready.Close()
+	return child.Process.Release()
+}
+
+func independentWindowsSecretRecoveryFlags() (uint32, error) {
+	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	err := windows.QueryInformationJobObject(0, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil)
+	return independentWindowsSecretRecoveryFlagsForJob(info.BasicLimitInformation.LimitFlags, err)
+}
+
+func independentWindowsSecretRecoveryFlagsForJob(limits uint32, err error) (uint32, error) {
+	flags := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
+	if errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+		return flags, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("inspect gateway recovery process job: %w", err)
+	}
+	if limits&windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK != 0 {
+		flags |= windows.CREATE_BREAKAWAY_FROM_JOB
+	} else if limits&windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE != 0 &&
+		limits&windows.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK == 0 {
+		return 0, errors.New("gateway recovery cannot survive the credential command's enclosing process job; nothing was changed")
+	}
+	return flags, nil
+}
+
+func recoverWindowsSecretGateway(ctx context.Context, stdout io.Writer) error {
+	if err := windowsSecretElevation("recover-gateway", nil); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(stdout, "READY\n"); err != nil {
+		return err
+	}
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		return err
+	}
+	release, err := lockWindowsSecretChange(ctx, layout, 10*time.Minute)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := requireWindowsSecretDeployment(); err != nil {
+		return err
+	}
+	manager, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		return err
+	}
+	defer service.Close()
+	_, err = startWindowsGatewayServiceIfStopped(scmGatewayService{service}, managed.StandaloneWindowsGatewaySvc, 60*time.Second, 250*time.Millisecond)
+	return err
 }
 
 // scmGatewayService drives the installed gateway service through the SCM.

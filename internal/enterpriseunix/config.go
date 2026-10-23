@@ -320,6 +320,12 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 	if err := config.ValidateManagedStandaloneConfig(raw, cfg, compiled.Plan, e.Layout); err != nil {
 		return nil, err
 	}
+	if err := config.ValidateManagedStandaloneRuntimeContent(cfg); err != nil {
+		return nil, err
+	}
+	if err := e.checkManagedPolicyDir(cfg); err != nil {
+		return nil, err
+	}
 	if err := e.checkRulePackDirs(cfg); err != nil {
 		return nil, err
 	}
@@ -582,6 +588,58 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 		}
 	}
 	return nil
+}
+
+// checkManagedPolicyDir mirrors the gateway's policy-tree trust check before
+// the lifecycle swaps config.yaml. checkRulePackDirs handles referenced packs
+// separately and preserves its more specific refusal text. Env.P keeps this
+// check valid on rooted test hosts.
+func (e *Env) checkManagedPolicyDir(cfg *config.Config) error {
+	dir := strings.TrimSpace(cfg.PolicyDir)
+	if dir == "" {
+		return nil
+	}
+	full := e.P(filepath.Clean(dir))
+	info, err := os.Lstat(full)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("config: inspect policy_dir %s: %w", dir, err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("config: managed standalone policy_dir %s is not a directory", dir)
+	}
+	if err := e.Trust(full, TrustRuntimeDir); err != nil {
+		return fmt.Errorf("config: managed standalone policy_dir is not administrator-controlled: %w", err)
+	}
+	entries := 0
+	return filepath.WalkDir(full, func(path string, _ fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("config: inspect policy_dir %s: %w", path, walkErr)
+		}
+		if path == full {
+			return nil
+		}
+		entries++
+		if entries > rulePackTreeMaxEntries {
+			return fmt.Errorf("config: managed standalone policy_dir has more than %d entries", rulePackTreeMaxEntries)
+		}
+		entry, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("config: inspect policy_dir %s: %w", path, err)
+		}
+		kind := TrustRuntimeFile
+		if entry.IsDir() {
+			kind = TrustRuntimeDir
+		} else if !entry.Mode().IsRegular() {
+			return fmt.Errorf("config: managed standalone policy_dir %s is not a regular file or directory", path)
+		}
+		if err := e.Trust(path, kind); err != nil {
+			return fmt.Errorf("config: managed standalone policy_dir is not administrator-controlled: %w", err)
+		}
+		return nil
+	})
 }
 
 // checkCandidateAssets builds the rule packs the config selects, with its

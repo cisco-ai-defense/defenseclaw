@@ -1489,6 +1489,21 @@ targets:
         function script:Assert-DefenseClawManagedInstallTree {
             param([Parameter(Mandatory)][hashtable]$Layout)
         }
+        function script:Assert-DefenseClawStandaloneInstallTreeNotInUse {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName,
+                [Parameter(Mandatory)][string]$GuardianServiceName,
+                [int]$SelfUninstallCallerPID
+            )
+            if ($script:HarnessState.crash_at -ceq 'install-holder-refusal') {
+                throw 'uninstall_in_use: an outside program holds an installed file; nothing was changed'
+            }
+        }
+        function script:Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
+            param([Parameter(Mandatory)][hashtable]$Layout)
+            $script:HarnessState.events.Add('replacement-backups-retired')
+        }
         function script:Assert-DefenseClawRecordedArtifactHashes {
             param(
                 [Parameter(Mandatory)]$Metadata,
@@ -3537,16 +3552,21 @@ targets:
                     ) `
                     -Message "$Name did not preserve exact purge retry semantics"
             }
-            elseif ($CrashAt -eq 'service-drift-preflight') {
+            elseif ($CrashAt -in @('service-drift-preflight', 'install-holder-refusal')) {
                 Assert-Harness `
                     -Condition ($script:HarnessState.transaction_calls -eq 0) `
-                    -Message "$Name mutated lifecycle state after service drift"
+                    -Message "$Name mutated lifecycle state after a precommit refusal"
                 Assert-Harness `
                     -Condition ($script:HarnessState.prepare_calls -eq 0) `
-                    -Message "$Name began hook teardown after service drift"
+                    -Message "$Name began hook teardown after a precommit refusal"
                 Assert-Harness `
                     -Condition ([bool]$script:HarnessState.binary_present) `
-                    -Message "$Name removed a binary after service drift"
+                    -Message "$Name removed a binary after a precommit refusal"
+                if ($CrashAt -ceq 'install-holder-refusal') {
+                    Assert-Harness `
+                        -Condition ($script:HarnessState.events.IndexOf('replacement-backups-retired') -lt 0) `
+                        -Message "$Name removed replacement backups before refusing an install-root holder"
+                }
             }
             elseif ($CrashAt -ceq 'post-binary-delete') {
                 Assert-Harness `
@@ -7188,6 +7208,11 @@ targets:
             -Name 'quiesce-prevents-reheal' `
             -CrashAt '' `
             -ExpectSuccess:$true
+        Invoke-HarnessUninstallCase `
+            -Name 'install-holder-refusal-before-backup-retirement' `
+            -CrashAt 'install-holder-refusal' `
+            -ExpectSuccess:$false `
+            -Purge:$true
         Invoke-HarnessUninstallCase `
             -Name 'crash-after-complete-retry-retirement' `
             -CrashAt '' `

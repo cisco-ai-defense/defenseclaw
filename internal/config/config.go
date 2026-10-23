@@ -2964,34 +2964,7 @@ func loadConfigSourceCheckedWithLayout(
 				return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
 			}
 		}
-		if err := managed.ValidateTrustedServiceRuntimeDir(
-			cfg.DataDir,
-			"managed data_dir",
-			os.Getenv(managed.WindowsServiceAccountEnv),
-		); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_data_dir_untrusted")
-			}
-			return nil, fmt.Errorf("config: managed_enterprise data_dir trust check failed: %w", err)
-		}
-		if err := validateManagedEnterpriseListenerBindings(&cfg); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_listener_non_loopback")
-			}
-			return nil, err
-		}
-		if checkPolicyInputs {
-			if err := validateManagedStandalonePolicyInputs(&cfg); err != nil {
-				if ReportConfigLoadError != nil {
-					ReportConfigLoadError(context.Background(), "managed_policy_input_untrusted")
-				}
-				return nil, err
-			}
-		}
-		if err := validateManagedEnterpriseWindowsPeerAuthKnobs(&cfg); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_ipc_peer_auth_unsupported_on_windows")
-			}
+		if err := validateManagedEnterpriseRuntime(&cfg, checkPolicyInputs, true); err != nil {
 			return nil, err
 		}
 	}

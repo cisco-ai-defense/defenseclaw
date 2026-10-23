@@ -2093,7 +2093,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	l.generationExposed = true
 	activationStarted := env.Now()
 	if !l.opts.NoStart {
-		if err := l.activate(ctx, units, restartSockets, hot); err != nil {
+		if err := l.activate(ctx, units, restartSockets, hot, p); err != nil {
 			// A readiness failure on the API port already names the holder.
 			if named := (*apiPortHeldError)(nil); !errors.As(err, &named) {
 				if held := l.portHeldProblem(ctx, account.UID, false); held != "" {
@@ -2679,7 +2679,7 @@ func socketsToRestart(env *Env, units []Unit, record *Deployment, p *plan, chang
 // restarted in one service-manager job, so the port is unbound only for
 // the moment the listener is replaced. With hot, a gateway that kept running
 // is not started again: it is waited for until it has applied the config.
-func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets map[string]bool, hot bool) error {
+func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets map[string]bool, hot bool, p *plan) error {
 	env := l.env
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage < ordered[j].Stage })
@@ -2730,6 +2730,25 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 		if hot && unit.Kind == "gateway" && env.Services.Active(ctx, unit) {
 			if err := l.settleHotGateway(ctx, unit); err != nil {
 				return err
+			}
+			continue
+		}
+		if env.GOOS == "linux" && unit.Kind == "sensor_helper" {
+			previous, _ := env.sensorState()
+			// A stop during an RPM handoff can leave the old helper active.
+			// systemctl start then succeeds without applying the new drop-in.
+			if env.Services.Active(ctx, unit) {
+				if err := restartUnit(ctx, env.Services, unit); err != nil {
+					return &unitActivationError{unit: unit, err: fmt.Errorf("restart %s: %w", unit.Name, err)}
+				}
+			} else if err := env.Services.Start(ctx, unit); err != nil {
+				return &unitActivationError{unit: unit, err: fmt.Errorf("start %s: %w", unit.Name, err)}
+			}
+			if previous.Intent.Mode != "" && string(previous.Intent.Mode) != p.config.Tetragon.helperMode() {
+				if err := l.waitHelperMode(ctx, unit, p.config.Tetragon.helperMode(), previous); err != nil {
+					return &unitActivationError{unit: unit, err: err}
+				}
+				l.helperModeRestart = true
 			}
 			continue
 		}

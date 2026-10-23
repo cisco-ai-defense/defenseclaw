@@ -47,6 +47,11 @@ type fakeServices struct {
 	failStart map[string]error
 	// failed units report systemd's failed state.
 	failed map[string]bool
+	// keepActiveOnStop models a systemd stop that returns while a helper is
+	// still active; a later start is then a successful no-op.
+	keepActiveOnStop map[string]bool
+	afterStart       func(Unit)
+	afterRestart     func(Unit)
 	// restarting units are in systemd's restart delay after a run with this
 	// Result ("success" for a planned restart, "exit-code" for a crash).
 	// PlannedRestart reads it once, and the unit is active again after that.
@@ -129,6 +134,9 @@ func (f *fakeServices) Start(_ context.Context, u Unit) error {
 	f.mu.Lock()
 	f.active[u.Name] = true
 	f.mu.Unlock()
+	if f.afterStart != nil {
+		f.afterStart(u)
+	}
 	return nil
 }
 
@@ -140,13 +148,18 @@ func (f *fakeServices) Restart(_ context.Context, u Unit) error {
 	f.mu.Lock()
 	f.active[u.Name] = true
 	f.mu.Unlock()
+	if f.afterRestart != nil {
+		f.afterRestart(u)
+	}
 	return nil
 }
 
 func (f *fakeServices) Stop(_ context.Context, u Unit) error {
 	f.record("stop " + u.Name)
 	f.mu.Lock()
-	f.active[u.Name] = false
+	if !f.keepActiveOnStop[u.Name] {
+		f.active[u.Name] = false
+	}
 	f.mu.Unlock()
 	return nil
 }

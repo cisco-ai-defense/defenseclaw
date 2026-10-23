@@ -52,6 +52,7 @@ $failures = & $module {
     $failures = [Collections.Generic.List[string]]::new()
     $script:TestCalls = [Collections.Generic.List[string]]::new()
     $script:TestFailing = @{}
+    $script:TestConfigGuard = $false
     $script:TestLocalSystem = $true
     $script:TestUntrustedSource = ''
     $script:TestVersions = @{}
@@ -110,6 +111,13 @@ $failures = & $module {
             $report['leftovers'] = @($script:TestLeftover)
         }
         $exitCode = 0
+        if ($script:TestConfigGuard -and $action -ceq 'restore' -and
+            [IO.File]::ReadAllText([string]$Layout.ConfigPath).Contains('/opt/cisco/defenseclaw/runtime')) {
+            $report.ok = $false
+            $report.phase = ''
+            $report['error'] = 'load protected Windows enterprise config: managed_enterprise data_dir trust check failed'
+            $exitCode = 1
+        }
         if ($script:TestFailing.ContainsKey("${gateway}:$action")) {
             $report.ok = $false
             $report.phase = ''
@@ -197,6 +205,7 @@ $failures = & $module {
                 $script:TestFailing[$entry] = $true
             }
             $script:TestCalls.Clear()
+            $script:TestConfigGuard = $false
             $script:TestLocalSystem = $true
             $script:TestUntrustedSource = ''
             Set-DefenseClawRecoveryGatewayCandidate -InstallerSource $setupInstaller
@@ -573,12 +582,17 @@ $failures = & $module {
             param([string]$Path, [string]$Kind, [string]$GatewayServiceSID)
             $script:TestAcls.Add($Kind + ':' + [IO.Path]::GetFileName($Path))
         }
+        function Get-DefenseClawDeterministicServiceSID {
+            param([string]$ServiceName)
+            return 'S-1-5-80-1-2-3-4-5'
+        }
 
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         $stateRoot = [IO.Path]::Combine($root, 'state')
         $layout.StateRoot = $stateRoot
         $layout.ManifestPath = [IO.Path]::Combine($stateRoot, 'targets.yaml')
         $layout.ConfigDirectory = [IO.Path]::Combine($stateRoot, 'etc')
+        $layout.ConfigPath = [IO.Path]::Combine($layout.ConfigDirectory, 'config.yaml')
         $layout.CertificationCodexHome = ''
         $layout.CoreHardeningCertification = $false
         $layout.ProviderLibraryPath = ''
@@ -589,8 +603,10 @@ $failures = & $module {
         $layout.AgentApplicationControlAttestationPath = [IO.Path]::Combine($stateRoot, 'agent-application-control.json')
         $layout.StateRootAncestors = @()
         $priorGateway = [IO.Path]::Combine($stateRoot, 'install', 'backup', 'defenseclaw-gateway.exe')
+        $priorConfig = [IO.Path]::Combine($stateRoot, 'install', 'file-06.bak')
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($priorGateway))
         [IO.File]::WriteAllText($priorGateway, 'prior-gateway', $utf8)
+        [IO.File]::WriteAllText($priorConfig, "config_version: 9`ndata_dir: C:\ProgramData\Cisco\DefenseClaw\runtime`n", $utf8)
         $snapshotPath = [IO.Path]::Combine($stateRoot, 'install', 'transaction.json')
         $generationRecord = [IO.Path]::Combine($layout.ConfigDirectory, 'config.generation.json')
         [void][IO.Directory]::CreateDirectory($layout.ConfigDirectory)
@@ -603,6 +619,8 @@ $failures = & $module {
             $label = [string]$case.Label
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $case.Profile
             Reset-TestHost
+            $script:TestConfigGuard = $case.Profile -ceq 'Standalone' -and $existed
+            [IO.File]::WriteAllText($layout.ConfigPath, "config_version: 9`ndata_dir: /opt/cisco/defenseclaw/runtime`n", $utf8)
             [IO.File]::WriteAllText($layout.ManagedHooksLifecycleJournalPath, '{}', $utf8)
             [IO.File]::WriteAllText($generationRecord, 'rejected-generation', $utf8)
             $script:TestAcls = [Collections.Generic.List[string]]::new()
@@ -624,6 +642,13 @@ $failures = & $module {
                         backup = $(if ($existed) { $priorGateway } else { '' })
                     }
                 )
+            }
+            if ($case.Profile -ceq 'Standalone') {
+                $snapshot['files'] += [ordered]@{
+                    path = $layout.ConfigPath
+                    existed = $existed
+                    backup = $(if ($existed) { $priorConfig } else { '' })
+                }
             }
             if (-not $existed) {
                 # Only a record the transaction creates is in the snapshot.
@@ -667,6 +692,9 @@ $failures = & $module {
                 (-not $present -or [IO.File]::ReadAllText($layout.GatewayPath).Trim() -cne 'prior-gateway')) {
                 $failures.Add("${label}: <InstallRoot>\bin does not hold the prior release's gateway again")
             }
+            if ($existed -and [IO.File]::ReadAllText($layout.ConfigPath) -cne [IO.File]::ReadAllText($priorConfig)) {
+                $failures.Add("${label}: rollback did not restore the prior config")
+            }
             if (-not $existed -and $present) {
                 $failures.Add("${label}: the recovery gateway was left at <InstallRoot>\bin")
             }
@@ -674,7 +702,8 @@ $failures = & $module {
                 [IO.File]::ReadAllText($generationRecord).Trim()
             } else { '' })
             $acls = @($script:TestAcls) -join '|'
-            if (($existed -and ($record -cne 'rejected-generation' -or $acls -cne '')) -or
+            $expectedAcls = $(if ($case.Profile -ceq 'Standalone' -and $existed) { 'ConfigFile:config.yaml' } else { '' })
+            if (($existed -and ($record -cne 'rejected-generation' -or $acls -cne $expectedAcls)) -or
                 (-not $existed -and ($record -cne '' -or $acls -cne '')) -or
                 $script:TestRecordedRestore -ne 1) {
                 $failures.Add("${label}: config.generation.json is '$record' with access $acls, restore recorded $($script:TestRecordedRestore) times, after the rollback")
