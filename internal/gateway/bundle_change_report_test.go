@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -262,5 +263,57 @@ func TestBundleReceiptReporterSkipsAChangeEventEditedAfterItWasWritten(t *testin
 				t.Fatalf("an edited change event was reported: %+v", sink.changes)
 			}
 		})
+	}
+}
+
+// A change or receipt whose reported marker could not be written is not
+// offered again, and its marker is written at a later poll once the marker
+// folder is repaired, so the change commands can remove the change from the
+// spool; the change keeps its delivery state until then. Before, the id was
+// cached as reported and this process never wrote its marker, so unreported
+// changes piled up until the spool refused new ones.
+func TestBundleReceiptReporterRetriesAMarkerItCouldNotWrite(t *testing.T) {
+	dir := t.TempDir()
+	receipts := enterprisestatus.PublicReceiptPath(dir)
+	sink := &fakeBundleReceiptSink{}
+	reporter := &bundleReceiptReporter{receiptPath: receipts, markerPath: filepath.Join(dir, bundleReceiptMarkerName),
+		sink: sink, enforcedVersion: func() uint64 { return 0 },
+		pins: audit.NewConfigChangePins(filepath.Join(dir, changeRecordPinsDirName))}
+	ev := writeTestChangeEvent(t, enterprisestatus.ChangeEventsDir(dir), enterprisestatus.ChangeKindSecret,
+		enterprisestatus.ChangeActionSet, enterprisestatus.ChangeApplied, "",
+		func(ev *enterprisestatus.ChangeEvent) { ev.SecretName = "splunk-hec-token" })
+	const receiptID = "r-01JAZ3Y8Q2K7V4N6M5P0R9S8T1"
+	writeTestPublicReceipt(t, filepath.Join(filepath.Dir(receipts), enterprisestatus.PublicReceiptEventsDirName, receiptID+".json"),
+		enterprisestatus.PublicReceipt{SchemaVersion: 1, ReceiptID: receiptID, BundleID: testBundleID, Version: 3,
+			State: enterprisestatus.BundleConfirmed, FinishedAt: "2026-10-23T10:00:00Z",
+			CurrentBundleID: testBundleID, CurrentVersion: 3})
+	// A file where the marker folder belongs: every marker write fails.
+	if err := os.WriteFile(reporter.seenDir(), []byte("in the way"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reporter.poll(context.Background())
+	reporter.poll(context.Background())
+	if len(sink.changes) != 1 || len(sink.receipts) != 1 {
+		t.Fatalf("offers with the marker folder broken: %d changes, %d receipts; want one each", len(sink.changes), len(sink.receipts))
+	}
+	if enterprisestatus.ChangeReported(dir, ev.EventID) || reporter.reportedOnDisk(receiptID) {
+		t.Fatal("a marker is on disk although its folder is broken")
+	}
+	if reporter.changes[ev.EventID] == nil {
+		t.Error("the change dropped its delivery state before its marker was on disk")
+	}
+	if err := os.Remove(reporter.seenDir()); err != nil {
+		t.Fatal(err)
+	}
+	reporter.poll(context.Background())
+	if !enterprisestatus.ChangeReported(dir, ev.EventID) || !reporter.reportedOnDisk(receiptID) {
+		t.Fatal("markers not written after the marker folder was repaired")
+	}
+	if reporter.changes[ev.EventID] != nil {
+		t.Fatal("the change kept its delivery state after its marker was written")
+	}
+	reporter.poll(context.Background())
+	if len(sink.changes) != 1 || len(sink.receipts) != 1 {
+		t.Fatalf("offers after the repair: %d changes, %d receipts; want still one each", len(sink.changes), len(sink.receipts))
 	}
 }

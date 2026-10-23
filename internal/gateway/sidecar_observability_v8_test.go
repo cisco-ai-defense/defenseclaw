@@ -73,6 +73,21 @@ func newSidecarRuntimeFixtureWithSigner(
 	signer audit.ProjectionIntegritySigner,
 ) sidecarRuntimeFixture {
 	t.Helper()
+	var off []observability.Bucket
+	if !collectLifecycle {
+		off = append(off, observability.BucketAgentLifecycle)
+	}
+	return newSidecarRuntimeFixtureCollectingNo(t, signer, off...)
+}
+
+// newSidecarRuntimeFixtureCollectingNo turns log collection off for each
+// bucket in off.
+func newSidecarRuntimeFixtureCollectingNo(
+	t *testing.T,
+	signer audit.ProjectionIntegritySigner,
+	off ...observability.Bucket,
+) sidecarRuntimeFixture {
+	t.Helper()
 	previousInstanceID := gatewaylog.SidecarInstanceID()
 	gatewaylog.SetSidecarInstanceID("sidecar-runtime-test")
 	t.Cleanup(func() { gatewaylog.SetSidecarInstanceID(previousInstanceID) })
@@ -91,12 +106,13 @@ func newSidecarRuntimeFixtureWithSigner(
 		Path: path, JudgeBodiesPath: filepath.Join(directory, "judge-bodies.db"),
 		RetentionDays: &retentionDays,
 	}}
-	if !collectLifecycle {
+	if len(off) > 0 {
 		disabled := false
-		source.Buckets = map[observability.Bucket]config.ObservabilityV8BucketPolicySource{
-			observability.BucketAgentLifecycle: {
+		source.Buckets = map[observability.Bucket]config.ObservabilityV8BucketPolicySource{}
+		for _, bucket := range off {
+			source.Buckets[bucket] = config.ObservabilityV8BucketPolicySource{
 				Collect: config.ObservabilityV8CollectSource{Logs: &disabled},
-			},
+			}
 		}
 	}
 	plan, err := config.CompileObservabilityV8(source)

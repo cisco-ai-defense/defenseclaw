@@ -5,6 +5,10 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,11 +17,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/google/uuid"
 )
@@ -266,7 +275,7 @@ func TestPendingHookRecoveryLeavesLiveHandlersOfThisProcessAlone(t *testing.T) {
 	live := filepath.Join(dir, entries[0].Name())
 
 	restarted := f.restartedAPI(t, true)
-	restarted.ensurePendingHookRecovery(t.Context())
+	restarted.recoverPendingHookOccurrences(t.Context(), nil)
 	takenOver := f.audited(t, session)[session]
 	stillThere := pendingPathExists(live)
 	close(reply.resume)
@@ -303,5 +312,322 @@ func TestPendingFailureHookDecisionIsTheClosedFallback(t *testing.T) {
 		if got := pendingFailureHookDecision(agentHookResponse{Action: action}); got.Action != "block" {
 			t.Fatalf("%s after pending failure = %q, want block", action, got.Action)
 		}
+	}
+}
+
+// ackedHookCall sends one claudecode tool call whose hook acknowledges the
+// answer it got.
+func ackedHookCall(t *testing.T, api *APIServer, session string, w http.ResponseWriter) {
+	t.Helper()
+	body := managedHookBody(session, "PreToolUse")
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook",
+		strings.NewReader(body+hookexec.HookDeliveryReceiptAck))
+	request.Header.Set(hookexec.HookDeliveryReceiptHeader, "1")
+	request.Header.Set(hookexec.HookDeliveryPayloadBytesHeader, strconv.Itoa(len(body)))
+	request.Header.Set("Content-Type", "application/json")
+	api.handleAgentHook("claudecode").ServeHTTP(w, request)
+}
+
+func pendingEntries(t *testing.T, f managedHookAuditFixture) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(f.api.scannerCfg.DataDir, pendingHookDirName))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names
+}
+
+// With guardrail.evaluation log collection off no hook_decision record is
+// ever kept, so none can hold an occurrence back: once the audit logger has
+// taken the connector row (the same collection policy keeps it out of the
+// local store), the occurrence is settled, on the live path and in recovery.
+// Before, every acknowledged call left its occurrence behind until the
+// pending writes failed and every managed call was answered 503.
+func TestPendingHookSettlesWhenHookDecisionCollectionIsOff(t *testing.T) {
+	f := newManagedHookAuditFixtureCollectingNo(t, nil, observability.BucketGuardrailEvaluation)
+	sessions := []string{"collection-off-1", "collection-off-2", "collection-off-3"}
+	for _, session := range sessions {
+		reply := &recordFullDuplexStatusWriter{ResponseRecorder: httptest.NewRecorder()}
+		ackedHookCall(t, f.api, session, reply)
+		if !strings.Contains(reply.Body.String(), hookexec.HookDeliveryConfirmed) {
+			t.Fatalf("%s: gateway response = %q, want the receipt confirmation", session, reply.Body.String())
+		}
+	}
+	if left := pendingEntries(t, f); len(left) != 0 {
+		t.Fatalf("pending occurrences after acknowledged calls = %v, want none", left)
+	}
+	audited := f.audited(t, sessions...)
+	for _, session := range sessions {
+		if got := audited[session]; got != "" && got != "allow" {
+			t.Fatalf("%s: audit = %q, want allow or no local row", session, got)
+		}
+	}
+	if got := f.decisions(t); len(got) != 0 {
+		t.Fatalf("hook_decision records = %v, want none with collection off", got)
+	}
+
+	const recovered = "collection-off-recovered"
+	path := orphanPendingHook(t, f, recovered)
+	f.restartedAPI(t, true).recoverPendingHookOccurrences(t.Context(), nil)
+	if pendingPathExists(path) {
+		t.Fatal("recovery kept an occurrence whose hook_decision is not collected")
+	}
+	if got := f.audited(t, recovered)[recovered]; got != "" && got != "unconfirmed/no_answer" {
+		t.Fatalf("recovered audit = %q, want unconfirmed/no_answer or no local row", got)
+	}
+}
+
+type fixedHookDecisionEmitter struct {
+	outcome pipeline.LocalLogOutcome
+	err     error
+}
+
+func (e fixedHookDecisionEmitter) Emit(
+	context.Context, router.Metadata, observabilityruntime.EmitBuilder,
+) (pipeline.LocalLogOutcome, error) {
+	return e.outcome, e.err
+}
+
+// A hook_decision result holds a pending occurrence only while a retry can
+// still keep the record.
+func TestHookDecisionLogResultSettlesOnlyWhatARetryCannotChange(t *testing.T) {
+	f := newManagedHookAuditFixture(t, nil)
+	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse",
+		SessionID: "decision-results", ToolName: "Bash", ToolInvocationID: "decision-results-tool"}
+	allow := agentHookResponse{Action: "allow", Mode: "action", Severity: "NONE"}
+	for _, tc := range []struct {
+		name    string
+		emitter sidecarRuntimeEmitter
+		resp    agentHookResponse
+		want    hookDecisionLogResult
+	}{
+		{"persisted", f.runtime, allow, hookDecisionLogPersisted},
+		{"runtime not bound", nil, allow, hookDecisionLogFailed},
+		{"local write failed", fixedHookDecisionEmitter{err: errors.New("disk full")}, allow, hookDecisionLogFailed},
+		{"collection off", fixedHookDecisionEmitter{}, allow, hookDecisionLogNotCollected},
+		{"managed-only projection", fixedHookDecisionEmitter{
+			outcome: pipeline.NewManagedOptionalFailureOutcomeForTest(pipeline.OptionalFailureOutputLimit),
+		}, allow, hookDecisionLogNotCollected},
+		{"invalid severity", f.runtime, agentHookResponse{Action: "allow", Mode: "action", Severity: "not-a-severity"},
+			hookDecisionLogUnbuildable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := f.restartedAPI(t, false)
+			if tc.emitter != nil {
+				bindHookLifecycleV8(t, api, tc.emitter)
+			}
+			got := api.emitHookDecisionObservabilityV8(t.Context(), req, tc.resp, HookAuditEnvelope{ElapsedMs: 1}, false)
+			if got != tc.want || got.settled() != (tc.want != hookDecisionLogFailed) {
+				t.Fatalf("result = %d (settled %t), want %d", got, got.settled(), tc.want)
+			}
+		})
+	}
+}
+
+// busyHookDecisionEmitter holds every hook_decision record after the first
+// free ones until release is closed, as a busy audit store does.
+type busyHookDecisionEmitter struct {
+	inner   sidecarRuntimeEmitter
+	free    int32
+	seen    atomic.Int32
+	release chan struct{}
+}
+
+func (e *busyHookDecisionEmitter) Emit(
+	ctx context.Context, metadata router.Metadata, builder observabilityruntime.EmitBuilder,
+) (pipeline.LocalLogOutcome, error) {
+	if metadata.Identity().Name == observability.EventName(observability.TelemetryEventHookDecision) &&
+		e.seen.Add(1) > e.free {
+		select {
+		case <-e.release:
+		case <-ctx.Done():
+			return pipeline.LocalLogOutcome{}, ctx.Err()
+		}
+	}
+	return e.inner.Emit(ctx, metadata, builder)
+}
+
+// A backlog behind a busy audit store does not hold the listeners: they
+// serve once the first pass has handled its startup share of entries or its
+// time budget has passed, and the rest is recovered while they serve.
+// Before, Run replayed every entry before it bound a listener.
+func TestPendingHookRecoveryDoesNotHoldListenersBehindABusyAudit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		free    int32
+		budget  time.Duration
+		entries int
+	}{
+		{"time budget", 0, 100 * time.Millisecond, 1000},
+		{"entry count", 1, time.Hour, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newManagedHookAuditFixture(t, nil)
+			var sessions []string
+			for i := range 3 {
+				session := fmt.Sprintf("busy-%s-%d", strings.ReplaceAll(tc.name, " ", "-"), i)
+				orphanPendingHook(t, f, session)
+				sessions = append(sessions, session)
+			}
+			busy := &busyHookDecisionEmitter{inner: f.runtime, free: tc.free, release: make(chan struct{})}
+			released := false
+			release := func() {
+				if !released {
+					released = true
+					close(busy.release)
+				}
+			}
+			defer release()
+			restarted := f.restartedAPI(t, false)
+			bindHookLifecycleV8(t, restarted, busy)
+			restarted.pendingHookStartupBudget = tc.budget
+			restarted.pendingHookStartupEntries = tc.entries
+			restarted.pendingHookRetryInterval = 20 * time.Millisecond
+			if err := restarted.SetSandboxIngress(SandboxIngressConfig{
+				Addr: "127.0.0.1:18971", Bindings: pendingHookRejectBindings{},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			runDone := make(chan error, 1)
+			go func() { runDone <- restarted.RunSandboxIngressOn(ctx, listener) }()
+			client := &http.Client{Timeout: 10 * time.Second}
+			response, err := client.Get("http://" + listener.Addr().String() + "/health")
+			if err != nil {
+				t.Fatalf("sandbox ingress did not serve while recovery waited on the audit: %v", err)
+			}
+			_ = response.Body.Close()
+			if left := pendingEntries(t, f); len(left) < 2 {
+				t.Fatalf("pending occurrences while serving = %v, want the busy ones still waiting", left)
+			}
+			release()
+			deadline := time.Now().Add(10 * time.Second)
+			for len(pendingEntries(t, f)) != 0 {
+				if time.Now().After(deadline) {
+					t.Fatalf("pending occurrences left after the audit freed up: %v", pendingEntries(t, f))
+				}
+				select {
+				case err := <-runDone:
+					t.Fatalf("gateway stopped during background recovery: %v", err)
+				case <-time.After(20 * time.Millisecond):
+				}
+			}
+			audited := f.audited(t, sessions...)
+			for _, session := range sessions {
+				if audited[session] != "unconfirmed/no_answer" {
+					t.Fatalf("%s: recovered audit = %q, want unconfirmed/no_answer", session, audited[session])
+				}
+			}
+			cancel()
+			<-runDone
+		})
+	}
+}
+
+// refuseConnectorHookAuditRows makes the store refuse connector audit rows,
+// not hook_decision records, until the returned function lifts it.
+func refuseConnectorHookAuditRows(t *testing.T, f managedHookAuditFixture) func() {
+	t.Helper()
+	database, err := sql.Open("sqlite", f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`CREATE TRIGGER test_refuse_connector_hook BEFORE INSERT ON audit_events
+		WHEN NEW.action = '` + string(audit.ActionConnectorHook) + `'
+		BEGIN SELECT RAISE(ABORT, 'connector audit refused by the test'); END`); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	return func() {
+		defer database.Close()
+		if _, err := database.Exec(`DROP TRIGGER IF EXISTS test_refuse_connector_hook`); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type onHookConfirmationWriter struct {
+	*httptest.ResponseRecorder
+	confirmed func()
+	once      sync.Once
+}
+
+func (w *onHookConfirmationWriter) EnableFullDuplex() error         { return nil }
+func (w *onHookConfirmationWriter) SetReadDeadline(time.Time) error { return nil }
+func (w *onHookConfirmationWriter) Flush() {
+	w.ResponseRecorder.Flush()
+	if strings.Contains(w.Body.String(), hookexec.HookDeliveryConfirmed) {
+		w.once.Do(w.confirmed)
+	}
+}
+
+// The connector audit row and the hook_decision of one occurrence never
+// disagree when recovery writes the row the live handler could not. With the
+// hook's final answer published, recovery writes that answer. When the final
+// answer could not be published, the records the handler writes carry the
+// published (unconfirmed) answer, which is all recovery can write. Before,
+// the hook_decision said allow and the recovered audit row said unconfirmed.
+func TestPendingHookTerminalRecordsAgreeWhenTheAuditRowIsRecovered(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		unpublished  bool
+		want         string
+		wantDecision string
+	}{
+		{"final answer published", false, "allow", "allow/ok"},
+		{"final answer not published", true, "unconfirmed/no_answer", "unconfirmed/ok"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.unpublished && (runtime.GOOS == "windows" || os.Geteuid() == 0) {
+				t.Skip("needs a directory mode this user cannot write through")
+			}
+			f := newManagedHookAuditFixture(t, nil)
+			session := "agree-" + strings.ReplaceAll(tc.name, " ", "-")
+			dir := filepath.Join(f.api.scannerCfg.DataDir, pendingHookDirName)
+			lift := refuseConnectorHookAuditRows(t, f)
+			reply := &onHookConfirmationWriter{ResponseRecorder: httptest.NewRecorder(), confirmed: func() {
+				if tc.unpublished {
+					if err := os.Chmod(dir, 0o500); err != nil {
+						t.Error(err)
+					}
+				}
+			}}
+			ackedHookCall(t, f.api, session, reply)
+			if err := os.Chmod(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			lift()
+			if !strings.Contains(reply.Body.String(), hookexec.HookDeliveryConfirmed) {
+				t.Fatalf("gateway response = %q, want the receipt confirmation", reply.Body.String())
+			}
+			if got := f.audited(t, session)[session]; got != "" {
+				t.Fatalf("audit row written although the store refused it: %q", got)
+			}
+			if left := pendingEntries(t, f); len(left) != 1 {
+				t.Fatalf("pending occurrences = %v, want the one whose audit row failed", left)
+			}
+			f.restartedAPI(t, true).recoverPendingHookOccurrences(t.Context(), nil)
+			if got := f.audited(t, session)[session]; got != tc.want {
+				t.Fatalf("recovered audit = %q, want %q", got, tc.want)
+			}
+			if got := strings.Join(f.decisions(t), ","); got != tc.wantDecision {
+				t.Fatalf("hook_decision records = %q, want %q", got, tc.wantDecision)
+			}
+			if left := pendingEntries(t, f); len(left) != 0 {
+				t.Fatalf("pending occurrences after recovery = %v, want none", left)
+			}
+		})
 	}
 }
