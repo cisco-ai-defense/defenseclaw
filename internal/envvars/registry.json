@@ -7486,6 +7486,32 @@
       "since": "1.0.3"
     },
     {
+      "name": "DEFENSECLAW_STANDALONE_UNINSTALL_PRECHECK",
+      "category": "upgrade_internal",
+      "purpose": "Asks the standalone Windows installer's Status to run the read-only uninstall refusals before the lifecycle CLI revokes protected hook session keys. Its value is the self-uninstall caller's process ID, or 0. It is not an installer parameter because the installer parameter set is the Secure Client command line. The installer reads it only for Status and clears it so no child process inherits it.",
+      "default": "unset",
+      "accepted_values": [
+        "0",
+        "positive decimal process ID (at most 9 digits)",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/windows_enterprise_standalone.go",
+          "description": "Sets it in the strict installer environment only for the Status uninstall precheck"
+        },
+        {
+          "location": "packaging/windows/install-enterprise.ps1",
+          "description": "Reads and clears it, then runs the read-only in-use and squatted-root refusal checks for Status"
+        }
+      ],
+      "since": "1.0.4",
+      "security_note": "Only the elevated lifecycle CLI sends this request. The precheck reads uninstall refusals without changing deployment state."
+    },
+    {
       "name": "DCLAW_FLEET_API_TOKEN",
       "category": "fleet",
       "purpose": "Opaque bearer token for the Fleet management API; the CLI generator uses URL-safe random text.",
