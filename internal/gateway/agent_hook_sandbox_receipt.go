@@ -90,11 +90,11 @@ func (a *APIServer) markSandboxHookReceiptSettled(ctx context.Context, p *pendin
 }
 
 func (a *APIServer) recordSandboxHookReceiptState(ctx context.Context, p *pendingHookOccurrence) error {
-	encoded, err := json.Marshal(p)
+	encoded, err := encodePendingHookOccurrence(p)
 	if err != nil {
 		return err
 	}
-	stored, err := a.store.RecordHookDeliveryVerdict(ctx, p.ID, encoded, pendingHookJournalLimits)
+	stored, err := a.store.UpdateHookDelivery(ctx, p.ID, encoded, pendingHookJournalLimits)
 	if err != nil {
 		return err
 	}

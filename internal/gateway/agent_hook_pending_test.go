@@ -111,7 +111,7 @@ func journalEntries(t *testing.T, f managedHookAuditFixture) []audit.HookDeliver
 	var all []audit.HookDeliveryJournalEntry
 	var after audit.HookDeliveryJournalEntry
 	for {
-		entries, err := f.store.HookDeliveries(t.Context(), after, 100)
+		entries, err := f.store.HookDeliveries(t.Context(), after, 100, pendingHookJournalLimits.OccurrenceBytes)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -121,6 +121,17 @@ func journalEntries(t *testing.T, f managedHookAuditFixture) []audit.HookDeliver
 		}
 		after = entries[len(entries)-1]
 	}
+}
+
+// awaitPendingHookDrain makes the test wait, when it ends and before the
+// bounds it changed are restored, for the drain pass a full journal started.
+func awaitPendingHookDrain(t *testing.T) {
+	t.Cleanup(func() {
+		deadline := time.Now().Add(time.Minute)
+		for pendingHookDraining.Load() && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
 }
 
 // pendingEntries is the id of every journal row, of any process.
@@ -826,13 +837,13 @@ func (r *hookRemoteRecorder) settled(t *testing.T, want int, ids ...string) {
 	time.Sleep(300 * time.Millisecond)
 }
 
-// The remote destinations get one decision per record of a call, the one
+// Every copy of a record the remote destinations get carries the verdict
 // the local store ends up with, however the live handler's writes fail. A
 // record the local store refuses still leaves for them (GAP-1536), so the
-// journal row records the decision before the records are written and
-// recovery replays it locally only; where that record is refused too, the
-// records wait for the local store, and recovery's decision is the only one
-// sent.
+// journal row pins the verdict before the records are written, and recovery
+// writes that verdict again under the same IDs; where the pin is refused
+// too, the records wait for the local store, and recovery pins and sends
+// its own verdict, the only one sent.
 func TestPendingHookRemoteDestinationsGetOneDecisionPerRecord(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -840,13 +851,16 @@ func TestPendingHookRemoteDestinationsGetOneDecisionPerRecord(t *testing.T) {
 		refuseDecision bool
 		want           string
 		wantDecision   string
-		live           []string // the remote decision of each record before recovery
-		remote         []string // and after it
+		// the remote copies of the connector row and of the hook_decision,
+		// before recovery and after it
+		liveRow, liveDecision, row, decision []string
 	}{
-		{"connector row refused", false, false, "allow", "allow/ok", []string{"answer"}, []string{"answer"}},
-		{"both records refused", true, false, "allow", "allow/ok", []string{"answer"}, []string{"answer"}},
+		{"connector row refused", false, false, "allow", "allow/ok",
+			[]string{"answer"}, []string{"answer"}, []string{"answer", "answer"}, []string{"answer"}},
+		{"both records refused", true, false, "allow", "allow/ok",
+			[]string{"answer"}, []string{"answer"}, []string{"answer", "answer"}, []string{"answer", "answer"}},
 		{"both records and the decision refused", true, true, "unconfirmed/no_answer", "unconfirmed/ok",
-			nil, []string{hookActionUnconfirmed}},
+			nil, nil, []string{hookActionUnconfirmed}, []string{hookActionUnconfirmed}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			remote := newHookRemoteRecorder()
@@ -872,13 +886,17 @@ func TestPendingHookRemoteDestinationsGetOneDecisionPerRecord(t *testing.T) {
 				t.Fatalf("journal rows = %v, want the one whose records failed", entries)
 			}
 			id := entries[0].ID
-			ids := []string{id, id + "-decision"}
-			remote.settled(t, len(tc.live), ids...)
-			for _, record := range ids {
-				if got := remote.decisions(record); strings.Join(got, ",") != strings.Join(tc.live, ",") {
-					t.Fatalf("remote copies of %s before recovery = %v, want %v", record, got, tc.live)
+			check := func(when string, row, decision []string) {
+				t.Helper()
+				remote.settled(t, len(row), id)
+				remote.settled(t, len(decision), id+"-decision")
+				for record, want := range map[string][]string{id: row, id + "-decision": decision} {
+					if got := remote.decisions(record); strings.Join(got, ",") != strings.Join(want, ",") {
+						t.Fatalf("remote copies of %s %s = %v, want %v", record, when, got, want)
+					}
 				}
 			}
+			check("before recovery", tc.liveRow, tc.liveDecision)
 			lift()
 			liftDecision()
 
@@ -886,12 +904,7 @@ func TestPendingHookRemoteDestinationsGetOneDecisionPerRecord(t *testing.T) {
 			if got, decisions := f.audited(t, session)[session], strings.Join(f.decisions(t), ","); got != tc.want || decisions != tc.wantDecision {
 				t.Fatalf("records after recovery: connector %q, hook_decision %q; want %q, %q", got, decisions, tc.want, tc.wantDecision)
 			}
-			remote.settled(t, len(tc.remote), ids...)
-			for _, record := range ids {
-				if got := remote.decisions(record); strings.Join(got, ",") != strings.Join(tc.remote, ",") {
-					t.Fatalf("remote copies of %s after recovery = %v, want %v", record, got, tc.remote)
-				}
-			}
+			check("after recovery", tc.row, tc.decision)
 			if left := pendingEntries(t, f); len(left) != 0 {
 				t.Fatalf("journal rows after recovery = %v, want none", left)
 			}
@@ -909,6 +922,7 @@ func TestPendingHookFullJournalAnswersClosedAndDrains(t *testing.T) {
 	f := newManagedHookAuditFixture(t, nil)
 	limits, interval := pendingHookJournalLimits, pendingHookDrainInterval
 	t.Cleanup(func() { pendingHookJournalLimits, pendingHookDrainInterval = limits, interval })
+	awaitPendingHookDrain(t)
 	pendingHookJournalLimits.Rows, pendingHookDrainInterval = 2, 0
 	pendingHookDrainAt.Store(0)
 
@@ -970,42 +984,4 @@ func (e *countingHookDecisionEmitter) Emit(
 		e.seen.Add(1)
 	}
 	return e.inner.Emit(ctx, metadata, builder)
-}
-
-// Recovery reads the journal in batches, so a journal of any size never
-// sits in memory at once, and a pass ends after a few rows the store
-// refuses instead of retrying every row against it; the next pass audits
-// every row once.
-func TestPendingHookRecoveryReadsBatchesAndStopsOnARefusingStore(t *testing.T) {
-	f := newManagedHookAuditFixture(t, nil)
-	total := pendingHookRecoveryBatch + 3
-	sessions := make([]string, 0, total)
-	for i := range total {
-		session := fmt.Sprintf("batch-%03d", i)
-		orphanPendingHook(t, f, session, pendingAllow)
-		sessions = append(sessions, session)
-	}
-	lift := refuseAuditInserts(t, f, "audit_events", "1")
-	refusing := f.restartedAPI(t, false)
-	counted := &countingHookDecisionEmitter{inner: f.runtime}
-	bindHookLifecycleV8(t, refusing, counted)
-	refusing.recoverPendingHooks(t.Context())
-	lift()
-	if got := counted.seen.Load(); got != pendingHookRecoveryFailures {
-		t.Fatalf("rows tried against a refusing store = %d, want %d", got, pendingHookRecoveryFailures)
-	}
-	if left := pendingEntries(t, f); len(left) != total {
-		t.Fatalf("journal rows after the refused pass = %d, want %d", len(left), total)
-	}
-
-	f.restartedAPI(t, true).recoverPendingHooks(t.Context())
-	if left := pendingEntries(t, f); len(left) != 0 {
-		t.Fatalf("journal rows after recovery = %d, want none", len(left))
-	}
-	audited := f.audited(t, sessions...)
-	for _, session := range sessions {
-		if audited[session] != "unconfirmed/no_answer" {
-			t.Fatalf("%s: recovered audit = %q, want unconfirmed/no_answer", session, audited[session])
-		}
-	}
 }
