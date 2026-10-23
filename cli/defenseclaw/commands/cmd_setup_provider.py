@@ -1873,8 +1873,16 @@ def _echo_provider_enforcement_legend(app: AppContext) -> None:
     configures DefenseClaw's judge/aux model only.
     """
     guardrail = getattr(app.cfg, "guardrail", None) if app.cfg else None
-    connector = connector_paths.normalize(getattr(guardrail, "connector", "") or "openclaw")
+    active = getattr(app.cfg, "active_connector", None) if app.cfg else None
+    connector = connector_paths.normalize(
+        active() if callable(active) else getattr(guardrail, "connector", "")
+    )
     click.echo()
+    if not connector:
+        ux.echo(
+            ux.dim("  No agent connector configured; a bound provider can serve DefenseClaw's judge/aux model only.")
+        )
+        return
     if platform_support.is_proxy_connector(connector):
         click.echo(
             ux.dim(

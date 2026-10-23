@@ -78,7 +78,7 @@ def _configure_openclaw(cfg: Config) -> None:
                 "connectors",
                 {"codex": PerConnectorGuardrailConfig(), "hermes": PerConnectorGuardrailConfig()},
             ),
-            True,
+            False,
         ),
         # Every other shape keeps the previous behaviour.
         (_configure_openclaw, False),

@@ -14799,15 +14799,15 @@ def _active_connector(cfg) -> str:
     Prefer the unified ``Config.active_connector()`` from S4.1 — it
     handles the legacy ``guardrail.connector`` field plus the
     ``claw.mode`` fallback the same way the rest of the CLI does.
-    Falls back to ``"openclaw"`` for older configs that predate the
-    method.
+    Older config objects without the method use their explicit connector
+    fields. An unconfigured install has no active connector.
     """
     if hasattr(cfg, "active_connector"):
         try:
-            return (cfg.active_connector() or "openclaw").lower()
+            return (cfg.active_connector() or "").lower()
         except Exception:
             pass
-    return (getattr(getattr(cfg, "guardrail", None), "connector", "") or "openclaw").lower()
+    return (getattr(getattr(cfg, "guardrail", None), "connector", "") or "").lower()
 
 
 def _doctor_active_connectors(cfg) -> list[str]:
@@ -14818,9 +14818,8 @@ def _doctor_active_connectors(cfg) -> list[str]:
     genuinely unconfigured install (every connector marker cleared, e.g. after
     ``setup remove`` drops the last one); doctor must honor that empty signal
     and render an explicit "no connector configured" state rather than
-    flooring to the singular :func:`_active_connector`, whose ``"openclaw"``
-    path-resolution default would fabricate a phantom OpenClaw connector on an
-    install that never used OpenClaw (D3).
+    flooring to a fabricated OpenClaw connector on an install that never used
+    OpenClaw (D3).
 
     Only legacy configs that predate ``active_connectors()`` fall back to the
     singular primary, preserving their single-connector behavior. Names are

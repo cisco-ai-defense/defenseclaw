@@ -64,6 +64,15 @@ func TestLoadOpenClawImpliedButNotInstalledConfiguresNoConnector(t *testing.T) {
 			if got := cfg.ActiveConnectors(); len(got) != 0 {
 				t.Fatalf("ActiveConnectors() = %v, want none", got)
 			}
+			if got := cfg.activeConnector(); got != "" {
+				t.Errorf("activeConnector() = %q, want no agent", got)
+			}
+			if got := cfg.SkillDirs(); len(got) != 0 {
+				t.Errorf("SkillDirs() = %v, want no agent paths", got)
+			}
+			if got := cfg.PluginDirs(); len(got) != 0 {
+				t.Errorf("PluginDirs() = %v, want no agent paths", got)
+			}
 			// The gateway publishes and diffs deep copies of the loaded config.
 			copied, err := cfg.DeepCopy()
 			if err != nil {
@@ -71,6 +80,9 @@ func TestLoadOpenClawImpliedButNotInstalledConfiguresNoConnector(t *testing.T) {
 			}
 			if copied.HasConnectorConfigured() {
 				t.Fatal("DeepCopy().HasConnectorConfigured() = true, want false without OpenClaw")
+			}
+			if got := copied.activeConnector(); got != "" {
+				t.Errorf("DeepCopy().activeConnector() = %q, want no agent", got)
 			}
 		})
 	}
@@ -113,4 +125,14 @@ func TestLoadOpenClawImpliedButNotInstalledConfiguresNoConnector(t *testing.T) {
 			t.Fatalf("ActiveConnectors() = %v, want [openclaw] for an explicit connector", got)
 		}
 	})
+}
+
+func TestLoadRosterWithoutClawBlockDoesNotSelectOpenClaw(t *testing.T) {
+	cfg, _ := loadWithoutOpenClaw(t, "config_version: 9\nguardrail:\n  connectors:\n    codex: {}\n", false)
+	if got := cfg.activeConnector(); got != "codex" {
+		t.Errorf("activeConnector() = %q, want configured codex", got)
+	}
+	if got := cfg.ActiveConnectors(); len(got) != 1 || got[0] != "codex" {
+		t.Errorf("ActiveConnectors() = %v, want [codex]", got)
+	}
 }

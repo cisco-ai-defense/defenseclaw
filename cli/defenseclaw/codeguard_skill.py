@@ -166,7 +166,7 @@ def _resolve_connector(cfg, connector: str | None) -> str:
         return connector_paths.normalize(connector)
     if hasattr(cfg, "active_connector"):
         return connector_paths.normalize(cfg.active_connector())
-    return connector_paths.normalize(getattr(getattr(cfg, "guardrail", object()), "connector", "") or "openclaw")
+    return connector_paths.normalize(getattr(getattr(cfg, "guardrail", object()), "connector", ""))
 
 
 def _normalize_target(target: str) -> str:

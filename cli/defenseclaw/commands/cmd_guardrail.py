@@ -176,7 +176,10 @@ def _resolve_active_connector(cfg) -> str:
     in-process configs that haven't been migrated yet.
     """
     if cfg is None:
-        return "openclaw"
+        return ""
+    configured = getattr(cfg, "has_connector_configured", None)
+    if callable(configured) and not configured():
+        return ""
     if hasattr(cfg, "active_connector") and callable(cfg.active_connector):
         try:
             name = (cfg.active_connector() or "").strip().lower()
@@ -188,7 +191,7 @@ def _resolve_active_connector(cfg) -> str:
         name = (cfg.guardrail.connector or "").strip().lower()
         if name:
             return name
-    return "openclaw"
+    return ""
 
 
 def _enabled_connectors_need_model(cfg, connector: str) -> bool:

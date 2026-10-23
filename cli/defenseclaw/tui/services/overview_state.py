@@ -180,7 +180,7 @@ class OverviewConfig:
     data_dir: str = ""
     environment: str = ""
     policy_dir: str = ""
-    claw_mode: str = "openclaw"
+    claw_mode: str = ""
     guardrail_enabled: bool = False
     guardrail_connector: str = ""
     guardrail_mode: str = "observe"
@@ -1405,11 +1405,10 @@ class OverviewPanelModel:
         ``"openclaw"`` for an empty / hook-only state. Precedence: explicit
         singular override (``guardrail.connector``) → the active *set*'s
         primary (``connector_modes`` — the multi-connector roster that the
-        singular ``config.active_connector()`` ignores, which is why a
-        ``[codex, openclaw]`` map used to surface a phantom ``openclaw``) →
-        the singular ``claw.mode`` → ``""`` (none configured). The Go-parity
-        ``config.active_connector()`` contract is deliberately left untouched;
-        this distinguishes "none configured" at the display layer only.
+        singular selection can omit, which is why a ``[codex, openclaw]`` map
+        used to surface a phantom ``openclaw``) →
+        the singular ``claw.mode`` → ``""`` (none configured). The config
+        resolver also returns ``""`` for an unconfigured install.
         Callers treat ``""`` as "no connector present" (e.g. the app's
         ``connector_present`` gate / merged-catalog fallback).
 

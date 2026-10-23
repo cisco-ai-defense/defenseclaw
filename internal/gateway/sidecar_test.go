@@ -72,25 +72,14 @@ func TestRunAIDiscoveryClosesStoreAfterWorkerStops(t *testing.T) {
 	}
 }
 
-// TestResolveActiveConnector_EmptyDefaultsToOpenClaw verifies the
-// "operator did not pick anything" branch of S1.4: an empty
-// guardrail.connector still works (back-compat) but emits an audible
-// "defaulting to openclaw" log line. The test asserts the resolver
-// returns the openclaw entry rather than nil so callers can rely on
-// the contract.
-func TestResolveActiveConnector_EmptyDefaultsToOpenClaw(t *testing.T) {
+// An empty name must not select an agent the operator has not configured.
+func TestResolveActiveConnector_EmptyReturnsError(t *testing.T) {
 	t.Parallel()
 	reg := connector.NewDefaultRegistry()
 
 	conn, err := resolveActiveConnector(reg, "", "test")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if conn == nil {
-		t.Fatalf("expected non-nil openclaw default, got nil")
-	}
-	if got := conn.Name(); got != "openclaw" {
-		t.Errorf("connector name = %q, want %q", got, "openclaw")
+	if err == nil || conn != nil {
+		t.Fatalf("empty name resolved to %v, %v; want error", conn, err)
 	}
 }
 
@@ -169,21 +158,14 @@ func TestTeardownPreviousConnector_CleansCodexTrustedHookState(t *testing.T) {
 	}
 }
 
-// TestResolveActiveConnector_WhitespaceTreatedAsEmpty pins the
-// "trim before lookup" behavior. Without this, a stray space in
-// guardrail.connector ("   " from a hand-edited config) would hit
-// the unknown-connector error path and abort the sidecar even
-// though the operator intent is clearly "use the default".
+// Whitespace is empty, and therefore cannot select OpenClaw.
 func TestResolveActiveConnector_WhitespaceTreatedAsEmpty(t *testing.T) {
 	t.Parallel()
 	reg := connector.NewDefaultRegistry()
 
 	conn, err := resolveActiveConnector(reg, "   ", "test")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if conn == nil || conn.Name() != "openclaw" {
-		t.Fatalf("whitespace name should default to openclaw, got %v", conn)
+	if err == nil || conn != nil {
+		t.Fatalf("whitespace name resolved to %v, %v; want error", conn, err)
 	}
 }
 
@@ -200,19 +182,23 @@ func TestConfiguredConnectorNameFallsBackToClawMode(t *testing.T) {
 	// default must not add an openclaw connector nobody configured.
 	cfg.Claw.Mode = "openclaw"
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {}}
-	if got := guardrailConnectorName(cfg); got != "claudecode" {
-		t.Fatalf("guardrailConnectorName with guardrail.connectors only = %q, want claudecode", got)
+	if got := configuredConnectorName(cfg); got != "claudecode" {
+		t.Fatalf("configuredConnectorName with guardrail.connectors only = %q, want claudecode", got)
 	}
 }
 
-func TestSecureClientGuardrailConnectorNameKeepsClawMode(t *testing.T) {
+func TestSecureClientConfiguredConnectorNameUsesRoster(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
 	cfg.Enterprise.Profile = "secure_client"
 	cfg.Claw.Mode = "openclaw"
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {}}
-	if got := guardrailConnectorName(cfg); got != "openclaw" {
-		t.Fatalf("Secure Client connector = %q, want openclaw", got)
+	if got := configuredConnectorName(cfg); got != "claudecode" {
+		t.Fatalf("Secure Client connector = %q, want configured claudecode", got)
+	}
+	cfg.Guardrail.Connector = "openclaw"
+	if got := configuredConnectorName(cfg); got != "openclaw" {
+		t.Fatalf("explicit Secure Client connector = %q, want openclaw", got)
 	}
 }
 
@@ -271,12 +257,7 @@ func TestResolveActiveConnector_UnknownNameReturnsError(t *testing.T) {
 				t.Fatalf("resolveActiveConnector(%q) must return nil connector on error, got %s", bad, conn.Name())
 			}
 			// Error text must name the bad value so operators can find
-			// it in logs. We also explicitly call out openclaw as the
-			// remediation default — the message is part of the
-			// operator-facing contract for S1.4.
-			if !strings.Contains(err.Error(), "openclaw") {
-				t.Errorf("error message should mention the openclaw default, got: %v", err)
-			}
+			// it in logs, with the registered choices for remediation.
 			if !strings.Contains(err.Error(), "amp") {
 				t.Errorf("error message should list the registered Amp connector, got: %v", err)
 			}

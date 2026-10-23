@@ -23,6 +23,8 @@ import os
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -121,12 +123,132 @@ class OlderConfigWithoutClawBlockTests(_FreshHome):
         self.assertFalse(cfg.has_connector_configured())
         self.assertEqual(cfg.active_connectors(), [])
 
+    def test_remote_fleet_keeps_legacy_openclaw_without_local_install(self):
+        from defenseclaw.config import load
+
+        original = (self.data_dir / "config.yaml").read_text(encoding="utf-8")
+        (self.data_dir / "config.yaml").write_text(
+            original + "gateway:\n  host: 10.0.0.5\n  fleet_mode: auto\n",
+            encoding="utf-8",
+        )
+
+        cfg = load()
+        self.assertTrue(cfg.has_connector_configured())
+        self.assertEqual(cfg.active_connector(), "openclaw")
+        self.assertEqual(cfg.active_connectors(), ["openclaw"])
+
+    def test_v8_upgrade_without_claw_block_selects_no_agent(self):
+        from defenseclaw.config import load
+
+        (self.data_dir / "config.yaml").write_text("config_version: 8\n", encoding="utf-8")
+        cfg = load()
+
+        self.assertEqual(cfg.active_connector(), "")
+        self.assertEqual(cfg.active_connectors(), [])
+
     def test_load_with_openclaw_installed_keeps_openclaw(self):
         from defenseclaw.config import load
 
         self._plant_openclaw()
 
         self.assertEqual(load().active_connectors(), ["openclaw"])
+
+    def test_singular_resolution_and_paths_name_no_agent(self):
+        from defenseclaw import config as config_module
+        from defenseclaw.commands import cmd_quickstart
+        from defenseclaw.config import load
+
+        cfg = load()
+        self.assertEqual(cfg.active_connector(), "")
+        self.assertEqual(cfg.claw_home_dir(), "")
+        self.assertEqual(cfg.skill_dirs(), [])
+        self.assertEqual(cfg.plugin_dirs(), [])
+        self.assertEqual(cfg.mcp_source_locations(), [])
+        self.assertEqual(cmd_quickstart._configured_quickstart_connectors(config_module), [])
+
+    def test_roster_without_claw_block_selects_the_configured_agent(self):
+        from defenseclaw import config as config_module
+        from defenseclaw.commands import cmd_quickstart
+        from defenseclaw.config import load
+        from defenseclaw.openclaw_presence import openclaw_implied_but_not_installed, openclaw_only_implied
+
+        (self.data_dir / "config.yaml").write_text(
+            "config_version: 9\nguardrail:\n  connectors:\n    codex: {}\n",
+            encoding="utf-8",
+        )
+        cfg = load()
+        self.assertEqual(cfg.active_connector(), "codex")
+        self.assertEqual(cfg.active_connectors(), ["codex"])
+        self.assertFalse(openclaw_only_implied(cfg))
+        self.assertFalse(openclaw_implied_but_not_installed(cfg))
+        self.assertEqual(cmd_quickstart._configured_quickstart_connectors(config_module), ["codex"])
+
+    def test_secure_client_roster_does_not_select_stale_openclaw(self):
+        from defenseclaw.config import PerConnectorGuardrailConfig, load
+
+        cfg = load()
+        cfg.deployment_mode = "managed_enterprise"
+        cfg.enterprise_profile = "secure_client"
+        cfg.guardrail._secure_client = True
+        cfg.claw.mode = "openclaw"
+        cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig()}
+        self.assertEqual(cfg.active_connector(), "codex")
+
+    def test_cli_discovery_and_scan_helpers_name_no_agent(self):
+        from defenseclaw import codeguard_skill
+        from defenseclaw.commands import _scan_ui, cmd_agent, cmd_doctor, cmd_guardrail, cmd_plugin, cmd_skill
+        from defenseclaw.config import load
+
+        app = AppContext()
+        app.cfg = load()
+        self.assertEqual(cmd_doctor._active_connector(app.cfg), "")
+        self.assertEqual(cmd_guardrail._resolve_active_connector(app.cfg), "")
+        self.assertEqual(cmd_agent._resolve_connector_for_restart(app.cfg), "")
+        self.assertEqual(codeguard_skill._resolve_connector(app.cfg, None), "")
+        self.assertEqual(cmd_skill._active_skill_connectors(app), [])
+        self.assertEqual(cmd_plugin._active_plugin_connectors(app), [])
+        self.assertEqual(cmd_skill._active_connector_name(app), "")
+        self.assertEqual(cmd_plugin._normalize_runtime_connector(""), "")
+        self.assertEqual(_scan_ui.ScanContext(component="skill", connector="").connector, "")
+        with patch.object(cmd_skill, "_run_openclaw") as run_openclaw:
+            self.assertEqual(cmd_skill._list_openclaw_skills_full(app), {"skills": []})
+        run_openclaw.assert_not_called()
+
+    def test_aibom_builder_does_not_inventory_an_unconfigured_agent(self):
+        from defenseclaw.config import load
+        from defenseclaw.inventory import claw_inventory
+
+        cfg = load()
+        with (
+            patch.object(claw_inventory, "_collect_filesystem_category") as collect,
+            patch.object(claw_inventory, "_fetch_all") as fetch,
+        ):
+            inv = claw_inventory.build_claw_aibom(cfg, live=True)
+        collect.assert_not_called()
+        fetch.assert_not_called()
+        self.assertEqual(inv["connector"], "")
+        self.assertFalse(inv["live"])
+        self.assertEqual(inv["summary"]["total_items"], 0)
+        self.assertEqual(inv["categories_collected"], [])
+        self.assertFalse(inv["summary"]["skills"]["collected"])
+        self.assertEqual(inv["connector_home"], "")
+        self.assertEqual(inv["connector_config_files"], [])
+        self.assertNotIn("openclaw_config", inv)
+        rendered = StringIO()
+        with redirect_stdout(rendered):
+            claw_inventory.format_claw_aibom_human(inv, summary_only=True)
+        self.assertIn("Agent AIBOM", rendered.getvalue())
+        self.assertNotIn("OpenClaw AIBOM", rendered.getvalue())
+
+    def test_credentials_do_not_infer_an_openclaw_proxy(self):
+        from defenseclaw import credentials
+        from defenseclaw.config import load
+
+        cfg = load()
+        cfg.guardrail.enabled = True
+        self.assertFalse(credentials._guardrail_proxy_uses_llm(cfg))
+        cfg.guardrail.connector = "openclaw"
+        self.assertTrue(credentials._guardrail_proxy_uses_llm(cfg))
 
     def test_a_connector_set_after_load_is_configured(self):
         from defenseclaw.config import load
@@ -181,6 +303,25 @@ class OlderConfigWithoutClawBlockTests(_FreshHome):
         self.assertEqual(active, "openclaw")
         self.assertEqual(model.active_connector_name(), "openclaw")
 
+    def test_tui_setup_names_no_agent_or_openclaw_paths(self):
+        from defenseclaw.config import load
+        from defenseclaw.tui.panels.setup import (
+            SetupPanelModel,
+            _active_connector_names_for_setup,
+            _openclaw_path_field,
+            connector_setup_wizard_fields,
+            wizard_field_value,
+        )
+        from defenseclaw.tui.services.overview_state import OverviewConfig, OverviewPanelModel
+
+        cfg = load()
+        self.assertEqual(_active_connector_names_for_setup(cfg), [])
+        field = _openclaw_path_field(cfg, "Home", "claw.home_dir", "")
+        self.assertIn("not used", field.value)
+        self.assertFalse(SetupPanelModel(cfg, os_name="linux").has_changes())
+        self.assertEqual(OverviewPanelModel(OverviewConfig()).active_connector_name(), "")
+        self.assertEqual(wizard_field_value(connector_setup_wizard_fields(cfg), "Connector"), "")
+
 
 class OlderInitClawModeTests(OlderConfigWithoutClawBlockTests):
     """The claw.mode openclaw default an init before 1.0.4 saved (upgrade path)."""
@@ -198,6 +339,13 @@ class OlderInitClawModeTests(OlderConfigWithoutClawBlockTests):
 
 class FirstRunDefaultConnectorTests(unittest.TestCase):
     """init --yes / --non-interactive and the prompt pick no absent agent."""
+
+    def test_backend_defaults_to_no_agent_without_a_choice(self):
+        from defenseclaw.bootstrap import FirstRunOptions, _normalize_connector
+
+        self.assertEqual(FirstRunOptions().connector, "none")
+        self.assertEqual(_normalize_connector(None), "none")
+        self.assertEqual(_normalize_connector("  "), "none")
 
     @staticmethod
     def _discovery(**installed: bool):

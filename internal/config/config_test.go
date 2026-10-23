@@ -877,6 +877,7 @@ func TestSkillDirsForOpenClaw_WithOpenclawJSON(t *testing.T) {
 func TestConfig_InstalledSkillCandidates(t *testing.T) {
 	cfg := &Config{
 		Claw: ClawConfig{
+			Mode:       "openclaw",
 			HomeDir:    "/tmp/test-home",
 			ConfigFile: "/tmp/nonexistent/openclaw.json",
 		},
@@ -909,7 +910,7 @@ func TestConfig_InstalledSkillCandidates(t *testing.T) {
 func TestConfig_PluginDirs(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "test-oc-home")
 	cfg := &Config{
-		Claw: ClawConfig{HomeDir: home},
+		Claw: ClawConfig{Mode: "openclaw", HomeDir: home},
 	}
 	dirs := cfg.PluginDirs()
 	if len(dirs) != 1 {

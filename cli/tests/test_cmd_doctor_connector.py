@@ -247,11 +247,11 @@ class TestActiveConnectorResolver(unittest.TestCase):
         cfg.guardrail.connector = "claudecode"
         self.assertEqual(_active_connector(cfg), "claudecode")
 
-    def test_active_connector_defaults_to_openclaw_when_unset(self) -> None:
+    def test_active_connector_names_no_agent_when_unset(self) -> None:
         cfg = MagicMock(spec=["guardrail"])
         cfg.guardrail = MagicMock()
         cfg.guardrail.connector = ""
-        self.assertEqual(_active_connector(cfg), "openclaw")
+        self.assertEqual(_active_connector(cfg), "")
 
     def test_active_connector_lowercases_method_result(self) -> None:
         """ZeptoClaw, OpenClaw, etc. — display casing varies, but the

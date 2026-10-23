@@ -78,11 +78,8 @@ def _normalize_target(raw: str) -> str:
 
     ``all`` is the primary every-connector form (no shell quoting
     needed); the literal ``*`` — the actual config value — is accepted
-    for parity with config.yaml and scripts. Rejects empty input here
-    rather than relying on :func:`connector_paths.normalize`, whose
-    empty-input behavior is to default to ``"openclaw"`` — which would
-    turn a blank argument into a confusing "proxy-backed connector"
-    error.
+    for parity with config.yaml and scripts. Rejects empty input here so a
+    blank argument gets a useful error before connector normalization.
     """
     cleaned = (raw or "").strip()
     if not cleaned:

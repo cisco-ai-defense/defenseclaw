@@ -424,6 +424,8 @@ def _configured_quickstart_connectors(cfg_mod) -> list[str]:
         active = cfg.active_connector()
     except Exception:
         return []
+    if not active:
+        return []
     if active == "openclaw" and not (
         getattr(cfg.guardrail, "enabled", False) and (cfg.guardrail.connector or "").strip()
     ):

@@ -3587,9 +3587,12 @@ def _resolve_connector_for_restart(cfg: Any) -> str:
     """Return the active connector name in lower-kebab form.
 
     Mirrors :func:`cmd_guardrail._resolve_active_connector` so the
-    restart helper teardowns/setups the right adapter. Falls back to
-    "openclaw" when nothing else is configured (matches Go default).
+    restart helper teardowns/setups the configured adapter. A Config that
+    explicitly reports no connector cannot fall through to a raw mode default.
     """
+    configured = getattr(cfg, "has_connector_configured", None)
+    if callable(configured) and not configured():
+        return ""
     try:
         active = cfg.active_connector()
         if active:
@@ -3606,7 +3609,7 @@ def _resolve_connector_for_restart(cfg: Any) -> str:
         mode = getattr(claw, "mode", "")
         if mode:
             return normalize_connector(str(mode))
-    return "openclaw"
+    return ""
 
 
 def _resolve_connectors_for_restart(cfg: Any) -> list[str]:

@@ -288,10 +288,10 @@ type Config struct {
 	legacyOpenShellPackDir   string
 	// offlineInspection never probes a signer's filesystem for a device default.
 	offlineInspection bool
-	// openClawNotInstalled records that no OpenClaw was installed when a
-	// config whose claw.mode only implies OpenClaw loaded, so
-	// HasConnectorConfigured reports no connector (GAP-0568). Set only by the
-	// loader, on a device load outside a managed enterprise service.
+	// openClawNotInstalled records that an implied OpenClaw has no local
+	// installation or remote fleet host, so HasConnectorConfigured reports no
+	// connector (GAP-0568). Set only by the loader, on a device load outside
+	// a managed enterprise service.
 	openClawNotInstalled bool
 	// offlineVendorPolicyDir and offlineVendorPolicyRoot redirect rule packs
 	// under the target layout's shipped policy folder to a private copy of
@@ -3098,7 +3098,12 @@ func loadConfigSourceCheckedWithLayout(
 	}
 
 	if !inspection && !managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		cfg.openClawNotInstalled = cfg.OpenClawOnlyImplied() && !cfg.OpenClawInstalled()
+		// Older installs can use OpenClaw only through a remote fleet gateway.
+		// An absent local binary/config must not hide that connector on upgrade.
+		// The empty host has the same loopback default as the gateway dialer.
+		cfg.openClawNotInstalled = cfg.OpenClawOnlyImplied() &&
+			(strings.TrimSpace(cfg.Gateway.Host) == "" || isLoopbackListenerHost(cfg.Gateway.Host)) &&
+			!cfg.OpenClawInstalled()
 	}
 
 	warnPlaintextSecrets(&cfg)

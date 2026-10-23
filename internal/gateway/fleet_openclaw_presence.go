@@ -38,8 +38,8 @@ const (
 //   - gateway.fleet_mode is unset ("" or the loader default "auto"; any other
 //     value, typos included, keeps the connector + host derivation),
 //   - gateway.host is loopback,
-//   - guardrail.connector is empty and guardrail.connectors has no openclaw
-//     entry, so "openclaw" comes only from claw.mode (init's default, and the
+//   - guardrail.connector and the connector roster are empty, so "openclaw"
+//     comes only from claw.mode (init's default, and the
 //     loader default when config.yaml has no claw block), and
 //   - no openclaw.json exists at claw.config_file or claw.home_dir, and no
 //     openclaw binary is found.

@@ -75,3 +75,111 @@ def test_a_picked_hint_for_an_installed_agent_still_passes_the_gate() -> None:
         assert "no agent connector is configured" not in result.output
     finally:
         cleanup_app(app, db_path, tmp_dir)
+
+
+def test_non_interactive_guardrail_uses_roster_when_claw_block_is_missing() -> None:
+    from unittest.mock import patch
+
+    from defenseclaw.commands import cmd_setup
+    from defenseclaw.config import PerConnectorGuardrailConfig
+
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        # An upgraded config can have a configured roster but no claw block.
+        # The loader supplies the old claw.mode default in this case.
+        app.cfg.claw.mode = "openclaw"
+        app.cfg.guardrail.connector = ""
+        app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig()}
+        argv = ["guardrail", "--non-interactive", "--no-restart", "--cisco-api-key-env", "ASIA_PACIFIC_KEY"]
+        with (
+            patch.object(cmd_setup, "_installed_picked_connector", return_value=None),
+            patch.object(cmd_setup, "_ensure_connector_available") as check,
+        ):
+            CliRunner().invoke(cmd_setup.setup, argv, obj=app)
+        check.assert_any_call("codex")
+        assert app.cfg.guardrail.connector != "openclaw"
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+def test_non_interactive_guardrail_refuses_legacy_config_without_claw_or_agent() -> None:
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from defenseclaw import config as config_module
+    from defenseclaw.commands import cmd_setup
+
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        Path(tmp_dir, "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+        with patch.object(config_module, "openclaw_installed", return_value=False):
+            app.cfg = config_module.load(data_dir=tmp_dir)
+        argv = ["guardrail", "--non-interactive", "--no-restart", "--cisco-api-key-env", "ASIA_PACIFIC_KEY"]
+        with patch.object(cmd_setup, "_detect_installed_connectors", return_value=[]):
+            result = CliRunner().invoke(cmd_setup.setup, argv, obj=app)
+        assert result.exit_code == 1, result.output
+        assert "no agent connector is configured" in result.output
+        assert app.cfg.guardrail.connector == ""
+        assert app.cfg.cisco_ai_defense.api_key_env != "ASIA_PACIFIC_KEY"
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+def test_non_interactive_guardrail_refuses_stale_openclaw_selection() -> None:
+    from unittest.mock import patch
+
+    from defenseclaw.commands import cmd_setup
+
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        app.cfg.claw.mode = "openclaw"
+        app.cfg.guardrail.connector = "openclaw"
+        app.cfg.guardrail.connectors = {}
+        argv = ["guardrail", "--non-interactive", "--no-restart", "--cisco-api-key-env", "ASIA_PACIFIC_KEY"]
+        with (
+            patch.object(cmd_setup, "_detect_installed_connectors", return_value=[]),
+            patch.object(cmd_setup, "_installed_picked_connector", return_value=None),
+            patch.object(cmd_setup, "_ensure_connector_available") as check,
+        ):
+            result = CliRunner().invoke(cmd_setup.setup, argv, obj=app)
+        assert result.exit_code == 1, result.output
+        assert "no agent connector is configured" in result.output
+        check.assert_not_called()
+        assert app.cfg.guardrail.connector == "openclaw"
+        assert app.cfg.cisco_ai_defense.api_key_env != "ASIA_PACIFIC_KEY"
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+def test_restart_without_a_connector_does_not_start_openclaw(tmp_path) -> None:
+    from unittest.mock import patch
+
+    from defenseclaw.commands import cmd_setup
+
+    with (
+        patch.object(cmd_setup, "_restart_defense_gateway", return_value=True),
+        patch.object(cmd_setup, "_restart_openclaw_gateway") as restart_openclaw,
+        patch.object(cmd_setup, "_check_openclaw_gateway") as check_openclaw,
+    ):
+        cmd_setup._restart_services(str(tmp_path))
+    restart_openclaw.assert_not_called()
+    check_openclaw.assert_not_called()
+
+
+def test_disabling_guardrail_without_an_agent_does_not_restart_openclaw() -> None:
+    from unittest.mock import patch
+
+    from defenseclaw.commands import cmd_setup
+
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        app.cfg.claw.mode = ""
+        app.cfg.guardrail.connector = ""
+        with (
+            patch.object(app.cfg, "save"),
+            patch.object(cmd_setup, "_restart_services") as restart,
+        ):
+            cmd_setup._disable_guardrail(app, app.cfg.guardrail)
+        assert restart.call_args.kwargs["connector"] == ""
+    finally:
+        cleanup_app(app, db_path, tmp_dir)

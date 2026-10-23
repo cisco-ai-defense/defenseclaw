@@ -546,7 +546,7 @@ def _list_openclaw_skills_full(
 ) -> dict[str, Any] | None:
     """Get the full skill list, dispatching on the resolved connector.
 
-    For ``openclaw`` (the historical default) we keep the sidecar →
+    For an explicitly selected ``openclaw`` we keep the sidecar →
     CLI fallback chain. For Codex / Claude Code / ZeptoClaw we walk
     the connector-specific skill directories via
     :func:`defenseclaw.skill_list.list_skills` (S4.4 adapter).
@@ -562,7 +562,7 @@ def _list_openclaw_skills_full(
     """
     if app is not None:
         active = _normalize_runtime_connector(
-            app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+            app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else ""
         )
         resolved = _normalize_runtime_connector(connector or active)
         if resolved != "openclaw":
@@ -585,7 +585,6 @@ def _list_openclaw_skills_full(
         # `openclaw` binary isn't on PATH (sandbox installs, CI, etc.).
         if app is not None and hasattr(app.cfg, "skill_dirs"):
             from defenseclaw.skill_list import list_skills as _adapter_list
-            resolved = _normalize_runtime_connector(connector or "openclaw")
             return {"skills": _adapter_list(app.cfg, prefer_cli=False, connector=resolved)}
         return None
     try:
@@ -610,7 +609,7 @@ def _get_openclaw_skill_info(
     if app is not None:
         resolved = _normalize_runtime_connector(
             connector or (
-                app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+                app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else ""
             )
         )
         if resolved != "openclaw":
@@ -1970,11 +1969,9 @@ def scan(
             else [None]
         )
         json_rows: list[dict[str, Any]] = []
-        active_label = (
-            str(app.cfg.active_connector() or "openclaw")
-            if hasattr(app.cfg, "active_connector")
-            else "openclaw"
-        )
+        active_label = str(app.cfg.active_connector() or "") if hasattr(app.cfg, "active_connector") else ""
+        if not active_label:
+            active_label = resolved_connectors[0] if len(resolved_connectors) == 1 else "none"
         batch_failed = False
         pack_cache: RulePackOverlayCache = {}
         for c in connectors:
@@ -3256,7 +3253,7 @@ def _active_skill_connectors(app: AppContext) -> list[str]:
         active = cfg.active_connector()
         if active:
             return [active]
-    return ["openclaw"]
+    return []
 
 
 def _skill_info_path(info: dict[str, Any] | None) -> str:
@@ -4739,13 +4736,13 @@ _SKILL_RUNTIME_NATIVE_SELECTION_CONNECTORS = {"codex", "claudecode"}
 def _normalize_runtime_connector(connector: str) -> str:
     from defenseclaw import connector_paths
     from defenseclaw.connector_contracts import normalize_connector
-    return connector_paths.normalize(normalize_connector(connector or "openclaw"))
+    return connector_paths.normalize(normalize_connector(connector))
 
 
 def _active_connector_name(app: AppContext) -> str:
     if hasattr(app.cfg, "active_connector"):
-        return _normalize_runtime_connector(app.cfg.active_connector() or "openclaw")
-    return "openclaw"
+        return _normalize_runtime_connector(app.cfg.active_connector())
+    return ""
 
 
 def _skill_runtime_native_selection_enforced(connector: str) -> bool:

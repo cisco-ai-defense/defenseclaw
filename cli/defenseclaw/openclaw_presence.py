@@ -129,8 +129,8 @@ def openclaw_installed(cfg: Any) -> bool:
 def openclaw_only_implied(cfg: Any) -> bool:
     """True when only ``claw.mode`` names OpenClaw.
 
-    ``guardrail.connector`` is empty and ``guardrail.connectors`` has no
-    openclaw entry, so nothing but the ``claw.mode`` default (or a leftover
+    ``guardrail.connector`` and the connector roster are empty, so nothing
+    but the ``claw.mode`` default (or a leftover
     of it) selects OpenClaw. ``setup openclaw`` pins ``guardrail.connector``.
     """
     guardrail = getattr(cfg, "guardrail", None)
@@ -140,7 +140,7 @@ def openclaw_only_implied(cfg: Any) -> bool:
     if str(getattr(guardrail, "connector", "") or "").strip():
         return False
     connectors = getattr(guardrail, "connectors", None) or {}
-    if isinstance(connectors, dict) and any(str(name).strip().lower() == "openclaw" for name in connectors):
+    if isinstance(connectors, dict) and any(str(name).strip() for name in connectors):
         return False
     return str(getattr(claw, "mode", "") or "").strip().lower() == "openclaw"
 
@@ -152,8 +152,8 @@ def openclaw_implied_but_not_installed(cfg: Any) -> bool:
 
     * ``gateway.fleet_mode`` is unset (``""`` or ``"auto"``),
     * ``gateway.host`` is loopback,
-    * ``guardrail.connector`` is empty and ``guardrail.connectors`` has no
-      openclaw entry, so only ``claw.mode`` names OpenClaw, and
+    * ``guardrail.connector`` and the connector roster are empty, so only
+      ``claw.mode`` names OpenClaw, and
     * no openclaw.json candidate exists and no openclaw binary is found.
 
     Anything else, including an installed or configured OpenClaw, keeps the

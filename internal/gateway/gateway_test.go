@@ -478,8 +478,11 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 			}
 		})
 	}
-	if got := proxyShouldBindForConfiguredConnector(nil); !got {
-		t.Errorf("proxyShouldBindForConfiguredConnector(nil) = %v, want true", got)
+	if got := proxyShouldBindForConfiguredConnector(nil); got {
+		t.Errorf("proxyShouldBindForConfiguredConnector(nil) = %v, want false", got)
+	}
+	if got := proxyShouldBindForConfiguredConnector(&config.Config{}); got {
+		t.Errorf("proxyShouldBindForConfiguredConnector(zero config) = %v, want false", got)
 	}
 }
 

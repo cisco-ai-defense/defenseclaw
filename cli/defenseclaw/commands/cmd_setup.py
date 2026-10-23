@@ -6068,7 +6068,7 @@ def _guardrail_setup_check_targets(app: AppContext, gc, explicit_connector: str 
         pass
 
     if not targets:
-        _add(getattr(gc, "connector", "") or "openclaw")
+        _add(getattr(gc, "connector", ""))
     return targets
 
 
@@ -6187,13 +6187,13 @@ def _configure_hilt_interactive(
             ux.subhead("No connector is currently in action mode, so approvals are inactive.")
             return
         ux.subhead("Applies to action-mode connector(s): " + ", ".join(action_connectors))
-        connector = action_connectors[0] if len(action_connectors) == 1 else (gc.connector or "openclaw")
+        connector = action_connectors[0] if len(action_connectors) == 1 else (target_connector or gc.connector)
     elif (gc.mode or "observe").lower() != "action":
         ux.subhead("Human approval is action-mode only.")
         ux.subhead("Current mode is observe, so approvals are inactive and no prompts will appear.")
         return
     else:
-        connector = gc.connector or "openclaw"
+        connector = target_connector or gc.connector
     ux.subhead(_hilt_support_note(connector))
     ux.subhead("CRITICAL findings still block. HILT can confirm risky HIGH findings first.")
     hilt = gc.hilt
@@ -6665,6 +6665,11 @@ def setup_guardrail(
 
     gc = app.cfg.guardrail
     explicit_connector = normalize_connector(agent_name) if agent_name else None
+    no_connector_message = (
+        "no agent connector is configured, so setup guardrail has nothing to protect. "
+        "Pass --connector <agent> (for example --connector claudecode), "
+        "or run defenseclaw setup <connector> first."
+    )
 
     if disable:
         # Always restart on disable — leaving the proxy running defeats the
@@ -6691,11 +6696,7 @@ def setup_guardrail(
     ):
         # GAP-2609: on a no-connector install (init --connector none) the
         # fallback below enrolled OpenClaw, an agent the operator never chose.
-        raise click.ClickException(
-            "no agent connector is configured, so setup guardrail has nothing to protect. "
-            "Pass --connector <agent> (for example --connector claudecode), "
-            "or run defenseclaw setup <connector> first."
-        )
+        raise click.ClickException(no_connector_message)
 
     try:
         # `setup openclaw|zeptoclaw` switches the connector in memory before it
@@ -6815,12 +6816,11 @@ def setup_guardrail(
         # this run actually turns the judge on (not on every re-run).
         judge_enabled_by_this_run = False
         # Connector resolution order in non-interactive mode:
-        #   1. explicit --connector / --agent flag (operator intent always wins)
-        #   2. existing gc.connector if already set to a non-default value
-        #      (preserves prior `setup guardrail` choice across re-runs)
-        #   3. <data_dir>/picked_connector hint written by install.sh
-        #      (operator intent at install time), when that agent is installed
-        #   4. fallback to "openclaw" (historical default)
+        #   1. explicit --connector / --agent flag
+        #   2. configured primary, roster, or non-default claw.mode
+        #   3. <data_dir>/picked_connector, only when that agent is installed
+        #   4. the installed OpenClaw implied by an older claw.mode
+        # There is no connector fallback on an unconfigured host.
         # We deliberately do NOT run filesystem auto-detect (the
         # ``~/.claude`` / ``~/.codex`` heuristic) in non-interactive mode:
         # those directories often pre-exist on developer workstations
@@ -6828,30 +6828,40 @@ def setup_guardrail(
         # back during scripted installs. Filesystem detection is only
         # used in the interactive picker where the operator can see and
         # confirm the suggested default.
-        target_connector = explicit_connector or ""
         if explicit_connector:
             target_connector = explicit_connector
-        elif not gc.connector or gc.connector == "openclaw":
-            picked = _installed_picked_connector(getattr(app.cfg, "data_dir", None))
-            if picked:
-                target_connector = normalize_connector(picked)
-            else:
-                target_connector = gc.connector
+        elif gc.connector == "openclaw" and not gc.connectors:
+            installed = _detect_installed_connectors()
+            # Older configs pinned OpenClaw before the operator picked an
+            # installed agent. Keep a real OpenClaw installation, but let a
+            # verified picked_connector supersede that stale default.
+            target_connector = (
+                "openclaw"
+                if "openclaw" in installed
+                else _installed_picked_connector(getattr(app.cfg, "data_dir", None), installed)
+                or ""
+            )
+        elif gc.connector or gc.connectors:
+            target_connector = app.cfg.active_connector()
+        elif app.cfg.has_connector_configured() and app.cfg.active_connector() != "openclaw":
+            target_connector = app.cfg.active_connector()
         else:
-            target_connector = gc.connector
-        target_connector = target_connector or gc.connector
-        if target_connector:
-            _ensure_connector_available(normalize_connector(target_connector))
-            configured_connectors = getattr(gc, "connectors", None)
-            if (
-                explicit_connector
-                or not configured_connectors
-                or not any(_windows_opencode_requires_exact_selection(name) for name in configured_connectors)
-            ):
-                target_connectors = (target_connector,)
-            else:
-                target_connectors = tuple(_guardrail_setup_check_targets(app, gc, None))
-            preselect_guardrail_targets(target_connectors)
+            target_connector = _installed_picked_connector(getattr(app.cfg, "data_dir", None)) or (
+                app.cfg.active_connector() if app.cfg.has_connector_configured() else ""
+            )
+        if not target_connector:
+            raise click.ClickException(no_connector_message)
+        _ensure_connector_available(normalize_connector(target_connector))
+        configured_connectors = getattr(gc, "connectors", None)
+        if (
+            explicit_connector
+            or not configured_connectors
+            or not any(_windows_opencode_requires_exact_selection(name) for name in configured_connectors)
+        ):
+            target_connectors = (target_connector,)
+        else:
+            target_connectors = tuple(_guardrail_setup_check_targets(app, gc, None))
+        preselect_guardrail_targets(target_connectors)
 
         if explicit_connector:
             roster = getattr(gc, "connectors", None) or {}
@@ -6864,11 +6874,9 @@ def setup_guardrail(
                 # primary must follow the connector this run configures.
                 gc.connector = target_connector
         elif not gc.connector or gc.connector == "openclaw":
-            if target_connector:
-                gc.connector = target_connector
+            gc.connector = target_connector
         per_connector_target = bool(
             explicit_connector
-            and target_connector
             and getattr(gc, "connectors", None)
             and target_connector in gc.connectors
         )
@@ -7008,7 +7016,7 @@ def setup_guardrail(
             # supply --llm-role explicitly.
             gc.llm_role = (
                 "judge_and_agent"
-                if (target_connector or gc.connector or "openclaw") in _PROXY_BACKED_CONNECTORS
+                if (target_connector or app.cfg.active_connector()) in _PROXY_BACKED_CONNECTORS
                 else "judge_only"
             )
         if detection_strategy is not None:
@@ -7272,7 +7280,8 @@ def setup_guardrail(
 
     # --- Summary ---
     click.echo()
-    connector_label = _CONNECTOR_META.get(gc.connector or "openclaw", {}).get("label", gc.connector)
+    summary_connector = app.cfg.active_connector()
+    connector_label = _CONNECTOR_META.get(summary_connector, {}).get("label", summary_connector)
     _actives = list(app.cfg.active_connectors()) if hasattr(app.cfg, "active_connectors") else []
     _multi = len(_actives) > 1
     scope_val = (
@@ -7373,7 +7382,7 @@ def setup_guardrail(
                 app.cfg.data_dir,
                 app.cfg.gateway.host,
                 app.cfg.gateway.port,
-                connector=gc.connector or "openclaw",
+                connector=app.cfg.active_connector(),
                 connectors=app.cfg.active_connectors(),
             )
         except BaseException as exc:
@@ -7418,7 +7427,8 @@ def setup_guardrail(
         allow_offline=not restart,
         change=(
             "guardrail-setup",
-            f"scope={gc.connector or 'openclaw'}:{gc.mode} mode={gc.mode} scanner_mode={gc.scanner_mode}",
+            f"scope={app.cfg.active_connector() or 'unconfigured'}:{gc.mode} "
+            f"mode={gc.mode} scanner_mode={gc.scanner_mode}",
         ),
     )
     if guardrail_secret_transaction is not None:
@@ -9295,12 +9305,11 @@ def _restart_restored_connector_runtime(
     """
     cfg = app.cfg
     restored = _guarded_connectors(cfg, cfg.active_connectors()) if hasattr(cfg, "active_connectors") else []
-    primary = normalize_connector(cfg.active_connector()) if hasattr(cfg, "active_connector") else "openclaw"
+    primary = normalize_connector(cfg.active_connector()) if hasattr(cfg, "active_connector") else ""
     if not restored:
         # The prior config guarded nothing (for example after `setup remove
-        # --force`). active_connector() still floors to "openclaw", but there
-        # is no OpenClaw gateway to bounce, so restart only DefenseClaw's
-        # gateway (GAP-1470).
+        # --force`). There is no agent gateway to bounce, so restart only
+        # DefenseClaw's gateway (GAP-1470).
         primary = ""
     if skip_openclaw and primary == "openclaw":
         # The OpenClaw gateway is down: waiting for it again only repeats the
@@ -12815,7 +12824,13 @@ def _echo_custom_provider_enforcement(cfg: Any) -> None:
     calls are never routed through or inspected by DefenseClaw. Only the
     proxy connectors (OpenClaw, ZeptoClaw) enforce it on agent traffic.
     """
-    connector = connector_paths.normalize(getattr(cfg.guardrail, "connector", "") or "openclaw")
+    active = getattr(cfg, "active_connector", None)
+    connector = connector_paths.normalize(
+        active() if callable(active) else getattr(cfg.guardrail, "connector", "")
+    )
+    if not connector:
+        ux.subhead("No agent connector configured; this provider can serve DefenseClaw's judge/aux model only.")
+        return
     if connector in _PROXY_BACKED_CONNECTORS:
         ux.subhead(
             f"Enforced: {connector} routes the agent's model traffic through "
@@ -13713,7 +13728,7 @@ def execute_guardrail_setup(
     """
     gc = app.cfg.guardrail
     warnings: list[str] = []
-    connector_name = gc.connector or "openclaw"
+    connector_name = gc.connector or app.cfg.active_connector()
     if connector_name in _CONNECTOR_NAMES:
         app.cfg.claw.mode = connector_name
     workspace = _configure_connector_workspace(app.cfg, workspace_dir)
@@ -14025,7 +14040,7 @@ def _interactive_guardrail_setup(
         click.echo()
     else:
         selected_connector = _select_connector_interactive(
-            gc.connector or "openclaw",
+            gc.connector or app.cfg.active_connector(),
             data_dir=getattr(app.cfg, "data_dir", None),
         )
         if _pre_mutation_selection is not None:
@@ -14251,7 +14266,9 @@ def _interactive_guardrail_setup(
     click.echo()
 
     hook_judge_scope = [
-        c for c in (mode_targets if is_multi else [gc.connector or "openclaw"]) if c in _HOOK_ENFORCED_CONNECTORS
+        c
+        for c in (mode_targets if is_multi else [gc.connector or app.cfg.active_connector()])
+        if c in _HOOK_ENFORCED_CONNECTORS
     ]
     judge_targets = [
         c for c in hook_judge_scope if (gc.effective_mode(c) if hasattr(gc, "effective_mode") else gc.mode) == "action"
@@ -14346,7 +14363,7 @@ def _interactive_guardrail_setup(
 
 
 def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
-    connector_name = gc.connector or "openclaw"
+    connector_name = gc.connector or app.cfg.active_connector()
     meta = _CONNECTOR_META.get(connector_name, {})
 
     click.echo()
@@ -14493,7 +14510,7 @@ def _restart_services(
     data_dir: str,
     oc_host: str = "127.0.0.1",
     oc_port: int = 18789,
-    connector: str = "openclaw",
+    connector: str = "",
     connectors: list[str] | None = None,
     wait_for_connector_ready: bool = False,
     start_if_stopped: bool = True,

@@ -108,8 +108,8 @@ class ResolveActiveConnectorTests(unittest.TestCase):
         cfg.active_connector = lambda: (_ for _ in ()).throw(RuntimeError("x"))
         self.assertEqual(cmd_guardrail._resolve_active_connector(cfg), "zeptoclaw")
 
-    def test_none_cfg_defaults_to_openclaw(self):
-        self.assertEqual(cmd_guardrail._resolve_active_connector(None), "openclaw")
+    def test_none_cfg_has_no_connector(self):
+        self.assertEqual(cmd_guardrail._resolve_active_connector(None), "")
 
     def test_resolve_member_connector_accepts_aliases(self):
         app = make_ctx(enabled=True, connector="codex")

@@ -3478,7 +3478,7 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
         self.assertGreater(len(self.health_body), 2_000)
         cfg = SimpleNamespace(
             openshell=None,
-            gateway=SimpleNamespace(api_port=self.port),
+            gateway=SimpleNamespace(api_port=self.port, fleet_mode="enabled"),
         )
         result = _DoctorResult()
 

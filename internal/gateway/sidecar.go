@@ -3502,7 +3502,7 @@ type watcherDirSources struct {
 //
 //	explicit gateway.watcher.{skill,plugin}.dirs
 //	  > active connector ComponentTargets("")
-//	  > cfg.SkillDirs() / cfg.PluginDirs() (OpenClaw default)
+//	  > cfg.SkillDirs() / cfg.PluginDirs() (configured agent)
 //
 // Pure: no globals, no I/O, no logging — every input arrives via
 // arguments. The third return value tags the source bucket so the
@@ -3607,12 +3607,9 @@ func watcherDefaultPluginDirs(cfg *config.Config, conn connector.Connector) []st
 // watcherConnectors resolves every configured connector, owners of a shared
 // folder layout first (enrolledRootPrecedence). A per-user watcher watches
 // the skill and plugin folders of each one, not only the first connector's
-// (GAP-0392). With no connector configured it resolves the default, as before.
+// (GAP-0392). With no connector configured there are no agent folders.
 func watcherConnectors(reg *connector.Registry, cfg *config.Config) []connector.Connector {
 	names := cfg.ActiveConnectors()
-	if len(names) == 0 {
-		names = []string{configuredConnectorName(cfg)}
-	}
 	sort.SliceStable(names, func(i, j int) bool {
 		if pi, pj := enrolledRootPrecedence(names[i]), enrolledRootPrecedence(names[j]); pi != pj {
 			return pi < pj
@@ -3734,10 +3731,9 @@ func opencodeWatcherDirs(dirs []string, activeRoot string) []string {
 }
 
 // watcherUsesConnectorDirs reports whether the watcher may watch the
-// connector's (or the OpenClaw default's) folders in the gateway's own home.
+// configured connector's folders in the gateway's own home.
 // Not when no connector is configured (init --connector none, or setup remove
-// of the last one): the empty name resolves to the OpenClaw default and
-// watching its folders would create ~/.openclaw (GAP-1056). Not on a managed
+// of the last one): no agent folders should be watched (GAP-1056). Not on a managed
 // enterprise service either: its home is the service profile, which never
 // holds a user's skills or plugins (GAP-0026). Secure Client keeps the
 // pre-1.0 connector directories; explicit gateway.watcher dirs apply in all
@@ -3841,14 +3837,13 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		return false, nil
 	}
 	// Resolve the active connector to get connector-specific component
-	// directories. Falls back to cfg.SkillDirs()/PluginDirs() (OpenClaw
-	// paths) when the connector does not implement ComponentScanner.
+	// directories. Falls back to cfg.SkillDirs()/PluginDirs() for the
+	// configured connector when it does not implement ComponentScanner.
 	// Unlike runGuardrail, the watcher is best-effort discovery: a
 	// misspelled guardrail.connector here should still be caught at
 	// runGuardrail's fail-fast check (see S1.4), so we log the error
-	// and fall back rather than aborting the watcher loop. That keeps
-	// the watcher useful for the OpenClaw default flow even while a
-	// freshly-broken connector name is being debugged.
+	// and fall back rather than aborting the watcher loop. An unconfigured
+	// install has no connector paths to watch.
 	reg := connector.NewDefaultRegistry()
 	conns := watcherConnectors(reg, s.currentConfig())
 	skillDirs, pluginDirs, roots, src := resolveWatcherDirsForConnectors(s.currentConfig(), conns, wcfg)
@@ -4459,10 +4454,8 @@ func (s *Sidecar) activeSessionKeys() []string {
 // resolveActiveConnector looks up the active connector in the registry
 // with a strict-but-friendly contract:
 //
-//   - Empty name: log INFO and return the openclaw default. This
-//     preserves backward compatibility with installs that predate the
-//     guardrail.connector field while still announcing the choice in
-//     the log so operators can see what was actually picked.
+//   - Empty name: return an error; selecting an uninstalled OpenClaw would
+//     bypass the operator's connector choice.
 //   - Non-empty name that the registry knows: return it.
 //   - Non-empty name that the registry does NOT know: return an error.
 //     This is the operator-typo case the silent "fall back to openclaw"
@@ -4477,21 +4470,12 @@ func (s *Sidecar) activeSessionKeys() []string {
 func resolveActiveConnector(reg *connector.Registry, name, surface string) (connector.Connector, error) {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
-		conn, ok := reg.Get("openclaw")
-		if !ok {
-			// The default connector is registered by NewDefaultRegistry,
-			// so the only way to get here is if a custom registry was
-			// passed in without it. Surface as an error rather than
-			// returning nil to avoid silent behavior downstream.
-			return nil, fmt.Errorf("[%s] no openclaw default in registry; pass an explicit guardrail.connector", surface)
-		}
-		fmt.Fprintf(os.Stderr, "[%s] guardrail.connector unset; defaulting to openclaw\n", surface)
-		return conn, nil
+		return nil, fmt.Errorf("[%s] no agent connector configured; run defenseclaw setup <connector>", surface)
 	}
 	conn, ok := reg.Get(trimmed)
 	if !ok {
 		return nil, fmt.Errorf(
-			"[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (%s) or remove the field to default to openclaw; %s",
+			"[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (%s); %s",
 			surface,
 			trimmed,
 			strings.Join(reg.Names(), ", "),
@@ -4517,9 +4501,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 
 	// Load the active connector from the registry. The connector name is
 	// written by `defenseclaw setup` into guardrail.connector. When the
-	// field is empty we treat that as "operator did not pick anything"
-	// and fall back to openclaw for backward compatibility (and log it
-	// at INFO so the operator can see what happened). When the field is
+	// field is empty the configured claw.mode or roster may still select an
+	// agent. When no agent is configured, boot refuses to guess. When the field is
 	// set to a value the registry does not know about, we fail fast
 	// rather than silently substituting openclaw — silent substitution
 	// would let a typo in `guardrail.connector` route Codex / Claude
@@ -4539,7 +4522,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	}
 	s.migrateRetiredConnectorState(ctx, registry)
 	s.reportUnrebasedRulePacks(ctx)
-	conn, err := resolveActiveConnector(registry, guardrailConnectorName(s.currentConfig()), "guardrail")
+	conn, err := resolveActiveConnector(registry, configuredConnectorName(s.currentConfig()), "guardrail")
 	if err != nil {
 		// Fail fast: the operator explicitly set a connector that does
 		// not exist. Returning here aborts sidecar boot so the operator
@@ -4640,10 +4623,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 	}
 
-	// resolveActiveConnector guarantees a non-nil connector — either the
-	// operator-selected one or the openclaw default. We can therefore
-	// drop the historical nil-guard and treat this as the canonical
-	// path; any "no active connector" condition is now a hard error.
+	// resolveActiveConnector guarantees a non-nil configured connector.
+	// An absent connector is a hard error.
 	fmt.Fprintf(os.Stderr, "[guardrail] active connector: %s (%s)\n", conn.Name(), conn.Description())
 
 	if !s.currentConfig().Guardrail.Enabled && guardianManagedLifecycle {
@@ -6844,42 +6825,28 @@ func shouldRunProviderProbeForConnector(conn connector.Connector, gc *config.Gua
 }
 
 func configuredConnectorName(cfg *config.Config) string {
-	if cfg == nil {
+	if cfg == nil || !cfg.HasConnectorConfigured() {
 		return ""
 	}
 	if name := strings.TrimSpace(cfg.Guardrail.Connector); name != "" {
 		return strings.ToLower(name)
 	}
-	return strings.ToLower(strings.TrimSpace(string(cfg.Claw.Mode)))
-}
-
-// guardrailConnectorName is the connector a single-connector guardrail boot
-// sets up. guardrail.connectors without guardrail.connector (an
-// administrator config) names it; the claw.mode default does not: the
-// gateway set up an openclaw connector nobody configured at every start and
-// the guardrail exited on its missing extension (GAP-0361). claw.mode still
-// picks among the listed connectors, and decides alone without the map.
-// Secure Client keeps the historical connector selection from claw.mode.
-func guardrailConnectorName(cfg *config.Config) string {
-	name := configuredConnectorName(cfg)
-	if cfg == nil || cfg.SecureClientIntegration() || strings.TrimSpace(cfg.Guardrail.Connector) != "" || len(cfg.Guardrail.Connectors) == 0 {
-		return name
-	}
-	roster := cfg.ActiveConnectors()
-	for _, listed := range roster {
-		if listed == name {
-			return name
+	mode := strings.ToLower(strings.TrimSpace(string(cfg.Claw.Mode)))
+	if len(cfg.Guardrail.Connectors) > 0 {
+		roster := cfg.ActiveConnectors()
+		for _, listed := range roster {
+			if listed == mode {
+				return mode
+			}
 		}
-	}
-	if len(roster) > 0 {
 		return roster[0]
 	}
-	return name
+	return mode
 }
 
 func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
-	if cfg == nil {
-		return true
+	if cfg == nil || !cfg.HasConnectorConfigured() {
+		return false
 	}
 	name := configuredConnectorName(cfg)
 	if connector.IsProxyConnector(name) {
@@ -6948,8 +6915,7 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 	}
 	fleetMode := strings.ToLower(strings.TrimSpace(cfg.Gateway.FleetMode))
 	// A managed standalone deployment is hook-only. Its connectors come
-	// from guardrail.connectors, so configuredConnectorName falls back to
-	// claw.mode (default "openclaw") and the heuristic below would dial.
+	// from guardrail.connectors; the fleet remains an explicit opt-in.
 	// The fleet client authenticates with the gateway's own API token,
 	// and on a managed host any local account can bind a loopback port
 	// such as the default 127.0.0.1:18789, so that dial would hand the
@@ -6997,8 +6963,8 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 }
 
 // openClawNotInstalledLocally reports a loopback fleet address on a machine
-// where agent discovery found no OpenClaw. OpenClaw is init's default
-// connector, so without this check such an install dials 127.0.0.1:18789
+// where agent discovery found no OpenClaw. Older init configs named OpenClaw
+// by default, so without this check such an install dials 127.0.0.1:18789
 // forever and reports the gateway as reconnecting. A remote gateway.host
 // still dials, and so does an install whose discovery has not run.
 func openClawNotInstalledLocally(cfg *config.Config) bool {

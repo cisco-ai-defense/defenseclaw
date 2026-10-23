@@ -121,6 +121,7 @@ def test_footer_names_what_ran(monkeypatch) -> None:
 
     model = SetupPanelModel({})
     model.open_wizard_form(SetupWizard.CONNECTOR_SETUP)
+    model.form_fields = [field.with_value("codex") if field.label == "Connector" else field for field in model.form_fields]
     action = model.submit_wizard_form()
     assert action.intent is not None
     assert action.intent.label == "setup " + action.intent.args[1]

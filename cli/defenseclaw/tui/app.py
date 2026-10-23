@@ -16460,7 +16460,7 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         # collapse an empty mode to "openclaw". OverviewPanelModel.active_connector_name()
         # then resolves the genuinely-zero-connector case to "" (no phantom
         # connector) instead of fabricating "openclaw". The Go-parity
-        # config.active_connector() contract is deliberately left untouched.
+        # The config resolver and Overview both leave an absent agent empty.
         claw_mode=display_claw_mode,
         guardrail_enabled=effective_guardrail_enabled,
         guardrail_connector=display_guardrail_connector,
