@@ -287,6 +287,88 @@ func TestDarwinPublishedPinDetectsPrivateManagedPreference(t *testing.T) {
 	}
 }
 
+func TestDarwinLifecyclePinsPerAccountPreferencesAndRepairsDrift(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	write := func(account string) {
+		t.Helper()
+		path := h.env.P("/Library/Managed Preferences/" + account + "/com.openai.codex.plist")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("<?xml version=\"1.0\"?><plist><dict></dict></plist>"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("alice")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	getPins := func() map[string]managed.PolicyViewFilePin {
+		t.Helper()
+		descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return descriptor.PolicyViewUserSources["codex"]
+	}
+	if pins := getPins(); len(pins) != 1 || pins["alice"].SHA256 == "" {
+		t.Fatalf("install did not attest alice's preference: %+v", pins)
+	}
+	write("bob")
+	status := h.run(Options{Action: ActionStatus})
+	if status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("status hid a new per-account source: %+v", status)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	if pins := getPins(); len(pins) != 2 || pins["bob"].SHA256 == "" {
+		t.Fatalf("ensure did not attest bob's preference: %+v", pins)
+	}
+}
+
+func TestDarwinEnsureMigratesDescriptorWithoutPerAccountPins(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	pref := h.env.P("/Library/Managed Preferences/alice/com.openai.codex.plist")
+	if err := os.MkdirAll(filepath.Dir(pref), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pref, []byte("<?xml version=\"1.0\"?><plist><dict></dict></plist>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.3"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	path := h.env.Layout.DescriptorPath
+	descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor.PolicyViewUserSources = nil // an older committed descriptor
+	data, err := managed.MarshalRuntimeDescriptor(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(path), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record, err := h.env.loadDeployment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Files[path] = sha256Bytes(data)
+	if err := h.env.saveDeployment(record); err != nil {
+		t.Fatal(err)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	if status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("status hid missing per-account pins: %+v", status)
+	}
+	result := h.run(Options{Action: ActionEnsure})
+	requireOK(t, result)
+	if result.Noop {
+		t.Fatal("ensure kept a descriptor without per-account pins")
+	}
+	updated, err := managed.ParseRuntimeDescriptor([]byte(h.read(path)))
+	if err != nil || updated.PolicyViewUserSources["codex"]["alice"].SHA256 == "" {
+		t.Fatalf("ensure did not attest alice's preference: %+v, %v", updated, err)
+	}
+}
+
 func TestHookBinaryIsTheMachinePolicyCommand(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		layout, err := managed.StandaloneLayoutFor(goos)

@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -203,6 +204,22 @@ var (
 		}
 		return enterprisepolicy.PolicyViewDigest(opts, connector)
 	}
+	standaloneHookAccount = func() (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		account, err := enterprisehooks.LookupStandaloneUIDBounded(ctx, os.Getuid())
+		if err != nil || account.UID != os.Getuid() || account.Name == "" {
+			return "", errors.New("cannot resolve managed hook account")
+		}
+		return account.Name, nil
+	}
+	standalonePolicyViewUser = func(goos, connector, account string, pin managed.PolicyViewFilePin) error {
+		opts, ok := standaloneMachinePolicyOptions(goos)
+		if !ok {
+			return errors.New("standalone machine policy paths are unavailable")
+		}
+		return enterprisepolicy.VerifyPolicyViewUserPin(opts, connector, account, pin)
+	}
 	standaloneSecureClientInstallDir = "/opt/cisco/secureclient/defenseclaw"
 )
 
@@ -250,6 +267,14 @@ func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 		observed, digestErr := standalonePolicyViewDigest(standaloneHookGOOS, connectorName)
 		if expected == "" || digestErr != nil || observed != expected {
 			viewReason = hookexec.ManagedPolicyViewReason
+		}
+		if viewReason == "" && standaloneHookGOOS == "darwin" &&
+			(connectorName == enterprisepolicy.ConnectorCodex || connectorName == enterprisepolicy.ConnectorClaudeCode) {
+			account, accountErr := standaloneHookAccount()
+			if accountErr != nil || standalonePolicyViewUser(standaloneHookGOOS, connectorName, account,
+				loaded.PolicyViewUserSources[connectorName][account]) != nil {
+				viewReason = hookexec.ManagedPolicyViewReason
+			}
 		}
 	}
 	reason := ""

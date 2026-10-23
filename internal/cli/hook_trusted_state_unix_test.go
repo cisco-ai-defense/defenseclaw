@@ -33,6 +33,7 @@ func withStandaloneHookRuntime(
 	t.Helper()
 	oldGOOS, oldLoad, oldPolicy, oldSC := standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir
 	oldDigest := standalonePolicyViewDigest
+	oldAccount, oldUserView := standaloneHookAccount, standalonePolicyViewUser
 	oldContext, oldReport := standaloneLinuxHookContext, reportStandaloneHookRefusal
 	standaloneLinuxHookContext = func() string { return "" }
 	reportStandaloneHookRefusal = func(string, string, string) {}
@@ -40,10 +41,13 @@ func withStandaloneHookRuntime(
 	standaloneRuntimeDescriptorLoad = load
 	standaloneMachinePolicyOptions = policy
 	standalonePolicyViewDigest = func(_, _ string) (string, error) { return strings.Repeat("a", 64), nil }
+	standaloneHookAccount = func() (string, error) { return "test-user", nil }
+	standalonePolicyViewUser = func(string, string, string, managed.PolicyViewFilePin) error { return nil }
 	standaloneSecureClientInstallDir = secureClientDir
 	t.Cleanup(func() {
 		standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir = oldGOOS, oldLoad, oldPolicy, oldSC
 		standalonePolicyViewDigest = oldDigest
+		standaloneHookAccount, standalonePolicyViewUser = oldAccount, oldUserView
 		standaloneLinuxHookContext, reportStandaloneHookRefusal = oldContext, oldReport
 		standaloneHookRuntime.Lock()
 		standaloneHookRuntime.prepared = false
@@ -231,6 +235,44 @@ func TestStandaloneHookRequiresPublishedPolicyContent(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestStandaloneMacHookChecksOnlyInvokingAccountPreference(t *testing.T) {
+	descriptor := testDescriptor()
+	descriptor.OpenHookConnectors = []string{"codex"}
+	descriptor.PolicyViewUserSources = map[string]map[string]managed.PolicyViewFilePin{
+		"codex": {
+			"alice": {SHA256: strings.Repeat("a", 64)},
+			"bob":   {SHA256: strings.Repeat("b", 64)},
+		},
+	}
+	withStandaloneHookRuntime(t, "darwin",
+		func(string) (*managed.RuntimeDescriptor, error) { return descriptor, nil },
+		noMarkers, "/nonexistent-secure-client")
+	account := "alice"
+	standaloneHookAccount = func() (string, error) { return account, nil }
+	standalonePolicyViewUser = func(_, connector, name string, pin managed.PolicyViewFilePin) error {
+		if connector != "codex" || name != account || pin.SHA256 != descriptor.PolicyViewUserSources["codex"][account].SHA256 {
+			return os.ErrInvalid
+		}
+		return nil
+	}
+	prepareEnterpriseManagedHookRuntime("codex")
+	if got := enterpriseManagedHookRuntimeFailureReason(); got != "" {
+		t.Fatalf("alice's valid policy refused because of bob's source: %q", got)
+	}
+	account = "bob"
+	standalonePolicyViewUser = func(string, string, string, managed.PolicyViewFilePin) error { return os.ErrPermission }
+	prepareEnterpriseManagedHookRuntime("codex")
+	if got := enterpriseManagedHookRuntimeFailureReason(); got != hookexec.ManagedPolicyViewReason ||
+		enterpriseManagedHookRuntimeFailMode() != "closed" {
+		t.Fatalf("unverifiable relevant source did not close: reason %q mode %q", got, enterpriseManagedHookRuntimeFailMode())
+	}
+	standaloneHookAccount = func() (string, error) { return "", os.ErrPermission }
+	prepareEnterpriseManagedHookRuntime("codex")
+	if got := enterpriseManagedHookRuntimeFailureReason(); got != hookexec.ManagedPolicyViewReason {
+		t.Fatalf("unresolved account did not close: %q", got)
 	}
 }
 

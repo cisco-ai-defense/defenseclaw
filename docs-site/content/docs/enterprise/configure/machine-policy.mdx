@@ -20,6 +20,12 @@ current vendor policy differs from the digest in the trusted runtime descriptor;
 verified view is pinned. `reconcile` also re-pins a verified view when it runs,
 but vendor policy paths do not automatically trigger it.
 
+On macOS, Codex and Claude Code hooks check the shared policy and only the
+invoking account's managed preference. The root lifecycle attests each
+per-account preference in the protected runtime descriptor. A hook refuses
+when its relevant preference is unreadable, missing, changed or otherwise
+unverifiable. Another account's preference does not affect this hook.
+
 ## Routes by connector
 
 | Connector | Route |

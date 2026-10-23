@@ -53,8 +53,9 @@ type renderInputs struct {
 	LoadCredential bool
 	// MachinePolicy are the connectors the descriptor records as protected
 	// by vendor machine policy.
-	MachinePolicy     []string
-	PolicyViewDigests map[string]string
+	MachinePolicy         []string
+	PolicyViewDigests     map[string]string
+	PolicyViewUserSources map[string]map[string]managed.PolicyViewFilePin
 }
 
 // renderFiles returns every non-binary file the deployment consists of.
@@ -246,6 +247,7 @@ func proxyEnvironment(cfg *validatedConfig) map[string]string {
 
 func (e *Env) renderDescriptor(in renderInputs) ([]byte, error) {
 	digests := in.PolicyViewDigests
+	userSources := in.PolicyViewUserSources
 	if digests == nil {
 		// An unchanged plan keeps the last committed pins. A publish updates
 		// them only after the vendor policy is actually on disk.
@@ -254,6 +256,7 @@ func (e *Env) renderDescriptor(in renderInputs) ([]byte, error) {
 			if data, err := readBounded(path, 64<<10); err == nil {
 				if previous, err := managed.ParseRuntimeDescriptor(data); err == nil {
 					digests = previous.PolicyViewDigests
+					userSources = previous.PolicyViewUserSources
 				}
 			}
 		}
@@ -269,6 +272,7 @@ func (e *Env) renderDescriptor(in renderInputs) ([]byte, error) {
 		HookSocket:              e.Layout.HookSocketPath,
 		MachinePolicyConnectors: append([]string{}, in.MachinePolicy...),
 		PolicyViewDigests:       make(map[string]string),
+		PolicyViewUserSources:   make(map[string]map[string]managed.PolicyViewFilePin),
 		DisableSelfUpdate:       true,
 		InstalledAt:             in.InstalledAt,
 	}
@@ -276,6 +280,9 @@ func (e *Env) renderDescriptor(in renderInputs) ([]byte, error) {
 	for _, name := range d.MachinePolicyConnectors {
 		if digest := digests[name]; digest != "" {
 			d.PolicyViewDigests[name] = digest
+		}
+		if len(userSources[name]) != 0 {
+			d.PolicyViewUserSources[name] = userSources[name]
 		}
 	}
 	if in.Config != nil {

@@ -18,9 +18,10 @@ import (
 // PolicyViewDigest binds the bytes of a connector's vendor machine policy
 // sources to the administrator's protected runtime descriptor. It includes
 // absent files and directory entries: hiding a policy file or introducing a
-// higher-precedence source changes the digest. Both publication and each
-// managed hook invocation use this exact reader, with a bounded file count
-// and the existing trusted, bounded policy-file reader.
+// higher-precedence shared source changes the digest. Per-account macOS
+// preferences are pinned separately for the invoking account. Both
+// publication and each managed hook invocation use this exact reader, with a
+// bounded file count and the existing trusted, bounded policy-file reader.
 func PolicyViewDigest(opts Options, connector string) (string, error) {
 	if opts.goos() != "linux" && opts.goos() != "darwin" {
 		return "", fmt.Errorf("policy-view digest is unavailable on %s", opts.goos())
@@ -73,13 +74,6 @@ func PolicyViewDigest(opts Options, connector string) (string, error) {
 		if preference != "" {
 			root := rooted(opts, "/Library/Managed Preferences")
 			add(filepath.Join(root, preference))
-			matches, err := filepath.Glob(filepath.Join(root, "*", preference))
-			if err != nil {
-				return "", err
-			}
-			for _, match := range matches {
-				add(match)
-			}
 		}
 	}
 	if len(seen) == 0 || len(seen) > 128 {
