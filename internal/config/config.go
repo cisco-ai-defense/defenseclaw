@@ -3099,11 +3099,8 @@ func loadConfigSourceCheckedWithLayout(
 
 	if !inspection && !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		// Older installs can use OpenClaw only through a remote fleet gateway.
-		// An absent local binary/config must not hide that connector on upgrade.
-		// The empty host has the same loopback default as the gateway dialer.
-		cfg.openClawNotInstalled = cfg.OpenClawOnlyImplied() &&
-			(strings.TrimSpace(cfg.Gateway.Host) == "" || isLoopbackListenerHost(cfg.Gateway.Host)) &&
-			!cfg.OpenClawInstalled()
+		// A remote host or explicit fleet mode must keep that connector on upgrade.
+		cfg.openClawNotInstalled = cfg.OpenClawImpliedButNotInstalled()
 	}
 
 	warnPlaintextSecrets(&cfg)

@@ -1015,6 +1015,25 @@ func (c *Config) OpenClawOnlyImplied() bool {
 	return strings.EqualFold(strings.TrimSpace(string(c.Claw.Mode)), "openclaw")
 }
 
+// OpenClawImpliedButNotInstalled reports when the loader and fleet gateway
+// should treat a defaulted OpenClaw connector as absent. An explicit fleet
+// mode keeps the connector, including for a loopback host without OpenClaw
+// installed locally. Mirrors openclaw_implied_but_not_installed in the CLI.
+func (c *Config) OpenClawImpliedButNotInstalled() bool {
+	if c == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Gateway.FleetMode)) {
+	case "", "auto":
+	default:
+		return false
+	}
+	if host := strings.TrimSpace(c.Gateway.Host); host != "" && !isLoopbackListenerHost(host) {
+		return false
+	}
+	return c.OpenClawOnlyImplied() && !c.OpenClawInstalled()
+}
+
 // OpenClawInstalled reports whether an openclaw.json candidate exists or an
 // openclaw binary is found. A stat error other than "does not exist" (for
 // example a permission error) counts as present. Mirrors

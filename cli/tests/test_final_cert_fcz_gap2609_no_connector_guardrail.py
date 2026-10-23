@@ -112,7 +112,7 @@ def test_non_interactive_guardrail_refuses_legacy_config_without_claw_or_agent()
     app, tmp_dir, db_path = make_app_context()
     try:
         Path(tmp_dir, "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
-        with patch.object(config_module, "openclaw_installed", return_value=False):
+        with patch("defenseclaw.openclaw_presence.openclaw_installed", return_value=False):
             app.cfg = config_module.load(data_dir=tmp_dir)
         argv = ["guardrail", "--non-interactive", "--no-restart", "--cisco-api-key-env", "ASIA_PACIFIC_KEY"]
         with patch.object(cmd_setup, "_detect_installed_connectors", return_value=[]):

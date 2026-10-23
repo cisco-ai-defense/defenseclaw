@@ -16,11 +16,7 @@
 
 package gateway
 
-import (
-	"strings"
-
-	"github.com/defenseclaw/defenseclaw/internal/config"
-)
+import "github.com/defenseclaw/defenseclaw/internal/config"
 
 // The Gateway subsystem publishes these when the OpenClaw fleet uplink is off
 // because OpenClaw is not installed (see openClawImpliedButNotInstalled). The
@@ -51,16 +47,5 @@ const (
 // the previous behaviour. The configuration checks run first so the
 // filesystem is only consulted in the narrow case.
 func openClawImpliedButNotInstalled(cfg *config.Config) bool {
-	if cfg == nil {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(cfg.Gateway.FleetMode)) {
-	case "", "auto":
-	default:
-		return false
-	}
-	if !isLoopbackGatewayHost(cfg.Gateway.Host) {
-		return false
-	}
-	return cfg.OpenClawOnlyImplied() && !cfg.OpenClawInstalled()
+	return cfg.OpenClawImpliedButNotInstalled()
 }

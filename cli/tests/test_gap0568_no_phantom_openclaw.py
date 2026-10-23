@@ -137,6 +137,21 @@ class OlderConfigWithoutClawBlockTests(_FreshHome):
         self.assertEqual(cfg.active_connector(), "openclaw")
         self.assertEqual(cfg.active_connectors(), ["openclaw"])
 
+    def test_explicit_loopback_fleet_keeps_legacy_openclaw_without_local_install(self):
+        from defenseclaw.config import load
+
+        original = (self.data_dir / "config.yaml").read_text(encoding="utf-8")
+        for fleet_mode in ("enabled", "enabledd"):
+            with self.subTest(fleet_mode=fleet_mode):
+                (self.data_dir / "config.yaml").write_text(
+                    original + f"gateway:\n  host: 127.0.0.1\n  fleet_mode: {fleet_mode}\n",
+                    encoding="utf-8",
+                )
+                cfg = load()
+                self.assertTrue(cfg.has_connector_configured())
+                self.assertEqual(cfg.active_connector(), "openclaw")
+                self.assertEqual(cfg.active_connectors(), ["openclaw"])
+
     def test_v8_upgrade_without_claw_block_selects_no_agent(self):
         from defenseclaw.config import load
 

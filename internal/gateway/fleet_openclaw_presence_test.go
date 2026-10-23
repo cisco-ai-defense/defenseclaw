@@ -60,10 +60,10 @@ func TestGatewayNoConnectorForLegacyConfigWithoutOpenClaw(t *testing.T) {
 	}
 }
 
-// An older config can use OpenClaw entirely through a remote fleet gateway,
-// with no OpenClaw installation on the local machine. Resolve the loaded
-// config before checking the gateway's dial decision.
-func TestGatewayLegacyRemoteOpenClawWithoutLocalInstall(t *testing.T) {
+// An older config can use OpenClaw through a remote fleet gateway or an
+// explicitly enabled loopback uplink, without a local OpenClaw installation.
+// Resolve the loaded config before checking the gateway's dial decision.
+func TestGatewayLegacyOpenClawWithoutLocalInstall(t *testing.T) {
 	for _, claw := range []struct {
 		name string
 		yaml string
@@ -72,25 +72,37 @@ func TestGatewayLegacyRemoteOpenClawWithoutLocalInstall(t *testing.T) {
 		{"older init mode", "claw:\n  mode: openclaw\n"},
 	} {
 		t.Run(claw.name, func(t *testing.T) {
-			testenv.SetHome(t, t.TempDir())
-			stubOpenClawBinary(t, false)
-			path := filepath.Join(t.TempDir(), config.DefaultConfigName)
-			raw := "config_version: 9\ngateway:\n  host: 10.0.0.5\n  fleet_mode: auto\n" + claw.yaml
-			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			cfg, err := config.LoadFromFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := cfg.ActiveConnectors(); len(got) != 1 || got[0] != "openclaw" {
-				t.Fatalf("loaded ActiveConnectors() = %v, want [openclaw]", got)
-			}
-			if got := configuredConnectorName(cfg); got != "openclaw" {
-				t.Errorf("configuredConnectorName() = %q, want openclaw", got)
-			}
-			if !gatewayShouldConnectForConfiguredConnector(cfg) || !RequiresFleetGateway(cfg) {
-				t.Error("loaded remote OpenClaw fleet config does not dial")
+			for _, fleet := range []struct {
+				name string
+				host string
+				mode string
+			}{
+				{"remote auto", "10.0.0.5", "auto"},
+				{"loopback enabled", "127.0.0.1", "enabled"},
+				{"loopback typo", "127.0.0.1", "enabledd"},
+			} {
+				t.Run(fleet.name, func(t *testing.T) {
+					testenv.SetHome(t, t.TempDir())
+					stubOpenClawBinary(t, false)
+					path := filepath.Join(t.TempDir(), config.DefaultConfigName)
+					raw := "config_version: 9\ngateway:\n  host: " + fleet.host + "\n  fleet_mode: " + fleet.mode + "\n" + claw.yaml
+					if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					cfg, err := config.LoadFromFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got := cfg.ActiveConnectors(); len(got) != 1 || got[0] != "openclaw" {
+						t.Fatalf("loaded ActiveConnectors() = %v, want [openclaw]", got)
+					}
+					if got := configuredConnectorName(cfg); got != "openclaw" {
+						t.Errorf("configuredConnectorName() = %q, want openclaw", got)
+					}
+					if !gatewayShouldConnectForConfiguredConnector(cfg) || !RequiresFleetGateway(cfg) {
+						t.Error("loaded OpenClaw fleet config does not dial")
+					}
+				})
 			}
 		})
 	}
