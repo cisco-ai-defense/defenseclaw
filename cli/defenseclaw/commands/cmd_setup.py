@@ -18487,7 +18487,7 @@ def _bootstrap_bridge(
         click.echo("  Run 'defenseclaw init' to seed it, or install from source.")
         return None
 
-    click.echo("  Starting local Splunk (this takes ~2 minutes)...")
+    click.echo("  Starting local Splunk (the first image download may take a while)...")
     # The bridge has its own private env file and never needs the gateway
     # bearer. Supplying the same explicit child environment to refresh/down
     # and up prevents it (and docker/compose descendants) from inheriting the
@@ -18507,8 +18507,12 @@ def _bootstrap_bridge(
     # operators to re-run the bridge by hand to see what actually failed.
     result: subprocess.CompletedProcess[str] | None = None
     try:
-        run_kwargs = {"capture_output": True, "text": True, "timeout": 300}
-        run_kwargs["env"] = env
+        run_kwargs = {"capture_output": True, "text": True, "timeout": 10800, "env": env}
+        if click.get_text_stream("stderr").isatty():
+            # Keep the JSON contract on stdout while Docker reports image
+            # download progress to the operator's terminal.
+            run_kwargs.pop("capture_output")
+            run_kwargs.update(stdout=subprocess.PIPE, stderr=None)
         result = subprocess.run(
             [bridge, "up", "--env-file", env_file, "--output", "json"],
             **run_kwargs,
@@ -18541,7 +18545,7 @@ def _bootstrap_bridge(
         ux.echo("    Note: Free mode may still show a login page — use these credentials")
         return contract
     except subprocess.TimeoutExpired:
-        click.echo("  Bridge startup timed out after 5 minutes")
+        click.echo("  Bridge startup timed out after 3 hours (including image download)")
         return None
     except _json.JSONDecodeError as exc:
         click.echo(f"  Bridge startup error: malformed JSON contract ({exc})")

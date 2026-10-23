@@ -10,8 +10,9 @@ from types import SimpleNamespace
 
 import click
 import pytest
+import yaml
 from click.testing import CliRunner
-from defenseclaw.commands import cmd_edge_connector_cli, cmd_edge_install, cmd_setup_edge_connector, cmd_setup_mqtt
+from defenseclaw.commands import cmd_config, cmd_edge_connector_cli, cmd_edge_install, cmd_setup_edge_connector, cmd_setup_mqtt
 from defenseclaw.context import AppContext
 from defenseclaw.dotenv_utils import persist_env_var
 from defenseclaw.file_permissions import make_private_directory
@@ -69,6 +70,16 @@ def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch
     assert "--endpoint https://fleet.example.com/api/v1/fleet" in install_guide
     assert "--target DEVICE --user USER" in install_guide
     assert "automatically registers" in install_guide
+    assert "defenseclaw config set fleet.trust_proxy_headers true" in install_guide
+    assert "defenseclaw-gateway restart" in install_guide
+    assert "X-Forwarded-Proto: https" in install_guide
+    assert "defenseclaw config set fleet.allow_key_over_http true" in install_guide
+    reference = (
+        Path(__file__).resolve().parents[2]
+        / "docs-site/content/docs/reference/edge-connector/configuration.mdx"
+    ).read_text(encoding="utf-8")
+    assert "fleet.trust_proxy_headers" in reference
+    assert "fleet.allow_key_over_http" in reference
     private_home = tmp_path / "fleet-home"
     make_private_directory(private_home)
     monkeypatch.setenv("DEFENSECLAW_HOME", str(private_home))
@@ -105,9 +116,24 @@ def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch
     assert calls[0][1:5] == ["-q", "--noproxy", "*", "-s"]
 
 
+def test_documented_proxy_trust_command_writes_fleet_setting(tmp_path, monkeypatch) -> None:
+    make_private_directory(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    result = CliRunner().invoke(
+        cmd_config.config_cmd,
+        ["set", "fleet.trust_proxy_headers", "true"],
+        obj=AppContext(),
+    )
+    assert result.exit_code == 0, result.output
+    written = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert written["fleet"]["trust_proxy_headers"] is True
+
+
 def test_edge_register_uses_saved_https_endpoint_without_redirects(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
     monkeypatch.delenv("DCLAW_FLEET_API_TOKEN", raising=False)
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+    monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
     (tmp_path / ".env").write_text(
         "DCLAW_FLEET_API_URL=https://fleet.example.com/api/v1/fleet\n"
         "DCLAW_FLEET_API_TOKEN=fixture-token\n"
@@ -148,6 +174,40 @@ def test_edge_register_uses_saved_https_endpoint_without_redirects(tmp_path, mon
     assert headers["X-DefenseClaw-Client"] == "python-cli"
     assert trust_env is False
     assert verify is True
+
+
+@pytest.mark.parametrize("ca_variable", ["REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"])
+def test_edge_https_client_honors_custom_ca_and_proxy(tmp_path, monkeypatch, ca_variable) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("DCLAW_FLEET_API_TOKEN", raising=False)
+    (tmp_path / ".env").write_text(
+        "DCLAW_FLEET_API_URL=https://fleet.example.com/api/v1/fleet\n"
+        "DCLAW_FLEET_API_TOKEN=fixture-token\n"
+    )
+    ca_bundle = tmp_path / "fleet-ca.pem"
+    ca_bundle.write_text("fixture CA bundle", encoding="utf-8")
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+    monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
+    monkeypatch.setenv(ca_variable, str(ca_bundle))
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:3128")
+    monkeypatch.setenv("NO_PROXY", "")
+    netrc = tmp_path / "ignored.netrc"
+    netrc.write_text("machine fleet.example.com login unrelated password unrelated\n", encoding="utf-8")
+    monkeypatch.setenv("NETRC", str(netrc))
+    app = _app(tmp_path)
+    app.cfg.gateway = SimpleNamespace(api_port=18970, token="", resolved_token=lambda: "")
+
+    client = cmd_edge_connector_cli._client(app)
+    settings = client._s.merge_environment_settings(
+        "https://fleet.example.com/api/v1/fleet/devices", {}, None, client._s.verify, None,
+    )
+    assert settings["verify"] == str(ca_bundle)
+    assert settings["proxies"]["https"] == "http://127.0.0.1:3128"
+    assert client._s.trust_env is False
+    prepared = client._s.prepare_request(
+        cmd_edge_connector_cli.req_lib.Request("POST", "https://fleet.example.com/api/v1/fleet/devices")
+    )
+    assert prepared.headers["Authorization"] == "Bearer fixture-token"
 
 
 def test_edge_register_https_refuses_gateway_token_fallback(tmp_path, monkeypatch) -> None:

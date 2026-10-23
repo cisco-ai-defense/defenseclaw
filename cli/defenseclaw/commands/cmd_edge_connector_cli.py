@@ -105,8 +105,11 @@ def _client(app: AppContext) -> _Fleet:
             if not fleet_token:
                 raise click.ClickException(f"{_TOKEN_ENV} is required for the HTTPS Fleet endpoint")
             session = req_lib.Session()
+            # Honor TLS trust and proxy settings without allowing .netrc to
+            # replace the Fleet bearer token with unrelated host credentials.
             session.trust_env = False
-            session.verify = True
+            session.verify = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("CURL_CA_BUNDLE") or True
+            session.proxies = req_lib.utils.get_environ_proxies(endpoint)
             session.headers["X-DefenseClaw-Client"] = "python-cli"
             if token:
                 session.headers["Authorization"] = f"Bearer {token}"

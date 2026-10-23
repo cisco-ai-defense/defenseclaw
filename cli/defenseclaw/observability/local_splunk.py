@@ -648,10 +648,10 @@ class NativeLocalSplunkController:
             return
         try:
             pulled = self.runner.run(
-                [self.docker_path, "pull", image], timeout=300, env=environment,
+                [self.docker_path, "pull", image], timeout=7200, capture=False, env=environment,
             )
         except CommandTimeoutError as exc:
-            raise LocalStackError(f"Local Splunk image registry timed out while pulling {image}") from exc
+            raise LocalStackError(f"Local Splunk image download timed out after 2 hours while pulling {image}") from exc
         if pulled.returncode != 0:
             raise LocalStackError(
                 f"cannot resolve Local Splunk image from the registry through the Docker daemon: {image}; "
