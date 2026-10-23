@@ -206,7 +206,7 @@ func TestManagedHookConfirmedAnswerSurvivesGatewayExitBeforeFinalization(t *test
 	// A crash after the records but before the journal row was deleted
 	// must not produce a second record of this occurrence on the next
 	// start of the main API.
-	if err := f.store.JournalHookDelivery(t.Context(), entries[0].ID, "the restarted process", entries[0].Occurrence, 1); err != nil {
+	if err := f.store.JournalHookDelivery(t.Context(), entries[0].ID, "the restarted process", entries[0].Occurrence, pendingHookJournalLimits); err != nil {
 		t.Fatal(err)
 	}
 	runAPIUntil(t, f.restartedAPI(t, true), func() bool { return len(pendingEntries(t, f)) == 0 })
