@@ -6,13 +6,12 @@ package gateway
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -27,31 +26,35 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/google/uuid"
 )
 
-// orphanPendingHook leaves the pending occurrence of an offered allow on disk
-// as a gateway that exited before its terminal audit would.
-func orphanPendingHook(t *testing.T, f managedHookAuditFixture, session string) string {
-	t.Helper()
-	req := agentHookRequest{
+var pendingAllow = agentHookResponse{Action: "allow", Mode: "action", Severity: "NONE"}
+
+func pendingToolRequest(session string) agentHookRequest {
+	return agentHookRequest{
 		ConnectorName: "claudecode", HookEventName: "PreToolUse", SessionID: session,
 		ToolName: "Bash", ToolInvocationID: session + "-tool",
 	}
-	p, err := f.api.beginPendingHookOccurrence(t.Context(), req,
-		agentHookResponse{Action: "allow", Mode: "action", Severity: "NONE"},
-		nil, 64, time.Millisecond, false, nil)
+}
+
+// orphanPendingHook journals an offered answer as a gateway that died before
+// its records would, and returns the occurrence.
+func orphanPendingHook(t *testing.T, f managedHookAuditFixture, session string, proposed agentHookResponse) *pendingHookOccurrence {
+	t.Helper()
+	req := pendingToolRequest(session)
+	p, err := f.api.journalHookDelivery(t.Context(), &req, proposed, nil, 64, time.Millisecond, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.release()
-	return p.path
+	return p
 }
 
+// restartedAPI is a server of the next gateway process on the same store.
 func (f managedHookAuditFixture) restartedAPI(t *testing.T, bindDecisions bool) *APIServer {
 	t.Helper()
 	restarted := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, f.store, f.api.logger, f.api.scannerCfg)
+	restarted.hookDeliveryProcessID = uuid.NewString()
 	if bindDecisions {
 		bindHookLifecycleV8(t, restarted, f.runtime)
 	}
@@ -73,13 +76,13 @@ func runAPIUntil(t *testing.T, a *APIServer, cond func() bool) {
 		}
 		select {
 		case err := <-runDone:
-			t.Fatalf("gateway stopped during pending hook recovery: %v", err)
+			t.Fatalf("gateway stopped during hook delivery recovery: %v", err)
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
 	select {
 	case err := <-runDone:
-		t.Fatalf("gateway stopped after pending hook recovery: %v", err)
+		t.Fatalf("gateway stopped after hook delivery recovery: %v", err)
 	case <-time.After(300 * time.Millisecond):
 	}
 	cancel()
@@ -101,121 +104,227 @@ func (f managedHookAuditFixture) hookRows(t *testing.T, session string) int {
 	return count
 }
 
-func pendingPathExists(path string) bool {
-	_, err := os.Lstat(path)
-	return err == nil
+// pendingEntries is the id of every journal row, of any process.
+func pendingEntries(t *testing.T, f managedHookAuditFixture) []string {
+	t.Helper()
+	entries, err := f.store.UnauditedHookDeliveries(t.Context(), "no process has this id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		ids = append(ids, entry.ID)
+	}
+	return ids
 }
 
-// A stray or invalid entry in the pending directory is skipped or
-// quarantined; it never stops the gateway, and valid occurrences beside it
-// are still audited.
-func TestPendingHookRecoverySkipsStrayAndQuarantinesInvalidEntries(t *testing.T) {
-	f := newManagedHookAuditFixture(t, nil)
-	const session = "recovered-beside-strays"
-	valid := orphanPendingHook(t, f, session)
-	dir := filepath.Dir(valid)
-	finder := filepath.Join(dir, ".DS_Store")
-	if err := os.WriteFile(finder, []byte("finder"), 0o644); err != nil {
+// refuseAuditInserts makes the store refuse inserts into table that match
+// when (a SQL condition on NEW), until the returned function lifts it.
+func refuseAuditInserts(t *testing.T, f managedHookAuditFixture, table, when string) func() {
+	t.Helper()
+	database, err := sql.Open("sqlite", f.path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	subdir := filepath.Join(dir, "notes")
-	if err := os.Mkdir(subdir, 0o700); err != nil {
+	name := "test_refuse_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := database.Exec(`CREATE TRIGGER ` + name + ` BEFORE INSERT ON ` + table + `
+		WHEN ` + when + `
+		BEGIN SELECT RAISE(ABORT, 'refused by the test'); END`); err != nil {
+		_ = database.Close()
 		t.Fatal(err)
 	}
-	garbage := filepath.Join(dir, uuid.NewString()+".json")
-	if err := safefile.WritePrivate(garbage, []byte("{not json")); err != nil {
-		t.Fatal(err)
-	}
-	mismatched := filepath.Join(dir, uuid.NewString()+".json")
-	if err := safefile.WritePrivate(mismatched, []byte(`{"ID":"`+uuid.NewString()+`"}`)); err != nil {
-		t.Fatal(err)
-	}
-	occupied := filepath.Join(dir, uuid.NewString()+".json")
-	if err := os.Mkdir(occupied, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	quarantined := []string{garbage, mismatched, occupied}
-	if runtime.GOOS != "windows" {
-		link := filepath.Join(dir, uuid.NewString()+".json")
-		if err := os.Symlink(valid, link); err != nil {
+	return func() {
+		defer database.Close()
+		if _, err := database.Exec(`DROP TRIGGER IF EXISTS ` + name); err != nil {
 			t.Fatal(err)
 		}
-		quarantined = append(quarantined, link)
 	}
+}
 
-	runAPIUntil(t, f.restartedAPI(t, true), func() bool { return !pendingPathExists(valid) })
+// refuseConnectorHookAuditRows makes the store refuse connector audit rows,
+// not hook_decision records, until the returned function lifts it.
+func refuseConnectorHookAuditRows(t *testing.T, f managedHookAuditFixture) func() {
+	t.Helper()
+	return refuseAuditInserts(t, f, "audit_events", `NEW.action = '`+string(audit.ActionConnectorHook)+`'`)
+}
 
+// refuseHookDeliveryJournal makes the store refuse journal rows, as a full
+// or read-only store does, until the returned function lifts it.
+func refuseHookDeliveryJournal(t *testing.T, f managedHookAuditFixture) func() {
+	t.Helper()
+	// The table is created on first use.
+	if err := f.store.JournalHookDelivery(t.Context(), "create", "test", []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.ForgetHookDelivery(t.Context(), "create"); err != nil {
+		t.Fatal(err)
+	}
+	return refuseAuditInserts(t, f, "hook_delivery_journal", "1")
+}
+
+// ackedHookCall sends one claudecode tool call whose hook acknowledges the
+// answer it got.
+func ackedHookCall(t *testing.T, api *APIServer, session string, w http.ResponseWriter) {
+	t.Helper()
+	body := managedHookBody(session, "PreToolUse")
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook",
+		strings.NewReader(body+hookexec.HookDeliveryReceiptAck))
+	request.Header.Set(hookexec.HookDeliveryReceiptHeader, "1")
+	request.Header.Set(hookexec.HookDeliveryPayloadBytesHeader, strconv.Itoa(len(body)))
+	request.Header.Set("Content-Type", "application/json")
+	api.handleAgentHook("claudecode").ServeHTTP(w, request)
+}
+
+// Stop the handler after its occurrence is journaled and before the answer
+// is offered: offer sets the receipt deadline first.
+type exitBeforeHookAnswerWriter struct{ *httptest.ResponseRecorder }
+
+func (w *exitBeforeHookAnswerWriter) EnableFullDuplex() error { return nil }
+func (w *exitBeforeHookAnswerWriter) SetReadDeadline(time.Time) error {
+	runtime.Goexit()
+	return nil
+}
+
+// A gateway that dies after journaling a call and before offering its
+// answer leaves exactly one journal row and no answer, and the next process
+// audits the call once: the closed hook took its fallback, which the
+// gateway cannot tell from an answer it never sent, so it is unconfirmed.
+func TestPendingHookSurvivesGatewayDeathBeforeTheAnswer(t *testing.T) {
+	f := newManagedHookAuditFixture(t, nil)
+	const session = "died-before-answer"
+	reply := &exitBeforeHookAnswerWriter{ResponseRecorder: httptest.NewRecorder()}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ackedHookCall(t, f.api, session, reply)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handler did not reach the answer")
+	}
+	if strings.Contains(reply.Body.String(), `"action"`) {
+		t.Fatalf("an answer left the gateway before it died: %q", reply.Body.String())
+	}
+	if left := pendingEntries(t, f); len(left) != 1 {
+		t.Fatalf("journal rows = %v, want one", left)
+	}
+	if rows := f.hookRows(t, session); rows != 0 {
+		t.Fatalf("connector rows before the restart = %d, want none", rows)
+	}
+	runAPIUntil(t, f.restartedAPI(t, true), func() bool { return len(pendingEntries(t, f)) == 0 })
 	if got := f.audited(t, session)[session]; got != "unconfirmed/no_answer" {
 		t.Fatalf("recovered audit = %q, want unconfirmed/no_answer", got)
 	}
-	for _, kept := range []string{finder, subdir} {
-		if !pendingPathExists(kept) {
-			t.Errorf("foreign entry %s was removed, want it left alone", filepath.Base(kept))
-		}
+	if got := f.decisions(t); strings.Join(got, ",") != "unconfirmed/ok" {
+		t.Fatalf("hook_decision records = %v, want [unconfirmed/ok]", got)
 	}
-	for _, bad := range quarantined {
-		if pendingPathExists(bad) || !pendingPathExists(bad+pendingHookQuarantineSuffix) {
-			t.Errorf("invalid occurrence %s was not quarantined", filepath.Base(bad))
-		}
+	if rows := f.hookRows(t, session); rows != 1 {
+		t.Fatalf("connector rows = %d, want one", rows)
 	}
-	// A later start skips the quarantined files and still serves.
-	again := orphanPendingHook(t, f, session+"-again")
-	runAPIUntil(t, f.restartedAPI(t, true), func() bool { return !pendingPathExists(again) })
+}
+
+// Without a durable journal row no answer is offered: the call is answered
+// 503, which a managed hook resolves closed, and the block it enforces is
+// the only record under the occurrence IDs. That holds when the audit is
+// refused too (nothing is recorded, nothing is left behind, and the gateway
+// keeps serving), and when the journal row landed although the write
+// reported a failure: recovery then completes the block, never a second
+// decision.
+func TestPendingHookUnwritableStoreNeverOffersAnAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		refuseAudit  bool
+		rowLanded    bool
+		want         string
+		wantDecision string
+	}{
+		{"journal refused", false, false, "block/no_answer", "block/ok"},
+		{"journal row landed anyway", false, true, "block/no_answer", "block/ok"},
+		{"journal and audit refused", true, false, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newManagedHookAuditFixture(t, nil)
+			session := "unwritable-" + strings.ReplaceAll(tc.name, " ", "-")
+			liftJournal := refuseHookDeliveryJournal(t, f)
+			liftAudit := func() {}
+			if tc.refuseAudit {
+				liftAudit = refuseAuditInserts(t, f, "audit_events", "1")
+			}
+			reply := &recordFullDuplexStatusWriter{ResponseRecorder: httptest.NewRecorder()}
+			ackedHookCall(t, f.api, session, reply)
+			liftAudit()
+			liftJournal()
+			if reply.finalStatus != http.StatusServiceUnavailable || strings.Contains(reply.Body.String(), `"action"`) {
+				t.Fatalf("response = status %d body %q, want 503 and no answer", reply.finalStatus, reply.Body.String())
+			}
+			if left := pendingEntries(t, f); len(left) != 0 {
+				t.Fatalf("journal rows = %v, want none", left)
+			}
+			if tc.rowLanded {
+				// The row of the refused write, as a commit that reported
+				// an error would have left it.
+				rows, err := f.store.ListEvents(50)
+				if err != nil {
+					t.Fatal(err)
+				}
+				id := ""
+				for _, row := range rows {
+					if row.Action == string(audit.ActionConnectorHook) && row.SessionID == session {
+						id = row.ID
+					}
+				}
+				req := pendingToolRequest(session)
+				data, err := json.Marshal(pendingHookOccurrence{
+					ID: id, Request: pendingRequest(req), Proposed: pendingResponse(pendingAllow),
+					NoReceipt: pendingResponse(unconfirmedHookDelivery(pendingAllow)), BodyBytes: 64,
+				})
+				if err != nil || id == "" {
+					t.Fatalf("connector row id %q: %v", id, err)
+				}
+				if err := f.store.JournalHookDelivery(t.Context(), id, "the failed process", data); err != nil {
+					t.Fatal(err)
+				}
+				f.restartedAPI(t, true).recoverPendingHooks(t.Context())
+			}
+			got, decisions := f.audited(t, session)[session], strings.Join(f.decisions(t), ",")
+			if got != tc.want || decisions != tc.wantDecision {
+				t.Fatalf("records: connector %q, hook_decision %q; want %q, %q", got, decisions, tc.want, tc.wantDecision)
+			}
+			if want := map[bool]int{false: 1, true: 0}[tc.refuseAudit]; f.hookRows(t, session) != want {
+				t.Fatalf("connector rows = %d, want %d", f.hookRows(t, session), want)
+			}
+			if left := pendingEntries(t, f); len(left) != 0 {
+				t.Fatalf("journal rows after recovery = %v, want none", left)
+			}
+			// The gateway still answers the next call.
+			next := &recordFullDuplexStatusWriter{ResponseRecorder: httptest.NewRecorder()}
+			ackedHookCall(t, f.api, session+"-next", next)
+			if !strings.Contains(next.Body.String(), hookexec.HookDeliveryConfirmed) {
+				t.Fatalf("next call = %q, want a confirmed answer", next.Body.String())
+			}
+		})
+	}
 }
 
 // An occurrence the audit cannot take yet (hook_decision not admitted) stays
-// on disk while the gateway serves, and a later pass audits it once.
+// journaled while the gateway serves, and a later start audits it once.
 func TestPendingHookRecoveryKeepsServingWhenTheAuditIsNotReady(t *testing.T) {
 	f := newManagedHookAuditFixture(t, nil)
 	const session = "audit-not-ready"
-	path := orphanPendingHook(t, f, session)
+	orphanPendingHook(t, f, session, pendingAllow)
 
 	runAPIUntil(t, f.restartedAPI(t, false), func() bool { return f.hookRows(t, session) == 1 })
-	if !pendingPathExists(path) {
-		t.Fatal("pending occurrence removed although its hook_decision was not persisted")
+	if left := pendingEntries(t, f); len(left) != 1 {
+		t.Fatalf("journal rows = %v, want the one whose hook_decision was not persisted", left)
 	}
 
-	runAPIUntil(t, f.restartedAPI(t, true), func() bool { return !pendingPathExists(path) })
+	runAPIUntil(t, f.restartedAPI(t, true), func() bool { return len(pendingEntries(t, f)) == 0 })
 	if got := f.hookRows(t, session); got != 1 {
 		t.Fatalf("connector audit rows = %d, want one", got)
 	}
 	if got := f.decisions(t); strings.Join(got, ",") != "unconfirmed/ok" {
 		t.Fatalf("hook_decision records = %v, want [unconfirmed/ok]", got)
-	}
-}
-
-// A pending directory whose protection drifted is not trusted: the gateway
-// serves, and the background retry audits the occurrence once it is repaired.
-func TestPendingHookRecoveryRetriesAfterDirectoryDriftIsRepaired(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("directory drift is a mode change here; Windows uses DACLs")
-	}
-	f := newManagedHookAuditFixture(t, nil)
-	const session = "drifted-directory"
-	path := orphanPendingHook(t, f, session)
-	dir := filepath.Dir(path)
-	if err := os.Chmod(dir, 0o770); err != nil {
-		t.Fatal(err)
-	}
-	restarted := f.restartedAPI(t, true)
-	restarted.pendingHookRetryInterval = 20 * time.Millisecond
-	repaired := false
-	runAPIUntil(t, restarted, func() bool {
-		if !repaired {
-			// One pass ran and refused the drifted directory.
-			time.Sleep(200 * time.Millisecond)
-			if !pendingPathExists(path) || f.hookRows(t, session) != 0 {
-				t.Fatal("drifted pending directory was trusted")
-			}
-			if err := os.Chmod(dir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			repaired = true
-		}
-		return !pendingPathExists(path)
-	})
-	if got := f.audited(t, session)[session]; got != "unconfirmed/no_answer" {
-		t.Fatalf("recovered audit = %q, want unconfirmed/no_answer", got)
 	}
 }
 
@@ -241,17 +350,11 @@ func (w *pauseAfterHookConfirmationWriter) Flush() {
 
 // A config reload starts a new APIServer in the same process while a hook
 // handler of the old one is still finishing. The new server's recovery must
-// leave that handler's occurrence alone, so the audit keeps the acknowledged
-// allow instead of an unconfirmed takeover.
+// leave that handler's journal row alone, so the audit keeps the
+// acknowledged allow instead of an unconfirmed takeover.
 func TestPendingHookRecoveryLeavesLiveHandlersOfThisProcessAlone(t *testing.T) {
 	f := newManagedHookAuditFixture(t, nil)
 	const session = "live-during-api-restart"
-	body := managedHookBody(session, "PreToolUse")
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook",
-		strings.NewReader(body+hookexec.HookDeliveryReceiptAck))
-	request.Header.Set(hookexec.HookDeliveryReceiptHeader, "1")
-	request.Header.Set(hookexec.HookDeliveryPayloadBytesHeader, strconv.Itoa(len(body)))
-	request.Header.Set("Content-Type", "application/json")
 	reply := &pauseAfterHookConfirmationWriter{
 		ResponseRecorder: httptest.NewRecorder(),
 		paused:           make(chan struct{}), resume: make(chan struct{}),
@@ -259,29 +362,25 @@ func TestPendingHookRecoveryLeavesLiveHandlersOfThisProcessAlone(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.api.handleAgentHook("claudecode").ServeHTTP(reply, request)
+		ackedHookCall(t, f.api, session, reply)
 	}()
 	select {
 	case <-reply.paused:
 	case <-time.After(10 * time.Second):
 		t.Fatal("gateway did not confirm the receipt")
 	}
-	dir := filepath.Join(f.api.scannerCfg.DataDir, pendingHookDirName)
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 {
-		close(reply.resume)
-		t.Fatalf("pending occurrences = %v (%v), want one", entries, err)
-	}
-	live := filepath.Join(dir, entries[0].Name())
+	live := pendingEntries(t, f)
 
-	restarted := f.restartedAPI(t, true)
-	restarted.recoverPendingHookOccurrences(t.Context(), nil)
+	reloaded := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, f.store, f.api.logger, f.api.scannerCfg)
+	bindHookLifecycleV8(t, reloaded, f.runtime)
+	reloaded.recoverPendingHooks(t.Context())
 	takenOver := f.audited(t, session)[session]
-	stillThere := pendingPathExists(live)
+	stillThere := len(pendingEntries(t, f))
 	close(reply.resume)
 	<-done
-	if takenOver != "" || !stillThere {
-		t.Fatalf("recovery during a live handler: audit = %q, file kept = %t; want no audit and the file kept", takenOver, stillThere)
+	if len(live) != 1 || takenOver != "" || stillThere != 1 {
+		t.Fatalf("recovery during a live handler: journal %v, audit %q, rows kept %d; want one row kept and no audit",
+			live, takenOver, stillThere)
 	}
 	if got := f.audited(t, session)[session]; got != "allow" {
 		t.Fatalf("audit after the handler finished = %q, want allow", got)
@@ -292,64 +391,65 @@ func TestPendingHookRecoveryLeavesLiveHandlersOfThisProcessAlone(t *testing.T) {
 	if got := f.decisions(t); strings.Join(got, ",") != "allow/ok" {
 		t.Fatalf("hook_decision records = %v, want [allow/ok]", got)
 	}
-	if pendingPathExists(live) {
-		t.Fatal("pending occurrence left after the handler finalized it")
+	if left := pendingEntries(t, f); len(left) != 0 {
+		t.Fatalf("journal rows left after the handler finalized = %v", left)
 	}
 }
 
-// A pending-state write failure answers 503 without offering the evaluated
+// A journal write failure answers 503 without offering the evaluated
 // answer; the managed hook resolves that closed in every fail mode.
 func TestPendingFailureHookDecisionIsTheClosedFallback(t *testing.T) {
 	allow := pendingFailureHookDecision(agentHookResponse{Action: "allow", Reason: "evaluated"})
 	if allow.Action != "block" || allow.RawAction != "allow" || allow.Reason != hookexec.ManagedGatewayNoAnswerReason {
-		t.Fatalf("allow after pending failure = %+v, want closed fallback", allow)
+		t.Fatalf("allow after journal failure = %+v, want closed fallback", allow)
 	}
 	block := pendingFailureHookDecision(agentHookResponse{Action: "block", Reason: "policy rule"})
 	if block.Action != "block" || block.Reason != "policy rule" {
-		t.Fatalf("policy block after pending failure = %+v, want the policy block", block)
+		t.Fatalf("policy block after journal failure = %+v, want the policy block", block)
 	}
 	for _, action := range []string{"alert", "warn", hookActionUnconfirmed} {
 		if got := pendingFailureHookDecision(agentHookResponse{Action: action}); got.Action != "block" {
-			t.Fatalf("%s after pending failure = %q, want block", action, got.Action)
+			t.Fatalf("%s after journal failure = %q, want block", action, got.Action)
 		}
 	}
 }
 
-// ackedHookCall sends one claudecode tool call whose hook acknowledges the
-// answer it got.
-func ackedHookCall(t *testing.T, api *APIServer, session string, w http.ResponseWriter) {
-	t.Helper()
-	body := managedHookBody(session, "PreToolUse")
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook",
-		strings.NewReader(body+hookexec.HookDeliveryReceiptAck))
-	request.Header.Set(hookexec.HookDeliveryReceiptHeader, "1")
-	request.Header.Set(hookexec.HookDeliveryPayloadBytesHeader, strconv.Itoa(len(body)))
-	request.Header.Set("Content-Type", "application/json")
-	api.handleAgentHook("claudecode").ServeHTTP(w, request)
-}
-
-func pendingEntries(t *testing.T, f managedHookAuditFixture) []string {
-	t.Helper()
-	entries, err := os.ReadDir(filepath.Join(f.api.scannerCfg.DataDir, pendingHookDirName))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+// A call without a receipt keeps a policy block under a closed hook: the
+// hook blocks whether the answer reached it or it took its fallback. So a
+// recovered policy block is audited as the block, not as unconfirmed.
+// Anything the receipt alone could prove is unconfirmed.
+func TestPendingHookNoReceiptDecisionKeepsAClosedPolicyBlock(t *testing.T) {
+	policyBlock := agentHookResponse{Action: "block", RawAction: "block", Mode: "action", Severity: "HIGH"}
+	for _, tc := range []struct {
+		name     string
+		mode     string
+		proposed agentHookResponse
+		want     string
+	}{
+		{"closed policy block", "closed", policyBlock, "block"},
+		{"closed allow", "closed", pendingAllow, "unconfirmed/no_answer"},
+		{"open policy block", "open", policyBlock, "unconfirmed/no_answer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newManagedHookAuditFixture(t, nil)
+			f.api.scannerCfg.Guardrail.HookFailMode = tc.mode
+			session := "no-receipt-" + strings.ReplaceAll(tc.name, " ", "-")
+			orphanPendingHook(t, f, session, tc.proposed)
+			f.restartedAPI(t, true).recoverPendingHooks(t.Context())
+			if got := f.audited(t, session)[session]; got != tc.want {
+				t.Fatalf("recovered audit = %q, want %q", got, tc.want)
+			}
+			if left := pendingEntries(t, f); len(left) != 0 {
+				t.Fatalf("journal rows after recovery = %v, want none", left)
+			}
+		})
 	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		names = append(names, entry.Name())
-	}
-	return names
 }
 
 // With guardrail.evaluation log collection off no hook_decision record is
-// ever kept, so none can hold an occurrence back: once the audit logger has
+// ever kept, so none can hold a journal row back: once the audit logger has
 // taken the connector row (the same collection policy keeps it out of the
-// local store), the occurrence is settled, on the live path and in recovery.
-// Before, every acknowledged call left its occurrence behind until the
-// pending writes failed and every managed call was answered 503.
+// local store), the row is settled, on the live path and in recovery.
 func TestPendingHookSettlesWhenHookDecisionCollectionIsOff(t *testing.T) {
 	f := newManagedHookAuditFixtureCollectingNo(t, nil, observability.BucketGuardrailEvaluation)
 	sessions := []string{"collection-off-1", "collection-off-2", "collection-off-3"}
@@ -361,7 +461,7 @@ func TestPendingHookSettlesWhenHookDecisionCollectionIsOff(t *testing.T) {
 		}
 	}
 	if left := pendingEntries(t, f); len(left) != 0 {
-		t.Fatalf("pending occurrences after acknowledged calls = %v, want none", left)
+		t.Fatalf("journal rows after acknowledged calls = %v, want none", left)
 	}
 	audited := f.audited(t, sessions...)
 	for _, session := range sessions {
@@ -374,10 +474,10 @@ func TestPendingHookSettlesWhenHookDecisionCollectionIsOff(t *testing.T) {
 	}
 
 	const recovered = "collection-off-recovered"
-	path := orphanPendingHook(t, f, recovered)
-	f.restartedAPI(t, true).recoverPendingHookOccurrences(t.Context(), nil)
-	if pendingPathExists(path) {
-		t.Fatal("recovery kept an occurrence whose hook_decision is not collected")
+	orphanPendingHook(t, f, recovered, pendingAllow)
+	f.restartedAPI(t, true).recoverPendingHooks(t.Context())
+	if left := pendingEntries(t, f); len(left) != 0 {
+		t.Fatal("recovery kept a journal row whose hook_decision is not collected")
 	}
 	if got := f.audited(t, recovered)[recovered]; got != "" && got != "unconfirmed/no_answer" {
 		t.Fatalf("recovered audit = %q, want unconfirmed/no_answer or no local row", got)
@@ -395,26 +495,24 @@ func (e fixedHookDecisionEmitter) Emit(
 	return e.outcome, e.err
 }
 
-// A hook_decision result holds a pending occurrence only while a retry can
-// still keep the record.
+// A hook_decision result holds a journal row only while a retry can still
+// keep the record.
 func TestHookDecisionLogResultSettlesOnlyWhatARetryCannotChange(t *testing.T) {
 	f := newManagedHookAuditFixture(t, nil)
-	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse",
-		SessionID: "decision-results", ToolName: "Bash", ToolInvocationID: "decision-results-tool"}
-	allow := agentHookResponse{Action: "allow", Mode: "action", Severity: "NONE"}
+	req := pendingToolRequest("decision-results")
 	for _, tc := range []struct {
 		name    string
 		emitter sidecarRuntimeEmitter
 		resp    agentHookResponse
 		want    hookDecisionLogResult
 	}{
-		{"persisted", f.runtime, allow, hookDecisionLogPersisted},
-		{"runtime not bound", nil, allow, hookDecisionLogFailed},
-		{"local write failed", fixedHookDecisionEmitter{err: errors.New("disk full")}, allow, hookDecisionLogFailed},
-		{"collection off", fixedHookDecisionEmitter{}, allow, hookDecisionLogNotCollected},
+		{"persisted", f.runtime, pendingAllow, hookDecisionLogPersisted},
+		{"runtime not bound", nil, pendingAllow, hookDecisionLogFailed},
+		{"local write failed", fixedHookDecisionEmitter{err: errors.New("disk full")}, pendingAllow, hookDecisionLogFailed},
+		{"collection off", fixedHookDecisionEmitter{}, pendingAllow, hookDecisionLogNotCollected},
 		{"managed-only projection", fixedHookDecisionEmitter{
 			outcome: pipeline.NewManagedOptionalFailureOutcomeForTest(pipeline.OptionalFailureOutputLimit),
-		}, allow, hookDecisionLogNotCollected},
+		}, pendingAllow, hookDecisionLogNotCollected},
 		{"invalid severity", f.runtime, agentHookResponse{Action: "allow", Mode: "action", Severity: "not-a-severity"},
 			hookDecisionLogUnbuildable},
 	} {
@@ -431,11 +529,10 @@ func TestHookDecisionLogResultSettlesOnlyWhatARetryCannotChange(t *testing.T) {
 	}
 }
 
-// busyHookDecisionEmitter holds every hook_decision record after the first
-// free ones until release is closed, as a busy audit store does.
+// busyHookDecisionEmitter holds every hook_decision record until release
+// is closed, as a busy audit store does.
 type busyHookDecisionEmitter struct {
 	inner   sidecarRuntimeEmitter
-	free    int32
 	seen    atomic.Int32
 	release chan struct{}
 }
@@ -443,8 +540,8 @@ type busyHookDecisionEmitter struct {
 func (e *busyHookDecisionEmitter) Emit(
 	ctx context.Context, metadata router.Metadata, builder observabilityruntime.EmitBuilder,
 ) (pipeline.LocalLogOutcome, error) {
-	if metadata.Identity().Name == observability.EventName(observability.TelemetryEventHookDecision) &&
-		e.seen.Add(1) > e.free {
+	if metadata.Identity().Name == observability.EventName(observability.TelemetryEventHookDecision) {
+		e.seen.Add(1)
 		select {
 		case <-e.release:
 		case <-ctx.Done():
@@ -454,160 +551,94 @@ func (e *busyHookDecisionEmitter) Emit(
 	return e.inner.Emit(ctx, metadata, builder)
 }
 
-// A backlog behind a busy audit store does not hold the listeners: they
-// serve once the first pass has handled its startup share of entries or its
-// time budget has passed, and the rest is recovered while they serve.
-// Before, Run replayed every entry before it bound a listener.
+// Recovery behind a busy audit store does not hold the listeners: the
+// sandbox ingress serves while recovery waits, and the rows are audited once
+// the store frees up.
 func TestPendingHookRecoveryDoesNotHoldListenersBehindABusyAudit(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		free    int32
-		budget  time.Duration
-		entries int
-	}{
-		{"time budget", 0, 100 * time.Millisecond, 1000},
-		{"entry count", 1, time.Hour, 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newManagedHookAuditFixture(t, nil)
-			var sessions []string
-			for i := range 3 {
-				session := fmt.Sprintf("busy-%s-%d", strings.ReplaceAll(tc.name, " ", "-"), i)
-				orphanPendingHook(t, f, session)
-				sessions = append(sessions, session)
-			}
-			busy := &busyHookDecisionEmitter{inner: f.runtime, free: tc.free, release: make(chan struct{})}
-			released := false
-			release := func() {
-				if !released {
-					released = true
-					close(busy.release)
-				}
-			}
-			defer release()
-			restarted := f.restartedAPI(t, false)
-			bindHookLifecycleV8(t, restarted, busy)
-			restarted.pendingHookStartupBudget = tc.budget
-			restarted.pendingHookStartupEntries = tc.entries
-			restarted.pendingHookRetryInterval = 20 * time.Millisecond
-			if err := restarted.SetSandboxIngress(SandboxIngressConfig{
-				Addr: "127.0.0.1:18971", Bindings: pendingHookRejectBindings{},
-			}); err != nil {
-				t.Fatal(err)
-			}
-			listener, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			runDone := make(chan error, 1)
-			go func() { runDone <- restarted.RunSandboxIngressOn(ctx, listener) }()
-			client := &http.Client{Timeout: 10 * time.Second}
-			response, err := client.Get("http://" + listener.Addr().String() + "/health")
-			if err != nil {
-				t.Fatalf("sandbox ingress did not serve while recovery waited on the audit: %v", err)
-			}
-			_ = response.Body.Close()
-			if left := pendingEntries(t, f); len(left) < 2 {
-				t.Fatalf("pending occurrences while serving = %v, want the busy ones still waiting", left)
-			}
-			release()
-			deadline := time.Now().Add(10 * time.Second)
-			for len(pendingEntries(t, f)) != 0 {
-				if time.Now().After(deadline) {
-					t.Fatalf("pending occurrences left after the audit freed up: %v", pendingEntries(t, f))
-				}
-				select {
-				case err := <-runDone:
-					t.Fatalf("gateway stopped during background recovery: %v", err)
-				case <-time.After(20 * time.Millisecond):
-				}
-			}
-			audited := f.audited(t, sessions...)
-			for _, session := range sessions {
-				if audited[session] != "unconfirmed/no_answer" {
-					t.Fatalf("%s: recovered audit = %q, want unconfirmed/no_answer", session, audited[session])
-				}
-			}
-			cancel()
-			<-runDone
-		})
+	f := newManagedHookAuditFixture(t, nil)
+	var sessions []string
+	for i := range 3 {
+		session := fmt.Sprintf("busy-%d", i)
+		orphanPendingHook(t, f, session, pendingAllow)
+		sessions = append(sessions, session)
 	}
-}
-
-// refuseConnectorHookAuditRows makes the store refuse connector audit rows,
-// not hook_decision records, until the returned function lifts it.
-func refuseConnectorHookAuditRows(t *testing.T, f managedHookAuditFixture) func() {
-	t.Helper()
-	database, err := sql.Open("sqlite", f.path)
+	busy := &busyHookDecisionEmitter{inner: f.runtime, release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(busy.release) }) }
+	defer release()
+	restarted := f.restartedAPI(t, false)
+	bindHookLifecycleV8(t, restarted, busy)
+	if err := restarted.SetSandboxIngress(SandboxIngressConfig{
+		Addr: "127.0.0.1:18971", Bindings: pendingHookRejectBindings{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.Exec(`CREATE TRIGGER test_refuse_connector_hook BEFORE INSERT ON audit_events
-		WHEN NEW.action = '` + string(audit.ActionConnectorHook) + `'
-		BEGIN SELECT RAISE(ABORT, 'connector audit refused by the test'); END`); err != nil {
-		_ = database.Close()
-		t.Fatal(err)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- restarted.RunSandboxIngressOn(ctx, listener) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for busy.seen.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
 	}
-	return func() {
-		defer database.Close()
-		if _, err := database.Exec(`DROP TRIGGER IF EXISTS test_refuse_connector_hook`); err != nil {
-			t.Fatal(err)
+	client := &http.Client{Timeout: 10 * time.Second}
+	response, err := client.Get("http://" + listener.Addr().String() + "/health")
+	if err != nil {
+		t.Fatalf("sandbox ingress did not serve while recovery waited on the audit: %v", err)
+	}
+	_ = response.Body.Close()
+	if left := pendingEntries(t, f); len(left) != 3 {
+		t.Fatalf("journal rows while serving = %v, want all three still waiting", left)
+	}
+	release()
+	for len(pendingEntries(t, f)) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("journal rows left after the audit freed up: %v", pendingEntries(t, f))
+		}
+		select {
+		case err := <-runDone:
+			t.Fatalf("gateway stopped during background recovery: %v", err)
+		case <-time.After(20 * time.Millisecond):
 		}
 	}
-}
-
-type onHookConfirmationWriter struct {
-	*httptest.ResponseRecorder
-	confirmed func()
-	once      sync.Once
-}
-
-func (w *onHookConfirmationWriter) EnableFullDuplex() error         { return nil }
-func (w *onHookConfirmationWriter) SetReadDeadline(time.Time) error { return nil }
-func (w *onHookConfirmationWriter) Flush() {
-	w.ResponseRecorder.Flush()
-	if strings.Contains(w.Body.String(), hookexec.HookDeliveryConfirmed) {
-		w.once.Do(w.confirmed)
+	audited := f.audited(t, sessions...)
+	for _, session := range sessions {
+		if audited[session] != "unconfirmed/no_answer" {
+			t.Fatalf("%s: recovered audit = %q, want unconfirmed/no_answer", session, audited[session])
+		}
 	}
+	cancel()
+	<-runDone
 }
 
-// The connector audit row and the hook_decision of one occurrence never
-// disagree when recovery writes the row the live handler could not. With the
-// hook's final answer published, recovery writes that answer. When the final
-// answer could not be published, the records the handler writes carry the
-// published (unconfirmed) answer, which is all recovery can write. Before,
-// the hook_decision said allow and the recovered audit row said unconfirmed.
+// The connector audit row and the hook_decision of one call never disagree
+// when the next process writes what the live handler could not. A stored
+// record decides its companion; with neither stored, both say unconfirmed.
 func TestPendingHookTerminalRecordsAgreeWhenTheAuditRowIsRecovered(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
-		unpublished  bool
+		refuseAll    bool
 		want         string
 		wantDecision string
 	}{
-		{"final answer published", false, "allow", "allow/ok"},
-		{"final answer not published", true, "unconfirmed/no_answer", "unconfirmed/ok"},
+		{"connector row refused", false, "allow", "allow/ok"},
+		{"both records refused", true, "unconfirmed/no_answer", "unconfirmed/ok"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.unpublished && (runtime.GOOS == "windows" || os.Geteuid() == 0) {
-				t.Skip("needs a directory mode this user cannot write through")
-			}
 			f := newManagedHookAuditFixture(t, nil)
 			session := "agree-" + strings.ReplaceAll(tc.name, " ", "-")
-			dir := filepath.Join(f.api.scannerCfg.DataDir, pendingHookDirName)
-			lift := refuseConnectorHookAuditRows(t, f)
-			reply := &onHookConfirmationWriter{ResponseRecorder: httptest.NewRecorder(), confirmed: func() {
-				if tc.unpublished {
-					if err := os.Chmod(dir, 0o500); err != nil {
-						t.Error(err)
-					}
-				}
-			}}
-			ackedHookCall(t, f.api, session, reply)
-			if err := os.Chmod(dir, 0o700); err != nil {
-				t.Fatal(err)
+			var lift func()
+			if tc.refuseAll {
+				lift = refuseAuditInserts(t, f, "audit_events", "1")
+			} else {
+				lift = refuseConnectorHookAuditRows(t, f)
 			}
+			reply := &recordFullDuplexStatusWriter{ResponseRecorder: httptest.NewRecorder()}
+			ackedHookCall(t, f.api, session, reply)
 			lift()
 			if !strings.Contains(reply.Body.String(), hookexec.HookDeliveryConfirmed) {
 				t.Fatalf("gateway response = %q, want the receipt confirmation", reply.Body.String())
@@ -616,9 +647,9 @@ func TestPendingHookTerminalRecordsAgreeWhenTheAuditRowIsRecovered(t *testing.T)
 				t.Fatalf("audit row written although the store refused it: %q", got)
 			}
 			if left := pendingEntries(t, f); len(left) != 1 {
-				t.Fatalf("pending occurrences = %v, want the one whose audit row failed", left)
+				t.Fatalf("journal rows = %v, want the one whose audit row failed", left)
 			}
-			f.restartedAPI(t, true).recoverPendingHookOccurrences(t.Context(), nil)
+			f.restartedAPI(t, true).recoverPendingHooks(t.Context())
 			if got := f.audited(t, session)[session]; got != tc.want {
 				t.Fatalf("recovered audit = %q, want %q", got, tc.want)
 			}
@@ -626,7 +657,61 @@ func TestPendingHookTerminalRecordsAgreeWhenTheAuditRowIsRecovered(t *testing.T)
 				t.Fatalf("hook_decision records = %q, want %q", got, tc.wantDecision)
 			}
 			if left := pendingEntries(t, f); len(left) != 0 {
-				t.Fatalf("pending occurrences after recovery = %v, want none", left)
+				t.Fatalf("journal rows after recovery = %v, want none", left)
+			}
+		})
+	}
+}
+
+// A record of the occurrence that is already stored decides its missing
+// companion, whatever the live handler recorded: the acknowledged allow,
+// the closed fallback, or unconfirmed.
+func TestPendingHookRecoveryTakesAStoredRecordAsTheAuthority(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		stored       agentHookResponse
+		decisionOnly bool
+		want         string
+		wantDecision string
+	}{
+		{"connector row allow", pendingAllow, false, "allow", "allow/ok"},
+		{"hook_decision allow", pendingAllow, true, "allow", "allow/ok"},
+		{"connector row closed fallback", pendingFailureHookDecision(pendingAllow), false, "block/no_answer", "block/ok"},
+		{"hook_decision closed fallback", pendingFailureHookDecision(pendingAllow), true, "block/no_answer", "block/ok"},
+		{"connector row unconfirmed", unconfirmedHookDelivery(pendingAllow), false, "unconfirmed/no_answer", "unconfirmed/ok"},
+		{"hook_decision unconfirmed", unconfirmedHookDelivery(pendingAllow), true, "unconfirmed/no_answer", "unconfirmed/ok"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newManagedHookAuditFixture(t, nil)
+			session := "authority-" + strings.ReplaceAll(tc.name, " ", "-")
+			p := orphanPendingHook(t, f, session, pendingAllow)
+			// The live handler's records under the occurrence IDs, one of
+			// them refused.
+			writer := f.restartedAPI(t, tc.decisionOnly)
+			lift := func() {}
+			if tc.decisionOnly {
+				lift = refuseConnectorHookAuditRows(t, f)
+			}
+			req := p.Request.request(p.ID, p.BodyBytes)
+			req.pendingRecovery = false
+			writer.finalizeAgentHook(enrichAgentHookContext(t.Context(), req), req.ConnectorName, req, tc.stored,
+				nil, nil, time.Millisecond, false, nil)
+			lift()
+			if stored := len(f.decisions(t)) + f.hookRows(t, session); stored != 1 {
+				t.Fatalf("stored records before recovery = %d, want one", stored)
+			}
+
+			f.restartedAPI(t, true).recoverPendingHooks(t.Context())
+			got, decisions := f.audited(t, session)[session], strings.Join(f.decisions(t), ",")
+			if got != tc.want || decisions != tc.wantDecision {
+				t.Fatalf("records after recovery: connector %q, hook_decision %q; want %q, %q",
+					got, decisions, tc.want, tc.wantDecision)
+			}
+			if rows := f.hookRows(t, session); rows != 1 {
+				t.Fatalf("connector rows = %d, want one", rows)
+			}
+			if left := pendingEntries(t, f); len(left) != 0 {
+				t.Fatalf("journal rows after recovery = %v, want none", left)
 			}
 		})
 	}

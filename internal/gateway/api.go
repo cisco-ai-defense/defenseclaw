@@ -76,19 +76,13 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
-	// Both API listeners give the same first recovery pass a bounded head
-	// start (ensurePendingHookRecovery); recovery never stops either of them.
+	// Both API listeners start one background recovery of the hook delivery
+	// journal rows earlier gateway processes left (startPendingHookRecovery);
+	// neither waits for it.
 	pendingHookRecoveryOnce sync.Once
-	// pendingHookStartup closes once the first pass has handled its startup
-	// share of entries; listeners stop waiting for it at
-	// pendingHookStartupDeadline.
-	pendingHookStartup         chan struct{}
-	pendingHookStartupDeadline time.Time
-	// Test overrides; zero is the default (defaultPendingHookRetryInterval,
-	// defaultPendingHookStartupBudget, defaultPendingHookStartupEntries).
-	pendingHookRetryInterval  time.Duration
-	pendingHookStartupBudget  time.Duration
-	pendingHookStartupEntries int
+	// hookDeliveryProcessID, when set, replaces this process's journal
+	// identity (deliveryProcessID): tests start a server as the next process.
+	hookDeliveryProcessID string
 	// sandboxAuthority is owned by this server and initialized on first use.
 	sandboxAuthority sandboxAuthorityHolder
 
@@ -1167,7 +1161,7 @@ func (a *APIServer) apiPortHeld(hasHookSocket bool, err error) bool {
 }
 
 func (a *APIServer) Run(ctx context.Context) error {
-	a.ensurePendingHookRecovery(ctx)
+	a.startPendingHookRecovery(ctx)
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
 	mux.HandleFunc("/health", a.handleHealth)
