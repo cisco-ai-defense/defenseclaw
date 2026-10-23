@@ -558,8 +558,9 @@ func TestCodexShellHookShowsTheStartStepWhenTheGatewayWasStopped(t *testing.T) {
 		func(dataDir string) {
 			_ = os.WriteFile(filepath.Join(dataDir, "gateway.stopped"), []byte("stopped\n"), 0o600)
 		}, "DEFENSECLAW_FAIL_MODE=open")
-	if code := exitCodeOf(run.err); code != 2 || !strings.Contains(run.stderr, "stopped with `defenseclaw-gateway stop`") {
-		t.Errorf("per-user open request: exit %d stderr=%q, want a closed block naming the stop", code, run.stderr)
+	// A per-user Codex block is Codex's own PreToolUse deny on stdout (GAP-0949).
+	if code := exitCodeOf(run.err); !codexBlockAnswer("PreToolUse", code, run.stdout) || !strings.Contains(run.stderr, "stopped with `defenseclaw-gateway stop`") {
+		t.Errorf("per-user open request: exit %d stdout=%q stderr=%q, want a closed block naming the stop", code, run.stdout, run.stderr)
 	}
 }
 
