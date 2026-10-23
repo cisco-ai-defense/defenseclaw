@@ -160,8 +160,8 @@ and readiness check, and exits `1` when anything fails. A healthy `status`, trim
 - With no agent enabled, `status` warns `no_connectors_enabled` and `verify` fails.
 - A new user appears after the next enumerator cycle (up to five minutes). To
   reconcile at once: `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux reconcile --json`.
-- On most distributions `verify` also warns `unprivileged_user_namespaces` or
-  `unprivileged_ptrace`. See [User namespaces](#user-namespaces).
+- On most distributions `status` and `verify` warn `unprivileged_user_namespaces`
+  or `unprivileged_ptrace` and report incomplete security. See [User namespaces](#user-namespaces).
 
 ## Remove
 
@@ -193,8 +193,8 @@ per-user install. See [Per-user installs](/docs/enterprise/install/reference/lin
 
 ### User namespaces
 
-On most distributions `verify` warns `unprivileged_user_namespaces` or
-`unprivileged_ptrace`: a standard user can start an agent with its own view of
+On most distributions `status` and `verify` warn `unprivileged_user_namespaces`
+or `unprivileged_ptrace` and report incomplete security: a standard user can start an agent with its own view of
 the machine-policy files, and that agent never calls the hook. DefenseClaw
 leaves these host-wide kernel settings alone unless you set
 `enterprise.machine_policy.linux.namespaces_and_ptrace: restrict`. That closes

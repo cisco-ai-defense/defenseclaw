@@ -39,7 +39,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 SCHEMA_VERSION = 2
 REQUIRED_KEYS = (
@@ -67,7 +67,7 @@ BOOLEAN_KEYS = ("ok", "noop", "installed", "transaction_pending", "coverage_comp
 MAX_INPUT_BYTES = 4 << 20
 
 
-def load_result(path: Path) -> Dict[str, Any]:
+def load_result(path: Path) -> dict[str, Any]:
     """Read one lifecycle result. The file must hold exactly one JSON object:
     MDMs parse the lifecycle's stdout, so any other text is a defect too."""
     raw = path.read_bytes()
@@ -91,7 +91,7 @@ def healthy_service_state(state: str) -> bool:
     return state == "running" or state.startswith("active/")
 
 
-def structural_problems(document: Dict[str, Any]) -> List[str]:
+def structural_problems(document: dict[str, Any]) -> list[str]:
     problems = [f"missing key {key!r}" for key in REQUIRED_KEYS if key not in document]
     if problems:
         return problems
@@ -121,7 +121,7 @@ def structural_problems(document: Dict[str, Any]) -> List[str]:
     return problems
 
 
-def check(document: Dict[str, Any], args: argparse.Namespace) -> List[str]:
+def check(document: dict[str, Any], args: argparse.Namespace) -> list[str]:
     problems = structural_problems(document)
     if problems:
         return problems
@@ -198,6 +198,15 @@ def check(document: Dict[str, Any], args: argparse.Namespace) -> List[str]:
         problems.append("security_complete is false")
     if args.security_incomplete and document["security_complete"] is not False:
         problems.append("security_complete is true, want false")
+    if args.policy_view_status:
+        if document["platform"] != "linux":
+            problems.append("policy-view status is Linux-only")
+        if document["coverage_complete"] is not True:
+            problems.append("policy-view status has coverage_complete false")
+        open_view = any(message["code"] in ("unprivileged_user_namespaces", "unprivileged_ptrace")
+                        for message in document.get("warnings") or [])
+        if document["security_complete"] is open_view:
+            problems.append("security_complete does not match the open policy-view warnings")
     # The warning texts follow the problems in the failure output.
     allowed = set(args.allow_warning)
     # security_incomplete explains a false security_complete, which
@@ -212,7 +221,7 @@ def check(document: Dict[str, Any], args: argparse.Namespace) -> List[str]:
     return problems
 
 
-def policy_problems(policy: Any, args: argparse.Namespace) -> List[str]:
+def policy_problems(policy: Any, args: argparse.Namespace) -> list[str]:
     if not args.policy_applied and args.config_generation_above is None:
         return []
     if not isinstance(policy, dict):
@@ -231,9 +240,9 @@ def policy_problems(policy: Any, args: argparse.Namespace) -> List[str]:
     return problems
 
 
-def machine_policy_problems(policies: Dict[str, Any], args: argparse.Namespace) -> List[str]:
-    problems = []  # type: List[str]
-    connectors = []  # type: List[str]
+def machine_policy_problems(policies: dict[str, Any], args: argparse.Namespace) -> list[str]:
+    problems: list[str] = []
+    connectors: list[str] = []
     for connector in args.machine_policy_target + args.machine_policy + args.machine_policy_enforced:
         if connector not in connectors:
             connectors.append(connector)
@@ -246,12 +255,17 @@ def machine_policy_problems(policies: Dict[str, Any], args: argparse.Namespace) 
         if connector in args.machine_policy and (not isinstance(owned, int) or isinstance(owned, bool) or owned < 1):
             problems.append(f"machine_policy.{connector} owns no entries")
         if connector in args.machine_policy_enforced and entry.get("effective_lock") != "enforce":
-            problems.append(f"machine_policy.{connector}.effective_lock is {entry.get('effective_lock')!r}, want 'enforce'")
+            problems.append(
+                f"machine_policy.{connector}.effective_lock is {entry.get('effective_lock')!r}, want 'enforce'"
+            )
     return problems
 
 
-def describe(document: Dict[str, Any]) -> str:
-    return "action={} ok={} noop={} installed={} installed_version={} exit_code={} coverage_complete={} security_complete={}".format(
+def describe(document: dict[str, Any]) -> str:
+    return (
+        "action={} ok={} noop={} installed={} installed_version={} exit_code={} "
+        "coverage_complete={} security_complete={}"
+    ).format(
         document.get("action"),
         document.get("ok"),
         document.get("noop"),
@@ -263,7 +277,7 @@ def describe(document: Dict[str, Any]) -> str:
     )
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("result", type=Path, help="file holding the lifecycle JSON result")
     parser.add_argument("--label", default="", help="step name to print")
@@ -294,6 +308,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="require security_complete to be false (Windows before the live Claude Code policy proof)",
     )
+    security.add_argument(
+        "--policy-view-status",
+        action="store_true",
+        help="require security_complete to be false exactly when Linux warns of open policy-view routes",
+    )
     parser.add_argument(
         "--expect-error",
         action="append",
@@ -304,7 +323,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--reboot-pending",
         action="store_true",
-        help="require a committed Linux deployment with only unprivileged_user_namespaces errors and security_complete false",
+        help="require a committed Linux deployment with only unprivileged_user_namespaces errors "
+        "and security_complete false",
     )
     parser.add_argument(
         "--policy-applied",

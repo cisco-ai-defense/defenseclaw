@@ -740,12 +740,15 @@ policy_checks=(--machine-policy claudecode --machine-policy codex
 restrict_views=0
 [ "$platform" != linux ] || [ -n "$upgrade_from" ] || restrict_views=1
 complete_or_pending=(--complete)
+read_security=(--complete)
 converged=(--noop)
 open_views=()
 if [ "$restrict_views" = 1 ]; then
     complete_or_pending=(--reboot-pending)
+    read_security=(--reboot-pending)
     converged=(--changed)
 elif [ "$platform" = linux ]; then
+    read_security=(--policy-view-status)
     open_views=(--allow-warning unprivileged_user_namespaces --allow-warning unprivileged_ptrace)
 fi
 if [ -n "$upgrade_from" ]; then
@@ -817,20 +820,23 @@ step "verify"
 lifecycle 04-verify verify
 retry_busy 04-verify verify
 check "$results/04-verify.json" verify --action verify --installed --version "$version" --ready \
-    "${complete_or_pending[@]}" "${policy_checks[@]}" ${open_views[@]+"${open_views[@]}"}
+    "${read_security[@]}" "${policy_checks[@]}" ${open_views[@]+"${open_views[@]}"}
 assert_policy_views
 
 step "status"
 lifecycle 05-status status
 retry_busy 05-status status
 check "$results/05-status.json" status --action status --installed --version "$version" \
-    "${complete_or_pending[@]}" "${policy_checks[@]}"
+    "${read_security[@]}" "${policy_checks[@]}" ${open_views[@]+"${open_views[@]}"}
 services_running
 
 step "MDM detection (detect.sh --require-healthy)"
 detected=$(detect_value --require-healthy --min-version "$version" || true)
 expected_detection=$version
 [ "$restrict_views" != 1 ] || expected_detection=unhealthy
+if [ "$platform" = linux ] && [ "$(json_field "$results/05-status.json" security_complete)" = False ]; then
+    expected_detection=unhealthy
+fi
 [ "$detected" = "$expected_detection" ] || die "detect.sh printed '$detected', want '$expected_detection'"
 echo "detect.sh: $detected"
 

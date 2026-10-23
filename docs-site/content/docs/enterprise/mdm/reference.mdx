@@ -292,7 +292,10 @@ hooks and machine policy are intact.
 | Linux | `dpkg-query -W -f='${Status} ${Version}' defenseclaw-enterprise` or `rpm -q defenseclaw-enterprise` (package channel only). Or `detect.sh --min-version X.Y.Z`, which covers every channel. | `detect.sh --require-healthy`, or the wrapper's `--action verify` exits `0`. |
 | macOS | `pkgutil --pkg-info com.cisco.defenseclaw.enterprise` reports `version: X.Y.Z` (pkg channel). Or `detect.sh --min-version X.Y.Z`. | `detect.sh --require-healthy`, or the wrapper's `--action verify` exits `0`. |
 
-On Linux, a config with
+On Linux, the default `namespaces_and_ptrace: leave` keeps the host's kernel
+settings. If unprivileged namespaces or ptrace are available, `status` and
+`verify` report incomplete security and `detect.sh --require-healthy` reports
+`unhealthy`. A config with
 `enterprise.machine_policy.linux.namespaces_and_ptrace: restrict` applies the
 host kernel restrictions at once but needs a reboot to end processes started
 before them. During that interval, package inventory and

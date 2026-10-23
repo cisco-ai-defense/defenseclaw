@@ -479,6 +479,13 @@ func newTestHost(t *testing.T, goos string) *testHost {
 	env.DockerEngine = func(context.Context, string) error { return nil }
 	env.fillDefaults()
 	h.env = env
+	if goos == "linux" {
+		// Tests of unrelated lifecycle behavior need explicit, readable
+		// kernel facts before status can claim complete security. Tests for
+		// open or unavailable controls replace or remove these fake values.
+		writeHostFile(t, h, sysctlMaxUserNamespaces, "0\n")
+		writeHostFile(t, h, sysctlPtraceScope, "2\n")
+	}
 	return h
 }
 

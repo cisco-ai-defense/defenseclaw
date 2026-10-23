@@ -115,6 +115,9 @@ func TestLinuxDefaultConfigLeavesKernelSettingsAlone(t *testing.T) {
 	if hasMessageCode(status.Errors, codeUserNamespaces) || hasMessageCode(status.Errors, codeUnprivilegedPtrace) {
 		t.Fatalf("status failed a default deployment on host kernel settings: %+v", status.Errors)
 	}
+	if status.SecurityComplete || !hasWarning(status, codeUserNamespaces) || !hasWarning(status, codeUnprivilegedPtrace) {
+		t.Fatalf("status hid the open policy-view routes: security_complete=%v warnings=%+v", status.SecurityComplete, status.Warnings)
+	}
 	verify := h.run(Options{Action: ActionVerify})
 	if hasMessageCode(verify.Errors, codeUserNamespaces) || hasMessageCode(verify.Errors, codeUnprivilegedPtrace) {
 		t.Fatalf("verify failed a default deployment on host kernel settings: %+v", verify.Errors)
@@ -123,6 +126,9 @@ func TestLinuxDefaultConfigLeavesKernelSettingsAlone(t *testing.T) {
 		if !hasWarning(verify, code) {
 			t.Fatalf("verify did not warn %s on an open host: %+v", code, verify.Warnings)
 		}
+	}
+	if verify.SecurityComplete {
+		t.Fatal("verify reported complete security while a process can hide machine policy")
 	}
 	for _, warning := range verify.Warnings {
 		if (warning.Code == codeUserNamespaces || warning.Code == codeUnprivilegedPtrace) &&
@@ -150,6 +156,23 @@ func TestLinuxDefaultConfigLeavesKernelSettingsAlone(t *testing.T) {
 	}
 	if got := closed.read(sysctlPtraceScope); got != "3\n" {
 		t.Fatalf("a default install changed the administrator's ptrace scope: %q", got)
+	}
+}
+
+func TestLinuxOpenPolicyViewStatusCannotClaimUnreadableKernelSettings(t *testing.T) {
+	h := newTestHost(t, "linux")
+	openKernel(t, h)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
+	for _, path := range []string{sysctlMaxUserNamespaces, sysctlPtraceScope} {
+		if err := os.Remove(h.env.P(path)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		if result.SecurityComplete || !hasWarning(result, codeUserNamespaces) || !hasWarning(result, codeUnprivilegedPtrace) {
+			t.Fatalf("%s claimed protection without readable kernel settings: %+v", action, result)
+		}
 	}
 }
 
@@ -328,9 +351,16 @@ func TestLinuxManagedUserNamespacesAreDisabledAndDetected(t *testing.T) {
 			t.Fatalf("%s missed missing persistent restriction: %+v", action, r)
 		}
 	}
-	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	repaired = h.run(Options{Action: ActionEnsure})
+	if !repaired.Installed || repaired.SecurityComplete || !hasMessageCode(repaired.Errors, codeUserNamespaces) {
+		t.Fatalf("ensure trusted the old boot proof after restoring the missing file: %+v", repaired)
+	}
 	if got := h.read(userNamespacesConfigPath); got != string(userNamespacesConfig) {
 		t.Fatalf("ensure did not restore persistent restriction: %q", got)
+	}
+	writeKernelSetting(t, h, userNamespaceBootIDPath, "boot-final\n")
+	if result := h.run(Options{Action: ActionStatus}); hasMessageCode(result.Errors, codeUserNamespaces) {
+		t.Fatalf("status did not clear after the next reboot: %+v", result)
 	}
 }
 
@@ -626,6 +656,35 @@ func TestLinuxSafeSameBootReinstallAndUnrestrictedReboot(t *testing.T) {
 	}
 	if marker := h.read(userNamespaceBootMarker); marker != "boot-after\n" {
 		t.Fatalf("reinstall did not require a new reboot: %q", marker)
+	}
+}
+
+// A same-boot uninstall marker attests only the uninstall it recorded. Once
+// a restricted deployment is installed again, losing its persistent file is
+// drift: restoring the file cannot reuse that older marker to skip a reboot.
+func TestLinuxRestoredMissingRestrictionRequiresNewBoot(t *testing.T) {
+	h, cfg := restrictedHost(t)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg}))
+	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg}))
+	if err := os.Remove(h.env.P(userNamespacesConfigPath)); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		if result := h.run(Options{Action: action}); result.SecurityComplete || !hasMessageCode(result.Errors, codeUserNamespaces) {
+			t.Fatalf("%s missed the missing persistent restriction: %+v", action, result)
+		}
+	}
+	repaired := h.run(Options{Action: ActionEnsure})
+	if !repaired.Installed || repaired.SecurityComplete || !hasMessageCode(repaired.Errors, codeUserNamespaces) {
+		t.Fatalf("ensure trusted the old uninstall marker after restoring a missing file: %+v", repaired)
+	}
+	if marker := h.read(userNamespaceBootMarker); marker != "boot-before\n" {
+		t.Fatalf("ensure did not attest the current boot: %q", marker)
+	}
+	writeKernelSetting(t, h, userNamespaceBootIDPath, "boot-after\n")
+	if result := h.run(Options{Action: ActionStatus}); hasMessageCode(result.Errors, codeUserNamespaces) {
+		t.Fatalf("status did not clear after reboot: %+v", result)
 	}
 }
 

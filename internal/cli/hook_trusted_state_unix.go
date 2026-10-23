@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,18 +50,92 @@ const (
 	standaloneRuntimeReasonHookSocketMissing = "enterprise_managed_hook_socket_missing"
 )
 
-// standaloneHookInUserNamespace reports a hook that runs in a Linux user
-// namespace other than the host's (its uid_map is not the identity map).
-var standaloneHookInUserNamespace = func() bool {
-	if runtime.GOOS != "linux" {
-		return false
-	}
-	data, err := os.ReadFile("/proc/self/uid_map")
+// The hook inherits the agent's process context. A managed Linux hook checks
+// its user and mount namespaces against the host's and refuses a traced
+// process. This is an invocation check: an agent that never loads its managed
+// hook still has no invocation to check, which status reports separately.
+var standaloneLinuxHookContext = func() string {
+	return linuxManagedHookContextReason(os.Readlink, readLinuxHookContextFile)
+}
+
+func readLinuxHookContextFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return false
+		return nil, err
 	}
-	fields := strings.Fields(string(data))
-	return len(fields) != 3 || fields[0] != "0" || fields[1] != "0" || fields[2] != "4294967295"
+	defer f.Close()
+	// Mount tables can be much larger than status or uid_map. Bound every
+	// read so a replaced proc file cannot consume unbounded memory.
+	maxBytes := int64(16 * 1024)
+	if strings.HasSuffix(path, "/mountinfo") {
+		maxBytes = 4 * 1024 * 1024
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil || int64(len(data)) > maxBytes {
+		return nil, errors.New("cannot read bounded Linux process context")
+	}
+	return data, nil
+}
+
+func linuxManagedHookContextReason(readlink func(string) (string, error), readFile func(string) ([]byte, error)) string {
+	uidMap, err := readFile("/proc/self/uid_map")
+	if err != nil {
+		return hookexec.ManagedProcessContextUnknownReason
+	}
+	fields := strings.Fields(string(uidMap))
+	if len(fields) != 3 || fields[0] != "0" || fields[1] != "0" || fields[2] != "4294967295" {
+		return hookexec.ManagedUserNamespaceReason
+	}
+	for _, kind := range []struct{ name, reason, fallback string }{
+		{"user", hookexec.ManagedUserNamespaceReason, "uid_map"},
+		{"mnt", hookexec.ManagedMountNamespaceReason, "mountinfo"},
+	} {
+		self, selfErr := readlink("/proc/self/ns/" + kind.name)
+		host, hostErr := readlink("/proc/1/ns/" + kind.name)
+		if selfErr != nil || self == "" {
+			return hookexec.ManagedProcessContextUnknownReason
+		}
+		if hostErr != nil {
+			// SELinux on managed RHEL denies standard users readlink on
+			// /proc/1/ns, even in the host namespaces. Compare the proc
+			// views the same users can read. A private mount view differs;
+			// unprivileged private user namespaces cannot retain the full
+			// host uid map checked above.
+			selfView, selfErr := readFile("/proc/self/" + kind.fallback)
+			hostView, hostErr := readFile("/proc/1/" + kind.fallback)
+			if selfErr != nil || hostErr != nil {
+				return hookexec.ManagedProcessContextUnknownReason
+			}
+			if !bytes.Equal(selfView, hostView) {
+				return kind.reason
+			}
+			continue
+		}
+		if host == "" {
+			return hookexec.ManagedProcessContextUnknownReason
+		}
+		if self != host {
+			return kind.reason
+		}
+	}
+	status, err := readFile("/proc/self/status")
+	if err != nil {
+		return hookexec.ManagedProcessContextUnknownReason
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		if !strings.HasPrefix(line, "TracerPid:") {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "TracerPid:")))
+		if err != nil || pid < 0 {
+			return hookexec.ManagedProcessContextUnknownReason
+		}
+		if pid != 0 {
+			return hookexec.ManagedTracedProcessReason
+		}
+		return ""
+	}
+	return hookexec.ManagedProcessContextUnknownReason
 }
 
 // reportStandaloneHookRefusal tells the gateway, over the hook socket, that
@@ -130,6 +206,10 @@ func implicitEnterpriseManagedHook() bool { return false }
 // remains a fail-closed invocation even after machine policy is removed.
 func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	contextReason := ""
+	if standaloneHookGOOS == "linux" {
+		contextReason = standaloneLinuxHookContext()
+	}
 	layout, err := managed.StandaloneLayoutFor(standaloneHookGOOS)
 	var loaded *managed.RuntimeDescriptor
 	if err == nil {
@@ -138,6 +218,8 @@ func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	reason := ""
 	secureClientHost := false
 	switch {
+	case contextReason != "":
+		reason = contextReason
 	case err == nil && loaded != nil && strings.TrimSpace(loaded.HookSocket) == "":
 		reason = standaloneRuntimeReasonHookSocketMissing
 	case err == nil:
@@ -153,11 +235,6 @@ func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 		}
 	default:
 		reason = standaloneRuntimeReasonInvalid
-		if standaloneHookInUserNamespace() {
-			// The root-owned files read as owned by the overflow uid here,
-			// so they fail their checks; say why (GAP-0923).
-			reason = hookexec.ManagedUserNamespaceReason
-		}
 	}
 	standaloneHookRuntime.Lock()
 	standaloneHookRuntime.prepared = true
@@ -240,7 +317,7 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	if opts.ManagedRuntimeFailure != "" {
 		if prepared && failed && !secureClientHost {
 			opts.ManagedStandalone = true
-			if opts.ManagedRuntimeFailure == hookexec.ManagedUserNamespaceReason {
+			if hookexec.IsManagedProcessContextReason(opts.ManagedRuntimeFailure) {
 				reportStandaloneHookRefusal(layout.HookSocketPath, connectorName, opts.ManagedRuntimeFailure)
 			}
 		}

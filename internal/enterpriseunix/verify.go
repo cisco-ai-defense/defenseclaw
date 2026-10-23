@@ -183,7 +183,11 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	if machinePolicyIncomplete(r) {
 		r.SecurityComplete = false
 	}
-	if strict && !env.policyViewsRestricted(record) {
+	if !env.policyViewsRestricted(record) {
+		// A hook can refuse a private process context only when an agent
+		// actually calls it. When the agent never loaded its machine policy,
+		// there is no hook call to refuse. Both status and verify must report
+		// the host's remaining route instead of claiming complete security.
 		l.warnOpenPolicyViews()
 	}
 	if strict {

@@ -196,16 +196,20 @@ sudo systemctl show defenseclaw-gateway.service \
 
 ## User namespaces
 
-On most distributions as shipped (Ubuntu 24.04 and RHEL 9 included), `verify`
-warns `unprivileged_user_namespaces`, `unprivileged_ptrace` or both. A standard
+On most distributions as shipped (Ubuntu 24.04 and RHEL 9 included), `status`
+and `verify` warn `unprivileged_user_namespaces`, `unprivileged_ptrace` or both
+and report `security_complete: false`. A standard
 user who can create a private user and mount namespace, or trace their own
 processes (for example with PRoot), can start an agent with its own view of the
 machine-policy files, the runtime descriptor and `/run/defenseclaw-hook`. That
 agent never calls the hook, so its tool calls are outside your enforcement
 ([Residual risks](/docs/enterprise/plan/threat-model#residual-risks)). An agent
-started in a private user namespace that still sees the policy (`unshare -Ur`)
-fails closed when it calls the hook, and the gateway records
-`enterprise_managed_user_namespace`.
+started in a private user or mount namespace that still sees the policy is
+refused when it calls the managed hook. A traced hook or one whose Linux process
+context cannot be checked is refused too. The hook gives a specific reason and
+attempts to report it to the gateway when the hook socket is reachable. This
+check runs only when the agent invokes the hook; it cannot stop an agent whose
+private policy view prevented registration.
 
 DefenseClaw leaves these kernel settings alone by default. Closing them is
 host-wide, and on a managed RHEL 9.8 host it broke other work:
@@ -245,7 +249,9 @@ DefenseClaw records the boot in the root-owned
 reports `unhealthy` until then. A third marker,
 `/etc/sysctl.d/.defenseclaw-userns-uninstalled-boot-id`, records when an
 uninstall removed the file: a reinstall after a boot without the file needs
-another reboot. The markers survive uninstall and purge.
+another reboot. Restoring a missing file from an installed deployment also
+requires a new reboot; an older uninstall marker cannot attest that repair.
+The markers survive uninstall and purge.
 
 Setting `leave` again (or removing the key) removes the managed sysctl file, as
 an uninstall does. The running kernel keeps the restricted values until you

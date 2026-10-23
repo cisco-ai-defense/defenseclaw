@@ -141,8 +141,9 @@ ten minutes), or after the user selects **Refresh** in the Intune app.
 The platform script's own run status is the first signal: it fails whenever `ensure`
 fails. For a separate health signal, add a second root platform script: a copy of
 `packaging/mdm/linux/detect.sh` with `DC_REQUIRE_HEALTHY=1` and, optionally,
-`DC_MIN_VERSION="X.Y.Z"`. It exits `0` when DefenseClaw is installed, new enough and
-passes `verify`, and `1` otherwise. Set its retries to **No retries**.
+`DC_MIN_VERSION="X.Y.Z"`. It exits `0` when DefenseClaw is installed, new enough,
+passes `verify` and reports `security_complete: true`, and `1` otherwise. Set
+its retries to **No retries**.
 
 Intune's custom compliance cannot run `detect.sh` (Microsoft runs Linux discovery
 scripts as the signed-in user, and DefenseClaw's status is readable only by root),
@@ -150,7 +151,10 @@ and a failed platform script does not make a Linux device noncompliant. Read eac
 script's per-device status instead (open the configuration profile and select
 **Device status**). The package database answers inventory:
 
-When your config sets `enterprise.machine_policy.linux.namespaces_and_ptrace:
+With the default `namespaces_and_ptrace: leave`, a host that still permits
+unprivileged namespaces or ptrace reports incomplete security. The health
+script reports `unhealthy` until the administrator addresses that risk. When
+your config sets `enterprise.machine_policy.linux.namespaces_and_ptrace:
 restrict`, DefenseClaw applies the Linux host restrictions with the first
 install that has it, but reports `unprivileged_user_namespaces` until the next
 reboot.

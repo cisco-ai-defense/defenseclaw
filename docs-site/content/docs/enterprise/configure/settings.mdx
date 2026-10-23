@@ -72,7 +72,7 @@ Under `enterprise.machine_policy.linux`. See [User namespaces](/docs/enterprise/
 
 | Key | Values and default | What it does |
 | --- | --- | --- |
-| `namespaces_and_ptrace` | `leave`, `restrict`. Default: `leave` | **Linux.** `leave` keeps the host's kernel settings; `verify` warns `unprivileged_user_namespaces` or `unprivileged_ptrace` while a standard user can hide machine policy from an agent. `restrict` sets `user.max_user_namespaces=0` and `kernel.yama.ptrace_scope=2` for the whole host and needs a reboot. It also stops Codex's workspace sandbox, rootless containers, OpenShell Docker sandboxes and a standard user's `gdb` and `strace`. Other operating systems ignore it. |
+| `namespaces_and_ptrace` | `leave`, `restrict`. Default: `leave` | **Linux.** `leave` keeps the host's kernel settings; `status` and `verify` warn `unprivileged_user_namespaces` or `unprivileged_ptrace` and report incomplete security while a standard user can hide machine policy from an agent. Managed hooks refuse private or traced process contexts when invoked. `restrict` sets `user.max_user_namespaces=0` and `kernel.yama.ptrace_scope=2` for the whole host and needs a reboot. It also stops Codex's workspace sandbox, rootless containers, OpenShell Docker sandboxes and a standard user's `gdb` and `strace`. Other operating systems ignore it. |
 
 ### `managed_hooks_only` on Windows
 

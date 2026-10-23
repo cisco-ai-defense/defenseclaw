@@ -2045,9 +2045,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	priorUserNamespaceRestricted := false
 	if restrictViews {
 		uninstalledThisBoot, hasUninstallMarker := env.userNamespaceUninstallState()
+		// The deployment record describes what was published, not what is on
+		// disk now. In particular, its old checksum and a same-boot uninstall
+		// marker cannot attest a file that went missing after reinstall.
+		fileAndKernelRestricted := env.userNamespaceProblem() == ""
 		priorUserNamespaceRestricted = env.userNamespaceBootProblem() == "" && env.ptraceBootProblem() == "" && env.ptraceProblem() == "" &&
-			(env.userNamespaceProblem() == "" || uninstalledThisBoot ||
-				record != nil && record.Files[userNamespacesConfigPath] == sha256Bytes(env.desiredPolicyViewConfig()) && !hasUninstallMarker)
+			(fileAndKernelRestricted && (!hasUninstallMarker || uninstalledThisBoot) ||
+				record == nil && uninstalledThisBoot)
 	}
 	changed, err := l.applyFilesRecorded(ctx, p, account)
 	if err != nil {

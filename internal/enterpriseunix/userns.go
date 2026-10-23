@@ -76,7 +76,7 @@ func (e *Env) policyViewsRestricted(record *Deployment) bool {
 	return e.GOOS == "linux" && record != nil && record.Files[userNamespacesConfigPath] != ""
 }
 
-// warnOpenPolicyViews adds verify warnings on a Linux deployment that leaves
+// warnOpenPolicyViews adds status and verify warnings on a Linux deployment that leaves
 // the kernel settings alone, while a standard user can still give an agent
 // a private view of machine policy through a user namespace or ptrace.
 func (l *lifecycle) warnOpenPolicyViews() {
@@ -92,9 +92,11 @@ func (l *lifecycle) warnOpenPolicyViews() {
 	}
 	if message := unprivilegedUserNamespaceWarning(read); message != "" {
 		l.result.AddWarning(codeUserNamespaces, message)
+		l.result.SecurityComplete = false
 	}
 	if message := unprivilegedPtraceWarning(read); message != "" {
 		l.result.AddWarning(codeUnprivilegedPtrace, message)
+		l.result.SecurityComplete = false
 	}
 }
 
@@ -108,7 +110,10 @@ func (l *lifecycle) warnOpenPolicyViews() {
 // change to a profile that allows user namespaces, so the warning names it.
 func unprivilegedUserNamespaceWarning(read func(path string) (string, bool)) string {
 	limit, ok := read(sysctlMaxUserNamespaces)
-	if !ok || limit == "0" {
+	if !ok {
+		return fmt.Sprintf("cannot read %s, so DefenseClaw cannot verify that standard users are prevented from creating private policy views; inspect the kernel setting, %s", sysctlMaxUserNamespaces, restrictPolicyViewsAdvice)
+	}
+	if limit == "0" {
 		return ""
 	}
 	if value, ok := read(sysctlUnprivilegedUsernsClone); ok && value == "0" {
@@ -139,10 +144,14 @@ func unprivilegedUserNamespaceWarning(read func(path string) (string, bool)) str
 }
 
 // unprivilegedPtraceWarning returns the warning text, or "" when Yama
-// restricts ptrace to administrators (scope 2 or 3) or is unavailable.
+// restricts ptrace to administrators (scope 2 or 3). Unavailable evidence
+// cannot establish that tracing is disabled.
 func unprivilegedPtraceWarning(read func(path string) (string, bool)) string {
 	scope, ok := read(sysctlPtraceScope)
-	if !ok || ptraceRestricted([]byte(scope)) {
+	if !ok {
+		return fmt.Sprintf("cannot read %s, so DefenseClaw cannot verify that standard users cannot trace agents and rewrite policy paths; inspect the kernel setting, %s", sysctlPtraceScope, restrictPolicyViewsAdvice)
+	}
+	if ptraceRestricted([]byte(scope)) {
 		return ""
 	}
 	return fmt.Sprintf("standard users can trace their own processes (kernel.yama.ptrace_scope=%s): a tracer "+

@@ -10,7 +10,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 CHECKER = Path(__file__).with_name("check_enterprise_lifecycle_result.py")
 
 
@@ -45,8 +44,7 @@ class RebootResultTest(unittest.TestCase):
             path.write_text(json.dumps(document), encoding="utf-8")
             return subprocess.run(
                 [sys.executable, str(CHECKER), str(path), "--platform", "linux", *flags],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 check=False,
             )
 
@@ -74,6 +72,18 @@ class RebootResultTest(unittest.TestCase):
     def test_reboot_transition_is_complete(self):
         self.assertEqual(self.check_result(result([], True), "--complete").returncode, 0)
         self.assertEqual(self.check_result(result(["unprivileged_user_namespaces"], False), "--complete").returncode, 1)
+
+    def test_default_policy_view_status_matches_open_route_warnings(self):
+        open_view = result([], False)
+        open_view["warnings"] = [{"code": "unprivileged_user_namespaces", "message": "private view possible"}]
+        flags = ("--policy-view-status", "--allow-warning", "unprivileged_user_namespaces")
+        self.assertEqual(self.check_result(open_view, *flags).returncode, 0)
+        open_view["warnings"] = []
+        self.assertEqual(self.check_result(open_view, *flags).returncode, 1)
+        open_view["security_complete"] = True
+        self.assertEqual(self.check_result(open_view, *flags).returncode, 0)
+        open_view["warnings"] = [{"code": "unprivileged_user_namespaces", "message": "private view possible"}]
+        self.assertEqual(self.check_result(open_view, *flags).returncode, 1)
 
 
 if __name__ == "__main__":

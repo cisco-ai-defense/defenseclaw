@@ -32,8 +32,8 @@ func withStandaloneHookRuntime(
 ) {
 	t.Helper()
 	oldGOOS, oldLoad, oldPolicy, oldSC := standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir
-	oldUserNamespace, oldReport := standaloneHookInUserNamespace, reportStandaloneHookRefusal
-	standaloneHookInUserNamespace = func() bool { return false }
+	oldContext, oldReport := standaloneLinuxHookContext, reportStandaloneHookRefusal
+	standaloneLinuxHookContext = func() string { return "" }
 	reportStandaloneHookRefusal = func(string, string, string) {}
 	standaloneHookGOOS = goos
 	standaloneRuntimeDescriptorLoad = load
@@ -41,7 +41,7 @@ func withStandaloneHookRuntime(
 	standaloneSecureClientInstallDir = secureClientDir
 	t.Cleanup(func() {
 		standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir = oldGOOS, oldLoad, oldPolicy, oldSC
-		standaloneHookInUserNamespace, reportStandaloneHookRefusal = oldUserNamespace, oldReport
+		standaloneLinuxHookContext, reportStandaloneHookRefusal = oldContext, oldReport
 		standaloneHookRuntime.Lock()
 		standaloneHookRuntime.prepared = false
 		standaloneHookRuntime.descriptor = nil
@@ -168,6 +168,89 @@ func TestStandaloneHookRuntimeUsesDescriptor(t *testing.T) {
 	}
 }
 
+// Even a readable, valid descriptor cannot make a hook safe when the agent
+// launched it from a private user namespace. An administrator's outage-only
+// open setting must not turn that process-context refusal into an allow.
+func TestStandaloneHookRefusesPrivateAgentContextWithValidDescriptor(t *testing.T) {
+	descriptor := testDescriptor()
+	descriptor.OpenHookConnectors = []string{"codex"}
+	withStandaloneHookRuntime(t, "linux",
+		func(string) (*managed.RuntimeDescriptor, error) { return descriptor, nil },
+		noMarkers, "/nonexistent-secure-client")
+	standaloneLinuxHookContext = func() string { return hookexec.ManagedUserNamespaceReason }
+	reported := ""
+	reportStandaloneHookRefusal = func(_, connectorName, reason string) { reported = connectorName + " " + reason }
+	if prepareEnterpriseManagedHookRuntime("codex") {
+		t.Fatal("a private-context hook became a no-op")
+	}
+	opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
+	if opts.ManagedRuntimeFailure != hookexec.ManagedUserNamespaceReason || !opts.ManagedStandalone ||
+		opts.FailMode != "closed" || !opts.StrictAvailability || !enterpriseManagedHookRuntimeForceClosed() {
+		t.Fatalf("valid descriptor hid the private context: failure=%q standalone=%v mode=%q strict=%v",
+			opts.ManagedRuntimeFailure, opts.ManagedStandalone, opts.FailMode, opts.StrictAvailability)
+	}
+	if reported != "codex "+hookexec.ManagedUserNamespaceReason {
+		t.Fatalf("private-context refusal was not reported: %q", reported)
+	}
+}
+
+func TestLinuxManagedHookContextReason(t *testing.T) {
+	baseLinks := map[string]string{
+		"/proc/self/ns/user": "user:[1]", "/proc/1/ns/user": "user:[1]",
+		"/proc/self/ns/mnt": "mnt:[2]", "/proc/1/ns/mnt": "mnt:[2]",
+	}
+	for _, tc := range []struct {
+		name, uidMap, selfMount, status, want string
+		hostLinksDenied, differentMounts      bool
+	}{
+		{name: "host login", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "Name:\thook\nTracerPid:\t0\n"},
+		{name: "private user namespace", uidMap: "0 1000 1\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", want: hookexec.ManagedUserNamespaceReason},
+		{name: "private mount namespace", uidMap: "0 0 4294967295\n", selfMount: "mnt:[3]", status: "TracerPid:\t0\n", want: hookexec.ManagedMountNamespaceReason},
+		{name: "traced hook", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t42\n", want: hookexec.ManagedTracedProcessReason},
+		{name: "unverifiable context", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "Name:\thook\n", want: hookexec.ManagedProcessContextUnknownReason},
+		{name: "protected host namespace links", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true},
+		{name: "protected links with a different mount view", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true, differentMounts: true, want: hookexec.ManagedMountNamespaceReason},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			links := make(map[string]string, len(baseLinks))
+			for path, target := range baseLinks {
+				links[path] = target
+			}
+			links["/proc/self/ns/mnt"] = tc.selfMount
+			got := linuxManagedHookContextReason(func(path string) (string, error) {
+				if tc.hostLinksDenied && strings.HasPrefix(path, "/proc/1/ns/") {
+					return "", os.ErrPermission
+				}
+				if target, ok := links[path]; ok {
+					return target, nil
+				}
+				return "", os.ErrNotExist
+			}, func(path string) ([]byte, error) {
+				switch path {
+				case "/proc/self/uid_map":
+					return []byte(tc.uidMap), nil
+				case "/proc/1/uid_map":
+					return []byte("0 0 4294967295\n"), nil
+				case "/proc/self/mountinfo":
+					if tc.differentMounts {
+						return []byte("private mount\n"), nil
+					}
+					return []byte("host mount\n"), nil
+				case "/proc/1/mountinfo":
+					return []byte("host mount\n"), nil
+				case "/proc/self/status":
+					return []byte(tc.status), nil
+				default:
+					return nil, os.ErrNotExist
+				}
+			})
+			if got != tc.want {
+				t.Fatalf("reason = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // A standalone runtime that fails its checks (an untrusted descriptor, or one
 // that names no hook socket, since the standalone hook has no loopback TCP
 // fallback and never reads a token) fails closed. Its options select no
@@ -200,7 +283,12 @@ func TestStandaloneHookRuntimeFailsClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			withStandaloneHookRuntime(t, tc.goos, tc.load, noMarkers, "/nonexistent-secure-client")
 			reported := ""
-			standaloneHookInUserNamespace = func() bool { return tc.userns }
+			standaloneLinuxHookContext = func() string {
+				if tc.userns {
+					return hookexec.ManagedUserNamespaceReason
+				}
+				return ""
+			}
 			reportStandaloneHookRefusal = func(_, connectorName, reason string) { reported = connectorName + " " + reason }
 			if prepareEnterpriseManagedHookRuntime("claudecode") {
 				t.Fatal("a failed standalone runtime is never a no-op")
