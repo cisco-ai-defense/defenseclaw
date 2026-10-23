@@ -21,7 +21,6 @@ package processutil
 import (
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"syscall"
 	"unsafe"
@@ -102,17 +101,22 @@ func startIndependent(cmd *exec.Cmd, host independentHost) error {
 // breakawayAccepted starts path suspended with CREATE_BREAKAWAY_FROM_JOB and
 // ends it before it runs: a job that allows no breakaway refuses the flag
 // when the process is created (Access is denied). cmd itself cannot be
-// started twice once its pipes are made, so the job is asked first.
+// started twice once its pipes are made, so the job is asked first. The
+// probe inherits no handle (three empty standard handles).
 func breakawayAccepted(path string) bool {
-	process, err := os.StartProcess(path, []string{path}, &os.ProcAttr{Sys: &syscall.SysProcAttr{
-		CreationFlags: windows.CREATE_SUSPENDED | windows.CREATE_BREAKAWAY_FROM_JOB |
-			windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
-	}})
+	_, handle, err := syscall.StartProcess(path, []string{path}, &syscall.ProcAttr{
+		Files: []uintptr{0, 0, 0},
+		Sys: &syscall.SysProcAttr{
+			CreationFlags: windows.CREATE_SUSPENDED | windows.CREATE_BREAKAWAY_FROM_JOB |
+				windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+		},
+	})
 	if err != nil {
 		return false
 	}
-	_ = process.Kill()
-	_, _ = process.Wait()
+	process := windows.Handle(handle)
+	_ = windows.TerminateProcess(process, 1)
+	_ = windows.CloseHandle(process)
 	return true
 }
 
