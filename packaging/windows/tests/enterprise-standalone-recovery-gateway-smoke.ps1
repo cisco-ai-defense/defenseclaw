@@ -612,7 +612,8 @@ $failures = & $module {
         )) {
             $existed = [bool]$case.Existed
             $label = [string]$case.Label
-            $cleanupFails = [bool]$case.CleanupFails
+            # Strict mode: a key a case does not set is read by index.
+            $cleanupFails = [bool]$case['CleanupFails']
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $case.Profile
             if ($case.ContainsKey('Failing')) {
                 Reset-TestHost -Failing ([string[]]$case.Failing)
@@ -681,13 +682,16 @@ $failures = & $module {
                 continue
             }
             if ($cleanupFails) {
-                $leftovers = @($script:DefenseClawRollbackLeftovers)
+                # The retire report adds its own leftovers; the cleanup adds
+                # only carol's folder, which this change created.
+                $all = @($script:DefenseClawRollbackLeftovers)
+                $leftovers = @($all | Microsoft.PowerShell.Core\Where-Object { ([string]$_).Contains('.defenseclaw (account ') })
                 if (-not [string]::IsNullOrEmpty($restoreError) -or
                     -not $calls.StartsWith('staged-gateway:restore|staged-gateway:retire|setup-gateway:retire|cleanup:setup-gateway', [StringComparison]::Ordinal) -or
                     $leftovers.Count -ne 1 -or
                     -not ([string]$leftovers[0]).StartsWith('C:\Users\carol\.defenseclaw (account S-1-5-21-1-2-3-1020), if it exists: a per-user DefenseClaw folder this change created; the rollback could not remove it (', [StringComparison]::Ordinal) -or
                     -not ([string]$leftovers[0]).Contains('cannot find the file')) {
-                    $failures.Add("${label}: '$restoreError', calls $calls, leftovers $($leftovers -join ' | ')")
+                    $failures.Add("${label}: '$restoreError', calls $calls, leftovers $($all -join ' | ')")
                 }
                 $present = [IO.File]::Exists($layout.GatewayPath)
                 if ($existed -and
