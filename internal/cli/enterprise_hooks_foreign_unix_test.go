@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -561,9 +562,13 @@ func TestStandaloneForeignCleanupRemovesVSCodeHooksOfAccountsNoLongerEligible(t 
 	if !strings.Contains(log.String(), "removed DefenseClaw's VS Code Local hooks for dave") {
 		t.Fatalf("log:\n%s", log.String())
 	}
-	// dave leaves the record once removed; alice stays recorded.
-	if len(written) != 1 || written[0].User != "alice" {
-		t.Fatalf("record written %+v, want alice only", written)
+	// Copilot is no longer governed: both the excluded and still eligible
+	// account lose its Local hooks, leaving no accounts to record.
+	if got := requests["alice"].CopilotVSCode; got == nil || got.HookFile || got.Plugin {
+		t.Fatalf("alice's removal %+v", got)
+	}
+	if len(written) != 0 {
+		t.Fatalf("record written %+v after removal", written)
 	}
 	// A governed pass records the folders each write created (only below
 	// that home) and keeps the ones recorded before.
@@ -583,5 +588,108 @@ func TestStandaloneForeignCleanupRemovesVSCodeHooksOfAccountsNoLongerEligible(t 
 	}
 	if len(nextCopilotVSCodeAccounts(next, nil, false, map[int]bool{4242: true, 4343: true}, nil)) != 0 {
 		t.Fatal("removed accounts must leave the record")
+	}
+}
+
+func TestStandaloneForeignCleanupRemovesVSCodeHooksWhenCopilotIsRemoved(t *testing.T) {
+	previousCfg, previousManifest := cfg, enterpriseHookManifest
+	previousLoad, previousVSCodeLoad := enterpriseHookLoadEligibleAccounts, enterpriseHookLoadCopilotVSCodeAccounts
+	previousCheck, previousRunner := enterpriseHookCheckHome, enterpriseHookWorkerRunner
+	t.Cleanup(func() {
+		cfg, enterpriseHookManifest = previousCfg, previousManifest
+		enterpriseHookLoadEligibleAccounts, enterpriseHookLoadCopilotVSCodeAccounts = previousLoad, previousVSCodeLoad
+		enterpriseHookCheckHome, enterpriseHookWorkerRunner = previousCheck, previousRunner
+		enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+		enterpriseHookForeignCleanupState.leftoversClean = false
+		enterpriseHookForeignCleanupState.unrepaired = nil
+	})
+	enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+	root := t.TempDir()
+	cfg = &config.Config{DataDir: root, DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileStandalone,
+			MachinePolicy: config.EnterpriseMachinePolicyConfig{Connectors: map[string]config.EnterpriseConnectorPolicy{"cursor": {}}}}}
+	enterpriseHookManifest = filepath.Join(root, "manifest", "targets.yaml")
+	authDir := filepath.Join(root, "auth")
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authDir)
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	recordPath := enterpriseHookCopilotVSCodeAccountsPath(enterpriseHookManifest)
+	if err := os.WriteFile(recordPath, []byte("record"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removal, err := enterpriseHookCopilotVSCodeRemoval()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eligible := enterprisehooks.UnixEligibleAccount{User: "alice", UID: 4242, GID: 4242, Home: filepath.Join(root, "alice")}
+	excluded := enterprisehooks.UnixEligibleAccount{User: "bob", UID: 4343, GID: 4343, Home: filepath.Join(root, "bob")}
+	prior := enterprisehooks.UnixEligibleAccount{User: "charlie", UID: 4444, GID: 4444, Home: filepath.Join(root, "charlie")}
+	for _, account := range []enterprisehooks.UnixEligibleAccount{eligible, excluded, prior} {
+		if err := os.MkdirAll(account.Home, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		result, err := enterprisepolicy.EnsureCopilotVSCodeUser(enterprisepolicy.CopilotVSCodeUserRequest{
+			Home: account.Home, GOOS: runtime.GOOS, HookBinary: removal.HookBinary, HookFile: true, Plugin: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch account.User {
+		case "alice":
+			eligible.CreatedDirs = result.CreatedDirs
+		case "bob":
+			excluded.CreatedDirs = result.CreatedDirs
+		}
+	}
+	enterpriseHookLoadEligibleAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		return []enterprisehooks.UnixEligibleAccount{eligible, prior}, nil
+	}
+	enterpriseHookLoadCopilotVSCodeAccounts = func(path string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		if path == recordPath {
+			return []enterprisehooks.UnixEligibleAccount{eligible, excluded}, nil
+		}
+		return nil, nil
+	}
+	enterpriseHookCheckHome = func(string, int) enterprisehooks.HomeCheck {
+		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable}
+	}
+	var mu sync.Mutex
+	requested := map[string]bool{}
+	enterpriseHookWorkerRunner = func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		mu.Lock()
+		requested[account.User] = request.CopilotVSCode != nil
+		mu.Unlock()
+		response := enterpriseHookWorkerResponse{}
+		for _, target := range request.Targets {
+			response.Targets = append(response.Targets, enterpriseHookWorkerTargetResult{Index: target.Index, OK: true})
+		}
+		if request.CopilotVSCode != nil {
+			request.Home = account.Home
+			response.CopilotVSCode = runEnterpriseHookWorkerCopilotVSCode(request)
+		}
+		return response, nil
+	}
+	var log bytes.Buffer
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, time.Now(), enterprisehooks.Manifest{}, nil, "")
+	for _, account := range []enterprisehooks.UnixEligibleAccount{eligible, excluded, prior} {
+		if !requested[account.User] {
+			t.Errorf("%s did not get a VS Code Local removal request: %s", account.User, log.String())
+		}
+		for _, path := range []string{enterprisepolicy.CopilotVSCodeLocalHookFilePath(account.Home), enterprisepolicy.CopilotPluginDir(account.Home)} {
+			if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("%s remains after removal: %v", path, err)
+			}
+		}
+		if account.User != prior.User {
+			for _, dir := range account.CreatedDirs {
+				if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("guardian-created directory %s remains: %v", dir, err)
+				}
+			}
+		}
+	}
+	if _, err := os.Lstat(recordPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("VS Code Local accounts record remains: %v", err)
 	}
 }

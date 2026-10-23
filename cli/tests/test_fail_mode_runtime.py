@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,11 @@ _SHARED_HOOK_SCRIPTS = (
 def _clear_global_fail_mode(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("DEFENSECLAW_FAIL_MODE", raising=False)
     monkeypatch.setattr("defenseclaw.fail_mode._windows_registration_freshness", lambda *_args: None)
+    if sys.platform == "win32":
+        # These fixtures model baked runtime mode and lock digests, not native
+        # agent hook files. The real registration is checked in the Windows
+        # doctor and hook-integrity suites.
+        monkeypatch.setattr("defenseclaw.fail_mode.registration_integrity_drift", lambda *_args: [])
     yield
 
 

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import click
 import pytest
-from defenseclaw import agent_selection, fail_mode
+from defenseclaw import agent_selection, fail_mode, hook_integrity
 from defenseclaw.commands import cmd_doctor, cmd_setup
 from defenseclaw.connector_contracts import (
     connector_lock_contract_invariant,
@@ -1094,10 +1094,9 @@ def test_kiro_setup_readiness_accepts_installed_native_hooks(
     cfg = _config(tmp_path)
     hook_path = tmp_path / "kiro-hooks" / "defenseclaw.json"
     hook_path.parent.mkdir(parents=True)
-    hook_path.write_text(
-        '{"version":"v1","hooks":[{"name":"defenseclaw-pre-tool","trigger":"PreToolUse"}]}\n',
-        encoding="utf-8",
-    )
+    script = str(tmp_path / "hooks" / "kiro-hook.sh")
+    hooks = list(hook_integrity._owned_file_renders(cfg, "kiro", script).values())
+    hook_path.write_text(json.dumps({"version": "v1", "hooks": hooks}) + "\n", encoding="utf-8")
     (tmp_path / "hook_contract_lock.json").write_text(
         json.dumps(
             {

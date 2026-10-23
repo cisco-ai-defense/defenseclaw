@@ -15,7 +15,6 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -479,8 +478,9 @@ func (c *hookOnlyConnector) rendersExactHookEntries() bool {
 // functions Setup writes with, and no other entry that Setup's reconcile
 // claims as DefenseClaw's (an edited script path or name, a misplaced or
 // duplicate entry). Entries Setup does not claim, the user's own hooks, are
-// ignored. Every entry that fails the check is one Setup replaces, so a heal
-// always converges.
+// ignored, except in Copilot's defenseclaw.json, DefenseClaw's own file, where
+// an event Setup binds holds nothing else. Every entry that fails the check is
+// one Setup replaces, so a heal always converges.
 func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document map[string]interface{}) bool {
 	if document == nil {
 		return false
@@ -505,13 +505,13 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 		for _, event := range events {
 			want[event] = copilotHookRegistration(runtime.GOOS, event, hookCommand)
 		}
-		edited := hookScriptBaseName(hookCommand)
 		return hookEventEntriesMatch(hooks, want, func(event string, entry interface{}) bool {
 			if _, registered := want[event]; registered {
-				return managedHookCommandEntry(entry, hookCommand) || editedDefenseClawHookEntry(entry, edited)
+				// defenseclaw.json is DefenseClaw's file; Setup leaves only
+				// its render on a bound event (patchCopilotHooksForOS).
+				return true
 			}
-			return slices.Contains(copilotCurrentHookEvents, event) &&
-				(containsHookScript(entry, hookCommand) || editedDefenseClawHookEntry(entry, edited))
+			return copilotUnexpectedEventOwnsHook(entry, hookCommand)
 		})
 	case "antigravity":
 		// Setup rewrites each DefenseClaw-owned outer key whole.
@@ -614,9 +614,10 @@ func ownedHookConfigHoldsEditedEntry(conn Connector, opts SetupOpts) bool {
 // applies (cli/defenseclaw/hook_integrity.py; both read
 // testdata/hook_edited_entries.json): a command or bash string whose script
 // word has DefenseClaw's hook shape for scriptName
-// (editedDefenseClawHookCommand), lies under the data directory's parent and
-// is not the script Setup registers. Claude Code's missing-script guard is
-// unwrapped first.
+// (editedDefenseClawHookCommand), lies under the data directory's parent or
+// runs a copy of a DefenseClaw hook script in any folder
+// (copiedDefenseClawHookCommand, rel-1-0-4 GAP-0600), and is not the script
+// Setup registers. Claude Code's missing-script guard is unwrapped first.
 func hookDocumentHoldsEditedEntry(document interface{}, dataDir, scriptName string) bool {
 	dataDir = filepath.ToSlash(filepath.Clean(dataDir))
 	current := path.Join(dataDir, "hooks", scriptName)
@@ -626,7 +627,8 @@ func hookDocumentHoldsEditedEntry(document interface{}, dataDir, scriptName stri
 		if !editedDefenseClawHookCommand(command, scriptName) {
 			continue
 		}
-		if word, _, ok := posixHookCommandSplit(command); ok && word != current && strings.HasPrefix(word, home) {
+		if word, _, ok := posixHookCommandSplit(command); ok && word != current &&
+			(strings.HasPrefix(word, home) || copiedDefenseClawHookCommand(command, scriptName)) {
 			return true
 		}
 	}

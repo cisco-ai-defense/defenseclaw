@@ -1585,10 +1585,11 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                     {
                         "version": 1,
                         "hooks": {
-                            "PreToolUse": [
+                            "preToolUse": [
                                 {
                                     "type": "command",
                                     "bash": os.path.join(tmp, ".defenseclaw", "hooks", "copilot-hook.sh"),
+                                    "timeoutSec": 30,
                                 }
                             ]
                         },

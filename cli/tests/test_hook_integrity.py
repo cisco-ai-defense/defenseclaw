@@ -183,7 +183,7 @@ def test_empty_token_is_a_problem_like_a_missing_one(tmp_path, monkeypatch):
 def test_removed_hook_registration_is_reported(tmp_path):
     # GAP-1230: the hooks key deleted from the agent's settings file.
     settings = tmp_path / "settings.json"
-    hook = {"command": str(tmp_path / "hooks" / "claude-code-hook.sh")}
+    hook = {"type": "command", "command": str(tmp_path / "hooks" / "claude-code-hook.sh"), "timeout": 30}
     settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [hook]}]}}))
     lock = {"version": 2, "connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}
     (tmp_path / "hook_contract_lock.json").write_text(json.dumps(lock))
@@ -214,7 +214,8 @@ def test_unquoted_hook_path_with_a_space_fails_doctor(tmp_path):
     cfg = SimpleNamespace(data_dir=str(data_dir))
 
     def register(command):
-        settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"command": command}]}]}}))
+        handler = {"type": "command", "command": command, "timeout": 30}
+        settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [handler]}]}}))
 
     register(shlex.quote(script))
     assert hook_registration_problems(cfg, "claudecode") == []
@@ -350,7 +351,8 @@ def test_claude_disable_all_hooks_is_degraded_with_its_own_repair(tmp_path, monk
     # GAP-1066/GAP-1067: the hooks stay registered but Claude Code runs none of them.
     monkeypatch.chdir(tmp_path)
     cfg, settings = _agent_config(tmp_path, "claudecode", "settings.json")
-    hooks = {"PreToolUse": [{"hooks": [{"type": "command", "command": "/x/.defenseclaw/hooks/claude-code-hook.sh"}]}]}
+    handler = {"type": "command", "command": "/x/.defenseclaw/hooks/claude-code-hook.sh", "timeout": 30}
+    hooks = {"PreToolUse": [{"hooks": [handler]}]}
     settings.write_text(json.dumps({"hooks": hooks}))
     assert hook_registration_problems(cfg, "claudecode") == []
 
@@ -370,7 +372,7 @@ def test_codex_hooks_turned_off_or_left_without_command_fail_doctor(tmp_path):
     cfg, config = _agent_config(tmp_path, "codex", "config.toml")
     (tmp_path / "hooks").mkdir()
     (tmp_path / "hooks" / "codex-hook.sh").write_text("#!/bin/bash\n")
-    command = "/home/u/.defenseclaw/hooks/codex-hook.sh --event PreToolUse"
+    command = f"{tmp_path}/hooks/codex-hook.sh --event PreToolUse"
     entry = "[[hooks.PreToolUse]]\nmatcher = '*'\n[[hooks.PreToolUse.hooks]]\ntype = 'command'\ntimeout = 30\n"
     config.write_text("[features]\nhooks = false\n" + entry + f"command = '{command}'\n")
 
@@ -447,13 +449,14 @@ def test_edited_hook_entry_fails_doctor_and_fix_reruns_setup(tmp_path, monkeypat
 
     def register(*paths):
         if connector == "hermes":
-            entries = "".join(f"  - command: \"'{path}'\"\n" for path in paths)
+            entries = "".join(f"  - command: \"'{path}'\"\n    matcher: .*\n    timeout: 30\n" for path in paths)
             config.write_text("hooks:\n  pre_tool_call:\n" + entries)
         elif connector == "copilot":
-            entries = [{"type": "command", "bash": f"'{path}' --event 'preToolUse'"} for path in paths]
+            entries = [{"type": "command", "bash": f"'{path}' --event 'preToolUse'", "timeoutSec": 30} for path in paths]
             config.write_text(json.dumps({"version": 1, "hooks": {"preToolUse": entries}}))
         else:
-            config.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"command": p} for p in paths]}]}}))
+            handlers = [{"type": "command", "command": p, "timeout": 30} for p in paths]
+            config.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": handlers}]}}))
 
     register(current)
     assert hook_registration_problems(cfg, connector) == []

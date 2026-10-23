@@ -3103,7 +3103,10 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime_name = "cursor-hook.ps1" if os.name == "nt" else "cursor-hook.sh"
-            runtime_path = os.path.join(tmpdir, runtime_name)
+            # Setup's own path: a copy anywhere else is not DefenseClaw's
+            # current hook (rel-1-0-4 GAP-0600).
+            runtime_path = os.path.join(tmpdir, "hooks", runtime_name)
+            os.mkdir(os.path.dirname(runtime_path), 0o700)
             if os.name == "nt":
                 runtime_body = (
                     "# defenseclaw-managed-hook v9\ndefenseclaw-hook.exe\n"

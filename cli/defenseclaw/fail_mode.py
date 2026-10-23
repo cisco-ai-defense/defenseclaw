@@ -183,6 +183,84 @@ class ConnectorFailModeState:
         }
 
 
+# Drift for a hook entry edited so the agent runs a tool call without it
+# (hook_integrity.unguarded_tool_call_hooks, rel-1-0-4 GAP-0538).
+REGISTRATION_UNGUARDED = "registration-unguarded"
+
+
+# Drift for a hook entry that runs a script other than the one Setup
+# registers (an edited path, a copy in another folder), and for a generated
+# hook script that changed since setup, is missing or that another account
+# can change (hook_integrity.edited_hook_problems and hook_runtime_problems,
+# rel-1-0-4 GAP-0600).
+REGISTRATION_FOREIGN = "registration-foreign"
+HOOK_RUNTIME_STALE = "hook-runtime-stale"
+
+
+def registration_unguarded(cfg: Any, connector: str) -> bool:
+    """Whether a recorded hook file of *connector* leaves its tool calls unguarded."""
+
+    from defenseclaw.hook_integrity import unguarded_tool_call_hooks
+
+    return bool(unguarded_tool_call_hooks(cfg, normalize(connector)))
+
+
+def registration_integrity_drift(cfg: Any, connector: str) -> list[str]:
+    """The drift of *connector*'s hook registration against DefenseClaw's own current, unmodified hook.
+
+    A registration is healthy only while every entry runs the script Setup
+    registered, with the bytes it sealed, owned by this account. An entry
+    repointed at an old copy kept ``guardrail fail-mode`` without drift
+    (rel-1-0-4 GAP-0600).
+    """
+
+    from defenseclaw.hook_integrity import edited_hook_problems, hook_runtime_problems
+
+    name = normalize(connector)
+    drift = [REGISTRATION_UNGUARDED] if registration_unguarded(cfg, name) else []
+    if _is_windows():
+        # Windows runs the native launcher. _windows_registration_freshness
+        # checks the connectors in _EXPECTED_CONTRACTS; the others get the
+        # doctor's validator of path, bytes and ACL here, which fail-mode
+        # skipped for Copilot (rel-1-0-4 GAP-0600).
+        if name in _WINDOWS_NATIVE_VALIDATED and name not in _EXPECTED_CONTRACTS:
+            native = _windows_native_integrity_drift(cfg, name)
+            if native:
+                drift.append(native)
+        return drift
+    if edited_hook_problems(cfg, name):
+        drift.append(REGISTRATION_FOREIGN)
+    # A missing or damaged token blocks every call; that is not a hook that
+    # runs unchecked, and the hook credential checks report it.
+    if any(not problem.startswith("hook token ") for problem in hook_runtime_problems(cfg, name)):
+        drift.append(HOOK_RUNTIME_STALE)
+    return drift
+
+
+# Connectors whose Windows hook registration the doctor validates natively
+# (cmd_doctor._windows_native_hook_check).
+_WINDOWS_NATIVE_VALIDATED = frozenset({"antigravity", "copilot", "hermes"})
+# A healthy registration, and one a running Hermes host has not reloaded yet
+# (its file is DefenseClaw's current hook).
+_WINDOWS_NATIVE_CURRENT_STATES = frozenset({"healthy", "pending-reload"})
+
+
+def _windows_native_integrity_drift(cfg: Any, connector: str) -> str | None:
+    """The drift of a Windows registration that is not DefenseClaw's current hook, or None."""
+
+    from defenseclaw.commands.cmd_doctor import _windows_native_hook_check
+
+    try:
+        check = _windows_native_hook_check(cfg, connector)
+    except Exception:  # noqa: BLE001 - an uninspectable registration is not a verified one.
+        return REGISTRATION_FOREIGN
+    if check.state in _WINDOWS_NATIVE_CURRENT_STATES:
+        return None
+    if check.state == "disabled":
+        return REGISTRATION_UNGUARDED  # the agent setting turns the hooks off
+    return HOOK_RUNTIME_STALE if check.state == "stale" else REGISTRATION_FOREIGN
+
+
 def resolve_connector_fail_mode(
     cfg: Any,
     connector: str,
@@ -229,6 +307,8 @@ def resolve_connector_fail_mode(
     # trust, and file identities, so the text probe is not used there.
     elif name == "codex" and not _is_windows() and not _codex_registration_current(workspace):
         drift.append("registration-missing")
+
+    drift.extend(registration_integrity_drift(cfg, name))
 
     lock_mode, lock_drift = _registration_lock_state(cfg, name)
     sources.append(("registration-lock", lock_mode))
@@ -289,6 +369,17 @@ def connector_fail_mode_report(
     guardrail = cfg.guardrail
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
     configured = normalize_fail_mode(resolver(name) if callable(resolver) else getattr(guardrail, "hook_fail_mode", ""))
+    # The upstream fail-open connectors (Antigravity, Copilot, Hermes) have no
+    # runtime record of their own, so they are never in this branch.
+    if name in _EXPECTED_CONTRACTS or name == "opencode":
+        return resolve_connector_fail_mode(
+            cfg,
+            name,
+            inspect_effective_policy=inspect_effective_policy,
+        ).to_report()
+    # An unguarded or foreign hook entry is drift whatever the fail mode: the
+    # agent does not run DefenseClaw's current hook for the call.
+    unguarded = registration_integrity_drift(cfg, name)
     if upstream_fail_open(cfg, name):
         return {
             "effective": "open",
@@ -297,19 +388,13 @@ def connector_fail_mode_report(
             "configured": configured,
             "desired": "open",
             "runtime": "open",
-            "current": True,
-            "drift": [],
+            "current": not unguarded,
+            "drift": unguarded,
             "sources": [
                 {"name": "config", "mode": configured},
                 {"name": f"{name}-upstream", "mode": "open"},
             ],
         }
-    if name in _EXPECTED_CONTRACTS or name == "opencode":
-        return resolve_connector_fail_mode(
-            cfg,
-            name,
-            inspect_effective_policy=inspect_effective_policy,
-        ).to_report()
     return {
         "effective": configured,
         "provenance": "config",
@@ -317,8 +402,8 @@ def connector_fail_mode_report(
         "configured": configured,
         "desired": configured,
         "runtime": None,
-        "current": None,
-        "drift": [],
+        "current": False if unguarded else None,
+        "drift": unguarded,
         "sources": [{"name": "config", "mode": configured}],
     }
 
