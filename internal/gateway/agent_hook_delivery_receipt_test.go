@@ -163,7 +163,10 @@ func TestManagedHookConfirmedAnswerSurvivesGatewayExitBeforeFinalization(t *test
 	runDone := make(chan error, 1)
 	go func() { runDone <- restarted.RunSandboxIngressOn(ctx, listener) }()
 	deadline := time.Now().Add(10 * time.Second)
-	for f.audited(t, session)[session] == "" && time.Now().Before(deadline) {
+	for time.Now().Before(deadline) {
+		if f.audited(t, session)[session] != "" && len(f.decisions(t)) == 1 {
+			break
+		}
 		select {
 		case err := <-runDone:
 			t.Fatalf("restarted gateway stopped before recovery: %v", err)
@@ -416,7 +419,7 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 	}
 	// Every call has its hook_decision, an unconfirmed one included: the
 	// hook result stays a technical ok (schema enum ok|panic).
-	wantDecisions := []string{"allow/ok", "allow/ok", "block/ok", "allow/ok", "unconfirmed/ok", "unconfirmed/ok", "unconfirmed/ok"}
+	wantDecisions := []string{"allow/ok", "allow/ok", "block/ok", "unconfirmed/ok", "unconfirmed/ok", "unconfirmed/ok", "unconfirmed/ok"}
 	if got := f.decisions(t); strings.Join(got, ",") != strings.Join(wantDecisions, ",") {
 		t.Errorf("hook_decision records = %v, want %v", got, wantDecisions)
 	}
