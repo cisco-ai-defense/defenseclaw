@@ -622,6 +622,12 @@ func TestPurgeWindowsNamespaceStateRootDeletesACLDriftedChild(t *testing.T) {
 			}
 		}
 	})
+	// GAP-0898: an elevated session can hold SeBackupPrivilege enabled (the
+	// AD-joined stack B host does over SSH), and Go opens every file with
+	// backup semantics, so the deny below was not observable there. Disable
+	// both privileges for the test, as LocalSystem holds them, so the fixture
+	// proves its deny and the purge must enable its own scoped privilege.
+	disableWindowsProcessPrivilegesForTest(t, "SeBackupPrivilege", "SeRestorePrivilege")
 	setWindowsSelfDenyDACL(t, child, currentWindowsTestSID(t), windows.FILE_READ_DATA)
 	if _, err := os.ReadFile(child); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		t.Fatalf("ACL-drifted child read error = %v, want access denied", err)
@@ -658,6 +664,12 @@ func TestPurgeWindowsNamespaceInstallRootSealsThenDeletesACLDriftedTree(t *testi
 	if err := os.WriteFile(child, []byte("payload"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// GAP-0898: an elevated session can hold SeBackupPrivilege enabled (the
+	// AD-joined stack B host does over SSH), and Go opens every file with
+	// backup semantics, so the deny below was not observable there. Disable
+	// both privileges for the test, as LocalSystem holds them, so the fixture
+	// proves its deny and the purge must enable its own scoped privilege.
+	disableWindowsProcessPrivilegesForTest(t, "SeBackupPrivilege", "SeRestorePrivilege")
 	setWindowsSelfDenyDACL(t, child, currentWindowsTestSID(t), windows.FILE_READ_DATA)
 	if _, err := os.ReadFile(child); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		t.Fatalf("fixture did not deny child data read: %v", err)
