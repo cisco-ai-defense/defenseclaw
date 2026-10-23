@@ -52,7 +52,7 @@ import click
 # pulled name-by-name so the wizard call sites read like
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
-from defenseclaw import connector_paths, envvars, platform_support, removed_connectors, terminal_checkbox, ux
+from defenseclaw import connector_paths, envvars, openclaw_presence, platform_support, removed_connectors, terminal_checkbox, ux
 from defenseclaw.audit_actions import (
     ACTION_SETUP_GATEWAY,
     ACTION_SETUP_GUARDRAIL,
@@ -125,7 +125,6 @@ from defenseclaw.logger import (
     keep_running_gateway_token,
 )
 from defenseclaw.notification_capabilities import desktop_notification_capability
-from defenseclaw.openclaw_presence import openclaw_fleet_link_configured
 from defenseclaw.paths import bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 from defenseclaw.platform_support import (
@@ -6839,14 +6838,19 @@ def setup_guardrail(
         # confirm the suggested default.
         if explicit_connector:
             target_connector = explicit_connector
-        elif gc.connector == "openclaw" and not gc.connectors and not openclaw_fleet_link_configured(app.cfg):
+        elif (
+            gc.connector == "openclaw"
+            and not gc.connectors
+            and not openclaw_presence.openclaw_fleet_link_configured(app.cfg)
+        ):
             # An older local setup could pin OpenClaw before the operator
             # picked an agent. A remote host or explicit fleet mode above
             # remains authoritative even without a local OpenClaw binary.
             installed = _detect_installed_connectors()
             target_connector = (
                 "openclaw"
-                if "openclaw" in installed
+                if platform_support.connector_supported_on_os("openclaw")
+                and ("openclaw" in installed or openclaw_presence.openclaw_installed(app.cfg))
                 else _installed_picked_connector(getattr(app.cfg, "data_dir", None), installed)
                 or ""
             )
