@@ -14,6 +14,7 @@ package enterprisehooks
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 // The migration map of the upgrade to 1.0.4: which account incarnation held
@@ -57,6 +60,14 @@ import (
 // past maxLegacyAgentOwners a file, the rest go to shards
 // (legacyAgentOwnersShardFile) that the main file counts, so no account is
 // dropped for the map's size either.
+//
+// A listed account the first pass cannot name at all (the listing and its
+// lookup give no name, and the guardian holds no recent record of its uid)
+// is looked up once more; while it stays unnamed the map is not recorded
+// (unnamedLegacyAgentOwners). Recorded without it, the map was closed and
+// could never add it, so its 1.0.x agents entry was refused for good once
+// its lookup answered again (review of r104 Q-identity, continuation 2,
+// loop round 3).
 
 // LegacyAgentOwnersFile is the file of the identity spool that holds the
 // migration map.
@@ -265,6 +276,91 @@ func WriteLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, now tim
 		legacyAgentOwnersClosed.set(dir)
 	}
 	return true, nil
+}
+
+// legacyAgentHolderOfRecord is the account name the guardian's identity
+// record of uid in dir gives, when the record is recent (written within
+// IdentitySpoolMaxAge, not in the future): before the first pass of 1.0.4,
+// the account the 1.0.x guardian last saw holding the uid. "" otherwise.
+func legacyAgentHolderOfRecord(dir string, uid int, now time.Time) string {
+	record, err := ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), nil)
+	if err != nil || record.UpdatedAt.IsZero() || record.UpdatedAt.After(now.Add(time.Minute)) ||
+		now.Sub(record.UpdatedAt) > IdentitySpoolMaxAge {
+		return ""
+	}
+	return record.User
+}
+
+// unnamedLegacyAgentOwners names, in owners as pending, each uid in unnamed:
+// a listed account of a pass before the map is recorded that neither the
+// listing, its lookup nor a recent guardian record named. Its account is
+// looked up once more. It reports whether the map may be recorded now:
+// false while one stays unnamed (a lookup that fails or does not finish),
+// so the map is recorded at a later pass that names every account. A uid
+// that two successive passes find unresolved holds no account, and is left
+// out: an account given it later is another one. A single not-found answer
+// can miss an account its directory still holds (GAP-1236).
+func unnamedLegacyAgentOwners(ctx context.Context, dir string, owners map[int]LegacyAgentOwner, unnamed []int,
+	logf func(string, ...any)) bool {
+	before := legacyAgentOwnersUnresolved.take(dir)
+	gone := map[int]bool{}
+	var unknown []int
+	for _, uid := range unnamed {
+		lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
+		account, err := identityLookupGated(lookupCtx, &identitySpoolDepartureGate, strconv.Itoa(uid),
+			func(ctx context.Context) (unixidentity.Account, error) { return identitySpoolLookupUID(ctx, uid) })
+		notFound := err != nil && lookupCtx.Err() == nil && unixidentity.IsNotFound(err)
+		cancel()
+		switch {
+		case err == nil && account.UID == uid && account.Name != "":
+			owners[uid] = LegacyAgentOwner{User: account.Name}
+		case notFound && before[uid]:
+			// No account holds the uid: nothing to bind.
+		case notFound:
+			gone[uid] = true
+			unknown = append(unknown, uid)
+		default:
+			unknown = append(unknown, uid)
+		}
+	}
+	if len(unknown) == 0 {
+		return true
+	}
+	legacyAgentOwnersUnresolved.set(dir, gone)
+	if logf != nil {
+		logf("[hook-guardian] agent identity migration map: no account name for uid %v (the lookup did not answer); "+
+			"the map is recorded at a later pass that names every listed account", unknown)
+	}
+	return false
+}
+
+// legacyAgentOwnersUnresolved holds, per spool directory, the unnamed uids
+// the last pass that did not record the map found unresolved.
+var legacyAgentOwnersUnresolved = unresolvedLegacyAgentOwners{byDir: map[string]map[int]bool{}}
+
+type unresolvedLegacyAgentOwners struct {
+	sync.Mutex
+	byDir map[string]map[int]bool
+}
+
+// take returns dir's marks and clears them: a mark counts only for the
+// next pass.
+func (u *unresolvedLegacyAgentOwners) take(dir string) map[int]bool {
+	u.Lock()
+	defer u.Unlock()
+	marks := u.byDir[dir]
+	delete(u.byDir, dir)
+	return marks
+}
+
+func (u *unresolvedLegacyAgentOwners) set(dir string, marks map[int]bool) {
+	u.Lock()
+	defer u.Unlock()
+	if len(marks) == 0 {
+		delete(u.byDir, dir)
+		return
+	}
+	u.byDir[dir] = marks
 }
 
 // legacyAgentOwnersClosed remembers, per spool directory, a map with no

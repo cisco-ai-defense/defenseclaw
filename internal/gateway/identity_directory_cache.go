@@ -212,7 +212,7 @@ func (c *identityCache[T]) getWithColdWait(key string, block, waitCold bool) (T,
 	entry.usedByHook = true
 	c.dropAgedLocked(key, entry, now)
 	age := now.Sub(entry.fetchedAt)
-	invalidated := entry.ok && (entry.fetchedAt.Before(c.staleBefore) || entry.fetchedAt.Before(entry.staleBefore))
+	invalidated := c.invalidatedLocked(entry)
 	expired := age >= c.lifetime(entry.facts) || invalidated
 	if (!entry.ok || expired) && entry.inflight == nil && !now.Before(entry.nextAttempt) {
 		c.refreshLocked(key, entry)
@@ -438,6 +438,14 @@ func (c *identityCache[T]) refreshFailing(key string) (since time.Time, reason s
 func (c *identityCache[T]) unsettled(facts T) bool {
 	return c.partial != nil && c.partial(facts) || c.settling != nil && c.settling(facts) ||
 		c.incomplete != nil && c.incomplete(facts)
+}
+
+// invalidatedLocked reports facts fetched before an invalidation (invalidate
+// for every key, refreshSoon for one) that no refresh has answered since.
+// They are served as expired facts are, and are never current: a decision
+// that needs current facts waits for the refresh.
+func (c *identityCache[T]) invalidatedLocked(entry *identityCacheEntry[T]) bool {
+	return entry.ok && (entry.fetchedAt.Before(c.staleBefore) || entry.fetchedAt.Before(entry.staleBefore))
 }
 
 // lifetime is how long facts are served before a refresh: the full TTL,

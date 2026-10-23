@@ -14,11 +14,16 @@ func (c *identityCache[T]) getNonblocking(key string) (T, bool) {
 	return c.getWithColdWait(key, false, false)
 }
 
-// getCached serves cached facts as getNonblocking does (an expired entry
-// starts one background refresh) and reports whether they are current:
-// within their lifetime and settled. Facts past their lifetime are still
+// getCached serves cached facts as getNonblocking does (an expired or
+// invalidated entry starts one background refresh) and reports whether they
+// are current: within their lifetime, fetched after the last invalidation
+// (invalidatedLocked), and settled. Facts past their lifetime are still
 // served to hooks that read only memory, but they can name an account as it
-// was before the directory changed it (a UPN it no longer gives).
+// was before the directory changed it (a UPN it no longer gives). So can
+// facts an invalidation made due for a refresh: they counted as current
+// until their lifetime ended, and a profile assignment change let an exempt
+// name they gave exempt the caller before the refresh, which the release
+// waited for (review of r104 Q-identity, continuation 2, loop round 3).
 func (c *identityCache[T]) getCached(key string) (facts T, current, ok bool) {
 	if _, ok = c.getNonblocking(key); !ok {
 		return facts, false, false
@@ -29,12 +34,72 @@ func (c *identityCache[T]) getCached(key string) (facts T, current, ok bool) {
 	if entry == nil {
 		return facts, false, false
 	}
-	now := c.now()
-	c.dropAgedLocked(key, entry, now)
+	_, current = c.currentLocked(key, entry)
 	if !entry.ok {
 		return facts, false, false
 	}
-	return entry.facts, now.Sub(entry.fetchedAt) < c.lifetime(entry.facts) && !c.unsettled(entry.facts), true
+	return entry.facts, current && !c.unsettled(entry.facts), true
+}
+
+// getCurrent returns key's facts only when they are current: within their
+// lifetime and fetched after the last invalidation (invalidatedLocked).
+// Facts that are not wait up to wait for the refresh they need (the one in
+// flight, or one started now), and a refresh that fails, is not due yet
+// after a failure, or does not finish in time returns none: the facts from
+// before it are never handed back as the answer. An exemption by a name the
+// facts give uses it, since the directory may have dropped the name
+// (review of r104 Q-identity, continuation 2, loop round 3). A blocking get
+// served expired settled facts at once, and invalidated ones once its wait
+// ended, so a name they gave still exempted the caller.
+func (c *identityCache[T]) getCurrent(key string, wait time.Duration) (T, bool) {
+	var zero T
+	if c == nil || key == "" || c.resolve == nil || wait <= 0 {
+		return zero, false
+	}
+	c.mu.Lock()
+	entry := c.entries[key]
+	if entry == nil {
+		if len(c.entries) >= identityDirectoryMax {
+			c.evictLocked()
+		}
+		entry = &identityCacheEntry[T]{}
+		c.entries[key] = entry
+	}
+	if facts, ok := c.currentLocked(key, entry); ok {
+		c.mu.Unlock()
+		return facts, true
+	}
+	if entry.inflight == nil && !c.now().Before(entry.nextAttempt) {
+		c.refreshLocked(key, entry)
+	}
+	done := entry.inflight
+	c.mu.Unlock()
+	if done == nil {
+		return zero, false
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		return zero, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.currentLocked(key, entry)
+}
+
+// currentLocked returns entry's facts when they are current: still served
+// (dropAgedLocked), within their lifetime, and fetched after the last
+// invalidation.
+func (c *identityCache[T]) currentLocked(key string, entry *identityCacheEntry[T]) (T, bool) {
+	var zero T
+	now := c.now()
+	c.dropAgedLocked(key, entry, now)
+	if !entry.ok || now.Sub(entry.fetchedAt) >= c.lifetime(entry.facts) || c.invalidatedLocked(entry) {
+		return zero, false
+	}
+	return entry.facts, true
 }
 
 // getFresh waits for a lookup started for this call or one already in flight.
@@ -42,7 +107,9 @@ func (c *identityCache[T]) getCached(key string) (facts T, current, ok bool) {
 // identityDirectoryRetry of completion; older answers require a new lookup.
 // A failed or timed-out lookup never returns facts from before it. Managed
 // macOS hooks use this for secondary groups: Open Directory gives no change
-// notification for their removal.
+// notification for their removal. Facts fetched before an invalidation
+// (invalidatedLocked) are never shared this way: the read waits for the
+// refresh, as a blocking get does.
 //
 // When the wait expires as the lookup completes, the outcome is read under
 // the cache lock, not from which select case won: a lookup still in flight
@@ -66,7 +133,7 @@ func (c *identityCache[T]) getFresh(key string, wait time.Duration) (T, bool) {
 	}
 	now := c.now()
 	c.dropAgedLocked(key, entry, now)
-	if entry.ok && (entry.pendingFresh && entry.generation > entry.servedGeneration &&
+	if entry.ok && !c.invalidatedLocked(entry) && (entry.pendingFresh && entry.generation > entry.servedGeneration &&
 		now.Before(entry.fetchedAt.Add(identityDirectoryRetry)) || now.Before(entry.freshUntil)) {
 		entry.pendingFresh, entry.servedGeneration = false, entry.generation
 		facts := entry.facts
