@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -102,6 +103,56 @@ func TestPrivateClaudeInstallMakesUnixStatusAndVerifyIncomplete(t *testing.T) {
 			}
 			if len(audited) != 2 || audited[0].InstallPath != install || audited[0].Version != "2.0.77" || audited[0].Reason != "unsupported_installed_version" {
 				t.Fatalf("private install audit = %+v", audited)
+			}
+		})
+	}
+}
+
+func TestMissingUnprotectedRecordMakesUnixCoverageUnknown(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			h := newTestHost(t, platform)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			writeFreshLedger(t, h)
+			path := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				messages := messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				if action == ActionVerify {
+					messages = messagesOf(result.Errors, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				}
+				if result.CoverageComplete || result.SecurityComplete ||
+					!strings.Contains(messages, "unprotected-agents record") {
+					t.Fatalf("%s %s hid missing install evidence: %+v", platform, action, result)
+				}
+			}
+		})
+	}
+}
+
+func TestStaleUnprotectedRecordMakesUnixCoverageUnknown(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			h := newTestHost(t, platform)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			writeFreshLedger(t, h)
+			path := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
+			old := time.Now().Add(-time.Hour)
+			if err := os.Chtimes(path, old, old); err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				messages := messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				if action == ActionVerify {
+					messages = messagesOf(result.Errors, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				}
+				if result.CoverageComplete || result.SecurityComplete || !strings.Contains(messages, "stale") {
+					t.Fatalf("%s %s hid stale scan evidence: %+v", platform, action, result)
+				}
 			}
 		})
 	}

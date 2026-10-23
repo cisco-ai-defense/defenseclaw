@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // An agent the standalone enumerator knows is installed for an eligible user
@@ -33,6 +34,17 @@ const UnprotectedAgentsFileName = "unprotected-agents.json"
 
 // UnprotectedAgentsMaxBytes bounds the record a reader accepts.
 const UnprotectedAgentsMaxBytes = 4 << 20
+
+// The enumerator runs every five minutes. Three missed cycles mean its last
+// result can no longer establish which agent copies are runnable now.
+const UnprotectedAgentsMaxAge = 16 * time.Minute
+
+// UnprotectedAgentsRecordStale uses the protected file's mtime as evidence
+// of the latest completed scan. The writer refreshes it even for an empty,
+// unchanged result.
+func UnprotectedAgentsRecordStale(modTime, now time.Time) bool {
+	return now.Sub(modTime) > UnprotectedAgentsMaxAge || modTime.After(now.Add(5*time.Minute))
+}
 
 // Status codes for an unprotected agent.
 const (

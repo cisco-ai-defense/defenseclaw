@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // UnixEligibleAccountsFileName is the root-only record the enumerator
@@ -101,7 +102,11 @@ func WriteUnixUnprotectedAgents(path string, agents []UnprotectedAgent) error {
 	if err != nil {
 		return err
 	}
-	return writeUnixRootOnlyRecord(path, data, ".defenseclaw-unprotected-*.new", UnprotectedAgentsMaxBytes)
+	if err := writeUnixRootOnlyRecord(path, data, ".defenseclaw-unprotected-*.new", UnprotectedAgentsMaxBytes); err != nil {
+		return err
+	}
+	now := time.Now()
+	return os.Chtimes(path, now, now)
 }
 
 // writeUnixRootOnlyRecord writes data at path: root-owned 0600 below a

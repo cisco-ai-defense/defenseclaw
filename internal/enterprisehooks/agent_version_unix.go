@@ -274,9 +274,13 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 		prefixes := userPrefixes
 		if unixUserDiscoveryExtended() {
 			// Volta keeps each global package in its own image.
-			prefixes = append([]string{filepath.Join(home, ".volta", "tools", "image", "packages", filepath.FromSlash(pkg))}, userPrefixes...)
+			prefixes = append([]string{filepath.Join(home, ".volta", "tools", "image", "packages", filepath.FromSlash(pkg))}, prefixes...)
 		}
-		for _, prefix := range append(append([]string{}, prefixes...), machinePrefixes()...) {
+		allPrefixes := append(append([]string{}, prefixes...), machinePrefixes()...)
+		if connector == "claudecode" {
+			allPrefixes = append(allPrefixes, filepath.Join(home, ".claude", "local"))
+		}
+		for _, prefix := range allPrefixes {
 			for _, candidate := range nodeModulesPackage(prefix, pkg) {
 				if !unixDiscoveryCandidateTrusted(home, candidate) {
 					continue
@@ -439,6 +443,9 @@ func DiscoverUnixMachineAgentVersion(connector string) string {
 func unixAgentBinaryCandidates(home, binary string) []string {
 	dirs := unixAgentDiscoveryDirs(home)
 	candidates := make([]string, 0, len(dirs)+2)
+	if binary == "claude" {
+		candidates = append(candidates, filepath.Join(home, ".claude", "local", "claude"))
+	}
 	for _, dir := range dirs {
 		candidates = append(candidates, filepath.Join(dir, binary))
 	}

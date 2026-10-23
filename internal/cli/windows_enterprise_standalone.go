@@ -1884,17 +1884,13 @@ var windowsEnterpriseUnprotectedAgentsReader = func() ([]enterprisehooks.Unprote
 func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 	agents, err := windowsEnterpriseUnprotectedAgentsReader()
 	if err != nil {
-		// A token that cannot read the protected record reports nothing
-		// about it, as for the manifest summary.
-		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission) {
-			message := "the enumerator's unprotected-agents record is unreadable: " + err.Error()
-			if result.Action == "verify" {
-				result.AddError(enterprisehooks.UnprotectedCodeAgentUnprotected, message)
-			} else {
-				result.AddWarning(enterprisehooks.UnprotectedCodeAgentUnprotected, message)
-			}
-			result.SecurityComplete = false
+		message := "the enumerator's unprotected-agents record is missing or unreadable: " + err.Error()
+		if result.Action == "verify" {
+			result.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		} else {
+			result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
+		result.CoverageComplete, result.SecurityComplete = false, false
 		return
 	}
 	for _, agent := range agents {

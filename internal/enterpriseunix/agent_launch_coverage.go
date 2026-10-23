@@ -7,11 +7,15 @@ package enterpriseunix
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -171,7 +175,7 @@ func launchCoverageExplanation(reason string) string {
 	case "launch_arguments_unverified":
 		return "the process arguments could not be verified"
 	case "claude_npm_launch_unverified":
-		return "a Claude Code npm script can be a separate copy whose managed hook contract cannot be verified from its process arguments"
+		return "the running Claude Code npm script has an unsupported or unreadable managed hook contract"
 	case "claude_version_unverified":
 		return "the running Claude Code release has no verified managed hook contract"
 	default:
@@ -184,7 +188,21 @@ func claudeManagedLaunchCoverage(argv []string) string {
 		return "launch_arguments_unverified"
 	}
 	if isScriptHost(filepath.Base(argv[0])) && len(argv) > 1 && agentCLIOf(argv) == "claude" {
-		return "claude_npm_launch_unverified"
+		// npm's bin/claude is a symlink to the package's cli.js. Resolve
+		// that path and inspect the package the process actually launched.
+		// A relative or unreadable script cannot prove which copy ran.
+		script := ""
+		for _, argument := range argv[1:] {
+			if !strings.HasPrefix(argument, "-") {
+				script = argument
+				break
+			}
+		}
+		if version := claudeNPMScriptVersion(script); version == "" ||
+			connector.ResolveHookContract("claudecode", version).Status != connector.HookCompatibilityKnown {
+			return "claude_npm_launch_unverified"
+		}
+		return ""
 	}
 	const nativeVersions = "/.local/share/claude/versions/"
 	if before, version, ok := strings.Cut(argv[0], nativeVersions); ok && before != "" && version != "" {
@@ -194,4 +212,44 @@ func claudeManagedLaunchCoverage(argv []string) string {
 		}
 	}
 	return ""
+}
+
+func claudeNPMScriptVersion(script string) string {
+	if !filepath.IsAbs(script) {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(script)
+	if err != nil || filepath.Base(resolved) != "cli.js" {
+		return ""
+	}
+	packageDir := filepath.Dir(resolved)
+	if filepath.Base(packageDir) != "claude-code" || filepath.Base(filepath.Dir(packageDir)) != "@anthropic-ai" {
+		return ""
+	}
+	path := filepath.Join(packageDir, "package.json")
+	// This metadata is user-controlled. Nonblocking, no-follow opening keeps
+	// a FIFO or replaced symlink from stalling privileged status and verify.
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return ""
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	const maxPackageBytes = 64 << 10
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxPackageBytes {
+		return ""
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxPackageBytes+1))
+	if err != nil || len(data) > maxPackageBytes {
+		return ""
+	}
+	var metadata struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(data, &metadata) != nil || metadata.Name != "@anthropic-ai/claude-code" {
+		return ""
+	}
+	return metadata.Version
 }

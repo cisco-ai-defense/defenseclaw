@@ -192,7 +192,17 @@ func TestManagedOpenCodePureLaunchLowersStatusAndVerifyOnUnix(t *testing.T) {
 }
 
 func TestManagedClaudePrivateNPMLaunchIsUnverifiedOnUnix(t *testing.T) {
-	const script = "/home/ubuntu/sa104r8-old/node_modules/@anthropic-ai/claude-code/cli.js"
+	home := t.TempDir()
+	script := filepath.Join(home, "node_modules", "@anthropic-ai", "claude-code", "cli.js")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("// fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(script), "package.json"), []byte(`{"name":"@anthropic-ai/claude-code","version":"2.0.77"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if got := agentCLIOf([]string{"node", script}); got != "claude" {
 		t.Fatalf("private npm script classified as %q", got)
 	}
@@ -230,6 +240,77 @@ func TestManagedClaudePrivateNPMLaunchIsUnverifiedOnUnix(t *testing.T) {
 				t.Fatalf("private Claude launch audit = %+v", audited)
 			}
 		})
+	}
+}
+
+func TestManagedClaudeSupportedNPMScriptLaunchStaysCovered(t *testing.T) {
+	home := t.TempDir()
+	packageDir := filepath.Join(home, "lib", "node_modules", "@anthropic-ai", "claude-code")
+	if err := os.MkdirAll(packageDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(packageDir, "cli.js")
+	if err := os.WriteFile(script, []byte("// fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packageDir, "package.json"), []byte(`{"name":"@anthropic-ai/claude-code","version":"2.1.230"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(bin, "claude")
+	if err := os.Symlink(script, launcher); err != nil {
+		t.Fatal(err)
+	}
+	for _, argv := range [][]string{{"node", script}, {"node", launcher}, {"node", "--no-warnings", launcher}} {
+		if reason := claudeManagedLaunchCoverage(argv); reason != "" {
+			t.Fatalf("supported npm launch %q reported %q", argv, reason)
+		}
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"),
+				ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+			const pid = 7181
+			if goos == "linux" {
+				writeHostFile(t, h, "/proc/stat", fmt.Sprintf("btime %d\n", time.Now().Unix()))
+				writeHostFile(t, h, fmt.Sprintf("/proc/%d/cmdline", pid), "node\x00"+launcher+"\x00")
+				writeHostFile(t, h, fmt.Sprintf("/proc/%d/stat", pid),
+					fmt.Sprintf("%d (node) S 1 %d %s1000 0 0", pid, pid, strings.Repeat("0 ", 16)))
+			} else {
+				h.runner.ps = fmt.Sprintf("%d %d 00:00:05 node %s", pid, os.Getuid(), launcher)
+				setDarwinProcessArgv(t, func(int) ([]string, error) { return []string{"node", launcher}, nil })
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				if strings.Contains(messagesOf(result.Warnings, codeManagedLaunchUninspected), "claudecode") ||
+					strings.Contains(messagesOf(result.Errors, codeManagedLaunchUninspected), "claudecode") {
+					t.Fatalf("%s %s flagged supported npm Claude: %+v", goos, action, result)
+				}
+			}
+		})
+	}
+	if err := os.WriteFile(filepath.Join(packageDir, "package.json"), []byte(`{"name":"other","version":"2.1.230"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if reason := claudeManagedLaunchCoverage([]string{"node", launcher}); reason != "claude_npm_launch_unverified" {
+		t.Fatalf("unreadable Claude package metadata reported %q", reason)
+	}
+	outside := filepath.Join(home, "claimed-package.json")
+	if err := os.WriteFile(outside, []byte(`{"name":"@anthropic-ai/claude-code","version":"2.1.230"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(packageDir, "package.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(packageDir, "package.json")); err != nil {
+		t.Fatal(err)
+	}
+	if reason := claudeManagedLaunchCoverage([]string{"node", launcher}); reason != "claude_npm_launch_unverified" {
+		t.Fatalf("linked Claude package metadata reported %q", reason)
 	}
 }
 

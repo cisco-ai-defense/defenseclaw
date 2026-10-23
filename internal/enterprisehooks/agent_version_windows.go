@@ -106,6 +106,9 @@ func windowsAgentPresence(profileHome, connectorName string) bool {
 	case "claudecode":
 		runtimeDirectory = filepath.Join(home, ".claude", "projects")
 		paths = append(paths, filepath.Join(home, ".local", "bin", "claude.exe"),
+			filepath.Join(home, ".claude", "local", "claude"),
+			filepath.Join(home, ".claude", "local", "claude.exe"),
+			filepath.Join(home, ".claude", "local", "claude.cmd"),
 			filepath.Join(home, ".claude.json"), filepath.Join(home, ".claude", "history.jsonl"),
 			filepath.Join(home, ".claude", "projects"))
 	case "codex":
@@ -212,6 +215,7 @@ func windowsAgentVersionCandidatePaths(profileHome, connectorName string) []stri
 			filepath.Join(appDataRoaming, "npm", "node_modules", "@anthropic-ai", "claude-code", "package.json"),
 			filepath.Join(bunGlobal, "@anthropic-ai", "claude-code", "package.json"),
 			filepath.Join(yarnGlobal, "@anthropic-ai", "claude-code", "package.json"),
+			filepath.Join(profileHome, ".claude", "local", "node_modules", "@anthropic-ai", "claude-code", "package.json"),
 		}
 	case "codex":
 		return []string{

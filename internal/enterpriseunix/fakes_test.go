@@ -514,7 +514,25 @@ func (h *testHost) payload(version string) string {
 
 func (h *testHost) run(opts Options) *enterprisestatus.Result {
 	h.t.Helper()
-	return Run(context.Background(), h.env, opts)
+	result := Run(context.Background(), h.env, opts)
+	if (opts.Action == ActionInstall || opts.Action == ActionEnsure) && result.OK && result.Installed {
+		// The fake enumerator never publishes its first empty record. Real
+		// status must wait for that record before claiming complete coverage.
+		path := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
+		if _, err := os.Stat(path); err == nil {
+			return result
+		} else if !os.IsNotExist(err) {
+			h.t.Fatal(err)
+		}
+		data, err := enterprisehooks.MarshalUnprotectedAgents(nil)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+	return result
 }
 
 func (h *testHost) read(canonical string) string {

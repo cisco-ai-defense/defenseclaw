@@ -42,6 +42,11 @@ func DiscoverUnixPrivateAgentInstalls(home string, connectors []string) []Privat
 	}
 	home = filepath.Clean(home)
 	roots := []string{home}
+	if connectorListed(connectors, "claudecode") {
+		// The vendor's local installer keeps a runnable copy two levels
+		// below the home; the one-child prefix scan cannot reach it.
+		roots = append(roots, filepath.Join(home, ".claude", "local"))
+	}
 	for _, root := range userNodePrefixes(home) {
 		if rel, err := filepath.Rel(home, root); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			roots = append(roots, root)
@@ -61,7 +66,11 @@ func DiscoverUnixPrivateAgentInstalls(home string, connectors []string) []Privat
 		if pkg == "" {
 			continue
 		}
-		for _, root := range roots {
+		connectorRoots := append([]string{}, roots...)
+		// Volta stores each package in its own image, rather than directly
+		// under tools/image. A supported selected image can hide an old one.
+		connectorRoots = append(connectorRoots, filepath.Join(home, ".volta", "tools", "image", "packages", filepath.FromSlash(pkg)))
+		for _, root := range connectorRoots {
 			for _, path := range nodeModulesPackage(root, pkg) {
 				if seen[path] || !unixDiscoveryCandidateTrusted(home, path) {
 					continue
@@ -90,6 +99,14 @@ func DiscoverUnixPrivateAgentInstalls(home string, connectors []string) []Privat
 					return append(found, PrivateAgentInstall{Connector: relevant, Incomplete: true})
 				}
 			}
+		}
+	}
+	if connectorListed(connectors, "claudecode") {
+		local := filepath.Join(home, ".claude", "local")
+		entry := filepath.Join(local, "node_modules", "@anthropic-ai", "claude-code", "cli.js")
+		info, err := os.Stat(entry)
+		if (err != nil || !info.Mode().IsRegular()) && unixAgentExecutablePresent(filepath.Join(local, "claude")) {
+			found = append(found, PrivateAgentInstall{Connector: "claudecode", Path: filepath.Join(local, "claude")})
 		}
 	}
 	if connectorListed(connectors, "claudecode") {

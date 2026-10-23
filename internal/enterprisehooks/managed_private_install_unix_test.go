@@ -88,6 +88,89 @@ func TestDiscoverUnixPrivateClaudeCopiesKeepsEveryOldVersion(t *testing.T) {
 	}
 }
 
+func TestDiscoverUnixClaudeLocalAndVoltaCopiesBesideSupportedInstall(t *testing.T) {
+	home := makeHome(t, trustedTestDir(t), "alice")
+	write := func(root, version string) string {
+		t.Helper()
+		dir := filepath.Join(home, root, "node_modules", "@anthropic-ai", "claude-code")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"@anthropic-ai/claude-code","version":"`+version+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "cli.js"), []byte("// fixture"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	write(".npm-global", "2.1.230")
+	local := write(filepath.Join(".claude", "local"), "2.0.77")
+	volta := write(filepath.Join(".volta", "tools", "image", "packages", "@anthropic-ai", "claude-code"), "2.0.76")
+	if err := os.WriteFile(filepath.Join(home, ".claude", "local", "claude"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got := DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode"})
+	if len(got) != 2 || got[0].Path != local || got[0].Version != "2.0.77" ||
+		got[1].Path != volta || got[1].Version != "2.0.76" {
+		t.Fatalf("vendor local and Volta old copies = %+v", got)
+	}
+	if version, _ := DiscoverUnixAgentVersion(context.Background(), home, "claudecode", false); version != "2.1.230" {
+		t.Fatalf("main probe lost the supported global copy: %q", version)
+	}
+}
+
+func TestDiscoverUnixClaudeLocalIsMainProbeCandidate(t *testing.T) {
+	previousExtended := unixUserDiscoveryExtended
+	unixUserDiscoveryExtended = func() bool { return true } // managed per-user worker
+	t.Cleanup(func() { unixUserDiscoveryExtended = previousExtended })
+	home := makeHome(t, trustedTestDir(t), "alice")
+	dir := filepath.Join(home, ".claude", "local", "node_modules", "@anthropic-ai", "claude-code")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"@anthropic-ai/claude-code","version":"2.0.77"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if version, _ := DiscoverUnixAgentVersion(context.Background(), home, "claudecode", false); version != "2.0.77" {
+		t.Fatalf("vendor local version = %q", version)
+	}
+}
+
+func TestDiscoverUnixClaudeLocalDoesNotReplaceSupportedMachineCopy(t *testing.T) {
+	home := makeHome(t, trustedTestDir(t), "alice")
+	for root, version := range map[string]string{"machine": "2.1.230", filepath.Join(".claude", "local"): "2.0.77"} {
+		dir := filepath.Join(home, root, "lib", "node_modules", "@anthropic-ai", "claude-code")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"@anthropic-ai/claude-code","version":"`+version+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	original := machinePrefixes
+	machinePrefixes = func() []string { return []string{filepath.Join(home, "machine")} }
+	t.Cleanup(func() { machinePrefixes = original })
+	if version, _ := DiscoverUnixAgentVersion(context.Background(), home, "claudecode", false); version != "2.1.230" {
+		t.Fatalf("vendor local copy replaced supported machine version: %q", version)
+	}
+}
+
+func TestDiscoverUnixClaudeLocalWrapperWithoutMetadataIsUnprotected(t *testing.T) {
+	home := makeHome(t, trustedTestDir(t), "alice")
+	wrapper := filepath.Join(home, ".claude", "local", "claude")
+	if err := os.MkdirAll(filepath.Dir(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	findings := DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode"})
+	if len(findings) != 1 || findings[0].Path != wrapper || findings[0].Version != "" || findings[0].Incomplete {
+		t.Fatalf("unversioned vendor wrapper = %+v", findings)
+	}
+}
+
 func TestDiscoverUnixPrivateClaudeWithoutVersionIsUnprotected(t *testing.T) {
 	home := makeHome(t, trustedTestDir(t), "alice")
 	entry := filepath.Join(home, "private", "node_modules", "@anthropic-ai", "claude-code", "cli.js")
@@ -125,5 +208,23 @@ func TestDiscoverUnixPrivateCodexAndCopilotBelowContract(t *testing.T) {
 	findings := DiscoverUnixPrivateAgentInstalls(home, []string{"codex", "copilot"})
 	if len(findings) != 2 || findings[0].Connector != "codex" || findings[1].Connector != "copilot" {
 		t.Fatalf("private npm agent versions = %+v", findings)
+	}
+}
+
+func TestDiscoverUnixVoltaCodexAndCopilotCopies(t *testing.T) {
+	home := makeHome(t, trustedTestDir(t), "alice")
+	for _, pkg := range []string{"@openai/codex", "@github/copilot"} {
+		path := filepath.Join(home, ".volta", "tools", "image", "packages", filepath.FromSlash(pkg),
+			"node_modules", filepath.FromSlash(pkg), "package.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"name":"`+pkg+`","version":"0.0.1"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	findings := DiscoverUnixPrivateAgentInstalls(home, []string{"codex", "copilot"})
+	if len(findings) != 2 || findings[0].Connector != "codex" || findings[1].Connector != "copilot" {
+		t.Fatalf("old Volta package copies = %+v", findings)
 	}
 }

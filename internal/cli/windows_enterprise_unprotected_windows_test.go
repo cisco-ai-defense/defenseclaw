@@ -70,22 +70,24 @@ func TestWindowsStandaloneStatusAndVerifyReportUnprotectedAgents(t *testing.T) {
 		t.Fatalf("verify = %+v, want a warning for the unprotected agent", verify)
 	}
 
-	// No record, or a record this token cannot read, reports nothing.
+	// No record, or a record this token cannot read, leaves install
+	// coverage unknown even when the other services are ready.
 	for _, err := range []error{os.ErrNotExist, os.ErrPermission} {
 		stubWindowsUnprotectedAgents(t, nil, err)
 		quiet := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
-		quiet.SecurityComplete = true
+		quiet.CoverageComplete, quiet.SecurityComplete = true, true
 		applyWindowsEnterpriseUnprotectedAgents(quiet)
-		if !quiet.SecurityComplete || len(quiet.Warnings) != 0 {
+		if quiet.CoverageComplete || quiet.SecurityComplete || len(quiet.Warnings) != 1 ||
+			quiet.Warnings[0].Code != enterprisehooks.UnprotectedCodeInstallScanIncomplete {
 			t.Fatalf("%v: %+v", err, quiet)
 		}
 	}
 	// A record that is present but untrusted or malformed is itself a gap.
 	stubWindowsUnprotectedAgents(t, nil, errors.New("noncanonical owner"))
 	broken := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
-	broken.SecurityComplete = true
+	broken.CoverageComplete, broken.SecurityComplete = true, true
 	applyWindowsEnterpriseUnprotectedAgents(broken)
-	if broken.SecurityComplete || len(broken.Warnings) != 1 || !strings.Contains(broken.Warnings[0].Message, "record is unreadable") {
+	if broken.CoverageComplete || broken.SecurityComplete || len(broken.Warnings) != 1 || !strings.Contains(broken.Warnings[0].Message, "record is missing or unreadable") {
 		t.Fatalf("broken record: %+v", broken)
 	}
 }
@@ -115,6 +117,23 @@ func TestWindowsPrivateClaudeInstallReportsAndAuditsEachCopy(t *testing.T) {
 	}
 	if len(audited) != 4 || !strings.Contains(audited[0], "old-a") || !strings.Contains(audited[3], "old-b") {
 		t.Fatalf("Windows install audits = %+v", audited)
+	}
+}
+
+func TestWindowsMissingUnprotectedRecordMakesCoverageUnknown(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
+	for _, action := range []string{"status", "verify"} {
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
+		result.CoverageComplete, result.SecurityComplete = true, true
+		applyWindowsEnterpriseUnprotectedAgents(result)
+		messages := result.Warnings
+		if action == "verify" {
+			messages = result.Errors
+		}
+		if result.CoverageComplete || result.SecurityComplete ||
+			!strings.Contains(fmt.Sprint(messages), "unprotected-agents record") {
+			t.Fatalf("%s hid missing install evidence: %+v", action, result)
+		}
 	}
 }
 

@@ -53,7 +53,7 @@ func DiscoverWindowsPrivateAgentInstalls(home string, names []string) []PrivateA
 	if err != nil && err != io.EOF || len(entries) > privateAgentInstallMaxEntries {
 		return []PrivateAgentInstall{{Connector: relevant, Incomplete: true}}
 	}
-	roots := []string{home, filepath.Join(home, "AppData", "Roaming", "npm"),
+	roots := []string{home, filepath.Join(home, ".claude", "local"), filepath.Join(home, "AppData", "Roaming", "npm"),
 		filepath.Join(home, ".bun", "install", "global"),
 		filepath.Join(home, "AppData", "Local", "Yarn", "Data", "global")}
 	for _, modules := range windowsStandaloneNodeModulesRoots(home) {
@@ -107,6 +107,26 @@ func DiscoverWindowsPrivateAgentInstalls(home string, names []string) []PrivateA
 					}
 				}
 			}
+		}
+	}
+	if containsPrivateConnector(names, "claudecode") {
+		local := filepath.Join(home, ".claude", "local")
+		entry := filepath.Join(local, "node_modules", "@anthropic-ai", "claude-code", "cli.js")
+		if _, err := os.Lstat(entry); os.IsNotExist(err) {
+			for _, base := range []string{"claude", "claude.cmd", "claude.exe"} {
+				wrapper := filepath.Join(local, base)
+				if info, err := os.Lstat(wrapper); err == nil {
+					if winpath.RejectReparseChain(wrapper) != nil {
+						incomplete = true
+					} else if info.Mode().IsRegular() {
+						found = append(found, PrivateAgentInstall{Connector: "claudecode", Path: wrapper})
+					}
+				} else if !os.IsNotExist(err) {
+					incomplete = true
+				}
+			}
+		} else if err != nil {
+			incomplete = true
 		}
 	}
 	if containsPrivateConnector(names, "claudecode") {

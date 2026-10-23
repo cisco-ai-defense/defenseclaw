@@ -44,6 +44,51 @@ func TestManagedWindowsReportsOldClaudeBesideSupportedInstall(t *testing.T) {
 	}
 }
 
+func TestManagedWindowsReportsClaudeLocalBesideSupportedInstall(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	home := t.TempDir()
+	writeWindowsAgentPackageJSON(t, filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@anthropic-ai", "claude-code"), "2.1.230")
+	old := filepath.Join(home, ".claude", "local", "node_modules", "@anthropic-ai", "claude-code")
+	writeWindowsAgentPackageJSON(t, old, "2.0.77")
+	if err := os.WriteFile(filepath.Join(old, "cli.js"), []byte("// fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "local", "claude.cmd"), []byte("@echo off\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	var uncovered []UnprotectedAgent
+	manifest, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+		ReportUnprotected: func(agent UnprotectedAgent) { uncovered = append(uncovered, agent) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Targets) != 1 || manifest.Targets[0].AgentVersion != "2.1.230" ||
+		len(uncovered) != 1 || uncovered[0].Version != "2.0.77" || uncovered[0].InstallPath != old {
+		t.Fatalf("vendor local old copy hidden: targets=%+v uncovered=%+v", manifest.Targets, uncovered)
+	}
+}
+
+func TestDiscoverWindowsClaudeLocalWrapperWithoutMetadataIsUnprotected(t *testing.T) {
+	home := t.TempDir()
+	wrapper := filepath.Join(home, ".claude", "local", "claude.cmd")
+	if err := os.MkdirAll(filepath.Dir(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(wrapper, []byte("@echo off\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	findings := DiscoverWindowsPrivateAgentInstalls(home, []string{"claudecode"})
+	found := false
+	for _, item := range findings {
+		found = found || item.Path == wrapper && item.Version == "" && !item.Incomplete
+	}
+	if !found {
+		t.Fatalf("unversioned vendor wrapper = %+v", findings)
+	}
+}
+
 func TestDiscoverWindowsPrivateClaudeWithoutVersionIsUnprotected(t *testing.T) {
 	home := t.TempDir()
 	entry := filepath.Join(home, "private", "node_modules", "@anthropic-ai", "claude-code", "cli.js")

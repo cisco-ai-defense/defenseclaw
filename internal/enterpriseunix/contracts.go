@@ -360,18 +360,35 @@ func (l *lifecycle) describeUnprotectedAgents() {
 	env, r := l.env, l.result
 	data, err := readBounded(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)), enterprisehooks.UnprotectedAgentsMaxBytes)
 	if err != nil {
+		message := "the enumerator's unprotected-agents record is missing or unreadable: " + err.Error()
+		if l.opts.Action == ActionVerify {
+			r.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		} else {
+			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		}
+		r.CoverageComplete, r.SecurityComplete = false, false
 		return
 	}
 	agents, err := enterprisehooks.ParseUnprotectedAgents(data)
 	if err != nil {
 		message := "the enumerator's unprotected-agents record is unreadable: " + err.Error()
 		if l.opts.Action == ActionVerify {
-			r.AddError(codeVerify, message)
+			r.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		} else {
-			r.AddWarning(codeAgentUnprotected, message)
+			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
-		r.SecurityComplete = false
+		r.CoverageComplete, r.SecurityComplete = false, false
 		return
+	}
+	info, err := os.Stat(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)))
+	if err != nil || enterprisehooks.UnprotectedAgentsRecordStale(info.ModTime(), time.Now()) {
+		message := "the enumerator's unprotected-agents record is stale or its scan time cannot be read"
+		if l.opts.Action == ActionVerify {
+			r.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		} else {
+			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		}
+		r.CoverageComplete, r.SecurityComplete = false, false
 	}
 	for _, agent := range agents {
 		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified || agent.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete {

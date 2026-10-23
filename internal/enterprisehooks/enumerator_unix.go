@@ -579,7 +579,9 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			}
 		}
 		if discoveryFailed {
-			for _, conn := range machineInspect {
+			// The worker also owns the private-install scan for per-user
+			// connectors. A failed worker cannot prove any of its agents absent.
+			for _, conn := range append(append([]string{}, machineInspect...), perUser...) {
 				report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: conn,
 					Code:   UnprotectedCodeInstallScanIncomplete,
 					Reason: "the account's agent versions and private installs could not be inspected this cycle"})
