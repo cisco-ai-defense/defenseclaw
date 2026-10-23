@@ -673,10 +673,10 @@ func actionWindowsInertHeader(keyword, header string) bool {
 	}
 	var tokens []string
 	for i := 0; i < len(header); {
-		switch c := header[i]; {
-		case c == ' ' || c == '\t' || c == ',':
+		switch c := header[i]; c {
+		case ' ', '\t', ',':
 			i++
-		case c == '\'' || c == '"':
+		case '\'', '"':
 			end := i + 1
 			for ; end < len(header); end++ {
 				if header[end] != c {
@@ -712,11 +712,21 @@ func actionWindowsInertHeader(keyword, header string) bool {
 		return false
 	}
 	for _, token := range tokens {
-		token = strings.TrimPrefix(token, "!")
-		if token == "" || token != "'" && token[0] != '$' && (token[0] < '0' || token[0] > '9') &&
-			!(token[0] == '-' && len(token) > 1 && token[1] != '-') {
+		if !actionWindowsInertToken(strings.TrimPrefix(token, "!")) {
 			return false
 		}
 	}
 	return true
+}
+
+// actionWindowsInertToken reports a quoted string ('), variable, number or
+// operator such as -eq or -not.
+func actionWindowsInertToken(token string) bool {
+	switch {
+	case token == "":
+		return false
+	case token == "'", token[0] == '$', token[0] >= '0' && token[0] <= '9':
+		return true
+	}
+	return token[0] == '-' && len(token) > 1 && token[1] != '-'
 }
