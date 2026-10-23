@@ -35,9 +35,13 @@ type managedHookAuditFixture struct {
 // managed gateway with its audit store and hook_decision records. wrap, when
 // set, wraps the hook's response writer.
 func newManagedHookAuditFixture(t *testing.T, wrap func(http.ResponseWriter) http.ResponseWriter) managedHookAuditFixture {
+	return newManagedHookAuditFixtureFor(t, "claudecode", wrap)
+}
+
+func newManagedHookAuditFixtureFor(t *testing.T, connectorName string, wrap func(http.ResponseWriter) http.ResponseWriter) managedHookAuditFixture {
 	t.Helper()
 	installCorrelationHMACForTest()
-	installDefaultProfileConnector(t, "claudecode")
+	installDefaultProfileConnector(t, connectorName)
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {
@@ -47,10 +51,10 @@ func newManagedHookAuditFixture(t *testing.T, wrap func(http.ResponseWriter) htt
 	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints})
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
 	cfg.Guardrail.Mode = "action"
-	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.Connector = connectorName
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
 	bindHookLifecycleV8(t, api, fixture.runtime)
-	hook := api.handleUnifiedConnectorHook("claudecode")
+	hook := api.handleUnifiedConnectorHook(connectorName)
 	server := httptest.NewServer(apiBodyLimitMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var rw http.ResponseWriter = &statusWriter{ResponseWriter: w}
 		if wrap != nil {
@@ -60,6 +64,46 @@ func newManagedHookAuditFixture(t *testing.T, wrap func(http.ResponseWriter) htt
 	}), apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes))
 	t.Cleanup(server.Close)
 	return managedHookAuditFixture{api: api, server: server, path: fixture.path, store: fixture.store}
+}
+
+func TestManagedOpenCodeAuditsItsFinalLocalRefusal(t *testing.T) {
+	f := newManagedHookAuditFixtureFor(t, "opencode", nil)
+	for _, tc := range []struct {
+		name, reason string
+		payload      map[string]interface{}
+	}{
+		{"non_authoritative_arguments", "later plugin argument mutations", map[string]interface{}{"arguments_authoritative": false, "mcp_identity_status": "not_mcp"}},
+		{"ambiguous_mcp_identity", "ambiguous MCP server identity", map[string]interface{}{"arguments_authoritative": true, "mcp_identity_status": "ambiguous"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := agentHookRequest{
+				HookEventName: "tool.execute.before", SessionID: "opencode-" + tc.name,
+				ToolName: "bash", ToolArgs: []byte(`{"command":"echo ok"}`), Payload: tc.payload,
+			}
+			resp := f.api.handleAgentHookSynthetic(t.Context(), "opencode", req, []byte(`{"tool_name":"bash","tool_input":{"command":"echo ok"}}`))
+			if resp.Action != "block" || resp.RawAction != "block" || resp.Severity != "HIGH" ||
+				!strings.Contains(resp.SourceReason, tc.reason) {
+				t.Fatalf("final verdict = %+v, want a complete local refusal", resp)
+			}
+			events, err := f.store.ListEvents(100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range events {
+				if event.Action == string(audit.ActionConnectorHookSynthetic) && event.SessionID == req.SessionID {
+					if !strings.Contains(event.Details, "action=block") ||
+						!strings.Contains(event.Details, "raw_action=block") ||
+						!strings.Contains(event.Details, "severity=HIGH") ||
+						!strings.Contains(event.Details, "mode=action") ||
+						!strings.Contains(event.Details, tc.reason) {
+						t.Fatalf("audit row = %q, want the final refusal fields", event.Details)
+					}
+					return
+				}
+			}
+			t.Fatal("local OpenCode refusal has no audit row")
+		})
+	}
 }
 
 // audited returns the audited action of each session's hook call.
@@ -306,6 +350,35 @@ func TestManagedHookAndGatewayAuditTheAnswerTheAgentGot(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("audited = %v, want %v", got, want)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// GAP-0672: the first benign Hermes pre_tool_call after a gateway start
+// needs the same acknowledged allow as the other managed native hooks.
+func TestManagedHermesFirstBenignCallAuditsAllow(t *testing.T) {
+	f := newManagedHookAuditFixtureFor(t, "hermes", nil)
+	home := t.TempDir()
+	token := "authenticated-generation-token"
+	var stdout, stderr bytes.Buffer
+	const session = "hermes-first-benign"
+	code := hookexec.Run(t.Context(), hookexec.Options{
+		Connector: "hermes", Event: "pre_tool_call", APIAddr: f.server.Listener.Addr().String(),
+		FailMode: "closed", ManagedEnterprise: true, AuthenticatedManagedToken: &token,
+		Home: home, HookDir: filepath.Join(home, "hooks"),
+		Stdin:  strings.NewReader(`{"hook_event_name":"pre_tool_call","session_id":"` + session + `","tool_name":"terminal","tool_input":{"command":"echo ok"}}`),
+		Stdout: &stdout, Stderr: &stderr, HTTPClient: &http.Client{}, StartedAt: time.Now(),
+	})
+	if code != 0 || strings.Contains(stdout.String(), `"block"`) {
+		t.Fatalf("Hermes benign answer code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if got := f.audited(t, session)[session]; got == "allow" {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("Hermes first benign audit = %q, want allow", got)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

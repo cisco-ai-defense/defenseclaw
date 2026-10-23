@@ -2615,6 +2615,26 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		}
 	}
 
+	// The managed OpenCode plugin can refuse an action after the gateway's
+	// policy answer when a later plugin may mutate its arguments, or when
+	// OpenCode cannot identify an MCP server uniquely. Fold that local
+	// refusal into the verdict before the audit and hook_decision are emitted.
+	// A missing authority claim is closed: the plugin starts unproven until
+	// its config hook has checked the final plugin order.
+	if a.scannerCfg != nil && a.scannerCfg.StandaloneEnterprise() &&
+		req.ConnectorName == "opencode" && mode == "action" &&
+		req.HookEventName == "tool.execute.before" && (action != "block" || rawAction != "block") {
+		var localRefusal string
+		if status, _ := req.Payload["mcp_identity_status"].(string); status == "ambiguous" {
+			localRefusal = "DefenseClaw refused an OpenCode tool with ambiguous MCP server identity."
+		} else if authoritative, _ := req.Payload["arguments_authoritative"].(bool); !authoritative {
+			localRefusal = "DefenseClaw refused an OpenCode action because later plugin argument mutations are not observable."
+		}
+		if localRefusal != "" {
+			action, rawAction, severity, reason, wouldBlock = "block", "block", "HIGH", localRefusal, false
+		}
+	}
+
 	// Emit per-rule findings before finalization so the eventual notification,
 	// audit row, and HTTP response share the same evaluation_id + rule_ids.
 	evalCtx := a.emitHookRuleFindings(ctx, req.ConnectorName, req.HookEventName, verdict,
