@@ -152,6 +152,13 @@ func windowsBundleRestoreRequested(action string, opts *windowsEnterpriseLifecyc
 // replacing names the bundle a killed run installed and the gateway never
 // confirmed, when this run settled it (windowsBundleSettle.replacing): the
 // change says that config is what the restore replaced, not an edit.
+// windowsBundleRestoreGenerationOptions binds the confirmed bundle config to
+// its principal (enterprisebundle.Driver.ConfigGenerationOptions); a seam
+// for tests.
+var windowsBundleRestoreGenerationOptions = func(driver *enterprisebundle.Driver, config []byte) (configwrite.Options, bool, error) {
+	return driver.ConfigGenerationOptions(config)
+}
+
 func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBundleRestore {
 	var out windowsBundleRestore
 	fail := func(code, message string) windowsBundleRestore {
@@ -219,14 +226,12 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 	} else if pending != nil {
 		return out
 	}
-	missing := plan.Missing
-	kept, was := "", "missing"
-	if !missing {
-		kept, was = keepWindowsEnterpriseRejectedConfig(layout, previous), "not the config of "+label
-	}
+	// Every read comes before the first write: a restore that cannot prove
+	// the bundle principal changed nothing, the edited config.yaml and its
+	// rejected copy included (q-win-lifecycle review, loop round 3).
 	restoreEnvironment := setTemporaryEnvironment(windowsEnterpriseServicePins(layout))
 	defer restoreEnvironment()
-	writeOptions, ok, err := driver.ConfigGenerationOptions(e.CurrentConfig)
+	writeOptions, ok, err := windowsBundleRestoreGenerationOptions(driver, e.CurrentConfig)
 	if err != nil || !ok {
 		detail := "the confirmed bundle config changed while waiting for the lifecycle lock"
 		if err != nil {
@@ -235,6 +240,11 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 		return fail("bundle_restore_failed", "cannot prove the confirmed bundle principal ("+detail+"); run defenseclaw.exe enterprise windows ensure --profile standalone from an elevated prompt")
 	}
 	writeOptions.ExpectSHA256 = plan.ExpectSHA256
+	missing := plan.Missing
+	kept, was := "", "missing"
+	if !missing {
+		kept, was = keepWindowsEnterpriseRejectedConfig(layout, previous), "not the config of "+label
+	}
 	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, e.CurrentConfig, writeOptions); err != nil {
 		return fail("bundle_restore_failed", "config.yaml is "+was+" and re-applying "+label+" from the bundle store failed: "+
 			windowsEnterpriseBoundedDiagnostic(err.Error()))
