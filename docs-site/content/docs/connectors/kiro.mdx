@@ -70,7 +70,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 ## Limits
 
 - On `kiro-cli --v3`, a blocked prompt still reaches the model with DefenseClaw's reason attached, and the audit log records the block.
-- Kiro IDE before 1.0.182 reads only workspace hooks and is not counted as protected: update it to 1.0.182 or later ([Supported versions](#supported-versions)).
+- Kiro IDE before 1.0.182 reads only workspace hooks and is not counted as protected: update it to 1.0.182 or later ([Supported versions](#supported-versions)). When a supported kiro-cli is installed beside it, `defenseclaw setup kiro --workspace <project-root> --mode action --yes` also writes the project's workspace copy.
 - A hook that does not answer within Kiro's timeout is ignored and the tool runs.
 - An agent you pick with `--agent` or `/agent swap` runs without DefenseClaw's hooks.
 - In enterprise managed mode, ACP editors are enrolled with `defenseclaw-gateway enterprise acp enroll`; it is preview, not yet verified live. Windows ARM64 is not certified.

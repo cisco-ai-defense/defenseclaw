@@ -131,13 +131,12 @@ Run bare, `guardrail fail-mode` prints the effective closed value for each activ
       - Claude Code (claudecode): closed
       - Codex (codex): closed
 
-  Invalid, unauthorized, incomplete, and unreachable gateway responses ALLOW the tool/prompt for connectors that are open above and BLOCK it for those that are closed.
-  Switch to closed: defenseclaw guardrail fail-mode closed
+  Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors that are closed above.
 ```
 
-Claude Code shows `open` because it has no value of its own; Codex shows `closed` because of its override.
+This is the output for a saved global `open` with a Codex override of `closed`: both connectors show `closed`, because a per-user connector is closed whatever an older install saved.
 
-With the global value `closed` and a connector set to `open`, the footer names the open connectors:
+With the global value `closed` and a connector set to `open`, the footer is the same:
 
 ```text
   Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors that are closed above.
