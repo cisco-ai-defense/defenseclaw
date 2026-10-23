@@ -20,6 +20,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 )
 
+// ErrConfirmationPrerequisiteMissing means an applied receipt cannot be
+// confirmed until a later delivery repairs a missing local prerequisite.
+// SettleRun keeps that receipt pending so the repairing delivery can proceed.
+var ErrConfirmationPrerequisiteMissing = errors.New("bundle confirmation prerequisite missing")
+
 // Driver applies a bundle around a lifecycle transaction it does not run
 // itself: the Windows lifecycle, whose transaction is the installer module.
 // Prepare receives the bundle (receipt), stages it, verifies the staged copy
@@ -463,6 +468,10 @@ func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (repor
 		if holds && d.TransactionApplied(rc, installed, policy) && digestErr == nil &&
 			policy.EffectiveDigest == rc.EffectivePolicyDigest && policy.Digest == rc.EffectivePolicyDigest {
 			if _, err := d.Store.Confirm(rc); err != nil {
+				if errors.Is(err, ErrConfirmationPrerequisiteMissing) {
+					report.Pending = append(report.Pending, rc.ReceiptID)
+					continue
+				}
 				return report, rollback, err
 			}
 			report.Completed = append(report.Completed, rc.ReceiptID)
@@ -601,6 +610,10 @@ func (d *Driver) settleCommitted(installedConfig []byte, installed string, polic
 			// it never falls through to fail it or name it for rollback
 			// (GAP-0485).
 			if _, err := d.Store.Confirm(rc); err != nil {
+				if errors.Is(err, ErrConfirmationPrerequisiteMissing) {
+					pending = append(pending, rc)
+					continue
+				}
 				return completed, interrupted, pending, rollback, fmt.Errorf("confirm the proven bundle %s version %d: %w", rc.BundleID, rc.Version, err)
 			}
 			completed = append(completed, rc.ReceiptID)

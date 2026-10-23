@@ -32,6 +32,26 @@ func windowsReceiptAnchorPaths(layout managed.StandaloneLayout, id string) (stag
 	return base + ".json", base + ".previous", nil
 }
 
+// The owner is written only after BeforeConfirm installs a receipt's anchors.
+// It prevents an older applied receipt from undoing a later receipt's install.
+func windowsReceiptAnchorOwnerPath(layout managed.StandaloneLayout) string {
+	return filepath.Join(layout.LifecycleDir, "bundle-anchors-owner")
+}
+
+func readWindowsReceiptAnchorOwner(layout managed.StandaloneLayout) (string, error) {
+	raw, err := safefile.ReadRegularFileBounded(windowsReceiptAnchorOwnerPath(layout), 64)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !enterprisestatus.ValidReceiptID(string(raw)) {
+		return "", errors.New("invalid trust anchor owner receipt")
+	}
+	return string(raw), nil
+}
+
 func (run *windowsBundleRun) bindReceiptAnchors() error {
 	if run.anchorStage == "" || run.prepared == nil || run.prepared.Receipt == nil {
 		return nil
@@ -72,7 +92,7 @@ func readWindowsReceiptAnchors(layout managed.StandaloneLayout, id string) (stag
 		// here. If it remains, this receipt was delivered with anchors and
 		// cannot borrow a valid anchor file from an earlier bundle.
 		if _, previousErr := os.Lstat(previousPath); previousErr == nil {
-			return stagePath, nil, nil, false, fmt.Errorf("staged trust anchors of receipt %s are missing", id)
+			return stagePath, nil, nil, false, fmt.Errorf("%w: staged trust anchors of receipt %s are missing", enterprisebundle.ErrConfirmationPrerequisiteMissing, id)
 		} else if !errors.Is(previousErr, fs.ErrNotExist) {
 			return stagePath, nil, nil, false, previousErr
 		}
@@ -101,7 +121,10 @@ func commitWindowsReceiptAnchors(layout managed.StandaloneLayout, receipt *enter
 		// An old or damaged pending receipt may have lost its stage. It must
 		// never become confirmed on a host with no trust anchors.
 		if _, _, err := windowsBundleReadAnchors(installedPath, bundleAnchorTrust); err != nil {
-			return nil, fmt.Errorf("cannot confirm bundle receipt %s without installed trust anchors: %w", receipt.ReceiptID, err)
+			if errors.Is(err, fs.ErrNotExist) || enterprisebundle.CodeOf(err) == enterprisebundle.CodeAnchorMissing {
+				return nil, fmt.Errorf("%w: cannot confirm bundle receipt %s without installed trust anchors: %v", enterprisebundle.ErrConfirmationPrerequisiteMissing, receipt.ReceiptID, err)
+			}
+			return nil, fmt.Errorf("cannot check installed trust anchors for bundle receipt %s: %w", receipt.ReceiptID, err)
 		}
 		return nil, nil
 	}
@@ -125,6 +148,12 @@ func commitWindowsReceiptAnchors(layout managed.StandaloneLayout, receipt *enter
 			}
 			return nil, fmt.Errorf("commit trust anchors of bundle receipt %s: %w", receipt.ReceiptID, err)
 		}
+		if err := writeWindowsBundleAdminFile(windowsReceiptAnchorOwnerPath(layout), []byte(receipt.ReceiptID)); err != nil {
+			if restoreErr := restoreWindowsBundleAnchors(installedPath, len(previous) != 0, previous); restoreErr != nil {
+				return nil, fmt.Errorf("record trust anchor owner of bundle receipt %s: %w; restore previous trust anchors: %v", receipt.ReceiptID, err, restoreErr)
+			}
+			return nil, fmt.Errorf("record trust anchor owner of bundle receipt %s: %w", receipt.ReceiptID, err)
+		}
 		change := &anchorOnlyChange{path: installedPath, existed: len(previous) != 0, previous: previous, installed: staged}
 		if err := recordWindowsAnchorsChange(layout, reservation, change); err != nil {
 			return nil, err
@@ -143,7 +172,26 @@ func restoreFailedWindowsReceiptAnchors(layout managed.StandaloneLayout, receipt
 		// confirmed. A staged receipt has no anchor change to undo.
 		return nil
 	}
+	state, err := newWindowsBundleDriver(layout).Store.LoadState()
+	if err != nil {
+		return err
+	}
+	// A later confirmed generation owns its anchors even when the stale
+	// receipt staged identical bytes (including a key rotation).
+	if state.Current != nil && state.Current.ConfigGeneration > receipt.ConfigGeneration {
+		return nil
+	}
+	owner, err := readWindowsReceiptAnchorOwner(layout)
+	if err != nil {
+		return err
+	}
+	if owner != "" && owner != receipt.ReceiptID {
+		return nil
+	}
 	_, staged, previous, present, err := readWindowsReceiptAnchors(layout, receipt.ReceiptID)
+	if errors.Is(err, enterprisebundle.ErrConfirmationPrerequisiteMissing) {
+		return nil
+	}
 	if err != nil || !present {
 		return err
 	}
@@ -156,7 +204,12 @@ func restoreFailedWindowsReceiptAnchors(layout managed.StandaloneLayout, receipt
 		return err
 	}
 	if bytes.Equal(current, staged) && !bytes.Equal(staged, previous) {
-		return restoreWindowsBundleAnchors(path, len(previous) != 0, previous)
+		if err := restoreWindowsBundleAnchors(path, len(previous) != 0, previous); err != nil {
+			return err
+		}
+	}
+	if owner == receipt.ReceiptID {
+		return os.Remove(windowsReceiptAnchorOwnerPath(layout))
 	}
 	return nil
 }
