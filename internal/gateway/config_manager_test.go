@@ -554,9 +554,12 @@ func TestStandaloneConfigManagerRejectsUnbundledConfigAndAssetReload(t *testing.
 	}
 	applied := 0
 	boot := true
-	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, _ ConfigDiff, source configReloadSource) error {
 		if boot {
 			boot = false
+			return errGenerationUnchanged
+		}
+		if source.recoveryOnly {
 			return errGenerationUnchanged
 		}
 		applied++
@@ -571,6 +574,12 @@ func TestStandaloneConfigManagerRejectsUnbundledConfigAndAssetReload(t *testing.
 		}
 		return candidate, loadErr
 	}
+	compiled, err := config.ParseCompileObservabilityV8(path, raw,
+		config.ObservabilityV8CompileOptions{DefaultDataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.bindInitialObservabilityV8Plan(compiled.Plan)
 	mgr.setStartupSource(path, raw)
 	if err := mgr.Reload(context.Background(), "startup_reconcile"); err != nil {
 		t.Fatalf("startup reconcile of boot bytes: %v", err)
@@ -589,8 +598,11 @@ func TestStandaloneConfigManagerRejectsUnbundledConfigAndAssetReload(t *testing.
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := mgr.ReloadAssets(context.Background(), "asset_watch"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
-		t.Fatalf("unbundled asset reload = %v, want named refusal", err)
+	if err := mgr.ReloadAssets(context.Background(), "asset_watch"); err != nil || mgr.rejected {
+		t.Fatalf("restored config recovery = %v, rejected=%t", err, mgr.rejected)
+	}
+	if err := mgr.ReloadAssets(context.Background(), "unsigned_asset_watch"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+		t.Fatalf("unbundled later asset reload = %v, want named refusal", err)
 	}
 	if applied != 0 {
 		t.Fatalf("unbundled reload applied %d times", applied)
