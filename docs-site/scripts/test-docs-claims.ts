@@ -240,13 +240,22 @@ describe('1.0.4 operator routes and limits', () => {
     assert.doesNotMatch(envVars, /On Windows, set.*\$env:DEFENSECLAW_CONFIG/i);
   });
 
-  it('keeps native-hook warnings and names the managed OpenCode code gap', () => {
+  it('keeps native-hook warnings and gives plugin readers a working report route', () => {
     const guard = page('enterprise/configure/foreign-hook-guard.mdx');
     assert.match(guard, /foreign_hooks: report.*enterprise policy show/i);
     assert.match(guard, /Cursor, Copilot and Devin.*defenseclaw-hook.*warning.*file and digest.*stderr/i);
     assert.match(guard, /Hermes.*stderr warning.*without the file and digest/i);
-    assert.match(guard, /Amp.*drops.*warnings/i);
-    assert.match(guard, /GAP-0697.*OpenCode.*drops.*warnings/i);
+    assert.match(guard, /OpenCode and Amp.*enterprise policy show.*file and digest/i);
+    assert.doesNotMatch(guard, /GAP-0697|(?:OpenCode|Amp).*drops.*warnings/i);
+  });
+
+  it('gives managed profile-explain routes in every identity troubleshooting row', () => {
+    const rows = readFileSync(join(site, 'content/docs/enterprise/identity/sources.mdx'), 'utf8')
+      .split('\n').filter((line) => line.startsWith('| ') && /profile explain/.test(line));
+    assert.ok(rows.length >= 4, 'identity troubleshooting rows are missing');
+    for (const row of rows) {
+      assert.match(row, /managed.*enterprise .*profile-explain/i, row);
+    }
   });
 
   it('gives a working managed restart route without promising it in the refusal', () => {
