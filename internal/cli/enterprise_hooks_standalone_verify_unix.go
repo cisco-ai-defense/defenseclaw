@@ -205,7 +205,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 		run.Rows[index] = row
 	}
 	for index, row := range run.Rows {
-		if row.Connector != "hermes" || (!row.OK && !row.Pending) {
+		if row.Connector != "hermes" || !row.OK {
 			continue
 		}
 		if err := enterprisehooks.ManagedHermesSessionHomeAttestation(runtime.GOOS, row.Connector, true, false); err != nil {

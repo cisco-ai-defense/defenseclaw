@@ -1211,13 +1211,14 @@ func TestStandaloneVerifyRefusesUnattestableHermesHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(run.Rows) != 2 || run.Failures != 2 || run.Pending != 0 {
-		t.Fatalf("unobservable session home must fail every Hermes target: rows=%+v failures=%d pending=%d", run.Rows, run.Failures, run.Pending)
+	if len(run.Rows) != 2 || run.Failures != 1 || run.Pending != 1 {
+		t.Fatalf("unobservable session home must fail a successful Hermes target and preserve recorded pending: rows=%+v failures=%d pending=%d", run.Rows, run.Failures, run.Pending)
 	}
-	for _, row := range run.Rows {
-		if row.OK || row.Pending || !strings.Contains(row.Error, "session-only HERMES_HOME") {
-			t.Fatalf("Hermes target was certified or the cause was hidden: %+v", row)
-		}
+	if row := run.Rows[0]; row.OK || row.Pending || !strings.Contains(row.Error, "session-only HERMES_HOME") {
+		t.Fatalf("Hermes target was certified or the cause was hidden: %+v", row)
+	}
+	if row := run.Rows[1]; row.OK || !row.Pending || row.Error != "" {
+		t.Fatalf("recorded unavailable home must remain pending: %+v", row)
 	}
 }
 
