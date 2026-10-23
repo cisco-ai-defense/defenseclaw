@@ -80,6 +80,23 @@ def test_keys_set_refuses_ignored_fail_mode_without_saving_or_restart_advice(tmp
         assert "DEFENSECLAW_FAIL_MODE" not in _dotenv(tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("name", "reason"),
+    [
+        ("DEFENSECLAW_FAIL_MODE", "ignored in .env"),
+        ("BAD-NAME", "not a valid environment variable name"),
+    ],
+)
+def test_keys_set_names_invalid_destination_before_reading_empty_stdin(tmp_path, name, reason):
+    app = _make_app_context(str(tmp_path))
+    with patch("defenseclaw.enforce.asset_lists.is_managed_standalone", return_value=False):
+        result = CliRunner().invoke(keys_cmd, ["set", name, "--value-stdin"], obj=app, input="")
+    assert result.exit_code != 0
+    assert reason in result.output
+    assert "No value on stdin" not in result.output
+    assert not (tmp_path / ".env").exists()
+
+
 def test_keys_set_managed_fail_mode_names_the_policy_bundle_route(tmp_path):
     app = _make_app_context(str(tmp_path))
     with patch("defenseclaw.enforce.asset_lists.is_managed_standalone", return_value=True):

@@ -237,12 +237,6 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
 
     if value_stdin and value is not None:
         raise click.UsageError("--value and --value-stdin are mutually exclusive")
-    if value_stdin:
-        line = click.get_text_stream("stdin").readline()
-        value = line.rstrip("\r\n")
-        if not value:
-            ux.err("No value on stdin — nothing saved.")
-            raise SystemExit(1)
 
     from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
 
@@ -281,6 +275,13 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
         reject_symlink(dotenv_path, what="dotenv file")
     except SafetyError as exc:
         _refuse_unsafe_dotenv(dotenv_path, exc)
+
+    if value_stdin:
+        line = click.get_text_stream("stdin").readline()
+        value = line.rstrip("\r\n")
+        if not value:
+            ux.err("No value on stdin — nothing saved.")
+            raise SystemExit(1)
 
     gateway_name = _gateway_token_name(app.cfg, env_name)
     if gateway_name:
