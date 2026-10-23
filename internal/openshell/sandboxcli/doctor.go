@@ -297,7 +297,7 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Status, c.Detail = openshell.StatusWarn, "could not list the sandboxes: "+apiError(err).Error()
 		return c
 	}
-	var bad, stopped, stoppedSilent, errored, timedOut []string
+	var bad, stopped, stoppedSilent, errored, timedOut, lingeringVMs, lingeringWayOn []string
 	running := 0
 	// A sandbox of the compute driver the gateway ran before a switch is in
 	// OpenShell's error state because the gateway cannot run it, not because a
@@ -327,6 +327,9 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		case sb.Phase != "error" || otherDriverNames[sb.Name]:
 		case openshell.ProvisioningTimedOut(sb.PhaseReason):
 			timedOut = append(timedOut, sb.Name)
+		case sb.Driver == "vm" && openshell.LingeringVM(openshell.PhaseError, sb.PhaseReason, false) && openshell.MainProcessFailed(sb.PhaseReason):
+			lingeringVMs = append(lingeringVMs, sb.Name)
+			lingeringWayOn = append(lingeringWayOn, sb.Name+": "+openshell.StopWayOn(sb.Name, openshell.PhaseError, sb.PhaseReason, true))
 		default:
 			errored = append(errored, sb.Name)
 		}
@@ -353,17 +356,21 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Status = openshell.StatusFail
 		c.Detail = "hooks do not reach the ingress " + firstNonEmpty(ingress, "(unknown)") + ", so every tool call fails closed: " + strings.Join(bad, "; ")
 		c.Fix = &openshell.Fix{Summary: "fix the cause above, then start the session again"}
-	case len(errored) > 0 || len(timedOut) > 0:
-		// A sandbox OpenShell lost (its container stopped: a Docker
-		// restart) stops and starts again; one whose provisioning timed out
-		// starts again without a stop, which OpenShell refuses for it
-		// (NVIDIA/OpenShell#4231, GAP-0278).
+	case len(errored) > 0 || len(timedOut) > 0 || len(lingeringVMs) > 0:
+		// A Docker sandbox whose container stopped can stop and start
+		// again. A MicroVM whose main process failed needs a lossy end or delete;
+		// one whose provisioning timed out starts again without a stop,
+		// which OpenShell refuses for it (NVIDIA/OpenShell#4231, GAP-0278).
 		c.Status = openshell.StatusWarn
 		var details, fixes []string
 		if len(errored) > 0 {
 			details = append(details, strings.Join(errored, ", ")+isAre(errored)+" in OpenShell's error state (the container stopped: Docker restarted, or the workload failed)")
 			fixes = append(fixes, "fix what stopped "+itThem(errored)+", then `"+CommandName+" stop NAME` and `"+CommandName+
 				" start NAME`, which keep the sandbox and its work")
+		}
+		if len(lingeringVMs) > 0 {
+			details = append(details, strings.Join(lingeringVMs, ", ")+isAre(lingeringVMs)+" in OpenShell's error state; "+itThem(lingeringVMs)+" may still have a running MicroVM")
+			fixes = append(fixes, lingeringWayOn...)
 		}
 		if len(timedOut) > 0 {
 			details = append(details, strings.Join(timedOut, ", ")+isAre(timedOut)+" in OpenShell's error state because "+
@@ -381,7 +388,9 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 			// while OpenShell does not report a MicroVM in the error state
 			// stopped (heldVMs), which this OpenShell neither stops nor
 			// starts: only its delete lets the upgrade go ahead.
-			c.Detail += ", where this OpenShell can neither stop nor start " + itThem(append(slices.Clone(errored), timedOut...))
+			allErrored := append(slices.Clone(errored), lingeringVMs...)
+			allErrored = append(allErrored, timedOut...)
+			c.Detail += ", where this OpenShell can neither stop nor start " + itThem(allErrored)
 			upgrade, move, waits := "upgrade OpenShell to "+openshell.InstallerVersion, "the upgrade", []string{"see Gateway"}
 			if managed {
 				upgrade, move, waits = "your organization's OpenShell setting moves this account to "+openshell.InstallerVersion+

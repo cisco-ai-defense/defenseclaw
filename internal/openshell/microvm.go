@@ -452,40 +452,50 @@ func executable(p string) bool {
 }
 
 // findVMDriver is the openshell-driver-vm the gateway starts: the one in
-// [openshell.drivers.vm] driver_dir, else the formula's (libexec, else
-// bin, of the keg under the Homebrew prefix), else one in the directories
-// the gateway itself searches (~/.local/libexec/openshell,
+// [openshell.drivers.vm] driver_dir, with only the gateway binary's sibling
+// as a fallback when driver_dir is explicit. Without it, search the
+// formula's (libexec, else bin, of the keg under the Homebrew prefix), then
+// the directories the gateway itself searches (~/.local/libexec/openshell,
 // /usr/libexec/openshell, /usr/local/libexec/openshell,
 // /usr/local/libexec), else the one next to the openshell-gateway on PATH
 // (in its directory or the libexec beside it, as OpenShell's release
-// archives lay them out). A gateway that runs the driver from anywhere
-// else names it through its running process. The second result is the
-// earlier user directory when a PATH-adjacent driver was selected and no
-// driver_dir was configured.
+// archives lay them out). Without an explicit driver_dir, a gateway that
+// runs the driver from anywhere else names it through its running process.
+// The second result is the earlier user directory when a PATH-adjacent
+// driver was selected and no driver_dir was configured.
 func (r *doctorRun) findVMDriver(ctx context.Context) (string, string) {
 	var dirs []string
+	userDir := ""
 	configuredDir := r.config != nil && filepath.IsAbs(r.config.VM.DriverDir)
 	if configuredDir {
 		dirs = append(dirs, r.config.VM.DriverDir)
+	} else {
+		if prefix := r.Gateway.BrewPrefix; prefix != "" {
+			keg := filepath.Join(prefix, "opt", path.Base(GatewayFormula))
+			dirs = append(dirs, filepath.Join(keg, "libexec"), filepath.Join(keg, "bin"))
+		}
+		if home, err := r.HomeDir(); err == nil && filepath.IsAbs(home) {
+			userDir = filepath.Join(home, ".local", "libexec", "openshell")
+			dirs = append(dirs, userDir)
+		}
+		dirs = append(dirs, "/usr/libexec/openshell", "/usr/local/libexec/openshell", "/usr/local/libexec")
 	}
-	if prefix := r.Gateway.BrewPrefix; prefix != "" {
-		keg := filepath.Join(prefix, "opt", path.Base(GatewayFormula))
-		dirs = append(dirs, filepath.Join(keg, "libexec"), filepath.Join(keg, "bin"))
-	}
-	userDir := ""
-	if home, err := r.HomeDir(); err == nil && filepath.IsAbs(home) {
-		userDir = filepath.Join(home, ".local", "libexec", "openshell")
-		dirs = append(dirs, userDir)
-	}
-	dirs = append(dirs, "/usr/libexec/openshell", "/usr/local/libexec/openshell", "/usr/local/libexec")
 	gatewayDirStart := len(dirs)
 	if gw, err := r.LookPath(GatewayBinary); err == nil && filepath.IsAbs(gw) {
-		bins := []string{filepath.Dir(gw)}
-		if real, err := filepath.EvalSymlinks(gw); err == nil && filepath.Dir(real) != bins[0] {
-			bins = append(bins, filepath.Dir(real))
-		}
-		for _, bin := range bins {
-			dirs = append(dirs, bin, filepath.Join(filepath.Dir(bin), "libexec"))
+		if configuredDir {
+			// OpenShell's current_exe() follows a gateway symlink. Its only
+			// fallback with driver_dir set is beside that executable.
+			if real, err := filepath.EvalSymlinks(gw); err == nil {
+				dirs = append(dirs, filepath.Dir(real))
+			}
+		} else {
+			bins := []string{filepath.Dir(gw)}
+			if real, err := filepath.EvalSymlinks(gw); err == nil && filepath.Dir(real) != bins[0] {
+				bins = append(bins, filepath.Dir(real))
+			}
+			for _, bin := range bins {
+				dirs = append(dirs, bin, filepath.Join(filepath.Dir(bin), "libexec"))
+			}
 		}
 	}
 	for i, dir := range dirs {
@@ -496,7 +506,7 @@ func (r *doctorRun) findVMDriver(ctx context.Context) (string, string) {
 			return p, ""
 		}
 	}
-	if r.running.Name != DriverVM {
+	if r.running.Name != DriverVM || configuredDir {
 		return "", ""
 	}
 	parent := 0

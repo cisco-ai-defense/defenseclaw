@@ -446,7 +446,7 @@ func (r *doctorRun) linuxVMDriverCheck() Check {
 	switch {
 	case m.E2fsprogs == "":
 		c.Fix = InstallE2fsprogsFix()
-	case m.DriverBinary == "" && !m.DriverRunning, m.DriverOlderThan != "":
+	case m.driverMissing(), m.DriverOlderThan != "":
 		c.Fix = m.vmDriverFix(r.GOARCH)
 	case len(stale) > 0:
 		c.Fix = m.StaleCacheFix()
@@ -478,7 +478,7 @@ func (m *MicroVMHost) Fixes(goarch string) []*Fix {
 	if m.E2fsprogs == "" {
 		out = append(out, InstallE2fsprogsFix())
 	}
-	if m.DriverBinary == "" && !m.DriverRunning || m.DriverOlderThan != "" {
+	if m.driverMissing() || m.DriverOlderThan != "" {
 		out = append(out, m.vmDriverFix(goarch))
 	}
 	return out
@@ -524,7 +524,7 @@ func (m *MicroVMHost) toolProblems() []string {
 	if m.E2fsprogs == "" {
 		out = append(out, "e2fsprogs (mke2fs and debugfs) is not installed: the MicroVM driver formats every MicroVM's disks with them")
 	}
-	if m.DriverBinary == "" && !m.DriverRunning {
+	if m.driverMissing() {
 		out = append(out, vmDriverBinary+" is not installed (NVIDIA's openshell package does not ship it)")
 	}
 	if m.DriverOlderThan != "" {
@@ -532,4 +532,11 @@ func (m *MicroVMHost) toolProblems() []string {
 			"(an upgrade of NVIDIA's openshell package leaves the driver, which the package does not ship, as it was)", m.DriverBinary, m.DriverVersion, m.DriverOlderThan))
 	}
 	return out
+}
+
+// A running VM gateway proves a driver was usable when it started. With an
+// explicit driver_dir, its binary still needs to be present for the next
+// gateway start; a driver found elsewhere cannot make that path usable.
+func (m *MicroVMHost) driverMissing() bool {
+	return m.DriverBinary == "" && (!m.DriverRunning || m.missingDriverDir != "")
 }

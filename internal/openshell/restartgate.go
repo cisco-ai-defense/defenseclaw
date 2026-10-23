@@ -37,11 +37,9 @@ func VMGone(said string) bool {
 	return saysReason(said, "ProcessExited")
 }
 
-// mainProcessFailed reports OpenShell's account of a sandbox in its error
-// state because its main process exited with an error (said: as for
-// VMGone): OpenShell returns its stop as it is (is_failed_main_process_result,
-// 0.1.3 and 0.1.5), and starts it again.
-func mainProcessFailed(said string) bool {
+// MainProcessFailed reports OpenShell's error reason for a workload whose
+// main process exited. OpenShell returns its stop as it is in this state.
+func MainProcessFailed(said string) bool {
 	return saysReason(said, "MainProcessFailed")
 }
 
@@ -98,10 +96,10 @@ func HoldsGateway(p SandboxPhase, said string, stopFlushes bool) bool {
 // timed out, which never ran its workload: a start after OpenShell's
 // cleanup, then the stop of the ready sandbox, brings it to stopped. It
 // returns its stop of a completed sandbox, or of one whose main process
-// failed, as it is, and nothing in OpenShell writes such a MicroVM's disk
-// back (exec needs a ready sandbox, and 0.1.5's flushing stop covers only a
-// running workload): its start ends the VM, with whatever the workload left
-// running, with no flush first, so what the VM had not written to its disk
+// failed, as it is. A lingering failed MicroVM may still run, and nothing
+// in OpenShell writes its disk back (exec needs a ready sandbox, and
+// 0.1.5's flushing stop covers only a running workload): its start ends
+// the VM with no flush first, so what the VM has not written to its disk
 // is lost. Its way on says so, and needs the start's --end-vm
 // (sandboxapi.StartRequest.EndVM), as does its delete, which loses all of
 // its work. Neither keeps all of it. The gateway also lists raw OpenShell
@@ -124,7 +122,7 @@ func StopWayOn(name string, p SandboxPhase, said string, runs bool) string {
 	case p == PhaseError && ProvisioningTimedOut(said):
 		return "wait a minute for OpenShell's cleanup of the provisioning that timed out, then `defenseclaw sandbox start " + name + "`, then " + dcStop +
 			" once it is ready (OpenShell refuses to stop a sandbox whose provisioning timed out), or " + del
-	case p == PhaseCompleted || mainProcessFailed(said):
+	case p == PhaseCompleted || p == PhaseError && LingeringVM(p, said, false) && MainProcessFailed(said):
 		return LingeringVMLoss + ": `defenseclaw sandbox start " + name + " --end-vm` ends the VM that way, then " + dcStop + " once it is ready; or " + del
 	}
 	return stop

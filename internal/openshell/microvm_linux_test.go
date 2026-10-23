@@ -155,6 +155,58 @@ func TestOldMicroVMDriverRepairUsesConfiguredDirectory(t *testing.T) {
 	}
 }
 
+// With driver_dir set, OpenShell searches that directory and the gateway
+// binary's sibling. An old copy in the user's default directory must not
+// make doctor repair a path the gateway will never select.
+func TestConfiguredVMDriverIgnoresDefaultCopy(t *testing.T) {
+	for _, sibling := range []bool{false, true} {
+		name := "configured driver missing"
+		if sibling {
+			name = "gateway sibling present"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newDoctorFixture(t)
+			f.onLinuxMicroVMs()
+			f.atRelease(openshell.InstallerVersion)
+			configuredDir := filepath.Join(f.home, "configured driver")
+			f.writeTOML(strings.Replace(linuxVMTOML, "[openshell.drivers.vm]\n",
+				"[openshell.drivers.vm]\ndriver_dir = \""+configuredDir+"\"\n", 1), f.started.Add(-time.Minute))
+			f.runner.On(f.linuxDriverPath()+" --version", "openshell-driver-vm 0.1.3\n", nil)
+			gatewayDir := filepath.Join(f.home, "gateway-bin")
+			gateway := filepath.Join(gatewayDir, openshell.GatewayBinary)
+			touchExecutable(t, gateway)
+			siblingDriver := filepath.Join(gatewayDir, "openshell-driver-vm")
+			if sibling {
+				touchExecutable(t, siblingDriver)
+				f.runner.On(siblingDriver+" --version", "openshell-driver-vm "+openshell.InstallerVersion+"\n", nil)
+			}
+			lookPath := f.doctor.LookPath
+			f.doctor.LookPath = func(name string) (string, error) {
+				if name == openshell.GatewayBinary {
+					return gateway, nil
+				}
+				return lookPath(name)
+			}
+			r := f.run()
+			if sibling {
+				if r.MicroVM == nil || r.MicroVM.DriverBinary != siblingDriver {
+					t.Fatalf("selected driver = %+v, want gateway sibling %q", r.MicroVM, siblingDriver)
+				}
+				expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusPass, siblingDriver)
+				return
+			}
+			if r.MicroVM == nil || r.MicroVM.DriverBinary != "" || !r.MicroVM.DriverRunning {
+				t.Fatalf("selected driver = %+v, want missing in configured directory", r.MicroVM)
+			}
+			c := expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusFail, "openshell-driver-vm is not installed")
+			if c.Fix == nil || !strings.Contains(c.Fix.Command, "'"+configuredDir+"'/openshell-driver-vm") ||
+				strings.Contains(c.Fix.Command, "$HOME/.local/libexec/openshell") {
+				t.Fatalf("repair for configured driver directory = %+v", c.Fix)
+			}
+		})
+	}
+}
+
 // Without driver_dir, a driver beside the gateway on PATH is searched after
 // the user's default directory. Use that earlier directory when writable;
 // otherwise repair the selected directory itself.

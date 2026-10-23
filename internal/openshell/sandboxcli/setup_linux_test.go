@@ -168,7 +168,8 @@ func TestSetupStopsWhereALinuxHostCannotStartAMicroVM(t *testing.T) {
 			has(t, ta.output(), "✗ MicroVM driver: e2fsprogs (mke2fs and debugfs) is not installed",
 				"openshell-driver-vm is not installed (NVIDIA's openshell package does not ship it)",
 				"→ install e2fsprogs 1.43 or newer", "sudo dnf install e2fsprogs",
-				"→ install openshell-driver-vm from OpenShell "+openshell.InstallerTag, "→ then run `defenseclaw sandbox setup` again")
+				"→ restore the gateway connection and confirm it runs OpenShell "+openshell.InstallerVersion+" before using this pinned install command; "+
+					"install openshell-driver-vm from OpenShell "+openshell.InstallerTag, "→ then run `defenseclaw sandbox setup` again")
 			if len(ta.gateway.planned) != 0 {
 				t.Fatalf("gateway plans = %+v", ta.gateway.planned)
 			}

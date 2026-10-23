@@ -88,6 +88,50 @@ func TestDoctorAdviceForAnOldErrorStateMicroVM(t *testing.T) {
 	}
 }
 
+// A failed MicroVM can keep running after its main process fails. Doctor
+// must describe the same lossy recovery as the start and stop commands,
+// while a VM whose process exited and an errored Docker sandbox keep the
+// ordinary stop/start path.
+func TestDoctorAdviceForALingeringFailedMicroVM(t *testing.T) {
+	for _, tc := range []struct {
+		name, driver, reason string
+		lingering            bool
+	}{
+		{"main process failed", "vm", "MainProcessFailed: Canonical main process exited with status 1", true},
+		{"VM process exited", "vm", "ProcessExited: VM process exited with status 1", false},
+		{"Docker container exited", "docker", "ContainerExited: exited", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := sampleSandbox("failed")
+			sb.Phase, sb.Driver, sb.PhaseReason = "error", tc.driver, tc.reason
+			ta := newTestApp(t, "", sb)
+			ta.daemon.status.Gateway.Version = openshell.SupportedMin
+			c := ta.hooksCheck(bg, "")
+			if c.Status != openshell.StatusWarn || c.Fix == nil {
+				t.Fatalf("hooks check = %+v", c)
+			}
+			if tc.lingering {
+				for _, want := range []string{
+					"`defenseclaw sandbox start failed --end-vm`",
+					"what the VM has not written to its disk is lost",
+					"`defenseclaw sandbox delete failed`",
+					"deletes it and its work",
+				} {
+					if !strings.Contains(c.Fix.Summary, want) {
+						t.Errorf("failed MicroVM advice lacks %q: %s", want, c.Fix.Summary)
+					}
+				}
+				if strings.Contains(c.Fix.Summary, "which keep the sandbox and its work") {
+					t.Errorf("failed MicroVM advice promises to keep work: %s", c.Fix.Summary)
+				}
+			} else if !strings.Contains(c.Fix.Summary, "`defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`") ||
+				strings.Contains(c.Fix.Summary, "--end-vm") {
+				t.Errorf("ordinary error advice = %s", c.Fix.Summary)
+			}
+		})
+	}
+}
+
 // TestStopOfAnEndedMicroVMSaysHowToStopIt: OpenShell returns the stop of
 // a MicroVM whose main process completed or failed as it is, and its VM
 // may still run. The round before told the user that the stop let it go,
