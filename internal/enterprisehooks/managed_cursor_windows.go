@@ -2410,9 +2410,24 @@ func restoreWindowsCursorManagedSnapshotUnlocked(
 	// this fix).
 	standalone := windowsEnterpriseStandaloneProcess()
 	validatedHooks := windowsManagedFileSnapshot{path: hooksPath, existed: current.hooks.existed, data: current.hooks.data}
-	renderHooks, err := windowsCursorRestoreHooksRender(snapshot, validatedHooks, current.hooksMetadata, adapterPath, standalone)
-	if err != nil {
-		return err
+	journaledFailMode := ""
+	if snapshot.PolicyActive {
+		var journaledState windowsCursorManagedPolicyState
+		if err := json.Unmarshal(snapshot.State, &journaledState); err != nil {
+			return fmt.Errorf("enterprise hooks: parse Cursor snapshot ownership state: %w", err)
+		}
+		journaledFailMode = cursorManagedPolicyFailMode(journaledState)
+	}
+	renderHooks := windowsCursorRestoreHooksRender(snapshot, validatedHooks, current.hooksMetadata, adapterPath, journaledFailMode, standalone)
+	// A rollback puts back the files this restore replaced. When those were
+	// an active guard (a failed install's or upgrade's rollback), hooks.json
+	// must end with that guard's registration, also when another writer saved
+	// the file after the restore wrote it: the save is kept, the registration
+	// is merged into it before the adapter, receipt and state go back, and
+	// the complete guard is checked after them.
+	rollbackFailMode, rollbackActive := "", false
+	if prior, priorErr := validateWindowsCursorManagedArtifacts(current); priorErr == nil && prior.active {
+		rollbackFailMode, rollbackActive = cursorManagedPolicyFailMode(prior.parsed), true
 	}
 	var written []cursorRestoreItem
 	var hooksWrite windowsCursorManagedHooksWrite
@@ -2422,6 +2437,11 @@ func restoreWindowsCursorManagedSnapshotUnlocked(
 		// administrator made since is newer and is kept.
 		if restoreErr := hooksWrite.undo(); restoreErr != nil {
 			failures = append(failures, restoreErr.Error())
+		}
+		if rollbackActive {
+			if restoreErr := restoreWindowsCursorRollbackRegistration(hooksPath, adapterPath, rollbackFailMode); restoreErr != nil {
+				failures = append(failures, restoreErr.Error())
+			}
 		}
 		if standalone {
 			for index := len(written) - 1; index >= 0; index-- {
@@ -2435,6 +2455,11 @@ func restoreWindowsCursorManagedSnapshotUnlocked(
 				if restoreErr := restoreWindowsCursorManagedFile(item.current, item.currentMetadata); restoreErr != nil {
 					failures = append(failures, restoreErr.Error())
 				}
+			}
+		}
+		if rollbackActive {
+			if verifyErr := verifyWindowsCursorManagedGuardActive(); verifyErr != nil {
+				failures = append(failures, "the rolled-back Cursor machine guard is incomplete until a repair: "+verifyErr.Error())
 			}
 		}
 		if len(failures) != 0 {
@@ -2459,36 +2484,131 @@ func restoreWindowsCursorManagedSnapshotUnlocked(
 		return rollback(err)
 	}
 	wantHooks, wantHooksMetadata := windowsCursorRestoredHooks(hooksWrite, validatedHooks, current.hooksMetadata)
-	restored, err := snapshotWindowsCursorManagedArtifacts()
-	if err != nil {
-		return rollback(err)
+	// A save that lands after the restore's write is newer and is kept too. It
+	// completes the restore when it already is what the snapshot needs: the
+	// journaled guard's registration for an active snapshot, no DefenseClaw
+	// entry for an inactive one. Otherwise the restore edits it as it edits a
+	// save made before its write, up to windowsCursorManagedGuardRebuildAttempts
+	// times.
+	for attempt := 1; ; attempt++ {
+		restored, err := snapshotWindowsCursorManagedArtifacts()
+		if err != nil {
+			return rollback(err)
+		}
+		newer := restored.hooks.existed != wantHooks.existed ||
+			!bytes.Equal(restored.hooks.data, wantHooks.data) ||
+			(wantHooksMetadata != nil && restored.hooksMetadata != *wantHooksMetadata)
+		hooksErr, err := windowsCursorRestoreOutcome(opts, snapshot, restored, newer, adapterPath, journaledFailMode)
+		switch {
+		case err != nil:
+			return rollback(err)
+		case hooksErr == nil:
+			return nil
+		case !newer || attempt == windowsCursorManagedGuardRebuildAttempts:
+			return rollback(hooksErr)
+		}
+		if hooksWrite, err = publishWindowsCursorManagedHooks(restored.hooks, renderHooks); err != nil {
+			return rollback(err)
+		}
+		wantHooks, wantHooksMetadata = windowsCursorRestoredHooks(hooksWrite, restored.hooks, restored.hooksMetadata)
 	}
-	if snapshot.PolicyActive {
-		restored, err = validateWindowsCursorManagedArtifacts(restored)
-		if err != nil || !restored.active {
-			if err == nil {
-				err = errors.New("restored Cursor policy is inactive")
-			}
-			return rollback(err)
+}
+
+// windowsCursorRestoreOutcome checks the files a snapshot restore left.
+// hooksErr reports a hooks.json that does not yet carry what the snapshot
+// needs; err reports any other difference. newer marks a hooks.json another
+// writer saved after the restore's write. Such a save completes an inactive
+// restore when it has no DefenseClaw entry, and an active one when the
+// journaled guard validates over it.
+func windowsCursorRestoreOutcome(
+	opts WindowsCursorManagedPolicyTeardownOptions,
+	snapshot WindowsCursorManagedPolicyTeardownSnapshot,
+	restored windowsCursorManagedArtifacts,
+	newer bool,
+	adapterPath string,
+	journaledFailMode string,
+) (hooksErr error, err error) {
+	if !snapshot.PolicyActive {
+		if restored.state.existed || restored.receipt.existed ||
+			restored.adapter.existed != snapshot.AdapterExisted ||
+			restored.receipt.existed != snapshot.ReceiptExisted ||
+			!bytes.Equal(restored.adapter.data, snapshot.Adapter) ||
+			!bytes.Equal(restored.receipt.data, snapshot.Receipt) ||
+			restored.adapterMetadata.securityDescriptor != snapshot.AdapterSecurityDescriptor ||
+			restored.adapterMetadata.attributes != snapshot.AdapterAttributes ||
+			restored.receiptMetadata.securityDescriptor != snapshot.ReceiptSecurityDescriptor ||
+			restored.receiptMetadata.attributes != snapshot.ReceiptAttributes {
+			return nil, errors.New("inactive Cursor snapshot was not restored exactly")
 		}
-		if err := windowsCursorOptionsMatch(restored.parsed, opts); err != nil {
-			return rollback(err)
+		if !newer {
+			return nil, nil
 		}
-	} else if restored.state.existed || restored.receipt.existed ||
-		restored.hooks.existed != wantHooks.existed ||
-		restored.adapter.existed != snapshot.AdapterExisted ||
-		restored.receipt.existed != snapshot.ReceiptExisted ||
-		!bytes.Equal(restored.hooks.data, wantHooks.data) ||
-		!bytes.Equal(restored.adapter.data, snapshot.Adapter) ||
-		!bytes.Equal(restored.receipt.data, snapshot.Receipt) ||
-		(wantHooksMetadata != nil && restored.hooksMetadata != *wantHooksMetadata) ||
-		restored.adapterMetadata.securityDescriptor != snapshot.AdapterSecurityDescriptor ||
-		restored.adapterMetadata.attributes != snapshot.AdapterAttributes ||
-		restored.receiptMetadata.securityDescriptor != snapshot.ReceiptSecurityDescriptor ||
-		restored.receiptMetadata.attributes != snapshot.ReceiptAttributes {
-		return rollback(errors.New("inactive Cursor snapshot was not restored exactly"))
+		if !restored.hooks.existed {
+			return nil, nil
+		}
+		cleaned, removeErr := connector.RemoveWindowsCursorEnterpriseHooks(restored.hooks.data, adapterPath)
+		if removeErr != nil {
+			return fmt.Errorf("enterprise hooks: inspect the newer Cursor hooks.json save: %w", removeErr), nil
+		}
+		if !bytes.Equal(cleaned, restored.hooks.data) {
+			return errors.New("enterprise hooks: a newer Cursor hooks.json save carries DefenseClaw entries the inactive snapshot does not"), nil
+		}
+		return nil, nil
+	}
+	if newer && (!restored.hooks.existed ||
+		connector.VerifyWindowsCursorEnterpriseHooksForMigration(restored.hooks.data, adapterPath, journaledFailMode) != nil) {
+		return errors.New("enterprise hooks: a newer Cursor hooks.json save does not carry the restored guard's registration"), nil
+	}
+	validated, err := validateWindowsCursorManagedArtifacts(restored)
+	if err == nil && !validated.active {
+		err = errors.New("restored Cursor policy is inactive")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return nil, windowsCursorOptionsMatch(validated.parsed, opts)
+}
+
+// restoreWindowsCursorRollbackRegistration makes hooks.json carry the
+// registration of the active guard a rollback puts back. A file that already
+// carries it is left alone. Any other file, a save another writer made after
+// the restore's write for example, is kept and the registration is merged
+// into it at the guard's fail mode with a compare-and-swap, so every other
+// entry keeps its bytes. A save in progress that is not JSON is kept, and the
+// error says so; the Guardian's repair rebuilds the guard from its record.
+func restoreWindowsCursorRollbackRegistration(hooksPath, adapterPath, failMode string) error {
+	live, err := snapshotWindowsManagedFileWithLimit(hooksPath, windowsCursorManagedHooksLimit)
+	if err != nil {
+		return err
+	}
+	_, err = publishWindowsCursorManagedHooks(live, func(base windowsManagedFileSnapshot) (windowsCursorManagedHooksEdit, error) {
+		if base.existed && connector.VerifyWindowsCursorEnterpriseHooksForMigration(base.data, adapterPath, failMode) == nil {
+			return windowsCursorManagedHooksEdit{data: base.data}, nil
+		}
+		hooks, mergeErr := mergeWindowsCursorManagedRebuildHooks(base, adapterPath, failMode, false)
+		if mergeErr != nil {
+			return windowsCursorManagedHooksEdit{}, mergeErr
+		}
+		return windowsCursorManagedHooksEdit{data: hooks}, nil
+	})
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: restore the Cursor machine guard registration in hooks.json: %w", err)
 	}
 	return nil
+}
+
+// verifyWindowsCursorManagedGuardActive reports whether the Cursor machine
+// guard on disk is complete and active.
+func verifyWindowsCursorManagedGuardActive() error {
+	artifacts, err := snapshotWindowsCursorManagedArtifacts()
+	if err != nil {
+		return err
+	}
+	artifacts, err = validateWindowsCursorManagedArtifacts(artifacts)
+	if err == nil && !artifacts.active {
+		err = errors.New("enterprise hooks: Cursor machine guard is not active")
+	}
+	return err
 }
 
 // windowsCursorRestoreHooksRender returns the restore's edit of the shared
@@ -2504,20 +2624,13 @@ func windowsCursorRestoreHooksRender(
 	validated windowsManagedFileSnapshot,
 	validatedMetadata windowsCursorManagedFileMetadata,
 	adapterPath string,
+	failMode string,
 	standalone bool,
-) (func(windowsManagedFileSnapshot) (windowsCursorManagedHooksEdit, error), error) {
+) func(windowsManagedFileSnapshot) (windowsCursorManagedHooksEdit, error) {
 	journaled := windowsManagedFileSnapshot{path: validated.path, existed: snapshot.HooksExisted, data: snapshot.Hooks}
 	journaledMetadata := windowsCursorManagedFileMetadata{
 		securityDescriptor: snapshot.HooksSecurityDescriptor,
 		attributes:         snapshot.HooksAttributes,
-	}
-	failMode := ""
-	if snapshot.PolicyActive {
-		var state windowsCursorManagedPolicyState
-		if err := json.Unmarshal(snapshot.State, &state); err != nil {
-			return nil, fmt.Errorf("enterprise hooks: parse Cursor snapshot ownership state: %w", err)
-		}
-		failMode = cursorManagedPolicyFailMode(state)
 	}
 	return func(base windowsManagedFileSnapshot) (windowsCursorManagedHooksEdit, error) {
 		if base.existed == validated.existed && bytes.Equal(base.data, validated.data) {
@@ -2552,7 +2665,7 @@ func windowsCursorRestoreHooksRender(
 			return windowsCursorManagedHooksEdit{remove: true}, nil
 		}
 		return windowsCursorManagedHooksEdit{data: cleaned}, nil
-	}, nil
+	}
 }
 
 // windowsCursorRestoredHooks is the hooks.json a restore left: what it

@@ -152,7 +152,9 @@ func TestWindowsCursorLifecycleRestoreKeepsAConcurrentHooksSave(t *testing.T) {
 // When a restore fails after it wrote hooks.json, its rollback puts the file
 // back only while it still holds the restore's bytes. A save made after the
 // restore's write is newer and is kept; the restore reports the failure, and
-// a later repair or restore starts from the saved file.
+// a later repair or restore starts from the saved file. A rollback to an
+// active guard merges that guard's registration into the save, so Cursor
+// calls never run outside the machine guard.
 func TestWindowsCursorRestoreRollbackKeepsANewerHooksSave(t *testing.T) {
 	t.Run("failed install rollback", func(t *testing.T) {
 		paths := withWindowsCursorStandaloneSeamsForTest(t)
@@ -163,18 +165,19 @@ func TestWindowsCursorRestoreRollbackKeepsANewerHooksSave(t *testing.T) {
 			t.Fatal(err)
 		}
 		installed := installWindowsCursorEmptyGuardForRestoreTest(t, paths)
-		// The save lands after the restore's write, so its exact check fails
-		// and the restore rolls back.
-		saved := saveAfterWindowsCursorHooksWriteForTest(t, paths.Hooks, func() {
+		// The restore's write is published, then fails, and a save lands in
+		// between: the restore rolls back over the newer file.
+		saved := failAfterWindowsCursorHooksSwapForTest(t, paths.Hooks, func() {
 			addWindowsCursorAdminHookForTest(t, paths.Hooks, "admin-after")
 		})
 		if err := RestoreWindowsCursorManagedPolicySnapshot(prior, installed, snapshot); err == nil {
-			t.Fatal("a restore whose hooks.json changed under it reported success")
+			t.Fatal("a restore whose hooks.json write failed reported success")
 		}
 		if !*saved {
 			t.Fatal("fixture: the save did not land after the restore's write")
 		}
-		requireWindowsCursorHooksContainForTest(t, paths.Hooks, "admin-original", "admin-after")
+		after := requireWindowsCursorHooksContainForTest(t, paths.Hooks, "admin-original", "admin-after")
+		requireWindowsCursorClosedGuardForTest(t, paths, after)
 	})
 	t.Run("refused uninstall rollback", func(t *testing.T) {
 		paths := withWindowsCursorStandaloneSeamsForTest(t)
