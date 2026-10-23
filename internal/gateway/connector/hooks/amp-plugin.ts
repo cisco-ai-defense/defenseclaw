@@ -568,6 +568,13 @@ async function installLockHeld(): Promise<boolean> {
 		} catch (error) {
 			if ((error as { code?: unknown } | null)?.code !== "ENOENT") return true
 		}
+		try {
+			// A folder that is not one cannot be looked in (Windows reports
+			// its child as absent).
+			if (!(await lstat(dir)).isDirectory()) return true
+		} catch (error) {
+			if ((error as { code?: unknown } | null)?.code !== "ENOENT") return true
+		}
 	}
 	return false
 }

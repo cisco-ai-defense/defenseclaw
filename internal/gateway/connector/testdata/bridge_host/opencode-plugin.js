@@ -592,6 +592,13 @@ async function defenseclawInstallLockHeld() {
     } catch (err) {
       if (!err || err.code !== "ENOENT") return true;
     }
+    try {
+      // A folder that is not one cannot be looked in (Windows reports its
+      // child as absent).
+      if (!(await lstat(dir)).isDirectory()) return true;
+    } catch (err) {
+      if (!err || err.code !== "ENOENT") return true;
+    }
   }
   return false;
 }
