@@ -1338,22 +1338,30 @@ func (s *Store) SettleOpen(open map[string]bool, keep ...string) (SettleReport, 
 			report.Interrupted = append(report.Interrupted, r.ReceiptID)
 		case StateApplied:
 			if st.names(r) {
+				var prerequisiteErr error
 				if s.BeforeConfirm != nil {
-					if err := s.BeforeConfirm(r); err != nil {
+					prerequisiteErr = s.BeforeConfirm(r)
+				}
+				if prerequisiteErr != nil {
+					if !errors.Is(prerequisiteErr, ErrConfirmationPrerequisiteMissing) {
+						return report, prerequisiteErr
+					}
+					// The state ref proves the config, but it cannot supply a
+					// missing confirmation prerequisite. Leave the receipt open
+					// for a later delivery or gateway check.
+				} else {
+					markConfirmed(r)
+					if err := s.Advance(r, StateConfirmed, func(r *Receipt) { r.ConfirmedAt = st.Current.ConfirmedAt }); err != nil {
 						return report, err
 					}
-				}
-				markConfirmed(r)
-				if err := s.Advance(r, StateConfirmed, func(r *Receipt) { r.ConfirmedAt = st.Current.ConfirmedAt }); err != nil {
-					return report, err
-				}
-				if s.AfterConfirm != nil {
-					if err := s.AfterConfirm(r); err != nil {
-						return report, err
+					if s.AfterConfirm != nil {
+						if err := s.AfterConfirm(r); err != nil {
+							return report, err
+						}
 					}
+					report.Completed = append(report.Completed, r.ReceiptID)
+					continue
 				}
-				report.Completed = append(report.Completed, r.ReceiptID)
-				continue
 			}
 			kept[r.Dir] = true
 			report.Unconfirmed = append(report.Unconfirmed, r)
