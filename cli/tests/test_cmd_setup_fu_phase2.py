@@ -2512,8 +2512,11 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     self.app.cfg = copy.deepcopy(original_cfg)
                     gc = self.app.cfg.guardrail
                     gc.enabled = True
-                    # A guarded OpenClaw refuses --connector opencode first (GAP-2452).
-                    gc.connector = {"configured": "opencode", "explicit": "codex"}.get(target_case, "openclaw")
+                    # The picked case has no saved connector: a saved OpenClaw
+                    # must take precedence over the hint on an upgrade.
+                    gc.connector = {"configured": "opencode", "explicit": "codex"}.get(target_case, "")
+                    if target_case == "picked":
+                        self.app.cfg.claw.mode = ""
                     if target_case == "explicit":
                         # Both connectors are registered; explicit selection
                         # still exercises the exact OpenCode admission path.
