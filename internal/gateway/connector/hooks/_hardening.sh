@@ -2245,6 +2245,19 @@ defenseclaw_gateway_post() {
     *$'\n'*|*$'\r'*) return 1 ;;
   esac
   if [ "$_dc_native_post" -eq 1 ]; then
+    # The agent's deadline includes shell preparation and starting the native
+    # helper. Give the helper only the time still left, reserving one second
+    # for process startup on short tool-call budgets. Its own timeout starts
+    # after startup, so passing the original four seconds could hold a tool
+    # call beyond the agent's answer window on a busy host.
+    case "$_dc_post_max_time" in ""|*[!0-9]*) return 1 ;; esac
+    _dc_hook_elapsed_ms
+    [ "$_DC_ELAPSED_MS" -ge 0 ] || _DC_ELAPSED_MS=0
+    local _dc_post_remaining=$(( _dc_post_max_time - (_DC_ELAPSED_MS + 999) / 1000 ))
+    [ "$_dc_post_remaining" -gt 0 ] || return 28
+    if [ "$_dc_post_max_time" -le 4 ] && [ "$_dc_post_remaining" -gt 2 ]; then
+      _dc_post_remaining=$((_dc_post_remaining - 1))
+    fi
     # harden_env moved HOME to a private scratch directory. Use the account
     # home it retained before that move, then verify every path component.
     local _dc_agent_home="${DEFENSECLAW_AGENT_HOME:-}"
@@ -2292,7 +2305,7 @@ defenseclaw_gateway_post() {
           if [ -n "${_DC_HOOK_NATIVE_VMEM_LIMIT:-}" ]; then
             ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 1
           fi
-          exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_max_time" --curl-output
+          exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
         ) 2>/dev/null
     )" || {
       _dc_listener_status=0
