@@ -401,7 +401,7 @@ func (a *APIServer) failSandboxHookClosed(
 			// block reaches some agents as an allow.
 			out = resp
 			out.Reason = sandboxInternalErrorReason
-			out.HookOutput = blockFallbackOutput(profile, connectorName, req, sandboxInternalErrorReason)
+			out.HookOutput = nativeFallbackOutput(profile, connectorName, req, "block", sandboxInternalErrorReason)
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("sandbox fail-closed render panic: %v", r))
 		}
 	}()

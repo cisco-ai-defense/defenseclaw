@@ -1847,8 +1847,9 @@ func (a *APIServer) hookFailedCheckResponse(
 	return lifecycleOutput(a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain))
 }
 
-// failedCheckNativeAction is the closed answer of a failed check before the
-// fail mode and the lifecycle rule apply: the event's certified native
+// failedCheckNativeAction is the closed answer of a failed check (and of a
+// profile refusal) before the fail mode and the lifecycle rule apply: the
+// event's certified native
 // control. That is a block where the connector's resolved contract can block
 // the event, and otherwise the advisory allow with would_block, so the agent,
 // the enforced audit field and the export agree. An advisory event's native
@@ -1943,11 +1944,11 @@ func failedCheckFallbackOutput(profile connector.HookProfile, req agentHookReque
 	return hookOutputFor(req, action, rawAction, reason, additional, profile.Capabilities)
 }
 
-// blockFallbackOutput is the native denial of a block whose connector
+// nativeFallbackOutput is the native output of an answer whose connector
 // renderer panicked: the callback-free render of failedCheckFallbackOutput. A
 // bare block without its native control reaches some agents as an allow
 // while the audit records it enforced.
-func blockFallbackOutput(profile connector.HookProfile, connectorName string, req agentHookRequest, reason string) (output map[string]interface{}) {
+func nativeFallbackOutput(profile connector.HookProfile, connectorName string, req agentHookRequest, action, reason string) (output map[string]interface{}) {
 	defer func() {
 		if recover() != nil {
 			output = nil
@@ -1956,7 +1957,7 @@ func blockFallbackOutput(profile connector.HookProfile, connectorName string, re
 	if req.ConnectorName == "" {
 		req.ConnectorName = connectorName
 	}
-	return failedCheckFallbackOutput(profile, req, "block", "block", reason, "")
+	return failedCheckFallbackOutput(profile, req, action, "block", reason, "")
 }
 
 // handleHookPanic centralises the side-effects of a recovered hook panic. The

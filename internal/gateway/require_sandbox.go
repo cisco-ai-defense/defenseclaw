@@ -482,7 +482,7 @@ func (a *APIServer) requireSandboxGateFailed(
 			// native denial.
 			if gated {
 				resp.Reason = outcome.Message
-				resp.HookOutput = blockFallbackOutput(profile, connectorName, req, outcome.Message)
+				resp.HookOutput = nativeFallbackOutput(profile, connectorName, req, "block", outcome.Message)
 			}
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("require-sandbox refusal render panic: %v", recovered))
 		}
