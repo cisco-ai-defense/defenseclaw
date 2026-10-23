@@ -21,12 +21,15 @@ func TestWatchdogUsesTheConnectedGatewayPeerTransport(t *testing.T) {
 		called++
 		return nil, errors.New("connected gateway peer belongs to another account")
 	}
-	for _, target := range []string{
-		"http://127.0.0.1:18970/health",
-		"http://127.0.0.1:18970/api/v1/watchdog/recovery",
+	for _, call := range []struct {
+		target  string
+		timeout time.Duration
+	}{
+		{"http://127.0.0.1:18970/health", watchdogProbeTimeout},
+		{"http://127.0.0.1:18970/api/v1/watchdog/recovery", 5 * time.Second},
 	} {
-		if _, err := watchdogPeerClient(target); err == nil {
-			t.Errorf("watchdog accepted unverified target %s", target)
+		if _, err := watchdogPeerClient(call.target, call.timeout); err == nil {
+			t.Errorf("watchdog accepted unverified target %s", call.target)
 		}
 	}
 	if called != 2 {
