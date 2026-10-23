@@ -708,18 +708,22 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// commits it to its agent: the audit row, hook_decision and
 		// dedupe get the decision the agent was given (GAP-0286).
 		wireResp := resp
+		// Reading or closing the answer can cancel the HTTP request before
+		// offer returns. Only a hang-up observed before the answer was sent
+		// can establish that an unreceipted hook missed that answer.
+		hungUpBeforeAnswer := r.Context().Err() != nil
 		if delivery != nil {
 			attemptedWrite = true
 			receipt := delivery.offer(w, func() {
 				a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, wireResp))
 			})
 			if receipt == hookexec.HookDeliveryReleased {
-				resp = a.unreceiptedHookDecision(r.Context(), connectorName, req.HookEventName, resp)
+				resp = a.unreceiptedHookDecision(hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
 			} else {
-				resp = a.deliveredHookDecision(connectorName, resp, receipt)
+				resp = a.deliveredHookDecision(hungUpBeforeAnswer, connectorName, resp, receipt)
 			}
 		} else {
-			resp = a.unreceiptedHookDecision(r.Context(), connectorName, req.HookEventName, resp)
+			resp = a.unreceiptedHookDecision(hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
 		}
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)

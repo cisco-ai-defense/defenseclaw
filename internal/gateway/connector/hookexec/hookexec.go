@@ -810,7 +810,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// dials, a gateway that accepted the call but does not answer, and the
 	// resends below (hookAnswerBudget).
 	opts.answerBy = answerDeadline(opts, opts.StartedAt)
-	ctx, stopAnswer, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, progressCeiling(opts, opts.StartedAt), opts.answerWatch)
+	ctx, stopAnswer, stopResponseDeadline, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, progressCeiling(opts, opts.StartedAt), opts.answerWatch)
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
 	// The account, its session, the asset facts and the resolved write
 	// paths are computed once, for every try of this call.
@@ -1026,6 +1026,11 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 	if delivery == nil {
 		stopAnswer()
+	} else if readErr == nil && int64(len(body)) <= defaultMaxBody {
+		// The complete proposal arrived in time. Its deadline no longer
+		// governs the receipt, but the watchdog still owns the agent output
+		// until finish commits it.
+		stopResponseDeadline()
 	}
 	if (readErr != nil || int64(len(body)) > defaultMaxBody) && managedNativeDecision(opts) &&
 		(resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
@@ -1087,7 +1092,13 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	code := sp.decide(opts, body)
 	if delivery != nil && resp.StatusCode == http.StatusOK && readErr == nil {
 		opts.answerWatch.setDeliveryReceipt(func(answered, localBlock bool) {
+			// finish calls this only after it writes the answer to the agent.
+			// Keep the request alive for the receipt, using its request/HTTP
+			// deadline rather than the already-met answer deadline.
+			stopAnswer()
 			if answered {
+				receiptTimer := time.AfterFunc(hookDeliveryReceiptTimeout, requestCancel)
+				defer receiptTimer.Stop()
 				if delivery.acknowledge(localBlock) == nil {
 					// Keep the request alive until HTTP has carried the receipt
 					// to the gateway. A successful Pipe.Write alone only proves
