@@ -379,7 +379,7 @@ func TestCursorReconcileWritesOnlyExplicitConfigHome(t *testing.T) {
 		"--json",
 	)
 	if !strings.Contains(stdout, `"connector":"cursor"`) ||
-		!strings.Contains(stdout, `"fail_mode":"open"`) ||
+		!strings.Contains(stdout, `"fail_mode":"closed"`) ||
 		stderr != "" {
 		t.Fatalf("Cursor reconcile: stdout=%q stderr=%q", stdout, stderr)
 	}
@@ -388,12 +388,12 @@ func TestCursorReconcileWritesOnlyExplicitConfigHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(hooks, []byte(`"failClosed": false`)) ||
+	if !bytes.Contains(hooks, []byte(`"failClosed": true`)) ||
 		!bytes.Contains(hooks, []byte(`"preToolUse"`)) {
 		t.Fatalf("Cursor reconcile wrote an incomplete registration: %s", hooks)
 	}
-	if lock := connector.LoadHookContractLockEntry(dataDir, "cursor"); lock.HookFailMode != "open" {
-		t.Fatalf("Cursor observe lock fail mode = %q, want open", lock.HookFailMode)
+	if lock := connector.LoadHookContractLockEntry(dataDir, "cursor"); lock.HookFailMode != "closed" {
+		t.Fatalf("Cursor observe lock fail mode = %q, want closed", lock.HookFailMode)
 	}
 }
 

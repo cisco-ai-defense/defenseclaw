@@ -24,8 +24,8 @@ import (
 )
 
 // A per-user Copilot CLI, Antigravity or Hermes hook with an unset
-// hook_fail_mode resolves closed outside Secure Client; only an explicit
-// "open" renders open. No hook reads DEFENSECLAW_FAIL_MODE (GAP-0315).
+// hook_fail_mode resolves closed outside Secure Client, including an older
+// explicit "open". No hook reads DEFENSECLAW_FAIL_MODE (GAP-0315).
 func TestPerUserNativeDenyHookKeepsTheResolvedFailMode(t *testing.T) {
 	scripts := map[string]string{"antigravity": "antigravity-hook.sh", "copilot": "copilot-hook.sh", "hermes": "hermes-hook.sh"}
 	for _, conn := range nativeDenyConnectors() {
@@ -34,7 +34,7 @@ func TestPerUserNativeDenyHookKeepsTheResolvedFailMode(t *testing.T) {
 		}{
 			{name: "unset", mode: "", want: "closed"},
 			{name: "closed", mode: "closed", want: "closed"},
-			{name: "open", mode: "open", want: "open"},
+			{name: "old open", mode: "open", want: "closed"},
 		} {
 			t.Run(conn.Name()+"/"+tc.name, func(t *testing.T) {
 				dir := t.TempDir()

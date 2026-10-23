@@ -363,13 +363,8 @@ defenseclaw_shared_hook_token_file() {
 # the only input: DEFENSECLAW_FAIL_MODE in the agent's environment is not read
 # (GAP-0315); guardian-managed hooks trust only installer-owned state.
 # Malformed, ambiguous or missing state fails closed. A record counts as open
-# only with its config source (FAIL_MODE_SOURCE=config, fail_mode_sources,
-# legacy_fail_mode_source): an earlier release's open may be an unset mode it
-# resolved open, and an open lowered for a vendor that cannot fail closed is
-# not an operator's choice. A managed hook's guardian-written records carry no
-# source (the managed readers decode them canonically); their open is the
-# administrator's explicit choice, so it counts when the hook is managed and
-# hooks/.hookcfg says managed_enterprise (defenseclaw_managed_runtime_sidecar).
+# only on a managed hook whose protected sidecar records managed_enterprise.
+# An earlier per-user open is never an outage exception.
 defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
@@ -377,6 +372,10 @@ defenseclaw_shared_runtime_fail_mode() {
   local candidate suffix recorded mode source selected="" summary="" managed_open=0 records=0
   if defenseclaw_managed_runtime_sidecar "$config"; then
     managed_open=1
+  fi
+  if [ "$managed_open" != 1 ]; then
+    printf closed
+    return 0
   fi
   for candidate in "${hook_dir}"/.hookcfg.*; do
     [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
@@ -475,14 +474,11 @@ print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.
     printf open
     return 0
   fi
-  # Otherwise only the unscoped legacy mode can open the call, as before
-  # connector records existed. Its flat record must name no connector and say
-  # open, and JSON a parser read must agree. Without a parser the flat record
-  # decides, as for connector records.
+  # An administrator may have installed only an unscoped managed record.
+  # Its flat and JSON records must agree when the JSON parser is available.
   if ! legacy_connector="$(defenseclaw_flat_hookcfg_value "$legacy" DEFENSECLAW_CONNECTOR 2>/dev/null)" \
     || [ -n "$legacy_connector" ] \
-    || [ "$(defenseclaw_flat_hookcfg_value "$legacy" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)" != "open" ] \
-    || { [ "$(defenseclaw_flat_hookcfg_value "$legacy" FAIL_MODE_SOURCE 2>/dev/null || true)" != "config" ] && [ "$managed_open" != 1 ]; }; then
+    || [ "$(defenseclaw_flat_hookcfg_value "$legacy" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)" != "open" ]; then
     printf closed
     return 0
   fi
@@ -1365,6 +1361,9 @@ defenseclaw_response_failure_reason() {
 # Managed standalone hooks still close malformed and error responses; the
 # administrator's open choice applies only to an outage.
 defenseclaw_should_fail_closed_on_unreachable() {
+  # An older per-user script may still carry FAIL_MODE=open after the helper
+  # has been refreshed. Its baked value is never an outage exception.
+  [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = 1 ] || return 0
   # Only an explicit open opens: an unset, empty or unknown FAIL_MODE closes.
   case "${FAIL_MODE:-}" in
     open) ;;

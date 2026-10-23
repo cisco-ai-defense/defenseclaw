@@ -165,13 +165,10 @@ type SetupOpts struct {
 	// connectors fall back to the process working directory.
 	WorkspaceDir string
 
-	// HookFailMode is the operator-chosen hook failure mode supplied to setup
-	// and hook-writing paths. Values: "open" (allow on response or
-	// transport failures) or "closed" (block on either failure class). Runtime
-	// setup populates it from cfg.EffectiveHookFailModeForConnector(conn.Name()).
-	// Hook-writing helpers normalize an empty or invalid value to the secure
-	// "closed" fallback. Cursor pins this per mode: closed for action and open
-	// for observe.
+	// HookFailMode is the resolved hook failure mode supplied to setup. A
+	// managed administrator may select open for an outage, and Secure Client
+	// may default open. Per-user renders always close, including a legacy open.
+	// Runtime setup populates it from cfg.EffectiveHookFailModeForConnector.
 	// Profile-only callers may omit it; provider-specific profile defaults are
 	// separate from the hook-writing boundary.
 	// DEFENSECLAW_STRICT_AVAILABILITY remains
@@ -180,23 +177,19 @@ type SetupOpts struct {
 
 	// ConfiguredHookFailMode is the hook fail mode the config sets
 	// explicitly for the connector (cfg.ConfiguredHookFailModeForConnector:
-	// "open", "closed", or "" when it sets none). A per-user Cursor
-	// HookFailMode follows its guardrail mode, which is no outage choice:
-	// its hooks fail open while the gateway is down only when this is open
-	// (OutageHookFailMode).
+	// "open", "closed", or "" when it sets none). This field records a legacy
+	// per-user open without granting an outage exception.
 	ConfiguredHookFailMode string
 
 	// SecureClientHookDelivery selects the Secure Client delivery contract
 	// (#1163): an unset HookFailMode renders open and an explicit value wins
 	// for every connector, Cursor included. Callers set it from
 	// cfg.SecureClientIntegration() (the enterprise guardian from its
-	// profile). Every other install leaves it false and keeps the
-	// fail-closed default and Cursor's action/observe rule.
+	// profile). Every other install leaves it false and keeps fail-closed hooks.
 	SecureClientHookDelivery bool
 
-	// GuardrailMode is the effective connector policy mode. Cursor uses it to
-	// render a blocking, fail-closed user hook for action and a nonblocking,
-	// fail-open user hook for observe. An empty value is treated as observe.
+	// GuardrailMode is the effective connector policy mode. It controls Cursor
+	// registration behavior; hook failures remain closed on per-user hosts.
 	GuardrailMode string
 
 	// HILTEnabled tells connectors with native approval surfaces to wire

@@ -377,21 +377,11 @@ func (c *Config) EffectiveActionHookFailModeForConnector(connector string) strin
 	return c.effectiveHookFailModeForConnector(connector, true)
 }
 
-// effectiveHookFailModeForConnector is the one hook fail-mode resolver
-// (owner decisions 2026-10-14 and 2026-10-20: the customer chooses open or
-// closed and the default is closed; only Secure Client defaults to open):
-//
-//   - an explicit value always wins, the automatic-protection overlay
-//     first, then the connector's own value, then the global one, and
-//     anything but "open" (any case) is closed. That includes a managed
-//     standalone deployment: its config is the administrator's (root- or
-//     SYSTEM-owned and trust-checked by the loader), so its open is the
-//     administrator's choice;
-//   - an unset value is open under Secure Client (secureClientHookFailModes,
-//     #1163) and closed everywhere else;
-//   - per-user Cursor follows its guardrail mode (observe open, action
-//     closed): its hook registration is the mode's.
-func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecision bool) string {
+// effectiveHookFailModeForConnector is the hook fail-mode resolver. A
+// managed host may use an administrator's explicit open during an outage;
+// Secure Client also defaults to open. A per-user install is always closed,
+// including observe-mode Cursor and values retained from an older config.
+func (c *Config) effectiveHookFailModeForConnector(connector string, _ bool) string {
 	if c == nil {
 		return "closed"
 	}
@@ -403,15 +393,6 @@ func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecis
 			return "open"
 		}
 		return "closed"
-	}
-	if normalizeConnectorKey(connector) == "cursor" {
-		if actionDecision || strings.EqualFold(strings.TrimSpace(c.EffectiveGuardrailModeForConnector(connector)), "action") {
-			return "closed"
-		}
-		return "open"
-	}
-	if mode := c.configuredHookFailModeForConnector(connector); mode != "" {
-		return mode
 	}
 	return "closed"
 }
@@ -431,9 +412,8 @@ func (c *Config) secureClientHookFailModes() bool {
 
 // ConfiguredHookFailModeForConnector is the hook fail mode the config sets
 // explicitly for connector (configuredHookFailModeForConnector), or "" when
-// it sets none. A per-user Cursor's resolved mode follows its guardrail mode,
-// so only this says whether an operator opened its hooks for an outage
-// (connector.OutageHookFailMode).
+// it sets none. This reports a stored legacy per-user open without making it
+// effective; only a managed administrator can select an outage open.
 func (c *Config) ConfiguredHookFailModeForConnector(connector string) string {
 	if c == nil {
 		return ""
