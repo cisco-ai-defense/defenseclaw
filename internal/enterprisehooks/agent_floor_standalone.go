@@ -18,6 +18,7 @@ package enterprisehooks
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -115,6 +116,51 @@ func kiroHookFloorRefusal(resolution connector.HookContractResolution) string {
 		return fmt.Sprintf("Kiro IDE version %s is below the certified minimum %s", normalized, KiroIDEGlobalHooksFloor)
 	}
 	return ""
+}
+
+// kiroCLIVersionBannerRE matches the banner `kiro-cli --version` prints
+// (Python's _KIRO_CLI_VERSION_RE in connector_contracts.py).
+var kiroCLIVersionBannerRE = regexp.MustCompile(`(?i)^kiro-cli\s+v?[0-9]`)
+
+// cachedSetupAgentVersion is the agent version an install or verify uses
+// when its caller named none: the one per-user discovery recorded in
+// agent_discovery.json. That cache is written by Python discovery, which
+// records a kiro-cli as its `kiro-cli X` banner and the Kiro IDE as a bare
+// X, while Go enumeration records a kiro-cli as a bare X and the IDE with
+// KiroIDEVersionSuffix. A cached IDE version is therefore marked with the
+// suffix, so the IDE's floor, not kiro-cli's, applies to it.
+func cachedSetupAgentVersion(dataDir, connectorName string) string {
+	cached := strings.TrimSpace(connector.LoadCachedAgentVersion(dataDir, connectorName))
+	if strings.ToLower(strings.TrimSpace(connectorName)) != "kiro" {
+		return cached
+	}
+	return kiroDiscoveryCacheVersion(cached)
+}
+
+// kiroDiscoveryCacheVersion maps a Kiro version in discovery-cache form to
+// the form the hook floors read: a kiro-cli banner stays as it is, and any
+// other version is the IDE's.
+func kiroDiscoveryCacheVersion(cached string) string {
+	cached = strings.TrimSpace(cached)
+	if cached == "" || strings.HasSuffix(cached, KiroIDEVersionSuffix) || kiroCLIVersionBannerRE.MatchString(cached) {
+		return cached
+	}
+	return cached + KiroIDEVersionSuffix
+}
+
+// kiroIDEMarkerAdded reports whether the only difference between a Kiro
+// contract lock and the entry an install would now record is the IDE marker
+// added to the same build: an earlier release installed from the discovery
+// cache and recorded the IDE's bare version. Unix Kiro renders one hooks file
+// for the CLI and the IDE under one contract, so this is no agent change. A
+// marker removed (an IDE row now read as a kiro-cli) is still drift.
+func kiroIDEMarkerAdded(previous, current connector.HookContractLockEntry) bool {
+	if strings.ToLower(strings.TrimSpace(previous.Connector)) != "kiro" ||
+		strings.TrimSpace(previous.ContractID) != strings.TrimSpace(current.ContractID) {
+		return false
+	}
+	before, after := strings.TrimSpace(previous.RawAgentVersion), strings.TrimSpace(current.RawAgentVersion)
+	return before != "" && !strings.HasSuffix(before, KiroIDEVersionSuffix) && after == before+KiroIDEVersionSuffix
 }
 
 // standaloneAgentFloorRefusal explains why resolution's version is below

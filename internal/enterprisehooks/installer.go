@@ -231,7 +231,7 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		setupOpts.GuardrailMode = strings.TrimSpace(opts.GuardrailMode)
 	}
 	if setupOpts.AgentVersion == "" {
-		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
+		setupOpts.AgentVersion = cachedSetupAgentVersion(dataDir, conn.Name())
 	}
 	if setupOpts.HookContractID == "" {
 		setupOpts.HookContractID = defaultHookContractID(resolveHookContract(conn.Name(), setupOpts.AgentVersion))
@@ -463,7 +463,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		setupOpts.HookAPITokenScoped = true
 	}
 	if setupOpts.AgentVersion == "" {
-		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
+		setupOpts.AgentVersion = cachedSetupAgentVersion(dataDir, conn.Name())
 	}
 	if setupOpts.HookContractID == "" {
 		setupOpts.HookContractID = defaultHookContractID(resolveHookContract(conn.Name(), setupOpts.AgentVersion))
@@ -1420,7 +1420,7 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err)
 		}
-		if connector.HookContractLockDrifted(previous, current) {
+		if connector.HookContractLockDrifted(previous, current) && !kiroIDEMarkerAdded(previous, current) {
 			if standaloneAcceptsAgentVersionChange(resolution) {
 				return nil
 			}
