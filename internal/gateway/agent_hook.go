@@ -1062,11 +1062,11 @@ func (a *APIServer) finalizeAgentHook(
 			auditErr = a.logConnectorHookAuditEnvelope(ctx, env)
 			result.AuditPersisted = auditErr == nil
 		})
-		// A delivered answer backed by a pending occurrence (w3-g3-obs)
-		// already reached the agent, and recovery writes its row from the
-		// published occurrence: the records keep the answer the agent got
-		// instead of a fail-mode verdict it never saw.
-		recoverable := req.pendingOccurrenceID != "" && (receipted || req.pendingRecovery)
+		// A call backed by a pending occurrence (w3-g3-obs; only a
+		// receipt-capable delivery has one) is recovered from the published
+		// occurrence, which holds the answer the agent got: the records keep
+		// that answer instead of a fail-mode verdict the agent never saw.
+		recoverable := req.pendingOccurrenceID != ""
 		if !result.AuditPersisted && !panicked && !errors.Is(auditErr, errHookAuditNotConfigured) {
 			if auditErr == nil {
 				auditErr = errors.New("the audit section panicked")
