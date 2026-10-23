@@ -55,6 +55,9 @@ func TestStandaloneStartupReconcilesUnmigratedV8File(t *testing.T) {
 		t.Fatal(err)
 	}
 	initial = withEnterpriseProfile(initial, managed.ProfileStandalone)
+	if err := config.ApplyRuntimeV8DataDirDefaultsFromBytes(initial, fixture.configPath, migrated, fixture.dataDir); err != nil {
+		t.Fatal(err)
+	}
 	initial.DataDir = compiled.DataDir
 	initial.AuditDB = compiled.Plan.Snapshot().Local.Path
 	initial.JudgeBodiesDB = compiled.Plan.Snapshot().Local.JudgeBodiesPath
