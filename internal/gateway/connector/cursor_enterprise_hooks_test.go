@@ -74,8 +74,12 @@ func TestRenderCursorAdapterFailsOpenOnlyWhenExplicitlyConfigured(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Its only denial is the install branch: while this account's installer
+	// holds its data directory the call is closed (GAP-0915).
+	deny := []byte(`{"continue":false,"permission":"deny"`)
+	installBranch := []byte("if ($installing) {\n                [Console]::Error.WriteLine('defenseclaw: DefenseClaw is being installed or upgraded for this account; blocking (fail mode closed)')\n                [Console]::Out.Write('" + `{"continue":false,"permission":"deny"`)
 	if !bytes.Contains(openAdapter, []byte(`{"continue":true}`)) ||
-		bytes.Contains(openAdapter, []byte(`{"continue":false,"permission":"deny"`)) {
+		bytes.Count(openAdapter, deny) != 1 || !bytes.Contains(openAdapter, installBranch) {
 		t.Fatalf("explicit-open adapter has wrong fallback:\n%s", openAdapter)
 	}
 	if bytes.Contains(openAdapter, []byte("--enterprise-managed")) {

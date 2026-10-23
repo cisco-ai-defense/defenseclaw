@@ -22,7 +22,30 @@ process {
 }
 
 end {
-    $hook = '{{.HookBinaryPS}}'
+{{if and (eq .FailMode "open") (not .Managed)}}    function Test-DefenseClawInstallLockHeld {
+        # The one install check of the Windows adapters: true while this
+        # account's installer holds its data directory, the folder above this
+        # adapter's hooks folder: its .install.lock exists as any type, or its
+        # state cannot be read. Only "not found" is free, as for the native hook
+        # (installLockHeld), the shell hooks and the in-agent plugins (GAP-0915).
+        try {
+            $dataDir = Split-Path -Parent $PSScriptRoot
+            if ([string]::IsNullOrEmpty($dataDir)) { return $true }
+            [void][System.IO.File]::GetAttributes((Join-Path $dataDir '.install.lock'))
+            return $true
+        }
+        catch {
+            $cause = $_.Exception
+            while ($null -ne $cause) {
+                if ($cause -is [System.IO.FileNotFoundException] -or $cause -is [System.IO.DirectoryNotFoundException]) {
+                    return $false
+                }
+                $cause = $cause.InnerException
+            }
+            return $true
+        }
+    }
+{{end}}    $hook = '{{.HookBinaryPS}}'
     $exitCode = 2
     $responseWritten = $false
 {{if .CursorTargetModesJSON64}}    $failMode = 'closed'
@@ -147,6 +170,19 @@ end {
                 $exitCode = 2
             }
         }
+{{else}}{{if and (eq .FailMode "open") (not .Managed)}}        # While this account's installer holds its data directory the answer
+        # is closed, as fail mode closed answers (GAP-0915).
+        $installing = Test-DefenseClawInstallLockHeld
+        if (-not $responseWritten) {
+            if ($installing) {
+                [Console]::Error.WriteLine('defenseclaw: DefenseClaw is being installed or upgraded for this account; blocking (fail mode closed)')
+                [Console]::Out.Write('{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}')
+            } else {
+                [Console]::Out.Write('{"continue":true}')
+            }
+        }
+        $exitCode = 0
+        if ($installing) { $exitCode = 2 }
 {{else}}        if (-not $responseWritten) {
 {{if eq .FailMode "open"}}
             [Console]::Out.Write('{"continue":true}')
@@ -158,7 +194,7 @@ end {
         $exitCode = 0
 {{else}}
         $exitCode = 2
-{{end}}{{end}}
+{{end}}{{end}}{{end}}
     }
     # powershell.exe -Command reduces a non-zero exit from an invoked script
     # to the generic process code 1. Cursor distinguishes the adapter's exact

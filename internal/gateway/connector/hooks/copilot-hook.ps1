@@ -19,7 +19,30 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$hook = '{{.HookBinaryPS}}'
+{{if and (eq .FailMode "open") (not .Managed)}}function Test-DefenseClawInstallLockHeld {
+    # The one install check of the Windows adapters: true while this
+    # account's installer holds its data directory, the folder above this
+    # adapter's hooks folder: its .install.lock exists as any type, or its
+    # state cannot be read. Only "not found" is free, as for the native hook
+    # (installLockHeld), the shell hooks and the in-agent plugins (GAP-0915).
+    try {
+        $dataDir = Split-Path -Parent $PSScriptRoot
+        if ([string]::IsNullOrEmpty($dataDir)) { return $true }
+        [void][System.IO.File]::GetAttributes((Join-Path $dataDir '.install.lock'))
+        return $true
+    }
+    catch {
+        $cause = $_.Exception
+        while ($null -ne $cause) {
+            if ($cause -is [System.IO.FileNotFoundException] -or $cause -is [System.IO.DirectoryNotFoundException]) {
+                return $false
+            }
+            $cause = $cause.InnerException
+        }
+        return $true
+    }
+}
+{{end}}$hook = '{{.HookBinaryPS}}'
 $timeoutMS = {{.CopilotHookTimeoutMS}}
 $process = $null
 $started = $false
@@ -109,7 +132,15 @@ try {
     }
 }
 catch {
-{{if eq .FailMode "open"}}    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)
+{{if and (eq .FailMode "open") (not .Managed)}}    # While this account's installer holds its data directory the answer is
+    # closed, as fail mode closed answers (GAP-0915).
+    if (Test-DefenseClawInstallLockHeld) {
+        [Console]::Error.WriteLine('defenseclaw: DefenseClaw is being installed or upgraded for this account; blocking (fail mode closed)')
+        [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed: ' + $_.Exception.Message); if (-not $responseWritten) { if ($Event -ceq 'preToolUse') { [Console]::Out.Write('{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}') } elseif ($Event -ceq 'permissionRequest') { [Console]::Out.Write('{"behavior":"deny","message":"DefenseClaw hook failed closed"}') } }
+    } else {
+        [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)
+    }
+{{else if eq .FailMode "open"}}    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)
 {{else}}    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed: ' + $_.Exception.Message); if (-not $responseWritten) { if ($Event -ceq 'preToolUse') { [Console]::Out.Write('{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}') } elseif ($Event -ceq 'permissionRequest') { [Console]::Out.Write('{"behavior":"deny","message":"DefenseClaw hook failed closed"}') } }
 {{end}}}
 finally {

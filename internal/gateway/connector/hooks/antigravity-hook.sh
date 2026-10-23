@@ -17,8 +17,35 @@ HOOK_EVENT="${1:-}"
 {{else if .Managed}}_DC_BOOT_FAIL_MODE="open"
 {{else}}_DC_BOOT_FAIL_MODE="{{.FailMode}}"
 case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_BOOT_FAIL_MODE="closed" ;; esac
+# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
+# installer holds its data directory DATA: DATA/.install.lock exists as any
+# file type, or DATA exists but cannot be searched, so the lock cannot be
+# shown absent; no DATA to look in counts as held too. It is the one install
+# check of every shell hook. The native hook (installLockHeld), the in-agent
+# plugins and the Windows adapters apply the same rule (GAP-0914).
+defenseclaw_install_lock_held() {
+  local data="${1:-}"
+  [ -n "$data" ] || return 0
+  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    return 0
+  fi
+  if [ -e "$data" ] || [ -L "$data" ]; then
+    if [ -d "$data" ] && [ -x "$data" ]; then
+      return 1
+    fi
+    return 0
+  fi
+  return 1
+}
+# While this account's installer holds its data directory every failure
+# before the helpers load is closed as well (GAP-0914).
+defenseclaw_boot_fails_closed() {
+  [ "$_DC_BOOT_FAIL_MODE" = "open" ] || return 0
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) return 0 ;; esac
+  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}"
+}
 {{end}}antigravity_bootstrap_failure() {
-  if [ "$_DC_BOOT_FAIL_MODE" != "open" ] && [ "$HOOK_EVENT" = "PreToolUse" ]; then
+  if {{if and (not .Managed) (not .Sandbox)}}defenseclaw_boot_fails_closed{{else}}[ "$_DC_BOOT_FAIL_MODE" != "open" ]{{end}} && [ "$HOOK_EVENT" = "PreToolUse" ]; then
     echo "defenseclaw: antigravity hook could not start; blocking (fail mode closed)" >&2
     printf '%s\n' '{"decision":"deny","reason":"DefenseClaw hook failed closed"}'
     exit 0
@@ -35,7 +62,7 @@ trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ]; then antigravity_bootstrap_fa
 case "$HOOK_EVENT" in
   PreInvocation|PreToolUse|PostToolUse|PostInvocation|Stop) ;;
   *)
-    if [ "$_DC_BOOT_FAIL_MODE" != "open" ]; then
+    if {{if and (not .Managed) (not .Sandbox)}}defenseclaw_boot_fails_closed{{else}}[ "$_DC_BOOT_FAIL_MODE" != "open" ]{{end}}; then
       _dc_unbound_input=""
       IFS= read -r -d '' -n 1048576 _dc_unbound_input || true
       _dc_object_re='^[[:space:]]*\{'
@@ -96,7 +123,7 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
   # A registered closed hook cannot treat missing local state as retirement.
   # The installed mode decides; strict availability tightens this exit as it
   # tightens every later outage (_DC_BOOT_FAIL_MODE).
-  [ ! -e "${DEFENSECLAW_HOME}/.install.lock" ] && [ ! -L "${DEFENSECLAW_HOME}/.install.lock" ] || _DC_BOOT_FAIL_MODE="closed"
+  ! defenseclaw_install_lock_held "${DEFENSECLAW_HOME}" || _DC_BOOT_FAIL_MODE="closed"
   if [ "$_DC_BOOT_FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     if [ "$HOOK_EVENT" = "PreToolUse" ]; then

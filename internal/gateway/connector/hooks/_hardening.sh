@@ -933,17 +933,36 @@ defenseclaw_hook_delivery_outcome() {
   printf '%s' "$outcome"
 }
 
+# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
+# installer holds its data directory DATA: DATA/.install.lock exists as any
+# file type, or DATA exists but cannot be searched, so the lock cannot be
+# shown absent; no DATA to look in counts as held too. It is the one install
+# check of every shell hook. The native hook (installLockHeld), the in-agent
+# plugins and the Windows adapters apply the same rule (GAP-0914).
+defenseclaw_install_lock_held() {
+  local data="${1:-}"
+  [ -n "$data" ] || return 0
+  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    return 0
+  fi
+  if [ -e "$data" ] || [ -L "$data" ]; then
+    if [ -d "$data" ] && [ -x "$data" ]; then
+      return 1
+    fi
+    return 0
+  fi
+  return 1
+}
+
 # defenseclaw_install_in_progress returns 0 (true) while this account is
-# being installed or upgraded: its installer holds .install.lock (any file
-# type) in the data directory. Managed and Secure Client hooks use
-# administrator-owned delivery policy instead of this per-user marker, and
-# return 1.
+# being installed or upgraded (defenseclaw_install_lock_held of its data
+# directory). Managed and Secure Client hooks use administrator-owned
+# delivery policy instead of this per-user marker, and return 1.
 defenseclaw_install_in_progress() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
-  local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-  [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]
+  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 }
 
 # While this account is being installed or upgraded, no failure may approve

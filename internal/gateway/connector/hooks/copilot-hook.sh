@@ -36,8 +36,34 @@ case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) FAIL_MODE="c
 # failure DefenseClaw sees prints Copilot's native deny with the reason ($1)
 # instead; Copilot's other events cannot block. Fail mode open lets the call
 # run.
+# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
+# installer holds its data directory DATA: DATA/.install.lock exists as any
+# file type, or DATA exists but cannot be searched, so the lock cannot be
+# shown absent; no DATA to look in counts as held too. It is the one install
+# check of every shell hook. The native hook (installLockHeld), the in-agent
+# plugins and the Windows adapters apply the same rule (GAP-0914).
+defenseclaw_install_lock_held() {
+  local data="${1:-}"
+  [ -n "$data" ] || return 0
+  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    return 0
+  fi
+  if [ -e "$data" ] || [ -L "$data" ]; then
+    if [ -d "$data" ] && [ -x "$data" ]; then
+      return 1
+    fi
+    return 0
+  fi
+  return 1
+}
+# copilot_hook_failure reads the install state when it answers, through the
+# shared check, also before the helpers load: a hook path that does not
+# resolve or a missing helper during an install or upgrade is closed
+# (GAP-0914).
 copilot_hook_failure() {
-  ! declare -F defenseclaw_close_during_install >/dev/null 2>&1 || defenseclaw_close_during_install
+  if [ "$FAIL_MODE" != "closed" ] && defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}"; then
+    FAIL_MODE="closed"
+  fi
   [ "$FAIL_MODE" != "open" ] || exit 0
   local text="DefenseClaw blocked this tool call (fail mode closed). Run \`defenseclaw doctor\` to see why."
   if [ -n "${1:-}" ] && declare -F defenseclaw_json_escape >/dev/null 2>&1; then
@@ -46,6 +72,9 @@ copilot_hook_failure() {
   copilot_deny "$text"
   exit 0
 }
+# An unexpected error status (set -e, set -u) before the hook's own EXIT
+# trap below is installed answers through copilot_hook_failure too.
+trap '_dc_copilot_rc=$?; if [ "$_dc_copilot_rc" -ne 0 ]; then copilot_hook_failure; fi' EXIT
 {{end}}# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-}}"
 if [ -z "$HOME" ]; then
@@ -93,7 +122,7 @@ unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
-  [ ! -e "${DEFENSECLAW_HOME}/.install.lock" ] && [ ! -L "${DEFENSECLAW_HOME}/.install.lock" ] || FAIL_MODE="closed"
+  ! defenseclaw_install_lock_held "${DEFENSECLAW_HOME}" || FAIL_MODE="closed"
   if [ "$FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     copilot_hook_failure

@@ -1316,6 +1316,11 @@ func validCopilotEvent(event string) bool {
 // decide shapes the connector-native stdout + exit code from a 2xx gateway
 // response body, returning a fail_response result if the body is not JSON.
 func (sp spec) decide(opts Options, body []byte) int {
+	// The answer is checked with the install state of now: an install that
+	// started while the gateway's body was read closes this call, so an
+	// answer whose native output contradicts its action is refused, not
+	// forwarded (GAP-0916).
+	closeDuringInstall(&opts, "")
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
 		return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid JSON response")
@@ -2263,12 +2268,13 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 }
 
 // closeDuringInstall is the one install check of a native hook call: Run
-// reads it when the call starts, after the agent's payload is in, when the
-// gateway has answered (or failed to), and every failure answer reads it
-// again when it answers. While the installer holds the per-user data
-// directory (perUserInstallInProgress) the call is closed, with strict
-// availability, so an install or upgrade that starts during a call closes
-// it as well (GAP-0893, GAP-0894). It returns the fail mode to answer with.
+// reads it when the call starts, after the agent's payload is in and when
+// the gateway has answered (or failed to); decide reads it once the whole
+// body is in, and every failure answer reads it again when it answers.
+// While the installer holds the per-user data directory
+// (perUserInstallInProgress) the call is closed, with strict availability,
+// so an install or upgrade that starts during a call closes it as well
+// (GAP-0893, GAP-0894, GAP-0916). It returns the fail mode to answer with.
 func closeDuringInstall(opts *Options, failMode string) string {
 	if !perUserInstallInProgress(*opts) {
 		return failMode

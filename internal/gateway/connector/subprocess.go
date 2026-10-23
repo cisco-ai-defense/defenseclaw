@@ -1421,10 +1421,103 @@ const hookScriptMaxBytes = 1 << 20
 // Each match is one line, so an adapter written with CRLF line ends is
 // closed too.
 var bakedAdapterFailModeOpens = strings.NewReplacer(
+	// This release's per-user open adapters read the install check in their
+	// catch block (GAP-0915); their closed form is the closed render, which
+	// has no check. These come first, so the single-line forms below never
+	// split them.
+	adapterInstallCheckPS, "",
+	cursorAdapterInstallCheckPS, "",
+	copilotAdapterOpenInstallFailure, "    "+copilotAdapterClosedFailure+"\n",
+	cursorAdapterOpenInstallFailure, cursorAdapterClosedInstallFailure,
 	`[Console]::Out.Write('{"continue":true}')`, `[Console]::Out.Write('`+cursorAdapterClosedResponse+`')`,
 	"$exitCode = 0\r\n", "$exitCode = 2\r\n",
 	"$exitCode = 0\n", "$exitCode = 2\n",
 	copilotAdapterOpenFailure, copilotAdapterClosedFailure,
+)
+
+// The install check and the open catch blocks of this release's per-user
+// open adapters (copilot-hook.ps1, cursor-hook.ps1), as rendered, and the
+// closed render's catch block of Cursor's adapter.
+const (
+	adapterInstallCheckPS = `function Test-DefenseClawInstallLockHeld {
+    # The one install check of the Windows adapters: true while this
+    # account's installer holds its data directory, the folder above this
+    # adapter's hooks folder: its .install.lock exists as any type, or its
+    # state cannot be read. Only "not found" is free, as for the native hook
+    # (installLockHeld), the shell hooks and the in-agent plugins (GAP-0915).
+    try {
+        $dataDir = Split-Path -Parent $PSScriptRoot
+        if ([string]::IsNullOrEmpty($dataDir)) { return $true }
+        [void][System.IO.File]::GetAttributes((Join-Path $dataDir '.install.lock'))
+        return $true
+    }
+    catch {
+        $cause = $_.Exception
+        while ($null -ne $cause) {
+            if ($cause -is [System.IO.FileNotFoundException] -or $cause -is [System.IO.DirectoryNotFoundException]) {
+                return $false
+            }
+            $cause = $cause.InnerException
+        }
+        return $true
+    }
+}
+`
+	cursorAdapterInstallCheckPS = `    function Test-DefenseClawInstallLockHeld {
+        # The one install check of the Windows adapters: true while this
+        # account's installer holds its data directory, the folder above this
+        # adapter's hooks folder: its .install.lock exists as any type, or its
+        # state cannot be read. Only "not found" is free, as for the native hook
+        # (installLockHeld), the shell hooks and the in-agent plugins (GAP-0915).
+        try {
+            $dataDir = Split-Path -Parent $PSScriptRoot
+            if ([string]::IsNullOrEmpty($dataDir)) { return $true }
+            [void][System.IO.File]::GetAttributes((Join-Path $dataDir '.install.lock'))
+            return $true
+        }
+        catch {
+            $cause = $_.Exception
+            while ($null -ne $cause) {
+                if ($cause -is [System.IO.FileNotFoundException] -or $cause -is [System.IO.DirectoryNotFoundException]) {
+                    return $false
+                }
+                $cause = $cause.InnerException
+            }
+            return $true
+        }
+    }
+`
+	copilotAdapterOpenInstallFailure = `    # While this account's installer holds its data directory the answer is
+    # closed, as fail mode closed answers (GAP-0915).
+    if (Test-DefenseClawInstallLockHeld) {
+        [Console]::Error.WriteLine('defenseclaw: DefenseClaw is being installed or upgraded for this account; blocking (fail mode closed)')
+        [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed: ' + $_.Exception.Message); if (-not $responseWritten) { if ($Event -ceq 'preToolUse') { [Console]::Out.Write('{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}') } elseif ($Event -ceq 'permissionRequest') { [Console]::Out.Write('{"behavior":"deny","message":"DefenseClaw hook failed closed"}') } }
+    } else {
+        [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)
+    }
+`
+	cursorAdapterOpenInstallFailure = `        # While this account's installer holds its data directory the answer
+        # is closed, as fail mode closed answers (GAP-0915).
+        $installing = Test-DefenseClawInstallLockHeld
+        if (-not $responseWritten) {
+            if ($installing) {
+                [Console]::Error.WriteLine('defenseclaw: DefenseClaw is being installed or upgraded for this account; blocking (fail mode closed)')
+                [Console]::Out.Write('{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}')
+            } else {
+                [Console]::Out.Write('{"continue":true}')
+            }
+        }
+        $exitCode = 0
+        if ($installing) { $exitCode = 2 }
+`
+	cursorAdapterClosedInstallFailure = `        if (-not $responseWritten) {
+
+            [Console]::Out.Write('{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}')
+
+        }
+
+        $exitCode = 2
+`
 )
 
 const (

@@ -118,8 +118,11 @@ func TestRefreshOfThisReleasesOpenAdapterIsItsClosedRender(t *testing.T) {
 		t.Run(adapter, func(t *testing.T) {
 			open, closed := render(t, adapter, "open"), render(t, adapter, "closed")
 			if adapter == "copilot-hook.ps1" {
-				if !bytes.Contains(open, []byte(copilotAdapterOpenFailure)) || bytes.Contains(open, []byte(copilotAdapterClosedFailure)) {
-					t.Fatalf("the open Copilot adapter does not fail open:\n%s", open)
+				// It fails open, except while this account's installer holds
+				// its data directory (GAP-0915).
+				if !bytes.Contains(open, []byte(copilotAdapterOpenInstallFailure)) ||
+					bytes.Count(open, []byte(copilotAdapterClosedFailure)) != 1 {
+					t.Fatalf("the open Copilot adapter does not fail open outside an install:\n%s", open)
 				}
 				if !bytes.Contains(closed, []byte(copilotAdapterClosedFailure)) || bytes.Contains(closed, []byte(copilotAdapterOpenFailure)) {
 					t.Fatalf("the closed Copilot adapter does not deny on a failure:\n%s", closed)
