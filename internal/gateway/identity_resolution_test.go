@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -317,6 +318,81 @@ func TestProvenMeetCoversUncertainSandboxProfile(t *testing.T) {
 	got := set.match(&subject, profileSubjectVerified, "codex", "")
 	if got.Name != "sandboxed" || got.Refused != "" || len(got.Unproven) != 0 {
 		t.Fatalf("proven sandbox profile = %+v; want sandboxed without refusal", got)
+	}
+}
+
+// A proven meet already enforces each member's pack. An unconfirmed account
+// name that repeats a proven member cannot change the decision, even when
+// the other proven member selected a different pack.
+func TestProvenMeetCoversUncertainDuplicateMemberWithDifferentPacks(t *testing.T) {
+	p := identityTestPlatforms[0]
+	subject := identityTestSubject(p, p.providers[0], stateProven, true)
+	subject.holderUnproven = true
+	root := t.TempDir()
+	aDir, bDir, cDir := filepath.Join(root, "a"), filepath.Join(root, "b"), filepath.Join(root, "c")
+	writeRulePackFixtureFile(t, aDir, "rules/a.yaml", `version: 1
+category: secret
+rules:
+  - id: MEET-DUPLICATE-A
+    pattern: "meet_duplicate_a"
+    title: first member
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+	writeRulePackFixtureFile(t, bDir, "rules/b.yaml", `version: 1
+category: secret
+rules:
+  - id: MEET-DUPLICATE-B
+    pattern: "meet_duplicate_b"
+    title: second member
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+	writeRulePackFixtureFile(t, cDir, "rules/c.yaml", `version: 1
+category: secret
+rules:
+  - id: MEET-DUPLICATE-C
+    pattern: "meet_duplicate_c"
+    title: third profile
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+	group := config.ProfileAssignment{Profile: "a", Match: config.ProfileMatch{Groups: []string{p.group}}}
+	uid := config.ProfileAssignment{Profile: "b", Match: config.ProfileMatch{Users: []string{p.id}}}
+	for _, member := range []string{"a", "b"} {
+		unknown := config.ProfileAssignment{Profile: member, Match: config.ProfileMatch{Users: []string{p.name}}}
+		for _, assignments := range [][]config.ProfileAssignment{{group, uid, unknown}, {unknown, uid, group}} {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "observe"
+			cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+				"a": {Mode: "action", BlockAt: "HIGH", RulePackDir: aDir},
+				"b": {Mode: "action", BlockAt: "HIGH", RulePackDir: bDir},
+				"c": {Mode: "action", BlockAt: "HIGH", RulePackDir: cDir},
+			}
+			cfg.Guardrail.ProfileAssignments = assignments
+			set := newGuardrailProfileSetFor(t, cfg)
+			got := set.match(&subject, profileSubjectVerified, "codex", "")
+			want := config.ProfileMeetName([]string{"a", "b"})
+			if got.Name != want || got.Refused != "" || len(got.Unproven) != 0 {
+				t.Fatalf("uncertain duplicate %s, assignments %+v: %+v; want proven meet %s", member, assignments, got, want)
+			}
+		}
+	}
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"a": {Mode: "action", BlockAt: "HIGH", RulePackDir: aDir},
+		"b": {Mode: "action", BlockAt: "HIGH", RulePackDir: bDir},
+		"c": {Mode: "action", BlockAt: "HIGH", RulePackDir: cDir},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{group, uid,
+		{Profile: "c", Match: config.ProfileMatch{Users: []string{p.name}}}}
+	got := newGuardrailProfileSetFor(t, cfg).match(&subject, profileSubjectVerified, "codex", "")
+	if got.Refused == "" || !slices.Contains(got.Unproven, "account:unknown") {
+		t.Fatalf("uncertain different pack = %+v; want account-holder refusal", got)
 	}
 }
 

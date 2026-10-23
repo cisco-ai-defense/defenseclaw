@@ -12,9 +12,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// A profile decision that depends on an unproven identity fact is refused
-// on every blocking surface. Name remains the meet of possible profiles for
-// diagnostics and for surfaces whose events cannot be blocked.
+// A profile decision that depends on an unproven identity fact or an
+// uncompiled meet is refused on every blocking surface. Name remains
+// diagnostic context for surfaces whose events cannot be blocked.
 
 func profileRefusal(ctx context.Context) string {
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil {
@@ -71,7 +71,7 @@ func (a *APIServer) refuseProfileInspect(w http.ResponseWriter, r *http.Request,
 	if reason == "" {
 		return false
 	}
-	fmt.Fprintf(os.Stderr, "[inspect] REFUSED %s: identity fact unproven\n", route)
+	fmt.Fprintf(os.Stderr, "[inspect] REFUSED %s: guardrail profile decision\n", route)
 	if a.logger != nil {
 		_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(r, route, action, target,
 			"severity=HIGH mode=action reason=guardrail_profile_refused"))
@@ -90,7 +90,7 @@ func refuseProfileProxy(w http.ResponseWriter, r *http.Request) bool {
 	if reason == "" {
 		return false
 	}
-	fmt.Fprintf(os.Stderr, "[guardrail] REFUSED %s: identity fact unproven\n", r.URL.Path)
+	fmt.Fprintf(os.Stderr, "[guardrail] REFUSED %s: guardrail profile decision\n", r.URL.Path)
 	writeOpenAIError(w, http.StatusForbidden, reason)
 	return true
 }

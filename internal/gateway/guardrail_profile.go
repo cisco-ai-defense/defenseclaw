@@ -185,7 +185,7 @@ type profileDecision struct {
 	Match         string
 	MatchedGroup  string
 	SubjectSource string
-	// Refused names an unproven identity fact the decision depends on.
+	// Refused names an unproven identity fact or an uncompiled profile meet.
 	// Enforcement surfaces block it; Name remains diagnostic context.
 	Refused string
 	// Assignment is the 1-based index of the assignment that matched, 0 for
@@ -644,7 +644,9 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 			legacy = func() (profileAgentClaim, bool) { return profileAgentLegacySource(ctx, agent) }
 		}
 	}
-	decision := set.matchAgent(subject, source, profileRequestConnector(ctx), agent, legacy)
+	connectorName := profileRequestConnector(ctx)
+	decision := set.matchAgent(subject, source, connectorName, agent, legacy)
+	decision = set.refuseUncompiledMeet(ctx, decision, connectorName)
 	resolved := &resolvedGuardrailProfile{decision: decision, set: set}
 	if decision.Name != "" {
 		if derived, ok := set.derivedProfile(decision.Name); ok {
@@ -1308,7 +1310,8 @@ func scanContentRulesForConnectorFor(ctx context.Context, connectorName, text, t
 func (r *resolvedGuardrailProfile) ruleGenerationFor(ctx context.Context, connectorName string) *compiledRulePackCategories {
 	if r != nil && r.set != nil {
 		if meet := r.set.meet(r.decision.Name); meet != nil {
-			return meet.ruleGeneration(ctx, r.set, connectorName)
+			generation, _ := meet.ruleGeneration(ctx, r.set, connectorName)
+			return generation
 		}
 	}
 	return r.ruleGeneration(connectorName)
@@ -1727,6 +1730,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		agent = ""
 	}
 	decision := set.matchAgent(subject, source, connectorName, agent, nil)
+	decision = set.refuseUncompiledMeet(r.Context(), decision, connectorName)
 	out["profile"] = decision.Name
 	out["digest"] = decision.Digest
 	out["match"] = decision.Match

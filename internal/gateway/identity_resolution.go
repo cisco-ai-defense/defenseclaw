@@ -699,6 +699,9 @@ func (set *guardrailProfileSet) profileCovers(a, b string, connectors []string) 
 // uncertain assignment. Its effective sandbox floor may be stricter than the
 // uncertain profile's floor, including when it is a combination of profiles.
 func (set *guardrailProfileSet) provenProfileCovers(a, b string, connectors []string) bool {
+	if members, ok := config.ProfileMeetMembers(a); ok && slices.Contains(members, b) && set.meet(a) != nil {
+		return true
+	}
 	return set.profileCoverage(a, b, connectors, true)
 }
 
