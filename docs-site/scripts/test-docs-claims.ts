@@ -503,6 +503,20 @@ describe('managed-host enrollment protection', () => {
     assert.doesNotMatch(changelog, /no Claude Code user is enrolled.{0,160}without DefenseClaw hooks/i);
     assert.match(changelog, /before Guardian activation.{0,300}authenticated.{0,150}empty (?:machine )?guards/i);
   });
+
+  it('requires full Windows verification before use after hook executable loss', () => {
+    for (const name of [
+      'enterprise/configure/machine-policy.mdx',
+      'enterprise/install/reference/windows.mdx',
+      'enterprise/mdm/intune/windows-reference.mdx',
+    ]) {
+      const guide = page(name);
+      const recovery = /missing hook executable.{0,700}/i.exec(guide)?.[0];
+      assert.ok(recovery, `${name} needs missing hook executable recovery guidance`);
+      assert.match(recovery, /enterprise windows verify --profile standalone --json/i, `${name} needs the full verify command`);
+      assert.match(recovery, /(?:before allowing|before resuming) (?:Claude Code|agent) use/i, `${name} must keep agent use stopped until verification passes`);
+    }
+  });
 });
 
 describe('docs claim CI coverage', () => {

@@ -413,7 +413,11 @@ with zero enrolled users: stop the affected agent with application control, fix
 the reported cause, and from an elevated session run
 `defenseclaw enterprise windows reconcile --profile standalone` or
 `defenseclaw enterprise windows repair --profile standalone`, then rerun
-`enterprise policy verify`. With
+`enterprise policy verify`. A missing hook executable is also a protection
+failure while the Claude Code drop-in stays installed. Stop Claude Code use,
+repair the installation, and require the full
+`enterprise windows verify --profile standalone --json` check to pass before
+allowing agent use. With
 `managed_hooks_only: enforce` (the default) the Claude
 Code drop-in `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json`
 sets `allowManagedHooksOnly: true`. Claude Code applies drop-ins in name order, so
