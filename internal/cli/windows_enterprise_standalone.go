@@ -1885,6 +1885,9 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 	agents, err := windowsEnterpriseUnprotectedAgentsReader()
 	if err != nil {
 		message := "the enumerator's unprotected-agents record is missing or unreadable: " + err.Error()
+		if errors.Is(err, os.ErrPermission) {
+			message = "this token cannot inspect the enumerator's protected unprotected-agents record; run status or verify from an elevated Administrator prompt: " + err.Error()
+		}
 		if result.Action == "verify" {
 			result.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		} else {

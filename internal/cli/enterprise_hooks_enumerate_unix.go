@@ -300,17 +300,13 @@ func runEnterpriseHooksEnumerateCycle(
 	if !current.StandaloneEnterprise() {
 		return report, errors.New("the managed config is no longer the standalone profile")
 	}
-	if strings.EqualFold(strings.TrimSpace(current.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest) {
+	manifestMode := strings.EqualFold(strings.TrimSpace(current.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest)
+	if manifestMode {
 		report.Idle = true
 		report.Reason = "enterprise.enrollment.mode is manifest; the administrator publishes targets"
-		if !opts.dryRun {
-			resolver := unixidentity.NewCachingResolver(enterpriseHooksEnumerateResolver(ctx))
-			report.ACPRevoked, _ = revokeGoneEnterpriseACPEnrollments(ctx, current, resolver, false, false, state, stderr)
-			if err := enterprisehooks.SaveUnixEnumeratorState(enterpriseHookEnumeratorStatePath(manifestPath), state); err != nil {
-				fmt.Fprintf(stderr, "[hook-enumerator] warn: could not persist enumerator state: %v\n", err)
-			}
+		if opts.dryRun {
+			return report, nil
 		}
-		return report, nil
 	}
 	machinePolicy, err := enterpriseHooksEnumerateMachinePolicyConnectors(opts.descriptor)
 	if err != nil {
@@ -354,11 +350,13 @@ func runEnterpriseHooksEnumerateCycle(
 		fmt.Fprintf(stderr, "%s", data)
 		return report, nil
 	}
-	report.Changed, err = enterpriseHooksEnumerateManifestWriter(manifestPath, manifest)
-	if err != nil {
-		return report, err
+	if !manifestMode {
+		report.Changed, err = enterpriseHooksEnumerateManifestWriter(manifestPath, manifest)
+		if err != nil {
+			return report, err
+		}
 	}
-	report.ACPRevoked, _ = revokeGoneEnterpriseACPEnrollments(ctx, current, resolver, cycle.DirectoryAnswered, false, state, stderr)
+	report.ACPRevoked, _ = revokeGoneEnterpriseACPEnrollments(ctx, current, resolver, cycle.DirectoryAnswered && !manifestMode, false, state, stderr)
 	if err := enterprisehooks.SaveUnixEnumeratorState(enterpriseHookEnumeratorStatePath(manifestPath), state); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not persist enumerator state: %v\n", err)
 	}
@@ -367,16 +365,20 @@ func runEnterpriseHooksEnumerateCycle(
 	// who therefore have no manifest rows.
 	// Accounts with an untrusted home are listed apart: the guardian keeps
 	// their identity record but writes nothing in their homes (GAP-0714).
-	if err := enterpriseHooksEnumerateEligibleWriter(enterprisehooks.UnixEligibleAccountsPath(manifestPath), cycle.EligibleAccounts, cycle.IdentityAccounts); err != nil {
-		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the eligible accounts: %v\n", err)
+	if !manifestMode {
+		if err := enterpriseHooksEnumerateEligibleWriter(enterprisehooks.UnixEligibleAccountsPath(manifestPath), cycle.EligibleAccounts, cycle.IdentityAccounts); err != nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the eligible accounts: %v\n", err)
+		}
 	}
 	// Status and verify report agents found installed but not enrollable,
 	// so an unprotected agent is never a silent gap.
 	if err := enterpriseHooksEnumerateUnprotectedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), cycle.Unprotected); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the unprotected agents: %v\n", err)
 	}
-	if err := enterpriseHooksEnumerateRefusedWriter(current.DataDir, cycle.RefusedSurfaces); err != nil {
-		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the refused surfaces: %v\n", err)
+	if !manifestMode {
+		if err := enterpriseHooksEnumerateRefusedWriter(current.DataDir, cycle.RefusedSurfaces); err != nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the refused surfaces: %v\n", err)
+		}
 	}
 	return report, nil
 }

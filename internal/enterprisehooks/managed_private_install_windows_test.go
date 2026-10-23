@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 func TestManagedWindowsReportsOldClaudeBesideSupportedInstall(t *testing.T) {
@@ -67,6 +69,50 @@ func TestManagedWindowsReportsClaudeLocalBesideSupportedInstall(t *testing.T) {
 	if len(manifest.Targets) != 1 || manifest.Targets[0].AgentVersion != "2.1.230" ||
 		len(uncovered) != 1 || uncovered[0].Version != "2.0.77" || uncovered[0].InstallPath != old {
 		t.Fatalf("vendor local old copy hidden: targets=%+v uncovered=%+v", manifest.Targets, uncovered)
+	}
+}
+
+func TestManagedWindowsReportsOldVoltaImagesBesideSupportedInstall(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	home := t.TempDir()
+	writeWindowsAgentPackageJSON(t, filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@anthropic-ai", "claude-code"), "2.1.230")
+	packages := map[string]string{"claudecode": "@anthropic-ai/claude-code", "codex": "@openai/codex", "copilot": "@github/copilot"}
+	old := map[string]string{}
+	for connector, pkg := range packages {
+		old[connector] = filepath.Join(home, "AppData", "Local", "Volta", "tools", "image", "packages", filepath.FromSlash(pkg), "node_modules", filepath.FromSlash(pkg))
+		writeWindowsAgentPackageJSON(t, old[connector], "0.0.1")
+	}
+	if err := os.WriteFile(filepath.Join(old["claudecode"], "cli.js"), []byte("// fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	var uncovered []UnprotectedAgent
+	cfg := standaloneEnumeratorConfig("claudecode")
+	enabled := true
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {Enabled: &enabled}, "codex": {Enabled: &enabled}, "copilot": {Enabled: &enabled},
+	}
+	manifest, err := EnumerateWindows(context.Background(), cfg, EnumerateOptions{
+		ReportUnprotected: func(agent UnprotectedAgent) { uncovered = append(uncovered, agent) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	supported := false
+	for _, target := range manifest.Targets {
+		supported = supported || target.Connector == "claudecode" && target.AgentVersion == "2.1.230"
+	}
+	if !supported {
+		t.Fatalf("supported npm copy lost its enrollment: %+v", manifest.Targets)
+	}
+	for connector, path := range old {
+		found := false
+		for _, agent := range uncovered {
+			found = found || agent.Connector == connector && agent.InstallPath == path && agent.Code == UnprotectedCodeHookContractUnverified
+		}
+		if !found {
+			t.Fatalf("%s Volta image hidden: %+v", connector, uncovered)
+		}
 	}
 }
 

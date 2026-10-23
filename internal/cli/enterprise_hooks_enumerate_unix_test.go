@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -91,6 +92,66 @@ func TestEnumerateCommandDryRunDiscoversThroughTheWorker(t *testing.T) {
 	}
 	if _, err := os.Stat(f.manifest); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("dry-run must not publish: %v", err)
+	}
+}
+
+func TestManifestModePublishesPrivateInstallScanWithoutRewritingTargets(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	original := []byte("version: 1\ntargets: []\n")
+	if err := os.WriteFile(f.manifest, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldLoader, oldResolver, oldSessions := enterpriseHooksEnumerateConfigLoader, enterpriseHooksEnumerateResolver, enterpriseHookSessionUIDs
+	oldWorker, oldManifestWriter, oldRecordWriter := enterpriseHookWorkerRunner, enterpriseHooksEnumerateManifestWriter, enterpriseHooksEnumerateUnprotectedWriter
+	t.Cleanup(func() {
+		enterpriseHooksEnumerateConfigLoader, enterpriseHooksEnumerateResolver, enterpriseHookSessionUIDs = oldLoader, oldResolver, oldSessions
+		enterpriseHookWorkerRunner, enterpriseHooksEnumerateManifestWriter, enterpriseHooksEnumerateUnprotectedWriter = oldWorker, oldManifestWriter, oldRecordWriter
+	})
+	cfg := standaloneTestConfig(f.dataDir)
+	cfg.Enterprise.Enrollment.Mode = config.EnterpriseEnrollmentManifest
+	cfg.Enterprise.Enrollment.IncludeUsers = []string{"alice"}
+	cfg.Enterprise.Enrollment.HomeRoots = []string{f.homes}
+	enabled := true
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {Enabled: &enabled}}
+	enterpriseHooksEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
+	enterpriseHooksEnumerateResolver = func(context.Context) unixidentity.Resolver { return resolver }
+	enterpriseHookSessionUIDs = func() []int { return nil }
+	enterpriseHookWorkerRunner = func(_ context.Context, _ enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		if request.Operation != enterpriseHookWorkerOpDiscover || !slices.Contains(request.Connectors, "claudecode") {
+			return enterpriseHookWorkerResponse{}, fmt.Errorf("unexpected worker request: %+v", request)
+		}
+		return enterpriseHookWorkerResponse{PrivateInstalls: []enterprisehooks.PrivateAgentInstall{{
+			Connector: "claudecode", Version: "2.0.77", Path: filepath.Join(alice, "old", "node_modules", "@anthropic-ai", "claude-code"),
+		}}}, nil
+	}
+	enterpriseHooksEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) {
+		t.Fatal("manifest mode rewrote administrator targets")
+		return false, nil
+	}
+	var published []enterprisehooks.UnprotectedAgent
+	enterpriseHooksEnumerateUnprotectedWriter = func(_ string, agents []enterprisehooks.UnprotectedAgent) error {
+		published = append([]enterprisehooks.UnprotectedAgent(nil), agents...)
+		return nil
+	}
+	state := &enterprisehooks.UnixEnumeratorState{Version: 1}
+	report, err := runEnterpriseHooksEnumerateCycle(context.Background(), io.Discard, f.manifest,
+		enterpriseHooksEnumerateOptions{manifest: f.manifest, descriptor: filepath.Join(f.root, "absent.json")}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, agent := range published {
+		found = found || agent.Version == "2.0.77" && agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified
+	}
+	if !report.Idle || !found {
+		t.Fatalf("manifest mode private scan: report=%+v published=%+v", report, published)
+	}
+	if got, err := os.ReadFile(f.manifest); err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("administrator targets changed: %q (%v)", got, err)
 	}
 }
 

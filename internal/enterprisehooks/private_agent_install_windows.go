@@ -76,7 +76,13 @@ func DiscoverWindowsPrivateAgentInstalls(home string, names []string) []PrivateA
 		if name != "claudecode" && name != "copilot" && name != "codex" {
 			continue
 		}
-		for _, root := range roots {
+		packageRoots := append([]string(nil), roots...)
+		for _, packageName := range packages {
+			// Volta gives each package an image below AppData\Local, outside
+			// the profile's immediate children and the npm prefix roots.
+			packageRoots = append(packageRoots, filepath.Join(home, "AppData", "Local", "Volta", "tools", "image", "packages", packageName))
+		}
+		for _, root := range packageRoots {
 			for _, packageName := range packages {
 				for _, modules := range []string{"node_modules", filepath.Join("lib", "node_modules")} {
 					packageDir := filepath.Join(root, modules, packageName)

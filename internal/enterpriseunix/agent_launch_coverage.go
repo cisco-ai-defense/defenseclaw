@@ -100,7 +100,7 @@ func (l *lifecycle) describePluginLaunchSession(ctx context.Context, session age
 	who, home := env.pluginLaunchAccount(ctx, session.UID)
 	reason := ""
 	if name == "claudecode" {
-		reason = claudeManagedLaunchCoverage(session.Args)
+		reason = claudeManagedLaunchCoverage(session.Args, session.Executable)
 	} else {
 		reason = enterprisestatus.PluginLaunchCoverage(name, session.Args, session.Env, session.EnvKnown, home)
 	}
@@ -183,7 +183,7 @@ func launchCoverageExplanation(reason string) string {
 	}
 }
 
-func claudeManagedLaunchCoverage(argv []string) string {
+func claudeManagedLaunchCoverage(argv []string, executable string) string {
 	if len(argv) == 0 {
 		return "launch_arguments_unverified"
 	}
@@ -204,12 +204,31 @@ func claudeManagedLaunchCoverage(argv []string) string {
 		}
 		return ""
 	}
+	if strings.TrimSpace(filepath.Base(argv[0])) == "claude" {
+		// Interactive npm Claude Code rewrites its entire command line to
+		// "claude". The kernel still names Node as the executable, but the
+		// script path and package version are gone. Do not infer that a
+		// supported package was launched from the selected install record.
+		executableName := strings.TrimSuffix(filepath.Base(executable), " (deleted)")
+		if isScriptHost(executableName) {
+			return "claude_npm_launch_unverified"
+		}
+		if executable == "" || !filepath.IsAbs(executable) {
+			return "launch_arguments_unverified"
+		}
+		if strings.HasSuffix(executable, " (deleted)") ||
+			(executableName != "claude" && !strings.Contains(executable, "/.local/share/claude/versions/")) {
+			return "launch_arguments_unverified"
+		}
+		argv = []string{executable}
+	}
 	const nativeVersions = "/.local/share/claude/versions/"
 	if before, version, ok := strings.Cut(argv[0], nativeVersions); ok && before != "" && version != "" {
 		version = strings.SplitN(version, "/", 2)[0]
 		if connector.ResolveHookContract("claudecode", version).Status != connector.HookCompatibilityKnown {
 			return "claude_version_unverified"
 		}
+		return ""
 	}
 	return ""
 }

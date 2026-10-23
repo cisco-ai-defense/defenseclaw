@@ -9,6 +9,7 @@ package enterpriseunix
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +128,62 @@ func TestMissingUnprotectedRecordMakesUnixCoverageUnknown(t *testing.T) {
 				if result.CoverageComplete || result.SecurityComplete ||
 					!strings.Contains(messages, "unprotected-agents record") {
 					t.Fatalf("%s %s hid missing install evidence: %+v", platform, action, result)
+				}
+			}
+		})
+	}
+}
+
+// A manifest-mode install starts the enumerator but does not itself publish
+// its scan. Run bypasses testHost.run, whose fake adds an empty record after
+// install, so status and verify exercise the real first-cycle contract.
+func TestManifestModeStatusAndVerifyWaitForPrivateInstallScan(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			h := newTestHost(t, platform)
+			body := strings.Replace(string(DefaultConfig(h.env.Layout)),
+				"enterprise:\n  profile: standalone\n",
+				"enterprise:\n  profile: standalone\n  enrollment:\n    mode: manifest\n", 1)
+			configPath := filepath.Join(t.TempDir(), "manifest-config.yaml")
+			if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			install := Run(context.Background(), h.env, Options{Action: ActionInstall,
+				PayloadDir: h.payload("1.0.4"), ConfigFile: configPath})
+			requireOK(t, install)
+			writeFreshLedger(t, h)
+			recordPath := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
+			if _, err := os.Stat(recordPath); !os.IsNotExist(err) {
+				t.Fatalf("fake install unexpectedly published scan: %v", err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := Run(context.Background(), h.env, Options{Action: action})
+				messages := messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				if action == ActionVerify {
+					messages = messagesOf(result.Errors, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				}
+				if result.CoverageComplete || result.SecurityComplete || messages == "" {
+					t.Fatalf("%s %s claimed complete coverage before its scan: %+v", platform, action, result)
+				}
+			}
+			data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+				User: "alice", Connector: "claudecode", Version: "2.0.77",
+				Code:   enterprisehooks.UnprotectedCodeHookContractUnverified,
+				Reason: "version 2.0.77 has no managed hook contract",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(recordPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := Run(context.Background(), h.env, Options{Action: action})
+				if result.CoverageComplete || result.SecurityComplete ||
+					messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeHookContractUnverified) == "" ||
+					messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete) != "" ||
+					messagesOf(result.Errors, enterprisehooks.UnprotectedCodeInstallScanIncomplete) != "" {
+					t.Fatalf("%s %s hid the manifest-mode private copy: %+v", platform, action, result)
 				}
 			}
 		})

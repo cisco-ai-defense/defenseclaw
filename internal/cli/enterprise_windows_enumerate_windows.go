@@ -238,7 +238,10 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		} else if cfg.StandaloneEnterprise() {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not load administrator targets for identity facts: %v\n", loadErr)
 		}
-		return nil
+		// Manifest mode gives target authorship to the administrator, not
+		// install inspection. Keep checking every eligible profile so a
+		// private runnable copy can still lower managed health.
+		return publishEnterpriseWindowsManifestInstallScan(cycleCtx, stderr, cfg, manifestPath)
 	}
 	logf := enumerationLoggerForStderr(stderr)
 	enumerateOpts := standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{
@@ -360,6 +363,37 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		// fleet; log a WARN if a single cycle overshoots so operators
 		// see the degradation before the hard 60 s ceiling fires.
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN cycle exceeded 10 s target: %s\n", elapsed)
+	}
+	return nil
+}
+
+func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.Writer, cfg *config.Config, manifestPath string) error {
+	cache, err := enterpriseWindowsEnumerateGroupCacheLoader(enterprisehooks.WindowsEnrollmentGroupsCachePath(manifestPath))
+	if err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN enrollment group cache is unreadable; starting from signed-in sessions only: %v\n", err)
+		cache = enterprisehooks.NewWindowsEnrollmentGroupCache()
+	}
+	var agents []enterprisehooks.UnprotectedAgent
+	opts := standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{
+		ExistingManifestPath: manifestPath,
+		GroupCache:           cache,
+		Logger:               enumerationLoggerForStderr(stderr),
+		ReportUnprotected: func(agent enterprisehooks.UnprotectedAgent) {
+			agents = append(agents, agent)
+		},
+	})
+	enterprisehooks.SetUnverifiedVersionsPolicy(cfg.Enterprise.Enrollment.UnverifiedVersionsFor)
+	var ownerUnknown []enterprisehooks.UnprotectedAgent
+	opts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg))
+	if _, err := enterpriseWindowsEnumerateProfileEnumerator(ctx, cfg, opts); err != nil {
+		return fmt.Errorf("enterprise windows enumerate: inspect manifest-mode profiles: %w", err)
+	}
+	agents = append(agents, ownerUnknown...)
+	if _, err := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, agents); err != nil {
+		return fmt.Errorf("enterprise windows enumerate: publish manifest-mode unprotected agents: %w", err)
+	}
+	for _, agent := range agents {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN %s: %s\n", agent.Code, agent.Message())
 	}
 	return nil
 }

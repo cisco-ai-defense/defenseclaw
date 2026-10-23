@@ -206,7 +206,7 @@ func TestManagedClaudePrivateNPMLaunchIsUnverifiedOnUnix(t *testing.T) {
 	if got := agentCLIOf([]string{"node", script}); got != "claude" {
 		t.Fatalf("private npm script classified as %q", got)
 	}
-	if got := claudeManagedLaunchCoverage([]string{"/home/alice/.local/share/claude/versions/2.0.77"}); got != "claude_version_unverified" {
+	if got := claudeManagedLaunchCoverage([]string{"/home/alice/.local/share/claude/versions/2.0.77"}, ""); got != "claude_version_unverified" {
 		t.Fatalf("old native release classified as %q", got)
 	}
 	for _, goos := range []string{"linux", "darwin"} {
@@ -243,6 +243,55 @@ func TestManagedClaudePrivateNPMLaunchIsUnverifiedOnUnix(t *testing.T) {
 	}
 }
 
+func TestManagedClaudeRewrittenInteractiveTitleLowersHealth(t *testing.T) {
+	if reason := claudeManagedLaunchCoverage([]string{"claude"}, "/opt/node22/bin/node"); reason != "claude_npm_launch_unverified" {
+		t.Fatalf("rewritten Node title = %q", reason)
+	}
+	if reason := claudeManagedLaunchCoverage([]string{"claude"}, "/opt/node22/bin/node (deleted)"); reason != "claude_npm_launch_unverified" {
+		t.Fatalf("rewritten title with deleted Node executable = %q", reason)
+	}
+	if reason := claudeManagedLaunchCoverage([]string{"claude"}, "/opt/dc-agents/bin/renamed-client"); reason != "launch_arguments_unverified" {
+		t.Fatalf("rewritten title with unknown executable = %q", reason)
+	}
+	if reason := claudeManagedLaunchCoverage([]string{"claude"}, "/home/alice/.local/share/claude/versions/2.1.230"); reason != "" {
+		t.Fatalf("supported native executable = %q", reason)
+	}
+	if reason := claudeManagedLaunchCoverage([]string{"claude"}, "/opt/dc-agents/bin/claude"); reason != "" {
+		t.Fatalf("generic native executable = %q", reason)
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"),
+				ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+			h.env.ReportLaunchCoverage = func(context.Context, managed.LaunchCoverageReport) error { return nil }
+			const pid = 7182
+			if goos == "linux" {
+				writeHostFile(t, h, "/proc/stat", fmt.Sprintf("btime %d\n", time.Now().Unix()))
+				writeHostFile(t, h, fmt.Sprintf("/proc/%d/cmdline", pid), "claude       \x00")
+				writeHostFile(t, h, fmt.Sprintf("/proc/%d/stat", pid),
+					fmt.Sprintf("%d (claude) S 1 %d %s1000 0 0", pid, pid, strings.Repeat("0 ", 16)))
+				if err := os.Symlink("/opt/node22/bin/node", h.env.P(fmt.Sprintf("/proc/%d/exe", pid))); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				h.runner.ps = fmt.Sprintf("%d %d 00:00:05 claude", pid, os.Getuid())
+				setDarwinProcessArgv(t, func(int) ([]string, error) { return []string{"claude       "}, nil })
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				if result.CoverageComplete || result.SecurityComplete ||
+					!strings.Contains(messagesOf(result.Warnings, codeManagedLaunchUninspected), "claudecode (pid 7182)") {
+					t.Fatalf("%s %s missed rewritten interactive title: %+v", goos, action, result)
+				}
+				if action == ActionVerify {
+					requireError(t, result, codeManagedLaunchUninspected)
+				}
+			}
+		})
+	}
+}
+
 func TestManagedClaudeSupportedNPMScriptLaunchStaysCovered(t *testing.T) {
 	home := t.TempDir()
 	packageDir := filepath.Join(home, "lib", "node_modules", "@anthropic-ai", "claude-code")
@@ -265,7 +314,7 @@ func TestManagedClaudeSupportedNPMScriptLaunchStaysCovered(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, argv := range [][]string{{"node", script}, {"node", launcher}, {"node", "--no-warnings", launcher}} {
-		if reason := claudeManagedLaunchCoverage(argv); reason != "" {
+		if reason := claudeManagedLaunchCoverage(argv, ""); reason != "" {
 			t.Fatalf("supported npm launch %q reported %q", argv, reason)
 		}
 	}
@@ -296,7 +345,7 @@ func TestManagedClaudeSupportedNPMScriptLaunchStaysCovered(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(packageDir, "package.json"), []byte(`{"name":"other","version":"2.1.230"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if reason := claudeManagedLaunchCoverage([]string{"node", launcher}); reason != "claude_npm_launch_unverified" {
+	if reason := claudeManagedLaunchCoverage([]string{"node", launcher}, ""); reason != "claude_npm_launch_unverified" {
 		t.Fatalf("unreadable Claude package metadata reported %q", reason)
 	}
 	outside := filepath.Join(home, "claimed-package.json")
@@ -309,7 +358,7 @@ func TestManagedClaudeSupportedNPMScriptLaunchStaysCovered(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(packageDir, "package.json")); err != nil {
 		t.Fatal(err)
 	}
-	if reason := claudeManagedLaunchCoverage([]string{"node", launcher}); reason != "claude_npm_launch_unverified" {
+	if reason := claudeManagedLaunchCoverage([]string{"node", launcher}, ""); reason != "claude_npm_launch_unverified" {
 		t.Fatalf("linked Claude package metadata reported %q", reason)
 	}
 }

@@ -57,10 +57,12 @@ func runStandaloneWindowsEnumerateCycleForTest(t *testing.T, cfg *config.Config)
 	previousConfig := enterpriseWindowsEnumerateConfigLoader
 	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
 	previousWriter := enterpriseWindowsEnumerateManifestWriter
+	previousRecordWriter := enterpriseWindowsEnumerateUnprotectedWriter
 	t.Cleanup(func() {
 		enterpriseWindowsEnumerateConfigLoader = previousConfig
 		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
 		enterpriseWindowsEnumerateManifestWriter = previousWriter
+		enterpriseWindowsEnumerateUnprotectedWriter = previousRecordWriter
 	})
 	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
 	calls := 0
@@ -72,6 +74,7 @@ func runStandaloneWindowsEnumerateCycleForTest(t *testing.T, cfg *config.Config)
 		calls++
 		return false, nil
 	}
+	enterpriseWindowsEnumerateUnprotectedWriter = func(string, []enterprisehooks.UnprotectedAgent) (bool, error) { return false, nil }
 	stderr := new(bytes.Buffer)
 	manifest := filepath.Join(t.TempDir(), "targets.yaml")
 	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), stderr, manifest); err != nil {
@@ -81,13 +84,14 @@ func runStandaloneWindowsEnumerateCycleForTest(t *testing.T, cfg *config.Config)
 }
 
 // enterprise.enrollment.mode manifest hands targets.yaml to the
-// administrator on Windows too: the enumerator neither walks nor publishes.
+// administrator on Windows too: the enumerator scans profiles for private
+// agents while leaving targets.yaml untouched.
 func TestEnterpriseWindowsEnumerateIdlesInManifestMode(t *testing.T) {
 	log, calls := runStandaloneWindowsEnumerateCycleForTest(t, standaloneWindowsEnrollmentConfig(
 		config.EnterpriseEnrollmentConfig{Mode: config.EnterpriseEnrollmentManifest},
 	))
-	if calls != 0 {
-		t.Fatalf("manifest mode walked or published targets (%d calls)", calls)
+	if calls != 1 {
+		t.Fatalf("manifest mode must scan profiles without publishing targets (%d calls)", calls)
 	}
 	if !strings.Contains(log, "cycle idle: enterprise.enrollment.mode is manifest") {
 		t.Fatalf("idle cycle must say why; log:\n%s", log)
@@ -98,6 +102,46 @@ func TestEnterpriseWindowsEnumerateIdlesInManifestMode(t *testing.T) {
 	))
 	if calls != 2 {
 		t.Fatalf("auto mode must enumerate and publish (%d calls)", calls)
+	}
+}
+
+func TestEnterpriseWindowsManifestModePublishesPrivateInstallScan(t *testing.T) {
+	cfg := standaloneWindowsEnrollmentConfig(config.EnterpriseEnrollmentConfig{Mode: config.EnterpriseEnrollmentManifest})
+	manifest := filepath.Join(t.TempDir(), "targets.yaml")
+	previousConfig, previousEnumerator := enterpriseWindowsEnumerateConfigLoader, enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter, previousRecordWriter := enterpriseWindowsEnumerateManifestWriter, enterpriseWindowsEnumerateUnprotectedWriter
+	t.Cleanup(func() {
+		enterpriseWindowsEnumerateConfigLoader, enterpriseWindowsEnumerateProfileEnumerator = previousConfig, previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter, enterpriseWindowsEnumerateUnprotectedWriter = previousWriter, previousRecordWriter
+	})
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
+	enterpriseWindowsEnumerateProfileEnumerator = func(_ context.Context, _ *config.Config, opts enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		if opts.ReportUnprotected == nil {
+			t.Fatal("manifest mode did not enable unprotected install reporting")
+		}
+		opts.ReportUnprotected(enterprisehooks.UnprotectedAgent{
+			User: "alice", SID: "S-1-5-21-1-2-3-1001", Connector: "claudecode", Version: "2.0.77",
+			Code: enterprisehooks.UnprotectedCodeHookContractUnverified, InstallPath: `C:\Users\alice\old`,
+		})
+		return enterprisehooks.Manifest{Version: 1}, nil
+	}
+	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) {
+		t.Fatal("manifest mode rewrote administrator targets")
+		return false, nil
+	}
+	var published []enterprisehooks.UnprotectedAgent
+	enterpriseWindowsEnumerateUnprotectedWriter = func(path string, agents []enterprisehooks.UnprotectedAgent) (bool, error) {
+		if path != manifest {
+			t.Fatalf("record manifest path = %q", path)
+		}
+		published = append([]enterprisehooks.UnprotectedAgent(nil), agents...)
+		return true, nil
+	}
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifest); err != nil {
+		t.Fatal(err)
+	}
+	if len(published) != 1 || published[0].Version != "2.0.77" {
+		t.Fatalf("manifest mode hid private copy: %+v", published)
 	}
 }
 

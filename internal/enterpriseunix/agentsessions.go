@@ -93,7 +93,9 @@ func agentCLIOf(argv []string) string {
 	if strings.Contains(argv[0], "/.local/share/claude/versions/") {
 		return "claude"
 	}
-	name := filepath.Base(argv[0])
+	// Node can replace its argv area with a short process title padded by
+	// spaces. Claude Code does this during an interactive npm session.
+	name := strings.TrimSpace(filepath.Base(argv[0]))
 	if agentCLINames[name] {
 		return name
 	}
@@ -134,8 +136,11 @@ type agentSession struct {
 	Started   time.Time
 	Args      []string
 	ArgsKnown bool
-	Env       map[string]string
-	EnvKnown  bool
+	// Executable is the kernel's executable path, independent of a process
+	// title that overwrote argv (notably interactive npm Claude Code).
+	Executable string
+	Env        map[string]string
+	EnvKnown   bool
 	// Unknown marks an unreadable agent-shaped command on macOS.
 	Unknown bool
 	// CodexServer marks the Codex background server.
@@ -238,7 +243,8 @@ func (e *Env) linuxAgentSessionsWithError() ([]agentSession, error) {
 			continue
 		}
 		started := time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100)
-		session := agentSession{PID: pid, UID: int(owner.Uid), Agent: agent, Started: started, Args: argv,
+		executable, _ := os.Readlink(filepath.Join(dir, "exe"))
+		session := agentSession{PID: pid, UID: int(owner.Uid), Agent: agent, Started: started, Args: argv, Executable: executable,
 			ArgsKnown: argvKnown, CodexServer: codexBackgroundServer(argv)}
 		if pluginLaunchConnector(agent) {
 			raw, err := readBounded(filepath.Join(dir, "environ"), 64<<10)
@@ -280,7 +286,8 @@ func (e *Env) darwinAgentSessionsWithError(ctx context.Context) ([]agentSession,
 			argv = psArgv(fields[3:])
 		}
 		if agent := agentCLIOf(argv); agent != "" {
-			session := agentSession{PID: pid, UID: uid, Agent: agent, Started: now.Add(-elapsed), Args: argv,
+			executable, _ := processExecPath(pid)
+			session := agentSession{PID: pid, UID: uid, Agent: agent, Started: now.Add(-elapsed), Args: argv, Executable: executable,
 				ArgsKnown: argvErr == nil, CodexServer: codexBackgroundServer(argv)}
 			if pluginLaunchConnector(agent) {
 				if raw, err := darwinProcessEnv(pid); err == nil {

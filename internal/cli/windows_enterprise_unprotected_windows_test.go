@@ -137,6 +137,24 @@ func TestWindowsMissingUnprotectedRecordMakesCoverageUnknown(t *testing.T) {
 	}
 }
 
+func TestWindowsUnreadableProtectedRecordExplainsElevation(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, nil, os.ErrPermission)
+	for _, action := range []string{"status", "verify"} {
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
+		result.CoverageComplete, result.SecurityComplete = true, true
+		applyWindowsEnterpriseUnprotectedAgents(result)
+		messages := result.Warnings
+		if action == "verify" {
+			messages = result.Errors
+		}
+		if result.CoverageComplete || result.SecurityComplete || len(messages) != 1 ||
+			messages[0].Code != enterprisehooks.UnprotectedCodeInstallScanIncomplete ||
+			!strings.Contains(messages[0].Message, "elevated") || strings.Contains(messages[0].Message, "missing") {
+			t.Fatalf("%s permission result = %+v", action, result)
+		}
+	}
+}
+
 // A config that enrols no connector (before GAP-0221 the loader dropped the
 // documented claudecode: {} entries) left every service healthy and verify
 // passing while DefenseClaw protected no agent: verify fails on it, status
