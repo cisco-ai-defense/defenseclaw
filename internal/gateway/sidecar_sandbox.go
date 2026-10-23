@@ -136,6 +136,8 @@ func (rt *sandboxRuntime) listenersReady() error {
 
 // statusListenerAddresses reports only ports this process actually holds.
 // A configured address alone is not proof: another account may have bound it.
+// A managed daemon deliberately releases both ports while idle; its next
+// create binds them, so that release does not make its gateway unavailable.
 func (rt *sandboxRuntime) statusListenerAddresses(st *sandboxapi.Status) {
 	if st == nil {
 		return
@@ -153,7 +155,8 @@ func (rt *sandboxRuntime) statusListenerAddresses(st *sandboxapi.Status) {
 		missing = append(missing, "egress")
 		keys = append(keys, "openshell.egress_port")
 	}
-	if st.Enabled && st.Available && len(missing) > 0 {
+	managedIdle := st.Managed != nil && st.Live != nil && *st.Live == 0
+	if st.Enabled && st.Available && len(missing) > 0 && !managedIdle {
 		st.Available = false
 		if st.Reason != "" {
 			st.Reason += "; "

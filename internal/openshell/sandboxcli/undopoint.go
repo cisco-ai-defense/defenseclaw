@@ -90,19 +90,16 @@ func (a *App) startSandbox(ctx context.Context, api API, sb *sandboxapi.Sandbox,
 // again.
 func (a *App) startError(ctx context.Context, api API, sb *sandboxapi.Sandbox, err error) error {
 	// Connect needs the code to distinguish another command's start race
-	// from a refusal. Preserve the typed conflict through this wrapper.
-	if sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
-		return apiError(err)
-	}
-	msg := apiError(err).Error()
+	// from a refusal. Keep the typed error beneath any recovery hint.
+	problem := apiError(err)
 	var e *sandboxapi.Error
 	if errors.As(err, &e) && e.Violation != nil {
 		switch e.Violation.Key {
 		case "workdir.mode", "harness", "harness.allowed":
-			return fmt.Errorf("%s; delete it (`%s delete %s`) and run it again", msg, CommandName, sb.Name)
+			return fmt.Errorf("%w; delete it (`%s delete %s`) and run it again", problem, CommandName, sb.Name)
 		}
 	}
-	return a.landlockHint(errors.New(msg), func() openshell.Driver { return statusDriver(ctx, api) })
+	return a.landlockHint(problem, func() openshell.Driver { return statusDriver(ctx, api) })
 }
 
 // keptUndoPoint reports whether a start kept the undo point it found: the

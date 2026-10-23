@@ -2304,6 +2304,12 @@ func TestSessionSummary(t *testing.T) {
 		{name: "stopped from elsewhere", opts: claude, exit: 255, setup: elsewhere(false), check: noStop,
 			want: []string{sbName + " was stopped from outside this session (`defenseclaw sandbox stop` or the TUI), which ended Claude Code", "Sandbox kept (stopped)"},
 			not:  []string{"the harness itself failed"}},
+		{name: "last managed sandbox stopped and idle listeners released", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
+			elsewhere(false)(ta)
+			ta.daemon.status.Managed = managedStatusFixture()
+			ta.daemon.status.IngressAddr, ta.daemon.status.EgressAddr = "", ""
+		}, want: []string{sbName + " was stopped from outside this session (`defenseclaw sandbox stop` or the TUI), which ended Claude Code"},
+			not: []string{"the OpenShell gateway is not available"}},
 		// GAP-0486: on a managed computer the organization stopped it, its
 		// profile no longer allowing sandboxes: not a stop from elsewhere.
 		{name: "the organization revoked sandboxes", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
