@@ -327,6 +327,131 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(restart.call_count, 2)
         self.assertEqual(restart.call_args_list[1].kwargs["connectors"], ["claudecode"])
 
+    def test_failed_restart_restores_the_discovery_cache_from_before_the_version_check(self):
+        # GAP-0547: `setup codex --mode action` republished agent_discovery.json
+        # in its version check, before the rollback point was taken. The
+        # restart failed on a peer the new cache left unversioned, and the
+        # rollback put that same cache back, so the gateway still could not
+        # start on the restored configuration.
+        self._seed_map("claudecode", "codex")
+        for name in ("claudecode", "codex"):
+            self.app.cfg.guardrail.connectors[name].mode = "action"
+        cache = os.path.join(self.app.cfg.data_dir, "agent_discovery.json")
+        prior = b'{"agents":{"claudecode":{"version":"2.1.304 (Claude Code)"}}}\n'
+        atomic_write_private_bytes(cache, prior)
+
+        def version_check(*_args, **_kwargs):
+            atomic_write_private_bytes(cache, b'{"agents":{"claudecode":{"version":""}}}\n')
+            return True
+
+        seen_by_restart: list[bytes] = []
+
+        def _restart(*_args, **_kwargs):
+            with open(cache, "rb") as handle:
+                seen_by_restart.append(handle.read())
+            if len(seen_by_restart) == 1:
+                raise click.ClickException("connector claudecode refresh failed: agent version not probed")
+
+        with (
+            _setup_patches() as restart,
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=version_check,
+            ),
+        ):
+            restart.side_effect = _restart
+            result = _invoke(["codex", "--yes", "--mode", "action"], self.app)
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("restored the prior connector configuration and runtime", result.output)
+        self.assertEqual(len(seen_by_restart), 2)
+        self.assertEqual(seen_by_restart[1], prior)
+        with open(cache, "rb") as handle:
+            self.assertEqual(handle.read(), prior)
+
+    def _run_codex_action_setup_over_cache(self, mode: int, *, fail_first_restart: bool):
+        self._seed_map("claudecode", "codex")
+        for name in ("claudecode", "codex"):
+            self.app.cfg.guardrail.connectors[name].mode = "action"
+        cache = os.path.join(self.app.cfg.data_dir, "agent_discovery.json")
+        prior = b'{"agents":{"claudecode":{"version":"2.1.304 (Claude Code)"}}}\n'
+        checked = b'{"agents":{"claudecode":{"version":""}}}\n'
+        atomic_write_private_bytes(cache, prior)
+        os.chmod(cache, mode)
+
+        def version_check(*_args, **_kwargs):
+            atomic_write_private_bytes(cache, checked)
+            return True
+
+        def _restart(*_args, **_kwargs):
+            if fail_first_restart and restart.call_count == 1:
+                raise click.ClickException("connector claudecode refresh failed: agent version not probed")
+
+        with (
+            _setup_patches() as restart,
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=version_check,
+            ),
+        ):
+            restart.side_effect = _restart
+            result = _invoke(["codex", "--yes", "--mode", "action"], self.app)
+        with open(cache, "rb") as handle:
+            final = handle.read()
+        return result, restart.call_count, prior, checked, final
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+    def test_group_readable_prior_discovery_cache_is_tightened_and_kept(self):
+        # An older release's umask could leave agent_discovery.json 0644. The
+        # early rollback copy refused setup on it on every retry.
+        result, restarts, prior, _checked, final = self._run_codex_action_setup_over_cache(
+            0o644, fail_first_restart=True
+        )
+        self.assertNotIn("Cannot establish connector setup rollback point", result.output)
+        self.assertIn("restored the prior connector configuration and runtime", result.output)
+        self.assertEqual(restarts, 2)
+        self.assertEqual(final, prior)
+        cache = os.path.join(self.app.cfg.data_dir, "agent_discovery.json")
+        self.assertEqual(stat.S_IMODE(os.stat(cache).st_mode) & 0o077, 0)
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+    def test_untrusted_prior_discovery_cache_does_not_refuse_setup(self):
+        # A cache writable by others cannot be the rollback copy; setup uses
+        # the private one the version check writes instead of exiting 1.
+        result, restarts, _prior, checked, final = self._run_codex_action_setup_over_cache(
+            0o666, fail_first_restart=False
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("Cannot establish connector setup rollback point", result.output)
+        self.assertIn("agent_discovery.json from before setup cannot be kept", result.output)
+        self.assertEqual(restarts, 1)
+        self.assertEqual(final, checked)
+
+    @pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="needs a non-root POSIX user")
+    def test_root_owned_prior_discovery_cache_names_the_chown_step(self):
+        cache = os.path.join(self.app.cfg.data_dir, "agent_discovery.json")
+        atomic_write_private_bytes(cache, b"{}\n")
+        real_lstat = os.lstat
+
+        def lstat(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            if os.fspath(path) == cache:
+                return os.stat_result((info.st_mode, info.st_ino, info.st_dev, info.st_nlink, 0, *info[5:]))
+            return info
+
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup._capture_setup_agent_discovery_file",
+                side_effect=OSError("agent_discovery.json rollback source is root-owned from a sudo-started gateway"),
+            ),
+            patch("defenseclaw.commands.cmd_setup.os.lstat", side_effect=lstat),
+            patch("defenseclaw.commands.cmd_setup.ux.warn") as warn,
+        ):
+            self.assertIsNone(cmd_setup._capture_setup_prior_agent_discovery(self.app.cfg.data_dir))
+        message = warn.call_args.args[0]
+        self.assertIn('sudo chown "$(id -un)"', message)
+        self.assertIn(shlex.quote(cache), message)
+
     def test_replace_readiness_failure_restores_prior_connector_set(self):
         self._seed_map("claudecode", "codex")
         prior = tuple(self.app.cfg.active_connectors())

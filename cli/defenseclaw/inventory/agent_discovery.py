@@ -973,7 +973,8 @@ def _configured_probe_names(data_dir: str | os.PathLike[str] | None) -> frozense
 
 
 def restrict_probes(connectors: list[str]) -> Any:
-    """Run only the CLIs of ``connectors`` in this command's discovery scans.
+    """Run only the CLIs of ``connectors`` and of the connectors the config
+    already enrolls in this command's discovery scans.
 
     ``init --connector copilot`` ran every installed agent CLI as a version
     probe, and those CLIs wrote their own config and cache folders
@@ -1175,15 +1176,17 @@ def discover_agents(
 
     scanned_at = _format_rfc3339(_now_utc())
     require_trusted, _prefixes = _ai_discovery_trust_config(data_dir)
-    probe_only = _PROBE_ONLY.get()
-    if probe_only is None:
-        probe_only = _configured_probe_names(data_dir)
+    # A restricted scan still probes every connector the config enrolls: the
+    # gateway reads each one's version from this cache when setup restarts it,
+    # so an enrolled agent that updated itself since the last scan came back
+    # unversioned and the gateway could not start (GAP-0547).
+    probe_only = _configured_probe_names(data_dir) | (_PROBE_ONLY.get() or frozenset())
     shared = _FRESH_SCANS.get()
     shared_key = (
         str(config_path_for_data_dir(data_dir)),
         require_trusted,
         tuple(_prefixes),
-        tuple(sorted(probe_only)) if probe_only is not None else None,
+        tuple(sorted(probe_only)),
     )
     if shared is not None and shared_key in shared:
         reused = shared[shared_key]
@@ -1203,7 +1206,7 @@ def discover_agents(
                     data_dir=data_dir,
                     require_trusted_binary_paths=require_trusted,
                     include_workspace_config=False,
-                    probe=probe_only is None or name in probe_only,
+                    probe=name in probe_only,
                 ),
                 DISCOVERABLE_CONNECTORS,
             )
