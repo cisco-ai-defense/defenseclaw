@@ -63,10 +63,8 @@ def tracked_host_owner_uid(path: str | os.PathLike[str], info: os.stat_result) -
     owner = info.st_uid
     if sys.platform != "linux" or owner != 65534:
         return owner
-    if os.environ.get("DEFENSECLAW_TRACKED_HOST_STAT_FD") != "5":
-        # The overflow UID can also equal the scanner's own UID. Without
-        # host evidence, accepting it would trust an unmapped file owner.
-        return -1
+    # The overflow UID can also equal the scanner's own UID. Without host
+    # evidence, accepting it would trust an unmapped file owner.
     if os.getpid() != 1:
         return -1
     raw = os.fsencode(path)
@@ -74,8 +72,11 @@ def tracked_host_owner_uid(path: str | os.PathLike[str], info: os.stat_result) -
         return -1
     nonce = os.urandom(8)
     request = struct.pack("!QQ", info.st_dev, info.st_ino) + nonce + struct.pack("!H", len(raw)) + raw
+    channel = tracked_host_stat_channel()
+    if channel is None:
+        return -1
     try:
-        with _tracked_host_stat_lock, socket.socket(fileno=os.dup(5)) as channel:
+        with _tracked_host_stat_lock, channel:
             channel.settimeout(2.0)
             channel.sendall(request)
             response = channel.recv(12)
@@ -85,6 +86,49 @@ def tracked_host_owner_uid(path: str | os.PathLike[str], info: os.stat_result) -
         return -1 if reported == 0xFFFFFFFF else reported
     except OSError:
         return -1
+
+
+def tracked_host_stat_channel() -> socket.socket | None:
+    """The scanner launcher's host-owner channel on fd 5, or None.
+
+    The environment variable only names the descriptor; the process and the
+    socket must prove it. The process runs in a PID namespace other than the
+    host's, and fd 5 is a connected AF_UNIX SOCK_SEQPACKET socket whose peer
+    runs as this user outside that namespace, so the kernel reports the peer's
+    PID as 0. Every other socket on fd 5 (TCP, UDP, a stream or a socketpair of
+    this process) is refused before a request is sent.
+    """
+    if sys.platform != "linux" or os.environ.get("DEFENSECLAW_TRACKED_HOST_STAT_FD") != "5":
+        return None
+    if not _in_child_pid_namespace():
+        return None
+    try:
+        channel = socket.socket(fileno=os.dup(5))
+    except OSError:
+        return None
+    try:
+        if channel.family != socket.AF_UNIX or channel.type != socket.SOCK_SEQPACKET:
+            raise OSError("not the launcher's socket")
+        credentials = channel.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("iII"))
+        pid, uid, gid = struct.unpack("iII", credentials)
+        if pid != 0 or uid != os.geteuid() or gid != os.getegid():
+            raise OSError("not the launcher's socket")
+    except OSError:
+        channel.close()
+        return None
+    return channel
+
+
+def _in_child_pid_namespace() -> bool:
+    """True when this process has a PID in more than one PID namespace."""
+    try:
+        with open("/proc/self/status", encoding="ascii", errors="replace") as status:
+            for line in status:
+                if line.startswith("NSpid:"):
+                    return len(line.split()) > 2
+    except OSError:
+        return False
+    return False
 
 
 class UnsafePathError(OSError):

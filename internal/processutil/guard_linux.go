@@ -38,8 +38,11 @@ func seccompArg(i uint32) uint32 { return 16 + 8*i }
 // guardTrackedInit is installed before the trusted PID-namespace init execs
 // the scanner. A scanner cannot clear the parent-death signal that links its
 // PID 1 to the launcher. Its own children remain signalable by positive PID.
-// The gateway and launcher are outside this PID namespace and non-dumpable;
-// the filter also refuses APIs that would inspect or inject into their memory.
+// The gateway and launcher are outside this PID namespace. The scanner still
+// sees them, and every other host process, through the host procfs: its
+// Landlock domain refuses ptrace access to all of them, and the filter also
+// refuses ptrace and cross-process memory and descriptor APIs. Nothing here
+// changes the gateway's own process state.
 func guardTrackedInit() error {
 	arch, ok := seccompArch[runtime.GOARCH]
 	if !ok {
@@ -73,9 +76,38 @@ func guardTrackedInit() error {
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return err
 	}
+	if err := enterScannerDomain(); err != nil {
+		return err
+	}
 	err = unix.Prctl(unix.PR_SET_SECCOMP, unix.SECCOMP_MODE_FILTER, uintptr(unsafe.Pointer(&prog)), 0, 0)
 	runtime.KeepAlive(filter)
 	return err
+}
+
+// scannerRuleset is struct landlock_ruleset_attr up to handled_access_fs,
+// the one field every Landlock ABI knows.
+type scannerRuleset struct{ handledAccessFS uint64 }
+
+// enterScannerDomain puts the scanner in a Landlock domain of its own. Landlock
+// refuses ptrace access from a domain to every process outside it: ptrace and
+// /proc/<pid>/mem, environ, maps, fd, cwd, root and exe of the gateway, the
+// launcher and any other host process. The gateway therefore stays dumpable,
+// and same-user status, stop, restart and upgrade checks keep reading its /proc
+// entries while a scan runs. The ruleset handles only block-device creation,
+// which an unprivileged scanner cannot do anyway, so file access is unchanged.
+// Without Landlock (a kernel before 5.13, or one booted without it, or a
+// service filter that refuses the calls) the scanner never starts.
+func enterScannerDomain() error {
+	attr := scannerRuleset{handledAccessFS: unix.LANDLOCK_ACCESS_FS_MAKE_BLOCK}
+	fd, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr), 0)
+	if errno != 0 {
+		return fmt.Errorf("processutil: no Landlock for the scanner: %w", errno)
+	}
+	defer unix.Close(int(fd))
+	if _, _, errno := unix.Syscall(unix.SYS_LANDLOCK_RESTRICT_SELF, fd, 0, 0); errno != 0 {
+		return fmt.Errorf("processutil: enter the scanner's Landlock domain: %w", errno)
+	}
+	return nil
 }
 
 // bpfAssembler builds a classic BPF program whose jumps name their targets.

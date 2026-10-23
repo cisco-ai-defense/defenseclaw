@@ -7,133 +7,264 @@ package daemon
 
 import (
 	"context"
-	"errors"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
-	"sync"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
+	"golang.org/x/sys/unix"
 )
 
-const scannerVisibilityHelperEnv = "DC_DAEMON_SCANNER_VISIBILITY_HELPER"
+const (
+	scanGatewayEnv        = "DC_DAEMON_SCAN_GATEWAY"
+	scanGatewayIgnoreTerm = "DC_DAEMON_SCAN_GATEWAY_IGNORE_TERM"
+)
 
-// A scan must not hide the gateway from another same-user status process.
-func TestScannerLeavesGatewayVisibleToDaemonStatus(t *testing.T) {
-	if base := os.Getenv(scannerVisibilityHelperEnv); base != "" {
-		if err := os.WriteFile(base+".initialized", []byte("ready"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		for {
-			if _, err := os.Stat(base + ".begin"); err == nil {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		var scans sync.WaitGroup
-		for _, suffix := range []string{".first", ".second"} {
-			scans.Add(1)
-			go func() {
-				defer scans.Done()
-				cmd := processutil.CommandContext(context.Background(), "/bin/sh", "-c",
-					`: > "$1"; while [ ! -e "$2" ]; do sleep 0.02; done`,
-					"sh", base+suffix+".active", base+suffix+".release")
-				cmd.Stderr = os.Stderr
-				result := "scanned"
-				if err := processutil.RunTracked(cmd); err != nil {
-					result = err.Error()
-				}
-				if err := os.WriteFile(base+suffix+".complete", []byte(result), 0o600); err != nil {
-					t.Error(err)
-				}
-			}()
-		}
-		scans.Wait()
-		time.Sleep(30 * time.Second)
+// TestDaemonScanGatewayProbe is the gateway the tests below start: it runs two
+// tracked scans that never end on their own, each with a child, and records
+// its own dumpable state while they run.
+func TestDaemonScanGatewayProbe(t *testing.T) {
+	base := os.Getenv(scanGatewayEnv)
+	if base == "" {
 		return
 	}
-
-	base := filepath.Join(t.TempDir(), "scan")
-	helper := exec.Command(os.Args[0], "-test.run=^TestScannerLeavesGatewayVisibleToDaemonStatus$")
-	helper.Env = append(os.Environ(), scannerVisibilityHelperEnv+"="+base)
-	helper.Stdout, helper.Stderr = os.Stdout, os.Stderr
-	if err := helper.Start(); err != nil {
-		t.Fatal(err)
+	if os.Getenv(scanGatewayIgnoreTerm) == "1" {
+		signal.Ignore(syscall.SIGTERM)
 	}
-	t.Cleanup(func() {
-		_ = helper.Process.Kill()
-		_ = helper.Wait()
-	})
-	waitForProbeMarker(t, base+".initialized")
-	exePath := filepath.Join("/proc", strconv.Itoa(helper.Process.Pid), "exe")
-	before, err := os.Readlink(exePath)
-	if err != nil {
-		t.Fatalf("read gateway executable before scan: %v", err)
+	if err := RegisterCurrentProcess(); err != nil {
+		os.Exit(2)
 	}
-	dataDir := t.TempDir()
-	d := New(dataDir)
-	identity, err := processStartIdentity(helper.Process.Pid)
-	if err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"first", "second"} {
+		go func() {
+			cmd := processutil.CommandContext(context.Background(), "/bin/sh", "-c",
+				`sh -c 'read -r p _ < /proc/self/stat; echo "$p" > "$0.tmp"; mv "$0.tmp" "$0"; exec sleep 600' "$1.child" &
+read -r p _ < /proc/self/stat; echo "$p" > "$1.tmp"; mv "$1.tmp" "$1"; while :; do sleep 1; done`,
+				"sh", base+"."+name)
+			_ = processutil.RunTracked(cmd)
+		}()
 	}
-	if err := d.writePIDInfo(helper.Process.Pid, before, identity); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(base+".begin", nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	waitForProbeMarker(t, base+".first.active")
-	waitForProbeMarker(t, base+".second.active")
-	if running, pid := d.IsRunning(); !running || pid != helper.Process.Pid {
-		t.Fatalf("IsRunning during scan = (%v, %d), want (true, %d)", running, pid, helper.Process.Pid)
-	}
-	if !d.HasAuthenticatedMigrationProcessIdentity(helper.Process.Pid) {
-		t.Fatal("active scan lost authenticated gateway identity")
-	}
-	if os.Geteuid() != 0 {
-		if err := d.Stop(100 * time.Millisecond); !errors.Is(err, ErrUnsafeProcessIdentity) {
-			t.Fatalf("unauthenticated stop during scan = %v, want identity refusal", err)
+	for _, name := range []string{"first", "second"} {
+		for _, file := range []string{base + "." + name, base + "." + name + ".child"} {
+			for {
+				if _, err := os.Stat(file); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 		}
 	}
-	if err := os.WriteFile(base+".first.release", nil, 0o600); err != nil {
+	dumpable, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
+	if err != nil {
+		os.Exit(3)
+	}
+	if err := os.WriteFile(base+".running", []byte(strconv.Itoa(dumpable)), 0o600); err != nil {
+		os.Exit(2)
+	}
+	for {
+		time.Sleep(time.Second)
+	}
+}
+
+// scanProcesses waits until the probe gateway at base runs both scans and
+// returns their host PIDs (each scanner and its child).
+func scanProcesses(t *testing.T, base string) []int {
+	t.Helper()
+	waitForScanMarker(t, base+".running")
+	if raw, err := os.ReadFile(base + ".running"); err != nil || string(raw) != "1" {
+		t.Fatalf("gateway dumpable while scans run = %q, %v; want 1", raw, err)
+	}
+	var pids []int
+	for _, file := range []string{".first", ".first.child", ".second", ".second.child"} {
+		raw, err := os.ReadFile(base + file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err != nil || !processExists(pid) {
+			t.Fatalf("scan process %s = %q, %v; not running", file, raw, err)
+		}
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
+func waitForScanMarker(t *testing.T, marker string) {
+	t.Helper()
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(marker); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", marker)
+		}
+	}
+}
+
+func requireScanProcessesEnded(t *testing.T, pids []int) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		alive := []int{}
+		for _, pid := range pids {
+			if processExists(pid) {
+				alive = append(alive, pid)
+			}
+		}
+		if len(alive) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			for _, pid := range alive {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+			t.Fatalf("scan processes %v outlived their gateway", alive)
+		}
+	}
+}
+
+// requireGatewayVisible checks what daemon status and a stale-gateway proof
+// read while scans run: the gateway's executable and environment in /proc,
+// liveness and the strong identity that authorizes stop and restart.
+func requireGatewayVisible(t *testing.T, d *Daemon, pid int, executable string) {
+	t.Helper()
+	proc := filepath.Join("/proc", strconv.Itoa(pid))
+	if live, err := os.Readlink(proc + "/exe"); err != nil || live != executable {
+		t.Fatalf("gateway executable during scan = %q, %v; want %q", live, err, executable)
+	}
+	if _, err := os.ReadFile(proc + "/environ"); err != nil {
+		t.Fatalf("read gateway environment during scan: %v", err)
+	}
+	if running, got := d.IsRunning(); !running || got != pid {
+		t.Fatalf("IsRunning during scan = (%v, %d), want (true, %d)", running, got, pid)
+	}
+	if !d.HasManagedProcessIdentity(pid) {
+		t.Fatal("gateway lost its strong process identity during a scan")
+	}
+}
+
+// r104 W25 review: while a scan ran, the gateway was non-dumpable, so status
+// lost its identity, stop refused it, and restart could not stop it. Status,
+// restart, stop and a forced stop must work while scans run, and every scan
+// process must end with the gateway that owns it.
+func TestDaemonStatusRestartAndStopDuringAScan(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
-	waitForProbeMarker(t, base+".first.complete")
-	if result, err := os.ReadFile(base + ".first.complete"); err != nil || string(result) != "scanned" {
-		t.Fatalf("first scan result = %q, %v", result, err)
+	d := New(t.TempDir())
+	args := []string{"-test.run=^TestDaemonScanGatewayProbe$"}
+	first := filepath.Join(t.TempDir(), "gateway")
+	t.Setenv(scanGatewayEnv, first)
+	pid, err := d.Start(args)
+	if err != nil {
+		t.Fatalf("start gateway: %v", err)
 	}
-	if running, pid := d.IsRunning(); !running || pid != helper.Process.Pid {
-		t.Fatalf("IsRunning with second scan active = (%v, %d)", running, pid)
+	t.Cleanup(func() { _ = d.Stop(time.Second) })
+	scans := scanProcesses(t, first)
+	requireGatewayVisible(t, d, pid, executable)
+
+	// The replacement ignores SIGTERM, so the last stop has to force it.
+	second := filepath.Join(t.TempDir(), "gateway")
+	t.Setenv(scanGatewayEnv, second)
+	t.Setenv(scanGatewayIgnoreTerm, "1")
+	restarted, err := d.Restart(args, 5*time.Second)
+	if err != nil || restarted == pid {
+		t.Fatalf("restart during a scan = %d, %v", restarted, err)
 	}
-	if os.Geteuid() != 0 && d.HasManagedProcessIdentity(helper.Process.Pid) {
-		t.Fatal("gateway became dumpable while another scanner remained live")
+	if processExists(pid) {
+		t.Fatalf("old gateway %d still runs after restart", pid)
 	}
-	if err := os.WriteFile(base+".second.release", nil, 0o600); err != nil {
+	requireScanProcessesEnded(t, scans)
+	scans = scanProcesses(t, second)
+	requireGatewayVisible(t, d, restarted, executable)
+
+	if err := d.Stop(300 * time.Millisecond); err != nil {
+		t.Fatalf("forced stop during a scan: %v", err)
+	}
+	if running, _ := d.IsRunning(); running || processExists(restarted) {
+		t.Fatal("gateway still runs after stop")
+	}
+	requireScanProcessesEnded(t, scans)
+}
+
+// An upgrade replaces the gateway's file while it runs. Status must still see
+// it as this data directory's gateway, and the authenticated stop the upgrade
+// uses must reach it, while scans run.
+func TestDaemonSeesAReplacedGatewayDuringAScan(t *testing.T) {
+	source, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
-	waitForProbeMarker(t, base+".second.complete")
-	if result, err := os.ReadFile(base + ".second.complete"); err != nil || string(result) != "scanned" {
-		t.Fatalf("second scan result = %q, %v", result, err)
+	installed := filepath.Join(t.TempDir(), "defenseclaw-gateway")
+	copyExecutable(t, source, installed)
+	base := filepath.Join(t.TempDir(), "gateway")
+	gateway := exec.Command(installed, "-test.run=^TestDaemonScanGatewayProbe$")
+	gateway.Env = append(os.Environ(), scanGatewayEnv+"="+base)
+	gateway.Stdout, gateway.Stderr = os.Stdout, os.Stderr
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
 	}
-	if after, err := os.Readlink(exePath); err != nil || after != before {
-		t.Fatalf("gateway executable after scan = %q, %v; want %q", after, err, before)
+	exited := make(chan struct{})
+	go func() {
+		_ = gateway.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		_ = gateway.Process.Kill()
+		<-exited
+	})
+	d := New(t.TempDir())
+	identity, err := processStartIdentity(gateway.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(helper.Process.Pid), "environ")); err != nil {
-		t.Fatalf("read gateway environment after scan: %v", err)
+	if err := d.writePIDInfo(gateway.Process.Pid, installed, identity); err != nil {
+		t.Fatal(err)
 	}
-	if running, pid := d.IsRunning(); !running || pid != helper.Process.Pid {
-		t.Fatalf("IsRunning after scan = (%v, %d), want (true, %d)", running, pid, helper.Process.Pid)
+	scans := scanProcesses(t, base)
+	requireGatewayVisible(t, d, gateway.Process.Pid, installed)
+
+	upgrade := installed + ".new"
+	copyExecutable(t, source, upgrade)
+	if err := os.Rename(upgrade, installed); err != nil {
+		t.Fatal(err)
 	}
-	if !d.HasManagedProcessIdentity(helper.Process.Pid) {
-		t.Fatal("gateway did not regain strong process identity after scan")
+	if running, pid := d.IsRunning(); !running || pid != gateway.Process.Pid {
+		t.Fatalf("IsRunning on a replaced gateway during a scan = (%v, %d)", running, pid)
 	}
-	if err := d.Stop(5 * time.Second); err != nil {
-		t.Fatalf("stop gateway after scan: %v", err)
+	if !d.RunsReplacedExecutable() || !d.HasAuthenticatedMigrationProcessIdentity(gateway.Process.Pid) {
+		t.Fatal("a replaced gateway was not recognized during a scan")
 	}
-	if running, _ := d.IsRunning(); running {
-		t.Fatal("gateway still reported running after stop")
+	accepted := func(pid int) error { return syscall.Kill(pid, syscall.SIGTERM) }
+	if err := d.StopGracefully(5*time.Second, accepted); err != nil {
+		t.Fatalf("authenticated stop of a replaced gateway during a scan: %v", err)
+	}
+	<-exited
+	requireScanProcessesEnded(t, scans)
+}
+
+func copyExecutable(t *testing.T, source, target string) {
+	t.Helper()
+	in, err := os.Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		t.Fatal(err)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

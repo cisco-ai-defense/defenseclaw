@@ -54,6 +54,7 @@ from defenseclaw.file_permissions import (
     UnsafePathError,
     open_regular_file_no_follow,
     tracked_host_owner_uid,
+    tracked_host_stat_channel,
 )
 
 _PathSnapshot = tuple[tuple[str, int, int, int, int, int, int], ...]
@@ -125,9 +126,11 @@ class PinnedExecutable:
             # retains the descriptor through launch in either case.
             kwargs["executable"] = f"/proc/self/fd/{self._fd}"
             kwargs["pass_fds"] = (*kwargs.get("pass_fds", ()), self._fd)
-            if os.getpid() == 1 and os.environ.get("DEFENSECLAW_TRACKED_HOST_STAT_FD") == "5":
+            channel = tracked_host_stat_channel() if os.getpid() == 1 else None
+            if channel is not None:
                 # The Go config helper checks the same host-owned files. Give
                 # it the scanner launcher's read-only ownership channel.
+                channel.close()
                 kwargs["pass_fds"] = (*kwargs["pass_fds"], 5)
         else:
             snapshot = self._require_same_file()

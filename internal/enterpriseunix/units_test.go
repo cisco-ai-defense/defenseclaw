@@ -66,6 +66,22 @@ func TestSensorHelperSyscallFilterAllowsFanotify(t *testing.T) {
 	}
 }
 
+// r104 W25 review: a tracked scanner enters a Landlock domain of its own
+// before it starts, so it cannot reach the gateway's /proc entries. The
+// gateway unit's @system-service filter has no Landlock calls; without them
+// every managed scan would be refused.
+func TestGatewayUnitAllowsTheScannerLandlockDomain(t *testing.T) {
+	allow, deny := unitSyscallFilter(t, unitGateway)
+	for _, call := range []string{"landlock_create_ruleset", "landlock_restrict_self"} {
+		if !allow[call] || deny[call] {
+			t.Fatalf("gateway SystemCallFilter does not allow %s (allow=%v deny=%v)", call, allow, deny)
+		}
+	}
+	if allow["@sandbox"] || allow["seccomp"] {
+		t.Fatal("gateway allows more of @sandbox than the Landlock calls")
+	}
+}
+
 // GAP-0210: the gateway judges a caller's /dev/kvm access by the device's
 // mode, so the node must be visible in its private /dev (bound read-only)
 // while PrivateDevices' closed device policy still refuses opening it.
