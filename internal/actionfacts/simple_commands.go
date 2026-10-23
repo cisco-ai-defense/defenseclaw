@@ -260,6 +260,10 @@ func simpleCommands(input Input, facts Facts, depth int) []SimpleCommand {
 				// original hook directory as an authoritative base.
 				if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) != 0 {
 					program, known := simpleStaticWord(call.Args[0], effective)
+					if !known && call.Args[0].Lit() == "[" {
+						// The test builtin: a lone bracket is not a glob.
+						program, known = "[", true
+					}
 					if !known || ChangesShellDirectory(CommandFact{Dialect: DialectPOSIX, Program: program}) {
 						nextCWD, changedDirectory = "", true
 					}
