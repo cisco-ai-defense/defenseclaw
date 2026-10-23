@@ -175,7 +175,7 @@ func TestCursorHook_FailClosedOnUnreachableEmitsDeny(t *testing.T) {
 	}
 }
 
-func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
+func TestCursorHook_DisabledMarkerKeepsPerUserHookClosed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -190,8 +190,8 @@ func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
 
 	cmd := exec.Command("bash", filepath.Join(dir, "cursor-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"beforeShellExecution"}`)
-	// Sanitize inherited DEFENSECLAW_* so a leaked FAIL_MODE / strict
-	// override from the dev shell cannot alter the explicit open path.
+	// Sanitize inherited DEFENSECLAW_* so the result comes from the
+	// installed per-user render rather than the dev shell.
 	cmd.Env = append(sanitizedTestEnv(),
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
@@ -199,12 +199,12 @@ func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("expected exit 0 when .disabled present, got %v; stderr=%s", err, stderr.String())
+	if err := cmd.Run(); exitCodeOf(err) != 2 {
+		t.Fatalf("disabled per-user hook exited %d, want closed (2); stdout=%s stderr=%s", exitCodeOf(err), stdout.String(), stderr.String())
 	}
-	// The disabled guard deliberately does not parse or retain the event body;
-	// it still emits Cursor's exact no-fields success object.
-	assertJSONEnvelope(t, stdout.String())
+	if !strings.Contains(stderr.String(), "fail mode closed") {
+		t.Fatalf("closed hook did not explain the disabled home: %s", stderr.String())
+	}
 }
 
 func TestCursorHook_MissingTokenFailsClosedEvenWhenOpenRequested(t *testing.T) {

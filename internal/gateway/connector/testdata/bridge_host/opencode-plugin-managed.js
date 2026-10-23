@@ -31,7 +31,7 @@ import { dirname, join } from "node:path";
 // env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
 const DC_API_ADDR = "{{.APIAddr}}";
 const DC_TOKEN_FILE = "{{.TokenFileJS}}";
-const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
+const DC_FAIL_MODE = "{{.FailMode}}"; // per-user and standalone hooks stay closed
 // The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the process
 // environment is not read (GAP-0315). As in the shell hooks,
 // DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035); it can
@@ -617,14 +617,10 @@ async function defenseclawLogFailOpen(reason, category) {
   }
 }
 
-async function defenseclawPerUserInstallInProgress() {
-  return false;
-}
 
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
-  const installClosed = actionable && await defenseclawPerUserInstallInProgress();
-  const failMode = installClosed ? "closed" : DC_FAIL_MODE;
-  const transportFailMode = installClosed ? "closed" : DC_TRANSPORT_FAIL_MODE;
+  const failMode = DC_FAIL_MODE;
+  const transportFailMode = DC_TRANSPORT_FAIL_MODE;
   let token;
   try {
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
@@ -678,7 +674,6 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     }
     const data = await res.json();
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
-
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
     const out = data && data.hook_output;
