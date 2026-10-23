@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -279,6 +280,11 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	subshells := 0
 	functions := make(map[string]*syntax.Stmt)
 	functionDepth := 0
+	// exported are the functions this action exported. A child shell imports
+	// them, so each body is judged once, at the first later command that may
+	// start one; an export alone runs nothing.
+	var exported []string
+	var importedBodies []*syntax.Stmt
 	var flatten func(stmt *syntax.Stmt) bool
 	flattenAll := func(stmts []*syntax.Stmt) bool {
 		for _, stmt := range stmts {
@@ -457,33 +463,15 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok && len(functions) != 0 &&
 				(decl.Variant.Value == "export" || decl.Variant.Value == "declare" ||
 					decl.Variant.Value == "typeset") {
-				exported, known := simpleExportedFunctionNames(decl)
+				names, known := simpleExportedFunctionNames(decl)
 				if !known {
 					return false
 				}
-				var bodies []*syntax.Stmt
-				for _, exportedName := range exported {
-					if body, found := functions[exportedName]; found && !slices.Contains(bodies, body) {
-						bodies = append(bodies, body)
+				for _, exportedName := range names {
+					// Bash refuses to export a name that is not yet a function.
+					if _, found := functions[exportedName]; found && !slices.Contains(exported, exportedName) {
+						exported = append(exported, exportedName)
 					}
-				}
-				if len(bodies) != 0 {
-					if functionDepth >= 8 || !keep(stmt.Cmd, stmt.Redirs...) {
-						return false
-					}
-					reduced = true
-					for _, body := range bodies {
-						if functionDepth >= 8 {
-							return false
-						}
-						functionDepth++
-						ok := flatten(body)
-						functionDepth--
-						if !ok {
-							return false
-						}
-					}
-					return true
 				}
 			}
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) != 0 {
@@ -541,7 +529,50 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		}
 		// Not stmt itself, whose text may end in a ; that a moved redirect
 		// cannot follow.
-		return keep(stmt.Cmd, stmt.Redirs...)
+		if !keep(stmt.Cmd, stmt.Redirs...) {
+			return false
+		}
+		call, isCall := stmt.Cmd.(*syntax.CallExpr)
+		if !allSimple || len(exported) == 0 || !isCall ||
+			!simpleMayImportExportedFunctions(call, source, exported) {
+			return true
+		}
+		var bodies []*syntax.Stmt
+		for _, exportedName := range exported {
+			if body := functions[exportedName]; body != nil && !slices.Contains(importedBodies, body) {
+				bodies = append(bodies, body)
+			}
+		}
+		if len(bodies) == 0 {
+			return true
+		}
+		importedBodies = append(importedBodies, bodies...)
+		reduced = true
+		if len(stmt.Redirs) != 0 {
+			moved, ok := text(stmt.Redirs[0].Pos(), stmt.Redirs[len(stmt.Redirs)-1].End())
+			if !ok {
+				return false
+			}
+			saved := redirects
+			redirects = append(redirects[:len(redirects):len(redirects)], moved)
+			defer func() { redirects = saved }()
+		}
+		for _, body := range bodies {
+			if functionDepth >= 8 {
+				return false
+			}
+			// The body runs in the child shell: its exit, directory and
+			// variables stay there.
+			functionDepth++
+			subshells++
+			ok := childScope(false, func() bool { return flatten(body) })
+			subshells--
+			functionDepth--
+			if !ok {
+				return false
+			}
+		}
+		return true
 	}
 	if !flattenAll(file.Stmts) {
 		return nil, false, false
@@ -581,8 +612,9 @@ func simpleEvalFunctionNames(call *syntax.CallExpr) ([]string, bool) {
 	return names, known
 }
 
-// An exported function is executable by a nested shell or later external
-// command. Judge the body at the export site, where its definition is known.
+// simpleExportedFunctionNames returns the functions an export, declare -fx
+// or typeset -fx statement exports. Only a later command that may start a
+// shell can run them (simpleMayImportExportedFunctions).
 func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 	if decl == nil || len(decl.Args) == 0 {
 		return nil, true
@@ -713,4 +745,65 @@ func inertPOSIXWords(words ...*syntax.Word) bool {
 		})
 	}
 	return inert
+}
+
+// simpleNonSpawningBuiltins are shell builtins that start no process, so no
+// shell that could import an exported function.
+var simpleNonSpawningBuiltins = map[string]bool{
+	":": true, "true": true, "false": true, "echo": true, "printf": true,
+	"test": true, "[": true, "export": true, "declare": true, "typeset": true,
+	"local": true, "readonly": true, "unset": true, "set": true, "shift": true,
+	"read": true, "cd": true, "pwd": true, "return": true, "exit": true,
+	"type": true, "hash": true, "alias": true, "unalias": true, "umask": true,
+	"wait": true, "jobs": true, "getopts": true, "let": true, "shopt": true,
+}
+
+// simpleSystemProgramDirs hold system utilities. A program run by a path
+// elsewhere may be a shell script.
+var simpleSystemProgramDirs = []string{"/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"}
+
+// simpleMayImportExportedFunctions reports whether call may start a shell
+// that imports the exported functions of its action and so may run one: a
+// shell named anywhere in its argv (directly, through a wrapper such as env,
+// sudo, xargs or find -exec, or in an interpreter's script text), $SHELL or
+// $BASH, a script launched by path, or an argv word that names an exported
+// function. A builtin that starts no process imports nothing.
+func simpleMayImportExportedFunctions(call *syntax.CallExpr, source string, exported []string) bool {
+	if call == nil || len(call.Args) == 0 {
+		return false
+	}
+	program, known := simpleStaticWord(call.Args[0], nil)
+	if known && simpleNonSpawningBuiltins[program] {
+		return false
+	}
+	if known && strings.Contains(program, "/") && !slices.ContainsFunc(simpleSystemProgramDirs,
+		func(dir string) bool { return strings.HasPrefix(program, dir) }) {
+		return true
+	}
+	for _, arg := range call.Args {
+		start, end := int(arg.Pos().Offset()), int(arg.End().Offset())
+		if start < 0 || end <= start || end > len(source) {
+			// No text to read: assume the worst.
+			return true
+		}
+		raw := source[start:end]
+		if strings.HasPrefix(strings.Trim(raw, `'"`), "./") ||
+			strings.HasPrefix(strings.Trim(raw, `'"`), "../") {
+			return true
+		}
+		for _, token := range strings.FieldsFunc(raw, func(r rune) bool {
+			return !(r == '_' || r == '.' || r == '/' || r == '-' || r == '+' ||
+				r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
+		}) {
+			switch path.Base(token) {
+			case "sh", "bash", "rbash", "dash", "ksh", "mksh", "zsh", "ash", "busybox", "SHELL", "BASH":
+				return true
+			}
+			if strings.HasSuffix(token, ".sh") || strings.HasSuffix(token, ".bash") ||
+				slices.Contains(exported, token) {
+				return true
+			}
+		}
+	}
+	return false
 }

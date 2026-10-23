@@ -23,7 +23,9 @@ func windowsSimplePotentialGroup(source string, dialect windowsDialect) bool {
 	if dialect == windowsCMD {
 		return trimmed[0] == '(' || strings.HasPrefix(strings.ToLower(trimmed), "if ")
 	}
-	if trimmed[0] == '{' || len(trimmed) > 1 && (trimmed[0] == '&' || trimmed[0] == '.') &&
+	// A statement that is only a bare { } is a scriptblock value; it runs
+	// nothing, so it needs no second pass.
+	if len(trimmed) > 1 && (trimmed[0] == '&' || trimmed[0] == '.') &&
 		strings.HasPrefix(strings.TrimLeft(trimmed[1:], " \t"), "{") {
 		return true
 	}
@@ -85,6 +87,25 @@ func windowsSimpleGroupSource(source string, dialect windowsDialect) (string, []
 			}
 			continue
 		}
+		if atStart && dialect == windowsPowerShell && char == '{' {
+			// A bare { } that is a whole statement is a scriptblock value:
+			// PowerShell writes it out and runs nothing in it. Keep it as an
+			// inert string of the same length. A block followed by a pipe,
+			// member access or argument may be invoked; it stays a group.
+			end := windowsSimpleScriptBlockEnd(runes, i)
+			if end < 0 {
+				return "", nil, false
+			}
+			if windowsSimpleStatementEnds(runes, end+1) {
+				for j := i + 1; j < end; j++ {
+					clean[j] = ' '
+				}
+				clean[i], clean[end] = '\'', '\''
+				i = end
+				atStart = false
+				continue
+			}
+		}
 		if atStart {
 			if opener, end, recognized, valid := windowsSimpleGroupOpening(runes, i, dialect); recognized {
 				if !valid || len(stack) >= 32 {
@@ -135,6 +156,54 @@ func windowsSimpleGroupSource(source string, dialect windowsDialect) (string, []
 		return "", nil, false
 	}
 	return string(clean), events, true
+}
+
+// windowsSimpleScriptBlockEnd returns the index of the } that closes the
+// PowerShell scriptblock opened at open, or -1.
+func windowsSimpleScriptBlockEnd(runes []rune, open int) int {
+	depth := 0
+	var quote rune
+	for i := open; i < len(runes); i++ {
+		char := runes[i]
+		switch {
+		case quote != 0:
+			if char == quote {
+				if i+1 < len(runes) && runes[i+1] == quote {
+					i++
+				} else {
+					quote = 0
+				}
+			} else if quote == '"' && char == '`' {
+				i++
+			}
+		case char == '`':
+			i++
+		case char == '\'' || char == '"':
+			quote = char
+		case char == '{':
+			depth++
+		case char == '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// windowsSimpleStatementEnds reports whether the PowerShell statement ends at
+// from: end of input, a statement separator, a pipeline chain operator, the
+// } of an enclosing block, or a comment.
+func windowsSimpleStatementEnds(runes []rune, from int) bool {
+	for from < len(runes) && (runes[from] == ' ' || runes[from] == '\t') {
+		from++
+	}
+	if from >= len(runes) || strings.ContainsRune(";\r\n}#", runes[from]) {
+		return true
+	}
+	return from+1 < len(runes) && (runes[from] == '&' && runes[from+1] == '&' ||
+		runes[from] == '|' && runes[from+1] == '|')
 }
 
 func windowsSimpleNeedsBoundary(runes []rune, from int) bool {
