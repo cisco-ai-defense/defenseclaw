@@ -52,12 +52,16 @@ const (
 	testSpoolUserC = "S-1-5-21-111111111-222222222-333333333-4003"
 )
 
-func TestWindowsIdentitySpoolUsesTheCurrentUPN(t *testing.T) {
+func TestWindowsIdentitySpoolUsesCurrentOrMarkedLastVerifiedUPN(t *testing.T) {
 	for _, tc := range []struct {
-		name, current string
+		name, current, want, source string
+		cachedKept                  bool
 	}{
-		{"UPN changed", "renamed@corp.example"},
-		{"UPN removed", ""},
+		{"UPN changed", "renamed@corp.example", "renamed@corp.example", UPNSourceTranslateName, false},
+		{"UPN casing changed", "Alice@corp.example", "Alice@corp.example", UPNSourceTranslateName, false},
+		{"translation unavailable", "", "alice@corp.example", UPNSourceWindowsKept, false},
+		{"cache returned last good", "alice@corp.example", "alice@corp.example", UPNSourceWindowsKept, true},
+		{"cache older than guardian record", "older@corp.example", "alice@corp.example", UPNSourceWindowsKept, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -75,7 +79,7 @@ func TestWindowsIdentitySpoolUsesTheCurrentUPN(t *testing.T) {
 			stubWindowsIdentityLookups(t, nil, nil)
 			windowsIdentityDirectoryFacts = func(string, time.Duration) useridentity.DirectoryFacts {
 				return useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
-					UPN: tc.current, Principal: tc.current, Source: useridentity.SourceWindowsLSA}
+					UPN: tc.current, UPNKept: tc.cachedKept, Principal: tc.current, Source: useridentity.SourceWindowsLSA}
 			}
 			cache := NewWindowsEnrollmentGroupCache()
 			cache.Users[testSpoolUserA] = nil
@@ -83,8 +87,9 @@ func TestWindowsIdentitySpoolUsesTheCurrentUPN(t *testing.T) {
 				t.Fatal(err)
 			}
 			got, err := ReadIdentitySpoolRecord(dir, testSpoolUserA, nil)
-			if err != nil || got.Facts.UPN != tc.current || got.Facts.Principal != tc.current {
-				t.Fatalf("current record = %+v, err %v; want UPN and principal %q", got, err, tc.current)
+			if err != nil || got.Facts.UPN != tc.want || got.Facts.Principal != tc.want || got.UPNSource != tc.source ||
+				(got.UPNKeptSince.IsZero() != (tc.source != UPNSourceWindowsKept)) {
+				t.Fatalf("record = %+v, err %v; want UPN and principal %q from %s", got, err, tc.want, tc.source)
 			}
 		})
 	}

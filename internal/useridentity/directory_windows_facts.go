@@ -214,6 +214,7 @@ type adUPNCache struct {
 
 type adUPNEntry struct {
 	upn     string
+	kept    bool
 	expires time.Time
 	done    chan struct{} // open while a lookup runs
 }
@@ -222,25 +223,26 @@ func newADUPNCache(translate func(string) string) *adUPNCache {
 	return &adUPNCache{translate: translate, now: time.Now, entries: map[string]adUPNEntry{}}
 }
 
-// lookup returns the UPN of samName: the current cached answer, or the one a
-// lookup started now (or already running) produces within wait. Once the
-// cached answer expires, an unfinished lookup returns no UPN; an earlier
-// answer is not a fact of this lookup.
-func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) string {
+// lookup returns the current answer when translation succeeds and the last
+// verified answer during a refresh or outage. kept distinguishes that answer
+// from a current fact for identity rows.
+func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) (upn string, kept bool) {
 	key := strings.ToUpper(strings.TrimSpace(sid)) + "\x00" + strings.ToLower(samName)
 	c.mu.Lock()
 	entry := c.entries[key]
 	if entry.done == nil && !c.now().Before(entry.expires) {
 		if len(c.entries) > 4096 {
 			c.entries = map[string]adUPNEntry{}
+			entry = adUPNEntry{}
 		}
-		entry = adUPNEntry{done: make(chan struct{})}
+		entry.done = make(chan struct{})
+		entry.kept = entry.upn != ""
 		c.entries[key] = entry
-		go c.run(key, samName, entry.done)
+		go c.run(key, samName, entry.upn, entry.done)
 	}
 	c.mu.Unlock()
 	if entry.done == nil || wait <= 0 {
-		return entry.upn
+		return entry.upn, entry.kept
 	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
@@ -248,22 +250,25 @@ func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) string {
 	case <-entry.done:
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		return c.entries[key].upn
+		answer := c.entries[key]
+		return answer.upn, answer.kept
 	case <-timer.C:
-		return entry.upn
+		return entry.upn, entry.kept
 	}
 }
 
-func (c *adUPNCache) run(key, samName string, done chan struct{}) {
+func (c *adUPNCache) run(key, samName, previous string, done chan struct{}) {
 	upn, ttl := c.translate(samName), adUPNTTL
+	kept := false
 	if upn == "" {
+		upn, kept = previous, previous != ""
 		ttl = adUPNFailureTTL
 	}
 	c.mu.Lock()
 	// Eviction can start a newer translation of the same SID while this
 	// one is still running. Its older answer must not replace that entry.
 	if entry, ok := c.entries[key]; ok && entry.done == done {
-		c.entries[key] = adUPNEntry{upn: upn, expires: c.now().Add(ttl)}
+		c.entries[key] = adUPNEntry{upn: upn, kept: kept, expires: c.now().Add(ttl)}
 	}
 	c.mu.Unlock()
 	close(done)

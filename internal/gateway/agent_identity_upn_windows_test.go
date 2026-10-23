@@ -179,3 +179,60 @@ func TestAgentIdentitySIDUsesCurrentGuardianUPNBeforeProfileLookup(t *testing.T)
 		})
 	}
 }
+
+// A guardian record may keep a last verified UPN for policy matching while
+// TranslateNameW is unavailable. It is not a current fact for the identity row.
+func TestAgentIdentitySIDOmitsKeptGuardianUPN(t *testing.T) {
+	agentIdentityTestSetup(t)
+	const sid = "S-1-5-21-1870-400-596-1105"
+	dir := t.TempDir()
+	previousDir, previousValidate := currentIdentitySpoolDir(), validateManagedGuardianAuthorization
+	setIdentitySpoolDir(dir)
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() {
+		setIdentitySpoolDir(previousDir)
+		validateManagedGuardianAuthorization = previousValidate
+	})
+	data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{
+		Key: sid, UpdatedAt: time.Now().UTC(), UPNSource: enterprisehooks.UPNSourceWindowsKept,
+		UPNKeptSince: time.Now().UTC().Add(-time.Minute),
+		Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+			UPN: "alice@corp.example.com", Principal: "alice@corp.example.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sid+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if upn, known := agentIdentityAccountUPN(sid); upn != "" || known {
+		t.Fatalf("identity row UPN = %q, known %t; want no current UPN", upn, known)
+	}
+	ctx := context.WithValue(context.Background(), verifiedUserScopedIdentityContextKey{}, strings.ToLower(sid))
+	facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: "codex"})
+	if facts.UserUPN != "" || !facts.UPNUnavailable {
+		t.Fatalf("hook row facts = %+v; want an unavailable current UPN", facts)
+	}
+}
+
+func TestAgentIdentitySIDOmitsKeptDirectoryCacheUPN(t *testing.T) {
+	agentIdentityTestSetup(t)
+	const sid = "S-1-5-21-1870-400-596-1105"
+	peerDirectoryCache()
+	previousCache, previousDir := windowsDirectories, currentIdentitySpoolDir()
+	setIdentitySpoolDir("")
+	windowsDirectories = newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+			UPN: "alice@corp.example.com", UPNKept: true, ResolvedAt: time.Now()}, nil
+	})
+	t.Cleanup(func() {
+		windowsDirectories = previousCache
+		setIdentitySpoolDir(previousDir)
+	})
+	if _, ok := windowsDirectories.get(sid, true); !ok {
+		t.Fatal("kept directory facts did not cache")
+	}
+	if upn, known := agentIdentityAccountUPN(sid); upn != "" || known {
+		t.Fatalf("identity row UPN = %q, known %t; want no current UPN", upn, known)
+	}
+}

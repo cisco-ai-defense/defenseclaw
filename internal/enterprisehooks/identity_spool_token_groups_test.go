@@ -74,9 +74,9 @@ func TestIdentitySpoolTokenGroupRecord(t *testing.T) {
 		if record.Facts.GroupsPartial || !record.UpdatedAt.Equal(now) || record.Key != tokenGroupsAccount {
 			t.Fatalf("record = %+v, want current token groups dated now", record)
 		}
-		if record.User != previous.User || record.Facts.UPN != "" || record.Facts.Principal != "" ||
-			record.Facts.Directory != previous.Facts.Directory || record.UPNSource != "" {
-			t.Fatalf("record = %+v, want current groups without a carried UPN", record)
+		if record.User != previous.User || record.Facts.UPN != previous.Facts.UPN || record.Facts.Principal != previous.Facts.UPN ||
+			record.Facts.Directory != previous.Facts.Directory || record.UPNSource != "windows_kept" || record.UPNKeptSince.IsZero() {
+			t.Fatalf("record = %+v, want current groups and a marked last-known UPN", record)
 		}
 		if !slices.Equal(previous.Facts.Groups, []string{tokenGroupsWeak, `CORP\weak`}) {
 			t.Fatalf("the previous record was changed: %v", previous.Facts.Groups)
@@ -92,15 +92,17 @@ func TestIdentitySpoolTokenGroupRecord(t *testing.T) {
 	})
 	t.Run("a sign-out is published as unknown groups", func(t *testing.T) {
 		record, publish := IdentitySpoolTokenGroupRecord(tokenGroupsPrevious(), nil, tokenGroupsAccount, []string{tokenGroupsWeak}, false, now)
-		if !publish || !record.Facts.GroupsPartial || len(record.Facts.Groups) != 0 || record.Facts.UPN != "" {
-			t.Fatalf("record = %+v, publish %v; want groups and UPN unknown", record.Facts, publish)
+		if !publish || !record.Facts.GroupsPartial || len(record.Facts.Groups) != 0 ||
+			record.Facts.UPN != "alice@corp.example" || record.UPNSource != "windows_kept" {
+			t.Fatalf("record = %+v, publish %v; want groups unknown and a marked last-known UPN", record, publish)
 		}
 	})
-	t.Run("unchanged groups do not keep an earlier UPN after timeout", func(t *testing.T) {
+	t.Run("unchanged groups keep a marked earlier UPN after timeout", func(t *testing.T) {
 		record, publish := IdentitySpoolTokenGroupRecord(tokenGroupsPrevious(), nil, tokenGroupsAccount, []string{tokenGroupsWeak}, true, now)
-		if !publish || record.Facts.UPN != "" || record.Facts.Principal != "" || record.UPNSource != "" ||
+		if !publish || record.Facts.UPN != "alice@corp.example" || record.Facts.Principal != record.Facts.UPN ||
+			record.UPNSource != "windows_kept" || !record.UPNKeptSince.Equal(now) ||
 			!record.UpdatedAt.Equal(now) || !slices.Equal(record.Facts.Groups, []string{tokenGroupsWeak, `CORP\weak`}) {
-			t.Fatalf("record = %+v, publish %v; want the same current groups with no old UPN", record, publish)
+			t.Fatalf("record = %+v, publish %v; want the same current groups and a marked last-known UPN", record, publish)
 		}
 	})
 	t.Run("no previous record and a signed-in session", func(t *testing.T) {
@@ -129,6 +131,46 @@ func TestIdentitySpoolTokenGroupRecord(t *testing.T) {
 				t.Fatalf("published %+v; want the record left as it is", record)
 			}
 		})
+	}
+}
+
+// GAP-0284: a signed-out Windows account keeps its last verified UPN for
+// profile matching, with a marker that keeps it out of current identity rows.
+func TestIdentitySpoolKeepsTheLastKnownUPN(t *testing.T) {
+	start := time.Date(2026, 10, 23, 1, 0, 0, 0, time.UTC)
+	previous := tokenGroupsPrevious()
+	previous.UpdatedAt = start.Add(-time.Minute)
+	pass := IdentitySpoolRecord{Key: previous.Key, UpdatedAt: start,
+		Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory}}
+	kept := KeepLastKnownUPN(pass, previous)
+	if kept.Facts.UPN != previous.Facts.UPN || kept.Facts.Principal != previous.Facts.UPN ||
+		kept.UPNSource != UPNSourceWindowsKept || !kept.UPNKeptSince.Equal(start) {
+		t.Fatalf("first kept record = %+v", kept)
+	}
+	legacy := previous
+	legacy.UPNSource = ""
+	if got := KeepLastKnownUPN(pass, legacy); got.Facts.UPN != previous.Facts.UPN || got.UPNSource != UPNSourceWindowsKept {
+		t.Fatalf("older record without UPN provenance lost its verified UPN: %+v", got)
+	}
+	again := KeepLastKnownUPN(IdentitySpoolRecord{Key: previous.Key, UpdatedAt: start.Add(time.Hour)}, kept)
+	if again.Facts.UPN != previous.Facts.UPN || !again.UPNKeptSince.Equal(start) {
+		t.Fatalf("later kept record = %+v; want original kept-since", again)
+	}
+	staleCache := pass
+	staleCache.Facts.UPN, staleCache.Facts.UPNKept = "older@corp.example", true
+	if got := KeepLastKnownUPN(staleCache, previous); got.Facts.UPN != previous.Facts.UPN ||
+		got.Facts.Principal != previous.Facts.UPN || got.UPNSource != UPNSourceWindowsKept {
+		t.Fatalf("stale cache displaced the latest verified record: %+v", got)
+	}
+	other := pass
+	other.Key = "S-1-5-21-1-2-3-4002"
+	if got := KeepLastKnownUPN(other, previous); got.Facts.UPN != "" || got.UPNSource != "" {
+		t.Fatalf("another SID inherited UPN: %+v", got)
+	}
+	current := pass
+	current.Facts.UPN = "renamed@corp.example"
+	if got := KeepLastKnownUPN(current, previous); got.Facts.UPN != current.Facts.UPN || got.UPNSource != "" {
+		t.Fatalf("fresh translation lost to old UPN: %+v", got)
 	}
 }
 

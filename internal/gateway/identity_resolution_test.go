@@ -570,3 +570,18 @@ func TestWindowsADUPNMissingFromCurrentRecordFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestWindowsKeptUPNStillSelectsAssignedProfile(t *testing.T) {
+	win := identityTestPlatforms[2]
+	subject := profileSubjectFromVerified(VerifiedSubject{UserID: win.id, IDKind: win.kind, UserName: win.name,
+		Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+			UPN: "alice@corp.example", UPNKept: true, Source: useridentity.SourceWindowsLSA,
+			GuardianRecord: true, Groups: []string{win.group}, ResolvedAt: time.Now(),
+			Assurance: useridentity.AssuranceVerified},
+		Source: subjectSourcePeerCredentials}, true)
+	set := identityTestSet(t, win, "watch", config.ProfileAssignment{Profile: "strict",
+		Match: config.ProfileMatch{Users: []string{"alice@corp.example"}}})
+	if got := set.match(&subject, profileSubjectVerified, "codex", ""); got.Refused != "" || got.Name != "strict" {
+		t.Fatalf("kept UPN assignment = %+v; want strict profile", got)
+	}
+}

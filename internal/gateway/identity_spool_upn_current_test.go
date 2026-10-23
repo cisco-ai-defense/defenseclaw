@@ -98,3 +98,16 @@ func TestMergeSpoolFactsUsesCurrentWindowsADUPN(t *testing.T) {
 		})
 	}
 }
+
+func TestMergeSpoolFactsKeepsWindowsUPNForPolicyWithFreshnessMarked(t *testing.T) {
+	const sid = "S-1-5-21-1-2-3-1105"
+	own := useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+		UPN: "old@corp.example", Principal: "old@corp.example"}
+	record := enterprisehooks.IdentitySpoolRecord{Key: sid, UPNSource: enterprisehooks.UPNSourceWindowsKept,
+		Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+			UPN: "alice@corp.example", Principal: "alice@corp.example"}}
+	merged := mergeSpoolFacts(own, record)
+	if merged.UPN != "alice@corp.example" || merged.Principal != merged.UPN || !merged.UPNKept {
+		t.Fatalf("merged kept UPN = %+v; want usable UPN marked unavailable for rows", merged)
+	}
+}

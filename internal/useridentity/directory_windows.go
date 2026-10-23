@@ -20,8 +20,15 @@ import (
 // at most wait for it (0 does not wait), and a lookup still running then
 // finishes in the background and answers a later call.
 func WindowsDirectoryFacts(sid string, wait time.Duration) DirectoryFacts {
-	return resolveWindowsDirectoryFacts(osWindowsDirectoryReader{}, sid,
-		func(sid, samName string) string { return adUPNs.lookup(sid, samName, wait) }, time.Now())
+	var kept bool
+	facts := resolveWindowsDirectoryFacts(osWindowsDirectoryReader{}, sid,
+		func(sid, samName string) string {
+			upn, wasKept := adUPNs.lookup(sid, samName, wait)
+			kept = wasKept
+			return upn
+		}, time.Now())
+	facts.UPNKept = kept && facts.UPN != ""
+	return facts
 }
 
 // WindowsGroupNames renders group SIDs as DOMAIN\name where LookupAccountSid

@@ -100,6 +100,10 @@ type DirectoryFacts struct {
 	// UPN is the userPrincipalName when the directory exposes one (SSSD
 	// InfoPipe, the Windows identity store, TranslateNameW).
 	UPN string `json:"upn,omitempty"`
+	// UPNKept marks a last verified Windows UPN reused while a fresh
+	// translation is unavailable. It may select a profile, but is not a
+	// current identity-row fact. Never emitted or stored.
+	UPNKept bool `json:"-"`
 	// Domain is the account's domain in lower case, by its DNS name where
 	// the OS knows it, else its NetBIOS name (defenseclaw.user.domain).
 	Domain string `json:"domain,omitempty"`

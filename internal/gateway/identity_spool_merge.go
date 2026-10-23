@@ -271,6 +271,7 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 	}
 	if currentWindowsRecord || spool.UPN != "" {
 		merged.UPN = spool.UPN
+		merged.UPNKept = record.UPNSource == enterprisehooks.UPNSourceWindowsKept
 	}
 	if currentWindowsRecord || spool.Principal != "" {
 		// One principal form per account, whichever guardian build wrote

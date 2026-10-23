@@ -128,7 +128,7 @@ func TestWindowsADDomainIgnoresComputerDNSSuffix(t *testing.T) {
 
 // TestADUPNCacheWaitsAndRetriesFailures pins GAP-0129: a lookup answers within
 // the wait it is given, and a failed lookup is retried after minutes. A
-// completed lookup with no UPN must clear the previous answer.
+// failed lookup keeps the last verified UPN for profile matching.
 func TestADUPNCacheWaitsAndRetriesFailures(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	answers := []string{"", "alice@corp.example.com", ""}
@@ -137,20 +137,20 @@ func TestADUPNCacheWaitsAndRetriesFailures(t *testing.T) {
 	cache.now = func() time.Time { return now }
 	const name = `CORP\alice`
 
-	if got := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "" || calls != 1 {
-		t.Fatalf("failed lookup = %q after %d calls; want empty after 1", got, calls)
+	if got, kept := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "" || kept || calls != 1 {
+		t.Fatalf("failed first lookup = %q, kept %t after %d calls; want no UPN", got, kept, calls)
 	}
 	now = now.Add(adUPNFailureTTL - time.Second)
-	if got := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "" || calls != 1 {
+	if got, _ := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "" || calls != 1 {
 		t.Fatalf("lookup inside the failure lifetime = %q after %d calls; want the cached failure", got, calls)
 	}
 	now = now.Add(2 * time.Second)
-	if got := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "alice@corp.example.com" || calls != 2 {
+	if got, kept := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "alice@corp.example.com" || kept || calls != 2 {
 		t.Fatalf("retried lookup = %q after %d calls; want the UPN after 2", got, calls)
 	}
 	now = now.Add(adUPNTTL)
-	if got := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "" || calls != 3 {
-		t.Fatalf("lookup after a failure = %q after %d calls; want the old UPN cleared", got, calls)
+	if got, kept := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "alice@corp.example.com" || !kept || calls != 3 {
+		t.Fatalf("lookup after a failure = %q, kept %t after %d calls; want the marked last verified UPN", got, kept, calls)
 	}
 }
 
@@ -159,7 +159,7 @@ func TestADUPNCacheUsesEachCompletedDirectoryAnswer(t *testing.T) {
 		name, current, want string
 	}{
 		{"UPN changed", "renamed@corp.example.com", "renamed@corp.example.com"},
-		{"UPN removed", "", ""},
+		{"UPN unavailable", "", "alice@corp.example.com"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Unix(1_800_000_000, 0)
@@ -167,19 +167,19 @@ func TestADUPNCacheUsesEachCompletedDirectoryAnswer(t *testing.T) {
 			cache := newADUPNCache(func(string) string { return answer })
 			cache.now = func() time.Time { return now }
 			const sid, sam = "S-1-5-21-1-2-3-1105", `CORP\alice`
-			if got := cache.lookup(sid, sam, time.Second); got != answer {
+			if got, _ := cache.lookup(sid, sam, time.Second); got != answer {
 				t.Fatalf("first UPN = %q, want %q", got, answer)
 			}
 			answer = tc.current
 			now = now.Add(adUPNTTL)
-			if got := cache.lookup(sid, sam, time.Second); got != tc.want {
+			if got, kept := cache.lookup(sid, sam, time.Second); got != tc.want || kept != (tc.current == "") {
 				t.Fatalf("current UPN = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestADUPNCacheDoesNotRepublishAnExpiredAnswerWhileRefreshing(t *testing.T) {
+func TestADUPNCacheKeepsVerifiedAnswerWhileRefreshing(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	started, finish := make(chan struct{}), make(chan struct{})
 	answer := "alice@corp.example.com"
@@ -192,17 +192,17 @@ func TestADUPNCacheDoesNotRepublishAnExpiredAnswerWhileRefreshing(t *testing.T) 
 	})
 	cache.now = func() time.Time { return now }
 	const sid, sam = "S-1-5-21-1-2-3-1105", `CORP\alice`
-	if got := cache.lookup(sid, sam, time.Second); got != answer {
+	if got, _ := cache.lookup(sid, sam, time.Second); got != answer {
 		t.Fatalf("first UPN = %q", got)
 	}
 	answer = "renamed@corp.example.com"
 	now = now.Add(adUPNTTL)
-	if got := cache.lookup(sid, sam, 0); got != "" {
-		t.Fatalf("expired UPN during refresh = %q, want none", got)
+	if got, kept := cache.lookup(sid, sam, 0); got != "alice@corp.example.com" || !kept {
+		t.Fatalf("UPN during refresh = %q, kept %t; want the marked last verified answer", got, kept)
 	}
 	<-started
 	close(finish)
-	if got := cache.lookup(sid, sam, time.Second); got != answer {
+	if got, _ := cache.lookup(sid, sam, time.Second); got != answer {
 		t.Fatalf("UPN after refresh = %q, want %q", got, answer)
 	}
 }
@@ -224,7 +224,7 @@ func TestADUPNCacheEvictedLookupCannotReplaceANewerAnswer(t *testing.T) {
 	})
 	now := time.Unix(1_800_000_000, 0)
 	cache.now = func() time.Time { return now }
-	if got := cache.lookup(sid, sam, 0); got != "" {
+	if got, _ := cache.lookup(sid, sam, 0); got != "" {
 		t.Fatalf("unfinished first lookup = %q", got)
 	}
 	<-firstStarted
@@ -236,12 +236,12 @@ func TestADUPNCacheEvictedLookupCannotReplaceANewerAnswer(t *testing.T) {
 	}
 	cache.mu.Unlock()
 	cache.lookup("other", `CORP\bob`, time.Second) // evicts the still-running first lookup
-	if got := cache.lookup(sid, sam, time.Second); got != "new@corp.example.com" {
+	if got, _ := cache.lookup(sid, sam, time.Second); got != "new@corp.example.com" {
 		t.Fatalf("new lookup = %q", got)
 	}
 	close(finishFirst)
 	<-firstDone
-	if got := cache.lookup(sid, sam, 0); got != "new@corp.example.com" {
+	if got, _ := cache.lookup(sid, sam, 0); got != "new@corp.example.com" {
 		t.Fatalf("answer after old lookup finished = %q, want the newer UPN", got)
 	}
 }
@@ -256,12 +256,12 @@ func TestADUPNCacheRetranslatesBeforeDirectoryRefresh(t *testing.T) {
 	cache.now = func() time.Time { return now }
 	const sid = "S-1-5-21-1-2-3-1105"
 	const sam = `CORP\alice`
-	if got := cache.lookup(sid, sam, time.Second); got != upn {
+	if got, _ := cache.lookup(sid, sam, time.Second); got != upn {
 		t.Fatalf("initial UPN = %q", got)
 	}
 	upn = "new@corp.example.com"
 	now = now.Add(15 * time.Minute)
-	if got := cache.lookup(sid, sam, time.Second); got != upn || calls != 2 {
+	if got, _ := cache.lookup(sid, sam, time.Second); got != upn || calls != 2 {
 		t.Fatalf("UPN after directory refresh = %q after %d translations; want %q after 2", got, calls, upn)
 	}
 }
@@ -299,10 +299,10 @@ func TestADUPNCacheDoesNotReuseAccountNameAcrossSIDs(t *testing.T) {
 		}
 		return "current@corp.example.com"
 	})
-	if got := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "former@corp.example.com" {
+	if got, _ := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "former@corp.example.com" {
 		t.Fatalf("former SID UPN = %q", got)
 	}
-	if got := cache.lookup("S-1-5-21-1-2-3-1106", name, time.Second); got != "current@corp.example.com" || calls != 2 {
+	if got, _ := cache.lookup("S-1-5-21-1-2-3-1106", name, time.Second); got != "current@corp.example.com" || calls != 2 {
 		t.Fatalf("new SID UPN = %q after %d translations", got, calls)
 	}
 }

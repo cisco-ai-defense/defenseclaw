@@ -210,6 +210,13 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 		case facts.UPN != "":
 			record.UPNSource = UPNSourceTranslateName
 		}
+		if facts.UPNKept {
+			record.UPNSource = UPNSourceWindowsKept
+			record.UPNKeptSince = now
+		}
+		if entry.previousErr == nil {
+			record = KeepLastKnownUPN(record, entry.previous)
+		}
 		publish(entry, record)
 	}
 	if entries, err := os.ReadDir(dir); err == nil {

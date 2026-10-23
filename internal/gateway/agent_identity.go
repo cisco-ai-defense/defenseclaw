@@ -19,6 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -177,6 +178,9 @@ func agentIdentityAccountUPN(userID string) (upn string, known bool) {
 	facts, ok := peerDirectoryCache().peekCurrent(userID)
 	if agentidentity.IsSID(userID) && currentIdentitySpoolDir() != "" {
 		if record, current := readIdentitySpoolFacts(userID, time.Now()); current {
+			if record.UPNSource == enterprisehooks.UPNSourceWindowsKept {
+				return "", false
+			}
 			upn := strings.TrimSpace(record.Facts.UPN)
 			return upn, upn != "" || record.Facts.Directory == useridentity.DirectoryLocal
 		}
@@ -187,6 +191,9 @@ func agentIdentityAccountUPN(userID string) (upn string, known bool) {
 		}
 	}
 	if !ok {
+		return "", false
+	}
+	if facts.UPNKept {
 		return "", false
 	}
 	upn = strings.TrimSpace(facts.UPN)
