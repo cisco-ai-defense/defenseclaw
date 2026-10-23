@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -506,5 +507,125 @@ func TestUserNativeOTLPCleanupKeepsOperatorHeadersBesideDefenseClawOnes(t *testi
 	}
 	if removed, err := RemoveUserNativeOTLP("claudecode", managed); err != nil || len(removed) != 0 {
 		t.Fatalf("second cleanup changed settings again: %v %v", removed, err)
+	}
+}
+
+// growUserNativeOTLPFile pads path with valid filler past the check's read
+// limit, keeping the DefenseClaw exporter in it, so only the size can make the
+// check refuse it.
+func growUserNativeOTLPFile(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pad := strings.Repeat("x", int(userNativeOTLPReadLimit))
+	if strings.HasSuffix(path, ".toml") {
+		data = append(data, []byte("\n# "+pad+"\n")...)
+	} else {
+		doc := map[string]interface{}{}
+		if err := json.Unmarshal(data, &doc); err != nil {
+			t.Fatal(err)
+		}
+		doc["defenseclaw_test_pad"] = pad
+		if data, err = json.Marshal(doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Managed Verify runs the residue check inside the shared Windows guardian on
+// every reconcile, against files the account controls. An agent config or a
+// setup backup past the read limit, whether real bytes or a huge sparse file,
+// must be reported unverified without being read, and repair must refuse it
+// without touching the file or the credential.
+func TestUserNativeOTLPCheckRefusesOversizedFilesUnread(t *testing.T) {
+	type target struct {
+		connector string
+		file      func(dir string) string
+	}
+	targets := []target{
+		{"codex", func(dir string) string { return filepath.Join(dir, "codex", "config.toml") }},
+		{"codex", func(dir string) string { return filepath.Join(dir, "codex_config_backup.json") }},
+		{"claudecode", func(dir string) string { return filepath.Join(dir, "claude", "settings.json") }},
+		{"claudecode", func(dir string) string { return filepath.Join(dir, "claudecode_backup.json") }},
+	}
+	for _, sparse := range []bool{false, true} {
+		for _, tc := range targets {
+			dir := t.TempDir()
+			name := tc.connector + "/" + filepath.Base(tc.file(dir))
+			if sparse {
+				name += "/sparse"
+			}
+			t.Run(name, func(t *testing.T) {
+				codexPath := filepath.Join(dir, "codex", "config.toml")
+				claudePath := filepath.Join(dir, "claude", "settings.json")
+				for _, path := range []string{codexPath, claudePath} {
+					if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				useCodexConfig(t, codexPath)
+				useClaudeSettings(t, claudePath)
+				seedEarlierCodexNativeExporter(t, dir, codexPath, "127.0.0.1:19555", "windows")
+				seedEarlierClaudeCodeNativeExporter(t, dir, claudePath, "127.0.0.1:19555", "windows")
+				managed := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ManagedEnterprise: true, GOOS: "windows"}
+				if residue, err := UserNativeOTLPResidue(tc.connector, managed); err != nil || len(residue) == 0 {
+					t.Fatalf("precondition: residue = %v, %v", residue, err)
+				}
+
+				path := tc.file(dir)
+				if sparse {
+					// A terabyte the guardian would otherwise try to allocate.
+					if err := makeSparseFile(path, 1<<40); err != nil {
+						t.Skipf("no sparse file here: %v", err)
+					}
+				} else {
+					growUserNativeOTLPFile(t, path)
+				}
+				before, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				token, err := OTLPPathTokenFilePath(dir, map[string]OTLPPathTokenScope{"codex": OTLPScopeCodex, "claudecode": OTLPScopeClaude}[tc.connector])
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				residue, err := UserNativeOTLPResidue(tc.connector, managed)
+				if !errors.Is(err, errUserNativeOTLPFileTooLarge) {
+					t.Fatalf("verify of an oversized %s = %v, %v; want it reported unverified", filepath.Base(path), residue, err)
+				}
+				if strings.Contains(err.Error(), dir) {
+					t.Fatalf("error names the account path: %v", err)
+				}
+				if _, err := RemoveUserNativeOTLP(tc.connector, managed); !errors.Is(err, errUserNativeOTLPFileTooLarge) {
+					t.Fatalf("repair of an oversized %s = %v; want it refused", filepath.Base(path), err)
+				}
+				after, err := os.Stat(path)
+				if err != nil || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+					t.Fatalf("repair touched the oversized file: %v", err)
+				}
+				if _, err := os.Lstat(token); err != nil {
+					t.Fatalf("repair revoked the credential it could not prove unused: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// The repair transform rereads the config under the larger compare-and-swap
+// bound; a file that grew past the check's limit since the first read is
+// refused there too.
+func TestUserNativeOTLPTransformRefusesOversizedInput(t *testing.T) {
+	big := bytes.Repeat([]byte(" "), int(userNativeOTLPReadLimit)+1)
+	if _, _, err := codexWithoutUserNativeOTLP(big, codexConfigBackup{}, SetupOpts{}); !errors.Is(err, errUserNativeOTLPFileTooLarge) {
+		t.Fatalf("Codex transform of oversized input: %v", err)
+	}
+	if _, _, err := claudeCodeWithoutUserNativeOTLP(big, claudeCodeBackup{}, SetupOpts{}); !errors.Is(err, errUserNativeOTLPFileTooLarge) {
+		t.Fatalf("Claude Code transform of oversized input: %v", err)
 	}
 }

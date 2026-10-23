@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -92,15 +94,85 @@ func withUserAgentConfigLock(path string, opts SetupOpts, fn func() error) error
 	return withFileLock(path, fn)
 }
 
+// userNativeOTLPReadLimit bounds every file the check reads: the agent
+// configuration and the setup backup. Managed Verify runs the check inside the
+// shared Windows guardian on every reconcile, against files the account
+// controls, so a larger file is reported unverified and never read or parsed.
+// Repair applies the same bound, so such a row stays unverified until the
+// account trims the file.
+const userNativeOTLPReadLimit int64 = 4 << 20
+
+// errUserNativeOTLPFileTooLarge marks a file over userNativeOTLPReadLimit.
+var errUserNativeOTLPFileTooLarge = errors.New("file exceeds the native OTLP check read limit")
+
+func userNativeOTLPTooLarge(name string) error {
+	return fmt.Errorf("%s is larger than %d bytes: %w", name, userNativeOTLPReadLimit, errUserNativeOTLPFileTooLarge)
+}
+
+// readUserNativeOTLPFile reads a regular file of at most
+// userNativeOTLPReadLimit bytes. It checks the size before it allocates and
+// reads through a limit, so neither a sparse file nor one that grows during
+// the read costs more than the limit. A missing file keeps its os.ErrNotExist.
+func readUserNativeOTLPFile(path string) ([]byte, error) {
+	name := filepath.Base(path)
+	before, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	// A FIFO or device would block the open or never end.
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	if before.Size() > userNativeOTLPReadLimit {
+		return nil, userNativeOTLPTooLarge(name)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return nil, fmt.Errorf("%s changed during inspection", name)
+	}
+	if opened.Size() > userNativeOTLPReadLimit {
+		return nil, userNativeOTLPTooLarge(name)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, userNativeOTLPReadLimit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > userNativeOTLPReadLimit {
+		return nil, userNativeOTLPTooLarge(name)
+	}
+	return data, nil
+}
+
+// readUserNativeOTLPBackup decodes the setup backup name in dataDir into
+// backup. A missing backup leaves backup as it is.
+func readUserNativeOTLPBackup(dataDir, name string, backup interface{}) error {
+	data, err := readUserNativeOTLPFile(filepath.Join(dataDir, name))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, backup)
+}
+
 func codexUserNativeOTLP(opts SetupOpts, apply bool) ([]string, error) {
 	configPath := codexConfigPath()
-	backup, err := (&CodexConnector{}).loadConfigBackup(opts.DataDir)
-	if err != nil && !os.IsNotExist(err) {
+	var backup codexConfigBackup
+	if err := readUserNativeOTLPBackup(opts.DataDir, "codex_config_backup.json", &backup); err != nil {
 		return nil, fmt.Errorf("load original Codex OTel config: %w", err)
 	}
-	raw, err := os.ReadFile(configPath)
+	raw, err := readUserNativeOTLPFile(configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read Codex config: %w", err)
@@ -137,6 +209,10 @@ func codexUserNativeOTLP(opts SetupOpts, apply bool) ([]string, error) {
 func codexWithoutUserNativeOTLP(raw []byte, backup codexConfigBackup, opts SetupOpts) ([]byte, []string, error) {
 	if len(raw) == 0 {
 		return nil, nil, nil
+	}
+	// The repair transform rereads the file under a larger bound.
+	if int64(len(raw)) > userNativeOTLPReadLimit {
+		return nil, nil, userNativeOTLPTooLarge("config.toml")
 	}
 	cfg := map[string]interface{}{}
 	if err := parseCodexTOML(raw, &cfg); err != nil {
@@ -195,13 +271,13 @@ func codexWithoutUserNativeOTLP(raw []byte, backup codexConfigBackup, opts Setup
 
 func claudeCodeUserNativeOTLP(opts SetupOpts, apply bool) ([]string, error) {
 	settingsPath := claudeCodeSettingsPath()
-	backup, err := (&ClaudeCodeConnector{}).loadBackup(opts.DataDir)
-	if err != nil && !os.IsNotExist(err) {
+	var backup claudeCodeBackup
+	if err := readUserNativeOTLPBackup(opts.DataDir, "claudecode_backup.json", &backup); err != nil {
 		return nil, fmt.Errorf("load Claude Code settings backup: %w", err)
 	}
-	raw, err := os.ReadFile(settingsPath)
+	raw, err := readUserNativeOTLPFile(settingsPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read Claude Code settings: %w", err)
@@ -239,6 +315,10 @@ func claudeCodeUserNativeOTLP(opts SetupOpts, apply bool) ([]string, error) {
 // /otlp/claudecode/ endpoint, a value the setup backup recorded, or the
 // earlier headers helper. Values that turn export off are left in place.
 func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts SetupOpts) ([]byte, []string, error) {
+	// The repair transform rereads the file under a larger bound.
+	if int64(len(raw)) > userNativeOTLPReadLimit {
+		return nil, nil, userNativeOTLPTooLarge("settings.json")
+	}
 	settings := map[string]interface{}{}
 	if err := json.Unmarshal(raw, &settings); err != nil || settings == nil {
 		// Claude Code ignores a settings file it cannot parse.
