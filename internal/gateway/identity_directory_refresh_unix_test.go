@@ -112,7 +112,7 @@ func TestFreshDirectoryReadRejectsOldTimedOutAnswer(t *testing.T) {
 func TestManagedMacUnassignedUPNExemptionPersistsAcrossHooks(t *testing.T) {
 	previousFresh := managedHookDirectoryNeedsFresh
 	previousHosted, previousFacts, previousBlocking := managedServiceHosted.Load(), identityFactsEnabled.Load(), identityLookupBlocking.Load()
-	previousConfirmed, previousDirectory := managedHookPeerAccountsConfirmed, managedHookPeerDirectory
+	previousConfirmed, previousHomes := managedHookPeerAccountsConfirmed, managedHookPeerHomes
 	managedHookDirectoryNeedsFresh = true
 	setManagedServiceHosted(true)
 	setIdentityFactsEnabled(true)
@@ -124,7 +124,7 @@ func TestManagedMacUnassignedUPNExemptionPersistsAcrossHooks(t *testing.T) {
 		setIdentityFactsEnabled(previousFacts)
 		setIdentityLookupBlocking(previousBlocking)
 		managedHookPeerAccountsConfirmed = previousConfirmed
-		managedHookPeerDirectory = previousDirectory
+		managedHookPeerHomes = previousHomes
 	})
 	const uid = 41965
 	cache := &managedHookPeerHomeCache{newResolver: func() unixidentity.Resolver {
@@ -141,7 +141,7 @@ func TestManagedMacUnassignedUPNExemptionPersistsAcrossHooks(t *testing.T) {
 		})
 		cache.directories.now = func() time.Time { return time.Unix(0, clock.Load()) }
 	})
-	managedHookPeerDirectory = cache.directory
+	managedHookPeerHomes = cache
 	peer := managedHookPeer{UID: uid, Name: "alice"}
 	z := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"alice@corp.example.com"}}, nil,
 		func() (managedHookLedger, error) { return managedHookLedger{}, nil })
@@ -215,6 +215,264 @@ func TestManagedMacNonblockingDirectoryReadDoesNotWait(t *testing.T) {
 		if facts, ok := cache.directory(uid, false); !ok || facts.ResolvedAt.IsZero() {
 			t.Fatalf("cached nonblocking read %d lost directory facts: %+v, ok=%t", i, facts, ok)
 		}
+	}
+}
+
+// Review of r104 Q-identity (loop round 1): when the wait of a fresh read
+// expires as its lookup completes, the outcome is read under the cache lock.
+// Here the completion takes the lock first and the expired reader second, the
+// order in which the reader used to mark an answer it had missed as pending
+// after the completion had already counted it as served: the next hook then
+// started another slow lookup. The reader returns the completed answer, and
+// a failure that completes at the boundary leaves nothing pending.
+func TestFreshDirectoryReadKeepsAnswerCompletedAtTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail bool
+	}{{"answer", false}, {"failure", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			var calls atomic.Int32
+			cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+				if calls.Add(1) == 1 {
+					close(entered)
+					<-release
+				}
+				if tc.fail {
+					return useridentity.DirectoryFacts{}, errors.New("Open Directory unavailable")
+				}
+				return useridentity.DirectoryFacts{Groups: []string{"current"}, ResolvedAt: time.Now()}, nil
+			})
+			var clock atomic.Int64
+			clock.Store(time.Unix(1_000_000, 0).UnixNano())
+			cache.now = func() time.Time { return time.Unix(0, clock.Load()) }
+			const wait = 300 * time.Millisecond
+			type result struct {
+				facts useridentity.DirectoryFacts
+				ok    bool
+			}
+			got := make(chan result, 1)
+			started := time.Now()
+			go func() {
+				facts, ok := cache.getFresh("501", wait)
+				got <- result{facts, ok}
+			}()
+			<-entered
+			cache.mu.Lock()
+			// The lookup completes and queues for the lock first; then the
+			// reader's wait expires and it queues behind the completion.
+			close(release)
+			time.Sleep(time.Until(started.Add(wait + 150*time.Millisecond)))
+			cache.mu.Unlock()
+			r := <-got
+			cache.mu.Lock()
+			pending := cache.entries["501"].pendingFresh
+			cache.mu.Unlock()
+			if tc.fail {
+				if r.ok || pending {
+					t.Fatalf("failed lookup at the boundary: ok=%t pending=%t; want no facts and nothing pending", r.ok, pending)
+				}
+				return
+			}
+			if !r.ok || !slices.Equal(r.facts.Groups, []string{"current"}) || pending {
+				t.Fatalf("answer completed at the timeout was lost: %+v ok=%t pending=%t", r.facts, r.ok, pending)
+			}
+			// A later hook still asks the directory again.
+			clock.Add(int64(identityDirectoryFreshCoalesce + time.Nanosecond))
+			if _, ok := cache.getFresh("501", wait); !ok || calls.Load() != 2 {
+				t.Fatalf("next hook: ok=%t after %d lookups; want a new lookup", ok, calls.Load())
+			}
+		})
+	}
+}
+
+// managedMacExemptFixture makes the hook path a managed Mac's: uid is alice's
+// account and its directory facts come from resolve, cached with the
+// predicates the gateway's own cache uses.
+func managedMacExemptFixture(t *testing.T, uid int, resolve func() (useridentity.DirectoryFacts, error)) (*managedHookPeerHomeCache, *atomic.Int64) {
+	t.Helper()
+	previousFresh := managedHookDirectoryNeedsFresh
+	previousHosted, previousFacts := managedServiceHosted.Load(), identityFactsEnabled.Load()
+	previousConfirmed, previousHomes := managedHookPeerAccountsConfirmed, managedHookPeerHomes
+	managedHookDirectoryNeedsFresh = true
+	setManagedServiceHosted(true)
+	setIdentityFactsEnabled(true)
+	managedHookPeerAccountsConfirmed = func() bool { return true }
+	cache := &managedHookPeerHomeCache{newResolver: func() unixidentity.Resolver {
+		return &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{uid: {Name: "alice", UID: uid, Home: "/Users/alice"}}}
+	}, now: time.Now}
+	clock := new(atomic.Int64)
+	clock.Store(time.Unix(1_000_000, 0).UnixNano())
+	cache.directoriesOnce.Do(func() {
+		cache.directories = newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) { return resolve() })
+		cache.directories.now = func() time.Time { return time.Unix(0, clock.Load()) }
+		cache.directories.incomplete = func(facts useridentity.DirectoryFacts) bool {
+			return hasUnnamedGroup(facts) || awaitingSpoolUPN(facts) || facts.OnlyPrimaryGroup
+		}
+		cache.directories.settling = openDirectorySettling
+	})
+	managedHookPeerHomes = cache
+	t.Cleanup(func() {
+		managedHookDirectoryNeedsFresh = previousFresh
+		setManagedServiceHosted(previousHosted)
+		setIdentityFactsEnabled(previousFacts)
+		managedHookPeerAccountsConfirmed = previousConfirmed
+		managedHookPeerHomes = previousHomes
+	})
+	return cache, clock
+}
+
+func managedMacAliceFacts() useridentity.DirectoryFacts {
+	return useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+		Source: useridentity.SourceMacOSOpenDirectory, Assurance: useridentity.AssuranceVerified,
+		Domain: "corp.example.com", AccountDomain: "CORP", Realm: "CORP.EXAMPLE.COM",
+		Principal: "alice@corp.example.com", UPN: "alice@corp.example.com",
+		Groups: []string{"staff", "dc-devs"}, ResolvedAt: time.Now()}
+}
+
+func waitDirectoryPublished(t *testing.T, cache *managedHookPeerHomeCache, uid int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		cache.directories.mu.Lock()
+		entry := cache.directories.entries[strconv.Itoa(uid)]
+		ready := entry != nil && entry.inflight == nil
+		cache.directories.mu.Unlock()
+		if ready {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("directory lookup was not published")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// Review of r104 Q-identity (loop round 1): with UPN or DOMAIN\user
+// exempt_users entries, a managed Mac waited for a fresh Open Directory
+// answer on every hook of every enrolled caller the entries did not name by
+// uid or exact name, up to 2 s a hook. Settled cached facts of the account
+// that holds the uid now reject a caller they do not name without a lookup.
+func TestManagedMacExemptNonmatchUsesCachedNames(t *testing.T) {
+	const uid = 41966
+	var lookups atomic.Int32
+	release := make(chan struct{})
+	releaseLookup := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseLookup)
+	cache, clock := managedMacExemptFixture(t, uid, func() (useridentity.DirectoryFacts, error) {
+		if lookups.Add(1) > 1 {
+			<-release // the directory has become slow
+		}
+		return managedMacAliceFacts(), nil
+	})
+	if _, ok := cache.directory(uid, true); !ok {
+		t.Fatal("first lookup returned no facts")
+	}
+	peerUID := uid
+	ledger := managedHookLedger{Targets: []managedHookLedgerTarget{{UID: &peerUID, Connector: "codex", OK: true}}}
+	peer := managedHookPeer{UID: uid, Name: "alice"}
+	for _, exempt := range [][]string{
+		{"carol@corp.example.com"}, {`CORP\carol`}, {`OTHER\alice`}, {"alice@other.example.com", "CORP\\bob"},
+	} {
+		z := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{ExemptUsers: exempt}, nil,
+			func() (managedHookLedger, error) { return ledger, nil })
+		for hook := 1; hook <= 3; hook++ {
+			clock.Add(int64(identityDirectoryFreshCoalesce + time.Nanosecond))
+			started := time.Now()
+			decision := z.decide(peer, "codex", "cli")
+			if elapsed := time.Since(started); elapsed > 300*time.Millisecond {
+				t.Fatalf("exempt_users %v, hook %d: enrolled caller waited %s for the directory", exempt, hook, elapsed)
+			}
+			if !decision.Allow || decision.Exempt {
+				t.Fatalf("exempt_users %v, hook %d: %+v; want an enrolled, not exempt, allow", exempt, hook, decision)
+			}
+		}
+	}
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("nonmatching callers started %d directory lookups; want only the first", got)
+	}
+}
+
+// A cached answer that names an exempt_users entry is only a possible
+// exemption: it is verified with a current answer within
+// managedHookExemptFreshWait, well inside a 2 s hook client budget. An
+// answer that is late costs the call its exemption (enrollment then
+// decides), never the call's deadline, and serves the next hook once in.
+func TestManagedMacExemptVerifiesPossibleExemptionWithinBound(t *testing.T) {
+	const uid = 41967
+	var lookups atomic.Int32
+	var slow atomic.Bool
+	release := make(chan struct{})
+	releaseLookup := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseLookup)
+	cache, clock := managedMacExemptFixture(t, uid, func() (useridentity.DirectoryFacts, error) {
+		lookups.Add(1)
+		if slow.Load() {
+			<-release
+		}
+		return managedMacAliceFacts(), nil
+	})
+	if _, ok := cache.directory(uid, true); !ok {
+		t.Fatal("first lookup returned no facts")
+	}
+	peer := managedHookPeer{UID: uid, Name: "alice"}
+	for _, entry := range []string{"alice@corp.example.com", `CORP\alice`} {
+		z := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{ExemptUsers: []string{entry}}, nil,
+			func() (managedHookLedger, error) { return managedHookLedger{}, nil })
+		slow.Store(false)
+		clock.Add(int64(identityDirectoryFreshCoalesce + time.Nanosecond))
+		if decision := z.decide(peer, "codex", "cli"); !decision.Allow || !decision.Exempt {
+			t.Fatalf("%s: current answer did not exempt: %+v", entry, decision)
+		}
+		slow.Store(true)
+		clock.Add(int64(identityDirectoryFreshCoalesce + time.Nanosecond))
+		started := time.Now()
+		decision := z.decide(peer, "codex", "cli")
+		elapsed := time.Since(started)
+		if elapsed >= identityDirectoryBudget || elapsed > managedHookExemptFreshWait+500*time.Millisecond {
+			t.Fatalf("%s: slow directory held the hook %s; want at most about %s", entry, elapsed, managedHookExemptFreshWait)
+		}
+		if decision.Allow || decision.Exempt {
+			t.Fatalf("%s: exemption without a current answer: %+v", entry, decision)
+		}
+		releaseLookup()
+		waitDirectoryPublished(t, cache, uid)
+		clock.Add(int64(identityDirectoryFreshCoalesce + time.Nanosecond))
+		before := lookups.Load()
+		if decision := z.decide(peer, "codex", "cli"); !decision.Allow || !decision.Exempt {
+			t.Fatalf("%s: next hook lost the late answer: %+v", entry, decision)
+		}
+		if got := lookups.Load(); got != before {
+			t.Fatalf("%s: next hook started another lookup instead of using the late answer", entry)
+		}
+		release = make(chan struct{})
+		releaseLookup = sync.OnceFunc(func() { close(release) })
+		t.Cleanup(releaseLookup)
+	}
+}
+
+// An incomplete cached answer (only the primary group, no UPN or domain yet)
+// binds no names: it does not reject a UPN exemption; the current answer
+// decides it.
+func TestManagedMacExemptUnsettledCacheWaitsForNames(t *testing.T) {
+	const uid = 41968
+	var lookups atomic.Int32
+	cache, clock := managedMacExemptFixture(t, uid, func() (useridentity.DirectoryFacts, error) {
+		if lookups.Add(1) == 1 {
+			return useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory,
+				Assurance: useridentity.AssuranceVerified, Groups: []string{"staff"}, OnlyPrimaryGroup: true,
+				ResolvedAt: time.Now()}, nil
+		}
+		return managedMacAliceFacts(), nil
+	})
+	if _, ok := cache.directory(uid, true); !ok {
+		t.Fatal("first lookup returned no facts")
+	}
+	clock.Add(int64(identityDirectoryFreshCoalesce + time.Nanosecond))
+	z := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"alice@corp.example.com"}}, nil,
+		func() (managedHookLedger, error) { return managedHookLedger{}, nil })
+	if decision := z.decide(managedHookPeer{UID: uid, Name: "alice"}, "codex", "cli"); !decision.Allow || !decision.Exempt {
+		t.Fatalf("incomplete cached answer rejected a UPN exemption: %+v", decision)
 	}
 }
 

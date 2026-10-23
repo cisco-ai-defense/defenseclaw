@@ -8,6 +8,7 @@ package gateway
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -95,4 +96,14 @@ func resolveWindowsDirectoryFacts(sid string, upnWait time.Duration) (useridenti
 // verifiedIdentityDirectory returns the directory facts of a verified SID.
 func verifiedIdentityDirectory(identity string, block bool) (useridentity.DirectoryFacts, bool) {
 	return windowsDirectoryFacts(identity, block)
+}
+
+// exemptIdentityDirectory returns the directory facts exempt matches a hook
+// caller's names with. Windows reads them as a blocking hook call does;
+// cached returns none, so no cached answer rejects an exemption early.
+func exemptIdentityDirectory(uid int, cached bool) (useridentity.DirectoryFacts, bool) {
+	if cached {
+		return useridentity.DirectoryFacts{}, false
+	}
+	return verifiedIdentityDirectory(strconv.Itoa(uid), true)
 }
