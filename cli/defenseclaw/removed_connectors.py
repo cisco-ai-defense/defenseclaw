@@ -26,6 +26,7 @@ module in 1.1.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -388,6 +389,22 @@ def _kept_token(c: _Removed, token: str) -> Leftover:
     return Leftover(token, what, step)
 
 
+def _stub_publication_receipt(data_dir: str, c: _Removed) -> str:
+    """Find the read-only marker for an interrupted module CAS publication."""
+    script = os.path.abspath(os.path.join(data_dir, "hooks", c.script))
+    digest = hashlib.sha256(os.fsencode(script)).hexdigest()[:24]
+    name = f".defenseclaw-cas-{digest}.intent"
+    for folder in (
+        os.path.join(data_dir, "connector_backups", c.name),
+        os.path.join(data_dir, "hooks", ".defenseclaw-cas-state"),
+    ):
+        for suffix in ("", ".complete"):
+            candidate = os.path.join(folder, name + suffix)
+            if os.path.lexists(candidate):
+                return candidate
+    return ""
+
+
 def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
     items: list[Leftover] = []
     teardown = f"run defenseclaw-gateway connector teardown --connector {c.name}"
@@ -420,6 +437,7 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
         if left:
             items.append(left)
     script = os.path.join(hooks, c.script)
+    publication_receipt = _stub_publication_receipt(data_dir, c)
     state = _script_state(script, c)
     # The teardown keeps the tokens while an old hook may still run at the
     # script path (removed.go hookLeft): they go once its step is done.
@@ -448,6 +466,14 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
         token_step = f"follow the step for {script} first"
     elif state != "absent":
         items.append(Leftover(script, state, "delete it once nothing above runs it"))
+    if publication_receipt:
+        items.append(
+            Leftover(
+                publication_receipt,
+                "interrupted publication of the stub that blocks every call; cleanup is incomplete",
+                teardown + " before deleting saved copies or tokens; keep this receipt if teardown reports an error",
+            )
+        )
     if c.name == "openhands":
         record = os.path.join(hooks, ".hookcfg.openhands")
         if os.path.lexists(record):
@@ -455,11 +481,14 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
             items.append(Leftover(record, what, "delete it"))
     backups = os.path.join(data_dir, "connector_backups", c.name)
     if os.path.lexists(backups):
+        backup_step = "copy back what you need, then delete this folder"
+        if publication_receipt:
+            backup_step = "do not delete this folder until " + teardown + " has recovered the interrupted publication"
         items.append(
             Leftover(
                 backups,
                 "the copies of your files DefenseClaw saved before its setup changed them (pristine_bytes, base64)",
-                "copy back what you need, then delete this folder",
+                backup_step,
             )
         )
     if c.name == "omnigent" and os.path.isdir(backups):

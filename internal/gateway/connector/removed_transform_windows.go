@@ -25,3 +25,7 @@ func removedStubTransform(
 	// Retire it now so teardown leaves only the saved copies it reports.
 	return recoverAtomicTransformWithStateDir(path, stateDir)
 }
+
+func removedStubRecoveryDir(_ string, stateDir string) string {
+	return stateDir
+}

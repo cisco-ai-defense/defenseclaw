@@ -454,6 +454,19 @@ func (c removedOnlyConnector) preflightTokens(dataDir string) error {
 // them while the old file is still at the path).
 func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	path := c.scriptPath(dataDir)
+	// The CAS may have detached the verified script before a process stopped.
+	// In that state the path is absent, but its old bytes and the staged stub
+	// are still protected by the recovery intent. Reconcile it before deciding
+	// that there is no script left to replace or revoking any tokens.
+	receipt, stateDir, err := c.pendingStubPublication(dataDir)
+	if err != nil {
+		return fmt.Errorf("inspect interrupted stub publication for %s: %w", path, err)
+	}
+	if receipt != "" {
+		if err := recoverAtomicTransformWithStateDir(path, stateDir); err != nil {
+			return fmt.Errorf("recover interrupted stub publication for %s: %w", path, err)
+		}
+	}
 	state, _, data, original, err := c.scriptStateAndLinks(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w; nothing was changed", path, err)
@@ -502,6 +515,32 @@ func (c removedOnlyConnector) replaceScript(dataDir string) error {
 		return fmt.Errorf("replace %s with the stub that blocks every call: %w (writing it into the file: %v)", path, err, inPlace)
 	}
 	return nil
+}
+
+// pendingStubPublication reads the exact CAS recovery namespace used to
+// publish this connector's stub. It never creates a backup directory during
+// a no-op teardown or a read-only verification.
+func (c removedOnlyConnector) pendingStubPublication(dataDir string) (string, string, error) {
+	path := c.scriptPath(dataDir)
+	stateDir := removedStubRecoveryDir(path, filepath.Join(dataDir, "connector_backups", c.name))
+	info, err := os.Lstat(stateDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", stateDir, nil
+	}
+	if err != nil {
+		return "", stateDir, err
+	}
+	if !info.IsDir() {
+		return "", stateDir, fmt.Errorf("recovery directory %s is not a directory", stateDir)
+	}
+	loaded, err := loadAtomicTransformIntentWithStates(path, stateDir)
+	if err != nil {
+		return "", stateDir, err
+	}
+	if loaded.exists {
+		return loaded.path, stateDir, nil
+	}
+	return "", stateDir, nil
 }
 
 // publishVerifiedStub binds the final publication to the file verified by
@@ -781,6 +820,11 @@ func removedPutBack(file *os.File, old []byte, n int, cause error) error {
 // fails.
 func (c removedOnlyConnector) hookLeft(dataDir string) error {
 	path := c.scriptPath(dataDir)
+	if receipt, _, err := c.pendingStubPublication(dataDir); err != nil {
+		return fmt.Errorf("inspect interrupted stub publication for %s: %w", path, err)
+	} else if receipt != "" {
+		return fmt.Errorf("interrupted stub publication for %s is still pending; run %s before removing saved copies or tokens", path, c.teardownCommand())
+	}
 	state, links, _, _, err := c.scriptStateAndLinks(path)
 	switch {
 	case err != nil:
@@ -959,6 +1003,14 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 		}
 	}
 	script := c.scriptPath(opts.DataDir)
+	publicationReceipt, publicationStateDir, publicationErr := c.pendingStubPublication(opts.DataDir)
+	if publicationErr != nil {
+		add(publicationStateDir, fmt.Sprintf("could not inspect interrupted stub publication (%v)", publicationErr),
+			"rerun "+c.teardownCommand()+"; do not delete saved copies or tokens until recovery succeeds")
+	} else if publicationReceipt != "" {
+		add(publicationReceipt, "interrupted publication of the stub that blocks every call; cleanup is incomplete",
+			"rerun "+c.teardownCommand()+" before deleting saved copies or tokens; keep this receipt if recovery fails")
+	}
 	state, links, _, _, err := c.scriptStateAndLinks(script)
 	tokenStep := c.teardownCommand()
 	switch {
@@ -985,8 +1037,12 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 	}
 	backups := filepath.Join(opts.DataDir, "connector_backups", c.name)
 	if _, err := os.Lstat(backups); err == nil {
+		step := "copy back what you need, then delete this folder"
+		if publicationReceipt != "" || publicationErr != nil {
+			step = "do not delete this folder until " + c.teardownCommand() + " has recovered the interrupted publication"
+		}
 		add(backups, "the copies of your files DefenseClaw saved before its setup changed them (pristine_bytes, base64)",
-			"copy back what you need, then delete this folder")
+			step)
 	}
 	for _, saved := range c.editedCopies(opts.DataDir) {
 		what := "your edited " + c.script

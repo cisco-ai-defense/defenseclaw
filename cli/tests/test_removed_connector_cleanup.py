@@ -18,6 +18,7 @@ step to remove it by hand.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -93,6 +94,25 @@ class _Host(unittest.TestCase):
 
 
 class LeftoversTests(_Host):
+    def test_interrupted_stub_publication_is_reported_before_backup_deletion(self):
+        for connector in removed_connectors._CONNECTORS:
+            backups = os.path.join(self.data, "connector_backups", connector.name)
+            script = os.path.abspath(os.path.join(self.hooks, connector.script))
+            digest = hashlib.sha256(os.fsencode(script)).hexdigest()[:24]
+            for folder, suffix in (
+                (backups, ""),
+                (os.path.join(self.hooks, ".defenseclaw-cas-state"), ".complete"),
+            ):
+                with self.subTest(connector=connector.name, folder=folder):
+                    intent = _write(os.path.join(folder, f".defenseclaw-cas-{digest}.intent{suffix}"), "pending\n")
+                    items = self.items(connector.name)
+                    self.assertIn(intent, items)
+                    self.assertIn("interrupted", items[intent].what)
+                    self.assertIn("connector teardown --connector " + connector.name, items[intent].step)
+                    if folder == backups:
+                        self.assertIn("do not delete", items[backups].step)
+                    os.remove(intent)
+
     def test_lists_everything_the_openhands_teardown_left(self):
         config = self.openhands()
         items = self.items("openhands")
@@ -406,6 +426,22 @@ class GoParityTests(unittest.TestCase):
 
 
 class DoctorTests(_Host):
+    def test_interrupted_publication_does_not_claim_a_live_stub(self):
+        c = removed_connectors._CONNECTORS[1]
+        script = os.path.abspath(os.path.join(self.hooks, c.script))
+        digest = hashlib.sha256(os.fsencode(script)).hexdigest()[:24]
+        _write(os.path.join(self.data, "connector_backups", c.name, f".defenseclaw-cas-{digest}.intent"), "pending\n")
+        result = _DoctorResult()
+        with (
+            patch.object(cmd_doctor, "_json_mode", True),
+            patch.object(removed_connectors, "leftovers", lambda data_dir: _leftovers(data_dir, self.home)),
+        ):
+            _check_removed_connector_cleanup(SimpleNamespace(data_dir=self.data), result)
+        [check] = result.checks
+        self.assertIn("interrupted publication", check["detail"])
+        self.assertIn("teardown", check["remediation"])
+        self.assertNotIn("blocked by DefenseClaw's stub", check["remediation"])
+
     def test_warns_with_each_step(self):
         config = self.openhands()
         result = _DoctorResult()
