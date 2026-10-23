@@ -468,6 +468,16 @@ Other recovery notes:
   or `etc` stops the gateway from starting. `repair`, `/ensure`, `/uninstall` and
   recovery put the deployment's permissions back. A redaction correlation key
   another account can open is refused before any service stops.
+- If Setup `/repair` refuses because the running gateway's installed config
+  cannot be validated for rollback, restore an approved, gateway-valid
+  `config.yaml` and retry `/repair`. If the refusal names an administrator-selected
+  policy, rule-pack or JSONL path that Repair does not restamp, correct
+  its permissions and the gateway service account's access before retrying.
+  Repair restores ACLs on its installed config, runtime root, bundle store and
+  protected credential store;
+  it leaves those administrator-selected paths in place. When `deployment.json` is readable, Setup
+  `/ensure CONFIG=<approved config>` can replace the invalid installed config.
+  All paths are checked again after Repair restores its managed permissions.
 - The rollback never deletes content in an account's `%USERPROFILE%\.defenseclaw`
   it cannot prove DefenseClaw wrote; it renames the folder to
   `.defenseclaw.rollback-<random>`. Review and delete that folder.

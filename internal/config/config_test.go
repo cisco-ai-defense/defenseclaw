@@ -583,7 +583,7 @@ func TestManagedEnterpriseWindowsPeerAuthKnobsAreRejected(t *testing.T) {
 			cfg.Managed.AllowedTeamIDs = c.team
 			cfg.Managed.AllowedSigningIDs = c.sig
 			cfg.Managed.AllowedBundleIDs = c.id
-			err := validateManagedEnterpriseWindowsPeerAuthKnobs(cfg)
+			err := ValidateManagedEnterpriseWindowsPeerAuthKnobs(cfg)
 			if runtime.GOOS != "windows" {
 				if err != nil {
 					t.Fatalf("non-windows: got err=%v, want nil (validator scoped to windows)", err)

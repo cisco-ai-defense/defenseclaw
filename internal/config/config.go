@@ -3435,7 +3435,7 @@ func ValidateManagedEnterpriseListenerBindings(cfg *Config) error {
 	return nil
 }
 
-// validateManagedEnterpriseWindowsPeerAuthKnobs refuses to load a
+// ValidateManagedEnterpriseWindowsPeerAuthKnobs refuses to load a
 // managed_enterprise config on Windows that carries non-empty
 // AllowedTeamIDs / AllowedSigningIDs / AllowedBundleIDs. Those allowlists
 // only take effect on macOS / linux, where LOCAL_PEERCRED-style peer
@@ -3454,7 +3454,7 @@ func ValidateManagedEnterpriseListenerBindings(cfg *Config) error {
 // unmanaged/BYOD contract (unmanaged doesn't ship the IPC surface at
 // all outside dev rigs), so this validator is scoped to
 // managed_enterprise on Windows.
-func validateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
+func ValidateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}

@@ -62,7 +62,7 @@ func validateManagedEnterpriseRuntime(cfg *Config, checkPolicyInputs, checkDataD
 			return err
 		}
 	}
-	if err := validateManagedEnterpriseWindowsPeerAuthKnobs(cfg); err != nil {
+	if err := ValidateManagedEnterpriseWindowsPeerAuthKnobs(cfg); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "managed_ipc_peer_auth_unsupported_on_windows")
 		}

@@ -1498,3 +1498,174 @@ Invoke-Case 'valid drifted' $valid $true $full
     assert "only Setup /repair" in cases["garbage without payload"]["repair"]
     assert cases["valid drifted"]["read"].startswith("managed DACL is not protected")
     assert cases["valid drifted"]["repair"].startswith("managed DACL is not protected")
+
+
+def _repair_rollback_config_cases(tmp_path: Path) -> dict[str, dict]:
+    """A running gateway can hold the last good policy after config.yaml is edited.
+
+    Repair must ask the authenticated replacement gateway to check the
+    rollback config before rebuilding deployment.json or opening a transaction.
+    An ACL drift that Repair can heal must not block that check.
+    """
+    import json
+
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    module = _text(MODULE)
+    entry = _function_body(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    assert entry.index("Assert-DefenseClawRepairRollbackConfig `") < entry.index(
+        "[void](Repair-DefenseClawUnreadableDeploymentMetadata `"
+    )
+    assert entry.index("Assert-DefenseClawRepairRollbackConfig `") < entry.index(
+        "return Invoke-DefenseClawInstallLikeLifecycle `"
+    )
+    install = _function_body(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    repair_stamp = install.index("if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {")
+    stamp_end = install.index("\n        }\n", repair_stamp)
+    assert "Set-DefenseClawManagedAcls" in install[repair_stamp:stamp_end]
+    assert "Set-DefenseClawStandaloneSecretsAcls" in install[repair_stamp:stamp_end]
+    assert install.index("$snapshot = New-DefenseClawTransaction `") < repair_stamp
+    assert install.index("Stop-DefenseClawService -Name $GatewayServiceName") < repair_stamp
+    assert repair_stamp < install.index("Assert-DefenseClawInstalledConfig -Layout $Layout")
+    assert "[string]$GatewayPath" in _function_body(module, "Invoke-DefenseClawGatewayCommand")
+    functions = "\n".join(
+        _function_body(module, name)
+        for name in (
+            "Assert-DefenseClawInstalledConfig",
+            "Assert-DefenseClawRepairRollbackConfig",
+            "Repair-DefenseClawUnreadableDeploymentMetadata",
+        )
+    )
+    harness = tmp_path / "repair-rollback-config.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n"
+        + functions
+        + r"""
+$script:SchemaVersion = 1
+$script:AdministratorsSID = 'S-1-5-32-544'
+$script:UnreadableMetadataMessage = 'could not read the installed deployment metadata'
+$root = '__ROOT__'
+$Layout = @{
+    ConfigPath = Join-Path $root 'config.yaml'; MetadataPath = Join-Path $root 'deployment.json'
+    PendingPath = Join-Path $root 'pending.json'; GatewayPath = Join-Path $root 'installed-gateway.exe'
+    RuntimeDirectory = Join-Path $root 'runtime'; CLIPath = Join-Path $root 'defenseclaw.exe'
+    InstallRoot = Join-Path $root 'install'; StateRoot = Join-Path $root 'state'
+}
+$Sources = @{ gateway = @{ path = 'authenticated-replacement-gateway.exe' } }
+foreach ($name in @('acp', 'hook', 'sensor_helper', 'installer', 'module')) { $Sources[$name] = @{} }
+function Get-DefenseClawServiceChecked { param($Name) return [pscustomobject]@{ Status = $global:ServiceStatus } }
+function Assert-DefenseClawSourceDescriptorCurrent { param($Source) $global:SourceChecks++ }
+function Invoke-DefenseClawGatewayCommand {
+    param($Layout, $GatewayServiceName, $Arguments, $GatewayPath)
+    $global:GatewayCalls++
+    if ($GatewayPath -cne $Sources.gateway.path -or $Arguments -notcontains 'validate-service-config' -or
+        $Arguments -contains '--record-lifecycle' -or $Arguments -notcontains $Layout.ConfigPath) {
+        throw 'repair did not use the authenticated gateway read-only config check'
+    }
+    if ($global:TrustProblem -and ($Arguments -notcontains '--repair-rollback' -or
+        $global:TrustProblem.Contains("outside Repair's ACL scope"))) {
+        throw $global:TrustProblem
+    }
+    if ([IO.File]::ReadAllText($Layout.ConfigPath).Contains('0.0.0.0')) {
+        throw 'gateway.api_bind must bind to exact canonical 127.0.0.1'
+    }
+    return 0
+}
+function Get-DefenseClawDeploymentMetadata {
+    param($Layout, [switch]$Required)
+    $raw = [IO.File]::ReadAllText($Layout.MetadataPath)
+    if (-not $raw.StartsWith('{')) { throw "$($script:UnreadableMetadataMessage) $($Layout.MetadataPath)" }
+    return $raw | ConvertFrom-Json
+}
+function Test-DefenseClawServiceExists { param($Name) return $true }
+function Assert-DefenseClawOwnedServiceOrAbsent { param($Name, $ExpectedGatewayPath) }
+function Write-DefenseClawJsonAtomic {
+    param($Path, $Value)
+    [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 10))
+}
+function Set-DefenseClawPathAcl { param($Path, $Kind, $GatewayServiceSID) $global:Stamps++ }
+function Invoke-Case([string]$Name, [string]$Metadata, [string]$Bind, [string]$Status,
+        [bool]$Pending, [string]$TrustProblem = '') {
+    [IO.File]::WriteAllText($Layout.MetadataPath, $Metadata)
+    [IO.File]::WriteAllText($Layout.ConfigPath, "gateway:`n  api_bind: $Bind`n")
+    if ($Pending) { [IO.File]::WriteAllText($Layout.PendingPath, '{}') }
+    elseif (Test-Path -LiteralPath $Layout.PendingPath) { Remove-Item -LiteralPath $Layout.PendingPath }
+    $global:ServiceStatus = $Status
+    $global:TrustProblem = $TrustProblem
+    $global:GatewayCalls = 0
+    $global:SourceChecks = 0
+    $global:Stamps = 0
+    $errorText = ''
+    try {
+        Assert-DefenseClawRepairRollbackConfig -Layout $Layout -Sources $Sources -GatewayServiceName 'DefenseClawGateway'
+        [void](Repair-DefenseClawUnreadableDeploymentMetadata -Layout $Layout -Sources $Sources `
+            -GatewayServiceName 'DefenseClawGateway' -GuardianServiceName 'DefenseClawHookGuardian' `
+            -WarningAction SilentlyContinue)
+    }
+    catch { $errorText = $_.Exception.Message }
+    [pscustomobject]@{
+        name = $Name; error = $errorText; metadata = [IO.File]::ReadAllText($Layout.MetadataPath)
+        pending = (Test-Path -LiteralPath $Layout.PendingPath); gateway_calls = $global:GatewayCalls
+        source_checks = $global:SourceChecks; stamps = $global:Stamps
+    } | ConvertTo-Json -Compress
+}
+Invoke-Case 'invalid malformed' 'broken metadata' '0.0.0.0' 'Running' $false
+Invoke-Case 'invalid valid' '{"installed":true}' '0.0.0.0' 'Running' $false
+Invoke-Case 'valid malformed' 'broken metadata' '127.0.0.1' 'Running' $false
+Invoke-Case 'runtime ACL drift' 'broken metadata' '127.0.0.1' 'Running' $false 'managed data_dir trust check failed'
+Invoke-Case 'bundle service read ACL drift' 'broken metadata' '127.0.0.1' 'Running' $false 'gateway service cannot read bundle rule pack'
+Invoke-Case 'external policy ACL drift' 'broken metadata' '127.0.0.1' 'Running' $false "policy_dir is outside Repair's ACL scope"
+Invoke-Case 'transitional service' 'broken metadata' '127.0.0.1' 'StartPending' $false
+Invoke-Case 'pending recovery' 'broken metadata' '0.0.0.0' 'Running' $true
+Invoke-Case 'stopped deferred' 'broken metadata' '0.0.0.0' 'Stopped' $false
+""".replace("__ROOT__", str(tmp_path)),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    cases = {case["name"]: case for case in map(json.loads, completed.stdout.strip().splitlines())}
+    return cases
+
+
+def test_repair_checks_the_running_gateway_rollback_config_before_rebuilding_metadata(tmp_path: Path) -> None:
+    import json
+
+    cases = _repair_rollback_config_cases(tmp_path)
+    for name, original in (("invalid malformed", "broken metadata"), ("invalid valid", '{"installed":true}')):
+        assert "gateway.api_bind" in cases[name]["error"], cases[name]
+        assert cases[name]["metadata"] == original, cases[name]
+        assert cases[name]["gateway_calls"] == 1, cases[name]
+        assert cases[name]["source_checks"] == 2, cases[name]
+        assert cases[name]["stamps"] == 0, cases[name]
+    assert cases["valid malformed"]["error"] == "", cases["valid malformed"]
+    assert json.loads(cases["valid malformed"]["metadata"])["installed"] is True
+    assert cases["valid malformed"]["stamps"] == 1
+    for name in ("runtime ACL drift", "bundle service read ACL drift"):
+        assert cases[name]["error"] == "", cases[name]
+        assert json.loads(cases[name]["metadata"])["installed"] is True, cases[name]
+        assert cases[name]["stamps"] == 1, cases[name]
+    assert "outside Repair's ACL scope" in cases["external policy ACL drift"]["error"]
+    assert cases["external policy ACL drift"]["metadata"] == "broken metadata"
+    assert cases["external policy ACL drift"]["stamps"] == 0
+    assert cases["transitional service"]["gateway_calls"] == 0
+    assert cases["transitional service"]["metadata"] == "broken metadata"
+    assert cases["pending recovery"]["metadata"] == "broken metadata"
+    assert cases["pending recovery"]["gateway_calls"] == 0
+    assert cases["stopped deferred"]["gateway_calls"] == 0
+
+
+def test_repair_rollback_refusal_names_the_supported_next_step(tmp_path: Path) -> None:
+    cases = _repair_rollback_config_cases(tmp_path)
+    for name in ("invalid malformed", "invalid valid"):
+        assert "Next step:" in cases[name]["error"], cases[name]
+        assert "/ensure CONFIG=" in cases[name]["error"], cases[name]
+    assert "administrator-selected path permissions" in cases["external policy ACL drift"]["error"]
+    assert "Next step:" in cases["transitional service"]["error"]
+    assert "retry Setup /repair" in cases["transitional service"]["error"]

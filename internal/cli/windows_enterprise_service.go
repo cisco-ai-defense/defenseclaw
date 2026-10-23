@@ -1743,6 +1743,7 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 		jsonOutput     bool
 		record         bool
 		recordRestored bool
+		repairRollback bool
 	)
 	cmd := &cobra.Command{
 		Use:          "validate-service-config",
@@ -1750,10 +1751,19 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 		Hidden:       true,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if repairRollback && (record || recordRestored) {
+				return errors.New("repair-rollback is read-only and cannot record a config generation")
+			}
 			if recordRestored {
 				return recordRestoredWindowsServiceConfig(cmd, configPath, dataDir, serviceAccount, jsonOutput)
 			}
-			report, err := validateWindowsServiceConfig(configPath, dataDir, serviceAccount, record)
+			var report windowsServiceConfigValidation
+			var err error
+			if repairRollback {
+				report, err = validateWindowsRepairRollbackConfig(configPath, dataDir, serviceAccount)
+			} else {
+				report, err = validateWindowsServiceConfig(configPath, dataDir, serviceAccount, record)
+			}
 			if jsonOutput {
 				if err != nil {
 					_ = newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(map[string]any{
@@ -1780,9 +1790,62 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 		"migrate a config_version 8 config and record the installed config generation (install-like lifecycle only)")
 	cmd.Flags().BoolVar(&recordRestored, "record-restored", false,
 		"record the config a lifecycle rollback restored as a new generation, without validating or migrating it")
+	cmd.Flags().BoolVar(&repairRollback, "repair-rollback", false,
+		"read-only rollback preflight for Repair; ACL trust is checked after Repair restamps managed paths")
 	_ = cmd.MarkFlagRequired("config")
 	_ = cmd.MarkFlagRequired("data-dir")
 	return cmd
+}
+
+// validateWindowsRepairRollbackConfig checks the config a running gateway
+// would have to restart on if Repair rolls back. It checks content and paths
+// outside Repair's ACL scope before stopping the service. Managed ACLs are
+// left to the journaled Repair and checked again after restamping.
+func validateWindowsRepairRollbackConfig(configPath, expectedDataDir, serviceAccount string) (windowsServiceConfigValidation, error) {
+	var report windowsServiceConfigValidation
+	configPath, err := filepath.Abs(strings.TrimSpace(configPath))
+	if err != nil {
+		return report, fmt.Errorf("resolve config path: %w", err)
+	}
+	expectedDataDir, err = filepath.Abs(strings.TrimSpace(expectedDataDir))
+	if err != nil {
+		return report, fmt.Errorf("resolve data dir: %w", err)
+	}
+	restore := setTemporaryEnvironment(map[string]string{
+		managed.ConfigPathEnv:            configPath,
+		managed.DeploymentModeEnv:        managed.DeploymentModeManagedEnterprise,
+		managed.WindowsServiceAccountEnv: strings.TrimSpace(serviceAccount),
+		"DEFENSECLAW_HOME":               expectedDataDir,
+	})
+	defer restore()
+	loaded, err := compileStandaloneGatewayRepairRollbackConfig(configPath, expectedDataDir)
+	if err != nil {
+		return report, err
+	}
+	loadedDataDir, err := filepath.Abs(loaded.DataDir)
+	if err != nil {
+		return report, fmt.Errorf("resolve loaded data_dir: %w", err)
+	}
+	if !strings.EqualFold(filepath.Clean(loadedDataDir), filepath.Clean(expectedDataDir)) {
+		return report, fmt.Errorf("managed data_dir %q does not match protected runtime %q", loadedDataDir, expectedDataDir)
+	}
+	apiBind := strings.TrimSpace(loaded.Gateway.APIBind)
+	if apiBind == "" {
+		apiBind = "127.0.0.1"
+	}
+	report = windowsServiceConfigValidation{
+		SchemaVersion:  1,
+		OK:             true,
+		ConfigPath:     filepath.Clean(configPath),
+		DataDir:        filepath.Clean(loadedDataDir),
+		DeploymentMode: loaded.DeploymentMode,
+		APIBind:        apiBind,
+		Profile:        managed.ProfileStandalone,
+	}
+	if loaded.Guardrail.Enabled {
+		report.GuardrailBind = loaded.Guardrail.EffectiveHost()
+	}
+	return report, nil
 }
 
 // The signed standalone installer asks its authenticated gateway whether the
