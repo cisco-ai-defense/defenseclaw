@@ -276,6 +276,126 @@ func TestWindowsBundleEnsureRestoresConfigChangedOutsideTheLifecycle(t *testing.
 	}
 }
 
+// A plain ensure settles receipts before restoring the confirmed bundle. A
+// candidate whose install was committed must remain installed while the
+// gateway is unavailable, so the next ensure can confirm that same receipt.
+func TestWindowsBundleRestoreKeepsCommittedPendingCandidate(t *testing.T) {
+	const candidateID = "b-01JA00000000000000000000D2"
+	for _, state := range []string{enterprisebundle.StateStaged, enterprisebundle.StateApplied} {
+		t.Run(state, func(t *testing.T) {
+			host := newWindowsBundleRestoreHost(t)
+			driver := newWindowsBundleDriver(host.layout)
+			candidate := append(append([]byte(nil), host.bundleConfig...), []byte("# signed candidate\n")...)
+			rc := windowsKilledApplyReceipt(t, driver, candidateID, 6, candidate, state)
+			if state == enterprisebundle.StateStaged {
+				recordWindowsBundleTestCommit(t, host.layout, rc, candidate)
+			}
+			livePolicy := windowsBundlePolicy
+			windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return nil }
+
+			cmd, _ := windowsBundleCommand()
+			opts := windowsBundleRestoreOptions()
+			if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts); done || err != nil {
+				t.Fatalf("plain ensure prepare: done=%t err=%v", done, err)
+			}
+			if got := windowsBundleReceiptState(t, host.layout, rc.ReceiptID); got.State != state {
+				t.Fatalf("outage settled candidate to %s, want %s", got.State, state)
+			}
+			if restore := restoreWindowsBundleConfig(t.Context(), windowsBundleSettleReplacing(opts)); restore.failed() || len(restore.changes) != 0 {
+				t.Fatalf("outage restored over pending candidate: %+v", restore)
+			}
+			if installed, err := os.ReadFile(host.layout.ConfigPath); err != nil || !bytes.Equal(installed, candidate) {
+				t.Fatalf("pending candidate no longer installed: %q (%v)", installed, err)
+			}
+			if _, err := os.Stat(host.rejectedPath()); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("pending candidate was rejected: %v", err)
+			}
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			finishWindowsEnterpriseBundle(cmd, opts, result)
+			if !windowsBundleHasCode(result.Warnings, enterprisebundle.WarnBundlePending) {
+				t.Fatalf("plain ensure did not report the pending receipt: %+v", result.Warnings)
+			}
+			result.Installed = true
+			addWindowsBundleEnforcementError(result, opts, false)
+			var pendingProblem string
+			for _, problem := range result.Errors {
+				if problem.Code == bundleNotAppliedCode {
+					pendingProblem = problem.Message
+				}
+			}
+			if !strings.Contains(pendingProblem, "receipt remains pending") {
+				t.Fatalf("plain ensure did not name the pending candidate: %+v", result.Errors)
+			}
+
+			windowsBundlePolicy = livePolicy
+			next := windowsBundleRestoreOptions()
+			if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", next); done || err != nil {
+				t.Fatalf("recovered ensure prepare: done=%t err=%v", done, err)
+			}
+			confirmed := windowsBundleReceiptState(t, host.layout, rc.ReceiptID)
+			current, err := driver.Store.LoadState()
+			if err != nil || confirmed.State != enterprisebundle.StateConfirmed || current.Current == nil || current.Current.BundleID != candidateID {
+				t.Fatalf("candidate was not confirmed after recovery: receipt=%+v state=%+v err=%v", confirmed, current, err)
+			}
+			if installed, err := os.ReadFile(host.layout.ConfigPath); err != nil || !bytes.Equal(installed, candidate) {
+				t.Fatalf("confirmation changed the candidate config: %q (%v)", installed, err)
+			}
+		})
+	}
+}
+
+func TestWindowsBundleRestoreReinstallsCurrentAfterCandidateDisproved(t *testing.T) {
+	const candidateID = "b-01JA00000000000000000000D3"
+	host := newWindowsBundleRestoreHost(t)
+	driver := newWindowsBundleDriver(host.layout)
+	candidate := append(append([]byte(nil), host.bundleConfig...), []byte("# rejected candidate\n")...)
+	rc := windowsKilledApplyReceipt(t, driver, candidateID, 6, candidate, enterprisebundle.StateApplied)
+	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy {
+		return &enterprisebundle.GatewayPolicy{EffectiveDigest: host.digest, Digest: host.digest, Applied: true,
+			BundleID: host.bundleID, BundleVersion: 5}
+	}
+	cmd, _ := windowsBundleCommand()
+	opts := windowsBundleRestoreOptions()
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts); done || err != nil {
+		t.Fatalf("plain ensure prepare: done=%t err=%v", done, err)
+	}
+	if got := windowsBundleReceiptState(t, host.layout, rc.ReceiptID); got.State != enterprisebundle.StateFailed || got.ErrorCode != enterprisebundle.CodeDigestMismatch {
+		t.Fatalf("disproved candidate = %s/%s, want failed/digest_mismatch", got.State, got.ErrorCode)
+	}
+	if restore := restoreWindowsBundleConfig(t.Context(), windowsBundleSettleReplacing(opts)); restore.failed() || len(restore.changes) != 1 {
+		t.Fatalf("confirmed bundle was not restored: %+v", restore)
+	}
+	if installed, err := os.ReadFile(host.layout.ConfigPath); err != nil || !bytes.Equal(installed, host.bundleConfig) {
+		t.Fatalf("confirmed bundle config not restored: %q (%v)", installed, err)
+	}
+}
+
+func TestWindowsBundleRestoreDoesNotKeepUncommittedCandidate(t *testing.T) {
+	const candidateID = "b-01JA00000000000000000000D4"
+	host := newWindowsBundleRestoreHost(t)
+	driver := newWindowsBundleDriver(host.layout)
+	candidate := append(append([]byte(nil), host.bundleConfig...), []byte("# uncommitted candidate\n")...)
+	rc := windowsKilledApplyReceipt(t, driver, candidateID, 6, candidate, enterprisebundle.StateStaged)
+	// Matching installed bytes alone do not prove that the lifecycle
+	// committed this receipt. The generation still belongs to A.
+	writeBundleTestFile(t, host.layout.ConfigPath, candidate)
+	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return nil }
+	cmd, _ := windowsBundleCommand()
+	opts := windowsBundleRestoreOptions()
+	if done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts); done || err != nil {
+		t.Fatalf("plain ensure prepare: done=%t err=%v", done, err)
+	}
+	if got := windowsBundleReceiptState(t, host.layout, rc.ReceiptID); got.State != enterprisebundle.StateFailed {
+		t.Fatalf("uncommitted candidate remained %s, want failed", got.State)
+	}
+	if restore := restoreWindowsBundleConfig(t.Context(), windowsBundleSettleReplacing(opts)); restore.failed() || len(restore.changes) != 1 {
+		t.Fatalf("confirmed bundle was not restored: %+v", restore)
+	}
+	if installed, err := os.ReadFile(host.layout.ConfigPath); err != nil || !bytes.Equal(installed, host.bundleConfig) {
+		t.Fatalf("confirmed bundle config not restored: %q (%v)", installed, err)
+	}
+}
+
 func TestWindowsBundleRepairRestoresConfigChangedOutsideTheLifecycle(t *testing.T) {
 	host := newWindowsBundleRestoreHost(t)
 	edited := host.tamper(t, false)

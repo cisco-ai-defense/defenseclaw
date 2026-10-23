@@ -84,12 +84,19 @@ func addWindowsBundleEnforcementError(result *enterprisestatus.Result, opts *win
 		!bundleEnforcementCheckedAction(result.Action) || !windowsEnterpriseIsElevated() {
 		return
 	}
-	e, _, _, ok := readWindowsBundleEnforcement()
+	e, _, driver, ok := readWindowsBundleEnforcement()
 	if !ok {
 		return
 	}
 	e.GatewayReady, e.Policy = result.Readiness.Gateway, result.Policy
-	if problem := e.Problem(); problem != "" && !windowsBundleHasCode(result.Errors, bundleNotAppliedCode) {
+	problem := e.Problem()
+	if e.ConfigReplaced() && driver != nil {
+		if pending, err := driver.CommittedPendingConfig(e.InstalledConfig); err == nil && pending != nil {
+			problem = "config.yaml is the committed config of policy bundle " + pending.BundleID +
+				" whose receipt remains pending; the gateway has not confirmed it yet, so " + bundleLabel(e.Current) + " remains current"
+		}
+	}
+	if problem != "" && !windowsBundleHasCode(result.Errors, bundleNotAppliedCode) {
 		result.AddError(bundleNotAppliedCode, problem)
 	}
 }
@@ -201,6 +208,15 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 		return fail("bundle_restore_failed", "cannot read the installed config.yaml to re-apply "+label+": "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 	}
 	if !plan.Write {
+		return out
+	}
+	// A plain ensure already tried to settle unfinished receipts. If the
+	// gateway could not answer, a committed candidate remains pending even
+	// though the previous confirmed bundle is still current. Replacing the
+	// candidate here would turn a confirmable receipt into a later failure.
+	if pending, err := driver.CommittedPendingConfig(previous); err != nil {
+		return fail("bundle_restore_failed", "cannot check pending policy bundle receipts before re-applying "+label+": "+windowsEnterpriseBoundedDiagnostic(err.Error()))
+	} else if pending != nil {
 		return out
 	}
 	missing := plan.Missing

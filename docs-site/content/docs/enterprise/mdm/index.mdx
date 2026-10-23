@@ -123,6 +123,18 @@ one gets a default that protects **no** agents.
   its config only from signed bundles and refuses a plain config with
   `bundle_required`.
 
+On Windows, a new signed bundle that never reaches a gateway reporting its
+policy before the apply deadline is failed and the lifecycle restores its
+previous config. If restoration or proof of the restored policy fails during
+an outage, the gateway is stopped. If the gateway accepted the candidate but
+became unavailable before receipt confirmation, the receipt stays `applied` and
+pending; retry `ensure`
+after recovery to settle it. A run interrupted after writing the config can
+also leave a `staged` receipt pending until `ensure` checks the gateway.
+Repeating an already confirmed bundle during an outage keeps its signed config
+installed and returns `not_confirmed` for that retry without creating another
+receipt.
+
 ## Deliver the AI Defense key
 
 The key is optional; without it the local policy engine decides alone. The config
