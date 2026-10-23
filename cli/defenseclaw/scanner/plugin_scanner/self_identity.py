@@ -71,17 +71,29 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "1e393c84632763e1cec972d5886bec8c38ca6a5662905527544f684df2c19fff",  # amp-plugin.ts
-            "7607fcb6bbe5743a5334dbf8a84849a5e17925678dcb95f2b407dd6f5a826633",  # amp-plugin-managed.ts
+            "8e186821a5d812a03362836056446bcaa5b9f13ba0c3adf1994b8d461bdc6922",  # amp-plugin.ts
+            "cfe91f892ba228430fabeaf8f74cede13e6c09e8ecce2f601b7bdbeead8ab948",  # amp-plugin-managed.ts
             "392bc21bb99d9978b69683dca8fd022d074037a1e9df6f885916c6525537cdd6",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "3527c973be5165fd59e81b79dc899f384ec08a15a1c3b481d30d56fec2733927",  # opencode-plugin.js
-            "8d73eba350bcec2b45fb4d9909e605d7d32ba5589729b255c033b4ac91cbecc7",  # opencode-plugin-managed.js
+            "5b545adb4ee029f0656f317d3dd4350202252e9bda46fa4e9c9939090b65fd33",  # opencode-plugin.js
+            "5824bbe5227f8dcd4703550e2e937c36e7888f441bbce814e10fc265b71c5236",  # opencode-plugin-managed.js
             "f81b5b2f208d2535ac028c49bc95941d5666bee72315053386c05cd9411e34de",  # opencode-plugin-secure-client.js
         }
+    ),
+}
+_BRIDGE_VARIABLE_MODE_LINES = {
+    "amp": (
+        b'const DC_FAIL_MODE: string = "',
+        b'" // per-user and standalone hooks stay closed\n',
+        b'const DC_FAIL_MODE: string = "{{.FailMode}}" // per-user and standalone hooks stay closed\n',
+    ),
+    "opencode": (
+        b'const DC_FAIL_MODE = "',
+        b'"; // per-user and standalone hooks stay closed\n',
+        b'const DC_FAIL_MODE = "{{.FailMode}}"; // per-user and standalone hooks stay closed\n',
     ),
 }
 _BRIDGE_DYNAMIC_LINES = {
@@ -97,12 +109,6 @@ _BRIDGE_DYNAMIC_LINES = {
             b'"\n',
             b'const DC_TOKEN_FILE = "{{.TokenFileJS}}"\n',
             "token",
-        ),
-        (
-            b'const DC_FAIL_MODE: string = "',
-            b'" // "open" or "closed"\n',
-            b'const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"\n',
-            "mode",
         ),
         (
             b'const DC_HOOK_SOCKET: string = "',
@@ -147,12 +153,6 @@ _BRIDGE_DYNAMIC_LINES = {
             b'";\n',
             b'const DC_TOKEN_FILE = "{{.TokenFileJS}}";\n',
             "token",
-        ),
-        (
-            b'const DC_FAIL_MODE = "',
-            b'"; // "open" or "closed"\n',
-            b'const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"\n',
-            "mode",
         ),
         (
             b'const DC_HOOK_SOCKET = "',
@@ -432,8 +432,6 @@ def _valid_bridge_dynamic_value(
 ) -> bool:
     if kind == "api":
         return _valid_bridge_api_address(value)
-    if kind == "mode":
-        return value in {b"open", b"closed"}
     if kind == "uid":
         return value.isdigit() and len(value) <= 10
     if kind == "proof":
@@ -486,6 +484,22 @@ def _matches_immutable_bridge_template(
         ):
             return False
         lines[index] = canonical
+    if hashlib.sha256(b"".join(lines)).hexdigest() in expected_digests:
+        return True
+    # Managed and Secure Client variants retain an administrator-selected
+    # mode. Per-user host templates bake in closed; their altered mode does
+    # not normalize to a trusted managed digest.
+    prefix, suffix, canonical = _BRIDGE_VARIABLE_MODE_LINES[connector]
+    matches = [
+        index for index, line in enumerate(lines)
+        if line.startswith(prefix) and line.endswith(suffix)
+    ]
+    if len(matches) != 1:
+        return False
+    index = matches[0]
+    if lines[index][len(prefix) : -len(suffix)] not in {b"open", b"closed"}:
+        return False
+    lines[index] = canonical
     return hashlib.sha256(b"".join(lines)).hexdigest() in expected_digests
 
 

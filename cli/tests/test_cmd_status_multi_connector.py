@@ -919,6 +919,15 @@ class TestStatusJson(unittest.TestCase):
         self.assertNotIn(self.tmp_dir, delivery)
         self.assertNotIn("token", delivery.lower())
 
+    def test_json_names_a_peer_holding_the_gateway_port(self):
+        self.app.cfg.gateway.api_port = 19081
+        with patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value="a process of another account"):
+            result = self._invoke_json()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        sidecar = json.loads(result.output)["sidecar"]
+        self.assertIsNone(sidecar["running"])
+        self.assertIn("port 19081 is held by a process of another account", sidecar["reason"])
+
     def test_json_roster_has_per_connector_mode(self):
         result = self._invoke_json()
         doc = json.loads(result.output)
@@ -1126,7 +1135,16 @@ class TestStatusProfileIdentity(unittest.TestCase):
                 "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
                 return_value=MagicMock(trusted=True, pid=4242, detail=""),
             )
+            # The test varies the configured port in memory for each fake
+            # endpoint; the client now reloads that configuration to prove it.
+            config_patch = patch("defenseclaw.config.load", return_value=app.cfg)
+            # This fixture serves both endpoints in the test account. Socket
+            # ownership is covered separately; this case exercises profile
+            # binding after that connected-peer check succeeds.
+            socket_patch = patch("defenseclaw.gateway._verify_connected_gateway_socket", return_value=None)
             listener_patch.start()
+            config_patch.start()
+            socket_patch.start()
             try:
                 with _owned_status_endpoint(str(ambient_home), foreign_health, owned_token) as (port, seen):
                     app.cfg.gateway.api_port = port
@@ -1177,6 +1195,8 @@ class TestStatusProfileIdentity(unittest.TestCase):
                 self.assertTrue(doc["sidecar"]["running"])
                 self.assertIn(matching_marker, json.dumps(doc))
             finally:
+                socket_patch.stop()
+                config_patch.stop()
                 listener_patch.stop()
                 cleanup_app(app, db_path, app_tmp)
 

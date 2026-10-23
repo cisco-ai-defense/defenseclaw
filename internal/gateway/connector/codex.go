@@ -41,11 +41,13 @@ import (
 // CodexConnector is the hook-only security surface for OpenAI Codex.
 // It does not interpose on chat traffic; codex-cli talks directly to
 // its native upstream (api.openai.com or the ChatGPT backend). The
-// connector wires three telemetry/inspection channels into
+// connector wires hooks and agent-turn notifications into
 // ~/.codex/config.toml:
 //   - codex-hook.sh under [hooks] for tool-call inspection
-//   - [otel.exporter.otlp-http] for native OTLP telemetry
 //   - notify-bridge.sh wired to `notify` for agent-turn events
+//
+// Managed hosts additionally configure native OTLP. Per-user hosts do not:
+// Codex cannot prove who owns a replaced loopback listener before exporting.
 //
 // Implements ComponentScanner, StopScanner.
 type CodexConnector struct {
@@ -467,17 +469,15 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 	// removed — Codex talks directly to its native upstream and
 	// DefenseClaw only observes via hooks + OTel.
 
-	otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeCodex, opts.OTLPPathToken)
-	if err != nil {
-		return c.rollbackSetupAfterSnapshot(
-			opts,
-			runtimeSnapshot,
-			fmt.Errorf("codex scoped OTLP token: %w", err),
-			false,
-			false,
-		)
+	if opts.ManagedEnterprise {
+		otlpToken, tokenErr := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeCodex, opts.OTLPPathToken)
+		if tokenErr != nil {
+			return c.rollbackSetupAfterSnapshot(
+				opts, runtimeSnapshot, fmt.Errorf("codex scoped OTLP token: %w", tokenErr), false, false,
+			)
+		}
+		opts.OTLPPathToken = otlpToken
 	}
-	opts.OTLPPathToken = otlpToken
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	// Plan C2: HookScriptOwner-driven. codex_hook.sh ships from the
@@ -517,16 +517,18 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			false,
 		)
 	}
-	// GAP-1550: keep Codex's native OTLP exports to the loopback gateway
-	// (and their bearer) off HTTP(S)_PROXY; see codex_dotenv.go.
-	if err := ensureCodexDotEnvProxyBypass(opts); err != nil {
-		return c.rollbackSetupAfterSnapshot(
-			opts,
-			runtimeSnapshot,
-			fmt.Errorf("codex .env loopback NO_PROXY: %w", err),
-			true,
-			false,
-		)
+	if !opts.ManagedEnterprise {
+		if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeCodex); err != nil {
+			return fmt.Errorf("revoke obsolete Codex native OTLP credential: %w", err)
+		}
+	}
+	if opts.ManagedEnterprise {
+		// Keep native exports and their bearer off HTTP(S)_PROXY.
+		if err := ensureCodexDotEnvProxyBypass(opts); err != nil {
+			return c.rollbackSetupAfterSnapshot(
+				opts, runtimeSnapshot, fmt.Errorf("codex .env loopback NO_PROXY: %w", err), true, false,
+			)
+		}
 	}
 
 	if opts.InstallCodeGuard {
@@ -913,6 +915,16 @@ func (c *CodexConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 	if profile.NativeOTLP != nil {
 		telemetryEndpoint = profile.NativeOTLP.Endpoint
 	}
+	nativeSignals := []string(nil)
+	sourceModes := []string{"hook"}
+	telemetryAuth := ""
+	telemetryNote := "Per-user Codex telemetry uses hooks; native export to an unverified loopback listener is disabled."
+	if profile.NativeOTLP != nil {
+		nativeSignals = []string{"logs", "metrics", "traces"}
+		sourceModes = []string{"native", "hook"}
+		telemetryAuth = "header-token"
+		telemetryNote = "Managed Codex native OTLP uses a connector-scoped Authorization header; hooks and Secure Client notify are separate channels."
+	}
 
 	return ConnectorCapabilities{
 		LLMTrafficMode: LLMTrafficModeForConnector(c.Name()),
@@ -982,15 +994,13 @@ func (c *CodexConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		},
 		Telemetry: TelemetryCapability{
 			NativeOTLP:       profile.NativeOTLP != nil,
-			NativeSignals:    []string{"logs", "metrics", "traces"},
+			NativeSignals:    nativeSignals,
 			HookSignals:      []string{"logs", "metrics", "traces"},
 			ConfigPaths:      []string{codexConfigPath()},
-			AuthMode:         "header-token",
+			AuthMode:         telemetryAuth,
 			EndpointTemplate: telemetryEndpoint,
-			SourceModes:      []string{"native", "hook"},
-			Notes: []string{
-				"Codex emits native OTLP directly to the loopback gateway with a connector-scoped Authorization header; hook and agent-turn-complete notify records are independent channels.",
-			},
+			SourceModes:      sourceModes,
+			Notes:            []string{telemetryNote},
 		},
 	}
 }
@@ -1002,7 +1012,9 @@ func (c *CodexConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 //   - the setup-only Codex OTLP renderer for ~/.codex/config.toml; and
 //   - operator-visible doctor reports.
 //
-// Endpoint is the gateway's standard loopback OTLP receiver. Codex supports
+// The native spec exists only for managed hosts and isolated sandbox artifact
+// rendering. Per-user hosts have no direct native destination. When present,
+// its endpoint is the gateway's standard loopback OTLP receiver. Codex supports
 // arbitrary exporter headers, so its connector-scoped credential is carried
 // as an Authorization bearer instead of appearing in the URL. The gateway
 // binds that bearer to x-defenseclaw-source=codex; it cannot authenticate the
@@ -1014,22 +1026,25 @@ func (c *CodexConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 // auth_mode, etc.) on every span/metric. See the inline comment in
 // the returned spec for the full rationale and links.
 //
-// LogUserPrompts is always enabled at the source. Observability v8 keeps the
+// Managed native LogUserPrompts is enabled at the source. Observability v8 keeps the
 // canonical record immutable and applies redaction independently for every
 // destination, so suppressing prompt content here would make an unredacted
 // route impossible and would make two destinations disagree about one source
 // occurrence.
 func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
-	otlpToken := strings.TrimSpace(opts.OTLPPathToken)
-	if otlpToken == "" && opts.DataDir != "" {
-		otlpToken, _ = LoadOTLPPathToken(opts.DataDir, OTLPScopeCodex)
-	}
-	headers := map[string]string{
-		"x-defenseclaw-source": "codex",
-		"x-defenseclaw-client": "codex-otel/1.0",
-	}
-	if otlpToken != "" {
-		headers["authorization"] = "Bearer " + otlpToken
+	var headers map[string]string
+	if opts.ManagedEnterprise || opts.sandboxNativeOTLP {
+		otlpToken := strings.TrimSpace(opts.OTLPPathToken)
+		if otlpToken == "" && opts.DataDir != "" {
+			otlpToken, _ = LoadOTLPPathToken(opts.DataDir, OTLPScopeCodex)
+		}
+		headers = map[string]string{
+			"x-defenseclaw-source": "codex",
+			"x-defenseclaw-client": "codex-otel/1.0",
+		}
+		if otlpToken != "" {
+			headers["authorization"] = "Bearer " + otlpToken
+		}
 	}
 	// Intentionally NOT setting ServiceName / ResourceAttributes
 	// on codex's NativeOTLPSpec — see F1 rationale below.
@@ -1059,17 +1074,21 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 	// native exporters that already self-identify (codex),
 	// the upstream tags are richer than anything we could
 	// synthesize from the outside.
-	profile := HookProfile{
-		Name:                "codex",
-		Capabilities:        c.HookCapabilities(opts),
-		SupportsTraceparent: true,
-		NativeOTLP: &NativeOTLPSpec{
+	var nativeOTLP *NativeOTLPSpec
+	if opts.ManagedEnterprise || opts.sandboxNativeOTLP {
+		nativeOTLP = &NativeOTLPSpec{
 			Kind:           NativeOTLPTOMLBlock,
 			Endpoint:       "http://" + opts.APIAddr,
 			Protocol:       "json",
 			Headers:        headers,
 			LogUserPrompts: true,
-		},
+		}
+	}
+	profile := HookProfile{
+		Name:                "codex",
+		Capabilities:        c.HookCapabilities(opts),
+		SupportsTraceparent: true,
+		NativeOTLP:          nativeOTLP,
 		// Profile-driven callbacks are the canonical shape for
 		// codex hook decode / verdict mapping / response. The
 		// gateway profile-runtime registry uses these pure callbacks
@@ -1821,18 +1840,25 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			cfg["features"] = features
 		}
 
-		// Native OTel exporter — runs on every install regardless of
-		// enforcement mode. Codex's [otel] block produces structured
-		// logs (raw API request/response, model + token counts) and
-		// metrics that complement the hook-based event stream. The
-		// /v1/logs and /v1/metrics endpoints on the gateway's API port
-		// receive the OTLP-HTTP payload and normalize into
-		// gateway.jsonl with source="codex_otel".
-		otelBlock, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
-		if err != nil {
-			return fmt.Errorf("render scoped Codex OTLP config: %w", err)
+		if opts.ManagedEnterprise {
+			otelBlock, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
+			if err != nil {
+				return fmt.Errorf("render scoped Codex OTLP config: %w", err)
+			}
+			cfg["otel"] = otelBlock
+		} else {
+			// A native exporter cannot check who accepted a TCP connection.
+			// Remove the block an earlier per-user setup wrote, restoring the
+			// operator's original OTel entries when the backup proves them.
+			original := backup
+			if backupExists {
+				original, err = c.loadConfigBackup(opts.DataDir)
+				if err != nil {
+					return fmt.Errorf("load original Codex OTel config: %w", err)
+				}
+			}
+			restoreCodexOtelEntries(cfg, original, opts)
 		}
-		cfg["otel"] = otelBlock
 
 		// Codex hands its notify program the turn record (prompt, reply and
 		// working directory) as a command-line argument, which other accounts

@@ -22,12 +22,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
-// GAP-0035 and GAP-0315 on the per-user OpenCode plugin: during a gateway
-// outage DEFENSECLAW_STRICT_AVAILABILITY=1 blocks a plugin installed open, as
-// it does for the shell hooks. DEFENSECLAW_FAIL_MODE is not read: closed
-// does not close an open plugin, open never reopens a closed one (1.0.4 lead
-// directive). A gateway that answers HTTP 503 is an outage too: the plugin
-// logs it as transport, so strict availability closes it (GAP-0035 review).
+// Per-user OpenCode hooks close on outages even when an earlier install
+// requested open. Neither DEFENSECLAW_FAIL_MODE nor strict availability can
+// reopen a closed hook. HTTP 503 is an outage too.
 func TestOpenCodePluginTakesItsInstalledModeAndStrictAvailability(t *testing.T) {
 	nodeForTest(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -54,10 +51,10 @@ func TestOpenCodePluginTakesItsInstalledModeAndStrictAvailability(t *testing.T) 
 			installed, strict, envMode string
 			wantBlock                  bool
 		}{
-			{"open", "", "", false},
+			{"open", "", "", true},
 			{"open", "1", "", true},
 			{"open", "yes", "", true},
-			{"open", "", "closed", false},
+			{"open", "", "closed", true},
 			{"open", "1", "open", true},
 			{"closed", "", "open", true},
 			{"closed", "", "", true},

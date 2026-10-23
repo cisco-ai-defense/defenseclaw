@@ -49,10 +49,10 @@ func expandCodexDotEnv(t *testing.T, raw []byte, env map[string]string) {
 	}
 }
 
-// GAP-1550: Setup adds a loopback NO_PROXY block to CODEX_HOME/.env that
+// GAP-1550: managed Setup adds a loopback NO_PROXY block to CODEX_HOME/.env that
 // merges with the user's own value, is idempotent, and Teardown restores the
 // file byte for byte (or removes it when Setup created it).
-func TestCodexDotEnvLoopbackNoProxy(t *testing.T) {
+func TestManagedCodexDotEnvLoopbackNoProxy(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		original *string
@@ -71,7 +71,7 @@ func TestCodexDotEnvLoopbackNoProxy(t *testing.T) {
 				}
 			}
 			c := NewCodexConnector()
-			opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+			opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ManagedEnterprise: true}
 			if err := c.Setup(context.Background(), opts); err != nil {
 				t.Fatalf("Setup: %v", err)
 			}
@@ -126,6 +126,38 @@ func TestCodexDotEnvLoopbackNoProxy(t *testing.T) {
 			}
 			if string(after) != *tc.original {
 				t.Fatalf("Teardown did not restore the user's .env:\n%q\nwant\n%q", after, *tc.original)
+			}
+		})
+	}
+}
+
+func TestPerUserCodexSetupDoesNotCreateANativeExporterProxyFile(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			dir := t.TempDir()
+			previous := CodexConfigPathOverride
+			CodexConfigPathOverride = filepath.Join(dir, "config.toml")
+			t.Cleanup(func() { CodexConfigPathOverride = previous })
+			path := filepath.Join(dir, ".env")
+			original := []byte("OPENAI_API_KEY=placeholder\nNO_PROXY=corp.example")
+			if err := os.WriteFile(path, original, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			c := NewCodexConnector()
+			opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", GOOS: goos}
+			if err := c.Setup(context.Background(), opts); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(data, original) {
+				t.Fatalf("per-user setup changed operator .env: %q, %v", data, err)
+			}
+			if err := c.Teardown(context.Background(), opts); err != nil {
+				t.Fatal(err)
+			}
+			data, err = os.ReadFile(path)
+			if err != nil || !bytes.Equal(data, original) {
+				t.Fatalf("per-user teardown changed operator .env: %q, %v", data, err)
 			}
 		})
 	}

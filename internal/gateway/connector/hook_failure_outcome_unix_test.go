@@ -180,6 +180,7 @@ func TestShellHookDiagnosticRecordsAreNotDeliveryOutcomes(t *testing.T) {
 		t.Run(conn.Name(), func(t *testing.T) {
 			invoke := hookArgvConnectorCase(t, conn.Name())
 			home := t.TempDir()
+			installNativeGatewayForHookTest(t, home)
 			hookDir := filepath.Join(home, "hooks")
 			opts := SetupOpts{DataDir: home, APIAddr: strings.TrimPrefix(server.URL, "http://"), APIToken: "scoped-test-token", HookFailMode: "open"}
 			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {

@@ -14,9 +14,11 @@ import (
 )
 
 // The installer holds this lock while it stops and replaces the account's
-// gateway. A plugin using fail mode open must still stop actionable calls
-// until that transaction has completed, for both a refused connection and a
-// gateway error response. Once the lock is gone, its configured mode applies.
+// gateway. A plugin rendered for fail mode open must still stop actionable
+// calls until that transaction has completed, for both a refused connection
+// and a gateway error response. Outside the window a per-user plugin is
+// closed whatever mode it was asked for (sa-port-peer): failures block and a
+// valid allow runs.
 func pluginInstallWindowCases(t *testing.T, asset, extension, harness string) {
 	t.Helper()
 	nodeForTest(t)
@@ -35,9 +37,18 @@ func pluginInstallWindowCases(t *testing.T, asset, extension, harness string) {
 			// Load once before the upgrade starts. An agent keeps this module in
 			// memory when the installer replaces the plugin file on disk.
 			session := startNodeHarnessSession(t, harness, plugin, failure)
-			if got := session.request("before install", "call"); got != "allow" {
-				t.Fatalf("%s before install = %q, want configured open", failure, got)
+			outside := func(phase string) {
+				t.Helper()
+				got := session.request(phase, "call")
+				if failure == "valid-allow" {
+					if got != "allow" {
+						t.Fatalf("%s %s = %q, want the gateway's allow", failure, phase, got)
+					}
+				} else if !strings.HasPrefix(got, "block:") || strings.Contains(got, "being installed or upgraded") {
+					t.Fatalf("%s %s = %q, want the closed failure block", failure, phase, got)
+				}
 			}
+			outside("before install")
 			beforeLog, beforeErr := os.ReadFile(filepath.Join(dataDir, "logs", "hook-failures.jsonl"))
 			if beforeErr != nil && !os.IsNotExist(beforeErr) {
 				t.Fatal(beforeErr)
@@ -63,10 +74,7 @@ func pluginInstallWindowCases(t *testing.T, asset, extension, harness string) {
 			if err := os.Remove(lock); err != nil {
 				t.Fatal(err)
 			}
-			allowed := session.request("after install", "call")
-			if allowed != "allow" {
-				t.Fatalf("%s without install lock = %q; want configured fail-open", failure, allowed)
-			}
+			outside("after install")
 			session.close()
 		})
 	}
@@ -157,8 +165,14 @@ func TestAmpPluginInstallWindowBlocksFailOpen(t *testing.T) {
 						strings.Contains(verdict.Message, "defenseclaw-gateway start") {
 						t.Fatalf("Amp with install lock = %+v; want both boundaries blocked", verdict)
 					}
-				} else if verdict.Action != "allow" || verdict.Status != "unchanged" {
-					t.Fatalf("Amp without install lock = %+v; want configured fail-open", verdict)
+				} else if failure == "valid-allow" {
+					if verdict.Action != "allow" || verdict.Status != "unchanged" {
+						t.Fatalf("Amp without install lock = %+v; want the gateway's allow", verdict)
+					}
+				} else if verdict.Action != "reject-and-continue" || strings.Contains(verdict.Message, "being installed or upgraded") {
+					// A per-user plugin renders closed whatever mode it was asked
+					// for (sa-port-peer): the failure blocks without the lock too.
+					t.Fatalf("Amp without install lock = %+v; want the closed failure block", verdict)
 				}
 			}
 			check("before install", false)

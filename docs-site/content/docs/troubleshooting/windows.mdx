@@ -106,7 +106,7 @@ Disabling stops only what the agent loads by that exact name (Codex `$skill` sel
 
 ## Native OTLP authentication fails
 
-**Fix.** Run `defenseclaw doctor` and `defenseclaw-gateway status`. Run the connector's setup again without `--mode` and restart the agent. If doctor says the gateway token changed, preview with `defenseclaw doctor --fix --dry-run`. Use `defenseclaw setup rotate-token --yes` only to replace the token for every connector. Never print, copy or replace token files or OTLP headers by hand. Hermes and Amp have no native OTLP export; for Amp run `defenseclaw setup amp --yes` again and relaunch Amp. Omitting `--mode` keeps Amp's saved mode.
+**Fix.** Native OTLP is enabled only on managed hosts and in OpenShell. For a managed install, run `defenseclaw doctor` and `defenseclaw-gateway status`, run the connector's setup again, then restart the agent. A per-user upgrade removes native OTLP settings and tokens; restart the agent to drop settings already loaded by its process. Never print, copy or replace token files or OTLP headers by hand. Hermes and Amp have no native OTLP export; for Amp run `defenseclaw setup amp --yes` again and relaunch Amp. Omitting `--mode` keeps Amp's saved mode.
 
 **Check.** The doctor authentication row is `[PASS]`.
 

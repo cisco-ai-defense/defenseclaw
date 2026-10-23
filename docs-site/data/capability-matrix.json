@@ -1,6 +1,6 @@
 {
   "_source": "Hand-curated from internal/gateway/connector setup paths and hook profiles, cli/defenseclaw/inventory/hook_contracts.json, the native Windows setup contracts, and the OpenShell sandbox artifacts (internal/gateway/connector/*_sandbox.go, internal/openshell/harness). Re-extract on every connector, hook-contract, or platform-support change.",
-  "_lastVerified": "2026-10-22",
+  "_lastVerified": "2026-10-23",
   "_order": "By adoption / popularity — mirrors the hero rotation (lib/hero-connectors.ts) and the docs nav (content/docs/connectors/(hook-connectors)/meta.json).",
   "connectors": [
     {
@@ -8,7 +8,7 @@
       "label": "Claude Code",
       "windowsSupport": "supported",
       "windowsNote": "Native executable hooks are supported on Windows x64; WSL is outside this connector contract.",
-      "summary": "Native lifecycle hooks, native approval, and OpenTelemetry export.",
+      "summary": "Native lifecycle hooks and approval; OpenTelemetry export on managed hosts and in OpenShell.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
       "subprocessPolicy": "none",
@@ -52,7 +52,7 @@
       "label": "Codex",
       "windowsSupport": "supported",
       "windowsNote": "Native Windows x64 uses the packaged PowerShell bridge and hook executable.",
-      "summary": "Config hooks, native OpenTelemetry, and an agent-turn completion bridge.",
+      "summary": "Config hooks; native OpenTelemetry and a turn-completion bridge on managed hosts and in OpenShell.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
       "subprocessPolicy": "none",
@@ -83,7 +83,7 @@
         "verified": "verified"
       },
       "hilt": "Codex has no native ask surface here; confirm becomes an alert/systemMessage with raw_action preserved. The TUI can review the event but cannot resume it.",
-      "notes": "Three telemetry channels at boot: hooks, native OTel, and the notify bridge for agent-turn-complete events. Hook-only connector — no proxy data path and no DefenseClaw subprocess sandbox or command shims."
+      "notes": "Per-user hosts use hooks without native OTel or a notify bridge. Managed hosts and OpenShell also use native OTel; Secure Client and OpenShell use a turn-completion bridge. Hook-only connector — no proxy data path and no DefenseClaw subprocess sandbox or command shims."
     },
     {
       "id": "openclaw",

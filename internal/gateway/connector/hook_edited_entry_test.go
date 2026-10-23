@@ -92,25 +92,6 @@ func TestEditedHookEntriesGolden(t *testing.T) {
 	}
 }
 
-// A connector may own helper scripts besides the script registered as a hook.
-// Claude's OTEL headers helper must not make its current enforcement hook look
-// like an edited copy of that helper after Setup has installed both scripts.
-func TestClaudeCurrentHookIsNotAnEditedOTELHelper(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the OTEL headers helper is used on Unix")
-	}
-	conn, opts, _ := installedClaudeCodeConnectorForPresence(t)
-	if !claudeCodeUsesOTLPHeadersHelper(opts) {
-		t.Fatal("fixture did not install the OTEL headers helper")
-	}
-	if ownedHookConfigHoldsEditedEntry(conn, opts) {
-		t.Fatal("the current Claude hook was mistaken for an edited OTEL helper")
-	}
-	if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
-		t.Fatalf("current Claude hooks: present=%v err=%v", present, err)
-	}
-}
-
 // GAP-0906, GAP-0907: after a DefenseClaw hook entry's script name, hook
 // directory or data directory is edited, the Setup repair (which the hook
 // guard and the managed guardian run) leaves exactly one hook set and no

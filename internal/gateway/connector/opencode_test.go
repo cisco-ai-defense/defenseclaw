@@ -294,6 +294,13 @@ func TestOpenCodePluginReloadsScopedTokenAndFailsCredentialErrorsClosed(t *testi
 			t.Fatal("rendered OpenCode plugin contains a rotation credential")
 		}
 	}
+	// This test exercises token rotation against a fake HTTP gateway; the
+	// connected-account check is exercised with the production render in
+	// TestPerUserPluginsCheckPeerBeforeSending.
+	harnessPluginPath := filepath.Join(root, "plugins", "token-rotation-harness.mjs")
+	if err := os.WriteFile(harnessPluginPath, []byte(withoutPeerCheckForTest(string(pluginBytes))), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	// The harness applies the config hook before it is ready, as OpenCode
 	// does at startup: its load heartbeat pays the process's first gateway
 	// request (fetch's first use and connection), which on a fresh or busy
@@ -320,7 +327,7 @@ for await (const _ of lines) {
   }
 }
 `
-	session := startNodeHarnessSession(t, harness, pluginPath)
+	session := startNodeHarnessSession(t, harness, harnessPluginPath)
 	for index, token := range []string{aToken, bToken, aToken} {
 		if index > 0 {
 			if err := atomicWriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
@@ -590,11 +597,11 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 	}
 	render := func(failMode string) []byte {
 		t.Helper()
-		return []byte(renderOpenCodePluginTemplate(t, templateData{
+		return []byte(withoutPeerCheckForTest(renderOpenCodePluginTemplate(t, templateData{
 			APIAddr:     "127.0.0.1:18970",
 			TokenFileJS: javaScriptStringContent(tokenPath),
 			FailMode:    failMode,
-		}))
+		})))
 	}
 	openPlugin := filepath.Join(dir, "opencode-open.mjs")
 	closedPlugin := filepath.Join(dir, "opencode-closed.mjs")

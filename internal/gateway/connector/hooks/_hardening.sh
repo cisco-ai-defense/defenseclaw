@@ -161,6 +161,10 @@ _DC_GATEWAY_RESTART_WAITED=""
 # / mmap failure when crossed, which is what we want.
 defenseclaw_harden_resources() {
   ulimit -S -t 5     2>/dev/null || true
+  # Go reserves more virtual address space than this shell budget even when
+  # its resident memory is small. Keep the hook capped, and restore this
+  # account's original soft limit only in the verified native POST child.
+  _DC_HOOK_NATIVE_VMEM_LIMIT="$(ulimit -S -v 2>/dev/null)"
   ulimit -S -v 524288 2>/dev/null || true
   ulimit -S -n 32    2>/dev/null || true
 }
@@ -174,6 +178,13 @@ defenseclaw_harden_env() {
   # same name, which would copy the value into the environment of every child
   # process (curl, jq, the cold-started gateway), so drop inherited ones first.
   unset -v API_TOKEN PAYLOAD CONTENT TOOL_INPUT TOOL_OUTPUT INSPECT_BODY RESPONSE RESULT OUTPUT
+
+  # Only a rendered managed hook may select the managed socket transport.
+  # Per-user scripts clear the managed marker before sourcing this helper;
+  # an agent's inherited socket path must not bypass the API owner check.
+  if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" != "1" ]; then
+    unset DEFENSECLAW_HOOK_SOCKET DEFENSECLAW_HOOK_SOCKET_UID
+  fi
 
   # Per-hook ephemeral HOME so any tool that stores state under $HOME
   # (gh, gcloud, openssl rand state, etc.) writes to a sandbox the
@@ -412,14 +423,9 @@ defenseclaw_shared_hook_token_file() {
 # are the only input: DEFENSECLAW_FAIL_MODE in the agent's environment is not
 # read (GAP-0315); guardian-managed hooks trust only installer-owned state.
 # Malformed, ambiguous, unverifiable or missing state fails closed. A record
-# counts as open only with its config source (FAIL_MODE_SOURCE=config,
-# fail_mode_sources, legacy_fail_mode_source): an earlier release's open may
-# be an unset mode it resolved open, and an open lowered for a vendor that
-# cannot fail closed is not an operator's choice. A managed hook's
-# guardian-written records carry no source (the managed readers decode them
-# canonically); their open is the administrator's explicit choice, so it
-# counts when the hook is managed and hooks/.hookcfg says managed_enterprise
-# (defenseclaw_managed_runtime_sidecar).
+# counts as open only on a managed hook whose protected sidecar records
+# managed_enterprise (defenseclaw_managed_runtime_sidecar). An earlier per-user
+# open is never an outage exception.
 defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
@@ -427,6 +433,10 @@ defenseclaw_shared_runtime_fail_mode() {
   local candidate suffix recorded mode source selected="" summary="" raw="" managed_open=0 records=0
   if defenseclaw_managed_runtime_sidecar "$config"; then
     managed_open=1
+  fi
+  if [ "$managed_open" != 1 ]; then
+    printf closed
+    return 0
   fi
   for candidate in "${hook_dir}"/.hookcfg.*; do
     [ -e "$candidate" ] || [ -L "$candidate" ] || continue
@@ -648,14 +658,11 @@ print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.
     printf open
     return 0
   fi
-  # Otherwise only the unscoped legacy mode can open the call, as before
-  # connector records existed. Its flat record must name no connector and say
-  # open, and JSON a parser read must agree. Without a parser the flat record
-  # decides, as for connector records.
+  # An administrator may have installed only an unscoped managed record.
+  # Its flat and JSON records must agree when the JSON parser is available.
   if ! legacy_connector="$(defenseclaw_flat_hookcfg_value "$legacy" DEFENSECLAW_CONNECTOR 2>/dev/null)" \
     || [ -n "$legacy_connector" ] \
-    || [ "$(defenseclaw_flat_hookcfg_value "$legacy" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)" != "open" ] \
-    || { [ "$(defenseclaw_flat_hookcfg_value "$legacy" FAIL_MODE_SOURCE 2>/dev/null || true)" != "config" ] && [ "$managed_open" != 1 ]; }; then
+    || [ "$(defenseclaw_flat_hookcfg_value "$legacy" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)" != "open" ]; then
     printf closed
     return 0
   fi
@@ -1525,25 +1532,23 @@ defenseclaw_own_gateway_stopped() {
   return 0
 }
 
-# defenseclaw_api_listener_foreign HOST:PORT returns 0 when this account's
-# per-user gateway is not running and the loopback listener on PORT belongs to
-# another account (GAP-1260). The hook then sends it no token or payload: an
-# account that holds this account's port, or its old port after a move, would
-# otherwise collect the connector's credential. A running gateway rendered the
-# current API_ADDR itself, so the check costs only the PID test then. Linux
-# reads the owner from /proc/net/tcp*; macOS lsof lists only this account's
-# sockets, so a listener it does not show that still accepts is another's.
-defenseclaw_api_listener_foreign() {
+# defenseclaw_api_listener_unproven HOST:PORT returns 0 for a foreign or
+# unknown listener, 1 for this account's listener, and 2 for a proven free
+# port. A stopped gateway, a stale PID record,
+# and unreadable socket tables must never send a token or hook payload to an
+# unverified endpoint. Linux reads /proc/net/tcp*; macOS lsof lists this
+# account's listeners. Managed hooks use their separate verified transport.
+defenseclaw_api_listener_unproven() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
-  defenseclaw_own_gateway_stopped || return 1
-  # The second argument (tests only) replaces /proc/net.
-  local port="${1##*:}" net="${2:-/proc/net}" uid="${EUID:-}" hex="" table="" owner=""
+  # The second and third arguments (tests only) replace /proc/net and lsof.
+  local port="${1##*:}" host="${1%:*}" net="${2:-/proc/net}" lsof="${3:-/usr/sbin/lsof}"
+  local uid="${EUID:-}" hex="" table="" owner="" own=""
   local _sl="" addr="" _rem="" st="" _q="" _t="" _r="" u="" _rest=""
-  case "$port" in ''|*[!0-9]*) return 1 ;; esac
-  [ -n "$uid" ] || return 1
+  case "$port" in ''|*[!0-9]*) return 0 ;; esac
+  [ -n "$uid" ] || return 0
   if [ -r "${net}/tcp" ]; then
     hex="$(printf '%04X' "$port")"
     for table in "${net}/tcp" "${net}/tcp6"; do
@@ -1555,18 +1560,24 @@ defenseclaw_api_listener_foreign() {
           ??????7F:"$hex"|00000000:"$hex"|00000000000000000000000000000000:"$hex"|00000000000000000000000001000000:"$hex"|0000000000000000FFFF0000??????7F:"$hex") ;;
           *) continue ;;
         esac
-        [ "$u" = "$uid" ] && return 1
-        owner="$u"
+        if [ "$u" = "$uid" ]; then own=1; else owner="$u"; fi
       done < "$table"
     done
-    [ -n "$owner" ]
-    return
+    [ -n "$owner" ] && return 0
+    [ -n "$own" ] && return 1
+    # No listener: the caller may cold-start this account's gateway, then
+    # retry ownership proof before it sends. Never send on this status.
+    return 2
   fi
-  if [ -x /usr/sbin/lsof ]; then
-    /usr/sbin/lsof -nP -a -u "$uid" -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1 && return 1
+  if [ -x "$lsof" ]; then
+    # A socket this account owns on another address is not proof for the
+    # configured destination. Require the exact local address in lsof.
+    case "$host" in 127.*) ;; *) return 0 ;; esac
+    "$lsof" -nP -a -u "$uid" -iTCP@"$host":"$port" -sTCP:LISTEN -t >/dev/null 2>&1 && return 1
     (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null && return 0
+    return 2
   fi
-  return 1
+  return 0
 }
 
 defenseclaw_response_failure_reason() {
@@ -1609,6 +1620,9 @@ defenseclaw_response_failure_reason() {
 defenseclaw_should_fail_closed_on_unreachable() {
   # An install that started since the hook selected its mode closes it.
   defenseclaw_close_during_install
+  # An older per-user script may still carry FAIL_MODE=open after the helper
+  # has been refreshed. Its baked value is never an outage exception.
+  [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = 1 ] || return 0
   # Only an explicit open opens: an unset, empty or unknown FAIL_MODE closes.
   case "${FAIL_MODE:-}" in
     open) ;;
@@ -2433,7 +2447,8 @@ defenseclaw_payload_tool_gate_max_time() {
 # POSTs BODY to the gateway at URL and prints "<response body>\n<http code>"
 # (curl -w), returning curl's exit status so the caller can tell a refused
 # connection (7) from other failures. Every host hook request to the gateway
-# goes through here.
+# goes through here. A per-user request uses the native helper, which verifies
+# the owner of the same connected socket that carries the bearer and event.
 #
 # Neither the bearer nor the body ever reaches curl's command line: any local
 # account can read a process's arguments (ps, /proc/<pid>/cmdline), and exec
@@ -2452,8 +2467,27 @@ defenseclaw_payload_tool_gate_max_time() {
 # into a transport failure. Bash 3.2 compatible.
 defenseclaw_gateway_post() {
   local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
-  local _dc_post_auth="" _dc_post_arg
+  local _dc_post_auth="" _dc_post_arg _dc_listener_status=0
+  local _dc_native_post=0 _dc_post_bin _dc_post_prefix _dc_post_path
+  local _dc_post_headers="" _dc_post_sep="" _dc_header_name _dc_header_value _dc_post_output
   local -a _dc_post_args _dc_post_auth_args
+  # This probe still distinguishes a free port for cold start. The native
+  # helper proves the actual connection again before it sends any data.
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) ;;
+    *)
+      if [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ]; then
+        [ -n "${API_ADDR:-}" ] || return 1
+        case "$_dc_post_url" in "http://""${API_ADDR}/"*) ;; *) return 1 ;; esac
+        defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?
+        case "$_dc_listener_status" in
+          1) _dc_native_post=1 ;; # This account owns the listener now.
+          2) return 7 ;; # No listener: let the existing cold-start retry run.
+          *) return 1 ;; # Foreign or unknown owner: fail closed.
+        esac
+      fi
+      ;;
+  esac
   shift 3
   _dc_post_args=()
   _dc_post_auth_args=()
@@ -2478,6 +2512,78 @@ defenseclaw_gateway_post() {
   case "$_dc_post_auth" in
     *$'\n'*|*$'\r'*) return 1 ;;
   esac
+  if [ "$_dc_native_post" -eq 1 ]; then
+    # The agent's deadline includes shell preparation and starting the native
+    # helper. Give the helper only the time still left, reserving one second
+    # for process startup on short tool-call budgets. Its own timeout starts
+    # after startup, so passing the original four seconds could hold a tool
+    # call beyond the agent's answer window on a busy host.
+    case "$_dc_post_max_time" in ""|*[!0-9]*) return 1 ;; esac
+    _dc_hook_elapsed_ms
+    [ "$_DC_ELAPSED_MS" -ge 0 ] || _DC_ELAPSED_MS=0
+    local _dc_post_remaining=$(( _dc_post_max_time - (_DC_ELAPSED_MS + 999) / 1000 ))
+    [ "$_dc_post_remaining" -gt 0 ] || return 28
+    if [ "$_dc_post_max_time" -le 4 ] && [ "$_dc_post_remaining" -gt 2 ]; then
+      _dc_post_remaining=$((_dc_post_remaining - 1))
+    fi
+    # harden_env moved HOME to a private scratch directory. Use the account
+    # home it retained before that move, then verify every path component.
+    local _dc_agent_home="${DEFENSECLAW_AGENT_HOME:-}"
+    case "$_dc_agent_home" in /*) ;; *) return 1 ;; esac
+    _dc_post_bin="${_dc_agent_home}/.local/bin/defenseclaw-gateway"
+    # This binary receives the bearer on stdin. A stale PID record, PATH
+    # entry, writable path, or symlink cannot select a different executable.
+    local _dc_secure_path _dc_secure_mode
+    for _dc_secure_path in "$_dc_agent_home" "$_dc_agent_home/.local" "$_dc_agent_home/.local/bin"; do
+      [ -d "$_dc_secure_path" ] && [ -O "$_dc_secure_path" ] && [ ! -L "$_dc_secure_path" ] || return 1
+      _dc_secure_mode="$(stat -c %a "$_dc_secure_path" 2>/dev/null || stat -f %Lp "$_dc_secure_path" 2>/dev/null)" || return 1
+      [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
+    done
+    [ -f "$_dc_post_bin" ] && [ -x "$_dc_post_bin" ] && [ -O "$_dc_post_bin" ] && [ ! -L "$_dc_post_bin" ] || return 1
+    _dc_secure_mode="$(stat -c %a "$_dc_post_bin" 2>/dev/null || stat -f %Lp "$_dc_post_bin" 2>/dev/null)" || return 1
+    [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
+    _dc_post_prefix="http://${API_ADDR}"
+    _dc_post_path="${_dc_post_url:${#_dc_post_prefix}}"
+    set -- "${_dc_post_args[@]+"${_dc_post_args[@]}"}"
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -H|--header) [ "$#" -ge 2 ] || return 1; shift ;;
+        *) return 1 ;;
+      esac
+      _dc_post_arg="$1"
+      shift
+      case "$_dc_post_arg" in *:*) ;; *) return 1 ;; esac
+      _dc_header_name="${_dc_post_arg%%:*}"
+      _dc_header_value="${_dc_post_arg#*:}"
+      _dc_header_value="${_dc_header_value# }"
+      case "$_dc_header_name" in ""|*[!A-Za-z0-9-]*) return 1 ;; esac
+      case "$_dc_header_value" in *$'\n'*|*$'\r'*) return 1 ;; esac
+      _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"$(defenseclaw_json_escape "$_dc_header_name")\":\"$(defenseclaw_json_escape "$_dc_header_value")\""
+      _dc_post_sep=,
+    done
+    if [ -n "$_dc_post_auth" ]; then
+      _dc_header_value="${_dc_post_auth#*:}"
+      _dc_header_value="${_dc_header_value# }"
+      _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"Authorization\":\"$(defenseclaw_json_escape "$_dc_header_value")\""
+    fi
+    _dc_post_output="$(
+      printf '{"path":"%s","headers":{%s},"body":"%s"}' \
+        "$(defenseclaw_json_escape "$_dc_post_path")" "$_dc_post_headers" "$(defenseclaw_json_escape "$_dc_post_body")" |
+        (
+          if [ -n "${_DC_HOOK_NATIVE_VMEM_LIMIT:-}" ]; then
+            ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 1
+          fi
+          exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
+        ) 2>/dev/null
+    )" || {
+      _dc_listener_status=0
+      defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?
+      [ "$_dc_listener_status" -eq 2 ] && return 7
+      return 1
+    }
+    printf '%s' "$_dc_post_output"
+    return 0
+  fi
   if [ -n "$_dc_post_auth" ]; then
     # The two characters a quoted curl config value escapes.
     _dc_post_auth="${_dc_post_auth//\\/\\\\}"

@@ -372,8 +372,8 @@ if [ -n "${_DC_RESOLVED_WRITES}" ]; then
   RESOLVED_HEADER_ARGS=(-H "X-DefenseClaw-Resolved-Writes: ${_DC_RESOLVED_WRITES}")
 fi
 {{end}}
-if defenseclaw_api_listener_foreign "$API_ADDR"; then
-  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+if defenseclaw_api_listener_unproven "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Another account may hold the port. Run \`defenseclaw setup gateway --api-port <free-port>\` to choose a free port"
 fi
 
 # defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the hook

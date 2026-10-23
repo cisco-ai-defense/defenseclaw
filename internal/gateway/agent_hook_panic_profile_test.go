@@ -249,6 +249,8 @@ func TestRecoveredHookFailModeByDeployment(t *testing.T) {
 							want, wantMode, reason = "allow", mode, "Secure Client's unset or open fail mode allows recovered errors"
 						} else if deployment.name == "standalone" && failMode == "open" {
 							reason = "the administrator's open applies to outages, not recovered evaluator errors"
+						} else if deployment.name == "oss" && failMode == "open" {
+							reason = "a legacy per-user open remains closed on evaluator failure"
 						} else if failMode == "open" && name != "cursor" {
 							want, wantMode, reason = "allow", mode, "explicit open is effective for this connector"
 						} else if failMode == "open" && name == "cursor" {

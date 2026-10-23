@@ -41,7 +41,6 @@ from defenseclaw.tui.panels.setup import (
     admission_action_fields,
     build_setup_sections,
     build_wizard_args,
-    connector_setup_command,
     connector_setup_wizard_fields,
     guardrail_wizard_fields,
     llm_model_candidates,
@@ -2616,9 +2615,9 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     assert fields["guardrail.judge.hook_connectors.codex"].value == "true"
     assert fields["guardrail.judge.hook_connectors.hermes"].value == "false"
 
-    # hermes has no override → inherits the global effective values.
+    # Hermes has no override; a per-user global open still resolves closed.
     assert fields["guardrail.connectors.hermes.enabled"].value == "true"
-    assert fields["guardrail.connectors.hermes.hook_fail_mode"].value == "open"
+    assert fields["guardrail.connectors.hermes.hook_fail_mode"].value == "closed"
     assert fields["guardrail.connectors.hermes.block_message"].value == "global blocked"
     assert fields["guardrail.connectors.hermes.hilt.enabled"].value == "false"
     assert fields["guardrail.connectors.hermes.hilt.min_severity"].value == "HIGH"

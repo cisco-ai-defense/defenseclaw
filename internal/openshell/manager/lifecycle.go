@@ -102,6 +102,11 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	if err := openshell.CheckHost(runtime.GOOS, runtime.GOARCH); err != nil {
 		st.Available, st.Reason = false, err.Error()
 	}
+	if m.opts.Listeners != nil {
+		if err := m.opts.Listeners(); err != nil {
+			st.Available, st.Reason = false, err.Error()
+		}
+	}
 	if eff, err := m.baseEffective(cfg); err == nil {
 		st.Profile = eff.Profile
 		if eff.Pack != nil {

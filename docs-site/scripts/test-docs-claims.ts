@@ -60,13 +60,14 @@ describe('Cursor observe outage mode', () => {
   it('keeps the rendered hook closed unless the config explicitly opens it', () => {
     const hooks = source('internal/gateway/connector/subprocess.go');
     const outage = hooks.split('func OutageHookFailMode(')[1]?.split('\n}')[0] ?? '';
-    assert.match(outage, /perUserCursorRender\(opts, conn\)/);
-    assert.match(outage, /!strings\.EqualFold\(strings\.TrimSpace\(opts\.ConfiguredHookFailMode\), "open"\)/);
-    assert.match(outage, /return "closed"/);
+    // sa-port-peer: a per-user render is closed whatever the config says.
+    assert.match(outage, /return resolveHookFailMode\(opts, conn\)/);
+    const resolve = hooks.split('func resolveHookFailMode(')[1]?.split('\n}')[0] ?? '';
+    assert.match(resolve, /return defaultHookFailMode/);
     assert.match(hooks, /func renderedHookFailMode\([\s\S]*?OutageHookFailMode\(opts, conn\)/);
     const failModes = page('reference/configuration/fail-modes.mdx').split('## Controls')[0] ?? '';
     const cursor = page('reference/connectors/cursor.mdx').split('## Fail mode')[1]?.split('## Limits')[0] ?? '';
-    assert.match(failModes, /Per-user Cursor in observe mode.{0,100}blocks supported events during a gateway outage by default/i);
+    assert.match(failModes, /Per-user hooks fail closed when the gateway cannot give a usable answer, in observe and action mode/i);
     assert.match(cursor, /observe mode.{0,100}blocks supported events on a gateway outage by default/i);
     const coverage = page('appendix/coverage-by-layer.mdx');
     assert.match(coverage, /Per-user Cursor in observe mode.{0,130}running hook blocks supported events during a gateway outage/i);
@@ -110,7 +111,7 @@ describe('Observe mode policy findings and gateway outages', () => {
 
   it('qualifies hook connector claims for Claude Code and Antigravity', () => {
     const outage = source('internal/gateway/connector/subprocess.go').split('func OutageHookFailMode(')[1]?.split('\n}')[0] ?? '';
-    assert.match(outage, /return mode/);
+    assert.match(outage, /return resolveHookFailMode\(opts, conn\)/);
     for (const connector of ['claudecode', 'antigravity']) {
       const section = page(`connectors/${connector}.mdx`).split('## What it can block or ask')[1]?.split('## Files it changes')[0] ?? '';
       assert.match(section, /Observe mode.{0,120}policy findings without blocking/i, connector);
@@ -335,10 +336,10 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     }
   });
 
-  it('says an upgrade keeps only an open the config sets', () => {
-    assert.ok(page('get-started/upgrade.mdx').includes("An upgrade sets each hook's fail mode from your config before the new hook runs"));
+  it('says an upgrade keeps per-user hooks closed', () => {
+    assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks fail closed even if an earlier config or registration saved `open`'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
-    assert.ok(page('reference/configuration/fail-modes.mdx').includes('Hooks follow an open fail mode only when your config sets it'));
+    assert.ok(page('reference/configuration/fail-modes.mdx').includes('An open value left in a per-user Windows hook sidecar or command flag is treated as closed'));
   });
 });
 

@@ -1851,6 +1851,10 @@ def fail_mode_cmd(
     (multi-connector installs only), writing a per-connector override
     while the global default and the other connectors are left untouched.
     """
+    managed_host = str(getattr(app.cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    if mode == "open" and not managed_host:
+        ux.err("Fail-open is reserved for administrator-managed hosts during an outage.", indent="  ")
+        raise SystemExit(1)
     if connector_flag:
         _set_connector_fail_mode(
             app, connector_flag, mode, restart=restart, yes=yes
@@ -1862,7 +1866,7 @@ def fail_mode_cmd(
     # (an OpenShell policy connector, a connector set up later), so a no-op
     # needs the saved global value to be exactly the requested one.
     saved_global = str(gc.hook_fail_mode or "").strip().lower()
-    current = saved_global if saved_global in ("open", "closed") else "open"
+    current = saved_global if managed_host and saved_global in ("open", "closed") else "closed"
 
     if mode is None:
         click.echo()
@@ -1946,7 +1950,8 @@ def fail_mode_cmd(
                 # GAP-1109: a connector override (or observe mode) keeps these
                 # open although the global default is closed.
                 _warn_still_fail_open(gc, _open_names)
-            click.echo(f"  {ux.dim('Switch to open:')}   defenseclaw guardrail fail-mode open")
+            if managed_host:
+                click.echo(f"  {ux.dim('Switch to open:')}   defenseclaw guardrail fail-mode open")
         click.echo()
         return
 

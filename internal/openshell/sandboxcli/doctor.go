@@ -113,7 +113,8 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	if a.Cfg != nil || managed {
 		st = a.probeDaemon(ctx, managed)
 		for i := range d.Ports {
-			// A daemon can hold one port while another program owns the other.
+			// A daemon can hold one port while another program owns the other, and
+			// an advertised address is not proof that this daemon bound it.
 			switch d.Ports[i].Name {
 			case "ingress":
 				d.Ports[i].ServedByDaemon = st.ingressListening
@@ -572,6 +573,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			// starts it, installing OpenShell first in setup mode. Nothing
 			// failed (GAP-0439, GAP-0441). Another account's sandboxes
 			// holding the port are the busy row below (GAP-0461).
+			p.ingressListening, p.egressListening = false, false
 			if st.DockerGroupMissing {
 				// Nothing has failed yet, but the first run's image build will
 				// (GAP-0556): the daemon cannot reach Docker.
@@ -580,7 +582,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			}
 			c.Status, c.Detail = openshell.StatusPass, "running; "+a.managedFirstRunText(st.Managed)
 		case !st.Available:
-			p.unavailable = true
+			p.ingressListening, p.egressListening, p.unavailable = false, false, true
 			c.Status, c.Detail = openshell.StatusFail, "running, but sandboxes are unavailable: "+sandboxapi.DisplayText(firstNonEmpty(st.Reason, "not connected to OpenShell"))
 			switch {
 			case st.Managed != nil && st.GatewayElsewhere != "":

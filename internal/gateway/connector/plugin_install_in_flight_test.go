@@ -102,8 +102,10 @@ func TestPerUserPluginAnswersClosedWhenAnInstallStartsDuringTheCall(t *testing.T
 						lines = runNodeHarness(t, ampInstallInFlightHarness, writeRenderedPlugin(t, "amp-plugin.ts", "defenseclaw.mts", data))
 						blocked = len(lines) > 0 && strings.Contains(lines[len(lines)-1], `"action":"reject-and-continue"`)
 					}
-					if blocked != install {
-						t.Fatalf("blocks=%v, want %v: %q", blocked, install, lines)
+					// A per-user plugin is closed whatever mode it was set up with
+					// (sa-port-peer): the failure blocks with or without an install.
+					if !blocked {
+						t.Fatalf("blocks=%v, want true (install %v): %q", blocked, install, lines)
 					}
 				})
 			}

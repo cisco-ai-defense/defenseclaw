@@ -538,9 +538,9 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 		{"claudecode", "PreToolUse", "action", "closed", "block"},
 		{"codex", "PreToolUse", "action", "closed", "block"},
 		{"hermes", "pre_tool_call", "action", "closed", "block"},
-		{"claudecode", "PreToolUse", "action", "open", "allow"},
-		{"codex", "PreToolUse", "action", "open", "allow"},
-		{"hermes", "pre_tool_call", "action", "open", "allow"},
+		{"claudecode", "PreToolUse", "action", "open", "block"},
+		{"codex", "PreToolUse", "action", "open", "block"},
+		{"hermes", "pre_tool_call", "action", "open", "block"},
 		{"claudecode", "PreToolUse", "observe", "closed", "block"},
 		{"codex", "PreToolUse", "observe", "closed", "block"},
 		{"hermes", "pre_tool_call", "observe", "closed", "block"},
@@ -607,14 +607,21 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 func TestHookPanicResponse_ActionProfileRequiresExplicitOpen(t *testing.T) {
 	for _, tc := range []struct {
 		name, connectorFail, globalFail, want string
+		managedStandalone                     bool
 	}{
-		{"observe connector default", "", "", "block"},
-		{"global open", "", "open", "allow"},
-		{"connector open", "open", "", "allow"},
-		{"connector closed over global open", "closed", "open", "block"},
+		{"observe connector default", "", "", "block", false},
+		{"per-user global open", "", "open", "block", false},
+		{"per-user connector open", "open", "", "block", false},
+		{"connector closed over global open", "closed", "open", "block", false},
+		{"managed administrator global open", "", "open", "allow", true},
+		{"managed administrator connector open", "open", "", "allow", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{}
+			if tc.managedStandalone {
+				cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+				cfg.Enterprise.Profile = managed.ProfileStandalone
+			}
 			cfg.Guardrail.Mode = "observe"
 			cfg.Codex.Mode = "action"
 			cfg.Guardrail.HookFailMode = tc.globalFail
@@ -752,8 +759,9 @@ func TestHandleAgentHook_PostEvaluationRecoveryUsesFailMode(t *testing.T) {
 // and standalone managed alike, deny every recovered panic on an enforcement
 // event even in observe mode, advisory events included. A lifecycle event
 // gets the neutral allow, or Claude Code's terminal answer. A standalone
-// administrator's open applies only to outages. Per-user explicit open and
-// Secure Client's unset default keep their open failure behavior; an
+// administrator's open applies only to outages, and every per-user hook
+// closes whatever mode it saved. Secure Client's unset default keeps its open
+// failure behavior; an
 // explicit closed denies under Secure Client too.
 func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 	type deployment int
@@ -824,10 +832,9 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 				for _, failSource := range failSources {
 					cfg := newConfig(t, d, mode, failSource, connectorName)
 					api := &APIServer{scannerCfg: cfg}
-					// Per-user Cursor fails closed in action mode whatever
-					// hook_fail_mode says. A standalone administrator's open
-					// applies only to outages, not evaluator panics.
-					open := failSource != "closed" && d != standalone && (connectorName != "cursor" || d != perUser)
+					// Every per-user connector closes on a failed check. A standalone
+					// administrator's open applies only to outages, not evaluator panics.
+					open := failSource != "closed" && d != standalone && d != perUser
 					for _, event := range append(append([]string{}, blocking...), lifecycle...) {
 						name := strings.Join([]string{dName, connectorName, event, mode, failSource}, "/")
 						req := agentHookRequest{ConnectorName: connectorName, HookEventName: event}

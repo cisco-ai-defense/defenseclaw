@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +18,7 @@ from defenseclaw.commands import cmd_config, cmd_edge_connector_cli, cmd_edge_in
 from defenseclaw.context import AppContext
 from defenseclaw.dotenv_utils import persist_env_var
 from defenseclaw.file_permissions import make_private_directory
+from defenseclaw.gateway import GatewayListenerNotOwnedError
 
 
 def _app(tmp_path):
@@ -106,14 +109,13 @@ def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch
 
     calls = []
 
-    def fake_run(args, **_kwargs):
+    def fake_request(*args):
         calls.append(args)
-        return SimpleNamespace(returncode=0, stdout='{"device_key":"' + "12" * 32 + '"}\n201', stderr="")
+        return 201, '{"device_key":"' + "12" * 32 + '"}'
 
-    monkeypatch.setattr(cmd_edge_install.subprocess, "run", fake_run)
+    monkeypatch.setattr(cmd_edge_install, "_fleet_api_request", fake_request)
     assert cmd_edge_install._register_device_via_api("1", "1", "42") == "12" * 32
-    assert endpoint + "/devices" in calls[0]
-    assert calls[0][1:5] == ["-q", "--noproxy", "*", "-s"]
+    assert calls[0][:3] == (endpoint, "POST", "/devices")
 
 
 def test_documented_proxy_trust_command_writes_fleet_setting(tmp_path, monkeypatch) -> None:
@@ -542,6 +544,77 @@ def test_device_registration_rejects_poisoned_endpoint_before_curl(monkeypatch) 
     )
     with pytest.raises(click.ClickException, match="requires HTTPS"):
         cmd_edge_install._register_device_via_api("1", "1", "42")
+
+
+def test_device_registration_keeps_token_and_body_off_an_unverified_local_fleet_port(monkeypatch) -> None:
+    received = []
+
+    class Peer(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            received.append((self.headers.get("Authorization"), self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(201)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"device_key":"' + b"12" * 32 + b'"}')
+
+        def log_message(self, _format, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Peer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("DCLAW_FLEET_API_URL", f"http://127.0.0.1:{server.server_port}/api/v1/fleet")
+    monkeypatch.setenv("DCLAW_FLEET_API_TOKEN", "must-never-cross-account")
+    try:
+        def refuse(*_args):
+            raise GatewayListenerNotOwnedError("foreign listener")
+
+        monkeypatch.setattr(
+            "defenseclaw.gateway._verify_connected_gateway_socket",
+            refuse,
+        )
+        assert cmd_edge_install._register_device_via_api("1", "1", "42") == ""
+        assert received == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_device_registration_proves_the_connected_local_fleet_socket(monkeypatch) -> None:
+    received = []
+
+    class Peer(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            received.append((self.headers.get("Authorization"), self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(201)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"device_key":"' + b"12" * 32 + b'"}')
+
+        def log_message(self, _format, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Peer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("DCLAW_FLEET_API_URL", f"http://127.0.0.1:{server.server_port}/api/v1/fleet")
+    monkeypatch.setenv("DCLAW_FLEET_API_TOKEN", "same-account-token")
+    verified = []
+    monkeypatch.setattr(
+        "defenseclaw.gateway._verify_connected_gateway_socket",
+        lambda _socket, host, port: verified.append((host, port)),
+    )
+    try:
+        assert cmd_edge_install._register_device_via_api("1", "2", "42") == "12" * 32
+        assert verified == [("127.0.0.1", server.server_port)]
+        assert len(received) == 1
+        assert received[0][0] == "Bearer same-account-token"
+        assert b'"device_id": 42' in received[0][1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_remote_installer_streams_secrets_outside_ssh_arguments(tmp_path, monkeypatch) -> None:

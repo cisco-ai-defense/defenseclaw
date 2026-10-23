@@ -373,7 +373,7 @@ func TestManagedBridgeTemplatesCloseOpenRender(t *testing.T) {
 		for _, tc := range []struct {
 			managed, secureClient bool
 			wantClosed            bool
-		}{{true, false, true}, {false, false, false}, {true, true, false}} {
+		}{{true, false, true}, {false, false, true}, {true, true, false}} {
 			body, err := renderHookTemplate(asset, templateData{FailMode: "open", Managed: tc.managed, SecureClient: tc.secureClient})
 			if err != nil {
 				t.Fatal(err)

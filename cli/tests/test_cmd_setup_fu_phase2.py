@@ -3601,14 +3601,20 @@ class TestGatewayOfflineStaging(_BaseSetup):
         openclaw_check.assert_not_called()
 
     def test_new_api_port_with_a_running_gateway_says_it_applies_on_restart(self):
+        import socket
+
         self.app.logger = MagicMock()
         self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("connection refused")
         self._seed_map("codex")
 
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            free_port = probe.getsockname()[1]
+
         with patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True), patch(
             "defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True
         ):
-            result = _invoke(["gateway", "--api-port", "19095", "--non-interactive"], self.app)
+            result = _invoke(["gateway", "--api-port", str(free_port), "--non-interactive"], self.app)
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("nothing listens on the new API port until the gateway restarts", result.output)

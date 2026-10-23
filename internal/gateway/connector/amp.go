@@ -130,6 +130,12 @@ func (c *AMPConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 			[]byte("if (DC_LISTENER_PROOF) await proveListener(token, init.signal)"),
 		)
 	}
+	if !opts.ManagedEnterprise {
+		markers = append(markers,
+			[]byte("const DC_PER_USER_NATIVE_POST: string = \"1\"\n"),
+			[]byte(`execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR]`),
+		)
+	}
 	for _, marker := range markers {
 		if !bytes.Contains(data, marker) {
 			return false, nil

@@ -1290,7 +1290,8 @@ func TestAPIServerHookPostureUsesPublishedRuntimeConfig(t *testing.T) {
 		}
 	}
 	if boot.EffectiveGuardrailModeForConnector("codex") != "observe" ||
-		boot.EffectiveHookFailModeForConnector("codex") != "open" {
+		boot.Guardrail.HookFailMode != "open" || boot.Guardrail.Connectors["codex"].HookFailMode != "open" ||
+		boot.EffectiveHookFailModeForConnector("codex") != "closed" {
 		t.Fatal("API posture read mutated the immutable boot snapshot")
 	}
 }
@@ -1362,10 +1363,9 @@ func TestConnectorSetChangeIsHotOffSecureClient(t *testing.T) {
 	}
 }
 
-// The CLI no longer restarts the gateway for a hook fail mode change
-// (GAP-0184): with hook self-heal off, no hook guard rewrites the hooks, so the
-// reload re-runs the connector setup; with it on the guards do.
-func TestHookFailModeChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
+// A legacy per-user open-to-closed edit cannot change the already-closed
+// runtime or the set of connectors that setup must install.
+func TestLegacyPerUserOpenEditDoesNotChangeConnectorSetup(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	oldCfg.Guardrail.Enabled = true
 	oldCfg.Guardrail.Connector = "codex"
@@ -1374,12 +1374,10 @@ func TestHookFailModeChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
 	oldCfg.Guardrail.HookFailMode = "open"
 	newCfg := cloneConfig(oldCfg)
 	newCfg.Guardrail.HookFailMode = "closed"
-	if !hookFailModeNeedsSetup(oldCfg, newCfg) {
-		t.Fatal("hook fail mode change with self-heal off did not re-run the connector setup")
-	}
-	oldCfg.Guardrail.HookSelfHeal, newCfg.Guardrail.HookSelfHeal = true, true
-	if hookFailModeNeedsSetup(oldCfg, newCfg) {
-		t.Fatal("hook fail mode change with self-heal on re-ran the setup; the hook guards apply it")
+	if oldCfg.EffectiveHookFailModeForConnector("codex") != "closed" ||
+		newCfg.EffectiveHookFailModeForConnector("codex") != "closed" ||
+		connectorSetChanged(oldCfg, newCfg) {
+		t.Fatal("legacy per-user open edit changed effective setup posture")
 	}
 }
 

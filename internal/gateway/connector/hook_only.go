@@ -1402,9 +1402,6 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 		return nil, fmt.Errorf("%s resolve absolute scoped hook credential path: %w", c.name, err)
 	}
 	failMode := setupHookFailMode(opts)
-	if failMode == "closed" && !c.capability(opts).SupportsFailClosed {
-		failMode = "open"
-	}
 	hookSocket, serviceUID := managedPluginHookSocket(opts)
 	rendered, err := renderTemplate(string(tmpl), templateData{
 		APIAddr:            opts.APIAddr,

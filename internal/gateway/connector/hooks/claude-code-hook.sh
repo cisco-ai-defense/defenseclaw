@@ -249,15 +249,22 @@ claude_fail_closed_decision() {
     reason="DefenseClaw blocked this because it could not reach its gateway (${1}). Run defenseclaw-gateway status to check it."
   fi
   event="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || return 1
+  local out=""
   case "$event" in
     PreToolUse)
-      _dc_jq -cn --arg r "$reason" \
-        '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}' ;;
+      out="$(_dc_jq -cn --arg r "$reason" \
+        '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}')" || return 1 ;;
     PermissionRequest)
-      _dc_jq -cn --arg r "$reason" \
-        '{hookSpecificOutput:{hookEventName:"PermissionRequest",decision:{behavior:"deny",message:$r}}}' ;;
+      out="$(_dc_jq -cn --arg r "$reason" \
+        '{hookSpecificOutput:{hookEventName:"PermissionRequest",decision:{behavior:"deny",message:$r}}}')" || return 1 ;;
     UserPromptSubmit|UserPromptExpansion)
-      _dc_jq -cn --arg r "$reason" '{decision:"block",reason:$r}' ;;
+      out="$(_dc_jq -cn --arg r "$reason" '{decision:"block",reason:$r}')" || return 1 ;;
+    *) return 1 ;;
+  esac
+  # Without jq or python3 the fallback reader cannot build this object and
+  # prints "null": that is no decision, so the caller's exit 2 blocks instead.
+  case "$out" in
+    "{"*deny*|"{"*block*) printf '%s\n' "$out" ;;
     *) return 1 ;;
   esac
 }
@@ -359,8 +366,8 @@ RESOLVED_HEADER_ARGS=()
 if [ -n "${_DC_RESOLVED_WRITES}" ]; then
   RESOLVED_HEADER_ARGS=(-H "X-DefenseClaw-Resolved-Writes: ${_DC_RESOLVED_WRITES}")
 fi
-{{end}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
-  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+{{end}}if defenseclaw_api_listener_unproven "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Another account may hold the port. Run \`defenseclaw setup gateway --api-port <free-port>\` to choose a free port"
 fi
 # A refused or dropped connection means this account's gateway is
 # restarting or not running (after a reboot, for example): send the call

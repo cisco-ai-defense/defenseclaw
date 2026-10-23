@@ -2401,9 +2401,8 @@ func TestSetupConnectorsIsolatedPreflightsAllScopedTokens(t *testing.T) {
 }
 
 // TestConnectorSetupOpts_PerConnectorHookFailMode verifies the per-connector
-// hook_fail_mode override flows into the SetupOpts via EffectiveHookFailModeFor
-// — the global fail mode for connectors without an override, the override
-// value for those that set one.
+// hook_fail_mode override flows into the SetupOpts via EffectiveHookFailModeFor.
+// A per-user legacy open is pinned closed for every connector.
 func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 	s := multiBootSidecar(t)
 	s.cfg.Guardrail.Mode = "action"
@@ -2414,8 +2413,8 @@ func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 	}
 
 	codexOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "codex"}}, "tok", "a", "b")
-	if codexOpts.HookFailMode != "open" {
-		t.Errorf("codex HookFailMode=%q, want global %q", codexOpts.HookFailMode, "open")
+	if codexOpts.HookFailMode != "closed" {
+		t.Errorf("codex HookFailMode=%q, want per-user closed", codexOpts.HookFailMode)
 	}
 	cursorOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "cursor"}}, "tok", "a", "b")
 	if cursorOpts.HookFailMode != "closed" {

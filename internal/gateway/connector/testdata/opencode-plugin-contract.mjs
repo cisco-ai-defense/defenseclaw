@@ -179,7 +179,7 @@ try {
     { name: "timeout", timeout: true },
     { name: "malformed", malformed: true },
   ]) {
-    await runScenario({ name: `${failure.name}-open`, failure });
+    await runScenario({ name: `${failure.name}-old-per-user-open`, failure, expectBlocked: true });
     await runScenario({
       name: `${failure.name}-closed`,
       pluginPath: closedPluginPath,

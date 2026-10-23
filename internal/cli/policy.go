@@ -23,11 +23,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -481,9 +483,7 @@ var policyReloadCmd = &cobra.Command{
 		bind := "127.0.0.1"
 		if cfg != nil {
 			port = cfg.Gateway.APIPort
-			if cfg.Gateway.APIBind != "" {
-				bind = cfg.Gateway.APIBind
-			}
+			bind = gatewayClientHost(cfg)
 		}
 
 		// The reload carries the gateway token: never to a listener that is
@@ -492,7 +492,7 @@ var policyReloadCmd = &cobra.Command{
 			return fmt.Errorf("policy reload: %s; the gateway token was not sent. %s", problem, foreignGatewayListenerFix(cfg))
 		}
 
-		url := fmt.Sprintf("http://%s:%d/policy/reload", bind, port)
+		url := "http://" + net.JoinHostPort(bind, strconv.Itoa(port)) + "/policy/reload"
 
 		req, err := http.NewRequest(http.MethodPost, url, nil)
 		if err != nil {
@@ -519,7 +519,10 @@ var policyReloadCmd = &cobra.Command{
 			}
 		}
 
-		client := &http.Client{Timeout: 10 * time.Second}
+		client, err := gatewayPeerClient(cfg, bind, port, 10*time.Second)
+		if err != nil {
+			return fmt.Errorf("policy reload: %w", err)
+		}
 		resp, err := client.Do(req)
 		if err != nil {
 			return fmt.Errorf("cannot reach sidecar at %s — is it running?", url)

@@ -103,8 +103,10 @@ func TestPerUserShellHookAnswersClosedWhenAnInstallStartsDuringTheCall(t *testin
 					}))
 					t.Cleanup(server.Close)
 					stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, strings.TrimPrefix(server.URL, "http://"), nil)
-					if got := shellHookBlocked(err, stdout); got != install {
-						t.Fatalf("blocks=%v, want %v: err=%v stdout=%q stderr=%q", got, install, err, stdout, stderr)
+					// A per-user hook is closed whatever mode it was set up with
+					// (sa-port-peer): the failure blocks with or without an install.
+					if got := shellHookBlocked(err, stdout); !got {
+						t.Fatalf("blocks=%v, want true (install %v): err=%v stdout=%q stderr=%q", got, install, err, stdout, stderr)
 					}
 				})
 			}
@@ -140,8 +142,9 @@ func TestPerUserShellHookOversizedPayloadClosesWhenAnInstallStartsDuringTheRead(
 					_ = stdin.Close()
 				}
 				stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, freeAPIAddr(t), write)
-				if got := shellHookBlocked(err, stdout); got != install {
-					t.Fatalf("blocks=%v, want %v: err=%v stdout=%q stderr=%q", got, install, err, stdout, stderr)
+				// Oversized input blocks a per-user hook in every mode (sa-port-peer).
+				if got := shellHookBlocked(err, stdout); !got {
+					t.Fatalf("blocks=%v, want true (install %v): err=%v stdout=%q stderr=%q", got, install, err, stdout, stderr)
 				}
 			})
 		}

@@ -19,6 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -87,15 +88,35 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 		return ctx, req, err
 	}
 	custody := audit.ConnectorCustodyHookOnly
+	nativePerUserHookOnly := false
 	if spec.NativeTelemetry.Stability != connector.NativeTelemetryNone {
-		// Migration never rewrites a connector's exporter. Authenticated native
-		// ingestion promotes this to defenseclaw; hook traffic only records the
-		// unchanged external topology.
+		// On managed hosts, authenticated native ingestion promotes this to
+		// defenseclaw; hook traffic alone records external custody.
 		custody = audit.ConnectorCustodyExternal
+		// Per-user Codex and Claude Code no longer install a native exporter:
+		// it cannot prove the account behind a loopback port. A previous
+		// release's native custody is historical after this upgrade.
+		_, sandboxed := sandboxauth.FromContext(ctx)
+		if cfg := a.runtimeConfigSnapshot(); !sandboxed && cfg != nil && cfg.EnterpriseProfile() == "" &&
+			(req.ConnectorName == "codex" || req.ConnectorName == "claudecode") {
+			custody = audit.ConnectorCustodyHookOnly
+			nativePerUserHookOnly = true
+		}
 	}
 	instance, err := resolveConnectorInstanceForRequest(ctx, repo, req.ConnectorName, string(spec.ProfileVersion), custody)
 	if err != nil {
 		return ctx, req, err
+	}
+	if nativePerUserHookOnly && instance.ExportCustody != custody {
+		// Resolve never downgrades an authenticated native stream from an older
+		// release. The verified per-user profile transition explicitly does.
+		instance.ExportCustody = custody
+		instance.ManagedConfigDigest = ""
+		instance.UpdatedAt = time.Now().UTC()
+		instance, err = repo.UpsertConnectorInstance(ctx, instance)
+		if err != nil {
+			return ctx, req, err
+		}
 	}
 
 	now := time.Now().UTC()

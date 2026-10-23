@@ -52,9 +52,11 @@ func TestOpenCodePluginFailOpenWritesAHookFailureLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := templateData{
-		APIAddr:     strings.TrimPrefix(server.URL, "http://"),
-		TokenFileJS: javaScriptStringContent(token),
-		FailMode:    "open",
+		APIAddr:      strings.TrimPrefix(server.URL, "http://"),
+		TokenFileJS:  javaScriptStringContent(token),
+		FailMode:     "open",
+		Managed:      true,
+		SecureClient: true,
 	}
 	harness := strings.Replace(openCodePluginHarness, `console.log("allow");`, `await plugin["tool.execute.after"]({ tool: "bash", sessionID: "S", messageID: "M", callID: "C" + i }, { output: "marker" }); console.log("allow");`, 1)
 	lines := runNodeHarness(t, harness, writeRenderedPlugin(t, "opencode-plugin.js", "defenseclaw.mjs", data), "1")

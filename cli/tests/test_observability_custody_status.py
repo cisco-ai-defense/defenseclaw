@@ -15,6 +15,7 @@ from defenseclaw.commands.cmd_doctor import (
     _check_connector_export_custody,
     _claude_exporter_reaches_gateway,
     _DoctorResult,
+    _emit_unattributed_otlp_credentials,
 )
 from defenseclaw.commands.cmd_status import _print_native_delivery_status
 from defenseclaw.observability.custody_status import (
@@ -164,18 +165,56 @@ def test_custody_status_is_read_only_and_reports_per_instance_evidence(tmp_path:
     assert codex.managed_config_state == "verified"
     assert codex.normalized_batches == 1
     assert codex.drop_only_batches == 1
-    assert codex.authentication_failures == 1
-    assert codex.credential_state == "invalid"
+    assert codex.authentication_failures == 0
+    assert codex.credential_state == "no_recent_failure"
     explicit = by_id["019b0000-0000-7000-8000-000000000002"]
     assert not explicit.default
     assert explicit.normalized_batches == 0
     assert explicit.authentication_failures == 0
     assert by_id["019b0000-0000-7000-8000-000000000003"].custody == "external"
     assert by_id["019b0000-0000-7000-8000-000000000004"].custody == "hook_only"
-    assert report.unattributed_authentication_failures == 1
+    assert report.unattributed_authentication_failures == 2
     assert "operator-secret" not in repr(report)
     assert external_file.read_bytes() == before
     assert external_file.stat().st_mtime_ns == before_mtime
+
+
+@pytest.mark.parametrize("accepted_delivery", [False, True])
+def test_untrusted_otlp_probe_does_not_fail_a_verified_exporter(tmp_path: Path, accepted_delivery: bool) -> None:
+    """A route name on a rejected request is a claim, not exporter identity."""
+    db_path = tmp_path / "audit.db"
+    db = _database(db_path)
+    _instance(db, "019b0000-0000-7000-8000-000000000001", "codex", "defenseclaw")
+    if accepted_delivery:
+        _event(db, "accepted", "telemetry.batch.normalized", "codex", "accepted-1", _record("logs", 2))
+    _event(
+        db,
+        "peer-probe", "telemetry.authentication.failed", "codex", "rejected-1", _record("logs", 0),
+        timestamp="2026-07-14T11:56:00Z",
+    )
+    db.commit()
+    db.close()
+    target = tmp_path / "codex-config.toml"
+    target.write_text("[otel]\nmanaged=true\n")
+    _managed_backup(tmp_path, "codex", target)
+
+    report = inspect_connector_custody(db_path, tmp_path, now=NOW)
+    (codex,) = report.instances
+    assert codex.managed_config_state == "verified"
+    assert codex.credential_state == "no_recent_failure"
+    assert report.unattributed_authentication_failures == 1
+
+    result = _DoctorResult()
+    _check_connector_export_custody(report, result)
+    rows = {row["label"]: row for row in result.checks}
+    assert rows["Connector OTLP: codex"]["status"] == "pass"
+    if accepted_delivery:
+        assert "accepted native delivery observed" in rows["Connector OTLP: codex"]["detail"]
+    assert rows["Native OTLP credentials"]["status"] == "warn"
+    assert "defenseclaw setup" not in rows["Native OTLP credentials"]["remediation"]
+    recent = _DoctorResult()
+    _emit_unattributed_otlp_credentials(report, recent, now=NOW)
+    assert "re-run 'defenseclaw setup" not in recent.checks[0]["remediation"]
 
 
 def test_custody_status_detects_managed_exporter_drift_without_repair(tmp_path: Path) -> None:

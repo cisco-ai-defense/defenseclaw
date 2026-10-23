@@ -18,13 +18,15 @@
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
 import { execFile, execFileSync } from 'node:child_process'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { lstatSync } from 'node:fs'
+
 import { lstat, stat } from 'node:fs/promises'
 import { homedir, userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 
 const DC_API_ADDR = "{{.APIAddr}}"
 const DC_TOKEN_FILE = "{{.TokenFileJS}}"
-const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"
+const DC_FAIL_MODE: string = "{{.FailMode}}" // per-user and standalone hooks stay closed
 // Standalone managed installs talk to the gateway's peer-authorized unix hook
 // socket instead of the TCP API: the gateway identifies the caller by
 // kernel-verified uid, so no bearer token leaves this process, and a user who
@@ -55,6 +57,9 @@ const DC_INSTALL_MARKER: string = "{{.InstallMarkerJS}}"
 // verdict. Empty skips the proof (per-user installs, Secure Client, and the
 // hook socket, whose owner is verified instead).
 const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"
+// Per-user plugins ask the native gateway binary to verify the connected
+// listener's account before each request. The proof above serves managed TCP.
+const DC_PER_USER_NATIVE_POST: string = ""
 const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
@@ -158,8 +163,9 @@ async function fullSessionFacts(): Promise<string> {
 	if (sessionFactsCache.key === key && now < sessionFactsCache.until) return sessionFactsCache.value
 	let value = ""
 	try {
-		const binary = DC_FOREIGN_GUARD ||
-			join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")
+		const binary = DC_FOREIGN_GUARD || (DC_PER_USER_NATIVE_POST
+			? perUserNativePostBinary()
+			: join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway"))
 		const out = String(execFileSync(binary, ["hook", "session-facts"], {
 			timeout: 3000, maxBuffer: 4096, windowsHide: true, stdio: ["ignore", "pipe", "ignore"],
 		})).trim()
@@ -284,14 +290,48 @@ async function proveListener(token: string, signal?: AbortSignal | null): Promis
 	}
 }
 
+function perUserNativePostBinary(): string {
+	const home = homedir()
+	const directory = join(home, ".local", "bin")
+	const binary = join(directory, process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")
+	const paths = [home, join(home, ".local"), directory, binary]
+	const uid = userInfo().uid
+	for (let index = 0; index < paths.length; index++) {
+		const info = lstatSync(paths[index])
+		if (info.isSymbolicLink() || (index === paths.length - 1 ? !info.isFile() : !info.isDirectory())) {
+			throw new Error("per-user gateway helper path is untrusted")
+		}
+		if (process.platform !== "win32" && (info.uid !== uid || (info.mode & 0o022) !== 0)) {
+			throw new Error("per-user gateway helper path is writable by another account")
+		}
+	}
+	return binary
+}
+
 // gatewayFetch posts over the verified managed hook socket when one is
-// configured (Bun's unix fetch option), and over TCP otherwise; a TCP
-// request that carries a per-user credential first requires the listener
-// proof.
+// configured (Bun's unix fetch option). A per-user post goes through the
+// native helper, which verifies the same connected socket it sends on.
 async function gatewayFetch(path: string, init: RequestInit, token: string): Promise<Response> {
 	if (!DC_HOOK_SOCKET) {
+		if (DC_PER_USER_NATIVE_POST) {
+			const binary = perUserNativePostBinary()
+			const output = execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
+				input: JSON.stringify({ path, headers: init.headers || {}, body: String(init.body || "") }),
+				timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8",
+			})
+			const reply = JSON.parse(output) as { status: number; body: string; retry_after?: string }
+			if (!Number.isInteger(reply.status) || reply.status < 100 || reply.status > 599 || typeof reply.body !== "string") {
+				throw new Error("invalid native gateway response")
+			}
+			return {
+				ok: reply.status >= 200 && reply.status < 300,
+				status: reply.status,
+				headers: { get: (name: string) => name.toLowerCase() === "retry-after" ? reply.retry_after || null : null },
+				json: async () => JSON.parse(reply.body),
+			} as Response
+		}
 		if (DC_LISTENER_PROOF) await proveListener(token, init.signal)
-		return fetch(`http://${DC_API_ADDR}${path}`, init)
+		return fetch(`http://${DC_API_ADDR}${path}`, { ...init, redirect: "error" })
 	}
 	await verifyHookSocket()
 	if (!(globalThis as typeof globalThis & { Bun?: unknown }).Bun) {
@@ -460,7 +500,7 @@ async function perUserInstallInProgress(): Promise<boolean> {
 }
 
 async function failureResponse(reason: string): Promise<GatewayResponse> {
-	if (DC_FAIL_MODE === "closed" || await perUserInstallInProgress()) {
+	if (DC_FAIL_MODE === "closed") {
 		return { action: "block", reason: `DefenseClaw hook failed closed (${reason})` }
 	}
 	return { action: "allow" }
@@ -651,6 +691,9 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			}
 			return data
 		} catch (error) {
+			if (DC_PER_USER_NATIVE_POST) {
+				return { action: "block", reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" }
+			}
 			if (await deploymentRemoved()) return { action: "allow" }
 			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
 				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }

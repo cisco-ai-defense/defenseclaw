@@ -35,7 +35,7 @@ func TestPluginSetupPublishesDespiteUnusableSharedHookRuntimeRecord(t *testing.T
 				OpenCodePluginPathOverride = path
 				return func() { OpenCodePluginPathOverride = old }
 			},
-			failModeJS: `DC_FAIL_MODE = "open"`,
+			failModeJS: `DC_FAIL_MODE = "closed"`,
 		},
 		{
 			name: "amp", fileName: "defenseclaw.ts",
@@ -46,7 +46,7 @@ func TestPluginSetupPublishesDespiteUnusableSharedHookRuntimeRecord(t *testing.T
 				AMPPluginPathOverride = path
 				return func() { AMPPluginPathOverride = old }
 			},
-			failModeJS: `DC_FAIL_MODE: string = "open"`,
+			failModeJS: `DC_FAIL_MODE: string = "closed"`,
 		},
 	} {
 		for _, state := range []struct {

@@ -641,7 +641,11 @@ func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, 
 				return failUnreachable(withManagedOutage(opts, err), sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 			}
 		} else {
-			opts.HTTPClient = defaultHTTPClient(requestTimeout)
+			var err error
+			opts.HTTPClient, err = newPerUserHookHTTPClient(requestTimeout, opts.APIAddr)
+			if err != nil {
+				return failUnreachable(opts, sp, "closed", "per-user gateway listener ownership could not be verified: "+err.Error())
+			}
 		}
 	}
 
@@ -789,7 +793,11 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 				return 0
 			}
 		} else {
-			opts.HTTPClient = defaultHTTPClient(defaultHookRequestTimeout)
+			var err error
+			opts.HTTPClient, err = newPerUserHookHTTPClient(defaultHookRequestTimeout, opts.APIAddr)
+			if err != nil {
+				return 0
+			}
 		}
 	}
 

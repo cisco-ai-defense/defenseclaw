@@ -15,7 +15,7 @@ Every environment variable DefenseClaw reads, with defaults, accepted values and
 Ambient `DEFENSECLAW_OTEL_*`, standard `OTEL_EXPORTER_OTLP_*` and `DEFENSECLAW_DISABLE_REDACTION` values are not live collection, routing or redaction policy. Destinations name credential variables explicitly through fields such as `token_env`, `bearer_env` or `{env: NAME}`. Rows described as legacy observability inputs are read only by the automatic upgrade converter and are retired after their value is materialized.
 </Callout>
 
-On per-user installs, `defenseclaw doctor` reports active security override flags visible to the CLI process. Inspect the gateway and Edge Connector service environments separately when they run under systemd or another supervisor. A Codex TUI or app server can outlive the shell that launched it, so a shell export is not a reliable way to set its hook posture. Set `guardrail.hook_fail_mode: closed` in config instead.
+On per-user installs, `defenseclaw doctor` reports active security override flags visible to the CLI process. Inspect the gateway and Edge Connector service environments separately when they run under systemd or another supervisor. A Codex TUI or app server can outlive the shell that launched it, so set its hook posture in `guardrail.hook_fail_mode` instead of relying on a shell export.
 
 ## Managed hosts and the environment
 

@@ -147,8 +147,10 @@ func TestPerUserShellHookBootstrapFailureClosesDuringAnInstall(t *testing.T) {
 					t.Fatalf("fail mode closed: %s, want a block", got)
 				}
 				if failure.openRuns && !closedAnyway {
-					if blocks, got := answer("open", false); blocks {
-						t.Fatalf("fail mode open without an install: %s, want the call to run", got)
+					// A per-user hook is closed whatever mode it was set up
+					// with (sa-port-peer), so open without an install blocks too.
+					if blocks, got := answer("open", false); !blocks {
+						t.Fatalf("fail mode open without an install: %s, want a block", got)
 					}
 				}
 			})

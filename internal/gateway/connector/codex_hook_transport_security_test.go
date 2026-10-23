@@ -5,199 +5,126 @@ package connector
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
-func TestCodexHookKeepsCredentialsAndPayloadOutOfCurlArgv(t *testing.T) {
+func TestCodexHookNativeTransportUsesScopedTokenAndPayload(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hooks are not used on Windows")
 	}
-
-	const (
-		scopedToken      = "codex-scoped-transport-token"
-		genericToken     = "inherited-generic-token"
-		inheritedAPI     = "inherited-exported-api-token"
-		inheritedPayload = "inherited-exported-payload"
-		payload          = `{"hook_event_name":"PreToolUse","tool_name":"Read","private":"payload-must-not-enter-argv"}`
-	)
-
-	hooksDir := t.TempDir()
+	const scopedToken = "codex-scoped-transport-token"
+	const payload = `{"hook_event_name":"PreToolUse","tool_name":"Read","private":"payload-must-not-enter-argv"}`
+	type receivedRequest struct{ authorization, body string }
+	received := make(chan receivedRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body bytes.Buffer
+		_, _ = body.ReadFrom(r.Body)
+		received <- receivedRequest{r.Header.Get("Authorization"), body.String()}
+		_, _ = w.Write([]byte(`{"action":"allow","codex_output":{"decision":"allow"}}`))
+	}))
+	defer server.Close()
+	home := t.TempDir()
+	installNativeGatewayForHookTest(t, home)
+	hooksDir := filepath.Join(home, "hooks")
 	if err := WriteHookScriptsForConnectorObject(
-		hooksDir,
-		freeAPIAddr(t),
-		scopedToken,
-		NewCodexConnector(),
+		hooksDir, strings.TrimPrefix(server.URL, "http://"), scopedToken, NewCodexConnector(),
 	); err != nil {
-		t.Fatalf("write Codex hook: %v", err)
+		t.Fatal(err)
 	}
-
-	stubDir := t.TempDir()
-	argvPath := filepath.Join(stubDir, "argv.txt")
-	headerPath := filepath.Join(stubDir, "header.txt")
-	bodyPath := filepath.Join(stubDir, "body.txt")
-	envPath := filepath.Join(stubDir, "env.txt")
-	stubPath := filepath.Join(stubDir, "curl")
-	stub := `#!/bin/sh
-set -eu
-: > "${CODEX_CURL_ARGV_CAPTURE}"
-: > "${CODEX_CURL_HEADER_CAPTURE}"
-: > "${CODEX_CURL_BODY_CAPTURE}"
-/usr/bin/env > "${CODEX_CURL_ENV_CAPTURE}"
-want=""
-for arg in "$@"; do
-  printf '%s\n' "$arg" >> "${CODEX_CURL_ARGV_CAPTURE}"
-  case "$want" in
-    header)
-      case "$arg" in
-        @*) cat "${arg#@}" >> "${CODEX_CURL_HEADER_CAPTURE}" ;;
-        *) printf '%s\n' "$arg" >> "${CODEX_CURL_HEADER_CAPTURE}" ;;
-      esac
-      want=""
-      ;;
-    body)
-      case "$arg" in
-        @*) cat "${arg#@}" >> "${CODEX_CURL_BODY_CAPTURE}" ;;
-        *) printf '%s' "$arg" >> "${CODEX_CURL_BODY_CAPTURE}" ;;
-      esac
-      want=""
-      ;;
-    config)
-      cat "$arg" >> "${CODEX_CURL_HEADER_CAPTURE}"
-      want=""
-      ;;
-  esac
-  case "$arg" in
-    -H|--header) want="header" ;;
-    -d|--data|--data-binary) want="body" ;;
-    -K|--config) want="config" ;;
-  esac
-done
-printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
-`
-	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
-		t.Fatalf("write curl stub: %v", err)
-	}
-
-	hookPath := filepath.Join(hooksDir, "codex-hook.sh")
-	bakeHookPathForTest(t, hookPath, stubDir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
-	cmd := exec.Command("bash", codexBoundShellHookArgsForTest(t, hookPath, "PreToolUse")...)
-	cmd.Env = append(os.Environ(),
-		"DEFENSECLAW_HOME="+t.TempDir(),
-		"DEFENSECLAW_GATEWAY_TOKEN="+genericToken,
-		"API_TOKEN="+inheritedAPI,
-		"PAYLOAD="+inheritedPayload,
-		"CODEX_CURL_ARGV_CAPTURE="+argvPath,
-		"CODEX_CURL_HEADER_CAPTURE="+headerPath,
-		"CODEX_CURL_BODY_CAPTURE="+bodyPath,
-		"CODEX_CURL_ENV_CAPTURE="+envPath,
-	)
+	cmd := exec.Command("bash", codexBoundShellHookArgsForTest(t, filepath.Join(hooksDir, "codex-hook.sh"), "PreToolUse")...)
+	cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home,
+		"DEFENSECLAW_GATEWAY_TOKEN=inherited-generic-token", "API_TOKEN=inherited-api-token", "PAYLOAD=inherited-payload")
 	cmd.Stdin = strings.NewReader(payload)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("run Codex hook: %v\nstdout=%q\nstderr=%q", err, stdout.String(), stderr.String())
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run Codex hook: %v\n%s", err, output)
 	}
-
-	argv := readCodexHookTransportCapture(t, argvPath)
-	for _, secret := range []string{scopedToken, genericToken, inheritedAPI, inheritedPayload, payload, "payload-must-not-enter-argv"} {
-		if strings.Contains(argv, secret) {
-			t.Fatalf("curl argv exposed private material %q:\n%s", secret, argv)
+	select {
+	case got := <-received:
+		if got.authorization != "Bearer "+scopedToken || got.body != payload {
+			t.Fatalf("native request header/body = %+v", got)
 		}
+		if strings.Contains(got.authorization+got.body, "inherited-") {
+			t.Fatalf("native request inherited unrelated credentials or payload: %+v", got)
+		}
+	default:
+		t.Fatal("Codex hook made no native request to the verified gateway")
 	}
-	header := strings.TrimSpace(readCodexHookTransportCapture(t, headerPath))
-	if !strings.Contains(header, "Authorization: Bearer "+scopedToken) {
-		t.Fatalf("transported headers = %q, want scoped token", header)
-	}
-	if strings.Contains(header, genericToken) {
-		t.Fatalf("transported Authorization header retained inherited generic token: %q", header)
-	}
-	body := readCodexHookTransportCapture(t, bodyPath)
-	if body != payload {
-		t.Fatalf("transported request body = %q, want %q", body, payload)
-	}
-	childEnv := readCodexHookTransportCapture(t, envPath)
-	if strings.Contains(childEnv, scopedToken) || strings.Contains(childEnv, genericToken) ||
-		strings.Contains(childEnv, inheritedAPI) || strings.Contains(childEnv, inheritedPayload) ||
-		strings.Contains(childEnv, payload) {
-		t.Fatalf("curl inherited a gateway credential in its environment: %q", childEnv)
-	}
-	if !strings.Contains(stdout.String(), `"decision":"allow"`) || strings.TrimSpace(stderr.String()) != "" {
-		t.Fatalf("hook protocol changed: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	if !strings.Contains(string(output), `"decision":"allow"`) {
+		t.Fatalf("hook response = %q", output)
 	}
 }
 
-func TestCodexHookEscapesCurlConfigTokenMetacharacters(t *testing.T) {
+func TestCodexHookPreservesTokenMetacharactersInNativeTransport(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hooks are not used on Windows")
 	}
-
 	const scopedToken = "codex-scoped\\token-\"quoted"
-	hooksDir := t.TempDir()
+	received := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"action":"allow","codex_output":{"decision":"allow"}}`))
+	}))
+	defer server.Close()
+	home := t.TempDir()
+	installNativeGatewayForHookTest(t, home)
+	hooksDir := filepath.Join(home, "hooks")
 	if err := WriteHookScriptsForConnectorObject(
-		hooksDir,
-		freeAPIAddr(t),
-		scopedToken,
-		NewCodexConnector(),
+		hooksDir, strings.TrimPrefix(server.URL, "http://"), scopedToken, NewCodexConnector(),
 	); err != nil {
-		t.Fatalf("write Codex hook: %v", err)
+		t.Fatal(err)
 	}
-
-	capture := runHookAndCaptureCurlTransport(t, filepath.Join(hooksDir, "codex-hook.sh"), nil)
-	if strings.Contains(capture.argv, scopedToken) {
-		t.Fatalf("curl argv exposed the scoped token:\n%s", capture.argv)
+	cmd := exec.Command("bash", codexBoundShellHookArgsForTest(t, filepath.Join(hooksDir, "codex-hook.sh"), "PreToolUse")...)
+	cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home)
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Read"}`)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run Codex hook: %v\n%s", err, output)
 	}
-	const wantConfigLine = `header = "Authorization: Bearer codex-scoped\\token-\"quoted"`
-	if !strings.Contains(capture.headers, wantConfigLine+"\n") {
-		t.Fatalf("transported curl config = %q, want escaped line %q", capture.headers, wantConfigLine)
+	select {
+	case got := <-received:
+		if got != "Bearer "+scopedToken {
+			t.Fatalf("native Authorization header = %q, want exact token", got)
+		}
+	default:
+		t.Fatal("Codex hook made no native request")
 	}
 }
 
-func TestCodexHookRejectsTokenLineBreakBeforeCurl(t *testing.T) {
+func TestCodexHookRejectsTokenLineBreakBeforeNativeRequest(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hooks are not used on Windows")
 	}
-
-	hooksDir := t.TempDir()
+	var received atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received.Add(1)
+		_, _ = w.Write([]byte(`{"action":"allow"}`))
+	}))
+	defer server.Close()
+	home := t.TempDir()
+	installNativeGatewayForHookTest(t, home)
+	hooksDir := filepath.Join(home, "hooks")
 	if err := WriteHookScriptsForConnectorObject(
-		hooksDir,
-		"127.0.0.1:18970",
-		"initial-scoped-token",
-		NewCodexConnector(),
+		hooksDir, strings.TrimPrefix(server.URL, "http://"), "initial-scoped-token", NewCodexConnector(),
 	); err != nil {
-		t.Fatalf("write Codex hook: %v", err)
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(hooksDir, ".hook-codex.token"), []byte("invalid\rtoken\n"), 0o600); err != nil {
-		t.Fatalf("replace scoped token: %v", err)
+		t.Fatal(err)
 	}
-
-	stubDir := t.TempDir()
-	invokedPath := filepath.Join(stubDir, "curl-invoked")
-	stubPath := filepath.Join(stubDir, "curl")
-	stub := "#!/bin/sh\n: > \"${CODEX_CURL_INVOKED}\"\nexit 99\n"
-	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
-		t.Fatalf("write curl stub: %v", err)
-	}
-
-	hookPath := filepath.Join(hooksDir, "codex-hook.sh")
-	bakeHookPathForTest(t, hookPath, stubDir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
-	cmd := exec.Command("bash", codexBoundShellHookArgsForTest(t, hookPath, "PreToolUse")...)
-	cmd.Env = append(os.Environ(),
-		"DEFENSECLAW_HOME="+t.TempDir(),
-		"CODEX_CURL_INVOKED="+invokedPath,
-	)
+	cmd := exec.Command("bash", codexBoundShellHookArgsForTest(t, filepath.Join(hooksDir, "codex-hook.sh"), "PreToolUse")...)
+	cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home)
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Read"}`)
 	output, _ := cmd.CombinedOutput()
-	if strings.Contains(string(output), "invalid\rtoken") {
-		t.Fatalf("invalid token leaked into hook output: %q", output)
-	}
-	if _, err := os.Stat(invokedPath); !os.IsNotExist(err) {
-		t.Fatalf("invalid token invoked curl: %v", err)
+	if strings.Contains(string(output), "invalid\rtoken") || received.Load() != 0 {
+		t.Fatalf("invalid token escaped to output or gateway: requests=%d output=%q", received.Load(), output)
 	}
 }
 
@@ -207,18 +134,5 @@ func codexBoundShellHookArgsForTest(t *testing.T, hookPath, event string) []stri
 	if err != nil {
 		t.Fatalf("resolve default Codex hook contract: %v", err)
 	}
-	return []string{
-		hookPath,
-		"--event", event,
-		"--hook-contract", contract.ContractID,
-	}
-}
-
-func readCodexHookTransportCapture(t *testing.T, path string) string {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read transport capture %s: %v", filepath.Base(path), err)
-	}
-	return string(data)
+	return []string{hookPath, "--event", event, "--hook-contract", contract.ContractID}
 }
