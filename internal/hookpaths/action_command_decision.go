@@ -351,6 +351,19 @@ func actionPrivateReadPath(value, cwd, home string) bool {
 	return false
 }
 
+// Keep the common reader set identical in POSIX shells and on a Windows home.
+// The Windows branch also has native readers; POSIX type is only a name lookup.
+// Identity use by ssh and ssh-keygen does not emit key bytes.
+func actionPrivateKeyReader(program string, windows bool) bool {
+	switch program {
+	case "cat", "head", "tail", "sort", "wc", "grep":
+		return true
+	case "type", "get-content", "get-childitem":
+		return windows
+	}
+	return false
+}
+
 // A generated basename is safe only when its parent is an ordinary resolved
 // directory and no existing name it might select aliases a protected file.
 // This retains ordinary log/date/temp names without claiming an invented
@@ -490,7 +503,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			}
 		}
 	}
-	if program == "cat" || program == "head" || program == "tail" || program == "sort" || program == "wc" || program == "grep" {
+	if actionPrivateKeyReader(program, false) {
 		for _, source := range words[1:] {
 			if source != "" && !strings.HasPrefix(source, "-") &&
 				actionPrivateReadPath(source, cwd, home) {
@@ -500,6 +513,9 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 	}
 	if program == "eval" {
 		return "eval-source"
+	}
+	if program == "make" || program == "gmake" {
+		return actionMakeDecision(words, actionMakeAssignments(stmt, home), cwd, home)
 	}
 	if program == "rsync" && len(words) >= 3 && strings.Contains(strings.Join(words[1:len(words)-1], " "), "-a") {
 		protected := newProtectedFiles(home)
@@ -632,6 +648,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 		return actionWordsDecision(words[index:], cwd, home, depth+1)
 	case "env":
 		index := 1
+		env := actionMakeAssignments(stmt, home)
 		for index < len(words) {
 			w := words[index]
 			switch {
@@ -656,10 +673,14 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			case strings.HasPrefix(w, "--unset=") || strings.HasPrefix(w, "-u") && len(w) > 2:
 				index++
 			case strings.Contains(w, "=") && !strings.HasPrefix(w, "-"):
+				env = append(env, w)
 				index++
 			case strings.HasPrefix(w, "-"):
 				return "dynamic-command"
 			default:
+				if actionMakeProgram(words[index]) {
+					return actionMakeDecision(words[index:], env, cwd, home)
+				}
 				return actionWordsDecision(words[index:], cwd, home, depth+1)
 			}
 		}
