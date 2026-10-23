@@ -27,6 +27,10 @@ const coldStartCurlStub = `#!/bin/sh
 n=$(cat "$DC_COLD_CAP/count" 2>/dev/null || echo 0)
 n=$((n + 1))
 echo "$n" > "$DC_COLD_CAP/count"
+# When each try reached the gateway (ns), for the restart-budget window.
+ts=$(date +%s%N 2>/dev/null)
+case "$ts" in ""|*[!0-9]*) ts=$(perl -MTime::HiRes=time -e 'printf("%.0f", time()*1e9)' 2>/dev/null) ;; esac
+[ -z "$ts" ] || echo "$ts" >> "$DC_COLD_CAP/tries"
 want=""
 for arg in "$@"; do
   case "$want" in
@@ -558,7 +562,7 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 			t.Parallel()
 			run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, nil,
 				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC="+rc)
-			assertBlockedWithinTheRestartBudget(t, run.elapsed)
+			assertBlockedWithinTheRestartBudget(t, run)
 			if rc == "7" && waitColdStartCapture(t, run.capDir, "gateway.log") == "" {
 				t.Fatal("a refused call did not start the gateway")
 			}
@@ -571,7 +575,7 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 			run := runHookForColdStart(t, NewCodexConnector(), "codex-hook.sh",
 				codexBoundShellHookArgsForTest(t, "codex-hook.sh", "PreToolUse")[1:], nil,
 				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC="+rc)
-			assertBlockedWithinTheRestartBudget(t, run.elapsed)
+			assertBlockedWithinTheRestartBudget(t, run)
 			if rc == "7" && waitColdStartCapture(t, run.capDir, "gateway.log") == "" {
 				t.Fatal("a refused call did not start the gateway")
 			}
@@ -583,11 +587,52 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 	}
 }
 
-func assertBlockedWithinTheRestartBudget(t *testing.T, elapsed time.Duration) {
+func assertBlockedWithinTheRestartBudget(t *testing.T, run coldStartHookRun) {
 	t.Helper()
-	// bash 3.2 (macOS) counts whole seconds, so the end can come up to a
-	// second early there.
-	if elapsed < 1500*time.Millisecond || elapsed > 4500*time.Millisecond {
-		t.Fatalf("the call was blocked after %s, want about 3 s", elapsed)
+	// The call waited for the restart: bash 3.2 (macOS) counts whole
+	// seconds, so the end can come up to a second early there.
+	if run.elapsed < 1500*time.Millisecond {
+		t.Fatalf("the call was blocked after %s, want about 3 s", run.elapsed)
 	}
+	// The 3-second budget is the hook's retry window: its last try starts
+	// inside it, counted from its first. Bash start-up before the first try
+	// and the block answer after the last are not part of it, and the full
+	// race suite stretches both on a loaded host (GAP-0938), so the window
+	// is read from the gateway stub's arrival times. A hook that hangs still
+	// fails on the wall clock.
+	if window, ok := coldStartTryWindow(t, run.capDir); ok {
+		if window > 4500*time.Millisecond {
+			t.Fatalf("the retries ran for %s, want about 3 s (call blocked after %s)", window, run.elapsed)
+		}
+		if run.elapsed > 30*time.Second {
+			t.Fatalf("the call was blocked after %s, want about 3 s of retries", run.elapsed)
+		}
+	} else if run.elapsed > 4500*time.Millisecond {
+		t.Fatalf("the call was blocked after %s, want about 3 s", run.elapsed)
+	}
+}
+
+// coldStartTryWindow is the time from the stub's first gateway try to its
+// last; false without two arrival times (no nanosecond clock on the host).
+func coldStartTryWindow(t *testing.T, capDir string) (time.Duration, bool) {
+	t.Helper()
+	var first, last int64
+	n := 0
+	for _, line := range strings.Fields(readColdStartCapture(t, capDir, "tries")) {
+		v, err := strconv.ParseInt(line, 10, 64)
+		if err != nil {
+			continue
+		}
+		if n == 0 || v < first {
+			first = v
+		}
+		if n == 0 || v > last {
+			last = v
+		}
+		n++
+	}
+	if n < 2 {
+		return 0, false
+	}
+	return time.Duration(last - first), true
 }
