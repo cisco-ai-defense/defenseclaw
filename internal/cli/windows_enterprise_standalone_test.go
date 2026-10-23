@@ -3775,11 +3775,16 @@ func TestWindowsRepairConfigRefusalRunsOnlyTheTransactionRecovery(t *testing.T) 
 	} {
 		pending = true
 		passes := tc.passes
-		windowsEnterpriseStandaloneRulePackTrust = func(string, string, string) error {
+		// The supplied config is refused until the recovery settles the
+		// transaction; a config that passes then needs no compile here.
+		windowsEnterpriseStandaloneConfigSource = func(string) error {
 			if passes && !pending {
 				return nil
 			}
-			return errors.New("a standard user can write to the pack")
+			return errors.New("a standard user can write to the config")
+		}
+		windowsEnterpriseStandaloneLayoutForPreflight = func() (managed.StandaloneLayout, error) {
+			return managed.StandaloneLayout{}, errors.New("the test compiles no config")
 		}
 		stub := &ensureStub{t: t, replies: tc.replies}
 		stub.install(t)

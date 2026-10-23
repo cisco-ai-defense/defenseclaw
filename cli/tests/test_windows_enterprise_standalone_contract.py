@@ -1394,4 +1394,3 @@ def test_uninstall_precheck_reads_the_uninstall_refusals_and_changes_nothing(tmp
     assert "$arguments['UninstallPrecheck'] = $true" in request
     go = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
     assert 'windowsEnterpriseUninstallPrecheckVariable = "DEFENSECLAW_STANDALONE_UNINSTALL_PRECHECK"' in go
-

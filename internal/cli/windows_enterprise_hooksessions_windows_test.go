@@ -738,7 +738,19 @@ func TestWindowsUnremovableScannerRuntimeRefusalKeepsTheSessionKeys(t *testing.T
 	}
 	windowsScannerRuntimeDir = func() (string, error) { return runtime, nil }
 	windowsScannerRuntimeTreeCheck = func(string) error { return errors.New(`BUILTIN\Users can add files to the python folder`) }
-	result, err := runWindowsHookSessionTestAction(t, "install", &windowsEnterpriseLifecycleOptions{profile: "standalone", resolvedProfile: "standalone", jsonOutput: true})
+	// With the installer arguments a real run passes: the retire before the
+	// services start reads its action from them.
+	opts := &windowsEnterpriseLifecycleOptions{profile: "standalone", resolvedProfile: "standalone", jsonOutput: true}
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	err := runWindowsEnterpriseStandaloneAction(context.Background(), command, "install", opts, `C:\stage\install-enterprise.ps1`,
+		windowsEnterprisePowerShellArgs("install", opts))
+	var result enterprisestatus.Result
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+		t.Fatalf("decode %q: %v", stdout.String(), decodeErr)
+	}
 	if err == nil || !windowsBundleHasCode(result.Errors, "scanner_runtime_untrusted") {
 		t.Fatalf("install over an unremovable untrusted scanner runtime: %v, errors %+v", err, result.Errors)
 	}
