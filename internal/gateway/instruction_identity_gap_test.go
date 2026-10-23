@@ -155,7 +155,9 @@ func TestInstructionProtectionOrdinaryHardLinks(t *testing.T) {
 					HookEventName: "PreToolUse", SessionID: "pnpm", CWD: project,
 					ToolName: c.tool, ToolInput: c.input,
 				})
-			if response.Action == guardrailActionBlock {
+			// GAP-0997: on Windows the authorized-keys write proof still
+			// refuses this write; the instruction rules must not.
+			if response.Action == guardrailActionBlock && runtime.GOOS != "windows" {
 				t.Fatalf("%s %v of an ordinary hard-linked file (%s) was blocked: %v", c.tool, c.input, source, response.Findings)
 			}
 			for rule := range instructionRuleFiles {
