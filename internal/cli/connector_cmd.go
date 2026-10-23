@@ -911,8 +911,8 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector %s teardown: %w", name, err)
 	}
 
-	// until 1.1: a removed connector's teardown changes only its hook script
-	// and tokens; the rest is listed with the steps to remove it by hand.
+	// until 1.1: a removed connector's teardown changes its hook script,
+	// tokens and retired lock entry; the rest is listed for manual cleanup.
 	leftovers, removed := connector.RemovedConnectorLeftovers(name, opts)
 	if connectorFlagJSON {
 		payload := map[string]any{
@@ -931,13 +931,24 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 }
 
 // runMarkedTeardown runs the Teardown of a connector that is already marked
-// inactive, and undoes that mark when the Teardown fails.
+// inactive, and undoes that mark when the cleanup cannot finish.
 func runMarkedTeardown(ctx context.Context, name string, conn connector.Connector, opts connector.SetupOpts, restoreState func() error) error {
-	if err := conn.Teardown(ctx, opts); err != nil {
+	refuse := func(err error) error {
 		if restoreErr := restoreState(); restoreErr != nil {
 			err = fmt.Errorf("%w; restore active connector state: %v", err, restoreErr)
 		}
 		return err
+	}
+	if err := conn.Teardown(ctx, opts); err != nil {
+		return refuse(err)
+	}
+	if connector.IsRemovedConnector(name) {
+		if err := conn.VerifyClean(opts); err != nil {
+			return refuse(fmt.Errorf("verify retired connector %s cleanup: %w", name, err))
+		}
+		if err := connector.ClearHookContractLockEntryForMode(opts.DataDir, name, opts.ManagedEnterprise); err != nil {
+			return refuse(fmt.Errorf("finish retired connector %s lock cleanup: %w", name, err))
+		}
 	}
 	if name == "opencode" {
 		// The empty folders the gateway's install watcher created go too.

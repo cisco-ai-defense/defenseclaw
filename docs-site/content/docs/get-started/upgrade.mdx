@@ -423,8 +423,8 @@ or OmniGent before 1.0.4:
   steps are below). If Gemini CLI was your only connector, the upgrade stops
   before it changes anything until you remove it.
 - **OpenHands and OmniGent were removed in 1.0.4.** The first gateway start
-  after the upgrade (and `defenseclaw uninstall`, and Windows Setup) does two
-  things for each of them, and nothing else:
+  after the upgrade (and `defenseclaw uninstall`, and Windows Setup) performs
+  the following cleanup for each of them:
   - It replaces the hook script an older DefenseClaw wrote, OpenHands'
     `~/.defenseclaw/hooks/openhands-hook.sh` or OmniGent's policy module
     `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`, with a stub that
@@ -444,6 +444,10 @@ or OmniGent before 1.0.4:
     the gateway, which blocks the call. Nothing in 1.0.4 accepts that token.
     Delete `~/.defenseclaw/hooks/.hook-openhands.token` only once no
     `hooks.json` runs `openhands-hook.sh` or a copy of it.
+  - Once the stub and token cleanup verifies, it removes only that retired
+    connector's entry from `hook_contract_lock.json`. Other connectors' lock
+    entries and the shared `.hookcfg` state stay as they are. A failed cleanup
+    or lock update is reported for retry, with a step to finish it.
 
   If that path holds a symbolic link, a file without DefenseClaw's marker in its
   first lines, or a marked script with a second name (a hard link) on any OS,

@@ -76,8 +76,8 @@ func (h retiredOpenHandsHost) requireTornDown(t *testing.T) {
 		!strings.Contains(string(body), "exit 2") || !strings.Contains(string(body), "OpenHands support was removed in DefenseClaw 1.0.4") {
 		t.Fatalf("hook script after the upgrade = %q, %v; want the stub that blocks every call", body, err)
 	}
-	if got := connector.LoadHookContractLockEntry(h.dataDir, "openhands"); got.Connector != "openhands" {
-		t.Fatalf("the openhands lock entry was cleared: %+v", got)
+	if got := connector.LoadHookContractLockEntry(h.dataDir, "openhands"); got.Connector != "" {
+		t.Fatalf("the retired OpenHands lock entry survived verified cleanup: %+v", got)
 	}
 	// The hook token stays: a copy of the old hook reads it (G-deadcode loop
 	// round 2, removed_connector_copied_hook_unix_test.go).
@@ -95,8 +95,8 @@ func (h retiredOpenHandsHost) requireTornDown(t *testing.T) {
 
 // until 1.1: the first gateway start after an upgrade from a release that
 // set up OpenHands turns the hook script into the stub that blocks every call
-// and keeps the hook token; hooks.json, the backups and the lock stay, and are
-// listed for the user to remove by hand.
+// and keeps the hook token; hooks.json and backups stay and are listed for the
+// user to remove by hand, while the retired lock entry is cleared.
 func TestUpgradeTearsDownTheRemovedOpenHandsConnector(t *testing.T) {
 	h := stageRetiredOpenHands(t)
 	if err := connector.SaveActiveConnector(h.dataDir, "openhands"); err != nil {

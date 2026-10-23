@@ -133,9 +133,14 @@ func TestUpgradeKeepsACopiedOpenHandsHookBlocking(t *testing.T) {
 	requireBlocked("after the upgrade")
 	requireTokenKept("after the upgrade")
 
-	// A gateway restart runs the cleanup of the removed connector again.
-	if !removedConnectorAlreadyTornDown(h.dataDir, "openhands") {
-		t.Fatal("after the upgrade the removed OpenHands connector still has teardown work, so every start would retry it")
+	// A gateway restart can repeat the idempotent cleanup without changing
+	// the copied hook or its token.
+	retired, _ := connector.RetiredConnector("openhands")
+	if err := retired.VerifyClean(opts); err != nil {
+		t.Fatalf("after the upgrade OpenHands still has teardown work: %v", err)
+	}
+	if got := connector.LoadHookContractLockEntry(h.dataDir, "openhands"); got.Connector != "" {
+		t.Fatalf("retired OpenHands lock entry survived: %+v", got)
 	}
 	if err := retireOrDropUnregisteredConnector(context.Background(), connector.NewDefaultRegistry(), h.dataDir, "openhands", "lock", nil); err != nil {
 		t.Fatalf("restart cleanup: %v", err)

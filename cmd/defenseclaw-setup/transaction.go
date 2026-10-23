@@ -3062,40 +3062,25 @@ func snapshotMigrationFile(path string) (migrationFileSnapshot, error) {
 
 func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 	if transaction.Action == "uninstall" {
-		// Agent clients cache hook commands for the lifetime of their process.
-		// Disable the stable launcher before touching connector configuration or
-		// user data; the launcher itself deliberately survives every uninstall
-		// mode and returns success for those cached invocations.
-		if err := disableStableHookRuntime(transaction.ID); err != nil {
-			return fmt.Errorf("disable stable hook runtime: %w", err)
-		}
 		publishedGateway := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
-		gatewayPath := filepath.Join(transaction.TrashPath, "bin", "defenseclaw-gateway.exe")
-		if pathExists(transaction.TrashPath) {
-			state, err := loadTransactionInstallState(transaction.TrashPath, transaction)
-			if err != nil {
-				return err
-			}
-			if !installStateMatchesSnapshot(state, transaction.PreviousState) {
-				return errors.New("committed uninstall found an unrelated transaction trash tree")
-			}
-			if _, err := stopOwnedServices(gatewayPath, transaction.DataRoot); err != nil {
-				return err
-			}
-			if err := verifyOwnedRuntimeReleased(gatewayPath, transaction.DataRoot); err != nil {
-				return fmt.Errorf("verify committed uninstall runtime release: %w", err)
-			}
-		}
-		// Connector lifecycle is always run by the manifest-verified gateway
-		// embedded in the executing Setup binary. The installed/trash copy is
-		// retained above only as the process-ownership identity used to stop a
-		// previously running service; it is never trusted to edit agent config.
-		if err := convergeCommittedUninstallConnectors(
-			transaction,
-			prepareConnectorMaintenanceGateway,
-			runConnectorLifecycleWithEnv,
-			func(recorder connectorReconciliationRecorder) error { return recorder.persist() },
-		); err != nil {
+		if err := convergeCommittedUninstallRecovery(transaction, committedUninstallRecoveryOps{
+			preflight:     preflightRetiredUninstallConnectors,
+			disable:       disableStableHookRuntime,
+			stop:          stopOwnedServices,
+			verifyStopped: verifyOwnedRuntimeReleased,
+			loadState:     loadTransactionInstallState,
+			exists:        pathExists,
+			restore:       startMissingServicesForRecovery,
+			inspect:       inspectOwnedServices,
+			reconcile: func(tx setupTransaction) error {
+				return convergeCommittedUninstallConnectors(
+					tx,
+					prepareConnectorMaintenanceGateway,
+					runConnectorLifecycleWithEnv,
+					func(recorder connectorReconciliationRecorder) error { return recorder.persist() },
+				)
+			},
+		}); err != nil {
 			return err
 		}
 		if _, _, err := configureGatewayAutoStart(publishedGateway, false); err != nil {
@@ -3283,6 +3268,144 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		transaction.TargetServices,
 		nativeInstallRuntimeConvergenceOps(),
 	)
+}
+
+type committedUninstallRecoveryOps struct {
+	preflight     func(setupTransaction) error
+	disable       func(string) error
+	stop          func(string, string) (serviceState, error)
+	verifyStopped func(string, string) error
+	loadState     func(string, setupTransaction) (*installState, error)
+	exists        func(string) bool
+	reconcile     func(setupTransaction) error
+	restore       func(string, string, serviceState) (serviceState, error)
+	inspect       func(string, string) (serviceState, error)
+}
+
+func convergeCommittedUninstallRecovery(transaction setupTransaction, ops committedUninstallRecoveryOps) error {
+	trashGateway := filepath.Join(transaction.TrashPath, "bin", "defenseclaw-gateway.exe")
+	publishedGateway := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
+	trashValidated := false
+	validateTrash := func() error {
+		if trashValidated || !ops.exists(transaction.TrashPath) {
+			return nil
+		}
+		state, err := ops.loadState(transaction.TrashPath, transaction)
+		if err != nil {
+			return err
+		}
+		if !installStateMatchesSnapshot(state, transaction.PreviousState) {
+			return errors.New("committed uninstall found an unrelated transaction trash tree")
+		}
+		trashValidated = true
+		return nil
+	}
+	authenticateGateway := func(path string) error {
+		if transaction.PreviousState == nil {
+			return errors.New("journal has no recorded installation for gateway restoration")
+		}
+		if path == trashGateway {
+			return validateTrash()
+		}
+		state, err := ops.loadState(transaction.InstallRoot, transaction)
+		if err != nil {
+			return err
+		}
+		if !installStateMatchesSnapshot(state, transaction.PreviousState) {
+			return errors.New("published gateway belongs to an unrelated installation")
+		}
+		return nil
+	}
+	restoreOnRefusal := func(cause error, stopped serviceState) error {
+		wanted := mergeServiceStates(transaction.PreviousServices, stopped)
+		if !wanted.Gateway && !wanted.Watchdog {
+			return cause
+		}
+		path := ""
+		bestRunning := -1
+		for _, candidate := range []string{publishedGateway, trashGateway} {
+			if !ops.exists(candidate) {
+				continue
+			}
+			if err := authenticateGateway(candidate); err != nil {
+				if candidate == publishedGateway {
+					// A replacement installation cannot prove the retired deny
+					// route of the gateway recorded in this journal.
+					continue
+				}
+				return errors.Join(cause, fmt.Errorf("authenticate recorded gateway after retired cleanup refusal: %w", err))
+			}
+			current, err := ops.inspect(candidate, transaction.DataRoot)
+			if err != nil {
+				return errors.Join(cause, fmt.Errorf("inspect recorded gateway after retired cleanup refusal: %w", err))
+			}
+			if (!wanted.Gateway || current.Gateway) && (!wanted.Watchdog || current.Watchdog) {
+				return cause
+			}
+			running := 0
+			if current.Gateway {
+				running++
+			}
+			if current.Watchdog {
+				running++
+			}
+			if running > bestRunning || (running == bestRunning && running == 0 && candidate == trashGateway) {
+				path = candidate
+				bestRunning = running
+			}
+		}
+		if path == "" {
+			return errors.Join(cause, errors.New("no authenticated recorded gateway binary is available; restore the owned installation before retrying retired connector teardown"))
+		}
+		if err := authenticateGateway(path); err != nil {
+			return errors.Join(cause, fmt.Errorf("authenticate recorded gateway before restoration: %w", err))
+		}
+		if _, err := ops.restore(path, transaction.DataRoot, wanted); err != nil {
+			return errors.Join(cause, fmt.Errorf("restore recorded gateway after retired cleanup refusal: %w", err))
+		}
+		current, err := ops.inspect(path, transaction.DataRoot)
+		if err != nil || (wanted.Gateway && !current.Gateway) || (wanted.Watchdog && !current.Watchdog) {
+			return errors.Join(cause, fmt.Errorf("verify recorded gateway restoration: state=%+v, error=%v", current, err))
+		}
+		return cause
+	}
+	// Authenticate the older journal's moved install before any lifecycle
+	// mutation or attempt to restore its runtime.
+	if err := validateTrash(); err != nil {
+		return err
+	}
+	// A 1.0.3 OmniGent module can return ALLOW if the gateway is stopped.
+	// Verify its deny stub while the old gateway route is still available.
+	// Older committed journals skipped this step and may already be stopped.
+	if err := ops.preflight(transaction); err != nil {
+		return restoreOnRefusal(fmt.Errorf("%w: %w", errRetiredUninstallPreflight, err), serviceState{})
+	}
+	// Agent clients cache hook commands for the lifetime of their process.
+	// Disable the stable launcher after retired cleanup and before touching
+	// other connector configuration or user data.
+	if err := ops.disable(transaction.ID); err != nil {
+		return fmt.Errorf("disable stable hook runtime: %w", err)
+	}
+	stopped := serviceState{}
+	if ops.exists(transaction.TrashPath) {
+		if err := validateTrash(); err != nil {
+			return err
+		}
+		var err error
+		stopped, err = ops.stop(trashGateway, transaction.DataRoot)
+		if err != nil {
+			return err
+		}
+		if err := ops.verifyStopped(trashGateway, transaction.DataRoot); err != nil {
+			return fmt.Errorf("verify committed uninstall runtime release: %w", err)
+		}
+	}
+	// Connector lifecycle always uses the manifest-verified gateway embedded
+	// in Setup. The installed/trash copy is only a service ownership identity.
+	if err := ops.reconcile(transaction); err != nil {
+		return restoreOnRefusal(err, stopped)
+	}
+	return nil
 }
 
 func convergeCommittedUninstallConnectors(

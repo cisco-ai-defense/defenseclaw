@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -43,7 +45,15 @@ func writeRemovedSetupRecord(t *testing.T, dataDir, path string) {
 		filepath.Join(dataDir, "connector_backups", "omnigent", "config.json"): string(record),
 		path: removedOmnigentPatchedConfig,
 	} {
-		if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		backupDir := filepath.Join(dataDir, "connector_backups", "omnigent")
+		var err error
+		if filepath.Dir(file) == backupDir {
+			// Older Setup made its private backup tree with an explicit owner.
+			err = safefile.ProtectDirectory(backupDir)
+		} else {
+			err = os.MkdirAll(filepath.Dir(file), 0o700)
+		}
+		if err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
@@ -53,8 +63,8 @@ func writeRemovedSetupRecord(t *testing.T, dataDir, path string) {
 }
 
 // until 1.1: native Setup and uninstall tear down a removed connector with an
-// explicit config home. The teardown changes only the policy module (the stub
-// that denies every request) and the tokens; config.yaml stays as it is,
+// explicit config home. The teardown changes the policy module (the stub
+// that denies every request), tokens and retired lock entry; config.yaml stays as it is,
 // whether or not it was edited, and the teardown lists it, with the module and
 // the backups, as left for the user (JSON for Setup, text for a person).
 // Teardown and verify succeed so uninstall and Setup go on.
@@ -81,6 +91,12 @@ func TestConnectorTeardownRemovedOmnigentHonoursConfigHome(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := os.WriteFile(module, []byte("# defenseclaw-managed-policy v1\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			lockPath := filepath.Join(dataDir, "hook_contract_lock.json")
+			if err := os.WriteFile(lockPath, []byte(`{"version":2,"updated_at":"2026-10-01T00:00:00Z","connectors":{`+
+				`"codex":{"connector":"codex","updated_at":"2026-10-01T00:00:00Z"},`+
+				`"omnigent":{"connector":"omnigent","updated_at":"2026-10-01T00:00:00Z"}}}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			defer withConnectorState(t, dataDir, "codex")()
@@ -123,6 +139,10 @@ func TestConnectorTeardownRemovedOmnigentHonoursConfigHome(t *testing.T) {
 			}
 			if body, err := os.ReadFile(module); err != nil || !strings.Contains(string(body), `"DENY"`) {
 				t.Fatalf("policy module after teardown = %q, %v; want the stub", body, err)
+			}
+			entries, err := connector.LoadProtectedHookContractLockEntries(dataDir)
+			if err != nil || len(entries) != 1 || entries["codex"].Connector != "codex" {
+				t.Fatalf("teardown left a retired lock peer or changed Codex: %+v, %v", entries, err)
 			}
 			if _, stderr, code := runConnectorCmd(t, "verify", "--connector", "omnigent", "--config-home", configHome); code != 0 {
 				t.Fatalf("verify exit=%d stderr=%s", code, stderr)

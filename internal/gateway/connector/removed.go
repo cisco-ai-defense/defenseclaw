@@ -61,9 +61,10 @@ package connector
 //     old hooks blocking. An OmniGent module that finds no token blocks, so
 //     its token goes.
 //
-// Nothing else is touched: agent config files (hooks.json, config.yaml),
-// import paths (.pth), runtime records (.hookcfg), backups, the hook
-// contract lock and every other connector's files stay as they are.
+// Teardown touches nothing else: agent config files (hooks.json, config.yaml),
+// import paths (.pth), runtime records (.hookcfg), backups, the hook contract
+// lock and every other connector's files stay as they are. The lifecycle
+// caller removes only the retired lock entry after VerifyClean succeeds.
 // RemovedConnectorLeftovers lists what is left, with the steps to remove it
 // by hand; status, doctor and every uninstall form show that list. The
 // gateway keeps the old hook routes, which block every call

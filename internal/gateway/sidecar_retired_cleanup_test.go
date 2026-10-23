@@ -18,8 +18,9 @@ package gateway
 
 // until 1.1: how boot treats a removed connector. Its teardown changes only
 // its hook script (it becomes the stub that blocks every call) and its
-// tokens; no boot path changes the agent config, the import path, the hook
-// contract lock or the shared hook state. A teardown that fails is kept and
+// tokens; after verification the lifecycle caller removes only its lock
+// entry. No boot path changes the agent config, import path or shared hook
+// state. A teardown that fails is kept and
 // retried. Delete with internal/gateway/connector/removed.go.
 
 import (
@@ -36,6 +37,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -66,6 +68,9 @@ func writeRetiredSetupRecord(t *testing.T, dataDir, connectorName, logical, path
 	}
 	data, err := json.Marshal(record)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.ProtectDirectory(filepath.Join(dataDir, "connector_backups", connectorName)); err != nil {
 		t.Fatal(err)
 	}
 	writeRetiredFile(t, filepath.Join(dataDir, "connector_backups", connectorName, logical+".json"), string(data))
@@ -179,10 +184,10 @@ func (h retiredOmnigentHost) token(t *testing.T) string {
 	return path
 }
 
-// snapshot is everything on the host but the module and the token.
+// snapshot is everything on the host but the module, token and retired lock.
 func (h retiredOmnigentHost) snapshot(t *testing.T) map[string]string {
 	t.Helper()
-	return retiredSnapshot(t, []string{h.home}, h.modulePath, h.token(t))
+	return retiredSnapshot(t, []string{h.home}, h.modulePath, h.token(t), filepath.Join(h.dataDir, "hook_contract_lock.json"))
 }
 
 func (h retiredOmnigentHost) requireStub(t *testing.T) {
@@ -221,7 +226,7 @@ func readOnlyRetiredHooks(t *testing.T, h retiredOmnigentHost) func() {
 // Every boot path that meets a removed connector whose teardown fails (the
 // stub cannot be written) returns the failure and keeps the name for the
 // next boot, with no file changed; once the cause is gone, the retry
-// finishes, and still changes nothing but the module and the token.
+// finishes, and changes only the module, token and retired lock entry.
 func TestRetiredConnectorCleanupFailureIsKeptForRetry(t *testing.T) {
 	ctx := context.Background()
 	registry := connector.NewDefaultRegistry()
@@ -300,12 +305,10 @@ func TestRetiredConnectorCleanupFailureIsKeptForRetry(t *testing.T) {
 // Review fixes (G-deadcode loop round 1, simplified teardown): every boot
 // path put the removed connector's config.yaml back, removed the .pth file,
 // the backups and the manual-cleanup record, and cleared the shared hook
-// contract lock and .hookcfg with the per-user writer. Now each path goes on
-// with the surviving connectors (the name is dropped) and changes only the
-// module, which becomes the stub, and the token; the lock-only path also
-// leaves an entry whose teardown is done alone on the next boot, with no
-// audit.
-func TestRemovedConnectorBootChangesOnlyTheScriptAndTokens(t *testing.T) {
+// contract lock and .hookcfg with the per-user writer. Each path now keeps
+// agent config, backups and shared hook state, while removing the retired
+// lock entry only after its stub and token cleanup verify.
+func TestRemovedConnectorBootChangesOnlyOwnedCleanupState(t *testing.T) {
 	ctx := context.Background()
 	registry := connector.NewDefaultRegistry()
 	for _, path := range []struct {
@@ -377,10 +380,52 @@ func TestRemovedConnectorBootChangesOnlyTheScriptAndTokens(t *testing.T) {
 					}
 				}
 			}
-			if got := connector.LoadHookContractLockEntry(h.dataDir, "omnigent"); got.Connector != "omnigent" {
-				t.Fatalf("the omnigent lock entry was cleared: %+v", got)
+			if got := connector.LoadHookContractLockEntry(h.dataDir, "omnigent"); got.Connector != "" {
+				t.Fatalf("the retired lock entry survived: %+v", got)
+			}
+			if got := connector.LoadHookContractLockEntry(h.dataDir, "codex"); got.Connector != "codex" {
+				t.Fatalf("the surviving Codex lock entry changed: %+v", got)
 			}
 		})
+	}
+}
+
+// A 1.0.3 Codex+OmniGent roster can become a one-target Codex setup after
+// migration. The gateway must remove the retired lock peer before publishing
+// Codex's fresh roster, or the CLI wait fails with "peer is not inactive".
+func TestRetiredOmnigentSingleConnectorUpgradeLeavesOneLockTarget(t *testing.T) {
+	h := stageRetiredOmnigent(t)
+	if err := connector.SaveActiveConnectors(h.dataDir, []string{"codex", "omnigent"}); err != nil {
+		t.Fatal(err)
+	}
+	sharedBefore, err := os.ReadFile(filepath.Join(h.dataDir, "hooks", ".hookcfg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerBefore := connector.LoadHookContractLockEntry(h.dataDir, "codex")
+	s := multiBootSidecar(t)
+	s.cfg.DataDir = h.dataDir
+	registry := connector.NewDefaultRegistry()
+	requested, ok := registry.Get("codex")
+	if !ok {
+		t.Fatal("Codex is unavailable")
+	}
+	if _, err := s.prepareSingleConnectorSetupTransaction(
+		context.Background(), registry, connector.SetupOpts{DataDir: h.dataDir}, requested,
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+	); err != nil {
+		t.Fatalf("prepare one-target Codex setup: %v", err)
+	}
+	h.requireStub(t)
+	entries, err := connector.LoadProtectedHookContractLockEntries(h.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !reflect.DeepEqual(entries["codex"], peerBefore) {
+		t.Fatalf("one-target lock = %+v, want only unchanged Codex", entries)
+	}
+	if body, err := os.ReadFile(filepath.Join(h.dataDir, "hooks", ".hookcfg")); err != nil || !reflect.DeepEqual(body, sharedBefore) {
+		t.Fatalf("shared hook runtime = %q, %v; want %q", body, err, sharedBefore)
 	}
 }
 
@@ -410,7 +455,7 @@ func TestRetiredConnectorCleanupLogsTheConfigItLeaves(t *testing.T) {
 // rel-1-0-4 GAP-0661 (the T7 live cell L7-dead-ro): with ~/.omnigent
 // read-only the first 1.0.4 start still finishes the cleanup, which never
 // writes the agent's config: the module becomes the stub, the token goes, the
-// lock entry stays, and one line names config.yaml with its step. Making the
+// retired lock entry is cleared, and one line names config.yaml with its step. Making the
 // folder writable and starting again changes nothing: what is left is the
 // user's to remove (the leftover list), never DefenseClaw's to delete.
 func TestRetiredConnectorCleanupNeverWritesAReadOnlyAgentConfig(t *testing.T) {
@@ -435,8 +480,8 @@ func TestRetiredConnectorCleanupNeverWritesAReadOnlyAgentConfig(t *testing.T) {
 	if got := h.snapshot(t); !reflect.DeepEqual(got, before) {
 		t.Fatalf("the cleanup changed more than the module and the token:\n got %v\nwant %v", got, before)
 	}
-	if got := connector.LoadHookContractLockEntry(h.dataDir, "omnigent"); got.Connector != "omnigent" {
-		t.Fatalf("lock entry = %+v, want it kept", got)
+	if got := connector.LoadHookContractLockEntry(h.dataDir, "omnigent"); got.Connector != "" {
+		t.Fatalf("retired lock entry = %+v, want it removed", got)
 	}
 	if n := strings.Count(out, "removed connector omnigent left "+h.configPath+":"); n != 1 {
 		t.Fatalf("%d log lines name %s, want 1:\n%s", n, h.configPath, out)

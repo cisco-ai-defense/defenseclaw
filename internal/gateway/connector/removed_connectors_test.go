@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -342,38 +343,51 @@ func TestRemovedTeardownChangesOnlyTheScriptTokensAndSavedHook(t *testing.T) {
 	}
 }
 
-// Review fixes (G-deadcode loop round 1): clearing a removed connector's hook
-// contract lock entry, as every boot, Setup and uninstall path does after its
-// teardown, rewrote the shared lock and .hookcfg with the per-user writer,
-// also on a managed host, and removed .hookcfg.openhands unchecked. For a
-// removed connector it is now a no-op in both modes; a surviving connector's
-// entry is still cleared.
-func TestRemovedConnectorLockEntryIsNeverCleared(t *testing.T) {
+// A retired entry is removed only after its deny stub and token cleanup verify.
+// The shared hook runtime and surviving connector entries remain unchanged.
+func TestRemovedConnectorLockEntryClearsOnlyAfterVerifiedCleanup(t *testing.T) {
 	for _, c := range removedConnectorsUnderTest() {
 		t.Run(c.name, func(t *testing.T) {
 			h := newRemovedHost(t)
 			h.stage(t, c)
-			before := h.snapshot(t)
-			for _, managed := range []bool{false, true} {
-				for _, spelling := range []string{c.name, strings.ToUpper(c.name), " " + c.label + " "} {
-					if err := ClearHookContractLockEntryForMode(h.dataDir, spelling, managed); err != nil {
-						t.Fatalf("clear %q managed=%v: %v", spelling, managed, err)
-					}
-					requireRemovedSame(t, "clearing "+spelling+"'s lock entry", h.snapshot(t), before)
-				}
+			// Windows keeps the lock sentinel for LockFileEx reuse; it is not
+			// part of the contract lock document being checked here.
+			lockSentinel := filepath.Join(h.dataDir, hookContractLockFile+".lock")
+			before := h.snapshot(t, lockSentinel)
+			if err := ClearHookContractLockEntry(h.dataDir, c.name); err == nil ||
+				!strings.Contains(err.Error(), "teardown") {
+				t.Fatalf("premature clear = %v, want the cleanup remedy", err)
 			}
-			if err := ClearHookContractLockEntry(h.dataDir, "open-hands"); err != nil {
+			requireRemovedSame(t, "premature clear", h.snapshot(t, lockSentinel), before)
+			conn, _ := RetiredConnector(c.name)
+			if err := conn.Teardown(context.Background(), h.opts); err != nil {
 				t.Fatal(err)
 			}
-			requireRemovedSame(t, "clearing open-hands' lock entry", h.snapshot(t), before)
+			if err := conn.VerifyClean(h.opts); err != nil {
+				t.Fatal(err)
+			}
+			sidecarBefore, err := os.ReadFile(filepath.Join(h.dataDir, "hooks", hookConfigSidecarName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			peerBefore := LoadHookContractLockEntry(h.dataDir, "codex")
+			if err := ClearHookContractLockEntry(h.dataDir, strings.ToUpper(c.name)); err != nil {
+				t.Fatal(err)
+			}
+			if got := LoadHookContractLockEntry(h.dataDir, c.name); got.Connector != "" {
+				t.Fatalf("retired lock entry survived verified cleanup: %+v", got)
+			}
+			if got := LoadHookContractLockEntry(h.dataDir, "codex"); !reflect.DeepEqual(got, peerBefore) {
+				t.Fatalf("surviving peer changed: got %+v, want %+v", got, peerBefore)
+			}
+			if body, err := os.ReadFile(filepath.Join(h.dataDir, "hooks", hookConfigSidecarName)); err != nil || !bytes.Equal(body, sidecarBefore) {
+				t.Fatalf("shared hook runtime changed: %q, %v", body, err)
+			}
 			if err := ClearHookContractLockEntry(h.dataDir, "codex"); err != nil {
 				t.Fatalf("clear codex: %v", err)
 			}
 			if got := LoadHookContractLockEntry(h.dataDir, "codex"); got.Connector != "" {
 				t.Fatalf("the codex entry survived its clear: %+v", got)
-			}
-			if got := LoadHookContractLockEntry(h.dataDir, c.name); got.Connector != c.name {
-				t.Fatalf("clearing codex dropped the %s entry: %+v", c.name, got)
 			}
 		})
 	}

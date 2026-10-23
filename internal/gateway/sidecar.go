@@ -7223,9 +7223,9 @@ func connectorDroppable(registry *connector.Registry, name string) bool {
 // (connector.RetiredConnector). A cleanup it cannot finish or verify is
 // returned with the lock entry kept, the way a registered connector's failed
 // teardown is: the caller keeps the name (active roster or lock) so a later
-// boot retries it. A removed connector (OpenHands, OmniGent; until 1.1) keeps
-// its lock entry even then: its teardown changes only its hook script and
-// tokens, and clearing its entry is a no-op. Any other name only loses
+// boot retries it. A removed connector (OpenHands, OmniGent; until 1.1)
+// clears only its own lock entry after its deny stub and token cleanup verify.
+// Any other name only loses
 // DefenseClaw's lock state (dropUnregisteredConnectorState).
 func retireOrDropUnregisteredConnector(ctx context.Context, registry *connector.Registry, dataDir, name, surface string, clearLock func(dataDir, connectorName string) error) error {
 	retired, ok := connector.RetiredConnector(name)
@@ -7260,16 +7260,6 @@ func logRemovedConnectorLeftovers(name string, opts connector.SetupOpts) {
 	for _, left := range leftovers {
 		fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s left %s: %s; to remove it: %s\n", name, left.Path, left.What, left.Step)
 	}
-}
-
-// removedConnectorAlreadyTornDown reports whether name is a removed connector
-// (until 1.1) whose teardown has nothing left to do.
-func removedConnectorAlreadyTornDown(dataDir, name string) bool {
-	if !connector.IsRemovedConnector(name) {
-		return false
-	}
-	retired, ok := connector.RetiredConnector(name)
-	return ok && retired.VerifyClean(connector.SetupOpts{DataDir: dataDir}) == nil
 }
 
 // auditDroppedConnectorState records that boot dropped the state of a
@@ -7362,11 +7352,6 @@ func reconcileOrphanedConnectorRegistrations(
 		if !ok {
 			if !connectorDroppable(registry, name) {
 				return fmt.Errorf("protected lock-only connector %q is not registered and a plugin may still provide it (check plugin discovery); %s", name, removedConnectorDocHint)
-			}
-			if removedConnectorAlreadyTornDown(dataDir, name) {
-				// until 1.1: a removed connector's lock entry stays after
-				// its teardown, so only a teardown still due runs.
-				continue
 			}
 			if err := retireOrDropUnregisteredConnector(ctx, registry, dataDir, name, "lock-only", ops.clearLock); err != nil {
 				return err

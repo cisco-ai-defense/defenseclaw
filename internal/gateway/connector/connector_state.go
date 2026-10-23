@@ -1073,13 +1073,8 @@ func ClearHookContractLockEntryForMode(
 	if strings.TrimSpace(dataDir) == "" {
 		return nil
 	}
-	if IsRemovedConnector(connectorName) {
-		// until 1.1: a removed connector's teardown changes only its hook
-		// script and tokens (removed.go). Its lock entry and .hookcfg
-		// state stay, in every mode: the shared files hold the surviving
-		// connectors' entries too, and only their own writer may change
-		// them.
-		return nil
+	if retired, ok := removedConnectorFor(connectorName); ok {
+		return clearRetiredHookContractLockEntry(dataDir, retired, managedEnterprise)
 	}
 	connectorName = normalizeConnectorName(connectorName)
 	path := filepath.Join(dataDir, hookContractLockFile)
@@ -1144,6 +1139,43 @@ func ClearHookContractLockEntryForMode(
 			}
 			return nil
 		})
+	})
+}
+
+// clearRetiredHookContractLockEntry drops only the retired connector's lock
+// entry after its deny stub and token cleanup are verified. The shared hook
+// runtime may still belong to another connector, so this never edits it.
+func clearRetiredHookContractLockEntry(dataDir string, retired removedOnlyConnector, managedEnterprise bool) error {
+	path := filepath.Join(dataDir, hookContractLockFile)
+	return withFileLockMode(path, managedEnterprise, func() error {
+		if err := retired.VerifyClean(SetupOpts{DataDir: dataDir}); err != nil {
+			return fmt.Errorf("retired connector %s cleanup is incomplete: %w; finish it with %s", retired.name, err, retired.teardownCommand())
+		}
+		lock, err := loadHookContractLockForUpdate(dataDir, managedEnterprise)
+		if err != nil {
+			return fmt.Errorf("load retired connector %s hook contract lock: %w", retired.name, err)
+		}
+		entry, exists := lock.Connectors[retired.name]
+		if !exists {
+			return nil
+		}
+		if normalizeConnectorName(entry.Connector) != retired.name {
+			return fmt.Errorf("retired connector %s lock entry belongs to %q; keep it for manual review", retired.name, entry.Connector)
+		}
+		delete(lock.Connectors, retired.name)
+		previousTimes := []string{lock.UpdatedAt}
+		for _, peer := range lock.Connectors {
+			previousTimes = append(previousTimes, peer.UpdatedAt)
+		}
+		lock.UpdatedAt = nextHookContractTimestamp(time.Now(), previousTimes...)
+		body, err := json.MarshalIndent(lock, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := hookRuntimeFileWriter(managedEnterprise)(path, append(body, '\n'), 0o600); err != nil {
+			return fmt.Errorf("write retired connector %s hook contract lock: %w; retry %s", retired.name, err, retired.teardownCommand())
+		}
+		return nil
 	})
 }
 

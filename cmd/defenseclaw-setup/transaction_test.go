@@ -3217,6 +3217,185 @@ func TestCommittedUninstallRecoveryReconcilesRetiredConnectorFromOlderJournal(t 
 	}
 }
 
+func TestCommittedUninstallRecoveryKeepsRetiredDenyRouteUntilTeardownVerified(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		initialRunning bool
+		refuseAt       string
+		wantEvents     []string
+		wantComplete   bool
+	}{
+		{"running gateway, hard-linked module", true, "preflight", []string{"load", "preflight", "inspect"}, false},
+		{"older journal already stopped gateway", false, "preflight", []string{"load", "preflight", "inspect", "restore", "inspect"}, false},
+		{"verified cleanup", true, "", []string{"load", "preflight", "disable", "stop", "verify stopped", "reconcile", "cleanup"}, true},
+		{"new hard link after preflight", true, "reconcile", []string{"load", "preflight", "disable", "stop", "verify stopped", "reconcile", "inspect", "restore", "inspect"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			prior := &installState{}
+			transaction := setupTransaction{
+				ID: strings.Repeat("b", 32), Action: "uninstall",
+				InstallRoot: filepath.Join(root, "install"), TrashPath: filepath.Join(root, "trash"),
+				DataRoot: filepath.Join(root, "data"), PreviousConnectors: []string{"omnigent"},
+				PreviousState: prior, PreviousServices: serviceState{Gateway: true},
+			}
+			journal := setupJournal{SchemaVersion: setupJournalSchemaVersion, Phase: setupPhaseCommitted, Transaction: transaction}
+			gatewayRunning := tc.initialRunning
+			phase := setupPhaseCommitted
+			var events []string
+			refusal := errors.New("hard-linked 1.0.3 OmniGent module requires manual recovery")
+			err := recoverSetupJournalPhase(journal, setupRecoveryOps{
+				Converge: func(tx setupTransaction) error {
+					return convergeCommittedUninstallRecovery(tx, committedUninstallRecoveryOps{
+						preflight: func(setupTransaction) error {
+							events = append(events, "preflight")
+							if tc.refuseAt == "preflight" {
+								return refusal
+							}
+							return nil
+						},
+						disable: func(string) error { events = append(events, "disable"); return nil },
+						exists: func(path string) bool {
+							return path == tx.TrashPath || path == filepath.Join(tx.TrashPath, "bin", "defenseclaw-gateway.exe")
+						},
+						loadState: func(string, setupTransaction) (*installState, error) {
+							events = append(events, "load")
+							return prior, nil
+						},
+						stop: func(string, string) (serviceState, error) {
+							events = append(events, "stop")
+							stopped := serviceState{Gateway: gatewayRunning}
+							gatewayRunning = false
+							return stopped, nil
+						},
+						verifyStopped: func(string, string) error {
+							events = append(events, "verify stopped")
+							if gatewayRunning {
+								t.Fatal("gateway still running after stop")
+							}
+							return nil
+						},
+						reconcile: func(setupTransaction) error {
+							events = append(events, "reconcile")
+							if tc.refuseAt != "" {
+								return refusal
+							}
+							return nil
+						},
+						restore: func(_ string, _ string, wanted serviceState) (serviceState, error) {
+							events = append(events, "restore")
+							if !wanted.Gateway {
+								t.Fatal("restore lost the recorded gateway")
+							}
+							gatewayRunning = true
+							return wanted, nil
+						},
+						inspect: func(string, string) (serviceState, error) {
+							events = append(events, "inspect")
+							return serviceState{Gateway: gatewayRunning}, nil
+						},
+					})
+				},
+				Cleanup: func(setupTransaction) error { events = append(events, "cleanup"); return nil },
+				Transition: func(_ setupTransaction, from, to string) error {
+					if from != phase {
+						t.Fatalf("phase = %s, transition from %s", phase, from)
+					}
+					phase = to
+					return nil
+				},
+			})
+			if !reflect.DeepEqual(events, tc.wantEvents) {
+				t.Fatalf("recovery events = %v, want %v", events, tc.wantEvents)
+			}
+			if tc.wantComplete {
+				if err != nil || phase != setupPhaseComplete {
+					t.Fatalf("verified recovery = %v, phase=%s", err, phase)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), refusal.Error()) || phase != setupPhaseCommitted || !gatewayRunning {
+				t.Fatalf("refused recovery = %v, phase=%s, gateway running=%t", err, phase, gatewayRunning)
+			}
+		})
+	}
+}
+
+func TestCommittedUninstallRecoveryAuthenticatesGatewayBeforeAcceptingRunningReplacement(t *testing.T) {
+	root := t.TempDir()
+	prior := &installState{}
+	transaction := setupTransaction{
+		ID: strings.Repeat("b", 32), Action: "uninstall",
+		InstallRoot: filepath.Join(root, "install"), TrashPath: filepath.Join(root, "trash"),
+		DataRoot: filepath.Join(root, "data"), PreviousState: prior,
+		PreviousServices: serviceState{Gateway: true}, PreviousConnectors: []string{"omnigent"},
+	}
+	publishedGateway := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
+	trashGateway := filepath.Join(transaction.TrashPath, "bin", "defenseclaw-gateway.exe")
+	trashRunning := false
+	restored := false
+	refusal := errors.New("hard-linked OmniGent module needs manual recovery")
+	phase := setupPhaseCommitted
+	err := recoverSetupJournalPhase(
+		setupJournal{SchemaVersion: setupJournalSchemaVersion, Phase: phase, Transaction: transaction},
+		setupRecoveryOps{
+			Converge: func(tx setupTransaction) error {
+				return convergeCommittedUninstallRecovery(tx, committedUninstallRecoveryOps{
+					preflight: func(setupTransaction) error { return refusal },
+					exists: func(path string) bool {
+						return path == tx.TrashPath || path == publishedGateway || path == trashGateway
+					},
+					loadState: func(path string, _ setupTransaction) (*installState, error) {
+						if path == tx.TrashPath {
+							return prior, nil
+						}
+						return &installState{TransactionID: "unrelated"}, nil
+					},
+					inspect: func(path, _ string) (serviceState, error) {
+						if path == publishedGateway {
+							return serviceState{Gateway: true}, nil
+						}
+						return serviceState{Gateway: trashRunning}, nil
+					},
+					restore: func(path, _ string, wanted serviceState) (serviceState, error) {
+						if path != trashGateway || !wanted.Gateway {
+							t.Fatalf("restore path=%s state=%+v; want recorded trash gateway", path, wanted)
+						}
+						restored, trashRunning = true, true
+						return wanted, nil
+					},
+				})
+			},
+			Cleanup:    func(setupTransaction) error { t.Fatal("refused recovery cleaned the journal"); return nil },
+			Transition: func(_ setupTransaction, _, to string) error { phase = to; return nil },
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), refusal.Error()) || phase != setupPhaseCommitted || !restored || !trashRunning {
+		t.Fatalf("recovery = %v, phase=%s, restored=%t, trash running=%t", err, phase, restored, trashRunning)
+	}
+}
+
+func TestCommittedUninstallRecoveryRefusesGatewayWithoutRecordedInstallState(t *testing.T) {
+	root := t.TempDir()
+	transaction := setupTransaction{
+		ID: strings.Repeat("b", 32), Action: "uninstall",
+		InstallRoot: filepath.Join(root, "install"), TrashPath: filepath.Join(root, "trash"),
+		DataRoot: filepath.Join(root, "data"), PreviousServices: serviceState{Gateway: true},
+	}
+	trashGateway := filepath.Join(transaction.TrashPath, "bin", "defenseclaw-gateway.exe")
+	err := convergeCommittedUninstallRecovery(transaction, committedUninstallRecoveryOps{
+		exists:    func(path string) bool { return path == transaction.TrashPath || path == trashGateway },
+		loadState: func(string, setupTransaction) (*installState, error) { return nil, nil },
+		preflight: func(setupTransaction) error { return errors.New("retired teardown refused") },
+		inspect:   func(string, string) (serviceState, error) { return serviceState{}, nil },
+		restore: func(string, string, serviceState) (serviceState, error) {
+			t.Fatal("restored a gateway with no recorded installation")
+			return serviceState{}, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "no recorded installation") {
+		t.Fatalf("recovery = %v, want unauthenticated gateway refusal", err)
+	}
+}
+
 func checkRetiredUninstallRefusalBeforeRuntimeRelease(t *testing.T) {
 	t.Helper()
 	transaction := setupTransaction{
