@@ -20,7 +20,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/google/uuid"
 )
 
@@ -113,7 +115,59 @@ type pendingHookOccurrence struct {
 	BodyBytes    int64
 	ElapsedNanos int64
 	Panicked     bool
-	path         string
+	// SandboxReceipt is present only while a managed sandbox hook's buffered
+	// relay answer awaits a separate authenticated acknowledgement. No hook
+	// body, tool arguments or response output is written to this spool.
+	SandboxReceipt *sandboxPendingHookReceipt
+	path           string
+}
+
+type sandboxPendingHookReceipt struct {
+	BindingID        string
+	RegistrationID   string
+	OfferedAt        time.Time
+	Proposed         pendingHookResponse
+	Reason           string
+	SourceReason     string
+	EnvelopeIdentity pendingHookEnvelopeIdentity
+	CallRef          string
+}
+
+// The first request has the actual hook payload and policy generation. Save
+// only its forensic identity fields, so the later receipt's audit row does
+// not borrow a newer lifecycle or configuration from another request.
+type pendingHookEnvelopeIdentity struct {
+	StepIdx            int
+	RulePackDir        string
+	AgentPhase         string
+	AgentPreviousPhase string
+	AgentSequence      int64
+	AgentLifecycleID   string
+	AgentExecutionID   string
+	AgentOperationID   string
+}
+
+func pendingEnvelopeIdentity(env HookAuditEnvelope) pendingHookEnvelopeIdentity {
+	return pendingHookEnvelopeIdentity{
+		StepIdx: env.StepIdx, RulePackDir: env.RulePackDir,
+		AgentPhase: env.AgentPhase, AgentPreviousPhase: env.AgentPreviousPhase,
+		AgentSequence: env.AgentSequence, AgentLifecycleID: env.AgentLifecycleID,
+		AgentExecutionID: env.AgentExecutionID, AgentOperationID: env.AgentOperationID,
+	}
+}
+
+func (p pendingHookEnvelopeIdentity) stamp(env *HookAuditEnvelope, resp agentHookResponse) {
+	env.StepIdx, env.RulePackDir = p.StepIdx, p.RulePackDir
+	env.Enforced = resp.Action == "block"
+	env.AgentPhase, env.AgentPreviousPhase = p.AgentPhase, p.AgentPreviousPhase
+	env.AgentSequence, env.AgentLifecycleID = p.AgentSequence, p.AgentLifecycleID
+	env.AgentExecutionID, env.AgentOperationID = p.AgentExecutionID, p.AgentOperationID
+}
+
+func (s sandboxPendingHookReceipt) response() agentHookResponse {
+	resp := s.Proposed.response()
+	resp.Reason, resp.SourceReason = s.Reason, s.SourceReason
+	return resp
 }
 
 func (a *APIServer) pendingHookDir() string {
@@ -134,7 +188,7 @@ func (a *APIServer) pendingHookDir() string {
 func (a *APIServer) beginPendingHookOccurrence(
 	ctx context.Context, req agentHookRequest, proposed agentHookResponse,
 	rawEventIDs []string, bodyBytes int64, elapsed time.Duration,
-	panicked bool, extra map[string]string,
+	panicked bool, extra map[string]string, sandboxReceipt ...bool,
 ) (*pendingHookOccurrence, error) {
 	if a == nil || a.store == nil || a.logger == nil || !a.store.Ready() {
 		return nil, errors.New("hook audit store is unavailable")
@@ -151,6 +205,24 @@ func (a *APIServer) beginPendingHookOccurrence(
 		RawEventIDs: rawEventIDs, Extra: extra, BodyBytes: bodyBytes,
 		ElapsedNanos: int64(elapsed), Panicked: panicked,
 		path: filepath.Join(dir, id+".json"),
+	}
+	if len(sandboxReceipt) > 0 && sandboxReceipt[0] {
+		binding, ok := sandboxauth.FromContext(ctx)
+		if !ok || binding.ID == "" {
+			return nil, errors.New("sandbox hook receipt has no authenticated binding")
+		}
+		p.SandboxReceipt = &sandboxPendingHookReceipt{
+			BindingID: binding.ID, RegistrationID: binding.RegistrationID,
+			OfferedAt: time.Now(), Proposed: pendingResponse(proposed),
+			Reason: proposed.Reason, SourceReason: hookSourceReason(proposed),
+			CallRef: manager.ContentRef(req.SessionID, req.ToolName, sandboxDecisionToolInput(req)),
+		}
+		if p.SandboxReceipt.Proposed.RawAction == "" {
+			p.SandboxReceipt.Proposed.RawAction = proposed.Action
+		}
+		var identity HookAuditEnvelope
+		a.stampHookEnvelopeIdentity(ctx, req.ConnectorName, &identity, req, proposed)
+		p.SandboxReceipt.EnvelopeIdentity = pendingEnvelopeIdentity(identity)
 	}
 	// The handler owns its occurrence from before it is published until it
 	// returns; recovery in this process leaves it alone.
@@ -591,7 +663,18 @@ func (a *APIServer) recoverPendingHookEntry(ctx context.Context, dir string, ent
 		a.quarantinePendingHookOccurrence(path, name, err)
 		return
 	}
+	// The buffered relay returns the answer before its separate receipt can
+	// arrive. Leave a live proposal alone until the hook's bounded retry
+	// window has passed; after a crash or missing acknowledgement, recovery
+	// records the existing unconfirmed fallback.
+	if p.SandboxReceipt != nil && time.Since(p.SandboxReceipt.OfferedAt) < sandboxHookReceiptWindow {
+		return
+	}
 	req := p.Request.request(p.ID, p.BodyBytes)
+	if p.SandboxReceipt != nil {
+		req.pendingEnvelopeIdentity = &p.SandboxReceipt.EnvelopeIdentity
+		req.pendingSandboxCallRef = p.SandboxReceipt.CallRef
+	}
 	resp, err := a.pendingHookRecoveryResponse(ctx, p)
 	if err != nil {
 		a.reportPendingHookProblem("audit lookup failed", name, err)
