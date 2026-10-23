@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"hash/fnv"
 	"os"
 	osuser "os/user"
 	"path/filepath"
@@ -60,9 +61,9 @@ type agentIdentityFacts struct {
 	// verified account with no UPN.
 	UserUPN        string
 	UPNUnavailable bool
-	// UPNRead numbers the read of UserUPN (agentIdentityUPNReads): a hook
-	// that read the UPN earlier can reach the recorder after a later one,
-	// and its older UPN must not replace the newer one.
+	// UPNRead numbers the read of UserUPN (agentIdentityUPNSnapshot): a
+	// hook that read the UPN earlier can reach the recorder after a later
+	// one, and its older UPN must not replace the newer one.
 	UPNRead   uint64
 	Connector string
 	InstallFP string
@@ -115,8 +116,7 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 	}
 	machine, machineVerified := agentidentity.HostMachineHash()
 	account := agentIdentityAccount(user)
-	upn, upnKnown := agentIdentityAccountUPN(user.ID)
-	upnRead := agentIdentityUPNReads.Add(1)
+	upn, upnKnown, upnRead := agentIdentityUPNSnapshot(user.ID)
 	facts := agentIdentityFacts{
 		MachineHash: machine,
 		UserID:      agentidentity.NormalizeUserID(user.ID),
@@ -170,9 +170,34 @@ func agentIdentityAccountDomains(userID string) string {
 	return useridentity.AccountDomains(facts)
 }
 
-// agentIdentityUPNReads numbers the hook path's UPN reads in the order they
-// complete (agentIdentityFacts.UPNRead).
+// agentIdentityUPNReads numbers the hook path's UPN reads
+// (agentIdentityFacts.UPNRead).
 var agentIdentityUPNReads atomic.Uint64
+
+// agentIdentityUPNReadLocks make a UPN read and its number one step per
+// account: of two hooks of one account, the one that read the UPN later
+// gets the larger number, also when the other paused between its read and
+// its number. Accounts share a lock only when their IDs hash alike.
+var agentIdentityUPNReadLocks [64]sync.Mutex
+
+// agentIdentityUPNReadHook, when a test sets it, runs between a UPN read
+// of an account and its number.
+var agentIdentityUPNReadHook atomic.Pointer[func(userID string)]
+
+// agentIdentityUPNSnapshot is agentIdentityAccountUPN with the number of
+// the read, taken under the account's lock.
+func agentIdentityUPNSnapshot(userID string) (upn string, known bool, read uint64) {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(agentidentity.NormalizeUserID(userID)))
+	lock := &agentIdentityUPNReadLocks[hash.Sum32()%uint32(len(agentIdentityUPNReadLocks))]
+	lock.Lock()
+	defer lock.Unlock()
+	upn, known = agentIdentityAccountUPN(userID)
+	if hook := agentIdentityUPNReadHook.Load(); hook != nil {
+		(*hook)(userID)
+	}
+	return upn, known, agentIdentityUPNReads.Add(1)
+}
 
 // agentIdentityAccountUPN is the UPN of the account a uid or SID's hooks ran
 // as. A current Windows guardian record wins before profile lookup refreshes

@@ -213,7 +213,9 @@ const (
 // answer of the newest translation that answered: a newer answer replaces
 // an older one, and an older or evicted translation never puts its answer
 // back. Only the newest translation started confirms its answer
-// (unconfirmed).
+// (unconfirmed). The last good answer survives evictions and failures
+// while a translation of the identity runs: an entry an eviction emptied
+// gets it back, kept and unconfirmed, until a newer translation answers.
 type adUPNCache struct {
 	translate func(samName string) string
 	now       func() time.Time
@@ -222,23 +224,31 @@ type adUPNCache struct {
 	entries map[string]adUPNEntry
 	// started numbers translations in the order they start. inflight holds,
 	// per identity with a translation running, the newest translation
-	// started, the newest one that answered, and how many run. Evictions
-	// clear entries but not inflight, so every completion knows whether a
-	// newer translation started or already answered; the last completion
-	// deletes the key, so the map only holds identities being translated.
+	// started, the last good answer and how many run. Evictions clear
+	// entries but not inflight, so every completion knows whether a newer
+	// translation started or already answered, and the last good answer
+	// outlives the entry; the last completion deletes the key, so the map
+	// only holds identities being translated.
 	started  uint64
 	inflight map[string]adUPNFlight
 }
 
+// adUPNFlight is one identity's running translations. best is the last
+// good answer: the one the entry held when a translation started, or a
+// newer one a translation returned; bestGen is the translation that
+// returned it.
 type adUPNFlight struct {
-	newest, answered uint64
-	running          int
+	newest, bestGen uint64
+	best            string
+	running         int
 }
 
 type adUPNEntry struct {
 	upn string
+	gen uint64 // the translation that returned upn
 	// kept: upn is an earlier answer that the newest translation, which
-	// failed, did not confirm. superseded: upn is the answer of a
+	// failed or an eviction emptied the entry of, did not confirm.
+	// superseded: upn is the answer of a
 	// translation a newer one overtook. Only unconfirmed reads them.
 	kept, superseded bool
 	expires          time.Time
@@ -267,10 +277,17 @@ func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) string {
 		c.started++
 		flight := c.inflight[key]
 		flight.newest, flight.running = c.started, flight.running+1
+		if entry.upn != "" && (flight.best == "" || entry.gen >= flight.bestGen) {
+			flight.best, flight.bestGen = entry.upn, entry.gen
+		} else if flight.best != "" {
+			// An eviction emptied the entry while an older translation
+			// runs: the last good answer stays, unconfirmed.
+			entry = adUPNEntry{upn: flight.best, gen: flight.bestGen, kept: true}
+		}
 		c.inflight[key] = flight
 		entry.done = make(chan struct{})
 		c.entries[key] = entry
-		go c.run(key, samName, entry.upn, entry.done, c.started)
+		go c.run(key, samName, entry.done, c.started)
 	}
 	c.mu.Unlock()
 	if entry.done == nil || wait <= 0 {
@@ -288,15 +305,14 @@ func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) string {
 	}
 }
 
-// run is translation seq of one identity; previous is the answer the entry
-// held when it started.
-func (c *adUPNCache) run(key, samName, previous string, done chan struct{}, seq uint64) {
+// run is translation seq of one identity.
+func (c *adUPNCache) run(key, samName string, done chan struct{}, seq uint64) {
 	answer := c.translate(samName)
 	c.mu.Lock()
 	flight := c.inflight[key]
-	overtaken, answeredLater := flight.newest > seq, flight.answered > seq
+	overtaken, answeredLater := flight.newest > seq, flight.bestGen > seq
 	if answer != "" && !answeredLater {
-		flight.answered = seq
+		flight.best, flight.bestGen = answer, seq
 	}
 	if flight.running--; flight.running > 0 {
 		c.inflight[key] = flight
@@ -306,9 +322,18 @@ func (c *adUPNCache) run(key, samName, previous string, done chan struct{}, seq 
 	entry, present := c.entries[key]
 	switch {
 	case overtaken && (answer == "" || answeredLater):
-		// A newer translation started. This one's failure keeps nothing,
-		// and its answer never replaces a newer one, also when an eviction
-		// has dropped that one meanwhile.
+		// A newer translation started. This one's failure keeps nothing of
+		// its own, and its answer never replaces a newer one. An entry an
+		// eviction emptied or dropped gets the last good answer back,
+		// unconfirmed: it keeps the running translation's done channel, or
+		// is retried after the failure lifetime.
+		if flight.best != "" && (entry.upn == "" || entry.gen < flight.bestGen) {
+			expires := c.now().Add(adUPNFailureTTL)
+			if present {
+				expires = entry.expires
+			}
+			c.entries[key] = adUPNEntry{upn: flight.best, gen: flight.bestGen, kept: true, expires: expires, done: entry.done}
+		}
 	case overtaken:
 		// The newest answer so far, but a newer translation runs or failed:
 		// lookup gives it (GAP-0129), never confirmed. The entry keeps that
@@ -317,17 +342,15 @@ func (c *adUPNCache) run(key, samName, previous string, done chan struct{}, seq 
 		if present {
 			expires = entry.expires
 		}
-		c.entries[key] = adUPNEntry{upn: answer, superseded: true, expires: expires, done: entry.done}
+		c.entries[key] = adUPNEntry{upn: answer, gen: seq, superseded: true, expires: expires, done: entry.done}
 	case answer != "":
-		c.entries[key] = adUPNEntry{upn: answer, expires: c.now().Add(adUPNTTL)}
+		c.entries[key] = adUPNEntry{upn: answer, gen: seq, expires: c.now().Add(adUPNTTL)}
 	default:
 		// The newest translation failed: the last good answer stays, the
-		// one the entry holds now (an overtaken translation may have
-		// answered meanwhile) or else the one it started from.
-		if present && entry.upn != "" {
-			previous = entry.upn
-		}
-		c.entries[key] = adUPNEntry{upn: previous, kept: previous != "", expires: c.now().Add(adUPNFailureTTL)}
+		// one an overtaken translation returned meanwhile or else the one
+		// the entry held when a translation started, also when an eviction
+		// emptied the entry since.
+		c.entries[key] = adUPNEntry{upn: flight.best, gen: flight.bestGen, kept: flight.best != "", expires: c.now().Add(adUPNFailureTTL)}
 	}
 	c.mu.Unlock()
 	close(done)
