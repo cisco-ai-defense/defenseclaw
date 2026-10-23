@@ -577,7 +577,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			r.AddError(codeAlreadyInstalled, "DefenseClaw enterprise is already installed; use upgrade, repair or ensure")
 			return 0
 		}
-		return l.settleInputChanges(ctx, l.freshInstall(ctx))
+		return l.requireProtectedTargets(l.settleInputChanges(ctx, l.freshInstall(ctx)))
 	case ActionUpgrade:
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed; use install or ensure")
@@ -587,7 +587,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			r.AddError(codeInvalidArguments, "upgrade needs --payload or --from-package")
 			return enterprisestatus.InvalidArgsExitCode(env.GOOS)
 		}
-		return l.settleInputChanges(ctx, l.apply(ctx, record))
+		return l.requireProtectedTargets(l.settleInputChanges(ctx, l.apply(ctx, record)))
 	case ActionRepair:
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed; use install or ensure")
@@ -598,15 +598,15 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		l.restoreTamperedHookBinary(ctx, record)
 		code := l.settleInputChanges(ctx, l.apply(ctx, record))
 		l.summarizeRepair()
-		return code
+		return l.requireProtectedTargets(code)
 	case ActionEnsure:
 		if record == nil {
-			return l.settleInputChanges(ctx, l.freshInstall(ctx))
+			return l.requireProtectedTargets(l.settleInputChanges(ctx, l.freshInstall(ctx)))
 		}
 		if l.opts.Bundle != "" {
-			return l.applyBundle(ctx, record)
+			return l.requireProtectedTargets(l.applyBundle(ctx, record))
 		}
-		return l.ensureInstalled(ctx, record, l.apply)
+		return l.requireProtectedTargets(l.ensureInstalled(ctx, record, l.apply))
 	case ActionReconcile:
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
