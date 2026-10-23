@@ -353,7 +353,11 @@ access. Status shows presence, modification time and a digest prefix only.
     the lifecycle apply and persist `user.max_user_namespaces=0` and
     `kernel.yama.ptrace_scope=2` (keeping 3) in
     `/etc/sysctl.d/99-zz-defenseclaw-userns.conf`; status and verify then fail
-    on drift and until a reboot after first application. The restriction is
+    on drift and until a reboot after first application. Changing back to
+    `leave` in the same boot keeps that boot warning even when the live
+    settings remain closed. A failed opt-in restores the prior live settings
+    when rollback restores a leave-mode deployment, or reports the setting it
+    could not restore. The restriction is
     host-wide: on managed RHEL 9.8 it stopped Codex's workspace sandbox and
     RootlessKit (namespaces) and OpenShell Docker sandboxes (ptrace), and it
     stops standard-user `gdb` and `strace`, so it is off by default. Loader or

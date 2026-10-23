@@ -1919,6 +1919,10 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 
 	l.rememberGeneration()
+	// A failed opt-in returns a leave-mode deployment to the live kernel
+	// settings it found. Restricted deployments keep their live controls on
+	// rollback, because their committed policy still relies on them.
+	var rollbackPolicyViews *policyViewKernelSettings
 
 	failAndRollback := func(code string, cause error) int {
 		r.AddError(code, cause.Error())
@@ -1958,7 +1962,19 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			// back before the services restart.
 			revertConfig = func() { newerConfig = l.revertRejectedConfig(record, committedConfig, p.config.Raw, cause.Error()) }
 		}
-		restored, err := l.rollback(ctx, snap, pending, false, keepNewerConfig, revertConfig)
+		var liveRestoreErr error
+		restoreLiveBeforeStart := func(filesRestored bool) {
+			if revertConfig != nil {
+				revertConfig()
+			}
+			if filesRestored && rollbackPolicyViews != nil {
+				liveRestoreErr = env.restorePolicyViewKernelSettings(*rollbackPolicyViews)
+			}
+		}
+		restored, err := l.rollback(ctx, snap, pending, false, keepNewerConfig, restoreLiveBeforeStart)
+		if liveRestoreErr != nil {
+			err = errors.Join(err, fmt.Errorf("live policy-view settings could not be restored after rollback: %w; inspect the kernel settings and reboot if they cannot be restored", liveRestoreErr))
+		}
 		if newerConfig != nil {
 			l.restoreNewerConfig(record.ServiceGID, newerConfig)
 		}
@@ -2058,6 +2074,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		return failAndRollback(errorCode(err, codeApply), err)
 	}
 	if restrictViews {
+		if !env.policyViewsRestricted(record) {
+			previous, err := env.readPolicyViewKernelSettings()
+			if err != nil {
+				return failAndRollback(codeUserNamespaces, err)
+			}
+			rollbackPolicyViews = &previous
+		}
 		if err := env.restrictManagedPolicyViews(priorUserNamespaceRestricted); err != nil {
 			return failAndRollback(codeUserNamespaces, err)
 		}
@@ -2833,10 +2856,10 @@ const keptSnapshotAdvice = "the previous deployment could not be fully restored;
 // policies stops first, so its policies are retired with the binary that
 // loaded them and never under it; it starts again when the restore fails.
 // beforeRestore runs once the services are stopped, just before the
-// snapshot is put back, and beforeStart right after. restored is false when
-// any file could not be put back; the snapshot must then be kept for a
-// retry.
-func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pending, restoreFirst bool, beforeRestore, beforeStart func()) (restored bool, err error) {
+// snapshot is put back. beforeStart runs afterwards and learns whether all
+// files were restored. restored is false when any file could not be put
+// back; the snapshot must then be kept for a retry.
+func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pending, restoreFirst bool, beforeRestore func(), beforeStart func(bool)) (restored bool, err error) {
 	env := l.env
 	units := env.Services.Units()
 	previouslyActive, previouslyEnabled := intent.PreviouslyActive, intent.PreviouslyEnabled
@@ -2910,7 +2933,7 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 	}
 	restoreErr := env.restore(snap)
 	if beforeStart != nil {
-		beforeStart()
+		beforeStart(restoreErr == nil)
 	}
 	l.rollbackConfigSHA, l.rollbackConfigFile = "", nil
 	if restoreErr == nil {
@@ -3455,8 +3478,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	if removePerUser && l.refuseUnresolvedPerUserRows(ctx) {
 		return 0
 	}
+	var uninstallMarker []byte
 	if env.policyViewsRestricted(record) {
-		if err := env.markUserNamespaceUninstall(); err != nil {
+		var err error
+		uninstallMarker, err = env.userNamespaceUninstallMarker()
+		if err != nil {
 			r.AddError(codeUninstall, err.Error())
 			return 0
 		}
@@ -3619,6 +3645,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 		if err := removeFile(env.P(path)); err != nil {
 			errs = append(errs, err)
+		} else if path == userNamespacesConfigPath && len(uninstallMarker) > 0 {
+			if err := env.markUserNamespaceUninstall(uninstallMarker); err != nil {
+				errs = append(errs, err)
+			}
 		}
 		if ownedParent(filepath.Dir(path)) {
 			_ = removeDirIfEmpty(env.P(filepath.Dir(path)))

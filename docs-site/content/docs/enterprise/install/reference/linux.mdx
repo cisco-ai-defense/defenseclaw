@@ -263,7 +263,16 @@ markers survive uninstall and purge.
 
 Setting `leave` again (or removing the key) removes the managed sysctl file, as
 an uninstall does. The running kernel keeps the restricted values until you
-change them or reboot.
+change them or reboot. If the restriction was first applied in this boot,
+`status` and `verify` still warn about namespaces and tracers that may have
+started earlier, even when both live values are closed. The warning clears
+after a later boot when both markers remain valid. If an opt-in fails and
+rolls back to a `leave` deployment,
+DefenseClaw restores the live settings it found before the attempt. A setting
+it cannot restore remains changed and the run reports an incomplete rollback.
+An uninstall records the boot that removed the persistent file only after the
+file is removed; a stopped uninstall that keeps the file retains its boot
+proof.
 
 On Ubuntu 24.04 you can close only the namespace route with
 `kernel.apparmor_restrict_unprivileged_unconfined=1`, which also restricts

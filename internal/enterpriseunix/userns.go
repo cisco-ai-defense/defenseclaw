@@ -98,6 +98,28 @@ func (l *lifecycle) warnOpenPolicyViews() {
 		l.result.AddWarning(codeUnprivilegedPtrace, message)
 		l.result.SecurityComplete = false
 	}
+	// Leaving the opt-in removes its persistent sysctl file, but it does not
+	// end a namespace or tracer that was already running when the live values
+	// were closed. Keep the boot attestation visible until another boot.
+	if l.env.hasPolicyViewBootEvidence() {
+		if problem := l.env.userNamespaceBootProblem(); problem != "" {
+			l.result.AddWarning(codeUserNamespaces, problem)
+			l.result.SecurityComplete = false
+		}
+		if problem := l.env.ptraceBootProblem(); problem != "" {
+			l.result.AddWarning(codeUnprivilegedPtrace, problem)
+			l.result.SecurityComplete = false
+		}
+	}
+}
+
+func (e *Env) hasPolicyViewBootEvidence() bool {
+	for _, path := range []string{userNamespaceBootMarker, ptraceBootMarker} {
+		if _, err := os.Lstat(e.P(path)); !errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+	}
+	return false
 }
 
 // unprivilegedUserNamespaceWarning returns the warning text, or "" when the
@@ -179,30 +201,76 @@ func (e *Env) desiredPolicyViewConfig() []byte {
 	return userNamespacesConfig
 }
 
+type policyViewKernelSettings struct {
+	userNamespaces []byte
+	ptrace         []byte
+}
+
+func (e *Env) readPolicyViewKernelSettings() (policyViewKernelSettings, error) {
+	if info, err := os.Lstat(e.P(sysctlMaxUserNamespaces)); err != nil || !info.Mode().IsRegular() {
+		return policyViewKernelSettings{}, fmt.Errorf("%s is unavailable or not a kernel setting; managed policy cannot be complete until the host refuses unprivileged user namespaces", sysctlMaxUserNamespaces)
+	}
+	previous, err := readBounded(e.P(sysctlMaxUserNamespaces), 64)
+	if err != nil {
+		return policyViewKernelSettings{}, fmt.Errorf("read %s before restricting user namespaces: %w", sysctlMaxUserNamespaces, err)
+	}
+	if info, err := os.Lstat(e.P(sysctlPtraceScope)); err != nil || !info.Mode().IsRegular() {
+		return policyViewKernelSettings{}, fmt.Errorf("%s is unavailable or not a kernel setting; managed policy cannot stop unprivileged ptrace path rewriting", sysctlPtraceScope)
+	}
+	previousPtrace, err := readBounded(e.P(sysctlPtraceScope), 64)
+	if err != nil {
+		return policyViewKernelSettings{}, fmt.Errorf("read %s before restricting ptrace: %w", sysctlPtraceScope, err)
+	}
+	return policyViewKernelSettings{userNamespaces: previous, ptrace: previousPtrace}, nil
+}
+
+// restorePolicyViewKernelSettings undoes an uncommitted opt-in when the
+// previous deployment left the kernel settings alone. It only overwrites
+// values this transaction set, so a concurrent administrator change stays.
+func (e *Env) restorePolicyViewKernelSettings(previous policyViewKernelSettings) error {
+	var failures []error
+	for _, setting := range []struct {
+		path, applied string
+		old           []byte
+	}{
+		{sysctlMaxUserNamespaces, "0", previous.userNamespaces},
+		{sysctlPtraceScope, "2", previous.ptrace},
+	} {
+		current, err := readBounded(e.P(setting.path), 64)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("read %s after rollback: %w", setting.path, err))
+			continue
+		}
+		if bytes.Equal(current, setting.old) {
+			continue
+		}
+		if strings.TrimSpace(string(current)) != setting.applied {
+			failures = append(failures, fmt.Errorf("%s changed after the opt-in; live setting was not overwritten", setting.path))
+			continue
+		}
+		if err := os.WriteFile(e.P(setting.path), setting.old, 0o644); err != nil {
+			failures = append(failures, fmt.Errorf("restore %s after rollback: %w", setting.path, err))
+			continue
+		}
+		if restored, err := readBounded(e.P(setting.path), 64); err != nil || !bytes.Equal(restored, setting.old) {
+			failures = append(failures, fmt.Errorf("verify restored %s after rollback: got %q: %v", setting.path, restored, err))
+		}
+	}
+	return errors.Join(failures...)
+}
+
 // restrictManagedPolicyViews applies both kernel restrictions before machine
-// policy is published. The live settings are not rolled back after a failed
-// transaction: reopening either path would restore the policy-masking bypass.
-// Boot markers require a reboot when either control is first applied or
-// reopened, because an existing namespace or tracer survives the change.
+// policy is published. Boot markers require a reboot when either control is
+// first applied or reopened: an existing namespace or tracer survives.
 func (e *Env) restrictManagedPolicyViews(priorRestricted bool) error {
 	if e.GOOS != "linux" {
 		return nil
 	}
-	if info, err := os.Lstat(e.P(sysctlMaxUserNamespaces)); err != nil || !info.Mode().IsRegular() {
-		return fmt.Errorf("%s is unavailable or not a kernel setting; managed policy cannot be complete until the host refuses unprivileged user namespaces", sysctlMaxUserNamespaces)
-	}
-	previous, err := readBounded(e.P(sysctlMaxUserNamespaces), 64)
+	previous, err := e.readPolicyViewKernelSettings()
 	if err != nil {
-		return fmt.Errorf("read %s before restricting user namespaces: %w", sysctlMaxUserNamespaces, err)
+		return err
 	}
-	if info, err := os.Lstat(e.P(sysctlPtraceScope)); err != nil || !info.Mode().IsRegular() {
-		return fmt.Errorf("%s is unavailable or not a kernel setting; managed policy cannot stop unprivileged ptrace path rewriting", sysctlPtraceScope)
-	}
-	previousPtrace, err := readBounded(e.P(sysctlPtraceScope), 64)
-	if err != nil {
-		return fmt.Errorf("read %s before restricting ptrace: %w", sysctlPtraceScope, err)
-	}
-	if strings.TrimSpace(string(previous)) != "0" || !ptraceRestricted(previousPtrace) ||
+	if strings.TrimSpace(string(previous.userNamespaces)) != "0" || !ptraceRestricted(previous.ptrace) ||
 		!priorRestricted || e.userNamespaceBootProblem() != "" || e.ptraceBootProblem() != "" {
 		bootID, err := e.currentBootID()
 		if err != nil {
@@ -221,7 +289,7 @@ func (e *Env) restrictManagedPolicyViews(priorRestricted bool) error {
 	if err := os.WriteFile(e.P(sysctlMaxUserNamespaces), []byte("0\n"), 0o644); err != nil {
 		return fmt.Errorf("apply %s=0: %w; managed policy cannot be complete until the host refuses unprivileged user namespaces", sysctlMaxUserNamespaces, err)
 	}
-	if strings.TrimSpace(string(previousPtrace)) != "3" {
+	if strings.TrimSpace(string(previous.ptrace)) != "3" {
 		if err := os.WriteFile(e.P(sysctlPtraceScope), []byte("2\n"), 0o644); err != nil {
 			return fmt.Errorf("apply %s=2: %w; managed policy cannot be complete until the host refuses unprivileged ptrace", sysctlPtraceScope, err)
 		}
@@ -247,25 +315,16 @@ func (e *Env) currentBootID() (string, error) {
 	return id, nil
 }
 
-// markUserNamespaceUninstall records the boot that removed our persistent
-// sysctl file. A reinstall in this boot may reuse a prior-boot attestation
-// when the restriction was healthy before removal, including a retry after
-// that removal if the live limit remains zero. After a reboot without the
-// file it may not.
-func (e *Env) markUserNamespaceUninstall() error {
+// userNamespaceUninstallMarker prepares proof while the persistent file is
+// still present. It is written only after that file is removed. A same-boot
+// reinstall may reuse a proven prior boot; a reboot without the file may not.
+func (e *Env) userNamespaceUninstallMarker() ([]byte, error) {
 	if e.GOOS != "linux" {
-		return nil
+		return nil, nil
 	}
 	id, err := e.currentBootID()
 	if err != nil {
-		return fmt.Errorf("record the uninstall boot: %w", err)
-	}
-	dir := e.P(filepath.Dir(userNamespaceUninstalled))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create host security directory: %w", err)
-	}
-	if err := e.Trust(dir, TrustAdminDir); err != nil {
-		return fmt.Errorf("%s is not administrator-controlled: %w", filepath.Dir(userNamespaceUninstalled), err)
+		return nil, fmt.Errorf("record the uninstall boot: %w", err)
 	}
 	priorSafeUninstall, _ := e.userNamespaceUninstallState()
 	live, liveErr := readBounded(e.P(sysctlMaxUserNamespaces), 64)
@@ -278,7 +337,18 @@ func (e *Env) markUserNamespaceUninstall() error {
 	if e.userNamespaceBootProblem() != "" || e.ptraceBootProblem() != "" || !priorBootProven {
 		marker = "unproven:" + id + "\n"
 	}
-	if err := e.writeFileAtomic(e.P(userNamespaceUninstalled), []byte(marker), 0o600, rootOwner()); err != nil {
+	return []byte(marker), nil
+}
+
+func (e *Env) markUserNamespaceUninstall(marker []byte) error {
+	dir := e.P(filepath.Dir(userNamespaceUninstalled))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create host security directory: %w", err)
+	}
+	if err := e.Trust(dir, TrustAdminDir); err != nil {
+		return fmt.Errorf("%s is not administrator-controlled: %w", filepath.Dir(userNamespaceUninstalled), err)
+	}
+	if err := e.writeFileAtomic(e.P(userNamespaceUninstalled), marker, 0o600, rootOwner()); err != nil {
 		return fmt.Errorf("record the boot that removed the persistent user namespace restriction: %w", err)
 	}
 	return nil

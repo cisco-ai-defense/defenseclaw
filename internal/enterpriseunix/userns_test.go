@@ -178,6 +178,164 @@ func TestLinuxOpenPolicyViewStatusCannotClaimUnreadableKernelSettings(t *testing
 	}
 }
 
+// Closing both live settings during this boot cannot rule out namespaces and
+// tracers that were already running when the restriction was applied. That
+// remains true after the administrator changes the deployment back to leave.
+func TestLinuxLeaveModeKeepsSameBootRestrictionWarning(t *testing.T) {
+	h := newTestHost(t, "linux")
+	openKernel(t, h)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
+	restricted := h.run(Options{Action: ActionEnsure, ConfigFile: restrictPolicyViewsConfig(t, h)})
+	if !restricted.Installed || restricted.SecurityComplete {
+		t.Fatalf("opt-in did not require a reboot: %+v", restricted)
+	}
+	leave := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(leave, DefaultConfig(h.env.Layout), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: leave}))
+	if got := h.read(sysctlMaxUserNamespaces); got != "0\n" {
+		t.Fatalf("opt-out unexpectedly changed the live namespace limit: %q", got)
+	}
+	if got := h.read(sysctlPtraceScope); got != "2\n" {
+		t.Fatalf("opt-out unexpectedly changed the live ptrace scope: %q", got)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if r.SecurityComplete || !hasWarning(r, codeUserNamespaces) || !hasWarning(r, codeUnprivilegedPtrace) {
+			t.Fatalf("%s hid surviving same-boot namespaces or tracers: %+v", action, r)
+		}
+	}
+	writeKernelSetting(t, h, userNamespaceBootIDPath, "boot-after\n")
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if hasWarning(r, codeUserNamespaces) || hasWarning(r, codeUnprivilegedPtrace) {
+			t.Fatalf("%s kept the same-boot warning after a later boot: %+v", action, r.Warnings)
+		}
+	}
+}
+
+// An aborted opt-in from leave must restore the host's live kernel settings
+// along with its deployment. The fault is after both sysctls were written.
+func TestLinuxFailedOptInRestoresLiveKernelSettings(t *testing.T) {
+	h := newTestHost(t, "linux")
+	openKernel(t, h)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
+	setLifecycleTestFault(t, h, testFaultAfterServices)
+	failed := h.run(Options{Action: ActionEnsure, ConfigFile: restrictPolicyViewsConfig(t, h)})
+	if failed.OK || !hasWarning(failed, codeRolledBack) {
+		t.Fatalf("opt-in did not roll back: %+v", failed)
+	}
+	if got := h.read(sysctlMaxUserNamespaces); got != "63229\n" {
+		t.Fatalf("rollback kept the uncommitted namespace restriction: %q", got)
+	}
+	if got := h.read(sysctlPtraceScope); got != "0\n" {
+		t.Fatalf("rollback kept the uncommitted ptrace restriction: %q", got)
+	}
+	if _, err := os.Stat(h.env.P(userNamespacesConfigPath)); !os.IsNotExist(err) {
+		t.Fatalf("rollback kept the persistent restriction: %v", err)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if r.SecurityComplete || !hasWarning(r, codeUserNamespaces) || !hasWarning(r, codeUnprivilegedPtrace) {
+			t.Fatalf("%s hid the open routes after rollback: %+v", action, r)
+		}
+	}
+}
+
+func TestLinuxRolledBackOptInOnClosedHostNeedsLaterBoot(t *testing.T) {
+	h := newTestHost(t, "linux")
+	writeKernelSetting(t, h, sysctlMaxUserNamespaces, "0\n")
+	writeKernelSetting(t, h, sysctlPtraceScope, "2\n")
+	writeKernelSetting(t, h, userNamespaceBootIDPath, "boot-before\n")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
+	setLifecycleTestFault(t, h, testFaultAfterServices)
+	failed := h.run(Options{Action: ActionEnsure, ConfigFile: restrictPolicyViewsConfig(t, h)})
+	if failed.OK || !hasWarning(failed, codeRolledBack) {
+		t.Fatalf("opt-in did not roll back: %+v", failed)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if r.SecurityComplete || !hasWarning(r, codeUserNamespaces) || !hasWarning(r, codeUnprivilegedPtrace) {
+			t.Fatalf("%s hid the current-boot opt-in after rollback: %+v", action, r)
+		}
+	}
+	writeKernelSetting(t, h, userNamespaceBootIDPath, "boot-after\n")
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if hasWarning(r, codeUserNamespaces) || hasWarning(r, codeUnprivilegedPtrace) {
+			t.Fatalf("%s kept an obsolete boot warning: %+v", action, r.Warnings)
+		}
+	}
+}
+
+func TestLinuxRollbackReportsLiveSettingItCannotRestore(t *testing.T) {
+	h := newTestHost(t, "linux")
+	openKernel(t, h)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
+	// Model an administrator raising ptrace_scope to 3 after opt-in wrote 2.
+	// A rollback cannot lower it again, so it must keep the stricter value
+	// and say that the host-wide setting was not restored.
+	h.env.Services = &hookedServices{
+		fakeServices: h.services,
+		onStart:      writeOnce(t, h, unitGateway, sysctlPtraceScope, []byte("3\n")),
+	}
+	setLifecycleTestFault(t, h, testFaultAfterServices)
+	failed := h.run(Options{Action: ActionEnsure, ConfigFile: restrictPolicyViewsConfig(t, h)})
+	if failed.OK || !hasMessageCode(failed.Errors, codeRollbackFailed) ||
+		!strings.Contains(messagesOf(failed.Errors, codeRollbackFailed), sysctlPtraceScope) {
+		t.Fatalf("rollback did not report the live setting it could not restore: %+v", failed)
+	}
+	if got := h.read(sysctlMaxUserNamespaces); got != "63229\n" {
+		t.Fatalf("rollback did not restore the independent namespace setting: %q", got)
+	}
+	if got := h.read(sysctlPtraceScope); got != "3\n" {
+		t.Fatalf("rollback overwrote the administrator's stricter ptrace scope: %q", got)
+	}
+}
+
+// A failed machine-policy removal keeps the deployment and its sysctl file.
+// It has not uninstalled the restriction, so it must not spend boot proof.
+func TestLinuxAbortedUninstallKeepsRestrictionBootProof(t *testing.T) {
+	h, cfg := restrictedHost(t)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg}))
+	fail := true
+	h.env.MachinePolicy = failingRemovePolicy{MachinePolicyManager: h.env.MachinePolicy, fail: &fail}
+	failed := h.run(Options{Action: ActionUninstall, Purge: true})
+	if !hasMessageCode(failed.Errors, codeUninstallIncomplete) || !exists(h.env.P(userNamespacesConfigPath)) || !exists(h.env.deploymentPath()) {
+		t.Fatalf("uninstall did not stop with the restriction intact: %+v", failed)
+	}
+	if _, err := os.Stat(h.env.P(userNamespaceUninstalled)); !os.IsNotExist(err) {
+		t.Fatalf("aborted uninstall recorded a removed restriction: %v", err)
+	}
+	writeKernelSetting(t, h, userNamespaceBootIDPath, "boot-after\n")
+	h.env.ProductVersion = "1.0.5"
+	upgraded := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.5")})
+	if !upgraded.Installed {
+		t.Fatalf("upgrade after aborted uninstall failed: %+v", upgraded)
+	}
+	requireProvenBoot(t, h, "upgrade after aborted uninstall", upgraded, "boot-prior\n")
+}
+
+func TestLinuxFailedSysctlFileRemovalDoesNotRecordUninstall(t *testing.T) {
+	h, cfg := restrictedHost(t)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg}))
+	path := h.env.P(userNamespacesConfigPath)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, "held"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	failed := h.run(Options{Action: ActionUninstall, Purge: true})
+	if failed.OK || !exists(path) {
+		t.Fatalf("uninstall unexpectedly removed the persistent path: %+v", failed)
+	}
+	if _, err := os.Stat(h.env.P(userNamespaceUninstalled)); !os.IsNotExist(err) {
+		t.Fatalf("failed sysctl removal recorded an uninstall: %v", err)
+	}
+}
+
 // Upgrades from every released 1.0.x keep the host's kernel settings with
 // the default config. An administrator who later opts in gets the
 // restriction and the reboot requirement; opting out again removes the
