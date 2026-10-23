@@ -142,10 +142,10 @@ func (factory *destinationDispatchFactory) Prepare(
 		if err != nil {
 			return nil, &destinationDispatchError{}
 		}
-		// The compiled destination contains the effective transport and
-		// routes. Keep its unmasked bytes in this graph only: RemoteDelivery
-		// scopes their hash to one event before journaling an acknowledgement.
-		identity, err := json.Marshal(destination)
+		// Acknowledgements name the receiving endpoint, not its collection or
+		// redaction policy. A policy reload must not reoffer a change that the
+		// same endpoint already received.
+		identity, err := recordedEndpointIdentity(destination)
 		if err != nil {
 			return nil, &destinationDispatchError{}
 		}
@@ -169,6 +169,28 @@ func (factory *destinationDispatchFactory) Prepare(
 		component.byName[destination.Name] = entry
 	}
 	return component, nil
+}
+
+// recordedEndpointIdentity includes only the destination and transport fields
+// that select a recipient. Adapter-prepared authentication and trust material
+// is appended by Prepare; route, batching and policy changes are excluded.
+func recordedEndpointIdentity(destination config.ObservabilityV8EffectiveDestination) ([]byte, error) {
+	return json.Marshal(struct {
+		Name        string                                     `json:"name"`
+		Kind        config.ObservabilityV8DestinationKind      `json:"kind"`
+		Path        string                                     `json:"path"`
+		Endpoint    string                                     `json:"endpoint"`
+		Protocol    string                                     `json:"protocol"`
+		Method      string                                     `json:"method"`
+		Index       string                                     `json:"index"`
+		LogOverride config.ObservabilityV8SignalOverrideSource `json:"log_override"`
+	}{
+		Name: destination.Name, Kind: destination.Kind,
+		Path: destination.Transport.Path, Endpoint: destination.Transport.Endpoint,
+		Protocol: destination.Transport.Protocol, Method: destination.Transport.Method,
+		Index:       destination.Transport.Index,
+		LogOverride: destination.Transport.SignalOverrides[observability.SignalLogs],
+	})
 }
 
 func destinationHasSecretReferences(destination config.ObservabilityV8EffectiveDestination) bool {

@@ -74,10 +74,10 @@ func NewRecordedRemoteDelivery(scope string, acknowledged []string, record func(
 	return delivery
 }
 
-// TrackingKey uses the compiled destination's transport, routing and prepared
-// authentication identity for a recorded occurrence. The identity is hashed with the
-// occurrence id, so a private acknowledgement file cannot be reused for a
-// different change or expose a reusable secret-derived plan fingerprint.
+// TrackingKey uses the recipient's endpoint, transport and prepared
+// authentication identity for a recorded occurrence. The identity is hashed
+// with the occurrence id, so a private acknowledgement file cannot be reused
+// for a different change or expose a reusable secret-derived fingerprint.
 // In-memory deliveries continue to use the destination name.
 func (delivery *RemoteDelivery) TrackingKey(destination, identity string) string {
 	if delivery == nil || delivery.record == nil {

@@ -50,6 +50,16 @@ func TestValidateRuntimeContractBindsExecutableDigestsAndMetadata(t *testing.T) 
 	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err != nil {
 		t.Fatalf("valid contract rejected: %v", err)
 	}
+	duplicate := strings.Replace(string(body), `"profile":"default"`, `"profile":"wrong","profile":"default"`, 1)
+	if err := os.WriteFile(path, []byte(duplicate), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err == nil {
+		t.Fatal("a duplicate lock field was accepted although verify refuses it")
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	lock["guard"] = map[string]any{"path": guard, "sha256": strings.Repeat("0", 64), "managed_custody": true}
 	body, _ = json.Marshal(lock)
 	if err := os.WriteFile(path, body, 0o600); err != nil {

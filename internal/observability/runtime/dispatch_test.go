@@ -27,6 +27,56 @@ type runtimeAdapterFactoryFunc func(
 	telemetry.V8ResourceContext,
 ) (delivery.Adapter, DestinationAdapterCleanup, error)
 
+func TestRecordedEndpointIdentityFollowsRecipient(t *testing.T) {
+	base := config.ObservabilityV8EffectiveDestination{
+		Name: "collector", Kind: config.ObservabilityV8DestinationOTLP,
+		Transport: config.ObservabilityV8TransportPlan{
+			Endpoint: "http://127.0.0.1:4318", Protocol: "http/protobuf", TimeoutMS: 1000,
+		},
+		Routes: []config.ObservabilityV8EffectiveRoute{{Name: "audit"}},
+	}
+	original, err := recordedEndpointIdentity(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*config.ObservabilityV8EffectiveDestination)
+		same   bool
+	}{
+		{name: "route reload", same: true, mutate: func(d *config.ObservabilityV8EffectiveDestination) {
+			d.Routes[0].Name = "changed-policy"
+		}},
+		{name: "retry setting", same: true, mutate: func(d *config.ObservabilityV8EffectiveDestination) {
+			d.Transport.TimeoutMS = 2000
+		}},
+		{name: "endpoint replacement", mutate: func(d *config.ObservabilityV8EffectiveDestination) {
+			d.Transport.Endpoint = "http://127.0.0.1:4319"
+		}},
+		{name: "OTLP logs override", mutate: func(d *config.ObservabilityV8EffectiveDestination) {
+			d.Transport.SignalOverrides = map[observability.Signal]config.ObservabilityV8SignalOverrideSource{
+				observability.SignalLogs: {Endpoint: "http://127.0.0.1:4320"},
+			}
+		}},
+		{name: "different named collector", mutate: func(d *config.ObservabilityV8EffectiveDestination) {
+			d.Name = "another-collector"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			current := base
+			current.Routes = append([]config.ObservabilityV8EffectiveRoute(nil), base.Routes...)
+			test.mutate(&current)
+			got, err := recordedEndpointIdentity(current)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Equal(got, original) != test.same {
+				t.Fatalf("same endpoint identity = %t, want %t", bytes.Equal(got, original), test.same)
+			}
+		})
+	}
+}
+
 func (function runtimeAdapterFactoryFunc) PrepareDestination(
 	ctx context.Context,
 	destination config.ObservabilityV8EffectiveDestination,

@@ -149,6 +149,9 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 	if err != nil {
 		return fmt.Errorf("read ACP runtime contract lock: %w", err)
 	}
+	if err := rejectDuplicateContractFields(body); err != nil {
+		return errors.New("ACP runtime contract lock is malformed")
+	}
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
 	var lock RuntimeContractLock
@@ -217,6 +220,55 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 		}
 	}
 	return nil
+}
+
+// rejectDuplicateContractFields keeps the guard's decoder in agreement with
+// verify: a later JSON field must not hide an earlier value of the same key.
+func rejectDuplicateContractFields(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	var readValue func() error
+	readValue = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		delim, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delim {
+		case '{':
+			seen := make(map[string]struct{})
+			for decoder.More() {
+				token, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := token.(string)
+				if !ok {
+					return errors.New("invalid object key")
+				}
+				if _, duplicate := seen[key]; duplicate {
+					return errors.New("duplicate object key")
+				}
+				seen[key] = struct{}{}
+				if err := readValue(); err != nil {
+					return err
+				}
+			}
+		case '[':
+			for decoder.More() {
+				if err := readValue(); err != nil {
+					return err
+				}
+			}
+		default:
+			return errors.New("invalid JSON delimiter")
+		}
+		_, err = decoder.Token()
+		return err
+	}
+	return readValue()
 }
 
 // SecureClientHost reports a Secure Client install, whose guard keeps the

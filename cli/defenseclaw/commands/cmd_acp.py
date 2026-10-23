@@ -9,7 +9,6 @@ import contextlib
 import copy
 import hashlib
 import io
-import ipaddress
 import json
 import ntpath
 import os
@@ -17,12 +16,12 @@ import secrets
 import shlex
 import shutil
 import stat
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 import click
 
@@ -41,11 +40,6 @@ from defenseclaw.file_permissions import (
 
 _SCHEMA_VERSION = ACP_REGISTRY["protocol"]["release"]
 _SCHEMA_SHA256 = ACP_REGISTRY["protocol"]["sha256"]
-# Go strings.TrimSpace excludes U+001C-U+001F, which Python str.strip removes.
-_GO_WHITESPACE = (
-    " \t\n\v\f\r\x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
-    "\u2028\u2029\u202f\u205f\u3000"
-)
 _REGISTRY = ACP_REGISTRY
 _CLIENTS = set(ACP_CLIENT_IDS)
 _AGENTS = {agent_id: (command, list(args)) for agent_id, (command, args) in ACP_AGENT_ENTRY_POINTS.items()}
@@ -368,7 +362,7 @@ def _lock_is_complete(document: dict[str, Any]) -> bool:
         return isinstance(item, dict) and all(isinstance(item.get(key), str) and item[key].strip() for key in keys)
 
     def optional_string(item: Any, key: str) -> bool:
-        return key not in item or isinstance(item[key], str)
+        return key not in item or item[key] is None or isinstance(item[key], str)
 
     client, agent, guard = document.get("client"), document.get("agent"), document.get("guard")
     adopted = client.get("adopted_entries", []) if isinstance(client, dict) else None
@@ -384,12 +378,12 @@ def _lock_is_complete(document: dict[str, Any]) -> bool:
         and optional_string(document, "generated_at")
         and strings(document.get("protocol"), "schema_version", "schema_sha256")
         and strings(client, "id", "config_path", "config_sha256")
-        and isinstance(adopted, list)
-        and all(isinstance(name, str) for name in adopted)
+        and (adopted is None or isinstance(adopted, list) and all(isinstance(name, str) for name in adopted))
         and strings(agent, "id", "path", "sha256")
         and optional_string(agent, "version")
-        and strings(guard, "path", "sha256")
-        and isinstance(guard.get("managed_custody", False), bool)
+        and strings(guard, "path")
+        and isinstance(guard.get("sha256"), str)
+        and (guard.get("managed_custody") is None or isinstance(guard["managed_custody"], bool))
         and strings(document, "profile", "mode")
     )
 
@@ -796,28 +790,9 @@ def _names_file(value: str, path: Path) -> bool:
         return _same_guard_path(value, str(path))
 
 
-def _guard_token_problem(value: str) -> str | None:
-    """The guard's checks of --token-file (run in cmd/defenseclaw-acp/main.go)."""
-    if not value:
-        return "it has no --token-file"
-    path = Path(os.path.normpath(value))
-    try:
-        info = path.lstat()
-        if not stat.S_ISREG(info.st_mode):
-            return f"its --token-file {path} is not a regular file"
-        if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
-            return f"its --token-file {path} permissions are too broad"
-        if os.name == "nt":
-            protection = windows_private_file_protection_error(path)
-            if protection:
-                return f"its --token-file {path} protection is unsafe: {protection}"
-        if info.st_size > 16 << 10:
-            return f"its --token-file {path} is unexpectedly large"
-        if not path.read_bytes().decode("utf-8", errors="surrogateescape").strip(_GO_WHITESPACE):
-            return f"its --token-file {path} is empty"
-    except OSError:
-        return f"its --token-file {path} cannot be read"
-    return None
+def _entry_names_lock(entry: dict[str, Any], path: Path) -> bool:
+    args = entry.get("args")
+    return isinstance(args, list) and any(isinstance(arg, str) and _names_file(arg, path) for arg in args)
 
 
 def _guard_contract_lock_problem(path: Path) -> str | None:
@@ -837,93 +812,54 @@ def _guard_contract_lock_problem(path: Path) -> str | None:
     return None
 
 
-def _guard_gateway_problem(value: str) -> str | None:
-    """Match NewHTTPEvaluator: only a literal HTTP loopback endpoint starts."""
-    endpoint = value.strip(_GO_WHITESPACE)
-    if any(ord(character) < 32 or ord(character) == 127 for character in endpoint):
-        return "its --gateway is not an HTTP literal loopback URL"
-    for index, character in enumerate(endpoint):
-        if character == "%" and (
-            index + 2 >= len(endpoint)
-            or any(digit not in "0123456789abcdefABCDEF" for digit in endpoint[index + 1:index + 3])
-        ):
-            return "its --gateway is not an HTTP literal loopback URL"
-    try:
-        parsed = urlsplit(endpoint)
-        host = parsed.hostname
-        if parsed.scheme != "http" or not host or parsed.username is not None or parsed.query or parsed.fragment:
-            return "its --gateway is not an HTTP literal loopback URL"
-        if "%" in host:  # net.ParseIP rejects IPv6 zone identifiers.
-            return "its --gateway is not an HTTP literal loopback URL"
-        # Go's URL parser accepts an empty or decimal port, without applying
-        # the socket layer's range check during evaluator construction.
-        authority = parsed.netloc
-        port = authority[authority.find("]") + 1:] if authority.startswith("[") else authority[len(host):]
-        if port and (not port.startswith(":") or (port[1:] and (not port[1:].isascii() or not port[1:].isdigit()))):
-            return "its --gateway is not an HTTP literal loopback URL"
-        address = ipaddress.ip_address(host)
-        loopback = address.is_loopback or (
-            isinstance(address, ipaddress.IPv6Address)
-            and address.ipv4_mapped is not None
-            and address.ipv4_mapped.is_loopback
-        )
-    except ValueError:
-        return "its --gateway is not an HTTP literal loopback URL"
-    return None if loopback else "its --gateway is not an HTTP literal loopback URL"
+def _guard_entry_refusal(entry: dict[str, Any], lock: dict[str, Any], lock_path: Path) -> str | None:
+    """Ask the pinned guard whether this entry would pass its startup checks.
 
-
-def _copy_refusal(entry: dict[str, Any], lock: dict[str, Any], lock_path: Path) -> str | None:
-    """Why the guard refuses a copied entry that names this lock, or None.
-
-    None also for an entry that names another lock, which is not this
-    binding's. Follows run in cmd/defenseclaw-acp/main.go and
-    ValidateRuntimeContract: flags take the guard's defaults, paths compare
-    as the guard compares them, the guard falls back to the catalog command
-    without a command after --, and --token-file and --gateway are checked.
-    The lock itself (its digests and pins) is checked once for the binding.
+    The check mode runs the guard's actual lock, token and gateway validation
+    and stops before starting the agent. A different lock is another binding.
     """
     args = entry.get("args")
     parsed = _guard_argv(args)
     if parsed is None:
-        named = isinstance(args, list) and any(isinstance(arg, str) and _names_file(arg, lock_path) for arg in args)
-        return "the guard does not accept its arguments" if named else None
-    values, launch = parsed
+        return "the guard does not accept its arguments" if _entry_names_lock(entry, lock_path) else None
+    values, _ = parsed
     if not _names_file(values["contract-lock"], lock_path):
+        if not values["contract-lock"] and _entry_names_lock(entry, lock_path):
+            return "its --contract-lock is not parsed by the guard"
         return None
-    lock_problem = _guard_contract_lock_problem(Path(values["contract-lock"]))
-    if lock_problem:
-        return f"its --contract-lock {lock_problem}"
-    if launch:
-        command = launch[0]
-    elif values["agent"] in _AGENTS:
-        command = _AGENTS[values["agent"]][0]
-    else:
-        return "it names no agent command"
-    lock_client, lock_agent, lock_guard = lock.get("client"), lock.get("agent"), lock.get("guard")
-    if (
-        not isinstance(lock_client, dict)
-        or not isinstance(lock_agent, dict)
-        or not isinstance(lock_guard, dict)
-        or [lock_client.get("id"), lock_agent.get("id"), lock.get("profile"), lock.get("mode")]
-        != [values["client"], values["agent"], values["profile"], values["mode"]]
-    ):
-        return "its --client, --agent, --profile or --mode does not match the lock"
-    if not isinstance(lock_agent.get("path"), str) or not _same_guard_path(command, lock_agent["path"]):
-        return "it launches another agent executable than the lock"
     guard = entry.get("command")
     guard = guard if isinstance(guard, str) and os.path.isabs(guard) else shutil.which(str(guard or ""))
     if guard is None:
-        # The editor cannot start it at all; the guard never runs.
-        return None
+        return "the guard executable cannot be started"
     if os.name == "nt" and not os.path.splitext(guard)[1]:
-        # Windows starts <path>.exe, which os.Executable then reports.
         guard += ".exe"
     if sys.platform.startswith("linux"):
-        # os.Executable resolves symlinks on Linux.
         guard = os.path.realpath(guard)
+    lock_guard = lock.get("guard")
+    if not isinstance(lock_guard, dict):
+        return "the lock does not name a guard executable"
     if not isinstance(lock_guard.get("path"), str) or not _same_guard_path(guard, lock_guard["path"]):
         return "it starts another guard executable than the lock"
-    return _guard_token_problem(values["token-file"]) or _guard_gateway_problem(values["gateway"])
+    # Never execute a newly substituted binary while checking an entry. The
+    # guard pin is exact on personal installs; managed custody is admin-owned.
+    try:
+        info = Path(guard).lstat()
+        if not stat.S_ISREG(info.st_mode):
+            return "the guard executable is not a regular file"
+        if _sha256_file(guard) != lock_guard["sha256"] and not (
+            lock_guard.get("managed_custody") is True and _managed_guard_custody_is_trusted(guard)
+        ):
+            return "the guard executable digest has drifted"
+        result = subprocess.run(
+            [guard, "--check-binding", *args], stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, errors="replace", timeout=15, check=False,
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return "the guard executable cannot complete its startup check"
+    if result.returncode == 0:
+        return None
+    detail = result.stderr.strip().removeprefix("defenseclaw-acp: ")
+    return detail[:500] or "the guard refuses this binding"
 
 
 def _verify_binding(
@@ -954,8 +890,6 @@ def _verify_binding(
             problems.append(f"editor settings file cannot be used: {exc.message}")
     servers = document.get("agent_servers")
     names = _pair_entry_names(servers, client, agent, data_dir) if isinstance(servers, dict) else []
-    if not names:
-        problems.append("managed editor entry is missing")
     lock_path = _contract_lock_path(data_dir, client, agent)
     lock_problem = _guard_contract_lock_problem(lock_path)
     if lock_problem:
@@ -986,23 +920,36 @@ def _verify_binding(
     if not _lock_is_complete(lock):
         problems.append("contract lock malformed or incomplete")
         return problems
-    if lock["protocol"]["schema_version"] != _SCHEMA_VERSION or lock["protocol"]["schema_sha256"] != _SCHEMA_SHA256:
-        problems.append("contract lock protocol pins do not match this guard")
-        return problems
+    adopted_names = lock_client.get("adopted_entries") or []
+    owned_names = set(names) | set(adopted_names)
+    named_entries = (
+        {name for name, entry in servers.items() if isinstance(entry, dict) and _entry_names_lock(entry, lock_path)}
+        if isinstance(servers, dict) else set()
+    )
+    if not owned_names.intersection(servers if isinstance(servers, dict) else {}) and not named_entries:
+        problems.append("managed editor entry is missing")
     problems.extend(
         f"adopted editor entry {name!r} no longer launches the DefenseClaw guard"
-        for name in lock_client.get("adopted_entries", [])
-        if name not in names
+        for name in adopted_names
+        if not isinstance(servers, dict) or name not in servers
     )
     locked_client_path = lock_client["config_path"]
     if Path(locked_client_path).resolve() != client_path.resolve():
         problems.append("client configuration path does not match")
-    elif settings_usable and lock_client["config_sha256"] != _client_digest(client_path):
+    elif (
+        settings_usable
+        and not lock_client["config_sha256"].startswith("entry-sha256:")
+        and lock_client["config_sha256"] != _client_digest(client_path)
+    ):
         problems.append("client configuration digest has drifted")
     for key in ("agent", "guard"):
         item = lock.get(key)
         path_value = item["path"]
-        if not Path(path_value).is_file():
+        try:
+            regular = stat.S_ISREG(Path(path_value).lstat().st_mode)
+        except OSError:
+            regular = False
+        if not regular:
             problems.append(f"{key} executable is missing")
         elif item["sha256"] != _sha256_file(path_value) and not (
             key == "guard"
@@ -1036,44 +983,27 @@ def _verify_binding(
                     f"contract lock mode {locked_mode!r} no longer matches profile "
                     f"{expected_profile!r} mode {expected_mode!r}; re-run acp setup"
                 )
-    for name in names:
-        entry = servers[name]
-        if not isinstance(entry, dict):
-            problems.append(f"editor entry {name!r} is not an object")
-            continue
-        args = entry.get("args")
-        options = _guard_options(entry)
-        if (
-            entry.get("command") != lock_guard["path"]
-            or not isinstance(args, list)
-            or not options
-            or not _launches_locked_agent(entry, options, lock, agent)
-            or any(options.get(flag) != expected for flag, expected in {
-                "--client": client, "--agent": agent,
-                "--contract-lock": str(lock_path.resolve()),
-                "--token-file": str(Path(data_dir).expanduser().resolve() / "acp" / (
-                    f"{client}-{agent}.token" if lock_guard.get("managed_custody")
-                    else ".token"
-                )),
-            }.items())
-        ):
-            problems.append(f"editor launch command does not match the lock: {name}")
-    # A copied entry with an edited gateway can look like an adopted alias to
-    # the ownership check. Check those flags on owned entries too; the other
-    # launch fields are checked in the names loop above.
     for name, entry in servers.items() if isinstance(servers, dict) else ():
-        if not isinstance(entry, dict) or not _entry_is_guarded(entry):
+        if not isinstance(entry, dict):
+            if name in owned_names:
+                problems.append(f"editor entry {name!r} is not an object")
             continue
-        if name in names:
-            options = _guard_options(entry)
-            reason = _guard_token_problem(options.get("--token-file", "")) or _guard_gateway_problem(
-                options.get("--gateway", "")
-            )
-        else:
-            reason = _copy_refusal(entry, lock, lock_path)
+        if name not in owned_names and not _entry_is_guarded(entry) and not _entry_names_lock(entry, lock_path):
+            continue
+        if name in adopted_names and not _entry_names_lock(entry, lock_path):
+            problems.append(f"adopted editor entry {name!r} no longer launches the DefenseClaw guard")
+            continue
+        reason = _guard_entry_refusal(entry, lock, lock_path)
+        if name in owned_names and reason is None:
+            parsed = _guard_argv(entry.get("args"))
+            if parsed is None or not _names_file(parsed[0]["contract-lock"], lock_path):
+                reason = "it no longer launches the DefenseClaw guard"
         if reason:
-            origin = "" if name in names else "setup did not write it and "
-            remedy = f"re-run acp setup for {client}/{agent}" if name in names else f"delete it from {client_path}"
+            origin = "" if name in owned_names else "setup did not write it and "
+            remedy = (
+                f"re-run acp setup for {client}/{agent}"
+                if name in owned_names else f"delete it from {client_path}"
+            )
             problems.append(
                 f"editor entry {name!r} cannot start: {origin}{reason} "
                 f"({remedy})"

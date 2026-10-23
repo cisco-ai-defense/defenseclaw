@@ -45,6 +45,17 @@ const startupLinger = 30 * time.Second
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		// Verification calls the same startup checks without an editor session.
+		// Do not wait for an ACP request on that diagnostic invocation.
+		for _, arg := range os.Args[1:] {
+			if arg == "--check-binding" {
+				fmt.Fprintf(os.Stderr, "defenseclaw-acp: %v\n", err)
+				os.Exit(1)
+			}
+			if arg == "--" {
+				break
+			}
+		}
 		var startup *startupError
 		if errors.As(err, &startup) {
 			fmt.Fprintf(os.Stderr, "defenseclaw-acp: %s\n", startup.message)
@@ -372,6 +383,7 @@ func run(args []string) error {
 	gateway := flags.String("gateway", "http://127.0.0.1:18970/api/v1/acp/evaluate", "loopback evaluation endpoint")
 	tokenFile := flags.String("token-file", "", "file containing the gateway bearer token")
 	contractLock := flags.String("contract-lock", "", "setup-generated runtime contract lock")
+	checkBinding := flags.Bool("check-binding", false, "check startup acceptance without starting an agent")
 	catalog := flags.Bool("catalog", false, "print the built-in ACP catalog as JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -444,6 +456,12 @@ func run(args []string) error {
 	evaluator, err := acp.NewHTTPEvaluator(*gateway, token)
 	if err != nil {
 		return fail(err)
+	}
+	if *mode != string(acp.ModeObserve) && *mode != string(acp.ModeAction) {
+		return fail(errors.New("ACP mode must be observe or action"))
+	}
+	if *checkBinding {
+		return nil
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -7,11 +7,15 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
+from functools import lru_cache
 from pathlib import Path
 from unittest.mock import patch
 
 import defenseclaw.commands.cmd_acp as cmd_acp_module
+import pytest
 from click.testing import CliRunner
 from defenseclaw.acp_catalog import ACP_AGENT_ENTRY_POINTS
 from defenseclaw.commands.cmd_acp import _write_token, acp_cmd
@@ -22,9 +26,30 @@ from tests.helpers import cleanup_app, make_app_context
 
 
 def _binary(path: Path) -> str:
-    path.write_bytes(b"test-binary")
+    if "guard" in path.name or "defenseclaw-acp" in path.name:
+        if os.name == "nt" and not path.suffix:
+            path = path.with_suffix(".exe")
+        shutil.copyfile(_built_guard(), path)
+    else:
+        path.write_bytes(b"test-binary")
     path.chmod(0o700)
     return str(path.resolve())
+
+
+@lru_cache(maxsize=1)
+def _built_guard() -> Path:
+    root = Path(__file__).parents[2]
+    path = Path(tempfile.mkdtemp(prefix="dc-acp-guard-test-")) / ("defenseclaw-acp.exe" if os.name == "nt" else "defenseclaw-acp")
+    subprocess.run(["go", "build", "-o", str(path), "./cmd/defenseclaw-acp"], cwd=root, check=True, capture_output=True)
+    return path
+
+
+def _guard_accepts(entry: dict) -> bool:
+    result = subprocess.run(
+        [entry["command"], "--check-binding", *entry["args"]],
+        stdin=subprocess.DEVNULL, capture_output=True, timeout=15, check=False,
+    )
+    return result.returncode == 0
 
 
 def _app(tmp_path: Path):
@@ -237,6 +262,129 @@ def test_verify_detects_agent_digest_drift(tmp_path, monkeypatch):
         cleanup_app(app, db_path, data_dir)
 
 
+def test_verify_agrees_with_guard_for_entry_pins_and_agent_file_types(tmp_path, monkeypatch):
+    """A valid entry pin starts; an agent symlink does not, even with the same bytes."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent_path = tmp_path / "kiro-cli"
+    agent = _binary(agent_path)
+    settings = _zed_settings(tmp_path)
+    lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+    try:
+        setup = CliRunner().invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent],
+            obj=app,
+        )
+        assert setup.exit_code == 0, setup.output
+        document = json.loads(settings.read_text())
+        entry = document["agent_servers"]["DefenseClaw · Kiro"]
+        canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        lock = json.loads(lock_path.read_text())
+        lock["client"]["config_sha256"] = "entry-sha256:" + hashlib.sha256(canonical).hexdigest()
+        atomic_write_private_bytes(lock_path, json.dumps(lock).encode())
+
+        for case, mutate, accepted in (
+            ("entry pin", lambda: None, True),
+            ("editor owned field", lambda: entry.__setitem__("default_mode", "acceptEdits"), True),
+            ("symlinked agent", lambda: (agent_path.rename(tmp_path / "agent-target"), agent_path.symlink_to(tmp_path / "agent-target")), False),
+        ):
+            if case == "symlinked agent":
+                settings.write_text(json.dumps(document))
+            try:
+                mutate()
+            except OSError:
+                if os.name == "nt":  # Windows runners may lack symlink creation privilege.
+                    continue
+                raise
+            if case == "editor owned field":
+                settings.write_text(json.dumps(document))
+            assert _guard_accepts(entry) is accepted, case
+            result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+            assert (result.exit_code == 0) is accepted, (case, result.output)
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_verify_refuses_symlinked_agent_with_identical_bytes(tmp_path, monkeypatch):
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent_path = tmp_path / "kiro-cli"
+    agent = _binary(agent_path)
+    try:
+        setup = CliRunner().invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent],
+            obj=app,
+        )
+        assert setup.exit_code == 0, setup.output
+        agent_path.rename(tmp_path / "agent-target")
+        try:
+            agent_path.symlink_to(tmp_path / "agent-target")
+        except OSError:
+            if os.name == "nt":  # Symlinks may require a Windows runner privilege.
+                pytest.skip("Windows runner cannot create a file symlink")
+            raise
+        result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert result.exit_code != 0, result.output
+        assert "agent executable" in result.output, result.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_verify_accepts_an_unchanged_entry_digest_lock(tmp_path, monkeypatch):
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    settings = _zed_settings(tmp_path)
+    lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+    try:
+        setup = CliRunner().invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent],
+            obj=app,
+        )
+        assert setup.exit_code == 0, setup.output
+        entry = json.loads(settings.read_text())["agent_servers"]["DefenseClaw · Kiro"]
+        canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        lock = json.loads(lock_path.read_text())
+        lock["client"]["config_sha256"] = "entry-sha256:" + hashlib.sha256(canonical).hexdigest()
+        atomic_write_private_bytes(lock_path, json.dumps(lock).encode())
+        result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert result.exit_code == 0, result.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_verify_uses_guard_acceptance_for_an_adopted_alias_with_a_custom_guard_name(tmp_path, monkeypatch):
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "guard")
+    agent = _binary(tmp_path / "kiro-cli")
+    settings.write_text(json.dumps({"agent_servers": {"My Kiro": {"command": agent, "args": ["acp"]}}}))
+    try:
+        adopted = CliRunner().invoke(
+            acp_cmd, ["adopt", "--client", "zed", "--guard-binary", guard, "--yes"], obj=app,
+        )
+        assert adopted.exit_code == 0, adopted.output
+        entry = json.loads(settings.read_text())["agent_servers"]["My Kiro"]
+        assert _guard_accepts(entry)
+        verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert verified.exit_code == 0, verified.output
+        settings.unlink()
+        assert not _guard_accepts(entry)
+        missing = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert missing.exit_code != 0
+        assert "editor settings file is missing" in missing.output, missing.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
 def test_verify_reports_a_copied_guard_entry_the_guard_refuses(tmp_path, monkeypatch):
     """GAP-0525: the guard sent a refused copy to verify, which said Verified."""
     _isolate_client_config(monkeypatch, tmp_path)
@@ -274,14 +422,6 @@ def _flag_removed(args: list[str], flag: str) -> list[str]:
 
 def _flag_set(args: list[str], flag: str, value: str) -> list[str]:
     return [*args[:args.index(flag) + 1], value, *args[args.index(flag) + 2:]]
-
-
-def test_guard_token_refuses_unicode_whitespace(tmp_path):
-    token = tmp_path / "whitespace.token"
-    atomic_write_private_bytes(token, "\u00a0".encode())
-    assert cmd_acp_module._guard_token_problem(str(token)) is not None
-    atomic_write_private_bytes(token, b"\x1c")
-    assert cmd_acp_module._guard_token_problem(str(token)) is None
 
 
 def test_verify_rejects_a_contract_lock_the_guard_cannot_open(tmp_path, monkeypatch):
@@ -338,6 +478,7 @@ def test_verify_rejects_guard_refused_metadata_in_an_adopted_lock(tmp_path, monk
         )
         assert adopted.exit_code == 0, adopted.output
         assert list(json.loads(settings.read_text())["agent_servers"]) == ["My Kiro"]
+        entry = json.loads(settings.read_text())["agent_servers"]["My Kiro"]
         assert CliRunner().invoke(acp_cmd, verify, obj=app).exit_code == 0
         lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
         original = json.loads(lock_path.read_text())
@@ -351,8 +492,8 @@ def test_verify_rejects_guard_refused_metadata_in_an_adopted_lock(tmp_path, monk
             return change
 
         cases = {
-            "stale schema digest": (set_field("f" * 64, "protocol", "schema_sha256"), "protocol pins"),
-            "stale schema version": (set_field("schema-v0", "protocol", "schema_version"), "protocol pins"),
+            "stale schema digest": (set_field("f" * 64, "protocol", "schema_sha256"), "runtime contract metadata"),
+            "stale schema version": (set_field("schema-v0", "protocol", "schema_version"), "runtime contract metadata"),
             "wrong lock version": (set_field(2, "version"), "malformed or incomplete"),
             "boolean lock version": (set_field(True, "version"), "malformed or incomplete"),
             "unexpected field": (set_field("unexpected", "protocol", "extra"), "malformed or incomplete"),
@@ -363,9 +504,10 @@ def test_verify_rejects_guard_refused_metadata_in_an_adopted_lock(tmp_path, monk
             lock = json.loads(json.dumps(original))
             mutate(lock)
             atomic_write_private_bytes(lock_path, json.dumps(lock).encode())
+            assert not _guard_accepts(entry), label
             result = CliRunner().invoke(acp_cmd, verify, obj=app)
             assert result.exit_code != 0, (label, result.output)
-            assert f"contract lock {expected}" in result.output, (label, result.output)
+            assert expected in result.output, (label, result.output)
             repair_prefix = "defenseclaw 'acp' 'setup'" if os.name == "nt" else "defenseclaw acp setup"
             assert f"run {repair_prefix}" in result.output, (label, result.output)
             if label == "stale schema digest":
@@ -373,7 +515,21 @@ def test_verify_rejects_guard_refused_metadata_in_an_adopted_lock(tmp_path, monk
                 assert status.exit_code == 0, status.output
                 binding = json.loads(status.output)["bindings"]["zed/kiro"]
                 assert binding["healthy"] is False
-                assert any("protocol pins" in problem for problem in binding["problems"])
+                assert any("runtime contract metadata" in problem for problem in binding["problems"])
+
+        # Go's lock decoder treats null optional fields as their zero values.
+        # The guard starts this adopted entry, so verify must accept it too.
+        for keys in (("generated_at",), ("agent", "version"), ("guard", "managed_custody"),
+                     ("client", "adopted_entries")):
+            lock = json.loads(json.dumps(original))
+            target = lock
+            for key in keys[:-1]:
+                target = target[key]
+            target[keys[-1]] = None
+            atomic_write_private_bytes(lock_path, json.dumps(lock).encode())
+            assert _guard_accepts(entry), keys
+            result = CliRunner().invoke(acp_cmd, verify, obj=app)
+            assert result.exit_code == 0, (keys, result.output)
         serialized = json.dumps(original)
         for label, body in {
             "invalid first version": '{"version": "invalid", ' + serialized[1:],
@@ -456,13 +612,16 @@ def test_verify_checks_copied_guard_entries_by_the_guards_rules(tmp_path, monkey
             "Bad escape gateway": _flag_set(args, "--gateway", "http://127.0.0.1/api/v1/acp/%zz"),
             "Untrimmed control gateway": _flag_set(args, "--gateway", "http://127.0.0.1/api/v1/acp/evaluate\x1c"),
             "Unknown flag": ["--sandbox", "on", *args],
+            "Unparsed lock": ["kiro-cli", "--contract-lock", lock],
         }
         if os.name != "nt":
             refused["Loose token"] = _flag_set(args, "--token-file", str(tmp_path / "loose.token"))
         whitespace_token = Path(data_dir) / "acp" / "whitespace.token"
         atomic_write_private_bytes(whitespace_token, "\u00a0".encode())
-        assert cmd_acp_module._guard_token_problem(str(whitespace_token)) is not None
         refused["Unicode whitespace token"] = _flag_set(args, "--token-file", str(whitespace_token))
+        separator_token = Path(data_dir) / "acp" / "separator.token"
+        atomic_write_private_bytes(separator_token, b"\x1c")
+        starts["Non Unicode separator token"] = _flag_set(args, "--token-file", str(separator_token))
         if linked is not None:
             refused["Linked lock"] = _flag_set(
                 _flag_set(args, "--contract-lock", str(linked / Path(lock).name)), "--profile", "watch"
@@ -477,7 +636,6 @@ def test_verify_checks_copied_guard_entries_by_the_guards_rules(tmp_path, monkey
                 ["icacls", str(acl_token), "/grant", "*S-1-1-0:(R)"], check=True, capture_output=True, text=True
             )
             assert windows_acl_confidentiality_error(acl_token) is not None
-            assert cmd_acp_module._guard_token_problem(str(acl_token)) is not None
             refused["Readable token"] = _flag_set(args, "--token-file", str(acl_token))
             metadata_token = Path(data_dir) / "acp" / "metadata.token"
             atomic_write_private_bytes(metadata_token, b"test token\n")
@@ -485,12 +643,14 @@ def test_verify_checks_copied_guard_entries_by_the_guards_rules(tmp_path, monkey
                 ["icacls", str(metadata_token), "/grant", "*S-1-1-0:(RA)"], check=True, capture_output=True, text=True
             )
             assert windows_acl_confidentiality_error(metadata_token) is None
-            assert cmd_acp_module._guard_token_problem(str(metadata_token)) is not None
             refused["Metadata token"] = _flag_set(args, "--token-file", str(metadata_token))
         document = json.loads(settings.read_text())
         for name, copy_args in {**starts, **refused}.items():
-            document["agent_servers"][name] = dict(exact, args=copy_args)
+            entry = dict(exact, args=copy_args)
+            assert _guard_accepts(entry) is (name in starts), name
+            document["agent_servers"][name] = entry
         settings.write_text(json.dumps(document))
+        cmd_acp_module._refresh_client_contract_digests(str(data_dir), "zed", settings)
 
         result = CliRunner().invoke(acp_cmd, verify, obj=app)
         assert result.exit_code != 0, result.output
@@ -926,7 +1086,7 @@ def test_adopt_points_the_operators_own_entry_at_the_guard(tmp_path, monkeypatch
                 assert cmd_acp_module._unproven_pair_entries("zed", "kiro", str(data_dir)) == ["Stale"]
             else:
                 assert verified.exit_code != 0, verified.output
-                assert f"editor launch command does not match the lock: {name}" in problems, problems
+                assert any(f"editor entry {name!r} cannot start" in problem for problem in problems), problems
         settings.write_text(json.dumps({"agent_servers": servers}))
         cmd_acp_module._refresh_client_contract_digests(str(data_dir), "zed", settings)
 
@@ -1175,8 +1335,8 @@ def test_refresh_repins_only_the_upgraded_defenseclaw_guard(tmp_path, monkeypatc
         assert CliRunner().invoke(acp_cmd, setup, obj=app).exit_code == 0
         verify = ["verify", "--client", "zed", "--agent", "kiro"]
 
-        old_sha = hashlib.sha256(guard_path.read_bytes()).hexdigest()
-        guard_path.write_bytes(b"upgraded-guard")
+        old_sha = hashlib.sha256(Path(guard).read_bytes()).hexdigest()
+        Path(guard).write_bytes(Path(guard).read_bytes() + b"upgraded-guard")
         result = CliRunner().invoke(acp_cmd, verify, obj=app)
         assert result.exit_code != 0 and "defenseclaw acp refresh" in result.output
 
@@ -1214,7 +1374,7 @@ def test_source_install_and_doctor_fix_repin_only_defenseclaws_guard(tmp_path, m
     try:
         setup = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent]
         assert CliRunner().invoke(acp_cmd, setup, obj=app).exit_code == 0
-        guard_path.write_bytes(b"source-build-guard")
+        Path(guard).write_bytes(Path(guard).read_bytes() + b"source-build-guard")
         other = tmp_path / "other" / "defenseclaw-acp"
         other.parent.mkdir()
         _binary(other)
@@ -1222,7 +1382,7 @@ def test_source_install_and_doctor_fix_repin_only_defenseclaws_guard(tmp_path, m
         result = CliRunner().invoke(acp_cmd, ["refresh", "--guard-path", guard], obj=app)
         assert "Re-pinned the DefenseClaw ACP guard for zed/kiro" in result.output
 
-        guard_path.write_bytes(b"upgraded-guard")
+        Path(guard).write_bytes(Path(guard).read_bytes() + b"upgraded-guard")
         agent_path.write_bytes(b"updated-agent")
         tag, plan = _fix_acp_guard_pins(app.cfg, assume_yes=True, plan_only=True)
         setup_prefix = (

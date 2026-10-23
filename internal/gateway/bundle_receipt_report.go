@@ -239,17 +239,24 @@ func (r *bundleReceiptReporter) hasSeen(id string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-func (r *bundleReceiptReporter) markSeen(id string) {
+func (r *bundleReceiptReporter) markSeen(id string) bool {
 	if !reportableID(id) {
-		return
+		return false
+	}
+	if r.hasSeen(id) {
+		return true
+	}
+	if err := os.MkdirAll(r.seenDir(), 0o700); err != nil {
+		return false
+	}
+	if err := configwrite.WriteFileDurable(filepath.Join(r.seenDir(), id), []byte("reported\n"), 0o600); err != nil {
+		return false
 	}
 	if r.seen == nil {
 		r.seen = make(map[string]bool)
 	}
 	r.seen[id] = true
-	if err := os.MkdirAll(r.seenDir(), 0o700); err == nil {
-		_ = configwrite.WriteFileDurable(filepath.Join(r.seenDir(), id), []byte("reported\n"), 0o600)
-	}
+	return true
 }
 
 func (r *bundleReceiptReporter) reportSpool() {
@@ -365,11 +372,11 @@ func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
 }
 
 func (r *bundleReceiptReporter) changeReported(id string) {
-	delete(r.changes, id)
-	r.markSeen(id)
-	if r.hasSeen(id) {
-		_ = os.RemoveAll(filepath.Join(r.acknowledgedDir(), id))
+	if !r.markSeen(id) {
+		return
 	}
+	delete(r.changes, id)
+	_ = os.RemoveAll(filepath.Join(r.acknowledgedDir(), id))
 }
 
 // acknowledgedDir is <data_dir>/bundle-receipt.acknowledged.d: per change

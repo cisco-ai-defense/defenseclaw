@@ -318,6 +318,46 @@ func TestBundleReceiptReporterDoesNotExportAnAcknowledgedChangeAgainAfterARestar
 	}
 }
 
+// A marker write can fail after a destination acknowledges a change. Its
+// acknowledgement must remain durable until the reported marker is durable;
+// otherwise a restart sends the same change to that endpoint again.
+func TestBundleReceiptReporterKeepsAcknowledgementsUntilReportedMarkerIsDurable(t *testing.T) {
+	f := newChangeExportFixture(t)
+	reporter := f.reporter()
+	if err := os.WriteFile(reporter.seenDir(), []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reporter.poll(t.Context())
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		state := reporter.changes[f.ev.EventID]
+		if state != nil {
+			if settled, delivered := state.delivery.Settled(); settled && delivered {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("destination did not acknowledge the change")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	reporter.poll(t.Context())
+	if reporter.hasSeen(f.ev.EventID) {
+		t.Fatal("change marked reported although its marker could not be written")
+	}
+	if got := reporter.acknowledgedDestinations(f.ev.EventID); len(got) != 1 {
+		t.Fatalf("acknowledgements after failed marker write = %v, want one", got)
+	}
+	if err := os.Remove(reporter.seenDir()); err != nil {
+		t.Fatal(err)
+	}
+	restarted := f.reporter()
+	pollUntil(t, restarted, func() bool { return restarted.hasSeen(f.ev.EventID) })
+	if got := f.exported(); got != 1 {
+		t.Fatalf("destination received change %d times, want once", got)
+	}
+}
+
 // A timed-out offer can still be queued or retrying. Its destination must
 // receive the change only once, even if the reporter offers the stored row
 // again. A replacement identity can receive it before the old one settles.
@@ -400,20 +440,39 @@ func TestBundleReceiptReporterDoesNotQueueAnOutstandingChangeAgain(t *testing.T)
 	}
 }
 
-// A destination name is reusable. Its old acknowledgement must not suppress
-// a pending change at a replacement endpoint or route after reload or restart.
-func TestBundleReceiptReporterReoffersAChangeAfterDestinationRebind(t *testing.T) {
+// Every current endpoint gets one copy of a change. Policy and collection
+// reloads, a ten-minute retry and a reporter restart preserve the same key;
+// a changed endpoint or resolved credential has another key.
+func TestBundleReceiptReporterDeliversEachChangeOncePerCurrentEndpoint(t *testing.T) {
 	for _, test := range []struct {
-		name            string
-		restartReporter bool
-		routeOnly       bool
+		name               string
+		restartReporter    bool
+		routeOnly          bool
+		collectionOff      bool
+		tenMinuteRetry     bool
+		credentialRotation bool
 	}{
-		{name: "live reload"},
-		{name: "reporter restart", restartReporter: true},
-		{name: "route change", routeOnly: true},
+		{name: "endpoint replacement"},
+		{name: "endpoint replacement after restart", restartReporter: true},
+		{name: "policy reload", routeOnly: true},
+		{name: "collection reload", collectionOff: true},
+		{name: "ten-minute retry", tenMinuteRetry: true},
+		{name: "credential rotation", credentialRotation: true, restartReporter: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newChangeExportFixture(t)
+			const credential = "W8_TABLE_DEST_RECIPIENT"
+			if test.credentialRotation {
+				f.trackRecipients.Store(true)
+				t.Setenv(credential, "first recipient")
+				raw := hookModelV8BootstrapRaw(f.dataDir, f.endpoint, []string{"logs"})
+				raw = bytes.Replace(raw, []byte("      protocol: http/protobuf\n"),
+					[]byte("      protocol: http/protobuf\n      headers:\n        X-Recipient: {env: "+credential+"}\n"), 1)
+				if result, err := f.sidecar.ReloadObservabilityRuntime(t.Context(), f.configPath, raw); err != nil ||
+					result.Status() != runtimegraph.ReloadApplied {
+					t.Fatalf("configure recipient: status=%v error=%v", result.Status(), err)
+				}
+			}
 			f.slow.Store(true)
 			first := f.reporter()
 			first.poll(t.Context())
@@ -426,6 +485,14 @@ func TestBundleReceiptReporterReoffersAChangeAfterDestinationRebind(t *testing.T
 			}
 			if first.hasSeen(f.ev.EventID) || f.exported() != 1 {
 				t.Fatalf("before rebind: reported=%t, endpoint A exports=%d", first.hasSeen(f.ev.EventID), f.exported())
+			}
+			if test.tenMinuteRetry {
+				first.changes[f.ev.EventID].offered = time.Now().Add(-bundleChangeDeliveryWait - time.Second)
+				pollUntil(t, first, func() bool { return first.hasSeen(f.ev.EventID) })
+				if got := f.exported(); got != 1 {
+					t.Fatalf("retry delivered change %d times, want once", got)
+				}
+				return
 			}
 			if test.restartReporter {
 				// A 1.0.4 journal written before this fix has only the name.
@@ -441,13 +508,20 @@ func TestBundleReceiptReporterReoffersAChangeAfterDestinationRebind(t *testing.T
 
 			var secondCapture *hookModelV8OTLPCapture
 			endpoint := f.endpoint
-			if !test.routeOnly {
+			if !test.routeOnly && !test.collectionOff && !test.credentialRotation {
 				secondCapture = &hookModelV8OTLPCapture{}
 				secondServer := httptest.NewServer(http.HandlerFunc(secondCapture.handler))
 				t.Cleanup(secondServer.Close)
 				endpoint = secondServer.URL
 			}
 			raw := hookModelV8BootstrapRaw(f.dataDir, endpoint, []string{"logs"})
+			if test.credentialRotation {
+				t.Setenv(credential, "replacement recipient")
+				raw = bytes.Replace(raw, []byte("      protocol: http/protobuf\n"),
+					[]byte("      protocol: http/protobuf\n      headers:\n        X-Recipient: {env: "+credential+"}\n"), 1)
+				raw = bytes.Replace(raw, []byte("export_interval_seconds: 1"),
+					[]byte("export_interval_seconds: 2"), 1)
+			}
 			if test.routeOnly {
 				changed := bytes.Replace(raw, []byte("        buckets: ['*']\n"),
 					[]byte("        buckets: ['*']\n        redaction_profile: strict\n"), 1)
@@ -455,6 +529,10 @@ func TestBundleReceiptReporterReoffersAChangeAfterDestinationRebind(t *testing.T
 					t.Fatal("test did not change the destination route")
 				}
 				raw = changed
+			}
+			if test.collectionOff {
+				raw = bytes.Replace(raw, []byte("compliance.activity:\n      collect: {logs: true"),
+					[]byte("compliance.activity:\n      collect: {logs: false"), 1)
 			}
 			result, err := f.sidecar.ReloadObservabilityRuntime(t.Context(), f.configPath,
 				raw)
@@ -475,11 +553,17 @@ func TestBundleReceiptReporterReoffersAChangeAfterDestinationRebind(t *testing.T
 				}
 			}
 			wantA, wantB := 1, 1
-			if test.routeOnly {
+			if test.routeOnly || test.collectionOff {
+				wantB = 0
+			}
+			if test.credentialRotation {
 				wantA, wantB = 2, 0
 			}
 			if countB != wantB || f.exported() != wantA {
 				t.Fatalf("pending change exports: endpoint A=%d, endpoint B=%d; want %d and %d", f.exported(), countB, wantA, wantB)
+			}
+			if test.credentialRotation && (f.tenantA.Load() != 1 || f.tenantB.Load() != 1) {
+				t.Fatalf("credential rotation delivered old=%d new=%d, want one each", f.tenantA.Load(), f.tenantB.Load())
 			}
 		})
 	}
