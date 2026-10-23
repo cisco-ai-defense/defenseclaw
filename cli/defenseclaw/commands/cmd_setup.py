@@ -52,7 +52,15 @@ import click
 # pulled name-by-name so the wizard call sites read like
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
-from defenseclaw import connector_paths, envvars, openclaw_presence, platform_support, removed_connectors, terminal_checkbox, ux
+from defenseclaw import (
+    connector_paths,
+    envvars,
+    openclaw_presence,
+    platform_support,
+    removed_connectors,
+    terminal_checkbox,
+    ux,
+)
 from defenseclaw.audit_actions import (
     ACTION_SETUP_GATEWAY,
     ACTION_SETUP_GUARDRAIL,
