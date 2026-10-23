@@ -60,8 +60,12 @@ type agentIdentityFacts struct {
 	// verified account with no UPN.
 	UserUPN        string
 	UPNUnavailable bool
-	Connector      string
-	InstallFP      string
+	// UPNRead numbers the read of UserUPN (agentIdentityUPNReads): a hook
+	// that read the UPN earlier can reach the recorder after a later one,
+	// and its older UPN must not replace the newer one.
+	UPNRead   uint64
+	Connector string
+	InstallFP string
 	// InstallHint is a config root the agent claimed (a CLAUDE_CONFIG_DIR or
 	// CODEX_HOME style override seen in the payload) that differs from
 	// InstallFP. It is recorded for operators and never moves the ID.
@@ -112,6 +116,7 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 	machine, machineVerified := agentidentity.HostMachineHash()
 	account := agentIdentityAccount(user)
 	upn, upnKnown := agentIdentityAccountUPN(user.ID)
+	upnRead := agentIdentityUPNReads.Add(1)
 	facts := agentIdentityFacts{
 		MachineHash: machine,
 		UserID:      agentidentity.NormalizeUserID(user.ID),
@@ -125,6 +130,7 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		UserIncarnation: agentIdentityAccountToken(agentidentity.NormalizeUserID(user.ID)),
 		UserUPN:         upn,
 		UPNUnavailable:  !upnKnown,
+		UPNRead:         upnRead,
 		Connector:       connectorName,
 		InstallFP:       agentIdentityInstallFP(connectorName, user),
 	}
@@ -163,6 +169,10 @@ func agentIdentityAccountDomains(userID string) string {
 	}
 	return useridentity.AccountDomains(facts)
 }
+
+// agentIdentityUPNReads numbers the hook path's UPN reads in the order they
+// complete (agentIdentityFacts.UPNRead).
+var agentIdentityUPNReads atomic.Uint64
 
 // agentIdentityAccountUPN is the UPN of the account a uid or SID's hooks ran
 // as. A current Windows guardian record wins before profile lookup refreshes
