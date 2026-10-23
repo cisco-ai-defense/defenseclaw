@@ -21,12 +21,12 @@ import (
 
 // A Cursor guard rebuild snapshots its artifacts when the transaction starts,
 // but Cursor and administrators do not take the DefenseClaw lock. Each write
-// is a compare-and-swap that returns the file it replaced. When another
-// writer changed a file in between, the rebuild puts that file back, undoes
-// its other writes and starts again from what is on disk: an administrator's
-// hooks.json edit is kept with the registration merged into it, a changed
-// file DefenseClaw owns is rebuilt, an edit that is not JSON stops the
-// rebuild, and an undo never puts a preimage back over a newer save.
+// is a compare-and-swap that publishes only over the file the rebuild read.
+// When another writer changed a file in between, the newer file is kept, the
+// rebuild undoes its other writes and starts again from what is on disk: an
+// administrator's hooks.json edit is kept with the registration merged into
+// it, a changed file DefenseClaw owns is rebuilt, an edit that is not JSON
+// stops the rebuild, and an undo never puts a preimage back over a newer save.
 func TestWindowsCursorMachineGuardRebuildKeepsConcurrentChanges(t *testing.T) {
 	const hook = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 	adminHooks := []byte(`{"version":1,"hooks":{"adminEvent":[{"type":"command","command":"admin-concurrent-hook"}]}}`)
@@ -309,7 +309,7 @@ func TestWindowsCursorMachineGuardRebuildKeepsConcurrentChanges(t *testing.T) {
 			write(t, paths.Hooks, ours)
 			// The administrator saves after the rebuild wrote.
 			write(t, paths.Hooks, adminHooks)
-			if err := item.undo(); !errors.Is(err, errWindowsCursorManagedGuardRebuildRaced) {
+			if err := item.undo(); !errors.Is(err, errWindowsCursorManagedConcurrentChange) {
 				t.Fatalf("undo over a newer save: %v", err)
 			}
 			if now := read(t, paths); !bytes.Equal(now.hooks, adminHooks) {
@@ -347,7 +347,7 @@ func TestWindowsCursorMachineGuardRebuildKeepsConcurrentChanges(t *testing.T) {
 			return true
 		})
 		restored, err := RestoreWindowsCursorManagedAdapter(hook)
-		if err == nil || restored || !errors.Is(err, errWindowsCursorManagedGuardRebuildRaced) {
+		if err == nil || restored || !errors.Is(err, errWindowsCursorManagedConcurrentChange) {
 			t.Fatalf("rebuild against a writer that never stops: restored=%t err=%v", restored, err)
 		}
 		if saves != windowsCursorManagedGuardRebuildAttempts {

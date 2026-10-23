@@ -104,7 +104,8 @@ func ReconcileWindowsCodexMachineRequirements(
 		return report, err
 	}
 	report := windowsCodexMachineReport("reconcile", opts)
-	err := withWindowsCodexMachineMutation(opts, func() error {
+	reconcile := func() error {
+		report = windowsCodexMachineReport("reconcile", opts)
 		requirements, err := readWindowsCodexMachineFile(
 			opts.RequirementsPath,
 			windowsCodexMachineRequirementsLimit,
@@ -298,12 +299,34 @@ func ReconcileWindowsCodexMachineRequirements(
 			return err
 		}
 		if requirementsChanged {
-			if err := writeWindowsCodexMachineFile(
+			// An administrator does not take the DefenseClaw lock. Publish the
+			// merge only over the file it was made from; a newer save is kept,
+			// the ownership record goes back to what this pass read, and the
+			// merge runs again on the newer file.
+			if err := writeWindowsCodexMachineFileIfUnchanged(
 				opts.RequirementsPath,
+				requirements,
 				rendered,
 				windowsCodexMachineRequirementsLimit,
 				"Codex machine requirements",
 			); err != nil {
+				if !errors.Is(err, errWindowsCodexMachineFileChanged) {
+					return err
+				}
+				var restoreErr error
+				if ownership.existed {
+					restoreErr = writeWindowsCodexMachineFile(
+						opts.OwnershipPath,
+						ownership.data,
+						windowsCodexMachineOwnershipLimit,
+						"Codex requirements ownership",
+					)
+				} else {
+					restoreErr = deleteWindowsCodexMachineFile(opts.OwnershipPath, "Codex requirements ownership")
+				}
+				if restoreErr != nil {
+					return fmt.Errorf("%v (restore Codex requirements ownership: %w)", err, restoreErr)
+				}
 				return err
 			}
 		}
@@ -333,6 +356,14 @@ func ReconcileWindowsCodexMachineRequirements(
 			report.Disposition = "reconciled"
 		}
 		return verifyWindowsCodexMachineRequirementsLocked(opts, nil)
+	}
+	err := withWindowsCodexMachineMutation(opts, func() error {
+		for attempt := 1; ; attempt++ {
+			err := reconcile()
+			if !errors.Is(err, errWindowsCodexMachineFileChanged) || attempt == windowsCodexMachineReconcileAttempts {
+				return err
+			}
+		}
 	})
 	if err != nil {
 		report.Error = err.Error()
@@ -1597,7 +1628,44 @@ func readWindowsCodexMachineFile(
 	return result, nil
 }
 
+// windowsCodexMachineReconcileAttempts bounds how often a reconcile merges
+// again after an administrator changed the requirements under it.
+const windowsCodexMachineReconcileAttempts = 4
+
+// errWindowsCodexMachineFileChanged reports that a file changed after the
+// caller read it; the newer file is kept.
+var errWindowsCodexMachineFileChanged = errors.New("changed concurrently")
+
+// windowsCodexMachineBeforeConditionalSwap runs just before a conditional
+// write swaps its file in; tests replace it to interleave a save.
+var windowsCodexMachineBeforeConditionalSwap = func(string) {}
+
 func writeWindowsCodexMachineFile(path string, data []byte, limit int, label string) error {
+	return writeWindowsCodexMachineFileWith(path, nil, data, limit, label)
+}
+
+// writeWindowsCodexMachineFileIfUnchanged publishes data only while path
+// still holds expected, the file the caller rendered data from. The
+// comparison and the replacement happen under one handle no other process can
+// write through (safefile.CompareAndSwapFile). A different file is kept, and
+// the error wraps errWindowsCodexMachineFileChanged.
+func writeWindowsCodexMachineFileIfUnchanged(
+	path string,
+	expected windowsCodexStableFile,
+	data []byte,
+	limit int,
+	label string,
+) error {
+	return writeWindowsCodexMachineFileWith(path, &expected, data, limit, label)
+}
+
+func writeWindowsCodexMachineFileWith(
+	path string,
+	expected *windowsCodexStableFile,
+	data []byte,
+	limit int,
+	label string,
+) error {
 	if len(data) > limit {
 		return fmt.Errorf("%s exceeds %d bytes", label, limit)
 	}
@@ -1607,6 +1675,9 @@ func writeWindowsCodexMachineFile(path string, data []byte, limit int, label str
 	existing, err := readWindowsCodexMachineFile(path, limit, true, label)
 	if err != nil {
 		return err
+	}
+	if expected != nil && (existing.existed != expected.existed || !bytes.Equal(existing.data, expected.data)) {
+		return fmt.Errorf("%s %w", label, errWindowsCodexMachineFileChanged)
 	}
 	if existing.existed && bytes.Equal(existing.data, data) {
 		return nil
@@ -1636,7 +1707,22 @@ func writeWindowsCodexMachineFile(path string, data []byte, limit int, label str
 		cleanup()
 		return fmt.Errorf("protect %s temp file: %w", label, err)
 	}
-	if err := safefile.ReplaceFile(tmpPath, path); err != nil {
+	if expected == nil {
+		err = safefile.ReplaceFile(tmpPath, path)
+	} else {
+		windowsCodexMachineBeforeConditionalSwap(path)
+		_, err = safefile.CompareAndSwapFile(
+			tmpPath, path,
+			safefile.SwapExpectation{Exists: expected.existed, Data: expected.data},
+			limit,
+			windowsCodexMachineSingleLinkCheck,
+		)
+		if errors.Is(err, safefile.ErrSwapRaced) {
+			cleanup()
+			return fmt.Errorf("%s %w", label, errWindowsCodexMachineFileChanged)
+		}
+	}
+	if err != nil {
 		cleanup()
 		return fmt.Errorf("publish %s: %w", label, err)
 	}
@@ -1649,6 +1735,19 @@ func writeWindowsCodexMachineFile(path string, data []byte, limit int, label str
 	}
 	if !bytes.Equal(persisted.data, data) {
 		return fmt.Errorf("%s changed during atomic publication", label)
+	}
+	return nil
+}
+
+// windowsCodexMachineSingleLinkCheck refuses a file with other hard links,
+// as readWindowsCodexMachineFile does.
+func windowsCodexMachineSingleLinkCheck(file *os.File) error {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info); err != nil {
+		return err
+	}
+	if info.NumberOfLinks != 1 {
+		return fmt.Errorf("%s has %d hardlinks", file.Name(), info.NumberOfLinks)
 	}
 	return nil
 }
