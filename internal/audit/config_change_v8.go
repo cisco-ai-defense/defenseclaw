@@ -47,6 +47,12 @@ type ConfigChange struct {
 	KeyIDsAdded, KeyIDsRemoved []string
 	// SecretName is the credential name ("" when the command refused it).
 	SecretName string
+	// FirstOffer says no gateway process can have offered this change
+	// before: it entered the change spool while this gateway's reporter ran,
+	// and this is its first offer. Only then may an offer of a change
+	// without a record pin go to the remote destinations while the audit
+	// store cannot say whether it holds the change's row.
+	FirstOffer bool
 }
 
 // configChangeMetricActor is the only actor label of the activity counters

@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -104,6 +105,12 @@ type bundleReceiptReporter struct {
 	changes map[string]*changeDelivery
 	// pins keeps the record of each change the same on every offer.
 	pins *audit.ConfigChangePins
+	// spoolAtStart holds the ids of the change events and reservations in
+	// the change spool when this reporter first read it (spoolScanned).
+	// Only a change that entered the spool later, on its first offer, is one
+	// no earlier gateway process can have offered (audit.ConfigChange.FirstOffer).
+	spoolAtStart map[string]bool
+	spoolScanned bool
 }
 
 // newBundleReceiptReporter returns the reporter of a standalone enterprise
@@ -334,6 +341,9 @@ func (r *bundleReceiptReporter) reportSpool() {
 // commands remove it, only once every sink confirmed it.
 func (r *bundleReceiptReporter) reportChanges() {
 	dir := r.changeDir()
+	if !r.spoolScanned {
+		r.spoolAtStart, r.spoolScanned = changeSpoolIDs(dir)
+	}
 	for _, ev := range enterprisestatus.ReportableChangeEvents(dir, r.hasSeen) {
 		r.reportChange(ev)
 	}
@@ -361,7 +371,9 @@ func (r *bundleReceiptReporter) reportChanges() {
 // change goes to every destination again, under the same record id.
 func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
 	state := r.changes[ev.EventID]
+	firstOffer := false
 	if state == nil {
+		firstOffer = r.spoolScanned && !r.spoolAtStart[ev.EventID]
 		state = &changeDelivery{delivery: observability.NewRemoteDelivery()}
 		if r.changes == nil {
 			r.changes = make(map[string]*changeDelivery)
@@ -382,6 +394,7 @@ func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
 		EventID: ev.EventID, Kind: ev.Kind, Action: ev.Action, Outcome: ev.Outcome, ReasonCode: ev.ReasonCode,
 		Actor: ev.Actor, ChangedAt: ev.Time, SHA256: ev.SHA256, PreviousSHA256: ev.PreviousSHA256,
 		KeyIDsAdded: ev.KeyIDsAdded, KeyIDsRemoved: ev.KeyIDsRemoved, SecretName: ev.SecretName,
+		FirstOffer: firstOffer,
 	}, state.delivery, r.pins)
 	state.retry = err != nil
 	if err != nil {
@@ -408,7 +421,30 @@ func (r *bundleReceiptReporter) markedChange(id string) {
 		return
 	}
 	delete(r.changes, id)
+	delete(r.spoolAtStart, id)
 	_ = r.pins.Remove(id)
+}
+
+// changeSpoolIDs is the id of every change event and reservation in the
+// change spool dir, and whether the spool could be read. A spool that does
+// not exist holds none.
+func changeSpoolIDs(dir string) (map[string]bool, bool) {
+	ids := map[string]bool{}
+	for _, folder := range []string{dir, filepath.Join(dir, enterprisestatus.ChangeReservedDirName)} {
+		entries, err := os.ReadDir(folder)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, false
+		}
+		for _, entry := range entries {
+			if id, ok := strings.CutSuffix(entry.Name(), ".json"); ok {
+				ids[id] = true
+			}
+		}
+	}
+	return ids, true
 }
 
 // reportedOnDisk reports whether the reported marker of id is on disk.

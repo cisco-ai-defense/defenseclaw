@@ -528,18 +528,28 @@ func (a *APIServer) pendingHookDecidedContext(ctx context.Context, p *pendingHoo
 }
 
 // settlePendingHook deletes the journal row once both records of the call
-// are settled. Otherwise the row stays for recovery.
+// are settled. Otherwise the row stays, and the recovery loop of the
+// running server takes it once this handler is done
+// (pendingHookRecoveryWake).
 func (a *APIServer) settlePendingHook(ctx context.Context, p *pendingHookOccurrence, result hookFinalizationResult) {
 	if p == nil {
 		return
 	}
-	defer pendingHooksInFlight.Delete(p.ID)
+	settled := false
+	defer func() {
+		pendingHooksInFlight.Delete(p.ID)
+		if !settled {
+			wakePendingHookRecovery()
+		}
+	}()
 	if !result.AuditPersisted || !result.DecisionSettled {
 		return
 	}
 	if err := a.store.ForgetHookDelivery(ctx, p.ID); err != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] hook delivery journal cleanup failed id=%s: %v\n", p.ID, err)
+		return
 	}
+	settled = true
 }
 
 // pendingHookRecovery runs one recovery pass at a time in this process: a
@@ -559,11 +569,92 @@ var (
 	pendingHookDraining atomic.Bool
 )
 
-// startPendingHookRecovery audits, in the background, the journal rows
-// earlier gateway processes left. Listeners never wait for it, and nothing
-// it meets stops the gateway.
+// pendingHookRecoveryRetryInterval is how long the recovery loop waits
+// before it tries again a row it could not audit (the store refused its
+// records or its deletion, or the journal could not be read), and before
+// it takes a row that was left for it (pendingHookRecoveryWake).
+var pendingHookRecoveryRetryInterval = 15 * time.Second
+
+// pendingHookRecoveryWake tells the recovery loop that a row was left for
+// it: a handler could not settle its call, or a full-journal drain pass
+// left rows. It is process-wide, so the loop of the server that runs now
+// also takes a row a handler of a server a config reload replaced left.
+var pendingHookRecoveryWake = make(chan struct{}, 1)
+
+func wakePendingHookRecovery() {
+	select {
+	case pendingHookRecoveryWake <- struct{}{}:
+	default:
+	}
+}
+
+// pendingHookPass is what a recovery pass left in the journal.
+type pendingHookPass int
+
+const (
+	// pendingHookPassDone: no row is left that a pass may take (the rows
+	// of this process's running handlers aside).
+	pendingHookPassDone pendingHookPass = iota
+	// pendingHookPassMore: the pass stopped at pendingHookRecoveryPassRows
+	// with rows still to take.
+	pendingHookPassMore
+	// pendingHookPassRetry: a row the pass took is still there (its
+	// records or its deletion were refused), or the journal could not be
+	// read.
+	pendingHookPassRetry
+)
+
+// journalsHookDeliveries reports whether this server keeps the hook
+// delivery journal: only a standalone enterprise gateway with an audit
+// store does (Secure Client and per-user hooks never journal).
+func (a *APIServer) journalsHookDeliveries() bool {
+	return a != nil && a.store != nil && a.scannerCfg != nil && a.scannerCfg.StandaloneEnterprise()
+}
+
+// startPendingHookRecovery starts, in the background, the recovery loop
+// of this server (runPendingHookRecovery). Listeners never wait for it,
+// and nothing it meets stops the gateway.
 func (a *APIServer) startPendingHookRecovery(ctx context.Context) {
-	a.pendingHookRecoveryOnce.Do(func() { go a.recoverPendingHooks(ctx) })
+	if !a.journalsHookDeliveries() {
+		return
+	}
+	retry := pendingHookRecoveryRetryInterval
+	a.pendingHookRecoveryOnce.Do(func() { go a.runPendingHookRecovery(ctx, retry) })
+}
+
+// runPendingHookRecovery audits the journal for as long as ctx lives, one
+// bounded pass at a time: a pass at start, for the rows earlier gateway
+// processes left; the next pass at once after a pass that stopped at its
+// bound; a pass retry later after a pass that left a row it could not
+// audit, or could not read the journal; and a pass retry after a row was
+// left for it (pendingHookRecoveryWake). A row leaves the journal within
+// pendingHookRecoveryAttempts tries, so the loop goes idle once the
+// journal holds only rows of running handlers.
+func (a *APIServer) runPendingHookRecovery(ctx context.Context, retry time.Duration) {
+	next := time.NewTimer(0)
+	defer next.Stop()
+	armed := true
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-pendingHookRecoveryWake:
+			if !armed {
+				next.Reset(retry)
+				armed = true
+			}
+			continue
+		case <-next.C:
+		}
+		switch a.recoverPendingHooks(ctx) {
+		case pendingHookPassMore:
+			next.Reset(0)
+		case pendingHookPassRetry:
+			next.Reset(retry)
+		default:
+			armed = false
+		}
+	}
 }
 
 // drainPendingHooks starts a recovery pass in the background when the
@@ -580,7 +671,9 @@ func (a *APIServer) drainPendingHooks() {
 		defer pendingHookDraining.Store(false)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		a.recoverPendingHooks(ctx)
+		if a.recoverPendingHooks(ctx) != pendingHookPassDone {
+			wakePendingHookRecovery()
+		}
 	}()
 }
 
@@ -591,10 +684,10 @@ var errPendingHookNotWritten = errors.New("records not written")
 // recoverPendingHooks is one recovery pass: oldest row first, at most
 // pendingHookRecoveryPassRows rows. Each row it takes is audited, tried
 // again by a later pass, or evicted; a row of a running handler is left
-// alone.
-func (a *APIServer) recoverPendingHooks(ctx context.Context) {
-	if a == nil || a.store == nil || a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() {
-		return
+// alone. It says what it left for a later pass.
+func (a *APIServer) recoverPendingHooks(ctx context.Context) pendingHookPass {
+	if !a.journalsHookDeliveries() {
+		return pendingHookPassDone
 	}
 	pendingHookRecovery.Lock()
 	defer pendingHookRecovery.Unlock()
@@ -602,16 +695,22 @@ func (a *APIServer) recoverPendingHooks(ctx context.Context) {
 		clear(pendingHookUnrecordedTries) // rows another process deleted
 	}
 	var after audit.HookDeliveryJournalEntry
-	taken := 0
+	taken, left := 0, pendingHookPassDone
 	for {
 		entries, err := a.store.HookDeliveries(ctx, after, pendingHookRecoveryBatch, pendingHookJournalLimits.OccurrenceBytes)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] hook delivery journal unreadable; kept for the next pass: %v\n", err)
-			return
+			return pendingHookPassRetry
 		}
 		for _, entry := range entries {
-			if ctx.Err() != nil || taken >= pendingHookRecoveryPassRows {
-				return
+			if ctx.Err() != nil {
+				return pendingHookPassRetry
+			}
+			if taken >= pendingHookRecoveryPassRows {
+				if left == pendingHookPassDone {
+					left = pendingHookPassMore
+				}
+				return left
 			}
 			after = audit.HookDeliveryJournalEntry{ID: entry.ID, CreatedAt: entry.CreatedAt}
 			if entry.ProcessID == a.deliveryProcessID() {
@@ -622,10 +721,11 @@ func (a *APIServer) recoverPendingHooks(ctx context.Context) {
 			taken++
 			if err := a.recoverPendingHook(ctx, entry); err != nil {
 				fmt.Fprintf(os.Stderr, "[gateway] hook delivery id=%s not recovered; tried again later: %v\n", entry.ID, err)
+				left = pendingHookPassRetry
 			}
 		}
 		if len(entries) < pendingHookRecoveryBatch {
-			return
+			return left
 		}
 	}
 }
@@ -645,13 +745,11 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 	var p pendingHookOccurrence
 	if entry.Occurrence == nil || json.Unmarshal(entry.Occurrence, &p) != nil ||
 		p.ID != entry.ID || p.Request.ConnectorName == "" || p.Request.HookEventName == "" {
-		a.evictPendingHook(ctx, entry.ID, nil, false, "the journal row cannot be read")
-		return nil
+		return a.evictPendingHook(ctx, entry.ID, nil, false, "the journal row cannot be read")
 	}
 	tries := p.Attempts + pendingHookUnrecordedTries[p.ID]
 	if tries >= pendingHookRecoveryAttempts {
-		a.evictPendingHook(ctx, p.ID, &p, p.Decided != nil, fmt.Sprintf("not audited in %d recovery attempts", tries))
-		return nil
+		return a.evictPendingHook(ctx, p.ID, &p, p.Decided != nil, fmt.Sprintf("not audited in %d recovery attempts", tries))
 	}
 	tries++
 	p.Attempts++
@@ -687,8 +785,7 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 	}
 	if err != nil {
 		if tries >= pendingHookRecoveryAttempts {
-			a.evictPendingHook(ctx, p.ID, &p, p.Decided != nil && !held, fmt.Sprintf("not audited in %d recovery attempts: %v", tries, err))
-			return nil
+			return a.evictPendingHook(ctx, p.ID, &p, p.Decided != nil && !held, fmt.Sprintf("not audited in %d recovery attempts: %v", tries, err))
 		}
 		return err
 	}
@@ -737,8 +834,10 @@ func (a *APIServer) writePendingHookRecords(ctx context.Context, p *pendingHookO
 //
 // The row is deleted even when the store refuses that record, which still
 // leaves for the remote destinations. pinned says the row's verdict is
-// pinned in the journal row.
-func (a *APIServer) evictPendingHook(ctx context.Context, id string, p *pendingHookOccurrence, pinned bool, cause string) {
+// pinned in the journal row. The error is that of the deletion: the row is
+// then still there, and a later pass evicts it again without a second
+// record.
+func (a *APIServer) evictPendingHook(ctx context.Context, id string, p *pendingHookOccurrence, pinned bool, cause string) error {
 	evictedID := id + "-evicted"
 	stored, known := a.storedPendingHookRecords(ctx, id, id+"-decision", evictedID)
 	persistCtx := ctx
@@ -784,7 +883,9 @@ func (a *APIServer) evictPendingHook(ctx context.Context, id string, p *pendingH
 	}
 	if err := a.forgetPendingHook(ctx, id); err != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] hook delivery id=%s evicted; its journal row was not deleted: %v\n", id, err)
+		return err
 	}
+	return nil
 }
 
 // storedPendingHookRecords is which of ids the store holds, and whether it

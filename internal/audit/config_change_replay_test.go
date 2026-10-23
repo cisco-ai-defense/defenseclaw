@@ -298,6 +298,9 @@ func TestLogConfigChangeOffersTheDestinationsWhileTheStoreCannotAnswer(t *testin
 	emitter := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
 	logger.SetRuntimeV8Emitter(emitter)
 	change, pins := testAnchorChange(), testConfigChangePins(t)
+	// The change entered the spool while the gateway ran, so no earlier
+	// offer of it exists.
+	change.FirstOffer = true
 	if _, err := logger.store.db.Exec(`ALTER TABLE audit_events RENAME TO audit_events_unreadable`); err != nil {
 		t.Fatal(err)
 	}
@@ -483,5 +486,85 @@ func TestAuditEventRecordDigestMigrationIsAdditive(t *testing.T) {
 	}
 	if got := migrations[len(migrations)-1].description; got != configChangeRecordDigestMigrationDescription {
 		t.Fatalf("last migration = %q, want the record digest one", got)
+	}
+}
+
+// A change without a record pin that an earlier gateway process may have
+// offered (not its first offer) goes to no sink while the audit store
+// cannot say whether it holds the change's row: with the pin file gone,
+// the row is what is left of the record that offer sent. Here the first
+// offer went to the destinations while the store kept its row, or refused
+// it; the pin file is lost; the next gateway (another run, sidecar and
+// binary) offers the change while the store cannot answer. No record is
+// built and no pin is written. Once the store answers, the stored row
+// rebuilds the first record. Before, the offer was taken as a first offer:
+// it pinned the new run and sent another record under the change's id.
+func TestLogConfigChangeWithoutAPinWaitsForTheStoreToAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		rowStored bool
+	}{
+		{"the store kept the row", true},
+		{"the store refused the row", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setTestProcess(t, "run-a", "sidecar-a", "1.0.4-dev.1")
+			store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
+			pins := testConfigChangePins(t)
+			first := newTestRuntimeV8Emitter(t, store, router.AdmissionOrdinary)
+			logger := NewLogger(store)
+			logger.SetRuntimeV8Emitter(first)
+			if !tc.rowStored {
+				if _, err := store.db.Exec(`CREATE TRIGGER test_refuse_change BEFORE INSERT ON audit_events
+					BEGIN SELECT RAISE(ABORT, 'refused by the test'); END`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := logger.LogConfigChange(testAnchorChange(), nil, pins); (err == nil) != tc.rowStored {
+				t.Fatalf("first offer: %v, want stored %t", err, tc.rowStored)
+			}
+			sent := builtRecords(first)
+			if len(sent) != 1 {
+				t.Fatalf("the first offer built %d records, want 1", len(sent))
+			}
+			if _, err := store.db.Exec(`DROP TRIGGER IF EXISTS test_refuse_change`); err != nil {
+				t.Fatal(err)
+			}
+			pinFile := filepath.Join(pins.dir, testConfigChangeID+".json")
+			if err := os.Remove(pinFile); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(`ALTER TABLE audit_events RENAME TO audit_events_unreadable`); err != nil {
+				t.Fatal(err)
+			}
+			setTestProcess(t, "run-b", "sidecar-b", "1.0.4-dev.2")
+			next := newTestRuntimeV8Emitter(t, store, router.AdmissionOrdinary)
+			logger = NewLogger(store)
+			logger.SetRuntimeV8Emitter(next)
+			if err := logger.LogConfigChange(testAnchorChange(), nil, pins); err == nil {
+				t.Fatal("an offer without a pin succeeded while the store could not answer")
+			} else {
+				t.Logf("refused: %v", err)
+			}
+			if built := builtRecords(next); len(built) != 0 {
+				t.Fatalf("the offer built %d records for the sinks while the store could not answer, want none", len(built))
+			}
+			if _, err := os.Lstat(pinFile); err == nil {
+				t.Fatal("the offer pinned a new record while the store could not answer")
+			}
+			if _, err := store.db.Exec(`ALTER TABLE audit_events_unreadable RENAME TO audit_events`); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.rowStored {
+				return
+			}
+			if err := logger.LogConfigChange(testAnchorChange(), nil, pins); err != nil {
+				t.Fatalf("offer once the store answers: %v", err)
+			}
+			built := builtRecords(next)
+			if len(built) != 1 || !bytes.Equal(recordBytes(t, built[0]), recordBytes(t, sent[0])) {
+				t.Fatalf("once the store answers the offer built %d records, want the first record", len(built))
+			}
+		})
 	}
 }
