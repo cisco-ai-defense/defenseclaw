@@ -449,10 +449,71 @@ func loadManagedFileBackupPath(path string) (managedFileBackup, error) {
 	if b.Version != managedBackupVersion {
 		return b, fmt.Errorf("unsupported managed backup version %d", b.Version)
 	}
+	if b.Connector == "codex" && b.LogicalName == "config.toml" {
+		moved, err := codexBackupTargetMatchingPostHash(path, b.Path, b.PostSHA256)
+		if err != nil {
+			return b, err
+		}
+		if moved != "" {
+			b.Path = moved
+			return b, nil
+		}
+	}
 	if moved, ok := managedBackupTargetAfterHomeMove(path, b.Path); ok {
 		b.Path = moved
 	}
 	return b, nil
+}
+
+// codexBackupTargetMatchingPostHash locates the installed config when a home
+// was copied but the old home still contains unrelated files. Path-only home
+// move detection cannot distinguish that copy from another user's root; the
+// backup's post-write hash identifies the exact Codex file Setup installed.
+func codexBackupTargetMatchingPostHash(recordPath, captured, postSHA256 string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || !filepath.IsAbs(captured) || filepath.Base(captured) != "config.toml" {
+		return "", nil
+	}
+	record, err := filepath.Abs(recordPath)
+	if err != nil || !managedPathWithin(record, home) || managedPathWithin(captured, home) {
+		return "", nil
+	}
+	expected, err := hex.DecodeString(postSHA256)
+	if err != nil || len(expected) != sha256.Size {
+		return "", nil
+	}
+	if codexConfigMatchesBackupHash(captured, expected) {
+		return "", nil // the recorded root still has the installed hooks
+	}
+	var match string
+	for ancestor, i := filepath.Dir(captured), 0; ancestor != filepath.Dir(ancestor) && i < 32; ancestor, i = filepath.Dir(ancestor), i+1 {
+		rel, err := filepath.Rel(ancestor, captured)
+		if err != nil {
+			break // different Windows volumes
+		}
+		candidate := filepath.Join(home, rel)
+		if !managedPathWithin(candidate, home) || !codexConfigMatchesBackupHash(candidate, expected) {
+			continue
+		}
+		if match != "" && !sameManagedTargetPath(match, candidate) {
+			return "", fmt.Errorf("Codex managed backup matches multiple current-home configs after a home move")
+		}
+		match = candidate
+	}
+	return match, nil
+}
+
+func codexConfigMatchesBackupHash(path string, expected []byte) bool {
+	readPath, err := userOwnedSettingsReadPath(path)
+	if err != nil {
+		return false
+	}
+	data, err := safefile.ReadRegularFileBounded(readPath, atomicTransformMaxConfigBytes)
+	if err != nil {
+		return false
+	}
+	sum := sha256.Sum256(data)
+	return bytes.Equal(sum[:], expected)
 }
 
 // managedBackupTargetAfterHomeMove maps a record captured before the account

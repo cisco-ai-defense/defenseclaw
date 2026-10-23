@@ -119,6 +119,104 @@ func TestCodexExplicitSetupMovesRememberedRoot(t *testing.T) {
 	}
 }
 
+func TestCodexExplicitSetupRestoresCopiedHomeRoot(t *testing.T) {
+	oldHome := testenv.PrivateTempDir(t)
+	currentHome := oldHome + "-current"
+	oldRoot := filepath.Join(oldHome, ".codex")
+	currentRoot := filepath.Join(currentHome, ".codex")
+	nextRoot := testenv.PrivateTempDir(t)
+	oldData := filepath.Join(oldHome, ".defenseclaw")
+	currentData := filepath.Join(currentHome, ".defenseclaw")
+	if err := os.Rename(testenv.PrivateTempDir(t), oldRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(testenv.PrivateTempDir(t), oldData); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", oldHome)
+	t.Setenv("USERPROFILE", oldHome)
+	t.Setenv("CODEX_HOME", oldRoot)
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: oldData, APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("initial setup: %v", err)
+	}
+	if err := os.Rename(oldHome, currentHome); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(oldHome)
+		_ = os.Rename(currentHome, oldHome)
+	})
+	t.Setenv("HOME", currentHome)
+	t.Setenv("USERPROFILE", currentHome)
+	t.Setenv("CODEX_HOME", currentRoot)
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", currentRoot)
+	opts.DataDir = currentData
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair after home move: %v", err)
+	}
+	configPath := filepath.Join(currentRoot, "config.toml")
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordPath := managedFileBackupPath(currentData, "codex", "config.toml")
+	preSetup, err := loadManagedFileBackupPath(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The copied receipt still names the prior home. An unrelated file or
+	// empty .codex folder there must not make Setup move hooks back to it.
+	preSetup.Path = filepath.Join(oldRoot, "config.toml")
+	preSetup.PostSHA256 = sha256Hex(config)
+	if err := writeManagedFileBackup(recordPath, preSetup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(oldRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldHome, ".profile"), []byte("kept"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CODEX_HOME", nextRoot)
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", nextRoot)
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("forward root move: %v", err)
+	}
+	t.Setenv("CODEX_HOME", currentRoot)
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", currentRoot)
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("reverse root move: %v", err)
+	}
+	hookMarker := []byte("codex-hook")
+	if runtime.GOOS == "windows" {
+		hookMarker = []byte("-EncodedCommand")
+	}
+	for _, item := range []struct {
+		root string
+		want bool
+	}{{currentRoot, true}, {nextRoot, false}, {oldRoot, false}} {
+		raw, err := os.ReadFile(filepath.Join(item.root, "config.toml"))
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if got := bytes.Contains(raw, hookMarker); got != item.want {
+			t.Fatalf("%s hook presence after rollback = %t, want %t", item.root, got, item.want)
+		}
+	}
+	restored, err := loadManagedFileBackupPath(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Path != configPath || restored.Existed != preSetup.Existed ||
+		restored.PristineSHA256 != preSetup.PristineSHA256 || !bytes.Equal(restored.PristineBytes, preSetup.PristineBytes) {
+		t.Fatalf("Codex rollback lost its original root or pristine config: path=%q existed=%v pristine=%q",
+			restored.Path, restored.Existed, restored.PristineSHA256)
+	}
+}
+
 func TestEnsureManagedBackupDirRestricted_TightensExistingDir(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
