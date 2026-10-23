@@ -34,45 +34,86 @@ const blanketOutageClaims = [
 ];
 
 describe('1.0.4 managed outage and upgrade claims', () => {
-  it('names the exact gateway-backed guarded outage and Windows Amp routes', () => {
+  it('documents the protected-record exception that the guarded outage path still uses', () => {
+    const guard = repoText('internal/cli/hook_foreign_guard.go');
+    assert.match(guard, /func protectedForeignHookSession\(/);
+    assert.match(guard, /if protected, ok := protectedForeignHookSession\(/);
     const outage = page('enterprise/configure/foreign-hook-guard.mdx').split('## Gateway outages')[1]?.split('## Approve a hook')[0] ?? '';
-    assert.match(outage, /foreign_hooks: remove.*default.*gateway-backed.*stopped.*restarting.*no answer.*administrator.*open/i);
-    assert.match(outage, /Windows Amp.*local.*plugin.*report.*allow/i);
-    assert.doesNotMatch(outage, /(?:earlier|fresh|trusted|published) (?:session )?record.{0,100}(?:allow|run)/i);
+    assert.match(outage, /administrator.*open.*fresh.*trusted.*process and session records.*block/i);
+    assert.match(outage, /Missing.*blocked.*stale.*untrusted.*block/i);
+    assert.doesNotMatch(outage, /guarded tool calls are blocked whatever the fail mode/i);
   });
 
-  it('states the guarded outage limit without a record-based escape', () => {
+  it('documents automatic legacy-supervisor stops and retry after a failed stop', () => {
+    const manager = repoText('internal/openshell/manager/box.go');
+    assert.match(manager, /scheduleOldSupervisorStop\(b\)/);
+    assert.match(repoText('internal/openshell/manager/reconcile.go'), /retryOldSupervisorStop\(b\)/);
+    const guide = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
+    assert.match(guide, /automatic stop.*old.*supervisor.*Reconciliation retries a failed stop/i);
+    assert.doesNotMatch(guide, /DefenseClaw never stops these guests itself/i);
+    assert.match(repoText('CHANGELOG.md'), /old supervisor.*automatically stops.*failed stop.*retries/i);
+  });
+
+  it('describes the stop after a failed MicroVM sync without an unavailable flag', () => {
+    const flush = repoText('internal/openshell/manager/graceful.go');
+    const lifecycle = repoText('internal/openshell/manager/lifecycle.go');
+    const command = repoText('internal/cli/sandbox.go');
+    assert.match(flush, /func \(m \*Manager\) flushSandbox\([^)]*\) \{/);
+    assert.match(lifecycle, /m\.endHarness\(ctx, gw, b\).*StopSandbox\(ctx, name\)/);
+    assert.match(command, /newSandboxStopCmd.*BoolVarP\(&o\.Yes, "yes"/);
+    assert.doesNotMatch(command, /discard-unsynced/);
+    for (const name of ['reference/sandboxes/cli.mdx', 'troubleshooting/sandboxes/setup-and-gateway.mdx']) {
+      const text = page(name);
+      assert.match(text, /sync fails.*stop_unflushed.*stop.*(?:may|can).*(?:empty|lost)/i, name);
+      assert.match(text, /no separate failed-sync confirmation or loss-acceptance flag/i, name);
+      assert.doesNotMatch(text, /--discard-unsynced/i, name);
+      assert.doesNotMatch(text, /sync fails.{0,100}keeps running/i, name);
+    }
+  });
+
+  it('gives package-upgrade precautions without promising a sandbox preflight', () => {
+    const linux = repoText('packaging/linux/preinstall.sh');
+    const macos = repoText('scripts/build-macos-enterprise-pkg.sh');
+    const macosPreinstall = macos.split('cat >"$SCRIPTS/preinstall" <<\'EOF\'')[1]?.split(' EOF ')[0] ?? '';
+    assert.ok(macosPreinstall, 'macOS pkg preinstall heredoc is present');
+    assert.doesNotMatch(linux, /sandbox/i);
+    assert.doesNotMatch(macosPreinstall, /sandbox/i);
+    for (const name of ['troubleshooting/sandboxes/setup-and-gateway.mdx', 'enterprise/runtime/sandboxes.mdx']) {
+      const text = page(name);
+      assert.match(text, /1\.0\.3 or older.*rpm.*deb.*macOS pkg.*do not check.*sandbox.*before.*replac/i, name);
+      assert.match(text, /save.*work.*sandbox stop.*package/i, name);
+      assert.doesNotMatch(text, /sandboxes_running|refuses before.*(?:changes|replacing)/i, name);
+    }
+  });
+  it('names the exact gateway-backed guarded outage and Windows Amp routes', () => {
+    const outage = page('enterprise/configure/foreign-hook-guard.mdx').split('## Gateway outages')[1]?.split('## Approve a hook')[0] ?? '';
+    assert.match(outage, /foreign_hooks: remove.*default.*classified gateway outage.*administrator.*open.*fresh, trusted process and session records.*Missing, blocked, stale or untrusted records block/i);
+    assert.match(outage, /at most 15 minutes old.*still revocable/i);
+    assert.match(outage, /Windows Amp.*local.*plugin.*report.*allow/i);
+  });
+
+  it('states the guarded outage record boundary without a blanket block', () => {
     const text = page('enterprise/configure/foreign-hook-guard.mdx');
-    assert.match(text, /guarded tool calls are blocked whatever the fail mode, `open` included/i);
-    assert.doesNotMatch(text, /(?:earlier|fresh|trusted|published) (?:session )?record.{0,100}(?:allow|run)/i);
+    assert.match(text, /earlier online allow alone does not guarantee.*next call runs/i);
+    assert.match(text, /fresh, trusted process and session records.*show no block/i);
+    assert.doesNotMatch(text, /guarded tool calls are blocked whatever the fail mode/i);
   });
 
   it('keeps the managed guarded outage limit across operator and threat-model pages', () => {
-    const outagePages: [string, RegExp][] = [
-      ['appendix/coverage-by-layer.mdx', /foreign_hooks: remove.{0,120}guarded calls block during an outage/i],
-      ['reference/configuration/fail-modes.mdx', /foreign_hooks: remove.{0,50}this blocks during an outage under `open`/i],
-      ['reference/connectors/devin.mdx', /foreign_hooks: remove.{0,130}guarded tool calls block during an outage.{0,50}`open`/i],
-      ['enterprise/configure/foreign-hook-guard.mdx', /foreign_hooks: remove.{0,250}guarded tool calls are blocked whatever the fail mode, `open` included/i],
-      ['enterprise/configure/reference.mdx', /foreign_hooks: remove.{0,60}guarded calls block during an outage even under `open`/i],
-      ['enterprise/operate/reference.mdx', /foreign_hooks: remove.{0,60}guarded calls block during an outage even under `open`/i],
-      ['enterprise/operate/lifecycle.mdx', /foreign_hooks: remove.{0,60}guarded calls block during an outage even under `open`/i],
-      ['enterprise/plan/threat-model.mdx', /foreign_hooks: remove.{0,60}guarded calls block during an outage.{0,50}`open`/i],
-      ['troubleshooting/enterprise/index.mdx', /foreign_hooks: remove.{0,70}guarded calls also block under `open`.{0,70}guards cannot check the session/i],
+    const names = [
+      'appendix/coverage-by-layer.mdx', 'reference/configuration/fail-modes.mdx',
+      'reference/connectors/devin.mdx', 'enterprise/configure/foreign-hook-guard.mdx',
+      'enterprise/configure/reference.mdx', 'enterprise/operate/reference.mdx',
+      'enterprise/operate/lifecycle.mdx', 'enterprise/plan/threat-model.mdx',
+      'troubleshooting/enterprise/index.mdx',
     ];
-    for (const [name, claim] of outagePages) {
-      assert.match(page(name), claim, name);
-      assert.doesNotMatch(`foreign_hooks: remove ${'unrelated '.repeat(80)} guarded calls block during an outage under \`open\``, claim, name);
+    for (const name of names) {
+      assert.match(page(name), /foreign_hooks: remove.*fresh, trusted process and session records/i, name);
     }
-    assert.match(repoText('docs/ENTERPRISE-THREAT-MODEL.md'), /R31.*foreign_hooks: remove.*blocks outages/i);
-    const changelog = repoText('CHANGELOG.md');
-    assert.match(changelog, /Known limits.*foreign_hooks: remove.*guarded connectors.*block tool calls during a gateway outage.*hook_fail_mode: open/i);
+    assert.match(repoText('docs/ENTERPRISE-THREAT-MODEL.md'), /R31.*foreign_hooks: remove.*fresh, trusted process and session records/i);
+    assert.match(repoText('CHANGELOG.md'), /foreign_hooks: remove.*fresh, trusted process and session records/i);
     assert.match(page('appendix/coverage-by-layer.mdx'), /On a per-user install or under Secure Client.*Connector limits and failure reporting vary.*Managed standalone behavior is in the next row/i);
     const all = docsText();
-    assert.doesNotMatch(all, /(?:fresh|trusted|protected) (?:process and session |session |hook )?records?.{0,100}(?:allow|run).{0,70}(?:outage|gateway.*down)/i);
-    assert.doesNotMatch(all, /(?:outage|gateway.*down).{0,100}(?:fresh|trusted|protected) (?:process and session |session |hook )?records?.{0,100}(?:allow|run)/i);
-    assert.doesNotMatch(all, /(?:lifts?|lifted) the 1\.0\.3 (?:outage )?limit/i);
-    // An unconditional statement about every connector would hide the
-    // administrator's outage-only open for connectors without this guard.
     for (const pattern of blanketOutageClaims) assert.doesNotMatch(all, pattern);
     assert.ok(blanketOutageClaims.some((pattern) => pattern.test('Every call checked while the gateway is down is blocked')));
   });
@@ -83,12 +124,9 @@ describe('1.0.4 managed outage and upgrade claims', () => {
     const failMode = hermes.split('## Fail mode')[1]?.split('## Limits')[0] ?? '';
     const row = hermes.match(/\| Hook fail mode \|[^|]*\|/)?.[0] ?? '';
     const managedRow = hermes.match(/\| Managed standalone \|[^|]*\|/)?.[0] ?? '';
-    for (const [name, section] of [['enterprise', enterprise], ['verdict row', row], ['fail mode', failMode]] as const) {
-      assert.match(section, /foreign_hooks: remove.{0,260}guard.{0,200}outage.{0,140}block.{0,100}open/i, name);
+    for (const [name, section] of [['enterprise', enterprise], ['verdict row', row], ['managed row', managedRow], ['fail mode', failMode]] as const) {
+      assert.match(section, /foreign_hooks: remove.*fresh, trusted process and session records.*otherwise it blocks/i, name);
     }
-    assert.match(managedRow, /outage-only `open`.*unguarded call run.*foreign_hooks: remove.*guarded outage calls block under `open`/i);
-    assert.doesNotMatch(row, /Only an explicit `open` lets it run/i);
-    assert.match(enterprise, /Linux and macOS.*foreign_hooks: remove.*pre_tool_call.*blocked.*administrator.*open/i);
     assert.match(enterprise, /foreign_hooks: report.*allow.*no session exchange.*classified outage.*open/i);
     assert.match(enterprise, /Windows Hermes.*does not run.*foreign-hook guard/i);
   });
@@ -96,12 +134,10 @@ describe('1.0.4 managed outage and upgrade claims', () => {
   for (const name of ['copilot', 'cursor', 'devin', 'opencode', 'amp', 'claudecode', 'codex']) {
     it(`keeps the managed ${name} fail-mode boundary in its connector page`, () => {
       const failMode = page(`reference/connectors/${name}.mdx`).split('## Fail mode')[1]?.split('## ')[0] ?? '';
-      assert.match(failMode, /managed standalone.*foreign_hooks: remove.*guarded tool calls.*gateway outage.*administrator.*open/i);
-      assert.match(failMode, /administrator.*open.*classified gateway outage|classified gateway outage.*administrator.*open/i);
-      assert.doesNotMatch(failMode, /When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless/i);
+      assert.match(failMode, /managed standalone.*classified gateway outage.*foreign_hooks: remove.*fresh, trusted process and session records.*otherwise it blocks/i);
+      assert.doesNotMatch(failMode, /guarded tool calls block during a gateway outage under administrator `open`/i);
       if (name === 'amp') {
         assert.match(failMode, /Windows Amp.*plugin.*blocks.*outage.*every fail mode/i);
-        assert.doesNotMatch(page('reference/connectors/amp.mdx'), /Gateway errors honor the configured open or closed hook failure mode/i);
       }
       if (name === 'claudecode' || name === 'codex') {
         assert.match(failMode, /managed_hooks_only: preserve.*foreign_hooks: remove/i);
@@ -138,72 +174,56 @@ describe('1.0.4 managed outage and upgrade claims', () => {
     assert.doesNotMatch(enterprise, /audit\.db-wal.*20 GB|fix needs a change to how the audit store indexes hook records and is deferred/i);
   });
 
-  it('keeps one supervisor upgrade entry with manual stop and guarded restart', () => {
+  it('keeps one supervisor upgrade entry with automatic stop and failed-stop retry', () => {
     const changelog = repoText('CHANGELOG.md');
     assert.equal((changelog.match(/\*\*Sandboxes run only on OpenShell 0\.1\.5 or later\.\*\*/g) ?? []).length, 1);
-    assert.match(changelog, /DefenseClaw never stops such a sandbox on its own.*Your own `sandbox stop` ends it/);
-    assert.doesNotMatch(changelog, /DefenseClaw stops it as soon as it sees it|A stop that fails is a second finding/);
+    assert.match(changelog, /old supervisor.*automatically stops.*stop fails.*reconciliation retries/i);
+    assert.doesNotMatch(changelog, /DefenseClaw never stops such a sandbox on its own|package's earlier-daemon preflight/i);
     const guide = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
-    assert.match(guide, /DefenseClaw closes its egress proxy and withdraws the network rules it added.*does not contain the old broker/i);
-    assert.match(guide, /Save its work, then run `defenseclaw sandbox stop <name>` yourself.*reconciliation never retries the stop for you/i);
-    assert.match(guide, /`defenseclaw sandbox exec` and `connect` run nothing in it/i);
-    assert.doesNotMatch(guide, /DefenseClaw stops it as soon as it sees it|`connect` stops it and starts it again/i);
+    assert.match(guide, /automatic stop.*Reconciliation retries a failed stop/i);
+    assert.match(guide, /sandbox exec.*runs nothing.*connect.*attempts to stop/i);
   });
 
-  it('explains the live legacy guest without promising an automatic stop or containment', () => {
+  it('explains the automatic stop and remaining risk for a live legacy guest', () => {
     const guide = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
     const legacy = guide.split('### A live legacy guest after upgrade')[1]?.split('## ')[0] ?? '';
-    assert.match(legacy, /Docker.*0\.1\.3.*keep.*supervisor.*upgrade/i);
-    assert.match(legacy, /unversioned.*1\.0\.3.*legacy/i);
-    assert.match(legacy, /MicroVM.*refuses.*gateway upgrade.*live/i);
-    assert.match(legacy, /never stops.*unprotected.*network broker.*not contained/i);
-    assert.match(legacy, /withdrawal fails.*retry.*withdrawal.*never.*stop/i);
-    assert.match(legacy, /ready.*sandbox stop.*MicroVM.*sync.*after the sync.*lost/i);
-    assert.match(legacy, /ended MicroVM.*sandbox delete.*0\.1\.5.*--end-vm/i);
-    assert.match(legacy, /restores.*create-time network policy.*old session approvals/i);
-    assert.match(legacy, /restor(?:e|ation) fails.*attempts to stop.*new session.*refuses the run/i);
-    assert.doesNotMatch(legacy, /automatically stops|reconciliation retries (?:a|the) stop/i);
+    assert.match(legacy, /Docker.*0\.1\.3.*old supervisor.*unversioned.*1\.0\.3/i);
+    assert.match(legacy, /old network broker.*bypass.*automatic stop.*old_supervisor/i);
+    assert.match(legacy, /stop fails.*remain live.*reconciliation retries a failed stop/i);
+    assert.match(legacy, /save or pull.*before an upgrade.*automatic stop can interrupt/i);
+    assert.doesNotMatch(legacy, /never stops.*guest|reconciliation never retries/i);
   });
 
-  it('refuses an earlier daemon package upgrade before a live sandbox is changed', () => {
+  it('gives precautions because package preinstall does not inspect live sandboxes', () => {
     const troubleshooting = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
     const enterprise = page('enterprise/runtime/sandboxes.mdx');
     const changelog = repoText('CHANGELOG.md');
-    const upgradeSections = [
-      troubleshooting.split('### Before a 1.0.4 package upgrade')[1]?.split('### ')[0] ?? '',
-      enterprise.split('### Upgrade from an earlier sandbox daemon')[1]?.split('### ')[0] ?? '',
-      changelog.split('- **Earlier sandbox daemons')[1]?.split(' - `defenseclaw guardrail use-pack`')[0] ?? '',
-    ];
-    for (const section of upgradeSections) {
-      assert.match(section, /a completed MicroVM or an error-state MicroVM whose VM is still running/i);
-    }
-    for (const name of ['enterprise/runtime/sandboxes.mdx', 'enterprise/runtime/sandbox-reference.mdx']) {
-      const modeSwitch = page(name).split('In both modes `ensure`')[1]?.split('### ')[0] ?? '';
-      assert.match(modeSwitch, /a completed MicroVM or an error-state MicroVM whose VM is still running/i, name);
-    }
-    for (const text of [troubleshooting, enterprise]) {
-      assert.match(text, /1\.0\.3 or older.*rpm.*deb.*macOS pkg.*refuses before.*changes/i);
-      assert.match(text, /running.*starting.*stopping.*completed MicroVM.*error-state MicroVM whose VM is still running.*does not answer/i);
-      assert.match(text, /sandbox stop.*sandbox delete.*install.*again/i);
-      assert.match(text, /last-package-result\.json.*sandboxes_running/i);
+    for (const text of [troubleshooting, enterprise, changelog]) {
+      assert.match(text, /rpm and deb packages and macOS pkg do not check sandbox state before replacing files/i);
+      assert.match(text, /save or pull.*work.*stop.*sandbox/i);
+      assert.doesNotMatch(text, /sandboxes_running|package.*refuses before replacing files.*sandbox/i);
     }
   });
 
-  it('keeps an unsynced MicroVM live until its user accepts the loss', () => {
-    const troubleshooting = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
-    const cli = page('reference/sandboxes/cli.mdx');
-    assert.match(troubleshooting, /sync fails.*keeps running.*--discard-unsynced.*--yes.*does not/i);
-    assert.match(cli, /sync fails.*keeps running.*--yes.*does not.*--discard-unsynced.*never stops a MicroVM/i);
+  it('warns that a failed MicroVM sync still leads to a stop', () => {
+    for (const text of [page('reference/sandboxes/cli.mdx'), page('troubleshooting/sandboxes/setup-and-gateway.mdx'), repoText('CHANGELOG.md')]) {
+      assert.match(text, /sync fails?.*stop_unflushed.*still proceeds.*writes.*(?:empty|lost)/i);
+      assert.match(text, /no separate failed-sync confirmation or loss-acceptance flag/i);
+      assert.doesNotMatch(text, /--discard-unsynced/i);
+      assert.doesNotMatch(text, /sync fails.{0,100}keeps running|only your explicit `--discard-unsynced` stops/i);
+    }
   });
 
-  it('uses the current legacy-unprotected status and managed verify row', () => {
+  it('uses the current old-supervisor finding without an invented verify row', () => {
     const troubleshooting = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
     const enterprise = page('enterprise/runtime/sandboxes.mdx');
     const changelog = repoText('CHANGELOG.md');
-    assert.match(troubleshooting, /running unprotected: legacy sandbox.*Unprotected.*row/i);
-    assert.match(enterprise, /sandbox_legacy_unprotected.*security_complete.*false.*verify.*fails/i);
-    assert.match(changelog, /running unprotected: legacy sandbox.*sandbox status.*sandbox doctor.*managed.*status.*verify/i);
-    assert.doesNotMatch(troubleshooting, /legacy sandbox running, not protected by the 1\.0\.4 egress policy/i);
+    assert.match(troubleshooting, /HIGH `old_supervisor` finding.*sandbox status.*warns/i);
+    assert.match(enterprise, /activity feed reports `old_supervisor`.*failed stop.*retried/i);
+    assert.match(changelog, /HIGH `old_supervisor` finding.*stop fails.*reconciliation retries/i);
+    for (const text of [troubleshooting, enterprise, changelog]) {
+      assert.doesNotMatch(text, /sandbox_legacy_unprotected|running unprotected: legacy sandbox|Legacy sandboxes.*row/i);
+    }
   });
 });
 

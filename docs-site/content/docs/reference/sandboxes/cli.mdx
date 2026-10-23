@@ -1063,12 +1063,13 @@ yet pulled (exit `5`), even with `--yes`: check it with
 stop. `sandbox delete <name>` gives up that work. If its disk does not answer
 within 15 seconds, stop asks first; `--yes` skips that question.
 
-If a MicroVM disk sync fails before stop, the MicroVM keeps running and stop
-says what would be lost. `--yes` does not accept that loss: on a terminal stop
-asks, and without one it exits `5`. Only your explicit `--discard-unsynced`
-stops it without that sync, losing writes since the last successful sync.
-DefenseClaw itself never stops a MicroVM after a failed sync for a hook alarm,
-policy change or sign-out.
+For a MicroVM whose driver does not flush on stop, DefenseClaw tries to sync
+its disk first. If sync fails, the activity feed records `stop_unflushed` and the stop still proceeds
+with the stop; writes since the last successful flush may come back empty.
+`--yes` skips the normal detached-run or attached-session confirmation, not a
+failed-sync prompt. There is no separate failed-sync confirmation or
+loss-acceptance flag. A stop triggered by DefenseClaw follows the same
+flush-then-stop path.
 
 ```bash
 defenseclaw sandbox stop myapp-7f3a

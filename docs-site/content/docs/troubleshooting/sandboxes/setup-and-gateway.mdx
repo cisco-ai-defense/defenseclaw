@@ -50,64 +50,47 @@ Run `defenseclaw sandbox doctor` first; each failed check names its fix. These a
 **Check:** the **Gateway** and **OpenShell CLI** rows pass.
 
 
-The upgrade restarts the gateway, which affects every sandbox on it, of every owner. Setup names the running ones first. On the Docker driver, running sandboxes keep running and lose their connections, and Docker pulls the new supervisor images from `ghcr.io` first (when it cannot reach `ghcr.io`, setup keeps the release you have and changes nothing). On the MicroVM driver, a gateway restart would stop every running sandbox and lose what it wrote since its last sync, so setup upgrades only once OpenShell reports every sandbox on the gateway stopped (or deleting, or its VM gone); until then it keeps the release you have and names each sandbox with the command that stops it. A gateway restart DefenseClaw makes (`sandbox doctor --fix`, `sandbox setup`) follows the same rule on every release, and neither goes by elapsed time. Running: `defenseclaw sandbox stop NAME`. Completed, or failed on 0.1.5: nothing in OpenShell writes such a MicroVM's disk back, so `defenseclaw sandbox start NAME` refuses; `start NAME --end-vm` starts it, losing what it has not written, and `stop` then stops it, or `defenseclaw sandbox delete NAME` deletes it with its work. On 0.1.3 such a MicroVM must be deleted. A gateway DefenseClaw cannot read refuses the restart while a MicroVM runs as your account. DefenseClaw checks again under its lifecycle lock right before the restart, and from that check to the healthy gateway it creates and starts no sandbox. On a Mac the first start of each image prepares its MicroVM disk again, and `defenseclaw sandbox image prune` removes the old ones. A live legacy guest needs the manual steps below. A Docker sandbox made on 0.1.1 to 0.1.4 keeps its work, but OpenShell 0.1.5 cannot read the bootstrap the older Docker driver kept for it (in `~/.local/state/openshell/docker-sandbox-tokens`): its start fails with ``unknown field `outer_fence` ``, and the gateway's own start of it after the restart leaves it in OpenShell's error state. `defenseclaw sandbox start <name>` (and `connect` or `pull`, which start a stopped sandbox) first rewrites that bootstrap the way 0.1.5 writes it, then starts the sandbox with its work. One in the error state: `defenseclaw sandbox stop <name>`, then `start`. An `openshell sandbox start` of your own does not rewrite it. 0.1.5 names the supervisor's OCSF log files `openshell-ocsf.*.jsonl` instead of `openshell-ocsf.*.log`; update a collector of your own that reads them. DefenseClaw does not upgrade an OpenShell installed another way. Before it enables bind mounts (Linux), DefenseClaw checks that the gateway lets a client without a certificate finish the TLS handshake but refuses that client's API calls, and that the gateway has no OIDC issuer.
+The upgrade restarts the gateway, which affects every sandbox on it, of every owner. Setup names the running ones first. On the Docker driver, running sandboxes keep running and lose their connections, and Docker pulls the new supervisor images from `ghcr.io` first (when it cannot reach `ghcr.io`, setup keeps the release you have and changes nothing). On the MicroVM driver, a gateway restart would stop every running sandbox and lose what it wrote since its last sync, so setup upgrades only once OpenShell reports every sandbox on the gateway stopped (or deleting, or its VM gone); until then it keeps the release you have and names each sandbox with the command that stops it. A gateway restart DefenseClaw makes (`sandbox doctor --fix`, `sandbox setup`) follows the same rule on every release, and neither goes by elapsed time. Running: `defenseclaw sandbox stop NAME`. Completed, or failed on 0.1.5: nothing in OpenShell writes such a MicroVM's disk back, so `defenseclaw sandbox start NAME` refuses; `start NAME --end-vm` starts it, losing what it has not written, and `stop` then stops it, or `defenseclaw sandbox delete NAME` deletes it with its work. On 0.1.3 such a MicroVM must be deleted. A gateway DefenseClaw cannot read refuses the restart while a MicroVM runs as your account. DefenseClaw checks again under its lifecycle lock right before the restart, and from that check to the healthy gateway it creates and starts no sandbox. On a Mac the first start of each image prepares its MicroVM disk again, and `defenseclaw sandbox image prune` removes the old ones. A live legacy guest may be stopped automatically as described below. A Docker sandbox made on 0.1.1 to 0.1.4 keeps its work, but OpenShell 0.1.5 cannot read the bootstrap the older Docker driver kept for it (in `~/.local/state/openshell/docker-sandbox-tokens`): its start fails with ``unknown field `outer_fence` ``, and the gateway's own start of it after the restart leaves it in OpenShell's error state. `defenseclaw sandbox start <name>` (and `connect` or `pull`, which start a stopped sandbox) first rewrites that bootstrap the way 0.1.5 writes it, then starts the sandbox with its work. One in the error state: `defenseclaw sandbox stop <name>`, then `start`. An `openshell sandbox start` of your own does not rewrite it. 0.1.5 names the supervisor's OCSF log files `openshell-ocsf.*.jsonl` instead of `openshell-ocsf.*.log`; update a collector of your own that reads them. DefenseClaw does not upgrade an OpenShell installed another way. Before it enables bind mounts (Linux), DefenseClaw checks that the gateway lets a client without a certificate finish the TLS handshake but refuses that client's API calls, and that the gateway has no OIDC issuer.
 
 A Docker sandbox created on OpenShell 0.1.1 to 0.1.4 keeps its work, but OpenShell 0.1.5 cannot read the older bootstrap under `~/.local/state/openshell/docker-sandbox-tokens`. After the upgrade, use `defenseclaw sandbox start NAME`: DefenseClaw moves the bootstrap to 0.1.5's format before starting it. If the gateway already left the sandbox in an error state, run `defenseclaw sandbox stop NAME` and then `defenseclaw sandbox start NAME`. A raw `openshell sandbox start` does not perform this migration.
 
 ### Before a 1.0.4 package upgrade
 
-A sandbox daemon from DefenseClaw 1.0.3 or older can stop its user's
-OpenShell gateway after replacement, even under a MicroVM whose workload
-ended. The 1.0.4 rpm, deb and macOS pkg refuses before it changes any files
-when such a daemon has a sandbox running, starting or stopping, a completed
-MicroVM or an error-state MicroVM whose VM is still running, or the daemon does
-not answer. The refusal names each user and sandbox. Ask that user to save work and run
-`defenseclaw sandbox stop <name>` for a running guest or
-`defenseclaw sandbox delete <name>` for an ended MicroVM, then install the
-package again. DefenseClaw stops none of them. On macOS,
-`last-package-result.json` records `sandboxes_running`; an idle older daemon
-is ended before the package replaces files. A daemon already on 1.0.4 waits
-for its sandboxes itself.
+A sandbox daemon from DefenseClaw 1.0.3 or older can stop its user's OpenShell
+gateway after the rpm, deb or macOS pkg replaces its program, including while a
+MicroVM still holds work. The 1.0.4 rpm and deb packages and macOS pkg do not
+check sandbox state before replacing files. Ask users to save or pull their
+work and run `defenseclaw sandbox stop <name>` for live sandboxes before installing the
+package. For an ended MicroVM that OpenShell cannot stop, follow the stop
+command's `start --end-vm` or `delete` guidance and account for unwritten work.
+Do not rely on the package installer to name or stop guests for you.
 
 ### A live legacy guest after upgrade
 
 A ready Docker sandbox started on OpenShell 0.1.3 can keep its old
 supervisor through a gateway upgrade. An unversioned record from
-DefenseClaw 1.0.3 or earlier is also legacy. For a MicroVM, DefenseClaw
-refuses its own gateway upgrade while the VM is live; an ended MicroVM can
-still keep running background work. DefenseClaw never stops
-these guests itself. It reports them as "running unprotected: legacy sandbox"
-in the activity feed, `sandbox status` and the doctor's failed **Legacy
-sandboxes** row; `sandbox status` lists each on an **Unprotected** row. The old network broker
-can still use its native fallback, so the guest is not contained.
+DefenseClaw 1.0.3 or earlier is also treated as legacy. A live MicroVM
+prevents DefenseClaw's own gateway upgrade, but a package upgrade can still
+leave an older daemon or supervisor in use. The old network broker can bypass
+sandbox policy while the guest remains live.
 
-DefenseClaw closes its egress proxy and withdraws the network rules it
-added and the providers it attached, but that does not contain the old
-broker. If network withdrawal fails, DefenseClaw reports the failure and
-will retry only the withdrawal; it never performs a stop. While the guest
-lives, DefenseClaw refuses every new sandbox create or start, and
-`defenseclaw sandbox exec` and `connect` run nothing in it.
+On discovery, DefenseClaw schedules an automatic stop of a ready guest on an
+old or unversioned supervisor. Its activity feed records a HIGH
+`old_supervisor` finding. If that stop fails, the guest can remain live and
+unprotected; `sandbox status` warns about its old supervisor,
+`defenseclaw sandbox exec` runs nothing in it, and `connect` attempts to stop
+it before starting a new session on the current supervisor. Reconciliation
+retries a failed stop on its next pass. Save or pull important work before an
+upgrade because the automatic stop can interrupt the guest before you issue a
+manual stop. If you see a failed-stop finding, run
+`defenseclaw sandbox stop <name>` or fix the cause the finding names; the next start uses the current
+supervisor.
 
-If the guest is ready, save its work, then run `defenseclaw sandbox stop <name>`
-yourself. On a MicroVM this syncs its disk first because the old release's
-stop does not flush it; writes after the sync may be lost. If sync fails, the
-MicroVM keeps running. You can run `defenseclaw sandbox stop <name>
---discard-unsynced` to accept losing writes since the last successful sync;
-`--yes` does not accept that loss, and a terminal stop asks first. A stop
-DefenseClaw initiates for a hook alarm or policy change never proceeds after
-a failed sync. If the stop
-fails, the guest stays live and reconciliation never retries the stop for
-you. For an ended MicroVM that OpenShell does not stop, use
-`defenseclaw sandbox delete <name>`, which deletes its work; on OpenShell
-0.1.5 or later, `defenseclaw sandbox start <name> --end-vm` can end the VM
-instead, losing data it has not written to disk.
-
-After your stop, `defenseclaw sandbox start <name>` or
-`defenseclaw sandbox connect <name>` starts the sandbox again on the
-current gateway's supported supervisor. DefenseClaw restores the
-create-time network policy without restoring old session approvals. If
-restoration fails, DefenseClaw attempts to stop the new session and refuses
-the run; it reports a failed stop.
+For a MicroVM whose driver does not flush on stop, DefenseClaw tries to sync
+its disk first. If sync fails, the activity feed records `stop_unflushed` and the stop still proceeds
+with the stop; writes since the last successful flush may come back empty.
+The stop command has `--yes` for its normal confirmation prompts. It has no
+separate failed-sync confirmation or loss-acceptance flag.
 
 ## A raw `openshell` sandbox stops a restart or rollback
 

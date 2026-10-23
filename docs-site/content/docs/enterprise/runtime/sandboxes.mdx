@@ -54,25 +54,20 @@ In both modes `ensure` renders the OpenShell gateway settings into a root-owned 
 ### Upgrade from an earlier sandbox daemon
 
 A sandbox daemon from DefenseClaw 1.0.3 or older can stop its user's OpenShell
-gateway after a package replaces its program, even under a MicroVM whose
-workload ended. The 1.0.4 rpm, deb and macOS pkg therefore refuses before it
-changes any files while that daemon has a sandbox running, starting or
-stopping, a completed MicroVM or an error-state MicroVM whose VM is still
-running, or the daemon does not answer. The refusal names each user and sandbox
-and the command that ends it:
-`defenseclaw sandbox stop <name>` for a running guest, or
-`defenseclaw sandbox delete <name>` for an ended MicroVM. Ask users to save
-their work, run those commands, then install the package again. On macOS,
-`last-package-result.json` records `sandboxes_running`. DefenseClaw stops no
-sandbox for them. An older daemon with no live sandbox is ended before files
-change; a 1.0.4 daemon waits for its own sandboxes.
+gateway after the package replaces its program, even while a MicroVM holds
+work. The 1.0.4 rpm and deb packages and macOS pkg do not check sandbox state
+before replacing files. Before installing, ask users to save or pull their work and
+run `defenseclaw sandbox stop <name>` for live guests. For an ended MicroVM
+that OpenShell cannot stop, follow the stop command's `start --end-vm` or
+`delete` guidance and account for unwritten work. The package installer does
+not name or stop those guests before replacement.
 
-If an old supervisor still has a live guest after an upgrade, managed status
-and verify report `sandbox_legacy_unprotected` and name it in a **sandbox
-unprotected** row. `security_complete` is false and `verify` fails until the
-user ends it. Its old broker can bypass sandbox network policy; closing
-DefenseClaw's egress proxy and withdrawing the network rules it added does
-not contain that broker. See [A live legacy guest after upgrade](/docs/troubleshooting/sandboxes/setup-and-gateway#a-live-legacy-guest-after-upgrade).
+After an upgrade, DefenseClaw schedules an automatic stop for a ready guest
+whose session uses an old or unversioned supervisor. The activity feed reports
+`old_supervisor`; a failed stop leaves the guest running with a warning and is
+retried during reconciliation. The old broker can bypass sandbox network
+policy until the guest stops. Save work before upgrading, and inspect a
+failed-stop finding if one appears. See [A live legacy guest after upgrade](/docs/troubleshooting/sandboxes/setup-and-gateway#a-live-legacy-guest-after-upgrade).
 
 ### Per-OS prerequisites
 

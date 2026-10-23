@@ -50,7 +50,7 @@ The last sentence appears only when the hook was present at session start. With 
 
 The [connector table](#which-connectors-it-covers) names where this guard runs on each OS. [Fail modes](/docs/reference/configuration/fail-modes#effective-behavior) describes the outage result when a connector has no guard.
 
-With `foreign_hooks: remove` (the default), the gateway-backed guard checks each covered session except Windows Amp. If the gateway is stopped, restarting or gives no answer, an administrator's `open` cannot override it: guarded tool calls are blocked whatever the fail mode, `open` included:
+With `foreign_hooks: remove` (the default), the gateway-backed guard checks each covered session except Windows Amp. During a classified gateway outage, the default `closed` blocks guarded calls. An administrator's `open` can let a guarded call proceed only when fresh, trusted process and session records show no block. Missing, blocked, stale or untrusted records block it. Other hook and policy refusals still apply. A blocked call can report:
 
 ```text
 enterprise_foreign_hook_blocked: DefenseClaw could not check this agent
@@ -58,7 +58,7 @@ session's hook record with its gateway, so the call is blocked. Retry when
 the DefenseClaw gateway is running; if the block continues, restart the agent.
 ```
 
-This is a known limit in 1.0.4: the guard keeps those session records in the gateway, so it cannot prove during an outage that a session is clean. An earlier online allow does not approve the next call while the gateway is down. Windows Amp keeps its guard record locally, but its managed plugin blocks gateway outages in every fail mode, even when `foreign_hooks` is `report` or `allow`. Calls without this guard follow their connector's hook or plugin route; an `open` setting alone does not guarantee that a call runs. Stop and session-end events get the agent's normal allow, so a blocked agent can still end its turn and exit.
+The gateway publishes protected records for the agent process and session after online checks. They must both be at most 15 minutes old, authentic and still revocable for the gateway-backed guard to use them during an outage under administrator `open`. An earlier online allow alone does not guarantee that the next call runs. Windows Amp keeps its guard record locally, but its managed plugin blocks gateway outages in every fail mode, even when `foreign_hooks` is `report` or `allow`. Calls without this guard follow their connector's hook or plugin route; an `open` setting alone does not guarantee that a call runs. Stop and session-end events get the agent's normal allow, so a blocked agent can still end its turn and exit.
 
 ## Approve a hook
 

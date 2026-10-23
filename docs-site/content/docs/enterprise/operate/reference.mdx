@@ -233,9 +233,10 @@ so a repair does not take the CPU the hooks need to answer in time.
 The administrator's `hook_fail_mode: open` allows only classified gateway outages:
 the service is stopped, restarting or gives no answer in time. Integrity,
 peer-verification, credential and rate-limit refusals still block. With
-`foreign_hooks: remove` (the default), guarded calls block during an outage
-even under `open`: the guard needs the gateway's session record except on
-Windows Amp, whose plugin blocks independently
+`foreign_hooks: remove` (the default), a gateway-backed guarded call can
+proceed during a classified outage under administrator `open` only with fresh,
+trusted process and session records showing no block. Missing, blocked, stale
+or untrusted records block; Windows Amp's plugin blocks independently
 ([Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#gateway-outages)).
 `DEFENSECLAW_STRICT_AVAILABILITY=1` closes outages too. See
 [Fail modes](/docs/reference/configuration/fail-modes).
