@@ -2059,7 +2059,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		return failAndRollback(errorCode(err, codeMachinePolicy), err)
 	}
 	restartSockets := socketsToRestart(env, units, record, p, changed)
-	if err := env.initialManifest(account); err != nil {
+	if err := env.initialManifest(); err != nil {
 		return failAndRollback(codeApply, err)
 	}
 	if l.opts.Action == ActionRepair {
@@ -2554,12 +2554,12 @@ func (e *Env) fixMetadata(path string, mode os.FileMode, owner fileOwner) error 
 // initialManifest seeds an empty guardian manifest so the guardian and the
 // sensor helper start before the enumerator has published its first rows.
 // An existing manifest (enumerator- or administrator-written) is kept.
-func (e *Env) initialManifest(account Account) error {
+func (e *Env) initialManifest() error {
 	path := e.P(e.Layout.ManifestPath)
 	if exists(path) {
 		return nil
 	}
-	return e.writeFileAtomic(path, []byte("version: 1\ntargets: []\n"), 0o640, fileOwner{UID: 0, GID: account.GID})
+	return e.writeFileAtomic(path, []byte("version: 1\ntargets: []\n"), 0o640, rootOwner())
 }
 
 // packageUnitDir is where the Linux package installs its units.

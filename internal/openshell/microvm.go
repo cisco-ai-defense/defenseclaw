@@ -90,6 +90,18 @@ type MicroVMHost struct {
 	// DriverBinary is the openshell-driver-vm the gateway starts; empty
 	// when none was found.
 	DriverBinary string `json:"driver_binary,omitempty"`
+	// gatewayVersion is the version the answering gateway reports. An empty
+	// value means no version was available, so no driver release can be chosen.
+	gatewayVersion string
+	// userRepairDir is the earlier user directory when DriverBinary was
+	// found beside the gateway on PATH without an explicit driver_dir.
+	userRepairDir string
+	// DriverVersion is the version DriverBinary reports (Linux), and
+	// DriverOlderThan the gateway's version when that is newer: an in-place
+	// upgrade of NVIDIA's package leaves the driver, which it does not ship,
+	// as it was (GAP-0652).
+	DriverVersion   string `json:"driver_version,omitempty"`
+	DriverOlderThan string `json:"driver_older_than,omitempty"`
 	// DriverFromFormula reports that DriverBinary is the one in the
 	// nvidia/openshell/openshell formula's keg, the only one the
 	// formula's post-install step (ResignVMDriverCommand) signs.
@@ -341,7 +353,7 @@ func (r *doctorRun) microVMHost(ctx context.Context) *MicroVMHost {
 		}
 	}
 	m.DriverRunning = r.running.Name == DriverVM
-	m.DriverBinary = r.findVMDriver(ctx)
+	m.DriverBinary, _ = r.findVMDriver(ctx)
 	m.DriverFromFormula = r.inFormulaKeg(m.DriverBinary)
 	if m.DriverBinary != "" {
 		out, err := r.Runner.Output(ctx, Command{Name: "codesign", Args: []string{"-d", "--entitlements", "-", m.DriverBinary}, Timeout: 30 * time.Second})
@@ -444,20 +456,26 @@ func executable(p string) bool {
 // /usr/local/libexec), else the one next to the openshell-gateway on PATH
 // (in its directory or the libexec beside it, as OpenShell's release
 // archives lay them out). A gateway that runs the driver from anywhere
-// else names it through its running process.
-func (r *doctorRun) findVMDriver(ctx context.Context) string {
+// else names it through its running process. The second result is the
+// earlier user directory when a PATH-adjacent driver was selected and no
+// driver_dir was configured.
+func (r *doctorRun) findVMDriver(ctx context.Context) (string, string) {
 	var dirs []string
-	if r.config != nil && filepath.IsAbs(r.config.VM.DriverDir) {
+	configuredDir := r.config != nil && filepath.IsAbs(r.config.VM.DriverDir)
+	if configuredDir {
 		dirs = append(dirs, r.config.VM.DriverDir)
 	}
 	if prefix := r.Gateway.BrewPrefix; prefix != "" {
 		keg := filepath.Join(prefix, "opt", path.Base(GatewayFormula))
 		dirs = append(dirs, filepath.Join(keg, "libexec"), filepath.Join(keg, "bin"))
 	}
+	userDir := ""
 	if home, err := r.HomeDir(); err == nil && filepath.IsAbs(home) {
-		dirs = append(dirs, filepath.Join(home, ".local", "libexec", "openshell"))
+		userDir = filepath.Join(home, ".local", "libexec", "openshell")
+		dirs = append(dirs, userDir)
 	}
 	dirs = append(dirs, "/usr/libexec/openshell", "/usr/local/libexec/openshell", "/usr/local/libexec")
+	gatewayDirStart := len(dirs)
 	if gw, err := r.LookPath(GatewayBinary); err == nil && filepath.IsAbs(gw) {
 		bins := []string{filepath.Dir(gw)}
 		if real, err := filepath.EvalSymlinks(gw); err == nil && filepath.Dir(real) != bins[0] {
@@ -467,13 +485,16 @@ func (r *doctorRun) findVMDriver(ctx context.Context) string {
 			dirs = append(dirs, bin, filepath.Join(filepath.Dir(bin), "libexec"))
 		}
 	}
-	for _, dir := range dirs {
+	for i, dir := range dirs {
 		if p := filepath.Join(dir, vmDriverBinary); executable(p) {
-			return p
+			if i >= gatewayDirStart && !configuredDir {
+				return p, userDir
+			}
+			return p, ""
 		}
 	}
 	if r.running.Name != DriverVM {
-		return ""
+		return "", ""
 	}
 	parent := 0
 	if gw := r.gatewayProcess(ctx); gw != nil {
@@ -484,9 +505,9 @@ func (r *doctorRun) findVMDriver(ctx context.Context) string {
 		p = findProcess(r.processes(ctx), vmDriverBinary, 0)
 	}
 	if p != nil && executable(p.path) {
-		return p.path
+		return p.path, ""
 	}
-	return ""
+	return "", ""
 }
 
 // ManagedMicroVMFix is what a user of a managed computer does about a MicroVM

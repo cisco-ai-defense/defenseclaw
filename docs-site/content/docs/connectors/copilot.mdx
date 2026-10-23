@@ -17,6 +17,8 @@ DefenseClaw installs a hook file that Copilot CLI runs on its lifecycle events. 
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector copilot` first. Until DefenseClaw is initialized, `defenseclaw setup copilot` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
 defenseclaw setup copilot  # first setup defaults to observe
 defenseclaw setup copilot --workspace /path/to/repo
@@ -46,7 +48,7 @@ What a gateway outage does to a GitHub Copilot CLI call, per install and fail mo
 
 <HookEventsList connector="copilot" />
 
-- `preToolUse` can ask you first. The approval appears inside Copilot CLI.
+- `preToolUse` can ask you first. The approval appears inside Copilot CLI in an interactive session. In Autopilot and in a non-interactive run (`copilot -p`) Copilot cannot ask, so it denies the call (`unable to ask user for confirmation`) with DefenseClaw's reason. Copilot's hook input does not say which mode it runs in, so the audit row still reads `action=confirm`: the call was denied, not asked.
 - `permissionRequest`, `agentStop` and `subagentStop` can return a deny or block.
 - `postToolUseFailure` is advisory. It can add recovery context after the tool failed.
 - Copilot CLI has no hook that can stop a prompt. A matching prompt reaches the model and the alert reads `detected in the prompt (cannot block)`. Tool-call rules still block.

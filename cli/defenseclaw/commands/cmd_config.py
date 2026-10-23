@@ -1049,6 +1049,9 @@ def config_migrate(dry_run: bool, ack: bool, as_json: bool) -> None:
     """
     from defenseclaw.config_inspect import migrate_config_v9
 
+    if dry_run and ack:
+        # --ack writes migration-v9.json, and --dry-run writes nothing (GAP-0627).
+        raise click.UsageError("--dry-run writes nothing and --ack marks migration-v9.json as read: use one of them")
     path = str(config_module.config_path())
     try:
         result = migrate_config_v9(config_path=path, dry_run=dry_run, ack=ack)

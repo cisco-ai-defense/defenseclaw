@@ -39,7 +39,7 @@ An unmodified 0.8.x install moves one value (`scanners.skill_scanner.policy: qui
 | --- | --- |
 | `defenseclaw upgrade` | The installer checks, before it changes anything, that your configuration can be migrated, then runs `defenseclaw migrate` after the swap. If the migration fails, the installer puts the previous install back. |
 | `defenseclaw migrate` | Brings configuration and data to this release's schema, including the v9 step. `--check` lists the pending steps without changing anything. |
-| `defenseclaw config migrate [--dry-run] [--ack] [--json]` | Runs only the v9 step. `--dry-run` writes nothing. `--ack` marks `migration-v9.json` as read. `--json` prints the whole record. |
+| `defenseclaw config migrate [--dry-run] [--ack] [--json]` | Runs only the v9 step. `--dry-run` writes nothing. `--ack` marks `migration-v9.json` as read; it is refused together with `--dry-run`. `--json` prints the whole record. |
 | `defenseclaw-gateway config migrate [--dry-run] [--ack] [--json]` | The same implementation, which `defenseclaw config migrate` calls. Its output also lists the removed keys and the audit entries it moved. |
 | The gateway, at start and on a reload | A `config_version: 8` file is migrated in memory, read-only. The file on disk is not touched. If the in-memory migration fails, the gateway refuses the file: at start it exits with an error that tells you to run `defenseclaw migrate`, and on a reload the previous configuration keeps running. |
 

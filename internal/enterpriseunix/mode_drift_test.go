@@ -332,6 +332,29 @@ func TestRepairRestoresStateFilesAfterARecursiveChownOrChmod(t *testing.T) {
 	}
 }
 
+// The enumerator publishes targets.yaml root:root 0640. A repair of a
+// healthy host after a publish has nothing to restore (GAP-0658).
+func TestRepairLeavesThePublishedTargetsManifestAlone(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			manifest := h.env.P(h.env.Layout.ManifestPath)
+			if err := os.Chmod(manifest, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			h.owners[manifest] = [2]int{0, 0}
+			for range 2 {
+				r := h.run(Options{Action: ActionRepair})
+				requireOK(t, r)
+				if containsLine(r.Changes, "restored the owner and mode") {
+					t.Fatalf("repair restored a manifest nothing changed: %v", r.Changes)
+				}
+			}
+		})
+	}
+}
+
 // GAP-0510: the subprocess shims the gateway writes at start (an upgrade
 // starts the new gateway after the transaction settled the modes) are
 // executable, 0700; verify passes them and ensure keeps them executable.

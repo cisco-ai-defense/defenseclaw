@@ -80,7 +80,7 @@ Alert #2
   …
 ```
 
-`Decision: confirm` means the gateway asked. Your approve or deny answer is handled inside Claude Code, so DefenseClaw records the finding and the verdict, not who approved. Outside Manual mode, the decision is `block`. Copilot CLI and Antigravity deny a confirm without asking in a non-interactive run (`-p`); their audit still shows `confirm`.
+`Decision: confirm` means the gateway asked. Your approve or deny answer is handled inside Claude Code, so DefenseClaw records the finding and the verdict, not who approved. Outside Manual mode, the decision is `block`. Copilot CLI and Antigravity deny a confirm without asking in a non-interactive run (`-p`), and Copilot CLI does the same in Autopilot; their audit still shows `confirm`, because their hook input does not say which mode they run in.
 
 ## When the agent cannot ask
 

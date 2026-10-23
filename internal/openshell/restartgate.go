@@ -104,24 +104,28 @@ func HoldsGateway(p SandboxPhase, said string, stopFlushes bool) bool {
 // running, with no flush first, so what the VM had not written to its disk
 // is lost. Its way on says so, and needs the start's --end-vm
 // (sandboxapi.StartRequest.EndVM), as does its delete, which loses all of
-// its work. Neither keeps all of it.
+// its work. Neither keeps all of it. The gateway also lists raw OpenShell
+// sandboxes, which DefenseClaw's commands refuse, so each stop and delete
+// also names OpenShell's own.
 func StopWayOn(name string, p SandboxPhase, said string, runs bool) string {
-	stop := "`defenseclaw sandbox stop " + name + "`"
-	del := "`defenseclaw sandbox delete " + name + "`, which deletes it and its work"
+	dcStop := "`defenseclaw sandbox stop " + name + "`"
+	stop := dcStop + " (DefenseClaw sandbox), or `openshell sandbox stop " + name + "` (raw OpenShell sandbox)"
+	del := "`defenseclaw sandbox delete " + name + "` (DefenseClaw sandbox) or `openshell sandbox delete " + name +
+		"` (raw OpenShell sandbox), which deletes it and its work"
 	switch {
 	case p == PhaseReady:
-		return stop + " (DefenseClaw sandbox), or `openshell sandbox stop " + name + "` (raw OpenShell sandbox)"
+		return stop
 	case p != PhaseCompleted && p != PhaseError:
-		return "wait until `defenseclaw sandbox list` shows it ready or stopped, then " + stop + " if it is ready"
+		return "wait until `openshell sandbox list` shows it ready or stopped, then " + stop + " if it is ready"
 	case !runs && p == PhaseCompleted:
 		return del + " (this OpenShell neither stops nor starts a completed MicroVM)"
 	case !runs:
 		return del + " (this OpenShell neither stops nor starts a sandbox in its error state)"
 	case p == PhaseError && ProvisioningTimedOut(said):
-		return "wait a minute for OpenShell's cleanup of the provisioning that timed out, then `defenseclaw sandbox start " + name + "`, then " + stop +
+		return "wait a minute for OpenShell's cleanup of the provisioning that timed out, then `defenseclaw sandbox start " + name + "`, then " + dcStop +
 			" once it is ready (OpenShell refuses to stop a sandbox whose provisioning timed out), or " + del
 	case p == PhaseCompleted || mainProcessFailed(said):
-		return LingeringVMLoss + ": `defenseclaw sandbox start " + name + " --end-vm` ends the VM that way, then " + stop + " once it is ready; or " + del
+		return LingeringVMLoss + ": `defenseclaw sandbox start " + name + " --end-vm` ends the VM that way, then " + dcStop + " once it is ready; or " + del
 	}
 	return stop
 }

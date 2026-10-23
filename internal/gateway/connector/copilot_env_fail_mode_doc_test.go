@@ -77,3 +77,24 @@ func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 		}
 	}
 }
+
+// A Copilot confirm is Copilot's own "ask": in Autopilot and in `copilot -p`
+// Copilot cannot ask and denies the call, and the audit keeps confirm because
+// Copilot's hook input names no mode. The connector page says so (GAP-0664).
+func TestCopilotConfirmIsCopilotsAskAndThePageSaysWhereItDenies(t *testing.T) {
+	out := copilotHookOutputForProfile("preToolUse", "confirm", "confirm", "needs approval", "")
+	if out["permissionDecision"] != "ask" {
+		t.Fatalf("preToolUse confirm = %v, want Copilot's ask", out)
+	}
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "docs-site", "content", "docs", "connectors", "copilot.mdx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(strings.Fields(string(data)), " ")
+	for _, want := range []string{"In Autopilot and in a non-interactive run (`copilot -p`) Copilot cannot ask, so it denies the call",
+		"the audit row still reads `action=confirm`"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("connectors/copilot.mdx does not say %q", want)
+		}
+	}
+}

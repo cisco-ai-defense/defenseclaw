@@ -439,6 +439,25 @@ func TestParseEnterpriseSetupEnsureAndSigners(t *testing.T) {
 	}
 }
 
+// A padded file property reaches the path checks as given, so they refuse
+// it as "empty, relative, padded, or environment-expanded" (GAP-0632).
+func TestStandaloneSetupKeepsAPaddedPath(t *testing.T) {
+	opts, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/ensure", `CONFIG=C:\c.yaml `, `MANIFEST=C:\t.yaml `, "JSON=1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Config != `C:\c.yaml ` || opts.Manifest != `C:\t.yaml ` {
+		t.Fatalf("config %q, manifest %q: the padding was dropped", opts.Config, opts.Manifest)
+	}
+	opts, _, err = parseStandaloneEnterpriseSetupOptions([]string{"/ensure", `BUNDLE=C:\b\v7.dcbundle `, `TRUSTANCHORS=C:\b\a.json `})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Bundle != `C:\b\v7.dcbundle ` || opts.TrustAnchors != `C:\b\a.json ` {
+		t.Fatalf("bundle %q, trust anchors %q: the padding was dropped", opts.Bundle, opts.TrustAnchors)
+	}
+}
+
 // The Secure Client Setup keeps its own action set and flags: ensure and
 // --allowed-signers are argument errors there, worded as before the
 // standalone flavor existed.

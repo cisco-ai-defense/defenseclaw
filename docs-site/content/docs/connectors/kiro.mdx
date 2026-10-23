@@ -17,6 +17,8 @@ DefenseClaw installs hooks for Kiro IDE and Kiro CLI under one Kiro connector. T
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector kiro` first. Until DefenseClaw is initialized, `defenseclaw setup kiro` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
 defenseclaw setup kiro                # first setup defaults to observe
 defenseclaw setup kiro --mode action  # block where Kiro honors a veto

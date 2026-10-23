@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 const site = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repo = join(site, '..');
+const docs = join(site, 'content/docs');
 const hookConnectors = [
   { id: 'claudecode', command: 'claude-code', name: 'Claude Code' },
   { id: 'codex', command: 'codex', name: 'Codex' },
@@ -158,6 +159,48 @@ describe('ZeptoClaw removal', () => {
     assert.match(turnOff, /setup remove zeptoclaw --yes`/);
     assert.match(turnOff, /last connector.{0,100}removal refuses/i);
     assert.match(turnOff, /defenseclaw setup remove zeptoclaw --yes --force/);
+  });
+});
+
+function mdxPages(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    return entry.isDirectory() ? mdxPages(path) : entry.name.endsWith('.mdx') ? [path] : [];
+  });
+}
+
+describe('recovery and repair advice', () => {
+  it('keeps the saved guardrail mode', () => {
+    const remediation = /recover|repair|restore|troubleshoot|turn it (?:off|back on)/i;
+    const modeCommand = /defenseclaw\s+(?:setup\b[^\n`]*--mode(?:\s|=)|guardrail\s+mode\s+(?:observe|action)\b)/i;
+    const modeProse = /\b(?:re-?run|run|repeat)\b[^.\n]*\bsetup\b[^.\n]*\bin (?:observe|action) mode\b/i;
+    const violations: string[] = [];
+    let checked = 0;
+    for (const file of mdxPages(docs)) {
+      const body = readFileSync(file, 'utf8');
+      const headings = [...body.matchAll(/^## (.+)$/gm)];
+      for (let i = 0; i < headings.length; i++) {
+        const title = headings[i][1];
+        // This section deliberately teaches a switch from observe to action.
+        // It is not a repair of an existing posture.
+        if (title === 'Nothing is blocked') continue;
+        const section = body.slice(
+          headings[i].index! + headings[i][0].length,
+          i + 1 < headings.length ? headings[i + 1].index : undefined,
+        );
+        if (!remediation.test(title) && !section.includes('**Fix.**') && !section.includes('Turn it back on')) {
+          continue;
+        }
+        checked++;
+        const normalized = section.replace(/\\\r?\n/g, ' ');
+        for (const pattern of [modeCommand, modeProse]) {
+          const found = pattern.exec(normalized);
+          if (found) violations.push(relative(docs, file) + ': ' + title + ': ' + found[0]);
+        }
+      }
+    }
+    assert.ok(checked > 0, 'no recovery or repair sections were checked');
+    assert.deepEqual(violations, []);
   });
 });
 

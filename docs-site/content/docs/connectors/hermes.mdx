@@ -17,6 +17,8 @@ DefenseClaw adds hooks to the default profile's `config.yaml` and approves exact
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector hermes` first. Until DefenseClaw is initialized, `defenseclaw setup hermes` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
 defenseclaw setup hermes                # first setup defaults to observe
 defenseclaw setup hermes --mode action  # block on policy hits

@@ -99,6 +99,10 @@ var configMigrateCmd = &cobra.Command{
 		if configMigrateTo != config.ConfigVersionV9 {
 			return fmt.Errorf("config migrate supports --to %d only", config.ConfigVersionV9)
 		}
+		if configMigrateDryRun && configMigrateAck {
+			// --ack writes migration-v9.json, and --dry-run writes nothing (GAP-0627).
+			return errors.New("--dry-run writes nothing and --ack marks migration-v9.json as read: use one of them")
+		}
 		path := strings.TrimSpace(configMigratePath)
 		if path == "" && strings.TrimSpace(configMigrateDataDir) != "" {
 			path = filepath.Join(configMigrateDataDir, "config.yaml")

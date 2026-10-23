@@ -17,6 +17,8 @@ DefenseClaw installs a TypeScript policy plugin in Amp's user plugin directory. 
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector amp` first. Until DefenseClaw is initialized, `defenseclaw setup amp` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
 defenseclaw setup amp                                  # first setup defaults to observe, global
 defenseclaw setup amp --mode action                    # enforce calls and results

@@ -17,6 +17,8 @@ DefenseClaw writes hooks and an OpenTelemetry exporter into Codex's `config.toml
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector codex` first. Until DefenseClaw is initialized, `defenseclaw setup codex` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
 defenseclaw setup codex                # first setup defaults to observe: record only
 defenseclaw setup codex --mode action  # block on policy hits

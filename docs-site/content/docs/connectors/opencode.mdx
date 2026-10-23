@@ -17,6 +17,8 @@ DefenseClaw installs one plugin file in OpenCode's plugin directory. The plugin 
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector opencode` first. Until DefenseClaw is initialized, `defenseclaw setup opencode` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
 defenseclaw setup opencode                # first setup defaults to observe: record only
 defenseclaw setup opencode --mode action  # block on policy hits by throwing

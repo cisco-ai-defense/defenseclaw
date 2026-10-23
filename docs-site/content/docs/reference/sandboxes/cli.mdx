@@ -1858,7 +1858,7 @@ On a Linux host with KVM, OpenShell's MicroVM driver (`vm`) runs each sandbox as
 | --- | --- |
 | KVM | `/dev/kvm` that your user can open for reading and writing. Where it belongs to the `kvm` group, run `sudo usermod -aG kvm $USER` and log in again. On a cloud VM, use an instance type with nested virtualization or a `.metal` size. |
 | `e2fsprogs` | Version 1.43 or newer, whose `mke2fs` and `debugfs` format each MicroVM's disks. |
-| The driver | `openshell-driver-vm`, which NVIDIA's package does not install. Download it from the OpenShell release with its `.sha256` file, check the digest and put it in `~/.local/libexec/openshell`. The doctor prints the commands for your architecture. |
+| The driver | `openshell-driver-vm`, which NVIDIA's package does not install. Download it from the OpenShell release with its `.sha256` file, check the digest and put it in `~/.local/libexec/openshell`. The doctor prints the commands for your architecture. It must be of the gateway's release: an upgrade of NVIDIA's package (`sandbox setup --install-openshell`) leaves the driver as it was, and the **MicroVM driver** check then fails with `… is OpenShell 0.1.3's, older than the gateway's 0.1.5` and names the commands that install the new one (with `sudo` for a driver in `/usr/libexec/openshell`). |
 | The service umask | The `openshell-gateway` service must run with a umask no stricter than `0022`. Setup writes a systemd drop-in (`zz-defenseclaw-umask.conf`) with `UMask=0022` as part of the gateway change. |
 
 Setup installs none of this. KVM access and `e2fsprogs` need an administrator and the driver is a download you verify, so setup stops with the way on and asks you to run it again.

@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
@@ -560,6 +561,10 @@ func captureStandaloneSetupErrorIntent(arguments []string, opts *enterpriseSetup
 	}
 }
 
+// standalonePathNames are the standalone Setup's file properties, whose
+// values the path checks see as given.
+var standalonePathNames = map[string]bool{"config": true, "manifest": true, "bundle": true, "trustanchors": true}
+
 func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone bool) ([]string, bool, error) {
 	normalized := make([]string, 0, len(arguments))
 	valueNames := map[string]string{
@@ -612,6 +617,11 @@ func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone b
 		if separator := strings.IndexByte(trimmed, '='); separator > 0 && !strings.HasPrefix(trimmed, "--") {
 			name := strings.ToLower(strings.ReplaceAll(trimmed[:separator], "-", ""))
 			value := trimmed[separator+1:]
+			if standalone && standalonePathNames[name] {
+				// A path keeps its padding, so the path check refuses it as
+				// the refusal says (GAP-0632).
+				value = strings.TrimLeftFunc(argument, unicode.IsSpace)[separator+1:]
+			}
 			if canonical, ok := valueNames[name]; ok {
 				normalized = append(normalized, "--"+canonical+"="+value)
 				continue

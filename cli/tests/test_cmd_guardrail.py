@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -660,14 +661,21 @@ class EnableCommandTests(unittest.TestCase):
         self.assertEqual(kwargs.get("connector"), "codex")
 
     def test_enable_aborts_when_no_model_configured(self):
-        runner = CliRunner()
-        app = make_ctx(enabled=False, connector="openclaw", model="", llm_model="")
-        result = runner.invoke(cmd_guardrail.enable_cmd, ["--yes"], obj=app)
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("guardrail.model is not set", result.output)
-        # Must NOT silently flip enabled to True.
-        self.assertFalse(app.cfg.guardrail.enabled)
-        app.cfg.save.assert_not_called()
+        docs = Path(__file__).resolve().parents[2] / "docs-site/content/docs/connectors"
+        for connector in ("openclaw", "zeptoclaw"):
+            runner = CliRunner()
+            app = make_ctx(enabled=False, connector=connector, model="", llm_model="")
+            result = runner.invoke(cmd_guardrail.enable_cmd, ["--yes"], obj=app)
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("Cannot enable: guardrail.model is not set.", result.output)
+            # Must NOT silently flip enabled to True.
+            self.assertFalse(app.cfg.guardrail.enabled)
+            app.cfg.save.assert_not_called()
+            # The page turns it back on with what works (GAP-0667).
+            page = " ".join((docs / f"{connector}.mdx").read_text(encoding="utf-8").split())
+            self.assertNotIn("Turn it back on with `defenseclaw guardrail enable`", page)
+            self.assertIn(f"Turn it back on by running the Set up command again, for example `defenseclaw setup {connector} ", page)
+            self.assertIn("`Cannot enable: guardrail.model is not set.`", page)
 
     def test_enable_hook_connector_without_model(self):
         # GAP-1562: hook connectors were enabled by init without a model,

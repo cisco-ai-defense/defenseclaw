@@ -80,7 +80,7 @@ func (l *lifecycle) currentOpenShellSettings() (openshellSettings, bool) {
 		return openshellSettings{}, false
 	}
 	return openshellSettings{Enabled: true, Install: applied.Install, Driver: applied.Driver, Fallback: applied.Fallback, Version: applied.Version,
-		GatewayPort: applied.GatewayPort, E2fsprogsDir: applied.E2fsprogsDir}, true
+		RaisedFrom: applied.RaisedFrom, GatewayPort: applied.GatewayPort, E2fsprogsDir: applied.E2fsprogsDir}, true
 }
 
 // describeOpenShell adds the sandbox rows to the result and warns for every

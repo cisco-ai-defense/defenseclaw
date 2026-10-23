@@ -691,11 +691,14 @@ type openshellState struct {
 // openshellApplied is the sandbox configuration the last committed
 // transaction applied.
 type openshellApplied struct {
-	Enabled      bool   `json:"enabled"`
-	Install      string `json:"install"`
-	Driver       string `json:"driver"`
-	Fallback     string `json:"driver_fallback,omitempty"`
-	Version      string `json:"version,omitempty"`
+	Enabled  bool   `json:"enabled"`
+	Install  string `json:"install"`
+	Driver   string `json:"driver"`
+	Fallback string `json:"driver_fallback,omitempty"`
+	Version  string `json:"version,omitempty"`
+	// RaisedFrom is the setup-mode pin Version was raised from
+	// (openshellSettings.RaisedFrom), so status and verify name it too.
+	RaisedFrom   string `json:"raised_from,omitempty"`
 	GatewayPort  int    `json:"gateway_port"`
 	Rendered     string `json:"rendered,omitempty"`
 	DaemonInputs string `json:"daemon_inputs,omitempty"`
@@ -722,7 +725,7 @@ func appliedOf(op *openshellPlan) *openshellApplied {
 	}
 	s := op.settings
 	a := &openshellApplied{Enabled: s.Enabled, Install: s.Install, Driver: s.Driver, Fallback: s.Fallback, Version: s.Version,
-		GatewayPort: s.GatewayPort, Rendered: op.digest, DaemonInputs: op.daemonInputs, E2fsprogsDir: s.E2fsprogsDir,
+		RaisedFrom: s.RaisedFrom, GatewayPort: s.GatewayPort, Rendered: op.digest, DaemonInputs: op.daemonInputs, E2fsprogsDir: s.E2fsprogsDir,
 		DefaultNamespaceBridge: op.defaultNamespaceBridge}
 	if a.usesDocker() {
 		a.DockerNamespace = openshell.ManagedDockerNamespace

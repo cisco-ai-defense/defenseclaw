@@ -64,3 +64,28 @@ def test_matrix_shows_delivery_failure_support_separately_from_agent_contract():
     component = (ROOT / "docs-site/components/capability-matrix.tsx").read_text()
     assert "c.hooks.supportsFailClosed || c.hooks.blocksDeliveryFailures" in component
     assert "Timeout or spawn failure can allow" in component
+
+
+def test_connector_set_up_starts_with_init_on_a_new_install(monkeypatch):
+    # `defenseclaw setup <agent>` refuses before init (GAP-0624): every
+    # connector page's Set up names the init step and the refusal it replaces.
+    from defenseclaw import config_writer
+    from defenseclaw.commands.cmd_init import init_cmd
+    from defenseclaw.config import not_initialized_error
+
+    monkeypatch.setattr(config_writer, "machine_managed_standalone", lambda: False)
+    refusal = str(not_initialized_error())
+    choices = next(p for p in init_cmd.params if p.name == "connector").type.choices
+    pages = sorted((DOCS / "connectors").glob("*.mdx"))
+    checked = 0
+    for page in pages:
+        text = page.read_text(encoding="utf-8")
+        if "## Set up\n" not in text:
+            continue
+        section = " ".join(text.split("## Set up\n", 1)[1].split("\n## ", 1)[0].split())
+        name = section.split("defenseclaw setup ", 1)[1].split()[0].strip("`")
+        assert name in choices, (page.name, name)
+        assert section.index(f"`defenseclaw init --connector {name}`") < section.index(f"defenseclaw setup {name} "), page.name
+        assert f"`{refusal}`" in section, page.name
+        checked += 1
+    assert checked >= 12

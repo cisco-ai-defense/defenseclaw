@@ -1114,9 +1114,13 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 		old := map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3"}
 		r := h.ensure(sandboxConfig(t, "linux", true, old))
 		requireOK(t, r)
-		if state, _ := rowState(r, "sandbox openshell pin"); !strings.HasPrefix(state, "ok: "+openshell.InstallerVersion) ||
-			!strings.Contains(state, "enterprise.openshell.version pins 0.1.3, which runs no sandbox") || !strings.HasSuffix(state, "set the pin to "+openshell.InstallerVersion) {
-			t.Errorf("pin row = %q", state)
+		// status and verify describe what ensure applied, raised pin
+		// included (GAP-0621).
+		for _, r := range []*enterprisestatus.Result{r, h.run(Options{Action: ActionStatus}), h.run(Options{Action: ActionVerify})} {
+			if state, _ := rowState(r, "sandbox openshell pin"); !strings.HasPrefix(state, "ok: "+openshell.InstallerVersion) ||
+				!strings.Contains(state, "enterprise.openshell.version pins 0.1.3, which runs no sandbox") || !strings.HasSuffix(state, "set the pin to "+openshell.InstallerVersion) {
+				t.Errorf("%s: pin row = %q", r.Action, state)
+			}
 		}
 		if v := h.env.loadOpenShellState().Applied.Version; v != openshell.InstallerVersion {
 			t.Fatalf("applied version = %q", v)

@@ -17,6 +17,8 @@ DefenseClaw adds hooks to Claude Code's settings and receives its native OpenTel
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector claude-code` first. Until DefenseClaw is initialized, `defenseclaw setup claude-code` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
 defenseclaw setup claude-code                # first setup defaults to observe: record only
 defenseclaw setup claude-code --mode action  # block on policy hits
