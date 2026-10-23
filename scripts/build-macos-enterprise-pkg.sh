@@ -168,7 +168,9 @@ done
 # deployments share the gateway port and the lifecycle would refuse anyway.
 # It also refuses a downgrade before the older binaries replace the installed
 # ones, unless the administrator created the root-owned rollback marker
-# /opt/cisco/defenseclaw/lifecycle/allow-downgrade (postinstall consumes it).
+# /opt/cisco/defenseclaw/lifecycle/allow-downgrade (postinstall consumes it),
+# and refuses while a sandbox daemon of DefenseClaw 1.0.3 or older has a
+# sandbox running (the legacy sandbox guard, GAP-0903).
 cat >"$SCRIPTS/preinstall" <<'EOF'
 #!/bin/sh
 if [ -e /opt/cisco/secureclient/defenseclaw ] ||
@@ -179,10 +181,43 @@ fi
 state=/opt/cisco/defenseclaw/lifecycle
 package_version="@DC_PKG_VERSION@"
 record="$state/deployment.json"
+installed=
 if [ -f "$record" ] && [ ! -L "$record" ] && [ "$(stat -f %u "$record")" = 0 ]; then
     installed=$(sed -n 's/.*"product_version": *"\([^"]*\)".*/\1/p' "$record" | head -n 1)
+fi
+# refuse CODE MESSAGE [SAID] refuses the install, printing SAID (MESSAGE
+# when there is none) on stderr: nothing was changed. The
+# Installer shows only a generic error, so the reason goes into the package
+# result an MDM detection or an administrator reads. The refusal changed
+# nothing, so the result reports the running deployment as its own status
+# sees it (GAP-1428: a fixed document said every service was down). The
+# fixed document stays the fallback for an installed gateway that cannot
+# answer.
+refuse() {
+    echo "${3:-$2}" >&2
+    umask 077
+    result="$state/last-package-result.json"
+    error="{\"code\":\"$1\",\"message\":\"$(printf '%s' "$2" | tr -d '"\\|&')\"}"
+    gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
+    if ! { [ -x "$gateway" ] && "$gateway" enterprise macos status --json 2>/dev/null | sed \
+        -e 's/^  "ok": [a-z]*,$/  "ok": false,/' \
+        -e 's/^  "action": "[a-z-]*",$/  "action": "ensure",/' \
+        -e 's/^  "noop": [a-z]*,$/  "noop": false,/' \
+        -e '/^  "noop_reason": /d' \
+        -e "s|^  \"product_version\": \"[^\"]*\",\$|  \"product_version\": \"$package_version\",|" \
+        -e "s|^  \"errors\": \[\],\$|  \"errors\": [$error],|" \
+        -e "s|^  \"errors\": \[\$|  \"errors\": [$error,|" \
+        -e 's/^  "exit_code": [0-9]*$/  "exit_code": 1/' >"$result.tmp" &&
+        grep -q "\"$1\"" "$result.tmp" && grep -q '^  "exit_code": 1$' "$result.tmp"; }; then
+        printf '{"schema_version":2,"ok":false,"action":"ensure","noop":false,"profile":"standalone","platform":"darwin","product_version":"%s","installed_version":"%s","installed":%s,"transaction_pending":false,"services":[],"readiness":{"gateway":false,"guardian":false,"enumerator":false,"sensor_helper":false},"inspection":{"local":"unknown","ai_defense":"unknown"},"machine_policy":{},"enrollment":{"targets":0,"pending":0,"failed":0,"exempt":0},"coverage_complete":false,"security_complete":false,"errors":[%s],"exit_code":1}\n' \
+            "$package_version" "$installed" "$([ -n "$installed" ] && echo true || echo false)" "$error" >"$result.tmp"
+    fi
+    mv -f "$result.tmp" "$result" && echo "See $result." >&2
+    exit 1
+}
+if [ -n "$installed" ]; then
     marker="$state/allow-downgrade"
-    if [ -n "$installed" ] && ! [ -f "$marker" ] && ! awk -v a="$package_version" -v b="$installed" '
+    if ! [ -f "$marker" ] && ! awk -v a="$package_version" -v b="$installed" '
         function norm(v) { sub(/^v/, "", v); sub(/\+.*/, "", v); return v }
         BEGIN {
             a = norm(a); b = norm(b); pa = ""; pb = ""
@@ -204,38 +239,17 @@ if [ -f "$record" ] && [ ! -L "$record" ] && [ "$(stat -f %u "$record")" = 0 ]; 
             }
             exit 0
         }'; then
-        message="DefenseClaw $installed is installed; refusing to downgrade to $package_version, so nothing was changed. For a deliberate rollback, create $marker as root first."
-        echo "$message" >&2
-        # The Installer shows only a generic error, so leave the reason in
-        # the package result an MDM detection or an administrator reads.
-        # The refusal changed nothing, so the result reports the running
-        # deployment as its own status sees it (GAP-1428: a fixed document
-        # said every service was down). The fixed document stays the
-        # fallback for an installed gateway that cannot answer.
-        umask 077
-        result="$state/last-package-result.json"
-        error="{\"code\":\"downgrade_refused\",\"message\":\"$message\"}"
-        gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
-        if ! { [ -x "$gateway" ] && "$gateway" enterprise macos status --json 2>/dev/null | sed \
-            -e 's/^  "ok": [a-z]*,$/  "ok": false,/' \
-            -e 's/^  "action": "[a-z-]*",$/  "action": "ensure",/' \
-            -e 's/^  "noop": [a-z]*,$/  "noop": false,/' \
-            -e '/^  "noop_reason": /d' \
-            -e "s|^  \"product_version\": \"[^\"]*\",\$|  \"product_version\": \"$package_version\",|" \
-            -e "s|^  \"errors\": \[\],\$|  \"errors\": [$error],|" \
-            -e "s|^  \"errors\": \[\$|  \"errors\": [$error,|" \
-            -e 's/^  "exit_code": [0-9]*$/  "exit_code": 1/' >"$result.tmp" &&
-            grep -q '"downgrade_refused"' "$result.tmp" && grep -q '^  "exit_code": 1$' "$result.tmp"; }; then
-            printf '{"schema_version":2,"ok":false,"action":"ensure","noop":false,"profile":"standalone","platform":"darwin","product_version":"%s","installed_version":"%s","installed":true,"transaction_pending":false,"services":[],"readiness":{"gateway":false,"guardian":false,"enumerator":false,"sensor_helper":false},"inspection":{"local":"unknown","ai_defense":"unknown"},"machine_policy":{},"enrollment":{"targets":0,"pending":0,"failed":0,"exempt":0},"coverage_complete":false,"security_complete":false,"errors":[%s],"exit_code":1}\n' \
-                "$package_version" "$installed" "$error" >"$result.tmp"
-        fi
-        mv -f "$result.tmp" "$result" && echo "See $result." >&2
-        exit 1
+        refuse downgrade_refused "DefenseClaw $installed is installed; refusing to downgrade to $package_version, so nothing was changed. For a deliberate rollback, create $marker as root first."
     fi
+fi
+# @LEGACY_SANDBOX_GUARD@
+if command -v dc_legacy_sandbox_guard >/dev/null 2>&1 &&
+    ! dc_legacy_sandbox_guard darwin /opt/cisco/defenseclaw/bin/defenseclaw-gateway /usr/local/bin/defenseclaw; then
+    refuse sandboxes_running "DefenseClaw ${installed:-an earlier release} is installed, and this install was refused: $dc_guard_reason" "$dc_guard_message"
 fi
 exit 0
 EOF
-sed -i.bak "s/@DC_PKG_VERSION@/${VERSION}/" "$SCRIPTS/preinstall" && rm -f "$SCRIPTS/preinstall.bak"
+"$REPO_ROOT/scripts/stamp-package-script.sh" "$VERSION" "$SCRIPTS/preinstall" "$SCRIPTS/preinstall"
 
 # postinstall applies the deployment. A failure has already been rolled back
 # by the lifecycle; it fails the install so the MDM reports it. It waits for

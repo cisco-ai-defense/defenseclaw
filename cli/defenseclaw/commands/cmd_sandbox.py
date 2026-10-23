@@ -364,7 +364,9 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "Stops a sandbox and keeps it for start or connect. When its detached run is still going, "
             "the stop ends it: stop asks first on a terminal (--yes does not). Every stop, this one or "
             "one from the TUI, the macOS app or undo, marks the run interrupted and keeps its log, so "
-            '"sandbox logs" still shows it.'
+            '"sandbox logs" still shows it. A MicroVM\'s disk is synced before its stop; when that sync '
+            "fails the MicroVM keeps running, and stop says what a stop would lose and asks on a terminal "
+            "(--yes does not answer that): --discard-unsynced stops it anyway."
         ),
         args=(_Arg("name"),),
         flags=(
@@ -373,6 +375,11 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
                 "bool",
                 "stop without asking when a detached run or a session in another terminal is still going",
                 short="y",
+            ),
+            _Flag(
+                "discard-unsynced",
+                "bool",
+                "stop a MicroVM whose disk could not be synced first, losing what it wrote since its last sync",
             ),
         ),
     ),

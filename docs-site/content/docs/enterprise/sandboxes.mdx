@@ -1503,6 +1503,20 @@ running sandbox counts again within the next minute.
   user runs; otherwise it reports "pending restart" and the launcher restarts
   an idle, outdated daemon on the next command. A MicroVM upgrade waits for
   running sandboxes.
+- **Upgrade from 1.0.0 to 1.0.3 while sandboxes run.** A sandbox daemon of
+  DefenseClaw 1.0.3 or older stops its user's OpenShell gateway once a package
+  replaces its program, under a MicroVM whose workload ended, which loses what
+  that VM has not written. So the 1.0.4 package (rpm, deb and the macOS pkg)
+  refuses before it changes anything while such a daemon has a sandbox that
+  is running, starting or stopping, or a MicroVM that completed or is in
+  OpenShell's error state. It exits non-zero and names each user, sandbox and
+  the command that user runs: `defenseclaw sandbox stop <name>` for a running
+  one, `defenseclaw sandbox delete <name>` for an ended MicroVM. It also
+  refuses when such a daemon does not answer. On macOS the refusal is in
+  `last-package-result.json` as `sandboxes_running`. DefenseClaw stops no
+  sandbox for you: once the users have ended theirs, install the package
+  again. An older daemon with nothing running is ended before the files
+  change. A daemon of 1.0.4 or later waits for its sandboxes by itself.
 - **Upgrade from 1.0.1 with the docker driver or the docker fallback.** Managed
   docker gateways now keep their containers and volumes in an OpenShell sandbox
   namespace of their own, `defenseclaw-managed`, so one gateway's start no longer
@@ -1649,6 +1663,7 @@ text and in `--json`. None of them is raised for a person.
 | `sandbox_policy_advisory` | A floor that works but probably isn't what you meant (an empty `request_access`, a pack without a digest, a `required_for` agent with no machine-owned hook), or packs still read from the folder releases before 1.0.2 used ([Packs](#packs)) | Read the message |
 | `sandbox_packs_dir_untrusted` | Other accounts can read the packs folder, or its owner or mode is not as required. `ensure` refuses it and `verify` fails | Make it `root:defenseclaw` (macOS `root:_defenseclaw`), mode 0750 |
 | `openshell_failed` | A sandbox step of the lifecycle failed (for example removing a link) | Read the message |
+| `sandbox_legacy_unprotected` | A user's sandbox is running unprotected: legacy sandbox. Its session runs the supervisor of an OpenShell release older than 0.1.5, whose network broker can let its connections bypass sandbox policy, and DefenseClaw cannot contain it. A `sandbox unprotected <user>` row names it with the command that ends it. `security_complete` is false and `verify` fails. The same holds while a daemon of an earlier DefenseClaw still holds sandboxes, or a daemon does not answer. No new sandbox runs for that user until it is gone | Ask the user to save their work and run the command named, `defenseclaw sandbox stop <name>` or `defenseclaw sandbox delete <name>`. DefenseClaw does not stop it for them |
 
 ### Relay refusals
 

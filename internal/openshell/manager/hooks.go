@@ -548,7 +548,7 @@ func (m *Manager) stopForAlarm(name, bindingID string, kind audit.SandboxFinding
 	if err := m.stop(ctx, b); err != nil {
 		m.logf("%s: stop %s: %v", what, name, err)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
-			Reason: string(kind), Message: "⚠ DefenseClaw could not stop the sandbox for " + what + ": stop it yourself"})
+			Reason: string(kind), Message: "⚠ DefenseClaw could not stop the sandbox for " + what + " (" + sandboxapi.AsError(err).Error() + "): stop it yourself"})
 		return
 	}
 	m.logf("%s: stopped %s", what, name)

@@ -113,14 +113,14 @@ func answerFor(want verifyRecord, hostname string) workloadAnswer {
 
 // workloadChecks answers the workload check of each sandbox as its record
 // expects, after edit (when set), and hands every other command to other
-// (exit 0 without output when nil).
+// (openshelltest.DefaultExec when nil: a stop's flush syncs).
 func (e *harnessEnv) workloadChecks(edit func(sandbox string, a *workloadAnswer), other openshelltest.ExecHandler) openshelltest.ExecHandler {
 	return func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		if !isWorkloadCheck(call) {
 			if other != nil {
 				return other(ctx, call)
 			}
-			return openshelltest.ExecResponse{}
+			return openshelltest.DefaultExec(call)
 		}
 		want := verifyRecord{UID: 1000, GID: 1000}
 		e.m.mu.Lock()
@@ -424,7 +424,7 @@ func TestStartChecksTheWorkloadAgainstTheRecord(t *testing.T) {
 		if isWorkloadCheck(call) {
 			return openshelltest.ExecResponse{Stdout: created.stdout()}
 		}
-		return openshelltest.ExecResponse{}
+		return openshelltest.DefaultExec(call)
 	})
 	// An upgrade that renders the hooks otherwise (here: another ingress
 	// port), which a check against a fresh render would refuse.

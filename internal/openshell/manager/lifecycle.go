@@ -125,7 +125,12 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 		if !b.missing && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason) {
 			live++
 		}
+		if !b.missing && !b.creating && oldSupervisorLive(b.phase, b.rec) {
+			st.Unprotected = append(st.Unprotected, sandboxapi.UnprotectedSandbox{Name: b.rec.Name, Phase: string(b.phase),
+				Stop: legacyStopCommand(b.rec.Name, b.phase)})
+		}
 	}
+	slices.SortFunc(st.Unprotected, func(a, b sandboxapi.UnprotectedSandbox) int { return strings.Compare(a.Name, b.Name) })
 	st.Live = &live
 	for _, a := range m.approvals {
 		if a.status == sandboxapi.ApprovalPending {
@@ -334,9 +339,14 @@ func (m *Manager) refuseRetained(b *box) error {
 
 // stop stops the sandbox of b once its harness has exited and, on a driver
 // whose stop does not flush (the MicroVM driver), after sync(1) in the
-// guest. A flush that fails does not hold the stop back: once OpenShell
-// takes the stop, the feed says what it may have lost (flushFailed), never
-// for a stop that was refused or not made. One whose main process
+// guest. A flush that fails holds the stop back (unsyncedStopRefusal: the VM
+// keeps running and loses nothing), unless the caller accepted that loss
+// (sandboxapi.DiscardUnsynced), which only the user's own stop does, after
+// it asked them (GAP-0902): DefenseClaw never stops a MicroVM after a failed
+// sync on its own, for a hook alarm, a policy, a lost listener or the
+// stop-sandboxes of a sign-out alike. Once OpenShell takes an accepted one,
+// the feed says what it may have lost (flushFailed), never for a stop that
+// was refused or not made. One whose main process
 // completed or failed OpenShell returns as it is: it keeps its phase, and
 // with it the OpenShell gateway (HoldsCompute), until OpenShell reports
 // another.
@@ -362,6 +372,10 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	// the stop ends is marked interrupted, and once the stop is published
 	// its log is kept for `sandbox logs` of the stopped sandbox (runlog.go).
 	run, flushErr := m.endHarness(ctx, gw, b)
+	if flushErr != nil && !sandboxapi.DiscardUnsynced(ctx) {
+		m.logf("sandbox %s: not stopped: its disk could not be synced first: %v", name, flushErr)
+		return unsyncedStopRefusal(name, flushErr)
+	}
 	if !ended {
 		m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
 	}
@@ -440,6 +454,19 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStop, false, nil, sb.Status.ExitCode)
 	return nil
+}
+
+// unsyncedStopRefusal refuses the stop of the MicroVM name whose disk could
+// not be synced first (err): its stop does not flush, so what the guest
+// wrote since its last sync would be lost. It keeps running instead, and
+// the user decides (sandboxapi.CodeUnsynced): the CLI asks, and says what is
+// lost, before it stops it with sandboxapi.StopRequest.DiscardUnsynced.
+func unsyncedStopRefusal(name string, err error) error {
+	return &sandboxapi.Error{Code: sandboxapi.CodeUnsynced,
+		Message: "sandbox " + name + " was not stopped: its MicroVM's disk could not be synced first (" + truncate(sandboxapi.DisplayText(err.Error()), 200) +
+			"), so a stop now would lose what it wrote since its last sync; it keeps running",
+		Detail: "save the work you need and stop it again, or stop it anyway, losing that: `defenseclaw sandbox stop " + name +
+			" --discard-unsynced` (on a terminal, `defenseclaw sandbox stop " + name + "` asks first)"}
 }
 
 // lockStart takes the gateway's lifecycle lock for a create or a start

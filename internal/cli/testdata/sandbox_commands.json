@@ -1008,8 +1008,13 @@
     "path": "sandbox stop",
     "use": "stop \u003cname\u003e",
     "short": "Stop a sandbox (it is kept for start or connect)",
-    "long": "Stops a sandbox and keeps it for start or connect. When its detached run is still\ngoing, the stop ends it: stop asks first on a terminal (--yes does not). Every stop,\nthis one or one from the TUI, the macOS app or undo, marks the run interrupted and\nkeeps its log, so \"sandbox logs\" still shows it.",
+    "long": "Stops a sandbox and keeps it for start or connect. When its detached run is still\ngoing, the stop ends it: stop asks first on a terminal (--yes does not). Every stop,\nthis one or one from the TUI, the macOS app or undo, marks the run interrupted and\nkeeps its log, so \"sandbox logs\" still shows it. A MicroVM's disk is synced before\nits stop; when that sync fails the MicroVM keeps running, and stop says what a stop\nwould lose and asks on a terminal (--yes does not answer that): --discard-unsynced\nstops it anyway.",
     "flags": [
+      {
+        "name": "discard-unsynced",
+        "type": "bool",
+        "default": "false"
+      },
       {
         "name": "yes",
         "shorthand": "y",

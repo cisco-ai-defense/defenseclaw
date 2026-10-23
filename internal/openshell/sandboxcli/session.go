@@ -1522,6 +1522,13 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 			return nil
 		}
 		if _, err := s.api.Stop(ctx, name); err != nil {
+			if sandboxapi.IsCode(err, sandboxapi.CodeUnsynced) {
+				// Its disk could not be synced: it keeps running, and the
+				// user's own stop says what is lost and asks (GAP-0902).
+				s.stopFailed = true
+				a.warn(apiError(err).Error())
+				return nil
+			}
 			if sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
 				// OpenShell's error state: nothing runs in it (GAP-0333).
 				a.warn("could not stop " + name + ": " + apiError(err).Error())

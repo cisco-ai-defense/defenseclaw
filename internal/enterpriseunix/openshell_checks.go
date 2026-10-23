@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 )
 
@@ -90,6 +91,9 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	env, r := l.env, l.result
 	settings, on := l.currentOpenShellSettings()
 	state := env.loadOpenShellState()
+	if on || len(state.Pending) > 0 {
+		l.describeLegacySandboxes(ctx)
+	}
 	if !on {
 		for _, entry := range state.sortedPending() {
 			if entry.Kind == "stop" {
@@ -169,6 +173,59 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify {
 		if err := env.publishPrerequisites(ctx, settings); err != nil {
 			r.AddWarning(codeState, "could not record "+openshell.PrerequisitesFile+": "+err.Error())
+		}
+	}
+}
+
+// describeLegacySandboxes reports, for every account whose sandbox daemon
+// runs, each legacy sandbox as running unprotected (GAP-0901): a live guest
+// whose session runs the supervisor of an OpenShell release older than the
+// oldest supported one, whose network broker can let its connections bypass
+// sandbox policy and which DefenseClaw cannot contain
+// (sandboxapi.Status.Unprotected), and every sandbox that a daemon of
+// DefenseClaw 1.0.3 or older still holds. Each is a row and a warning with
+// the command its user runs to end it, since DefenseClaw stops none itself
+// and the account's daemon runs no new sandbox until it is gone; the
+// deployment is then not security-complete, and verify fails. A daemon that
+// runs but cannot answer is reported the same way: what cannot be shown
+// protected is not. A user daemon runs only under a running user manager
+// (Linux: the signed-in and lingering accounts).
+func (l *lifecycle) describeLegacySandboxes(ctx context.Context) {
+	ops := l.env.sandboxOps()
+	accounts := ops.LoggedIn(ctx)
+	if l.env.GOOS == "darwin" {
+		accounts = ops.Accounts(ctx)
+	}
+	seen := map[int]bool{}
+	for _, a := range accounts {
+		if seen[a.UID] {
+			continue
+		}
+		seen[a.UID] = true
+		st, err := ops.Status(ctx, a)
+		var lines []string
+		switch {
+		case err != nil:
+			lines = []string{"its sandbox daemon could not say whether one runs (" + err.Error() + "); as " + a.Name + ", `defenseclaw sandbox status` names any"}
+		case st.Legacy && st.busy() > 0:
+			held := "1 sandbox"
+			if n := st.busy(); n != 1 {
+				held = fmt.Sprintf("%d sandboxes", n)
+			}
+			lines = []string{"the sandbox daemon of an earlier DefenseClaw holds " + held + ", which this version cannot show protected; as " + a.Name +
+				", `defenseclaw sandbox list` names them, and `defenseclaw sandbox stop NAME` ends a running one"}
+		default:
+			for _, u := range st.Unprotected {
+				lines = append(lines, u.Name+"; as "+a.Name+", `"+u.Stop+"` ends it")
+			}
+		}
+		for _, line := range lines {
+			l.result.Services = append(l.result.Services, enterprisestatus.Service{Name: "sandbox unprotected " + a.Name, Kind: sandboxRowKind,
+				State: sandboxapi.LegacyUnprotected + ": " + line})
+			l.result.AddWarning(codeLegacySandbox, a.Name+": "+sandboxapi.LegacyUnprotected+": "+line+". Its session runs the supervisor of an OpenShell "+
+				"release older than "+openshell.SupportedMin+", whose network broker can let its connections bypass sandbox policy and DefenseClaw cannot "+
+				"contain; DefenseClaw stops no sandbox for its user, and runs no new sandbox for "+a.Name+" until it is gone")
+			l.result.SecurityComplete = false
 		}
 	}
 }

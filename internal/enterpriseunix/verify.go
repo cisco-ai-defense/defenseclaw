@@ -196,7 +196,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// status reports them as warnings with security_complete false.
 		for _, warning := range r.Warnings {
 			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected ||
-				warning.Code == codeNoConnectorsEnabled || warning.Code == codeSandboxPackDir {
+				warning.Code == codeNoConnectorsEnabled || warning.Code == codeSandboxPackDir || warning.Code == codeLegacySandbox {
 				problems = append(problems, warning.Message)
 			}
 		}

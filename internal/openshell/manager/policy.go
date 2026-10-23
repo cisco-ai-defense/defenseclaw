@@ -811,7 +811,7 @@ func (m *Manager) scheduleForeignStop(name, bindingID string) {
 		if err := m.stop(ctx, b); err != nil {
 			m.logf("foreign rules: stop %s: %v", name, err)
 			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
-				Reason: policyReasonForeignRule, Message: "⚠ DefenseClaw could not stop the sandbox for repeated foreign network rules: stop it yourself"})
+				Reason: policyReasonForeignRule, Message: "⚠ DefenseClaw could not stop the sandbox for repeated foreign network rules (" + sandboxapi.AsError(err).Error() + "): stop it yourself"})
 		}
 	}()
 }

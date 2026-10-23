@@ -64,6 +64,9 @@ type API interface {
 	Create(ctx context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error)
 	Delete(ctx context.Context, name string, req sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error)
 	Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
+	// StopWith is Stop with a request: the stop the user accepted the loss
+	// of what a MicroVM has not synced for.
+	StopWith(ctx context.Context, name string, req sandboxapi.StopRequest) (*sandboxapi.Sandbox, error)
 	Start(ctx context.Context, name string, req sandboxapi.StartRequest) (*sandboxapi.Sandbox, error)
 	Undo(ctx context.Context, name string, req sandboxapi.UndoRequest) (*sandboxapi.UndoResponse, error)
 	Review(ctx context.Context, name string, req sandboxapi.ReviewRequest) (*sandboxapi.ReviewResponse, error)

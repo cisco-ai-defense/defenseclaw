@@ -303,6 +303,11 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 		row("Telemetry", a.style(fmt.Sprintf("%s refused since the daemon started; last: %s",
 			plural(st.TelemetryFailures, "record", "records"), truncate(sandboxapi.DisplayText(st.TelemetryError), 200)), ansiRed))
 	}
+	for _, u := range st.Unprotected {
+		// A live legacy guest (GAP-0901): no new sandbox runs until it is
+		// gone, and DefenseClaw does not stop it for the user.
+		row("Unprotected", a.style(u.Name+": "+sandboxapi.LegacyUnprotected+"; no new sandbox runs until it is gone: `"+u.Stop+"`", ansiRed))
+	}
 }
 
 func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
@@ -648,9 +653,10 @@ func oldSupervisorRefusal(sb *sandboxapi.Sandbox) error {
 	name := sb.Name
 	stop := "save the work you need, then run `" + CommandName + " stop " + name + "`"
 	if d, ok := openshell.LookupDriver(sb.Driver); !ok || !d.StopFlushes {
-		stop += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost)"
+		stop += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost) " +
+			"and, when that sync fails, asks before it stops the VM"
 	}
-	return fmt.Errorf("%s: legacy sandbox running, not protected by the 1.0.4 egress policy: its session runs the supervisor of an OpenShell release older than %s, "+
+	return fmt.Errorf("%s: "+sandboxapi.LegacyUnprotected+": its session runs the supervisor of an OpenShell release older than %s, "+
 		"whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494), so DefenseClaw runs nothing in it and does not stop it for you: "+
 		"%s; then `%s start %s` (or `connect`) runs it on the gateway's own supervisor",
 		name, openshell.SupportedMin, stop, CommandName, name)
@@ -812,6 +818,11 @@ type StopOptions struct {
 	// whose own disk could not be looked at, without asking. A copy-mode
 	// MicroVM whose disk is full keeps running even so (fullDiskStop).
 	Yes bool
+	// DiscardUnsynced stops a MicroVM whose disk could not be synced first,
+	// losing what it wrote since its last sync. Yes does not: without it
+	// such a stop is asked on a terminal, and refused without one
+	// (stopOrAsk).
+	DiscardUnsynced bool
 }
 
 // ExitStopKept is the exit status of a `sandbox stop` that kept the
@@ -862,9 +873,9 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 			}
 		}
 	}
-	stopped, err := api.Stop(ctx, o.Name)
-	if err != nil {
-		return stopFailure(ctx, api, o.Name, err)
+	stopped, err := a.stopOrAsk(ctx, api, o)
+	if err != nil || stopped == nil {
+		return err
 	}
 	// A hook request since the look is something that ran in it after all.
 	if copyAt != nil && !stopped.Hooks.LastHookAt.After(sb.Hooks.LastHookAt) {
@@ -876,6 +887,38 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	}
 	a.ok(stopped.Name + " is " + stopped.Phase)
 	return nil
+}
+
+// stopOrAsk makes the stop of o.Name. The daemon does not stop a MicroVM
+// whose disk it could not sync first (sandboxapi.CodeUnsynced, GAP-0902):
+// on a terminal the user is told what is lost and asked, and only a yes
+// stops it, accepting the loss (sandboxapi.StopRequest.DiscardUnsynced);
+// --discard-unsynced accepts it up front. --yes does not, since the TUI, the
+// macOS app and scripts pass it for the question about a detached run.
+// Without a terminal the sandbox keeps running (ExitStopKept). A no keeps
+// it running too, and returns no sandbox and no error.
+func (a *App) stopOrAsk(ctx context.Context, api API, o StopOptions) (*sandboxapi.Sandbox, error) {
+	stopped, err := api.StopWith(ctx, o.Name, sandboxapi.StopRequest{DiscardUnsynced: o.DiscardUnsynced})
+	if err != nil && !o.DiscardUnsynced && sandboxapi.IsCode(err, sandboxapi.CodeUnsynced) {
+		a.warn(sandboxapi.AsError(err).Message)
+		if !a.IO.TTY {
+			a.note("to stop it anyway, losing that: `" + CommandName + " stop " + o.Name + " --discard-unsynced`")
+			return nil, &ExitError{Code: ExitStopKept, Err: &Silent{Err: errors.New(o.Name + " keeps running: its disk could not be synced")}}
+		}
+		ok, aerr := a.ask("Stop "+o.Name+" anyway and lose what it wrote since its last sync?", false, false)
+		if aerr != nil {
+			return nil, aerr
+		}
+		if !ok {
+			a.note(o.Name + " keeps running; save the work you need, then stop it again")
+			return nil, nil
+		}
+		stopped, err = api.StopWith(ctx, o.Name, sandboxapi.StopRequest{DiscardUnsynced: true})
+	}
+	if err != nil {
+		return nil, stopFailure(ctx, api, o.Name, err)
+	}
+	return stopped, nil
 }
 
 // stopFailure is the error of the stop of the sandbox name that the daemon

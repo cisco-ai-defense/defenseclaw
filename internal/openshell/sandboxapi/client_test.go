@@ -374,3 +374,68 @@ func TestStartAcrossDaemonVersions(t *testing.T) {
 		})
 	}
 }
+
+// GAP-0902: a 1.0.4 daemon refuses the stop of a MicroVM whose sync failed
+// (CodeUnsynced) unless the user accepted the loss
+// (StopRequest.DiscardUnsynced). A 1.0.3 daemon decodes the stop's body
+// strictly into an empty struct, so it refuses the field: the stop the user
+// accepted goes again without it (that daemon holds no stop back). A plain
+// stop sends the same {} as before, and a refusal other than the unknown
+// field is returned as it is.
+func TestStopAcrossDaemonVersions(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		strict   bool
+		discard  bool
+		unsynced bool
+		want     []string
+		code     string
+	}{
+		{name: "1.0.3 daemon, accepted loss", strict: true, discard: true, want: []string{`{"discard_unsynced":true}`, `{}`}},
+		{name: "1.0.3 daemon, plain stop", strict: true, want: []string{`{}`}},
+		{name: "current daemon, accepted loss", discard: true, unsynced: true, want: []string{`{"discard_unsynced":true}`}},
+		{name: "current daemon refuses an unsynced stop", unsynced: true, want: []string{`{}`}, code: CodeUnsynced},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var bodies []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				bodies = append(bodies, strings.TrimSpace(string(raw)))
+				fail := func(e *Error) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(e.HTTPStatus())
+					_ = json.NewEncoder(w).Encode(e)
+				}
+				dec := json.NewDecoder(bytes.NewReader(raw))
+				if tc.strict {
+					dec.DisallowUnknownFields()
+					var req struct{}
+					if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+						fail(Errorf(CodeInvalid, "invalid JSON body: %v", err))
+						return
+					}
+				} else {
+					var req StopRequest
+					_ = dec.Decode(&req)
+					if tc.unsynced && !req.DiscardUnsynced {
+						fail(Errorf(CodeUnsynced, "sandbox box was not stopped"))
+						return
+					}
+				}
+				_ = json.NewEncoder(w).Encode(Sandbox{Name: "box", Phase: "stopped"})
+			}))
+			defer srv.Close()
+			sb, err := NewClient(srv.URL, "t").StopWith(context.Background(), "box", StopRequest{DiscardUnsynced: tc.discard})
+			if tc.code != "" {
+				if !IsCode(err, tc.code) || AsError(err).HTTPStatus() != http.StatusConflict {
+					t.Fatalf("StopWith = %+v, %v; want %s (409)", sb, err, tc.code)
+				}
+			} else if err != nil || sb == nil || sb.Phase != "stopped" {
+				t.Fatalf("StopWith = %+v, %v", sb, err)
+			}
+			if !reflect.DeepEqual(bodies, tc.want) {
+				t.Fatalf("requests = %q, want %q", bodies, tc.want)
+			}
+		})
+	}
+}

@@ -408,13 +408,45 @@ func (c *Client) Delete(ctx context.Context, name string, req DeleteRequest) (*D
 	return &out, nil
 }
 
-// Stop stops a sandbox and keeps it for a later start.
+// Stop stops a sandbox and keeps it for a later start. A MicroVM whose
+// disk could not be synced first is not stopped (CodeUnsynced).
 func (c *Client) Stop(ctx context.Context, name string) (*Sandbox, error) {
+	return c.StopWith(ctx, name, StopRequest{})
+}
+
+// StopWith is Stop with req. A daemon of DefenseClaw 1.0.3 or older refuses
+// StopRequest.DiscardUnsynced, a field its strict decoder does not know; it
+// holds no stop back for a failed sync either, so the stop the user accepted
+// goes again without the field. Kept, like Start's, through the 1.0.4
+// upgrade window.
+func (c *Client) StopWith(ctx context.Context, name string, req StopRequest) (*Sandbox, error) {
 	var out Sandbox
-	if err := c.do(ctx, http.MethodPost, sandboxPath(name, "stop"), nil, struct{}{}, &out); err != nil {
+	err := c.do(ctx, http.MethodPost, sandboxPath(name, "stop"), nil, req, &out)
+	if err != nil && req.DiscardUnsynced && unknownFieldRefused(err, "discard_unsynced") {
+		out = Sandbox{}
+		err = c.do(ctx, http.MethodPost, sandboxPath(name, "stop"), nil, StopRequest{}, &out)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// discardUnsyncedKey marks the context of a stop whose user accepted the
+// loss of what a MicroVM has not synced (StopRequest.DiscardUnsynced).
+type discardUnsyncedKey struct{}
+
+// WithDiscardUnsynced is ctx for a stop the user accepted that loss for:
+// the API's stop route sets it from StopRequest.DiscardUnsynced.
+func WithDiscardUnsynced(ctx context.Context) context.Context {
+	return context.WithValue(ctx, discardUnsyncedKey{}, true)
+}
+
+// DiscardUnsynced reports a stop whose user accepted that loss
+// (WithDiscardUnsynced).
+func DiscardUnsynced(ctx context.Context) bool {
+	v, _ := ctx.Value(discardUnsyncedKey{}).(bool)
+	return v
 }
 
 // Start starts a stopped sandbox with a freshly rotated binding.

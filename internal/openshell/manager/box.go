@@ -732,7 +732,7 @@ func (m *Manager) sandboxReleaseRefusal(gw *Gateway) error {
 
 // legacyUnprotected opens every account of a live legacy guest
 // (oldSupervisorLive): the owner's words for the state.
-const legacyUnprotected = "legacy sandbox running, not protected by the 1.0.4 egress policy"
+const legacyUnprotected = sandboxapi.LegacyUnprotected
 
 // legacyContainment is what DefenseClaw does, and does not, about a live
 // legacy guest. Closing its egress proxy and withdrawing the network rules
@@ -776,14 +776,25 @@ func oldSupervisorLive(phase audit.SandboxPhase, rec record) bool {
 // stop (or, on OpenShell SupportedMin or later, its start with --end-vm).
 func legacyWayOn(name string, phase audit.SandboxPhase, driver string) string {
 	if phase == audit.SandboxPhaseReady {
-		way := "save the work you need, then run `defenseclaw sandbox stop " + name + "`"
+		way := "save the work you need, then run `" + legacyStopCommand(name, phase) + "`"
 		if stopLosesWrites(driver) {
-			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost)"
+			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost) " +
+				"and, when that sync fails, asks before it stops the VM"
 		}
 		return way
 	}
 	return "OpenShell does not stop this VM, whose workload ended: `defenseclaw sandbox delete " + name + "` deletes it and its work, or on OpenShell " +
 		openshell.SupportedMin + " or later `defenseclaw sandbox start " + name + " --end-vm` ends the VM, losing what it has not written to its disk"
+}
+
+// legacyStopCommand is the command that ends the live legacy guest name in
+// phase: the stop of a ready one, else the delete of a MicroVM whose
+// workload ended (legacyWayOn says what each costs).
+func legacyStopCommand(name string, phase audit.SandboxPhase) string {
+	if phase == audit.SandboxPhaseReady {
+		return "defenseclaw sandbox stop " + name
+	}
+	return "defenseclaw sandbox delete " + name
 }
 
 // oldSupervisorWarning is the view's warning about the live legacy guest

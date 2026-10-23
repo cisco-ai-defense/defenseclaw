@@ -89,6 +89,17 @@ type SandboxStatus struct {
 	// which that stop ends with no flush; a stop of it ends it first
 	// (StopKill).
 	Legacy bool
+	// Unprotected are the account's live legacy guests, as a daemon of
+	// DefenseClaw 1.0.4 or later reports them (sandboxapi.Status.Unprotected):
+	// each runs unprotected until its user ends it.
+	Unprotected []UnprotectedSandbox
+}
+
+// UnprotectedSandbox is one live legacy guest of an account: its name and
+// the command its user runs to end it.
+type UnprotectedSandbox struct {
+	Name string `json:"name"`
+	Stop string `json:"stop"`
 }
 
 // daemonStop is scope for a stop of the sandbox daemon that st describes:
@@ -478,6 +489,7 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 		Managed   *struct {
 			PendingRestart bool `json:"pending_restart"`
 		} `json:"managed"`
+		Unprotected []UnprotectedSandbox `json:"unprotected"`
 	}
 	if err := json.Unmarshal(res.Stdout, &reply); err != nil {
 		return st, fmt.Errorf("read the sandbox status of %s: %w", a.Name, err)
@@ -495,6 +507,7 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 	}
 	st.StartedAt = reply.StartedAt
 	st.PendingRestart = reply.Managed != nil && reply.Managed.PendingRestart
+	st.Unprotected = reply.Unprotected
 	return st, nil
 }
 

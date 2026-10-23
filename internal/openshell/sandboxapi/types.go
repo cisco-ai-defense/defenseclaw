@@ -133,6 +133,25 @@ type Status struct {
 	// Managed is set by a managed host's per-user sandbox daemon: the
 	// caller's own policy, never another account's.
 	Managed *ManagedStatus `json:"managed,omitempty"`
+	// Unprotected names every live legacy guest (Sandbox.OldSupervisor),
+	// which runs unprotected until its user ends it, with the command that
+	// does: the managed lifecycle's status and verify read it. Unset by a
+	// daemon before DefenseClaw 1.0.4, whose running sandboxes all are.
+	Unprotected []UnprotectedSandbox `json:"unprotected,omitempty"`
+}
+
+// LegacyUnprotected opens every account of a live legacy guest
+// (Sandbox.OldSupervisor): its session runs the supervisor of an OpenShell
+// release older than the oldest supported one, whose network broker
+// DefenseClaw cannot contain.
+const LegacyUnprotected = "running unprotected: legacy sandbox"
+
+// UnprotectedSandbox is one entry of Status.Unprotected.
+type UnprotectedSandbox struct {
+	Name  string `json:"name"`
+	Phase string `json:"phase"`
+	// Stop is the command its user runs to end it.
+	Stop string `json:"stop"`
 }
 
 // Busy is how many sandboxes may hold compute (Live, and never fewer than
@@ -817,6 +836,17 @@ type DeleteResponse struct {
 	Deleted   bool     `json:"deleted"`
 	Providers []string `json:"providers,omitempty"`
 	Warnings  []string `json:"warnings,omitempty"`
+}
+
+// StopRequest is POST /sandboxes/{name}/stop.
+type StopRequest struct {
+	// DiscardUnsynced stops a MicroVM whose disk could not be synced
+	// first, losing what it wrote since its last sync: the user said yes
+	// to that. Without it the daemon refuses such a stop with CodeUnsynced
+	// and the sandbox keeps running. Nothing in DefenseClaw sets it on its
+	// own. A daemon before 1.0.4, which holds no stop back, refuses the
+	// field (Client.StopWith sends the stop again without it).
+	DiscardUnsynced bool `json:"discard_unsynced,omitempty"`
 }
 
 // StartRequest is POST /sandboxes/{name}/start.

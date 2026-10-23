@@ -44,7 +44,7 @@ func TestNoCommandStopsOrRunsInALegacySandbox(t *testing.T) {
 				func() error { return ta.Connect(bg, ConnectOptions{Name: "m1-b"}) },
 			} {
 				err := run()
-				if err == nil || !strings.Contains(err.Error(), "m1-b: legacy sandbox running, not protected by the 1.0.4 egress policy") ||
+				if err == nil || !strings.Contains(err.Error(), "m1-b: "+sandboxapi.LegacyUnprotected) ||
 					!strings.Contains(err.Error(), "does not stop it for you: save the work you need, then run `defenseclaw sandbox stop m1-b`") {
 					t.Fatalf("refusal = %v", err)
 				}
@@ -84,7 +84,7 @@ func TestDoctorIsNotReadyWhileALegacySandboxRuns(t *testing.T) {
 	ta.daemon.add(ended)
 	c := row(ta)
 	if c == nil || c.Status != openshell.StatusFail || c.Fix == nil ||
-		!strings.Contains(c.Detail, "old-ready, old-ended: legacy sandbox running, not protected by the 1.0.4 egress policy") ||
+		!strings.Contains(c.Detail, "old-ready, old-ended: "+sandboxapi.LegacyUnprotected) ||
 		!strings.Contains(c.Detail, "creates and starts no sandbox until they are gone") ||
 		!strings.Contains(c.Fix.Summary, "save the work you need in old-ready, then run `defenseclaw sandbox stop old-ready`, which syncs the VM's disk first") ||
 		!strings.Contains(c.Fix.Summary, "`defenseclaw sandbox delete old-ended` deletes old-ended and its work") {

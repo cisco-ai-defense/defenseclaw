@@ -316,7 +316,7 @@ func (a *App) legacySandboxCheck(ctx context.Context) *openshell.Check {
 		gone = "they are gone"
 	}
 	return &openshell.Check{ID: CheckIDLegacySandbox, Title: "Legacy sandboxes", Status: openshell.StatusFail,
-		Detail: strings.Join(names, ", ") + ": legacy sandbox running, not protected by the 1.0.4 egress policy (" + itsTheir(names) +
+		Detail: strings.Join(names, ", ") + ": " + sandboxapi.LegacyUnprotected + " (" + itsTheir(names) +
 			" session runs the supervisor of an OpenShell release older than " + openshell.SupportedMin + ", whose network broker can let connections " +
 			"bypass sandbox policy, NVIDIA/OpenShell#4494, and DefenseClaw cannot contain it); DefenseClaw stops " + itThem(names) +
 			" for nobody, and creates and starts no sandbox until " + gone,
@@ -332,7 +332,8 @@ func legacyStopWay(sb *sandboxapi.Sandbox) string {
 	if sb.Phase == "ready" {
 		way := "save the work you need in " + sb.Name + ", then run `" + CommandName + " stop " + sb.Name + "`"
 		if d, ok := openshell.LookupDriver(sb.Driver); !ok || !d.StopFlushes {
-			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost)"
+			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost) " +
+				"and, when that sync fails, asks before it stops the VM"
 		}
 		return way
 	}
