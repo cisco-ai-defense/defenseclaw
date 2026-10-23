@@ -19,6 +19,7 @@ on:
       - 'internal/enterprisehooks/managed_policy_windows.go'
       - 'bundles/local_observability_stack/grafana/dashboards/defenseclaw-agent-360.json'
       - 'internal/enterprisepolicy/claude.go'
+      - 'internal/openshell/manager/box.go'
       - '.github/workflows/docs-site.yml'
   pull_request:
     paths:
@@ -37,6 +38,7 @@ on:
       - 'internal/enterprisehooks/managed_policy_windows.go'
       - 'bundles/local_observability_stack/grafana/dashboards/defenseclaw-agent-360.json'
       - 'internal/enterprisepolicy/claude.go'
+      - 'internal/openshell/manager/box.go'
       - '.github/workflows/docs-site.yml'
   workflow_dispatch:
 

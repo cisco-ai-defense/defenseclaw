@@ -855,12 +855,13 @@ describe('agent identity rows (rel-1-0-4 GAP-0596)', () => {
     assert.ok(identity.includes('readIdentitySpoolFacts(userID, time.Now())'));
     assert.ok(cache.includes('!entry.failedSince.IsZero()'));
     assert.ok(cache.includes('entry.fetchedAt.Add(c.lifetime(entry.facts))'));
-    assert.ok(ad.includes('return entry.kept || entry.upn != upn'));
+    assert.ok(ad.includes('return entry.kept || entry.superseded || entry.upn != upn'));
     assert.ok(spool.includes('KeepLastKnownUPN(record, entry.previous)'));
     assert.ok(identity.includes('if record.UPNKept() {'));
     assert.ok(identity.includes('if facts.UPNKept {'));
     assert.match(windows, /wait := time\.Duration\(0\)[\s\S]*?if identityLookupBlocking\.Load\(\)/);
-    assert.ok(recorder.includes('rec.UPN = facts.UserUPN'));
+    assert.ok(recorder.includes('sighting := agentIdentityUPN{read: facts.UPNRead, upn: facts.UserUPN, unavailable: facts.UPNUnavailable}'));
+    assert.ok(recorder.includes('rec.UPN, rec.UPNUnavailable = sighting.upn, sighting.unavailable'));
     assert.ok(recorder.includes('rec.UPN = buffered.UPN'));
     assert.ok(store.includes('user_upn = excluded.user_upn'));
 
@@ -888,7 +889,7 @@ describe('Windows AD UPN outage wording', () => {
     assert.ok(row.includes('Agent identity rows leave that kept UPN out'), 'the current row behavior is missing');
     // GAP-0129 and GAP-0284: the cache and the guardian keep the last good UPN.
     const ad = source('internal/useridentity/directory_windows_facts.go');
-    assert.ok(ad.includes('upn, ttl, kept = previous, adUPNFailureTTL, previous != ""'));
+    assert.ok(ad.includes('c.entries[key] = adUPNEntry{upn: previous, kept: previous != "", expires: c.now().Add(adUPNFailureTTL)}'));
     const spool = source('internal/enterprisehooks/identity_spool.go');
     assert.ok(spool.includes('record.Facts.UPN = previous.Facts.UPN'));
     assert.ok(spool.includes('func MarkWindowsKeptUPN('));
