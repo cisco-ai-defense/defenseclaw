@@ -506,7 +506,14 @@ type protectedFile struct {
 	path    string
 	info    os.FileInfo
 	unknown bool
+	// renamed is an unreadable protected path that is a symlink: the file
+	// it names may have another name, so its link names cannot prove it.
+	renamed bool
 }
+
+// protectedLinkNames lists every name of a file (fileLinkNames). It is a
+// variable so a test can list the names a POSIX volume cannot.
+var protectedLinkNames = fileLinkNames
 
 type protectedFiles []protectedFile
 
@@ -520,6 +527,9 @@ func newProtectedFiles(home string) protectedFiles {
 			protected.info = info
 		case !os.IsNotExist(err):
 			protected.unknown = true
+			if link, err := os.Lstat(path); err == nil && link.Mode()&os.ModeSymlink != 0 {
+				protected.renamed = true
+			}
 		}
 		files = append(files, protected)
 	}
@@ -537,10 +547,17 @@ func (files protectedFiles) has(resolved string) bool {
 }
 
 // target maps a resolved write target to the protected path when both name
-// the same file. When a protected file cannot be identified, a multiply
-// linked target may be an alias of it and is reported as unresolvable.
+// the same file. A protected file the caller cannot read (sshd's Windows
+// administrators key file under its folder's ACL) is matched by the names
+// of a multiply linked target instead: the protected file's own entry is one
+// of its names, so a full list of names (Windows) without that file name
+// proves an ordinary file, like a pnpm or uv store file. A link count proves
+// nothing. Where the names cannot all be listed (POSIX, a network share) the
+// target may be an alias and is reported as unresolvable.
 func (files protectedFiles) target(resolved string) (string, bool) {
 	var info os.FileInfo
+	var names []string
+	listed, complete := false, false
 	for _, p := range files {
 		if p.info == nil && !p.unknown {
 			continue
@@ -557,8 +574,22 @@ func (files protectedFiles) target(resolved string) (string, bool) {
 			}
 			continue
 		}
-		if linkCount(resolved, info) > 1 {
+		if linkCount(resolved, info) <= 1 {
+			continue
+		}
+		if !listed {
+			listed = true
+			var listable bool
+			names, complete, listable = protectedLinkNames(resolved)
+			complete = complete && listable
+		}
+		if !complete || p.renamed {
 			return "", false
+		}
+		for _, name := range names {
+			if strings.EqualFold(filepath.Base(name), filepath.Base(p.path)) {
+				return p.path, true
+			}
 		}
 	}
 	return resolved, true

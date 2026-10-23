@@ -155,9 +155,9 @@ func TestInstructionProtectionOrdinaryHardLinks(t *testing.T) {
 					HookEventName: "PreToolUse", SessionID: "pnpm", CWD: project,
 					ToolName: c.tool, ToolInput: c.input,
 				})
-			// GAP-0997: on Windows the authorized-keys write proof still
-			// refuses this write; the instruction rules must not.
-			if response.Action == guardrailActionBlock && runtime.GOOS != "windows" {
+			// Windows too (GAP-0997): an unreadable administrators key file
+			// is matched by the file's link names, not its link count.
+			if response.Action == guardrailActionBlock {
 				t.Fatalf("%s %v of an ordinary hard-linked file (%s) was blocked: %v", c.tool, c.input, source, response.Findings)
 			}
 			for rule := range instructionRuleFiles {
@@ -267,6 +267,73 @@ func TestInstructionProtectionRefusesHardLinkCreation(t *testing.T) {
 				t.Fatalf("%q: action=%q findings=%v, want blocked=%t rule %s", tc.command, action, findings, tc.blocked, tc.rule)
 			}
 		})
+	}
+}
+
+// Hard-link API text that a program only prints, and a symbolic link a
+// wrapper (sudo, env, sh -c, find -exec, xargs) creates, make no hard link: an
+// allow-listed shell runs them as the release does. Executable hard-link
+// calls and wrapped hard links stay refused. Every command is judged from the
+// gateway's own view and, where the hook lists write targets, from the hook
+// client's evidence.
+func TestInstructionProtectionLinkTextAndWrappedSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell forms; TestInstructionProtectionWindowsHardLinks covers Windows")
+	}
+	root := instructionIdentityTestRoot(t)
+	project := filepath.Join(root, "project")
+	writeActiveAgentTestFile(t, project, "CLAUDE.md")
+	for _, tc := range []struct {
+		command, rule string
+	}{
+		{`python3 -c "print('os.link(')"`, ""},
+		{`python3 -c "x = 'os.link('; print(x)  # Path.hardlink_to("`, ""},
+		{`python3 -c "print('see CLAUDE.md before os.link(')"`, ""},
+		{`node -e "console.log('fs.linkSync(')"`, ""},
+		{`cd /tmp && python3 -c "print('os.link(')"`, ""},
+		{"sudo ln -s CLAUDE.md notes.txt", ""},
+		{"env ln --symbolic CLAUDE.md notes.txt", ""},
+		{"sh -c 'ln -s CLAUDE.md notes.txt'", ""},
+		{`find . -name CLAUDE.md -exec ln -s {} notes.txt \;`, ""},
+		{"sudo cp -s CLAUDE.md notes.txt", ""},
+		{`python3 -c "import os; os.link('CLAUDE.md', 'n')"`, "COG-CLAUDE-MD"},
+		{`python3 -c "exec('os.link(a, b)')"`, "COG-AGENTS-MD"},
+		{`python3 -c "print(f'{os.link(a, b)}')"`, "COG-AGENTS-MD"},
+		{`python3 -c "print('x')" 'os.link('`, "COG-AGENTS-MD"},
+		{"sudo ln CLAUDE.md notes.txt", "COG-CLAUDE-MD"},
+		{"sh -c 'ln -s a b; ln CLAUDE.md notes.txt'", "COG-CLAUDE-MD"},
+		{`find . -name CLAUDE.md -exec ln -s {} a \; -exec ln {} b \;`, "COG-CLAUDE-MD"},
+	} {
+		input := map[string]interface{}{"command": tc.command}
+		contexts := map[string]context.Context{"gateway file system": t.Context()}
+		body := mustJSON(t, map[string]interface{}{
+			"hook_event_name": "PreToolUse", "session_id": "link-text", "cwd": project,
+			"tool_name": "Bash", "tool_input": input,
+		})
+		if targets, ok := hookpaths.Decode(hookpaths.Resolve(body)); ok && len(targets) > 0 {
+			contexts["hook client evidence"] = context.WithValue(t.Context(), resolvedWritesContextKey{}, targets)
+		}
+		for source, ctx := range contexts {
+			api := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH")
+			allowTool(api.scannerCfg, "Bash", "claudecode", "ordinary shell work")
+			response := api.evaluateClaudeCodeHook(withAuthenticatedHookConnector(ctx, "claudecode"), claudeCodeHookRequest{
+				HookEventName: "PreToolUse", SessionID: "link-text", CWD: project, ToolName: "Bash", ToolInput: input,
+			})
+			if tc.rule != "" {
+				if response.Action != guardrailActionBlock || !findingStringHasRuleID(response.Findings, tc.rule) {
+					t.Errorf("%q (%s): action=%q findings=%v, want %s", tc.command, source, response.Action, response.Findings, tc.rule)
+				}
+				continue
+			}
+			if response.Action == guardrailActionBlock {
+				t.Errorf("%q (%s) was blocked: %v", tc.command, source, response.Findings)
+			}
+			for rule := range instructionRuleFiles {
+				if findingStringHasRuleID(response.Findings, rule) {
+					t.Errorf("%q (%s) got %s: %v", tc.command, source, rule, response.Findings)
+				}
+			}
+		}
 	}
 }
 

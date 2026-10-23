@@ -315,6 +315,44 @@ func TestInstructionLinkCreation(t *testing.T) {
 		{"wrapped symbolic", "sudo ln -s /opt/x /usr/local/bin/x", "", false},
 		{"wrapped copy", `bash -lc "cp a b" > out.txt`, "", false},
 		{"wrapped dynamic", `xargs ln < list`, "", false},
+		// Hard-link API text in a string the program only prints is data.
+		{"python printed text", `python3 -c "print('os.link(')"`, "", false},
+		{"python printed texts", `python3 -I -c 'print("x", "Path.hardlink_to(" + "y"); print("z")'`, "", false},
+		{"node printed text", `node -e "console.log('fs.linkSync(')"`, "", false},
+		{"ruby printed text", `ruby -e "puts 'FileUtils.ln('"`, "", false},
+		{"perl printed text", `perl -e 'print "os.link(\n"'`, "", false},
+		{"printed text after cd", `cd /tmp && python3 -c "print('os.link(')"`, "", false},
+		{"printed text in a shell body", `bash -c 'python3 -c "print(\"os.link(\")"'`, "", false},
+		{"printed text piped", `printf 'os.link(a, b)' | python3 -c "print('x')"`, "", false},
+		// Executable hard-link calls, and text the code can read, stay unknown.
+		{"python call", `python3 -c "import os; os.link(a, b)"`, "", true},
+		{"python f-string call", `python3 -c "print(f'{os.link(a, b)}')"`, "", true},
+		{"python exec", `python3 -c "exec('os.link(a, b)')"`, "", true},
+		{"python argument text", `python3 -c "print('x')" 'os.link('`, "", true},
+		{"python stdin code", `printf 'os.link(a, b)' | python3 -c "exec(input())"`, "", true},
+		{"python here-document", "python3 -c \"print('x')\" <<'EOF'\nos.link(a, b)\nEOF", "", true},
+		{"python import path", `PYTHONPATH=. python3 -c "print('os.link(')"`, "", true},
+		{"node template", "node -e 'console.log(`${require(\"fs\").linkSync(a, b)}`)'", "", true},
+		{"ruby interpolation", `ruby -e 'puts "#{File.link(a, b)}"'`, "", true},
+		{"perl interpolation", `perl -e 'print "@{[ os.link(a) ]}"'`, "", true},
+		{"interpreter reads stdin", `echo 'os.link(a, b)' | python3`, "", true},
+		{"shell body call", `sh -c 'python3 -c "import os; os.link(a, b)"'`, "", true},
+		// A wrapper's ln or cp is read with its options, as a direct call is.
+		{"sudo symbolic", "sudo ln -s CLAUDE.md notes.txt", "", false},
+		{"env symbolic long", "env ln --symbolic CLAUDE.md x", "", false},
+		{"nice symbolic force", "nice -n 5 ln -sf CLAUDE.md x", "", false},
+		{"sudo busybox symbolic", "sudo busybox ln -s CLAUDE.md x", "", false},
+		{"sh -c symbolic", "sh -c 'ln -s CLAUDE.md x'", "", false},
+		{"find exec symbolic", `find . -name CLAUDE.md -exec ln -s {} /tmp/x \;`, "", false},
+		{"xargs symbolic", "printf 'CLAUDE.md\\n' | xargs -I{} ln -s {} /tmp/x", "", false},
+		{"sudo cp symbolic", "sudo cp -s CLAUDE.md x", "", false},
+		{"sudo cp", "sudo cp CLAUDE.md backup.md", "", false},
+		{"sudo hard after symbolic", "sudo ln -s a b; sudo ln CLAUDE.md x", "CLAUDE.md", false},
+		{"find exec hard after symbolic", `find . -name CLAUDE.md -exec ln -s {} /tmp/x \; -exec ln {} /tmp/y \;`, "CLAUDE.md", false},
+		{"sh -c hard after symbolic", "sh -c 'ln -s a b; ln CLAUDE.md x'", "CLAUDE.md", false},
+		{"sudo cp link", "sudo cp -l CLAUDE.md x", "CLAUDE.md", false},
+		{"sudo ln dynamic option", `sudo ln "$OPT" CLAUDE.md x`, "CLAUDE.md", false},
+		{"sudo ln symbolic option value", "sudo ln -S .s CLAUDE.md x", "CLAUDE.md", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, unknown := InstructionLinkCreation("Bash", tc.command, project, home, nil)
@@ -337,6 +375,44 @@ func TestInstructionLinkCreation(t *testing.T) {
 	}
 	if got, unknown := InstructionLinkCreation("Bash", command, project, home, []string{far}); !sameInstructionPath(got, far) || unknown {
 		t.Fatalf("link of a loaded file's alias = %q, unknown=%t; want %q", got, unknown, far)
+	}
+}
+
+// A protected file the caller cannot read (sshd's Windows administrators key
+// file) is matched by the names of a multiply linked target, not by its link
+// count: an ordinary hard-linked file whose every name is listed is written
+// as the release writes it. Where the names cannot all be listed, it stays
+// unresolvable.
+func TestProtectedTargetOfUnreadableKeysByLinkNames(t *testing.T) {
+	root := instructionIdentityRoot(t)
+	stored := instructionIdentityFile(t, filepath.Join(root, "store"), "index.js")
+	installed := instructionIdentityLink(t, stored, filepath.Join(root, "node_modules", "index.js"))
+	single := instructionIdentityFile(t, root, "plain.js")
+	keys := filepath.Join(root, "ProgramData", "ssh", "administrators_authorized_keys")
+	t.Cleanup(func() { protectedLinkNames = fileLinkNames })
+	for _, tc := range []struct {
+		name               string
+		renamed            bool
+		names              []string
+		complete, listable bool
+		target, want       string
+		ok                 bool
+	}{
+		{"ordinary file, every name listed", false, []string{stored, installed}, true, true, installed, installed, true},
+		{"single link", false, nil, false, false, single, single, true},
+		{"a name of the keys file", false, []string{installed, filepath.Join(root, "x", "Administrators_Authorized_Keys")}, true, true, installed, keys, true},
+		{"names stop early", false, []string{stored}, false, true, installed, "", false},
+		{"names not listable", false, nil, false, false, installed, "", false},
+		{"keys path is a symlink", true, []string{stored, installed}, true, true, installed, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			protectedLinkNames = func(string) ([]string, bool, bool) { return tc.names, tc.complete, tc.listable }
+			files := protectedFiles{{path: keys, unknown: true, renamed: tc.renamed}}
+			got, ok := files.target(tc.target)
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("target(%q) = %q, %t; want %q, %t", tc.target, got, ok, tc.want, tc.ok)
+			}
+		})
 	}
 }
 

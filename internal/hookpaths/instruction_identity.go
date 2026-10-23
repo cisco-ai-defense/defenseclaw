@@ -188,7 +188,7 @@ func InstructionLinkCreation(tool, command, cwd, home string, loaded []string) (
 	if command == "" || isApplyPatchToolName(tool) || !filepath.IsAbs(cwd) {
 		return "", false
 	}
-	sources, opaque, wrapped := hardLinkSources(command, cwd, home)
+	sources, opaque, wrapped := hardLinkSources(command, cwd, home, 0)
 	for _, source := range sources {
 		literal := OperandPath(source, cwd)
 		if name, named := InstructionFileName(filepath.Base(literal), instructionNameFold()); named {
@@ -221,17 +221,17 @@ func InstructionLinkCreation(tool, command, cwd, home string, loaded []string) (
 // hardLinkSources lists the static source operands of the hard links a shell
 // command creates with ln, link or cp --link (also through busybox or
 // toybox). opaque reports a hard link whose operands are not static and an
-// interpreter or Windows hard-link call; wrapped reports a wrapper (sudo, sh
-// -c, find -exec, xargs) that may run ln or cp, whose options this package
-// does not read.
-func hardLinkSources(command, cwd, home string) (sources []string, opaque, wrapped bool) {
+// interpreter or Windows hard-link call that may run (linkTextInert); wrapped
+// reports a wrapper (sudo, sh -c, find -exec, xargs) that may run a hard ln
+// or cp (wrappedHardLink). depth counts the shell bodies read so far.
+func hardLinkSources(command, cwd, home string, depth int) (sources []string, opaque, wrapped bool) {
 	file, parsed := parseShell(command)
 	if !parsed {
 		return nil, hardLinkCall.MatchString(command), tactics.RunsProgram(command, linkPrograms...)
 	}
 	if hardLinkCall.MatchString(command) {
 		for _, stmt := range file.Stmts {
-			if !dataStatement(stmt, home) {
+			if !linkTextInert(stmt, command, cwd, home, depth) {
 				opaque = true
 				break
 			}
@@ -318,20 +318,10 @@ func hardLinkSources(command, cwd, home string) (sources []string, opaque, wrapp
 			if tactics.RunsProgram(command[start.Offset():call.End().Offset()], linkPrograms...) {
 				wrapped = true
 			}
-		case program == "find" || program == "xargs" || program == "parallel":
-			// find -exec and xargs run a program named by a later word.
-			text := command[start.Offset():call.End().Offset()]
-			for _, word := range words[1:] {
-				if slices.Contains(linkPrograms, programBase(word)) ||
-					slices.Contains(copyPrograms, programBase(word)) && copyLinkOption.MatchString(text) {
-					wrapped = true
-				}
-			}
 		default:
-			// A wrapper (sudo, env, nice, sh -c, eval) may run one.
-			text := command[start.Offset():call.End().Offset()]
-			if tactics.RunsProgram(text, linkPrograms...) ||
-				tactics.RunsProgram(text, copyPrograms...) && copyLinkOption.MatchString(text) {
+			// A wrapper (sudo, env, nice, sh -c, eval, find -exec, xargs)
+			// may run one.
+			if wrappedHardLink(command[start.Offset():call.End().Offset()], words, static, cwd, home, depth) {
 				wrapped = true
 			}
 		}
