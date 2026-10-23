@@ -44,8 +44,8 @@
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 13766,
-      "sha256": "e4cef8d1c33b19fc3576a3a323d3070b99ac88ba632e35171978bde5b12c3c20"
+      "size": 14106,
+      "sha256": "2693cb593ddce0a98771843c95863e958aedbbd5da74a61dfa364f6a373acc06"
     },
     "/usr/local/lib/defenseclaw/hooks/devin-hook.sh": {
       "mode": "-rwxr-xr-x",

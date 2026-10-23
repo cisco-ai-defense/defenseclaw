@@ -409,8 +409,7 @@ case "$ACTION" in
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
 
-{{if .Sandbox}}if ! defenseclaw_sandbox_confirm_receipt "/api/v1/codex/hook" "$RESULT" \
-  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}"; then
+{{if .Sandbox}}if ! defenseclaw_sandbox_confirm_receipt "/api/v1/codex/hook" "$RESULT"; then
   fail_unreachable "sandbox hook receipt was not acknowledged"
 fi
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
