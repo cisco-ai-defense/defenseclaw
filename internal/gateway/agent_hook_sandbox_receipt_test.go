@@ -225,8 +225,8 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			if err := f.api.recoverPendingHook(t.Context(), entry); err != nil {
 				t.Fatal(err)
 			}
-			if got := f.audited(t, faultSession)[faultSession]; got != "block" {
-				t.Fatalf("failed ACK final audit = %q, want block", got)
+			if got := f.audited(t, faultSession)[faultSession]; got != "block/no_answer" {
+				t.Fatalf("failed ACK final audit = %q, want block/no_answer", got)
 			}
 			rows, err = f.store.ListEvents(200)
 			if err != nil {
