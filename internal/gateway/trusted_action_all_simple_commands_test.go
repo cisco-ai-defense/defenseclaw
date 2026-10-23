@@ -217,8 +217,10 @@ func TestTrustedActionFunctionCallSpellingsMatchBody(t *testing.T) {
 		"f() { rm -rf /; }; 'f'",
 		`f() { rm -rf /; }; "f"; true`,
 		`f() { rm -rf /; }; \f`,
-		"f() { rm -rf /; }; command f",
-		"f() { rm -rf /; }; builtin f",
+		// command and builtin skip function lookup, but an eval after them
+		// runs its text with it (command f itself: TestTrustedActionW24InertDefinitionsDoNotBlock).
+		"f() { rm -rf /; }; command eval f",
+		"f() { rm -rf /; }; builtin eval f",
 		"f() { rm -rf /; }; time f",
 		"f() { rm -rf /; }; eval f",
 		"f() { rm -rf /; }; trap f EXIT",
@@ -244,7 +246,7 @@ func TestTrustedActionFunctionCallSpellingsMatchBody(t *testing.T) {
 	}
 	for _, command := range []string{
 		"f() { cat ~/.ssh/id_rsa; }; 'f'",
-		"f() { cat ~/.ssh/id_rsa; }; command f",
+		"f() { cat ~/.ssh/id_rsa; }; command eval f",
 		"f() { cat ~/.ssh/id_rsa; }; eval f",
 		"f() { cat ~/.ssh/id_rsa; }; eval 'true; f'",
 		"f() { cat ~/.ssh/id_rsa; }; trap f EXIT",
