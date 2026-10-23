@@ -889,6 +889,13 @@ func (c removedOnlyConnector) hookLeft(opts SetupOpts) error {
 		}
 		return nil
 	case state == removedScriptAbsent:
+		if _, err := os.Lstat(opts.DataDir); errors.Is(err, os.ErrNotExist) {
+			// An uninstall removed the data directory, the stub with it: an
+			// agent config that still names the script is a leftover the
+			// teardown lists for the user, never residue that holds the
+			// uninstall (until 1.1).
+			return nil
+		}
 		if config, live := c.registrationRunsScript(opts); live {
 			return fmt.Errorf("%s is gone, but %s still runs or imports it (or cannot be checked), so %s does not block its calls. To finish: run %s, which writes the stub that blocks every call, or %s",
 				path, config, c.label, c.teardownCommand(), c.configStep)
