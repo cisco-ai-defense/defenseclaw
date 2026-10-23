@@ -245,7 +245,7 @@ func stripCopilotVSCodeOwnedHooks(data []byte, goos, hookBinary string) ([]byte,
 		}
 	}
 	value, present := doc.get("hooks")
-	if !present {
+	if !present || value == nil {
 		if !foreignTopLevel {
 			return nil, true, false, nil
 		}

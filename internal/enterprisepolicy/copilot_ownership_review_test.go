@@ -87,7 +87,7 @@ func TestCopilotManagedDropInPreservesIndependentHandlers(t *testing.T) {
 	}
 }
 
-func TestCopilotPolicyRemovalKeepsCommandWithOperatorStatement(t *testing.T) {
+func TestCopilotPolicyRemovalStripsTamperedOwnCommand(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "windows"} {
 		t.Run(goos, func(t *testing.T) {
 			binary := "/opt/defenseclaw/bin/defenseclaw-hook"
@@ -106,7 +106,7 @@ func TestCopilotPolicyRemovalKeepsCommandWithOperatorStatement(t *testing.T) {
 			} else {
 				prior = strings.TrimPrefix(prior, connector.CopilotRemovedDeploymentGuardPOSIX(binary))
 			}
-			if !copilotHandlerIsRemovable(opts, "preToolUse", map[string]any{
+			if !copilotHandlerIsRemovable(opts, map[string]any{
 				"type": "command", field: prior, "timeoutSec": 30,
 			}) {
 				t.Fatal("prior release handler must remain removable during upgrade")
@@ -120,6 +120,7 @@ func TestCopilotPolicyRemovalKeepsCommandWithOperatorStatement(t *testing.T) {
 			document := map[string]any{"version": 1, "hooks": map[string]any{"preToolUse": []any{
 				map[string]any{"type": "command", field: published, "timeoutSec": 30},
 				map[string]any{"type": "command", field: operator, "timeoutSec": 30},
+				map[string]any{"type": "command", field: "operator-tool"},
 			}}}
 			data, err := json.Marshal(document)
 			if err != nil {
@@ -130,21 +131,21 @@ func TestCopilotPolicyRemovalKeepsCommandWithOperatorStatement(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !removed {
-				t.Fatal("published handler was not removed")
+				t.Fatal("DefenseClaw handlers were not removed")
 			}
 			var got map[string]any
 			if err := json.Unmarshal(remaining, &got); err != nil {
 				t.Fatal(err)
 			}
 			entries := got["hooks"].(map[string]any)["preToolUse"].([]any)
-			if len(entries) != 1 || entries[0].(map[string]any)[field] != operator {
-				t.Fatalf("operator statement was removed: %s", remaining)
+			if len(entries) != 1 || entries[0].(map[string]any)[field] != "operator-tool" {
+				t.Fatalf("tampered command remained or independent handler was removed: %s", remaining)
 			}
 		})
 	}
 }
 
-func TestCopilotManagedReconcileRefusesCombinedHandler(t *testing.T) {
+func TestCopilotManagedReconcileRepairsOwnCommandAndRefusesCombinedHandler(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "windows"} {
 		t.Run(goos, func(t *testing.T) {
 			binary := "/opt/defenseclaw/bin/defenseclaw-hook"
@@ -177,13 +178,52 @@ func TestCopilotManagedReconcileRefusesCombinedHandler(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if merged, err := mergeCopilotDropIn(opts, current); err == nil || merged != nil ||
+					merged, err := mergeCopilotDropIn(opts, current)
+					if variant == "suffix" {
+						if err != nil || string(merged) != string(document) {
+							t.Fatalf("reconcile did not restore its %s handler: returned_document=%s, err=%v", variant, merged, err)
+						}
+					} else if err == nil || merged != nil ||
 						!strings.Contains(err.Error(), "move independent content to a separate handler") {
 						t.Fatalf("reconcile claimed a combined %s handler: returned_document=%t, err=%v", variant, merged != nil, err)
 					}
 				})
 			}
 		})
+	}
+}
+
+func TestCopilotExtraFieldVerifyAndReconcileAgree(t *testing.T) {
+	opts := testOptions(t)
+	opts.CopilotCLIPolicyOnly = true
+	path, err := copilotDropInPath(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := copilotTarget{}
+	if _, err := target.Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(readFile(t, path)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	pre := doc["hooks"].(map[string]any)["preToolUse"].([]any)[0].(map[string]any)
+	pre["operator"] = map[string]any{"command": "operator-tool"}
+	edited, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, string(edited))
+	verified, err := target.Verify(opts)
+	if err != nil || verified.Covered || !hasConflict(verified, "move independent content to a separate handler") {
+		t.Fatalf("verify claimed a handler reconcile cannot safely replace: %+v, %v", verified, err)
+	}
+	if _, err := target.Reconcile(opts); err == nil || !strings.Contains(err.Error(), "move independent content to a separate handler") {
+		t.Fatalf("reconcile did not refuse the extra field: %v", err)
+	}
+	if got := readFile(t, path); got != string(edited) {
+		t.Fatalf("reconcile changed the combined handler: %s", got)
 	}
 }
 

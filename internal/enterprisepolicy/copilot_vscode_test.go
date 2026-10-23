@@ -284,7 +284,7 @@ func TestCopilotVSCodeRepairsATamperedHookFile(t *testing.T) {
 
 func TestCopilotVSCodeClaimsInertPluginDocument(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "windows"} {
-		for _, document := range []string{`{}`, `{"hooks":{"PreToolUse":[]}}`} {
+		for _, document := range []string{`{}`, `{"hooks":null}`, `{"hooks":{"PreToolUse":[]}}`} {
 			t.Run(goos+"/"+document, func(t *testing.T) {
 				home := t.TempDir()
 				hookBinary := testHookBinary
@@ -329,13 +329,15 @@ func TestCopilotVSCodeClaimsInertPluginDocument(t *testing.T) {
 	home := t.TempDir()
 	path := CopilotPluginHooksPath(home)
 	independent := `{"hooks":{"PreToolUse":[]},"operator":{"enabled":true}}`
-	writeFile(t, path, independent)
-	for _, keep := range []bool{true, false} {
-		result, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
-			Home: home, GOOS: "linux", HookBinary: testHookBinary, Plugin: keep,
-		})
-		if err != nil || !slices.Contains(result.Kept, path) || readFile(t, path) != independent {
-			t.Fatalf("independent plugin content was changed: %+v, %v", result, err)
+	for _, independent := range []string{independent, `{"hooks":null,"operator":{"enabled":true}}`} {
+		writeFile(t, path, independent)
+		for _, keep := range []bool{true, false} {
+			result, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+				Home: home, GOOS: "linux", HookBinary: testHookBinary, Plugin: keep,
+			})
+			if err != nil || !slices.Contains(result.Kept, path) || readFile(t, path) != independent {
+				t.Fatalf("independent plugin content was changed: %+v, %v", result, err)
+			}
 		}
 	}
 }

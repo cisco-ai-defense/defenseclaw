@@ -122,10 +122,11 @@ func copilotHandlerReferencesManagedHook(opts Options, raw any) bool {
 	return strings.HasPrefix(command, shellQuote(opts.HookBinary)+" hook --connector copilot --enterprise-managed --event ")
 }
 
-// A recognizable command can still contain an independent shell statement.
-// Cleanup requires the whole executable field to match a published render.
-func copilotHandlerIsRemovable(opts Options, event string, raw any) bool {
-	if !copilotHandlerIsOwned(opts, raw) || stringField(raw, "type") != "command" {
+// DefenseClaw owns a recognizable command in its drop-in when the handler
+// contains only its contract fields. A modified executable field is drift to
+// repair; extra fields may contain independent content and stay untouched.
+func copilotHandlerIsRemovable(opts Options, raw any) bool {
+	if !copilotHandlerIsOwned(opts, raw) {
 		return false
 	}
 	field := "bash"
@@ -148,16 +149,7 @@ func copilotHandlerIsRemovable(opts Options, event string, raw any) bool {
 			return false
 		}
 	}
-	command := stringField(raw, field)
-	published := stringField(copilotHandler(opts, event, 0), field)
-	if command == published {
-		return true
-	}
-	if opts.goos() == "windows" {
-		old := strings.Replace(published, connector.CopilotRemovedDeploymentGuardPowerShell(opts.HookBinary)+"; ", "", 1)
-		return command == old
-	}
-	return command == strings.TrimPrefix(published, connector.CopilotRemovedDeploymentGuardPOSIX(opts.HookBinary))
+	return true
 }
 
 // copilotHandlerIsIntact reports a DefenseClaw handler whose command is the
@@ -260,8 +252,9 @@ func inspectCopilot(opts Options, state *State) error {
 					state.OwnedEntries++
 					ownedPerEvent[event]++
 					repair := "the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites it"
-					if !copilotHandlerIsRemovable(opts, event, handler) {
+					if !copilotHandlerIsRemovable(opts, handler) {
 						repair = "move independent content to a separate handler, then run repair; DefenseClaw leaves this combined handler in place"
+						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s contains independent fields; %s", file, event, repair)
 					}
 					if !copilotHandlerIsIntact(opts, event, handler) {
 						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s is not the command DefenseClaw publishes, so it may not enforce; %s", file, event, repair)
@@ -446,7 +439,7 @@ func copilotStrip(opts Options) stripFunc {
 			}
 			remaining := make([]any, 0, len(list))
 			for _, handler := range list {
-				if copilotHandlerIsRemovable(opts, event, handler) {
+				if copilotHandlerIsRemovable(opts, handler) {
 					owned = true
 					continue
 				}
@@ -487,7 +480,7 @@ func mergeCopilotDropIn(opts Options, current []byte) ([]byte, error) {
 				value, _ := hooks.get(event)
 				list, _ := value.([]any)
 				for _, handler := range list {
-					if copilotHandlerReferencesManagedHook(opts, handler) && !copilotHandlerIsRemovable(opts, event, handler) {
+					if copilotHandlerReferencesManagedHook(opts, handler) && !copilotHandlerIsRemovable(opts, handler) {
 						return nil, fmt.Errorf("event %s combines DefenseClaw's command with independent content; move independent content to a separate handler", event)
 					}
 				}
