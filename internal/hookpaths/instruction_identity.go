@@ -163,7 +163,7 @@ func InstructionLinkCreation(tool, command, cwd, home string) (instruction strin
 	if command == "" || isApplyPatchToolName(tool) || !filepath.IsAbs(cwd) {
 		return "", false
 	}
-	sources, opaque := hardLinkSources(command, cwd, home)
+	sources, opaque, wrapped := hardLinkSources(command, cwd, home)
 	for _, source := range sources {
 		literal := OperandPath(source, cwd)
 		if name, named := InstructionFileName(filepath.Base(literal), instructionNameFold()); named {
@@ -183,24 +183,28 @@ func InstructionLinkCreation(tool, command, cwd, home string) (instruction strin
 		}
 		unknown = unknown || aliasUnknown
 	}
-	if opaque {
+	if opaque || wrapped {
 		if match := instructionNameText.FindStringSubmatch(command); match != nil {
 			name, _ := InstructionFileName(match[1], true)
 			return name, false
 		}
-		unknown = true
+		// A wrapped ln without an instruction name is left to the write:
+		// a later write through the link meets InstructionAlias.
+		unknown = unknown || opaque
 	}
 	return "", unknown
 }
 
 // hardLinkSources lists the static source operands of the hard links a shell
 // command creates with ln, link or cp --link (also through busybox or
-// toybox). opaque reports a hard link whose operands are not static, a
-// wrapper that may run ln, and an interpreter or Windows hard-link call.
-func hardLinkSources(command, cwd, home string) (sources []string, opaque bool) {
+// toybox). opaque reports a hard link whose operands are not static and an
+// interpreter or Windows hard-link call; wrapped reports a wrapper (sudo, sh
+// -c, find -exec, xargs) that may run ln or cp, whose options this package
+// does not read.
+func hardLinkSources(command, cwd, home string) (sources []string, opaque, wrapped bool) {
 	file, parsed := parseShell(command)
 	if !parsed {
-		return nil, hardLinkCall.MatchString(command) || tactics.RunsProgram(command, linkPrograms...)
+		return nil, hardLinkCall.MatchString(command), tactics.RunsProgram(command, linkPrograms...)
 	}
 	if hardLinkCall.MatchString(command) {
 		for _, stmt := range file.Stmts {
@@ -289,7 +293,7 @@ func hardLinkSources(command, cwd, home string) (sources []string, opaque bool) 
 		case program == "":
 			// A program named by a parameter or substitution may be ln.
 			if tactics.RunsProgram(command[start.Offset():call.End().Offset()], linkPrograms...) {
-				opaque = true
+				wrapped = true
 			}
 		case program == "find" || program == "xargs" || program == "parallel":
 			// find -exec and xargs run a program named by a later word.
@@ -297,7 +301,7 @@ func hardLinkSources(command, cwd, home string) (sources []string, opaque bool) 
 			for _, word := range words[1:] {
 				if slices.Contains(linkPrograms, programBase(word)) ||
 					slices.Contains(copyPrograms, programBase(word)) && copyLinkOption.MatchString(text) {
-					opaque = true
+					wrapped = true
 				}
 			}
 		default:
@@ -305,12 +309,12 @@ func hardLinkSources(command, cwd, home string) (sources []string, opaque bool) 
 			text := command[start.Offset():call.End().Offset()]
 			if tactics.RunsProgram(text, linkPrograms...) ||
 				tactics.RunsProgram(text, copyPrograms...) && copyLinkOption.MatchString(text) {
-				opaque = true
+				wrapped = true
 			}
 		}
 		return true
 	})
-	return sources, opaque
+	return sources, opaque, wrapped
 }
 
 // symbolicLinkCall reports an ln call with a static symbolic option. link

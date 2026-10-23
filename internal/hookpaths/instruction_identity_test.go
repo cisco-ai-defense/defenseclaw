@@ -247,6 +247,9 @@ func TestInstructionLinkCreation(t *testing.T) {
 		{"ordinary hard link", "ln plain.txt plain2.txt", "", false},
 		{"data only", `echo "os.link(CLAUDE.md)"`, "", false},
 		{"read", "cat CLAUDE.md", "", false},
+		{"wrapped symbolic", "sudo ln -s /opt/x /usr/local/bin/x", "", false},
+		{"wrapped copy", `bash -lc "cp a b" > out.txt`, "", false},
+		{"wrapped dynamic", `xargs ln < list`, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, unknown := InstructionLinkCreation("Bash", tc.command, project, home)
@@ -260,21 +263,21 @@ func TestInstructionLinkCreation(t *testing.T) {
 	}
 }
 
+// A runner (sh -c, env, eval, find -exec, xargs) hides ln's options; an
+// instruction name in its text is enough to refuse it.
 func TestInstructionLinkCreationThroughRunners(t *testing.T) {
 	root := instructionIdentityRoot(t)
 	project := filepath.Join(root, "project")
 	instructionIdentityFile(t, project, "AGENTS.md")
 	for _, command := range []string{
-		"xargs ln < list",
 		"printf 'AGENTS.md\\n' | xargs -I{} ln {} /tmp/x",
 		`find . -name AGENTS.md -execdir cp -l {} /tmp/x \;`,
 		"sh -c 'ln AGENTS.md x'",
 		"env ln AGENTS.md x",
 		"eval 'ln AGENTS.md x'",
 	} {
-		got, unknown := InstructionLinkCreation("Bash", command, project, root)
-		if got == "" && !unknown {
-			t.Errorf("InstructionLinkCreation(%q) allowed a hard link it cannot read", command)
+		if got, _ := InstructionLinkCreation("Bash", command, project, root); got != "AGENTS.md" {
+			t.Errorf("InstructionLinkCreation(%q) = %q, want AGENTS.md", command, got)
 		}
 	}
 }
