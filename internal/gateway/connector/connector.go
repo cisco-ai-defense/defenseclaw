@@ -578,10 +578,9 @@ func (e ContentEnvelope) clone() ContentEnvelope {
 //     gateway uses this to decide whether to expect a propagated trace
 //     context vs. mint a fresh root span. v6-managed hooks set this true.
 //   - NativeOTLP: optional descriptor for the connector's native OTLP
-//     emission. nil when the connector does not emit native OTLP (cursor,
-//     hermes, copilot today), and for per-user Codex or Claude Code because
-//     their native exporters cannot verify the loopback listener's owner.
-//     Managed Codex (TOML) and Claude Code (env) retain their descriptors.
+//     emission. nil on host Codex and Claude Code installs because their
+//     native exporters cannot verify the loopback listener's owner. Their
+//     isolated sandbox renderers keep a private native receiver.
 //   - Decode: optional decoder for connector-specific event/content/tool
 //     wire shape. Identity fields returned by Decode are advisory only and
 //     MUST NOT override Correlation bindings; the gateway accepts correlation

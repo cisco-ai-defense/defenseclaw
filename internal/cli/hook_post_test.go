@@ -59,6 +59,24 @@ func TestHookPostCommandUsesConnectedSameAccountSocket(t *testing.T) {
 	}
 }
 
+func TestSecureClientNativePluginPostRefusesAnUnverifiedListener(t *testing.T) {
+	previous := secureClientHost
+	secureClientHost = func() bool { return true }
+	t.Cleanup(func() { secureClientHost = previous })
+	seen := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		seen++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	input := `{"path":"/api/v1/amp/hook","headers":{"Authorization":"Bearer shared-secret"},"body":"private tool event"}`
+	var output bytes.Buffer
+	err := postSecureClientPluginHook(context.Background(), strings.TrimPrefix(server.URL, "http://"), strings.NewReader(input), &output)
+	if err == nil || seen != 0 || output.Len() != 0 {
+		t.Fatalf("Secure Client sent a hook to an unverified listener: requests=%d output=%q error=%v", seen, output.String(), err)
+	}
+}
+
 func TestHookVerifyConnectedCommandProvesTheOpenSocket(t *testing.T) {
 	cmd, _, err := rootCmd.Find([]string{"hook-verify-connected"})
 	if err != nil || cmd == rootCmd || cmd.RunE == nil {

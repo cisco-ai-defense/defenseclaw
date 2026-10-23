@@ -14,10 +14,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -171,8 +173,8 @@ func NewHTTPEvaluator(endpoint, token string) (*HTTPEvaluator, error) {
 	return newHTTPEvaluator(endpoint, token, false)
 }
 
-// NewManagedHTTPEvaluator is for an administrator-owned gateway service. A
-// user guard cannot require that service's accepted socket to have its UID.
+// NewManagedHTTPEvaluator is for an administrator-owned gateway service. It
+// verifies the process behind the accepted socket before sending a challenge.
 func NewManagedHTTPEvaluator(endpoint, token string) (*HTTPEvaluator, error) {
 	return newHTTPEvaluator(endpoint, token, true)
 }
@@ -192,11 +194,10 @@ func newHTTPEvaluator(endpoint, token string, managed bool) (*HTTPEvaluator, err
 	challengeURL.Path = "/api/v1/acp/challenge"
 	var client *http.Client
 	if managed {
-		transport := http.DefaultTransport.(*http.Transport).Clone()
-		// The scoped token must never go to an environment proxy.
-		transport.Proxy = nil
-		client = &http.Client{Timeout: 10 * time.Second, Transport: transport,
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		client, err = managedGatewayClientFactory(10*time.Second, u.Host, managedGatewayServiceName())
+		if err != nil {
+			return nil, fmt.Errorf("verify managed ACP gateway transport: %w", err)
+		}
 	} else {
 		// Authenticate the accepted socket before even the challenge's MAC
 		// or the encrypted evaluation crosses a per-user account boundary.
@@ -211,6 +212,22 @@ func newHTTPEvaluator(endpoint, token string, managed bool) (*HTTPEvaluator, err
 		token:             token,
 		client:            client,
 	}, nil
+}
+
+var managedGatewayClientFactory = hookexec.NewManagedEnterpriseGatewayHTTPClient
+
+func managedGatewayServiceName() string {
+	switch runtime.GOOS {
+	case "linux":
+		return "defenseclaw-gateway.service"
+	case "darwin":
+		if secureClientHost() {
+			return "com.cisco.secureclient.defenseclaw"
+		}
+		return "com.cisco.defenseclaw.gateway"
+	default:
+		return managed.StandaloneWindowsGatewaySvc
+	}
 }
 
 func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, error) {

@@ -324,9 +324,19 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 	// A plugin rendered before the listener proof existed would still send
 	// its credential to whoever holds the TCP port; it is repaired.
 	if managedPluginListenerProof(opts) {
+		proofCall := []byte("if (DC_LISTENER_PROOF) return defenseclawProvenTCPRequest(path, init, token);")
+		if pluginSecureClientProfile(opts) {
+			proofCall = []byte("if (DC_LISTENER_PROOF) await defenseclawProveListener(token, init.signal);")
+		}
 		markers = append(markers,
 			[]byte("const DC_LISTENER_PROOF = \"1\";\n"),
-			[]byte("if (DC_LISTENER_PROOF) await defenseclawProveListener(token, init.signal);"),
+			proofCall,
+		)
+	}
+	if !opts.ManagedEnterprise {
+		markers = append(markers,
+			[]byte(`const DC_PER_USER_NATIVE_POST = "1";`),
+			[]byte(`execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR]`),
 		)
 	}
 	for _, marker := range markers {

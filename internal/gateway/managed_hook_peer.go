@@ -515,6 +515,16 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			a.serveSandboxRoute(authorizer, peer, route, w, r, next)
 			return
 		}
+		if r.URL.Path == connector.UserScopedRotationProofPath {
+			// A root lifecycle can prove a large roster during key rotation.
+			// Hook-call budgets must not make that transaction fail mid-roster.
+			if peer.UID != 0 {
+				writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonGuardianOnly)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
 		r, release := a.admitHookCaller(w, r, strconv.Itoa(peer.UID), route)
 		if release == nil {
 			return
@@ -651,9 +661,10 @@ var loadStandaloneRuntimeDescriptor = func(goos string) (*managed.RuntimeDescrip
 // managedHookSocketMux registers only the agent-facing routes on the hook
 // socket: connector hook endpoints, the inspect endpoints, the Codex
 // notifier, the refused-write report of a standard user CLI, the root
-// guardian's repair report and the managed sandbox authority routes a user's
-// sandbox daemon calls. Management, status, configuration, policy and scan
-// routes are not reachable through it at all.
+// guardian's repair report, the root lifecycle's credential rotation proof,
+// and the managed sandbox authority routes a user's sandbox daemon calls.
+// Management, status, configuration, policy and scan routes are not reachable
+// through it at all.
 func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
@@ -668,6 +679,7 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
 	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
 	mux.HandleFunc(managedGuardianRepairAuditPath, a.handleManagedGuardianRepairAudit)
+	mux.HandleFunc(connector.UserScopedRotationProofPath, a.serveRotationListenerProof)
 	a.registerSandboxAuthorityRoutes(mux)
 	a.registerSandboxRelayRoutes(mux)
 	handler := bodyLimitMiddleware(mux, func(r *http.Request) int64 {

@@ -71,15 +71,15 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "6cd04c194e9e6d5a4118d02d20ef858f4f92747133a53f109e7cdea192956969",  # amp-plugin.ts
-            "392bc21bb99d9978b69683dca8fd022d074037a1e9df6f885916c6525537cdd6",  # amp-plugin-secure-client.ts
+            "79116e6510f4831313edcb643b453723ac73e0b631864c6b97f7a7fd62e5882f",  # amp-plugin.ts
+            "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "ab1d7021b74d9f72126ca25e194b66c4b8a4f935762fcc382146bacdfdfaadcb",  # opencode-plugin.js
-            "d0352385448f53df7378bc4a2bcdb2d92c0f3c4c4bb7f7d3d04b4c433ed2cf9b",  # opencode-plugin-managed.js
-            "f81b5b2f208d2535ac028c49bc95941d5666bee72315053386c05cd9411e34de",  # opencode-plugin-secure-client.js
+            "02b3992a6acf4eeaff78be66700008f9d0f31c879226dfdb7b638a4fa7a94071",  # opencode-plugin.js
+            "75621934ec7511f7c7f4e3121aed6dc222a73315e1f17cebe9c4354ddc5c0e0f",  # opencode-plugin-managed.js
+            "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
         }
     ),
 }
@@ -108,6 +108,18 @@ _BRIDGE_DYNAMIC_LINES = {
             b'"\n',
             b'const DC_TOKEN_FILE = "{{.TokenFileJS}}"\n',
             "token",
+        ),
+        (
+            b'const DC_NATIVE_POST_BINARY = "',
+            b'"\n',
+            b'const DC_NATIVE_POST_BINARY = "{{.NativePostBinaryJS}}"\n',
+            "native",
+        ),
+        (
+            b'const DC_FAIL_MODE: string = "',
+            b'" // "open" or "closed"\n',
+            b'const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"\n',
+            "mode",
         ),
         (
             b'const DC_HOOK_SOCKET: string = "',
@@ -152,6 +164,18 @@ _BRIDGE_DYNAMIC_LINES = {
             b'";\n',
             b'const DC_TOKEN_FILE = "{{.TokenFileJS}}";\n',
             "token",
+        ),
+        (
+            b'const DC_NATIVE_POST_BINARY = "',
+            b'";\n',
+            b'const DC_NATIVE_POST_BINARY = "{{.NativePostBinaryJS}}";\n',
+            "native",
+        ),
+        (
+            b'const DC_FAIL_MODE = "',
+            b'"; // "open" or "closed"\n',
+            b'const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"\n',
+            "mode",
         ),
         (
             b'const DC_HOOK_SOCKET = "',
@@ -398,6 +422,8 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
     absolute paths.
     """
 
+    if kind == "native" and value == b"":
+        return False
     if value == b"":
         return True
     try:
@@ -406,7 +432,7 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
         return False
     if not isinstance(path, str) or not os.path.isabs(path) or any(ord(char) < 0x20 for char in path):
         return False
-    if kind != "guard":
+    if kind not in {"guard", "native"}:
         return True
     try:
         info = os.lstat(path)
@@ -436,7 +462,9 @@ def _valid_bridge_dynamic_value(
     if kind == "proof":
         # The Windows standalone listener proof is on ("1") or off ("").
         return value in {b"", b"1"}
-    if kind in {"socket", "guard", "marker"}:
+    if kind == "mode":
+        return value in {b"open", b"closed"}
+    if kind in {"socket", "guard", "marker", "native"}:
         return _valid_bridge_managed_path(kind, value)
     if kind != "token":
         return False
@@ -471,6 +499,10 @@ def _matches_immutable_bridge_template(
             for index, line in enumerate(lines)
             if line.startswith(prefix) and line.endswith(suffix)
         ]
+        if not matches and kind in {"native", "proof", "mode"}:
+            # Current and Secure Client templates have distinct fields, each
+            # still covered by its exact pinned digest.
+            continue
         if len(matches) != 1:
             return False
         index = matches[0]

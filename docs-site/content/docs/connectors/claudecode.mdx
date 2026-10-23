@@ -9,7 +9,7 @@ keywords:
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-DefenseClaw adds hooks to Claude Code's settings. Per-user host setup disables native OpenTelemetry export and removes settings left by earlier releases: Claude Code cannot verify which local account holds a stopped gateway's TCP port. Managed hosts and OpenShell images retain native telemetry. This is a hook connector: Claude Code talks to Anthropic directly and no proxy is involved.
+DefenseClaw adds hooks to Claude Code's settings. Host setup disables native OpenTelemetry export and removes settings left by earlier releases: Claude Code cannot verify which local account holds a stopped gateway's TCP port. Isolated OpenShell images retain native telemetry. This is a hook connector: Claude Code talks to Anthropic directly and no proxy is involved.
 
 ## Platform support
 
@@ -23,7 +23,7 @@ defenseclaw setup claude-code --mode action  # block on policy hits
 ```
 
 On Windows, run the same commands in PowerShell. Quit and reopen Claude Code afterwards so it loads the hooks.
-After upgrading from an earlier per-user release, quit all running Claude Code processes and reopen them so they stop using the old exporter settings.
+After upgrading from an earlier release, quit all running Claude Code processes and reopen them so they stop using any old exporter settings.
 
 ## Check it
 

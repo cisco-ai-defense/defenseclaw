@@ -244,8 +244,8 @@ A user can break files DefenseClaw needs in their own account, for example by re
 ## Rotate per-user credentials
 
 The guardian gives each enrolled user credentials that it derives from one
-per-machine key and binds to that user's uid or SID. The agents' telemetry uses them
-on every OS, and so do hooks and in-agent plugins on Windows. On Linux and macOS,
+per-machine key and binds to that user's uid or SID. Native agent telemetry,
+where enabled, uses them on every OS, as do hooks and in-agent plugins on Windows. On Linux and macOS,
 hooks and in-agent plugins reach the gateway over the hook socket and hold no
 credential. Rotate the key when a user's credentials may have been copied, or on your
 own schedule.

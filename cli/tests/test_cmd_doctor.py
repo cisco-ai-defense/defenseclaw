@@ -333,8 +333,18 @@ class DoctorHermesPathTests(unittest.TestCase):
             self.assertIn("live=false", result.checks[0]["detail"])
 
 class DoctorGuardrailTests(unittest.TestCase):
+    def setUp(self):
+        from defenseclaw.commands import cmd_doctor
+
+        trusted = patch.object(
+            cmd_doctor, "_trusted_gateway_listener",
+            return_value=cmd_doctor._GatewayTrust("trusted", "verified fixture gateway", 4321),
+        )
+        trusted.start()
+        self.addCleanup(trusted.stop)
+
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
-    def test_empty_guardrail_model_is_not_a_warning(self, _mock_probe):
+    def test_empty_guardrail_model_is_not_a_warning(self, mock_probe):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
             audit_db="/tmp/defenseclaw/audit.db",
@@ -355,6 +365,35 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.warned, 0)
         self.assertEqual(result.passed, 1)
         self.assertNotIn("guardrail.model", " ".join(c["detail"] for c in result.checks))
+        self.assertTrue(mock_probe.call_args.kwargs["bound_peer"].trusted)
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
+    def test_proxy_health_refuses_foreign_listener_decision(self, mock_probe):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="", port=4000),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        with patch.object(
+            cmd_doctor,
+            "_trusted_gateway_listener",
+            return_value=cmd_doctor._GatewayTrust(
+                "foreign_listener", "the gateway listener belongs to another account", 4321
+            ),
+        ):
+            _check_guardrail_proxy(cfg, result)
+
+        self.assertEqual(result.failed, 1)
+        self.assertIn("another account", result.checks[0]["detail"])
+        mock_probe.assert_not_called()
 
     def test_proxy_interception_fails_when_self_test_misses(self):
         cfg = Config(
@@ -2647,7 +2686,8 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
                 cmd_doctor._check_gateway_home_mismatch(cfg, result)
 
         rows = [c for c in result.checks if c["label"] == "Gateway home"]
-        self.assertEqual(rows, [], result.checks)
+        self.assertEqual([row["status"] for row in rows], ["skip"], result.checks)
+        self.assertIn("ownership was not inferred", rows[0]["detail"])
 
 
 class DoctorFixDryRunTests(unittest.TestCase):
@@ -3025,6 +3065,21 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
     def setUp(self):
         import http.server
         import threading
+
+        from defenseclaw.commands import cmd_doctor
+
+        trusted = patch.object(
+            cmd_doctor, "_trusted_gateway_listener",
+            return_value=cmd_doctor._GatewayTrust("trusted", "verified fixture gateway", 4321),
+        )
+        trusted.start()
+        self.addCleanup(trusted.stop)
+        peer_request = patch.object(
+            cmd_doctor, "_gateway_peer_bound_request",
+            side_effect=lambda url, _trust, **kwargs: cmd_doctor._http_probe_once(url, **kwargs),
+        )
+        peer_request.start()
+        self.addCleanup(peer_request.stop)
 
         # The in-process server stands in for this account's gateway, so it
         # is not reported as a foreign process holding the port.
@@ -3406,6 +3461,16 @@ class DoctorFixHelpTextTests(unittest.TestCase):
 
 class TestSandboxSubsystemDoctor(unittest.TestCase):
     """The gateway's sandbox subsystem as doctor reads it."""
+
+    def setUp(self):
+        from defenseclaw.commands import cmd_doctor
+
+        trusted = patch.object(
+            cmd_doctor, "_trusted_gateway_listener",
+            return_value=cmd_doctor._GatewayTrust("trusted", "verified fixture gateway", 4321),
+        )
+        trusted.start()
+        self.addCleanup(trusted.stop)
 
     def _cfg(self, data_dir: str) -> Config:
         cfg = Config(

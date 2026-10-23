@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -493,6 +494,9 @@ func TestPolicyReloadPreRunLeavesAuditStoreToGateway(t *testing.T) {
 // A Secure Client host keeps the policy reload output of main (issue #1092):
 // the HTTP status and body of a refused reload, not the GAP-0160 sentence.
 func TestSecureClientPolicyReloadKeepsTheOutputOfMain(t *testing.T) {
+	previousFactory := managedGatewayClientFactory
+	managedGatewayClientFactory = func(time.Duration, string, string) (*http.Client, error) { return &http.Client{}, nil }
+	t.Cleanup(func() { managedGatewayClientFactory = previousFactory })
 	ownGatewayListener(t)
 	const token = "reload-fixture-value"
 	const body = `{"error":"reload failed: policy: read data.json: open /p/data.json: no such file or directory","status":"failed"}`

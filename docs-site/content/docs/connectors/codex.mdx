@@ -9,7 +9,7 @@ keywords:
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-DefenseClaw writes hooks into Codex's `config.toml`. Per-user host setup removes the native OpenTelemetry exporter installed by earlier releases: Codex cannot verify which local account holds a stopped gateway's TCP port. Managed hosts and OpenShell images retain native telemetry. On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. Codex in an OpenShell sandbox (`defenseclaw sandbox run codex`) is the exception: the sandbox image installs `codex-notify.sh` and sets `notify` in its managed config. This is a hook connector: Codex talks to OpenAI directly and no proxy is involved.
+DefenseClaw writes hooks into Codex's `config.toml`. Host setup removes native OpenTelemetry exporters installed by earlier releases: Codex cannot verify which local account holds a stopped gateway's TCP port. Isolated OpenShell images retain native telemetry. On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. Codex in an OpenShell sandbox (`defenseclaw sandbox run codex`) is the exception: the sandbox image installs `codex-notify.sh` and sets `notify` in its managed config. This is a hook connector: Codex talks to OpenAI directly and no proxy is involved.
 
 ## Platform support
 
@@ -23,7 +23,7 @@ defenseclaw setup codex --mode action  # block on policy hits
 ```
 
 On Windows, run the same commands in PowerShell. Quit and reopen Codex afterwards.
-After upgrading from an earlier per-user release, quit all running Codex processes and reopen them so they stop using the old exporter configuration.
+After upgrading from an earlier release, quit all running Codex processes and reopen them so they stop using any old exporter configuration.
 
 ## Check it
 
@@ -47,10 +47,10 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 
 | What | macOS and Linux | Windows |
 | --- | --- | --- |
-| Hooks; managed native telemetry | `$CODEX_HOME/config.toml` (default `~/.codex`) | `%CODEX_HOME%\config.toml` |
+| Hooks; removal of older native telemetry | `$CODEX_HOME/config.toml` (default `~/.codex`) | `%CODEX_HOME%\config.toml` |
 | Hook program | `~/.defenseclaw/hooks/codex-hook.sh` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 | Connector credentials | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
-| Proxy bypass for telemetry | `$CODEX_HOME/.env` (marked block, only when a proxy is set) | not written |
+| Proxy bypass for cloud credentials | `$CODEX_HOME/.env` (managed, marked block) | not written |
 
 Teardown restores the backup, or removes only DefenseClaw's entries.
 

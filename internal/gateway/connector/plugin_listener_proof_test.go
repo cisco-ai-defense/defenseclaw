@@ -24,16 +24,17 @@ import (
 // transport renders it; a unix hook socket verifies its owner instead.
 func TestManagedPluginListenerProofOnlyForManagedTCPPlugins(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "hook.sock")
+	guard := filepath.Join(t.TempDir(), "defenseclaw-hook")
 	for _, tc := range []struct {
 		name string
 		opts SetupOpts
 		want bool
 	}{
-		{"managed TCP plugin", SetupOpts{ManagedEnterprise: true, ManagedListenerProof: true}, true},
-		{"not requested", SetupOpts{ManagedEnterprise: true}, false},
+		{"managed TCP plugin", SetupOpts{ManagedEnterprise: true, ManagedListenerProof: true, ForeignHookGuardBinary: guard}, true},
+		{"not requested", SetupOpts{ManagedEnterprise: true, ForeignHookGuardBinary: guard}, false},
 		{"unmanaged", SetupOpts{ManagedListenerProof: true}, false},
 		// Windows keeps TCP even when a socket is named.
-		{"hook socket", SetupOpts{ManagedEnterprise: true, ManagedListenerProof: true, ManagedHookSocket: socket}, runtime.GOOS == "windows"},
+		{"hook socket", SetupOpts{ManagedEnterprise: true, ManagedListenerProof: true, ManagedHookSocket: socket, ForeignHookGuardBinary: guard}, runtime.GOOS == "windows"},
 	} {
 		if got := managedPluginListenerProof(tc.opts); got != tc.want {
 			t.Errorf("%s: listener proof = %v, want %v", tc.name, got, tc.want)
@@ -149,16 +150,20 @@ func runListenerProofPlugin(t *testing.T, asset, addr, tokenPath string, proof b
 		proofValue = "1"
 	}
 	harness, name := openCodeListenerProofHarness, "opencode-plugin.mjs"
-	if asset == "amp-plugin.ts" {
+	if strings.HasPrefix(asset, "amp-plugin") {
 		harness, name = ampListenerProofHarness, "amp-plugin.mts"
 	}
-	path := writeRenderedPlugin(t, asset, name, templateData{
+	data := templateData{
 		APIAddr:         addr,
 		TokenFileJS:     javaScriptStringContent(tokenPath),
 		ListenerProofJS: proofValue,
 		FailMode:        "closed",
 		Managed:         true,
-	})
+	}
+	path := filepath.Join(testenv.PrivateTempDir(t), name)
+	if err := os.WriteFile(path, []byte(renderPluginAssetForTest(t, asset, data)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return strings.Join(runNodeHarness(t, harness, path), "\n")
 }
 
@@ -205,12 +210,13 @@ func TestPluginListenerProofKeepsTheCredentialFromAnImpostor(t *testing.T) {
 				t.Fatalf("impostor received a credential or payload: %+v", request)
 			}
 
-			// Control: without the proof the impostor is trusted.
+			// A host render missing both the native account check and the
+			// listener proof must refuse its TCP fallback as well.
 			verdict = runListenerProofPlugin(t, tc.asset, addr, tokenPath, false)
 			requests = impostorSeen.snapshot()
-			if verdict != "allow" || len(requests) != 1 || requests[0].authorization != "Bearer "+credential ||
-				!strings.Contains(requests[0].body, "listener-proof-marker") {
-				t.Fatalf("control without the proof: verdict %q, requests %+v", verdict, requests)
+			if !strings.HasPrefix(verdict, "block:DefenseClaw hook failed closed") ||
+				!strings.Contains(verdict, "no account proof") || len(requests) != 0 {
+				t.Fatalf("unguarded TCP fallback: verdict %q, requests %+v", verdict, requests)
 			}
 
 		})
@@ -429,7 +435,7 @@ func TestManagedPluginVerificationRequiresEachRenderedSafeguard(t *testing.T) {
 		{"amp foreign-hook guard", "amp", func(o *SetupOpts) { o.ForeignHookGuardBinary = guard },
 			`const DC_FOREIGN_GUARD: string = ""` + "\n", `const DC_FOREIGN_GUARD: string = "` + javaScriptStringContent(guard) + `"` + "\n", true},
 		{"amp listener proof", "amp", func(o *SetupOpts) { o.ManagedListenerProof = true },
-			`const DC_LISTENER_PROOF: string = ""` + "\n", `const DC_LISTENER_PROOF: string = "1"` + "\n", true},
+			`const DC_LISTENER_PROOF: string = ""` + "\n", `const DC_LISTENER_PROOF: string = "1"` + "\n", false},
 		{"opencode listener proof", "opencode", func(o *SetupOpts) { o.ManagedListenerProof = true },
 			`const DC_LISTENER_PROOF = "";` + "\n", `const DC_LISTENER_PROOF = "1";` + "\n", false},
 	} {
@@ -467,6 +473,7 @@ func TestManagedPluginVerificationRequiresEachRenderedSafeguard(t *testing.T) {
 			}
 			required := opts
 			required.ManagedEnterprise = true
+			required.ForeignHookGuardBinary = guard
 			tc.require(&required)
 			if present, err := OwnedHooksPresent(conn, required); err != nil || present {
 				t.Fatalf("a plugin without the safeguard must fail verification: %v %v", present, err)

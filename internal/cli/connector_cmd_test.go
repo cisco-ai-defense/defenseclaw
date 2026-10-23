@@ -542,12 +542,12 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	if err := toml.Unmarshal(codexRegistration, &codexConfig); err != nil {
 		t.Fatalf("parse reconciled Codex config: %v", err)
 	}
-	if _, exists := codexConfig["otel"]; exists {
-		t.Fatal("per-user Codex reconciliation installed a native OTel exporter")
+	if otel, present := codexConfig["otel"]; present {
+		t.Fatalf("reconciled Codex config retains an unverified native OTLP exporter: %#v", otel)
 	}
 	otlpToken, err := connector.LoadOTLPPathToken(dataDir, connector.OTLPScopeCodex)
 	if err != nil || otlpToken != "" {
-		t.Fatalf("per-user Codex reconciliation retained an OTLP token: present=%t, error=%v", otlpToken != "", err)
+		t.Fatalf("obsolete connector-scoped OTLP token = %q, %v; want revoked", otlpToken, err)
 	}
 	claudeAfter, err := os.ReadFile(claudePath)
 	if err != nil {
@@ -722,7 +722,7 @@ func TestConnectorReconcilePreservesClaudeCustodyAcrossPeerSetupAndRosterRefresh
 			env["OTEL_LOGS_EXPORTER"] != "none" ||
 			env["OTEL_METRICS_EXPORTER"] != "none" ||
 			env["OTEL_TRACES_EXPORTER"] != "none" {
-			t.Fatalf("%s restored an unsafe per-user Claude native exporter", stage)
+			t.Fatalf("%s enabled an unverified Claude native OTLP exporter: %#v", stage, env)
 		}
 		if _, endpoint := env["OTEL_EXPORTER_OTLP_ENDPOINT"]; endpoint {
 			t.Fatalf("%s restored a per-user Claude OTLP endpoint", stage)
@@ -1169,7 +1169,7 @@ func TestConnectorReconcileLegacyOpenEditsKeepBothClosedContractsCurrent(t *test
 	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	closed := assertMixedHookContractsCurrent(t, dataDir, home)
 	if closed.Connectors["claudecode"].HookFailMode != "closed" || closed.Connectors["codex"].HookFailMode != "closed" {
-		t.Fatalf("per-user lock modes are wrong: Claude=%q Codex=%q", closed.Connectors["claudecode"].HookFailMode, closed.Connectors["codex"].HookFailMode)
+		t.Fatalf("per-user lock modes must remain closed: Claude=%q Codex=%q", closed.Connectors["claudecode"].HookFailMode, closed.Connectors["codex"].HookFailMode)
 	}
 	codexAfter, err := os.ReadFile(codexPath)
 	if err != nil {
@@ -1231,7 +1231,7 @@ func TestConnectorReconcileLegacyOpenEditsKeepBothClosedContractsCurrent(t *test
 	assertConnectorReconcileStderr(t, "codex", stderr)
 	reverse := assertMixedHookContractsCurrent(t, dataDir, home)
 	if reverse.Connectors["claudecode"].HookFailMode != "closed" || reverse.Connectors["codex"].HookFailMode != "closed" {
-		t.Fatalf("legacy open edit escaped per-user close: %+v", reverse.Connectors)
+		t.Fatalf("per-user lock modes must remain closed: %+v", reverse.Connectors)
 	}
 	for _, mode := range []string{"closed", "open", "closed", "open"} {
 		claudeMode = cfg.Guardrail.Connectors["claudecode"]

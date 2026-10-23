@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 )
 
 var perUserGatewayClientFactory = hookexec.NewPerUserGatewayHTTPClient
+var managedGatewayClientFactory = hookexec.NewManagedEnterpriseGatewayHTTPClient
 
 // gatewayPeerClient is the transport for Go CLI requests to a per-user
 // gateway. The socket owner is checked after Dial, before net/http can send
@@ -24,16 +26,29 @@ var perUserGatewayClientFactory = hookexec.NewPerUserGatewayHTTPClient
 // service-specific identity checks instead of a same-account requirement.
 func gatewayPeerClient(c *config.Config, host string, port int, timeout time.Duration) (*http.Client, error) {
 	if c != nil && c.SecureClientIntegration() && secureClientHost() {
-		return &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: nil}, CheckRedirect: refuseGatewayPeerRedirect}, nil
+		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managedServiceName(true))
 	}
 	if _, present := managedHostWindowsStandalone(); present &&
 		(c == nil || c.StandaloneEnterprise() || managed.IsManagedEnterprise(c.DeploymentMode)) {
-		return &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: nil}, CheckRedirect: refuseGatewayPeerRedirect}, nil
+		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managed.StandaloneWindowsGatewaySvc)
 	}
 	if c != nil && (c.StandaloneEnterprise() || managed.IsManagedEnterprise(c.DeploymentMode)) {
-		return &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: nil}, CheckRedirect: refuseGatewayPeerRedirect}, nil
+		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managedServiceName(false))
 	}
 	return perUserGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)))
+}
+
+func managedServiceName(secureClient bool) string {
+	if runtime.GOOS == "linux" {
+		return "defenseclaw-gateway.service"
+	}
+	if runtime.GOOS == "darwin" {
+		if secureClient {
+			return "com.cisco.secureclient.defenseclaw"
+		}
+		return "com.cisco.defenseclaw.gateway"
+	}
+	return managed.StandaloneWindowsGatewaySvc
 }
 
 func gatewayPeerClientForURL(c *config.Config, rawURL string, timeout time.Duration) (*http.Client, error) {
@@ -46,8 +61,4 @@ func gatewayPeerClientForURL(c *config.Config, rawURL string, timeout time.Durat
 		return nil, fmt.Errorf("gateway target port is invalid")
 	}
 	return gatewayPeerClient(c, target.Hostname(), port, timeout)
-}
-
-func refuseGatewayPeerRedirect(*http.Request, []*http.Request) error {
-	return http.ErrUseLastResponse
 }

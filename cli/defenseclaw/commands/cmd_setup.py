@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import http.client
 import json as _json
 import os
 import queue
@@ -14397,7 +14396,7 @@ def _gateway_pid_generation_marker(data_dir: str) -> bytes | None:
         return None
 
 
-def _gateway_api_endpoint(data_dir: str) -> tuple[str, int] | None:
+def _gateway_api_config(data_dir: str) -> Any | None:
     try:
         cfg = load_config(data_dir=data_dir)
         gateway = cfg.gateway
@@ -14409,28 +14408,33 @@ def _gateway_api_endpoint(data_dir: str) -> tuple[str, int] | None:
         return None
     if not isinstance(host, str) or not host.strip() or not 1 <= port <= 65535:
         return None
-    return host, port
+    return cfg
 
 
 def _read_defense_gateway_health_once(
-    host: str,
-    port: int,
+    cfg: Any,
     *,
     timeout: float,
 ) -> dict[str, Any] | None:
-    connection = http.client.HTTPConnection(host, port, timeout=timeout)
+    # Setup uses this document to decide whether a replacement gateway is
+    # ready. Bind the request to the configured gateway's accepted socket, as
+    # Doctor does for audit-store and lifecycle decisions.
+    from defenseclaw.commands.cmd_doctor import _gateway_health_probe
+
+    code, body = _gateway_health_probe(
+        cfg,
+        timeout=timeout,
+        response_limit=1 << 20,
+        allow_truncation=False,
+        bypass_proxy=True,
+    )
+    if code != 200:
+        return None
     try:
-        connection.request("GET", "/health")
-        response = connection.getresponse()
-        body = response.read(1 << 20)
-        if response.status != 200:
-            return None
         health = _json.loads(body)
         return health if isinstance(health, dict) else None
-    except (OSError, http.client.HTTPException, UnicodeDecodeError, ValueError):
+    except (TypeError, ValueError):
         return None
-    finally:
-        connection.close()
 
 
 def _gateway_runtime_generation_before_restart(data_dir: str) -> _GatewayRuntimeGeneration:
@@ -14442,13 +14446,13 @@ def _gateway_runtime_generation_before_restart(data_dir: str) -> _GatewayRuntime
     # probing an ambient/default API endpoint that may belong to a different
     # installation while preparing a fresh start.
     config_path = config_path_for_data_dir(data_dir)
-    endpoint = (
-        _gateway_api_endpoint(data_dir)
+    gateway_cfg = (
+        _gateway_api_config(data_dir)
         if pid_marker is not None and os.path.isfile(config_path)
         else None
     )
-    if endpoint is not None:
-        health = _read_defense_gateway_health_once(*endpoint, timeout=0.5)
+    if gateway_cfg is not None:
+        health = _read_defense_gateway_health_once(gateway_cfg, timeout=0.5)
         raw_started_at = health.get("started_at") if health is not None else None
         if isinstance(raw_started_at, str) and raw_started_at.strip():
             started_at = raw_started_at.strip()
@@ -15144,33 +15148,12 @@ def _connector_runtime_snapshot_failure(
 
 
 def _read_gateway_health(data_dir: str, *, timeout: float = 1.0) -> dict[str, Any] | None:
-    try:
-        config_path = config_path_for_data_dir(data_dir)
-        if not os.path.isfile(config_path):
-            return None
-        cfg = load_config(data_dir=data_dir)
-        gateway = cfg.gateway
-        from defenseclaw.logger import _gateway_api_host
-
-        host = _gateway_api_host(cfg)
-        port = int(getattr(gateway, "api_port", 18970) or 18970)
-    except (AttributeError, OSError, TypeError, ValueError):
+    if not os.path.isfile(config_path_for_data_dir(data_dir)):
         return None
-    if not 1 <= port <= 65535:
+    gateway_cfg = _gateway_api_config(data_dir)
+    if gateway_cfg is None:
         return None
-    connection = http.client.HTTPConnection(host, port, timeout=max(0.01, min(timeout, 1.0)))
-    try:
-        connection.request("GET", "/health")
-        response = connection.getresponse()
-        body = response.read(1 << 20)
-        if response.status != 200:
-            return None
-        health = _json.loads(body)
-        return health if isinstance(health, dict) else None
-    except (OSError, http.client.HTTPException, UnicodeDecodeError, ValueError):
-        return None
-    finally:
-        connection.close()
+    return _read_defense_gateway_health_once(gateway_cfg, timeout=max(0.01, min(timeout, 1.0)))
 
 
 def _gateway_health_generation(data_dir: str) -> str | None:
@@ -16148,10 +16131,9 @@ def _wait_for_defense_gateway_api(
     This also covers the platform socket-reclaim retry in the Go API server,
     which may legitimately take up to 30 seconds.
     """
-    endpoint = _gateway_api_endpoint(data_dir)
-    if endpoint is None:
+    gateway_cfg = _gateway_api_config(data_dir)
+    if gateway_cfg is None:
         return False
-    host, port = endpoint
     expected = {normalize_connector(name) for name in expected_connectors if name}
 
     bounded_timeout = max(0.0, timeout)
@@ -16165,7 +16147,7 @@ def _wait_for_defense_gateway_api(
         # the caller's budget. Clamp to that original budget so a single
         # health probe never receives a longer timeout than setup promised,
         # particularly for short test/automation deadlines.
-        health = _read_defense_gateway_health_once(host, port, timeout=probe_timeout)
+        health = _read_defense_gateway_health_once(gateway_cfg, timeout=probe_timeout)
         api = health.get("api") if health is not None else None
         state = api.get("state") if isinstance(api, dict) else None
         ready = isinstance(state, str) and state.strip().lower() == "running"

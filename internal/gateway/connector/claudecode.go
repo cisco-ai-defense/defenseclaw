@@ -40,8 +40,8 @@ import (
 // ~/.claude/settings.json:
 //   - claude-code-hook.sh under hooks for tool-call inspection
 //
-// Managed hosts also install an OTel env block for native telemetry. Per-user
-// hosts omit it because the exporter cannot verify a loopback port's owner.
+// Isolated sandboxes install an OTel env block for native telemetry. Host
+// installs omit it because the exporter cannot verify a loopback port's owner.
 //
 // Implements ComponentScanner, StopScanner.
 type ClaudeCodeConnector struct {
@@ -142,7 +142,7 @@ func (c *ClaudeCodeConnector) ToolInspectionMode() ToolInspectionMode { return T
 func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
 
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
-	if opts.ManagedEnterprise {
+	if opts.sandboxNativeOTLP {
 		otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeClaude, opts.OTLPPathToken)
 		if err != nil {
 			return fmt.Errorf("claudecode scoped OTLP token: %w", err)
@@ -177,14 +177,13 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return fmt.Errorf("claudecode settings hooks: %w", err)
 	}
 
-	// On per-user hosts this disables the native exporter and removes
-	// endpoints that an earlier setup wrote. A native exporter cannot
-	// verify the account behind the loopback listener. Managed hosts
-	// retain native logs and metrics in addition to hook events.
+	// Host installs disable native exporters and remove endpoints that an
+	// earlier setup wrote. Native exporters cannot verify who owns a replaced
+	// loopback listener. Hook events remain available.
 	if err := c.patchClaudeCodeOtelEnv(opts); err != nil {
 		return fmt.Errorf("claudecode otel env: %w", err)
 	}
-	if !opts.ManagedEnterprise {
+	if !opts.sandboxNativeOTLP {
 		if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeClaude); err != nil {
 			return fmt.Errorf("revoke obsolete Claude Code native OTLP credential: %w", err)
 		}
@@ -430,7 +429,7 @@ func (c *ClaudeCodeConnector) HookScripts(opts SetupOpts) []string {
 func (c *ClaudeCodeConnector) RequiredEnv() []EnvRequirement {
 	return []EnvRequirement{{
 		Scope:       EnvScopeNone,
-		Description: "Hooks and native OpenTelemetry are written to Claude Code settings; no shell environment variables are required.",
+		Description: "Hooks are written to Claude Code settings; native OpenTelemetry is configured only for isolated OpenShell images.",
 	}}
 }
 
@@ -497,12 +496,12 @@ func (c *ClaudeCodeConnector) Capabilities(opts SetupOpts) ConnectorCapabilities
 	nativeSignals := []string(nil)
 	sourceModes := []string{"hook"}
 	telemetryAuth := ""
-	telemetryNote := "Per-user Claude Code telemetry uses hooks; native export to an unverified loopback listener is disabled."
+	telemetryNote := "Host Claude Code telemetry uses hooks; native export to an unverified loopback listener is disabled."
 	if profile.NativeOTLP != nil {
 		nativeSignals = []string{"logs", "metrics"}
 		sourceModes = []string{"native", "hook"}
 		telemetryAuth = "header-token"
-		telemetryNote = "Managed Claude Code native logs and metrics use a connector-scoped Authorization header; native traces and content capture stay disabled."
+		telemetryNote = "Isolated sandbox Claude Code native logs and metrics use a connector-scoped Authorization header; native traces and content capture stay disabled."
 	}
 
 	return ConnectorCapabilities{
@@ -583,8 +582,8 @@ func (c *ClaudeCodeConnector) Capabilities(opts SetupOpts) ConnectorCapabilities
 	}
 }
 
-// HookProfile implements HookProfileProvider. On managed hosts and for
-// isolated sandbox artifact rendering, NativeOTLPSpec describes the env block:
+// HookProfile implements HookProfileProvider. Only isolated sandbox artifact
+// rendering uses NativeOTLPSpec for the env block:
 // an env-block targeting the gateway's loopback OTLP-HTTP receiver. Claude
 // Code supports standard OTLP headers, so its connector-scoped credential is
 // carried as an Authorization bearer rather than appearing in the endpoint
@@ -597,7 +596,7 @@ func (c *ClaudeCodeConnector) Capabilities(opts SetupOpts) ConnectorCapabilities
 // not informed consent to collect prompts or responses at the source.
 func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 	var headers map[string]string
-	if opts.ManagedEnterprise || opts.sandboxNativeOTLP {
+	if opts.sandboxNativeOTLP {
 		otlpToken := strings.TrimSpace(opts.OTLPPathToken)
 		if otlpToken == "" && opts.DataDir != "" {
 			otlpToken, _ = LoadOTLPPathToken(opts.DataDir, OTLPScopeClaude)
@@ -636,7 +635,7 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 		"OTEL_LOG_RAW_API_BODIES": "0",
 	}
 	var nativeOTLP *NativeOTLPSpec
-	if opts.ManagedEnterprise || opts.sandboxNativeOTLP {
+	if opts.sandboxNativeOTLP {
 		nativeOTLP = &NativeOTLPSpec{
 			Kind:               NativeOTLPEnvBlock,
 			Endpoint:           "http://" + opts.APIAddr,
@@ -1733,10 +1732,14 @@ var claudeCodeOtelEnvKeys = []string{
 // the source. Teardown restores unchanged managed values and preserves operator
 // edits made afterward.
 func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
-	if !opts.ManagedEnterprise {
+	if !opts.sandboxNativeOTLP {
+		failMode := defaultHookFailMode
+		if opts.ManagedEnterprise && strings.TrimSpace(opts.HookFailMode) != "" {
+			failMode = normalizeHookFailMode(opts.HookFailMode)
+		}
 		return map[string]string{
 			"CLAUDE_CODE_ENABLE_TELEMETRY": "0",
-			"DEFENSECLAW_FAIL_MODE":        defaultHookFailMode,
+			"DEFENSECLAW_FAIL_MODE":        failMode,
 			"OTEL_LOGS_EXPORTER":           "none",
 			"OTEL_METRICS_EXPORTER":        "none",
 			"OTEL_TRACES_EXPORTER":         "none",
@@ -1765,10 +1768,11 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	return env
 }
 
-// The prior per-user profile wrote native OTLP settings. Only cleanup and
-// residue checks use this reference; per-user setup never renders it to disk.
+// Prior host profiles wrote native OTLP settings. Only cleanup and residue
+// checks use this reference; host setup never renders it to disk.
 func claudeCodeNativeOtelReferenceEnv(opts SetupOpts) map[string]string {
 	opts.ManagedEnterprise = true
+	opts.sandboxNativeOTLP = true
 	return buildClaudeCodeOtelEnv(opts)
 }
 

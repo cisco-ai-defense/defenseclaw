@@ -38,10 +38,12 @@ func TestPerUserGatewayClientDoesNotTrustManagedModeFromEnvironment(t *testing.T
 
 func TestManagedGatewayClientKeepsServiceAccountTransportDuringUpgrade(t *testing.T) {
 	previousFactory := perUserGatewayClientFactory
+	previousManagedFactory := managedGatewayClientFactory
 	previousSecureClient := secureClientHost
 	previousWindowsManaged := managedHostWindowsStandalone
 	t.Cleanup(func() {
 		perUserGatewayClientFactory = previousFactory
+		managedGatewayClientFactory = previousManagedFactory
 		secureClientHost = previousSecureClient
 		managedHostWindowsStandalone = previousWindowsManaged
 	})
@@ -51,10 +53,43 @@ func TestManagedGatewayClientKeepsServiceAccountTransportDuringUpgrade(t *testin
 		t.Fatal("managed service account was required to match the CLI account")
 		return nil, nil
 	}
+	called := false
+	managedGatewayClientFactory = func(_ time.Duration, addr, service string) (*http.Client, error) {
+		called = true
+		if addr != "127.0.0.1:18970" || service != managedServiceName(false) {
+			t.Errorf("managed service peer = %q/%q", addr, service)
+		}
+		return nil, errors.New("connected managed gateway peer is unverified")
+	}
 	c := config.DefaultConfig()
 	c.DeploymentMode = managed.DeploymentModeManagedEnterprise
 	client, err := gatewayPeerClient(c, "127.0.0.1", 18970, time.Second)
-	if err != nil || client == nil {
-		t.Fatalf("managed gateway transport was refused: client=%v error=%v", client, err)
+	if !called || client != nil || err == nil {
+		t.Fatalf("managed gateway bypassed service peer check: called=%t client=%v error=%v", called, client, err)
+	}
+}
+
+func TestSecureClientGatewayClientRequiresVerifiedServiceTransport(t *testing.T) {
+	previousFactory := managedGatewayClientFactory
+	previousSecureClient := secureClientHost
+	t.Cleanup(func() {
+		managedGatewayClientFactory = previousFactory
+		secureClientHost = previousSecureClient
+	})
+	secureClientHost = func() bool { return true }
+	called := false
+	managedGatewayClientFactory = func(_ time.Duration, addr, service string) (*http.Client, error) {
+		called = true
+		if addr != "127.0.0.1:18970" || service != managedServiceName(true) {
+			t.Errorf("service peer = %q/%q", addr, service)
+		}
+		return nil, errors.New("connected managed gateway peer is unverified")
+	}
+	c := config.DefaultConfig()
+	c.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	c.Enterprise.Profile = managed.ProfileSecureClient
+	client, err := gatewayPeerClient(c, "127.0.0.1", 18970, time.Second)
+	if !called || client != nil || err == nil {
+		t.Fatalf("Secure Client bypassed service peer check: called=%t client=%v error=%v", called, client, err)
 	}
 }

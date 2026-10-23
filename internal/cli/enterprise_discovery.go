@@ -392,13 +392,17 @@ func enterpriseGatewayGet(path string, out any) (string, error) {
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("X-DefenseClaw-Token", token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client, err := gatewayPeerClient(cfg, gatewayClientHost(cfg), cfg.Gateway.APIPort, wait)
+	if err != nil {
+		return "", fmt.Errorf("the gateway at %s has an unverified service peer: %w", host, err)
+	}
+	resp, err := client.Do(req)
 	if errors.Is(err, context.DeadlineExceeded) && !secureClient {
 		return "", fmt.Errorf("the gateway at %s took the connection but did not answer within %g s; it is running, and a request "+
 			"that waits for the directory (SSSD or the domain controller) can take that long. Try again", host, wait.Seconds())
 	}
 	if err != nil {
-		return "", fmt.Errorf("the gateway at %s did not answer; check the deployment with: %s", host, enterpriseDiscoveryStatusHint())
+		return "", fmt.Errorf("the gateway at %s did not answer; check the deployment with: %s (the connected service peer may be unverified)", host, enterpriseDiscoveryStatusHint())
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

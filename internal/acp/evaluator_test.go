@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -74,6 +75,13 @@ func TestPerUserEvaluatorPinsRequestsToConfiguredGateway(t *testing.T) {
 }
 
 func TestManagedEvaluatorUsesServiceTransport(t *testing.T) {
+	previousFactory := managedGatewayClientFactory
+	var requestedAddr, requestedService string
+	managedGatewayClientFactory = func(timeout time.Duration, apiAddr, serviceName string) (*http.Client, error) {
+		requestedAddr, requestedService = apiAddr, serviceName
+		return &http.Client{Timeout: timeout}, nil
+	}
+	t.Cleanup(func() { managedGatewayClientFactory = previousFactory })
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -88,6 +96,9 @@ func TestManagedEvaluatorUsesServiceTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if requestedAddr != origin.Listener.Addr().String() || requestedService != managedGatewayServiceName() {
+		t.Fatalf("managed transport selected %q, %q; want the configured endpoint and service", requestedAddr, requestedService)
+	}
 	response, err := evaluator.client.Get(service.URL + "/health")
 	if err != nil {
 		t.Fatal(err)
@@ -95,6 +106,25 @@ func TestManagedEvaluatorUsesServiceTransport(t *testing.T) {
 	_ = response.Body.Close()
 	if received.Load() != 1 {
 		t.Fatalf("managed service received %d requests, want one", received.Load())
+	}
+}
+
+func TestManagedEvaluatorRefusesUnverifiedServiceBeforeChallenge(t *testing.T) {
+	var received atomic.Int32
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer listener.Close()
+	evaluator, err := NewManagedHTTPEvaluator(listener.URL, "managed-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evaluator.Evaluate(context.Background(), Evaluation{}); err == nil {
+		t.Fatal("an unverified managed gateway answered the ACP challenge")
+	}
+	if got := received.Load(); got != 0 {
+		t.Fatalf("unverified managed listener received %d ACP challenge requests, want zero", got)
 	}
 }
 
