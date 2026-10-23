@@ -1143,6 +1143,11 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.Inspection.AIDefense = "unknown"
 	}
 	r.AddAIDefenseWarning()
+	// Ensure, install and repair describe the same managed Hermes coverage
+	// limit as status and verify, without adding status-v2 output blocks.
+	if record != nil && !l.statusV2() {
+		l.describeConnectors(record)
+	}
 }
 
 // runningDeploymentPrefix starts each warning describeRunning adds.

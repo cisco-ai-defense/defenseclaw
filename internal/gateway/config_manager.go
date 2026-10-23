@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -762,13 +763,13 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			pendingTrigger = ""
 			pendingKinds = map[string]bool{}
 			if len(kinds) == 1 && kinds[configGenerationTrigger] {
-				// A bundle can replace policy assets without changing parsed
-				// config fields. Its generation record is then the only event
-				// that tells us to build and audit the new policy.
+				// A lifecycle generation can replace policy assets without
+				// changing parsed config fields. Its record is then the only
+				// event that tells us to build and audit the new policy.
 				m.mu.Lock()
-				pendingBundle := m.pendingBundleGeneration(nil)
+				pendingGeneration := m.pendingManagedGeneration(nil)
 				m.mu.Unlock()
-				if pendingBundle {
+				if pendingGeneration {
 					if err := m.reload(ctx, reason, false); err != nil && ctx.Err() == nil {
 						fmt.Fprintf(os.Stderr, "[config] reload failed: %v\n", err)
 					}
@@ -1054,13 +1055,24 @@ func (m *ConfigManager) savedWriteNotApplied(raw []byte) bool {
 	return ok && m.appliedGenerationKnown && generation > m.appliedGeneration
 }
 
-// pendingBundleGeneration is true only for a new lifecycle-recorded bundle
-// whose generation has not passed through the config manager's apply path.
-func (m *ConfigManager) pendingBundleGeneration(raw []byte) bool {
+// pendingManagedGeneration accepts a new signed bundle, or a lifecycle
+// generation recorded before bundle trust anchors were installed. In both
+// cases the record must bind these config bytes and advance the applied
+// generation; a watched hand edit has neither proof.
+func (m *ConfigManager) pendingManagedGeneration(raw []byte) bool {
 	state, err := configwrite.ReadGenerationState(m.path)
-	return err == nil && state.BundleID != "" && m.appliedGenerationKnown &&
-		state.Generation > m.appliedGeneration &&
-		(raw == nil || strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)))
+	if err != nil || !m.appliedGenerationKnown || state.Generation <= m.appliedGeneration ||
+		(raw != nil && !strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw))) {
+		return false
+	}
+	if state.BundleID != "" {
+		return true
+	}
+	if state.Actor != configwrite.ActorLifecycle || state.BundleVersion != 0 || state.SignerKeyID != "" {
+		return false
+	}
+	_, err = os.Lstat(filepath.Join(filepath.Dir(m.path), "trust", enterprisebundle.AnchorsName))
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // startupSourceUnchanged reports whether config.yaml still holds the bytes
@@ -1283,14 +1295,14 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if source.compiledV8 != nil && source.compiledV8.Plan != nil && m.observabilityV8PlanChanged(source.compiledV8.Plan) {
 		diff.Changed = sortedUniqueStrings(append(diff.Changed, "observability"))
 	}
-	// On a standalone managed host the lifecycle's signed bundle is the only
-	// source of a new config or policy generation. A watcher event or an
-	// authenticated API call cannot turn hand-edited bytes or assets active.
+	// On a standalone managed host only the lifecycle records a new config
+	// or policy generation. Once anchors exist, that record must name a signed
+	// bundle. A watcher or API call cannot activate hand-edited bytes/assets.
 	// The boot bytes are already the running snapshot and may be reconciled
 	// once before the manager has an applied generation.
 	startupBoot := !assets && !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
 		sha256.Sum256(source.raw) == m.startupSource
-	pendingBundle := m.pendingBundleGeneration(source.raw)
+	pendingGeneration := m.pendingManagedGeneration(source.raw)
 	// A watched asset can be checked without a new bundle only when the
 	// config bytes are the ones already running. At startup those are the
 	// exact boot bytes; later they are the last applied bytes. The same proof
@@ -1298,12 +1310,12 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	// The sidecar rebuilds all referenced assets and refuses any difference.
 	knownBytes := m.appliedRaw != nil && bytes.Equal(m.appliedRaw, source.raw) ||
 		m.appliedRaw == nil && m.startupKnown && sha256.Sum256(source.raw) == m.startupSource
-	proveUnchanged := !pendingBundle && knownBytes && (assets || m.rejected) &&
+	proveUnchanged := !pendingGeneration && knownBytes && (assets || m.rejected) &&
 		oldCfg.StandaloneEnterprise() && next.StandaloneEnterprise()
 	if (oldCfg.StandaloneEnterprise() || next.StandaloneEnterprise()) && !startupBoot &&
-		!pendingBundle && !proveUnchanged &&
+		!pendingGeneration && !proveUnchanged &&
 		(assets || m.rejected || !bytes.Equal(m.appliedRaw, source.raw) || len(diff.Changed) > 0) {
-		err := fmt.Errorf("config reload refused: this managed computer takes config and policy from a signed policy bundle; apply a new signed bundle")
+		err := fmt.Errorf("config reload refused: this managed computer requires a lifecycle-recorded generation, or a signed policy bundle when trust anchors are installed; run enterprise ensure or apply a new signed bundle")
 		m.rejected = true
 		recordGenerationBuildError(err)
 		m.recordLoadError(ctx, "managed_unbundled_reload")
@@ -1328,8 +1340,8 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if len(diff.Changed) == 0 && (assets || m.rejected) {
 		diff.Changed = []string{configDiffAssets}
 	}
-	if len(diff.Changed) == 0 && pendingBundle {
-		// The bundle may have changed only a referenced policy file. Build
+	if len(diff.Changed) == 0 && pendingGeneration {
+		// The lifecycle may have changed only a referenced policy file. Build
 		// its generation before recording that it was applied.
 		diff.Changed = []string{configDiffAssets}
 	}

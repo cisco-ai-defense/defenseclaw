@@ -20,6 +20,7 @@ package enterpriseunix
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -137,39 +138,87 @@ func (l *lifecycle) settleHotGateway(ctx context.Context, gateway Unit) error {
 	if l.bundle != nil {
 		receipt = l.bundle.receipt
 	}
-	if want, ok := l.bundlePolicyWant(ctx, receipt); ok {
+	want, ok := l.bundlePolicyWant(ctx, receipt)
+	if !ok {
+		return errors.New("the installed config's effective policy digest could not be computed, so the running gateway cannot confirm the change")
+	}
+	state, err := configwrite.ReadGenerationState(env.P(env.Layout.ConfigPath))
+	if err != nil {
+		return fmt.Errorf("read the installed config generation before confirming the gateway: %w", err)
+	}
+	probe := func() (bool, string) {
+		body, err := l.gatewayHealth(ctx, gateway, l.serviceUID)
+		if err != nil {
+			return false, "read gateway health: " + err.Error()
+		}
+		health := parseBundleHealth(body)
+		switch {
+		case health.reloadError != "":
+			return false, "gateway rejected the config reload: " + health.reloadError
+		case health.configState == "error":
+			return false, "gateway config.state=error: " + health.configError
+		case health.configGeneration != state.Generation:
+			return false, fmt.Sprintf("gateway reports config generation %d, not lifecycle generation %d", health.configGeneration, state.Generation)
+		case health.bundleID != state.BundleID || health.bundleVersion != state.BundleVersion:
+			return false, fmt.Sprintf("gateway reports bundle %q version %d, not lifecycle bundle %q version %d", health.bundleID, health.bundleVersion, state.BundleID, state.BundleVersion)
+		case health.digest != want:
+			return false, fmt.Sprintf("gateway reports effective policy %s, not %s of the installed config", shortDigest(health.digest), shortDigest(want))
+		default:
+			return true, ""
+		}
+	}
+	wait := func() (bool, string, error) {
 		deadline := env.Now().Add(min(hotApplyTimeout, env.ReadyTimeout))
+		var cause string
 		for {
-			if body, err := l.gatewayHealth(ctx, gateway, l.serviceUID); err == nil && gatewayPolicyDigest(body) == want {
-				l.gatewayKeptRunning = true
-				l.noteChange("applied the config change in the running %s; it was not restarted", gateway.Name)
-				return nil
+			if applied, reason := probe(); applied {
+				return true, "", nil
+			} else {
+				cause = reason
 			}
 			if l.installedConfigReplaced() {
-				// Another push replaced config.yaml while this run applied
-				// the previous one (two pushes a few seconds apart): the
-				// gateway follows the newer file and never reports this
-				// run's policy. Restarting it applied a hot change cold
-				// (GAP-0738); the follow-up transaction of this run applies
-				// the newer config to the running gateway instead.
-				l.gatewayKeptRunning = true
-				l.noteChange("left %s running: config.yaml was replaced while it applied the previous version, and the follow-up applies the new one", gateway.Name)
-				return nil
+				// A follow-up transaction applies a newer config push.
+				return false, "replaced", nil
 			}
 			if !env.Now().Before(deadline) {
-				break
+				return false, cause, nil
 			}
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return false, cause, ctx.Err()
 			case <-time.After(env.PollInterval):
 			}
 		}
 	}
+	applied, cause, err := wait()
+	if err != nil {
+		return err
+	}
+	if applied {
+		l.gatewayKeptRunning = true
+		l.noteChange("applied the config change in the running %s; it was not restarted", gateway.Name)
+		return nil
+	}
+	if cause == "replaced" {
+		// Restarting here would apply the newer push cold (GAP-0738).
+		l.gatewayKeptRunning = true
+		l.noteChange("left %s running: config.yaml was replaced while it applied the previous version, and the follow-up applies the new one", gateway.Name)
+		return nil
+	}
 	if err := restartUnit(ctx, env.Services, gateway); err != nil {
 		return fmt.Errorf("restart %s: %w", gateway.Name, err)
 	}
-	return l.waitGatewayReady(ctx, gateway)
+	if err := l.waitGatewayReady(ctx, gateway); err != nil {
+		return err
+	}
+	applied, cause, err = wait()
+	if err != nil {
+		return err
+	}
+	if !applied && cause != "replaced" {
+		return fmt.Errorf("%s restarted but did not confirm lifecycle generation %d: %s", gateway.Name, state.Generation, cause)
+	}
+	return nil
 }
 
 // bundlePolicyWant reuses the digest already computed while verifying a

@@ -37,6 +37,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -624,6 +625,87 @@ func TestStandaloneConfigManagerRejectsUnbundledConfigAndAssetReload(t *testing.
 	}
 	if applied != 0 {
 		t.Fatalf("unbundled reload applied %d times", applied)
+	}
+}
+
+func TestStandaloneConfigManagerAppliesOnlyRecordedNoAnchorLifecycleGenerations(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	initialRaw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.DeploymentMode = "managed_enterprise"
+	initial.Enterprise.Profile = "standalone"
+	applied := 0
+	boot := true
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+		if boot {
+			boot = false
+			return errGenerationUnchanged
+		}
+		applied++
+		return nil
+	})
+	loader := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
+		candidate, err := loader(source, raw)
+		if err == nil {
+			candidate.DeploymentMode = "managed_enterprise"
+			candidate.Enterprise.Profile = "standalone"
+		}
+		return candidate, err
+	}
+	mgr.setStartupSource(path, initialRaw)
+	if err := mgr.Reload(t.Context(), "startup_reconcile"); err != nil {
+		t.Fatal(err)
+	}
+	writeLifecycle := func(raw []byte) uint64 {
+		t.Helper()
+		result, err := configwrite.ReplaceDocument(t.Context(), path, raw, configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise ensure"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.Generation
+	}
+	commented := append([]byte("# managed comment\n"), initialRaw...)
+	commentGeneration := writeLifecycle(commented)
+	if err := mgr.Reload(t.Context(), "watch"); err != nil {
+		t.Fatalf("lifecycle comment generation rejected: %v", err)
+	}
+	if !mgr.appliedGenerationKnown || mgr.appliedGeneration != commentGeneration {
+		t.Fatalf("comment generation: applies=%d recorded=%d/%t, want %d", applied, mgr.appliedGeneration, mgr.appliedGenerationKnown, commentGeneration)
+	}
+	beforeAction := applied
+	action := bytes.Replace(commented, []byte("mode: observe"), []byte("mode: action"), 1)
+	actionGeneration := writeLifecycle(action)
+	if err := mgr.Reload(t.Context(), "watch"); err != nil {
+		t.Fatalf("lifecycle policy generation rejected: %v", err)
+	}
+	if applied != beforeAction+1 || mgr.appliedGeneration != actionGeneration || mgr.Current().Guardrail.Mode != "action" {
+		t.Fatalf("policy generation: applies=%d recorded=%d mode=%q", applied, mgr.appliedGeneration, mgr.Current().Guardrail.Mode)
+	}
+	beforeRefusal := applied
+	// Once bundle trust anchors exist, a lifecycle record without a signed
+	// bundle is no longer an authorization to reload managed policy.
+	anchorDir := filepath.Join(dir, "trust")
+	if err := os.MkdirAll(anchorDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(anchorDir, "bundle-anchors.json"), []byte("present"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeLifecycle(append([]byte("# another comment\n"), action...))
+	if err := mgr.Reload(t.Context(), "watch"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+		t.Fatalf("unbundled generation with anchors = %v, want signed-bundle refusal", err)
+	}
+	if applied != beforeRefusal || mgr.appliedGeneration != actionGeneration {
+		t.Fatalf("refused generation applied: applies=%d recorded=%d", applied, mgr.appliedGeneration)
 	}
 }
 

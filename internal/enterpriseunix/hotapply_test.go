@@ -15,11 +15,13 @@ package enterpriseunix
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
@@ -74,7 +76,9 @@ func TestEnsureAppliesAHotConfigChangeInTheRunningGateway(t *testing.T) {
 		if reloads && strings.Contains(h.read(h.env.Layout.ConfigPath), "rule_pack: strict") {
 			reported = digest("c")
 		}
-		return 200, []byte(`{"api":{"state":"running"},"policy":{"effective_digest":"` + reported + `"},"inspection":{"local":"active","ai_defense":"disabled"}}`), nil
+		state, _ := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+		return 200, []byte(fmt.Sprintf(`{"api":{"state":"running"},"policy":{"effective_digest":%q,"config_generation":%d},"inspection":{"local":"active","ai_defense":"disabled"}}`,
+			reported, state.Generation)), nil
 	}
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 
@@ -123,6 +127,77 @@ func TestEnsureAppliesAHotConfigChangeInTheRunningGateway(t *testing.T) {
 	reloads = false
 	if _, touched := ensure(strings.Replace(hot, "mode: action\n", "mode: action\n  block_at: HIGH\n", 1)); !touched {
 		t.Fatal("a gateway that did not apply the change was not restarted")
+	}
+}
+
+func TestNoAnchorHotEnsureRequiresGatewayGenerationAndCleanReload(t *testing.T) {
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	h := newTestHost(t, "linux")
+	h.env.Runner = &policyDigestRunner{fakeRunner: h.runner, digest: digest}
+	staleGeneration, restartFrom := uint64(0), -1
+	reloadError := ""
+	persist := false
+	h.env.HealthGet = func(context.Context) (int, []byte, error) {
+		if !h.healthy || !h.services.isActive(unitGateway) {
+			return 0, nil, errors.New("connection refused")
+		}
+		state, err := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+		if err != nil {
+			return 0, nil, err
+		}
+		generation, lastError := state.Generation, ""
+		restarted := false
+		if restartFrom >= 0 {
+			for _, call := range h.services.calls[restartFrom:] {
+				if call == "restart "+unitGateway {
+					restarted = true
+				}
+			}
+		}
+		if state.Generation > staleGeneration && (persist || !restarted) {
+			generation, lastError = staleGeneration, reloadError
+		}
+		return 200, []byte(fmt.Sprintf(`{"api":{"state":"running"},"policy":{"effective_digest":%q,"config_generation":%d,"last_reload_error":%q},"inspection":{"local":"active","ai_defense":"disabled"}}`,
+			digest, generation, lastError)), nil
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	for _, tc := range []struct {
+		name, reloadError string
+	}{
+		{"rejected reload with unchanged digest", "managed generation was refused"},
+		{"stale generation without reload error", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, err := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			staleGeneration, reloadError = state.Generation, tc.reloadError
+			configFile := writeTempConfig(t, []byte("# "+tc.name+"\n"+h.read(h.env.Layout.ConfigPath)))
+			restartFrom = len(h.services.calls)
+			r := h.run(Options{Action: ActionEnsure, ConfigFile: configFile})
+			requireOK(t, r)
+			if r.Policy == nil || !r.Policy.Applied {
+				t.Fatalf("ensure did not report the restarted gateway's policy: policy=%+v warnings=%+v", r.Policy, r.Warnings)
+			}
+			restarted := false
+			for _, call := range h.services.calls[restartFrom:] {
+				restarted = restarted || call == "restart "+unitGateway
+			}
+			if !restarted {
+				t.Fatalf("ensure returned without restarting the gateway for stale generation %d: changes=%q", staleGeneration, r.Changes)
+			}
+		})
+	}
+	state, err := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleGeneration, reloadError, persist = state.Generation, "managed generation refused after restart", true
+	restartFrom = len(h.services.calls)
+	refused := h.run(Options{Action: ActionEnsure, ConfigFile: writeTempConfig(t, []byte("# rejected after restart\n"+h.read(h.env.Layout.ConfigPath)))})
+	if refused.OK || !strings.Contains(fmt.Sprint(refused.Errors), reloadError) {
+		t.Fatalf("persistent rejection did not fail with its cause: exit=%d errors=%+v warnings=%+v", refused.ExitCode, refused.Errors, refused.Warnings)
 	}
 }
 
@@ -229,7 +304,9 @@ func TestAConfigPushedDuringAHotApplyKeepsTheGatewayRunning(t *testing.T) {
 				case strings.Contains(config, "mode: action"):
 					reported = digest("b")
 				}
-				return 200, []byte(`{"api":{"state":"running"},"policy":{"effective_digest":"` + reported + `"},"inspection":{"local":"active","ai_defense":"disabled"}}`), nil
+				state, _ := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+				return 200, []byte(fmt.Sprintf(`{"api":{"state":"running"},"policy":{"effective_digest":%q,"config_generation":%d},"inspection":{"local":"active","ai_defense":"disabled"}}`,
+					reported, state.Generation)), nil
 			}
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 			if err := os.WriteFile(h.env.P(h.env.Layout.ConfigPath), []byte(first), 0o640); err != nil {
