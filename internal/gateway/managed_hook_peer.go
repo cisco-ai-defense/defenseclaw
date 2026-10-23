@@ -275,11 +275,12 @@ func (z *managedHookAuthorizer) exempt(peer managedHookPeer) bool {
 	// past their lifetime that match no entry reject the caller without
 	// waiting (the refresh they started serves a later hook), so an enrolled
 	// caller is not held on every expiry. Every other case waits for the
-	// answer a blocking hook read gets, within identityDirectoryBudget (a
-	// managed Mac: a current answer): missing facts, unsettled ones (a UPN or
-	// domain not given yet, which may also still give one the directory has
-	// since dropped), and expired facts that match an entry, since the
-	// directory may have removed that name since. A name the facts gave
+	// current answer, within identityDirectoryBudget (exemptIdentityDirectory):
+	// missing facts, unsettled ones (a UPN or domain not given yet, which may
+	// also still give one the directory has since dropped), and expired or
+	// invalidated facts that match an entry, since the directory may have
+	// removed that name since; a refresh that fails or does not finish in
+	// time exempts no one (loop round 3). A name the facts gave
 	// before therefore never exempts a caller after the directory dropped it
 	// (review of r104 Q-identity, continuation 2, loop round 2), and waiting
 	// on every hook, which held every caller or denied a named exemption on a
@@ -304,12 +305,13 @@ const (
 	// exemptFactsNone: no facts, or unsettled ones that may lack a name a
 	// current answer gives; a current answer decides.
 	exemptFactsNone exemptFactsState = iota
-	// exemptFactsExpired: settled facts past their lifetime. A name they
-	// give may be one the directory has since dropped, so a match waits for
-	// a current answer; a nonmatch rejects.
+	// exemptFactsExpired: settled facts past their lifetime, or fetched
+	// before an invalidation (a profile assignment change, a guardian record
+	// with news). A name they give may be one the directory has since
+	// dropped, so a match waits for a current answer; a nonmatch rejects.
 	exemptFactsExpired
-	// exemptFactsCurrent: facts within their lifetime and settled, or the
-	// answer of a blocking read; they decide.
+	// exemptFactsCurrent: facts within their lifetime, fetched after the
+	// last invalidation and settled, or a current answer; they decide.
 	exemptFactsCurrent
 )
 
@@ -325,9 +327,10 @@ func (z *managedHookAuthorizer) hostRunExempt(peer managedHookPeer) bool {
 // managedHookExemptFacts are the verified directory facts exempt matches a
 // caller's names with, from the cache the caller's hook requests use; tests
 // replace it. cached returns the facts the cache holds now, without waiting,
-// and how far they decide (exemptFactsState); otherwise the facts are read
-// as a blocking hook read gets them (exemptIdentityDirectory), so the first
-// hook after a restart can use a UPN or DOMAIN\name exemption.
+// and how far they decide (exemptFactsState); otherwise they are a current
+// answer (exemptIdentityDirectory; on Windows, what a blocking hook read
+// gets), so the first hook after a restart can use a UPN or DOMAIN\name
+// exemption.
 var managedHookExemptFacts = exemptIdentityDirectory
 
 // decide authorizes one hook call. surface is the caller's

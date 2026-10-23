@@ -122,6 +122,10 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	}
 	keep, left := map[string]bool{}, map[string]bool{}
 	owners := map[int]LegacyAgentOwner{}
+	// Until the migration map is recorded, every listed account must be in
+	// it by name (unnamedLegacyAgentOwners).
+	ownersUnrecorded := !LegacyAgentOwnersRecorded(dir)
+	var unnamed []int
 	var passErr error
 	answeredDirectories := map[string]bool{}
 	for _, account := range accounts {
@@ -148,6 +152,13 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			}
 		}
 		keep[name] = true
+		// The name the guardian's record of the uid gave before this pass:
+		// the account that held it before the upgrade, when the listing and
+		// the lookup below give none.
+		holderBefore := ""
+		if ownersUnrecorded && account.User == "" {
+			holderBefore = legacyAgentHolderOfRecord(dir, account.UID, time.Now())
+		}
 		lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
 		record, err := identitySpoolCollect(lookupCtx, account, time.Now().UTC())
 		cancel()
@@ -221,18 +232,22 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			}
 		}
 		if _, proven := owners[account.UID]; !proven {
-			if user := cmp.Or(record.User, account.User); user != "" {
+			if user := cmp.Or(record.User, account.User, holderBefore); user != "" {
 				// No owner proof on this pass (the lookup failed, or the
 				// home is not there now, as an automounted one can be): the
 				// map lists the account as pending, under the name the host
 				// gives it, and a later pass that proves the account under
 				// that name adds its owner (WriteLegacyAgentOwners).
 				owners[account.UID] = LegacyAgentOwner{User: user}
+			} else if ownersUnrecorded {
+				unnamed = append(unnamed, account.UID)
 			}
 		}
 	}
-	if _, err := WriteLegacyAgentOwners(dir, owners, time.Now(), setOwnership); err != nil {
-		passErr = errors.Join(passErr, fmt.Errorf("record the agent identity migration map: %w", err))
+	if !ownersUnrecorded || unnamedLegacyAgentOwners(ctx, dir, owners, unnamed, logf) {
+		if _, err := WriteLegacyAgentOwners(dir, owners, time.Now(), setOwnership); err != nil {
+			passErr = errors.Join(passErr, fmt.Errorf("record the agent identity migration map: %w", err))
+		}
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
