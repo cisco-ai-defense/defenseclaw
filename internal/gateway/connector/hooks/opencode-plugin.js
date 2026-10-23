@@ -56,7 +56,7 @@ const DC_HOOK_SOCKET = "";
 const DC_FOREIGN_GUARD = "";
 const DC_INSTALL_MARKER = "";
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}";
-const DC_FAIL_MODE = "{{if and .Managed (not .SecureClient)}}closed{{else}}{{.FailMode}}{{end}}"; // "open" or "closed"
+const DC_FAIL_MODE = "{{if and .Managed .SecureClient}}{{.FailMode}}{{else}}closed{{end}}"; // per-user and standalone hooks stay closed
 // The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the process
 // environment is not read (GAP-0315). As in the shell hooks,
 // DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035); it can
@@ -679,21 +679,10 @@ async function defenseclawLogFailOpen(reason, category) {
   }
 }
 
-{{end}}async function defenseclawPerUserInstallInProgress() {
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}  if (DC_FAIL_MODE !== "open") return false;
-  try {
-    await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"));
-    return true;
-  } catch (err) {
-    return !err || err.code !== "ENOENT";
-  }
-{{else}}  return false;
-{{end}}}
-
+{{end}}
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
-  const installClosed = actionable && await defenseclawPerUserInstallInProgress();
-  const failMode = installClosed ? "closed" : DC_FAIL_MODE;
-  const transportFailMode = installClosed ? "closed" : DC_TRANSPORT_FAIL_MODE;
+  const failMode = DC_FAIL_MODE;
+  const transportFailMode = DC_TRANSPORT_FAIL_MODE;
   let token;
   try {
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
@@ -751,11 +740,6 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
 {{else}}{{if not .SecureClient}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
-{{if not .Managed}}      if (failMode === "open") {
-        if (actionable) await defenseclawLogFailOpen("invalid gateway verdict", "response");
-        return null;
-      }
-{{end}}
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
 {{end}}{{end}}    const out = data && data.hook_output;

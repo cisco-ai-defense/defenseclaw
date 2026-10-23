@@ -167,7 +167,7 @@ func TestManagedNativeHookSidecarDeliveryModes(t *testing.T) {
 	}
 }
 
-func TestShellFailOpenWarningEscapingAndLogWriteFailure(t *testing.T) {
+func TestSecureClientShellFailOpenWarningEscapingAndLogWriteFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("native Windows uses the authenticated hook executor")
 	}
@@ -184,7 +184,7 @@ func TestShellFailOpenWarningEscapingAndLogWriteFailure(t *testing.T) {
 				}
 			}
 			cmd := exec.Command("bash", "-c", `. "$1"; FAIL_MODE=open; defenseclaw_log_hook_delivery_failure codex codex-hook $'offline\nforged' transport open`, "test", filepath.Join(hooks, "_hardening.sh"))
-			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DEFENSECLAW_HOME=" + home}
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DEFENSECLAW_HOME=" + home, "DEFENSECLAW_MANAGED_HOOK=1"}
 			out, err := cmd.CombinedOutput()
 			if err != nil || !strings.Contains(string(out), "WARNING hook fail-open") || strings.Count(string(out), "\n") != 1 {
 				t.Fatalf("warning failed or forged line: err=%v output=%q", err, out)

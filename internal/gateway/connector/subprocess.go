@@ -614,6 +614,12 @@ type renderedHookScript struct {
 // order writeHookScriptsCommonWithTransport writes them. tokenFile is the
 // basename of the token file the connector scripts read.
 func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient, secureClientDelivery bool) ([]renderedHookScript, error) {
+	// All per-user render paths, including legacy setup helpers, must pin
+	// closed before the hook bytes are written. An old explicit open cannot
+	// authorize a tool call while this account's gateway is unavailable.
+	if !managed {
+		failMode = "closed"
+	}
 	connectorData := templateData{
 		APIAddr:              apiAddr,
 		APIToken:             "",

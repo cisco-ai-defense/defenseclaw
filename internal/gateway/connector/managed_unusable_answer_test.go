@@ -108,6 +108,7 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 					}))
 					t.Cleanup(server.Close)
 					home := t.TempDir()
+					installNativeGatewayForHookTest(t, home)
 					hookDir := filepath.Join(home, ".defenseclaw", "hooks")
 					opts := SetupOpts{
 						DataDir:            filepath.Join(home, ".defenseclaw"),
@@ -152,7 +153,7 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 					out := stdout.String()
 					blocked := code == 2 || strings.Contains(out, `"deny"`) ||
 						strings.Contains(out, `"block"`) || strings.Contains(out, `"continue":false`)
-					wantBlocked := answer.block || (!answer.usable && failMode == "closed")
+					wantBlocked := answer.block || !answer.usable
 					if blocked != wantBlocked {
 						t.Fatalf("exit %d stdout=%q stderr=%q: blocked = %v, want %v", code, out, stderr.String(), blocked, wantBlocked)
 					}

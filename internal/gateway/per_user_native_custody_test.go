@@ -10,6 +10,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
 func TestPerUserNativeCapableHooksRecordHookOnlyCustody(t *testing.T) {
@@ -53,7 +54,8 @@ func TestPerUserSandboxNativeCustodyRemainsSeparate(t *testing.T) {
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	server.scannerCfg = config.DefaultConfig()
-	ctx := sandboxCtx(sessionScopeBinding("sb_0000000000000000000000000000000a", "claudecode"))
+	ctx := sandboxauth.WithRequest(t.Context(), sandboxauth.Binding{ID: "sb_0000000000000000000000000000000a", Connector: "claudecode"}, nil)
+	ctx = withAuthenticatedHookConnector(ctx, "claudecode")
 	profile := server.hookProfileForRequest(ctx, "claudecode")
 	body := []byte(`{"hook_event_name":"UserPromptSubmit","session_id":"session-1","prompt":"hello"}`)
 	payload := map[string]interface{}{

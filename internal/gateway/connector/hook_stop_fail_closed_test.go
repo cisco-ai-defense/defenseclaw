@@ -257,8 +257,8 @@ func TestPerUserShellHooksLetAFailedStopEventThrough(t *testing.T) {
 			}
 		}
 		open := runPerUserHookForStop(t, tc.c, tc.script, tc.args, tc.stdin, "exit:7", "DEFENSECLAW_FAIL_MODE=open")
-		if open.code != 0 || strings.Contains(open.stderr, stopEventNotBlockedLead) {
-			t.Errorf("%s, fail mode open: exit %d stderr=%q, want the unchanged fail-open allow", tc.name, open.code, open.stderr)
+		if open.code != 0 || !strings.Contains(open.stderr, stopEventNotBlockedLead) {
+			t.Errorf("%s, per-user open request: exit %d stderr=%q, want the neutral stop outcome with closed posture", tc.name, open.code, open.stderr)
 		}
 	}
 

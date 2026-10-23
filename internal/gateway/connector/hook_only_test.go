@@ -3124,7 +3124,7 @@ func TestCopilotHookContractReconciliationIsEventBoundAndVersionExact(t *testing
 	}
 }
 
-func TestCursorHooks_ActionIsFailClosedAndObserveRefreshIsFailOpen(t *testing.T) {
+func TestCursorHooks_ActionAndObserveRefreshFailClosed(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "hooks.json")
 	prev := CursorHooksPathOverride
@@ -3167,8 +3167,8 @@ func TestCursorHooks_ActionIsFailClosedAndObserveRefreshIsFailOpen(t *testing.T)
 			t.Fatalf("Cursor %s entries = %d after refresh, want 1", event, len(entries))
 		}
 		entry, _ := entries[0].(map[string]interface{})
-		if entry["failClosed"] != false {
-			t.Fatalf("Cursor %s retained failClosed=true after observe refresh: %#v", event, entry)
+		if entry["failClosed"] != true {
+			t.Fatalf("Cursor %s must stay fail-closed after observe refresh: %#v", event, entry)
 		}
 		if fmt.Sprint(entry["timeout"]) != "30" {
 			t.Fatalf("Cursor %s timeout=%#v, want 30 seconds", event, entry["timeout"])

@@ -20,39 +20,31 @@ import (
 )
 
 // A per-user Linux or macOS gateway has no service unit, so after a reboot
-// the shell hooks start it: a refused request (curl exit 7) starts
-// `defenseclaw-gateway start --hook-cold-start` in the background once and
-// is sent again while it starts. The stub fails the first DC_COLD_FAILS
-// requests (default 1) with DC_COLD_FIRST_RC (default 7).
-const coldStartCurlStub = `#!/bin/sh
-n=$(cat "$DC_COLD_CAP/count" 2>/dev/null || echo 0)
-n=$((n + 1))
-echo "$n" > "$DC_COLD_CAP/count"
-want=""
-for arg in "$@"; do
-  case "$want" in
-    body)
-      case "$arg" in
-        @*) cat "${arg#@}" > "$DC_COLD_CAP/body.$n" ;;
-        *) printf '%s' "$arg" > "$DC_COLD_CAP/body.$n" ;;
-      esac
-      want="" ;;
-    config) cat "$arg" > "$DC_COLD_CAP/config.$n"; want="" ;;
-  esac
-  case "$arg" in
-    -d|--data|--data-binary) want=body ;;
-    -K|--config) want=config ;;
-  esac
-done
-if [ "$n" -le "${DC_COLD_FAILS:-1}" ]; then exit "${DC_COLD_FIRST_RC:-7}"; fi
-printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
-`
-
-// The stub records only starts: the hook also asks the binary for session
-// facts (on macOS always, elsewhere when a credential cache can exist), and
-// that read never starts a gateway.
+// The stub records native hook-post calls and starts separately. A shell
+// hook sends its body and token to hook-post on stdin, then may cold start
+// the gateway after a refused call.
 const coldStartGatewayStub = `#!/bin/sh
 [ "$1" = hook ] && exit 0
+if [ "$1" = hook-post ]; then
+  n=$(cat "$DC_COLD_CAP/count" 2>/dev/null || echo 0)
+  n=$((n + 1))
+  echo "$n" > "$DC_COLD_CAP/count"
+  cat > "$DC_COLD_CAP/body.$n"
+  cp "$DC_COLD_CAP/body.$n" "$DC_COLD_CAP/config.$n"
+  if [ "$n" -le "${DC_COLD_FAILS:-1}" ]; then
+    if [ "${DC_COLD_DROP_LISTENER:-0}" = 1 ]; then
+      : > "$DC_COLD_CAP/drop.$n"
+      i=0
+      while [ ! -e "$DC_COLD_CAP/dropped.$n" ] && [ "$i" -lt 100 ]; do
+        sleep .01
+        i=$((i + 1))
+      done
+    fi
+    exit "${DC_COLD_FIRST_RC:-7}"
+  fi
+  printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
+  exit 0
+fi
 printf '%s|%s|%s|%s|%s\n' "$HOME" "$*" "$(ulimit -S -t)" "$(ulimit -H -t)" "${DEFENSECLAW_GATEWAY_TOKEN+inherited}" >> "$DC_COLD_CAP/gateway.log"
 exit 0
 `
@@ -71,9 +63,8 @@ func runHookForColdStart(t *testing.T, c Connector, script string, args []string
 	t.Helper()
 	hooksDir := t.TempDir()
 	apiAddr := freeAPIAddr(t)
-	// curl is stubbed below, so it never creates a connection. Bind the
-	// endpoint as this account to let these retry tests reach their transport
-	// stub; free and foreign listeners are covered by separate security tests.
+	// Bind the endpoint as this account to let these retry tests reach the
+	// native transport stub; free and foreign listeners have separate tests.
 	listener, err := net.Listen("tcp", apiAddr)
 	if err != nil {
 		t.Fatal(err)
@@ -82,12 +73,7 @@ func runHookForColdStart(t *testing.T, c Connector, script string, args []string
 	if err := writePerUserHooksForTestFailMode(hooksDir, apiAddr, "cold-start-scoped-token", c, extraEnv); err != nil {
 		t.Fatalf("write hooks: %v", err)
 	}
-	stubDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stubDir, "curl"), []byte(coldStartCurlStub), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	hookPath := filepath.Join(hooksDir, script)
-	bakeHookPathForTest(t, hookPath, stubDir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 
 	home := t.TempDir()
 	dataDir := filepath.Join(home, ".defenseclaw")
@@ -107,6 +93,49 @@ func runHookForColdStart(t *testing.T, c Connector, script string, args []string
 		prepare(dataDir)
 	}
 	capDir := t.TempDir()
+	dropListener := false
+	for _, entry := range extraEnv {
+		if entry == "DC_COLD_DROP_LISTENER=1" {
+			dropListener = true
+		}
+	}
+	if dropListener {
+		stop, done := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(done)
+			for n := 1; ; n++ {
+				marker := filepath.Join(capDir, "drop."+strconv.Itoa(n))
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					if _, err := os.Stat(marker); err == nil {
+						break
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+				_ = listener.Close()
+				_ = os.WriteFile(filepath.Join(capDir, "dropped."+strconv.Itoa(n)), nil, 0o600)
+				time.Sleep(50 * time.Millisecond)
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					nextListener, listenErr := net.Listen("tcp", apiAddr)
+					if listenErr == nil {
+						listener = nextListener
+						break
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+			}
+		}()
+		defer func() { close(stop); <-done }()
+	}
 
 	env := make([]string, 0, 64)
 	for _, entry := range sanitizedTestEnv() {
@@ -173,7 +202,7 @@ func TestShellHooksColdStartTheGatewayAfterARefusedRequest(t *testing.T) {
 			if tc.args != nil {
 				args = tc.args(t, tc.script)
 			}
-			run := runHookForColdStart(t, tc.c, tc.script, args, nil)
+			run := runHookForColdStart(t, tc.c, tc.script, args, nil, "DC_COLD_DROP_LISTENER=1")
 			if run.err != nil {
 				t.Fatalf("hook failed: %v\nstderr=%s", run.err, run.stderr)
 			}
@@ -181,7 +210,7 @@ func TestShellHooksColdStartTheGatewayAfterARefusedRequest(t *testing.T) {
 				t.Fatalf("the retried request still reported the gateway unreachable: %s", run.stderr)
 			}
 			if got := strings.TrimSpace(readColdStartCapture(t, run.capDir, "count")); got != "2" {
-				t.Fatalf("curl ran %q times, want 2 (refused, then sent again)", got)
+				t.Fatalf("native post ran %q times, want 2 (refused, then sent again)", got)
 			}
 			log := strings.TrimSpace(waitColdStartCapture(t, run.capDir, "gateway.log"))
 			fields := strings.Split(log, "|")
@@ -215,9 +244,9 @@ func TestShellHooksColdStartTheGatewayAfterARefusedRequest(t *testing.T) {
 }
 
 func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
-	// Without a start, a refused call is still sent again for the restart
-	// budget (a restart or an upgrade may be under way), then reported.
-	const waited = "restarting or not running (no answer within 3 seconds); try again in a moment, or run `defenseclaw-gateway start`"
+	// With a listener still bound, a failed native post is ambiguous. The
+	// hook blocks without retrying credentials to a possibly changed peer.
+	const waited = "this account's gateway is not running; run `defenseclaw-gateway start`"
 	// An install or upgrade stops the gateway like an operator does and
 	// starts it again when it is done: a restart, not a stop (GAP-0140).
 	const installing = "DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done"
@@ -225,7 +254,6 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 		prepare func(string)
 		env     []string
 		hint    string
-		retried bool
 		closed  bool
 	}{
 		// The hook names the way back (SWEEP-16): an explicit stop is never
@@ -235,20 +263,19 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 		}, hint: "stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection"},
 		"install in progress": {prepare: func(dataDir string) {
 			_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
-		}, hint: installing, retried: true, closed: true},
+		}, hint: installing, closed: true},
 		"stopped by an upgrade in progress": {prepare: func(dataDir string) {
 			_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
 			_ = os.WriteFile(filepath.Join(dataDir, "gateway.stopped"), []byte("stopped\n"), 0o600)
-		}, hint: installing, retried: true, closed: true},
+		}, hint: installing, closed: true},
 		"no configuration": {prepare: func(dataDir string) {
 			_ = os.Remove(filepath.Join(dataDir, "config.yaml"))
-		}, hint: waited, retried: true},
-		"autostart off": {env: []string{"DEFENSECLAW_GATEWAY_AUTOSTART=0"}, hint: waited, retried: true},
+		}, hint: waited},
+		"autostart off": {env: []string{"DEFENSECLAW_GATEWAY_AUTOSTART=0"}, hint: waited},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			// An open install still closes while the installer owns the lock.
+			// An old per-user open setting stays closed, including during install.
 			env := append([]string{"DEFENSECLAW_FAIL_MODE=open", "DC_COLD_FAILS=1000"}, tc.env...)
 			run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, tc.prepare, env...)
 			time.Sleep(200 * time.Millisecond) // a background start would have logged by now
@@ -256,11 +283,8 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 				t.Fatalf("hook started the gateway: %q", log)
 			}
 			count, _ := strconv.Atoi(strings.TrimSpace(readColdStartCapture(t, run.capDir, "count")))
-			if tc.retried && count < 2 {
-				t.Fatalf("curl ran %d times, want the call sent again", count)
-			}
-			if !tc.retried && count != 1 {
-				t.Fatalf("curl ran %d times, want 1", count)
+			if count != 1 {
+				t.Fatalf("native post ran %d times, want one refused attempt with no send to a changed peer", count)
 			}
 			if !strings.Contains(run.stderr, "gateway unreachable") {
 				t.Fatalf("stderr = %q, want the unreachable report", run.stderr)
@@ -277,24 +301,19 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 			if tc.hint == "" && strings.Contains(run.stderr, "defenseclaw-gateway start") {
 				t.Errorf("stderr = %q, want no start advice", run.stderr)
 			}
-			if tc.closed {
-				if !strings.Contains(run.stdout, `"permissionDecision":"deny"`) ||
-					!strings.Contains(run.stdout, "is being installed or upgraded for this account") ||
-					!strings.Contains(run.stdout, "defenseclaw-gateway status") ||
-					strings.Contains(run.stdout, "stopped with") || strings.Contains(run.stdout, "systemMessage") {
-					t.Errorf("stdout = %q, want the install-time native deny and next step", run.stdout)
-				}
-				return
+			if !strings.Contains(run.stdout, `"permissionDecision":"deny"`) || strings.Contains(run.stdout, "systemMessage") {
+				t.Errorf("stdout = %q, want a per-user native deny", run.stdout)
 			}
-			// Claude Code hides stderr of a hook that exits 0, so the next
-			// step is also on stdout as a systemMessage (GAP-0037).
-			assertGatewayDownNotice(t, run.stdout, tc.hint != "")
+			if tc.closed && (!strings.Contains(run.stdout, "is being installed or upgraded for this account") ||
+				strings.Contains(run.stdout, "stopped with")) {
+				t.Errorf("stdout = %q, want the install-time native deny", run.stdout)
+			}
 		})
 	}
 }
 
 // A frozen or hung gateway keeps its listener, so the request times out
-// (curl 28) while gateway.pid names a live process. The line says so once,
+// (native post exit 28) while gateway.pid names a live process. The line says so once,
 // with the next step, instead of "gateway unreachable ...: gateway
 // unreachable" (GAP-1204).
 func TestShellHookNamesTheNextStepForAHungGateway(t *testing.T) {
@@ -315,13 +334,13 @@ func TestShellHookNamesTheNextStepForAHungGateway(t *testing.T) {
 		t.Fatalf("a timed-out request started the gateway: %q", log)
 	}
 	if got := strings.TrimSpace(readColdStartCapture(t, run.capDir, "count")); got != "1" {
-		t.Fatalf("curl ran %q times, want 1: a gateway that accepted the call keeps it", got)
+		t.Fatalf("native post ran %q times, want 1: a gateway that accepted the call keeps it", got)
 	}
 
 	open := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, alive,
 		"DEFENSECLAW_FAIL_MODE=open", "DC_COLD_FIRST_RC=28")
-	if !strings.Contains(open.stdout, "the gateway is running but did not answer. Run `defenseclaw-gateway restart`") {
-		t.Errorf("fail-open stdout = %q, want the restart notice", open.stdout)
+	if reason := failClosedDenyReason(t, open); !strings.Contains(reason, "the gateway is running but did not answer") {
+		t.Errorf("per-user open request yielded %q, want a closed deny naming the hung gateway", reason)
 	}
 }
 
@@ -408,40 +427,15 @@ func exitCodeOf(err error) int {
 	return -1
 }
 
-// Codex, like Claude Code, shows only the systemMessage of a fail-open hook.
+// An old per-user open setting cannot allow Codex past a stopped gateway.
 func TestCodexShellHookShowsTheStartStepWhenTheGatewayWasStopped(t *testing.T) {
 	run := runHookForColdStart(t, NewCodexConnector(), "codex-hook.sh",
 		codexBoundShellHookArgsForTest(t, "codex-hook.sh", "PreToolUse")[1:],
 		func(dataDir string) {
 			_ = os.WriteFile(filepath.Join(dataDir, "gateway.stopped"), []byte("stopped\n"), 0o600)
 		}, "DEFENSECLAW_FAIL_MODE=open")
-	if run.err != nil {
-		t.Fatalf("hook failed: %v\nstderr=%s", run.err, run.stderr)
-	}
-	assertGatewayDownNotice(t, run.stdout, true)
-	if !strings.Contains(run.stdout, "stopped with `defenseclaw-gateway stop`") {
-		t.Errorf("stdout = %q, want the stop named", run.stdout)
-	}
-}
-
-func assertGatewayDownNotice(t *testing.T, stdout string, want bool) {
-	t.Helper()
-	if !want {
-		if strings.TrimSpace(stdout) != "" {
-			t.Errorf("stdout = %q, want no notice", stdout)
-		}
-		return
-	}
-	var out struct {
-		SystemMessage string `json:"systemMessage"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &out); err != nil {
-		t.Fatalf("stdout = %q, want one JSON hook result: %v", stdout, err)
-	}
-	if !strings.HasPrefix(out.SystemMessage, "DefenseClaw is not checking this session") ||
-		!strings.Contains(out.SystemMessage, "Run `defenseclaw-gateway start` to resume protection.") ||
-		!strings.Contains(out.SystemMessage, "`defenseclaw-gateway status`") || strings.Contains(out.SystemMessage, ".exe") {
-		t.Errorf("systemMessage = %q, want the gateway-down notice with the start and status steps", out.SystemMessage)
+	if code := exitCodeOf(run.err); code != 2 || !strings.Contains(run.stderr, "stopped with `defenseclaw-gateway stop`") {
+		t.Errorf("per-user open request: exit %d stderr=%q, want a closed block naming the stop", code, run.stderr)
 	}
 }
 
@@ -455,8 +449,8 @@ func TestShellHookIsAnsweredByTheGatewayThatRestarts(t *testing.T) {
 		started  bool
 	}{
 		{name: "refused", rc: "7", started: true},
-		{name: "empty reply", rc: "52"},
-		{name: "reset", rc: "56"},
+		{name: "empty reply", rc: "52", started: true},
+		{name: "reset", rc: "56", started: true},
 	} {
 		for _, hook := range []struct {
 			c      Connector
@@ -466,21 +460,21 @@ func TestShellHookIsAnsweredByTheGatewayThatRestarts(t *testing.T) {
 			{NewCodexConnector(), "codex-hook.sh"},
 		} {
 			t.Run(tc.name+"/"+hook.script, func(t *testing.T) {
-				t.Parallel()
 				var args []string
 				if hook.script == "codex-hook.sh" {
 					args = codexBoundShellHookArgsForTest(t, hook.script, "PreToolUse")[1:]
 				}
 				run := runHookForColdStart(t, hook.c, hook.script, args, nil,
-					"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=3", "DC_COLD_FIRST_RC="+tc.rc)
-				if run.elapsed > 3*time.Second {
+					"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=2", "DC_COLD_FIRST_RC="+tc.rc, "DC_COLD_DROP_LISTENER=1")
+				if run.elapsed > 4*time.Second {
 					t.Fatalf("the call took %s", run.elapsed)
 				}
 				if run.err != nil || strings.Contains(run.stdout, "deny") || strings.Contains(run.stderr, "unreachable") {
-					t.Fatalf("err=%v stdout=%q stderr=%q, want the restarted gateway's allow", run.err, run.stdout, run.stderr)
+					t.Fatalf("err=%v stdout=%q stderr=%q native-post-count=%q gateway-start=%q, want the restarted gateway's allow", run.err, run.stdout, run.stderr,
+						readColdStartCapture(t, run.capDir, "count"), readColdStartCapture(t, run.capDir, "gateway.log"))
 				}
-				if got := strings.TrimSpace(readColdStartCapture(t, run.capDir, "count")); got != "4" {
-					t.Fatalf("curl ran %q times, want 4 (three failed tries, then the answer)", got)
+				if got := strings.TrimSpace(readColdStartCapture(t, run.capDir, "count")); got != "3" {
+					t.Fatalf("native post ran %q times, want 3 (two failed tries, then the answer)", got)
 				}
 				if tc.started {
 					if log := strings.TrimSpace(waitColdStartCapture(t, run.capDir, "gateway.log")); strings.Count(log, "start --hook-cold-start") != 1 {
@@ -502,9 +496,8 @@ func TestShellHookIsAnsweredByTheGatewayThatRestarts(t *testing.T) {
 func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 	for _, rc := range []string{"7", "56"} {
 		t.Run("claude-code/"+rc, func(t *testing.T) {
-			t.Parallel()
 			run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, nil,
-				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC="+rc)
+				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC="+rc, "DC_COLD_DROP_LISTENER=1")
 			assertBlockedWithinTheRestartBudget(t, run.elapsed)
 			if rc == "7" && waitColdStartCapture(t, run.capDir, "gateway.log") == "" {
 				t.Fatal("a refused call did not start the gateway")
@@ -514,10 +507,9 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 			}
 		})
 		t.Run("codex/"+rc, func(t *testing.T) {
-			t.Parallel()
 			run := runHookForColdStart(t, NewCodexConnector(), "codex-hook.sh",
 				codexBoundShellHookArgsForTest(t, "codex-hook.sh", "PreToolUse")[1:], nil,
-				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC="+rc)
+				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC="+rc, "DC_COLD_DROP_LISTENER=1")
 			assertBlockedWithinTheRestartBudget(t, run.elapsed)
 			if rc == "7" && waitColdStartCapture(t, run.capDir, "gateway.log") == "" {
 				t.Fatal("a refused call did not start the gateway")

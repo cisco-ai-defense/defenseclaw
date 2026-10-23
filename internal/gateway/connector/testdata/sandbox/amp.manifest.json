@@ -12,8 +12,8 @@
     "/sandbox/.config/amp/plugins/defenseclaw.ts": {
       "mode": "-rw-------",
       "owner": "user",
-      "size": 25984,
-      "sha256": "ba040bc1895b4b8eb0c2707cc0af7ebaba67aed09a00b5f850b8e0d3bfd6e8d0"
+      "size": 25869,
+      "sha256": "7c103ee36c9de5959907dc1c8cdf84abc4dac27c07b6e4c0c038afd723dcf06f"
     }
   }
 }

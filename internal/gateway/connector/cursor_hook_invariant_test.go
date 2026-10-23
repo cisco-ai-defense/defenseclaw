@@ -146,8 +146,8 @@ func TestCursorHook_NeverEmptyStdout(t *testing.T) {
 				"open",
 				`{"hook_event_name":"beforeShellExecution"}`,
 			)
-			if err != nil {
-				t.Fatalf("expected exit 0 (fail-open), got %v; stderr=%s", err, stderr)
+			if (tc.name == "server_5xx" || tc.name == "gateway_unreachable") != (err != nil) {
+				t.Fatalf("unexpected per-user hook exit %v; stdout=%s; stderr=%s", err, stdout, stderr)
 			}
 			trimmed := strings.TrimSpace(stdout)
 			if trimmed == "" {
@@ -170,8 +170,8 @@ func TestCursorHook_NeverEmptyStdout(t *testing.T) {
 			"open",
 			strings.Repeat("x", (1<<20)+1),
 		)
-		if err != nil {
-			t.Fatalf("expected exit 0 for oversized fail-open input, got %v; stderr=%s", err, stderr)
+		if err == nil {
+			t.Fatalf("expected fail-closed for oversized per-user input, stdout=%s; stderr=%s", stdout, stderr)
 		}
 		assertJSONEnvelope(t, stdout)
 	})
@@ -181,7 +181,7 @@ func TestCursorHook_NeverEmptyStdout(t *testing.T) {
 // side: a default / observe (non-closed) install must write
 // failClosed:false so an empty or slow hook can never be misread as a
 // fail-closed block.
-func TestCursorHooks_ObserveModeWritesFailClosedFalse(t *testing.T) {
+func TestCursorHooks_ObserveModeWritesFailClosedTrue(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "hooks.json")
 	prev := CursorHooksPathOverride
@@ -202,11 +202,11 @@ func TestCursorHooks_ObserveModeWritesFailClosedFalse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read cursor hooks: %v", err)
 	}
-	if !strings.Contains(string(data), `"failClosed": false`) {
-		t.Fatalf("observe-mode cursor hooks must write failClosed:false, got:\n%s", string(data))
+	if !strings.Contains(string(data), `"failClosed": true`) {
+		t.Fatalf("observe-mode cursor hooks must write failClosed:true, got:\n%s", string(data))
 	}
-	if strings.Contains(string(data), `"failClosed": true`) {
-		t.Fatalf("observe-mode cursor hooks must not write failClosed:true, got:\n%s", string(data))
+	if strings.Contains(string(data), `"failClosed": false`) {
+		t.Fatalf("observe-mode cursor hooks must not write failClosed:false, got:\n%s", string(data))
 	}
 }
 

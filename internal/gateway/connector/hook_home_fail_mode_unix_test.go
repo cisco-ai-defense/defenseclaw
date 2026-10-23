@@ -51,10 +51,10 @@ func TestPerUserHookHomeUnavailableFollowsTheInstalledMode(t *testing.T) {
 			env       []string
 			wantBlock bool
 		}{
-			{"no-env", nil, false},
-			{"env-closed", []string{"DEFENSECLAW_FAIL_MODE=Closed"}, false},
+			{"no-env", nil, true},
+			{"env-closed", []string{"DEFENSECLAW_FAIL_MODE=Closed"}, true},
 			{"strict", []string{"DEFENSECLAW_STRICT_AVAILABILITY=yes"}, true},
-			{"env-open", []string{"DEFENSECLAW_FAIL_MODE=open"}, false},
+			{"env-open", []string{"DEFENSECLAW_FAIL_MODE=open"}, true},
 		} {
 			t.Run(agent.script+"/"+tc.name, func(t *testing.T) {
 				cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, agent.script)}, agent.args...)...)

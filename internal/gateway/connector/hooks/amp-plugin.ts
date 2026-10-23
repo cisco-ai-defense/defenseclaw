@@ -46,7 +46,7 @@ const DC_HOOK_SOCKET: string = ""
 const DC_FOREIGN_GUARD: string = ""
 const DC_INSTALL_MARKER: string = ""
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}"
-const DC_FAIL_MODE: string = "{{if and .Managed (not .SecureClient)}}closed{{else}}{{.FailMode}}{{end}}" // "open" or "closed"
+const DC_FAIL_MODE: string = "{{if and .Managed .SecureClient}}{{.FailMode}}{{else}}closed{{end}}" // per-user and standalone hooks stay closed
 // Standalone managed installs talk to the gateway's peer-authorized unix hook
 // socket instead of the TCP API: the gateway identifies the caller by
 // kernel-verified uid, so no bearer token leaves this process, and a user who
@@ -552,19 +552,8 @@ function gatewayStopped(error: unknown): boolean {
 	return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused")
 }
 
-async function perUserInstallInProgress(): Promise<boolean> {
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}	if (DC_FAIL_MODE !== "open") return false
-	try {
-		await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"))
-		return true
-	} catch (error) {
-		return (error as { code?: unknown } | null)?.code !== "ENOENT"
-	}
-{{else}}	return false
-{{end}}}
-
 async function failureResponse(reason: string): Promise<GatewayResponse> {
-	if (DC_FAIL_MODE === "closed" || await perUserInstallInProgress()) {
+	if (DC_FAIL_MODE === "closed") {
 		return { action: "block", reason: `DefenseClaw hook failed closed (${reason})` }
 	}
 	return { action: "allow" }

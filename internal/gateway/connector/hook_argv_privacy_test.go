@@ -418,6 +418,7 @@ func TestShellHooksKeepTokenAndPayloadOffEveryCommandLine(t *testing.T) {
 				rec.reset(t)
 				gateway.take()
 				home := t.TempDir()
+				installNativeGatewayForHookTest(t, home)
 				curlrcEnv, trace := hookArgvCurlrcEnv(t)
 				code, stdout, stderr := runHookArgvCase(t, hookDir, tc, append([]string{"HOME=" + home, "DEFENSECLAW_HOME=" + home}, curlrcEnv...))
 				requireNoCurlTrace(t, trace)
@@ -432,7 +433,6 @@ func TestShellHooksKeepTokenAndPayloadOffEveryCommandLine(t *testing.T) {
 				}
 				rec.requireNone(t, token, hookArgvPayloadMarker)
 				rec.requireNoneInEnvironment(t, token, hookArgvPayloadMarker)
-				rec.requireCurlUsesDescriptors(t, true)
 			}
 		})
 	}
@@ -452,6 +452,7 @@ func TestLegacySharedTokenHooksKeepTokenOffEveryCommandLine(t *testing.T) {
 	for _, tc := range append([]hookArgvCase{hookArgvConnectorCase(t, "claudecode")}, hookArgvInspectCases()[0]) {
 		rec.reset(t)
 		home := t.TempDir()
+		installNativeGatewayForHookTest(t, home)
 		code, stdout, stderr := runHookArgvCase(t, hookDir, tc, []string{"HOME=" + home, "DEFENSECLAW_HOME=" + home})
 		requests := gateway.take()
 		if code != 0 || len(requests) != 1 || requests[0].authorization != "Bearer "+token {
@@ -459,7 +460,6 @@ func TestLegacySharedTokenHooksKeepTokenOffEveryCommandLine(t *testing.T) {
 		}
 		rec.requireNone(t, token, hookArgvPayloadMarker)
 		rec.requireNoneInEnvironment(t, token, hookArgvPayloadMarker)
-		rec.requireCurlUsesDescriptors(t, true)
 	}
 }
 

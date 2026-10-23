@@ -165,7 +165,7 @@ func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 				if code != 0 {
 					t.Fatalf("exit %d, want 0 (stdout %q stderr %q)", code, out, errOut)
 				}
-				if mode == "open" || tc.deny == "" {
+				if tc.deny == "" {
 					if strings.TrimSpace(out) != "" {
 						t.Fatalf("stdout %q, want no decision (stderr %q)", out, errOut)
 					}

@@ -180,7 +180,7 @@ defenseclaw_api_listener_unproven() { return 1; }
 curl() { echo leaked; }
 if defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 'secret payload' -H 'Authorization: Bearer secret'; then echo sent; else echo blocked; fi`
 	cmd := exec.Command("bash", "-c", script, "bash", helper)
-	cmd.Env = append(os.Environ(), "HOME="+home, "DC_NATIVE_MARKER="+marker)
+	cmd.Env = append(os.Environ(), "HOME="+home, "DEFENSECLAW_AGENT_HOME="+home, "DC_NATIVE_MARKER="+marker)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("bash: %v\n%s", err, out)
@@ -222,7 +222,7 @@ curl() { echo leaked; }
 defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 '{"private":"tool event"}' \
   -H 'Content-Type: application/json' -H 'Authorization: Bearer private-token'`
 	cmd := exec.Command("bash", "-c", script, "bash", helper)
-	cmd.Env = append(os.Environ(), "HOME="+home, "DC_NATIVE_INPUT="+inputPath)
+	cmd.Env = append(os.Environ(), "HOME="+home, "DEFENSECLAW_AGENT_HOME="+home, "DC_NATIVE_INPUT="+inputPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil || string(out) != "{\"action\":\"allow\"}\n200" {
 		t.Fatalf("native shell post = %q, error=%v", out, err)

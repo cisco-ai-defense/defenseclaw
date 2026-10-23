@@ -20,13 +20,9 @@ import (
 	"testing"
 )
 
-// 1.0.4 review (loop round 2): one inspect-* script serves every connector of
-// a data directory and nothing authenticates which one an invocation runs
-// for. Its fail mode is the strictest recorded mode: an inherited
-// DEFENSECLAW_CONNECTOR naming an open peer, two closed records with no
-// selector, or a legacy open kept from an upgrade never open it while a
-// connector is recorded closed. Every parser path is checked: jq, the python3
-// fallback, and neither (flat records only).
+// One inspect-* script serves every connector of a per-user data directory.
+// Its fail mode stays closed for all stored modes, selectors and parsers,
+// including older open records left by an upgrade.
 func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 	helper, err := filepath.Abs(filepath.Join("hooks", "_hardening.sh"))
 	if err != nil {
@@ -34,8 +30,8 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 	}
 	python, pyErr := exec.LookPath("python3")
 	_, jqErr := exec.LookPath("jq")
-	// Records as 1.0.4 writes them: an open counts only with its config
-	// source (G3-upg); the unsourced cases below check that rule.
+	// Include older sourced and unsourced open records to check that neither
+	// can weaken the current per-user posture.
 	flat := func(name, mode string) string {
 		return "DEFENSECLAW_CONNECTOR=" + name + "\nDEFENSECLAW_FAIL_MODE=" + mode + "\nFAIL_MODE_SOURCE=config\n"
 	}
@@ -75,31 +71,28 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 		{"upgrade/legacy-open-json-closed-entry-no-flat", state{".hookcfg": closedLegacyOpenJSON},
 			"", [3]string{"closed", "closed", "closed"}},
 		{"json-closed-entry-flat-open", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": mixedJSON},
-			"claudecode", [3]string{"closed", "closed", "open"}},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
 		{"malformed-flat-mode", state{".hookcfg.codex": flat("codex", "OPEN "), ".hookcfg.claudecode": flat("claudecode", "open")},
 			"", [3]string{"closed", "closed", "closed"}},
 		{"malformed-json", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": "{not json"},
-			"claudecode", [3]string{"closed", "closed", "open"}},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
 		{"json-fail-modes-not-a-map", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":["open"]}`},
-			"claudecode", [3]string{"closed", "closed", "open"}},
-		// The modes the shared hooks keep: a selected connector's own open
-		// record when every record is open, and the legacy mode for a call
-		// no single connector owns (an install no connector refresh has
-		// rewritten yet, or several open records), as before 1.0.4.
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		// Even all-open records and an old legacy open are closed.
 		{"all-open/no-selector", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": openJSON},
 			"", [3]string{"closed", "closed", "closed"}},
 		{"all-open/no-selector-legacy-open", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg.claudecode": flat("claudecode", "open"),
 			".hookcfg.legacy": flat("", "open"), ".hookcfg": strings.Replace(openJSON, `"legacy_fail_mode":"closed"`, `"legacy_fail_mode":"open"`, 1)},
-			"", [3]string{"open", "open", "open"}},
+			"", [3]string{"closed", "closed", "closed"}},
 		// Loop round 3: the JSON legacy open alone (no flat legacy record,
 		// which every writer since 0.8.10 writes with it) opens nothing.
 		{"all-open/no-selector-json-legacy-open-only", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg.claudecode": flat("claudecode", "open"),
 			".hookcfg": strings.Replace(openJSON, `"legacy_fail_mode":"closed"`, `"legacy_fail_mode":"open"`, 1)},
 			"", [3]string{"closed", "closed", "closed"}},
 		{"single-open-record", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg": `{"version":2,"fail_modes":{"codex":"open"},"fail_mode_sources":{"codex":"config"}}`},
-			"codex", [3]string{"open", "open", "open"}},
+			"codex", [3]string{"closed", "closed", "closed"}},
 		{"all-open/selector-recorded", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": openJSON},
-			"codex", [3]string{"open", "open", "open"}},
+			"codex", [3]string{"closed", "closed", "closed"}},
 		{"all-open/selector-unrecorded", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": openJSON},
 			"cursor", [3]string{"closed", "closed", "closed"}},
 		{"single-closed", state{".hookcfg.codex": flat("codex", "closed"), ".hookcfg": `{"version":2,"fail_modes":{"codex":"closed"}}`},
@@ -107,16 +100,16 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 		{"legacy-only-open-json-only", state{".hookcfg": legacyOpenJSON},
 			"", [3]string{"closed", "closed", "closed"}},
 		{"legacy-only-open-flat", state{".hookcfg.legacy": flat("", "open"), ".hookcfg": legacyOpenJSON},
-			"", [3]string{"open", "open", "open"}},
+			"", [3]string{"closed", "closed", "closed"}},
 		{"legacy-only-open-selector", state{".hookcfg": legacyOpenJSON},
 			"codex", [3]string{"closed", "closed", "closed"}},
 		{"legacy-flat-closed-json-open", state{".hookcfg.legacy": flat("", "closed"), ".hookcfg": legacyOpenJSON},
 			"", [3]string{"closed", "closed", "closed"}},
 		{"legacy-flat-open-json-legacy-missing", state{".hookcfg.legacy": flat("", "open"), ".hookcfg": `{"version":2,"gateway_addr":"127.0.0.1:1"}`},
-			"", [3]string{"closed", "closed", "open"}},
+			"", [3]string{"closed", "closed", "closed"}},
 		{"legacy-flat-open-json-empty-map", state{".hookcfg.legacy": flat("", "open"),
 			".hookcfg": `{"version":2,"gateway_addr":"127.0.0.1:1","fail_modes":{},"legacy_fail_mode":"open","legacy_fail_mode_source":"config"}`},
-			"", [3]string{"open", "open", "open"}},
+			"", [3]string{"closed", "closed", "closed"}},
 		// A legacy record must name no connector, as a connector record must
 		// name its own.
 		{"legacy-flat-without-connector-line", state{".hookcfg.legacy": "DEFENSECLAW_FAIL_MODE=open\n", ".hookcfg": legacyOpenJSON},
@@ -129,7 +122,7 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 		{"unsourced/single-open-record", state{".hookcfg.codex": unsourced("codex", "open"), ".hookcfg": `{"version":2,"fail_modes":{"codex":"open"}}`},
 			"codex", [3]string{"closed", "closed", "closed"}},
 		{"unsourced/json-open-flat-sourced", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg": `{"version":2,"fail_modes":{"codex":"open"}}`},
-			"codex", [3]string{"closed", "closed", "open"}},
+			"codex", [3]string{"closed", "closed", "closed"}},
 		{"unsourced/legacy-only-open", state{".hookcfg.legacy": unsourced("", "open"), ".hookcfg": `{"version":2,"legacy_fail_mode":"open"}`},
 			"", [3]string{"closed", "closed", "closed"}},
 		// Loop round 3: a v2 JSON whose fail_modes is present but not an
@@ -138,15 +131,15 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 		// JSON, follows the flat legacy record.
 		{"fail-modes-missing-no-flat", state{".hookcfg": legacyOpenJSON}, "", [3]string{"closed", "closed", "closed"}},
 		{"fail-modes-null-no-flat", state{".hookcfg": malformedMap("null")}, "", [3]string{"closed", "closed", "closed"}},
-		{"fail-modes-null", state{".hookcfg.legacy": flat("", "open"), ".hookcfg": malformedMap("null")}, "", [3]string{"closed", "closed", "open"}},
-		{"fail-modes-false", state{".hookcfg.legacy": flat("", "open"), ".hookcfg": malformedMap("false")}, "", [3]string{"closed", "closed", "open"}},
-		{"fail-modes-empty-list", state{".hookcfg.legacy": flat("", "open"), ".hookcfg": malformedMap("[]")}, "", [3]string{"closed", "closed", "open"}},
-		{"fail-modes-zero", state{".hookcfg.legacy": flat("", "open"), ".hookcfg": malformedMap("0")}, "", [3]string{"closed", "closed", "open"}},
-		{"fail-modes-empty-string", state{".hookcfg.legacy": flat("", "open"), ".hookcfg": malformedMap(`""`)}, "", [3]string{"closed", "closed", "open"}},
+		{"fail-modes-null", state{".hookcfg.legacy": flat("", "open"), ".hookcfg": malformedMap("null")}, "", [3]string{"closed", "closed", "closed"}},
+		{"fail-modes-false", state{".hookcfg.legacy": flat("", "open"), ".hookcfg": malformedMap("false")}, "", [3]string{"closed", "closed", "closed"}},
+		{"fail-modes-empty-list", state{".hookcfg.legacy": flat("", "open"), ".hookcfg": malformedMap("[]")}, "", [3]string{"closed", "closed", "closed"}},
+		{"fail-modes-zero", state{".hookcfg.legacy": flat("", "open"), ".hookcfg": malformedMap("0")}, "", [3]string{"closed", "closed", "closed"}},
+		{"fail-modes-empty-string", state{".hookcfg.legacy": flat("", "open"), ".hookcfg": malformedMap(`""`)}, "", [3]string{"closed", "closed", "closed"}},
 		{"fail-modes-null-selector", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": malformedMap("null")},
-			"claudecode", [3]string{"closed", "closed", "open"}},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
 		{"fail-modes-null-single-flat-record", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg.legacy": flat("", "open"), ".hookcfg": malformedMap("null")},
-			"", [3]string{"closed", "closed", "open"}},
+			"", [3]string{"closed", "closed", "closed"}},
 	} {
 		for i, parser := range []string{"jq", "python3", "none"} {
 			t.Run(tc.name+"/"+parser, func(t *testing.T) {
@@ -203,9 +196,8 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 	}
 }
 
-// The same rule end to end, through the real setup writers and the real
-// inspect-* scripts: with DEFENSECLAW_HOME missing, a hook that resolves open
-// exits 0 and one that resolves closed blocks.
+// The same rule end to end, through real setup writers and inspect-* scripts:
+// with DEFENSECLAW_HOME missing, every per-user hook blocks.
 func TestSharedInspectHooksNeverTakeAPeersOpenMode(t *testing.T) {
 	type install struct {
 		conn Connector
@@ -234,12 +226,12 @@ func TestSharedInspectHooksNeverTakeAPeersOpenMode(t *testing.T) {
 		// (writeHookConfigSidecar records its config source) that no
 		// connector refresh has rewritten yet or whose records are all open.
 		{"both-open", "", []install{{NewCodexConnector(), "open"}, {NewClaudeCodeConnector(), "open"}},
-			[]string{"claudecode", "codex"}, true},
+			[]string{"claudecode", "codex"}, false},
 		{"both-open-unattributed", "", []install{{NewCodexConnector(), "open"}, {NewClaudeCodeConnector(), "open"}},
 			[]string{"", "cursor"}, false},
 		{"upgrade-1.0-open-both-open-unattributed", "v2", []install{{NewCodexConnector(), "open"}, {NewClaudeCodeConnector(), "open"}},
-			[]string{""}, true},
-		{"legacy-open-not-refreshed", "v2", nil, []string{""}, true},
+			[]string{""}, false},
+		{"legacy-open-not-refreshed", "v2", nil, []string{""}, false},
 		// Loop round 3: the same install with fail_modes made null is
 		// malformed and blocks.
 		{"legacy-open-not-refreshed-null-map", "v2-null-map", nil, []string{""}, false},

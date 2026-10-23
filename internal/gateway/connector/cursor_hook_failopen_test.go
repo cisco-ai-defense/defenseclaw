@@ -142,15 +142,15 @@ func assertJSONEnvelope(t *testing.T, out string) {
 	}
 }
 
-func TestCursorHook_FailOpenOnUnreachableEmitsAllow(t *testing.T) {
+func TestCursorHook_PerUserOpenRequestStillDeniesOnUnreachable(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
 	stdout, stderr, err := runCursorHook(t, "127.0.0.1:1", "open", true)
-	if err != nil {
-		t.Fatalf("expected exit 0 (fail-open), got %v; stderr=%s", err, stderr)
+	if err == nil {
+		t.Fatalf("expected a per-user fail-closed exit, stdout=%s; stderr=%s", stdout, stderr)
 	}
-	assertAllowEnvelope(t, stdout)
+	assertDenyEnvelope(t, stdout)
 }
 
 func TestCursorHook_FailClosedOnUnreachableEmitsDeny(t *testing.T) {
@@ -207,20 +207,19 @@ func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
 	assertJSONEnvelope(t, stdout.String())
 }
 
-func TestCursorHook_MissingTokenFailsOpenWithAllow(t *testing.T) {
+func TestCursorHook_MissingTokenFailsClosedEvenWhenOpenRequested(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
-	// No .token file and no DEFENSECLAW_GATEWAY_TOKEN, not strict =>
-	// historical allow-and-warn, but must emit an explicit allow so a
-	// fail-open entry never depends on Cursor's empty-output fallback.
+	// No .token file and no DEFENSECLAW_GATEWAY_TOKEN must block a per-user
+	// tool call even when an old config requested open.
 	stdout, stderr, err := runCursorHook(t, "127.0.0.1:1", "open", false)
-	if err != nil {
-		t.Fatalf("expected exit 0 (fail-open on missing token), got %v; stderr=%s", err, stderr)
+	if err == nil {
+		t.Fatalf("expected fail-closed on missing token, stdout=%s; stderr=%s", stdout, stderr)
 	}
-	assertAllowEnvelope(t, stdout)
-	if !strings.Contains(stderr, "allowing cursor tool") {
-		t.Errorf("stderr should announce allowing on the fail-open path, got: %q", stderr)
+	assertDenyEnvelope(t, stdout)
+	if !strings.Contains(stderr, "blocking cursor tool") {
+		t.Errorf("stderr should announce blocking on the fail-closed path, got: %q", stderr)
 	}
 }
 
