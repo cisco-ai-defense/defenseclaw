@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync/atomic"
 	"testing"
 
@@ -28,10 +29,15 @@ func TestNewHTTPEvaluatorRequiresLiteralLoopback(t *testing.T) {
 			t.Fatalf("NewHTTPEvaluator(%q) accepted a non-literal-loopback endpoint", endpoint)
 		}
 	}
-	for _, endpoint := range []string{
-		"http://127.0.0.1:18970/api/v1/acp/evaluate",
-		"http://[::1]:18970/api/v1/acp/evaluate",
-	} {
+	valid := []string{"http://127.0.0.1:18970/api/v1/acp/evaluate"}
+	// The Windows connected-process proof uses the IPv4 TCP table. An IPv6
+	// endpoint must be refused there rather than bypassing that proof.
+	if runtime.GOOS != "windows" {
+		valid = append(valid, "http://[::1]:18970/api/v1/acp/evaluate")
+	} else if _, err := NewHTTPEvaluator("http://[::1]:18970/api/v1/acp/evaluate", "secret"); err == nil {
+		t.Fatal("Windows accepted an IPv6 per-user evaluator without a connected-process proof")
+	}
+	for _, endpoint := range valid {
 		if _, err := NewHTTPEvaluator(endpoint, "secret"); err != nil {
 			t.Fatalf("NewHTTPEvaluator(%q): %v", endpoint, err)
 		}
