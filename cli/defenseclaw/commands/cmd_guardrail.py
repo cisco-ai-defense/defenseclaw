@@ -5105,6 +5105,47 @@ def _change_suppression(
 # ---------------------------------------------------------------------------
 
 
+class _ActionHookInspectionError(Exception):
+    def __init__(self, connector: str) -> None:
+        self.connector = connector
+        super().__init__(connector)
+
+
+def _action_hook_switch_problems(
+    cfg, *, connector: str | None = None, global_mode: str | None = None
+) -> list[tuple[str, str]]:
+    """Find hooks-off settings for the enabled connectors an action request would cover."""
+    from defenseclaw import policy_catalog
+    from defenseclaw.hook_integrity import agent_hook_switch_problems
+
+    gc = cfg.guardrail
+    if not gc.enabled:
+        return []
+    if connector:
+        targets = [connector]
+    else:
+        desired_global_mode = gc.mode if global_mode is None else global_mode
+        try:
+            actives = cfg.active_connectors()
+        except Exception as exc:  # noqa: BLE001 - an unreadable roster cannot prove enforcement.
+            raise _ActionHookInspectionError("active connector roster") from exc
+        targets = []
+        for name in actives:
+            override = gc._connector_override(name)
+            mode = (getattr(override, "mode", "") or "").strip() if override is not None else ""
+            if gc.effective_enabled(name) and policy_catalog.mode_label(mode or desired_global_mode) == "action":
+                targets.append(name)
+
+    switched_off = []
+    for name in targets:
+        try:
+            problems = agent_hook_switch_problems(cfg, normalize_connector(name))
+        except Exception as exc:  # noqa: BLE001 - unknown agent settings cannot prove enforcement.
+            raise _ActionHookInspectionError(name) from exc
+        switched_off.extend((name, problem) for problem in problems)
+    return switched_off
+
+
 @guardrail.command("mode")
 @click.argument("mode", required=False, type=click.Choice(["observe", "action"]))
 @click.option(
@@ -5218,32 +5259,19 @@ def mode_cmd(
         # may have turned the hooks off since the last mode change. Check
         # every connector the requested global action mode would cover, even
         # when the gateway is stopped and no runtime read-back is available.
-        from defenseclaw.hook_integrity import agent_hook_switch_problems, repair_command
+        from defenseclaw.hook_integrity import repair_command
 
-        action_targets = (
-            [connector_key]
-            if connector_key
-            else [
-                c
-                for c in actives
-                if gc.effective_enabled(c)
-                and (not _override(c) or policy_catalog.mode_label(_override(c)) == "action")
-            ]
-        )
-        switched_off = []
-        for name in action_targets:
-            try:
-                problems = agent_hook_switch_problems(app.cfg, normalize_connector(name))
-            except Exception:  # noqa: BLE001 - unknown agent settings cannot prove enforcement.
-                _finish(
-                    ok=False,
-                    exit_code=1,
-                    new_mode=previous,
-                    previous=previous,
-                    message=f"Nothing was changed: {_connector_label(name)} hook settings could not be inspected.",
-                )
-                return
-            switched_off.extend((name, problem) for problem in problems)
+        try:
+            switched_off = _action_hook_switch_problems(app.cfg, connector=connector_key, global_mode="action")
+        except _ActionHookInspectionError as exc:
+            _finish(
+                ok=False,
+                exit_code=1,
+                new_mode=previous,
+                previous=previous,
+                message=f"Nothing was changed: {_connector_label(exc.connector)} hook settings could not be inspected.",
+            )
+            return
         if switched_off:
             details = "; ".join(f"{_connector_label(name)}: {problem}" for name, problem in switched_off)
             _finish(
