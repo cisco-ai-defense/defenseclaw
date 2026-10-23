@@ -10,7 +10,50 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
+
+func TestGAP0655InterpreterWriteGuidanceReachesAgent(t *testing.T) {
+	redaction.SetAgentReasonRedactionDisabled(false)
+	t.Cleanup(func() { redaction.SetAgentReasonRedactionDisabled(false) })
+	useAgentVerdictProfile(t, false, false)
+	home, cwd := r104ReviewHome(t)
+	input := actionfacts.Input{Tool: "Bash",
+		Command: `python3 -c 'from pathlib import Path; p=Path("ali"+"as"); p.write_text("marker")'`,
+		CWD:     cwd, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	generation := &compiledRulePackCategories{categories: []ruleCategory{{
+		Name: "command", Rules: []PatternRule{{ID: "persistence.ssh_authorized_keys_command",
+			Title: "SSH authorized keys mutation", Severity: "CRITICAL", Confidence: 0.98}},
+	}}}
+	request := trustedActionRequest{Input: input, EnforcementCapable: true}
+	findings := appendTrustedHomeResolvedSSHKeyWriteFinding(nil, generation, request, actionfacts.Analyze(input))
+	for _, finding := range findings {
+		if finding.RuleID != "persistence.ssh_authorized_keys_command" {
+			continue
+		}
+		if !strings.Contains(finding.Title, "Interpreter") || !strings.Contains(finding.Title, unprovenWriteGuidance) {
+			t.Fatalf("unexpected interpreter write title %q", finding.Title)
+		}
+		source := "matched: " + finding.RuleID + ":" + finding.Title
+		profile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{})
+		resp := agentHookResponseForProfile(profile,
+			agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_call"},
+			"block", "block", "CRITICAL", source, nil, "action", true, connector.HookCapability{})
+		if !strings.Contains(resp.Reason, unprovenWriteGuidance) ||
+			strings.Contains(resp.Reason, "<redacted") || !strings.Contains(resp.Reason, agentBlockNoRetry) {
+			t.Fatalf("agent received %q for %q", resp.Reason, source)
+		}
+		if wire, _ := resp.HookOutput["reason"].(string); wire != resp.Reason {
+			t.Fatalf("Hermes wire reason = %q, want %q", wire, resp.Reason)
+		}
+		if got := agentDisplayReason(source, redaction.SinkPolicyRedact); !strings.Contains(got, "<redacted") {
+			t.Fatalf("managed redaction was bypassed: %q", got)
+		}
+		return
+	}
+	t.Fatal("interpreter write produced no protected-write finding")
+}
 
 func TestR104UnprovenProtectedReachDecisions(t *testing.T) {
 	home, cwd := r104ReviewHome(t)

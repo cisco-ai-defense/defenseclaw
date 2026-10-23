@@ -38,6 +38,17 @@ func UnprovenWriteTitle(reason string) string {
 	return unprovenReasonTitles[reason]
 }
 
+// IsUnprovenWriteTitle recognizes only fixed, product-authored class titles.
+// Callers may show these titles without exposing command text or path data.
+func IsUnprovenWriteTitle(title string) bool {
+	for _, known := range unprovenReasonTitles {
+		if title == known {
+			return true
+		}
+	}
+	return false
+}
+
 var (
 	unprovenPathToken  = regexp.MustCompile(`[A-Za-z0-9_./~*?\[\]-]+`)
 	unprovenQuotedPath = []*regexp.Regexp{

@@ -170,6 +170,29 @@ func TestHermesHookActionModeVerdicts(t *testing.T) {
 	}
 }
 
+func TestGAP0870HermesSudoListWithCWDIsAllowed(t *testing.T) {
+	home, cwd := r104ReviewHome(t)
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "hermes"
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+	profile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{})
+	payload := map[string]interface{}{
+		"hook_event_name": "pre_tool_call", "tool_name": "terminal",
+		"tool_input": map[string]interface{}{"command": "sudo -l"},
+		"cwd":        cwd, "session_id": "sudo-list",
+	}
+	req := normalizeAgentHookRequestWithProfile("hermes", payload, profile)
+	if req.CWD != cwd {
+		t.Fatalf("Hermes cwd = %q, want %q (home %q)", req.CWD, cwd, home)
+	}
+	resp := api.evaluateAgentHook(t.Context(), req)
+	if resp.Action != "allow" || resp.HookOutput != nil {
+		t.Fatalf("Hermes sudo -l: action=%q, reason=%q, output=%v", resp.Action, resp.Reason, resp.HookOutput)
+	}
+}
+
 // TestHookOutputFor_AllConnectors_AllActions is the contract test
 // that locks the JSON shape every hook script downstream parses.
 // Each row pins:
