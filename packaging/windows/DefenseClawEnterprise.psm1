@@ -11340,10 +11340,15 @@ function New-DefenseClawDeploymentMetadata {
         $ManagedHooksActivation,
         [string]$InstallRootIdentity = '',
         [string]$StateRootIdentity = '',
-        [bool]$UninstallPurgeRequested = $false
+        [bool]$UninstallPurgeRequested = $false,
+        [bool]$UninstallPurgeUserStateRequested = $false
     )
-    if ($Installed -and $UninstallPurgeRequested) {
+    if ($Installed -and
+        ($UninstallPurgeRequested -or $UninstallPurgeUserStateRequested)) {
         throw 'only an uninstall tombstone records an uninstall purge request'
+    }
+    if ($UninstallPurgeUserStateRequested -and -not $UninstallPurgeRequested) {
+        throw 'an uninstall per-user purge request requires the uninstall purge'
     }
     if (-not [string]::IsNullOrEmpty($InstallRootIdentity) -and
         ($Installed -or $InstallRootIdentity -cnotmatch
@@ -11520,10 +11525,17 @@ function New-DefenseClawDeploymentMetadata {
             $metadata['product_version'] = $productVersion
         }
         if (-not $Installed) {
-            # The uninstall mode commits with the tombstone. Recovery of an
-            # interrupted uninstall replays exactly this mode.
+            # The uninstall mode commits with the tombstone: the purge, and
+            # whether it also removes each enrolled account's per-user data
+            # and binaries (Setup PURGE=1). Recovery of an interrupted
+            # uninstall replays exactly this mode.
             $metadata['uninstall_purge_requested'] = [bool]$UninstallPurgeRequested
+            $metadata['uninstall_purge_user_state_requested'] =
+                [bool]$UninstallPurgeUserStateRequested
         }
+    }
+    elseif ($UninstallPurgeUserStateRequested) {
+        throw 'only a standalone uninstall tombstone records a per-user purge'
     }
     if (-not $Installed -and
         -not [string]::IsNullOrEmpty($InstallRootIdentity)) {
@@ -26664,6 +26676,17 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
     if (Test-DefenseClawMetadataInstalled -Metadata $metadata) {
         throw 'managed-hook finalization requires an uninstall tombstone'
     }
+    # The finalize removes the enrolled accounts' per-user data and binaries
+    # when the uninstall asked for it. A recovery or retry replays the request
+    # the tombstone recorded, whether or not it asked again (an explicit purge
+    # of this run still counts), so the tombstone outlives that removal.
+    $purgeUserState = [bool]$script:DefenseClawUninstallPurgeUserState
+    if (Test-DefenseClawStandaloneProfile) {
+        $purgeUserState = (
+            $purgeUserState -or
+            (Get-DefenseClawTombstonePurgeUserStateRequested -Metadata $metadata)
+        )
+    }
     foreach ($name in @(
         Get-DefenseClawManagedServiceNames `
             -GatewayServiceName $GatewayServiceName `
@@ -26760,12 +26783,19 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
         $teardownPhase -cne 'finalized') {
         throw "managed-hook finalization requires a prepared or finalized journal: $teardownPhase"
     }
-    return Invoke-DefenseClawManagedHooksTeardownCommand `
-        -Layout $Layout `
-        -GatewayServiceName $GatewayServiceName `
-        -GuardianServiceName $GuardianServiceName `
-        -Action finalize `
-        -PurgeContractLocks:$Purge
+    $callerPurgeUserState = $script:DefenseClawUninstallPurgeUserState
+    $script:DefenseClawUninstallPurgeUserState = $purgeUserState
+    try {
+        return Invoke-DefenseClawManagedHooksTeardownCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -Action finalize `
+            -PurgeContractLocks:$Purge
+    }
+    finally {
+        $script:DefenseClawUninstallPurgeUserState = $callerPurgeUserState
+    }
 }
 
 function Write-DefenseClawProtectedTextAtomic {
@@ -31501,20 +31531,48 @@ function Get-DefenseClawTombstonePurgeRequested {
     return [bool]$property.Value
 }
 
+function Get-DefenseClawTombstonePurgeUserStateRequested {
+    <#
+        Whether the uninstall an authenticated standalone tombstone recorded
+        also removes each enrolled account's per-user data and binaries
+        (Setup /uninstall PURGE=1). The managed-hook finalize does that
+        removal, so its replay by a recovery or a retry that did not ask for
+        it still does it. Tombstones written before 1.0.4 record none and
+        replay without it; keep the missing-field case while 1.0.0-1.0.3
+        tombstones can be upgraded. A malformed mode, or a per-user purge
+        without the uninstall purge it is part of, is refused.
+    #>
+    param([Parameter(Mandatory)]$Metadata)
+    $property = $Metadata.PSObject.Properties['uninstall_purge_user_state_requested']
+    if ($null -eq $property) {
+        return $false
+    }
+    if ($property.Value -isnot [bool]) {
+        throw 'uninstall tombstone has an invalid recorded per-user purge mode'
+    }
+    if ([bool]$property.Value -and
+        -not (Get-DefenseClawTombstonePurgeRequested -Metadata $Metadata)) {
+        throw 'uninstall tombstone records a per-user purge without its uninstall purge'
+    }
+    return [bool]$property.Value
+}
+
 function Test-DefenseClawCommittedUninstallUnsettled {
     <#
         Whether a committed standalone uninstall still has postcommit work:
         its recorded purge has not removed the tombstone (the tombstone goes
         with StateRoot), or InstallRoot or the managed-hook teardown journal
         remains. A settled state-keeping uninstall keeps its tombstone for
-        good and is not replayed. Setup's recovery watcher decides the same
-        way (standaloneCommittedUninstallUnsettled).
+        good and is not replayed. A malformed recorded mode is refused before
+        any cleanup. Setup's recovery watcher decides the same way
+        (standaloneCommittedUninstallUnsettled).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)]$Metadata
     )
-    if (Get-DefenseClawTombstonePurgeRequested -Metadata $Metadata) {
+    if ((Get-DefenseClawTombstonePurgeUserStateRequested -Metadata $Metadata) -or
+        (Get-DefenseClawTombstonePurgeRequested -Metadata $Metadata)) {
         return $true
     }
     return [bool](
@@ -35076,7 +35134,10 @@ function Invoke-DefenseClawUninstallLifecycle {
             -ManagedHooksActivation $managedHooksActivation `
             -InstallRootIdentity $installRootIdentity `
             -StateRootIdentity $stateRootIdentity `
-            -UninstallPurgeRequested ([bool]$Purge)
+            -UninstallPurgeRequested ([bool]$Purge) `
+            -UninstallPurgeUserStateRequested (
+                [bool]$script:DefenseClawUninstallPurgeUserState
+            )
         if ($tombstone -is [Collections.IDictionary] -and
             $tombstone.Contains('product_version')) {
             # The tombstone names the release that was removed, not the
