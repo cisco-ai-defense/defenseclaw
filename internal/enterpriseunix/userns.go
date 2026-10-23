@@ -232,14 +232,6 @@ func (e *Env) restrictManagedPolicyViews(priorRestricted bool) error {
 	if problem := e.ptraceProblem(); problem != "" {
 		return fmt.Errorf("%s", problem)
 	}
-	// The persistent file is back and the boot is attested again, either by
-	// the markers just written or by the proven same-boot uninstall this
-	// transaction relied on. The uninstall marker has served its purpose;
-	// kept, it would make every later transaction distrust a proven boot
-	// and demand another reboot (GAP-0851).
-	if err := os.Remove(e.P(userNamespaceUninstalled)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("clear %s after restoring the restriction: %w", userNamespaceUninstalled, err)
-	}
 	return nil
 }
 
@@ -288,6 +280,26 @@ func (e *Env) markUserNamespaceUninstall() error {
 	}
 	if err := e.writeFileAtomic(e.P(userNamespaceUninstalled), []byte(marker), 0o600, rootOwner()); err != nil {
 		return fmt.Errorf("record the boot that removed the persistent user namespace restriction: %w", err)
+	}
+	return nil
+}
+
+// clearUserNamespaceUninstall removes the uninstall marker once a
+// restricted deployment has committed: the persistent file and both live
+// settings were re-established and verified, and this boot is attested
+// either by fresh boot markers or by the proven same-boot uninstall the
+// transaction relied on. Kept, the marker made every later change after a
+// reboot distrust a proven boot and ask for another reboot (GAP-0851). It
+// is cleared only after the commit, so a transaction that rolls back keeps
+// the same-boot proof its retry needs. A marker that cannot be removed stays
+// in place, which only ever asks for a reboot, and the run fails.
+func (e *Env) clearUserNamespaceUninstall() error {
+	if e.GOOS != "linux" {
+		return nil
+	}
+	if err := os.Remove(e.P(userNamespaceUninstalled)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("could not remove %s after re-establishing the restriction: %w; "+
+			"remove it as root, or the next change after a reboot asks for another reboot", userNamespaceUninstalled, err)
 	}
 	return nil
 }

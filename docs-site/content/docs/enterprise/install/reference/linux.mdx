@@ -255,10 +255,11 @@ reports `unhealthy` until then. A third marker,
 uninstall removed the file: a reinstall after a boot without the file needs
 another reboot. Restoring a missing file from an installed deployment also
 requires a new reboot; an older uninstall marker cannot attest that repair.
-The next restricted install or `ensure` clears the uninstall marker, so a
-later boot with the file in place stays healthy. The boot markers survive
-uninstall and purge; the uninstall marker survives until that next restricted
-install or `ensure`.
+A restricted install, upgrade or `ensure` that commits clears the uninstall
+marker, so a later boot with the file in place stays healthy; one that rolls
+back keeps it. If the marker cannot be removed, the run fails with
+`unprivileged_user_namespaces` and names the file to remove as root. The boot
+markers survive uninstall and purge.
 
 Setting `leave` again (or removing the key) removes the managed sysctl file, as
 an uninstall does. The running kernel keeps the restricted values until you

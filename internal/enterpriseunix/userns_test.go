@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // restrictPolicyViewsConfig is the default managed config with the
@@ -757,34 +759,130 @@ func TestMacOSUserNamespaceSettingIsNotRequired(t *testing.T) {
 	}
 }
 
-// A same-boot reinstall can use the old boot proof while the live kernel
-// stayed restricted. Its uninstall marker must not invalidate that proof on
-// later transactions after another restricted boot.
+// requireProvenBoot fails when action asks for a reboot on a boot that the
+// restriction has covered since it started, or rewrites its boot markers.
+func requireProvenBoot(t *testing.T, h *testHost, label string, r *enterprisestatus.Result, markers string) {
+	t.Helper()
+	if hasMessageCode(r.Errors, codeUserNamespaces) || hasMessageCode(r.Errors, codeUnprivilegedPtrace) {
+		t.Fatalf("%s demanded another reboot on a proven boot: %+v", label, r.Errors)
+	}
+	for _, marker := range []string{userNamespaceBootMarker, ptraceBootMarker} {
+		if got := h.read(marker); got != markers {
+			t.Fatalf("%s rewrote proven boot marker %s: %q, want %q", label, marker, got, markers)
+		}
+	}
+}
+
+// An uninstall marker attests only the uninstall it recorded. Once a
+// restricted deployment is installed again (in the same boot, or after a
+// reboot that needed a new attestation), it is spent: kept, every later
+// non-noop change after a reboot distrusted the proven boot and asked for
+// another reboot (GAP-0851).
 func TestLinuxProvenRestrictionAfterUninstallNeedsNoReboot(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// reinstall runs the reinstall after the purge and returns the boot
+		// the boot markers must name afterwards.
+		reinstall func(t *testing.T, h *testHost, cfg string) string
+	}{
+		{"same-boot reinstall", func(t *testing.T, h *testHost, cfg string) string {
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg}))
+			return "boot-prior\n"
+		}},
+		{"reinstall after a reboot without the file", func(t *testing.T, h *testHost, cfg string) string {
+			// The file was gone across this reboot, so the kernel came up open.
+			writeKernelSetting(t, h, userNamespaceBootIDPath, "boot-mid\n")
+			writeKernelSetting(t, h, sysctlMaxUserNamespaces, "63229\n")
+			writeKernelSetting(t, h, sysctlPtraceScope, "0\n")
+			r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg})
+			if !r.Installed || r.SecurityComplete || !hasMessageCode(r.Errors, codeUserNamespaces) {
+				t.Fatalf("reinstall after an unrestricted boot did not ask for a reboot: %+v", r)
+			}
+			return "boot-mid\n"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, cfg := restrictedHost(t)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg}))
+			requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+			if got := h.read(userNamespaceUninstalled); got != "boot-before\n" {
+				t.Fatalf("uninstall marker = %q", got)
+			}
+			markers := tc.reinstall(t, h, cfg)
+			if _, err := os.Stat(h.env.P(userNamespaceUninstalled)); !os.IsNotExist(err) {
+				t.Fatalf("reinstall kept the spent uninstall marker: %v", err)
+			}
+			writeKernelSetting(t, h, userNamespaceBootIDPath, "boot-after\n")
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				r := h.run(Options{Action: action})
+				requireProvenBoot(t, h, action, r, markers)
+			}
+			for i, version := range []string{"1.0.5", "1.0.6"} {
+				h.env.ProductVersion = version
+				r := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload(version)})
+				if !r.Installed {
+					t.Fatalf("upgrade %d failed: %+v", i+1, r)
+				}
+				requireProvenBoot(t, h, "upgrade to "+version, r, markers)
+			}
+			edited := filepath.Join(t.TempDir(), "config.yaml")
+			raw, err := os.ReadFile(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(edited, append(raw, []byte("# edited by the administrator\n")...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ensured := h.run(Options{Action: ActionEnsure, ConfigFile: edited})
+			if !ensured.Installed || len(ensured.Changes) == 0 {
+				t.Fatalf("config change was not applied: %+v", ensured)
+			}
+			requireProvenBoot(t, h, "config-change ensure", ensured, markers)
+		})
+	}
+}
+
+// The marker is spent only when the reinstall commits: a reinstall that rolls
+// back keeps the same-boot proof, so its retry in the same boot is trusted.
+func TestLinuxRolledBackReinstallKeepsSameBootUninstallProof(t *testing.T) {
 	h, cfg := restrictedHost(t)
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg}))
 	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+	setLifecycleTestFault(t, h, testFaultAfterServices)
+	failed := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg})
+	if failed.OK || !hasMessageCode(failed.Errors, codeLifecycleTestFault) {
+		t.Fatalf("the test fault did not fail the reinstall: %+v", failed)
+	}
 	if got := h.read(userNamespaceUninstalled); got != "boot-before\n" {
-		t.Fatalf("uninstall marker = %q", got)
+		t.Fatalf("a rolled-back reinstall spent the uninstall marker: %q", got)
 	}
-	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg}))
+	clearLifecycleTestFault(t, h)
+	retried := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg})
+	requireOK(t, retried)
+	requireProvenBoot(t, h, "same-boot retry", retried, "boot-prior\n")
 	if _, err := os.Stat(h.env.P(userNamespaceUninstalled)); !os.IsNotExist(err) {
-		t.Fatalf("reinstall retained the spent uninstall marker: %v", err)
+		t.Fatalf("the committed retry kept the spent uninstall marker: %v", err)
 	}
-	writeKernelSetting(t, h, userNamespaceBootIDPath, "boot-after\n")
-	for _, action := range []string{ActionStatus, ActionVerify} {
-		if r := h.run(Options{Action: action}); hasMessageCode(r.Errors, codeUserNamespaces) {
-			t.Fatalf("%s demanded a reboot on a proven boot: %+v", action, r.Errors)
-		}
+}
+
+// A marker that cannot be removed stays in place (it only ever asks for a
+// reboot) and the run says so instead of reporting success.
+func TestLinuxUninstallMarkerThatCannotBeRemovedFailsTheRun(t *testing.T) {
+	h, cfg := restrictedHost(t)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg}))
+	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+	marker := h.env.P(userNamespaceUninstalled)
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
 	}
-	h.env.ProductVersion = "1.0.5"
-	upgraded := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.5")})
-	if !upgraded.Installed || hasMessageCode(upgraded.Errors, codeUserNamespaces) {
-		t.Fatalf("upgrade on a proven boot demanded another reboot: %+v", upgraded.Errors)
+	if err := os.MkdirAll(filepath.Join(marker, "held"), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	for _, marker := range []string{userNamespaceBootMarker, ptraceBootMarker} {
-		if got := h.read(marker); got != "boot-prior\n" {
-			t.Fatalf("upgrade rewrote proven boot marker %s: %q", marker, got)
-		}
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: cfg})
+	if r.OK || r.SecurityComplete || !strings.Contains(messagesOf(r.Errors, codeUserNamespaces), userNamespaceUninstalled) {
+		t.Fatalf("a marker that could not be removed did not fail the run: %+v", r)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("the unremovable marker is gone: %v", err)
 	}
 }

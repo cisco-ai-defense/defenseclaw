@@ -2220,6 +2220,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err := env.saveDeployment(newRecord); err != nil {
 		return failAndRollback(codeApply, err)
 	}
+	if restrictViews {
+		if err := env.clearUserNamespaceUninstall(); err != nil {
+			r.AddError(codeUserNamespaces, err.Error())
+		}
+	}
 	if l.bundle != nil {
 		// The commit point of the bundle: the gateway reported its policy
 		// above. A step below that fails does not undo it (finishBundle).
