@@ -78,7 +78,7 @@ func TestLauncherLaunchAgentPreKickstartHeal(t *testing.T) {
 			} else if err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"print gui/501", "print gui/501/" + launcherAgentLabel}
+			want := []string{"print gui/501", "print user/501", "print gui/501/" + launcherAgentLabel}
 			if tc.wantReload == launcherAgentLabel {
 				want = append(want, "bootout gui/501/"+launcherAgentLabel, "bootstrap gui/501 "+launcherAgentPlist)
 			}

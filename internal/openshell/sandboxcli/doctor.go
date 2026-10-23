@@ -44,6 +44,10 @@ const (
 	CheckIDWrappers = "shell-wrappers"
 	CheckIDAdmin    = "admin-policy"
 	CheckIDHooks    = "sandbox-hooks"
+	// CheckIDLegacySandbox fails while a sandbox runs the supervisor of an
+	// OpenShell release older than openshell.SupportedMin
+	// (sandboxapi.Sandbox.OldSupervisor).
+	CheckIDLegacySandbox = "legacy-sandbox"
 	// CheckIDManagedRuntime is a managed computer's OpenShell as the
 	// account's daemon reports it.
 	CheckIDManagedRuntime = "managed-runtime"
@@ -173,6 +177,9 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		rep.Checks = append(rep.Checks, st.check)
 		if st.available {
 			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress))
+			if c := a.legacySandboxCheck(ctx); c != nil {
+				rep.Checks = append(rep.Checks, *c)
+			}
 		}
 		runDriver, _ := openshell.LookupDriver(string(rep.Driver))
 		images := a.imagesCheck(ctx, image.MicroVMTarget(runDriver))
@@ -281,6 +288,61 @@ func itsTheir(names []string) string {
 		return "its"
 	}
 	return "their"
+}
+
+// legacySandboxCheck fails while a sandbox runs the supervisor of an
+// OpenShell release older than openshell.SupportedMin
+// (sandboxapi.Sandbox.OldSupervisor): that release's network broker can let
+// its connections bypass sandbox policy, DefenseClaw cannot contain it, and
+// the daemon creates and starts no sandbox while it runs. DefenseClaw stops
+// none itself, so the fix names the command that ends each. nil when none
+// runs, or when the list cannot be read (the hooks check says so).
+func (a *App) legacySandboxCheck(ctx context.Context) *openshell.Check {
+	api, err := a.api()
+	if err != nil {
+		return nil
+	}
+	list, err := api.List(ctx)
+	if err != nil {
+		return nil
+	}
+	var names, ways []string
+	for i := range list {
+		if sb := &list[i]; sb.OldSupervisor {
+			names = append(names, sb.Name)
+			ways = append(ways, legacyStopWay(sb))
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	gone := "it is gone"
+	if len(names) > 1 {
+		gone = "they are gone"
+	}
+	return &openshell.Check{ID: CheckIDLegacySandbox, Title: "Legacy sandboxes", Status: openshell.StatusFail,
+		Detail: strings.Join(names, ", ") + ": legacy sandbox running, not protected by the 1.0.4 egress policy (" + itsTheir(names) +
+			" session runs the supervisor of an OpenShell release older than " + openshell.SupportedMin + ", whose network broker can let connections " +
+			"bypass sandbox policy, NVIDIA/OpenShell#4494, and DefenseClaw cannot contain it); DefenseClaw stops " + itThem(names) +
+			" for nobody, and creates and starts no sandbox until " + gone,
+		Fix: &openshell.Fix{Summary: strings.Join(ways, "; ")}}
+}
+
+// legacyStopWay is how the user ends the legacy sandbox sb
+// (sandboxapi.Sandbox.OldSupervisor): the stop of a ready one, which on a
+// MicroVM syncs its disk first because that release's stop does not, and
+// the delete of a MicroVM whose workload ended, which OpenShell does not
+// stop (or its start with --end-vm on OpenShell SupportedMin or later).
+func legacyStopWay(sb *sandboxapi.Sandbox) string {
+	if sb.Phase == "ready" {
+		way := "save the work you need in " + sb.Name + ", then run `" + CommandName + " stop " + sb.Name + "`"
+		if d, ok := openshell.LookupDriver(sb.Driver); !ok || !d.StopFlushes {
+			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost)"
+		}
+		return way
+	}
+	return "`" + CommandName + " delete " + sb.Name + "` deletes " + sb.Name + " and its work, or on OpenShell " + openshell.SupportedMin + " or later `" +
+		CommandName + " start " + sb.Name + " --end-vm` ends its VM, losing what it has not written to its disk"
 }
 
 // hooksCheck reports the sandboxes whose current session's hooks do not

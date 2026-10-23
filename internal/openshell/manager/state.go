@@ -217,9 +217,11 @@ type record struct {
 	// it was kept, whose sessions all began on an older release.
 	SessionRelease string `json:"session_release,omitempty"`
 	// OldSupervisorNetworkClosed records that DefenseClaw withdrew the
-	// network rules of a ready or ended MicroVM on a legacy supervisor. The next
-	// successful start restores only its create-time policy, after OpenShell
-	// has replaced that supervisor; it survives a daemon restart.
+	// network rules and providers of a live legacy guest (oldSupervisorLive),
+	// confirmed loaded: what it added, not a containment of the old broker
+	// (GAP-0831). The next successful start restores only its create-time
+	// policy, after OpenShell has replaced that supervisor; it survives a
+	// daemon restart.
 	OldSupervisorNetworkClosed bool `json:"old_supervisor_network_closed,omitempty"`
 	// OldSupervisorProviders are the providers DefenseClaw detached while
 	// closing that legacy VM's direct network routes. They are restored only
@@ -227,7 +229,7 @@ type record struct {
 	OldSupervisorProviders []string `json:"old_supervisor_providers,omitempty"`
 	// OldSupervisorNetworkRestore says the next session must get its
 	// create-time network back. DefenseClaw records it before it changes
-	// any provider or rule of a legacy MicroVM, so a containment cut short
+	// any provider or rule of a legacy guest, so a withdrawal cut short
 	// after a change (a policy OpenShell did not load, a record that could
 	// not be saved) still has the next start restore it.
 	OldSupervisorNetworkRestore bool `json:"old_supervisor_network_restore,omitempty"`

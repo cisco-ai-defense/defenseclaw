@@ -329,7 +329,7 @@ func (c *Client) Status(ctx context.Context) (*Status, error) {
 func (c *Client) Ready(ctx context.Context, req ReadyRequest) (*Status, error) {
 	var out Status
 	err := c.do(ctx, http.MethodPost, PathReady, nil, req, &out)
-	if err != nil && req.Harness != "" && readyHarnessRefused(err) {
+	if err != nil && req.Harness != "" && unknownFieldRefused(err, "harness") {
 		out = Status{}
 		err = c.do(ctx, http.MethodPost, PathReady, nil, struct{}{}, &out)
 	}
@@ -339,11 +339,13 @@ func (c *Client) Ready(ctx context.Context, req ReadyRequest) (*Status, error) {
 	return &out, nil
 }
 
-// readyHarnessRefused reports an older daemon's refusal of
-// ReadyRequest.Harness, a field its strict decoder does not know.
-func readyHarnessRefused(err error) bool {
+// unknownFieldRefused reports an older daemon's refusal of a request field
+// its strict decoder does not know (field, as JSON names it): a daemon of
+// DefenseClaw 1.0.3 or older answers "invalid JSON body: json: unknown
+// field" for every field 1.0.4 added.
+func unknownFieldRefused(err error, field string) bool {
 	e := AsError(err)
-	return e.Code == CodeInvalid && strings.Contains(e.Message, `unknown field "harness"`)
+	return e.Code == CodeInvalid && strings.Contains(e.Message, `unknown field "`+field+`"`)
 }
 
 // List returns every DefenseClaw sandbox.
@@ -416,9 +418,19 @@ func (c *Client) Stop(ctx context.Context, name string) (*Sandbox, error) {
 }
 
 // Start starts a stopped sandbox with a freshly rotated binding.
+// A daemon of DefenseClaw 1.0.3 or older refuses StartRequest.EndVM, a
+// field its strict decoder does not know; it refuses no start of an ended
+// MicroVM either, so the start the user asked to end the VM goes again
+// without the field. Kept, like Ready's, through the 1.0.4 upgrade window.
 func (c *Client) Start(ctx context.Context, name string, req StartRequest) (*Sandbox, error) {
 	var out Sandbox
-	if err := c.do(ctx, http.MethodPost, sandboxPath(name, "start"), nil, req, &out); err != nil {
+	err := c.do(ctx, http.MethodPost, sandboxPath(name, "start"), nil, req, &out)
+	if err != nil && req.EndVM && unknownFieldRefused(err, "end_vm") {
+		req.EndVM = false
+		out = Sandbox{}
+		err = c.do(ctx, http.MethodPost, sandboxPath(name, "start"), nil, req, &out)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &out, nil

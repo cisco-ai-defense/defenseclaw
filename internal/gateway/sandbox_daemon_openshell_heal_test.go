@@ -64,7 +64,7 @@ func TestAccountOpenShellLaunchAgentPreKickstartHeal(t *testing.T) {
 			} else if err != nil || reloaded != tc.wantReload {
 				t.Fatalf("startUnit reloaded=%v err=%v", reloaded, err)
 			}
-			want := []string{"print gui/5001", "print gui/5001/" + openShellGatewayLabel}
+			want := []string{"print gui/5001", "print user/5001", "print gui/5001/" + openShellGatewayLabel}
 			if tc.wantReload {
 				want = append(want, "bootout gui/5001/"+openShellGatewayLabel, "bootstrap gui/5001 "+openShellGatewayPlist)
 			}
@@ -216,5 +216,40 @@ func TestAccountOpenShellStartsTheTaggedGatewayLabel(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("commands lack %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestAccountOpenShellStartsTheGatewayAgentWhereItIsLoaded (GAP-0863): the
+// OpenShell gateway job of a fresh AD account was loaded in its background
+// domain (user/<uid>), and the daemon's bootstrap of it into gui/<uid>,
+// which launchd refuses for a label the account already has, failed with
+// "Bootstrap failed: 5: Input/output error". The daemon now starts it in
+// the domain that has it.
+func TestAccountOpenShellStartsTheGatewayAgentWhereItIsLoaded(t *testing.T) {
+	r := newOpenShellRig(t, "darwin")
+	var calls []string
+	r.o.run = func(_ context.Context, _ string, args, _ []string) (string, error) {
+		line := strings.Join(args, " ")
+		calls = append(calls, line)
+		switch {
+		case line == "print gui/5001":
+			return "gui/5001 = {\n}\n", nil
+		case line == "print user/5001":
+			return "user/5001 = {\n\tservices = {\n\t\t0\t-\t" + openShellGatewayLabel + "\n\t}\n}\n", nil
+		case line == "print user/5001/"+openShellGatewayLabel:
+			return "state = not running\nruns = 0\nlast exit code = (never exited)\n", nil
+		case strings.HasPrefix(line, "print gui/5001/"):
+			return "Could not find service", errors.New("exit status 113")
+		case strings.HasPrefix(line, "bootstrap gui/5001 "):
+			return "Bootstrap failed: 5: Input/output error", errors.New("exit status 5")
+		}
+		return "", nil
+	}
+	if _, err := r.o.startUnit(context.Background()); err != nil {
+		t.Fatalf("startUnit: %v (calls %q)", err, calls)
+	}
+	want := []string{"print gui/5001", "print user/5001", "print user/5001/" + openShellGatewayLabel, "kickstart user/5001/" + openShellGatewayLabel}
+	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("launchctl calls:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
 	}
 }

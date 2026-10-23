@@ -809,14 +809,16 @@ func (o *accountOpenShell) kickstartLaunchAgent(ctx context.Context, target stri
 	return commandError(daemonLaunchctl+" kickstart "+target, out, err)
 }
 
-// launchDomain is the launchd domain of the account's agents: the graphical
-// session when there is one, else the background session of an ssh login.
+// launchDomain is the launchd domain of the account's OpenShell gateway
+// agent (openshell.LaunchDomain): the one its job is loaded in, else the
+// graphical session when there is one, else the background session of an
+// ssh login.
 func (o *accountOpenShell) launchDomain(ctx context.Context) string {
-	gui := "gui/" + strconv.Itoa(o.uid)
-	if _, err := o.run(ctx, daemonLaunchctl, []string{"print", gui}, nil); err == nil {
-		return gui
-	}
-	return "user/" + strconv.Itoa(o.uid)
+	label, _ := openShellGatewayAgent()
+	domain, _ := openshell.LaunchDomain(o.uid, openshell.GatewayAgentBase, label, func(domain string) (string, error) {
+		return o.run(ctx, daemonLaunchctl, []string{"print", domain}, nil)
+	})
+	return domain
 }
 
 var launchdLastExit = regexp.MustCompile(`last exit code = (\d+)`)

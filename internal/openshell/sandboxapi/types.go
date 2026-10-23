@@ -445,10 +445,12 @@ type Sandbox struct {
 	// OldSupervisor marks a sandbox whose session runs the supervisor of an
 	// OpenShell release older than openshell.SupportedMin (or of one its
 	// record does not name), whose network broker can bypass sandbox policy
-	// (NVIDIA/OpenShell#4494). The daemon stops a ready session (GAP-0415);
-	// for a completed or failed MicroVM it withdraws network access while
-	// keeping its compute and disk until OpenShell reports the VM gone. A
-	// warning reports a failed withdrawal.
+	// (NVIDIA/OpenShell#4494): a ready session, or a MicroVM whose workload
+	// ended but whose VM may still run. The daemon never stops it on its
+	// own: it closes its egress proxy and withdraws its network rules, which
+	// does not contain that broker, so it reports it unprotected (Warnings,
+	// with the command that ends it) and creates and starts no sandbox
+	// while it runs. The CLI runs nothing in it.
 	OldSupervisor bool `json:"old_supervisor,omitempty"`
 	// NestedRepos are the git repositories the nested-repository guard
 	// found in a mounted project during the current session.
@@ -840,7 +842,8 @@ type StartRequest struct {
 	// what it left running (openshell.LingeringVM): OpenShell's start ends
 	// that VM with no flush first, so what it has not written to its disk is
 	// lost. Without it the daemon refuses such a start with
-	// CodeConflict. A daemon before 1.0.4 ignores it.
+	// CodeConflict. A daemon before 1.0.4, which refuses no such start,
+	// refuses the field (Client.Start sends the start again without it).
 	EndVM bool `json:"end_vm,omitempty"`
 	// LLM is the model credential as the caller's environment holds it now
 	// (secret values): when it is of the profile the sandbox was created
