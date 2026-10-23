@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -36,8 +37,14 @@ func scannerDetachedFixture(t *testing.T, pidFile string) string {
 		}
 		detach = `perl -MPOSIX -e 'POSIX::setsid() >= 0 or die; exec @ARGV or die'`
 	}
+	pidWrite := `echo $$ > "$1"`
+	if runtime.GOOS == "linux" {
+		// /proc is the host mount even inside the scanner's PID namespace.
+		// Shell $$ is namespace-local and may name an unrelated host process.
+		pidWrite = `read -r p _ < /proc/self/stat; echo "$p" > "$1"`
+	}
 	path := filepath.Join(t.TempDir(), "scanner-fixture")
-	script := "#!/bin/sh\npidfile=" + scannerQuote(pidFile) + "\n" + detach + ` sh -c 'echo $$ > "$1"; exec sleep 60' sh "$pidfile" </dev/null >/dev/null 2>&1 &
+	script := "#!/bin/sh\npidfile=" + scannerQuote(pidFile) + "\n" + detach + ` sh -c '` + pidWrite + `; exec sleep 60' sh "$pidfile" </dev/null >/dev/null 2>&1 &
 while [ ! -s "$pidfile" ]; do sleep 0.01; done
 if [ "${DC_SCANNER_TEST_WAIT:-}" = 1 ]; then sleep 60; fi
 printf '{"findings":[]}\n'

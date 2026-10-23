@@ -21,6 +21,8 @@ package processutil
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,7 +32,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/unix"
 )
 
@@ -44,8 +48,7 @@ const (
 	containNewGroup  = `perl -e 'setpgrp(0, 0) or die; exec @ARGV or die' `
 )
 
-// containRunners are the two Linux supervisors: the PID namespace runner and
-// the subreaper custodian scanners keep.
+// Both contained hook probes and tracked scanners must end detached children.
 var containRunners = map[string]func(*exec.Cmd) error{"RunContained": RunContained, "RunTracked": RunTracked}
 
 func requireContainTools(t *testing.T) {
@@ -106,12 +109,25 @@ func TestRunContainedFailsClosedWithoutANamespace(t *testing.T) {
 	}
 	t.Cleanup(func() { containIDMap = previous })
 	ran := filepath.Join(t.TempDir(), "ran")
-	err := RunContained(CommandContext(context.Background(), "/bin/sh", "-c", `: > "$1"`, "sh", ran))
+	err := runContainedDirect(CommandContext(context.Background(), "/bin/sh", "-c", `: > "$1"`, "sh", ran))
 	if !errors.Is(err, ErrNotContained) {
 		t.Fatalf("RunContained = %v, want ErrNotContained", err)
 	}
 	if _, statErr := os.Stat(ran); statErr == nil {
 		t.Fatal("the command ran outside a namespace of its own")
+	}
+}
+
+// Exercise the public launcher path when it cannot create the runner's namespace.
+func TestRunContainedLauncherFailsClosedWithoutANamespace(t *testing.T) {
+	t.Setenv("DC_PROCESSUTIL_TEST_FAIL_NAMESPACE", "1")
+	ran := filepath.Join(t.TempDir(), "ran")
+	err := RunContained(CommandContext(context.Background(), "/bin/sh", "-c", `: > "$1"`, "sh", ran))
+	if !errors.Is(err, ErrNotContained) {
+		t.Fatalf("RunContained = %v, want ErrNotContained", err)
+	}
+	if _, statErr := os.Stat(ran); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("command executed without containment: %v", statErr)
 	}
 }
 
@@ -188,51 +204,93 @@ func TestRunContainedAsTheGuardianActingAsAUser(t *testing.T) {
 	}
 }
 
-// When the supervisor cannot sweep what is left, the run fails closed.
-func TestRunTrackedFailsClosedWhenItCannotEndTheTree(t *testing.T) {
-	requireContainTools(t)
-	previous := containSweepBudget
-	containSweepBudget = 0
-	t.Cleanup(func() { containSweepBudget = previous })
-	pidFile := filepath.Join(t.TempDir(), "escaped.pid")
-	err := RunTracked(CommandContext(context.Background(), "/bin/sh", "-c",
-		"setsid "+containChild+" &\n"+containWaitPID+"\nexit 0", "sh", pidFile))
+// Scanner runtimes use positive PIDs to stop their own helpers. In particular,
+// Python's subprocess timeout kills by PID before it can return to the caller.
+func TestRunTrackedCanStopItsOwnChildByPID(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	cmd := CommandContext(context.Background(), "/bin/sh", "-c",
+		`sh -c 'read -r p _ < /proc/self/stat; echo "$p" > "$1"; exec sleep 60' sh "$1" & child=$!; while [ ! -s "$1" ]; do sleep 0.01; done; kill -TERM "$child" || exit 11; wait "$child"; [ "$?" -eq 143 ]`,
+		"sh", pidFile)
+	if err := RunTracked(cmd); err != nil {
+		t.Fatalf("RunTracked could not stop its child by PID: %v", err)
+	}
 	pid := readContainPID(t, pidFile)
-	_ = syscall.Kill(pid, syscall.SIGKILL)
-	if !errors.Is(err, ErrNotContained) {
-		t.Fatalf("RunTracked = %v, want ErrNotContained", err)
+	if helperRunning(pid) {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatalf("child %d still runs after a successful wait", pid)
 	}
 }
 
-// A command that kills its supervisor cannot pass.
-func TestRunTrackedFailsWhenTheSupervisorIsKilled(t *testing.T) {
-	requireContainTools(t)
-	// RunContained is also called by the long-lived gateway. Its custodian
-	// must never sweep another child of the gateway while ending this probe.
-	unrelated := exec.Command("sleep", "60")
-	if err := unrelated.Start(); err != nil {
+func TestRunTrackedKeepsCommandExit125(t *testing.T) {
+	err := RunTracked(CommandContext(context.Background(), "/bin/sh", "-c", "exit 125"))
+	var exitErr *exec.ExitError
+	if errors.Is(err, ErrNotContained) || !errors.As(err, &exitErr) || exitErr.ExitCode() != 125 {
+		t.Fatalf("RunTracked = %v, want command exit 125", err)
+	}
+}
+
+func TestRunTrackedPythonSubprocessTimeout(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not installed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := CommandContext(ctx, python, "-c", `import subprocess
+try:
+    subprocess.run(["sleep", "60"], timeout=0.1, check=True)
+except subprocess.TimeoutExpired:
+    print("timeout handled")
+else:
+    raise AssertionError("sleep did not time out")`)
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := RunTracked(cmd); err != nil {
+		t.Fatalf("Python could not handle the subprocess timeout: %v: %s", err, out.String())
+	}
+	if strings.TrimSpace(out.String()) != "timeout handled" {
+		t.Fatalf("Python timeout result = %q", out.String())
+	}
+}
+
+func TestRunTrackedPreservesRootOwnedExecutableCustody(t *testing.T) {
+	if os.Getenv("DC_TRACKED_MANAGED_HELPER") == "1" {
+		if err := managed.ValidateTrustedFilePath("/etc/passwd", "root-owned file"); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 is not installed")
+	}
+	cli, err := filepath.Abs("../../cli")
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_ = unrelated.Process.Kill()
-		_ = unrelated.Wait()
-	})
-	pidFile := filepath.Join(t.TempDir(), "escaped.pid")
-	err := RunTracked(CommandContext(context.Background(), "/bin/sh", "-c",
-		"setsid "+containChild+" &\n"+containWaitPID+"\n"+
-			// Only ever the supervisor: never the test binary.
-			`case "$(tr '\0' ' ' < /proc/$PPID/cmdline)" in `+containSupervisorArg0+`*) kill -9 -$PPID ;; esac`+
-			"\nexit 0", "sh", pidFile))
-	pid := readContainPID(t, pidFile)
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	if err == nil {
-		t.Fatal("RunTracked passed after the command killed its supervisor")
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if helperRunning(pid) {
-		t.Fatalf("RunTracked returned after its supervisor died while descendant %d still runs", pid)
-	}
-	if !helperRunning(unrelated.Process.Pid) {
-		t.Fatalf("RunContained killed unrelated gateway child %d", unrelated.Process.Pid)
+	code := `import os
+from defenseclaw.config import _managed_config_trust_problem
+from defenseclaw.file_permissions import tracked_host_owner_uid, trusted_posix_executable_path
+from defenseclaw.pinned_exec import run_pinned_executable
+assert _managed_config_trust_problem('/etc/passwd') is None
+path = trusted_posix_executable_path('/bin/echo')
+result = run_pinned_executable([path, 'root-owned'], capture_output=True, text=True)
+assert result.returncode == 0 and result.stdout.strip() == 'root-owned', result
+assert tracked_host_owner_uid('/bin/echo', os.stat('/bin/sh')) == -1
+helper = trusted_posix_executable_path(os.environ['DC_TRACKED_TEST_BINARY'])
+result = run_pinned_executable([helper, '-test.run=^TestRunTrackedPreservesRootOwnedExecutableCustody$'],
+                               capture_output=True, text=True,
+                               env={**os.environ, 'DC_TRACKED_MANAGED_HELPER': '1'})
+assert result.returncode == 0, (result.stdout, result.stderr)`
+	cmd := CommandContext(context.Background(), "python3", "-c", code)
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+cli, "DC_TRACKED_TEST_BINARY="+testBinary)
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := RunTracked(cmd); err != nil {
+		t.Fatalf("root-owned executable custody inside scanner = %v: %s", err, out.String())
 	}
 }
 
@@ -279,12 +337,8 @@ func TestRunContainedEndsTheTreeWhenTheRunnerIsKilled(t *testing.T) {
 	}
 }
 
-// r104 W5b review: a hook that SIGKILLed the subreaper custodian, its
-// grandparent, took the runner and itself down with it, and the kernel handed
-// its setsid child to init, which kept running; the same held for a scanner
-// below RunTracked (GAP-0631). The command must not be able to end anything
-// that contains it, whichever ancestor it targets and however it signals,
-// and nothing it started may outlive the run.
+// A command can read host ancestor IDs from /proc even inside a PID
+// namespace. It must not be able to signal them or leave a detached child.
 func TestRunContainedSurvivesTheCommandKillingEverySupervisor(t *testing.T) {
 	requireContainTools(t)
 	// Collect every supervisor ancestor by the pids this test sees, outermost
@@ -299,28 +353,19 @@ done
 	for _, kill := range []struct {
 		name, script string
 		amd64        bool // raw amd64 system call numbers
-		trackedOnly  bool
 	}{
-		{"kill", `kill -9 $list`, false, false},
-		{"process groups", `for p in $list; do kill -9 -$p; done`, false, false},
-		{"perl", `perl -e 'kill 9, @ARGV' $list`, false, false},
-		{"tgkill", `perl -e 'syscall(234, $_+0, $_+0, 9) for @ARGV' $list`, true, false},
-		{"tkill", `for p in $list; do for t in /proc/$p/task/*; do perl -e 'syscall(200, $ARGV[0]+0, 9)' "${t##*/}"; done; done`, true, false},
-		{"pidfd", `perl -e 'for (@ARGV) { my $fd = syscall(434, $_+0, 0); syscall(424, $fd, 9, 0, 0) if $fd >= 0 }' $list`, false, false},
-		{"I/O owner", `perl -e 'for (@ARGV) { pipe(my $r, my $w) or die; fcntl($r, 8, $_+0); fcntl($r, 10, 9); fcntl($r, 4, 020000); syswrite($w, "x") }' $list`, false, false},
-		{"socket owner", `perl -MSocket -e 'for (@ARGV) { socketpair(my $r, my $w, AF_UNIX, SOCK_STREAM, 0) or die; ioctl($r, 0x8901, pack("i", $_)); fcntl($r, 10, 9); fcntl($r, 4, 020000); syswrite($w, "x") }' $list`, false, false},
-		{"sigqueue", `perl -e 'for (@ARGV) { my $i = pack("iii", 9, 0, -1) . "\0" x 116; syscall(129, $_+0, 9, $i) }' $list`, true, false},
-		{"kill by thread ID", `set -- $list; p=$1; t=$p; for path in /proc/$p/task/*; do [ "${path##*/}" != "$p" ] && { t=${path##*/}; break; }; done; [ "$t" != "$p" ] || exit 7; kill -9 "$t"`, false, true},
-		{"sigqueue by thread ID", `set -- $list; p=$1; t=$p; for path in /proc/$p/task/*; do [ "${path##*/}" != "$p" ] && { t=${path##*/}; break; }; done; [ "$t" != "$p" ] || exit 7; perl -e 'my $i = pack("iii", 9, 0, -1) . "\0" x 116; syscall(129, $ARGV[0]+0, 9, $i)' "$t"`, true, true},
-		{"I/O owner by thread ID", `set -- $list; p=$1; t=$p; for path in /proc/$p/task/*; do [ "${path##*/}" != "$p" ] && { t=${path##*/}; break; }; done; [ "$t" != "$p" ] || exit 7; perl -e 'pipe(my $r, my $w) or die; fcntl($r, 8, $ARGV[0]+0); fcntl($r, 10, 9); fcntl($r, 4, 020000); syswrite($w, "x")' "$t"`, false, true},
-		{"prlimit custodian", `set -- $list; perl -e 'my $limit = pack("QQ", 0, 0); syscall(302, $ARGV[0]+0, 7, $limit, 0)' "$1"`, true, true},
-		{"join custodian group then kill zero", `set -- $list; perl -e 'syscall(109, 0, $ARGV[0]+0) == 0 or die "setpgid: $!"; kill 9, 0' "$1"`, true, true},
+		{"kill", `kill -9 $list`, false},
+		{"process groups", `for p in $list; do kill -9 -$p; done`, false},
+		{"perl", `perl -e 'kill 9, @ARGV' $list`, false},
+		{"tgkill", `perl -e 'syscall(234, $_+0, $_+0, 9) for @ARGV' $list`, true},
+		{"tkill", `for p in $list; do for t in /proc/$p/task/*; do perl -e 'syscall(200, $ARGV[0]+0, 9)' "${t##*/}"; done; done`, true},
+		{"pidfd", `perl -e 'for (@ARGV) { my $fd = syscall(434, $_+0, 0); syscall(424, $fd, 9, 0, 0) if $fd >= 0 }' $list`, false},
+		{"I/O owner", `perl -e 'for (@ARGV) { pipe(my $r, my $w) or die; fcntl($r, 8, $_+0); fcntl($r, 10, 9); fcntl($r, 4, 020000); syswrite($w, "x") }' $list`, false},
+		{"socket owner", `perl -MSocket -e 'for (@ARGV) { socketpair(my $r, my $w, AF_UNIX, SOCK_STREAM, 0) or die; ioctl($r, 0x8901, pack("i", $_)); fcntl($r, 10, 9); fcntl($r, 4, 020000); syswrite($w, "x") }' $list`, false},
+		{"sigqueue", `perl -e 'for (@ARGV) { my $i = pack("iii", 9, 0, -1) . "\0" x 116; syscall(129, $_+0, 9, $i) }' $list`, true},
 	} {
 		for name, run := range containRunners {
 			t.Run(name+"/"+kill.name, func(t *testing.T) {
-				if kill.trackedOnly && name != "RunTracked" {
-					t.Skip("the PID-namespace runner has no subreaper custodian")
-				}
 				if kill.amd64 && runtime.GOARCH != "amd64" {
 					t.Skip("raw syscall numbers are amd64's")
 				}
@@ -341,25 +386,87 @@ done
 	}
 }
 
-// The custodian is not dumpable, so the command cannot trace it and make it
-// exit (GAP-0631): its /proc entries belong to root.
-func TestRunTrackedCustodianIsNotDumpable(t *testing.T) {
+func TestRunTrackedLauncherIsNotDumpable(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root owns every /proc entry it has")
 	}
 	var out strings.Builder
-	cmd := CommandContext(context.Background(), "/bin/sh", "-c", `read -r _ _ _ a _ < /proc/self/stat
-while [ "${a:-0}" -gt 1 ]; do
-  case "$(tr '\0' ' ' < /proc/$a/cmdline)" in "`+containSupervisorArg0+` `+containCustodianMode+` "*) stat -c %u /proc/$a/status; exit 0 ;; esac
-  read -r _ _ _ a _ < /proc/$a/stat || break
-done
-exit 7`)
+	cmd := CommandContext(context.Background(), "/bin/sh", "-c", `read -r _ _ _ parent _ < /proc/self/stat; stat -c %u /proc/$parent/status`)
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := RunTracked(cmd); err != nil {
 		t.Fatalf("RunTracked = %v: %s", err, out.String())
 	}
-	if got := strings.TrimSpace(out.String()); got != "0" {
-		t.Fatalf("the custodian's /proc status belongs to %q, want root (not dumpable)", got)
+	if got := strings.TrimSpace(out.String()); got == strconv.Itoa(os.Geteuid()) {
+		t.Fatalf("the launcher's /proc status belongs to the scanner UID %q", got)
+	}
+}
+
+const containInjectionHelperEnv = "DC_PROCESSUTIL_INJECTION_HELPER"
+
+func TestRunTrackedCannotInjectIntoOwnerHelper(t *testing.T) {
+	gateway, err := strconv.Atoi(os.Getenv(containInjectionHelperEnv))
+	if err != nil || gateway <= 1 {
+		t.Skip("helper process of TestRunTrackedCannotInjectIntoOwner")
+	}
+	raw, err := os.ReadFile("/proc/self/stat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(string(raw[strings.LastIndexByte(string(raw), ')')+1:]))
+	launcher, err := strconv.Atoi(fields[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]int{"gateway": gateway, "launcher": launcher} {
+		if memory, err := os.Open("/proc/" + strconv.Itoa(target) + "/mem"); err == nil {
+			_ = memory.Close()
+			t.Errorf("scanner opened %s memory", name)
+		} else if !errors.Is(err, os.ErrPermission) {
+			t.Errorf("open %s memory = %v, want permission denied", name, err)
+		}
+		if fd, err := unix.PidfdOpen(target, 0); err == nil {
+			_ = unix.Close(fd)
+			t.Errorf("scanner opened %s pidfd", name)
+		}
+		// PTRACE_SEIZE does not stop the target. If it ever succeeds,
+		// detach before reporting the failure.
+		_, _, errno := unix.Syscall6(unix.SYS_PTRACE, 0x4206, uintptr(target), 0, 0, 0, 0)
+		if errno == 0 {
+			_, _, _ = unix.Syscall6(unix.SYS_PTRACE, 17, uintptr(target), 0, 0, 0, 0)
+			t.Errorf("scanner attached to %s", name)
+		} else if errno != unix.EPERM {
+			t.Errorf("ptrace %s = %v, want EPERM", name, errno)
+		}
+		for _, call := range []struct {
+			name string
+			nr   uintptr
+		}{
+			{"process_vm_readv", unix.SYS_PROCESS_VM_READV},
+			{"process_vm_writev", unix.SYS_PROCESS_VM_WRITEV},
+		} {
+			_, _, errno := unix.Syscall6(call.nr, uintptr(target), 0, 0, 0, 0, 0)
+			if errno != unix.EPERM {
+				t.Errorf("%s %s = %v, want EPERM", call.name, name, errno)
+			}
+		}
+	}
+	fd, err := unix.PidfdOpen(os.Getpid(), 0)
+	if err != nil {
+		t.Fatalf("pidfd_open self: %v", err)
+	}
+	defer unix.Close(fd)
+	if _, err := unix.PidfdGetfd(fd, 0, 0); err != unix.EPERM {
+		t.Errorf("pidfd_getfd self = %v, want EPERM", err)
+	}
+}
+
+func TestRunTrackedCannotInjectIntoOwner(t *testing.T) {
+	cmd := CommandContext(context.Background(), os.Args[0], "-test.run=^TestRunTrackedCannotInjectIntoOwnerHelper$")
+	cmd.Env = append(os.Environ(), containInjectionHelperEnv+"="+strconv.Itoa(os.Getpid()))
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := RunTracked(cmd); err != nil {
+		t.Fatalf("injection probe = %v: %s", err, out.String())
 	}
 }
 
@@ -408,7 +515,7 @@ func TestRunContainedKeepsTheCommandResult(t *testing.T) {
 	}{
 		{"exit 0", 0},
 		{"exit 3", 3},
-		{"kill -TERM 0", 128 + int(syscall.SIGTERM)},
+		{"trap 'exit 143' TERM; kill -TERM $$", 128 + int(syscall.SIGTERM)},
 		{`[ -z "${` + containSupervisorEnv + `+x}" ] || exit 9`, 0},
 	} {
 		for name, run := range containRunners {
@@ -444,5 +551,199 @@ func readContainPID(t *testing.T, path string) int {
 			t.Fatalf("command never wrote %s: %v", path, err)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+const lateGatewayThreadEnv = "DC_PROCESSUTIL_LATE_GATEWAY_THREAD"
+
+const clearParentDeathEnv = "DC_PROCESSUTIL_CLEAR_PARENT_DEATH"
+
+func TestRunTrackedCannotClearParentDeathSignal(t *testing.T) {
+	if os.Getenv(clearParentDeathEnv) != "" {
+		if err := unix.Prctl(unix.PR_SET_PDEATHSIG, 0, 0, 0, 0); err != unix.EPERM {
+			t.Fatalf("scanner cleared parent-death signal: %v", err)
+		}
+		uid, gid := os.Geteuid(), os.Getegid()
+		if err := unix.Setresuid(uid, uid, uid); err != nil {
+			t.Fatalf("scanner could not set its own UID: %v", err)
+		}
+		if err := unix.Setresgid(gid, gid, gid); err != nil {
+			t.Fatalf("scanner could not set its own GID: %v", err)
+		}
+		var signal int
+		if err := unix.Prctl(unix.PR_GET_PDEATHSIG, uintptr(unsafe.Pointer(&signal)), 0, 0, 0); err != nil || signal != int(unix.SIGKILL) {
+			t.Fatalf("scanner lost its parent-death signal after an identity call: signal=%d err=%v", signal, err)
+		}
+		return
+	}
+	cmd := CommandContext(context.Background(), os.Args[0], "-test.run=^TestRunTrackedCannotClearParentDeathSignal$")
+	cmd.Env = append(os.Environ(), clearParentDeathEnv+"=1")
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := RunTracked(cmd); err != nil {
+		t.Fatalf("scanner parent-death guard = %v: %s", err, out.String())
+	}
+}
+
+// A scanner can exec a setuid-marked file. With no_new_privs the exec must
+// leave the PID-namespace init's parent-death signal in place.
+func TestRunTrackedSetuidExecKeepsParentDeathSignal(t *testing.T) {
+	source, err := os.Open(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	path := filepath.Join(t.TempDir(), "setuid-scanner")
+	dst, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(dst, source); err != nil {
+		_ = dst.Close()
+		t.Fatal(err)
+	}
+	if err := dst.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o4755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := CommandContext(context.Background(), path, "-test.run=^TestRunTrackedCannotClearParentDeathSignal$")
+	cmd.Env = append(os.Environ(), clearParentDeathEnv+"=1")
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := RunTracked(cmd); err != nil {
+		t.Fatalf("setuid-marked scanner lost parent-death guard: %v: %s", err, out.String())
+	}
+}
+
+// A snapshot of the gateway's thread IDs becomes stale as soon as Go starts
+// another thread. Keep the attempted kill in a helper so a vulnerable run
+// cannot end the test process.
+func TestRunTrackedCannotSignalLateGatewayThread(t *testing.T) {
+	if base := os.Getenv(lateGatewayThreadEnv); base != "" {
+		ready, ids := base+".ready", base+".ids"
+		cmd := CommandContext(context.Background(), "/bin/sh", "-c",
+			`: > "$1"; while [ ! -s "$2" ]; do sleep 0.01; done; for tid in $(cat "$2"); do kill -9 "$tid" 2>/dev/null || :; done`,
+			"sh", ready, ids)
+		done := make(chan error, 1)
+		go func() { done <- RunTracked(cmd) }()
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			if _, err := os.Stat(ready); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("scanner did not start")
+			}
+		}
+		threads := make(chan int, 32)
+		release := make(chan struct{})
+		for range 32 {
+			go func() {
+				runtime.LockOSThread()
+				defer runtime.UnlockOSThread()
+				threads <- unix.Gettid()
+				<-release
+			}()
+		}
+		var list strings.Builder
+		for range 32 {
+			fmt.Fprintln(&list, <-threads)
+		}
+		if err := os.WriteFile(ids, []byte(list.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := <-done
+		close(release)
+		if err != nil {
+			t.Fatalf("tracked command = %v", err)
+		}
+		return
+	}
+	base := filepath.Join(t.TempDir(), "gateway")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	helper := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRunTrackedCannotSignalLateGatewayThread$")
+	helper.Env = append(os.Environ(), lateGatewayThreadEnv+"="+base)
+	out, err := helper.CombinedOutput()
+	if err != nil {
+		t.Fatalf("scanner signaled a newly created gateway thread: %v: %s", err, out)
+	}
+}
+
+const filteredGatewayChildEnv = "DC_PROCESSUTIL_FILTERED_GATEWAY_CHILD"
+
+func TestRunTrackedLeavesUnrelatedFilteredGatewayChildHelper(t *testing.T) {
+	ready := os.Getenv(filteredGatewayChildEnv)
+	if ready == "" {
+		t.Skip("helper process")
+	}
+	filter := []unix.SockFilter{{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ALLOW}}
+	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Prctl(unix.PR_SET_SECCOMP, unix.SECCOMP_MODE_FILTER, uintptr(unsafe.Pointer(&prog)), 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	runtime.KeepAlive(filter)
+	if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Minute)
+}
+
+// A separate gateway child can install its own seccomp filter during a scan.
+// Ending the scanner's supervisor must leave that gateway child untouched.
+func TestRunTrackedLeavesUnrelatedFilteredGatewayChild(t *testing.T) {
+	requireContainTools(t)
+	dir := t.TempDir()
+	pidFile, supervisorFile := filepath.Join(dir, "detached.pid"), filepath.Join(dir, "supervisor.pid")
+	cmd := CommandContext(context.Background(), "/bin/sh", "-c",
+		"setsid "+containChild+" &\n"+containWaitPID+"\n"+
+			`read -r _ _ _ ancestor _ < /proc/self/stat; outer=0
+while [ "${ancestor:-0}" -gt 1 ]; do
+  case "$(tr '\0' ' ' < /proc/$ancestor/cmdline)" in `+containSupervisorArg0+`*) outer=$ancestor ;; esac
+  read -r _ _ _ ancestor _ < /proc/$ancestor/stat || break
+done
+[ "$outer" -gt 1 ] || exit 7
+echo "$outer" > "$2"
+sleep 60`, "sh", pidFile, supervisorFile)
+	done := make(chan error, 1)
+	go func() { done <- RunTracked(cmd) }()
+	child := readContainPID(t, pidFile)
+	t.Cleanup(func() { _ = unix.Kill(child, unix.SIGKILL) })
+	supervisor := readContainPID(t, supervisorFile)
+	ready := filepath.Join(dir, "unrelated.ready")
+	unrelated := exec.Command(os.Args[0], "-test.run=^TestRunTrackedLeavesUnrelatedFilteredGatewayChildHelper$")
+	unrelated.Env = append(os.Environ(), filteredGatewayChildEnv+"="+ready)
+	if err := unrelated.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unrelated.Process.Kill(); _ = unrelated.Wait() })
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("unrelated child did not install its filter")
+		}
+	}
+	if err := unix.Kill(supervisor, unix.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("RunTracked passed after its supervisor was killed")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunTracked did not return after its supervisor was killed")
+	}
+	if helperRunning(child) {
+		t.Fatalf("scanner descendant %d outlived its supervisor", child)
+	}
+	if !helperRunning(unrelated.Process.Pid) {
+		t.Fatalf("unrelated filtered gateway child %d was killed", unrelated.Process.Pid)
 	}
 }

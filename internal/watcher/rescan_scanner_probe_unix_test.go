@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,7 +33,12 @@ func TestScannerVersionProbeEndsDetachedHelper(t *testing.T) {
 	}
 	pidFile := filepath.Join(t.TempDir(), "helper.pid")
 	binary := filepath.Join(t.TempDir(), "scanner-fixture")
-	script := "#!/bin/sh\npidfile='" + pidFile + "'\n" + detach + ` sh -c 'echo $$ > "$1"; exec sleep 60' sh "$pidfile" </dev/null >/dev/null 2>&1 &
+	pidWrite := `echo $$ > "$1"`
+	if runtime.GOOS == "linux" {
+		// The child PID namespace still sees the host's /proc mount.
+		pidWrite = `read -r p _ < /proc/self/stat; echo "$p" > "$1"`
+	}
+	script := "#!/bin/sh\npidfile='" + pidFile + "'\n" + detach + ` sh -c '` + pidWrite + `; exec sleep 60' sh "$pidfile" </dev/null >/dev/null 2>&1 &
 while [ ! -s "$pidfile" ]; do sleep 0.01; done
 echo 'scanner-fixture 1.2.3'
 `

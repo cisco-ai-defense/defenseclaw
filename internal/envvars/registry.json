@@ -8123,7 +8123,7 @@
     {
       "name": "DEFENSECLAW_CONTAINED_RUN_SUPERVISOR",
       "category": "hook_internal",
-      "purpose": "Set to 1, together with the argv[0] defenseclaw-contained-run, only when a DefenseClaw Go binary re-runs itself on Linux as the PID-namespace runner of processutil.RunContained (the Hermes Verify execution probe) or the child-subreaper supervisor of processutil.RunTracked (gateway scanner runs). The supervisor removes it before it starts the probed command.",
+      "purpose": "Set to 1, together with the argv[0] defenseclaw-contained-run, only when a DefenseClaw Go binary re-runs itself on Linux as the PID-namespace runner of processutil.RunContained (the Hermes Verify execution probe) or the PID-namespace scanner launcher of processutil.RunTracked. The supervisor removes it before it starts the probed command.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -8136,6 +8136,34 @@
         {
           "location": "internal/processutil/contain_linux.go",
           "description": "Go reader: selects the supervisor mode at process start"
+        }
+      ],
+      "since": "1.0.4"
+    },
+    {
+      "name": "DEFENSECLAW_TRACKED_HOST_STAT_FD",
+      "category": "hook_internal",
+      "purpose": "Linux scanner custody channel descriptor, set to 5 by the trusted RunTracked launcher. A scanner in a one-ID user namespace uses the read-only channel to confirm the host owner of a previously inspected inode; the launcher overwrites inherited values and never opens or writes the requested path.",
+      "default": "unset",
+      "accepted_values": [
+        "5",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/processutil/contain_linux.go",
+          "description": "Go writer: passes the launcher-owned descriptor to the scanner"
+        },
+        {
+          "location": "internal/managed/trust_owner_linux.go",
+          "description": "Go reader: checks the host owner of managed runtime paths"
+        },
+        {
+          "location": "cli/defenseclaw/file_permissions.py",
+          "description": "Python reader: checks the host owner of scanner executable and config paths"
         }
       ],
       "since": "1.0.4"

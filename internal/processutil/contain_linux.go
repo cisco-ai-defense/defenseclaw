@@ -20,15 +20,17 @@ package processutil
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
 	"strconv"
-	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -44,24 +46,19 @@ import (
 // RunContained used before took its runner and itself down, and the kernel
 // handed its setsid child to init, which kept running (r104 W5b review).
 //
-// RunTracked runs cmd below a child subreaper custodian and a separate
-// runner. A command that kills its immediate parent kills the runner; its
-// descendants are then reparented to the custodian, which kills and reaps
-// them. The command cannot end the custodian instead: the runner's seccomp
-// filter refuses positive signal targets and remote prlimit, and the runner
-// starts a separate session so a command cannot join the custodian's group
-// and signal it with kill(0) (guardCustodian). The custodian is a
-// separate process so gateway children are never included in its sweep. Scanners keep it: without privilege the PID
-// namespace needs a user namespace mapping only this process's IDs, where
-// root-owned files read as owned by the overflow user, and DefenseClaw's own
-// plugin-scanner then refuses its root-owned runtime.
+// RunTracked starts the scanner itself as PID 1 of a new PID namespace.
+// Killing that process kills all descendants in the namespace, including
+// detached children, before its pidfd becomes readable. The namespace also
+// keeps the gateway and its unrelated children out of the scanner's PID map.
 const (
-	containSupervisorArg0 = "defenseclaw-contained-run"
-	containSupervisorEnv  = "DEFENSECLAW_CONTAINED_RUN_SUPERVISOR"
-	containCustodianMode  = "custodian"
-	containRunnerMode     = "runner"
-	containInitMode       = "init"
-	containLauncherMode   = "launcher"
+	containSupervisorArg0   = "defenseclaw-contained-run"
+	containSupervisorEnv    = "DEFENSECLAW_CONTAINED_RUN_SUPERVISOR"
+	containInitMode         = "init"
+	containLauncherMode     = "launcher"
+	containTrackedMode      = "tracked-launcher"
+	containTrackedInit      = "tracked-init"
+	containHostStatEnv      = "DEFENSECLAW_TRACKED_HOST_STAT_FD"
+	containFailNamespaceEnv = "DC_PROCESSUTIL_TEST_FAIL_NAMESPACE"
 )
 
 // Supervisor exit codes. Any other code is the command's own (128+signal
@@ -78,9 +75,8 @@ const (
 	containExitNotStarted = 127
 )
 
-// containSweepBudget bounds the supervisor's sweep of what the command left;
-// tests set it to zero to reach the fail-closed result.
-var containSweepBudget = 2 * time.Second
+// A killed PID-namespace init can briefly leave a descendant holding a pipe.
+const containPipeWaitDelay = 2 * time.Second
 
 // containIDMap maps this process's IDs into the runner's user namespace;
 // tests map an ID this process does not have to reach the fail-closed result.
@@ -88,36 +84,99 @@ var containIDMap = func(id int) []syscall.SysProcIDMap {
 	return []syscall.SysProcIDMap{{ContainerID: id, HostID: id, Size: 1}}
 }
 
+var trackedGatewayProtection struct {
+	sync.Mutex
+	active  int
+	restore bool
+}
+
+// A private PID namespace still inherits the host procfs. Keep the gateway
+// non-dumpable until every tracked scanner is gone, then restore its original
+// visibility for daemon status, stop and upgrades.
+func protectTrackedGateway() error {
+	trackedGatewayProtection.Lock()
+	defer trackedGatewayProtection.Unlock()
+	if trackedGatewayProtection.active == 0 && trackedGatewayProtection.restore {
+		// A prior cleanup could not restore dumpability. Keep protection in
+		// place for this scan and retry restoration when it ends.
+		if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+			return fmt.Errorf("%w: protect gateway memory: %v", ErrNotContained, err)
+		}
+	} else if trackedGatewayProtection.active == 0 {
+		initial, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
+		if err != nil {
+			return fmt.Errorf("%w: inspect gateway memory protection: %v", ErrNotContained, err)
+		}
+		if initial != 0 && initial != 1 {
+			return fmt.Errorf("%w: unsupported gateway dumpability %d", ErrNotContained, initial)
+		}
+		trackedGatewayProtection.restore = initial == 1
+		if trackedGatewayProtection.restore {
+			if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+				return fmt.Errorf("%w: protect gateway memory: %v", ErrNotContained, err)
+			}
+		}
+	}
+	trackedGatewayProtection.active++
+	return nil
+}
+
+func releaseTrackedGateway() error {
+	trackedGatewayProtection.Lock()
+	defer trackedGatewayProtection.Unlock()
+	trackedGatewayProtection.active--
+	if trackedGatewayProtection.active == 0 && trackedGatewayProtection.restore {
+		if err := unix.Prctl(unix.PR_SET_DUMPABLE, 1, 0, 0, 0); err != nil {
+			return fmt.Errorf("%w: restore gateway status visibility: %v", ErrNotContained, err)
+		}
+		trackedGatewayProtection.restore = false
+	}
+	return nil
+}
+
 func init() {
 	if len(os.Args) < 5 || os.Args[0] != containSupervisorArg0 || os.Args[3] != "--" ||
 		os.Getenv(containSupervisorEnv) != "1" {
 		return
 	}
-	budget, err := time.ParseDuration(os.Args[2])
-	if err != nil || budget < 0 {
-		os.Exit(containExitNotContained)
-	}
 	switch os.Args[1] {
-	case containCustodianMode:
-		os.Exit(superviseContained(os.Args[4:], budget))
-	case containRunnerMode:
-		os.Exit(runContainedCommand(os.Args[4:], false))
 	case containInitMode:
-		os.Exit(runContainedCommand(os.Args[4:], true))
+		if os.Args[2] != "0s" {
+			os.Exit(containExitNotContained)
+		}
+		os.Exit(runContainedCommand(os.Args[4:]))
 	case containLauncherMode:
+		if os.Args[2] != "0s" {
+			os.Exit(containExitNotContained)
+		}
 		os.Exit(launchContained(os.Args[4:]))
+	case containTrackedMode:
+		parent, err := strconv.Atoi(os.Args[2])
+		if err != nil || parent < 1 {
+			os.Exit(containExitNotContained)
+		}
+		os.Exit(launchTracked(os.Args[4:], parent))
+	case containTrackedInit:
+		if os.Args[2] != "3,4" {
+			os.Exit(containExitNotContained)
+		}
+		os.Exit(execTracked(os.Args[4:]))
 	default:
 		os.Exit(containExitNotContained)
 	}
 }
 
 func runContained(cmd *exec.Cmd) error {
+	return runContainedMode(cmd, containLauncherMode)
+}
+
+func runContainedDirect(cmd *exec.Cmd) error {
+	return runContainedMode(cmd, containInitMode)
+}
+
+func runContainedMode(cmd *exec.Cmd, mode string) error {
 	if cmd.Process != nil {
 		return errors.New("processutil: RunContained: already started")
-	}
-	mode := containInitMode
-	if mixedCredentials() {
-		mode = containLauncherMode
 	}
 	target := cmd.Path
 	cmd.Path = "/proc/self/exe"
@@ -206,6 +265,9 @@ func launchContained(argv []string) int {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if os.Getenv(containFailNamespaceEnv) == "1" {
+		return containExitNotContained
+	}
 	go func() {
 		<-terms
 		cancel()
@@ -213,7 +275,7 @@ func launchContained(argv []string) int {
 	child := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	child.Env = withoutEnv(os.Environ(), containSupervisorEnv)
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
-	err := runContained(child)
+	err := runContainedDirect(child)
 	var exitErr *exec.ExitError
 	switch {
 	case ctx.Err() != nil:
@@ -237,15 +299,20 @@ func effectiveCapabilities() uint64 {
 	return uint64(data[1].Effective)<<32 | uint64(data[0].Effective)
 }
 
-// runTracked runs cmd below the subreaper custodian, which owns every orphan
-// of the tree.
-func runTracked(cmd *exec.Cmd) error {
+// runTracked runs a scanner as PID 1 in a private PID namespace. The
+// launcher is outside that namespace, so the scanner cannot address it or the
+// gateway by PID. The launcher holds a pidfd for the scanner and is linked to
+// the gateway by a parent-death signal and its own pidfd.
+func runTracked(cmd *exec.Cmd) (runErr error) {
 	if cmd.Process != nil {
 		return errors.New("processutil: RunTracked: already started")
 	}
+	if len(cmd.ExtraFiles) != 0 {
+		return errors.New("processutil: RunTracked: ExtraFiles are not passed to the scanner")
+	}
 	target := cmd.Path
 	cmd.Path = "/proc/self/exe"
-	cmd.Args = append([]string{containSupervisorArg0, containCustodianMode, containSweepBudget.String(), "--", target}, cmd.Args[1:]...)
+	cmd.Args = append([]string{containSupervisorArg0, containTrackedMode, strconv.Itoa(os.Getpid()), "--", target}, cmd.Args[1:]...)
 	env := cmd.Env
 	if env == nil {
 		env = os.Environ()
@@ -254,86 +321,250 @@ func runTracked(cmd *exec.Cmd) error {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
-	cmd.SysProcAttr.Setpgid = true
-	// The supervisor ends and reaps the tree when this thread dies or the
-	// command is canceled. Killing the supervisor instead would hand what
-	// left the command's group to init.
-	cmd.SysProcAttr.Pdeathsig = syscall.SIGTERM
-	if cmd.Cancel != nil {
-		cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	attr := cmd.SysProcAttr
+	attr.Setpgid = true
+	attr.Pdeathsig = syscall.SIGKILL
+	pidfd := -1
+	attr.PidFD = &pidfd
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("%w: cannot establish scanner custody channel: %v", ErrNotContained, err)
 	}
-	// The parent-death signal follows the thread that started the child.
+	owner := os.NewFile(uintptr(fds[0]), "scanner-custody")
+	launcherChannel := os.NewFile(uintptr(fds[1]), "scanner-custody-child")
+	defer owner.Close()
+	defer launcherChannel.Close()
+	cmd.ExtraFiles = []*os.File{launcherChannel}
+	if cmd.WaitDelay == 0 || cmd.WaitDelay > containPipeWaitDelay {
+		cmd.WaitDelay = containPipeWaitDelay
+	}
+	ready := make(chan struct{})
+	if cmd.Cancel != nil {
+		cmd.Cancel = func() error {
+			<-ready
+			if pidfd < 0 {
+				return cmd.Process.Kill()
+			}
+			err := unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
+			if errors.Is(err, unix.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+	}
+	if err := protectTrackedGateway(); err != nil {
+		return err
+	}
+	scannerFD := -1
+	provenEnded := true // the start gate is still closed
+	defer func() {
+		if !provenEnded {
+			// Keep the gateway protected after a bounded wait, then restore
+			// visibility only when the scanner pidfd reports its exit.
+			go func(fd int) {
+				defer unix.Close(fd)
+				for !waitScannerPidfd(fd, time.Minute) {
+					time.Sleep(time.Second)
+				}
+				if err := releaseTrackedGateway(); err != nil {
+					fmt.Fprintf(os.Stderr, "processutil: %v\n", err)
+				}
+			}(scannerFD)
+			return
+		}
+		if scannerFD >= 0 {
+			_ = unix.Close(scannerFD)
+		}
+		if err := releaseTrackedGateway(); err != nil {
+			runErr = errors.Join(runErr, err)
+		}
+	}()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	err := cmd.Run()
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == containExitNotContained {
-		return fmt.Errorf("%w: %s", ErrNotContained, target)
+	if err := cmd.Start(); err != nil {
+		close(ready)
+		_ = launcherChannel.Close()
+		return fmt.Errorf("%w: %s: %v", ErrNotContained, target, err)
 	}
+	_ = launcherChannel.Close()
+	close(ready)
+	if pidfd < 0 {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("%w: no launcher pidfd", ErrNotContained)
+	}
+	defer unix.Close(pidfd)
+	if err := unix.SetsockoptTimeval(int(owner.Fd()), unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{Sec: 10}); err != nil {
+		_ = unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
+		_ = cmd.Wait()
+		return fmt.Errorf("%w: scanner custody deadline: %v", ErrNotContained, err)
+	}
+	var scannerPID [4]byte
+	if _, err := io.ReadFull(owner, scannerPID[:]); err != nil {
+		_ = unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
+		_ = cmd.Wait()
+		return fmt.Errorf("%w: scanner custody handshake: %v", ErrNotContained, err)
+	}
+	scannerFD, err = unix.PidfdOpen(int(binary.LittleEndian.Uint32(scannerPID[:])), 0)
+	if err != nil {
+		_ = unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
+		_ = cmd.Wait()
+		return fmt.Errorf("%w: cannot own scanner pidfd: %v", ErrNotContained, err)
+	}
+	provenEnded = false
+	if _, err := owner.Write([]byte{1}); err != nil {
+		_ = unix.PidfdSendSignal(scannerFD, unix.SIGKILL, nil, 0)
+		_ = unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
+		_ = cmd.Wait()
+		provenEnded = waitScannerPidfd(scannerFD, 5*time.Second)
+		return fmt.Errorf("%w: scanner custody acknowledge: %v", ErrNotContained, err)
+	}
+	_ = owner.Close()
+	err = cmd.Wait()
+	if err != nil {
+		// The launcher may have been killed before it observed the command's
+		// exit. Its parent-death signal is backed by this scanner pidfd.
+		_ = unix.PidfdSendSignal(scannerFD, unix.SIGKILL, nil, 0)
+	}
+	if !waitScannerPidfd(scannerFD, 5*time.Second) {
+		return fmt.Errorf("%w: scanner did not end with its launcher", ErrNotContained)
+	}
+	provenEnded = true
 	return err
 }
 
-// superviseContained owns the tree after the runner exits, including when a
-// hook sends SIGKILL to the runner. Its own wait and sweep are confined to this
-// process, never to the gateway that launched it.
-func superviseContained(argv []string, budget time.Duration) int {
+func waitScannerPidfd(fd int, timeout time.Duration) bool {
+	events := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		n, err := unix.Poll(events, int(remaining.Milliseconds())+1)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		return err == nil && n == 1 && events[0].Revents&unix.POLLIN != 0
+	}
+}
+
+// launchTracked is a short-lived child of the gateway. It owns only one
+// scanner namespace. A gate holds the scanner's exec until this process has
+// finished the user-ID map and made its own /proc memory inaccessible.
+func launchTracked(argv []string, expectedParent int) int {
 	runtime.LockOSThread()
-	terms := make(chan os.Signal, 1)
-	signal.Notify(terms, syscall.SIGTERM)
-	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+	if os.Getppid() != expectedParent {
 		return containExitNotContained
 	}
-	// Not dumpable: the command cannot trace it or write its memory.
-	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+	owner := os.NewFile(3, "scanner-custody")
+	defer owner.Close()
+	unix.CloseOnExec(3)
+	gateRead, gateWrite, err := os.Pipe()
+	if err != nil {
 		return containExitNotContained
 	}
-	if os.Getppid() == 1 {
-		// The parent died before the parent-death signal was armed.
-		return containExitTerminated
+	defer gateWrite.Close()
+	readyRead, readyWrite, err := os.Pipe()
+	if err != nil {
+		_ = gateRead.Close()
+		return containExitNotContained
 	}
+	defer readyRead.Close()
+	defer readyWrite.Close()
+	statFDs, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		_ = gateRead.Close()
+		return containExitNotContained
+	}
+	statOwner := os.NewFile(uintptr(statFDs[0]), "scanner-host-stat-owner")
+	statChild := os.NewFile(uintptr(statFDs[1]), "scanner-host-stat-child")
+	statOwnerFD := int(statOwner.Fd())
+	var statDone chan struct{}
+	defer func() {
+		_ = unix.Shutdown(statOwnerFD, unix.SHUT_RDWR)
+		if statDone != nil {
+			select {
+			case <-statDone:
+			case <-time.After(containPipeWaitDelay):
+			}
+		}
+		_ = statOwner.Close()
+	}()
+	defer statChild.Close()
 	child := exec.Command("/proc/self/exe", argv...)
-	child.Args = append([]string{containSupervisorArg0, containRunnerMode, budget.String(), "--"}, argv...)
-	child.Env = os.Environ()
+	child.Args = append([]string{containSupervisorArg0, containTrackedInit, "3,4", "--"}, argv...)
+	child.Env = append(withoutEnv(os.Environ(), containHostStatEnv), containHostStatEnv+"=5")
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
-	// A separate session keeps the command from joining the custodian's
-	// process group, which would let kill(0) bypass the signal filter.
-	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGKILL}
+	child.ExtraFiles = []*os.File{gateRead, readyWrite, statChild}
+	pidfd := -1
+	child.SysProcAttr = &syscall.SysProcAttr{
+		Setsid: true, Pdeathsig: syscall.SIGKILL, PidFD: &pidfd,
+		Cloneflags: syscall.CLONE_NEWPID | syscall.CLONE_NEWUSER,
+	}
+	// Map only this scanner's IDs, even for a privileged gateway. A scanner
+	// cannot switch to another mapped UID and thereby clear Pdeathsig.
+	child.SysProcAttr.UidMappings = containIDMap(os.Geteuid())
+	child.SysProcAttr.GidMappings = containIDMap(os.Getegid())
+	child.SysProcAttr.GidMappingsEnableSetgroups = false
 	if err := child.Start(); err != nil {
-		return containExitNotStarted
-	}
-	// Only the command and what it started hold its streams now, so the
-	// parent's pipe closes when they are gone.
-	releaseStdio()
-	done := make(chan error, 1)
-	go func() { done <- child.Wait() }()
-	terminated := false
-	var waitErr error
-	select {
-	case waitErr = <-done:
-	case <-terms:
-		terminated = true
-		_ = unix.Kill(-child.Process.Pid, unix.SIGKILL)
-		_ = child.Process.Kill()
-		waitErr = <-done
-	}
-	if !reapAllChildren(budget) {
+		_ = gateRead.Close()
 		return containExitNotContained
 	}
-	select {
-	case <-terms:
-		terminated = true
-	default:
+	_ = gateRead.Close()
+	_ = readyWrite.Close()
+	_ = statChild.Close()
+	statDone = make(chan struct{})
+	go func() {
+		serveTrackedHostStat(statOwnerFD)
+		close(statDone)
+	}()
+	if pidfd < 0 {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+		return containExitNotContained
 	}
-	if terminated {
-		return containExitTerminated
+	defer unix.Close(pidfd)
+	if os.Getppid() != expectedParent || unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0) != nil {
+		_ = unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
+		_ = child.Wait()
+		return containExitNotContained
 	}
+	var guarded [1]byte
+	if _, err := io.ReadFull(readyRead, guarded[:]); err != nil || guarded[0] != 1 {
+		_ = unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
+		_ = child.Wait()
+		return containExitNotContained
+	}
+	var scannerPID [4]byte
+	binary.LittleEndian.PutUint32(scannerPID[:], uint32(child.Process.Pid))
+	if _, err := owner.Write(scannerPID[:]); err != nil {
+		_ = unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
+		_ = child.Wait()
+		return containExitNotContained
+	}
+	var acknowledge [1]byte
+	if _, err := io.ReadFull(owner, acknowledge[:]); err != nil || acknowledge[0] != 1 {
+		_ = unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
+		_ = child.Wait()
+		return containExitNotContained
+	}
+	_ = owner.Close()
+	if _, err := gateWrite.Write([]byte{1}); err != nil {
+		_ = unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
+		_ = child.Wait()
+		return containExitNotContained
+	}
+	_ = gateWrite.Close()
+	releaseStdio()
+	waitErr := child.Wait()
 	var exitErr *exec.ExitError
 	switch {
 	case waitErr == nil:
 		return 0
 	case errors.As(waitErr, &exitErr):
 		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-			return containExitNotContained
+			return 128 + int(status.Signal())
 		}
 		return exitErr.ExitCode()
 	default:
@@ -341,18 +572,75 @@ func superviseContained(argv []string, budget time.Duration) int {
 	}
 }
 
-// runContainedCommand is the command's immediate parent. Below the custodian
-// it is deliberately not a subreaper: if the command kills it, every orphan
-// moves to the custodian. As the init of a PID namespace (asInit), its exit
-// ends everything else in the namespace.
-func runContainedCommand(argv []string, asInit bool) int {
-	runtime.LockOSThread()
-	if asInit != (os.Getpid() == 1) || os.Getppid() == 1 {
+// execTracked is the scanner's PID-namespace init until the gate opens.
+// Exec keeps PID 1 while replacing this trusted launcher with the scanner.
+func execTracked(argv []string) int {
+	if os.Getpid() != 1 {
 		return containExitNotContained
 	}
-	// Below the custodian, the command must not end it (GAP-0631). This
-	// thread starts the command, so the filter is the command's.
-	if !asInit && guardCustodian(os.Getppid()) != nil {
+	if err := guardTrackedInit(); err != nil {
+		return containExitNotContained
+	}
+	ready := os.NewFile(4, "scanner-filter-ready")
+	unix.CloseOnExec(4)
+	if _, err := ready.Write([]byte{1}); err != nil {
+		_ = ready.Close()
+		return containExitNotContained
+	}
+	_ = ready.Close()
+	gate := os.NewFile(3, "scanner-start-gate")
+	var token [1]byte
+	n, err := gate.Read(token[:])
+	_ = gate.Close()
+	if err != nil || n != 1 || token[0] != 1 {
+		return containExitNotContained
+	}
+	if err := syscall.Exec(argv[0], argv, withoutEnv(os.Environ(), containSupervisorEnv)); err != nil {
+		fmt.Fprintf(os.Stderr, "processutil: start scanner: %v\n", err)
+		return containExitNotStarted
+	}
+	return 0
+}
+
+// serveTrackedHostStat reports the real host UID for the exact inode the
+// scanner inspected. A one-ID user namespace otherwise turns every root-owned
+// runtime file into overflow UID 65534, which rejects the managed install.
+// This broker never opens or writes a file; it rechecks dev+ino and returns
+// only the metadata needed by the existing custody checks.
+func serveTrackedHostStat(fd int) {
+	var packet [4096 + 26]byte
+	for {
+		n, _, err := unix.Recvfrom(fd, packet[:], 0)
+		if err != nil || n < 26 {
+			return
+		}
+		length := int(binary.BigEndian.Uint16(packet[24:26]))
+		if length == 0 || n != 26+length {
+			return
+		}
+		uid := ^uint32(0)
+		path := string(packet[26:n])
+		if info, err := os.Lstat(path); err == nil {
+			if stat, ok := info.Sys().(*syscall.Stat_t); ok &&
+				stat.Dev == binary.BigEndian.Uint64(packet[0:8]) &&
+				stat.Ino == binary.BigEndian.Uint64(packet[8:16]) {
+				uid = stat.Uid
+			}
+		}
+		var response [12]byte
+		copy(response[:8], packet[16:24])
+		binary.BigEndian.PutUint32(response[8:], uid)
+		if _, err := unix.SendmsgN(fd, response[:], nil, nil, unix.MSG_NOSIGNAL); err != nil {
+			return
+		}
+	}
+}
+
+// runContainedCommand is PID 1 of the hook probe's namespace. Its exit
+// ends everything else in the namespace.
+func runContainedCommand(argv []string) int {
+	runtime.LockOSThread()
+	if os.Getpid() != 1 || os.Getppid() == 1 {
 		return containExitNotContained
 	}
 	child := exec.Command(argv[0], argv[1:]...)
@@ -376,66 +664,6 @@ func runContainedCommand(argv []string, asInit bool) int {
 	default:
 		return containExitNotContained
 	}
-}
-
-// reapAllChildren kills and reaps this process's children until it has
-// none. As a subreaper, this process becomes the parent of every orphaned
-// descendant, so no child left means no descendant left. It reports false
-// when children remain after budget.
-func reapAllChildren(budget time.Duration) bool {
-	deadline := time.Now().Add(budget)
-	self := os.Getpid()
-	for {
-		for {
-			var status unix.WaitStatus
-			pid, err := unix.Wait4(-1, &status, unix.WNOHANG, nil)
-			if errors.Is(err, unix.ECHILD) {
-				return true
-			}
-			if errors.Is(err, unix.EINTR) {
-				continue
-			}
-			if err != nil {
-				return false
-			}
-			if pid <= 0 {
-				break
-			}
-		}
-		if !time.Now().Before(deadline) {
-			return false
-		}
-		for _, pid := range childPIDs(self) {
-			_ = unix.Kill(pid, unix.SIGKILL)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// childPIDs lists the processes whose parent is parent.
-func childPIDs(parent int) []int {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return nil
-	}
-	want := strconv.Itoa(parent)
-	var pids []int
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue
-		}
-		raw, err := os.ReadFile("/proc/" + entry.Name() + "/stat")
-		if err != nil {
-			continue
-		}
-		stat := string(raw)
-		fields := strings.Fields(stat[strings.LastIndexByte(stat, ')')+1:])
-		if len(fields) > 1 && fields[1] == want {
-			pids = append(pids, pid)
-		}
-	}
-	return pids
 }
 
 // releaseStdio points the supervisor's standard streams at /dev/null.

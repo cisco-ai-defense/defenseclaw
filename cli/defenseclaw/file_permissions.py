@@ -21,10 +21,13 @@ from __future__ import annotations
 import contextlib
 import os
 import shlex
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -45,6 +48,43 @@ UNSAFE_PATH_CHANGED = "unsafe-path-changed"
 UNSAFE_PATH_UNTRUSTED_CUSTODY = "unsafe-path-untrusted-custody"
 UNSAFE_PATH_NOT_ABSOLUTE = "unsafe-path-not-absolute"
 UNSAFE_PATH_INSPECTION_FAILED = "unsafe-path-inspection-failed"
+
+_tracked_host_stat_lock = threading.Lock()
+
+
+def tracked_host_owner_uid(path: str | os.PathLike[str], info: os.stat_result) -> int:
+    """Recover a file's host UID inside a tracked scanner's user namespace.
+
+    An unmapped owner appears as 65534 there. The scanner launcher, which is
+    outside that namespace, checks the same inode and reports its actual UID.
+    Missing or mismatched evidence is refused even when the scanner itself
+    uses the overflow UID. This channel is present only in the PID-1 scanner.
+    """
+    owner = info.st_uid
+    if sys.platform != "linux" or owner != 65534:
+        return owner
+    if os.environ.get("DEFENSECLAW_TRACKED_HOST_STAT_FD") != "5":
+        # The overflow UID can also equal the scanner's own UID. Without
+        # host evidence, accepting it would trust an unmapped file owner.
+        return -1
+    if os.getpid() != 1:
+        return -1
+    raw = os.fsencode(path)
+    if not raw or len(raw) > 4096:
+        return -1
+    nonce = os.urandom(8)
+    request = struct.pack("!QQ", info.st_dev, info.st_ino) + nonce + struct.pack("!H", len(raw)) + raw
+    try:
+        with _tracked_host_stat_lock, socket.socket(fileno=os.dup(5)) as channel:
+            channel.settimeout(2.0)
+            channel.sendall(request)
+            response = channel.recv(12)
+        if len(response) != 12 or response[:8] != nonce:
+            return -1
+        reported = struct.unpack("!I", response[8:])[0]
+        return -1 if reported == 0xFFFFFFFF else reported
+    except OSError:
+        return -1
 
 
 class UnsafePathError(OSError):
@@ -237,6 +277,7 @@ _DOTENV_PROCESS_CONTROL_NAMES = frozenset(
         "DEFENSECLAW_SANDBOX_TOKEN",
         "DEFENSECLAW_STRICT_AVAILABILITY",
         "DEFENSECLAW_TEST",
+        "DEFENSECLAW_TRACKED_HOST_STAT_FD",
         "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
         "DEFENSECLAW_TRUSTED_PROXY_CIDRS",
         "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES",
@@ -691,7 +732,7 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
         )
     geteuid = getattr(os, "geteuid", None)
     current_uid = geteuid() if callable(geteuid) else info.st_uid
-    if info.st_uid not in {0, current_uid} or stat.S_IMODE(info.st_mode) & 0o022:
+    if tracked_host_owner_uid(resolved, info) not in {0, current_uid} or stat.S_IMODE(info.st_mode) & 0o022:
         raise UnsafePathError(
             f"gateway executable {resolved} can be changed by another account; "
             f"make this account or root its owner and run: chmod go-w {shlex.quote(str(resolved))}",
@@ -716,8 +757,9 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
         # can replace this account's folder inside it (the gateway's own
         # directory check allows it too). Without this, every config check
         # failed for a home under /tmp.
-        root_sticky = parent_info.st_uid == 0 and parent_info.st_mode & stat.S_ISVTX
-        if parent_info.st_uid not in {0, current_uid} or (
+        parent_uid = tracked_host_owner_uid(current, parent_info)
+        root_sticky = parent_uid == 0 and parent_info.st_mode & stat.S_ISVTX
+        if parent_uid not in {0, current_uid} or (
             stat.S_IMODE(parent_info.st_mode) & 0o022 and not root_sticky
         ):
             # Name the folder: a chmod on the (possibly symlinked) command

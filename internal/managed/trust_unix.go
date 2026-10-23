@@ -184,8 +184,9 @@ func validateServiceRuntimeTreeEntries(root, label string) error {
 		if !ok {
 			return fmt.Errorf("%s: cannot inspect file owner", cur)
 		}
-		if !trustedRuntimeOwner(st.Uid) {
-			return fmt.Errorf("%s: owner uid %d is not trusted for %s; expected root/admin uid 0 or defenseclaw service uid", cur, st.Uid, label)
+		owner := hostOwnerUID(cur, info, st.Uid)
+		if !trustedRuntimeOwner(owner) {
+			return fmt.Errorf("%s: owner uid %d is not trusted for %s; expected root/admin uid 0 or defenseclaw service uid", cur, owner, label)
 		}
 		return validateTrustedPathACL(cur)
 	})
@@ -246,8 +247,9 @@ func validateTrustedRuntimeFileElement(path, label string) error {
 	if !ok {
 		return fmt.Errorf("%s: cannot inspect file owner", path)
 	}
-	if !trustedRuntimeOwner(st.Uid) {
-		return fmt.Errorf("%s: owner uid %d is not trusted for %s; expected root/admin uid 0 or defenseclaw service uid", path, st.Uid, label)
+	owner := hostOwnerUID(path, info, st.Uid)
+	if !trustedRuntimeOwner(owner) {
+		return fmt.Errorf("%s: owner uid %d is not trusted for %s; expected root/admin uid 0 or defenseclaw service uid", path, owner, label)
 	}
 	return nil
 }
@@ -297,9 +299,10 @@ func validateTrustedPathElement(path string, wantDir bool, label string, advisor
 	if !ok {
 		return fmt.Errorf("%s: cannot inspect file owner", path)
 	}
-	if st.Uid != 0 {
+	owner := hostOwnerUID(path, info, st.Uid)
+	if owner != 0 {
 		return relaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
-			"%s: owner uid %d is not trusted for %s; expected root/admin uid 0", path, st.Uid, label,
+			"%s: owner uid %d is not trusted for %s; expected root/admin uid 0", path, owner, label,
 		))
 	}
 	return nil
@@ -333,10 +336,11 @@ func validateTrustedRuntimeDirElement(path string, label string, advisory bool) 
 	if !ok {
 		return fmt.Errorf("%s: cannot inspect directory owner", path)
 	}
-	if !trustedRuntimeOwner(st.Uid) {
+	owner := hostOwnerUID(path, info, st.Uid)
+	if !trustedRuntimeOwner(owner) {
 		return relaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
 			"%s: owner uid %d is not trusted for %s; expected root/admin uid 0 or defenseclaw service uid",
-			path, st.Uid, label,
+			path, owner, label,
 		))
 	}
 	return nil
