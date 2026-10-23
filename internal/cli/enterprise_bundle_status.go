@@ -303,34 +303,12 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 }
 
 func currentBuildBundleDigest(ctx context.Context, store *enterprisebundle.Store, ref *enterprisebundle.Ref) (string, []byte, error) {
-	b, err := store.ReadVersion(ref)
-	if err != nil {
-		return "", nil, err
-	}
-	manifest, err := enterprisebundle.DecodeManifest(b.Manifest)
-	if err != nil {
-		return "", nil, err
-	}
-	signature, err := enterprisebundle.DecodeSignature(b.Signature)
-	if err != nil {
-		return "", nil, err
-	}
-	if manifest.BundleID != ref.BundleID || manifest.Version != ref.Version || signature.KeyID != ref.SignerKeyID ||
-		!slices.Contains(manifest.Target.Platforms, runtime.GOOS) {
-		return "", nil, fmt.Errorf("confirmed bundle identity does not match its stored manifest and signer")
-	}
 	layout, err := enterprisebundle.Layout(runtime.GOOS)
 	if err != nil {
 		return "", nil, err
 	}
-	deviceLayout := enterprisebundle.DeviceLayoutFromManaged(layout)
-	root := store.VersionDir(ref.Dir)
-	cfg, rendered, err := enterprisebundle.LoadConfigForDeviceLayout(b, root, runtime.GOOS, deviceLayout)
-	if err != nil {
-		return "", nil, err
-	}
-	digest, err := bundleDigester(ctx, cfg, rendered, runtime.GOOS, root)
-	return digest, rendered, err
+	return enterprisebundle.VerifiedCurrentDigest(ctx, store, ref, runtime.GOOS,
+		enterprisebundle.DeviceLayoutFromManaged(layout), bundleDigester)
 }
 
 // bundleReceiptWarningMessage explains a warning code the confirmed
