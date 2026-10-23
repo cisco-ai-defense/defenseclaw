@@ -22,7 +22,7 @@ defenseclaw setup zeptoclaw --mode observe --restart
 defenseclaw setup zeptoclaw --mode action --rule-pack default --restart
 ```
 
-The proxy is in the data path in both modes. Observe records and never blocks. Action enforces. Run `defenseclaw doctor` to check the result.
+The proxy is in the data path in both modes. Observe records policy findings without blocking on those findings; a gateway outage still stops proxied requests. Action enforces policy. Run `defenseclaw doctor` to check the result.
 
 ## Check it
 
@@ -64,7 +64,11 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-To drop the connector from the configuration, run `defenseclaw setup remove zeptoclaw --yes`.
+To drop the connector from the configuration, run `defenseclaw setup remove zeptoclaw --yes`. If ZeptoClaw is the last connector, removal refuses because the gateway would enforce nothing. To deliberately remove that last connector, run:
+
+```bash
+defenseclaw setup remove zeptoclaw --yes --force
+```
 
 Turn it back on with `defenseclaw guardrail enable`.
 

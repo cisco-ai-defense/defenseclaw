@@ -18,11 +18,14 @@ DefenseClaw adds hooks to the default profile's `config.yaml` and approves exact
 ## Set up
 
 ```bash
-defenseclaw setup hermes                # observe (default)
+defenseclaw setup hermes                # first setup defaults to observe
 defenseclaw setup hermes --mode action  # block on policy hits
 ```
 
-On Windows, run the same commands in PowerShell. Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
+A re-run without `--mode` keeps the current mode. On Windows, run the same
+commands in PowerShell. Interactive setup asks for the mode, whether to add to
+or replace an existing connector roster, and whether to add an LLM judge. For
+scripts, pass `--yes --mode observe` (or `--mode action`).
 
 Then reload or restart every Hermes host. Hermes registers hooks in each running process, so restarting the DefenseClaw gateway does not reload them. Until you reload, setup and doctor report `pending_reload`.
 
@@ -75,7 +78,12 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-This keeps Hermes's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove hermes --yes` (add `--force` if it is the last one). Then reload every Hermes host.
+With the default gateway restart, disabling removes DefenseClaw's hooks and
+their approvals from Hermes's config and allowlist. It preserves your other
+Hermes settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks
+and approvals. To remove the connector, run
+`defenseclaw setup remove hermes --yes` (add `--force` if it is the last one).
+Then reload every Hermes host.
 
 On a multi-connector install, add `--connector hermes` to `guardrail disable` and `guardrail enable` to change only this agent.
 

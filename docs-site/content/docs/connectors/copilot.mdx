@@ -18,11 +18,16 @@ DefenseClaw installs a hook file that Copilot CLI runs on its lifecycle events. 
 ## Set up
 
 ```bash
-defenseclaw setup copilot
+defenseclaw setup copilot  # first setup defaults to observe
 defenseclaw setup copilot --workspace /path/to/repo
 ```
 
-On Windows, use PowerShell and a Windows path such as `'C:\path\to\repo'`. Hooks are global by default. `--workspace` writes them into one repository instead and pins the workspace for the whole install. Setup refuses it once another connector is configured. To scope every connector to a repository, run `defenseclaw setup guardrail --workspace /path/to/repo`.
+A re-run without `--mode` keeps the current mode. On Windows, use PowerShell
+and a Windows path such as `'C:\path\to\repo'`. Hooks are global by default.
+`--workspace` writes them into one repository instead and pins the workspace
+for the whole install. Setup refuses it once another connector is configured.
+To scope every connector to a repository, run
+`defenseclaw setup guardrail --workspace /path/to/repo`.
 
 Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
 
@@ -70,7 +75,11 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-This keeps Copilot's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove copilot --yes` (add `--force` if it is the last one).
+With the default gateway restart, disabling removes DefenseClaw's hooks from
+Copilot's global or configured workspace file and preserves your other Copilot
+settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To
+remove the connector, run `defenseclaw setup remove copilot --yes` (add
+`--force` if it is the last one).
 
 On a multi-connector install, add `--connector copilot` to `guardrail disable` and `guardrail enable` to change only this agent.
 
