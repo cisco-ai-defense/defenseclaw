@@ -626,10 +626,6 @@ describe('1.0.4 operator routes and limits', () => {
   });
 });
 
-function source(name: string): string {
-  return readFileSync(join(repo, name), 'utf8');
-}
-
 describe('agent identity rows (rel-1-0-4 GAP-0596)', () => {
   it('documents every JSON field the row has, on every OS', () => {
     const record = source('internal/inventory/agent_identity_store.go');
