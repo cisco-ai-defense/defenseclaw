@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,6 +53,33 @@ func TestUpgradeKeepsLocalAgentsAssignmentWithPrivateHome(t *testing.T) {
 				t.Fatalf("%s: %+v, mode %q; want prior agents assignment", version, got, mode)
 			}
 		})
+	}
+}
+
+// A large upgrade: the guardian's migration map records 65,536 accounts
+// (enterprisehooks.maxLegacyAgentOwners) and is over 4 MiB. The agents entry
+// written for alice's 1.0.x agent identity still applies to her.
+func TestUpgradeKeepsAgentsAssignmentWithLargeMigrationMap(t *testing.T) {
+	b := newUpgradeBridge(t, "alice")
+	legacy := agentidentity.LegacyAgentID(b.inputs(70001, "alice"))
+	b.peer(70001)
+	owners := map[int]enterprisehooks.LegacyAgentOwner{70001: {User: "alice", Token: enterprisehooks.LegacyAgentOwnerToken("files", b.homes[70001])}}
+	for i := 0; len(owners) < 65536; i++ {
+		owners[1_900_000_000+i] = enterprisehooks.LegacyAgentOwner{
+			User:  fmt.Sprintf("dcad-user-%05d@corp.dclab.example.com", i),
+			Token: fmt.Sprintf("sid:S-1-5-21-1004336348-1177238915-682003330-%d", 100000+i),
+		}
+	}
+	if written, err := enterprisehooks.WriteLegacyAgentOwners(b.dir, owners, time.Now(), nil); err != nil || !written {
+		t.Fatalf("write: written=%t err=%v", written, err)
+	}
+	if info, err := os.Stat(filepath.Join(b.dir, enterprisehooks.LegacyAgentOwnersFile)); err != nil || info.Size() <= 4<<20 {
+		t.Fatalf("map stat %v; want a map over 4 MiB", err)
+	}
+	legacyAgentOwners = &legacyAgentOwnerCache{}
+	got, mode := b.hook(legacyConfig(legacy, upgradeProfiles), 70001, profileSubject{UserID: "70001", UserName: "alice"})
+	if got.Name != "relaxed" || got.Match != profileMatchAgent || mode != "observe" || got.Refused != "" {
+		t.Fatalf("%+v, mode %q; want the prior agents assignment", got, mode)
 	}
 }
 
