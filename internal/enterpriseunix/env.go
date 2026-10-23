@@ -236,6 +236,9 @@ type Env struct {
 	// ProcessExecPath returns the executable path the kernel recorded when
 	// process pid started (macOS only; see gatewayProcesses).
 	ProcessExecPath func(pid int) (string, error)
+	// ProcessImagePath returns the kernel's absolute path of the image
+	// process pid runs (macOS only; see absoluteExecPath).
+	ProcessImagePath func(pid int) (string, error)
 	// DockerEngine connects to the Docker engine socket at the rooted path
 	// and returns nil when the engine accepts the connection (see
 	// dockerEngineAnswers); status and verify use it for the openshell block
@@ -397,6 +400,9 @@ func (e *Env) fillDefaults() {
 	}
 	if e.ProcessExecPath == nil {
 		e.ProcessExecPath = processExecPath
+	}
+	if e.ProcessImagePath == nil {
+		e.ProcessImagePath = processImagePath
 	}
 	if e.DiskSpace == nil {
 		e.DiskSpace = diskSpace

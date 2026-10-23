@@ -8,14 +8,17 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
@@ -36,6 +39,10 @@ func TestWindowsManagedLaunchCoverageNamesPureModeAndAuditsItsWarning(t *testing
 	windowsEnterpriseEnrolledConnectors = func() ([]string, error) {
 		return []string{"opencode", "amp", "kiro", "devin", "hermes"}, nil
 	}
+	enrollWindowsLaunchAccounts(t, nil, aliceLaunchSID)
+	priorAccountSID := windowsEnterpriseAccountSID
+	t.Cleanup(func() { windowsEnterpriseAccountSID = priorAccountSID })
+	windowsEnterpriseAccountSID = func(string) string { return aliceLaunchSID }
 	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
 		return []inventory.AgentProcess{
 			{PID: 33, Connector: "opencode", User: `DCFC\alice`, Args: []string{"opencode.exe", "--pure"}, ArgsKnown: true},
@@ -115,6 +122,7 @@ func TestWindowsManagedLaunchCoverageNormalProfilesStayHealthy(t *testing.T) {
 	}
 	windowsEnterpriseAccountSID = func(string) string { return sid }
 	enterpriseHookSIDProfilePath = func(string) (string, error) { return profile, nil }
+	enrollWindowsLaunchAccounts(t, nil, sid)
 	windowsManagedLaunchEnvironment = func(pid int) (map[string]string, error) {
 		env := map[string]string{"USERPROFILE": `c:\users\ALICE`,
 			"APPDATA": profile + `\AppData\Roaming`, "LOCALAPPDATA": profile + `\AppData\Local`,
@@ -197,6 +205,7 @@ func TestWindowsManagedKiroResumePlacementIsUnverified(t *testing.T) {
 		enterpriseHookSIDProfilePath = priorProfile
 	})
 	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return []string{"kiro"}, nil }
+	enrollWindowsLaunchAccounts(t, nil, aliceLaunchSID)
 	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
 		return []inventory.AgentProcess{{PID: 7192, Connector: "kiro", User: `DCFC\alice`, OwnerSID: "S-1-5-21-111-222-333-1001",
 			Args: []string{"kiro-cli.exe", "--resume-id", "cloud-session-id"}, ArgsKnown: true}}, nil
@@ -219,6 +228,148 @@ func TestWindowsManagedKiroResumePlacementIsUnverified(t *testing.T) {
 	}
 	if len(audited) != 2 || audited[0] != "kiro:kiro_resume_placement_unverified" {
 		t.Fatalf("Kiro resume audits = %+v", audited)
+	}
+}
+
+const aliceLaunchSID = "S-1-5-21-111-222-333-1001"
+
+// enrollWindowsLaunchAccounts gives each SID an enabled Claude Code row in
+// the guardian manifest (an enrolled profile) and pins the installed
+// enrollment policy for the test.
+func enrollWindowsLaunchAccounts(t *testing.T, policy *config.EnterpriseEnrollmentConfig, sids ...string) {
+	t.Helper()
+	priorTargets, priorPolicy := windowsEnterpriseEnrolledTargets, windowsEnterpriseEnrollmentPolicy
+	t.Cleanup(func() {
+		windowsEnterpriseEnrolledTargets, windowsEnterpriseEnrollmentPolicy = priorTargets, priorPolicy
+	})
+	rows := map[string]bool{}
+	for _, sid := range sids {
+		rows[windowsEnterpriseManifestRowKey(enterprisehooks.ManifestTarget{SID: sid, Connector: "claudecode"})] = true
+	}
+	windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) { return rows, nil }
+	windowsEnterpriseEnrollmentPolicy = func() (config.EnterpriseEnrollmentConfig, error) {
+		if policy == nil {
+			return config.EnterpriseEnrollmentConfig{}, nil
+		}
+		return *policy, nil
+	}
+}
+
+// Only an enrolled profile's launch is judged: a profile that
+// enterprise.enrollment excludes or exempts has no per-user rows and is
+// unprotected by design, so its bypass launch must not fail verify or be
+// audited. An unknown owner or an unreadable manifest is still judged.
+func TestWindowsManagedLaunchCoverageJudgesOnlyEnrolledProfiles(t *testing.T) {
+	priorConnectors, priorProcesses, priorAudit := windowsEnterpriseEnrolledConnectors, windowsEnterpriseAgentProcesses, windowsManagedLaunchAudit
+	priorEnvironment, priorProfile, priorAccountSID := windowsManagedLaunchEnvironment, enterpriseHookSIDProfilePath, windowsEnterpriseAccountSID
+	t.Cleanup(func() {
+		windowsEnterpriseEnrolledConnectors, windowsEnterpriseAgentProcesses = priorConnectors, priorProcesses
+		windowsManagedLaunchAudit, windowsManagedLaunchEnvironment = priorAudit, priorEnvironment
+		enterpriseHookSIDProfilePath, windowsEnterpriseAccountSID = priorProfile, priorAccountSID
+	})
+	const (
+		alice = aliceLaunchSID
+		bob   = "S-1-5-21-111-222-333-1002"
+		carol = "S-1-5-21-111-222-333-1003"
+		dave  = "S-1-5-21-111-222-333-1004"
+		erin  = "S-1-5-21-111-222-333-1005"
+	)
+	profiles := map[string]string{alice: `C:\Users\alice`, bob: `C:\Users\bob`, carol: `C:\Users\carol`, dave: `C:\Users\dave`, erin: `C:\Users\erin`}
+	enterpriseHookSIDProfilePath = func(sid string) (string, error) {
+		if profile, ok := profiles[sid]; ok {
+			return profile, nil
+		}
+		return "", errors.New("no profile")
+	}
+	windowsEnterpriseAccountSID = func(string) string { return "" }
+	windowsManagedLaunchEnvironment = func(int) (map[string]string, error) {
+		profile := profiles[alice]
+		return map[string]string{"USERPROFILE": profile, "APPDATA": profile + `\AppData\Roaming`,
+			"LOCALAPPDATA": profile + `\AppData\Local`, "PROGRAMDATA": os.Getenv("ProgramData")}, nil
+	}
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return []string{"opencode", "hermes"}, nil }
+	var audited []int
+	windowsManagedLaunchAudit = func(process inventory.AgentProcess, _, _ string) error {
+		audited = append(audited, process.PID)
+		return nil
+	}
+	pure := func(pid int, sid, user string) inventory.AgentProcess {
+		return inventory.AgentProcess{PID: pid, Connector: "opencode", User: user, OwnerSID: sid,
+			Args: []string{"opencode.exe", "--pure"}, ArgsKnown: true}
+	}
+	judged := func(action string) []int {
+		t.Helper()
+		audited = nil
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
+		result.Installed, result.CoverageComplete, result.SecurityComplete = true, true, true
+		applyWindowsEnterpriseLaunchCoverage(result)
+		var pids []int
+		for _, warning := range result.Warnings {
+			for _, pid := range []int{8101, 8102, 8103, 8104, 8105, 8106, 8107} {
+				if strings.Contains(warning.Message, fmt.Sprintf("(pid %d)", pid)) {
+					pids = append(pids, pid)
+				}
+			}
+		}
+		if (len(pids) == 0) != (result.CoverageComplete && result.SecurityComplete) ||
+			(action == "verify" && len(result.Errors) != len(pids)) || !slices.Equal(audited, pids) {
+			t.Fatalf("%s judged %v but health/errors/audit disagree: %+v audit %v", action, pids, result, audited)
+		}
+		return pids
+	}
+
+	// The reported scenario: alice is enrolled; the excluded bob has no rows.
+	policy := &config.EnterpriseEnrollmentConfig{ExcludeUsers: []string{"bob"}, ExemptUsers: []string{`DCFC\dave`}}
+	enrollWindowsLaunchAccounts(t, policy, alice, dave, erin)
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+		return []inventory.AgentProcess{
+			{PID: 8101, Connector: "opencode", User: `DCFC\alice`, OwnerSID: alice, Args: []string{"opencode.exe"}, ArgsKnown: true},
+			pure(8102, bob, `DCFC\bob`),
+		}, nil
+	}
+	for _, action := range []string{"status", "verify"} {
+		if pids := judged(action); len(pids) != 0 {
+			t.Fatalf("%s judged an excluded profile: %v", action, pids)
+		}
+	}
+
+	// erin's per-user row for opencode is not needed: an enrolled profile
+	// (any enabled row) is judged for every selected connector. dave is
+	// exempt (machine-policy rows only), carol has no rows, and the owner of
+	// 8106 is unknown.
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+		return []inventory.AgentProcess{
+			pure(8101, alice, `DCFC\alice`), pure(8102, bob, `DCFC\bob`), pure(8103, carol, `DCFC\carol`),
+			pure(8104, dave, `DCFC\dave`), pure(8105, erin, `DCFC\erin`), pure(8106, "", ""),
+			// bob's name is excluded although this process shows only his SID's
+			// profile folder.
+			pure(8107, bob, ""),
+		}, nil
+	}
+	for _, action := range []string{"status", "verify"} {
+		if pids := judged(action); !slices.Equal(pids, []int{8101, 8105, 8106}) {
+			t.Fatalf("%s judged %v, want enrolled alice and erin and the unknown owner", action, pids)
+		}
+	}
+	// An exempt profile that kept its per-user row for the connector keeps
+	// its registration, so its launch is judged.
+	priorTargets := windowsEnterpriseEnrolledTargets
+	windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) {
+		rows, err := priorTargets()
+		out := map[string]bool{windowsEnterpriseManifestRowKey(enterprisehooks.ManifestTarget{SID: dave, Connector: "opencode"}): true}
+		for key := range rows {
+			out[key] = true
+		}
+		return out, err
+	}
+	if pids := judged("verify"); !slices.Equal(pids, []int{8101, 8104, 8105, 8106}) {
+		t.Fatalf("exempt profile with its own row: judged %v", pids)
+	}
+	// An unreadable manifest cannot prove a profile unenrolled; the
+	// administrator's exclusions and exemptions still apply.
+	windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) { return nil, errors.New("access denied") }
+	if pids := judged("verify"); !slices.Equal(pids, []int{8101, 8103, 8105, 8106}) {
+		t.Fatalf("unreadable manifest: judged %v", pids)
 	}
 }
 

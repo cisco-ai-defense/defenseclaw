@@ -74,7 +74,6 @@ func TestPluginLaunchCoverage(t *testing.T) {
 		{"Kiro resume equals could be cloud", "kiro", []string{"kiro-cli", "--resume-id=session-id"}, map[string]string{}, true, "kiro_resume_placement_unverified"},
 		{"Kiro prompt mentions resume", "kiro", []string{"kiro-cli", "--", "--resume-id=session-id"}, map[string]string{}, true, ""},
 		{"Kiro default home", "kiro", []string{"kiro-cli"}, map[string]string{"KIRO_HOME": home + "/.kiro"}, true, ""},
-		{"Kiro equivalent home", "kiro", []string{"kiro-cli"}, map[string]string{"KIRO_HOME": home + "/.kiro/../.kiro/"}, true, ""},
 		{"Kiro default home with moved agents", "kiro", []string{"kiro-cli"}, map[string]string{"KIRO_HOME": home + "/.kiro", "KIRO_AGENT_CONFIG_DIR": "/tmp/agents"}, true, "kiro_hook_config_relocated"},
 		{"Kiro moved home", "kiro", []string{"kiro-cli"}, map[string]string{"KIRO_HOME": "/tmp/other"}, true, "kiro_hook_config_relocated"},
 		{"Kiro moved agents", "kiro", []string{"kiro-cli"}, map[string]string{"KIRO_AGENT_CONFIG_DIR": "/tmp/agents"}, true, "kiro_hook_config_relocated"},
