@@ -109,7 +109,7 @@ func TestAStopAnOlderDaemonCouldNotMakeSaysTheWayOn(t *testing.T) {
 		{name: "older daemon, MicroVM", driver: "vm", err: generic,
 			want: "is in error state; t8 is in OpenShell's error state (MainProcessFailed: Canonical main process exited with status 137): OpenShell does not stop it, " +
 				"so its MicroVM may still run, and DefenseClaw stops, restarts and upgrades no OpenShell gateway under it, nor moves this account to another OpenShell setup, " +
-				"until OpenShell reports it stopped: `defenseclaw sandbox delete t8`, which deletes it and its work"},
+				"until OpenShell reports it stopped: `defenseclaw sandbox delete t8` (DefenseClaw sandbox) or `openshell sandbox delete t8` (raw OpenShell sandbox), which deletes it and its work"},
 		{name: "older daemon, docker", driver: "docker", err: generic, not: "OpenShell does not stop it"},
 		{name: "current daemon", driver: "vm", err: &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: "t8 is in OpenShell's error state", Detail: "its own way on"},
 			want: "t8 is in OpenShell's error state: its own way on", not: "OpenShell does not stop it"},
