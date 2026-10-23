@@ -24,7 +24,7 @@ func journalIDs(t *testing.T, store *Store, size int) []string {
 	var ids []string
 	var after HookDeliveryJournalEntry
 	for {
-		entries, err := store.HookDeliveries(t.Context(), after, size)
+		entries, err := store.HookDeliveries(t.Context(), after, size, 1<<20)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -50,10 +50,10 @@ func TestHookDeliveryJournal(t *testing.T) {
 
 	// A store that never journaled a call has no table: nothing to recover,
 	// nothing to record or forget.
-	if entries, err := store.HookDeliveries(ctx, HookDeliveryJournalEntry{}, 10); err != nil || len(entries) != 0 {
+	if entries, err := store.HookDeliveries(ctx, HookDeliveryJournalEntry{}, 10, 1<<20); err != nil || len(entries) != 0 {
 		t.Fatalf("journal of a fresh store = %v, %v; want empty", entries, err)
 	}
-	if found, err := store.RecordHookDeliveryVerdict(ctx, "missing", []byte(`{}`), journalRows(10)); err != nil || found {
+	if found, err := store.UpdateHookDelivery(ctx, "missing", []byte(`{}`), journalRows(10)); err != nil || found {
 		t.Fatalf("verdict on a fresh store = %t, %v; want no row and no error", found, err)
 	}
 	if err := store.ForgetHookDelivery(ctx, "missing"); err != nil {
@@ -83,16 +83,16 @@ func TestHookDeliveryJournal(t *testing.T) {
 			t.Fatalf("journaled an incomplete row %+v", bad)
 		}
 	}
-	if found, err := store.RecordHookDeliveryVerdict(ctx, "c", []byte(`{"ID":"c","Decided":{}}`), journalRows(10)); err != nil || !found {
+	if found, err := store.UpdateHookDelivery(ctx, "c", []byte(`{"ID":"c","Decided":{}}`), journalRows(10)); err != nil || !found {
 		t.Fatalf("verdict of row c = %t, %v; want recorded", found, err)
 	}
-	if found, err := store.RecordHookDeliveryVerdict(ctx, "missing", []byte(`{}`), journalRows(10)); err != nil || found {
+	if found, err := store.UpdateHookDelivery(ctx, "missing", []byte(`{}`), journalRows(10)); err != nil || found {
 		t.Fatalf("verdict of a missing row = %t, %v; want no row and no error", found, err)
 	}
 
 	_ = store.Close()
 	store = openTestStore(t, path)
-	entries, err := store.HookDeliveries(ctx, HookDeliveryJournalEntry{}, 10)
+	entries, err := store.HookDeliveries(ctx, HookDeliveryJournalEntry{}, 10, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,10 +111,10 @@ func TestHookDeliveryJournal(t *testing.T) {
 	if err := store.JournalHookDelivery(ctx, "d", "live", []byte(`{}`), journalRows(10)); err == nil {
 		t.Fatal("a closed store journaled a call")
 	}
-	if _, err := store.RecordHookDeliveryVerdict(ctx, "b", []byte(`{}`), journalRows(10)); err == nil {
+	if _, err := store.UpdateHookDelivery(ctx, "b", []byte(`{}`), journalRows(10)); err == nil {
 		t.Fatal("a closed store recorded a verdict")
 	}
-	if _, err := store.HookDeliveries(ctx, HookDeliveryJournalEntry{}, 10); err == nil {
+	if _, err := store.HookDeliveries(ctx, HookDeliveryJournalEntry{}, 10, 1<<20); err == nil {
 		t.Fatal("a closed store listed its journal")
 	}
 }
@@ -138,8 +138,10 @@ func TestHookDeliveryJournalIsBounded(t *testing.T) {
 	if got := strings.Join(journalIDs(t, store, 2), ","); got != "p/r1,p/r2,p/r3,p/r4,p/r5" {
 		t.Fatalf("journal read in batches of 2 = %s, want r1..r5 once each", got)
 	}
-	if _, err := store.HookDeliveries(ctx, HookDeliveryJournalEntry{}, 0); err == nil {
-		t.Fatal("an unbounded read was served")
+	for _, bounds := range [][2]int{{0, 1 << 20}, {10, 0}} {
+		if _, err := store.HookDeliveries(ctx, HookDeliveryJournalEntry{}, bounds[0], bounds[1]); err == nil {
+			t.Fatalf("a read without a row and a byte limit %v was served", bounds)
+		}
 	}
 	if err := store.ForgetHookDelivery(ctx, "r2"); err != nil {
 		t.Fatal(err)
@@ -181,20 +183,49 @@ func TestHookDeliveryJournalBoundsItsBytes(t *testing.T) {
 		t.Fatalf("journal = %s, want b1, b2, b3 and no refused row", got)
 	}
 
-	if found, err := store.RecordHookDeliveryVerdict(ctx, "b1", occurrence(41), limits); !found || !errors.Is(err, ErrHookDeliveryJournalFull) {
+	if found, err := store.UpdateHookDelivery(ctx, "b1", occurrence(41), limits); !found || !errors.Is(err, ErrHookDeliveryJournalFull) {
 		t.Fatalf("verdict past the byte limit = %t, %v; want the row and ErrHookDeliveryJournalFull", found, err)
 	}
-	if _, err := store.RecordHookDeliveryVerdict(ctx, "b1", occurrence(65), limits); !errors.Is(err, ErrHookDeliveryOccurrenceTooLarge) {
+	if _, err := store.UpdateHookDelivery(ctx, "b1", occurrence(65), limits); !errors.Is(err, ErrHookDeliveryOccurrenceTooLarge) {
 		t.Fatalf("verdict over the occurrence limit = %v, want ErrHookDeliveryOccurrenceTooLarge", err)
 	}
-	entries, err := store.HookDeliveries(ctx, HookDeliveryJournalEntry{}, 1)
+	entries, err := store.HookDeliveries(ctx, HookDeliveryJournalEntry{}, 1, 1<<20)
 	if err != nil || len(entries) != 1 || len(entries[0].Occurrence) != 40 {
 		t.Fatalf("row b1 after refused verdicts = %+v, %v; want its 40-byte occurrence", entries, err)
 	}
-	if found, err := store.RecordHookDeliveryVerdict(ctx, "b1", occurrence(30), limits); !found || err != nil {
+	if found, err := store.UpdateHookDelivery(ctx, "b1", occurrence(30), limits); !found || err != nil {
 		t.Fatalf("verdict within the limits = %t, %v; want recorded", found, err)
 	}
-	if found, err := store.RecordHookDeliveryVerdict(ctx, "missing", occurrence(10), limits); found || err != nil {
+	if found, err := store.UpdateHookDelivery(ctx, "missing", occurrence(10), limits); found || err != nil {
 		t.Fatalf("verdict of a missing row = %t, %v; want no row and no error", found, err)
+	}
+}
+
+// A read never loads an occurrence over its byte limit, whatever an earlier
+// build stored: the row is listed without its occurrence, so recovery holds
+// at most a batch of bounded occurrences in memory.
+func TestHookDeliveryJournalReadsNoOccurrenceOverItsLimit(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
+	ctx := t.Context()
+	for _, row := range []struct {
+		id   string
+		size int
+	}{{"small", 100}, {"large", 4096}} {
+		if err := store.JournalHookDelivery(ctx, row.id, "p", []byte(strings.Repeat("x", row.size)), journalRows(10)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := store.HookDeliveries(ctx, HookDeliveryJournalEntry{}, 10, 1024)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("journal = %+v, %v; want both rows", entries, err)
+	}
+	if entries[0].ID != "small" || len(entries[0].Occurrence) != 100 {
+		t.Fatalf("row within the limit = %s with %d bytes, want small with 100", entries[0].ID, len(entries[0].Occurrence))
+	}
+	if entries[1].ID != "large" || entries[1].Occurrence != nil {
+		t.Fatalf("row over the limit = %s with %d bytes, want large without its occurrence", entries[1].ID, len(entries[1].Occurrence))
+	}
+	if entries, err = store.HookDeliveries(ctx, HookDeliveryJournalEntry{}, 10, 4096); err != nil || len(entries[1].Occurrence) != 4096 {
+		t.Fatalf("row read with room for it = %+v, %v; want its occurrence", entries, err)
 	}
 }

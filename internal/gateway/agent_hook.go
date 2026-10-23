@@ -836,6 +836,13 @@ func (a *APIServer) finalizeAgentHook(
 	// otherwise. If identity stamping itself panics, notification stays
 	// fail-closed behind canonical enforcement persistence.
 	result := hookFinalizationResult{Enforced: resp.Action == "block"}
+	// live is false for a journaled call that recovery writes
+	// (agent_hook_pending.go): it writes the call's two records only, and
+	// repeats none of the live side effects (health counters, sandbox
+	// observations, the hook join ring, spans, alerts), which belong to the
+	// call when it ran and would name the state and policy of the server
+	// that recovers it.
+	live := !req.pendingRecovery
 	safeSection := func(section string, fn func()) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -893,11 +900,13 @@ func (a *APIServer) finalizeAgentHook(
 		// These fields describe the already-active HTTP/hook span. They are
 		// independent of metric export and must remain available even when the
 		// destination collects traces but not metrics.
-		enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
+		if live {
+			enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
+		}
 	})
 
 	safeSection("health", func() {
-		if !a.recordsConnectorHealth(ctx) {
+		if !live || !a.recordsConnectorHealth(ctx) {
 			return
 		}
 		a.health.RecordConnectorRequestFor(connectorName)
@@ -914,10 +923,12 @@ func (a *APIServer) finalizeAgentHook(
 			a.health.RecordToolInspectionFor(connectorName)
 		}
 	})
-	safeSection("sandbox", func() {
-		a.observeSandboxHookDecision(ctx, req, resp)
-	})
-	if !panicked {
+	if live {
+		safeSection("sandbox", func() {
+			a.observeSandboxHookDecision(ctx, req, resp)
+		})
+	}
+	if live && !panicked {
 		// Before the response is written, so the decision is in the
 		// runtime planes' join ring when the tool's process starts.
 		safeSection("hook_join", func() {
@@ -957,7 +968,7 @@ func (a *APIServer) finalizeAgentHook(
 			// With no companion to persist, an enforced hook is
 			// notification-ready as soon as the audit row below lands.
 			result.EnforcementPersisted = env.Enforced
-			if !panicked {
+			if live && !panicked {
 				a.emitHookGuardrailOutcomeV8(ctx, req, resp, elapsed)
 			}
 		})
@@ -976,7 +987,7 @@ func (a *APIServer) finalizeAgentHook(
 			}
 			auditErr := a.logConnectorHookAuditEnvelope(ctx, env)
 			result.AuditPersisted = auditErr == nil
-			if !panicked {
+			if live && !panicked {
 				a.alertSensitiveHookToolResult(ctx, connectorName, req, resp)
 			}
 		})

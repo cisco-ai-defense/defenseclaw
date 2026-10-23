@@ -193,9 +193,6 @@ const (
 	// it: the remote destinations get the record once, and never one the
 	// producer later writes differently.
 	RemoteExportAfterLocalWrite
-	// RemoteExportNone writes the record to the local store only. A producer
-	// uses it for a record the remote destinations already got.
-	RemoteExportNone
 )
 
 // WithRemoteExport sets when the runtime sends the records emitted with ctx
