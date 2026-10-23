@@ -26,11 +26,13 @@ package connector
 //     DefenseClaw marker, with a static deny stub. A stub an older teardown
 //     left that allowed every call is replaced the same way. The stub blocks
 //     every call and says that support was removed in 1.0.4 and how to
-//     remove the hook. The stub is written into the file itself first (the
-//     same file, so every other name of it, a hard link, gets it too; the
-//     whole stub, synced and read back), and then a copy is renamed over
-//     the path through an identity-bound compare-and-swap
-//     (removedOnlyConnector.replaceScript).
+//     remove the hook. For OpenHands, the stub is written into the verified
+//     file itself first (the same file, so every other name of it, a hard
+//     link, gets it too; the whole stub, synced and read back), and then a
+//     copy is published through an identity-bound compare-and-swap. An
+//     OmniGent module is never written in place: a single-link module gets
+//     the complete stub through the recoverable compare-and-swap, and a
+//     module with other names is left for manual cleanup with its tokens.
 //     An OmniGent module whose bytes are not the ones the older setup
 //     recorded it wrote (its backup record's post-setup hash) was edited:
 //     its exact bytes are saved first, synced and read back, under
@@ -362,11 +364,10 @@ func (c removedOnlyConnector) isStub(data []byte) bool {
 // reads on from where it was, so the file must not end where the old one
 // went on: after the stub come blanks out to the old end, then exit 2. A
 // run that reads on from anywhere past the stub reaches that exit 2. It
-// stays within removedScriptReadLimit. OmniGent imports the whole module at
-// once, so its stub is written alone.
+// stays within removedScriptReadLimit.
 func (c removedOnlyConnector) inPlaceStub(oldLen int) []byte {
 	stub := []byte(c.tombstone)
-	if c.inPlaceTail == "" || oldLen <= len(stub) {
+	if oldLen <= len(stub) {
 		return stub
 	}
 	pad := min(oldLen-len(stub), removedScriptReadLimit-len(stub)-len(c.inPlaceTail))
@@ -444,14 +445,12 @@ func (c removedOnlyConnector) preflightTokens(dataDir string) error {
 	return nil
 }
 
-// replaceScript writes the deny stub over a script an older release wrote.
-// It writes the stub into the file itself first, so every name of the file
-// (a hard link) blocks, then renames a copy over the path, which replaces
-// the file at the path itself, never a link's target. When the stub cannot
-// be written into a file with more than one name, nothing is renamed: the
-// rename would give only this name the stub, and a later run would then
-// revoke the tokens of the old hook under its other names (hookLeft keeps
-// them while the old file is still at the path).
+// replaceScript publishes the deny stub over a script an older release
+// wrote. OpenHands first writes the stub into the verified file itself, so
+// every hard-linked name blocks, then publishes a distinct copy at the
+// path. OmniGent only publishes a complete copy, and refuses an old module
+// with hard links. A refusal keeps the tokens and leaves the old path for
+// a later retry or manual cleanup.
 func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	path := c.scriptPath(dataDir)
 	// The CAS may have detached the verified script before a process stopped.
@@ -467,7 +466,7 @@ func (c removedOnlyConnector) replaceScript(dataDir string) error {
 			return fmt.Errorf("recover interrupted stub publication for %s: %w", path, err)
 		}
 	}
-	state, _, data, original, err := c.scriptStateAndLinks(path)
+	state, links, data, original, err := c.scriptStateAndLinks(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w; nothing was changed", path, err)
 	}
@@ -480,7 +479,17 @@ func (c removedOnlyConnector) replaceScript(dataDir string) error {
 	if err := keep(data, nil); err != nil {
 		return fmt.Errorf("%w; nothing was changed", err)
 	}
-	written, inPlace := c.writeStubInPlace(path, keep)
+	if c.name == removedOmnigentID {
+		if links > 1 {
+			return fmt.Errorf("%s is the module an older DefenseClaw wrote and has %d names (hard links); refusing to replace it. To finish: %s",
+				path, links, c.hardLinkStep(path))
+		}
+		if err := c.publishVerifiedStub(dataDir, path, original, false, keep); err != nil {
+			return fmt.Errorf("publish the complete deny stub for %s: %w", path, err)
+		}
+		return nil
+	}
+	written, inPlace := c.writeStubInPlace(path, original, keep)
 	if inPlace != nil {
 		// A failed in-place write can coincide with a new file at the path.
 		// Only the old, still-owned file may be published over.
@@ -566,6 +575,16 @@ func (c removedOnlyConnector) publishVerifiedStub(
 		}
 		if !named.Mode().IsRegular() || !os.SameFile(named, verified) {
 			return atomicTransformResult{}, fmt.Errorf("%s changed identity before stub publication: %w", path, errAtomicTransformConflict)
+		}
+		if c.name == removedOmnigentID {
+			_, links, observed, opened, err := c.scriptStateAndLinks(path)
+			if err != nil || opened == nil || !os.SameFile(opened, verified) || !bytes.Equal(observed, current) {
+				return atomicTransformResult{}, fmt.Errorf("%s changed while the complete stub was staged: %w", path, errAtomicTransformConflict)
+			}
+			if links > 1 {
+				return atomicTransformResult{}, fmt.Errorf("%s has %d names (hard links); refusing to replace the module. To finish: %s",
+					path, links, c.hardLinkStep(path))
+			}
 		}
 		state := c.classifyScript(current)
 		if writtenInPlace {
@@ -726,8 +745,9 @@ var (
 	removedInPlaceTruncate = func(file *os.File, size int64) error { return file.Truncate(size) }
 )
 
-// writeStubInPlace writes the stub into the file at path, which every one of
-// its names shares. The file is checked again through the handle it writes:
+// writeStubInPlace writes the OpenHands stub into the verified file at path,
+// which every one of its names shares. It checks the file again through the
+// handle it writes:
 // one that is no longer an older release's script, or that another account
 // than the hooks folder's owner owns (removedInPlaceRefusal), is not
 // written. The stub itself (well under one page) goes in first; if that
@@ -737,7 +757,10 @@ var (
 // of inPlaceStub, the cut, the mode) only finishes the file, which is synced
 // and read back. keep saves the old bytes it read through the handle, with
 // the handle's file (keepEdited), before anything is written.
-func (c removedOnlyConnector) writeStubInPlace(path string, keep func([]byte, os.FileInfo) error) (os.FileInfo, error) {
+func (c removedOnlyConnector) writeStubInPlace(path string, verified os.FileInfo, keep func([]byte, os.FileInfo) error) (os.FileInfo, error) {
+	if c.name != removedOpenHandsID {
+		return nil, fmt.Errorf("%s modules must use complete stub publication", c.label)
+	}
 	file, err := os.OpenFile(path, os.O_RDWR|otlpOpenNoFollow(), 0)
 	if err != nil {
 		return nil, err
@@ -747,7 +770,7 @@ func (c removedOnlyConnector) writeStubInPlace(path string, keep func([]byte, os
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > removedScriptReadLimit {
+	if !info.Mode().IsRegular() || info.Size() > removedScriptReadLimit || !os.SameFile(info, verified) {
 		return nil, fmt.Errorf("%s changed while it was read", path)
 	}
 	folder, err := os.Stat(filepath.Dir(path))
@@ -766,6 +789,10 @@ func (c removedOnlyConnector) writeStubInPlace(path string, keep func([]byte, os
 	}
 	if err := keep(old, info); err != nil {
 		return nil, err
+	}
+	named, err := os.Lstat(path)
+	if err != nil || !named.Mode().IsRegular() || !os.SameFile(named, info) {
+		return nil, fmt.Errorf("%s changed identity before the in-place stub write: %w", path, errAtomicTransformConflict)
 	}
 	stub := c.inPlaceStub(len(old))
 	head := len(c.tombstone)
