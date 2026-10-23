@@ -514,15 +514,17 @@ in the services by hand.
 | `DEFENSECLAW_UNIX_SERVICE_ACCOUNT` | The macOS service definitions, and the gateway commands the macOS lifecycle runs, set it to `_defenseclaw`. Linux uses the default, `defenseclaw`. Set it yourself only for custom packaging that runs the gateway under another account; a wrong value makes the runtime trust check reject the real service account |
 | `DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR` | Test-only. Points `install.sh` at a temporary runtime descriptor. The per-user gateway still refuses to start on a managed host |
 
-On this release, administrators also set `DEFENSECLAW_CONFIG` when they run the
-`enterprise policy` commands, so the commands read the managed config instead
-of the caller's `~/.defenseclaw/config.yaml`:
+On standalone managed Linux and macOS, run the installed `enterprise policy`
+commands as root without setting `DEFENSECLAW_CONFIG`. The commands use the
+trusted runtime descriptor to pin the installed config, data directory and
+deployment mode together instead of reading root's per-user config:
 
 ```bash
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
 ```
 
-On macOS use `/opt/cisco/defenseclaw/etc/config.yaml`. On managed Windows with
+The first command is for Linux; the second is for macOS. On managed Windows with
 the standalone profile, use an elevated PowerShell prompt to run
 `enterprise policy show --json` without setting `DEFENSECLAW_CONFIG`:
 
@@ -530,9 +532,9 @@ the standalone profile, use an elevated PowerShell prompt to run
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --json
 ```
 
-The CLI pins the installed config, data directory and service identity together.
-Setting only `DEFENSECLAW_CONFIG` skips that automatic pinning and can make the
-command read the caller's runtime directory. See
+The Windows CLI pins the installed config, data directory and service identity
+together. On every OS, setting only `DEFENSECLAW_CONFIG` skips automatic pinning
+and can make the command read the caller's runtime directory. See
 [Machine policy status](/docs/enterprise/operate/operations#machine-policy-status).
 
 ## Check what is active

@@ -362,9 +362,19 @@ describe('1.0.4 operator routes and limits', () => {
     assert.match(groupRow, /managed Windows.*defenseclaw\.exe.*enterprise windows profile-explain --user/);
   });
 
-  it('uses the managed Windows administrator route instead of a config-only shell', () => {
+  it('uses the installed standalone administrator route on every OS', () => {
     const hooks = page('reference/commands/cli.mdx').split('### Per-user hooks (`enterprise hooks`)')[1]?.split('### ACP')[0] ?? '';
     const envVars = page('reference/configuration/env-vars.mdx');
+    const policy = source('internal/cli/enterprise_policy.go');
+    const unixPin = source('internal/cli/enterprise_policy_platform_unix.go');
+    assert.match(policy, /pinStandaloneManagedEnv\(\)/);
+    assert.match(unixPin, /managedStandaloneAdminDeployment\(\)/);
+    assert.match(unixPin, /managed\.ConfigPathEnv:\s+layout\.ConfigPath/);
+    assert.match(unixPin, /"DEFENSECLAW_HOME":\s+layout\.DataDir/);
+    assert.match(envVars, /On standalone managed Linux and macOS.*without setting `DEFENSECLAW_CONFIG`/is);
+    assert.match(envVars, /sudo \/opt\/defenseclaw\/bin\/defenseclaw-gateway enterprise policy show --json/);
+    assert.match(envVars, /sudo \/opt\/cisco\/defenseclaw\/bin\/defenseclaw-gateway enterprise policy show --json/);
+    assert.doesNotMatch(envVars, /sudo DEFENSECLAW_CONFIG=.*enterprise policy show --json/);
     assert.match(hooks, /On managed Windows.*enterprise windows status.*enterprise windows verify/i);
     assert.match(hooks, /DEFENSECLAW_CONFIG.*alone.*does not.*guardian/i);
     assert.match(envVars, /On managed Windows.*elevated.*enterprise policy show --json.*without setting `DEFENSECLAW_CONFIG`/i);
