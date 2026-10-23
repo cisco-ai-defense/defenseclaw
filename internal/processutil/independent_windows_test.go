@@ -40,17 +40,17 @@ import (
 const independentBase = uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
 
 func TestStartIndependentDecidesFromTheEnclosingJob(t *testing.T) {
-	const childPID = 4242
+	membershipUnknown := errors.New("IsProcessInJob failed")
 	for _, tc := range []struct {
 		name        string
 		limits      uint32
 		queryErr    error
 		selfInJob   bool
-		startErr    error
-		childInJob  bool
+		inJobErr    error
+		accepted    bool
 		wantFlags   uint32
+		wantProbe   bool
 		wantStarted bool
-		wantStopped bool
 		wantBound   bool
 	}{
 		{name: "no job", queryErr: windows.ERROR_INVALID_HANDLE, wantFlags: independentBase, wantStarted: true},
@@ -60,48 +60,43 @@ func TestStartIndependentDecidesFromTheEnclosingJob(t *testing.T) {
 			wantFlags: independentBase, wantStarted: true},
 		{name: "job that outlives its handle", wantFlags: independentBase, wantStarted: true},
 		{name: "kill on close, no breakaway", limits: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, wantBound: true},
-		// GAP-0960 and loop round 2: a LocalSystem scheduled task cannot
-		// read its own job. Breaking away and proving it is enough.
-		{name: "unreadable job, breakaway taken", queryErr: windows.ERROR_ACCESS_DENIED, selfInJob: true,
-			wantFlags: independentBase | windows.CREATE_BREAKAWAY_FROM_JOB, wantStarted: true},
+		// GAP-0960: a LocalSystem scheduled task cannot read its own job.
+		// An unreadable job is unknown, never a refusal (loop round 5).
+		{name: "unreadable job, breakaway accepted", queryErr: windows.ERROR_ACCESS_DENIED, selfInJob: true, accepted: true,
+			wantProbe: true, wantFlags: independentBase | windows.CREATE_BREAKAWAY_FROM_JOB, wantStarted: true},
 		{name: "unreadable job, breakaway refused", queryErr: windows.ERROR_ACCESS_DENIED, selfInJob: true,
-			startErr:  &os.PathError{Op: "fork/exec", Path: "child.exe", Err: windows.ERROR_ACCESS_DENIED},
-			wantFlags: independentBase | windows.CREATE_BREAKAWAY_FROM_JOB, wantBound: true},
-		{name: "unreadable job, child still in a job", queryErr: windows.ERROR_ACCESS_DENIED, selfInJob: true, childInJob: true,
-			wantFlags: independentBase | windows.CREATE_BREAKAWAY_FROM_JOB, wantStarted: true, wantStopped: true, wantBound: true},
+			wantProbe: true, wantFlags: independentBase, wantStarted: true},
+		{name: "unreadable job, membership unknown, breakaway accepted", queryErr: windows.ERROR_ACCESS_DENIED, inJobErr: membershipUnknown, accepted: true,
+			wantProbe: true, wantFlags: independentBase | windows.CREATE_BREAKAWAY_FROM_JOB, wantStarted: true},
+		{name: "unreadable job, membership unknown, breakaway refused", queryErr: windows.ERROR_ACCESS_DENIED, inJobErr: membershipUnknown,
+			wantProbe: true, wantFlags: independentBase, wantStarted: true},
 		{name: "query refused outside any job", queryErr: windows.ERROR_ACCESS_DENIED, wantFlags: independentBase, wantStarted: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			started, stopped := false, false
+			started, probed := false, false
 			var flags uint32
 			cmd := exec.Command("child.exe")
 			err := startIndependent(cmd, independentHost{
 				jobLimits: func() (uint32, error) { return tc.limits, tc.queryErr },
-				inJob: func(pid int) (bool, error) {
-					switch pid {
-					case 0:
-						return tc.selfInJob, nil
-					case childPID:
-						return tc.childInJob, nil
+				inJob:     func() (bool, error) { return tc.selfInJob, tc.inJobErr },
+				breakawayAccepted: func(path string) bool {
+					probed = true
+					if path != cmd.Path {
+						t.Errorf("probed %q, want the child's own path %q", path, cmd.Path)
 					}
-					return false, fmt.Errorf("unexpected pid %d", pid)
+					return tc.accepted
 				},
 				start: func(c *exec.Cmd) error {
 					flags = c.SysProcAttr.CreationFlags
-					if tc.startErr != nil {
-						return tc.startErr
-					}
 					started = true
-					c.Process = &os.Process{Pid: childPID}
 					return nil
 				},
-				stop: func(*exec.Cmd) { stopped = true },
 			})
 			if errors.Is(err, ErrChildBoundToJob) != tc.wantBound || (!tc.wantBound && err != nil) {
 				t.Fatalf("err = %v, want bound=%v", err, tc.wantBound)
 			}
-			if started != tc.wantStarted || stopped != tc.wantStopped {
-				t.Fatalf("started=%v stopped=%v, want %v %v", started, stopped, tc.wantStarted, tc.wantStopped)
+			if started != tc.wantStarted || probed != tc.wantProbe {
+				t.Fatalf("started=%v probed=%v, want %v %v", started, probed, tc.wantStarted, tc.wantProbe)
 			}
 			if tc.wantFlags != 0 && flags != tc.wantFlags {
 				t.Fatalf("flags = %#x, want %#x", flags, tc.wantFlags)
@@ -228,14 +223,15 @@ func newSupervisorJob(t *testing.T, limits uint32) windows.Handle {
 }
 
 // A recovery helper started from a kill-on-close job that allows breakaway,
-// with the flag or silently, outlives the job being closed; one that allows
-// none starts nothing. A job a member cannot query cannot be made here (the
-// query of the caller's own job ignores the job's DACL), so the unreadable
-// rows refuse only the limits query and keep the real job and start: the
-// child then asks for CREATE_BREAKAWAY_FROM_JOB, and a job that allows only
-// silent breakaway accepts it (loop round 3 review), so that job still gives
-// an independent helper. The scheduled-task test below is the real
-// unreadable context.
+// with the flag or silently, outlives the job being closed; from a readable
+// one that allows none nothing starts. A job a member cannot query cannot be
+// made here (the query of the caller's own job ignores the job's DACL), so
+// the unreadable rows refuse only the limits query and keep the real job,
+// probe and start: the child asks for CREATE_BREAKAWAY_FROM_JOB when the job
+// accepts it (a job that allows only silent breakaway does, loop round 3
+// review), and an unreadable job that accepts no breakaway still gets its
+// helper, in the job, rather than a refusal (loop round 5). The
+// scheduled-task test below is the real unreadable context.
 func TestStartIndependentFromAKillOnCloseJob(t *testing.T) {
 	outer, outerErr := currentJobLimits()
 	selfInJob, _ := processInAnyJob(0)
@@ -245,6 +241,9 @@ func TestStartIndependentFromAKillOnCloseJob(t *testing.T) {
 		limits     uint32
 		unreadable bool
 		wantStart  bool
+		// inJob: the helper starts, but in the job (an unreadable job
+		// that accepts no breakaway).
+		inJob bool
 	}{
 		{name: "breakaway allowed", limits: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK, wantStart: true},
 		{name: "silent breakaway", limits: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | windows.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, wantStart: true},
@@ -253,7 +252,7 @@ func TestStartIndependentFromAKillOnCloseJob(t *testing.T) {
 			unreadable: true, wantStart: true},
 		{name: "unreadable, silent breakaway", limits: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | windows.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
 			unreadable: true, wantStart: true},
-		{name: "unreadable, breakaway refused", limits: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, unreadable: true},
+		{name: "unreadable, breakaway refused", limits: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, unreadable: true, inJob: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.wantStart && !escapes {
@@ -313,6 +312,16 @@ func TestStartIndependentFromAKillOnCloseJob(t *testing.T) {
 			}
 			if !report.InJob || report.QueryErr != "" {
 				t.Fatalf("the child did not run in a readable job: %+v", report)
+			}
+			if tc.inJob {
+				if report.StartErr != "" || report.Bound || report.Grandchild == 0 || !report.GrandchildInJob {
+					t.Fatalf("an unreadable job that accepts no breakaway did not get its helper in the job: %+v", report)
+				}
+				// The supervisor closes the job: the helper ends with it.
+				_ = windows.CloseHandle(job)
+				jobOpen = false
+				waitProcessGone(t, report.Grandchild, 10*time.Second)
+				return
 			}
 			if !tc.wantStart {
 				if !report.Bound || report.Grandchild != 0 {

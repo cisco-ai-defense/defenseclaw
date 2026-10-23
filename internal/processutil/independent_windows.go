@@ -21,6 +21,7 @@ package processutil
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"syscall"
 	"unsafe"
@@ -29,27 +30,27 @@ import (
 )
 
 // ErrChildBoundToJob reports that a child StartIndependent would start
-// could not be proven to outlive the enclosing process job.
-var ErrChildBoundToJob = errors.New("the child cannot be proven to outlive the enclosing process job")
+// would end with the enclosing process job: the job kills its processes when
+// it closes and lets none break away.
+var ErrChildBoundToJob = errors.New("the child cannot outlive the enclosing process job")
 
 // independentHost is what StartIndependent asks of Windows; tests replace it.
 type independentHost struct {
 	// jobLimits reads the limit flags of the job this process is in.
 	jobLimits func() (uint32, error)
-	// inJob reports whether process pid (0: this process) is in any job.
-	inJob func(pid int) (bool, error)
-	start func(*exec.Cmd) error
-	stop  func(*exec.Cmd)
+	// inJob reports whether this process is in any job.
+	inJob func() (bool, error)
+	// breakawayAccepted reports whether the enclosing job lets path start
+	// with CREATE_BREAKAWAY_FROM_JOB.
+	breakawayAccepted func(path string) bool
+	start             func(*exec.Cmd) error
 }
 
 var windowsIndependentHost = independentHost{
-	jobLimits: currentJobLimits,
-	inJob:     processInAnyJob,
-	start:     (*exec.Cmd).Start,
-	stop: func(cmd *exec.Cmd) {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	},
+	jobLimits:         currentJobLimits,
+	inJob:             func() (bool, error) { return processInAnyJob(0) },
+	breakawayAccepted: breakawayAccepted,
+	start:             (*exec.Cmd).Start,
 }
 
 // StartIndependent starts cmd detached (its own process group, no console)
@@ -62,13 +63,13 @@ var windowsIndependentHost = independentHost{
 //     when the job allows it. A job that kills its members on close and
 //     lets none go silently is refused (ErrChildBoundToJob) before
 //     anything starts.
-//   - When the job query fails otherwise (Access is denied for the
-//     LocalSystem process of a one-shot scheduled task, GAP-0960; natively
-//     that process is in no job), IsProcessInJob, which needs no access to
-//     a job, decides. In no job nothing more is needed. In a job the child
-//     is started with CREATE_BREAKAWAY_FROM_JOB and must then be in no job
-//     at all. A job that refuses the breakaway starts nothing; a child
-//     still in a job is stopped. Both are ErrChildBoundToJob.
+//   - A job whose limits cannot be read (Access is denied for the
+//     LocalSystem process of a one-shot scheduled task, GAP-0960) is
+//     unknown, not refused: the caller has recorded what the helper would
+//     finish. IsProcessInJob, which needs no access to the job, says
+//     whether there is one. In no job nothing more is needed. In a job, or
+//     when that is unknown too, the child breaks away when the job accepts
+//     the flag, and otherwise starts in the job.
 func StartIndependent(cmd *exec.Cmd) error {
 	return startIndependent(cmd, windowsIndependentHost)
 }
@@ -76,7 +77,6 @@ func StartIndependent(cmd *exec.Cmd) error {
 func startIndependent(cmd *exec.Cmd, host independentHost) error {
 	flags := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
 	limits, queryErr := host.jobLimits()
-	prove := false
 	switch {
 	case errors.Is(queryErr, windows.ERROR_INVALID_HANDLE):
 		// This process is in no job.
@@ -88,37 +88,32 @@ func startIndependent(cmd *exec.Cmd, host independentHost) error {
 			return fmt.Errorf("%w: the job kills its processes when it closes and allows no breakaway", ErrChildBoundToJob)
 		}
 	default:
-		member, err := host.inJob(0)
-		if err != nil {
-			return fmt.Errorf("inspect the enclosing process job: %w", errors.Join(queryErr, err))
-		}
-		if member {
+		if member, err := host.inJob(); (err != nil || member) && host.breakawayAccepted(cmd.Path) {
 			flags |= windows.CREATE_BREAKAWAY_FROM_JOB
-			prove = true
 		}
 	}
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.CreationFlags = flags
-	if err := host.start(cmd); err != nil {
-		if prove && errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return fmt.Errorf("%w: the job cannot be inspected (%v) and refuses breakaway", ErrChildBoundToJob, queryErr)
-		}
-		return err
-	}
-	if !prove {
-		return nil
-	}
-	member, err := host.inJob(cmd.Process.Pid)
-	if err == nil && !member {
-		return nil
-	}
-	host.stop(cmd)
+	return host.start(cmd)
+}
+
+// breakawayAccepted starts path suspended with CREATE_BREAKAWAY_FROM_JOB and
+// ends it before it runs: a job that allows no breakaway refuses the flag
+// when the process is created (Access is denied). cmd itself cannot be
+// started twice once its pipes are made, so the job is asked first.
+func breakawayAccepted(path string) bool {
+	process, err := os.StartProcess(path, []string{path}, &os.ProcAttr{Sys: &syscall.SysProcAttr{
+		CreationFlags: windows.CREATE_SUSPENDED | windows.CREATE_BREAKAWAY_FROM_JOB |
+			windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+	}})
 	if err != nil {
-		return fmt.Errorf("%w: the started child's job could not be checked: %v", ErrChildBoundToJob, err)
+		return false
 	}
-	return fmt.Errorf("%w: the started child is still in a job that cannot be inspected (%v)", ErrChildBoundToJob, queryErr)
+	_ = process.Kill()
+	_, _ = process.Wait()
+	return true
 }
 
 func currentJobLimits() (uint32, error) {
