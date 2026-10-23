@@ -154,6 +154,27 @@ def openclaw_fleet_link_configured(cfg: Any) -> bool:
     return fleet_mode not in {"", "auto"} or not _is_loopback_gateway_host(getattr(gateway, "host", ""))
 
 
+def openclaw_setup_fleet_link_configured(cfg: Any) -> bool:
+    """Whether setup keeps a saved OpenClaw that this host does not have.
+
+    Mirrors the dial override in ``gatewayShouldConnectForConfiguredConnector``:
+    ``enabled``/``on``/``true`` always dial, ``disabled``/``off``/``false``
+    never do, and any other value (unset, ``auto`` or a typo) dials only a
+    remote gateway host. Unlike :func:`openclaw_fleet_link_configured` (the
+    loader's question, which keeps a typo's connector), a value that never
+    dials is no link, so an absent OpenClaw cannot win setup's selection.
+    """
+    gateway = getattr(cfg, "gateway", None)
+    if gateway is None:
+        return False
+    fleet_mode = str(getattr(gateway, "fleet_mode", "") or "").strip().lower()
+    if fleet_mode in {"enabled", "on", "true"}:
+        return True
+    if fleet_mode in {"disabled", "off", "false"}:
+        return False
+    return not _is_loopback_gateway_host(getattr(gateway, "host", ""))
+
+
 def openclaw_implied_but_not_installed(cfg: Any) -> bool:
     """True when the gateway reports the OpenClaw fleet off as "not installed".
 

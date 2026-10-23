@@ -147,19 +147,18 @@ func NativeHookRuntimeNoop() bool {
 	nativeHookRuntimeSnapshot.recognized = recognized
 	nativeHookRuntimeSnapshot.err = err
 	nativeHookRuntimeSnapshot.Unlock()
-	if hookArgsContainEnterpriseManaged(os.Args[1:]) ||
-		(len(os.Args) > 1 && os.Args[1] == "hook" && implicitEnterpriseManagedHook()) {
-		connectorName, connectorErr := hookConnectorFromArgs(os.Args[1:])
-		if connectorErr != nil {
-			nativeEnterpriseHookRuntimeSnapshot.Lock()
-			nativeEnterpriseHookRuntimeSnapshot.prepared = true
-			nativeEnterpriseHookRuntimeSnapshot.executable = executable
-			nativeEnterpriseHookRuntimeSnapshot.connector = connectorName
-			nativeEnterpriseHookRuntimeSnapshot.err = connectorErr
-			nativeEnterpriseHookRuntimeSnapshot.Unlock()
-			return false
-		}
-		return prepareEnterpriseManagedHookRuntime(connectorName)
+	if len(os.Args) > 1 && os.Args[1] == "hook" &&
+		(hookArgsContainEnterpriseManaged(os.Args[1:]) || implicitEnterpriseManagedHook()) {
+		// A managed hook call resolves its runtime in the hook command, after
+		// it armed the answer watchdog (prepareEnterpriseManagedHookRuntime
+		// there). The resolution reads machine policy, the account's runtime
+		// generation and their ACLs; resolved here, before the watchdog, a
+		// host that a Claude attestation repair saturated held registered
+		// calls 5.2 to 5.8 s, past the five seconds the agent waits
+		// (rel-1-0-4 GAP-0872). Every outcome of the deferred resolution is
+		// the same: an absent runtime ends the call with no answer, any other
+		// failure closes it.
+		return false
 	}
 	if !recognized {
 		return false
@@ -234,39 +233,12 @@ func hookArgsContainEnterpriseManaged(args []string) bool {
 	return false
 }
 
-func hookConnectorFromArgs(args []string) (string, error) {
-	var connectorName string
-	for index := 0; index < len(args); index++ {
-		arg := args[index]
-		switch {
-		case arg == "--connector":
-			if index+1 >= len(args) {
-				return "", fmt.Errorf("enterprise managed hook connector flag has no value")
-			}
-			index++
-			connectorName = args[index]
-		case strings.HasPrefix(arg, "--connector="):
-			connectorName = strings.TrimPrefix(arg, "--connector=")
-		}
-	}
-	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
-	if connectorName != "codex" && connectorName != "claudecode" && connectorName != "cursor" &&
-		!windowsStandalonePerUserHookConnector(connectorName) {
-		return connectorName, fmt.Errorf(
-			"enterprise managed hook connector %q is not supported",
-			connectorName,
-		)
-	}
-	return connectorName, nil
-}
-
 // prepareEnterpriseManagedHookRuntime caches the authenticated Windows
 // generation. Its true result is the native launcher tombstone.
 func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	// Cobra passes the raw flag value ("ClaudeCode" for --connector
-	// ClaudeCode), but hookConnectorFromArgs caches the lowercase form
-	// ("claudecode"). Without normalization here the snapshot cache would
-	// key on a case that enterpriseManagedHookRuntimeEndpoint's lowercase
+	// ClaudeCode). Without normalization here the snapshot cache would key
+	// on a case that enterpriseManagedHookRuntimeConnection's lowercase
 	// comparison never matches, so events would silently fail closed to
 	// 127.0.0.1:1 with no recorded reason.
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
@@ -657,17 +629,5 @@ func windowsHookPathHasNoReparsePoints(path string) bool {
 			return true
 		}
 		cursor = parent
-	}
-}
-
-// windowsStandalonePerUserHookConnector reports whether name is a standalone
-// per-user connector whose runtime is this hook binary. OpenCode's managed
-// plugin (machine policy route) runs it for every event.
-func windowsStandalonePerUserHookConnector(name string) bool {
-	switch name {
-	case "copilot", "antigravity", "devin", "hermes", "kiro", "opencode":
-		return true
-	default:
-		return false
 	}
 }

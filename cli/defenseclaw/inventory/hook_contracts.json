@@ -8,6 +8,8 @@
       "kind": "acp-with-native-hook-defense-in-depth",
       "compatibility_gate": "not-gated",
       "version_probe": "kiro-cli --version",
+      "cli_hook_floor": "2.27.1",
+      "ide_global_hooks_floor": "1.0.182",
       "contracts": [],
       "native_hook_inventory": {
         "status": "installed",

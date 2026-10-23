@@ -2901,7 +2901,7 @@ class TestKiroConnectorScopeRequiresWorkspace(unittest.TestCase):
         row = self._scope_row("kiro", "")
         self.assertEqual(row["status"], "pass")
         self.assertIn(path, row["detail"])
-        self.assertIn("claw.workspace_dir", row["detail"])
+        self.assertIn("before 1.0.182", row["detail"])
 
     def test_kiro_ide_below_global_hooks_floor_warns(self) -> None:
         self._write_global_hooks("/home/u/.defenseclaw/hooks/kiro-hook.sh --hook-surface v3")
@@ -2912,6 +2912,19 @@ class TestKiroConnectorScopeRequiresWorkspace(unittest.TestCase):
         row = self._scope_row("kiro", "")
         self.assertEqual(row["status"], "warn")
         self.assertEqual(row["reason_code"], "kiro_ide_below_global_hooks_floor")
+
+    def test_kiro_ide_with_unreadable_version_warns(self) -> None:
+        # An installed IDE whose product.json names no version is unknown, so
+        # it is not counted as protected (it was skipped as no IDE before).
+        self._write_global_hooks("/home/u/.defenseclaw/hooks/kiro-hook.sh --hook-surface v3")
+        product = os.path.join(self._kiro_home.name, "product.json")
+        with open(product, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        self._ide_products.append(product)
+        row = self._scope_row("kiro", "")
+        self.assertEqual(row["status"], "warn")
+        self.assertEqual(row["reason_code"], "kiro_ide_version_unknown")
+        self.assertIn(product, row["detail"])
 
     def test_kiro_custom_default_agent_is_reported(self) -> None:
         # The global hook file stays authoritative; a custom default agent is

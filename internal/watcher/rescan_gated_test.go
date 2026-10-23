@@ -380,6 +380,7 @@ func TestScannerVersionChangesAfterBinaryReplacement(t *testing.T) {
 func TestRescanCycleRefusesInstalledSkillAddedToDeniedList(t *testing.T) {
 	t.Setenv("PATH", "")
 	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "openclaw"
 	cfg.Watch.RescanContentGated = true
 	ocPath := filepath.Join(cfg.DataDir, "openclaw.json")
 	servers := `{"mcp":{"servers":{"think":{"command":"npx","args":["-y","@modelcontextprotocol/server-sequential-thinking"]}}}}`
