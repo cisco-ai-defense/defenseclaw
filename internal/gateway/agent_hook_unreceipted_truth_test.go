@@ -47,14 +47,20 @@ func TestUnreceiptedObserveHookKeepsModeAndUnconfirmedAction(t *testing.T) {
 	}
 	for name, got := range map[string]agentHookResponse{
 		"older hook":      api.unreceiptedHookDecision(ctx, "claudecode", "PreToolUse", proposal),
-		"missing receipt": deliveredHookDecision(proposal, ""),
+		"missing receipt": api.deliveredHookDecision("claudecode", proposal, ""),
 	} {
 		if got.Action != hookActionUnconfirmed || got.RawAction != "block" || got.Mode != "observe" || got.WouldBlock || got.Reason != hookexec.ManagedGatewayNoAnswerReason {
 			t.Errorf("%s observe result = %+v, want unconfirmed block proposal in observe mode", name, got)
 		}
 	}
-	confirmedBlock := deliveredHookDecision(proposal, hookexec.HookDeliveryReceiptBlock)
+	confirmedBlock := api.deliveredHookDecision("claudecode", proposal, hookexec.HookDeliveryReceiptBlock)
 	if confirmedBlock.Action != "block" || confirmedBlock.Mode != "action" {
 		t.Errorf("confirmed fallback block = %+v, want enforced block", confirmedBlock)
+	}
+	api.scannerCfg.Guardrail.HookFailMode = "open"
+	openProposal := agentHookResponse{Action: "block", RawAction: "block", Mode: "action"}
+	got := api.deliveredHookDecision("claudecode", openProposal, "")
+	if got.Action != hookActionUnconfirmed || got.RawAction != "block" || got.Mode != "action" {
+		t.Errorf("open outage without a receipt = %+v, want unconfirmed block proposal", got)
 	}
 }

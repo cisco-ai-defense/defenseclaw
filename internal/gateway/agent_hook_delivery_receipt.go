@@ -96,12 +96,15 @@ const hookActionUnconfirmed = "unconfirmed"
 // whether the hook consumed its offered answer before the connection closed.
 // The audit therefore records an unconfirmed delivery unless either outcome
 // would have been a block.
-func deliveredHookDecision(resp agentHookResponse, receipt string) agentHookResponse {
+func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookResponse, receipt string) agentHookResponse {
 	switch receipt {
 	case hookexec.HookDeliveryReceiptAck:
 		return resp
 	case hookexec.HookDeliveryReceiptBlock:
 		return failedClosedHookDelivery(resp, "managed hook rejected the proposed answer")
+	}
+	if a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) == "open" {
+		return unconfirmedHookDelivery(resp)
 	}
 	if resp.Action == "block" {
 		// The policy block and the fallback have the same result.
