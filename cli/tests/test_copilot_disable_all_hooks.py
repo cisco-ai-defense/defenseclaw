@@ -34,10 +34,13 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
+from click.testing import CliRunner
 from defenseclaw import bootstrap, hook_integrity
-from defenseclaw.commands import cmd_doctor, cmd_status
+from defenseclaw.commands import cmd_doctor, cmd_guardrail, cmd_setup, cmd_status
+from defenseclaw.context import AppContext
 
 from tests.test_hook_registration_every_connector import _CASES, _case_id, _install
 
@@ -102,6 +105,82 @@ def _doctor_rows(cfg, monkeypatch) -> list[dict[str, Any]]:
     r = cmd_doctor._DoctorResult(passive=True, quiet=True)
     cmd_doctor._check_connector_hooks(cfg, "copilot", r)
     return [row for row in r.checks if row["label"] == "Copilot hooks"]
+
+
+def _mode_context(cfg, monkeypatch) -> AppContext:
+    cfg.claw.mode = "copilot"
+    cfg.guardrail.connector = "copilot"
+    cfg.guardrail.enabled = True
+    cfg.guardrail.mode = "observe"
+    cfg.save = MagicMock()
+    monkeypatch.setattr(cmd_setup, "_check_connector_version_supported_for_setup", lambda *_a, **_k: True)
+    monkeypatch.setattr(cmd_guardrail, "_gateway_running", lambda _app: False)
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    return app
+
+
+def _mode_action(app: AppContext, *args: str):
+    result = CliRunner().invoke(cmd_guardrail.guardrail, ["mode", *args, "--json"], obj=app, catch_exceptions=False)
+    return result, json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("case, layer, platform", _SWITCH_CASES)
+def test_guardrail_mode_action_refuses_each_copilot_hooks_off_layer(tmp_path, monkeypatch, case, layer, platform):
+    cfg, _paths = _copilot(tmp_path, monkeypatch, case, platform)
+    settings = _write(tmp_path, layer, json.dumps({"disableAllHooks": True}))
+    app = _mode_context(cfg, monkeypatch)
+
+    result, payload = _mode_action(app, "action", "--connector", "copilot")
+
+    assert result.exit_code == 1, result.output
+    assert payload["ok"] is False and str(settings) in payload["message"]
+    assert "disableAllHooks" in payload["message"]
+    assert cfg.guardrail.mode == "observe"
+    assert cfg.guardrail.connectors == {}
+    cfg.save.assert_not_called()
+
+
+@pytest.mark.parametrize("value", [True, "yes"], ids=["true", "malformed"])
+@pytest.mark.parametrize("request_kind", ["scoped", "global", "already-action", "clear-to-action"])
+@pytest.mark.parametrize("platform", ["posix", "windows"])
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook layouts")
+def test_guardrail_mode_action_refuses_copilot_registration_switch(
+    tmp_path, monkeypatch, value, request_kind, platform
+):
+    case = next(c for c in _COPILOT if c["scope"] == "user")
+    cfg, paths = _copilot(tmp_path, monkeypatch, case, platform)
+    registration = Path(paths[0])
+    document = json.loads(registration.read_text(encoding="utf-8"))
+    registration.write_text(json.dumps({"disableAllHooks": value, **document}), encoding="utf-8")
+    app = _mode_context(cfg, monkeypatch)
+    if request_kind == "already-action":
+        cfg.guardrail.mode = "action"
+    elif request_kind == "clear-to-action":
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        cfg.guardrail.mode = "action"
+        cfg.guardrail.connectors = {"copilot": PerConnectorGuardrailConfig(mode="observe")}
+    args = {
+        "scoped": ("action", "--connector", "copilot"),
+        "global": ("action",),
+        "already-action": ("action",),
+        "clear-to-action": ("--clear", "--connector", "copilot"),
+    }[request_kind]
+
+    result, payload = _mode_action(app, *args)
+
+    assert result.exit_code == 1, result.output
+    assert payload["ok"] is False and str(registration) in payload["message"]
+    assert "disableAllHooks" in payload["message"]
+    if request_kind == "scoped":
+        assert cfg.guardrail.mode == "observe"
+    if request_kind == "global":
+        assert cfg.guardrail.mode == "observe"
+    if request_kind == "clear-to-action":
+        assert cfg.guardrail.connectors["copilot"].mode == "observe"
+    cfg.save.assert_not_called()
 
 
 @pytest.mark.parametrize("case", _COPILOT_PARAMS)

@@ -5211,6 +5211,50 @@ def mode_cmd(
     affected = [connector_key] if connector_key else [c for c in actives if not _override(c)]
     fail_before = {c: _cursor_pinned_fail_mode(gc, c) or gc.effective_hook_fail_mode(c) for c in affected}
     previous = _effective(connector_key)
+    becomes_action = mode == "action" or (clear and policy_catalog.mode_label(gc.mode) == "action")
+
+    if becomes_action and gc.enabled:
+        # An unchanged action request must check the agent too: its settings
+        # may have turned the hooks off since the last mode change. Check
+        # every connector the requested global action mode would cover, even
+        # when the gateway is stopped and no runtime read-back is available.
+        from defenseclaw.hook_integrity import agent_hook_switch_problems, repair_command
+
+        action_targets = (
+            [connector_key]
+            if connector_key
+            else [
+                c
+                for c in actives
+                if gc.effective_enabled(c)
+                and (not _override(c) or policy_catalog.mode_label(_override(c)) == "action")
+            ]
+        )
+        switched_off = []
+        for name in action_targets:
+            try:
+                problems = agent_hook_switch_problems(app.cfg, normalize_connector(name))
+            except Exception:  # noqa: BLE001 - unknown agent settings cannot prove enforcement.
+                _finish(
+                    ok=False,
+                    exit_code=1,
+                    new_mode=previous,
+                    previous=previous,
+                    message=f"Nothing was changed: {_connector_label(name)} hook settings could not be inspected.",
+                )
+                return
+            switched_off.extend((name, problem) for problem in problems)
+        if switched_off:
+            details = "; ".join(f"{_connector_label(name)}: {problem}" for name, problem in switched_off)
+            _finish(
+                ok=False,
+                exit_code=1,
+                new_mode=previous,
+                previous=previous,
+                notes=[f"Next: {repair_command(name, problem)}" for name, problem in switched_off],
+                message=f"Nothing was changed: action mode cannot guard these connectors: {details}",
+            )
+            return
 
     if connector_key is None:
         if (gc.mode or "").strip() == mode:
@@ -5252,7 +5296,6 @@ def mode_cmd(
     # after an observe-mode quickstart that never probed it). Probe, and record
     # the discovery evidence the gateway reads, before saving, so the switch
     # either works or changes nothing.
-    becomes_action = mode == "action" or (clear and policy_catalog.mode_label(gc.mode) == "action")
     if becomes_action:
         from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
 

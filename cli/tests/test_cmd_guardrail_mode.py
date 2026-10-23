@@ -13,12 +13,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_guardrail, cmd_setup
 from defenseclaw.config import PerConnectorGuardrailConfig, default_config
+from defenseclaw.connector_paths import connector_hook_config_paths, copilot_home
 from defenseclaw.context import AppContext
 
 from tests.environment import isolated_home_env
@@ -217,6 +219,80 @@ def test_copilot_mode_switch_keeps_its_fail_mode(app) -> None:
     result, _ = _run(app, "action", "--connector", "copilot", "--no-restart")
     assert result.exit_code == 0, result.output
     assert "Hook failures for" not in result.output
+
+
+@pytest.mark.parametrize("source", ["settings", "registration"])
+def test_copilot_action_refuses_hooks_off_with_no_running_gateway(app, monkeypatch, tmp_path, source) -> None:
+    # Use the native path resolver on each OS, including Windows. A stopped
+    # gateway must not make an action-mode claim when Copilot runs no hooks.
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot"))
+    monkeypatch.setattr(cmd_guardrail, "_gateway_running", lambda _app: False)
+    app.cfg.claw.mode = "copilot"
+    app.cfg.guardrail.connector = "copilot"
+    path = (
+        Path(copilot_home(), "settings.json")
+        if source == "settings"
+        else Path(connector_hook_config_paths("copilot")[0])
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"disableAllHooks": true}', encoding="utf-8")
+
+    result, payload = _run(app, "action", "--connector", "copilot", "--json")
+
+    assert result.exit_code == 1, result.output
+    assert payload["ok"] is False and str(path) in payload["message"]
+    assert "disableAllHooks" in payload["message"]
+    assert app.cfg.guardrail.mode == "observe"
+    app.cfg.save.assert_not_called()
+
+    from defenseclaw import gateway
+
+    monkeypatch.setattr(gateway, "current_user_guardrail_profile", lambda _cfg: {"error": "offline"})
+    status = CliRunner().invoke(cmd_guardrail.guardrail, ["status", "--json"], obj=app, catch_exceptions=False)
+    assert status.exit_code == 0, status.output
+    posture = json.loads(status.stdout)
+    assert any("disableAllHooks" in warning and str(path) in warning for warning in posture["warnings"])
+
+
+@pytest.mark.parametrize("copilot_override", ["", "observe"], ids=["covered", "observe-only"])
+def test_global_action_checks_only_the_copilot_scope(app, monkeypatch, tmp_path, copilot_override) -> None:
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot"))
+    monkeypatch.setattr(cmd_guardrail, "_gateway_running", lambda _app: False)
+    app.cfg.guardrail.connectors = {
+        "codex": PerConnectorGuardrailConfig(),
+        "copilot": PerConnectorGuardrailConfig(mode=copilot_override),
+    }
+    settings = Path(copilot_home(), "settings.json")
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text('{"disableAllHooks": true}', encoding="utf-8")
+
+    result, payload = _run(app, "action", "--json")
+
+    if copilot_override == "observe":
+        assert result.exit_code == 0, result.output
+        assert payload["not_covered"] == ["copilot"]
+        assert app.cfg.guardrail.mode == "action"
+    else:
+        assert result.exit_code == 1, result.output
+        assert payload["ok"] is False and str(settings) in payload["message"]
+        assert app.cfg.guardrail.mode == "observe"
+        app.cfg.save.assert_not_called()
+
+
+def test_copilot_action_text_does_not_claim_enforcement_with_hooks_off(app, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot"))
+    app.cfg.claw.mode = "copilot"
+    app.cfg.guardrail.connector = "copilot"
+    settings = Path(copilot_home(), "settings.json")
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text('{"disableAllHooks": true}', encoding="utf-8")
+
+    result, _ = _run(app, "action")
+
+    assert result.exit_code == 1, result.output
+    assert "Nothing was changed" in result.output and "disableAllHooks" in result.output
+    assert "now in action mode" not in result.output
+    app.cfg.save.assert_not_called()
 
 
 def test_action_mode_without_registered_hooks_is_not_reported_as_success(app, restarts, rerenders, tmp_path) -> None:
