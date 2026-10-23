@@ -212,19 +212,37 @@ type adUPNCache struct {
 
 	mu      sync.Mutex
 	entries map[string]adUPNEntry
+	// started numbers translations in the order they start. inflight holds,
+	// per identity with a translation running, the newest one started and
+	// how many run. Evictions clear entries but not inflight, so a finishing
+	// translation always knows whether a newer one overtook it; the map only
+	// holds identities whose translations are still running. Only
+	// unconfirmed's metadata uses them.
+	started  uint64
+	inflight map[string]adUPNFlight
+}
+
+type adUPNFlight struct {
+	newest  uint64
+	running int
 }
 
 type adUPNEntry struct {
 	upn string
 	// kept: upn is an earlier answer the latest completed translation did
-	// not confirm (it failed). Only unconfirmed reads it.
-	kept    bool
-	expires time.Time
-	done    chan struct{} // open while a lookup runs
+	// not confirm (it failed). superseded: upn is the answer of a
+	// translation that a newer one of the same identity, started after an
+	// eviction, overtook. Only unconfirmed reads them.
+	kept, superseded bool
+	expires          time.Time
+	done             chan struct{} // open while a lookup runs
 }
 
 func newADUPNCache(translate func(string) string) *adUPNCache {
-	return &adUPNCache{translate: translate, now: time.Now, entries: map[string]adUPNEntry{}}
+	return &adUPNCache{
+		translate: translate, now: time.Now,
+		entries: map[string]adUPNEntry{}, inflight: map[string]adUPNFlight{},
+	}
 }
 
 // lookup returns the UPN of samName: the cached answer, or the one a lookup
@@ -239,9 +257,13 @@ func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) string {
 			c.entries = map[string]adUPNEntry{}
 			entry = adUPNEntry{}
 		}
+		c.started++
+		flight := c.inflight[key]
+		flight.newest, flight.running = c.started, flight.running+1
+		c.inflight[key] = flight
 		entry.done = make(chan struct{})
 		c.entries[key] = entry
-		go c.run(key, samName, entry.upn, entry.done)
+		go c.run(key, samName, entry.upn, entry.done, c.started)
 	}
 	c.mu.Unlock()
 	if entry.done == nil || wait <= 0 {
@@ -259,28 +281,42 @@ func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) string {
 	}
 }
 
-func (c *adUPNCache) run(key, samName, previous string, done chan struct{}) {
+func (c *adUPNCache) run(key, samName, previous string, done chan struct{}, seq uint64) {
 	upn, ttl, kept := c.translate(samName), adUPNTTL, false
 	if upn == "" {
 		upn, ttl, kept = previous, adUPNFailureTTL, previous != ""
 	}
 	c.mu.Lock()
-	c.entries[key] = adUPNEntry{upn: upn, kept: kept, expires: c.now().Add(ttl)}
+	// Eviction can start newer translations of the same identity while
+	// this one runs, and they may finish in any order. The answer is stored
+	// either way, so lookup gives what it always gave (GAP-0129), but the
+	// answer of a translation a newer one overtook is never reported
+	// confirmed, whatever an older completion wrote to the entry meanwhile:
+	// inflight, which evictions do not clear, knows the newest one started.
+	flight := c.inflight[key]
+	superseded := flight.newest > seq
+	if flight.running--; flight.running > 0 {
+		c.inflight[key] = flight
+	} else {
+		delete(c.inflight, key)
+	}
+	c.entries[key] = adUPNEntry{upn: upn, kept: kept, superseded: superseded, expires: c.now().Add(ttl)}
 	c.mu.Unlock()
 	close(done)
 }
 
 // unconfirmed reports whether upn, an answer lookup gave for the identity,
-// is not what its latest completed translation verified: the last good UPN
-// kept through a failed lookup, or an answer the cache no longer holds. It
-// changes no answer lookup gives; agent identity rows use it to leave a
-// kept UPN out (GAP-0129 keeps it for profile matching).
+// is not what its latest translation verified: the last good UPN kept
+// through a failed lookup, the answer of a translation a newer one overtook,
+// or an answer the cache no longer holds. It changes no answer lookup
+// gives; agent identity rows use it to leave such a UPN out (GAP-0129 keeps
+// it for profile matching).
 func (c *adUPNCache) unconfirmed(sid, samName, upn string) bool {
 	key := strings.ToUpper(strings.TrimSpace(sid)) + "\x00" + strings.ToLower(samName)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry := c.entries[key]
-	return entry.kept || entry.upn != upn
+	return entry.kept || entry.superseded || entry.upn != upn
 }
 
 // Limit Windows account lookups that remain in the OS after their caller's
