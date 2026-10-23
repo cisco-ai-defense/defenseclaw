@@ -68,6 +68,7 @@ describe('1.0.4 managed outage and upgrade claims', () => {
       assert.match(text, /no separate failed-sync confirmation or loss-acceptance flag/i, name);
       assert.doesNotMatch(text, /--discard-unsynced/i, name);
       assert.doesNotMatch(text, /sync fails.{0,100}keeps running/i, name);
+      assert.doesNotMatch(text, /stop still proceeds with the stop/i, name);
     }
   });
 
@@ -78,12 +79,38 @@ describe('1.0.4 managed outage and upgrade claims', () => {
     assert.ok(macosPreinstall, 'macOS pkg preinstall heredoc is present');
     assert.doesNotMatch(linux, /sandbox/i);
     assert.doesNotMatch(macosPreinstall, /sandbox/i);
-    for (const name of ['troubleshooting/sandboxes/setup-and-gateway.mdx', 'enterprise/runtime/sandboxes.mdx']) {
-      const text = page(name);
-      assert.match(text, /1\.0\.3 or older.*rpm.*deb.*macOS pkg.*do not check.*sandbox.*before.*replac/i, name);
-      assert.match(text, /save.*work.*sandbox stop.*package/i, name);
-      assert.doesNotMatch(text, /sandboxes_running|refuses before.*(?:changes|replacing)/i, name);
+    const sections = [
+      page('troubleshooting/sandboxes/setup-and-gateway.mdx').split('### Before a 1.0.4 package upgrade')[1]?.split('### ')[0] ?? '',
+      page('enterprise/runtime/sandboxes.mdx').split('### Upgrade from an earlier sandbox daemon')[1]?.split('### ')[0] ?? '',
+      repoText('CHANGELOG.md').split('### Known limits')[1]?.split('### Changed')[0] ?? '',
+    ];
+    for (const [index, section] of sections.entries()) {
+      assert.match(section, /rpm and deb packages and macOS pkg do not check sandbox state before replacing files/i, `package section ${index}`);
+      assert.match(section, /save or pull.*work.*stop.*sandbox/i, `package section ${index}`);
+      assert.doesNotMatch(section, /sandboxes_running|package.*refuses before replacing files.*sandbox/i, `package section ${index}`);
+      if (index < 2) {
+        assert.match(section, /completed MicroVM or an error-state MicroVM whose VM is still running/i, `package section ${index}`);
+        assert.match(section, /error-state MicroVM whose VM has exited does not need a stop for a later gateway restart/i, `package section ${index}`);
+      }
     }
+  });
+
+  it('keeps the gateway restart boundary for a MicroVM whose VM has exited', () => {
+    const restartGate = repoText('internal/openshell/restartgate.go');
+    assert.match(restartGate, /case PhaseError: return !stopFlushes && !VMGone\(said\)/);
+    const manager = repoText('internal/openshell/manager/box.go');
+    assert.match(manager, /case audit\.SandboxPhaseError: return openshell\.HoldsGateway\(openshell\.PhaseError, reason, !stopLosesWrites\(driver\)\)/);
+    const troubleshooting = page('troubleshooting/sandboxes/setup-and-gateway.mdx')
+      .split('The upgrade restarts the gateway')[1]?.split('### Before a 1.0.4 package upgrade')[0] ?? '';
+    assert.match(troubleshooting, /completed MicroVM.*error-state MicroVM whose VM is still running/i);
+    assert.match(troubleshooting, /error-state MicroVM whose VM has exited.*(?:exempt|does not block)/i);
+    for (const name of ['enterprise/runtime/sandboxes.mdx', 'enterprise/runtime/sandbox-reference.mdx']) {
+      const modeSwitch = page(name).split('In both modes `ensure`')[1]?.split('### ')[0] ?? '';
+      assert.match(modeSwitch, /completed MicroVM or an error-state MicroVM whose VM is still running/i, name);
+      assert.match(modeSwitch, /error-state MicroVM whose VM has exited.*(?:exempt|does not block)/i, name);
+    }
+    const changelog = repoText('CHANGELOG.md').split('**Sandboxes run only on OpenShell 0.1.5 or later.**')[1]?.split(' - **')[0] ?? '';
+    assert.match(changelog, /gone \(its VM process exited\).*completed MicroVM.*other error state.*VM keeps running/i);
   });
   it('names the exact gateway-backed guarded outage and Windows Amp routes', () => {
     const outage = page('enterprise/configure/foreign-hook-guard.mdx').split('## Gateway outages')[1]?.split('## Approve a hook')[0] ?? '';

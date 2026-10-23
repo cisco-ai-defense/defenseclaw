@@ -1064,8 +1064,9 @@ stop. `sandbox delete <name>` gives up that work. If its disk does not answer
 within 15 seconds, stop asks first; `--yes` skips that question.
 
 For a MicroVM whose driver does not flush on stop, DefenseClaw tries to sync
-its disk first. If sync fails, the activity feed records `stop_unflushed` and the stop still proceeds
-with the stop; writes since the last successful flush may come back empty.
+its disk first. If sync fails, the activity feed records `stop_unflushed` and
+the stop still proceeds; writes since the last successful flush may come back
+empty.
 `--yes` skips the normal detached-run or attached-session confirmation, not a
 failed-sync prompt. There is no separate failed-sync confirmation or
 loss-acceptance flag. A stop triggered by DefenseClaw follows the same
