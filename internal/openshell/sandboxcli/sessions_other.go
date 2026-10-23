@@ -18,9 +18,18 @@
 
 package sandboxcli
 
-// Sandboxes run on Linux and macOS only (CheckSupported): elsewhere no
-// session attaches to one.
+import "context"
 
-func (a *App) holdSession(string) (release func()) { return func() {} }
+// Sandboxes run on Linux and macOS only (CheckSupported, and the sandbox
+// command refuses every other system first): elsewhere no session attaches
+// to one, so there is no lease to hold, count or order with a stop.
 
-func (a *App) attachedSessions(string) int { return 0 }
+func (a *App) holdSession(context.Context, string, func(context.Context) error) (release func(), err error) {
+	return func() {}, nil
+}
+
+func (a *App) lockForStop(context.Context, string) (others int, release func(), err error) {
+	return 0, func() {}, nil
+}
+
+func (a *App) attachedSessions(string) (int, error) { return 0, nil }

@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"net/http"
@@ -65,6 +66,34 @@ func captureRequireSandboxRecords(t *testing.T) *[]requireSandboxRecord {
 	recordRequireSandbox = func(_ context.Context, _ *APIServer, rec requireSandboxRecord) { got = append(got, rec) }
 	t.Cleanup(func() { recordRequireSandbox = old })
 	return &got
+}
+
+// GAP-0266: an installed 0.1.3 prerequisite is unavailable, but it must
+// never be described to the caller as absent. The lifecycle has already
+// published the version and the administrator's remedy in the trusted record.
+func TestSandboxPrerequisiteNamesInstalledUnsupportedOpenShell(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Enterprise.OpenShell.Install = config.EnterpriseOpenShellInstallPrerequisite
+	record := sandboxPrerequisitesRecord{Version: 1, Install: cfg.Enterprise.OpenShell.Install, Driver: "docker"}
+	if err := json.Unmarshal([]byte(`{"missing":[{"item":"openshell cli","detail":"openshell is not installed"}]}`), &record); err != nil {
+		t.Fatal(err)
+	}
+	// Read the real record shape, including its detail and fix, to catch a
+	// parser that discards the part that distinguishes old from absent.
+	var fromRecord sandboxPrerequisitesRecord
+	if err := json.Unmarshal([]byte(`{"version":1,"install":"prerequisite","driver":"docker","ready":false,"missing":[{"item":"openshell cli","detail":"openshell: OpenShell 0.1.3 runs no DefenseClaw sandbox: upgrade OpenShell to 0.1.5 in place","fix":"upgrade OpenShell to 0.1.5"}]}`), &fromRecord); err != nil {
+		t.Fatal(err)
+	}
+	why := sandboxPrerequisiteWhy(cfg, "linux", "docker", fromRecord, true)
+	if !strings.Contains(why, "OpenShell 0.1.3") || !strings.Contains(why, "upgrade OpenShell to 0.1.5") || strings.Contains(why, "not installed") {
+		t.Fatalf("installed unsupported OpenShell: %q", why)
+	}
+	if code := sandboxUnavailable(why).Code; code != "prerequisite_missing" {
+		t.Fatalf("installed unsupported OpenShell reason code = %q", code)
+	}
+	if got := sandboxPrerequisiteWhy(cfg, "linux", "docker", record, true); got != sandboxUnavailableNoOpenShell {
+		t.Fatalf("absent OpenShell = %q", got)
+	}
 }
 
 // TestRequireSandboxExemptWindowsAccountForms (GAP-0092): a per-user

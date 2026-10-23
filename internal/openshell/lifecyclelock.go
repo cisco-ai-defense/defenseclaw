@@ -27,21 +27,29 @@ import (
 )
 
 // lifecycleLockFile, in the account's OpenShell configuration directory,
-// keeps DefenseClaw from creating or starting a sandbox on the account's
-// gateway while DefenseClaw restarts or upgrades that gateway: the
-// restart's or the upgrade's check of the sandboxes holds only until one
-// starts, and an upgrade's restart comes minutes after it. A restart or an
-// upgrade holds it exclusively from its check to the healthy gateway after
-// it (LockGatewayLifecycle); a create or a start holds it shared over
+// keeps DefenseClaw from creating, starting, attaching to, stopping or
+// deleting a sandbox on the account's gateway while DefenseClaw restarts,
+// upgrades or rolls back that gateway: the restart's or the upgrade's check
+// of the sandboxes holds only until one starts, and an upgrade's restart
+// comes minutes after it. A restart, an upgrade or a rollback holds it
+// exclusively from its check to the healthy gateway after it
+// (LockGatewayLifecycle); a create or a start holds it shared over
 // OpenShell's call (LockSandboxStart), so a sandbox started before the
-// check is in the list the check reads, and one started after waits. It
-// is advisory, between DefenseClaw processes of the account (the CLI and
-// its sandbox daemon): another OpenShell client is not held back.
+// check is in the list the check reads, and one started after waits; a
+// session's attach and a stop or a delete hold it shared with the
+// sandbox's own gate (LockGatewayShared). It is advisory, between
+// DefenseClaw processes of the account (the CLI and its sandbox daemon):
+// another OpenShell client, a raw `openshell sandbox start` for one, is not
+// held back, which is why every restart checks OpenShell's own account of
+// the sandboxes last, right before it, and why a raw start during a
+// DefenseClaw rollback is unsupported.
 const lifecycleLockFile = ".defenseclaw-lifecycle.lock"
 
-// ErrGatewayBusy refuses a create or a start while DefenseClaw restarts or
-// upgrades the OpenShell gateway, and a restart or an upgrade while
-// another is under way or a create or a start does not end in time.
+// ErrGatewayBusy refuses a create or a start while DefenseClaw restarts,
+// upgrades or rolls back the OpenShell gateway, an attach, a stop or a
+// delete that waited for one past lifecycleLockWait, and a restart, an
+// upgrade or a rollback while another is under way or a create, a start,
+// an attach, a stop or a delete does not end in time.
 var ErrGatewayBusy = errors.New("openshell: DefenseClaw is restarting or upgrading the OpenShell gateway")
 
 // lifecycleLockWait bounds how long a restart or an upgrade waits for the
@@ -95,7 +103,7 @@ func LockGatewayLifecycle(ctx context.Context, dir string) (unlock func(), err e
 			return u, lerr
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("%w: another restart or upgrade, or a sandbox create or start, held it for %s; try again once it is done", ErrGatewayBusy, lifecycleLockWait)
+			return nil, fmt.Errorf("%w: another restart, upgrade or rollback, or a sandbox create, start, attach, stop or delete, held it for %s; try again once it is done", ErrGatewayBusy, lifecycleLockWait)
 		}
 		t := time.NewTimer(lifecycleLockPoll)
 		select {
@@ -127,34 +135,38 @@ func LockSandboxStart(dir string) (unlock func(), err error) {
 	return unlock, err
 }
 
-// WaitGatewayLifecycle gates every DefenseClaw sandbox command at entry.
-// A rollback holds the lifecycle lock exclusively through its final
-// stopped check and restart; commands wait for it to finish before reading
-// or changing sandbox state. Create and start also hold their shared lock
-// across the OpenShell call (LockSandboxStart).
-func WaitGatewayLifecycle(ctx context.Context, dir string) error {
+// LockGatewayShared takes the lifecycle lock of the OpenShell
+// configuration directory dir ("" is UserConfigDir) shared, waiting up to
+// lifecycleLockWait for a restart, an upgrade or a rollback that holds it
+// (ErrGatewayBusy after it, the end of ctx before it). DefenseClaw's
+// sandbox commands hold it while they attach a session to a sandbox and
+// while they stop or delete one (sandboxcli's per-sandbox gate), so a
+// gateway restart, which holds it exclusively from its last check of the
+// sandboxes to the healthy gateway, is the exclusive lock of every sandbox
+// of the account. unlock releases it. A directory that does not exist
+// holds no lock (lifecycleLockPath).
+func LockGatewayShared(ctx context.Context, dir string) (unlock func(), err error) {
 	path, err := lifecycleLockPath(dir, false)
-	if err != nil || path == "" {
-		return err
+	if err != nil {
+		return nil, err
+	}
+	if path == "" {
+		return func() {}, nil
 	}
 	deadline := time.Now().Add(lifecycleLockWait)
 	for {
-		unlock, lockErr := tryLockFile(path, false)
-		if lockErr == nil {
-			unlock()
-			return nil
-		}
-		if !errors.Is(lockErr, errLockHeld) {
-			return lockErr
+		u, lerr := tryLockFile(path, false)
+		if !errors.Is(lerr, errLockHeld) {
+			return u, lerr
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%w: wait for the gateway rollback to finish, then retry the sandbox command", ErrGatewayBusy)
+			return nil, fmt.Errorf("%w: it held the lifecycle lock for %s; once it is done, retry the sandbox command", ErrGatewayBusy, lifecycleLockWait)
 		}
 		t := time.NewTimer(lifecycleLockPoll)
 		select {
 		case <-ctx.Done():
 			t.Stop()
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-t.C:
 		}
 	}

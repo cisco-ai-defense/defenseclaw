@@ -34,53 +34,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
-func TestForeignHookRemovalIsDeniedBeforeItsLedgerCommit(t *testing.T) {
-	dataDir := useUserCleanupStateDir(t)
-	previous := cfg
-	t.Cleanup(func() { cfg = previous })
-	cfg = standaloneTestConfig(dataDir)
-	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"cursor": {}}
-	home := t.TempDir()
-	hook := filepath.Join(home, ".cursor", "hooks.json")
-	if err := os.MkdirAll(filepath.Dir(hook), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(hook, []byte("foreign hook"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	token, err := beginEnterpriseForeignHookCleanup(io.Discard, "1000", []string{"cursor"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(hook); err != nil {
-		t.Fatal(err)
-	}
-	ledger := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFile)
-	pending, err := loadEnterpriseForeignHookRemovals(ledger)
-	if err != nil || !slices.ContainsFunc(pending, func(r enterprisepolicy.ForeignHookRemoval) bool { return r.Path == token && r.Connector == "cursor" }) {
-		t.Fatalf("removal visible without a pending denial: %+v (%v)", pending, err)
-	}
-	if err := recordEnterpriseForeignHookRemovals(io.Discard, "1000", home, "cursor", []string{hook}); err != nil {
-		t.Fatal(err)
-	}
-	if err := finishEnterpriseForeignHookCleanup(io.Discard, token, false); err != nil {
-		t.Fatal(err)
-	}
-	committed, err := loadEnterpriseForeignHookRemovals(ledger)
-	if err != nil || slices.ContainsFunc(committed, func(r enterprisepolicy.ForeignHookRemoval) bool { return r.Path == token }) ||
-		!slices.ContainsFunc(committed, func(r enterprisepolicy.ForeignHookRemoval) bool { return r.Path == hook && r.Connector == "cursor" }) {
-		t.Fatalf("cleanup did not commit the exact removal: %+v (%v)", committed, err)
-	}
-}
-
-func TestForeignHookCleanupRefusesUnboundAccount(t *testing.T) {
-	dataDir := useUserCleanupStateDir(t)
-	previous := cfg
-	t.Cleanup(func() { cfg = previous })
-	cfg = standaloneTestConfig(dataDir)
-	if _, err := beginEnterpriseForeignHookCleanup(io.Discard, "unverified-account", []string{"cursor"}); err == nil {
-		t.Fatal("cleanup can remove hooks without a denial bound to a verified account")
-	}
+// useStandaloneForeignHookFenceFixture gives the standalone cfg the test set
+// a guardian whose removal commits work in temporary folders
+// (useForeignHookRemovalRecords).
+func useStandaloneForeignHookFenceFixture(t *testing.T) {
+	t.Helper()
+	useForeignHookRemovalRecords(t)
 }
 
 func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
@@ -99,7 +58,7 @@ func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
 			HookBinary: "/opt/defenseclaw/bin/defenseclaw-hook",
 			Policy:     enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RouteMachinePolicy, ForeignHooks: config.ForeignHooksRemove, Guard: true},
 		}},
-	}, time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC))
+	}, time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC), nil)
 	report := reports["cursor"]
 	if report.Error != "" || len(report.Removed) != 1 || report.BackupDir == "" {
 		t.Fatalf("cleanup report %+v", report)
@@ -181,6 +140,7 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 			}},
 		},
 	}
+	useStandaloneForeignHookFenceFixture(t)
 	enterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
 	accounts := []enterprisehooks.UnixEligibleAccount{{User: "alice", UID: 4242, GID: 4242, Home: "/home/alice", HomeInode: 7}}
 	var loadedFrom string
@@ -200,11 +160,8 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 			t.Errorf("worker spawned for %+v", account)
 		}
 		requests = append(requests, request)
-		if !request.ForeignCleanup[0].Plan {
-			// The second worker cleans the file the first one planned.
-			return enterpriseHookWorkerResponse{Cleanup: map[string]enterpriseHookWorkerCleanupReport{
-				"cursor": {Removed: request.ForeignCleanup[0].Files, BackupDir: "/home/alice/.defenseclaw/foreign-hooks-backup/cursor/x"},
-			}}, nil
+		if request.cleanupFence == nil {
+			t.Error("the worker's cleanup must commit its removals through the guardian")
 		}
 		var targets []enterpriseHookWorkerTargetResult
 		for _, target := range request.Targets {
@@ -213,7 +170,7 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 		return enterpriseHookWorkerResponse{
 			Targets: targets,
 			Cleanup: map[string]enterpriseHookWorkerCleanupReport{
-				"cursor": {Planned: []string{"/home/alice/.cursor/hooks.json"}},
+				"cursor": {Removed: []string{"/home/alice/.cursor/hooks.json"}, BackupDir: "/home/alice/.defenseclaw/foreign-hooks-backup/cursor/x"},
 			},
 			Blocks: []enterprisepolicy.BlockSummary{{
 				BlockRecord: enterprisepolicy.BlockRecord{Time: "2026-09-26T11:59:00Z", Connector: "cursor", Event: "preToolUse", Scope: "project", Path: "/home/alice/repo/.cursor/hooks.json\nforged line", Digest: "ab"},
@@ -232,9 +189,9 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 	if loadedFrom != "/etc/defenseclaw/hook-guardian/"+enterprisehooks.UnixEligibleAccountsFileName {
 		t.Fatalf("eligible accounts loaded from %s", loadedFrom)
 	}
-	if len(requests) != 2 || requests[0].Operation != enterpriseHookWorkerOpForeignCleanup || requests[1].Operation != enterpriseHookWorkerOpForeignCleanup ||
-		len(requests[1].Targets) != 0 || len(requests[1].ForeignCleanup) != 1 ||
-		!slices.Equal(requests[1].ForeignCleanup[0].Files, []string{"/home/alice/.cursor/hooks.json"}) {
+	// One worker per account: it removes and commits each removal through
+	// its session; what no commit recorded is recorded once it ends.
+	if len(requests) != 1 || requests[0].Operation != enterpriseHookWorkerOpForeignCleanup || len(requests[0].ForeignCleanup) != 1 {
 		t.Fatalf("worker requests %+v", requests)
 	}
 	ledger, err := loadEnterpriseForeignHookRemovals(filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFile))
@@ -277,12 +234,12 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 
 	// Within the interval nothing runs again; a new account does.
 	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(time.Minute), enterprisehooks.Manifest{}, perUser, "")
-	if len(requests) != 2 {
+	if len(requests) != 1 {
 		t.Fatal("cleanup must be throttled")
 	}
 	accounts = append(accounts, enterprisehooks.UnixEligibleAccount{User: "bob", UID: 4242, GID: 4242, Home: "/home/alice", HomeInode: 7})
 	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(2*time.Minute), enterprisehooks.Manifest{}, perUser, "")
-	if len(requests) != 6 {
+	if len(requests) != 3 {
 		t.Fatalf("a changed account list must run at once, got %d requests", len(requests))
 	}
 }
@@ -501,6 +458,7 @@ func TestStandaloneForeignCleanupRewritesADeletedCopilotLocalHookFileAtOnce(t *t
 			MachinePolicy: config.EnterpriseMachinePolicyConfig{Connectors: map[string]config.EnterpriseConnectorPolicy{"copilot": {}}},
 		},
 	}
+	useStandaloneForeignHookFenceFixture(t)
 	home := t.TempDir()
 	enterpriseHookLoadEligibleAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) {
 		return []enterprisehooks.UnixEligibleAccount{{User: "alice", UID: 4242, GID: 4242, Home: home}}, nil
@@ -561,13 +519,19 @@ func TestStandaloneForeignCleanupRemovesVSCodeHooksOfAccountsNoLongerEligible(t 
 			MachinePolicy: config.EnterpriseMachinePolicyConfig{Connectors: map[string]config.EnterpriseConnectorPolicy{"cursor": {}}},
 		},
 	}
+	useStandaloneForeignHookFenceFixture(t)
 	enterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
 	// The record lives in the guardian's authorization directory: the
 	// guardian service cannot write the manifest folder (ReadOnlyPaths=
 	// /etc/defenseclaw), so a record next to the manifest was never written.
-	cfg.DataDir = "/var/lib/defenseclaw"
-	t.Setenv(managed.HookGuardianAuthorizationDirEnv, "/var/lib/defenseclaw-hook-guardian")
-	recordPath := "/var/lib/defenseclaw-hook-guardian/" + enterprisehooks.UnixCopilotVSCodeAccountsFileName
+	stateRoot := t.TempDir()
+	cfg.DataDir = filepath.Join(stateRoot, "var", "lib", "defenseclaw")
+	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	guardianRoot := filepath.Join(stateRoot, "var", "lib", "defenseclaw-hook-guardian")
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianRoot)
+	recordPath := filepath.Join(guardianRoot, enterprisehooks.UnixCopilotVSCodeAccountsFileName)
 	alice := enterprisehooks.UnixEligibleAccount{User: "alice", UID: 4242, GID: 4242, Home: "/home/alice", HomeInode: 7}
 	// dave got the VS Code Local files while eligible, then was excluded.
 	dave := enterprisehooks.UnixEligibleAccount{User: "dave", UID: 4343, GID: 4343, Home: "/home/dave", HomeInode: 7,
@@ -688,6 +652,7 @@ func TestStandaloneCopilotVSCodeWritesOnlyToEnrolledAccounts(t *testing.T) {
 			cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"copilot": {}}
 			cfg.Enterprise.Enrollment.UnenrolledUsers = tc.unenrolled
 			cfg.Enterprise.Enrollment.ExcludeUsers = []string{"4202"}
+			useStandaloneForeignHookFenceFixture(t)
 			enterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
 			accounts := []enterprisehooks.UnixEligibleAccount{
 				{User: "alice", UID: 4201, GID: 4201, Home: "/home/alice", HomeInode: 7},

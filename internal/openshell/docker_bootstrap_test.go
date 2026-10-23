@@ -152,8 +152,8 @@ func TestMigrateDockerBootstrapInTheStateFolder(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(stateHome, "openshell", "docker-sandbox-tokens", "default", "another-sandbox"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	moved, err := openshell.MigrateDockerBootstrap(stateHome, id)
-	if err != nil || len(moved) != 2 {
+	moved, kept, err := openshell.MigrateDockerBootstrap(stateHome, id)
+	if err != nil || !kept || len(moved) != 2 {
 		t.Fatalf("moved %v, %v", moved, err)
 	}
 	for _, name := range dockerBootstrapFiles {
@@ -172,13 +172,13 @@ func TestMigrateDockerBootstrapInTheStateFolder(t *testing.T) {
 	if entries, _ := os.ReadDir(dir); len(entries) != len(dockerBootstrapFiles) {
 		t.Fatalf("left in the folder: %v", entries)
 	}
-	if moved, err := openshell.MigrateDockerBootstrap(stateHome, id); err != nil || len(moved) != 0 {
+	if moved, kept, err := openshell.MigrateDockerBootstrap(stateHome, id); err != nil || !kept || len(moved) != 0 {
 		t.Fatalf("second pass moved %v, %v", moved, err)
 	}
-	if moved, err := openshell.MigrateDockerBootstrap(stateHome, "no-such-sandbox"); err != nil || len(moved) != 0 {
+	if moved, kept, err := openshell.MigrateDockerBootstrap(stateHome, "no-such-sandbox"); err != nil || kept || len(moved) != 0 {
 		t.Fatalf("a sandbox with no folder: %v, %v", moved, err)
 	}
-	if moved, err := openshell.MigrateDockerBootstrap(t.TempDir(), id); err != nil || len(moved) != 0 {
+	if moved, kept, err := openshell.MigrateDockerBootstrap(t.TempDir(), id); err != nil || kept || len(moved) != 0 {
 		t.Fatalf("a state folder the docker driver never used: %v, %v", moved, err)
 	}
 }
@@ -221,7 +221,7 @@ func TestABootstrapThatCannotBeMovedIsLeftAsItWas(t *testing.T) {
 			if err := os.WriteFile(path, data, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := openshell.MigrateDockerBootstrap(stateHome, id); !errors.Is(err, openshell.ErrDockerBootstrap) {
+			if _, _, err := openshell.MigrateDockerBootstrap(stateHome, id); !errors.Is(err, openshell.ErrDockerBootstrap) {
 				t.Fatalf("err = %v", err)
 			}
 			if got, _ := os.ReadFile(path); string(got) != string(data) {
@@ -243,7 +243,7 @@ func TestABootstrapThatCannotBeMovedIsLeftAsItWas(t *testing.T) {
 			if err := os.Symlink(target, path); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := openshell.MigrateDockerBootstrap(stateHome, id); !errors.Is(err, openshell.ErrDockerBootstrap) {
+			if _, _, err := openshell.MigrateDockerBootstrap(stateHome, id); !errors.Is(err, openshell.ErrDockerBootstrap) {
 				t.Fatalf("err = %v", err)
 			}
 			if got, _ := os.ReadFile(target); string(got) != string(readBootstrap(t, "0.1.3", "boundary-bootstrap.json")) {
@@ -252,8 +252,45 @@ func TestABootstrapThatCannotBeMovedIsLeftAsItWas(t *testing.T) {
 		})
 	}
 	for _, bad := range []struct{ home, id string }{{"relative", id}, {t.TempDir(), "../x"}, {t.TempDir(), ""}, {t.TempDir(), ".."}} {
-		if _, err := openshell.MigrateDockerBootstrap(bad.home, bad.id); !errors.Is(err, openshell.ErrDockerBootstrap) {
+		if _, _, err := openshell.MigrateDockerBootstrap(bad.home, bad.id); !errors.Is(err, openshell.ErrDockerBootstrap) {
 			t.Errorf("MigrateDockerBootstrap(%q, %q) = %v", bad.home, bad.id, err)
 		}
+	}
+}
+
+// TestAStateFolderThatCannotBeListedIsNotTheSandboxsBootstrap: a
+// docker-sandbox-tokens folder, or a namespace of it, that cannot be read
+// says nothing about the sandbox's bootstrap: ErrDockerStateUnreadable,
+// not ErrDockerBootstrap, when the sandbox is in no namespace that could
+// be, and the sandbox's files move when another namespace keeps them.
+func TestAStateFolderThatCannotBeListedIsNotTheSandboxsBootstrap(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs folder modes that deny their owner")
+	}
+	const id = "173db0f1-f401-4104-b94b-aaec75789fc3"
+	lock := func(t *testing.T, dir string, mode os.FileMode) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, mode); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	}
+	stateHome := t.TempDir()
+	lock(t, filepath.Join(stateHome, "openshell", "docker-sandbox-tokens"), 0)
+	moved, kept, err := openshell.MigrateDockerBootstrap(stateHome, id)
+	if !errors.Is(err, openshell.ErrDockerStateUnreadable) || errors.Is(err, openshell.ErrDockerBootstrap) || kept || len(moved) != 0 {
+		t.Fatalf("a tokens folder that cannot be listed: %v, %v, %v", moved, kept, err)
+	}
+
+	stateHome, _ = stageBootstrap(t, "defenseclaw-u1000", id)
+	lock(t, filepath.Join(stateHome, "openshell", "docker-sandbox-tokens", "default"), 0o600)
+	if moved, kept, err := openshell.MigrateDockerBootstrap(stateHome, id); err != nil || !kept || len(moved) != 2 {
+		t.Fatalf("a namespace that cannot be searched, the sandbox in another: %v, %v, %v", moved, kept, err)
+	}
+	if moved, kept, err := openshell.MigrateDockerBootstrap(stateHome, "no-such-sandbox"); !errors.Is(err, openshell.ErrDockerStateUnreadable) || kept || len(moved) != 0 {
+		t.Fatalf("a sandbox in no namespace that could be searched: %v, %v, %v", moved, kept, err)
 	}
 }

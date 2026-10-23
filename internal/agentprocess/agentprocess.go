@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Process is one process-table entry.
@@ -122,83 +123,37 @@ func StartedBefore(identity, mark string) bool {
 	return startErr == nil && clockErr == nil && start <= clock
 }
 
-// Self returns the identity of this process, or "" when it cannot be read.
-func Self() string {
-	lookup, done := newLookup()
-	defer done()
-	return selfFrom(lookup, os.Getpid())
+// CompareMarks orders two Now values of one host: -1, 0 or +1 as a is
+// earlier than, the same as or later than b. ok is false when they cannot
+// be compared: they name another OS or boot, or one does not parse.
+func CompareMarks(a, b string) (order int, ok bool) {
+	x, y := strings.Split(a, ":"), strings.Split(b, ":")
+	if len(x) != 3 || len(y) != 3 || x[0] != y[0] || x[1] != y[1] {
+		return 0, false
+	}
+	first, firstErr := strconv.ParseInt(x[2], 10, 64)
+	second, secondErr := strconv.ParseInt(y[2], 10, 64)
+	if firstErr != nil || secondErr != nil {
+		return 0, false
+	}
+	switch {
+	case first < second:
+		return -1, true
+	case first > second:
+		return 1, true
+	}
+	return 0, true
 }
 
-func selfFrom(lookup func(int) (Process, error), self int) string {
-	process, err := lookup(self)
-	if err != nil {
+// NowAfter is Now moved d ahead: a mark that also covers agent processes
+// that start within d from now (the hook guardian records a removal with it
+// before the file changes, GAP-0381). "" when the clock cannot be read.
+func NowAfter(d time.Duration) string {
+	boot, clock, ok := currentClock()
+	if !ok || clockUnitsPerSecond <= 0 {
 		return ""
 	}
-	return process.identity()
-}
-
-// Ended reports whether the process an identity names has provably ended:
-// it is of another boot or operating system, no process has its ID, the
-// process with its ID started at another time, or it has exited. An
-// identity that does not parse, or a lookup that fails otherwise, is not
-// known to have ended.
-func Ended(identity string) bool {
-	lookup, done := newLookup()
-	defer done()
-	return endedFrom(lookup, currentBoot(), identity)
-}
-
-func endedFrom(lookup func(int) (Process, error), boot, identity string) bool {
-	parts := strings.Split(identity, ":")
-	if len(parts) != 4 {
-		return false
-	}
-	pid, pidErr := strconv.Atoi(parts[2])
-	if _, startErr := strconv.ParseInt(parts[3], 10, 64); pidErr != nil || startErr != nil || pid <= 0 {
-		return false
-	}
-	if parts[0] != runtime.GOOS {
-		return true
-	}
-	if parts[1] != boot {
-		// Only two known boot IDs prove another boot.
-		return parts[1] != "" && boot != ""
-	}
-	process, err := lookup(pid)
-	if errors.Is(err, errNotFound) {
-		return true
-	}
-	if err != nil {
-		return false
-	}
-	return process.Exited || process.identity() != identity
-}
-
-// Decidable reports whether Ended can tell, once the process identity
-// names has ended, that it has: identity parses and names a process of this
-// operating system and of this boot. An identity read while the Linux boot
-// ID was unknown never reads as ended after a reboot, and "" (Self failed)
-// names no process at all.
-func Decidable(identity string) bool {
-	boot, _, ok := currentClock()
-	return ok && decidableFrom(boot, identity)
-}
-
-func decidableFrom(boot, identity string) bool {
-	parts := strings.Split(identity, ":")
-	if len(parts) != 4 || parts[0] != runtime.GOOS || parts[1] != boot {
-		return false
-	}
-	pid, pidErr := strconv.Atoi(parts[2])
-	_, startErr := strconv.ParseInt(parts[3], 10, 64)
-	return pidErr == nil && startErr == nil && pid > 0
-}
-
-// currentBoot is the boot an identity of this boot names ("" when unknown,
-// and always outside Linux).
-func currentBoot() string {
-	boot, _, _ := currentClock()
-	return boot
+	return fmt.Sprintf("%s:%s:%d", runtime.GOOS, boot, clock+int64(d.Seconds()*float64(clockUnitsPerSecond))+1)
 }
 
 // Identity returns the identity of the agent process that runs this

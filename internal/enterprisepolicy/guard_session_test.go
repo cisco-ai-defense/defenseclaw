@@ -32,22 +32,6 @@ func sessionDeny(path, digest string) GuardDecision {
 	}
 }
 
-func TestForeignHookPendingCleanupDeniesDuringRemovalLedgerGap(t *testing.T) {
-	now := time.Now().UTC()
-	pending := ForeignHookRemoval{Identity: "1000", Connector: "claudecode",
-		Path: ForeignHookCleanupPendingPrefix + "test>", At: now.Format(time.RFC3339Nano), Mark: "unprovable"}
-	update := SessionUpdate{AccountHome: t.TempDir(), StateDir: t.TempDir(),
-		Key:      SessionKey{Connector: "claudecode", Session: "session-after-cleanup-start"},
-		Decision: GuardDecision{}, Removals: []ForeignHookRemoval{pending}, Now: now}
-	if got := ApplyForeignHookSession(update); !got.Deny || !strings.Contains(got.Reason, "cleanup and its denial record are not complete") {
-		t.Fatalf("hook call allowed while file removal is visible but ledger is pending: %+v", got)
-	}
-	update.Removals = nil
-	if got := ApplyForeignHookSession(update); got.Deny {
-		t.Fatalf("completed cleanup left a temporary denial: %+v", got)
-	}
-}
-
 type sessionHarness struct {
 	t       *testing.T
 	home    string

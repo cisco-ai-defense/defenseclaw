@@ -894,7 +894,12 @@ harness to your terminal, or a login shell in the project folder with
   own print flag after `--`), which runs one prompt headless.
 - **Stopping.** A session stops the sandbox at its end only when it started
   it. It leaves a sandbox running whose detached run is still going, or that
-  another session is attached to.
+  another session is attached to. The count of attached sessions and the
+  stop (or `--rm` delete) happen under one lock that every attach also
+  takes, so a session that attaches meanwhile is never stopped under its
+  harness: it waits, finds the sandbox stopped, and says to run
+  `connect NAME` again. A count DefenseClaw cannot make keeps the sandbox
+  running.
 - **Shared sandboxes.** Two sessions can share a sandbox (a second `claude`
   in the folder offers to resume it). Neither one's end stops it, undoes the
   folder or deletes it (`--rm`) under the other, and the one that ends first
@@ -1039,7 +1044,9 @@ Stops a sandbox. It is kept, so `start` or `connect` can resume it. When a
 detached run is still going, or a session runs in it from another terminal
 (a harness session, or `connect --shell`), `stop` names it and asks first on
 a terminal (`--yes` skips the question; without a terminal it warns), and
-`delete` names such a session in its question. The stop marks the run
+`delete` names such a session in its question. A session that attaches
+after the question is named and asked about again before the stop or the
+delete. The stop marks the run
 interrupted and keeps its log for `sandbox logs`, as every stop does.
 
 For a copy-mode sandbox that no detached run and no other session is using,

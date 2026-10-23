@@ -20,6 +20,26 @@ These problems appear while a sandbox runs or when you pull its work back.
 
 **Check:** the run starts.
 
+## A connect says the sandbox was stopped while it attached
+
+**You see:** `NAME is stopped now: it was stopped while this session attached (another terminal's session ended, or a stop ran) → start it again: defenseclaw sandbox connect NAME`.
+
+**Cause:** another terminal's session ended, or `defenseclaw sandbox stop NAME` ran, and decided to stop the sandbox just before this connect recorded its session. DefenseClaw orders every attach with every stop and delete of a sandbox, so a stop never ends a session that attached before it. A session that comes second finds the sandbox stopped and does not start in it.
+
+**Fix:** run `defenseclaw sandbox connect NAME` again. It starts the sandbox and attaches.
+
+**Check:** the harness starts, and `defenseclaw sandbox status NAME` shows it ready.
+
+## A sandbox keeps running: DefenseClaw cannot confirm the other sessions
+
+**You see:** ``cannot confirm whether another session uses NAME: ...; run `defenseclaw sandbox status NAME` before retrying``, or `NAME keeps running: cannot confirm whether another session uses NAME`.
+
+**Cause:** DefenseClaw could not count the sessions attached to the sandbox, or another DefenseClaw command held the sandbox for more than two minutes. An uncertain count is not zero sessions, so the session's end, `stop`, `delete` and `pull` leave the sandbox running.
+
+**Fix:** run `defenseclaw sandbox status NAME`, end the sessions you no longer need, then run `defenseclaw sandbox stop NAME`.
+
+**Check:** `defenseclaw sandbox list` shows it stopped.
+
 ## Every tool call is blocked
 
 **You see:** ``[defenseclaw] ⚠ DefenseClaw hooks are not reaching the daemon; every tool call is being blocked (<reason>). Run: defenseclaw sandbox doctor``, or ``⚠ the DefenseClaw daemon is not reachable, so the hooks fail closed``.

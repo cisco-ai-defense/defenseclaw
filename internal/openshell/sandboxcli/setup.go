@@ -515,7 +515,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 					a.warn("could not record the gateway change for teardown: " + rerr.Error())
 				}
 				if err != nil {
-					return fmt.Errorf("change the gateway configuration: %w", err)
+					return fmt.Errorf("change the gateway configuration: %w", retryAfterStop(err))
 				}
 				switched = switching
 				if microVM {
@@ -544,7 +544,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 				break
 			}
 			if err := a.Gateway.Restart(ctx); err != nil {
-				return fmt.Errorf("restart the OpenShell gateway: %w", err)
+				return fmt.Errorf("restart the OpenShell gateway: %w", retryAfterStop(err))
 			}
 			switched = true
 			a.ok("gateway restarted: it runs sandboxes in OpenShell MicroVMs")
@@ -1035,6 +1035,16 @@ func homebrewPrefixHint(err error) string {
 // stop each. microVM is a restart on the MicroVM driver; switching one
 // onto it, after which no sandbox made on the docker driver can start, so
 // any sandbox on the gateway, running or not, is asked about.
+// retryAfterStop names the command to retry after a gateway restart that
+// OpenShell's own account of a sandbox refused (openshell.ErrUnflushed,
+// which names the stop of each one): setup, run again the same way.
+func retryAfterStop(err error) error {
+	if errors.Is(err, openshell.ErrUnflushed) {
+		return fmt.Errorf("%w; after stopping it, rerun `%s setup` with the same flags", err, CommandName)
+	}
+	return err
+}
+
 func (a *App) consentGatewayRestart(ctx context.Context, o SetupOptions, assume, microVM, switching bool) (bool, error) {
 	if o.RestartGateway {
 		return true, nil

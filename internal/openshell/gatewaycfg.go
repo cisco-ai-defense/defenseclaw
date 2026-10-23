@@ -1628,22 +1628,62 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 	if err != nil {
 		return err
 	}
+	pending := g.pendingMark()
 	if err := g.markRestartPending(); err != nil {
 		return err
 	}
 	if err := g.restore(ctx, res); err != nil {
 		return err
 	}
-	// Raw openshell clients do not hold DefenseClaw's lifecycle lock. Check
-	// again after file and unit work, immediately before the restart.
+	// The final check, under the lifecycle lock, after the file and unit
+	// work and right before the restart. DefenseClaw starts and attaches
+	// nothing meanwhile (every DefenseClaw path holds this lock shared), but
+	// a raw `openshell` client takes no DefenseClaw lock: one that started a
+	// sandbox since the first check aborts the rollback here, with the
+	// gateway left on the files it runs and the restart mark as it was. One
+	// that starts a sandbox after this check cannot be fenced from here,
+	// which is why a raw start during a rollback is unsupported.
 	if err := g.CheckStopped(ctx); err != nil {
 		if restoreErr := g.restoreGatewayFiles(ctx, activeFiles, res); restoreErr != nil {
 			return fmt.Errorf("%w; restoring the active gateway files after the refused rollback failed: %v", err, restoreErr)
 		}
-		g.clearRestartPending()
-		return fmt.Errorf("%w (the active gateway files were kept and the gateway was not restarted)", err)
+		pending.putBack(g)
+		return fmt.Errorf("%w (the rollback was aborted: the active gateway files were kept and the gateway was not restarted)", err)
 	}
 	return g.restart(ctx)
+}
+
+// restartMark is the pending-restart mark as it was before a rollback
+// wrote its own (pendingMark): a rollback that aborts puts it back, so a
+// restart that was pending before it stays pending, and one that was not
+// is not reported.
+// One that could not be read stays marked: doctor then reports a restart
+// pending rather than none.
+type restartMark struct {
+	data    []byte
+	exists  bool
+	unknown bool
+}
+
+func (g *GatewayConfigurator) pendingMark() restartMark {
+	data, err := safefile.ReadRegularFileBounded(g.restartPendingPath(), 4<<10)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return restartMark{}
+	case err != nil:
+		return restartMark{unknown: true}
+	}
+	return restartMark{data: data, exists: true}
+}
+
+func (m restartMark) putBack(g *GatewayConfigurator) {
+	switch {
+	case m.unknown:
+	case !m.exists:
+		g.clearRestartPending()
+	default:
+		_ = safefile.Write(g.restartPendingPath(), m.data)
+	}
 }
 
 // noUserManager reports a `systemctl --user` failure that means this

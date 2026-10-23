@@ -726,7 +726,8 @@ func (m *Manager) migrateBootstrap(gw *Gateway, name string, sb *openshell.Sandb
 // legacyBootstrapRefusal is the failed start of the sandbox name whose
 // Docker bootstrap OpenShell release could not read because an OpenShell
 // before 0.1.5 wrote it (one migrateBootstrap did not find: the gateway
-// keeps its state in another folder); nil for another error.
+// keeps its state in another folder, or one it could not list); nil for
+// another error.
 func legacyBootstrapRefusal(name, release string, err error) error {
 	if err == nil || !strings.Contains(err.Error(), "unknown field `outer_fence`") {
 		return nil

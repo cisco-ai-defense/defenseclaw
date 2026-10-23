@@ -167,6 +167,11 @@ type App struct {
 	DockerEngine func(ctx context.Context) (string, error)
 	// Sleep waits between polls (tests make it instant).
 	Sleep func(context.Context, time.Duration) error
+	// LifecycleDir is the OpenShell configuration directory whose gateway
+	// lifecycle lock an attach, a stop and a delete hold shared, and a
+	// gateway restart or rollback exclusively ("" is
+	// openshell.UserConfigDir; openshell.LockGatewayShared).
+	LifecycleDir string
 	// HookWindow is how long a harness session may run before its first
 	// authenticated hook is overdue and the run warns that the hooks do
 	// not reach DefenseClaw (DefaultHookWindow).

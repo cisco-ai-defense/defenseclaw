@@ -114,6 +114,12 @@ func sandboxHelp(cmd *cobra.Command, args []string) {
 	rootCmd.HelpFunc()(cmd, args)
 }
 
+const managedSandboxDoctorLong = `Checks that your account can run sandboxes under the policy your organization set
+for you: the platform, sandbox service, OpenShell CLI and compute driver, harness
+images, shell wrappers and organization policy. Exits 1 when a check fails,
+with --output json too and with --json (both print ok=false). Your
+organization sets up and repairs sandboxes; if a check fails, ask your administrator.`
+
 func applyManagedSandboxHelp() {
 	sandboxCmd.Long = launcherSandboxLong
 	for _, cmd := range sandboxCmd.Commands() {
@@ -129,11 +135,7 @@ func applyManagedSandboxHelp() {
 				}
 			})
 		case "doctor":
-			cmd.Long = `Checks that your account can run sandboxes under the policy your organization set
-for you: the platform, sandbox service, OpenShell CLI and compute driver, harness
-images, shell wrappers and organization policy. Exits 1 when a check fails, with
---output json too (the JSON "ok" is false then). Your
-organization sets up and repairs sandboxes; if a check fails, ask your administrator.`
+			cmd.Long = managedSandboxDoctorLong
 		case "run":
 			cmd.Long = launcherRunLong
 			hide = []string{"context", "no-snapshot"}
@@ -269,13 +271,7 @@ func sandboxHostRefusal(goos, goarch string, cleanup bool) error {
 func sandboxRunE(fn func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, args []string) error) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		app := newSandboxApp(cmd)
-		var err error
-		if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
-			err = openshell.WaitGatewayLifecycle(cmd.Context(), "")
-		}
-		if err == nil {
-			err = fn(cmd.Context(), app, cmd, args)
-		}
+		err := fn(cmd.Context(), app, cmd, args)
 		if err == nil {
 			return nil
 		}
@@ -455,7 +451,7 @@ func newSandboxDoctorCmd() *cobra.Command {
 version and compute driver (on a Mac, the MicroVM driver: e2fsprogs, its signature,
 the sandbox identity and resources), bind mounts, telemetry, ports, the DefenseClaw
 daemon, harness images, shell wrappers and the organization policy. Exits 1 when a
-check fails, with --output json too (the JSON "ok" is false then).`,
+check fails, with --output json too and with --json (both print ok=false).`,
 		Args: cobra.NoArgs,
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())

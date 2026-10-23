@@ -579,6 +579,8 @@ func TestGatewayRestartsHoldTheLifecycleLock(t *testing.T) {
 	if err := f.cfg.Rollback(context.Background(), res); err != nil {
 		t.Fatal(err)
 	}
+	// Rollback checks again after it restores the files (GAP-0347), still
+	// under the lock.
 	held("Rollback", 3)
 	f.flush = fmt.Errorf("%w (dc-a: ready)", openshell.ErrUnflushed)
 	if err := f.cfg.Restart(context.Background()); !errors.Is(err, openshell.ErrUnflushed) {

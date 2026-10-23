@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -29,40 +28,6 @@ type CleanupResult struct {
 	Reported   []Finding `json:"reported"`
 	BackupDir  string    `json:"backup_dir,omitempty"`
 	FilesTouch []string  `json:"files_touched,omitempty"`
-	// Planned are the files a planning cleanup (CleanupScope.Plan) would
-	// edit.
-	Planned []string `json:"planned,omitempty"`
-}
-
-// CleanupScope limits what a cleanup edits. The guardian plans a cleanup
-// first, publishes a pending denial for the connectors whose agents may
-// load the planned files, and then cleans only those files: a pass that
-// finds nothing to remove denies nothing, and an unapproved entry that
-// appears in another file after the plan waits for the next pass.
-type CleanupScope struct {
-	// Plan edits nothing and lists in CleanupResult.Planned each file the
-	// cleanup would edit.
-	Plan bool
-	// Files, unless nil, are the only files the cleanup edits; an
-	// unapproved entry in any other file is reported and left.
-	Files []string
-}
-
-// edits reports whether the cleanup edits path to remove findings. A plan
-// lists path instead; a file outside Files is reported.
-func (s CleanupScope) edits(path string, findings []Finding, result *CleanupResult) bool {
-	if s.Plan {
-		result.Planned = appendUnique(result.Planned, path)
-		return false
-	}
-	if s.Files == nil || slices.ContainsFunc(s.Files, func(file string) bool { return samePath(filepath.Clean(file), filepath.Clean(path)) }) {
-		return true
-	}
-	for _, finding := range findings {
-		finding.Reason = "found after this pass planned its cleanup, so the next pass removes it: " + finding.Reason
-		result.Reported = append(result.Reported, finding)
-	}
-	return false
 }
 
 // CleanUserForeignHooks removes unapproved foreign hooks and plugins from
@@ -78,7 +43,7 @@ func (s CleanupScope) edits(path string, findings []Finding, result *CleanupResu
 // the hooks mapping is rewritten (as Setup writes it) and every other byte
 // is kept.
 func CleanUserForeignHooks(req GuardRequest, now time.Time) (CleanupResult, error) {
-	return CleanUserForeignHooksWithRedirects(req, nil, CleanupScope{}, now)
+	return CleanUserForeignHooksWithRedirects(req, nil, now)
 }
 
 // CleanUserForeignHooksWithRedirects is CleanUserForeignHooks for the
@@ -88,8 +53,8 @@ func CleanUserForeignHooks(req GuardRequest, now time.Time) (CleanupResult, erro
 // OPENCODE_CONFIG, OPENCODE_CONFIG_DIR, APPDATA, HERMES_HOME or another HOME. A file
 // reached through more than one of them is cleaned once. It runs with the
 // user's credentials, so a recorded location reaches only what the user
-// can write. scope limits what it edits.
-func CleanUserForeignHooksWithRedirects(req GuardRequest, redirects []EnvRedirect, scope CleanupScope, now time.Time) (CleanupResult, error) {
+// can write.
+func CleanUserForeignHooksWithRedirects(req GuardRequest, redirects []EnvRedirect, now time.Time) (CleanupResult, error) {
 	result := CleanupResult{}
 	if !req.Policy.Guard || req.Policy.ForeignHooks != config.ForeignHooksRemove {
 		return result, nil
@@ -106,7 +71,7 @@ func CleanUserForeignHooksWithRedirects(req GuardRequest, redirects []EnvRedirec
 	type sourceKey struct{ path, format string }
 	var visited []sourceKey
 	for _, pass := range passes {
-		errs = append(errs, cleanUserSources(pass, backupDir, scope, func(source hookSource) bool {
+		errs = append(errs, cleanUserSources(pass, backupDir, func(source hookSource) bool {
 			key := sourceKey{filepath.Clean(source.path), source.format}
 			for _, existing := range visited {
 				if existing.format == key.format && samePath(existing.path, key.path) {
@@ -120,9 +85,8 @@ func CleanUserForeignHooksWithRedirects(req GuardRequest, redirects []EnvRedirec
 	return result, errors.Join(errs...)
 }
 
-// cleanUserSources cleans req's user sources that first accepts, within
-// scope.
-func cleanUserSources(req GuardRequest, backupDir string, scope CleanupScope, first func(hookSource) bool, result *CleanupResult) []error {
+// cleanUserSources cleans req's user sources that first accepts.
+func cleanUserSources(req GuardRequest, backupDir string, first func(hookSource) bool, result *CleanupResult) []error {
 	var errs []error
 	scan := newGuardScan(req)
 	for _, source := range guardSources(req) {
@@ -182,11 +146,12 @@ func cleanUserSources(req GuardRequest, backupDir string, scope CleanupScope, fi
 					}
 					continue
 				}
-				if !scope.edits(finding.Path, []Finding{finding}, result) {
-					continue
-				}
-				if err := movePluginAside(finding.Path, backupDir); err != nil {
+				path := finding.Path
+				ran, removeErr, err := req.guardedRemoval([]string{path}, func() error { return movePluginAside(path, backupDir) })
+				if err != nil {
 					errs = append(errs, err)
+				}
+				if !ran || removeErr != nil {
 					result.Reported = append(result.Reported, finding)
 					continue
 				}
@@ -195,7 +160,7 @@ func cleanUserSources(req GuardRequest, backupDir string, scope CleanupScope, fi
 				result.FilesTouch = appendUnique(result.FilesTouch, finding.Path)
 			}
 		case formatHermesYAML:
-			if err := cleanHermesYAMLSource(scan, source, backupDir, scope, result); err != nil {
+			if err := cleanHermesYAMLSource(scan, source, backupDir, result); err != nil {
 				errs = append(errs, err)
 			}
 		case formatFlatDir:
@@ -212,12 +177,12 @@ func cleanUserSources(req GuardRequest, backupDir string, scope CleanupScope, fi
 					continue
 				}
 				child := source.child(filepath.Join(source.path, entry.Name()), formatFlat)
-				if err := cleanJSONSource(scan, child, backupDir, scope, result); err != nil {
+				if err := cleanJSONSource(scan, child, backupDir, result); err != nil {
 					errs = append(errs, err)
 				}
 			}
 		default:
-			if err := cleanJSONSource(scan, source, backupDir, scope, result); err != nil {
+			if err := cleanJSONSource(scan, source, backupDir, result); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -226,7 +191,7 @@ func cleanUserSources(req GuardRequest, backupDir string, scope CleanupScope, fi
 }
 
 // cleanJSONSource rewrites one user JSON file without its foreign entries.
-func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, scope CleanupScope, result *CleanupResult) error {
+func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, result *CleanupResult) error {
 	req := scan.req
 	data, exists, err := scan.readSource(source)
 	if err != nil {
@@ -260,7 +225,7 @@ func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, scope
 		remove[finding.key] = true
 		removed = append(removed, finding)
 	}
-	if len(remove) == 0 || !scope.edits(source.path, removed, result) {
+	if len(remove) == 0 {
 		return nil
 	}
 	doc, err := decodeOrderedObject(data)
@@ -324,20 +289,45 @@ func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, scope
 	if err != nil {
 		return err
 	}
-	if err := backupUserFile(source.path, data, backupDir); err != nil {
-		return err
+	return rewriteUserSource(req, source, data, rendered, removed, backupDir, result)
+}
+
+// rewriteUserSource replaces source's file with rendered, which drops the
+// removed hooks, as one guarded removal (GuardRequest.GuardRemoval), after
+// a backup of the original data.
+func rewriteUserSource(req GuardRequest, source hookSource, data, rendered []byte, removed []Finding, backupDir string, result *CleanupResult) error {
+	backedUp := false
+	ran, removeErr, err := req.guardedRemoval(findingPaths(removed), func() error {
+		if err := backupUserFile(source.path, data, backupDir); err != nil {
+			return err
+		}
+		backedUp = true
+		info, err := os.Lstat(source.path)
+		if err != nil {
+			return err
+		}
+		return rewriteUserFile(source.path, rendered, info.Mode().Perm())
+	})
+	if backedUp {
+		result.BackupDir = backupDir
 	}
-	result.BackupDir = backupDir
-	info, err := os.Lstat(source.path)
-	if err != nil {
-		return err
+	switch {
+	case !ran:
+		result.Reported = append(result.Reported, removed...)
+	case removeErr == nil:
+		result.Removed = append(result.Removed, removed...)
+		result.FilesTouch = appendUnique(result.FilesTouch, source.path)
 	}
-	if err := rewriteUserFile(source.path, rendered, info.Mode().Perm()); err != nil {
-		return err
+	return err
+}
+
+// findingPaths lists the files findings name, each once.
+func findingPaths(findings []Finding) []string {
+	var paths []string
+	for _, finding := range findings {
+		paths = appendUnique(paths, finding.Path)
 	}
-	result.Removed = append(result.Removed, removed...)
-	result.FilesTouch = appendUnique(result.FilesTouch, source.path)
-	return nil
+	return paths
 }
 
 func backupName(path string) string {

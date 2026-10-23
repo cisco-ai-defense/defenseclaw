@@ -1562,6 +1562,17 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         ux.echo(f"  {ux.dim(f'{label} hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
         return
 
+    if (
+        mode == "closed" and not restart and gc.enabled and _tracks_runtime_fail_mode(app.cfg, key)
+        and (runtime_state.desired != "closed" or not runtime_state.current)
+    ):
+        ux.err(f"{label} still has a hook that is not verified closed.", indent="  ")
+        ux.subhead(
+            f"Run: defenseclaw guardrail fail-mode closed --connector {key} --yes",
+            indent="    ",
+        )
+        raise SystemExit(1)
+
     click.echo()
     if mode == configured_mode:
         click.echo(f"  {ux.bold(f'Reconciling {label} hook runtime:')} {ux.accent(mode)}")
@@ -1699,16 +1710,26 @@ def _apply_global_fail_mode_transaction(
                 disabled = frozenset(name for name in transaction_targets if _disabled_on_its_own(gc, name))
                 live_targets = [name for name in transaction_targets if name not in disabled]
                 runtime_targets = [name for name in live_targets if _tracks_runtime_fail_mode(app.cfg, name)]
-                if live_targets and len(runtime_targets) == len(live_targets):
+
+                # A mixed install needs a gateway restart for its other
+                # connectors. Close every mode-aware hook first: an old open
+                # Copilot or Hermes registration otherwise allows calls while
+                # the gateway is between processes.
+                if mode == "closed":
                     for name in runtime_targets:
                         reconcile_connector_registration(app.cfg, name)
+                if live_targets and len(runtime_targets) == len(live_targets):
+                    if mode != "closed":
+                        for name in runtime_targets:
+                            reconcile_connector_registration(app.cfg, name)
                 elif not _gateway_running(app):
                     # GAP-1370: like the --connector form, never start a
                     # gateway the user stopped; it loads the saved value
                     # when it starts.
                     gateway_stopped = True
-                    for name in runtime_targets:
-                        reconcile_connector_registration(app.cfg, name)
+                    if mode != "closed":
+                        for name in runtime_targets:
+                            reconcile_connector_registration(app.cfg, name)
                 else:
                     from defenseclaw.commands import cmd_setup
 
@@ -1968,6 +1989,19 @@ def fail_mode_cmd(
         if not fail_mode_targets and _tracks_runtime_fail_mode(app.cfg, single_connector)
         else None
     )
+    if mode == "closed" and not restart and gc.enabled:
+        unclosed = [
+            name for name in fail_mode_targets
+            if _tracks_runtime_fail_mode(app.cfg, name)
+            and not _disabled_on_its_own(gc, name)
+            and (runtime_states[name].desired != "closed" or not runtime_states[name].current)
+        ]
+        if single_state is not None and (single_state.desired != "closed" or not single_state.current):
+            unclosed.append(single_connector)
+        if unclosed:
+            ux.err("Registered hooks are not verified closed: " + ", ".join(unclosed), indent="  ")
+            ux.subhead("Run: defenseclaw guardrail fail-mode closed --yes", indent="    ")
+            raise SystemExit(1)
     if (
         not fail_mode_targets
         and saved_global == mode

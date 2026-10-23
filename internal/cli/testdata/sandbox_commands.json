@@ -184,7 +184,7 @@
     "path": "sandbox doctor",
     "use": "doctor",
     "short": "Check that this machine can run sandboxes",
-    "long": "Checks the platform, Landlock, Docker, the OpenShell service, CLI, registration,\nversion and compute driver (on a Mac, the MicroVM driver: e2fsprogs, its signature,\nthe sandbox identity and resources), bind mounts, telemetry, ports, the DefenseClaw\ndaemon, harness images, shell wrappers and the organization policy. Exits 1 when a\ncheck fails, with --output json too (the JSON \"ok\" is false then).",
+    "long": "Checks the platform, Landlock, Docker, the OpenShell service, CLI, registration,\nversion and compute driver (on a Mac, the MicroVM driver: e2fsprogs, its signature,\nthe sandbox identity and resources), bind mounts, telemetry, ports, the DefenseClaw\ndaemon, harness images, shell wrappers and the organization policy. Exits 1 when a\ncheck fails, with --output json too and with --json (both print ok=false).",
     "flags": [
       {
         "name": "fix",

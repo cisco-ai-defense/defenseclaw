@@ -2254,6 +2254,10 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	if cfg == nil {
 		return run, fmt.Errorf("enterprise hooks reconcile: config is not loaded")
 	}
+	// Every pass, after its removals: outage allows work again once the
+	// gateway or an earlier pass removed the protected session record key
+	// (GAP-0352).
+	defer ensureEnterpriseForeignHookSessionKey(os.Stderr)
 	if enterpriseHooksStandaloneUnixActive() {
 		started := time.Now()
 		run, err := runEnterpriseHookReconcileOnceStandaloneUnix(ctx)
@@ -3753,6 +3757,16 @@ func writeEnterpriseHookGuardianState(
 // prepareEnterpriseHookAuthorizationDir creates (or re-hardens) the
 // protected directory that holds the guardian's records and returns it.
 func prepareEnterpriseHookAuthorizationDir(dataDir string) (string, error) {
+	authorizationDir, err := hardenEnterpriseHookAuthorizationDir(dataDir)
+	if err != nil {
+		return "", err
+	}
+	return authorizationDir, nil
+}
+
+// hardenEnterpriseHookAuthorizationDir creates (or re-hardens) the protected
+// directory that holds the guardian's records and returns it.
+func hardenEnterpriseHookAuthorizationDir(dataDir string) (string, error) {
 	authorizationDir := managed.HookGuardianAuthorizationDir(dataDir)
 	if info, statErr := os.Lstat(authorizationDir); statErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {

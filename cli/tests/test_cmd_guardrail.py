@@ -1301,7 +1301,11 @@ class PerConnectorFailModeTests(unittest.TestCase):
         app = make_multi_ctx({"codex": None, "copilot": None, "antigravity": None})
         app.cfg.deployment_mode = "managed_enterprise"
         app.cfg.managed_outside_secure_client = lambda: False
-        result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes", "--no-restart"], obj=app)
+        with (
+            patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+            patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"),
+        ):
+            result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("BLOCK supported connectors", result.output)
         self.assertIn("Antigravity, GitHub Copilot CLI remain fail-open.", result.output)
@@ -1312,7 +1316,8 @@ class PerConnectorFailModeTests(unittest.TestCase):
         # remaining fail-open (hooks-upg loop 2 with the T3 train).
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "copilot": None, "antigravity": None})
-        result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes", "--no-restart"], obj=app)
+        with patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"):
+            result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("BLOCK supported connectors", result.output)
         self.assertNotIn("remain fail-open", result.output)
@@ -1446,10 +1451,13 @@ class PerConnectorFailModeTests(unittest.TestCase):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "cursor": None})
         app.cfg.guardrail.hook_fail_mode = "open"
-        with patch(
-            "defenseclaw.commands.cmd_setup._restart_services",
-            side_effect=[OSError("reload failed"), None],
-        ) as restart_mock:
+        with (
+            patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"),
+            patch(
+                "defenseclaw.commands.cmd_setup._restart_services",
+                side_effect=[OSError("reload failed"), None],
+            ) as restart_mock,
+        ):
             result = runner.invoke(
                 cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
             )

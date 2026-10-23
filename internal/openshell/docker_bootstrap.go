@@ -63,46 +63,67 @@ const (
 // 0.1.5 that MigrateDockerBootstrap could not rewrite.
 var ErrDockerBootstrap = errors.New("openshell: the Docker sandbox bootstrap of an OpenShell release before 0.1.5 could not be moved to 0.1.5")
 
+// ErrDockerStateUnreadable is a state folder whose Docker sandbox folders
+// cannot be listed, so whether it keeps a sandbox is not known. It says
+// nothing about the sandbox's own bootstrap (ErrDockerBootstrap).
+var ErrDockerStateUnreadable = errors.New("openshell: the Docker sandbox folders of an OpenShell state folder cannot be listed")
+
 // MigrateDockerBootstrap rewrites, for the Docker sandbox whose OpenShell
 // id is sandboxID, the bootstrap files an OpenShell before 0.1.5 wrote
 // (see above), in every namespace of the state folder stateHome
-// (UserStateHome) that keeps the sandbox. It names the files it rewrote; a
-// sandbox with no such folder, or whose files 0.1.5 wrote, has none. A
-// file it cannot read, parse or replace is ErrDockerBootstrap, and is left
-// as it was.
-func MigrateDockerBootstrap(stateHome, sandboxID string) ([]string, error) {
+// (UserStateHome) that keeps the sandbox. It names the files it rewrote,
+// and reports whether the folder keeps the sandbox; a sandbox with no such
+// folder, or whose files 0.1.5 wrote, has none. A file of the sandbox it
+// cannot read, parse or replace is ErrDockerBootstrap, and is left as it
+// was. A state folder it cannot list, finding the sandbox in no namespace
+// it could, is ErrDockerStateUnreadable.
+func MigrateDockerBootstrap(stateHome, sandboxID string) (migrated []string, kept bool, err error) {
 	if !plainPathElement(sandboxID) || !filepath.IsAbs(stateHome) {
-		return nil, fmt.Errorf("%w: no sandbox folder for id %q under %q", ErrDockerBootstrap, sandboxID, stateHome)
+		return nil, false, fmt.Errorf("%w: no sandbox folder for id %q under %q", ErrDockerBootstrap, sandboxID, stateHome)
 	}
 	root := filepath.Join(stateHome, "openshell", dockerSandboxTokensDir)
 	namespaces, err := os.ReadDir(root)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrDockerBootstrap, err)
+		return nil, false, fmt.Errorf("%w: %v", ErrDockerStateUnreadable, err)
 	}
-	var migrated []string
+	var unlisted error
 	for _, ns := range namespaces {
 		if !ns.IsDir() {
 			continue
 		}
 		dir := filepath.Join(root, ns.Name(), sandboxID)
-		if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+		fi, err := os.Lstat(dir)
+		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
+		if err != nil {
+			if unlisted == nil {
+				unlisted = fmt.Errorf("%w: %v", ErrDockerStateUnreadable, err)
+			}
+			continue
+		}
+		if !fi.IsDir() {
+			continue
+		}
+		kept = true
 		for _, name := range []string{dockerRuntimeDescriptor, dockerBoundaryConfigFile} {
 			path := filepath.Join(dir, name)
 			done, err := migrateDockerBootstrapFile(path)
 			if err != nil {
-				return migrated, fmt.Errorf("%w: %s: %v", ErrDockerBootstrap, path, err)
+				return migrated, true, fmt.Errorf("%w: %s: %v", ErrDockerBootstrap, path, err)
 			}
 			if done {
 				migrated = append(migrated, path)
 			}
 		}
 	}
-	return migrated, nil
+	if !kept && unlisted != nil {
+		return nil, false, unlisted
+	}
+	return migrated, kept, nil
 }
 
 // plainPathElement reports whether s is one path element of its own.

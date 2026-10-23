@@ -154,6 +154,47 @@ func TestSessionEnd(t *testing.T) {
 	})
 }
 
+type attachAtCopyQuestion struct {
+	read    io.Reader
+	attach  func()
+	started bool
+}
+
+func holdTestSession(t *testing.T, ta *testApp, name string) func() {
+	t.Helper()
+	release, err := ta.holdSession(bg, name, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return release
+}
+
+func (r *attachAtCopyQuestion) Read(p []byte) (int, error) {
+	if !r.started {
+		r.started = true
+		r.attach()
+	}
+	return r.read.Read(p)
+}
+
+// Terminal 2 can reconnect while terminal 1 is deciding where to put its
+// copy's changes. Applying those changes must not stop terminal 2's harness.
+func TestW4B2CopyApplyKeepsNewlyAttachedSession(t *testing.T) {
+	ta := newTestApp(t, "")
+	var release func()
+	ta.IO.In = &attachAtCopyQuestion{read: strings.NewReader("a\n"), attach: func() {
+		release = holdTestSession(t, ta, "fix-tests")
+	}}
+	t.Cleanup(func() {
+		if release != nil {
+			release()
+		}
+	})
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "codex", Copy: true, Name: "fix-tests"}))
+	has(t, ta.output(), "Bring the changes back?", "keeps running: 1 other session is attached")
+	ta.wantCalls(t, 0, "POST", "fix-tests/stop")
+}
+
 // A headless run in the foreground (--prompt, or the harness's print flag
 // the shell wrapper's `claude -p` passes) deletes the sandbox it created
 // when it ends and nothing is left in it to bring back or undo, by the rules
@@ -1130,7 +1171,7 @@ func TestConnectLeavesARunningSandboxRunning(t *testing.T) {
 func TestStopAndDeleteNameAnAttachedSession(t *testing.T) {
 	ta := newTestApp(t, "n\nn\n", sampleSandbox("box"))
 	runAnswers(ta, "run=none\n", "")
-	defer ta.holdSession("box")()
+	defer holdTestSession(t, ta, "box")()
 	ta.ok(t, ta.Stop(bg, StopOptions{Name: "box"}))
 	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"box"}}))
 	if ta.calls("POST", "box/stop") != 0 || ta.calls("DELETE", "box") != 0 {
@@ -2094,7 +2135,7 @@ func TestDeleteSaysWhereTheWorkWent(t *testing.T) {
 	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyBranch, Applied: true, Branch: "dc/fix-tests"}
 	ta.ok(t, ta.Pull(bg, PullOptions{Name: "fix-tests", Branch: true}))
 	ta.copy.pending = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkNone}
-	release := ta.holdSession("fix-tests")
+	release := holdTestSession(t, ta, "fix-tests")
 	ta.ok(t, ta.Stop(bg, StopOptions{Name: "fix-tests", Yes: true}))
 	release()
 	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"fix-tests"}, Yes: true}))

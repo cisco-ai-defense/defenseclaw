@@ -76,8 +76,8 @@ func verifyEnterpriseHookRecordOwnership(path string, gid int) error {
 
 // enterpriseHookServiceGroupLookupTimeout bounds the service account lookup
 // of a guardian record write. NSS and Directory Services take no context,
-// and the write that settles a foreign-hook cleanup's pending denial must
-// not wait on them without end: the denial would outlive its cleanup.
+// and a removal ledger write runs under the account's removal lock, which
+// must not wait on them without end.
 var enterpriseHookServiceGroupLookupTimeout = 15 * time.Second
 
 // enterpriseHookServiceUserLookup is user.Lookup. Replaceable in tests.
@@ -85,8 +85,7 @@ var enterpriseHookServiceUserLookup = user.Lookup
 
 // enterpriseHookServiceGroups holds the group of each service account found,
 // for the life of the guardian process: once a write has published a
-// record, such as a cleanup's pending denial, the writes after it, such as
-// the one that settles that denial, make no directory call.
+// record, the writes after it make no directory call.
 var (
 	enterpriseHookServiceGroupsMu sync.Mutex
 	enterpriseHookServiceGroups   = map[string]int{}
@@ -131,4 +130,40 @@ func enterpriseHookServiceGroup(name string) (int, error) {
 	enterpriseHookServiceGroups[name] = answer.gid
 	enterpriseHookServiceGroupsMu.Unlock()
 	return answer.gid, nil
+}
+
+// enterpriseHookLookup is one running lookup that takes no context; value
+// is set before done is closed.
+type enterpriseHookLookup struct {
+	done  chan struct{}
+	value any
+}
+
+// enterpriseHookLookups are the lookups still running, by key, so a
+// stalled directory holds one lookup per key, not one per caller.
+var (
+	enterpriseHookLookupsMu sync.Mutex
+	enterpriseHookLookups   = map[string]*enterpriseHookLookup{}
+)
+
+// startEnterpriseHookLookup runs fn for key, or joins the run for key that
+// has not ended. The caller bounds how long it waits for done.
+func startEnterpriseHookLookup(key string, fn func() any) *enterpriseHookLookup {
+	enterpriseHookLookupsMu.Lock()
+	defer enterpriseHookLookupsMu.Unlock()
+	if lookup := enterpriseHookLookups[key]; lookup != nil {
+		return lookup
+	}
+	lookup := &enterpriseHookLookup{done: make(chan struct{})}
+	enterpriseHookLookups[key] = lookup
+	go func() {
+		defer func() {
+			enterpriseHookLookupsMu.Lock()
+			delete(enterpriseHookLookups, key)
+			enterpriseHookLookupsMu.Unlock()
+			close(lookup.done)
+		}()
+		lookup.value = fn()
+	}()
+	return lookup
 }

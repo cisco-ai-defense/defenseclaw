@@ -1284,7 +1284,9 @@ func (a *App) resolveLiveMount(ctx context.Context, api API, spec *harness.Spec,
 func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sandbox, copyMode, repoChanged bool) (bool, error) {
 	run := a.runLaunchOf(sb)
 	held := fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder", sb.Name, sb.Phase, sb.WorkdirMode)
-	if n := a.attachedSessions(sb.Name); n > 0 {
+	if n, err := a.attachedSessions(sb.Name); err != nil {
+		a.warn("cannot count the sessions attached to " + sb.Name + ": " + err.Error())
+	} else if n > 0 {
 		// Both sessions share it: neither's end stops it under the other.
 		held += fmt.Sprintf(", and %s attached to it", plural(int64(n), "session is", "sessions are"))
 	}

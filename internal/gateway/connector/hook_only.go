@@ -29,6 +29,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -5167,7 +5168,7 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 }
 
 func copilotUnexpectedEventOwnsHook(raw interface{}, hookScript string) bool {
-	if containsHookScript(raw, hookScript) || editedDefenseClawHookEntry(raw, hookScriptBaseName(hookScript)) {
+	if containsHookScript(raw, hookScript) || editedDefenseClawHookEntry(raw, hookScriptBaseName(hookScript)) || copilotOldManagedCopyEntry(raw) {
 		return true
 	}
 	if !isCopilotPowerShellAdapterCommand(hookScript) {
@@ -5477,6 +5478,37 @@ func ensureJSONObject(obj map[string]interface{}, key string) map[string]interfa
 		obj[key] = child
 	}
 	return child
+}
+
+// copilotOldManagedCopyEntry recognizes a copied DefenseClaw launcher outside
+// the usual data directory. A stale registered copy can still answer open
+// after the current launcher is rendered closed. Only a regular script with
+// DefenseClaw's Copilot marker is claimed; an unrelated operator hook stays.
+func copilotOldManagedCopyEntry(raw interface{}) bool {
+	entry, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for _, key := range []string{"bash", "command"} {
+		command, _ := entry[key].(string)
+		word, rest, parsed := posixHookCommandSplit(strings.TrimSpace(command))
+		if !parsed || !filepath.IsAbs(word) || filepath.Clean(word) != word ||
+			(rest != "" && !strings.HasPrefix(rest, " --event ")) {
+			continue
+		}
+		body, err := safefile.ReadRegularFileBounded(word, 1<<20)
+		if err != nil {
+			continue
+		}
+		if len(body) > 512 {
+			body = body[:512]
+		}
+		if bytes.Contains(body, []byte("# defenseclaw-managed-hook v")) &&
+			bytes.Contains(body, []byte("DefenseClaw Copilot CLI hook")) {
+			return true
+		}
+	}
+	return false
 }
 
 func appendUniqueMatcherHookGroup(raw interface{}, hookScript string, group map[string]interface{}) []interface{} {

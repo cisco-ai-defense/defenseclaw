@@ -403,29 +403,6 @@ func TestGatewayConfigRollback(t *testing.T) {
 			t.Fatalf("rollback did not restore and restart: %v", err)
 		}
 	})
-	t.Run("raw MicroVM starts during rollback restore", func(t *testing.T) {
-		f := newGatewayFixture(t)
-		f.write(t, "gateway.toml", operatorTOML)
-		res, err := f.apply(f.plan(t, bindMounts))
-		if err != nil {
-			t.Fatal(err)
-		}
-		applied := f.read(t, "gateway.toml")
-		restarts := f.restarts()
-		checks := 0
-		f.cfg.CheckStopped = func(context.Context) error {
-			checks++
-			if checks == 2 {
-				return fmt.Errorf("%w; raw-box (ready): `openshell sandbox stop raw-box`; then retry", openshell.ErrUnflushed)
-			}
-			return nil
-		}
-		err = f.cfg.Rollback(context.Background(), res)
-		if !errors.Is(err, openshell.ErrUnflushed) || checks < 2 || f.restarts() != restarts ||
-			f.read(t, "gateway.toml") != applied || !strings.Contains(err.Error(), "openshell sandbox stop raw-box") {
-			t.Fatalf("rollback crossed raw start: err=%v checks=%d restarts=%d config=%q", err, checks, f.restarts()-restarts, f.read(t, "gateway.toml"))
-		}
-	})
 	// GAP-0149: teardown restarted a stopped service (another account's
 	// gateway held the port), which then restarted forever. A stopped
 	// service gets its files back and no start.

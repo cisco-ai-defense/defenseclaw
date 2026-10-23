@@ -214,7 +214,7 @@ func TestCleanupRemovesUserHermesHooksAndKeepsTheRestOfTheFile(t *testing.T) {
 	profile := filepath.Join(req.Home, "profiles", "work")
 	writeFile(t, filepath.Join(profile, "config.yaml"), hermesConfig(script, hermesRewriteEntry))
 	writeFile(t, configPath, hermesConfig(script))
-	result, err = CleanUserForeignHooksWithRedirects(req, []EnvRedirect{{Vars: map[string]string{"HERMES_HOME": profile}}}, CleanupScope{}, time.Now())
+	result, err = CleanUserForeignHooksWithRedirects(req, []EnvRedirect{{Vars: map[string]string{"HERMES_HOME": profile}}}, time.Now())
 	if err != nil || len(result.Removed) != 1 || result.Removed[0].Path != filepath.Join(profile, "config.yaml") {
 		t.Fatalf("cleanup of the HERMES_HOME config: %+v %v", result, err)
 	}
@@ -273,7 +273,7 @@ func TestGuardReadsTheHermesManagedScopeConfigTheEnvironmentNames(t *testing.T) 
 	if !ok || redirect.Vars["HERMES_MANAGED_DIR"] != managed {
 		t.Fatalf("the hook must record HERMES_MANAGED_DIR for the guardian's cleanup: %+v %v", redirect, ok)
 	}
-	result, err := CleanUserForeignHooksWithRedirects(req, []EnvRedirect{redirect}, CleanupScope{}, time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC))
+	result, err := CleanUserForeignHooksWithRedirects(req, []EnvRedirect{redirect}, time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC))
 	if err != nil || len(result.Removed) != 1 || result.Removed[0].Path != managedConfig {
 		t.Fatalf("cleanup of the HERMES_MANAGED_DIR config: %+v %v", result, err)
 	}

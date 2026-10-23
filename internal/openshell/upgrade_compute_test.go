@@ -414,6 +414,11 @@ func TestLifecycleLock(t *testing.T) {
 	restart()
 }
 
+// A sandbox attach, stop or delete holds the account's lifecycle lock
+// shared (LockGatewayShared): it waits for a restart or a rollback that
+// holds it, gets it once that is done, shares it with the others and with
+// creates and starts, keeps a restart out while it holds it, and gives up
+// with ErrGatewayBusy after the bounded wait.
 func TestSandboxCommandWaitsForGatewayRollbackLock(t *testing.T) {
 	dir := t.TempDir()
 	unlock, err := openshell.LockGatewayLifecycle(context.Background(), dir)
@@ -421,7 +426,12 @@ func TestSandboxCommandWaitsForGatewayRollbackLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- openshell.WaitGatewayLifecycle(context.Background(), dir) }()
+	var held func()
+	go func() {
+		u, err := openshell.LockGatewayShared(context.Background(), dir)
+		held = u
+		done <- err
+	}()
 	select {
 	case err := <-done:
 		t.Fatalf("sandbox command crossed the rollback lock: %v", err)
@@ -435,6 +445,24 @@ func TestSandboxCommandWaitsForGatewayRollbackLock(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("sandbox command did not resume after rollback")
+	}
+	start, err := openshell.LockSandboxStart(dir)
+	if err != nil {
+		t.Fatalf("a start beside a held attach: %v", err)
+	}
+	start()
+	openshell.SetLifecycleLockWait(t, 200*time.Millisecond)
+	if _, err := openshell.LockGatewayLifecycle(context.Background(), dir); !errors.Is(err, openshell.ErrGatewayBusy) {
+		t.Fatalf("a restart while an attach holds the lock: %v", err)
+	}
+	held()
+	unlock, err = openshell.LockGatewayLifecycle(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if _, err := openshell.LockGatewayShared(context.Background(), dir); !errors.Is(err, openshell.ErrGatewayBusy) {
+		t.Fatalf("an attach after the bounded wait: %v, want ErrGatewayBusy", err)
 	}
 }
 

@@ -178,7 +178,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "version and compute driver (on a Mac, the MicroVM driver: e2fsprogs, its signature, "
             "the sandbox identity and resources), bind mounts, telemetry, ports, the DefenseClaw "
             "daemon, harness images, shell wrappers and the organization policy. Exits 1 when a "
-            'check fails, with --output json too (the JSON "ok" is false then).'
+            "check fails, with --output json too and with --json (both print ok=false)."
         ),
         flags=(
             _OUTPUT,

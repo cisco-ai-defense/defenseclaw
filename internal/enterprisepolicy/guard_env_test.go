@@ -177,7 +177,7 @@ func TestCleanupCoversRecordedEnvRedirects(t *testing.T) {
 
 	writeFile(t, defaultHooks, `{"hooks": {"preToolUse": [{"bash": "./other.sh"}]}}`)
 	redirect := EnvRedirect{Vars: map[string]string{"COPILOT_HOME": custom}}
-	result, err = CleanUserForeignHooksWithRedirects(req, []EnvRedirect{redirect, redirect}, CleanupScope{}, time.Now().Add(time.Second))
+	result, err = CleanUserForeignHooksWithRedirects(req, []EnvRedirect{redirect, redirect}, time.Now().Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}

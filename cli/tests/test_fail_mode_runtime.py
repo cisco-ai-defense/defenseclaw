@@ -1116,7 +1116,7 @@ def test_fail_mode_change_list_matches_status_runtime_and_cursor_contract(
         result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
     assert result.exit_code == 0, result.output
     restart.assert_not_called()
-    assert "(codex): closed → open" in result.output
+    assert "(codex): closed → open" in result.output or "(codex): closed -> open" in result.output
     assert "(codex): already open" not in result.output
     assert "(cursor): stays closed" in result.output
     assert "Cursor action mode keeps hook failures closed" in result.output
@@ -1618,6 +1618,67 @@ def test_closed_fail_mode_re_renders_native_deny_hooks_with_the_gateway_stopped(
     assert "nothing to do" not in result.output
     assert sorted(call.args[1] for call in reconcile.call_args_list) == ["antigravity", "copilot"]
     restart.assert_not_called()
+
+
+def test_closed_fail_mode_closes_each_hook_before_a_mixed_gateway_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = _stale_native_deny_app(monkeypatch, tmp_path, ["copilot", "hermes"], multi=True)
+    app.cfg.guardrail.connectors["kiro"] = dcconfig.PerConnectorGuardrailConfig(hook_fail_mode="closed")
+    app.cfg.active_connectors = lambda: ["copilot", "hermes", "kiro"]
+    closed: set[str] = set()
+
+    def state(_cfg: object, name: str) -> SimpleNamespace:
+        return SimpleNamespace(desired="closed", current=name in closed, runtime="closed" if name in closed else "open", drift=())
+
+    def reconcile(_cfg: object, name: str) -> None:
+        closed.add(name)
+
+    def restart(*_args: object, **_kwargs: object) -> None:
+        assert closed == {"copilot", "hermes"}, "gateway restart exposed an older open hook"
+
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True),
+        patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", side_effect=state),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration", side_effect=reconcile),
+        patch("defenseclaw.commands.cmd_setup._restart_services", side_effect=restart),
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert closed == {"copilot", "hermes"}
+
+
+def test_closed_fail_mode_refuses_a_mixed_restart_when_a_hook_cannot_close(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = _stale_native_deny_app(monkeypatch, tmp_path, ["copilot", "hermes"], multi=True)
+    app.cfg.guardrail.connectors["kiro"] = dcconfig.PerConnectorGuardrailConfig(hook_fail_mode="closed")
+    app.cfg.active_connectors = lambda: ["copilot", "hermes", "kiro"]
+
+    def reconcile(_cfg: object, name: str) -> None:
+        if name == "hermes":
+            raise OSError("hermes registration unavailable")
+
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration", side_effect=reconcile),
+        patch("defenseclaw.commands.cmd_guardrail._rollback_fail_mode_transaction"),
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code != 0
+    assert "hermes registration unavailable" in result.output
+    restart.assert_not_called()
+
+
+def test_closed_fail_mode_no_restart_refuses_open_registered_hooks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = _stale_native_deny_app(monkeypatch, tmp_path, ["copilot", "hermes"], multi=True)
+    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes", "--no-restart"], obj=app)
+    assert result.exit_code != 0
+    assert "defenseclaw guardrail fail-mode closed --yes" in result.output
+    app.cfg.save.assert_not_called()
 
 
 def test_secure_client_native_deny_hooks_need_no_fail_mode_refresh(

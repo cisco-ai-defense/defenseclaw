@@ -52,7 +52,7 @@ func TestForeignHookGuardRecordsRedirectsTheGuardianCleans(t *testing.T) {
 			HookBinary: foreignGuardHookBinary,
 			Policy:     fixture.summary.Connectors["copilot"],
 		}},
-	}, time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC))
+	}, time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC), nil)
 	report := reports["copilot"]
 	if report.Error != "" || len(report.Removed) != 1 || report.Removed[0] != foreign {
 		t.Fatalf("the worker must clean the redirected user config: %+v", report)
@@ -89,7 +89,7 @@ func TestWorkerForeignCleanupReportsAnUnreadableRedirectRecord(t *testing.T) {
 			HookBinary: foreignGuardHookBinary,
 			Policy:     enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RouteMachinePolicy, ForeignHooks: config.ForeignHooksRemove, Guard: true},
 		}},
-	}, time.Now())
+	}, time.Now(), nil)
 	report := reports["cursor"]
 	if len(report.Removed) != 1 || !strings.Contains(report.Error, enterprisepolicy.EnvRecordPath(home)) {
 		t.Fatalf("the default location is cleaned and the bad record reported: %+v", report)

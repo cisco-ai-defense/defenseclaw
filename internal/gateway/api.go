@@ -93,8 +93,11 @@ type APIServer struct {
 	// never wait on each other's exchanges.
 	foreignHookSessionLocks keyedMutex
 	// foreignHookRemovals reads the hook guardian foreign-hook removal
-	// ledger on every session exchange, including pending cleanup denials.
+	// ledger on every session exchange.
 	foreignHookRemovals foreignHookRemovalSource
+	// foreignHookOwed are the revocations of protected session records the
+	// operating system refused, tried again until they take.
+	foreignHookOwed foreignHookRevocationsOwed
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
@@ -1381,6 +1384,24 @@ func (a *APIServer) Run(ctx context.Context) error {
 	go func() {
 		defer close(refusalsDone)
 		a.serveUnenrolledRefusals(refusalCtx)
+	}()
+
+	// A revocation of an account's protected session records that the
+	// operating system refused is tried again until it takes, and once more
+	// as this run stops (foreign_hook_revocation_owed.go); a no-op where the
+	// gateway publishes no records.
+	revocationsCtx, stopRevocations := context.WithCancel(ctx)
+	revocationsDone := make(chan struct{})
+	defer func() {
+		stopRevocations()
+		select {
+		case <-revocationsDone:
+		case <-time.After(foreignHookRevocationStopTimeout):
+		}
+	}()
+	go func() {
+		defer close(revocationsDone)
+		a.retryOwedForeignHookRevocations(revocationsCtx, foreignHookRevocationRetryEvery)
 	}()
 
 	errCh := make(chan error, 2)

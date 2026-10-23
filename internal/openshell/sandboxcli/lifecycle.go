@@ -604,9 +604,13 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	// began: the probe, the refresh or the harness's start failed.
 	fail := func(err error) error {
 		if started {
-			a.warn("stopping " + sb.Name + " after the failure")
-			if _, serr := api.Stop(context.WithoutCancel(ctx), sb.Name); serr != nil {
-				a.warn("could not stop " + sb.Name + ": " + apiError(serr).Error())
+			switch _, keep, serr := a.stopIfAlone(context.WithoutCancel(ctx), api, sb.Name); {
+			case keep != "":
+				a.warn(sb.Name + " keeps running after the failure: " + keep)
+			case serr != nil:
+				a.warn("could not stop " + sb.Name + " after the failure: " + apiError(serr).Error())
+			default:
+				a.warn("stopped " + sb.Name + " after the failure")
 			}
 		}
 		return err
@@ -862,10 +866,12 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 		return apiError(err)
 	}
 	var copyAt *workspace.CopyStatus
+	asked := 0
 	if sb.Phase == "ready" {
 		if gateway, err := a.gatewayName(ctx); err == nil {
 			cli := a.cli(gateway)
-			ok, idle, err := a.beforeStop(ctx, cli, sb, o.Yes)
+			ok, idle, attached, err := a.beforeStop(ctx, cli, sb, o.Yes)
+			asked = attached
 			if err != nil {
 				return err
 			}
@@ -875,8 +881,14 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 			}
 			// A detached run or a session still going can change the copy
 			// between the look and the stop.
-			if sb.WorkdirMode == config.OpenShellWorkdirCopy && idle && a.attachedSessions(sb.Name) == 0 {
-				copyAt = a.copyAtStop(ctx, cli, sb)
+			if sb.WorkdirMode == config.OpenShellWorkdirCopy && idle {
+				n, err := a.attachedSessions(sb.Name)
+				if err != nil {
+					return attachedUnknown(sb.Name, err)
+				}
+				if n == 0 {
+					copyAt = a.copyAtStop(ctx, cli, sb)
+				}
 			}
 			if ok, err := a.fullDiskStop(ctx, cli, sb, copyAt, o.Yes); err != nil || !ok {
 				if err == nil {
@@ -885,6 +897,23 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 				return err
 			}
 		}
+	}
+	// The stop is decided under the sandbox's exclusive gate: a session that
+	// attached since the question above is named and asked about again, and
+	// none attaches between this count and OpenShell's stop.
+	others, release, err := a.lockForStop(ctx, o.Name)
+	if err != nil {
+		return attachedUnknown(o.Name, err)
+	}
+	defer release()
+	if others > asked {
+		if ok, err := a.confirmEnding(attachedText(o.Name, others)+" now; stopping the sandbox ends "+them(others), "Stop anyway?", o.Yes); err != nil || !ok {
+			if err == nil {
+				a.note(o.Name + " keeps running")
+			}
+			return err
+		}
+		copyAt = nil
 	}
 	stopped, err := api.Stop(ctx, o.Name)
 	if err != nil {
@@ -1199,7 +1228,12 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 				a.note(name + "'s work was last " + a.handoverText(h) + "; nothing newer is left in it")
 			}
 		}
-		if n := a.attachedSessions(name); n > 0 {
+		n, err := a.attachedSessions(name)
+		if err != nil {
+			errs = append(errs, attachedUnknown(name, err))
+			continue
+		}
+		if n > 0 {
 			// Its sessions in other terminals end with it (GAP-0285).
 			what := attachedText(name, n) + "; deleting it ends " + them(n)
 			question = what + ". " + question
@@ -1214,7 +1248,10 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 		if !yes {
 			continue
 		}
-		res, err := api.Delete(ctx, name, sandboxapi.DeleteRequest{KeepSnapshot: o.KeepSnapshot})
+		res, err := a.deleteAsked(ctx, api, name, n, o)
+		if errors.Is(err, errKept) {
+			continue
+		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, apiError(err)))
 			continue
@@ -1226,6 +1263,50 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// errKept is a stop or a delete the user declined once asked again.
+var errKept = errors.New("kept")
+
+// deleteAsked deletes sandbox name, whose deletion the user confirmed with
+// asked sessions attached to it, under the sandbox's exclusive gate: one
+// that attached since is named and asked about again (errKept when the
+// answer is no), and none attaches between this count and OpenShell's
+// delete.
+func (a *App) deleteAsked(ctx context.Context, api API, name string, asked int, o DeleteOptions) (*sandboxapi.DeleteResponse, error) {
+	others, release, err := a.lockForStop(ctx, name)
+	if err != nil {
+		return nil, attachedUnknown(name, err)
+	}
+	defer release()
+	if others > asked {
+		ok, err := a.confirmEnding(attachedText(name, others)+" now; deleting it ends "+them(others), "Delete anyway?", o.Yes)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			a.note(name + " is kept")
+			return nil, errKept
+		}
+	}
+	return api.Delete(ctx, name, sandboxapi.DeleteRequest{KeepSnapshot: o.KeepSnapshot})
+}
+
+// stopIfAlone stops sandbox name, which this command started, unless a
+// session is attached to it, deciding under the sandbox's exclusive gate
+// (lockForStop): keep says why it was left running (sessions attached, or
+// a count that could not be made), "" when OpenShell was asked to stop it.
+func (a *App) stopIfAlone(ctx context.Context, api API, name string) (stopped *sandboxapi.Sandbox, keep string, err error) {
+	others, release, err := a.lockForStop(ctx, name)
+	if err != nil {
+		return nil, attachedUnknown(name, err).Error(), nil
+	}
+	defer release()
+	if others > 0 {
+		return nil, attachedText(name, others) + " → stop it once " + map[bool]string{true: "it ends", false: "they end"}[others == 1] + ": " + CommandName + " stop " + name, nil
+	}
+	stopped, err = api.Stop(ctx, name)
+	return stopped, "", err
 }
 
 // unhandedWork says what work a copy-mode sandbox holds that never came
