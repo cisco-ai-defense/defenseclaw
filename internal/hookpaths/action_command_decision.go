@@ -819,6 +819,7 @@ func actionWrappedDecision(program string, words []string, cwd, home string, dep
 		return "dynamic-command"
 	}
 	index := 1
+	sudoList := false
 	for index < len(words) && strings.HasPrefix(words[index], "-") {
 		word := words[index]
 		if word == "--" {
@@ -867,6 +868,13 @@ func actionWrappedDecision(program string, words []string, cwd, home string, dep
 			value = word == "-E" || word == "--conflict-exit-code" || word == "-w" || word == "--timeout"
 			known = value || strings.Contains(" -s -x -u -n -o -F --shared --exclusive --unlock --nonblock --close --no-fork ", " "+word+" ")
 		case "sudo":
+			if word == "-l" || word == "-ll" || word == "--list" {
+				// sudo's list mode queries policy; the following command, if
+				// present, is a query argument and is never executed.
+				sudoList = true
+				known = true
+				break
+			}
 			value = strings.Contains(" -u -g -h -p -C -r -t --user --group --host --prompt --close-from --role --type ", " "+word+" ")
 			known = value || strings.Contains(" -n -E -H -S -b -k -K -v --non-interactive --preserve-env ", " "+word+" ") || strings.HasPrefix(word, "--user=") || strings.HasPrefix(word, "--group=")
 		case "script":
@@ -891,6 +899,9 @@ func actionWrappedDecision(program string, words []string, cwd, home string, dep
 		} else {
 			index++
 		}
+	}
+	if program == "sudo" && sudoList {
+		return ""
 	}
 	if index >= len(words) {
 		return "dynamic-command"
