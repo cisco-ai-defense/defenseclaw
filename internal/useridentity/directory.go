@@ -100,9 +100,12 @@ type DirectoryFacts struct {
 	// UPN is the userPrincipalName when the directory exposes one (SSSD
 	// InfoPipe, the Windows identity store, TranslateNameW).
 	UPN string `json:"upn,omitempty"`
-	// UPNKept marks a last verified Windows UPN reused while a fresh
-	// translation is unavailable. It may select a profile, but is not a
-	// current identity-row fact. Never emitted or stored.
+	// UPNKept marks a UPN that the latest completed directory answer did
+	// not confirm: the last good Windows AD UPN a failed TranslateNameW
+	// reuses (GAP-0129), or one the guardian kept (GAP-0284, InfoPipe's
+	// infopipe_kept). Profile matching reads UPN and ignores this mark;
+	// agent identity rows leave a kept UPN out because it is not a current
+	// fact. Never serialized.
 	UPNKept bool `json:"-"`
 	// Domain is the account's domain in lower case, by its DNS name where
 	// the OS knows it, else its NetBIOS name (defenseclaw.user.domain).

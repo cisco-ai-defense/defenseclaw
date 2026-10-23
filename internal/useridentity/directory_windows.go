@@ -18,13 +18,14 @@ import (
 // the machine's own state (see directory_windows_facts.go). An AD UPN comes
 // from TranslateNameW, which may contact a domain controller: the call waits
 // at most wait for it (0 does not wait), and a lookup still running then
-// finishes in the background and answers a later call.
+// finishes in the background and answers a later call. UPNKept marks an AD
+// UPN that the latest translation did not confirm (adUPNCache.unconfirmed).
 func WindowsDirectoryFacts(sid string, wait time.Duration) DirectoryFacts {
-	var kept bool
+	kept := false
 	facts := resolveWindowsDirectoryFacts(osWindowsDirectoryReader{}, sid,
 		func(sid, samName string) string {
-			upn, wasKept := adUPNs.lookup(sid, samName, wait)
-			kept = wasKept
+			upn := adUPNs.lookup(sid, samName, wait)
+			kept = upn != "" && adUPNs.unconfirmed(sid, samName, upn)
 			return upn
 		}, time.Now())
 	facts.UPNKept = kept && facts.UPN != ""

@@ -196,8 +196,10 @@ const (
 	// UPN-only rename is checked on each refresh even when SID and SAM name
 	// remain unchanged.
 	adUPNTTL = 5 * time.Minute
-	// adUPNFailureTTL is how long an unanswered lookup is reused. It is
-	// short so a laptop that starts off the corporate network retries soon.
+	// adUPNFailureTTL is how long a failed lookup (no domain controller
+	// reachable) is reused. It is short so a laptop that starts the gateway
+	// off the corporate network gets its UPN minutes after it is back, not a
+	// day later; the last good answer is kept meanwhile.
 	adUPNFailureTTL = 2 * time.Minute
 )
 
@@ -213,7 +215,9 @@ type adUPNCache struct {
 }
 
 type adUPNEntry struct {
-	upn     string
+	upn string
+	// kept: upn is an earlier answer the latest completed translation did
+	// not confirm (it failed). Only unconfirmed reads it.
 	kept    bool
 	expires time.Time
 	done    chan struct{} // open while a lookup runs
@@ -223,10 +227,10 @@ func newADUPNCache(translate func(string) string) *adUPNCache {
 	return &adUPNCache{translate: translate, now: time.Now, entries: map[string]adUPNEntry{}}
 }
 
-// lookup returns the current answer when translation succeeds and the last
-// verified answer during a refresh or outage. kept distinguishes that answer
-// from a current fact for identity rows.
-func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) (upn string, kept bool) {
+// lookup returns the UPN of samName: the cached answer, or the one a lookup
+// started now (or already running) produces within wait. A lookup that takes
+// longer returns the previous answer, if any, and finishes in the background.
+func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) string {
 	key := strings.ToUpper(strings.TrimSpace(sid)) + "\x00" + strings.ToLower(samName)
 	c.mu.Lock()
 	entry := c.entries[key]
@@ -236,13 +240,12 @@ func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) (upn string
 			entry = adUPNEntry{}
 		}
 		entry.done = make(chan struct{})
-		entry.kept = entry.upn != ""
 		c.entries[key] = entry
 		go c.run(key, samName, entry.upn, entry.done)
 	}
 	c.mu.Unlock()
 	if entry.done == nil || wait <= 0 {
-		return entry.upn, entry.kept
+		return entry.upn
 	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
@@ -250,28 +253,34 @@ func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) (upn string
 	case <-entry.done:
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		answer := c.entries[key]
-		return answer.upn, answer.kept
+		return c.entries[key].upn
 	case <-timer.C:
-		return entry.upn, entry.kept
+		return entry.upn
 	}
 }
 
 func (c *adUPNCache) run(key, samName, previous string, done chan struct{}) {
-	upn, ttl := c.translate(samName), adUPNTTL
-	kept := false
+	upn, ttl, kept := c.translate(samName), adUPNTTL, false
 	if upn == "" {
-		upn, kept = previous, previous != ""
-		ttl = adUPNFailureTTL
+		upn, ttl, kept = previous, adUPNFailureTTL, previous != ""
 	}
 	c.mu.Lock()
-	// Eviction can start a newer translation of the same SID while this
-	// one is still running. Its older answer must not replace that entry.
-	if entry, ok := c.entries[key]; ok && entry.done == done {
-		c.entries[key] = adUPNEntry{upn: upn, kept: kept, expires: c.now().Add(ttl)}
-	}
+	c.entries[key] = adUPNEntry{upn: upn, kept: kept, expires: c.now().Add(ttl)}
 	c.mu.Unlock()
 	close(done)
+}
+
+// unconfirmed reports whether upn, an answer lookup gave for the identity,
+// is not what its latest completed translation verified: the last good UPN
+// kept through a failed lookup, or an answer the cache no longer holds. It
+// changes no answer lookup gives; agent identity rows use it to leave a
+// kept UPN out (GAP-0129 keeps it for profile matching).
+func (c *adUPNCache) unconfirmed(sid, samName, upn string) bool {
+	key := strings.ToUpper(strings.TrimSpace(sid)) + "\x00" + strings.ToLower(samName)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[key]
+	return entry.kept || entry.upn != upn
 }
 
 // Limit Windows account lookups that remain in the OS after their caller's

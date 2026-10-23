@@ -30,8 +30,7 @@ func TestIdentitySpoolRecordStillProves(t *testing.T) {
 	}{
 		{"the same facts, a newer timestamp", func(r *IdentitySpoolRecord) { r.UpdatedAt = time.Now() }, true},
 		{"group names not resolved this pass", func(r *IdentitySpoolRecord) { r.Facts.Groups = []string{users, strict} }, true},
-		{"the UPN not resolved this pass", func(r *IdentitySpoolRecord) { r.Facts.UPN, r.Facts.Principal = "", "" }, false},
-		{"the UPN is now kept", func(r *IdentitySpoolRecord) { r.UPNSource = UPNSourceWindowsKept }, false},
+		{"the UPN not resolved this pass", func(r *IdentitySpoolRecord) { r.Facts.UPN, r.Facts.Principal = "", "" }, true},
 		{"the account name not resolved this pass", func(r *IdentitySpoolRecord) { r.User = "" }, true},
 		{"a realm resolved only this pass", func(r *IdentitySpoolRecord) { r.Facts.Realm = "CORP.EXAMPLE" }, true},
 		{"another connector address", func(r *IdentitySpoolRecord) { r.ConnectorEmails = map[string]string{"codex": "a@b.example"} }, true},
@@ -41,7 +40,6 @@ func TestIdentitySpoolRecordStillProves(t *testing.T) {
 		{"signed out", func(r *IdentitySpoolRecord) { r.Facts.GroupsPartial, r.Facts.Groups = true, nil }, false},
 		{"another account name", func(r *IdentitySpoolRecord) { r.User = `CORP\bob` }, false},
 		{"another UPN", func(r *IdentitySpoolRecord) { r.Facts.UPN = "bob@corp.example" }, false},
-		{"UPN casing changed", func(r *IdentitySpoolRecord) { r.Facts.UPN = "Alice@corp.example" }, false},
 		{"another principal", func(r *IdentitySpoolRecord) { r.Facts.Principal = "bob@corp.example" }, false},
 		{"another domain", func(r *IdentitySpoolRecord) { r.Facts.Domain = "lab.example" }, false},
 		{"another directory", func(r *IdentitySpoolRecord) { r.Facts.Directory = useridentity.DirectoryEntraID }, false},

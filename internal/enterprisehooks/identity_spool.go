@@ -71,9 +71,6 @@ const (
 	UPNSourceDerived       = "derived"
 	UPNSourceIdentityStore = "identity_store"
 	UPNSourceTranslateName = "translate_name"
-	// UPNSourceWindowsKept is the last verified UPN of a SID retained while
-	// Windows cannot give a fresh answer. Policy may match it; rows omit it.
-	UPNSourceWindowsKept = "windows_kept"
 )
 
 // IdentitySpoolRecord is one account's spool file.
@@ -85,12 +82,16 @@ type IdentitySpoolRecord struct {
 	User      string    `json:"user,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 	// UPNSource says where Facts.UPN, or the derived Facts.Principal, came
-	// from: infopipe, identity_store, translate_name, windows_kept, or derived (the
+	// from: infopipe, identity_store, translate_name, or derived (the
 	// sAMAccountName@REALM fallback; Facts.UPN is then empty).
 	UPNSource string `json:"upn_source,omitempty"`
-	// UPNKeptSince is when the guardian first kept a UPN. An InfoPipe UPN
-	// goes once it is IdentitySpoolKeptUPNMaxAge old. A Windows UPN follows
-	// the last-good outage behavior of GAP-0129 and GAP-0284.
+	// UPNKeptSince is when the guardian first kept an InfoPipe UPN that
+	// InfoPipe no longer reported (UPNSource infopipe_kept): the UPN goes
+	// once it is IdentitySpoolKeptUPNMaxAge old. On Windows it is when the
+	// guardian first kept the last known UPN of a pass that did not verify
+	// one (MarkWindowsKeptUPN); the UPN stays for profile matching
+	// (GAP-0129, GAP-0284) and UPNSource keeps naming the lookup that
+	// verified it. The gateway leaves a kept UPN out of agent identity rows.
 	UPNKeptSince time.Time `json:"upn_kept_since,omitzero"`
 	// AccountSID is the SID SSSD holds for the uid (Linux), the account's
 	// immutable directory identifier; empty for an account without one. An
@@ -312,14 +313,59 @@ func ParseIdentitySpoolRecord(data []byte, key string) (IdentitySpoolRecord, err
 	return record, nil
 }
 
+// KeepLastKnownUPN carries the UPN of the account's previous record into a
+// fresh record that resolved none, with the principal it gave. Windows
+// resolves a UPN only while the user is signed in, so without it a signed-out
+// account's record fell back to account@REALM and the account showed two
+// principals (GAP-0284). The SID or uid is the record key, so the previous
+// record is the same account.
+func KeepLastKnownUPN(record, previous IdentitySpoolRecord) IdentitySpoolRecord {
+	if record.Facts.UPN != "" || previous.Facts.UPN == "" || !strings.EqualFold(record.Key, previous.Key) {
+		return record
+	}
+	record.Facts.UPN = previous.Facts.UPN
+	record.Facts.Principal = previous.Facts.UPN
+	record.UPNSource = previous.UPNSource
+	if record.Facts.Domain == "" {
+		record.Facts.Domain = previous.Facts.Domain
+	}
+	return record
+}
+
+// MarkWindowsKeptUPN sets UPNKeptSince on a Windows record whose UPN is not
+// the answer of this pass (kept): the last known UPN KeepLastKnownUPN
+// carried, the last good answer the AD UPN cache gave through a failed
+// TranslateNameW, or a token-group-only record's earlier UPN. It dates the
+// first pass that kept the same UPN, and clears the mark on a record whose
+// UPN this pass verified. It changes no UPN, principal or source, so
+// profile matching is what it was; the mark only keeps the UPN out of
+// agent identity rows, which list current facts (UPNKept).
+func MarkWindowsKeptUPN(record, previous IdentitySpoolRecord, kept bool) IdentitySpoolRecord {
+	record.UPNKeptSince = time.Time{}
+	if !kept || record.Facts.UPN == "" {
+		return record
+	}
+	record.UPNKeptSince = record.UpdatedAt
+	if strings.EqualFold(record.Key, previous.Key) && strings.EqualFold(record.Facts.UPN, previous.Facts.UPN) &&
+		!previous.UPNKeptSince.IsZero() && !previous.UPNKeptSince.After(record.UpdatedAt) {
+		record.UPNKeptSince = previous.UPNKeptSince
+	}
+	return record
+}
+
+// UPNKept reports whether the record's UPN is one the guardian kept rather
+// than verified in the pass that wrote it: InfoPipe's infopipe_kept, or a
+// Windows UPN MarkWindowsKeptUPN dated.
+func (r IdentitySpoolRecord) UPNKept() bool {
+	return r.Facts.UPN != "" && (r.UPNSource == UPNSourceInfoPipeKept || !r.UPNKeptSince.IsZero())
+}
+
 // IdentitySpoolRecordStillProves reports whether previous, the record an
 // account has, still proves what current, the record a pass resolved for
 // the same account and could not publish, says, so a failed publication
 // need not withdraw it. The group SIDs (a Windows record's token groups;
 // the names a pass could not resolve this time are not compared) and
-// whether they are known (GroupsPartial) must be the same. The UPN and its
-// kept marker must agree: keeping an old fresh record after a failed write
-// of a kept one would present the earlier UPN as current. A name,
+// whether they are known (GroupsPartial) must be the same. A name, UPN,
 // principal, domain, realm, directory, tenant or SID that both name must
 // agree; one the pass did not resolve this time contradicts nothing.
 // Connector addresses and timestamps decide no profile and are not
@@ -331,12 +377,9 @@ func IdentitySpoolRecordStillProves(previous, current IdentitySpoolRecord) bool 
 	if !current.Facts.GroupsPartial && !sameGroupSIDs(previous.Facts.Groups, current.Facts.Groups) {
 		return false
 	}
-	if previous.Facts.UPN != current.Facts.UPN ||
-		(previous.UPNSource == UPNSourceWindowsKept) != (current.UPNSource == UPNSourceWindowsKept) {
-		return false
-	}
 	for _, pair := range [][2]string{
 		{previous.User, current.User},
+		{previous.Facts.UPN, current.Facts.UPN},
 		{previous.Facts.Principal, current.Facts.Principal},
 		{previous.Facts.Domain, current.Facts.Domain},
 		{previous.Facts.Realm, current.Facts.Realm},
@@ -383,23 +426,21 @@ func IdentitySpoolWithdrawnByFailedWrite(previous IdentitySpoolRecord, previousE
 // windowsIdentityAccountWait, still running from an earlier pass, or cut by
 // the end of the cycle): the token groups the enumerator holds for the
 // account this cycle (groupSIDs; known only while signedIn), which need no
-// lookup, over the previous record's account facts. A retained UPN is marked
-// windows_kept, so an identity row never presents it as current. Kept as it was, the
+// lookup, over the facts of its previous record. Kept as it was, the
 // previous record went on naming an earlier sign-in's groups, so a user who
 // had gained a strict group kept the weaker profile of the old ones until a
 // lookup answered in time or the record aged out (loop round 3). The
 // groups are their SIDs, which the gateway matches assignments by, each
 // followed by the name the previous record gave it. publish is false when
 // the previous record already says this (the same SIDs, or groups unknown
-// in both) and has no UPN or principal to mark. An unreadable
-// record is neither replaced nor withdrawn here. An account without a record
-// gets one only for a signed-in session, whose token supplies groups.
+// in both), and when it could not be read: an unknown record is neither
+// replaced nor withdrawn here. An account without a record gets one only
+// for a signed-in session, the only one with groups to publish.
 func IdentitySpoolTokenGroupRecord(previous IdentitySpoolRecord, previousErr error, key string, groupSIDs []string, signedIn bool,
 	now time.Time) (record IdentitySpoolRecord, publish bool) {
 	switch {
 	case previousErr == nil:
-		if previous.Facts.GroupsPartial == !signedIn && (!signedIn || sameGroupSIDs(previous.Facts.Groups, groupSIDs)) &&
-			previous.Facts.UPN == "" && previous.Facts.Principal == "" && previous.UPNSource == "" && previous.UPNKeptSince.IsZero() {
+		if previous.Facts.GroupsPartial == !signedIn && (!signedIn || sameGroupSIDs(previous.Facts.Groups, groupSIDs)) {
 			return previous, false
 		}
 	case errors.Is(previousErr, os.ErrNotExist) && signedIn:
@@ -409,53 +450,12 @@ func IdentitySpoolTokenGroupRecord(previous IdentitySpoolRecord, previousErr err
 	}
 	record = previous
 	record.Key, record.UpdatedAt = key, now
-	// Only token groups were verified in this pass. Keep the last verified
-	// UPN for policy while marking that it was not reverified this pass.
-	record.Facts.UPN, record.Facts.Principal, record.UPNSource = "", "", ""
-	record.UPNKeptSince = time.Time{}
-	record = KeepLastKnownUPN(record, previous)
 	record.Facts.GroupsPartial = !signedIn
 	record.Facts.Groups = nil
 	if signedIn {
 		record.Facts.Groups = groupsWithNames(groupSIDs, previous.Facts.Groups)
 	}
 	return record, true
-}
-
-// KeepLastKnownUPN carries a Windows account's last verified UPN through an
-// unavailable directory lookup. The immutable SID is the record key. A
-// successful new translation wins, including a case-only change. Marking the
-// kept value lets identity rows omit it while policy still selects the UPN
-// assignment (GAP-0129, GAP-0284).
-func KeepLastKnownUPN(record, previous IdentitySpoolRecord) IdentitySpoolRecord {
-	if record.Facts.UPNKept && previous.Facts.UPN != "" && strings.EqualFold(record.Key, previous.Key) {
-		// A retained cache answer may predate the last successfully
-		// published guardian record. Use the latter when they disagree.
-		record.Facts.UPN = previous.Facts.UPN
-		record.Facts.Principal = previous.Facts.UPN
-	}
-	if record.Facts.UPN == "" {
-		if previous.Facts.UPN == "" || !strings.EqualFold(record.Key, previous.Key) {
-			return record
-		}
-		record.Facts.UPN = previous.Facts.UPN
-		record.Facts.Principal = previous.Facts.UPN
-		if record.Facts.Domain == "" {
-			record.Facts.Domain = previous.Facts.Domain
-		}
-		record.Facts.UPNKept = true
-	}
-	if !record.Facts.UPNKept {
-		return record
-	}
-	record.UPNSource = UPNSourceWindowsKept
-	record.UPNKeptSince = record.UpdatedAt
-	if strings.EqualFold(record.Key, previous.Key) && previous.UPNSource == UPNSourceWindowsKept &&
-		strings.EqualFold(record.Facts.UPN, previous.Facts.UPN) &&
-		!previous.UPNKeptSince.IsZero() && !previous.UPNKeptSince.After(record.UpdatedAt) {
-		record.UPNKeptSince = previous.UPNKeptSince
-	}
-	return record
 }
 
 // groupsWithNames lists sids, each followed by the name previous (a record's

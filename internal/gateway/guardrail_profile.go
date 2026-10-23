@@ -796,10 +796,8 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 		// The names of these gids are unknown, not absent.
 		unconfirmedGroups: s.Directory.UnconfirmedGroups,
 		accountToken:      firstNonEmpty(s.Directory.AccountSID, s.Directory.AccountRecord),
-		upnUnproven: lookupAttempted && !s.Directory.ResolvedAt.IsZero() &&
-			(awaitingSpoolUPN(s.Directory) || s.IDKind == useridentity.KindWindowsSID &&
-				s.Directory.Directory != useridentity.DirectoryLocal && s.Directory.UPN == ""),
-		GroupsUnknown: lookupAttempted && s.Directory.GroupsPartial,
+		upnUnproven:       lookupAttempted && !s.Directory.ResolvedAt.IsZero() && awaitingSpoolUPN(s.Directory),
+		GroupsUnknown:     lookupAttempted && s.Directory.GroupsPartial,
 		LookupFailed: lookupAttempted && (s.Directory.ResolvedAt.IsZero() ||
 			windowsToken && awaitingSpool(s.Directory) && !s.Directory.GroupsPartial),
 		tokenGroupsCause: tokenGroupsCause,

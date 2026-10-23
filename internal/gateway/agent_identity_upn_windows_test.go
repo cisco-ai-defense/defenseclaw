@@ -194,7 +194,7 @@ func TestAgentIdentitySIDOmitsKeptGuardianUPN(t *testing.T) {
 		validateManagedGuardianAuthorization = previousValidate
 	})
 	data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{
-		Key: sid, UpdatedAt: time.Now().UTC(), UPNSource: enterprisehooks.UPNSourceWindowsKept,
+		Key: sid, UpdatedAt: time.Now().UTC(), UPNSource: enterprisehooks.UPNSourceTranslateName,
 		UPNKeptSince: time.Now().UTC().Add(-time.Minute),
 		Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
 			UPN: "alice@corp.example.com", Principal: "alice@corp.example.com"},

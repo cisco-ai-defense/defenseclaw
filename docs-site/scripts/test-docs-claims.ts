@@ -696,9 +696,9 @@ describe('agent identity rows (rel-1-0-4 GAP-0596)', () => {
     assert.ok(identity.includes('readIdentitySpoolFacts(userID, time.Now())'));
     assert.ok(cache.includes('!entry.failedSince.IsZero()'));
     assert.ok(cache.includes('entry.fetchedAt.Add(c.lifetime(entry.facts))'));
-    assert.ok(ad.includes('entry.kept = entry.upn != ""'));
+    assert.ok(ad.includes('return entry.kept || entry.upn != upn'));
     assert.ok(spool.includes('KeepLastKnownUPN(record, entry.previous)'));
-    assert.ok(identity.includes('record.UPNSource == enterprisehooks.UPNSourceWindowsKept'));
+    assert.ok(identity.includes('if record.UPNKept() {'));
     assert.ok(identity.includes('if facts.UPNKept {'));
     assert.match(windows, /wait := time\.Duration\(0\)[\s\S]*?if identityLookupBlocking\.Load\(\)/);
     assert.ok(recorder.includes('rec.UPN = facts.UserUPN'));
@@ -709,13 +709,13 @@ describe('agent identity rows (rel-1-0-4 GAP-0596)', () => {
     const upn = api.slice(api.indexOf('`upn` is the account'), api.indexOf('`total` counts'));
     assert.ok(upn.includes('current Windows guardian record takes precedence'));
     assert.ok(upn.includes('an expired or failed directory answer omits'));
-    assert.ok(upn.includes('last verified Windows AD UPN can remain available for profile matching'));
-    assert.ok(upn.includes('an earlier value is'));
+    assert.ok(upn.includes('profile matching still uses the last good UPN'));
+    assert.ok(upn.includes('an earlier value is not carried into the row'));
     assert.ok(upn.includes('A completed background lookup does not update the row by itself; another hook must run'));
 
     const reference = page('enterprise/identity/reference.mdx');
     assert.ok(reference.includes('another hook runs after the directory cache has a current UPN'));
-    assert.ok(reference.includes('last verified AD UPN is kept for profile matching'));
+    assert.ok(reference.includes('profile matching still uses that last good UPN'));
     assert.ok(reference.includes("Each hook replaces the row's UPN"));
   });
 });
@@ -725,13 +725,17 @@ describe('Windows AD UPN outage wording', () => {
     const sources = page('enterprise/identity/sources.mdx');
     const row = sources.split('| AD UPN |')[1]?.split('| Verified |')[0];
     assert.ok(row, 'the Windows AD UPN source row is missing');
-    assert.ok(row.includes('last verified UPN is kept for profile matching'), 'the outage policy behavior is missing');
-    assert.ok(row.includes('omitted from agent identity rows'), 'the current row behavior is missing');
-    assert.ok(source('internal/enterprisehooks/identity_spool.go').includes('UPNSourceWindowsKept = "windows_kept"'));
-    assert.ok(source('internal/useridentity/directory_windows_facts.go').includes('upn, kept = previous, previous != ""'));
+    assert.ok(row.includes('the last good answer is kept during the outage for profile matching'), 'the outage policy behavior is missing');
+    assert.ok(row.includes('Agent identity rows leave that kept UPN out'), 'the current row behavior is missing');
+    // GAP-0129 and GAP-0284: the cache and the guardian keep the last good UPN.
+    const ad = source('internal/useridentity/directory_windows_facts.go');
+    assert.ok(ad.includes('upn, ttl, kept = previous, adUPNFailureTTL, previous != ""'));
+    const spool = source('internal/enterprisehooks/identity_spool.go');
+    assert.ok(spool.includes('record.Facts.UPN = previous.Facts.UPN'));
+    assert.ok(spool.includes('func MarkWindowsKeptUPN('));
     const changelog = source('CHANGELOG.md');
-    assert.ok(changelog.includes('last verified UPN for profile matching'));
-    assert.ok(changelog.includes('omit that kept UPN'));
+    assert.ok(changelog.includes('Profile matching is unchanged'));
+    assert.ok(changelog.includes('rows leave out that kept UPN'));
   });
 });
 

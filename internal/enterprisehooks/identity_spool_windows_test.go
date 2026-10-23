@@ -52,67 +52,6 @@ const (
 	testSpoolUserC = "S-1-5-21-111111111-222222222-333333333-4003"
 )
 
-func TestWindowsIdentitySpoolUsesCurrentOrMarkedLastVerifiedUPN(t *testing.T) {
-	for _, tc := range []struct {
-		name, current, want, source string
-		cachedKept                  bool
-	}{
-		{"UPN changed", "renamed@corp.example", "renamed@corp.example", UPNSourceTranslateName, false},
-		{"UPN casing changed", "Alice@corp.example", "Alice@corp.example", UPNSourceTranslateName, false},
-		{"translation unavailable", "", "alice@corp.example", UPNSourceWindowsKept, false},
-		{"cache returned last good", "alice@corp.example", "alice@corp.example", UPNSourceWindowsKept, true},
-		{"cache older than guardian record", "older@corp.example", "alice@corp.example", UPNSourceWindowsKept, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			before := IdentitySpoolRecord{Key: testSpoolUserA, User: `CORP\alice`, UpdatedAt: time.Now().UTC().Add(-time.Minute),
-				UPNSource: UPNSourceTranslateName, Facts: useridentity.DirectoryFacts{
-					Directory: useridentity.DirectoryActiveDirectory, UPN: "alice@corp.example", Principal: "alice@corp.example",
-				}}
-			data, err := MarshalIdentitySpoolRecord(before)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(dir, testSpoolUserA+".json"), data, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			stubWindowsIdentityLookups(t, nil, nil)
-			windowsIdentityDirectoryFacts = func(string, time.Duration) useridentity.DirectoryFacts {
-				return useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
-					UPN: tc.current, UPNKept: tc.cachedKept, Principal: tc.current, Source: useridentity.SourceWindowsLSA}
-			}
-			cache := NewWindowsEnrollmentGroupCache()
-			cache.Users[testSpoolUserA] = nil
-			if err := WriteWindowsIdentitySpool(context.Background(), dir, cache, nil, nil, nil, nil); err != nil {
-				t.Fatal(err)
-			}
-			got, err := ReadIdentitySpoolRecord(dir, testSpoolUserA, nil)
-			if err != nil || got.Facts.UPN != tc.want || got.Facts.Principal != tc.want || got.UPNSource != tc.source ||
-				(got.UPNKeptSince.IsZero() != (tc.source != UPNSourceWindowsKept)) {
-				t.Fatalf("record = %+v, err %v; want UPN and principal %q from %s", got, err, tc.want, tc.source)
-			}
-		})
-	}
-}
-
-func TestWindowsIdentitySpoolWaitsWithinTheAccountBudgetForCurrentUPN(t *testing.T) {
-	stubWindowsIdentityLookups(t, nil, nil)
-	var wait time.Duration
-	windowsIdentityDirectoryFacts = func(_ string, budget time.Duration) useridentity.DirectoryFacts {
-		wait = budget
-		return useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
-			UPN: "alice@corp.example", Source: useridentity.SourceWindowsLSA}
-	}
-	cache := NewWindowsEnrollmentGroupCache()
-	cache.Users[testSpoolUserA] = nil
-	if err := WriteWindowsIdentitySpool(context.Background(), t.TempDir(), cache, nil, nil, nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	if wait <= 0 || wait > windowsIdentityUPNWait {
-		t.Fatalf("directory UPN wait = %s, want a positive wait at most %s", wait, windowsIdentityUPNWait)
-	}
-}
-
 // stubWindowsIdentityLookups replaces the directory lookups of a record:
 // facts is called once per account in the order the pass takes them.
 func stubWindowsIdentityLookups(t *testing.T, facts func(sid string), budgets *[]time.Duration) {
@@ -255,7 +194,7 @@ func TestWindowsIdentitySpoolWriteFailureWithdrawsOldRecord(t *testing.T) {
 
 // Loop round 2, finding 1: a failed publication withdraws the previous
 // record only when the pass disproved it. A signed-in user whose token
-// groups and UPN did not change keeps the record, so the gateway keeps its strict
+// groups did not change keeps the record, so the gateway keeps its strict
 // group profile; withdrawing it sent the request to default_lookup_failed
 // and a possibly weaker default. Changed groups, a sign-out (groups no
 // longer known) and another account name still withdraw it.
@@ -274,9 +213,6 @@ func TestWindowsIdentitySpoolWriteFailureKeepsARecordItDidNotDisprove(t *testing
 			groups: []string{strict}, names: named, signedIn: true, wantKept: true},
 		{name: "same token groups, names not resolved this pass", previous: IdentitySpoolRecord{User: `CORP\alice`, Facts: useridentity.DirectoryFacts{Groups: []string{strict, `CORP\strict`}}},
 			groups: []string{strict}, signedIn: true, wantKept: true},
-		{name: "same token groups, earlier UPN unavailable now", previous: IdentitySpoolRecord{User: `CORP\alice`,
-			Facts: useridentity.DirectoryFacts{UPN: "alice@corp.example", Groups: []string{strict, `CORP\strict`}}},
-			groups: []string{strict}, names: named, signedIn: true},
 		{name: "a group added", previous: IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Groups: []string{strict}}},
 			groups: []string{strict, "S-1-5-32-545"}, signedIn: true},
 		{name: "a group removed", previous: IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Groups: []string{strict, "S-1-5-32-545"}}},
@@ -520,8 +456,8 @@ func TestWindowsIdentitySpoolWriteFailureKeepsAnUnreadableRecord(t *testing.T) {
 // record, which named a weaker one, whenever the account's directory
 // lookups took longer than windowsIdentityAccountWait, and at every such
 // pass until the record aged out. The pass now publishes the token groups,
-// which need no lookup, without carrying the previous UPN while lookup goes on;
-// unchanged groups also clear an old UPN.
+// which need no lookup, over the previous facts, while the lookup goes on;
+// unchanged groups leave the record as it was.
 func TestWindowsIdentitySpoolPublishesTheTokenGroupsOfALateLookup(t *testing.T) {
 	const weak, strict = "S-1-5-21-111111111-222222222-333333333-7001", "S-1-5-21-111111111-222222222-333333333-7000"
 	dir := t.TempDir()
@@ -554,11 +490,11 @@ func TestWindowsIdentitySpoolPublishesTheTokenGroupsOfALateLookup(t *testing.T) 
 	if readErr != nil || !slices.Contains(record.Facts.Groups, strict) || record.Facts.GroupsPartial || !record.UpdatedAt.After(previousAt) {
 		t.Fatalf("A's record = %+v (%v), want the strict token group published", record, readErr)
 	}
-	if record.User != `CORP\user` || record.Facts.UPN != "" || !slices.Contains(record.Facts.Groups, `CORP\weak`) {
-		t.Fatalf("A's record = %+v, want current groups without an old UPN", record)
+	if record.User != `CORP\user` || record.Facts.UPN != "user@corp.example" || !slices.Contains(record.Facts.Groups, `CORP\weak`) {
+		t.Fatalf("A's record = %+v, want the previous facts and group names kept", record)
 	}
-	if record, readErr := ReadIdentitySpoolRecord(dir, testSpoolUserB, nil); readErr != nil || !record.UpdatedAt.After(previousAt) || record.Facts.UPN != "" {
-		t.Fatalf("B's record = %+v (%v), want unchanged groups with the old UPN cleared", record, readErr)
+	if record, readErr := ReadIdentitySpoolRecord(dir, testSpoolUserB, nil); readErr != nil || !record.UpdatedAt.Equal(previousAt) {
+		t.Fatalf("B's record = %+v (%v), want it kept as it was", record, readErr)
 	}
 	// The lookup of A still runs at the next pass, which also leaves the
 	// published groups in place.

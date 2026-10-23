@@ -636,9 +636,10 @@ account's UPN in the current verified directory facts or Windows guardian
 record when the agent was last seen. Each later hook replaces that value. A
 current Windows guardian record takes precedence over an earlier cached
 answer. Without a current UPN, an expired or failed directory answer omits
-`upn` from the row. The last verified Windows AD UPN can remain available for
-profile matching during an outage, but it is marked kept and an earlier value is
-not carried into the row. On Windows, a cold Active
+`upn` from the row. During a directory outage, profile matching still uses
+the last good UPN that the directory cache or guardian keeps; that kept UPN is
+not a current fact, so it is left out and an earlier value is not carried into
+the row. On Windows, a cold Active
 Directory lookup can still be running when a hook records the row, so `upn`
 may be absent. A completed background lookup does not update the row by
 itself; another hook must run. Rows also keep their last snapshot until the

@@ -250,10 +250,9 @@ func readIdentitySpoolFactsForAccount(key, accountName, accountSID string, now t
 
 // mergeSpoolFacts overlays the guardian's root-resolved record on the facts
 // the gateway resolved itself for the same verified account. The spool wins
-// for the UPN and principal and for the realm and directory type it resolved
-// with them. A Windows directory record with an empty UPN clears an earlier one.
-// The gateway's own answer wins for groups, which it resolved just now.
-// When the guardian's InfoPipe lookup by
+// for the UPN and principal, which only root can read, and for the realm and
+// directory type it resolved with them; the gateway's own answer wins for
+// groups, which it resolved just now. When the guardian's InfoPipe lookup by
 // uid holds the account in another SSSD domain than the gateway's own facts
 // name (record.SSSDDomain), the gateway's domain, realm, principal and
 // directory type are another account's, and the spool's replace them even
@@ -261,19 +260,16 @@ func readIdentitySpoolFactsForAccount(key, accountName, accountSID string, now t
 func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.IdentitySpoolRecord) useridentity.DirectoryFacts {
 	spool := record.Facts
 	merged := own
-	// A Windows guardian record is the current verified answer, even when
-	// a token-only pass could not name its directory or UPN. An older
-	// gateway answer must not fill the missing UPN back in.
-	currentWindowsRecord := strings.HasPrefix(record.Key, "S-1-")
 	if record.SSSDDomain != "" && own.Domain != "" && !strings.EqualFold(own.Domain, record.SSSDDomain) &&
 		!strings.EqualFold(own.Domain, spool.Domain) {
 		merged.Domain, merged.Realm, merged.Principal, merged.Directory, merged.AccountDomain = "", "", "", "", ""
 	}
-	if currentWindowsRecord || spool.UPN != "" {
+	if spool.UPN != "" {
 		merged.UPN = spool.UPN
-		merged.UPNKept = record.UPNSource == enterprisehooks.UPNSourceWindowsKept
+		// Agent identity rows only; profile matching ignores the mark.
+		merged.UPNKept = record.UPNKept()
 	}
-	if currentWindowsRecord || spool.Principal != "" {
+	if spool.Principal != "" {
 		// One principal form per account, whichever guardian build wrote
 		// the record (GAP-0259).
 		merged.Principal = spool.Principal
@@ -300,7 +296,7 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 		merged.Groups = spool.Groups
 		merged.GroupsPartial = spool.GroupsPartial
 	}
-	if spool.Source != "" && (currentWindowsRecord || spool.UPN != "" || merged.Source == "") {
+	if spool.Source != "" && (spool.UPN != "" || merged.Source == "") {
 		merged.Source = spool.Source
 	}
 	if merged.ResolvedAt.IsZero() {
@@ -312,8 +308,8 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 }
 
 // forgetOnSpoolGroupChange drops key's cached facts when the guardian's
-// identity record lists another group set or current UPN than the cached
-// answer. On Windows the groups come from the account's sign-in token: after a
+// identity record lists another group set than the one they were built
+// from. On Windows the groups come from the account's sign-in token: after a
 // user signed out and in again the enumerator recorded the new groups at
 // once and `profile-explain` showed them, while hooks kept the cached old
 // ones for up to 15 more minutes (GAP-1027). A new sign-in now applies at the
@@ -332,7 +328,7 @@ func forgetOnSpoolGroupChange(cache *identityDirectoryCache, key string, now tim
 // outage default, which can be weaker than the assignment the facts select.
 //
 // On Windows (checkGroups) the record is the only source of an account's
-// token groups, so a record that is gone ends the cached groups and UPN: the
+// token groups, so a record that is gone ends the cached groups: the
 // enumerator removes it when the account left its group cache or the
 // enrollment, or when it could not publish groups that changed (GAP-0329).
 // The next lookup has no groups and takes the outage path: a request whose
@@ -366,12 +362,10 @@ func forgetOnSpoolChange(cache *identityDirectoryCache, key string, now time.Tim
 		switch {
 		case state == identitySpoolUnreadable:
 		case state == identitySpoolAbsent:
-			if len(cached.Groups) > 0 || cached.GuardianRecord && cached.UPN != "" {
+			if len(cached.Groups) > 0 {
 				cache.forget(key)
 			}
 		case cached.GroupsPartial != record.Facts.GroupsPartial || !sameGroupSet(cached.Groups, record.Facts.Groups):
-			cache.forget(key)
-		case cached.UPN != record.Facts.UPN || cached.Principal != record.Facts.Principal:
 			cache.forget(key)
 		}
 		return

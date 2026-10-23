@@ -19,7 +19,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -168,7 +167,9 @@ func agentIdentityAccountDomains(userID string) string {
 // agentIdentityAccountUPN is the UPN of the account a uid or SID's hooks ran
 // as. A current Windows guardian record wins before profile lookup refreshes
 // the gateway cache. Otherwise only current cached directory facts may name
-// it. known is false when no current answer or directory UPN is available.
+// it. A kept UPN (the last good answer profile matching keeps through an
+// outage, GAP-0129 and GAP-0284) is not current, so the row leaves it out.
+// known is false when no current answer or directory UPN is available.
 // This never looks the account up, so the hook path does not wait for it.
 func agentIdentityAccountUPN(userID string) (upn string, known bool) {
 	userID = agentidentity.NormalizeUserID(userID)
@@ -178,7 +179,7 @@ func agentIdentityAccountUPN(userID string) (upn string, known bool) {
 	facts, ok := peerDirectoryCache().peekCurrent(userID)
 	if agentidentity.IsSID(userID) && currentIdentitySpoolDir() != "" {
 		if record, current := readIdentitySpoolFacts(userID, time.Now()); current {
-			if record.UPNSource == enterprisehooks.UPNSourceWindowsKept {
+			if record.UPNKept() {
 				return "", false
 			}
 			upn := strings.TrimSpace(record.Facts.UPN)

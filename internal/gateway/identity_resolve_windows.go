@@ -68,7 +68,7 @@ const windowsUPNWait = 1500 * time.Millisecond
 // adWithoutUPN marks facts the cache must refresh soon: an AD account whose
 // UPN was not available yet (a slow or unreachable domain controller).
 func adWithoutUPN(facts useridentity.DirectoryFacts) bool {
-	return facts.Directory == useridentity.DirectoryActiveDirectory && (facts.UPN == "" || facts.UPNKept)
+	return facts.Directory == useridentity.DirectoryActiveDirectory && facts.UPN == ""
 }
 
 // resolveWindowsDirectoryFacts resolves a SID's facts, waiting at most
