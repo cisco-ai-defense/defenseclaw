@@ -2131,6 +2131,35 @@ class OrphanCopilotPluginTests(unittest.TestCase):
                 cmd_uninstall._remove_orphan_copilot_plugin()
             self.assertFalse(plugin.exists(), "the released Windows plugin was DefenseClaw's")
 
+    def test_orphan_cleanup_removes_current_guarded_plugin_on_both_platforms(self):
+        fixture_dir = (
+            Path(__file__).resolve().parents[2]
+            / "internal"
+            / "enterprisepolicy"
+            / "testdata"
+            / "copilot-vscode-guarded"
+        )
+        for platform_name in ("linux", "windows"):
+            with self.subTest(platform=platform_name), tempfile.TemporaryDirectory() as tmp:
+                fixture = fixture_dir / f"{platform_name}-hooks.json"
+                hooks = json.loads(fixture.read_text(encoding="utf-8"))
+                commands = [handler["command"] for group in hooks["hooks"].values() for handler in group]
+                self.assertTrue(commands)
+                if platform_name == "linux":
+                    self.assertTrue(all(" || exit 0; exec " in command for command in commands))
+                else:
+                    self.assertTrue(all("-EncodedCommand " in command for command in commands))
+                plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+                (plugin / "hooks").mkdir(parents=True)
+                (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+                (plugin / "hooks" / "hooks.json").write_text(json.dumps(hooks))
+                with (
+                    patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                    patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+                ):
+                    cmd_uninstall._remove_orphan_copilot_plugin()
+                self.assertFalse(plugin.exists(), f"the guarded {platform_name} plugin was DefenseClaw's")
+
     def test_orphan_cleanup_keeps_edited_windows_handler_with_operator_command(self):
         fixture = Path(__file__).resolve().parents[2] / "internal" / "enterprisepolicy" / "testdata" / "copilot-vscode-1.0.0" / "windows-hooks.json"
         hooks = json.loads(fixture.read_text())

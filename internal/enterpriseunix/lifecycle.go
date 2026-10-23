@@ -2244,6 +2244,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		r.AddError(codeMachinePolicyIncomplete, "repair could not put DefenseClaw hooks back in vendor machine policy: "+
 			l.machinePolicyErr.Error()+"; the rest of the deployment is repaired")
 	}
+	if l.opts.Action == ActionEnsure && l.machinePolicyErr != nil {
+		// Ensure can apply other deployment changes while a combined or
+		// unreadable vendor entry remains. A successful exit would claim the
+		// requested coverage even though the descriptor excludes it.
+		r.AddError(codeMachinePolicyIncomplete, "ensure could not put DefenseClaw hooks in vendor machine policy: "+
+			l.machinePolicyErr.Error()+"; other deployment changes may have been applied")
+	}
 	return 0
 }
 

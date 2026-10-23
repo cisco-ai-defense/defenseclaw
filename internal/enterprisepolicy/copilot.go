@@ -100,6 +100,17 @@ func copilotHandlerIsOwned(opts Options, raw any) bool {
 			return false
 		}
 	}
+	return copilotHandlerReferencesManagedHook(opts, raw)
+}
+
+// copilotHandlerReferencesManagedHook also recognizes a combined handler.
+// Such an entry is never removed as ours, but reconcile must not claim it
+// repaired the drop-in by appending a second copy beside it.
+func copilotHandlerReferencesManagedHook(opts Options, raw any) bool {
+	field := "bash"
+	if opts.goos() == "windows" {
+		field = "powershell"
+	}
 	command := stringField(raw, field)
 	if opts.goos() == "windows" {
 		return strings.Contains(command, connector.PowerShellQuoteLiteral(opts.HookBinary)) &&
@@ -248,19 +259,26 @@ func inspectCopilot(opts Options, state *State) error {
 				if copilotHandlerIsOwned(opts, handler) {
 					state.OwnedEntries++
 					ownedPerEvent[event]++
+					repair := "the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites it"
+					if !copilotHandlerIsRemovable(opts, event, handler) {
+						repair = "move independent content to a separate handler, then run repair; DefenseClaw leaves this combined handler in place"
+					}
 					if !copilotHandlerIsIntact(opts, event, handler) {
-						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s is not the command DefenseClaw publishes, so it may not enforce; the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites it", file, event)
+						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s is not the command DefenseClaw publishes, so it may not enforce; %s", file, event, repair)
 					}
 					if _, published := timeouts[event]; !published {
 						// Intact compares the command with the one rendered
 						// for this key, so a DefenseClaw command bound to an
 						// event DefenseClaw does not publish (or to no
 						// Copilot event at all) passed as intact.
-						state.entryConflict("%s: a DefenseClaw policy hook is registered for Copilot event %q, which DefenseClaw does not publish; the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites the drop-in without it", file, event)
+						state.entryConflict("%s: a DefenseClaw policy hook is registered for Copilot event %q, which DefenseClaw does not publish; %s", file, event, repair)
 					}
 					if want, ok := timeouts[event]; ok && copilotHandlerTimeout(handler) != fmt.Sprint(want) {
-						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s has timeoutSec %q, DefenseClaw publishes %d; Copilot lets the tool call proceed when the hook times out, so deploy the exported value; the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites it", file, event, copilotHandlerTimeout(handler), want)
+						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s has timeoutSec %q, DefenseClaw publishes %d; Copilot lets the tool call proceed when the hook times out, so deploy the exported value; %s", file, event, copilotHandlerTimeout(handler), want, repair)
 					}
+				} else if copilotHandlerReferencesManagedHook(opts, handler) {
+					state.ForeignEntries++
+					state.entryConflict("%s: Copilot event %s combines DefenseClaw's command with an independent executable field; move independent content to a separate handler, then run repair", file, event)
 				} else {
 					state.ForeignEntries++
 				}
@@ -458,6 +476,23 @@ func mergeCopilotDropIn(opts Options, current []byte) ([]byte, error) {
 	rendered, err := renderCopilotDropIn(opts)
 	if err != nil || len(bytes.TrimSpace(current)) == 0 {
 		return rendered, err
+	}
+	currentDoc, err := decodeOrderedObject(current)
+	if err != nil {
+		return nil, err
+	}
+	if value, _ := currentDoc.get("hooks"); value != nil {
+		if hooks, ok := value.(*object); ok {
+			for _, event := range hooks.keys {
+				value, _ := hooks.get(event)
+				list, _ := value.([]any)
+				for _, handler := range list {
+					if copilotHandlerReferencesManagedHook(opts, handler) && !copilotHandlerIsRemovable(opts, event, handler) {
+						return nil, fmt.Errorf("event %s combines DefenseClaw's command with independent content; move independent content to a separate handler", event)
+					}
+				}
+			}
+		}
 	}
 	admin, _, err := copilotStrip(opts)(current)
 	if err != nil {

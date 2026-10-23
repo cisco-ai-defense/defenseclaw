@@ -658,8 +658,8 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 		}
 		if len(state.UserFileForeign) > 0 {
 			drift = append(drift, fmt.Sprintf(
-				"DefenseClaw's %s plugin holds hooks DefenseClaw did not write for %d enrolled user(s): %s; the hook guardian leaves such a file in place and the foreign-hook guard denies that user's %s calls while it is there: move the file aside, and the guardian writes DefenseClaw's plugin on its next pass",
-				state.Connector, len(state.UserFileForeign), firstPaths(state.UserFileForeign), state.Connector))
+				"DefenseClaw's %s Local hook or plugin cannot be replaced for enrolled users: %s; the hook guardian leaves it in place: move the independent handlers aside or repair the file, then the guardian can write DefenseClaw's hooks on its next pass",
+				state.Connector, firstPaths(state.UserFileForeign)))
 			r.SecurityComplete = false
 		}
 		if len(pending) > 0 {

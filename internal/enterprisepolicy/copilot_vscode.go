@@ -246,6 +246,9 @@ func stripCopilotVSCodeOwnedHooks(data []byte, goos, hookBinary string) ([]byte,
 	}
 	value, present := doc.get("hooks")
 	if !present {
+		if !foreignTopLevel {
+			return nil, true, false, nil
+		}
 		return data, false, foreignTopLevel, nil
 	}
 	hooks, ok := value.(*object)
@@ -288,6 +291,11 @@ func stripCopilotVSCodeOwnedHooks(data []byte, goos, hookBinary string) ([]byte,
 		}
 	}
 	if !owned {
+		if !foreign {
+			// An empty copy at DefenseClaw's own plugin path is a
+			// truncated or cleared hook document, not an independent hook.
+			return nil, true, false, nil
+		}
 		return data, false, foreign, nil
 	}
 	if hooks.len() == 0 {
@@ -558,9 +566,9 @@ func CopilotVSCodeUserState(home, goos, hookBinary string) (hookFile, plugin boo
 		same(CopilotPluginHooksPath(home), hooks) && same(filepath.Join(CopilotPluginDir(home), "plugin.json"), manifest)
 }
 
-// copilotVSCodeUserKept reports, read-only, the plugin files under home
-// that the guardian leaves in place because they hold hooks DefenseClaw did
-// not write (an earlier DefenseClaw render is replaced, not kept).
+// copilotVSCodeUserKept reports, read-only, the Local hook and plugin files
+// that the guardian leaves in place because they hold independent content
+// (an earlier DefenseClaw render is replaced, not kept).
 func copilotVSCodeUserKept(home, goos, hookBinary string) []string {
 	result, _ := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{Home: home, GOOS: goos, HookBinary: hookBinary, HookFile: true, Plugin: true, DryRun: true})
 	return result.Kept

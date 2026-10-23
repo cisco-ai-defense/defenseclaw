@@ -282,6 +282,115 @@ func TestCopilotVSCodeRepairsATamperedHookFile(t *testing.T) {
 	}
 }
 
+func TestCopilotVSCodeClaimsInertPluginDocument(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, document := range []string{`{}`, `{"hooks":{"PreToolUse":[]}}`} {
+			t.Run(goos+"/"+document, func(t *testing.T) {
+				home := t.TempDir()
+				hookBinary := testHookBinary
+				if goos == "windows" {
+					hookBinary = `C:\DefenseClaw\defenseclaw-hook.exe`
+				}
+				path := CopilotPluginHooksPath(home)
+				writeFile(t, path, document)
+				if goos == "linux" {
+					opts := withPolicy(testOptions(t), copilotConnector, func(p *config.EnterpriseConnectorPolicy) {
+						p.ManagedHooksOnly = config.ManagedHooksOnlyEnforce
+					})
+					opts.CopilotUserHomes = []string{home}
+					writeFile(t, rooted(opts, "/usr/share/code/resources/app/package.json"), `{"version":"1.139.2"}`)
+					state := State{}
+					copilotVSCodeStatus(opts, &state)
+					if slices.Contains(state.UserFileForeign, path) || !slices.Contains(state.UserFileDrift, path) {
+						t.Fatalf("inert plugin is not independent content: %+v", state)
+					}
+				}
+				req := CopilotVSCodeUserRequest{Home: home, GOOS: goos, HookBinary: hookBinary, Plugin: true}
+				result, err := EnsureCopilotVSCodeUser(req)
+				if err != nil || !result.PluginOK || slices.Contains(result.Kept, path) {
+					t.Fatalf("setup did not repair inert plugin document: %+v, %v", result, err)
+				}
+				want, err := RenderCopilotVSCodeLocalHooks(goos, hookBinary)
+				if err != nil || readFile(t, path) != string(want) {
+					t.Fatalf("plugin hooks were not rewritten: %v", err)
+				}
+				writeFile(t, path, document)
+				req.Plugin = false
+				result, err = EnsureCopilotVSCodeUser(req)
+				if err != nil || !slices.Contains(result.Removed, path) {
+					t.Fatalf("uninstall did not remove inert plugin document: %+v, %v", result, err)
+				}
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("inert plugin hooks remain: %v", err)
+				}
+			})
+		}
+	}
+	home := t.TempDir()
+	path := CopilotPluginHooksPath(home)
+	independent := `{"hooks":{"PreToolUse":[]},"operator":{"enabled":true}}`
+	writeFile(t, path, independent)
+	for _, keep := range []bool{true, false} {
+		result, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+			Home: home, GOOS: "linux", HookBinary: testHookBinary, Plugin: keep,
+		})
+		if err != nil || !slices.Contains(result.Kept, path) || readFile(t, path) != independent {
+			t.Fatalf("independent plugin content was changed: %+v, %v", result, err)
+		}
+	}
+}
+
+func TestCopilotVSCodeStatusClassifiesRetainedLocalHook(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			home := t.TempDir()
+			if _, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+				Home: home, GOOS: goos, HookBinary: testHookBinary, HookFile: true, Plugin: true,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			path := CopilotVSCodeLocalHookFilePath(home)
+			writeFile(t, path, `{"hooks":{"PreToolUse":[{"type":"command","command":"operator-tool"}]}}`)
+			opts := testOptions(t)
+			opts.GOOS, opts.HookBinary, opts.CopilotUserHomes = goos, testHookBinary, []string{home}
+			state := State{}
+			copilotVSCodeStatus(opts, &state)
+			if !slices.Contains(state.UserFileForeign, path) || slices.Contains(state.UserFileDrift, path) {
+				t.Fatalf("retained Local hook classified as repairable drift: %+v", state)
+			}
+		})
+	}
+}
+
+// The Python orphan cleanup consumes these exact current Go renders. Keep
+// its guarded POSIX and PowerShell fixtures in sync with the writer.
+func TestCopilotVSCodeGuardedOrphanFixturesMatchRender(t *testing.T) {
+	for _, tc := range []struct{ goos, hookBinary string }{
+		{"linux", "/opt/dc/defenseclaw-hook"},
+		{"windows", `C:\DefenseClaw\defenseclaw-hook.exe`},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			want, err := RenderCopilotVSCodeLocalHooks(tc.goos, tc.hookBinary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(filepath.Join("testdata", "copilot-vscode-guarded", tc.goos+"-hooks.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.goos == "windows" {
+				// GetSystemDirectoryW reports "system32" on some Windows
+				// installs; the non-Windows renderer uses "System32".
+				got = bytes.ReplaceAll(got, []byte(`\\System32\\WindowsPowerShell`), []byte(`\\system32\\WindowsPowerShell`))
+				want = bytes.ReplaceAll(want, []byte(`\\System32\\WindowsPowerShell`), []byte(`\\system32\\WindowsPowerShell`))
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatal("orphan cleanup fixture differs from the current Go render")
+			}
+		})
+	}
+}
+
 // The guardian created ~/.copilot, ~/.copilot/hooks and
 // ~/.copilot/installed-plugins for the Local files, and their removal left
 // them in the home, empty. The write reports the folders it created; the

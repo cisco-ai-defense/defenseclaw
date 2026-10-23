@@ -5518,14 +5518,7 @@ func removeCopilotHookReferencesProfile(path string, secureClient bool, hookScri
 	}
 	var pruned map[string]interface{}
 	if secureClient {
-		remaining, changed, err := stripCopilotOwnedEntry(cfg, hookScript)
-		if err != nil {
-			return fmt.Errorf("copilot: cannot remove Secure Client hooks in %s: %w", path, err)
-		}
-		if !changed {
-			return nil
-		}
-		pruned, _ = remaining.(map[string]interface{})
+		pruned, _ = removeHookScriptReferencesLegacy(cfg, hookScript).(map[string]interface{})
 	} else {
 		pruned = make(map[string]interface{}, len(cfg))
 		for key, value := range cfg {

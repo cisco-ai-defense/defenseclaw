@@ -144,6 +144,49 @@ func TestCopilotPolicyRemovalKeepsCommandWithOperatorStatement(t *testing.T) {
 	}
 }
 
+func TestCopilotManagedReconcileRefusesCombinedHandler(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			binary := "/opt/defenseclaw/bin/defenseclaw-hook"
+			field, other := "bash", "powershell"
+			if goos == "windows" {
+				binary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+				field, other = "powershell", "bash"
+			}
+			opts := Options{GOOS: goos, HookBinary: binary}
+			for _, variant := range []string{"suffix", "extra field", "second executable"} {
+				t.Run(variant, func(t *testing.T) {
+					document, err := renderCopilotDropIn(opts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var doc map[string]any
+					if err := json.Unmarshal(document, &doc); err != nil {
+						t.Fatal(err)
+					}
+					handler := doc["hooks"].(map[string]any)["preToolUse"].([]any)[0].(map[string]any)
+					switch variant {
+					case "suffix":
+						handler[field] = handler[field].(string) + "; Write-Output operator"
+					case "extra field":
+						handler["operator"] = map[string]any{"command": "operator-tool"}
+					case "second executable":
+						handler[other] = "operator-tool"
+					}
+					current, err := json.Marshal(doc)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if merged, err := mergeCopilotDropIn(opts, current); err == nil || merged != nil ||
+						!strings.Contains(err.Error(), "move independent content to a separate handler") {
+						t.Fatalf("reconcile claimed a combined %s handler: returned_document=%t, err=%v", variant, merged != nil, err)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestCopilotLocalRemovalKeepsIndependentHandler(t *testing.T) {
 	home := t.TempDir()
 	req := CopilotVSCodeUserRequest{Home: home, GOOS: "linux", HookBinary: testHookBinary, HookFile: true}
