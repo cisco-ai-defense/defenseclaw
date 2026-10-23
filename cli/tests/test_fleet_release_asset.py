@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -37,3 +38,19 @@ def test_fleet_release_asset_ships_policy_page_for_compiler_ctest(tmp_path: Path
     assert compiler_test.returncode == 0, compiler_test.stdout + compiler_test.stderr
     assert "Ran 1 test" in compiler_test.stderr
     assert (extracted / POLICY_PAGE).is_file()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the release asset builder runs on POSIX")
+def test_install_smoke_assets_include_fleet_policy_page(tmp_path: Path) -> None:
+    assets = tmp_path / "assets"
+    build = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "build-release-assets.sh"),
+         "9.9.9", str(assets), "linux/amd64"],
+        cwd=ROOT, capture_output=True, text=True, timeout=900, check=False,
+    )
+    assert build.returncode == 0, build.stdout + build.stderr
+
+    with tarfile.open(assets / "defenseclaw-fleet-assets.tar.gz", "r:gz") as archive:
+        page = archive.extractfile(str(POLICY_PAGE))
+        assert page is not None
+        assert page.read() == (ROOT / POLICY_PAGE).read_bytes()
