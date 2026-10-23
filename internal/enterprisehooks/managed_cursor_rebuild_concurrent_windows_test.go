@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -282,34 +283,36 @@ func TestWindowsCursorMachineGuardRebuildKeepsConcurrentChanges(t *testing.T) {
 		paths := installWindowsCursorStandaloneGuardForTest(t, hook, true)
 		ours := []byte(`{"version":1,"hooks":{"stop":[]}}`)
 		for _, preimageExisted := range []bool{true, false} {
-			preimage := windowsManagedFileSnapshot{path: paths.Hooks}
-			var metadata windowsCursorManagedFileMetadata
 			if preimageExisted {
 				write(t, paths.Hooks, []byte(`{"version":1,"hooks":{}}`))
-				var err error
-				if preimage, err = snapshotWindowsManagedFileWithLimit(paths.Hooks, windowsCursorManagedHooksLimit); err != nil {
-					t.Fatal(err)
-				}
-				if metadata, err = snapshotWindowsCursorManagedFileMetadata(preimage); err != nil {
-					t.Fatal(err)
-				}
 			} else if err := os.Remove(paths.Hooks); err != nil && !errors.Is(err, os.ErrNotExist) {
 				t.Fatal(err)
 			}
-			item := &windowsCursorManagedRebuildWrite{
-				preimage: preimage, metadata: metadata, limit: windowsCursorManagedHooksLimit, data: ours, shared: true,
+			preimage, err := readWindowsCursorSharedHooks(paths.Hooks)
+			if err != nil {
+				t.Fatal(err)
 			}
-			write(t, paths.Hooks, ours)
-			if err := item.undo(); err != nil {
+			publish := func() safefile.SharedFileWrite {
+				t.Helper()
+				written, err := publishWindowsCursorManagedHooks(preimage, func(safefile.SharedFile) (safefile.SharedEdit, error) {
+					return safefile.SharedEdit{Data: ours}, nil
+				})
+				if err != nil || !written.Written {
+					t.Fatalf("publish: written=%t err=%v", written.Written, err)
+				}
+				return written
+			}
+			written := publish()
+			if err := undoWindowsCursorManagedHooks(written, nil); err != nil {
 				t.Fatalf("undo over the rebuild's own bytes: %v", err)
 			}
-			if now := read(t, paths); !bytes.Equal(now.hooks, preimage.data) {
-				t.Fatalf("undo did not put the preimage back: %q", now.hooks)
+			if now, err := readWindowsCursorSharedHooks(paths.Hooks); err != nil || !now.Same(preimage) {
+				t.Fatalf("undo did not put the preimage back: %+v err=%v", now, err)
 			}
-			write(t, paths.Hooks, ours)
+			written = publish()
 			// The administrator saves after the rebuild wrote.
 			write(t, paths.Hooks, adminHooks)
-			if err := item.undo(); !errors.Is(err, errWindowsCursorManagedConcurrentChange) {
+			if err := undoWindowsCursorManagedHooks(written, nil); !errors.Is(err, errWindowsCursorManagedConcurrentChange) {
 				t.Fatalf("undo over a newer save: %v", err)
 			}
 			if now := read(t, paths); !bytes.Equal(now.hooks, adminHooks) {
