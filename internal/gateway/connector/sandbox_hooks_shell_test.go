@@ -275,6 +275,12 @@ func TestSandboxClaudeAndCodexAcknowledgeTheirRelayedToolAnswer(t *testing.T) {
 				run.calls[1].headers["authorization"] != "Bearer sandbox-token" {
 				t.Fatalf("receipt crossed the wrong binding or route: %+v", run.calls)
 			}
+			for i, call := range run.calls {
+				argv := strings.Join(call.argv, "\n")
+				if strings.Contains(argv, "sandbox-token") || strings.Contains(strings.ToLower(argv), "authorization") {
+					t.Fatalf("call %d exposed the bearer on argv: %s", i, argv)
+				}
+			}
 			var ack map[string]string
 			if err := json.Unmarshal([]byte(run.calls[1].body), &ack); err != nil ||
 				ack["delivery_receipt"] != receiptID || ack["result"] != "ack" {
