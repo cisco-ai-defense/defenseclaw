@@ -626,6 +626,7 @@ func (codexTarget) Verify(opts Options) (State, error) {
 		state.Route = RouteUnsupported
 		return state, nil
 	}
+	verifyWindowsHookExecutable(opts, "Codex", &state)
 	current, exists, err := readPolicyFile(opts, path)
 	if err != nil {
 		return state, err

@@ -480,19 +480,7 @@ func (t claudeTarget) Verify(opts Options) (State, error) {
 		if !exists {
 			state.conflict("%s does not exist: %s", path, windowsMissingMachineHookDiagnostic("Claude Code"))
 		}
-		// Claude Code can continue a tool call when the registered command
-		// cannot start. A valid drop-in therefore proves no protection if
-		// quarantine removed the executable it names.
-		info, err := os.Lstat(opts.HookBinary)
-		reason := ""
-		if err != nil {
-			reason = fmt.Sprintf("is unavailable: %v", err)
-		} else if !info.Mode().IsRegular() || info.Size() == 0 {
-			reason = "is not a non-empty regular file"
-		}
-		if reason != "" {
-			state.conflict("Claude Code hook executable %s %s. Stop Claude Code use, repair the installation, then run 'defenseclaw enterprise windows verify --profile standalone --json' from an elevated session before allowing agent use", opts.HookBinary, reason)
-		}
+		verifyWindowsHookExecutable(opts, "Claude Code", &state)
 	}
 	if err := inspectClaude(opts, policy, &state); err != nil {
 		return state, err

@@ -141,10 +141,11 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --json
 - `export --connector <name>` prints DefenseClaw's entries to deploy through your own policy tool.
 - `verify` exits 1 when any machine-policy connector is not covered. `verify --live` runs the real Codex or Claude Code client to prove it loads the hooks.
 
-A missing hook executable makes Windows Claude Code policy verification fail even
-when its drop-in remains installed and no users are enrolled. Stop Claude Code,
-repair the installation, and run `enterprise windows verify --profile standalone --json`
-from an elevated prompt. Require that full check to pass before allowing agent use.
+A missing hook executable makes Windows Claude Code, Codex and Copilot policy
+verification fail even when their machine policy files remain installed and no
+users are enrolled. Stop the affected agent, repair the installation, and run
+`enterprise windows verify --profile standalone --json` from an elevated prompt.
+Require that full check to pass before allowing agent use.
 
 Export formats and the `--live` requirements are in [Detail](/docs/enterprise/configure/reference#inspect-export-and-verify).
 
