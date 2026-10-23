@@ -109,7 +109,7 @@ func TestDirectoryCredentialSplitIsTotalAndExclusive(t *testing.T) {
 	}
 }
 
-func TestDirectoryCredentialAcquisitionBashLoginWrapperDetectionOnly(t *testing.T) {
+func TestDirectoryCredentialAcquisitionBashLoginWrapperFailsClosed(t *testing.T) {
 	t.Parallel()
 	command := `bash -lc 'mkdir -p /tmp/enum && impacket-GetUserSPNs -dc-ip 192.0.2.10 -request corp.example/user; cat /tmp/enum/out'`
 	for _, profile := range []string{"default", "permissive", "strict"} {
@@ -120,13 +120,17 @@ func TestDirectoryCredentialAcquisitionBashLoginWrapperDetectionOnly(t *testing.
 			"benchmark-"+profile,
 			profile,
 		)
-		if len(evaluation.Findings) != 1 ||
-			evaluation.Findings[0].RuleID != directoryTicketRequestRuleID ||
-			evaluation.Findings[0].ContributesToEnforcement ||
-			evaluation.Route != "fallback" || evaluation.Authoritative ||
-			evaluation.EnforcementEligible || evaluation.Action == guardrailActionBlock ||
-			evaluation.Action == guardrailActionConfirm {
-			t.Fatalf("profile=%s escaped detection-only boundary: %+v", profile, evaluation)
+		findings := make(map[string]DeterministicActionFinding, len(evaluation.Findings))
+		for _, finding := range evaluation.Findings {
+			findings[finding.RuleID] = finding
+		}
+		request, hasRequest := findings[directoryTicketRequestRuleID]
+		uncertain, hasUncertain := findings["ACTION-COMPOUND-UNPROVEN"]
+		if len(evaluation.Findings) != 2 || !hasRequest || request.ContributesToEnforcement ||
+			!hasUncertain || !uncertain.ContributesToEnforcement ||
+			evaluation.Route != "mixed" || evaluation.Authoritative ||
+			evaluation.EnforcementEligible || evaluation.Action != guardrailActionBlock {
+			t.Fatalf("profile=%s did not fail closed on login shell: %+v", profile, evaluation)
 		}
 	}
 }

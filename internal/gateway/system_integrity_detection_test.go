@@ -70,7 +70,7 @@ func TestPOSIXSystemInterpreterWrapperProfilePosture(t *testing.T) {
 	}
 }
 
-func TestPOSIXSystemInterpreterWrapperPartialShellRetainsDetectionOnly(t *testing.T) {
+func TestPOSIXSystemInterpreterWrapperPartialShellFailsClosed(t *testing.T) {
 	const command = "if [ ! -e /usr/bin/python3.12.real ]; then mv /usr/bin/python3.12 /usr/bin/python3.12.real; fi\n" +
 		"cat >/usr/bin/.python3.12.wrap <<'EOF'\n" +
 		"#!/bin/sh.real\n" +
@@ -89,11 +89,25 @@ func TestPOSIXSystemInterpreterWrapperPartialShellRetainsDetectionOnly(t *testin
 		connector,
 		"strict",
 	)
-	if result.Action != "allow" || result.ParseStatus != string(actionfacts.StatusPartial) ||
+	if result.Action != "block" || result.ParseStatus != string(actionfacts.StatusPartial) ||
 		!slices.Contains(result.RuleIDs, posixSystemInterpreterWrapperID) ||
-		len(result.Findings) != 1 || result.Findings[0].Disposition != "detect_only" ||
-		result.Findings[0].ContributesToEnforcement {
-		t.Fatalf("result=%+v, want partial detection-only finding", result)
+		!slices.Contains(result.RuleIDs, "ACTION-COMPOUND-UNPROVEN") ||
+		len(result.Findings) != 2 {
+		t.Fatalf("result=%+v, want partial fail-closed finding", result)
+	}
+	for _, finding := range result.Findings {
+		switch finding.RuleID {
+		case posixSystemInterpreterWrapperID:
+			if finding.Disposition != "detect_only" || finding.ContributesToEnforcement {
+				t.Fatalf("interpreter wrapper unexpectedly enforceable: %+v", finding)
+			}
+		case "ACTION-COMPOUND-UNPROVEN":
+			if !finding.ContributesToEnforcement {
+				t.Fatalf("partial compound action did not fail closed: %+v", finding)
+			}
+		default:
+			t.Fatalf("unexpected finding: %+v", finding)
+		}
 	}
 }
 
