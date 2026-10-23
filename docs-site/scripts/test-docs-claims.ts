@@ -93,6 +93,31 @@ describe('1.0.4 managed outage and upgrade claims', () => {
     assert.match(enterprise, /Windows Hermes.*does not run.*foreign-hook guard/i);
   });
 
+  for (const name of ['copilot', 'cursor', 'devin', 'opencode', 'amp', 'claudecode', 'codex']) {
+    it(`keeps the managed ${name} fail-mode boundary in its connector page`, () => {
+      const failMode = page(`reference/connectors/${name}.mdx`).split('## Fail mode')[1]?.split('## ')[0] ?? '';
+      assert.match(failMode, /managed standalone.*foreign_hooks: remove.*guarded tool calls.*gateway outage.*administrator.*open/i);
+      assert.match(failMode, /administrator.*open.*classified gateway outage|classified gateway outage.*administrator.*open/i);
+      assert.doesNotMatch(failMode, /When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless/i);
+      if (name === 'amp') {
+        assert.match(failMode, /Windows Amp.*plugin.*blocks.*outage.*every fail mode/i);
+        assert.doesNotMatch(page('reference/connectors/amp.mdx'), /Gateway errors honor the configured open or closed hook failure mode/i);
+      }
+      if (name === 'claudecode' || name === 'codex') {
+        assert.match(failMode, /managed_hooks_only: preserve.*foreign_hooks: remove/i);
+      }
+    });
+  }
+
+  for (const name of ['antigravity', 'kiro']) {
+    it(`limits managed ${name} open to classified outages`, () => {
+      const failMode = page(`reference/connectors/${name}.mdx`).split('## Fail mode')[1]?.split('## ')[0] ?? '';
+      assert.match(failMode, /managed standalone.*administrator.*open.*classified gateway outage/i);
+      assert.match(failMode, /(?:authentication|unusable answer).*block.*every fail mode/i);
+      assert.doesNotMatch(failMode, /When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless/i);
+    });
+  }
+
   it('distinguishes the Windows Amp local guard record from gateway-backed sessions', () => {
     const guard = page('enterprise/configure/foreign-hook-guard.mdx');
     assert.match(guard, /Windows Amp keeps its guard record locally.*managed plugin blocks gateway outages in every fail mode.*report.*allow/i);
@@ -171,13 +196,13 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     for (const name of ['reference/connectors/copilot.mdx']) {
       const text = page(name);
       assert.ok(!/no fail-closed hook transport/i.test(text), name);
-      assert.ok(text.includes('in fail mode `closed`, the default'), name);
+      assert.match(text, /On a per-user install.*denies supported calls.*mode `closed` \(the default outside Secure Client\)/i, name);
     }
     for (const name of ['reference/connectors/antigravity.mdx']) {
       const text = page(name);
       assert.ok(!text.includes('A gateway failure lets the call run'), name);
       assert.ok(!text.includes('normal fail-open operation'), name);
-      assert.ok(text.includes('In fail mode `closed`, the default'), name);
+      assert.match(text, /On a per-user install, `closed` \(the default outside Secure Client\) denies `PreToolUse`/i, name);
     }
   });
 

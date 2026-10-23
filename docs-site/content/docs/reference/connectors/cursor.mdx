@@ -114,7 +114,7 @@ DefenseClaw does not enable Cursor native approval. Confirm verdicts stay attrib
 
 ## Fail mode
 
-Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. Action mode registers `failClosed: true` and observe mode registers `failClosed: false`; a conflicting `--fail-mode` is ignored with a warning. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+Fail closed: yes. On a per-user install, an invoked hook follows its effective fail mode for a gateway delivery failure: `closed` blocks supported calls and `open` can let them run. The unset mode is `closed` outside Secure Client. Action mode registers `failClosed: true` and observe mode registers `failClosed: false`; a conflicting `--fail-mode` is ignored with a warning. On a managed standalone host, the administrator's `open` applies only to a classified gateway outage; refusals and unusable answers block in every fail mode. With `foreign_hooks: remove` (the default), guarded tool calls block during a gateway outage under administrator `open` because the session check needs the gateway. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes) and [Gateway outages](/docs/enterprise/configure/foreign-hook-guard#gateway-outages).
 
 ## Limits
 

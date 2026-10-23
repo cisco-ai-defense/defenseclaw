@@ -107,7 +107,7 @@ The contract is `amp-plugin-v1`, plugin script `v2`. DefenseClaw pins the normal
 | `tool.result` | Inspect status and output after execution, before model delivery | Preserve, withhold or replace, or native confirm |
 | `agent.end` | Close the turn and record its status | Observe only |
 
-Amp documents no `session.end` and no separate subagent events. Oracle, Task launchers, MCP tools and plugin-defined tools are governed at their parent `tool.call`. If Amp emits events from a child thread, DefenseClaw enforces that child's calls under its thread ID and invents no parent-child edge. For a `confirm` decision, the plugin calls Amp's confirmation UI only when the thread is active in the foreground. Denial, a background thread or unavailable UI rejects a pending call or withholds a pending result. Gateway errors honor the configured open or closed hook failure mode. Fail-closed applies once the plugin has loaded, and a killed or stopped check blocks the call.
+Amp documents no `session.end` and no separate subagent events. Oracle, Task launchers, MCP tools and plugin-defined tools are governed at their parent `tool.call`. If Amp emits events from a child thread, DefenseClaw enforces that child's calls under its thread ID and invents no parent-child edge. For a `confirm` decision, the plugin calls Amp's confirmation UI only when the thread is active in the foreground. Denial, a background thread or unavailable UI rejects a pending call or withholds a pending result. On a per-user install, gateway delivery failures follow the effective hook fail mode. Fail-closed applies once the plugin has loaded, and a killed or stopped check blocks the call.
 
 ## Native ask
 
@@ -115,7 +115,7 @@ Amp can ask in the active foreground thread during `tool.call` and before a `too
 
 ## Fail mode
 
-Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. Gateway errors honor the configured open or closed mode. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+Fail closed: yes. On a per-user install, an invoked plugin in mode `closed` blocks supported calls on a gateway delivery failure; mode `open` can let an eligible call run. The unset mode is `closed` outside Secure Client. On a managed standalone host, the administrator's `open` applies only to a classified gateway outage; refusals and unusable answers block in every fail mode. With `foreign_hooks: remove` on Linux and macOS, guarded tool calls block during a gateway outage under administrator `open` because their session check needs the gateway. Windows Amp keeps a local guard record, and its managed plugin blocks a gateway outage in every fail mode, including with `foreign_hooks: report` or `allow`. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes) and [Gateway outages](/docs/enterprise/configure/foreign-hook-guard#gateway-outages).
 
 ## Limits
 

@@ -117,7 +117,7 @@ Only `PreToolUse` supports native ask. DefenseClaw sends `force_ask`, which alwa
 
 ## Fail mode
 
-Antigravity does not document non-zero hook exit status as enforcement, so DefenseClaw does not advertise connector-wide fail-closed support. In fail mode `closed`, the default, a gateway, authentication or decoding failure denies `PreToolUse` with `decision: "deny"`; with `open` it gets the event's no-op answer. Antigravity itself still runs a call when the hook times out or cannot start. Under Secure Client the hook stays open. Other events keep their documented non-blocking shapes. DefenseClaw does not claim it can override Antigravity's own permission bypass.
+Antigravity does not document non-zero hook exit status as enforcement, so DefenseClaw does not advertise connector-wide fail-closed support. On a per-user install, `closed` (the default outside Secure Client) denies `PreToolUse` on a gateway delivery failure with `decision: "deny"`; `open` returns the event's no-op answer. On a managed standalone host, the administrator's `open` applies only to a classified gateway outage; authentication and unusable answer or decoding failures block in every fail mode. Antigravity itself still runs a call when the hook times out or cannot start. Under Secure Client the unset mode is `open`, and an explicit `closed` is kept. Other events keep their documented non-blocking shapes. DefenseClaw does not claim it can override Antigravity's own permission bypass. See [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 
