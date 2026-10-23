@@ -229,7 +229,9 @@ func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *
 					userState = matchYes
 				}
 			case res.Account == proofProven:
-				if userEntryMatches(subject, entry) {
+				if ambiguousBareUserEntry(subject, entry) {
+					userState, userNeed = max(userState, matchMaybe), "account:ambiguous_short_name"
+				} else if userEntryMatches(subject, entry) {
 					userState = matchYes
 				} else if res.UPN != proofProven && strings.ContainsAny(entry, `@\`) && !strings.HasPrefix(entry, `.\`) {
 					// A UPN or DOMAIN\name entry may name the account
@@ -470,6 +472,8 @@ func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubjec
 		switch fact {
 		case "account:failed":
 			why = append(why, "the account holder is ambiguous")
+		case "account:ambiguous_short_name":
+			why = append(why, "a bare users entry may name accounts in more than one trusted domain; use a qualified name or uid")
 		case "account:unknown":
 			why = append(why, "the account holder is unconfirmed")
 		case "upn:unknown":

@@ -3008,8 +3008,8 @@ def _check_guardrail_profile(cfg, r: _DoctorResult) -> None:
         )
     else:
         _emit("pass", "Guardrail profile", profile_status_text(cfg, result), r=r, check_id="doctor.guardrail.profile")
-    # A directory that does not answer leaves only default_lookup_failed on
-    # each record otherwise (GAP-0145).
+    # A directory that does not answer can leave refused requests whose
+    # assignments need missing facts; each refusal names its fact (GAP-0145).
     directory = (result.get("directory") or {}).get("message")
     if directory:
         _emit(

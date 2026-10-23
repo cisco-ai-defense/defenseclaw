@@ -196,7 +196,7 @@ func matchText(m *sandboxapi.ManagedExplain) string {
 	case "default_unverified":
 		return "the default (your identity could not be verified)"
 	case "default_lookup_failed":
-		return "the default (your directory couldn't be reached)"
+		return "the default (your directory couldn't be reached; no assignment needs the missing facts)"
 	case "none":
 		return "no organization profile applies; your organization's floor does"
 	}

@@ -325,15 +325,17 @@ func enterpriseIdentityViewError(err error) error {
 }
 
 // unresolvedProfileExplainAccount returns the gateway's lookup_error when
-// the account it was asked about did not resolve (no subject.user_id).
+// the account it was asked about did not resolve. A numeric uid may still
+// appear in subject.user_id for comparison with a hook call from that uid.
 func unresolvedProfileExplainAccount(answer json.RawMessage) string {
 	var resolved struct {
-		LookupError string `json:"lookup_error"`
-		Subject     struct {
+		LookupError       string `json:"lookup_error"`
+		AccountUnresolved bool   `json:"account_unresolved"`
+		Subject           struct {
 			UserID string `json:"user_id"`
 		} `json:"subject"`
 	}
-	if json.Unmarshal(answer, &resolved) != nil || resolved.Subject.UserID != "" {
+	if json.Unmarshal(answer, &resolved) != nil || resolved.Subject.UserID != "" && !resolved.AccountUnresolved {
 		return ""
 	}
 	return resolved.LookupError

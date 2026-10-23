@@ -277,12 +277,13 @@ The text column quotes stable fragments; the complete notice adds the sandbox na
 | Settings drift | "Sandboxes are paused: your OpenShell settings differ from your organization's" and "Ask IT to repair them." |
 | Policy can't load | "Your organization's sandbox policy can't be loaded on this computer." |
 | Another account holds the ports | "Sandboxes aren't available for your account on this computer right now: another account is using them" and "Try again when that account has no sandbox running." |
-| Directory lookup is provisional | "Your organization's directory couldn't be reached, so its default policy applies for now. Try again in a moment." |
+| Directory lookup is provisional and no assignment needs the missing fact | "Your organization's directory couldn't be reached, so its default policy applies for now. Try again in a moment." |
+| An assignment needs an unconfirmed identity fact | The request is refused, and the message names the missing fact. |
 | Account can't be looked up on the computer (a new run) | "Your account can't be looked up on this computer right now. Try again in a moment." and "This isn't your organization's sandbox policy." |
 | Registration ended by the organization (a new connection) | "your organization's policy no longer covers this sandbox; delete it and start it again with defenseclaw sandbox run" |
 | Access request exceeds the profile | "You can't approve this."; the notice gives the request-access contact and the caller's profile, rule, host and sandbox to quote |
 
-A user's policy that differs from what you expect usually means their groups did not match, or the lookup failed and `default_profile` applied. Run `profile-explain --user` and `sandbox explain`; see [Troubleshooting identity](/docs/enterprise/identity/sources#troubleshooting-identity).
+A user's policy that differs from what you expect may reflect group membership the host has confirmed. If a lookup fails, a request whose assignment needs the missing fact is refused and names that fact. When no assignment needs it, the proven or default profile applies. Run `profile-explain --user` and `sandbox explain`; see [Troubleshooting identity](/docs/enterprise/identity/sources#troubleshooting-identity).
 
 ## Moved from the sandboxes task page
 
@@ -510,7 +511,7 @@ Two residuals come from the operating system. The sandbox daemon is an ordinary 
 
 ![enterprise linux sandbox list as root: four registrations of one user in the revoked state, each with the engineering profile, matched by group, the claudecode agent, its sandbox name and the docker driver](/images/sandboxes/managed/admin-sandbox-list.png)
 
-`ensure` and `verify` print warnings, never failures, for configurations that work but that you probably did not intend: a `default_profile` looser than an assigned profile (offline and unverified users get the default, so it matters most), a floor reachable only through `match.agents` or `match.connectors`, a `required_for` connector with no machine-owned hook on the OS, and an empty `request_access`. They also validate the packs, their digests and their strictness, and refuse a packs directory that others can read.
+`ensure` and `verify` print warnings, never failures, for configurations that work but that you probably did not intend: a `default_profile` looser than an assigned profile (it applies when no proven assignment matches and no missing fact is needed), a floor reachable only through `match.agents` or `match.connectors`, a `required_for` connector with no machine-owned hook on the OS, and an empty `request_access`. They also validate the packs, their digests and their strictness, and refuse a packs directory that others can read.
 
 ### Pieces of a managed sandbox
 
@@ -523,9 +524,9 @@ Two residuals come from the operating system. The sandbox daemon is an ordinary 
 
 ### Assignment matching details
 
-`default_profile` is what a person gets when DefenseClaw cannot read their groups, for example while the domain controller and the SSSD cache are both unavailable, so `offline-floor` repeats every setting of `contractors` and `engineering`. A `default_profile` looser than an assigned profile gives that person less than the assigned profile would, and `ensure` warns for each such setting. If you pin a pack for one profile with `required_pack` and `required_pack_digest`, pin it for `default_profile` too.
+`default_profile` applies when no proven assignment selects the account and no assignment needs an unconfirmed fact. If DefenseClaw cannot read groups needed by an assignment, the request is refused with the missing group fact named. The `offline-floor` example repeats every setting of `contractors` and `engineering` as a safe default for accounts with no matching assignment. `ensure` warns for each default setting looser than an assigned profile. If you pin a pack for one profile with `required_pack` and `required_pack_digest`, pin it for `default_profile` too.
 
-The first assignment that matches the verified user and the agent's connector wins. When none matches, or the user's groups cannot be read, `default_profile` applies; when that is empty the floor applies alone. `match.agents` is ignored for sandboxes, because agent ids are claimed by the caller. Write each group in the spelling the host reports (`group@domain` on Linux with SSSD fully qualified names, `DOMAIN\group` on macOS and Windows). A bare group name also selects the members of a local group of the same name, which a person with root on that host can create, and `ensure` warns when a bare entry is ambiguous that way. See [User and group policies](/docs/reference/policy/guardrail-profiles). A copyable example is [`packaging/identity/ad/sandbox-profiles.example.yaml`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/packaging/identity/ad/sandbox-profiles.example.yaml). Every key, how a profile tightens the floor, packs and hook silence are in the [sandbox reference](/docs/enterprise/runtime/sandbox-reference#the-keys-and-how-they-combine).
+Proven matching assignments combine at their strictest settings. When none matches and no assignment needs an unconfirmed fact, `default_profile` applies; when it is empty the floor applies alone. If a needed group fact cannot be read, the request is refused and names it. `match.agents` is ignored for sandboxes, because agent ids are claimed by the caller. Write each group in the spelling the host reports (`group@domain` on Linux with SSSD fully qualified names, `DOMAIN\group` on macOS and Windows). A bare group name also selects the members of a local group of the same name, which a person with root on that host can create, and `ensure` warns when a bare entry is ambiguous that way. See [User and group policies](/docs/reference/policy/guardrail-profiles). A copyable example is [`packaging/identity/ad/sandbox-profiles.example.yaml`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/packaging/identity/ad/sandbox-profiles.example.yaml). Every key, how a profile tightens the floor, packs and hook silence are in the [sandbox reference](/docs/enterprise/runtime/sandbox-reference#the-keys-and-how-they-combine).
 
 ### The managed `defenseclaw` command
 

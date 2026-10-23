@@ -228,7 +228,7 @@ func claudeCodeOutputForProfile(req HookProfileRequest, action, rawAction, reaso
 					"message":  claudeCodeReasonOrDefault(reason),
 				},
 			}}
-		case "TaskCreated", "TaskCompleted", "TeammateIdle":
+		case "SessionStart", "TaskCreated", "TaskCompleted", "TeammateIdle":
 			// No structured output: hookexec must render the policy reason on
 			// stderr and exit 2 so Claude applies the event-specific feedback.
 			return nil

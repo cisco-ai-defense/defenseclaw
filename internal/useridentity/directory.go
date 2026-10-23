@@ -115,8 +115,8 @@ type DirectoryFacts struct {
 	// GroupsPartial marks Windows group membership as unknown because the
 	// SYSTEM enumerator found no active desktop session. Older spool records
 	// can still contain last-session groups; profile matching must ignore them.
-	// The gateway refreshes these facts soon and uses the default profile
-	// for group-dependent decisions (GAP-0243).
+	// The gateway refreshes these facts soon. A request whose assignment
+	// needs the unknown groups is refused with that fact named (GAP-0243).
 	GroupsPartial bool `json:"groups_partial,omitempty"`
 	// UnconfirmedGroups are the gids among Groups, as numbers, that stay
 	// numbers although no NSS group service proved they have no name: one

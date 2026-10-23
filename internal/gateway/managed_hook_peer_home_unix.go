@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math/bits"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,6 +31,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
+
+var managedHookDirectoryNeedsFresh = runtime.GOOS == "darwin"
 
 // managedHookPeerHomeTTL bounds how long a resolved home is reused, so a
 // moved or recreated account is picked up without restarting the gateway.
@@ -546,6 +549,9 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 	}
 	cache := c.directoryCache()
 	forgetOnSpoolAccountChange(cache, key, time.Now())
+	if managedHookDirectoryNeedsFresh && identityFactsEnabled.Load() && managedServiceHosted.Load() {
+		return cache.getFresh(key, identityDirectoryBudget)
+	}
 	return cache.get(key, block)
 }
 
@@ -563,6 +569,15 @@ func (c *managedHookPeerHomeCache) explainDirectory(uid int) (useridentity.Direc
 	c.noteHolder(uid, key)
 	cache := c.directoryCache()
 	forgetOnSpoolAccountChange(cache, key, time.Now())
+	if managedHookDirectoryNeedsFresh && identityFactsEnabled.Load() && managedServiceHosted.Load() {
+		if facts, ok := cache.getFresh(key, identityDirectoryBudget); ok {
+			return facts, nil
+		}
+		if _, reason, failed := cache.failing(key); failed {
+			return useridentity.DirectoryFacts{}, fmt.Errorf("current directory facts for uid %s are unavailable: %s", key, reason)
+		}
+		return useridentity.DirectoryFacts{}, fmt.Errorf("current directory facts for uid %s did not answer within %s", key, identityDirectoryBudget)
+	}
 	return explainDirectoryFacts(cache, key)
 }
 

@@ -95,6 +95,9 @@ type profileSubject struct {
 	// LookupError is why the lookup failed, when `explain` knows (the live
 	// path only records default_lookup_failed).
 	LookupError string
+	// accountUnresolved marks a numeric explain subject whose uid has no
+	// account database holder now. Its uid still describes a hook caller.
+	accountUnresolved bool
 	// viaProcessOwner marks a subject verified as the per-user gateway's own
 	// account, so explain and telemetry report it as process_owner.
 	viaProcessOwner bool
@@ -109,6 +112,9 @@ type profileSubject struct {
 	// GAP-0418). Such an account is selected by its uid or SID, or as
 	// .\name (COMPUTER\name on Windows).
 	localAccount bool
+	// An SSSD qualified-name host may have this short name in several
+	// trusted domains. A bare users entry cannot bind either account.
+	qualifiedNamesMayCollide bool
 	// cachedFactsAge is set when explain serves an account the directory
 	// cannot name now from the facts its hooks still apply (GAP-0899).
 	cachedFactsAge time.Duration
@@ -794,6 +800,10 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 		viaProcessOwner:  s.Source == subjectSourceProcessOwner,
 		nameUnconfirmed:  nameUnconfirmed,
 		localAccount:     s.Directory.Directory == useridentity.DirectoryLocal,
+		qualifiedNamesMayCollide: (s.Directory.Source == useridentity.SourceSSSD ||
+			s.Directory.Source == useridentity.SourceSSSDInfoPipe) &&
+			s.Directory.Directory == useridentity.DirectoryActiveDirectory &&
+			strings.ContainsAny(s.UserName, `@\`),
 	}
 }
 
@@ -913,9 +923,9 @@ func localProfileSubject(account *osuser.User) profileSubject {
 	groups, err := accountGroups(account)
 	subject.Groups = groups
 	if err != nil {
-		// Groups that could not be listed are unknown, not empty: the subject
-		// selects as a failed lookup does for a request (default_lookup_failed)
-		// and explain names the reason.
+		// Groups that could not be listed are unknown, not empty. A request
+		// whose assignment needs them is refused (default_lookup_failed),
+		// and explain names the missing group fact and the lookup error.
 		subject.LookupFailed, subject.LookupError = true, err.Error()
 	}
 	return subject
@@ -1096,6 +1106,13 @@ func userEntryMatches(subject *profileSubject, entry string) bool {
 	}
 	domain, account, qualified := strings.Cut(strings.TrimSpace(entry), `\`)
 	return qualified && account != "" && useridentity.EqualFold(account, userName) && subjectInDomain(subject, domain)
+}
+
+func ambiguousBareUserEntry(subject *profileSubject, entry string) bool {
+	entry = strings.TrimSpace(entry)
+	return subject != nil && subject.qualifiedNamesMayCollide && entry != "" &&
+		!strings.ContainsAny(entry, `@\`) && useridentity.KindForID(entry) == "" &&
+		useridentity.EqualFold(entry, subject.UserName)
 }
 
 // subjectInDomain compares only verified account namespaces. Guessing a
@@ -1690,6 +1707,9 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 			// explains kept an outage's stale facts in use indefinitely
 			// (GAP-0496, GAP-0517).
 			refreshedFacts = true
+		}
+		if found.accountUnresolved {
+			out["account_unresolved"] = true
 		}
 		subject, source = &found, profileSubjectLookup
 		// directory says where the account lives (local, active_directory,

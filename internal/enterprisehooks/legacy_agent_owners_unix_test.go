@@ -66,6 +66,37 @@ func TestLegacyAgentOwnersAreWrittenOnce(t *testing.T) {
 	}
 }
 
+// The 1.0.2 guardian treats every *.json in the identity spool as a uid.
+// An upgrade map must survive 1.0.4 and be invisible after rollback.
+func TestLegacyAgentOwnersSurviveRollbackWithoutAStaleIdentityRecord(t *testing.T) {
+	dir := t.TempDir()
+	owners := map[int]LegacyAgentOwner{501: {User: "alice", Token: "home:1:2"}}
+	if written, err := WriteLegacyAgentOwners(dir, owners, time.Now(), nil); err != nil || !written {
+		t.Fatalf("write migration map: written=%t err=%v", written, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "legacy-agent-owners.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("1.0.2 sees a non-uid JSON identity record: %v", err)
+	}
+	if got, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[501] != owners[501] {
+		t.Fatalf("1.0.4 cannot read its migration map after rollback: %+v, %t", got, ok)
+	}
+	if err := os.Rename(filepath.Join(dir, LegacyAgentOwnersFile), filepath.Join(dir, oldLegacyAgentOwnersFile)); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[501] != owners[501] {
+		t.Fatalf("the gateway lost the earlier map before guardian migration: %+v, %t", got, ok)
+	}
+	if err := WriteIdentitySpool(context.Background(), dir, nil, nil, nil, nil); err != nil {
+		t.Fatalf("upgrade an earlier 1.0.4 spool: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, oldLegacyAgentOwnersFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old map remains visible on rollback: %v", err)
+	}
+	if got, ok := ReadLegacyAgentOwners(dir, nil); !ok || got[501] != owners[501] {
+		t.Fatalf("migration changed the account binding: %+v, %t", got, ok)
+	}
+}
+
 // The guardian records the map at its first pass that collected every
 // account, from what it collected, and keeps it through every later pass's
 // cleanup.

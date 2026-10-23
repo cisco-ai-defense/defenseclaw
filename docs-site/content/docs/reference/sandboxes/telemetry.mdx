@@ -76,7 +76,7 @@ metric label.
 | `defenseclaw.guardrail.profile.name`, `.digest`, `.match`, `.matched_group` | The guardrail profile that governs the sandbox, the digest of its configuration, and why it matched. The same attributes the hook decisions carry. |
 | `defenseclaw.sandbox.policy.digest` | The digest of the effective sandbox policy: the organization floor combined with the profile's `sandbox` section. |
 | `defenseclaw.sandbox.policy.generation` | The managed gateway's configuration generation at the last resolve or re-match. |
-| `defenseclaw.sandbox.policy.provisional` | `true` while the sandbox runs under `default_profile` because the directory lookup had not resolved. |
+| `defenseclaw.sandbox.policy.provisional` | `true` while the sandbox runs under `default_profile` because a directory lookup has not resolved and no assignment needs the missing fact. A request needing that fact is refused and names it. |
 | `defenseclaw.openshell.version`, `defenseclaw.openshell.install_mode` | The OpenShell release the daemon verified, and how it was provided: `prerequisite` or `setup`. |
 | `defenseclaw.subject.key` | An `hmac-sha256:` pseudonym of the account, so one person can be followed across records without the principal. The principal itself is recorded only when `ai_discovery.include_user_principal` is on. |
 

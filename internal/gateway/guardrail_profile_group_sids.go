@@ -24,11 +24,14 @@ import (
 // when the SID-to-name lookup answered in time. That lookup (LookupAccountSid)
 // cannot be cancelled: a domain controller that stalled eight of them kept
 // every later group a bare SID, so an assignment that names the group missed
-// and the user got the default profile. Each group name an assignment writes
+// and the user got the default profile before unproven-fact refusal was added.
+// Each group name an assignment writes
 // is therefore resolved to its SID once per profile set, that is once per
 // configuration generation (a reload builds a new set), and the decision
-// compares the SIDs of the caller token only. A name that does not resolve
-// selects nobody; explain, status and doctor name it, and requests retry it
+// compares the SIDs of the caller token only. An unresolved name whose
+// assignment may change the decision causes a refusal that names the missing
+// group SID. A definitively absent name selects nobody. Explain, status and
+// doctor name these states, and requests retry unresolved names
 // at most once a minute without waiting for the answer. A name that resolved
 // is looked up again once a minute too: a local group deleted and recreated
 // under the same name gets a new SID, and the set kept the deleted one, so

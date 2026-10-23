@@ -256,6 +256,47 @@ func TestIdentityDirectoryCacheLogsFailureAndRecoveryOnce(t *testing.T) {
 	}
 }
 
+func TestIdentityDirectoryFailureMessagesDescribeRefusal(t *testing.T) {
+	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	cache := newIdentityCache(func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{}, errors.New("directory unavailable")
+	})
+	cache.now = func() time.Time { return now }
+	cache.maxAge = identityDirectoryMaxAge
+	for _, tc := range []struct {
+		name  string
+		entry identityCacheEntry[useridentity.DirectoryFacts]
+		want  string
+	}{
+		{name: "cold lookup", want: "until a lookup succeeds"},
+		{name: "cached facts", entry: identityCacheEntry[useridentity.DirectoryFacts]{ok: true, fetchedAt: now}, want: "keeps its last facts for at most 1h0m0s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			message := cache.noteResultLocked("1201", &tc.entry, errors.New("directory unavailable"), now)
+			for _, want := range []string{"directory lookup for 1201 failed", tc.want,
+				"requests whose assignments need missing identity facts are refused",
+				"refusal names the missing fact"} {
+				if !strings.Contains(message, want) {
+					t.Errorf("message %q lacks %q", message, want)
+				}
+			}
+			if strings.Contains(message, "directory-dependent assignments use the default") {
+				t.Errorf("message still promises a default profile: %q", message)
+			}
+		})
+	}
+
+	var expired string
+	cache.logf = func(format string, args ...any) { expired = fmt.Sprintf(format, args...) }
+	entry := &identityCacheEntry[useridentity.DirectoryFacts]{ok: true, fetchedAt: now.Add(-identityDirectoryMaxAge)}
+	cache.dropAgedLocked("1201", entry, now)
+	for _, want := range []string{"no longer used", "requests whose assignments need missing identity facts are refused", "refusal names the missing fact"} {
+		if !strings.Contains(expired, want) {
+			t.Errorf("expiry message %q lacks %q", expired, want)
+		}
+	}
+}
+
 // GAP-0696: a deleted account that keeps sending hook calls is reported as a
 // failing lookup, by uid, only until the directory answers for another
 // account: then its "no such account" is an answer, not a failure.
@@ -363,7 +404,7 @@ func TestDirectoryHealthViewNamesTheFailingLookups(t *testing.T) {
 	}
 	since := time.Date(2026, 10, 6, 21, 4, 8, 0, time.UTC)
 	view, message := directoryHealthView(identityCacheHealth{Failing: 3, Since: since, LastError: "getent timed out", Stale: 2, OldestAge: 25 * time.Minute}, since)
-	for _, want := range []string{"failing for 3 account(s) since 21:04:08Z", "getent timed out", "default_lookup_failed", "2 account(s) are served facts up to 25m0s old"} {
+	for _, want := range []string{"failing for 3 account(s) since 21:04:08Z", "getent timed out", "default_lookup_failed", "each refusal names the missing fact", "2 account(s) are served facts up to 25m0s old"} {
 		if !strings.Contains(message, want) {
 			t.Errorf("message %q lacks %q", message, want)
 		}
@@ -436,9 +477,8 @@ func TestIdentitySpoolRecordRequiresCurrentAccountSID(t *testing.T) {
 			t.Errorf("%s: record read %v, want %v", tc.name, ok, tc.want)
 		}
 		// Review loop 5: the recreated account's lookup fails (its UPN is
-		// unknown until the guardian writes its record), so a users entry
-		// written as a UPN selects default_lookup_failed and is retried,
-		// not the plain default as a verified answer.
+		// unknown until the guardian writes its record), so a request whose
+		// users entry needs the UPN is refused, naming it, and retried.
 		var unconfirmed *identityFactsUnconfirmedError
 		if recreated := !tc.want; recreated != errors.As(err, &unconfirmed) {
 			t.Errorf("%s: lookup error %v, want an unconfirmed-facts error %v", tc.name, err, recreated)

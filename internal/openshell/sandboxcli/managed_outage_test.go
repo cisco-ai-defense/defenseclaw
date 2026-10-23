@@ -58,10 +58,11 @@ func TestManagedRunAccountOutageIsNotAPolicyRefusal(t *testing.T) {
 }
 
 // GAP-0507: a managed run waits up to 10 seconds for the computer to look the
-// account up before it refuses. An SSSD that comes back within the wait
-// starts the run, provisional under the default profile; one that stays away
-// is refused with the account outage text after five more checks two seconds
-// apart, and nothing is created.
+// account up before it refuses. When SSSD answers within the wait, this test's
+// stubbed daemon allows the run with a provisional default profile; a real
+// request whose assignment needs an unconfirmed fact is refused and names it.
+// If SSSD stays away, the account outage text is returned after five more
+// checks two seconds apart, and nothing is created.
 func TestManagedRunWaitsForTheAccountBeforeRefusing(t *testing.T) {
 	outage := &openshell.AccountLookupError{Err: errors.New("ssh -G: No user exists for uid 94404116")}
 	for _, tc := range []struct {

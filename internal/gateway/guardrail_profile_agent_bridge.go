@@ -179,8 +179,16 @@ func (b *profileAgentBridge) resolve(agent string, claim profileAgentClaim, know
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !known {
-		b.refreshLocked()
+		wasRead := b.read
+		b.refreshLocked(false)
 		recorded, ok := b.derived[agent]
+		if wasRead && b.read && !ok {
+			// A hook may have enrolled this agent after explain last read
+			// the ledger. An absent entry must be checked at the current
+			// ledger head before explain calls it unconfirmed.
+			b.refreshLocked(true)
+			recorded, ok = b.derived[agent]
+		}
 		if !b.read || !ok {
 			// Neither the request nor the ledger says what agent's 1.0.3
 			// identity is: any entry may be it.
@@ -210,9 +218,9 @@ func (b *profileAgentBridge) resolve(agent string, claim profileAgentClaim, know
 }
 
 // refreshLocked reads the ledger again once its answer is due. b.mu is held.
-func (b *profileAgentBridge) refreshLocked() {
+func (b *profileAgentBridge) refreshLocked(force bool) {
 	now := time.Now()
-	if now.Before(b.readAt) {
+	if !force && now.Before(b.readAt) {
 		return
 	}
 	if derived, ok := readProfileAgentLedger(); ok {

@@ -15,6 +15,7 @@ package enterprisehooks
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -45,7 +46,12 @@ import (
 
 // LegacyAgentOwnersFile is the file of the identity spool that holds the
 // migration map.
-const LegacyAgentOwnersFile = "legacy-agent-owners.json"
+const LegacyAgentOwnersFile = "legacy-agent-owners.map"
+
+// Builds before 1.0.4 stored the map beside uid.json records. Published
+// 1.0.2 reads that name as a uid after rollback, so the root guardian moves
+// an existing map out of the record namespace before its next pass.
+const oldLegacyAgentOwnersFile = "legacy-agent-owners.json"
 
 const (
 	legacyAgentOwnersVersion  = 1
@@ -113,7 +119,13 @@ func LegacyAgentOwnersRecorded(dir string) bool {
 // so the next pass tries again. setOwnership gives the file the guardian
 // authorization ownership before it is renamed into place.
 func WriteLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, now time.Time, setOwnership func(string) error) (bool, error) {
-	if dir == "" || LegacyAgentOwnersRecorded(dir) {
+	if dir == "" {
+		return false, nil
+	}
+	if err := moveLegacyAgentOwners(dir); err != nil {
+		return false, err
+	}
+	if LegacyAgentOwnersRecorded(dir) {
 		return false, nil
 	}
 	doc := legacyAgentOwnersDoc{Version: legacyAgentOwnersVersion, WrittenAt: now.UTC(), Owners: map[string]LegacyAgentOwner{}}
@@ -142,7 +154,15 @@ func ReadLegacyAgentOwners(dir string, trust func(path, label string) error) (ma
 	if dir == "" {
 		return nil, false
 	}
-	path := filepath.Join(dir, LegacyAgentOwnersFile)
+	if owners, ok := readLegacyAgentOwnersFile(filepath.Join(dir, LegacyAgentOwnersFile), trust); ok {
+		return owners, true
+	}
+	// A guardian already running before this upgrade may not have moved its
+	// old map yet. Keep its agent assignments working during that handoff.
+	return readLegacyAgentOwnersFile(filepath.Join(dir, oldLegacyAgentOwnersFile), trust)
+}
+
+func readLegacyAgentOwnersFile(path string, trust func(path, label string) error) (map[int]LegacyAgentOwner, bool) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxLegacyAgentOwnersBytes {
 		return nil, false
@@ -174,6 +194,22 @@ func ReadLegacyAgentOwners(dir string, trust func(path, label string) error) (ma
 		out[uid] = owner
 	}
 	return out, true
+}
+
+func moveLegacyAgentOwners(dir string) error {
+	oldPath := filepath.Join(dir, oldLegacyAgentOwnersFile)
+	if _, err := os.Lstat(oldPath); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if _, ok := readLegacyAgentOwnersFile(oldPath, nil); !ok {
+		return errors.New("invalid previous agent identity migration map")
+	}
+	if LegacyAgentOwnersRecorded(dir) {
+		return os.Remove(oldPath)
+	}
+	return os.Rename(oldPath, filepath.Join(dir, LegacyAgentOwnersFile))
 }
 
 func validLegacyAgentOwner(owner LegacyAgentOwner) bool {

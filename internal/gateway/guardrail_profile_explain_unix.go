@@ -176,8 +176,8 @@ var profileExplainDirectoryFacts = func(id string) (useridentity.DirectoryFacts,
 
 // profileExplainUID explains a uid the account database cannot name now as
 // a hook call from it is decided: the kernel verifies the uid, so users
-// entries naming it still select their profile, from the cached facts if any
-// and with default_lookup_failed for the rest. Explain printed
+// entries naming it still select their profile, from the cached facts if any;
+// requests needing other missing facts are refused and name them. Explain printed
 // default_lookup_failed for it while its hook calls got the uid's profile
 // (GAP-0361).
 func profileExplainUID(name string, lookupErr error) (profileSubject, bool) {
@@ -201,7 +201,7 @@ func profileExplainUID(name string, lookupErr error) (profileSubject, bool) {
 	}
 	return profileSubject{
 		UserID: name, IDKind: useridentity.KindForID(name), UserName: userName,
-		LookupFailed: identityLookupBlocking.Load(), LookupError: reason,
+		LookupFailed: identityLookupBlocking.Load(), LookupError: reason, accountUnresolved: true,
 	}, true
 }
 

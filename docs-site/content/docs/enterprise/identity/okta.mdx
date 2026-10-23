@@ -95,7 +95,7 @@ defenseclaw guardrail profile explain --user alice --connector claudecode
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice --connector claudecode
 ```
 
-A match of `group` with the group name shows the assignment worked. `default` means no assignment matched. `default_lookup_failed` means DefenseClaw could not look the user up.
+A match of `group` with the group name shows the assignment worked. `default` means no assignment matched. `default_lookup_failed` means an identity fact was not confirmed. When an assignment needs it, the request is refused and names that fact; otherwise the proven or default profile applies. Run `profile-explain --user` for the decision and reason.
 
 ## More
 

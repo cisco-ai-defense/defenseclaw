@@ -108,8 +108,9 @@ func DirectoryLookupBudget() time.Duration {
 //
 // A lookup that does not finish fails as a whole: facts that lack the
 // groups, or take a directory account for a local one, would be cached as
-// resolved (the gateway keeps them for 15 minutes) and select the default
-// profile as though the account had no groups. So does an SSSD NSS
+// resolved (the gateway keeps them for 15 minutes) and falsely decide an
+// assignment. The failed lookup instead makes a request whose assignment
+// needs the missing fact refuse and name it. So does an SSSD NSS
 // responder that does not answer, while SSSD is stopped or restarting.
 func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity.DirectoryFacts, error) {
 	return r.directoryFactsForUID(uid, now, true)

@@ -61,8 +61,14 @@ var legacyAgentOwnerTokenNow = func(uid int, account string) string {
 	incarnation := ""
 	if dir := currentIdentitySpoolDir(); dir != "" {
 		if record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), validateManagedGuardianAuthorization); err == nil &&
-			legacyAgentOwnerSameAccount(record.User, account) && strings.HasPrefix(record.AccountIncarnation, "sid:") {
-			incarnation = record.AccountIncarnation
+			legacyAgentOwnerSameAccount(record.User, account) && !record.UpdatedAt.IsZero() &&
+			!record.UpdatedAt.After(time.Now().Add(time.Minute)) && time.Since(record.UpdatedAt) <= enterprisehooks.IdentitySpoolMaxAge {
+			if record.LegacyOwnerToken != "" {
+				return record.LegacyOwnerToken
+			}
+			if strings.HasPrefix(record.AccountIncarnation, "sid:") {
+				incarnation = record.AccountIncarnation
+			}
 		}
 	}
 	if incarnation == "" {

@@ -112,6 +112,9 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			return fmt.Errorf("set identity spool ownership: %w", err)
 		}
 	}
+	if err := moveLegacyAgentOwners(dir); err != nil {
+		return fmt.Errorf("move agent identity migration map out of rollback records: %w", err)
+	}
 	keep, left := map[string]bool{}, map[string]bool{}
 	owners := map[int]LegacyAgentOwner{}
 	var passErr error
@@ -174,11 +177,12 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 						"no longer keeping the UPN it reported before", account.UID, IdentitySpoolKeptUPNMaxAge)
 				}
 			}
+			if record.User != "" {
+				record.LegacyOwnerToken = LegacyAgentOwnerToken(record.AccountIncarnation, identitySpoolAccountHome(account.UID))
+			}
 			err = writeIdentitySpoolFile(dir, name, record, setOwnership)
-			if err == nil && record.User != "" {
-				if token := LegacyAgentOwnerToken(record.AccountIncarnation, identitySpoolAccountHome(account.UID)); token != "" {
-					owners[account.UID] = LegacyAgentOwner{User: record.User, Token: token}
-				}
+			if err == nil && record.LegacyOwnerToken != "" {
+				owners[account.UID] = LegacyAgentOwner{User: record.User, Token: record.LegacyOwnerToken}
 			}
 			if err == nil && identitySpoolDirectoryRecord(record) {
 				if key := identitySpoolDirectoryKey(record); key != "" {

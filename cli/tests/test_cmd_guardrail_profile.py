@@ -249,7 +249,7 @@ def test_explain_prints_the_refusal_and_its_missing_fact(monkeypatch):
 
 
 def test_explain_match_line_names_default_lookup_failed(monkeypatch):
-    """GAP-0275: "match: default" while requests get default_lookup_failed."""
+    """GAP-0275: explain names the live default when no assignment needs missing facts."""
     result = _explain(
         monkeypatch,
         {
@@ -257,11 +257,55 @@ def test_explain_match_line_names_default_lookup_failed(monkeypatch):
             "profile": "",
             "match": "default",
             "subject": {"user_name": "alice@corp.example.com", "group_count": 1},
-            "cache": {"match": "default_lookup_failed", "profile": "", "age_seconds": 0, "refresh_after_seconds": 0},
+            "cache": {"match": "default_lookup_failed", "profile": "", "refused": False, "age_seconds": 0, "refresh_after_seconds": 0},
         },
     )
     match_line = next(line for line in result.output.splitlines() if line.strip().startswith("match:"))
     assert "default_lookup_failed" in match_line
+
+
+def test_explain_legacy_cache_match_does_not_infer_a_settled_default(monkeypatch):
+    """A gateway without an explicit refusal state gives no proof of a default decision."""
+    result = _explain(
+        monkeypatch,
+        {
+            "profiles_configured": True,
+            "profile": "strict",
+            "match": "user",
+            "subject": {"user_name": "alice", "group_count": 1},
+            "cache": {"profile": "candidate-only", "match": "default_lookup_failed", "failing_since": "2026-10-22T12:00:00Z"},
+        },
+    )
+    assert result.exit_code == 0
+    assert "refusal state not supplied" in result.output
+    assert "no assignment needs the missing fact" not in result.output
+    assert "candidate-only" not in result.output
+
+
+def test_explain_cache_refusal_names_the_missing_fact(monkeypatch):
+    reason = "DefenseClaw refused this request: group membership is unconfirmed"
+    result = _explain(
+        monkeypatch,
+        {
+            "profiles_configured": True,
+            "profile": "strict",
+            "match": "user",
+            "subject": {"user_name": "alice", "group_count": 1},
+            "cache": {
+                "failing_since": "2026-10-22T12:00:00Z",
+                "profile": "candidate-only",
+                "match": "default_lookup_failed",
+                "refused_reason": reason,
+            },
+        },
+    )
+    assert result.exit_code == 0
+    match_line = next(line for line in result.output.splitlines() if line.strip().startswith("match:"))
+    cache_line = next(line for line in result.output.splitlines() if line.strip().startswith("cache:"))
+    assert "requests are refused" in match_line
+    assert "group membership is unconfirmed" in match_line
+    assert "refused: " + reason in cache_line
+    assert "candidate-only" not in cache_line
 
 
 def test_explain_failed_gateway_lookup_has_no_cached_facts(monkeypatch):

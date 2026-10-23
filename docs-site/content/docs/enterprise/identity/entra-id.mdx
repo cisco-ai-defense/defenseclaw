@@ -91,7 +91,7 @@ ai_discovery:
 A per-user install reads the config from the user's own profile, so the user can change their profile. To enforce a policy the user cannot change, use the standalone enterprise profile, which reads the machine config.
 </Callout>
 
-Set a strict `default_profile`: a failed lookup lands on it ([why](/docs/how-to/policies/give-a-group-its-own-policy/)). Keys are in [User- and group-based policies](/docs/reference/policy/guardrail-profiles); the per-platform support table is in [Identity detail](/docs/enterprise/identity/reference#5-map-users-and-groups-to-profiles).
+Set a strict `default_profile` for accounts no assignment selects. A failed lookup refuses requests whose assignments need the missing fact, and the refusal names it ([why](/docs/how-to/policies/give-a-group-its-own-policy/)). Keys are in [User- and group-based policies](/docs/reference/policy/guardrail-profiles); the per-platform support table is in [Identity detail](/docs/enterprise/identity/reference#5-map-users-and-groups-to-profiles).
 
 ## 6. Check
 

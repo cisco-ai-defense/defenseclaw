@@ -123,7 +123,7 @@ func TestManagedExplainRowsOtherShapes(t *testing.T) {
 		return b.String()
 	}
 	has(t, join(&sandboxapi.ManagedExplain{Match: "default_lookup_failed", Provisional: true, Allowed: true, AllowMount: true, AllowHostPorts: true, AllowYolo: true, AllowUnblock: true, PolicyDigest: "sha256:abc"}),
-		"(your organization's floor)   matched: the default (your directory couldn't be reached); provisional until your directory answers",
+		"(your organization's floor)   matched: the default (your directory couldn't be reached; no assignment needs the missing facts); provisional until your directory answers",
 		"Required | no agent has to run in a sandbox", "your organization limits no hosts",
 		"you may approve asks for a session or for good", "access: contact your IT help desk")
 	has(t, join(&sandboxapi.ManagedExplain{Match: "none", Allowed: false}), "Sandboxes | your organization doesn't allow sandboxes for you")

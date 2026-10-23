@@ -510,7 +510,8 @@ func TestGuardrailProfileSelectionIgnoresClaimedIdentity(t *testing.T) {
 // TestGuardrailProfileSelectsVerifiedDirectoryGroup runs the real S1
 // source: a verified subject's directory group selects the group's profile,
 // a request that only claims that user in its headers gets the default, and
-// a waited-on lookup that never resolved reports default_lookup_failed.
+// a waited-on lookup that never resolved refuses when an assignment needs
+// the missing fact, naming it (default_lookup_failed).
 func TestGuardrailProfileSelectsVerifiedDirectoryGroup(t *testing.T) {
 	prevOwner := processOwnerProfileSubject
 	processOwnerProfileSubject = func() (profileSubject, bool) { return profileSubject{}, false }
@@ -859,8 +860,8 @@ func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
 }
 
 // TestExplainReportsAFailedDirectoryLookup pins GAP-0124: when the directory
-// lookup of an account fails, explain says so, as a request gets
-// default_lookup_failed; it must not answer from the OS account database
+// lookup of an account fails, explain says so, as a request needing that
+// fact is refused and names it; it must not answer from the OS account database
 // with a profile no request receives.
 func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
 	previousBlocking := identityLookupBlocking.Load()
@@ -879,9 +880,10 @@ func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
 }
 
 // TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails pins GAP-0212:
-// explain resolves the account afresh, but the gateway's requests for it get
-// default_lookup_failed while its own lookups fail, and explain says so; groups
-// kept as numbers are named as a sign of an unreachable directory.
+// explain resolves the account afresh, but requests use the gateway's cached
+// outcome. With no assignment needing a missing fact, they use the default
+// (default_lookup_failed), and explain says so; groups kept as numbers are
+// named as a sign of an unreachable directory.
 func TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails(t *testing.T) {
 	previousBlocking := identityLookupBlocking.Load()
 	setIdentityLookupBlocking(true)
@@ -897,9 +899,17 @@ func TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails(t *testing.T) {
 	set := &guardrailProfileSet{}
 	decision := set.match(&explained, profileSubjectLookup, "", "")
 	view, warning := explainCacheView(set, &explained, decision, "", "", time.Now())
-	if view == nil || view["match"] != profileMatchDefaultLookupFailed || !strings.Contains(warning, "default_lookup_failed") ||
-		!strings.Contains(warning, "timeout") {
+	if view == nil || view["match"] != profileMatchDefaultLookupFailed || view["refused"] != false ||
+		!strings.Contains(warning, "default_lookup_failed") ||
+		!strings.Contains(warning, "timeout") || !strings.Contains(warning, "rerun explain after a successful lookup") ||
+		strings.Contains(warning, "the profile above applies") {
 		t.Fatalf("view %v, warning %q; want the lookup failure named", view, warning)
+	}
+	set.profiles = map[string]config.DerivedGuardrailProfile{"strict": {Digest: "strict-digest"}}
+	set.assignments = []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-sbx-devs"}}}}
+	view, _ = explainCacheView(set, &explained, decision, "", "", time.Now())
+	if view["refused"] != true || !strings.Contains(fmt.Sprint(view["refused_reason"]), "group") {
+		t.Fatalf("view %v; want explicit refusal state and missing group fact", view)
 	}
 	if note := unnamedGroupsNote(&explained, nil); !strings.Contains(note, "1 of this account's 1 group(s) are shown by number") {
 		t.Fatalf("unnamed groups note = %q", note)
@@ -1315,7 +1325,8 @@ func TestExplainShowsTheProfileRequestsStillGet(t *testing.T) {
 		return cached, now.Add(-7 * time.Minute), true
 	}
 	view, warning := explainCacheView(set, explained, decision, "", "", now)
-	if view["age_seconds"] != 420 || view["refresh_after_seconds"] != 480 || view["profile"] != "watch" || view["differs"] != true ||
+	if view["age_seconds"] != 420 || view["refresh_after_seconds"] != 480 || view["profile"] != "watch" ||
+		view["refused"] != false || view["differs"] != true ||
 		!strings.Contains(warning, "7m0s ago") || !strings.Contains(warning, "within 8m0s") {
 		t.Fatalf("view = %v, warning = %q; want 7 minute old facts that still give watch", view, warning)
 	}
@@ -1748,11 +1759,47 @@ func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 	}
 }
 
-// PM-13: a bare users entry selects the directory account of that name and
-// never a local namesake, which falls to default_profile on Linux (SSSD next
-// to /etc/passwd), Windows (the domain next to the computer's SAM) and macOS
-// (an AD account next to the local node). The local account is selected by
-// its uid or SID, or as .\name (GAP-0305, GAP-0313, GAP-0418).
+// A qualified-name SSSD host can have the same short account name in two
+// trusted domains. Neither account may receive a relaxed profile by that
+// short name; the administrator must use a qualified name or uid.
+func TestSSSDQualifiedNamesDoNotGrantBareNamesakeProfile(t *testing.T) {
+	previous := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Mode: "action", BlockAt: "low"}, "relaxed": {Mode: "observe"},
+	}
+	cfg.Guardrail.DefaultProfile = "strict"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{
+		Profile: "relaxed", Match: config.ProfileMatch{Users: []string{"dcad-r103-eng1"}},
+	}}
+	set, err := newGuardrailProfileSet(cfg, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ uid, domain, source string }{
+		{"94404135", "dclab.test", useridentity.SourceSSSD},
+		{"844201107", "dclab2.test", useridentity.SourceSSSDInfoPipe},
+	} {
+		subject := profileSubjectFromVerified(VerifiedSubject{
+			UserID: tc.uid, UserName: "dcad-r103-eng1@" + tc.domain,
+			Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+				Source: tc.source, Domain: tc.domain, ResolvedAt: time.Now()},
+		}, true)
+		if got := set.match(&subject, profileSubjectVerified, "claudecode", ""); got.Name != "strict" || got.Refused == "" ||
+			got.Match != profileMatchDefaultLookupFailed {
+			t.Errorf("%s: bare namesake decision %+v; want strict refusal", tc.domain, got)
+		}
+	}
+}
+
+// PM-13: a bare users entry never selects a local namesake. On an SSSD host
+// with qualified names it is ambiguous across trusted domains and refuses;
+// on Windows and macOS it selects the directory account. The local account
+// is selected by its uid or SID, or as .\name (GAP-0305, GAP-0313, GAP-0418,
+// GAP-0725).
 func TestBareUsersEntrySkipsLocalNamesake(t *testing.T) {
 	previous := identityFactsEnabled.Load()
 	setIdentityFactsEnabled(true)
@@ -1808,7 +1855,13 @@ func TestBareUsersEntrySkipsLocalNamesake(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			domain := profileSubjectFromVerified(tc.domain, true)
 			local := profileSubjectFromVerified(tc.local, true)
-			if got := set.match(&domain, profileSubjectVerified, "claudecode", ""); got.Name != "contractors" || got.Match != profileMatchUser {
+			got := set.match(&domain, profileSubjectVerified, "claudecode", "")
+			if tc.name == "linux" {
+				if got.Refused == "" || got.Match != profileMatchDefaultLookupFailed ||
+					!slices.Contains(got.Unproven, "account:ambiguous_short_name") {
+					t.Fatalf("qualified directory account: %+v, want ambiguous short-name refusal", got)
+				}
+			} else if got.Name != "contractors" || got.Match != profileMatchUser {
 				t.Fatalf("directory account: %+v, want contractors by user", got)
 			}
 			if got := set.match(&local, profileSubjectVerified, "claudecode", ""); got.Name != "floor" || got.Match != profileMatchDefault {

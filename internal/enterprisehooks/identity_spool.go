@@ -99,6 +99,11 @@ type IdentitySpoolRecord struct {
 	// not in the record object, which the 1.0.3 and older gateways decode
 	// with unknown fields refused.
 	AccountSID string `json:"-"`
+	// LegacyOwnerToken is the root guardian's home or SID proof for the
+	// pre-1.0.4 agents migration map. The gateway service cannot stat a
+	// private home under ProtectHome=yes. It lives in the extension so an
+	// older gateway can still read the first record object on rollback.
+	LegacyOwnerToken string `json:"-"`
 	// SSSDDomain is the SSSD domain that holds the uid by InfoPipe
 	// Users.FindByID (Linux): the gateway drops a domain, realm and
 	// principal of its own that name another domain (mergeSpoolFacts).
@@ -136,7 +141,8 @@ type IdentitySpoolRecord struct {
 // the first object only and stop there. It is decoded without refusing
 // unknown fields, so a later build can add facts to it the same way.
 type identitySpoolRecordExtension struct {
-	AccountSID string `json:"account_sid,omitempty"`
+	AccountSID       string `json:"account_sid,omitempty"`
+	LegacyOwnerToken string `json:"legacy_owner_token,omitempty"`
 }
 
 // identitySpoolClockSlack is how far in the future a record may be dated
@@ -286,6 +292,7 @@ func ParseIdentitySpoolRecord(data []byte, key string) (IdentitySpoolRecord, err
 			return record, errors.New("identity spool record has data after its extension")
 		}
 		record.AccountSID = strings.TrimSpace(extension.AccountSID)
+		record.LegacyOwnerToken = strings.TrimSpace(extension.LegacyOwnerToken)
 	}
 	if record.Version != IdentitySpoolRecordVersion {
 		return record, fmt.Errorf("unsupported identity spool record version %d", record.Version)
@@ -544,10 +551,10 @@ func ReadIdentitySpoolRecords(dir string, trust func(path, label string) error, 
 func MarshalIdentitySpoolRecord(record IdentitySpoolRecord) ([]byte, error) {
 	record.Version = IdentitySpoolRecordVersion
 	data, err := json.Marshal(record)
-	if err != nil || record.AccountSID == "" {
+	if err != nil || record.AccountSID == "" && record.LegacyOwnerToken == "" {
 		return data, err
 	}
-	extension, err := json.Marshal(identitySpoolRecordExtension{AccountSID: record.AccountSID})
+	extension, err := json.Marshal(identitySpoolRecordExtension{AccountSID: record.AccountSID, LegacyOwnerToken: record.LegacyOwnerToken})
 	if err != nil {
 		return nil, err
 	}

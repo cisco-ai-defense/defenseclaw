@@ -125,8 +125,8 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 	// old groups at its next spool check instead of for another hour. A
 	// record that still says what this pass found stays: withdrawing it
 	// dropped the cached groups of a user whose strict groups had not
-	// changed, and the request took a possibly weaker default
-	// (default_lookup_failed). So does one the pass could not read
+	// changed, so requests needing them were refused with the missing
+	// group fact named. So does one the pass could not read
 	// (IdentitySpoolWithdrawnByFailedWrite).
 	publish := func(entry account, record IdentitySpoolRecord) {
 		name := entry.key + ".json"

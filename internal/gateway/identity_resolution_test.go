@@ -329,22 +329,25 @@ func TestUnprovenFactsWithIncomparableProfilesApplyTheirMeet(t *testing.T) {
 
 // GAP-0323: a cold lookup timeout or a directory outage with a strict group
 // assignment before a weaker default selected default_lookup_failed and
-// the weaker default. It now selects the strictest profile that may apply.
+// the weaker default. It now refuses and names the missing group fact;
+// the strict profile is only a diagnostic candidate.
 func TestGAP0323LookupFailureNeverSelectsAWeakerDefault(t *testing.T) {
 	p := identityTestPlatforms[0]
 	set := identityTestSet(t, p, "watch",
 		config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{p.group}}})
 	failed := profileSubject{UserID: p.id, IDKind: p.kind, LookupFailed: true}
-	if got := set.match(&failed, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed {
-		t.Fatalf("failed lookup selected %+v; want strict", got)
+	if got := set.match(&failed, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed ||
+		!strings.Contains(got.Refused, "group membership is unconfirmed") {
+		t.Fatalf("failed lookup selected %+v; want refusal naming group membership, with strict only as candidate", got)
 	}
 	// A uid assignment needs no directory and still applies; the failed
 	// lookup cannot make the account weaker than it either.
 	set = identityTestSet(t, p, "watch",
 		config.ProfileAssignment{Profile: "tooling", Match: config.ProfileMatch{Users: []string{p.id}}},
 		config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{p.group}}})
-	if got := set.match(&failed, profileSubjectVerified, "codex", ""); got.Name != "strict" {
-		t.Fatalf("a uid assignment before an unknown group selected %+v; want strict (strictest regardless of order)", got)
+	if got := set.match(&failed, profileSubjectVerified, "codex", ""); got.Name != "strict" ||
+		!strings.Contains(got.Refused, "group membership is unconfirmed") {
+		t.Fatalf("a uid assignment before an unknown group selected %+v; want refusal naming the group, with strict only as candidate", got)
 	}
 }
 

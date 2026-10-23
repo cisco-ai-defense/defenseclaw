@@ -16,7 +16,9 @@ import (
 
 // Directory facts on the hot path.
 //
-// Hook calls read only memory. A cached answer is served even when it is
+// Linux and Windows hook calls read only memory. Managed macOS hook calls
+// wait for current Open Directory groups before deciding (getFresh).
+// Otherwise, a cached answer is served even when it is
 // older than identityDirectoryTTL, and one background refresh replaces it
 // (stale-while-revalidate). A key never seen before starts one shared
 // lookup (singleflight), and the request that started it waits for it at
@@ -29,21 +31,22 @@ import (
 //
 // Callers block when a guardrail profile assignment selects by user or
 // group, so the budget covers a cold SSSD or Active Directory lookup (often
-// one to two seconds) and every request still gets its group profile while
-// the first lookup is in flight or after it failed. A lookup slower than
-// that selects the default profile with match default_lookup_failed; the
-// budget stays well inside the hook request timeout.
+// one to two seconds). If it fails or exceeds the budget, a request whose
+// assignment needs an unconfirmed fact is refused and names that fact;
+// other requests use their proven or default profile. The budget stays well
+// inside the hook request timeout.
 //
 // The first failure of a key's lookup, and its recovery, are logged once
 // (logf) with the resolver's own reason, so an account that cannot resolve at
 // all (in more groups than DefenseClaw names, a directory that never answers)
-// leaves a line in the gateway log instead of only a default_lookup_failed on
-// every record (GAP-0124).
+// leaves a line in the gateway log alongside refused requests that name the
+// missing fact (GAP-0124).
 //
 // Facts whose refreshes keep failing are not served forever: past maxAge
 // (identityDirectoryMaxAge for directory facts, four times the TTL) they are
-// dropped, and directory-dependent assignments use default_lookup_failed
-// until a lookup succeeds. Without the bound a user removed from the directory kept the
+// dropped. Requests whose assignments need the missing facts are refused and
+// name them; other requests use their proven or default profile until a lookup
+// succeeds. Without the bound a user removed from the directory kept the
 // profile of the group they had left, and a user added to one stayed on the
 // default, for as long as the outage lasted (GAP-0145). health reports how many
 // accounts are failing and how stale their facts are, for doctor and status.
@@ -64,6 +67,9 @@ const (
 	// the guardian's identity spool record is trusted (identitySpoolMaxAge).
 	identityDirectoryMaxAge = 4 * identityDirectoryTTL
 )
+
+const directoryLookupFailureOutcome = "requests whose assignments need missing identity facts are refused (default_lookup_failed), " +
+	"and the refusal names the missing fact; other requests use their proven or default profile until a lookup succeeds"
 
 // identityDirectoryCache caches directory facts per uid or SID.
 type identityDirectoryCache = identityCache[useridentity.DirectoryFacts]
@@ -277,8 +283,7 @@ func (c *identityCache[T]) dropAgedLocked(key string, entry *identityCacheEntry[
 	}
 	entry.facts, entry.ok = none, false
 	if c.logf != nil {
-		c.logf("directory facts for %s are %s old and no longer used; the account gets the default guardrail profile "+
-			"(default_lookup_failed) until a lookup succeeds", key, age.Round(time.Minute))
+		c.logf("directory facts for %s are %s old and no longer used; %s", key, age.Round(time.Minute), directoryLookupFailureOutcome)
 	}
 }
 
@@ -437,9 +442,9 @@ func (c *identityCache[T]) lifetime(facts T) time.Duration {
 	}
 }
 
-// failing reports a key whose lookups fail and that has no facts to serve:
-// its requests get default_lookup_failed until a lookup succeeds. reason is
-// the resolver's own text for the failure.
+// failing reports a key whose lookups fail and that has no facts to serve.
+// Requests whose assignments need the missing facts are refused and name
+// them; reason is the resolver's own text for the lookup failure.
 func (c *identityCache[T]) failing(key string) (since time.Time, reason string, ok bool) {
 	if c == nil {
 		return time.Time{}, "", false
@@ -503,8 +508,8 @@ func (c *identityCache[T]) invalidate() {
 // finish in time, the facts are served as before. News that only adds to
 // the facts (a guardian record that names the account's UPN, or one written
 // after the facts were resolved without one) never costs a request the
-// facts it had, so a slow directory cannot send it to a weaker
-// default_lookup_failed profile (loop round 3).
+// facts it had. If those facts later become unconfirmed, requests whose
+// assignments need them are refused and name the missing fact (loop round 3).
 func (c *identityCache[T]) refreshSoon(key string) {
 	if c == nil {
 		return
@@ -608,10 +613,9 @@ func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntr
 		entry.failedSince = now
 	}
 	entry.lastErr = reason
-	keeps := "directory-dependent assignments use the default guardrail profile (default_lookup_failed) until a lookup succeeds"
+	keeps := directoryLookupFailureOutcome
 	if entry.ok && c.maxAge > 0 {
-		keeps = fmt.Sprintf("the account keeps its last facts for at most %s, then directory-dependent assignments use the default guardrail "+
-			"profile (default_lookup_failed) until a lookup succeeds", c.maxAge)
+		keeps = fmt.Sprintf("the account keeps its last facts for at most %s; after they expire, %s", c.maxAge, directoryLookupFailureOutcome)
 	}
 	return fmt.Sprintf("directory lookup for %s failed: %s; %s", key, reason, keeps)
 }

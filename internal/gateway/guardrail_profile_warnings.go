@@ -360,7 +360,9 @@ func unnamedGroupsNote(subject *profileSubject, sids *profileGroupSIDs) string {
 // operating system's account database, and each one it answers "no such
 // group" for is a warning in explain, status, doctor and `profile list`, and
 // a line in the gateway log at start and at each reload (GAP-0135). A lookup
-// that fails or runs out of time says nothing: only a definite absence warns.
+// that fails or runs out of time proves no absence: only a definite absence
+// warns. Requests whose assignments need an unresolved group are refused and
+// name the missing fact.
 //
 // An SSSD that is offline with a cold cache does not fail: it answers "no such
 // group" for groups that exist. So nothing is warned while the directory
@@ -956,8 +958,8 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 	facts, fetchedAt, ok := cachedDirectoryFacts(explained.UserID)
 	if !ok {
 		// No facts are cached. When the gateway's own lookups for the account
-		// fail, directory-dependent assignments get default_lookup_failed
-		// whatever this fresh lookup found (GAP-0212).
+		// fail, requests whose assignments need the missing facts are refused
+		// and name them, regardless of this fresh lookup (GAP-0212).
 		since, reason, failing := cachedDirectoryFailure(explained.UserID)
 		if !failing {
 			return nil, ""
@@ -970,6 +972,7 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 			"last_error":    reason,
 			"profile":       live.Name,
 			"match":         live.Match,
+			"refused":       live.Refused != "",
 			"differs":       differs,
 		}
 		if live.Refused != "" {
@@ -977,7 +980,7 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 		}
 		if differs {
 			warning = fmt.Sprintf("requests of this account currently %s: the gateway's directory lookup for it has failed since %s (%s) "+
-				"and is retried every %s; the profile above applies once a lookup succeeds",
+				"and is retried every %s; rerun explain after a successful lookup to see the proven profile",
 				explainCacheOutcome(live), since.UTC().Format("15:04:05Z"), reason, identityDirectoryRetry)
 		}
 		return view, warning
@@ -998,6 +1001,7 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 		"refresh_after_seconds": int(refresh.Seconds()),
 		"profile":               live.Name,
 		"match":                 live.Match,
+		"refused":               live.Refused != "",
 		"differs":               differs,
 	}
 	if live.Refused != "" {
@@ -1005,7 +1009,7 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 	}
 	if differs {
 		warning = fmt.Sprintf("requests of this account still use the directory facts the gateway fetched %s ago, so they %s; "+
-			"the profile above applies from the next refresh, within %s. Restart the gateway to refresh now",
+			"rerun explain after the next successful refresh to see the proven profile. The gateway refreshes within %s; restart it to refresh now",
 			age, explainCacheOutcome(live), refresh)
 	}
 	// The lookup explain started failed: the answer above, like the
@@ -1034,8 +1038,8 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 //
 // A directory that does not answer (a domain controller down, SSSD offline)
 // leaves no trace on the tools an administrator uses: the accounts without
-// cached facts get default_lookup_failed for directory-dependent assignments,
-// and the only sign was that match on each record. directoryHealthView reports the
+// cached facts refuse requests whose assignments need the missing facts and
+// name them; the only sign was that refusal on each record. directoryHealthView reports the
 // accounts whose lookups failed in the last cache lifetime, with the reason
 // and the age of the facts still served, to explain, status and doctor
 // (GAP-0145).
@@ -1069,7 +1073,7 @@ func directoryHealthView(h identityCacheHealth, now time.Time) (view map[string]
 		return nil, ""
 	}
 	message = fmt.Sprintf("directory lookups are failing for %d account(s) since %s (last error: %s); requests whose assignments need missing facts "+
-		"are refused (default_lookup_failed)", h.Failing, h.Since.UTC().Format("15:04:05Z"), h.LastError)
+		"are refused (default_lookup_failed), and each refusal names the missing fact", h.Failing, h.Since.UTC().Format("15:04:05Z"), h.LastError)
 	if h.Stale > 0 {
 		message += fmt.Sprintf(", and %d account(s) are served facts up to %s old, which are dropped at %s",
 			h.Stale, h.OldestAge.Round(time.Minute), identityDirectoryMaxAge)

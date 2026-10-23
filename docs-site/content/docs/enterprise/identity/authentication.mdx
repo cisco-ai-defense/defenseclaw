@@ -75,7 +75,7 @@ The command lists every identity, most recently seen first. `--limit N` lists on
 
 ### Sandboxed agents
 
-An agent in an OpenShell sandbox is attributed to the host user who started it, but the binding supplies no verified directory facts or groups, so user and group selectors cannot match: the default profile or a connector-only assignment applies. Each sandbox has its own `agt-`. See [Identity detail](/docs/enterprise/identity/reference#sandboxed-agents).
+An agent in an OpenShell sandbox is attributed to the host user who started it. The binding alone supplies no verified directory facts or groups. A request whose assignment needs a fact no other verified record supplies is refused, with that fact named; otherwise a proven connector-only assignment or the default profile applies. Each sandbox has its own `agt-`. See [Identity detail](/docs/enterprise/identity/reference#sandboxed-agents).
 
 ## Assign a profile to a group
 

@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"errors"
 	"slices"
 	"strconv"
 	"sync"
@@ -17,6 +18,62 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
+
+// Managed macOS hooks must not reuse a former secondary membership while
+// the directory can answer with the new membership, or during an outage.
+func TestManagedMacHookRefreshesSecondaryGroupsBeforeDecision(t *testing.T) {
+	previous := managedHookDirectoryNeedsFresh
+	previousHosted, previousFacts := managedServiceHosted.Load(), identityFactsEnabled.Load()
+	previousConfirmed := managedHookPeerAccountsConfirmed
+	managedHookDirectoryNeedsFresh = true
+	setManagedServiceHosted(true)
+	setIdentityFactsEnabled(true)
+	managedHookPeerAccountsConfirmed = func() bool { return true }
+	t.Cleanup(func() {
+		managedHookDirectoryNeedsFresh = previous
+		setManagedServiceHosted(previousHosted)
+		setIdentityFactsEnabled(previousFacts)
+		managedHookPeerAccountsConfirmed = previousConfirmed
+	})
+	const uid = 41963
+	cache := &managedHookPeerHomeCache{newResolver: func() unixidentity.Resolver {
+		return &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{
+			uid: {Name: "macuser", UID: uid, Home: "/Users/macuser"},
+		}}
+	}, now: time.Now}
+	var mu sync.Mutex
+	groups := []string{"relaxed"}
+	failed := false
+	cache.directoriesOnce.Do(func() {
+		cache.directories = newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if failed {
+				return useridentity.DirectoryFacts{}, errors.New("Open Directory unavailable")
+			}
+			return useridentity.DirectoryFacts{Groups: slices.Clone(groups), ResolvedAt: time.Now()}, nil
+		})
+	})
+	read := func() (useridentity.DirectoryFacts, bool) { return cache.directory(uid, true) }
+	if first, ok := read(); !ok || !slices.Contains(first.Groups, "relaxed") {
+		t.Fatalf("initial groups = %v, ok=%t", first.Groups, ok)
+	}
+	mu.Lock()
+	groups = []string{"staff"}
+	mu.Unlock()
+	if next, ok := read(); !ok || slices.Contains(next.Groups, "relaxed") {
+		t.Fatalf("removed secondary group still reached the hook: %v, ok=%t", next.Groups, ok)
+	}
+	mu.Lock()
+	failed = true
+	mu.Unlock()
+	if stale, ok := read(); ok {
+		t.Fatalf("directory outage reused former groups: %v", stale.Groups)
+	}
+	if stale, err := cache.explainDirectory(uid); err == nil {
+		t.Fatalf("explain reported stale groups that hooks refuse: %v", stale.Groups)
+	}
+}
 
 // Review of GAP-0551 (loop 1): a uid handed from one domain's alice to
 // another domain's alice with the same home is another account, which its

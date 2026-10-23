@@ -130,8 +130,8 @@ func TestUnreadableSpoolRecordKeepsCachedStrictFacts(t *testing.T) {
 	}
 
 	// A withdrawn Windows record ends the token groups. The next lookup has
-	// none, and the request takes the outage path (default_lookup_failed),
-	// not a plain default as if the account were in no group.
+	// none, and a request needing them is refused with the missing group
+	// fact named (default_lookup_failed), not a verified no-group decision.
 	trustErr = nil
 	write(sid, time.Now())
 	cache := newCache(sid)

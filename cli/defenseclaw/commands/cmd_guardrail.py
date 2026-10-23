@@ -5851,14 +5851,25 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     profile = result.get("profile") or ux.dim("none (guardrail.* applies)")
     click.echo(f"  profile: {profile}")
     cache = result.get("cache") or {}
+    cache_refused = cache.get("refused") is True or bool(cache.get("refused_reason"))
+    cache_settled = cache.get("refused") is False and not cache_refused
     if result.get("match"):
         reason = result["match"]
         if result.get("matched_group"):
             reason += f" ({result['matched_group']})"
-        # GAP-0275: this lookup worked, but the gateway's own is failing and its
-        # requests get default_lookup_failed; "match: default" read as a verified no-match.
+        # GAP-0275: this lookup worked, but the gateway's own is failing.
+        # Show only the cache decision and refusal details the gateway supplied.
         if cache.get("match") == "default_lookup_failed" and result["match"] != "default_lookup_failed":
-            reason += " (requests get default_lookup_failed: the gateway's directory lookup for this account fails)"
+            if cache_refused:
+                missing_fact = cache.get("refused_reason") or "missing fact not supplied by gateway"
+                reason += f" (requests are refused: {missing_fact})"
+            elif cache_settled:
+                reason += (
+                    " (requests use the default profile (default_lookup_failed); "
+                    "no assignment needs the missing fact)"
+                )
+            else:
+                reason += " (gateway reports default_lookup_failed for requests; refusal state not supplied)"
         click.echo(f"  match:   {reason}")
     if result.get("refused"):
         # GAP-0522: requests that need an unproven identity fact are refused;
@@ -5867,7 +5878,13 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     if result.get("digest"):
         click.echo(f"  digest:  {result['digest']}")
     if cache:
-        cache_decision = f"(profile {cache.get('profile') or 'none'}, match {cache.get('match')})"
+        if cache_refused:
+            missing_fact = cache.get("refused_reason") or "missing fact not supplied by gateway"
+            cache_decision = f"(refused: {missing_fact}, match {cache.get('match')})"
+        elif cache.get("match") == "default_lookup_failed" and not cache_settled:
+            cache_decision = "(match default_lookup_failed; refusal state not supplied)"
+        else:
+            cache_decision = f"(profile {cache.get('profile') or 'none'}, match {cache.get('match')})"
         if cache.get("failing_since"):
             click.echo(
                 f"  cache:   requests have no cached directory facts {cache_decision}; "

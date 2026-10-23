@@ -6,6 +6,8 @@
 package gateway
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,36 @@ import (
 type upgradeBridge struct {
 	*strictBridge
 	dir string
+}
+
+// The RHEL gateway has ProtectHome=yes. The root guardian can stat a local
+// account's home at upgrade, while the gateway cannot stat it from its own
+// mount namespace. The trusted current identity record carries that proof.
+func TestUpgradeKeepsLocalAgentsAssignmentWithPrivateHome(t *testing.T) {
+	for _, version := range []string{"1.0.0", "1.0.2", "1.0.3"} {
+		t.Run(version, func(t *testing.T) {
+			b := newUpgradeBridge(t, "alice")
+			legacy := agentidentity.LegacyAgentID(b.inputs(70001, "alice"))
+			b.migrate(70001, "alice")
+			token := enterprisehooks.LegacyAgentOwnerToken("files", b.homes[70001])
+			record, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{
+				Key: "70001", User: "alice", AccountIncarnation: "files", LegacyOwnerToken: token,
+				UpdatedAt: time.Now().UTC(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(b.dir, "70001.json"), record, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			managedHookPeerHome = func(int) string { return "" }
+			got, mode := b.hook(legacyConfig(legacy, upgradeProfiles), 70001,
+				profileSubject{UserID: "70001", UserName: "alice"})
+			if got.Name != "relaxed" || got.Match != profileMatchAgent || mode != "observe" || got.Refused != "" {
+				t.Fatalf("%s: %+v, mode %q; want prior agents assignment", version, got, mode)
+			}
+		})
+	}
 }
 
 func newUpgradeBridge(t *testing.T, account string) *upgradeBridge {

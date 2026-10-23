@@ -136,11 +136,28 @@ func TestEnterpriseProfileExplainFailsForUnresolvedAccount(t *testing.T) {
 		if strings.Contains(path, "user=misspelled-name") {
 			return "", json.Unmarshal([]byte(`{"lookup_error":"no account named \"misspelled-name\" on this host","profile":"","subject":{"user_id":"","user_name":"misspelled-name"}}`), out)
 		}
+		if strings.Contains(path, "user=59999") {
+			return "", json.Unmarshal([]byte(`{"lookup_error":"the account database names no account for this uid now","account_unresolved":true,"profile":"default","subject":{"user_id":"59999","user_name":""}}`), out)
+		}
 		return "", json.Unmarshal([]byte(`{"lookup_error":"","profile":"","match":"","subject":{"user_id":"1001","user_name":"alice"}}`), out)
 	}
 	platform := runtime.GOOS
 	if platform == "darwin" {
 		platform = "macos"
+	}
+	for _, asJSON := range []bool{false, true} {
+		args := []string{"--user", "59999"}
+		if asJSON {
+			args = append(args, "--json")
+		}
+		cmd := newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[0])
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err == nil || commandExitCode(err) != enterprisestatus.UnixExitFailure ||
+			!strings.Contains(err.Error(), "no account for this uid") {
+			t.Fatalf("json=%v: unknown uid must fail: %v", asJSON, err)
+		}
 	}
 	for _, asJSON := range []bool{false, true} {
 		args := []string{"--user", "misspelled-name"}

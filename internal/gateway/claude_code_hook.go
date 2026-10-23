@@ -529,10 +529,11 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 					"message":  reasonOrDefaultClaudeCode(reason),
 				},
 			}}
-		case "TaskCreated", "TaskCompleted", "TeammateIdle":
+		case "SessionStart", "TaskCreated", "TaskCompleted", "TeammateIdle":
 			// These team/task events use exit 2 + stderr as event-specific
-			// feedback. Top-level continue:false stops the teammate entirely,
-			// which is not the documented denial behavior for these events.
+			// feedback. SessionStart also uses exit 2 + stderr: a JSON
+			// decision:block is not a native SessionStart block and caused
+			// hookexec to replace the identity refusal with a generic error.
 			return nil
 		case "Elicitation":
 			return map[string]interface{}{"hookSpecificOutput": map[string]interface{}{

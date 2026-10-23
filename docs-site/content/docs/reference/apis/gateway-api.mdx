@@ -577,6 +577,10 @@ failed, the answer adds `lookup_error`. If an assignment depends on the missing 
 profile with its digest. With no profiles configured the answer is
 `"profiles_configured": false` with an empty `profile` and the global
 settings under `effective`; `subject` is still resolved when `user` is given.
+When `cache` is present, its `refused` boolean states whether the gateway's
+cached decision refuses; `cache.refused_reason` names the missing fact on a
+refusal. Clients should not infer a settled decision from an older response
+that lacks `cache.refused`.
 
 ```json title="GET /api/v1/agents/identities?user=alice (trimmed)"
 {
