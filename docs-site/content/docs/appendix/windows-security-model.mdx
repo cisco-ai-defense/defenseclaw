@@ -9,11 +9,10 @@ keywords:
   - DefenseClaw token rotation
 ---
 
-On Windows, blocking and telemetry are separate paths. An agent's hook or
-plugin can wait for DefenseClaw's decision and be blocked; the agent's own
-OpenTelemetry (OTLP) export cannot. Both arrive at the same local gateway over
-authenticated loopback, and both end up in the same local audit log and any
-destinations you configure.
+On Windows, an agent's hook or plugin waits for DefenseClaw's decision and
+can block. Isolated OpenShell agents may also export native OpenTelemetry
+(OTLP), which records activity but cannot block it. Host Codex and Claude Code
+use hooks because their native exporters cannot verify a local TCP listener.
 
 ## Connector telemetry channels
 
@@ -25,11 +24,17 @@ The rule on Windows: only a hook or plugin that waits for DefenseClaw's answer
 can block. OTLP and other telemetry add detail to the audit log and
 dashboards, but cannot block an action after the fact.
 
-When a connector supports native OTLP, DefenseClaw gives it a separate scoped
-credential and pins the source identity to that connector. Hook and plugin
+Host setup disables Codex and Claude Code native OTLP and revokes credentials
+from earlier releases because those exporters cannot verify who holds a
+stopped gateway's port. Hook and plugin
 credentials are also connector-scoped and remain distinct from the gateway
 master token. Connector pages identify which channels exist and where their
 managed settings live.
+
+Standalone OpenCode and Amp plugins use one TCP connection for the listener
+challenge and hook request. The gateway checks that the account opening the
+challenge owns the scoped credential before it returns a proof. Per-user
+plugins verify the connected listener's account through the native helper.
 
 A scoped credential is accepted only for its connector and route; it cannot
 authenticate the management API, another connector, or a non-loopback request.

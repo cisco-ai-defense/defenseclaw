@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1282,6 +1283,23 @@ func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, erro
 	}
 	installedMarker, _, _ := bytes.Cut(data, []byte("\n"))
 	installedMarker = bytes.TrimSuffix(installedMarker, []byte("\r"))
+	if c.name == "opencode" {
+		if pluginSecureClientProfile(opts) &&
+			(!bytes.Contains(data, []byte(`const DC_NATIVE_POST_BINARY = "`)) ||
+				!bytes.Contains(data, []byte(`return defenseclawNativePost(path, init);`))) {
+			return false, nil
+		}
+		if !opts.ManagedEnterprise && (!bytes.Contains(data, []byte(`const DC_PER_USER_NATIVE_POST = "1";`)) ||
+			!bytes.Contains(data, []byte(`execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR]`))) {
+			return false, nil
+		}
+		if managedPluginListenerProof(opts) {
+			proofCall := []byte(`if (DC_LISTENER_PROOF) return defenseclawProvenTCPRequest(path, init, token);`)
+			if !bytes.Contains(data, []byte(`const DC_LISTENER_PROOF = "1";`)) || !bytes.Contains(data, proofCall) {
+				return false, nil
+			}
+		}
+	}
 	return bytes.Equal(installedMarker, marker), nil
 }
 
@@ -1357,7 +1375,7 @@ func managedPluginForeignHookGuardMarker(opts SetupOpts, declaration, terminator
 // asks for it and keeps the TCP transport renders it; a plugin on the hook
 // socket verifies the socket's owner instead.
 func managedPluginListenerProof(opts SetupOpts) bool {
-	if !opts.ManagedEnterprise || !opts.ManagedListenerProof {
+	if !opts.ManagedEnterprise || !opts.ManagedListenerProof || pluginSecureClientProfile(opts) {
 		return false
 	}
 	socket, _ := managedPluginHookSocket(opts)
@@ -1401,13 +1419,11 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 		return nil, fmt.Errorf("%s resolve absolute scoped hook credential path: %w", c.name, err)
 	}
 	failMode := setupHookFailMode(opts)
-	if failMode == "closed" && !c.capability(opts).SupportsFailClosed {
-		failMode = "open"
-	}
 	hookSocket, serviceUID := managedPluginHookSocket(opts)
 	rendered, err := renderTemplate(string(tmpl), templateData{
 		APIAddr:            opts.APIAddr,
 		TokenFileJS:        javaScriptStringContent(tokenPath),
+		NativePostBinaryJS: javaScriptStringContent(secureClientPluginNativePostBinary(opts)),
 		HookSocketJS:       javaScriptStringContent(hookSocket),
 		ServiceUID:         serviceUID,
 		ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts)),
@@ -1422,6 +1438,13 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 		return nil, fmt.Errorf("%s render plugin template: %w", c.name, err)
 	}
 	return []byte(rendered), nil
+}
+
+func secureClientPluginNativePostBinary(opts SetupOpts) string {
+	if !pluginSecureClientProfile(opts) || !filepath.IsAbs(opts.HookExecutable) {
+		return ""
+	}
+	return filepath.Clean(opts.HookExecutable)
 }
 
 // managedPluginArtifactDrift returns the managed plugin path when the
@@ -1527,6 +1550,16 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	}
 	if err := openCodeWritePluginFile(path, renderedBody, 0o600); err != nil {
 		return rollback(fmt.Errorf("%s write plugin: %w", c.name, err))
+	}
+	// The plugin carries its own fail mode and reads no shell hook runtime
+	// record. An earlier release or reconcile may have left a stale mode in
+	// that record (GAP-0635). Clean it after publishing the plugin: damage to
+	// unused shared state must neither block Setup nor alter that state.
+	if !opts.ManagedEnterprise {
+		hookDir := filepath.Join(opts.DataDir, "hooks")
+		if err := clearHookConfigSidecarEntry(hookDir, c.name); err != nil {
+			log.Printf("[connector] %s setup: could not remove unused hook runtime record in %s: %v", c.name, hookDir, err)
+		}
 	}
 	return nil
 }
@@ -5144,10 +5177,20 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 			return fmt.Errorf("copilot: unsupported hook event %q in resolved contract", event)
 		}
 		selected[event] = true
-		// defenseclaw.json is DefenseClaw's file: on an event it binds, any
-		// entry but Setup's render (an old copy, a wrapper, a renamed script)
-		// is not DefenseClaw's current hook, and Copilot ran it beside the
-		// re-added entry (rel-1-0-4 GAP-0600). The event holds the render alone.
+		// Copilot runs every entry in an event array. An independent entry in
+		// this file must be moved before Setup can safely restore the current
+		// hook. Check all entries before writing any event back to disk.
+		if raw, present := hooks[event]; present {
+			entries, ok := raw.([]interface{})
+			if !ok {
+				entries = []interface{}{raw}
+			}
+			for _, entry := range entries {
+				if !copilotBoundEventOwnsHook(entry, hookScript) {
+					return fmt.Errorf("copilot: cannot repair event %q in %s: an independent or unrecognized handler is present; move it to another hook file in the same hooks directory, then run defenseclaw setup copilot again", event, path)
+				}
+			}
+		}
 		hooks[event] = []interface{}{copilotHookRegistration(goos, event, hookScript)}
 	}
 	// Remove DefenseClaw's handler from events outside this contract too. An
@@ -5156,22 +5199,14 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 		if selected[event] {
 			continue
 		}
-		entries, ok := raw.([]interface{})
-		if !ok {
-			// Presence and Doctor also find our command in a malformed mapping.
-			// Remove it here so the guardian's next Setup can converge.
-			if copilotUnexpectedEventOwnsHook(raw, hookScript) {
-				delete(hooks, event)
-			}
+		remaining, changed, err := stripCopilotOwnedEntry(raw, hookScript)
+		if err != nil {
+			return fmt.Errorf("copilot: cannot repair event %q in %s: %w", event, path, err)
+		}
+		if !changed {
 			continue
 		}
-		remaining := make([]interface{}, 0, len(entries))
-		for _, entry := range entries {
-			if !copilotUnexpectedEventOwnsHook(entry, hookScript) {
-				remaining = append(remaining, entry)
-			}
-		}
-		if len(remaining) == 0 {
+		if remaining == nil {
 			delete(hooks, event)
 		} else {
 			hooks[event] = remaining
@@ -5180,8 +5215,133 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 	return writeJSONObject(path, cfg)
 }
 
+// A bound event may be replaced only when every executable command in its
+// entry is a known DefenseClaw form. Do not claim a combined command or a
+// nested handler merely because it also mentions our script.
+func copilotBoundEventOwnsHook(raw interface{}, hookScript string) bool {
+	if copilotLiveOperatorLookalike(raw, hookScript) {
+		return false
+	}
+	entry, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if kind, present := entry["type"]; present && kind != "command" {
+		return false
+	}
+	for _, key := range []string{"handlers", "hooks", "action"} {
+		if _, present := entry[key]; present {
+			return false
+		}
+	}
+	owned := false
+	for _, key := range []string{"bash", "command", "powershell", "command_windows", "commandWindows"} {
+		value, present := entry[key]
+		if !present {
+			continue
+		}
+		command, ok := value.(string)
+		if !ok || !copilotBoundEventOwnsCommand(key, command, hookScript) {
+			return false
+		}
+		owned = true
+	}
+	return owned
+}
+
+func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
+	if isCopilotPowerShellAdapterCommand(hookScript) {
+		if key != "powershell" && key != "command" {
+			return false
+		}
+		if isCopilotNativeHookCommand(command) {
+			return true
+		}
+		for _, event := range copilotCurrentHookEvents {
+			if command == copilotHookInvocationCommandForEvent("windows", event, hookScript) {
+				return true
+			}
+		}
+		// A previous DefenseClaw adapter may have been deleted along with
+		// its data directory. Its event-bound command still identifies it.
+		if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
+			adapter := strings.ReplaceAll(binding[1], "''", "'")
+			if _, err := os.Lstat(adapter); errors.Is(err, os.ErrNotExist) {
+				return true
+			}
+		}
+		return copilotMarkedAdapterCommand(command)
+	}
+	if managedHookCommandEntry(map[string]interface{}{key: command}, hookScript) {
+		return true
+	}
+	if key == "powershell" {
+		return copilotMarkedAdapterCommand(command)
+	}
+	if key != "bash" && key != "command" {
+		return false
+	}
+	word, rest, ok := hookScriptWordAfterWrapper(strings.TrimSpace(command))
+	if !ok || !filepath.IsAbs(word) || filepath.Clean(word) != word ||
+		(rest != "" && !copilotBoundEventArgument(rest)) {
+		return false
+	}
+	if copilotMarkedShellCopy(word) {
+		return true
+	}
+	// A deleted copy has no marker to read. The exact DefenseClaw script
+	// name with Copilot's event binding remains a repairable registration.
+	if isCopilotShellHookScript(word) && copilotBoundEventArgument(rest) {
+		if _, err := os.Lstat(word); errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+	}
+	_, owned := editedDefenseClawHookScript(word+rest, "copilot-hook.sh")
+	return owned
+}
+
+func copilotMarkedShellCopy(path string) bool {
+	body, err := safefile.ReadRegularFileBounded(path, 1<<20)
+	if err != nil {
+		return false
+	}
+	if len(body) > 512 {
+		body = body[:512]
+	}
+	return bytes.Contains(body, []byte("# defenseclaw-managed-hook v"))
+}
+
+func copilotMarkedAdapterCommand(command string) bool {
+	binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command))
+	if len(binding) != 3 || !ValidCopilotHookEvent(binding[2]) {
+		return false
+	}
+	adapter := strings.ReplaceAll(binding[1], "''", "'")
+	body, err := safefile.ReadRegularFileBounded(adapter, 1<<20)
+	if err != nil {
+		return false
+	}
+	if len(body) > 512 {
+		body = body[:512]
+	}
+	return bytes.Contains(body, []byte("# defenseclaw-managed-hook v")) &&
+		bytes.Contains(bytes.ToLower(body), []byte("copilot"))
+}
+
+func copilotBoundEventArgument(rest string) bool {
+	for _, event := range copilotCurrentHookEvents {
+		if rest == " --event "+shellWord(event) || rest == " --event "+event {
+			return true
+		}
+	}
+	return false
+}
+
 func copilotUnexpectedEventOwnsHook(raw interface{}, hookScript string) bool {
-	if containsHookScript(raw, hookScript) || editedDefenseClawHookEntry(raw, hookScriptBaseName(hookScript)) || copilotOldManagedCopyEntry(raw) {
+	if copilotLiveOperatorLookalike(raw, hookScript) {
+		return false
+	}
+	if copilotBoundEventOwnsHook(raw, hookScript) || containsHookScript(raw, hookScript) || editedDefenseClawHookEntry(raw, hookScriptBaseName(hookScript)) || copilotOldManagedCopyEntry(raw) {
 		return true
 	}
 	if !isCopilotPowerShellAdapterCommand(hookScript) {
@@ -5189,6 +5349,139 @@ func copilotUnexpectedEventOwnsHook(raw interface{}, hookScript string) bool {
 	}
 	adapter := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'"))
 	return copilotPowerShellCommandClaimsHandler(raw, adapter)
+}
+
+// A live operator script may share the DefenseClaw basename and Copilot's
+// event argument. Its content has no DefenseClaw marker, so neither Setup
+// nor teardown may claim it. A deleted copy remains repairable.
+func copilotLiveOperatorLookalike(raw interface{}, hookScript string) bool {
+	entry, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for _, key := range []string{"bash", "command", "powershell", "command_windows", "commandWindows"} {
+		command, _ := entry[key].(string)
+		if command == "" {
+			continue
+		}
+		if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
+			adapter := strings.ReplaceAll(binding[1], "''", "'")
+			current := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'")
+			if !strings.EqualFold(adapter, current) && !copilotMarkedAdapterCommand(command) {
+				if info, err := os.Lstat(adapter); err == nil && info.Mode().IsRegular() {
+					return true
+				}
+			}
+			continue
+		}
+		word, rest, parsed := hookScriptWordAfterWrapper(strings.TrimSpace(command))
+		if parsed && word != hookScript && isCopilotShellHookScript(word) && copilotBoundEventArgument(rest) &&
+			!copilotMarkedShellCopy(word) {
+			if info, err := os.Lstat(word); err == nil && info.Mode().IsRegular() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// stripCopilotOwnedEntry removes only handler entries that belong to
+// DefenseClaw. An unexpected event can contain nested independent handlers;
+// finding our command anywhere in the enclosing value is not ownership of
+// that whole value. A handler with both our executable and an independent
+// executable cannot be separated, so leave the file unchanged and report it.
+func stripCopilotOwnedEntry(raw interface{}, hookScript string) (interface{}, bool, error) {
+	switch value := raw.(type) {
+	case []interface{}:
+		remaining := make([]interface{}, 0, len(value))
+		changed := false
+		for _, item := range value {
+			kept, removed, err := stripCopilotOwnedEntry(item, hookScript)
+			if err != nil {
+				return raw, false, err
+			}
+			changed = changed || removed
+			if kept != nil {
+				remaining = append(remaining, kept)
+			}
+		}
+		if len(remaining) == 0 && changed {
+			return nil, true, nil
+		}
+		return remaining, changed, nil
+	case map[string]interface{}:
+		ownCommand, foreignCommand := false, false
+		for _, key := range []string{"command", "bash", "powershell", "command_windows", "commandWindows"} {
+			command, present := value[key]
+			if !present {
+				continue
+			}
+			if text, ok := command.(string); ok {
+				candidate := map[string]interface{}{key: text}
+				owned := copilotBoundEventOwnsHook(candidate, hookScript)
+				if !owned && copilotUnexpectedEventOwnsHook(candidate, hookScript) {
+					owned = !strings.Contains(text, hookScript) || copilotCommandRunsCurrentHook(text, hookScript)
+				}
+				if owned {
+					ownCommand = true
+				} else {
+					foreignCommand = true
+				}
+			}
+		}
+		if ownCommand {
+			if foreignCommand {
+				return raw, false, errors.New("a handler combines DefenseClaw and independent commands; move the independent command to its own handler")
+			}
+			for _, child := range value {
+				switch child.(type) {
+				case []interface{}, map[string]interface{}:
+					return raw, false, errors.New("a handler combines DefenseClaw and independent nested content; separate the handlers")
+				}
+			}
+			return nil, true, nil
+		}
+		remaining := make(map[string]interface{}, len(value))
+		changed := false
+		for key, child := range value {
+			switch child.(type) {
+			case []interface{}, map[string]interface{}:
+				kept, removed, err := stripCopilotOwnedEntry(child, hookScript)
+				if err != nil {
+					return raw, false, err
+				}
+				changed = changed || removed
+				if kept != nil {
+					remaining[key] = kept
+				}
+			default:
+				remaining[key] = child
+			}
+		}
+		if len(remaining) == 0 && changed {
+			return nil, true, nil
+		}
+		return remaining, changed, nil
+	default:
+		return raw, false, nil
+	}
+}
+
+// A command can mention our hook path as data (for example an audit log
+// argument). Only a command that starts the hook counts as an edited copy.
+func copilotCommandRunsCurrentHook(command, hookScript string) bool {
+	segments := strings.NewReplacer("&&", ";", "||", ";", "\n", ";").Replace(command)
+	for _, segment := range strings.Split(segments, ";") {
+		segment = strings.TrimSpace(segment)
+		if strings.HasPrefix(segment, hookScript) {
+			return true
+		}
+		word, _, ok := hookScriptWordAfterWrapper(segment)
+		if ok && word == hookScript {
+			return true
+		}
+	}
+	return false
 }
 
 // copilotCommandContainsScript matches the POSIX doctor's command-key search.
@@ -5239,7 +5532,13 @@ func copilotPowerShellCommandClaimsHandler(raw interface{}, adapter string) bool
 			if key == "powershell" {
 				if command, ok := item.(string); ok {
 					lowered := strings.ToLower(command)
-					if strings.Contains(lowered, adapter) || copilotPowerShellAdapterBinding.MatchString(strings.TrimSpace(command)) ||
+					missingAdapter := false
+					if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
+						path := strings.ReplaceAll(binding[1], "''", "'")
+						_, err := os.Lstat(path)
+						missingAdapter = errors.Is(err, os.ErrNotExist)
+					}
+					if strings.Contains(lowered, adapter) || copilotMarkedAdapterCommand(command) || missingAdapter ||
 						((strings.Contains(lowered, "hook --connector copilot") || strings.Contains(lowered, "'hook','--connector','copilot'")) &&
 							(strings.Contains(lowered, "defenseclaw-hook") || strings.Contains(lowered, "$hookprocess") || strings.HasPrefix(lowered, "& "))) {
 						return true
@@ -5564,7 +5863,8 @@ func removeJSONHookReferencesProfile(path string, secureClient bool, hookScripts
 		if hooks, ok := pruned["hooks"].(map[string]interface{}); ok {
 			before, _ := cfg["hooks"].(map[string]interface{})
 			pruneNewlyEmptyHookEntries(before, hooks)
-			if len(hooks) == 0 {
+			// An empty hooks object the user already had is theirs (GAP-0650).
+			if len(hooks) == 0 && len(before) > 0 {
 				delete(pruned, "hooks")
 			}
 		}
@@ -5595,36 +5895,48 @@ func removeCopilotHookReferencesProfile(path string, secureClient bool, hookScri
 	}
 	var pruned map[string]interface{}
 	if secureClient {
-		pruned, _ = removeHookScriptReferencesLegacy(cfg, hookScript).(map[string]interface{})
+		remaining, changed, err := stripCopilotOwnedEntry(cfg, hookScript)
+		if err != nil {
+			return fmt.Errorf("copilot: cannot remove Secure Client hooks in %s: %w", path, err)
+		}
+		if !changed {
+			return nil
+		}
+		pruned, _ = remaining.(map[string]interface{})
 	} else {
-		pruned, _ = removeHookScriptReferences(cfg, hookScript).(map[string]interface{})
+		pruned = make(map[string]interface{}, len(cfg))
+		for key, value := range cfg {
+			pruned[key] = value
+		}
 	}
 	if pruned == nil {
 		pruned = map[string]interface{}{}
 	}
 	if !secureClient {
 		if hooks, ok := pruned["hooks"].(map[string]interface{}); ok {
+			before := hooks
+			hooks = make(map[string]interface{}, len(before))
+			for event, raw := range before {
+				hooks[event] = raw
+			}
+			pruned["hooks"] = hooks
 			// Doctor and Setup claim an edited handler on any event in this
 			// DefenseClaw-owned file. Teardown must use the same predicate:
 			// the generic remover only recognizes exact commands in lists.
 			for event, raw := range hooks {
-				if entries, ok := raw.([]interface{}); ok {
-					remaining := make([]interface{}, 0, len(entries))
-					for _, entry := range entries {
-						if !copilotUnexpectedEventOwnsHook(entry, hookScript) {
-							remaining = append(remaining, entry)
-						}
-					}
-					if len(remaining) == 0 && len(entries) > 0 {
-						delete(hooks, event)
-					} else {
-						hooks[event] = remaining
-					}
-				} else if copilotUnexpectedEventOwnsHook(raw, hookScript) {
+				remaining, changed, err := stripCopilotOwnedEntry(raw, hookScript)
+				if err != nil {
+					return fmt.Errorf("copilot: cannot remove event %q in %s: %w", event, path, err)
+				}
+				if !changed {
+					continue
+				}
+				if remaining == nil {
 					delete(hooks, event)
+				} else {
+					hooks[event] = remaining
 				}
 			}
-			before, _ := cfg["hooks"].(map[string]interface{})
 			pruneNewlyEmptyHookEntries(before, hooks)
 			if len(hooks) == 0 {
 				delete(pruned, "hooks")

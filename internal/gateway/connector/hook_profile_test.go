@@ -69,10 +69,14 @@ func TestHookProfileMatrix(t *testing.T) {
 
 	reg := NewDefaultRegistry()
 	opts := SetupOpts{
-		APIAddr:  "127.0.0.1:18970",
-		APIToken: "tok-test",
-		DataDir:  t.TempDir(),
+		APIAddr:           "127.0.0.1:18970",
+		APIToken:          "tok-test",
+		DataDir:           t.TempDir(),
+		ManagedEnterprise: true,
 	}
+	// Native exporter specs are rendered only inside the isolated OpenShell
+	// artifact. Host profiles cannot verify a replaced loopback listener.
+	opts.sandboxNativeOTLP = true
 
 	for _, tc := range cases {
 		tc := tc

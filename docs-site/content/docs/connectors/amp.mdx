@@ -59,6 +59,16 @@ What a gateway outage does to an Amp call, per install and fail mode, is in the 
 - A prompt has no hook, so a matching prompt reaches the model. Tool-call rules still block.
 - Ask works only for the active foreground thread. A background thread or missing UI rejects the call instead of allowing it.
 
+### Rejected command display
+
+In the tested Amp 0.0.1790798464 build, a policy-rejected shell call can still have
+a checked, collapsed **Ran 1 command** summary. This counts an attempted tool
+call; the command did not execute. Expand the tool result to see **Tool rejected
+by plugin** and the DefenseClaw policy reason. The matching DefenseClaw audit
+block and absent command output confirm the rejection. The plugin sends Amp
+`reject-and-continue` with that reason before execution; Amp's [plugin API](https://ampcode.com/docs/plugin-api)
+does not provide a field for changing the collapsed summary.
+
 ## Files it changes
 
 | What | Where |

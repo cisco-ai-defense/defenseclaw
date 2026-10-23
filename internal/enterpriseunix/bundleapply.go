@@ -1026,8 +1026,14 @@ func (l *lifecycle) confirmRecoveredBundle(ctx context.Context) error {
 	if err != nil || state.ConfigSHA256 != sha256Bytes(installed) || state.BundleID != current.BundleID || state.BundleVersion != current.Version {
 		return fmt.Errorf("restored config generation does not name confirmed bundle %s version %d: %v", current.BundleID, current.Version, err)
 	}
-	if current.EffectivePolicyDigest == "" {
-		return fmt.Errorf("confirmed bundle %s has no effective policy digest", current.BundleID)
+	// The state keeps the digest of the build that confirmed this bundle.
+	// After an upgrade the restored bytes can produce a new effective digest.
+	// Recompute it from the pinned, hashed bundle with this build before
+	// comparing the gateway. The earlier raw check proves the installed bytes.
+	digest, _, err := enterprisebundle.VerifiedCurrentDigest(ctx, store, current, env.GOOS,
+		enterprisebundle.DeviceLayoutFromManaged(env.Layout), env.BundleDigester)
+	if err != nil {
+		return fmt.Errorf("compute restored bundle policy: %w", err)
 	}
 	gateway, ok := gatewayUnitOf(env.Services.Units())
 	if !ok {
@@ -1039,11 +1045,11 @@ func (l *lifecycle) confirmRecoveredBundle(ctx context.Context) error {
 			return err
 		}
 		health := parseBundleHealth(body)
-		if health.digest != current.EffectivePolicyDigest || health.configGeneration != state.Generation ||
+		if health.digest != digest || health.configGeneration != state.Generation ||
 			health.bundleID != current.BundleID || health.bundleVersion != current.Version || health.reloadError != "" || health.configState == "error" {
 			return fmt.Errorf("gateway policy %s at config generation %d for bundle %s version %d does not match confirmed bundle %s version %d policy %s at generation %d (reload error: %s)",
 				health.digest, health.configGeneration, health.bundleID, health.bundleVersion,
-				current.BundleID, current.Version, current.EffectivePolicyDigest, state.Generation, health.reloadError)
+				current.BundleID, current.Version, digest, state.Generation, health.reloadError)
 		}
 		return nil
 	}

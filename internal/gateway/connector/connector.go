@@ -95,6 +95,9 @@ type SetupOpts struct {
 	// disable-sentinel overrides and derive their data directory from the
 	// verified script location instead.
 	ManagedEnterprise bool
+	// sandboxNativeOTLP selects the isolated OpenShell artifact renderer. It
+	// cannot be set by a host setup caller or a configuration file.
+	sandboxNativeOTLP bool
 	// ManagedHookSocket is the standalone gateway's peer-authorized unix
 	// hook socket (from the root-owned runtime descriptor). When set on a
 	// unix host, in-agent plugins (OpenCode, Amp) and connector shell hooks
@@ -162,13 +165,10 @@ type SetupOpts struct {
 	// connectors fall back to the process working directory.
 	WorkspaceDir string
 
-	// HookFailMode is the operator-chosen hook failure mode supplied to setup
-	// and hook-writing paths. Values: "open" (allow on response or
-	// transport failures) or "closed" (block on either failure class). Runtime
-	// setup populates it from cfg.EffectiveHookFailModeForConnector(conn.Name()).
-	// Hook-writing helpers normalize an empty or invalid value to the secure
-	// "closed" fallback. Cursor pins this per mode: closed for action and open
-	// for observe.
+	// HookFailMode is the resolved hook failure mode supplied to setup. A
+	// managed administrator may select open for an outage, and Secure Client
+	// may default open. Per-user renders always close, including a legacy open.
+	// Runtime setup populates it from cfg.EffectiveHookFailModeForConnector.
 	// Profile-only callers may omit it; provider-specific profile defaults are
 	// separate from the hook-writing boundary.
 	// DEFENSECLAW_STRICT_AVAILABILITY remains
@@ -177,23 +177,21 @@ type SetupOpts struct {
 
 	// ConfiguredHookFailMode is the hook fail mode the config sets
 	// explicitly for the connector (cfg.ConfiguredHookFailModeForConnector:
-	// "open", "closed", or "" when it sets none). A per-user Cursor
-	// HookFailMode follows its guardrail mode, which is no outage choice:
-	// its hooks fail open while the gateway is down only when this is open
-	// (OutageHookFailMode).
+	// "open", "closed", or "" when it sets none). This field records a legacy
+	// per-user open without granting an outage exception.
 	ConfiguredHookFailMode string
 
 	// SecureClientHookDelivery selects the Secure Client delivery contract
 	// (#1163): an unset HookFailMode renders open and an explicit value wins
 	// for every connector, Cursor included. Callers set it from
 	// cfg.SecureClientIntegration() (the enterprise guardian from its
-	// profile). Every other install leaves it false and keeps the
-	// fail-closed default and Cursor's action/observe rule.
+	// profile). Every other install leaves it false and keeps fail-closed hooks.
 	SecureClientHookDelivery bool
 
 	// GuardrailMode is the effective connector policy mode. Cursor uses it to
 	// render blocking decisions in action and would-block decisions in observe.
-	// Its standalone registration closes hook-process failure in both modes.
+	// Its standalone registration closes hook-process failure in both modes;
+	// per-user hook failures stay closed.
 	GuardrailMode string
 
 	// HILTEnabled tells connectors with native approval surfaces to wire
@@ -582,9 +580,9 @@ func (e ContentEnvelope) clone() ContentEnvelope {
 //     gateway uses this to decide whether to expect a propagated trace
 //     context vs. mint a fresh root span. v6-managed hooks set this true.
 //   - NativeOTLP: optional descriptor for the connector's native OTLP
-//     emission. nil when the connector does not emit native OTLP (cursor,
-//     hermes, copilot today). Non-nil for codex (TOML),
-//     claudecode (env).
+//     emission. nil on host Codex and Claude Code installs because their
+//     native exporters cannot verify the loopback listener's owner. Their
+//     isolated sandbox renderers keep a private native receiver.
 //   - Decode: optional decoder for connector-specific event/content/tool
 //     wire shape. Identity fields returned by Decode are advisory only and
 //     MUST NOT override Correlation bindings; the gateway accepts correlation

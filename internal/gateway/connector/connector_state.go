@@ -1065,6 +1065,102 @@ func ManagedHookContractTimestamps(
 	return lock.UpdatedAt, entry.UpdatedAt, nil
 }
 
+// sealRemovedConnectorScript records digest as the digest of script in the
+// hook contract lock entry of connectorName, a connector 1.0.4 removed: the
+// deny stub its teardown left at that path, run by the agent configs listed
+// in configs, which the entry then names among its hook config paths; ""
+// removes the script's digest (nothing is there). A stub that an agent config
+// still runs is sealed even when the lock or the entry is gone: the entry is
+// written again with only the stub and its configs. Nothing else in the lock
+// changes. An entry that already records it writes nothing; with no lock or
+// no entry, a digest "" or no config writes nothing either. until 1.1.
+func sealRemovedConnectorScript(dataDir, connectorName, script, digest string, configs []string, managedEnterprise bool) error {
+	if strings.TrimSpace(dataDir) == "" || !IsRemovedConnector(connectorName) {
+		return nil
+	}
+	connectorName = normalizeConnectorName(connectorName)
+	path := filepath.Join(dataDir, hookContractLockFile)
+	create := digest != "" && len(configs) > 0
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) && !create {
+		return nil
+	}
+	return withFileLockMode(path, managedEnterprise, func() error {
+		lock, err := loadHookContractLockForUpdate(dataDir, managedEnterprise)
+		if err != nil {
+			return fmt.Errorf("load hook contract lock: %w", err)
+		}
+		if lock.Connectors == nil {
+			lock.Connectors = map[string]HookContractLockEntry{}
+		}
+		entry, ok := lock.Connectors[connectorName]
+		if !ok {
+			if !create {
+				return nil
+			}
+			entry = HookContractLockEntry{Connector: connectorName}
+		}
+		recorded, has := entry.HookScriptDigests[script]
+		var missing []string
+		if digest != "" {
+			for _, config := range configs {
+				if !removedLockNamesConfig(entry, config) {
+					missing = append(missing, filepath.ToSlash(config))
+				}
+			}
+		}
+		if ok && len(missing) == 0 && ((digest == "" && !has) || (digest != "" && recorded == digest)) {
+			return nil
+		}
+		entry.HookScriptDigests = cloneHookScriptDigests(entry.HookScriptDigests)
+		if digest == "" {
+			delete(entry.HookScriptDigests, script)
+			if len(entry.HookScriptDigests) == 0 {
+				entry.HookScriptDigests = nil
+			}
+		} else {
+			if entry.HookScriptDigests == nil {
+				entry.HookScriptDigests = map[string]string{}
+			}
+			entry.HookScriptDigests[script] = digest
+		}
+		if len(missing) > 0 {
+			entry.Locations.HookConfigPaths = append(append([]string(nil), entry.Locations.HookConfigPaths...), missing...)
+		}
+		previousTimes := []string{lock.UpdatedAt}
+		for _, peer := range lock.Connectors {
+			previousTimes = append(previousTimes, peer.UpdatedAt)
+		}
+		entry.UpdatedAt = nextHookContractTimestamp(time.Now(), previousTimes...)
+		lock.UpdatedAt = entry.UpdatedAt
+		lock.Connectors[connectorName] = entry
+		body, err := json.MarshalIndent(lock, "", "  ")
+		if err != nil {
+			return err
+		}
+		return hookRuntimeFileWriter(managedEnterprise)(path, append(body, '\n'), 0o600)
+	})
+}
+
+// removedConnectorLockEntry returns the hook contract lock entry of a
+// removed connector, or nil when there is no lock or no entry. until 1.1.
+func removedConnectorLockEntry(dataDir, connectorName string, managedEnterprise bool) (*HookContractLockEntry, error) {
+	if strings.TrimSpace(dataDir) == "" {
+		return nil, nil
+	}
+	if _, err := os.Lstat(filepath.Join(dataDir, hookContractLockFile)); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	lock, err := loadHookContractLockForUpdate(dataDir, managedEnterprise)
+	if err != nil {
+		return nil, err
+	}
+	entry, ok := lock.Connectors[normalizeConnectorName(connectorName)]
+	if !ok {
+		return nil, nil
+	}
+	return &entry, nil
+}
+
 func ClearHookContractLockEntry(dataDir, connectorName string) error {
 	return ClearHookContractLockEntryForMode(dataDir, connectorName, false)
 }

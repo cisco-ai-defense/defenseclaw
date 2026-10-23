@@ -69,6 +69,11 @@ shutil.copytree(
 )
 PY
 fi
+# dist-cli builds the Fleet archive, whose policy compiler CTest reads this
+# page. Keep the rest of docs-site out of the release smoke source copy.
+FLEET_POLICY_PAGE="docs-site/content/docs/reference/edge-connector/policies.mdx"
+mkdir -p "${WORK}/src/${FLEET_POLICY_PAGE%/*}"
+cp "${ROOT}/${FLEET_POLICY_PAGE}" "${WORK}/src/${FLEET_POLICY_PAGE}"
 cd "${WORK}/src"
 scripts/stamp-version.sh "${VERSION}" >/dev/null
 make --no-print-directory dist-cli dist-installers dist-requirements DIST_DIR="${OUT}" >/dev/null

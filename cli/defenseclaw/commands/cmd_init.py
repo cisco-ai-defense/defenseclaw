@@ -258,6 +258,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     from defenseclaw.commands.cmd_setup import _validated_api_key_env_name
 
     refuse_first_run_when_managed()
+    if fail_mode == "open":
+        raise click.ClickException("Fail-open is reserved for administrator-managed hosts during an outage")
 
     from defenseclaw import config as config_module
 
@@ -1475,52 +1477,18 @@ def _prompt_action_connectors(
     return action
 
 
-def _current_hook_fail_mode(data_dir: str | os.PathLike[str] | None = None) -> str:
-    """The hook fail mode an Enter at the init prompt keeps.
-
-    A new install gets the config default, closed, which --non-interactive,
-    quickstart and the fail-mode help all name; a re-run keeps the saved
-    value (GAP-0047)."""
-    try:
-        from defenseclaw import config as cfg_mod
-
-        if not os.path.isfile(cfg_mod.config_path_for_data_dir(data_dir or cfg_mod.default_data_path())):
-            return "closed"
-        saved = (cfg_mod.load(data_dir=data_dir).guardrail.hook_fail_mode or "").strip().lower()
-        return saved if saved in {"open", "closed"} else "closed"
-    except Exception:  # noqa: BLE001 - an unreadable config offers the default
-        return "closed"
-
-
 def _prompt_action_policy(
     *,
     fail_mode: str | None,
     human_approval: bool | None,
     hilt_min_severity: str | None,
-    data_dir: str | os.PathLike[str] | None = None,
 ) -> tuple[str | None, bool | None, str | None]:
     """Ask the action-mode policy knobs once, shared by every action connector.
 
-    These (hook fail-mode + HITL) only matter when at least one connector
-    enforces, so we ask them a single time after the action subset is known
-    rather than per connector. Pre-supplied flags skip the matching prompt."""
-    # Hook fail-mode: surface the choice so first-run operators don't have to
-    # discover `defenseclaw guardrail fail-mode` later.
+    Hook failures stay closed on per-user hosts. HITL is asked once after the
+    action subset is known rather than per connector."""
     if fail_mode is None:
-        terminal_checkbox.restore_line_prompt_mode()
-        ux.section("Hook fail-mode (delivery and response failures)")
-        ux.subhead(
-            "What hooks do when delivery/authentication fails or the gateway response is invalid.",
-        )
-        ux.subhead(
-            "Strict availability can additionally force transport and missing-token failures closed.",
-        )
-        fail_mode = click.prompt(
-            "  " + ux.bold("Fail mode"),
-            type=click.Choice(["open", "closed"], case_sensitive=False),
-            default=_current_hook_fail_mode(data_dir),
-            show_choices=True,
-        )
+        fail_mode = "closed"
     # Human-In-the-Loop (HITL) only fires in action mode, so it is only asked
     # here (after at least one connector opted into action).
     if human_approval is None:
@@ -2064,11 +2032,7 @@ def _prompt_first_run(
             fail_mode=fail_mode,
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity,
-            data_dir=data_dir,
         )
-        if "cursor" in action_set and (shared_fail or "").lower() == "open":
-            # GAP-1517: Cursor's hook contract ties failures to its mode.
-            ux.subhead("Cursor keeps fail mode closed: in action mode its hooks always fail closed.")
 
     # Offer the judge for every connector the operator selected for action.
     # Hook-contract downgrades still apply to the saved profile, but they
@@ -2738,11 +2702,9 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
     else:
         renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
     if not proxy and _closed_fail_mode_connectors(report, connectors):
-        # --non-interactive keeps the closed default the wizard asks about
-        # (GAP-1424): say what it means and how to change it.
+        # Per-user hooks stay closed even when an older config contains open.
         renderer.echo(
-            "  Fail mode is closed: hooks block the agent while the gateway is unreachable;"
-            " to allow and log instead: defenseclaw guardrail fail-mode open"
+            "  Fail mode is closed: hooks block the agent while the gateway is unreachable."
         )
     if not proxy and platform_support.host_os() in {"linux", "darwin"}:
         # No service unit restarts a per-user gateway on Linux or macOS; the
@@ -3831,27 +3793,21 @@ def _read_pid(pid_file: str) -> int | None:
 
 def _check_sidecar_health(api_port: int, retries: int = 3, bind: str = "127.0.0.1") -> dict | None:
     """Poll the sidecar REST API and return parsed health JSON (or None)."""
-    import json as _json
     import time
-    import urllib.error
-    import urllib.request
 
-    host = f"[{bind}]" if ":" in bind and not bind.startswith("[") else bind
-    url = f"http://{host}:{api_port}/health"
-    for i in range(retries):
+    import requests
+
+    from defenseclaw.gateway import OrchestratorClient
+
+    client = OrchestratorClient(host=bind, port=api_port, timeout=3)
+    for _ in range(retries):
         time.sleep(1)
         try:
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                if resp.status == 200:
-                    body = resp.read().decode("utf-8", errors="replace")
-                    try:
-                        health = _json.loads(body)
-                    except (_json.JSONDecodeError, TypeError):
-                        health = None
-                    _print_health_summary(health)
-                    return health
-        except (urllib.error.URLError, OSError, ValueError):
+            health = client.health()
+            if isinstance(health, dict):
+                _print_health_summary(health)
+                return health
+        except (requests.RequestException, OSError, ValueError, TypeError):
             pass
 
     click.echo("  Health:        not responding")

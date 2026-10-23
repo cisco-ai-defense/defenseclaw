@@ -852,9 +852,9 @@ def _http_probe(
     on Linux, macOS, and Windows.  A timed-out worker owns no mutable Doctor
     state and cannot delay process exit.
 
-    Pass ``bound_peer`` (a trusted gateway listener) for any request that
-    carries the gateway token: the request is then written only on a
-    connection whose accepting process is that verified gateway.
+    Pass ``bound_peer`` for requests that carry a gateway token or consume a
+    local gateway health decision: the request is written only on a connection
+    whose accepting process is the verified gateway.
     """
 
     if timeout <= 0:
@@ -1017,7 +1017,7 @@ def _gateway_peer_bound_request(
     allow_truncation: bool = True,
     evidence: GatewayEvidence | None = None,
 ) -> tuple[int, str]:
-    """Send one token-bearing request only over a connection the gateway accepted.
+    """Send one local request only over a connection the gateway accepted.
 
     Listener inspection says which process owned the endpoint a moment ago,
     but the request needs its own connection, and the endpoint can change
@@ -1920,6 +1920,21 @@ def _daemon_effective_gateway_token(cfg) -> tuple[str, str, str]:
     return resolved, "", "gateway config"
 
 
+def _unreadable_gateway_dotenv(cfg) -> str:
+    """Return the gateway ``.env`` path when it exists but this account cannot read it."""
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        return ""
+    path = os.path.join(data_dir, ".env")
+    try:
+        read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
+    except PermissionError:
+        return path
+    except OSError:
+        return ""
+    return ""
+
+
 def _missing_gateway_token_detail(cfg) -> str:
     """Return an actionable missing-token message without false fix promises."""
     custom_env = _custom_gateway_token_env(cfg)
@@ -1927,6 +1942,14 @@ def _missing_gateway_token_detail(cfg) -> str:
         return (
             f"custom token provider {custom_env!r} is empty — populate it or "
             "explicitly change gateway.token_env; auto-fix preserves custom providers"
+        )
+    # The token is in a .env this account cannot read: a new token would
+    # replace the file and its other secrets (GAP-0662).
+    unreadable = _unreadable_gateway_dotenv(cfg)
+    if unreadable:
+        return (
+            f"this account cannot read {unreadable}, which holds the gateway token — "
+            "restore this account's read access to it; doctor --fix does not replace it"
         )
     return "no gateway token is configured — run `defenseclaw doctor --fix` to generate and persist one"
 
@@ -2501,9 +2524,17 @@ def _check_live_audit_store(health: dict | None, r: _DoctorResult) -> None:
         )
 
 
+def _gateway_health_probe(cfg, **kwargs) -> tuple[int, str]:
+    """Read gateway health only from a verified accepting process."""
+    trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted:
+        return 0, f"gateway listener identity is unverified: {trust.detail}"
+    return _http_probe(_gateway_api_url(cfg, "/health"), bound_peer=trust, **kwargs)
+
+
 def _live_gateway_health(cfg) -> dict | None:
-    code, body = _http_probe(
-        _gateway_api_url(cfg, "/health"),
+    code, body = _gateway_health_probe(
+        cfg,
         timeout=5.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,
@@ -3835,6 +3866,13 @@ def _foreign_gateway_port_holder(cfg) -> str:
     """Name the API port holder when it is not this account's verified gateway."""
     holder = _gateway_port_holder(cfg)
     if not holder:
+        # macOS lsof sees only this account's sockets. A peer listener can
+        # answer on the port while lsof gives us no PID; use the same
+        # loopback holder check that protects token-bearing CLI calls.
+        from defenseclaw.gateway import foreign_loopback_listener
+
+        if foreign_loopback_listener(_gateway_api_host(cfg), cfg.gateway.api_port):
+            return "a process of another account"
         return ""
     try:
         if _trusted_gateway_listener(cfg).trusted:
@@ -4005,27 +4043,26 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         )
         return None
     bind = _gateway_api_host(cfg)
-    url = _gateway_api_url(cfg, "/health")
     while True:
-        code, body = _http_probe(
-            url,
+        lock_holder = None
+        trust = _trusted_gateway_listener(cfg)
+        if not trust.trusted:
+            # The listener can be mid-handover (GAP-0535): wait for a start,
+            # restart or stop that holds the start lock before reading it.
+            locked, lock_holder = _gateway_start_in_progress(cfg, r)
+            if locked and lock_holder is None:
+                # The start lock was released, so the listener may have
+                # changed hands: read it again. The run waits for the lock
+                # only once, so this ends.
+                continue
+        code, body = _gateway_health_probe(
+            cfg,
             timeout=5.0,
             response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
             allow_truncation=False,
             bypass_proxy=True,
         )
-        lock_holder = None
-        if code != 200:
-            break
-        trust = _trusted_gateway_listener(cfg)
-        if trust.trusted:
-            break
-        locked, lock_holder = _gateway_start_in_progress(cfg, r)
-        if not locked or lock_holder is not None:
-            break
-        # The start lock was released, so the listener may have changed hands:
-        # the /health read before the wait is no evidence about it. Probe
-        # again; the run waits for the lock only once, so this ends.
+        break
     if code == 200:
         holder = "" if trust.trusted or lock_holder is not None else _gateway_port_holder(cfg)
         if lock_holder is not None:
@@ -4238,6 +4275,41 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         except (json.JSONDecodeError, TypeError):
             detail = body if body.startswith("response exceeds") else "could not parse /health response"
             _emit("warn", "Sidecar health JSON", detail, r=r)
+    elif code == 0 and lock_holder is not None:
+        # Neither this account's verified gateway nor shown to be another
+        # process's while a start, restart or stop still runs.
+        _emit(
+            "warn",
+            "Sidecar API",
+            f"{bind}:{cfg.gateway.api_port}: {_gateway_start_in_progress_detail(lock_holder)}",
+            r=r,
+            remediation=_GATEWAY_START_IN_PROGRESS_REMEDIATION,
+        )
+        r.sidecar_unverified = True
+    elif code == 0 and body.startswith("gateway listener identity is unverified:"):
+        trust = _trusted_gateway_listener(cfg)
+        if holder := _foreign_gateway_port_holder(cfg):
+            _emit(
+                "fail",
+                "Sidecar API",
+                f"{_foreign_gateway_port_detail(cfg, holder)} ({trust.detail})",
+                r=r,
+                remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
+            )
+            r.gateway_down = "foreign"
+        elif trust.code == "missing":
+            start = "start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'"
+            _emit(
+                "fail",
+                "Sidecar API",
+                f"the gateway is not running (no verified listener on {bind}:{cfg.gateway.api_port}); {start}",
+                r=r,
+                remediation=start,
+            )
+            r.gateway_down = "stopped"
+        else:
+            _emit("fail", "Sidecar API", body, r=r)
+            r.sidecar_unverified = True
     elif holder := _foreign_gateway_port_holder(cfg):
         # A refused health probe does not prove the port is free. A holder
         # found independently is the cause the operator needs to act on.
@@ -6108,14 +6180,6 @@ def _gateway_start_in_progress_detail(holder: int) -> str:
 
 def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
     """Report home ownership only from the same strong trust chain as auth."""
-    code, _ = _http_probe(
-        _gateway_api_url(cfg, "/health"),
-        timeout=5.0,
-        bypass_proxy=True,
-    )
-    if code != 200:
-        return
-
     trust = _trusted_gateway_listener(cfg)
     if not trust.trusted:
         locked, holder = _gateway_start_in_progress(cfg, r)
@@ -6130,29 +6194,26 @@ def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
             return
         if locked:
             trust = _trusted_gateway_listener(cfg)
-    if trust.trusted:
-        _emit(
-            "pass",
-            "Gateway home",
-            "managed listener is bound to this canonical data home",
-            r=r,
-        )
+    if not trust.trusted:
+        if trust.code == "foreign_home":
+            _emit("fail", "Gateway home", "managed PID record is bound to a different canonical data home", r=r)
+        elif trust.code in {"foreign_listener", "ambiguous_listener"}:
+            _emit("fail", "Gateway home", trust.detail, r=r)
+        else:
+            _emit("skip", "Gateway home", f"{trust.detail}; canonical runtime-home ownership was not inferred", r=r)
         return
-    if trust.code == "foreign_home":
-        _emit(
-            "fail",
-            "Gateway home",
-            "managed PID record is bound to a different canonical data home",
-            r=r,
-        )
+    code, _ = _gateway_health_probe(
+        cfg,
+        timeout=5.0,
+        bypass_proxy=True,
+    )
+    if code != 200:
         return
-    if trust.code in {"foreign_listener", "ambiguous_listener"}:
-        _emit("fail", "Gateway home", trust.detail, r=r)
-        return
+
     _emit(
-        "skip",
+        "pass",
         "Gateway home",
-        f"{trust.detail}; canonical runtime-home ownership was not inferred",
+        "managed listener is bound to this canonical data home",
         r=r,
     )
 
@@ -8282,7 +8343,6 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
     if api_port <= 0 or api_port > 65535:
         return False, "cannot resolve the sidecar API port for a Cursor runtime probe"
 
-    health_url = _gateway_api_url(cfg, "/health")
     payload = json.dumps(
         {
             "hook_event_name": "sessionStart",
@@ -8354,8 +8414,8 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
         # process tree is fully reaped and live sidecar state is read again
         # before a second native event is allowed to start.
         for attempt in range(_CURSOR_WINDOWS_RUNTIME_PROBE_ATTEMPTS):
-            before_code, before_body = _http_probe(
-                health_url,
+            before_code, before_body = _gateway_health_probe(
+                cfg,
                 timeout=3.0,
                 response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
                 allow_truncation=False,
@@ -8409,8 +8469,8 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
     if "additional_context" in response and not isinstance(response["additional_context"], str):
         return False, "configured Cursor adapter returned invalid sessionStart additional_context"
 
-    after_code, after_body = _http_probe(
-        health_url,
+    after_code, after_body = _gateway_health_probe(
+        cfg,
         timeout=3.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,
@@ -9893,12 +9953,21 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
     # a /c/<connector> base URL, never through an advertised model name.
 
     host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
+    trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted:
+        _emit("fail", "Guardrail proxy", f"gateway listener identity is unverified: {trust.detail}", r=r)
+        return
     url = f"http://{host}:{cfg.guardrail.port}/health"
-    code, _ = _http_probe(url, timeout=5.0)
+    code, detail = _http_probe(url, timeout=5.0, bypass_proxy=True, bound_peer=trust)
     if code == 200:
         _emit("pass", "Guardrail proxy", f"healthy on port {cfg.guardrail.port}", r=r)
     else:
-        _emit("fail", "Guardrail proxy", f"not responding on port {cfg.guardrail.port}", r=r)
+        reason = (
+            "connected proxy listener is not the verified DefenseClaw gateway process"
+            if "connected gateway endpoint is not served" in detail
+            else f"not responding on port {cfg.guardrail.port}"
+        )
+        _emit("fail", "Guardrail proxy", reason, r=r)
 
 
 # ZeptoClaw rewrites api_base natively and does not run the fetch
@@ -10838,6 +10907,9 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     if _doctor_secure_client(cfg):
         return
     label = "Policy"
+    if r.sidecar_unverified or r.gateway_down == "foreign":
+        _emit_policy_without_gateway(cfg, r, label, "the API port is not served by this account's verified gateway")
+        return
     if not isinstance(live_health, dict):
         reason = (
             "live state was not checked while config.yaml is invalid; see the Config validation row"
@@ -10845,9 +10917,6 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
             else "the gateway is not running"
         )
         _emit_policy_without_gateway(cfg, r, label, reason)
-        return
-    if r.sidecar_unverified:
-        _emit_policy_without_gateway(cfg, r, label, "the API port is not served by this account's verified gateway")
         return
     policy = live_health.get("policy")
     if not isinstance(policy, dict) or not policy.get("effective_digest"):
@@ -11803,6 +11872,7 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
         r,
         configured=_otlp_configured_connectors(cfg),
         gateway_addr=gateway_api_addr(cfg),
+        native_export_expected=_enterprise_profile(cfg) in {"standalone", "secure_client"},
     )
     _check_galileo_trace_canaries(
         status,
@@ -11861,7 +11931,8 @@ def _claude_exporter_reaches_gateway(gateway_addr: str) -> bool:
 
 
 def _check_connector_export_custody(
-    report, r: _DoctorResult, *, configured: set[str] | None = None, gateway_addr: str = ""
+    report, r: _DoctorResult, *, configured: set[str] | None = None, gateway_addr: str = "",
+    native_export_expected: bool = True,
 ) -> None:
     """Render per-instance custody and bounded native-ingest evidence.
 
@@ -11912,6 +11983,29 @@ def _check_connector_export_custody(
             # fold it into one line per connector, as status does (GAP-2097).
             # Hook-only ones fold too: they are the same past runs (GAP-2104).
             idle[item.connector] = idle.get(item.connector, 0) + 1
+            continue
+        if (
+            not native_export_expected
+            and item.default
+            and item.connector in {"codex", "claudecode"}
+            and item.custody in {"defenseclaw", "external"}
+        ):
+            # Upgrades retain native-exporter receipts already in the audit
+            # ledger. Per-user setup removes that unsafe TCP exporter, so a
+            # historical row cannot justify reinstalling it (GAP-0775).
+            credential_problem = item.credential_state == "invalid"
+            _emit(
+                "warn" if credential_problem else "pass",
+                label,
+                f"historical custody={item.custody}; no DefenseClaw native exporter is expected "
+                "in this per-user profile; hook telemetry remains active",
+                r=r,
+                remediation=(
+                    "restart agents and background servers launched before the upgrade to discard their "
+                    "in-memory exporter"
+                    if credential_problem else ""
+                ),
+            )
             continue
         if item.custody == "external":
             if item.connector == "claudecode" and _claude_exporter_reaches_gateway(gateway_addr):
@@ -12076,8 +12170,8 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
     """Rejected OTLP attempts no trusted connector owns (GAP-2294).
 
     The count covers a rolling window, so the row names the window and the
-    age of the last attempt. Re-running setup cannot clear old attempts; it
-    is only suggested while attempts are still arriving.
+    age of the last attempt. A rejected request has no trusted sender identity,
+    so it cannot show that a configured exporter needs to be rewritten.
     """
     from defenseclaw.observability.custody_status import _format_time, _parse_time
 
@@ -12104,17 +12198,17 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
             "OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config"
         )
     else:
-        # A running agent keeps the token it started with, so setup alone
-        # cannot stop a background server's attempts (GAP-0313).
+        # A running agent keeps the token it started with, but a rejected
+        # route might also be a peer probe (GAP-0803). Neither proves that
+        # the installed exporter is wrong.
         remediation = (
-            "attempts are recent. An agent that was already running when its DefenseClaw token "
+            "attempts are recent, but a rejected route does not prove an installed exporter is broken. "
+            "An agent that was already running when its DefenseClaw token "
             "changed (an upgrade, a rollback, 'defenseclaw setup' or 'setup rotate-token') keeps sending the old "
             "token until it restarts: restart your agents and their background servers (Codex's "
             "app-server outlives its sessions: run 'codex app-server daemon restart'). "
-            "Otherwise a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config "
-            "usually causes this: re-run 'defenseclaw setup <connector>' for each agent that "
-            "exports telemetry, then restart it; if the count keeps growing, look for other OTLP "
-            "senders pointed at the gateway port"
+            "If the count keeps growing, inspect which process sends OTLP to the gateway port and "
+            "check any stale OTEL_EXPORTER_OTLP_* setting before changing agent configuration"
         )
     _emit("warn", "Native OTLP credentials", detail, r=r, remediation=remediation)
 
@@ -16160,9 +16254,10 @@ def _check_removed_connector_cleanup(cfg, r: _DoctorResult) -> None:
     Each thing left is listed with the step to remove it; a host with none
     prints no row.
     """
-    from defenseclaw.removed_connectors import leftovers
+    from defenseclaw.removed_connectors import SCRIPT_GONE_WHAT, STUB_UNUSABLE_WHAT, leftovers
 
-    for left in leftovers(str(getattr(cfg, "data_dir", "") or "")):
+    workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
+    for left in leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace):
         steps = "; ".join(f"{item.path}: {item.what} (to remove: {item.step})" for item in left.items)
         pending_publication = any("interrupted publication" in item.what for item in left.items)
         remediation = f"do each step above; until then {left.label} is blocked by DefenseClaw's stub"
@@ -16171,8 +16266,16 @@ def _check_removed_connector_cleanup(cfg, r: _DoctorResult) -> None:
                 "rerun connector teardown to recover the interrupted publication; "
                 "preserve its receipt and saved copies if recovery fails"
             )
+        # A registration whose script is gone, or a stub the agent may not
+        # run or load, does not block: an upgrade that left one is not
+        # finished (GAP-0833 class).
+        unblocked = any(item.what in (SCRIPT_GONE_WHAT, STUB_UNUSABLE_WHAT) for item in left.items)
+        if not pending_publication and unblocked:
+            remediation = (
+                f"run defenseclaw-gateway connector teardown --connector {left.connector}, then do each step above"
+            )
         _emit(
-            "warn",
+            "fail" if unblocked else "warn",
             f"Removed connector [{left.label}]",
             f"removed in DefenseClaw 1.0.4; left for you to remove by hand: {steps}",
             r=r,
@@ -16622,6 +16725,8 @@ def _fix_gateway_token(
     current, _current_env, _current_source = _daemon_effective_gateway_token(cfg)
     if current and not rotate_required:
         return ("skip", f"{env_var} already set")
+    if _unreadable_gateway_dotenv(cfg):
+        return ("fail", _missing_gateway_token_detail(cfg))
 
     configured_env = (getattr(cfg.gateway, "token_env", "") or "").strip()
     if configured_env and not any(
@@ -17458,13 +17563,21 @@ def _fix_gateway_service(
         plan_only and "doctor.gateway.pid.remove-stale" in projected_repairs
     )
 
-    code, body = _http_probe(
-        _gateway_api_url(cfg, "/health"),
+    code, body = _gateway_health_probe(
+        cfg,
         timeout=3.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,
         bypass_proxy=True,
     )
+    if (
+        code == 0
+        and body.startswith("gateway listener identity is unverified:")
+        and not stale_pid_projected
+    ):
+        endpoint_trust = _trusted_gateway_listener_for_lifecycle(cfg)
+        if endpoint_trust.code != "missing":
+            return ("fail", f"{endpoint_trust.detail}; refusing lifecycle mutation")
 
     reason = ""
     process_trust: _GatewayTrust | None = None
@@ -17575,8 +17688,8 @@ def _fix_gateway_service(
             f"could not {action} gateway service ({lifecycle_detail}); run `defenseclaw-gateway status`",
         )
 
-    verified_code, verified_body = _http_probe(
-        _gateway_api_url(cfg, "/health"),
+    verified_code, verified_body = _gateway_health_probe(
+        cfg,
         timeout=3.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,

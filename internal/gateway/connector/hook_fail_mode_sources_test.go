@@ -126,9 +126,8 @@ func (cannotFailClosedForTest) HookCapabilities(SetupOpts) HookCapability {
 // Antigravity render an unset mode closed (their hooks print the native
 // denial), and a Cursor in observe renders closed unless the config sets open
 // (its observe registration stays fail-open): both carry the source. An open
-// CapableHookFailMode lowered for a vendor that cannot fail closed is that
-// vendor's limit and has no source, so the native hook fails it closed and
-// the installers' refresh writes closed.
+// Even a vendor without a fail-closed contract cannot lower the recorded
+// per-user mode to open; the hook blocks supported events itself.
 func TestPerUserRenderRecordsOnlyAnOutageModeTheConfigChose(t *testing.T) {
 	for _, test := range []struct {
 		name                          string
@@ -137,13 +136,13 @@ func TestPerUserRenderRecordsOnlyAnOutageModeTheConfigChose(t *testing.T) {
 		wantMode, wantSource, wantOut string
 	}{
 		{"copilot unset", NewCopilotConnector(), SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
-		{"copilot explicit open", NewCopilotConnector(), SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
+		{"copilot old explicit open", NewCopilotConnector(), SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
 		{"antigravity unset", NewAntigravityConnector(), SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
 		{"cursor observe unset", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
-		{"cursor observe explicit open", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
+		{"cursor observe old explicit open", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
 		{"cursor action explicit open", NewCursorConnector(), SetupOpts{GuardrailMode: "action", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
-		{"capability-lowered unset", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{}, "open", "", "closed"},
-		{"capability-lowered explicit open", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
+		{"limited vendor unset", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
+		{"limited vendor old explicit open", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dataDir := t.TempDir()
@@ -171,11 +170,9 @@ func TestPerUserRenderRecordsOnlyAnOutageModeTheConfigChose(t *testing.T) {
 	}
 }
 
-// A per-user Cursor's contract (its hook lock) follows the guardrail mode
-// while its outage mode is closed without an explicit open: the runtime
-// validation accepts a closed runtime under an open contract and still
-// refuses an open runtime under a closed one.
-func TestCursorRuntimeMayBeClosedUnderAnOpenContract(t *testing.T) {
+// A per-user Cursor's runtime stays closed even when an older config asked
+// for open. A closed contract validates that state; an open contract is stale.
+func TestCursorRuntimeIsClosedUnderOldOpenConfig(t *testing.T) {
 	cursor := NewCursorConnector()
 	for _, test := range []struct {
 		name     string
@@ -183,9 +180,9 @@ func TestCursorRuntimeMayBeClosedUnderAnOpenContract(t *testing.T) {
 		contract string
 		ok       bool
 	}{
-		{"observe, unset", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "open", true},
-		{"observe, explicit open", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", true},
-		{"open runtime, closed contract", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", false},
+		{"observe, old open config", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "closed", true},
+		{"observe, old explicit open", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", true},
+		{"stale open contract", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dataDir := t.TempDir()
@@ -194,8 +191,8 @@ func TestCursorRuntimeMayBeClosedUnderAnOpenContract(t *testing.T) {
 			if err := WriteHookScriptsForConnectorObjectWithOpts(filepath.Join(dataDir, "hooks"), opts, cursor); err != nil {
 				t.Fatal(err)
 			}
-			if test.contract == "open" && resolveHookFailMode(opts, cursor) != "open" {
-				t.Fatal("precondition: the observe contract is not open")
+			if got := resolveHookFailMode(opts, cursor); got != "closed" {
+				t.Fatalf("per-user Cursor mode = %q, want closed", got)
 			}
 			if err := ValidateHookRuntimeState(dataDir, "cursor", test.contract); (err == nil) != test.ok {
 				t.Fatalf("validate against %s: %v, want ok=%v", test.contract, err, test.ok)
@@ -369,11 +366,9 @@ func TestRefreshHookFailModesClosesAnEarlierReleasesHooks(t *testing.T) {
 	}
 }
 
-// The shared inspect scripts of this release follow an open from the hook
-// runtime records only when its config source is recorded: an earlier
-// release's record (or a peer entry it left) and an open CapableHookFailMode
-// lowered fail closed while the gateway is down.
-func TestSharedShellReaderFollowsOnlyAnOpenTheConfigChose(t *testing.T) {
+// The shared inspect scripts reject every per-user open record, including
+// one with a config source saved by an earlier release.
+func TestSharedShellReaderClosesEveryPerUserOpen(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hooks are not used on Windows")
 	}
@@ -392,10 +387,10 @@ func TestSharedShellReaderFollowsOnlyAnOpenTheConfigChose(t *testing.T) {
 		needsJSON                 bool
 	}{
 		{name: "earlier release's flat open", flat: "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\n", want: "closed"},
-		{name: "flat open from the config", flat: "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\nFAIL_MODE_SOURCE=config\n", want: "open"},
+		{name: "flat open from the config", flat: "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\nFAIL_MODE_SOURCE=config\n", want: "closed"},
 		{name: "flat closed", flat: "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=closed\nFAIL_MODE_SOURCE=config\n", want: "closed"},
 		{name: "earlier release's JSON open", sidecar: `{"version":2,"fail_modes":{"codex":"open"}}`, want: "closed"},
-		{name: "JSON open from the config", sidecar: `{"version":2,"fail_modes":{"codex":"open"},"fail_mode_sources":{"codex":"config"}}`, want: "open", needsJSON: true},
+		{name: "JSON open from the config", sidecar: `{"version":2,"fail_modes":{"codex":"open"},"fail_mode_sources":{"codex":"config"}}`, want: "closed", needsJSON: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if test.needsJSON && !jsonReadable {
@@ -425,6 +420,28 @@ func TestSharedShellReaderFollowsOnlyAnOpenTheConfigChose(t *testing.T) {
 				t.Fatalf("fail mode %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+// The 0.8.10-1.0.3 scripts can keep FAIL_MODE=open in a running agent while
+// 1.0.4 has already refreshed the shared helper. That helper must close the
+// failure boundary without waiting for the agent to reload its registration.
+func TestRefreshedHelperClosesAnOldPerUserOpenHook(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hooks are not used on Windows")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(hookDir, "_hardening.sh"), helper, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "-c", `. "$1/_hardening.sh"; FAIL_MODE=open; defenseclaw_should_fail_closed_on_unreachable`, "test", hookDir)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir()}
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("old per-user open stayed open: %v: %s", err, output)
 	}
 }
 
@@ -525,7 +542,7 @@ func TestSharedShellReaderFollowsAManagedSidecarsOpen(t *testing.T) {
 		{name: "per-user hook reads a managed sidecar", managed: false, connector: "codex", setup: func(t *testing.T, d string) { writeManaged(t, d, "codex", "open") }, want: "closed"},
 		{name: "per-user sourced open", managed: false, connector: "codex", setup: func(t *testing.T, d string) {
 			writePerUser(t, d, "codex", "open", HookFailModeSourceConfig)
-		}, want: "open"},
+		}, want: "closed"},
 	} {
 		for _, tools := range readerToolSets(t) {
 			t.Run(test.name+"/"+tools.name, func(t *testing.T) {

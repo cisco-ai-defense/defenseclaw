@@ -524,6 +524,7 @@ type resolvedGuardrailProfile struct {
 
 type resolvedGuardrailProfileKey struct{}
 type profileRouteConnectorKey struct{}
+type profileRuleScanConnectorKey struct{}
 
 // withGuardrailProfileDecision resolves the request's profile once, right
 // after authentication, and stores it on ctx. routeConnector is the
@@ -605,7 +606,21 @@ func requestLegacyAgentIdentity(ctx context.Context, agent string) (profileAgent
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(r.Context(), "")))
+		ctx := r.Context()
+		scanConnector := profileRequestConnector(ctx)
+		routeConnector := ""
+		if r.URL.Path == "/api/v1/inspect/tool" {
+			// This route scans the authenticated connector, or the
+			// gateway's configured connector for an unscoped credential.
+			routeConnector = a.connectorName()
+			if scanConnector == "" {
+				scanConnector = routeConnector
+			}
+		}
+		// The other inspect routes scan the authenticated connector or the
+		// global generation. An empty value is an explicit global scope.
+		ctx = context.WithValue(ctx, profileRuleScanConnectorKey{}, config.NormalizeConnectorName(scanConnector))
+		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(ctx, routeConnector)))
 	})
 }
 

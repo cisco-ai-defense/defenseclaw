@@ -17,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -248,6 +249,8 @@ func TestRecoveredHookFailModeByDeployment(t *testing.T) {
 							want, wantMode, reason = "allow", mode, "Secure Client's unset or open fail mode allows recovered errors"
 						} else if deployment.name == "standalone" && failMode == "open" {
 							reason = "the administrator's open applies to outages, not recovered evaluator errors"
+						} else if deployment.name == "oss" && failMode == "open" {
+							reason = "a legacy per-user open remains closed on evaluator failure"
 						} else if failMode == "open" && name != "cursor" {
 							want, wantMode, reason = "allow", mode, "explicit open is effective for this connector"
 						} else if failMode == "open" && name == "cursor" {
@@ -293,19 +296,25 @@ func TestRecoveredHookVerdictUsesRegisteredProfiles(t *testing.T) {
 				cfg.Guardrail.Mode, cfg.Guardrail.HookFailMode, cfg.Guardrail.Connector = "action", "closed", name
 				server := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 				response, req := postPanicTestHook(t, server, name, tc.event)
+				output := panicTestOutput(name, response)
+				if hookexec.LifecycleEvent(name, tc.event) && !terminalLifecycleEvent(name, tc.event) {
+					wire, _ := output.(map[string]interface{})
+					if response["action"] != "allow" || response["raw_action"] != "block" || response["would_block"] != true || lifecycleAnswerRepeats(wire) {
+						t.Fatalf("lifecycle panic response=%v, want a neutral allow", response)
+					}
+					if row := soleHookDecisionForTest(t, store); row.Structured["result"] != "panic" {
+						t.Fatalf("audit result=%v, want one panic row", row.Structured["result"])
+					}
+					return
+				}
 				if response["action"] != "block" || response["raw_action"] != "block" || response["would_block"] != false || response["mode"] != "action" {
 					t.Fatalf("panic response=%v, want closed block/action", response)
 				}
 				expected := agentHookResponseForProfile(profile, req, "block", "block", "WARN", "comparison reason for recovered hook evaluation error", nil, "action", false, profile.Capabilities)
-				output := panicTestOutput(name, response)
 				switch {
-				case name == "claudecode" && (tc.event == "Stop" || tc.event == "SubagentStop" || tc.event == "TeammateIdle"):
+				case terminalLifecycleEvent(name, tc.event):
 					if wire, ok := output.(map[string]interface{}); !ok || wire["continue"] != false || wire["stopReason"] == "" {
 						t.Fatalf("Claude lifecycle panic output=%v, want terminal closed failure", output)
-					}
-				case name == "antigravity" && tc.event == "Stop":
-					if wire, ok := output.(map[string]interface{}); !ok || wire["decision"] != "continue" {
-						t.Fatalf("Antigravity Stop panic output=%v, want native veto", output)
 					}
 				default:
 					if got, want := normalizedPanicOutput(output), normalizedPanicOutput(expected.HookOutput); !reflect.DeepEqual(got, want) {
@@ -375,12 +384,16 @@ func TestHookPanicResponseNativeFallbackAfterResponderPanic(t *testing.T) {
 			api := &APIServer{scannerCfg: cfg, connectorRegistry: registry}
 			req := agentHookRequest{ConnectorName: name, HookEventName: tc.event}
 			resp := api.hookPanicResponse(t.Context(), name, req, nil, nil)
-			denies := panicWireDenies(resp.HookOutput)
-			if name == "antigravity" && tc.event == "Stop" {
-				denies = resp.HookOutput["decision"] == "continue"
+			if hookexec.LifecycleEvent(name, tc.event) {
+				// The lifecycle answer survives a second responder panic
+				// without turning into a veto that repeats the hook.
+				if !panicked || resp.Action != "allow" || !resp.WouldBlock || lifecycleAnswerRepeats(resp.HookOutput) {
+					t.Fatalf("%s responder panic response=%+v, panicked=%t", name, resp, panicked)
+				}
+				return
 			}
 			if !panicked || resp.Action != "block" || resp.Mode != "action" || resp.WouldBlock ||
-				!denies {
+				!panicWireDenies(resp.HookOutput) {
 				t.Fatalf("%s responder panic response=%+v, panicked=%t", name, resp, panicked)
 			}
 		})

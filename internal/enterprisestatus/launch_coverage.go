@@ -4,6 +4,8 @@
 package enterprisestatus
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -173,11 +175,57 @@ func openCodeManagedConfigRelocated(env map[string]string) bool {
 	return false
 }
 
+// sameLaunchPath reports whether the directory a launch selected (a) is the
+// one the managed install uses (b). Equal clean spellings match
+// (case-insensitively on Windows). Other spellings match only when this
+// process proves they name one directory: both resolve to the same existing
+// directory (a symlink, junction, bind mount, short or case alias, macOS
+// /etc -> /private/etc), or neither exists yet and both name the same entry
+// of one parent directory. A relative path, one that cannot be resolved,
+// and on Windows a network or device path or a link to one, is not proven
+// and stays reported. Unix resolves ".." after links, so a spelling with
+// ".." is compared by the directory it resolves to, never by its text.
 func sameLaunchPath(a, b string) bool {
-	if runtime.GOOS == "windows" {
-		return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+	physical := runtime.GOOS != "windows" && (launchPathHasDotDot(a) || launchPathHasDotDot(b))
+	if !physical {
+		a, b = filepath.Clean(a), filepath.Clean(b)
+		if a == b || runtime.GOOS == "windows" && strings.EqualFold(a, b) {
+			return true
+		}
 	}
-	return filepath.Clean(a) == filepath.Clean(b)
+	return sameLaunchDirectory(a, b, physical, 0)
+}
+
+// maxLaunchPathDepth bounds the walk to the nearest existing ancestors.
+const maxLaunchPathDepth = 64
+
+func sameLaunchDirectory(a, b string, physical bool, depth int) bool {
+	if depth > maxLaunchPathDepth || !filepath.IsAbs(a) || !filepath.IsAbs(b) {
+		return false
+	}
+	aID, aErr := statLaunchPath(a)
+	bID, bErr := statLaunchPath(b)
+	if aErr == nil && bErr == nil {
+		return sameLaunchDirIdentity(aID, bID)
+	}
+	// A directory the agent has not created yet is the same one only when
+	// both spellings name one entry of one existing parent.
+	if physical || !errors.Is(aErr, fs.ErrNotExist) || !errors.Is(bErr, fs.ErrNotExist) {
+		return false
+	}
+	aName, bName := filepath.Base(a), filepath.Base(b)
+	if aName != bName && (runtime.GOOS != "windows" || !strings.EqualFold(aName, bName)) {
+		return false
+	}
+	aParent, bParent := filepath.Dir(a), filepath.Dir(b)
+	if aParent == a || bParent == b {
+		return false
+	}
+	return sameLaunchDirectory(aParent, bParent, false, depth+1)
+}
+
+func launchPathHasDotDot(path string) bool {
+	return path == ".." || strings.HasPrefix(path, "../") || strings.HasSuffix(path, "/..") || strings.Contains(path, "/../")
 }
 
 func launchHomeRelocated(env map[string]string, accountHome string) bool {

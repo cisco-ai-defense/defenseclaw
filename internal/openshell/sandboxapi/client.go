@@ -36,8 +36,11 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+var sandboxPeerClientFactory = hookexec.NewPerUserGatewayHTTPClient
 
 // Client is a typed client of the daemon's sandbox API.
 type Client struct {
@@ -79,8 +82,27 @@ func ClientForConfig(cfg *config.Config) (*Client, error) {
 	if port <= 0 {
 		port = config.DefaultGatewayAPIPort
 	}
-	host := config.APIBindHost(cfg)
-	return NewClient("http://"+net.JoinHostPort(host, strconv.Itoa(port)), token), nil
+	host := strings.Trim(config.APIBindHost(cfg), "[]")
+	if host == "" || host == "*" {
+		host = "127.0.0.1"
+	} else if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		if ip.To4() != nil {
+			host = "127.0.0.1"
+		} else {
+			host = "::1"
+		}
+	}
+	address := net.JoinHostPort(host, strconv.Itoa(port))
+	// The sandbox CLI carries the gateway master token and may send a full
+	// sandbox request body. Prove the connected peer before sending either.
+	// A zero client timeout preserves context-bound image and create calls.
+	httpClient, err := sandboxPeerClientFactory(0, address)
+	if err != nil {
+		return nil, fmt.Errorf("sandboxapi: verify per-user gateway target: %w", err)
+	}
+	client := NewClient("http://"+address, token)
+	client.HTTP = httpClient
+	return client, nil
 }
 
 // ErrNotManagedHost is returned by ClientForHost on a computer without a
@@ -329,7 +351,7 @@ func (c *Client) Status(ctx context.Context) (*Status, error) {
 func (c *Client) Ready(ctx context.Context, req ReadyRequest) (*Status, error) {
 	var out Status
 	err := c.do(ctx, http.MethodPost, PathReady, nil, req, &out)
-	if err != nil && req.Harness != "" && readyHarnessRefused(err) {
+	if err != nil && req.Harness != "" && unknownFieldRefused(err, "harness") {
 		out = Status{}
 		err = c.do(ctx, http.MethodPost, PathReady, nil, struct{}{}, &out)
 	}
@@ -339,11 +361,13 @@ func (c *Client) Ready(ctx context.Context, req ReadyRequest) (*Status, error) {
 	return &out, nil
 }
 
-// readyHarnessRefused reports an older daemon's refusal of
-// ReadyRequest.Harness, a field its strict decoder does not know.
-func readyHarnessRefused(err error) bool {
+// unknownFieldRefused reports an older daemon's refusal of a request field
+// its strict decoder does not know (field, as JSON names it): a daemon of
+// DefenseClaw 1.0.3 or older answers "invalid JSON body: json: unknown
+// field" for every field 1.0.4 added.
+func unknownFieldRefused(err error, field string) bool {
 	e := AsError(err)
-	return e.Code == CodeInvalid && strings.Contains(e.Message, `unknown field "harness"`)
+	return e.Code == CodeInvalid && strings.Contains(e.Message, `unknown field "`+field+`"`)
 }
 
 // List returns every DefenseClaw sandbox.
@@ -416,9 +440,19 @@ func (c *Client) Stop(ctx context.Context, name string) (*Sandbox, error) {
 }
 
 // Start starts a stopped sandbox with a freshly rotated binding.
+// A daemon of DefenseClaw 1.0.3 or older refuses StartRequest.EndVM, a
+// field its strict decoder does not know; it refuses no start of an ended
+// MicroVM either, so the start the user asked to end the VM goes again
+// without the field. Kept, like Ready's, through the 1.0.4 upgrade window.
 func (c *Client) Start(ctx context.Context, name string, req StartRequest) (*Sandbox, error) {
 	var out Sandbox
-	if err := c.do(ctx, http.MethodPost, sandboxPath(name, "start"), nil, req, &out); err != nil {
+	err := c.do(ctx, http.MethodPost, sandboxPath(name, "start"), nil, req, &out)
+	if err != nil && req.EndVM && unknownFieldRefused(err, "end_vm") {
+		req.EndVM = false
+		out = Sandbox{}
+		err = c.do(ctx, http.MethodPost, sandboxPath(name, "start"), nil, req, &out)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &out, nil

@@ -478,6 +478,11 @@ func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
 	if err := os.Remove(f.socket); err != nil {
 		t.Fatal(err)
 	}
+	opts.HookFailMode = "open"
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewDevinConnector()); err != nil {
+		t.Fatal(err)
+	}
+	bakeHookPathForTest(t, hookPath, filepath.Dir(curlPath)+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 	if code, stdout, stderr := run(); code != 0 || !strings.Contains(stderr, "gateway service is not running") {
 		t.Fatalf("open mode with a verified missing socket: exit %d stdout=%q stderr=%q, want an outage allow", code, stdout, stderr)
 	}

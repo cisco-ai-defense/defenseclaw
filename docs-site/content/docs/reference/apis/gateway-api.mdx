@@ -348,7 +348,7 @@ Chain state holds bounded masks and fingerprints, not raw commands, arguments, p
 | --- | --- | --- |
 | `POST` | `/v1/skill/scan` | Run the skill scanner against the local target directory named in the request. |
 | `POST` | `/v1/plugin/scan` | Run the plugin scanner against the local target directory named in the request. |
-| `POST` | `/v1/mcp/scan` | Run the MCP scanner against a configured server name or URL. Local filesystem paths are unsupported and return HTTP 400. |
+| `POST` | `/v1/mcp/scan` | Run the MCP scanner against a supported MCP URL or a configured server name. Path or JSON-file targets (`/path`, `./path`, `own.json`, Windows paths and `file:` URIs) return HTTP 400 with the cause before scanning; a bare identifier without path or file syntax is interpreted as a configured server name. |
 | `POST` | `/v1/skill/fetch` | Stream a tar.gz of an existing local directory after resolving it beneath a configured skill or plugin root; this does not fetch from a registry. |
 | `POST` | `/scan/result` | Persist a scanner result through the canonical audit logger. |
 

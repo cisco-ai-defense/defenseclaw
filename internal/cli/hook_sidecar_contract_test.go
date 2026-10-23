@@ -77,16 +77,13 @@ func TestReadHookSidecarSharedVectors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// The mode the sidecar names, as status reads it too. Whether an
-			// open counts (its config source, hookSidecarFailMode) is the
-			// native hook's next step, tested on its own.
-			sidecar := readHookSidecar(path)
-			mode := sidecar[hookSidecarFailModeKey(vector.Connector)]
-			if mode == "" {
-				mode = sidecar["DEFENSECLAW_FAIL_MODE"]
-			}
-			if got := nativeHookFailMode(mode); got != vector.Mode {
-				t.Fatalf("fail mode %q, want %q", got, vector.Mode)
+			// Status still reads the vector's mode (fail_mode.py); the
+			// per-user native hook takes only the gateway address from any
+			// sidecar and stays closed (sa-port-peer).
+			for key := range readHookSidecar(path) {
+				if key != "DEFENSECLAW_GATEWAY_ADDR" {
+					t.Fatalf("the native hook read %q from the sidecar", key)
+				}
 			}
 		})
 	}

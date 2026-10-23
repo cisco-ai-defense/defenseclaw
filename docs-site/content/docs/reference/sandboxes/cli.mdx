@@ -1883,7 +1883,7 @@ systemctl --user disable --now openshell-gateway
 ```
 
 <Callout type="warn" title="Handing the gateway over stops the sandboxes it runs">
-Every sandbox the gateway runs stops with it. A live-mounted sandbox's edits are already in your folder and its undo point is kept, and a copy keeps its work in the sandbox. Neither account can connect to those sandboxes until the account that made them runs the gateway again.
+Every sandbox the gateway runs stops with it. A live-mounted sandbox's edits are already in your folder and its undo point is kept. A copy's sandbox disk remains, but a MicroVM may lose changes after its last successful disk sync. Neither account can connect to those sandboxes until the account that made them runs the gateway again.
 </Callout>
 
 Membership in the `docker` group is root-equivalent on the machine. Every account in the group can list every sandbox container (`docker ps`) and run commands in it (`docker exec`). Give the group only to accounts that trust each other. Several users on one host are tracked upstream in [NVIDIA/OpenShell#4273](https://github.com/NVIDIA/OpenShell/issues/4273).
@@ -1933,7 +1933,7 @@ Either have the owner give you write access, or install a Homebrew of your own i
 | The sandbox user | Set for the whole gateway: every MicroVM runs as your uid and gid. |
 | Disk use | About 5 GB per image the driver has started, in `~/.local/state/openshell/vm-driver`. `defenseclaw sandbox image prune` and `image rm` remove unused images and their disks. |
 | Per-run settings | Claude Code and Codex settings are baked, root-owned and read-only, into a small run image for each sandbox. A run with other `--env`, credentials or model provider prepares another disk. |
-| Stopping | `defenseclaw sandbox stop NAME` saves the MicroVM's disk. A gateway restart stops every MicroVM on it, so setup asks before it restarts a gateway with sandboxes running. |
+| Stopping | For a running MicroVM, `defenseclaw sandbox stop NAME` requests a disk sync before the stop; a failed sync may lose changes since the last successful one. A gateway restart stops every MicroVM on it, so setup asks before it restarts a gateway with sandboxes running. |
 | Disk full | DefenseClaw warns once when a MicroVM's overlay disk reaches 90% use. `defenseclaw sandbox status NAME` shows the warning while it runs. |
 
 Limits on a Mac: there is no live mount and no pre-session snapshot, `sandbox undo` reverts the last `pull --apply`, `--context` is refused, the copy has no Git LFS, and OpenShell calls the driver experimental. A harness runs only after its image proves its hooks fire in a MicroVM ([which agents run](/docs/features/sandbox-details#which-agents-run)).

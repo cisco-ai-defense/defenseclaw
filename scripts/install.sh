@@ -525,6 +525,38 @@ installed_version() {
     done
 }
 
+# Older OpenCode and Amp processes retain their plugin in memory. Releases
+# before this one do not inspect .install.lock, so stopping the gateway under
+# one would let an open-mode tool call through. Inspect this account's native
+# agent processes immediately before a gateway swap; an unreadable process
+# list cannot establish that the swap is safe.
+loaded_plugin_agents() {
+    local processes
+    processes="$(ps -u "$(id -u)" -o pid= -o ucomm= -o args= 2>/dev/null)" || return 2
+    printf '%s\n' "$processes" | awk '
+        {
+            pid=$1; executable=tolower($2); sub(/^.*\//, "", executable)
+            # macOS can truncate the middle column to a launch-path prefix.
+            # argv[0] still carries the executable path in that case.
+            command=tolower($3); sub(/^.*\//, "", command)
+            agent=""
+            if (executable == "opencode" || executable == "opencode.exe" || command == "opencode" || command == "opencode.exe") agent="OpenCode"
+            else if (executable == "amp" || executable == "amp.exe" || command == "amp" || command == "amp.exe") agent="Amp"
+            else if (executable ~ /^(node|bun)(\.exe)?$/) {
+                args=tolower($0)
+                if (args ~ /(^|[\/[:space:]])opencode([\/[:space:]]|$)/) agent="OpenCode"
+                else if (args ~ /@sourcegraph\/amp([\/[:space:]]|$)/ || args ~ /(^|[\/[:space:]])amp([\/[:space:]]|$)/) agent="Amp"
+            }
+            if (agent != "") print agent " (PID " pid ")"
+        }'
+}
+
+assert_no_loaded_plugin_agents() {
+    local agents
+    agents="$(loaded_plugin_agents)" || die "Could not check running OpenCode and Amp processes; the gateway was not stopped"
+    [[ -z "$agents" ]] || die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: ${agents//$'\n'/, }"
+}
+
 stop_gateway() {
     # stop_gateway BINARY: stop the running gateway, preferring its own binary.
     # The stop is the install's, not the operator's: the gateway.stopped
@@ -745,6 +777,7 @@ if [[ "${ROLLBACK}" == true ]]; then
     saved_was_running="$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null || true)"
     restart="${was_running}"
     [[ "${saved_was_running}" == true ]] && restart=true
+    assert_no_loaded_plugin_agents
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
     if [[ -n "${current}" ]] && version_lt "${back_to}" 1.0.0 && ! version_lt "${current}" 1.0.0; then
         remove_connector_registrations_for_legacy
@@ -892,7 +925,12 @@ checksum_ok() {
     [[ -n "${expected}" && "$(sha256_of "${file}")" == "${expected}" ]]
 }
 verify() {
-    checksum_ok "$@" || die "$(basename "$1") does not match checksums.txt; nothing was changed"
+    if ! checksum_ok "$@"; then
+        local asset
+        asset="$(basename "$1")"
+        rm -rf "${STAGING}" || die "${asset} does not match checksums.txt; could not remove staged assets at ${STAGING}; installed files were not changed"
+        die "${asset} does not match checksums.txt; staged assets were removed; nothing was changed"
+    fi
 }
 cosign_major="$(cosign version 2>/dev/null | awk '/GitVersion/{print $2}' | sed 's/^v//' | cut -d. -f1 || true)"
 if [[ "${cosign_major:-0}" =~ ^[0-9]+$ ]] && [[ "${cosign_major:-0}" -ge 2 ]]; then
@@ -1014,6 +1052,7 @@ if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" 
     pick_connector
 fi
 
+assert_no_loaded_plugin_agents
 WAS_RUNNING=false
 RESTORED_NOTE="Your previous install is back."
 OLD_GATEWAY_PID="$(gateway_pid || true)"
@@ -1083,6 +1122,10 @@ if [[ "${WAS_RUNNING}" == true ]]; then
     rm -f "${SNAP}/GATEWAY_RESTART_UNPROVEN"
 fi
 finish_swap
+# until 1.1: an upgrade never ends with a removed connector's hook left unsealed.
+if [[ -n "${PREV_VERSION}" && "${WAS_RUNNING}" == true ]] && ! finish_retired_connector_cleanup; then
+    START_RC=3
+fi
 report_retired_connector_leftovers
 trap - HUP PIPE
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
@@ -1918,6 +1961,27 @@ finish_swap() {
     find -H "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
         -exec rm -rf {} + 2>/dev/null || true
     ok "Installed DefenseClaw ${VERSION}"
+}
+
+# until 1.1: the gateway tears the removed connectors (OpenHands, OmniGent)
+# down when it starts, but a start that brings the other connectors up only
+# logs one it could not finish. Check each here: one not done is torn down
+# again, and one still not done (an agent config that runs a hook DefenseClaw
+# could not put the sealed stub under) is named with its cause and step, and
+# the install exits 3, not 0.
+finish_retired_connector_cleanup() {
+    local gateway="${BIN_DIR}/defenseclaw-gateway" name why failed=0
+    [[ -x "${gateway}" ]] || return 0
+    for name in openhands omnigent; do
+        "${gateway}" connector verify --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" >>"${LOG}" 2>&1 && continue
+        "${gateway}" connector teardown --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" >>"${LOG}" 2>&1 || true
+        why="$("${gateway}" connector verify --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" 2>&1)" && continue
+        printf '%s\n' "${why}" >>"${LOG}"
+        why="$(printf '%s' "${why}" | tr '\n' ' ' | sed -E 's/^[[:space:]]*(✗|X)[[:space:]]+//; s/[[:space:]]+$//')"
+        err "DefenseClaw ${VERSION} could not finish removing the ${name} connector, so its agent may not be blocked: ${why:-see ${LOG}}"
+        failed=1
+    done
+    return "${failed}"
 }
 
 # until 1.1: the removed connectors' teardown deliberately keeps vendor

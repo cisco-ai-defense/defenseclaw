@@ -19,8 +19,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // enterpriseExplainCallerFacts resolves the account profile-explain names
@@ -58,4 +60,40 @@ var enterpriseExplainCallerFacts = func(user string) string {
 		return ""
 	}
 	return value
+}
+
+// enterpriseIdentityViewHolderProof is the holder_proof of the agent
+// identity view for the account user names: <uid>:<the proof of its home>
+// (enterprisehooks.LegacyAgentOwnerToken), which the caller, root, reads
+// through NSS and stat as the guardian does. The gateway cannot stat a home
+// under ProtectHome, and the guardian rewrites its identity records at its
+// next pass, so the first view after a local account was deleted and created
+// again under the same name and uid listed the agent identities of the
+// account before it (T8r, GAP-0422). "" when the caller is not root, user is
+// an id, NSS does not resolve it, or its account incarnation is a SID, which
+// tells accounts apart already. Tests replace it.
+var enterpriseIdentityViewHolderProof = func(user string) string {
+	user = strings.TrimSpace(user)
+	if user == "" || os.Geteuid() != 0 || useridentity.KindForID(user) != "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resolver, err := unixidentity.NewNSSResolver(ctx)
+	if err != nil {
+		return ""
+	}
+	account, err := resolver.LookupUser(user)
+	if err != nil || account.UID <= 0 || account.Name == "" {
+		return ""
+	}
+	incarnation, known := resolver.AccountIncarnation(account.UID, account.Name)
+	if !known || strings.HasPrefix(incarnation, "sid:") {
+		return ""
+	}
+	token := enterprisehooks.LegacyAgentOwnerToken(incarnation, account.Home)
+	if !strings.HasPrefix(token, "home:") {
+		return ""
+	}
+	return strconv.Itoa(account.UID) + ":" + token
 }

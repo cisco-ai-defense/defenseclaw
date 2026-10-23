@@ -93,6 +93,13 @@ func copilotHandlerIsOwned(opts Options, raw any) bool {
 	if opts.goos() == "windows" {
 		field = "powershell"
 	}
+	// A second executable field is an independent handler choice in the
+	// same entry. Never claim or remove the whole entry in that case.
+	for _, other := range []string{"bash", "command", "powershell"} {
+		if other != field && stringField(raw, other) != "" {
+			return false
+		}
+	}
 	command := stringField(raw, field)
 	if opts.goos() == "windows" {
 		return strings.Contains(command, connector.PowerShellQuoteLiteral(opts.HookBinary)) &&
@@ -102,6 +109,44 @@ func copilotHandlerIsOwned(opts Options, raw any) bool {
 	// ensure rewrites it.
 	command = strings.TrimPrefix(command, connector.CopilotRemovedDeploymentGuardPOSIX(opts.HookBinary))
 	return strings.HasPrefix(command, shellQuote(opts.HookBinary)+" hook --connector copilot --enterprise-managed --event ")
+}
+
+// A recognizable command can still contain an independent shell statement.
+// Cleanup requires the whole executable field to match a published render.
+func copilotHandlerIsRemovable(opts Options, event string, raw any) bool {
+	if !copilotHandlerIsOwned(opts, raw) || stringField(raw, "type") != "command" {
+		return false
+	}
+	field := "bash"
+	if opts.goos() == "windows" {
+		field = "powershell"
+	}
+	var keys []string
+	switch value := raw.(type) {
+	case *object:
+		keys = value.keys
+	case map[string]any:
+		for key := range value {
+			keys = append(keys, key)
+		}
+	default:
+		return false
+	}
+	for _, key := range keys {
+		if key != "type" && key != field && key != "timeoutSec" {
+			return false
+		}
+	}
+	command := stringField(raw, field)
+	published := stringField(copilotHandler(opts, event, 0), field)
+	if command == published {
+		return true
+	}
+	if opts.goos() == "windows" {
+		old := strings.Replace(published, connector.CopilotRemovedDeploymentGuardPowerShell(opts.HookBinary)+"; ", "", 1)
+		return command == old
+	}
+	return command == strings.TrimPrefix(published, connector.CopilotRemovedDeploymentGuardPOSIX(opts.HookBinary))
 }
 
 // copilotHandlerIsIntact reports a DefenseClaw handler whose command is the
@@ -260,10 +305,6 @@ func (t copilotTarget) Reconcile(opts Options) (State, error) {
 		state.Route = RouteUnsupported
 		return state, nil
 	case config.MachinePolicyOwnershipMerge:
-		rendered, err := renderCopilotDropIn(opts)
-		if err != nil {
-			return state, err
-		}
 		created, err := takeBackPolicyPath(opts, paths[0], &state)
 		if err != nil {
 			return state, err
@@ -280,6 +321,10 @@ func (t copilotTarget) Reconcile(opts Options) (State, error) {
 		}
 		if err != nil {
 			return state, err
+		}
+		rendered, err := mergeCopilotDropIn(opts, current)
+		if err != nil {
+			return state, fmt.Errorf("cannot merge Copilot policy without changing independent handlers in %s: %w", paths[0], err)
 		}
 		changed, err := publishWithRecord(opts, copilotConnector, paths[0], current, exists, rendered, exists && bytes.Equal(current, rendered), copilotStrip(opts), &state, created...)
 		if err != nil {
@@ -358,31 +403,104 @@ func (t copilotTarget) RemoveOwned(opts Options) (State, error) {
 	return state, errors.Join(err, removeVSCodeDevicePolicy(opts, &state), removeCopilotManagedSettings(opts, &state))
 }
 
-// copilotStrip treats a drop-in carrying a DefenseClaw policy hook as
-// DefenseClaw's whole file; any other content under the drop-in name is
-// left alone.
+// copilotStrip removes DefenseClaw's handlers within its drop-in. An
+// administrator can add independent handlers to the same event or another
+// event; uninstall and the next reconcile must retain them.
 func copilotStrip(opts Options) stripFunc {
-	return wholeFileStrip(func(current []byte) bool {
+	return func(current []byte) ([]byte, bool, error) {
+		if len(bytes.TrimSpace(current)) == 0 {
+			return current, false, nil
+		}
 		doc, err := decodeOrderedObject(current)
 		if err != nil {
-			return false
+			return nil, false, err
 		}
 		hooksValue, _ := doc.get("hooks")
 		hooks, _ := hooksValue.(*object)
 		if hooks == nil {
-			return false
+			return current, false, nil
 		}
-		for _, event := range hooks.keys {
+		owned := false
+		for _, event := range append([]string(nil), hooks.keys...) {
 			value, _ := hooks.get(event)
-			list, _ := value.([]any)
+			list, ok := value.([]any)
+			if !ok {
+				continue
+			}
+			remaining := make([]any, 0, len(list))
 			for _, handler := range list {
-				if copilotHandlerIsOwned(opts, handler) {
-					return true
+				if copilotHandlerIsRemovable(opts, event, handler) {
+					owned = true
+					continue
 				}
+				remaining = append(remaining, handler)
+			}
+			if len(remaining) == 0 && len(list) > 0 {
+				hooks.delete(event)
+			} else if len(remaining) != len(list) {
+				hooks.set(event, remaining)
 			}
 		}
-		return false
-	})
+		if !owned {
+			return current, false, nil
+		}
+		if hooks.len() == 0 {
+			doc.delete("hooks")
+		}
+		if doc.len() == 0 || (doc.len() == 1 && doc.keys[0] == "version") {
+			return nil, true, nil
+		}
+		admin, err := encodeOrdered(doc)
+		return admin, true, err
+	}
+}
+
+func mergeCopilotDropIn(opts Options, current []byte) ([]byte, error) {
+	rendered, err := renderCopilotDropIn(opts)
+	if err != nil || len(bytes.TrimSpace(current)) == 0 {
+		return rendered, err
+	}
+	admin, _, err := copilotStrip(opts)(current)
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(admin)) == 0 {
+		return rendered, nil
+	}
+	doc, err := decodeOrderedObject(admin)
+	if err != nil {
+		return nil, err
+	}
+	want, err := decodeOrderedObject(rendered)
+	if err != nil {
+		return nil, err
+	}
+	doc.set("version", json.Number("1"))
+	value, present := doc.get("hooks")
+	hooks, ok := value.(*object)
+	if present && !ok {
+		return nil, errors.New("hooks is not an object")
+	}
+	if !present {
+		hooks = newObject()
+		doc.set("hooks", hooks)
+	}
+	wantValue, _ := want.get("hooks")
+	wantHooks := wantValue.(*object)
+	for _, event := range wantHooks.keys {
+		value, _ := wantHooks.get(event)
+		currentValue, present := hooks.get(event)
+		if !present {
+			hooks.set(event, value)
+			continue
+		}
+		list, ok := currentValue.([]any)
+		if !ok {
+			return nil, fmt.Errorf("event %s is not a handler list", event)
+		}
+		hooks.set(event, append(list, value.([]any)...))
+	}
+	return encodeOrdered(doc)
 }
 
 func (copilotTarget) Export(opts Options, format string) ([]byte, error) {

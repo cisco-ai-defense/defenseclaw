@@ -306,13 +306,23 @@ class TestConnectorContractManifest(unittest.TestCase):
 
     def test_codex_setup_banner_describes_scoped_otlp_routes(self) -> None:
         with patch("defenseclaw.commands.cmd_setup.click.echo") as echo:
-            _print_connector_observability_banner("codex")
+            _print_connector_observability_banner("codex", native_export_expected=True)
         rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
         self.assertIn("scoped bearer + source header on /v1/<signal>", rendered)
         self.assertNotIn("/otlp/codex/<token>", rendered)
         self.assertNotIn("/api/v1/codex/notify", rendered)
         self.assertNotIn("otel / notify", rendered)
         self.assertNotIn("notify bridge", rendered)
+
+    def test_per_user_setup_banner_describes_hook_only_telemetry(self) -> None:
+        for connector in ("codex", "claudecode"):
+            with self.subTest(connector=connector):
+                with patch("defenseclaw.commands.cmd_setup.click.echo") as echo:
+                    _print_connector_observability_banner(connector)
+                rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
+                self.assertIn("Restart agents and background servers", rendered)
+                self.assertNotIn("Native OTel", rendered)
+                self.assertIn("cleanup of older DefenseClaw", rendered)
 
     def test_setup_banner_prints_the_gateway_hook_route(self) -> None:
         # GAP-1611: the gateway serves Claude Code on /api/v1/claude-code/hook.

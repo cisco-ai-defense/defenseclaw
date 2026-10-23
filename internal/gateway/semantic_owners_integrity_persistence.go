@@ -1497,7 +1497,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				reason = hookpaths.ActionCommandDecision(input.Command, input.CWD, input.ActiveHome)
 			}
 			if unproven := hookpaths.UnprovenWriteTitle(reason); unproven != "" {
-				title = unproven + "; use a literal path or split the command"
+				title = unproven + unprovenWriteGuidance
 			}
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle

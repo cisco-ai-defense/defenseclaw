@@ -1,6 +1,6 @@
 ---
 title: Codex
-description: Guard Codex with DefenseClaw hooks that can block before a tool runs, plus Codex's native OpenTelemetry.
+description: Guard Codex with DefenseClaw hooks that can block before a tool runs.
 keywords:
   - Codex connector
   - Codex hooks
@@ -9,7 +9,7 @@ keywords:
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-DefenseClaw writes hooks and an OpenTelemetry exporter into Codex's `config.toml`. On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. Codex in an OpenShell sandbox (`defenseclaw sandbox run codex`) is the exception: the sandbox image installs `codex-notify.sh` and sets `notify` in its managed config. This is a hook connector: Codex talks to OpenAI directly and no proxy is involved.
+DefenseClaw writes hooks into Codex's `config.toml`. Host setup removes native OpenTelemetry exporters installed by earlier releases: Codex cannot verify which local account holds a stopped gateway's TCP port. Isolated OpenShell images retain native telemetry. On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. Codex in an OpenShell sandbox (`defenseclaw sandbox run codex`) is the exception: the sandbox image installs `codex-notify.sh` and sets `notify` in its managed config. This is a hook connector: Codex talks to OpenAI directly and no proxy is involved.
 
 ## Platform support
 
@@ -26,6 +26,7 @@ defenseclaw setup codex --mode action  # block on policy hits
 
 A re-run without `--mode` keeps the current mode. On Windows, run the same
 commands in PowerShell. Quit and reopen Codex afterwards.
+After upgrading from an earlier release, quit all running Codex processes and reopen them so they stop using any old exporter configuration.
 
 ## Check it
 
@@ -49,10 +50,10 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 
 | What | macOS and Linux | Windows |
 | --- | --- | --- |
-| Hooks and OpenTelemetry | `$CODEX_HOME/config.toml` (default `~/.codex`) | `%CODEX_HOME%\config.toml` |
+| Hooks; removal of older native telemetry | `$CODEX_HOME/config.toml` (default `~/.codex`) | `%CODEX_HOME%\config.toml` |
 | Hook program | `~/.defenseclaw/hooks/codex-hook.sh` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 | Connector credentials | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
-| Proxy bypass for telemetry | `$CODEX_HOME/.env` (marked block, only when a proxy is set) | not written |
+| Proxy bypass for cloud credentials | `$CODEX_HOME/.env` (managed, marked block) | not written |
 
 Teardown restores the backup, or removes only DefenseClaw's entries.
 
@@ -65,7 +66,7 @@ Teardown restores the backup, or removes only DefenseClaw's entries.
 
 ## On a managed computer
 
-The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup codex` and `setup remove`, and has no `guardrail` group. Protected requirements pin `[features] hooks = true`, so `codex features disable hooks` writes the user's config but hooks stay on.
+The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup codex` and `setup remove`, and has no `guardrail` group. Protected requirements pin `[features] hooks = true`, so `codex features disable hooks` writes the user's config but hooks stay on. On standalone Linux and macOS, the guardian also removes that conflicting user preference during reconciliation; while it remains, Codex can reject an unrelated project trust write.
 
 The per-user files in [Files it changes](#files-it-changes) are not used there. The hooks are in Codex's machine requirements file and run the administrator's hook program:
 

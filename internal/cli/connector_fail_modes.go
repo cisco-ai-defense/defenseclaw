@@ -183,16 +183,13 @@ func refreshFailModeResolver(cmd *cobra.Command) (func(string) string, string, b
 	}
 	// This release cannot load the config: a 0.8.x one before 'defenseclaw
 	// migrate', which the installer's 'migrate --check' has just validated,
-	// or none. Its explicit fail modes are the operator's (every migration
-	// keeps them); everything else is closed, Cursor included.
+	// or none. Per-user hooks must be closed during that migration too, even
+	// if an older config document still contains an explicit open.
 	raw := readHookConfigDocument(config.ConfigPath())
 	if config.ManagedEnterpriseDocument(raw) {
 		return nil, "document", true
 	}
-	return func(name string) string {
-		if config.ConfiguredHookFailModeInDocument(raw, name) == "open" {
-			return "open"
-		}
+	return func(string) string {
 		return "closed"
 	}, "document", false
 }

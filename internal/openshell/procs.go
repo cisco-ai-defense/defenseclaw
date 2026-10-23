@@ -19,6 +19,7 @@ package openshell
 import (
 	"context"
 	"fmt"
+	"os"
 	pathpkg "path"
 	"path/filepath"
 	"strconv"
@@ -65,6 +66,16 @@ func (r *doctorRun) processes(ctx context.Context) []process {
 		path := strings.Join(f[3:], " ")
 		if linux {
 			path = f[3]
+			// procps prints argv without escaping spaces in argv[0]. When
+			// that first word cannot name the gateway or driver, ask the
+			// kernel for the executable of a candidate process instead of
+			// selecting an unrelated gateway from PATH.
+			if base := filepath.Base(path); base != GatewayBinary && base != vmDriverBinary &&
+				(strings.Contains(line, GatewayBinary) || strings.Contains(line, vmDriverBinary)) {
+				if exe, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe"); err == nil && filepath.IsAbs(exe) {
+					path = exe
+				}
+			}
 		}
 		if err1 != nil || err2 != nil || err3 != nil || owner != uid || !filepath.IsAbs(path) {
 			continue

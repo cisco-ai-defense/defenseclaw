@@ -60,13 +60,14 @@ describe('Cursor observe outage mode', () => {
   it('keeps the rendered hook closed unless the config explicitly opens it', () => {
     const hooks = source('internal/gateway/connector/subprocess.go');
     const outage = hooks.split('func OutageHookFailMode(')[1]?.split('\n}')[0] ?? '';
-    assert.match(outage, /perUserCursorRender\(opts, conn\)/);
-    assert.match(outage, /!strings\.EqualFold\(strings\.TrimSpace\(opts\.ConfiguredHookFailMode\), "open"\)/);
-    assert.match(outage, /return "closed"/);
+    // sa-port-peer: a per-user render is closed whatever the config says.
+    assert.match(outage, /return resolveHookFailMode\(opts, conn\)/);
+    const resolve = hooks.split('func resolveHookFailMode(')[1]?.split('\n}')[0] ?? '';
+    assert.match(resolve, /return defaultHookFailMode/);
     assert.match(hooks, /func renderedHookFailMode\([\s\S]*?OutageHookFailMode\(opts, conn\)/);
     const failModes = page('reference/configuration/fail-modes.mdx').split('## Controls')[0] ?? '';
     const cursor = page('reference/connectors/cursor.mdx').split('## Fail mode')[1]?.split('## Limits')[0] ?? '';
-    assert.match(failModes, /Per-user Cursor in observe mode.{0,100}blocks supported events during a gateway outage by default/i);
+    assert.match(failModes, /Per-user hooks fail closed when the gateway cannot give a usable answer, in observe and action mode/i);
     assert.match(cursor, /observe mode.{0,100}blocks supported events on a gateway outage by default/i);
     const coverage = page('appendix/coverage-by-layer.mdx');
     assert.match(coverage, /Per-user Cursor in observe mode.{0,130}running hook blocks supported events during a gateway outage/i);
@@ -110,7 +111,7 @@ describe('Observe mode policy findings and gateway outages', () => {
 
   it('qualifies hook connector claims for Claude Code and Antigravity', () => {
     const outage = source('internal/gateway/connector/subprocess.go').split('func OutageHookFailMode(')[1]?.split('\n}')[0] ?? '';
-    assert.match(outage, /return mode/);
+    assert.match(outage, /return resolveHookFailMode\(opts, conn\)/);
     for (const connector of ['claudecode', 'antigravity']) {
       const section = page(`connectors/${connector}.mdx`).split('## What it can block or ask')[1]?.split('## Files it changes')[0] ?? '';
       assert.match(section, /Observe mode.{0,120}policy findings without blocking/i, connector);
@@ -170,6 +171,66 @@ function mdxPages(dir: string): string[] {
 }
 
 describe('recovery and repair advice', () => {
+  it('describes recovery and data loss for a failed MicroVM', () => {
+    const body = page('troubleshooting/sandboxes/runs-and-sessions.mdx');
+    const section = body.split('## A sandbox is in OpenShell\'s error state')[1]?.split('## ')[0];
+    assert.ok(section, 'error-state troubleshooting section is missing');
+    for (const text of ['Docker', 'MicroVM', 'MainProcessFailed', '--end-vm', 'has not written to its disk is lost',
+      'defenseclaw sandbox status NAME', 'defenseclaw sandbox stop NAME', 'defenseclaw sandbox delete NAME',
+      'deletes it and its work', 'process exited',
+      'stopped after ending and stopping a failed VM', 'absent after deletion']) {
+      assert.ok(section.includes(text), `error-state recovery must describe ${text}`);
+    }
+    assert.ok(!section.includes('which keep the sandbox and its work'), 'error-state recovery promises to keep unwritten VM work');
+    const exited = section.split('For a MicroVM whose process exited')[1]?.split('For a MicroVM whose main process failed')[0];
+    assert.ok(exited, 'exited-VM recovery needs its own advice');
+    assert.ok(exited.includes('last successful disk sync'), 'an exited VM may have unsynced work');
+    assert.ok(!exited.includes('keep the sandbox and its work'), 'an exited VM has no confirmed disk sync');
+    assert.ok(section.includes('ProcessPollFailed') && section.includes('a stop that OpenShell refuses does not release the VM'),
+      'another held VM error must not promise stop/start recovery');
+    const refusedStart = body.split('## A sandbox is not as DefenseClaw prepared it')[1]?.split('## ')[0];
+    assert.ok(refusedStart?.includes('last successful disk sync'), 'refused-start advice must qualify MicroVM work');
+    assert.ok(!refusedStart?.includes('(its work is kept)'), 'refused-start advice promises unsynced work');
+    const handoff = page('reference/sandboxes/cli.mdx').split('Handing the gateway over stops the sandboxes it runs')[1]?.split('</Callout>')[0];
+    assert.ok(handoff?.includes('last successful disk sync'), 'gateway handoff advice must qualify copy-mode MicroVM work');
+    assert.ok(!handoff?.includes('a copy keeps its work in the sandbox'), 'gateway handoff promises unsynced copy-mode work');
+    const managed = page('enterprise/runtime/sandboxes.mdx');
+    assert.ok(managed.includes('last successful disk sync'), 'managed upgrade advice must qualify failed-VM work');
+    assert.ok(!managed.includes('a completed or failed MicroVM on 0.1.5 is started'),
+      'managed upgrade advice must not send every failed VM through --end-vm');
+    assert.ok(!managed.includes('the user stops and starts a MicroVM that was in the error state'),
+      'managed upgrade advice promises a failed VM can always stop and start');
+    const upgrade = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
+    assert.ok(upgrade.includes('On OpenShell 0.1.5 or later, `openshell sandbox stop` requests a guest flush'),
+      'raw OpenShell stops must name the release that flushes the guest');
+    assert.ok(upgrade.includes('gateway older than OpenShell 0.1.5, save its work'),
+      'raw OpenShell stops on older gateways need a save-first warning');
+    assert.ok(!upgrade.includes('`openshell sandbox stop` does not sync its guest disk'),
+      'raw OpenShell stop must not be described as never syncing');
+    for (const [name, claim] of [
+      ['troubleshooting/sandboxes/setup-and-gateway.mdx', 'last successful disk sync'],
+      ['troubleshooting/sandboxes/disk-and-telemetry.mdx', 'last successful disk sync'],
+      ['reference/sandboxes/cli.mdx', 'last successful one'],
+      ['enterprise/runtime/sandbox-reference.mdx', 'last successful disk sync'],
+    ]) {
+      assert.ok(page(name).includes(claim), `${name} must qualify what a failed sync preserves`);
+    }
+  });
+
+  it('keeps legacy guest stop advice aligned with the manager', () => {
+    const manager = readFileSync(join(repo, 'internal/openshell/manager/box.go'), 'utf8');
+    const autoStops = manager.includes('func (m *Manager) stopOldSupervisor(');
+    const userStops = manager.includes('func (m *Manager) reconcileOldSupervisor(');
+    assert.notEqual(autoStops, userStops, 'the legacy guest stop mechanism needs an explicit docs check');
+    const upgrade = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
+    assert.equal(upgrade.includes('It does not stop that legacy guest for you'), userStops,
+      'manual legacy-guest stop advice requires the no-auto-stop manager');
+    assert.equal(upgrade.includes('run `defenseclaw sandbox stop <name>` yourself'), userStops,
+      'manual stop instructions require the no-auto-stop manager');
+    assert.equal(upgrade.includes('`connect` refuses until you stop it'), userStops,
+      'legacy connect advice must follow the manager behavior');
+  });
+
   it('keeps the saved guardrail mode', () => {
     const remediation = /recover|repair|restore|troubleshoot|turn it (?:off|back on)/i;
     const modeCommand = /defenseclaw\s+(?:setup\b[^\n`]*--mode(?:\s|=)|guardrail\s+mode\s+(?:observe|action)\b)/i;
@@ -218,11 +279,11 @@ describe('1.0.4 audit flood and upgrade claims', () => {
     assert.doesNotMatch(enterprise, /audit\.db-wal.*20 GB|fix needs a change to how the audit store indexes hook records and is deferred/i);
   });
 
-  it('keeps one supervisor upgrade entry with automatic stop and failed-stop recovery', () => {
+  it('keeps one supervisor upgrade entry with manual stop and guarded restart', () => {
     const changelog = repoText('CHANGELOG.md');
     assert.equal((changelog.match(/\*\*Sandboxes run only on OpenShell 0\.1\.5 or later\.\*\*/g) ?? []).length, 1);
-    assert.match(changelog, /DefenseClaw stops it as soon as it sees it.*A stop that fails is a second finding/);
-    assert.doesNotMatch(changelog, /A sandbox that keeps running through the upgrade keeps the old supervisor: the feed/);
+    assert.match(changelog, /DefenseClaw never stops such a sandbox on its own.*Your own `sandbox stop` ends it/);
+    assert.doesNotMatch(changelog, /DefenseClaw stops it as soon as it sees it|A stop that fails is a second finding/);
   });
 });
 
@@ -275,10 +336,10 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     }
   });
 
-  it('says an upgrade keeps only an open the config sets', () => {
-    assert.ok(page('get-started/upgrade.mdx').includes("An upgrade sets each hook's fail mode from your config before the new hook runs"));
+  it('says an upgrade keeps per-user hooks closed', () => {
+    assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks fail closed even if an earlier config or registration saved `open`'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
-    assert.ok(page('reference/configuration/fail-modes.mdx').includes('Hooks follow an open fail mode only when your config sets it'));
+    assert.ok(page('reference/configuration/fail-modes.mdx').includes('An open value left in a per-user Windows hook sidecar or command flag is treated as closed'));
   });
 });
 
@@ -353,6 +414,18 @@ describe('Hook connector setup and teardown', () => {
     const turnOff = page('connectors/claudecode.mdx').split('## Turn it off')[1]?.split('## Details')[0];
     assert.match(turnOff ?? '', /whole-guardrail disable.*`--no-restart`.*restart the gateway/i);
     assert.match(turnOff ?? '', /`--connector claudecode`.*`--no-restart`.*running gateway.*(?:at once|without a restart)/i);
+  });
+});
+
+describe('Amp rejected command display', () => {
+  it('explains the collapsed summary without treating an attempted call as execution', () => {
+    const plugin = source('internal/gateway/connector/hooks/amp-plugin.ts');
+    const amp = page('connectors/amp.mdx');
+    assert.match(plugin, /case "block":[\s\S]*?action: "reject-and-continue",\s*message: verdict\.reason/);
+    assert.match(amp, /Ran 1 command/);
+    assert.match(amp, /Tool rejected by plugin/);
+    assert.match(amp, /command did not execute/i);
+    assert.match(amp, /audit.*block/i);
   });
 });
 
@@ -493,6 +566,30 @@ describe('managed-host enrollment protection', () => {
     assert.match(reference, /configured Claude Code, Codex and Cursor.{0,260}before the first (?:user )?enrollment.{0,260}after the last enrolled (?:user|SID) is removed/i);
   });
 
+  it('matches Claude Code missing-policy guidance to status and policy verify', () => {
+    const enumerator = readFileSync(join(repo, 'internal/enterprisehooks/enumerator_standalone_windows.go'), 'utf8');
+    const consequence = /func windowsUnenrolledConsequence\(connector string\) string \{([\s\S]*?)\n\}/.exec(enumerator)?.[1];
+    assert.ok(consequence, 'Windows unenrolled-user consequence not found');
+    assert.match(consequence, /case "cursor":\s*if !windowsCursorMachinePolicyPublished\(\)/);
+    assert.match(consequence, /case "codex":\s*if !windowsCodexMachinePolicyPublished\(\)/);
+    assert.doesNotMatch(consequence, /case "claudecode"|windowsClaudeMachinePolicyPublished/);
+    assert.match(consequence, /machine-policy hooks refuse this user's tool calls until it is enrolled/);
+
+    const verifier = readFileSync(join(repo, 'internal/enterprisepolicy/claude.go'), 'utf8');
+    const verify = /func \(t claudeTarget\) Verify\(opts Options\) \(State, error\) \{([\s\S]*?)\n\}/.exec(verifier)?.[1];
+    assert.ok(verify, 'Claude Code policy verification not found');
+    assert.match(verify, /if !exists \{\s*state\.conflict\(/);
+    assert.match(verify, /state\.finish\(\)/);
+
+    const reference = page('enterprise/configure/reference.mdx');
+    const claude = /On Windows, Claude Code's .*?(?= On Windows, the guardian keeps Cursor's)/.exec(reference)?.[0];
+    assert.ok(claude, 'Windows Claude Code policy paragraph not found');
+    assert.match(claude, /status.*does not name a missing Claude Code machine policy/i);
+    assert.match(claude, /enterprise policy verify.*fails.*missing machine hook/i);
+    assert.match(claude, /Stop Claude Code use.*repair.*verify.*passes/i);
+    assert.doesNotMatch(claude, /status.*names missing policy/i);
+  });
+
   it('describes the installed Windows policy as a product change', () => {
     const changelog = readFileSync(join(repo, 'CHANGELOG.md'), 'utf8');
     assert.match(
@@ -541,6 +638,57 @@ describe('docs claim CI coverage', () => {
 });
 
 describe('1.0.4 operator routes and limits', () => {
+  it('derives the MCP-description YARA signature count from the shipped rules', () => {
+    const rules = readFileSync(join(repo, 'policies/yara/mcp-tools/description_injection.yara'), 'utf8');
+    const count = (rules.match(/^rule\s+\w+/gm) ?? []).length;
+    assert.ok(count > 0, 'no bundled MCP-description YARA rules found');
+    const words = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+      'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen'];
+    const expected = words[count] ?? String(count);
+    assert.match(page('reference/policy/detection.mdx'), new RegExp(`\\b${expected} MCP-description YARA signatures\\b`));
+  });
+
+  it('states that unknown connectors make profile explain fail with valid names', () => {
+    const thresholds = page('reference/policy/thresholds.mdx');
+    assert.match(thresholds, /profile explain.*unknown connector.*(?:HTTP 400|400 Bad Request).*valid connectors/i);
+    assert.doesNotMatch(thresholds, /unknown connector.*(?:uses|falls back to|resolves to) (?:the )?(?:default|global) (?:profile|threshold)/i);
+  });
+
+  it('limits proxy replacement to Linux and macOS', () => {
+    const agents = page('how-to/agents/add-or-remove-an-agent.mdx');
+    assert.match(agents, /setup openclaw --replace.*Linux and macOS.*native Windows.*(?:unsupported|no guardrail proxy)/i);
+  });
+
+  it('aligns the TUI footer and status Policy line with the applied config counter', () => {
+    const tui = page('reference/commands/tui.mdx');
+    const cli = page('reference/commands/cli.mdx').split('### Policy generation and digest')[1]?.split('### ')[0] ?? '';
+    assert.match(tui, /`gen`.*config\.generation\.json.*(?:survives|persists).*gateway restart/i);
+    assert.doesNotMatch(tui, /`gen` is the gateway's policy generation|restarts at 1 when the gateway starts/i);
+    assert.match(tui, /Policy line.*same.*policy\.config_generation.*config generation N/i);
+    assert.match(tui, /per-user.*applied hand edit.*(?:moves|increments).*counter/i);
+    assert.doesNotMatch(tui, /prints a different, gateway-local policy generation|hand edit can change the policy digest without moving/i);
+    assert.match(cli, /Policy:.*config generation 2/i);
+    assert.match(cli, /plain `defenseclaw status`.*policy\.config_generation.*TUI footer/i);
+    assert.match(cli, /separate `policy\.generation`.*restarts at 1/i);
+    assert.match(cli, /per-user.*hand edit.*(?:next|moves|increments).*config generation/i);
+    assert.doesNotMatch(cli, /The generation number is the gateway's own counter and restarts at 1/i);
+  });
+
+  it('does not promise enrollment for an extension without an engine version', () => {
+    const enrollment = page('enterprise/configure/enrollment.mdx');
+    assert.match(enrollment, /extension.*engine version.*(?:no engine version|without an engine version).*surface_unverified.*not enrolled/i);
+    assert.match(enrollment, /Codex.*Windows.*reported.*not enrolled/i);
+    const risk = repoText('docs/ENTERPRISE-THREAT-MODEL.md').split('| R25 |')[1]?.split('| R26 |')[0] ?? '';
+    assert.match(risk, /engine version.*surface_unverified.*not enrolled/i);
+    assert.doesNotMatch(risk, /enrollment finds an agent only through its CLI install/i);
+  });
+
+  it('does not advertise local files as MCP scan targets', () => {
+    const api = page('reference/apis/gateway-api.mdx');
+    assert.match(api, /`POST`\s*\|\s*`\/v1\/mcp\/scan`[^\n]*Path or JSON-file targets[^\n]*HTTP 400[^\n]*bare identifier without path or file syntax[^\n]*configured server name/i);
+    assert.doesNotMatch(api, /MCP scanner against a target URL or local path/i);
+  });
+
   it('keeps managed readers off per-user HITL commands', () => {
     const ask = page('how-to/guardrail/ask-before-risky-calls.mdx');
     assert.match(ask, /managed computer.*guardrail\.connectors\.<id>\.hilt/i);
@@ -570,9 +718,19 @@ describe('1.0.4 operator routes and limits', () => {
     assert.match(groupRow, /managed Windows.*defenseclaw\.exe.*enterprise windows profile-explain --user/);
   });
 
-  it('uses the managed Windows administrator route instead of a config-only shell', () => {
+  it('uses the installed standalone administrator route on every OS', () => {
     const hooks = page('reference/commands/cli.mdx').split('### Per-user hooks (`enterprise hooks`)')[1]?.split('### ACP')[0] ?? '';
     const envVars = page('reference/configuration/env-vars.mdx');
+    const policy = source('internal/cli/enterprise_policy.go');
+    const unixPin = source('internal/cli/enterprise_policy_platform_unix.go');
+    assert.match(policy, /pinStandaloneManagedEnv\(\)/);
+    assert.match(unixPin, /managedStandaloneAdminDeployment\(\)/);
+    assert.match(unixPin, /managed\.ConfigPathEnv:\s+layout\.ConfigPath/);
+    assert.match(unixPin, /"DEFENSECLAW_HOME":\s+layout\.DataDir/);
+    assert.match(envVars, /On standalone managed Linux and macOS.*without setting `DEFENSECLAW_CONFIG`/is);
+    assert.match(envVars, /sudo \/opt\/defenseclaw\/bin\/defenseclaw-gateway enterprise policy show --json/);
+    assert.match(envVars, /sudo \/opt\/cisco\/defenseclaw\/bin\/defenseclaw-gateway enterprise policy show --json/);
+    assert.doesNotMatch(envVars, /sudo DEFENSECLAW_CONFIG=.*enterprise policy show --json/);
     assert.match(hooks, /On managed Windows.*enterprise windows status.*enterprise windows verify/i);
     assert.match(hooks, /DEFENSECLAW_CONFIG.*alone.*does not.*guardian/i);
     assert.match(envVars, /On managed Windows.*elevated.*enterprise policy show --json.*without setting `DEFENSECLAW_CONFIG`/i);
@@ -697,12 +855,13 @@ describe('agent identity rows (rel-1-0-4 GAP-0596)', () => {
     assert.ok(identity.includes('readIdentitySpoolFacts(userID, time.Now())'));
     assert.ok(cache.includes('!entry.failedSince.IsZero()'));
     assert.ok(cache.includes('entry.fetchedAt.Add(c.lifetime(entry.facts))'));
-    assert.ok(ad.includes('return entry.kept || entry.upn != upn'));
+    assert.ok(ad.includes('return entry.kept || entry.superseded || entry.upn != upn'));
     assert.ok(spool.includes('KeepLastKnownUPN(record, entry.previous)'));
     assert.ok(identity.includes('if record.UPNKept() {'));
     assert.ok(identity.includes('if facts.UPNKept {'));
     assert.match(windows, /wait := time\.Duration\(0\)[\s\S]*?if identityLookupBlocking\.Load\(\)/);
-    assert.ok(recorder.includes('rec.UPN = facts.UserUPN'));
+    assert.ok(recorder.includes('sighting := agentIdentityUPN{read: facts.UPNRead, upn: facts.UserUPN, unavailable: facts.UPNUnavailable}'));
+    assert.ok(recorder.includes('rec.UPN, rec.UPNUnavailable = sighting.upn, sighting.unavailable'));
     assert.ok(recorder.includes('rec.UPN = buffered.UPN'));
     assert.ok(store.includes('user_upn = excluded.user_upn'));
 
@@ -730,7 +889,8 @@ describe('Windows AD UPN outage wording', () => {
     assert.ok(row.includes('Agent identity rows leave that kept UPN out'), 'the current row behavior is missing');
     // GAP-0129 and GAP-0284: the cache and the guardian keep the last good UPN.
     const ad = source('internal/useridentity/directory_windows_facts.go');
-    assert.ok(ad.includes('upn, ttl, kept = previous, adUPNFailureTTL, previous != ""'));
+    // A failed newest lookup keeps the last good answer, marked kept, for the failure TTL.
+    assert.match(ad, /kept: [\w.]+ != "", expires: c\.now\(\)\.Add\(adUPNFailureTTL\)/);
     const spool = source('internal/enterprisehooks/identity_spool.go');
     assert.ok(spool.includes('record.Facts.UPN = previous.Facts.UPN'));
     assert.ok(spool.includes('func MarkWindowsKeptUPN('));

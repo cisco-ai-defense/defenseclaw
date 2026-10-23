@@ -6,7 +6,9 @@
 # launcher is missing, fails or times out, a closed fail mode denies a tool
 # call with Copilot's native answer (Copilot ignores a failed hook process);
 # only an open one lets it run.
-{{if .SecureClientDelivery}}[CmdletBinding()]
+{{if not .Managed}}# During an install or upgrade a per-user hook returns a native denial in
+# every fail mode.
+{{end}}{{if .SecureClientDelivery}}[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet(
@@ -44,8 +46,36 @@ $stdinClosed = $false
 $responseWritten = $false
 $deadline = [System.Diagnostics.Stopwatch]::StartNew()
 
-try {
-    if (-not (Test-Path -LiteralPath $hook -PathType Leaf)) {
+{{if not .Managed}}function Test-DefenseClawInstallLockHeld {
+    # The one install check of the Windows adapters: true while this
+    # account's installer holds its data directory, the folder above this
+    # adapter's hooks folder: its .install.lock exists as any type, or its
+    # state cannot be read. Only "not found" is free, as for the native hook
+    # (installLockHeld), the shell hooks and the in-agent plugins (GAP-0915).
+    try {
+        $dataDir = Split-Path -Parent $PSScriptRoot
+        if ([string]::IsNullOrEmpty($dataDir)) { return $true }
+        [void][System.IO.File]::GetAttributes((Join-Path $dataDir '.install.lock'))
+        return $true
+    }
+    catch {
+        $cause = $_.Exception
+        while ($null -ne $cause) {
+            if ($cause -is [System.IO.FileNotFoundException] -or $cause -is [System.IO.DirectoryNotFoundException]) {
+                return $false
+            }
+            $cause = $cause.InnerException
+        }
+        return $true
+    }
+}
+$installGuard = $false
+{{end}}try {
+{{if not .Managed}}    if (Test-DefenseClawInstallLockHeld) {
+        $installGuard = $true
+        throw 'DefenseClaw install or upgrade in progress'
+    }
+{{end}}    if (-not (Test-Path -LiteralPath $hook -PathType Leaf)) {
         throw "DefenseClaw hook launcher is missing: $hook"
     }
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -117,7 +147,11 @@ try {
         }
         throw "DefenseClaw hook launcher exited $($process.ExitCode) without an answer"
     }
-    if ($stdout.Length -gt 0) {
+{{if not .Managed}}    if (Test-DefenseClawInstallLockHeld) {
+        $installGuard = $true
+        throw 'DefenseClaw install or upgrade in progress'
+    }
+{{end}}    if ($stdout.Length -gt 0) {
         [Console]::Out.Write($stdout)
         $responseWritten = $true
     }
@@ -126,8 +160,26 @@ try {
     }
 }
 catch {
-{{if eq .FailMode "open"}}    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)
+{{if not .Managed}}    $failure = $_.Exception.Message
+    # This adapter is the first Windows hook process Copilot starts. If
+    # its launcher is missing or times out during an upgrade, the native hook
+    # cannot answer, so the adapter must supply Copilot's own denial.
+    if (-not $responseWritten -and ($installGuard -or (Test-DefenseClawInstallLockHeld))) {
+        [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed while DefenseClaw is being installed or upgraded: ' + $failure)
+        $message = 'DefenseClaw is being installed or upgraded for this account; try again in a moment, or run the installer again if it has stopped.'
+        switch ($Event) {
+            'preToolUse' {
+                [Console]::Out.WriteLine('{"permissionDecision":"deny","permissionDecisionReason":"' + $message + '"}')
+            }
+            'permissionRequest' {
+                [Console]::Out.WriteLine('{"behavior":"deny","message":"' + $message + '"}')
+            }
+        }
+    }
+    else {
+{{end}}{{if eq .FailMode "open"}}    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)
 {{else}}    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed: ' + $_.Exception.Message); if (-not $responseWritten) { if ($Event -ceq 'preToolUse') { [Console]::Out.Write('{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}') } elseif ($Event -ceq 'permissionRequest') { [Console]::Out.Write('{"behavior":"deny","message":"DefenseClaw hook failed closed"}') } }
+{{end}}{{if not .Managed}}    }
 {{end}}}
 finally {
     if ($started -and -not $process.HasExited) {

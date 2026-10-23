@@ -171,14 +171,19 @@ func dispatchTrustedAction(
 	}()
 	if !request.simpleCommandPass {
 		defer func() {
+			checkedWholeWrite := false
+			wholeWriteSafe := false
+			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
 			for _, simple := range actionfacts.SimpleCommands(request.Input, facts) {
 				if simple.EvaluationFailure != "" {
-					ruleID, title := "ACTION-COMPOUND-UNPROVEN", "Shell command could not be fully evaluated"
-					if simple.EvaluationFailure == "limit" {
-						ruleID, title = "ACTION-COMPOUND-LIMIT", "Shell command exceeds policy evaluation limit"
+					if simple.EvaluationFailure != "limit" {
+						// A parser gap is already represented by the whole-action
+						// evaluation. It is not itself an enforcement finding.
+						continue
 					}
+					const ruleID = "ACTION-COMPOUND-LIMIT"
 					failure := RuleFinding{
-						RuleID: ruleID, Title: title,
+						RuleID: ruleID, Title: "Shell command exceeds policy evaluation limit",
 						Severity: "CRITICAL", Confidence: 1,
 						enforcement: findingEnforcementAllowed,
 					}.withTrustedActionProof(newEvaluationFailureFindingProof(ruleID))
@@ -204,7 +209,31 @@ func dispatchTrustedAction(
 				child.conflictSource = nil
 				child.record, child.recordTelemetry = nil, nil
 				child.simpleCommandPass = true
-				findings = withSimpleCommandFindings(findings, dispatchTrustedAction(parent, child))
+				childFindings := dispatchTrustedAction(parent, child)
+				if simple.ZshHistoryBuiltin {
+					// Zsh's history builtin lists events (fc -l). The Bash-only
+					// history -c clear rule does not apply inside that shell.
+					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+						return f.RuleID == "integrity.history_tamper"
+					})
+				}
+				if simple.UnresolvedBoundVariable {
+					if !checkedWholeWrite {
+						checkedWholeWrite = true
+						wholeWriteSafe = wholeCommandKnown &&
+							hookpaths.ActionCommandDecision(wholeCommand,
+								request.Input.CWD, request.Input.ActiveHome) == ""
+					}
+					if wholeWriteSafe {
+						// A child with a missing action-local value cannot prove a
+						// protected write by itself. The full action's class resolver
+						// has already judged that binding; retain every other rule.
+						childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+							return f.RuleID == "persistence.ssh_authorized_keys_command"
+						})
+					}
+				}
+				findings = withSimpleCommandFindings(findings, childFindings)
 			}
 		}()
 	}

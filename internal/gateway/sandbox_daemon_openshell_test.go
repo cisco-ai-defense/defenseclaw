@@ -736,9 +736,10 @@ func TestSandboxDaemonReadyRespectsAllowedHarnessesBeforeInstall(t *testing.T) {
 }
 
 // A CLI of DefenseClaw 1.0.3 or older readies with an empty object (or no
-// body): the daemon judges the agent its own managed configuration runs,
-// against both sandbox.allowed and the agent allowlist, before it installs
-// anything, never no agent at all.
+// body) and does not say which agent it will run. The daemon asks about its
+// own agent first and readies when the policy allows any agent a create may
+// run (the create judges the run's own); with none allowed it installs
+// nothing.
 func TestSandboxDaemonReadyFromAnOlderCLIJudgesTheDaemonsAgent(t *testing.T) {
 	for _, tc := range []struct {
 		name, body   string
@@ -749,7 +750,8 @@ func TestSandboxDaemonReadyFromAnOlderCLIJudgesTheDaemonsAgent(t *testing.T) {
 	}{
 		{"empty object, codex allowed", `{}`, true, []string{"codex"}, http.StatusOK, 1},
 		{"no body, codex allowed", ``, true, nil, http.StatusOK, 1},
-		{"codex not in the allowlist", `{}`, true, []string{"claudecode"}, http.StatusForbidden, 0},
+		{"only another agent in the allowlist", `{}`, true, []string{"claudecode"}, http.StatusOK, 1},
+		{"no run harness in the allowlist", `{}`, true, []string{"openclaw"}, http.StatusForbidden, 0},
 		{"sandboxes forbidden", `{}`, false, nil, http.StatusForbidden, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -783,6 +785,75 @@ func TestSandboxDaemonReadyFromAnOlderCLIJudgesTheDaemonsAgent(t *testing.T) {
 			}
 			if !slices.Contains(asked, "codex/codex") {
 				t.Fatalf("policy asked for %v, want the daemon's own agent codex", asked)
+			}
+		})
+	}
+}
+
+// Profiles match per connector. An older CLI's empty ready must not be
+// refused because the daemon's own agent's profile forbids sandboxes when
+// another agent's profile allows them (the create then judges the run's
+// agent), while a ready that names the forbidden agent still refuses before
+// any install, and so does an empty one when no agent's profile allows a
+// run or the gateway cannot answer.
+func TestSandboxDaemonReadyFromAnOlderCLIReadiesForAnyAllowedAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name, body    string
+		claudeAllowed bool
+		codexAllowed  bool
+		explainErr    bool
+		wantCode      int
+		wantPrepared  int64
+	}{
+		{"empty, own agent forbidden, another allowed", `{}`, true, false, false, http.StatusOK, 1},
+		{"no body, own agent forbidden, another allowed", ``, true, false, false, http.StatusOK, 1},
+		{"named forbidden agent", `{"harness":"codex"}`, true, false, false, http.StatusForbidden, 0},
+		{"empty, every agent forbidden", `{}`, false, false, false, http.StatusForbidden, 0},
+		{"empty, gateway does not answer", `{}`, true, true, true, http.StatusServiceUnavailable, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+				o.Settings.Operational.Harnesses = []string{"codex"}
+			})
+			profiles := &guardrailProfileSet{
+				profiles: map[string]config.DerivedGuardrailProfile{"codex-profile": {}, "other-profile": {}},
+				assignments: []config.ProfileAssignment{{
+					Profile: "codex-profile", Match: config.ProfileMatch{Connectors: []string{"codex"}},
+				}},
+				defaultProfile: "other-profile",
+			}
+			var asked []string
+			f.relay.explain = func(req sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+				asked = append(asked, req.Harness)
+				if tc.explainErr {
+					return sandboxapi.ManagedExplain{}, errors.New("the managed gateway is down")
+				}
+				profile := profiles.match(nil, "", req.Connector, "").Name
+				return sandboxapi.ManagedExplain{Profile: profile,
+					Allowed: profile == "codex-profile" && tc.codexAllowed || profile == "other-profile" && tc.claudeAllowed}, nil
+			}
+			f.run(t)
+			client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", f.socket)
+			}}}
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+				"http://sandbox-daemon"+sandboxapi.PathReady, bytes.NewBufferString(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set(sandboxapi.ClientHeader, sandboxapi.ClientName)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantCode || f.os.prepared.Load() != tc.wantPrepared {
+				t.Fatalf("ready %q: HTTP %d, prepared %d; want HTTP %d, prepared %d (asked %v)",
+					tc.body, resp.StatusCode, f.os.prepared.Load(), tc.wantCode, tc.wantPrepared, asked)
+			}
+			if len(asked) == 0 || asked[0] != "codex" {
+				t.Fatalf("policy asked for %v, want the daemon's own agent codex first", asked)
 			}
 		})
 	}

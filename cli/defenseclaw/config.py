@@ -2646,7 +2646,7 @@ class GuardrailConfig:
         return self.hilt
 
     def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """The customer chooses open or closed; the default is closed (owner rule).
+        """Resolve hook failure behavior for this deployment profile.
 
         Mirrors Go ``Config.EffectiveHookFailModeForConnector``:
 
@@ -2657,10 +2657,7 @@ class GuardrailConfig:
           mode; an explicit value always wins (the administrator's config
           sets it), and an unset one is open under Secure Client (#1163) and
           closed on the standalone profile;
-        - everywhere else a fail mode that is not set is ``closed``, in
-          observe and action mode alike; only an explicit ``open`` opens a
-          hook, and Cursor follows its guardrail mode (action closed,
-          observe open).
+        - per-user hosts always fail closed, including old explicit opens.
         """
         owner = getattr(self, "_owner", None)
         cfg = owner() if callable(owner) else None
@@ -2680,16 +2677,7 @@ class GuardrailConfig:
             if self.hook_fail_mode.strip():
                 return _normalize_hook_fail_mode(self.hook_fail_mode)
             return "closed" if standalone else "open"
-        # Cursor's native hook registration follows policy mode. A stored
-        # fail mode from an older setup cannot override that contract.
-        if str(connector).strip().lower() == "cursor":
-            return "closed" if self.effective_mode(connector).strip().lower() == "action" else "open"
-        pc = self._connector_override(connector)
-        if pc is not None and pc.hook_fail_mode.strip():
-            # Only an explicit open opens; any other value (closed, a typo) is
-            # closed, as in Go.
-            return _normalize_hook_fail_mode(pc.hook_fail_mode)
-        return _normalize_hook_fail_mode(self.hook_fail_mode)
+        return "closed"
 
     def secure_client_hook_fail_modes(self) -> bool:
         """Whether this guardrail belongs to a Secure Client config.

@@ -852,6 +852,11 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertIn("allowlist_entries=23", check.detail)
         self.assertIn("Windows-native executable", check.detail)
         self.assertIn("live=false", check.detail)
+        self.assertIn("cannot verify which hooks an already running host loaded", check.detail)
+        self.assertNotIn("must be reloaded or restarted", check.detail)
+        self.assertIn("close every Hermes CLI/TUI/gateway/desktop/service host", check.repair)
+        self.assertIn("run 'defenseclaw doctor'", check.repair)
+        self.assertIn("start Hermes again after the on-disk checks pass", check.repair)
 
     def test_hermes_direct_command_matches_upstream_shlex_argv(self) -> None:
         command = (
@@ -2953,6 +2958,8 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
         self.assertEqual(result.checks[-1]["status"], "fail", result.checks[-1])
         self.assertIn("pending-reload", result.checks[-1]["detail"])
+        self.assertIn("cannot verify which hooks an already running host loaded", result.checks[-1]["detail"])
+        self.assertIn("close every Hermes", result.checks[-1]["remediation"])
         self.assertIn(f"agent_executable={executable}", result.checks[-1]["detail"])
         self.assertNotIn("99.0.0", result.checks[-1]["detail"])
 

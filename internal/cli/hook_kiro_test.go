@@ -110,9 +110,8 @@ func TestKiroHookCommandRunsAndForwardsItsSurface(t *testing.T) {
 // A Kiro hook that fails before it can run (a flag it does not know, a value
 // it does not list, a stray argument) must exit 2 so Kiro blocks instead of
 // going ahead, when its policy is to fail closed: an administrator-managed
-// hook, or any hook whose --fail-mode, hook sidecar or DEFENSECLAW_FAIL_MODE
-// does not say open (unset is closed). An explicitly fail-open Kiro hook and
-// every other connector keep cobra's status 1, except while the account's
+// hook, or any per-user hook regardless of an old open flag or sidecar.
+// Other connectors keep cobra's status 1, except while the account's
 // installer holds the data directory: every hook then fails closed
 // (GAP-0862).
 func TestHookPreRunFailureUsesTheConnectorsBlockingExit(t *testing.T) {
@@ -126,8 +125,8 @@ func TestHookPreRunFailureUsesTheConnectorsBlockingExit(t *testing.T) {
 		{name: "kiro fail closed, unknown flag", args: []string{"--connector", "kiro", "--not-a-hook-flag", "--fail-mode", "closed"}, want: 2},
 		{name: "kiro managed, connector spelled with =", args: []string{"--connector=kiro", "--not-a-hook-flag", "--enterprise-managed"}, want: 2},
 		{name: "kiro closed in the hook sidecar", args: []string{"--connector", "kiro", "--hook-surface", "v9"}, sidecar: `{"version":2,"fail_modes":{"kiro":"closed"}}`, want: 2},
-		{name: "kiro fail open keeps 1", args: []string{"--connector", "kiro", "--not-a-hook-flag", "--fail-mode", "open"}, want: 1},
-		{name: "kiro open in the hook sidecar keeps 1", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"kiro":"open"},"fail_mode_sources":{"kiro":"config"}}`, want: 1},
+		{name: "kiro old open flag still blocks", args: []string{"--connector", "kiro", "--not-a-hook-flag", "--fail-mode", "open"}, want: 2},
+		{name: "kiro old open sidecar still blocks", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"kiro":"open"},"fail_mode_sources":{"kiro":"config"}}`, want: 2},
 		{name: "kiro unset fails closed", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, want: 2},
 		{name: "kiro sidecar without kiro fails closed", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"codex":"open"}}`, want: 2},
 		{name: "codex unknown flag", args: []string{"--connector", "codex", "--not-a-hook-flag", "--fail-mode", "closed"}, want: 1},

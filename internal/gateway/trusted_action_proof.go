@@ -121,11 +121,11 @@ func newParserShadowFindingProof(ruleID string) findingProof {
 	return newFindingProof(findingProofParserShadow, ruleID, false)
 }
 
-// A bounded parser failure must not leave an unvisited command as an allow
-// path. These IDs are issued only by the local per-command evaluator.
+// Only an actual evaluation limit can authorize a refusal. Parse uncertainty
+// remains a diagnostic and cannot decide an action.
 func newEvaluationFailureFindingProof(ruleID string) findingProof {
 	return newFindingProof(findingProofEvaluationFailure, ruleID,
-		ruleID == "ACTION-COMPOUND-LIMIT" || ruleID == "ACTION-COMPOUND-UNPROVEN")
+		ruleID == "ACTION-COMPOUND-LIMIT")
 }
 
 func newFindingProof(

@@ -567,9 +567,13 @@ seed_upgrade_secret() {
 }
 
 # upgrade_secret_kept: the stored credential holds exactly upgrade_secret_value.
+# python3 compares the bytes: cmp (diffutils) is absent from the minimal
+# UBI 9 init image the rpm-el9 lane boots (GAP-0886).
 upgrade_secret_kept() {
     [ -n "$upgrade_secret_value" ] && [ -f "$secrets_dir/$upgrade_secret_name" ] &&
-        printf '%s' "$upgrade_secret_value" | cmp -s - "$secrets_dir/$upgrade_secret_name"
+        DC_LANE_SECRET=$upgrade_secret_value "${python:-python3}" -c \
+            'import os, sys; sys.exit(open(sys.argv[1], "rb").read() != os.environ["DC_LANE_SECRET"].encode())' \
+            "$secrets_dir/$upgrade_secret_name"
 }
 
 write_admin_config() {

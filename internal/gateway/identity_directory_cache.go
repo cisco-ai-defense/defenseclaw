@@ -127,9 +127,10 @@ type identityCache[T any] struct {
 }
 
 type identityCacheEntry[T any] struct {
-	facts     T
-	ok        bool
-	fetchedAt time.Time
+	facts      T
+	ok         bool
+	usedByHook bool
+	fetchedAt  time.Time
 	// generation identifies a successful current lookup. A fresh read that
 	// timed out may use its completion shortly after it finishes, and nearby
 	// reads within one hook interval share that answer.
@@ -208,6 +209,7 @@ func (c *identityCache[T]) getWithColdWait(key string, block, waitCold bool) (T,
 		entry = &identityCacheEntry[T]{}
 		c.entries[key] = entry
 	}
+	entry.usedByHook = true
 	c.dropAgedLocked(key, entry, now)
 	age := now.Sub(entry.fetchedAt)
 	invalidated := entry.ok && (entry.fetchedAt.Before(c.staleBefore) || entry.fetchedAt.Before(entry.staleBefore))
@@ -718,6 +720,12 @@ func (c *identityCache[T]) health() identityCacheHealth {
 	now := c.now()
 	for key, entry := range c.entries {
 		if entry.failedSince.IsZero() || now.Sub(entry.lastFailedAt) >= identityDirectoryTTL {
+			continue
+		}
+		if entry.gone && entry.fetchedAt.IsZero() && !entry.usedByHook {
+			// A deliberately queried nonexistent account has never supplied facts
+			// to hook calls. Keep its lookup refusal, but do not turn it into a
+			// directory outage warning for the managed deployment.
 			continue
 		}
 		if c.confirmGone && entry.gone && c.answeredAt.After(entry.lastFailedAt) {

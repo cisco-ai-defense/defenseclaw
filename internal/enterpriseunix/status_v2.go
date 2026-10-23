@@ -33,7 +33,8 @@ import (
 // The status v2 blocks (enterprisestatus connector_block.go,
 // openshell_block.go, identity_block.go) on Linux and macOS: status and
 // verify only, from files and rows the other describe steps already read.
-// They never add an error or change security_complete.
+// The Hermes block also reports the session-home attestation limit, which
+// makes managed verification incomplete when a Hermes target is possible.
 
 // statusV2 reports whether this run prints the status v2 blocks.
 func (l *lifecycle) statusV2() bool {
@@ -107,6 +108,20 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 	}
 	failMode := func(name string) string { return enterprisehooks.ManagedHookFailMode(cfg, name) }
 	block, hidden := enterprisestatus.BuildConnectors(in, failMode)
+	if state, ok := block["hermes"]; ok && state.Enabled &&
+		(state.Detected == nil || *state.Detected || state.Targets != nil && state.Targets.Total > 0) {
+		state.HooksInstalled = enterprisestatus.HooksInstalledUnknown
+		block["hermes"] = state
+		r.CoverageComplete, r.SecurityComplete = false, false
+		if err := enterprisehooks.ManagedHermesSessionHomeAttestation(env.GOOS, "hermes", true, false); err != nil {
+			message := "connectors.hermes: " + err.Error()
+			if l.opts.Action == ActionVerify {
+				r.AddError(enterprisestatus.CodeStatusDetailUnavailable, message)
+			} else {
+				r.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, message)
+			}
+		}
+	}
 	r.Connectors = block
 	if hidden > 0 {
 		r.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, fmt.Sprintf("connectors: %d agent version(s) not shown: "+

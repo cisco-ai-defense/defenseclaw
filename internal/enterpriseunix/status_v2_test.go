@@ -119,6 +119,52 @@ func TestStatusV2BlocksLinuxAndMacOS(t *testing.T) {
 	}
 }
 
+// A shell that was already running can export HERMES_HOME after its process
+// environment was captured. The guardian's healthy default-home receipt
+// cannot prove what a later Hermes process launched from that shell reads.
+func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			file, home := "linux-standalone.yaml", "/home/alice"
+			if goos == "darwin" {
+				file, home = "macos-standalone.yaml", "/Users/alice"
+			}
+			raw := strings.Replace(string(readSampleConfig(t, file)), "    claudecode: {}", "    claudecode: {}\n    hermes: {}", 1)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: writeTempConfig(t, []byte(raw))}))
+			writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n"+
+				"  - user: alice\n    uid: 1001\n    user_home: "+home+"\n    connector: hermes\n    agent_version: 0.21.0\n")
+			writeFreshLedger(t, h)
+			state, err := json.Marshal(map[string]any{"results": []map[string]any{{
+				"user": "alice", "user_home": home, "connector": "hermes", "ok": true,
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				r := h.run(Options{Action: action})
+				if got := r.Connectors["hermes"].HooksInstalled; got != enterprisestatus.HooksInstalledUnknown {
+					t.Fatalf("%s certified Hermes hooks from a persistent-home receipt: %q", action, got)
+				}
+				if r.CoverageComplete || r.SecurityComplete {
+					t.Fatalf("%s certified universal Hermes coverage: coverage=%t security=%t", action, r.CoverageComplete, r.SecurityComplete)
+				}
+				messages := messagesOf(r.Warnings, enterprisestatus.CodeStatusDetailUnavailable) +
+					messagesOf(r.Errors, enterprisestatus.CodeStatusDetailUnavailable)
+				if !strings.Contains(messages, "session-only HERMES_HOME") {
+					t.Fatalf("%s did not name the unknown home: %q", action, messages)
+				}
+				if action == ActionVerify && r.ExitCode == 0 {
+					t.Fatal("verify certified an unobservable Hermes launch home")
+				}
+			}
+		})
+	}
+}
+
 func mustJSON(t *testing.T, value any) []byte {
 	t.Helper()
 	data, err := json.Marshal(value)

@@ -173,6 +173,7 @@ func TestRemovedTeardownNeverWritesIntoTheOldScript(t *testing.T) {
 				}
 				requireRemovedOldWhole(t, held, old.body)
 				h.requireStub(t, c)
+				h.requireSealed(t, c, removedStubDigest(c))
 				h.requireRevoked(t, c)
 				if err := c.VerifyClean(h.opts); err != nil {
 					t.Fatalf("VerifyClean: %v", err)

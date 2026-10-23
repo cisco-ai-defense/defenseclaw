@@ -615,13 +615,8 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	if !strings.Contains(string(data), filepath.Join(home, ".defenseclaw", "hooks", "codex-hook.sh")) {
 		t.Fatalf("codex config does not reference per-user hook script:\n%s", string(data))
 	}
-	if strings.Contains(string(data), "/otlp/codex/"+otlpToken) {
-		t.Fatalf("codex config leaked the supplied service OTLP token in an endpoint:\n%s", string(data))
-	}
-	doubleQuotedBearer := `authorization = "Bearer ` + otlpToken + `"`
-	singleQuotedBearer := `authorization = 'Bearer ` + otlpToken + `'`
-	if !strings.Contains(string(data), doubleQuotedBearer) && !strings.Contains(string(data), singleQuotedBearer) {
-		t.Fatalf("codex config does not carry the supplied service OTLP token as an Authorization bearer:\n%s", string(data))
+	if strings.Contains(string(data), "[otel]") || strings.Contains(string(data), otlpToken) {
+		t.Fatalf("managed codex config still exports OTLP to an unverified listener:\n%s", string(data))
 	}
 	userOTLPToken, err := connector.OTLPPathTokenFilePath(filepath.Join(home, ".defenseclaw"), connector.OTLPScopeCodex)
 	if err != nil {
@@ -803,8 +798,8 @@ func TestVerifyFailsWhenHooksCarryCredentialsNotBoundToTheUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "Bearer "+perUser.OTLPPathToken) || strings.Contains(string(data), shared.OTLPPathToken) {
-		t.Fatalf("codex config does not carry only the per-user OTLP credential:\n%s", data)
+	if strings.Contains(string(data), "[otel]") || strings.Contains(string(data), perUser.OTLPPathToken) || strings.Contains(string(data), shared.OTLPPathToken) {
+		t.Fatalf("codex config still exports a managed OTLP credential:\n%s", data)
 	}
 	lock, err := os.ReadFile(filepath.Join(home, ".defenseclaw", "hook_contract_lock.json"))
 	if err != nil {

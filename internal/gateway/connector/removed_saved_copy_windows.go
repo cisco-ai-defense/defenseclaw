@@ -18,10 +18,28 @@
 
 package connector
 
-import "os"
+import (
+	"errors"
+	"os"
+)
 
 // removedSavedCopyPrivate checks the private file DACL through the same open
 // handle used to read its bytes. Go's Windows mode bits say nothing about it.
 func removedSavedCopyPrivate(file *os.File, _ os.FileInfo) error {
 	return validateAtomicTransformBoundFilePrivatePlatform(file)
 }
+
+// removedInPlaceRefusal is never nil on Windows: no release wrote an
+// OpenHands script there (its hooks.json runs the native launcher, which
+// blocks the removed connectors), and an OmniGent module there gets the
+// rename, or keeps its tokens when it has other names, so it still reaches
+// the retired gateway route, which blocks every call. until 1.1, with
+// removed.go.
+func removedInPlaceRefusal(os.FileInfo, os.FileInfo) error {
+	return errors.New("on Windows the stub is only renamed over the path")
+}
+
+// removedStubMetadataRefusal is nil on Windows: no mode bit or owner check
+// decides whether an agent runs or loads a file there. until 1.1, with
+// removed.go.
+func removedStubMetadataRefusal(os.FileInfo, os.FileInfo, os.FileMode) error { return nil }

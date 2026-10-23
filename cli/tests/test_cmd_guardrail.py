@@ -393,6 +393,8 @@ class FailModeCommandTests(unittest.TestCase):
     def test_show_current_value_open(self):
         runner = CliRunner()
         app = make_ctx(enabled=True, hook_fail_mode="open")
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.managed_outside_secure_client = lambda: True
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("guardrail.hook_fail_mode: open", result.output)
@@ -1123,6 +1125,15 @@ class PerConnectorFailModeTests(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
 
+    def test_per_user_open_is_refused_before_changing_config(self):
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        runner = CliRunner()
+        for args in (["open", "--yes"], ["open", "--connector", "codex", "--yes"]):
+            result = runner.invoke(cmd_guardrail.fail_mode_cmd, args, obj=app)
+            self.assertNotEqual(result.exit_code, 0, result.output)
+            self.assertIn("managed", result.output.lower())
+        app.cfg.save.assert_not_called()
+
     def test_set_one_connector_closed_persists_and_restarts_only_it(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
@@ -1138,7 +1149,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         # Only codex gets the override; claudecode keeps the global default.
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("codex"), "closed")
-        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("claudecode"), "open")
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("claudecode"), "closed")
         # Global default is untouched.
         self.assertEqual(app.cfg.guardrail.hook_fail_mode, "open")
         app.cfg.save.assert_called_once()
@@ -1376,6 +1387,8 @@ class PerConnectorFailModeTests(unittest.TestCase):
     def test_bare_set_open_reconciles_closed_connector_override(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "cursor": None})
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.guardrail._secure_client = True
         app.cfg.guardrail.hook_fail_mode = "open"
         app.cfg.guardrail.connectors["cursor"].hook_fail_mode = "closed"
         state = SimpleNamespace(current=True, drift=())
@@ -1401,10 +1414,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
             {"codex", "cursor"},
         )
 
-    def test_bare_set_open_keeps_cursor_action_fail_closed(self):
-        # GAP-1432: Cursor's action mode pins its hooks fail-closed (as
-        # `setup cursor` writes them). Storing open left doctor failing
-        # "inconsistent Cursor posture" until `setup cursor --yes --restart`.
+    def test_bare_set_open_is_refused_on_per_user_action_cursor(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "cursor": None})
         app.cfg.guardrail.hook_fail_mode = "closed"
@@ -1417,15 +1427,14 @@ class PerConnectorFailModeTests(unittest.TestCase):
             patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", return_value=state),
         ):
             result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "open")
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "closed")
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
-        self.assertIn("stays closed", result.output)
-        self.assertIn("1 connector overrides = open; Cursor stays closed)", result.output)
+        self.assertIn("administrator-managed", result.output)
 
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["open", "--connector", "cursor", "--yes"], obj=app)
         self.assertEqual(result.exit_code, 1, msg=result.output)
-        self.assertIn("guardrail mode observe --connector cursor", result.output)
+        self.assertIn("administrator-managed", result.output)
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
 
     def test_confirm_refuses_when_output_is_piped(self):
@@ -1435,6 +1444,8 @@ class PerConnectorFailModeTests(unittest.TestCase):
 
         runner = CliRunner()
         app = make_multi_ctx({"codex": None})
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.managed_outside_secure_client = lambda: True
         app.cfg.guardrail.hook_fail_mode = "closed"
         app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
         state = SimpleNamespace(current=True, drift=(), desired="closed")
@@ -1471,6 +1482,8 @@ class PerConnectorFailModeTests(unittest.TestCase):
     def test_connector_open_clears_dormant_closed_override_in_observe_mode(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.guardrail._secure_client = True
         app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
         with patch(
             "defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"

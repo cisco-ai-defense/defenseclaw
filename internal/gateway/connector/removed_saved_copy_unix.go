@@ -19,8 +19,10 @@
 package connector
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"syscall"
 )
 
 // removedSavedCopyPrivate refuses a saved copy of an edited module that
@@ -30,4 +32,43 @@ func removedSavedCopyPrivate(_ *os.File, info os.FileInfo) error {
 		return fmt.Errorf("its mode is %o, not private (600)", perm)
 	}
 	return nil
+}
+
+// removedInPlaceRefusal says why the mode of a hard-linked removed
+// connector's stub may not be set through the file (nil when it may): only a
+// file that the owner of its hooks folder owns is changed in place. So a
+// name in the hooks folder that leads to another account's file never makes
+// a privileged teardown change it. until 1.1, with removed.go.
+func removedInPlaceRefusal(file, folder os.FileInfo) error {
+	fileStat, ok := file.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("its owner cannot be read")
+	}
+	folderStat, ok := folder.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("the hooks folder's owner cannot be read")
+	}
+	if fileStat.Uid != folderStat.Uid {
+		return errors.New("another account than the hooks folder's owner owns it")
+	}
+	return nil
+}
+
+// removedStubMetadataRefusal says why the agent may not run or load a removed
+// connector's stub, or why another account may change it (nil when neither):
+// its owner cannot read it, an executable stub (mode, the one the teardown
+// writes, has the owner execute bit) is not executable by its owner, others
+// may write it, or another account than the hooks folder's owner owns it.
+// until 1.1, with removed.go.
+func removedStubMetadataRefusal(file, folder os.FileInfo, mode os.FileMode) error {
+	perm := file.Mode().Perm()
+	switch {
+	case perm&0o400 == 0:
+		return fmt.Errorf("its mode is %o, so its owner cannot read it (the teardown writes %o)", perm, mode)
+	case mode&0o100 != 0 && perm&0o100 == 0:
+		return fmt.Errorf("its mode is %o, so its owner cannot run it (the teardown writes %o)", perm, mode)
+	case perm&0o022 != 0:
+		return fmt.Errorf("its mode is %o, so other accounts may change it (the teardown writes %o)", perm, mode)
+	}
+	return removedInPlaceRefusal(file, folder)
 }

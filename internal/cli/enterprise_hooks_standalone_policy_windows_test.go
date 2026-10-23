@@ -283,6 +283,12 @@ func TestWindowsCopilotVSCodeUserOwnsTheLocalHookFile(t *testing.T) {
 	if err := windowsCopilotVSCodeUser(home, true, false); err == nil || !strings.Contains(err.Error(), hookFile) {
 		t.Fatalf("verify must name the edited hook file: %v", err)
 	}
+	if err := windowsCopilotVSCodeUser(home, false, false); err == nil {
+		t.Fatal("apply must refuse the independent handler")
+	}
+	if err := os.Remove(hookFile); err != nil {
+		t.Fatal(err)
+	}
 	if err := windowsCopilotVSCodeUser(home, false, false); err != nil {
 		t.Fatal(err)
 	}
@@ -300,6 +306,29 @@ func TestWindowsCopilotVSCodeUserOwnsTheLocalHookFile(t *testing.T) {
 	}
 	if _, err := os.Lstat(hookFile); !os.IsNotExist(err) {
 		t.Fatalf("hook file left behind: %v", err)
+	}
+}
+
+func TestWindowsCopilotApplyRefusesIndependentLocalHandler(t *testing.T) {
+	previous := enterpriseHookWindowsGuardianOptions
+	t.Cleanup(func() { enterpriseHookWindowsGuardianOptions = previous })
+	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
+		return enterprisepolicy.Options{HookBinary: `C:\Program Files\Cisco\DefenseClaw\defenseclaw-hook.exe`}, []string{"copilot"}, true, nil
+	}
+	home := t.TempDir()
+	path := enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	foreign := []byte(`{"hooks":{"PreToolUse":[{"type":"command","command":"operator-hook"}]}}`)
+	if err := os.WriteFile(path, foreign, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsCopilotVSCodeUser(home, false, false); err == nil || !strings.Contains(err.Error(), path) {
+		t.Fatalf("apply claimed a guarded Local hook despite the independent handler: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != string(foreign) {
+		t.Fatalf("apply changed the operator's hook: %q, %v", got, err)
 	}
 }
 

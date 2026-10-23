@@ -82,8 +82,8 @@ func TestManagedWindowsReportsOldVoltaImagesBesideSupportedInstall(t *testing.T)
 		old[connector] = filepath.Join(home, "AppData", "Local", "Volta", "tools", "image", "packages", filepath.FromSlash(pkg), "node_modules", filepath.FromSlash(pkg))
 		writeWindowsAgentPackageJSON(t, old[connector], "0.0.1")
 	}
-	if err := os.WriteFile(filepath.Join(old["claudecode"], "cli.js"), []byte("// fixture"), 0o644); err != nil {
-		t.Fatal(err)
+	for connector, entry := range map[string]string{"claudecode": "cli.js", "codex": `bin\codex.js`, "copilot": "npm-loader.js"} {
+		windowsClaudeCopy(t, old[connector], "0.0.1", entry)
 	}
 	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
 	var uncovered []UnprotectedAgent
@@ -160,9 +160,8 @@ func TestDiscoverWindowsPrivateClaudeWithoutVersionIsUnprotected(t *testing.T) {
 
 func TestDiscoverWindowsPrivateCodexAndCopilotBelowContract(t *testing.T) {
 	home := t.TempDir()
-	for _, pkg := range []string{"@openai/codex", "@github/copilot"} {
-		path := filepath.Join(home, "private", "node_modules", filepath.FromSlash(pkg))
-		writeWindowsAgentPackageJSON(t, path, "0.0.1")
+	for pkg, entry := range map[string]string{"@openai/codex": `bin\codex.js`, "@github/copilot": "npm-loader.js"} {
+		windowsClaudeCopy(t, filepath.Join(home, "private", "node_modules", filepath.FromSlash(pkg)), "0.0.1", entry)
 	}
 	findings := DiscoverWindowsPrivateAgentInstalls(home, []string{"codex", "copilot"})
 	if len(findings) != 2 || findings[0].Connector != "codex" || findings[1].Connector != "copilot" {

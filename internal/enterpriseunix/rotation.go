@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -679,8 +679,9 @@ func (l *lifecycle) waitGatewayKeys(ctx context.Context, gateway Unit, serviceUI
 }
 
 // proveKey has the gateway prove, for every target, that it accepts the
-// target's hook credential derived from key: the listener proof the
-// standalone plugins use, which names the credential only by its SHA-256.
+// target's hook credential derived from key. The protected socket route uses
+// the same HMAC as standalone plugins and names the credential only by its
+// SHA-256, while the TCP route remains bound to the plugin caller's UID.
 func (l *lifecycle) proveKey(ctx context.Context, key string, targets map[string]enterprisehooks.CredentialAttestationTarget) error {
 	var refused []string
 	for _, target := range targets {
@@ -709,19 +710,16 @@ func (l *lifecycle) proveKey(ctx context.Context, key string, targets map[string
 	return nil
 }
 
-// listenerProof asks the gateway's loopback API for a listener proof.
-func listenerProof(ctx context.Context, addr, connectorName, keyID, nonce string) (string, error) {
-	dialer := &net.Dialer{Timeout: 3 * time.Second}
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			Proxy:             nil,
-			DialContext:       dialer.DialContext,
-			DisableKeepAlives: true,
-		},
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+// listenerProof asks the gateway over the protected hook socket for a
+// credential proof. The connection's peer UID is checked before writing any
+// challenge. The root lifecycle is authorized on this socket, while the TCP
+// route remains bound to the user's UID for in-agent callers.
+func listenerProof(ctx context.Context, socket, addr string, serviceUID int, connectorName, keyID, nonce string) (string, error) {
+	client, err := hookexec.NewManagedStandaloneHookSocketHTTPClient(5*time.Second, socket, serviceUID)
+	if err != nil {
+		return "", fmt.Errorf("gateway hook socket is unverified: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+connector.UserScopedListenerProofPath, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+connector.UserScopedRotationProofPath, nil)
 	if err != nil {
 		return "", err
 	}
@@ -730,7 +728,7 @@ func listenerProof(ctx context.Context, addr, connectorName, keyID, nonce string
 	req.Header.Set(connector.UserScopedListenerNonceHeader, nonce)
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("gateway hook socket is unverified or unavailable: %w", err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))

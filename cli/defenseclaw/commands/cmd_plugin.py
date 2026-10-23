@@ -1361,7 +1361,7 @@ def _build_scan_options(
     default="",
     help=(
         "Install into one configured connector's plugin directory. "
-        "Default: every configured connector that exposes a plugin directory."
+        "Default: every configured connector with a supported install directory."
     ),
 )
 @pass_ctx
@@ -1381,7 +1381,9 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
     based on scan severity. Use --force to overwrite an existing plugin.
 
     With no ``--connector`` the source is materialized into every configured
-    connector that exposes a plugin directory. ``--connector`` narrows both
+    connector with a supported install directory. Codex marketplace installs
+    must use Codex's own flow; copying into its cache is not an install.
+    ``--connector`` narrows both
     placement and admission/enforcement attribution to that peer.
     """
     import tempfile
@@ -1666,11 +1668,25 @@ def _plugin_install_targets(
 ) -> list[tuple[str, str]]:
     """Return ``(connector, install_root)`` targets for plugin installs.
 
-    Antigravity is a normal filesystem-backed target: its documented global
-    plugin directory is returned by ``cfg.plugin_dirs("antigravity")`` just
-    like Claude Code, Codex, and Hermes. Keep capability decisions in the path
-    adapter instead of hard-coding connector exclusions here.
+    Codex's cache is an inventory root, not an install root: a flat copy at
+    cache/<name> is invisible to Codex and to DefenseClaw discovery. Refuse a
+    Codex-only request; a multi-connector request names the skipped peer.
     """
+    codex = [connector for connector in connectors if connector_paths.normalize(connector) == "codex"]
+    if codex:
+        cause = (
+            "Codex plugins require its marketplace install flow; a copy into "
+            "plugins/cache/<name> is not discoverable. Install with Codex, "
+            "then inspect it with 'defenseclaw plugin list --connector codex'. "
+            "No Codex copy was made."
+        )
+        if len(codex) == len(connectors):
+            click.echo(f"error: {cause}", err=True)
+            raise SystemExit(1)
+        for connector in codex:
+            click.echo(f"[install] skipping connector={connector}: {cause}")
+        connectors = [connector for connector in connectors if connector not in codex]
+
     targets: list[tuple[str, str]] = []
     skipped: list[str] = []
     for connector in connectors:

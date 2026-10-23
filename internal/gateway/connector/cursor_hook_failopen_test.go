@@ -142,15 +142,15 @@ func assertJSONEnvelope(t *testing.T, out string) {
 	}
 }
 
-func TestCursorHook_FailOpenOnUnreachableEmitsAllow(t *testing.T) {
+func TestCursorHook_PerUserOpenRequestStillDeniesOnUnreachable(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
 	stdout, stderr, err := runCursorHook(t, "127.0.0.1:1", "open", true)
-	if err != nil {
-		t.Fatalf("expected exit 0 (fail-open), got %v; stderr=%s", err, stderr)
+	if err == nil {
+		t.Fatalf("expected a per-user fail-closed exit, stdout=%s; stderr=%s", stdout, stderr)
 	}
-	assertAllowEnvelope(t, stdout)
+	assertDenyEnvelope(t, stdout)
 }
 
 func TestCursorHook_FailClosedOnUnreachableEmitsDeny(t *testing.T) {
@@ -175,7 +175,7 @@ func TestCursorHook_FailClosedOnUnreachableEmitsDeny(t *testing.T) {
 	}
 }
 
-func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
+func TestCursorHook_DisabledMarkerKeepsPerUserHookClosed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -190,8 +190,8 @@ func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
 
 	cmd := exec.Command("bash", filepath.Join(dir, "cursor-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"beforeShellExecution"}`)
-	// Sanitize inherited DEFENSECLAW_* so a leaked FAIL_MODE / strict
-	// override from the dev shell cannot alter the explicit open path.
+	// Sanitize inherited DEFENSECLAW_* so the result comes from the
+	// installed per-user render rather than the dev shell.
 	cmd.Env = append(sanitizedTestEnv(),
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
@@ -199,28 +199,28 @@ func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("expected exit 0 when .disabled present, got %v; stderr=%s", err, stderr.String())
+	err := cmd.Run()
+	if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 2 {
+		t.Fatalf("disabled per-user hook exited %v, want closed (2); run error=%v stdout=%s stderr=%s", cmd.ProcessState, err, stdout.String(), stderr.String())
 	}
-	// The disabled guard deliberately does not parse or retain the event body;
-	// it still emits Cursor's exact no-fields success object.
-	assertJSONEnvelope(t, stdout.String())
+	if !strings.Contains(stderr.String(), "fail mode closed") {
+		t.Fatalf("closed hook did not explain the disabled home: %s", stderr.String())
+	}
 }
 
-func TestCursorHook_MissingTokenFailsOpenWithAllow(t *testing.T) {
+func TestCursorHook_MissingTokenFailsClosedEvenWhenOpenRequested(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
-	// No .token file and no DEFENSECLAW_GATEWAY_TOKEN, not strict =>
-	// historical allow-and-warn, but must emit an explicit allow so a
-	// fail-open entry never depends on Cursor's empty-output fallback.
+	// No .token file and no DEFENSECLAW_GATEWAY_TOKEN must block a per-user
+	// tool call even when an old config requested open.
 	stdout, stderr, err := runCursorHook(t, "127.0.0.1:1", "open", false)
-	if err != nil {
-		t.Fatalf("expected exit 0 (fail-open on missing token), got %v; stderr=%s", err, stderr)
+	if err == nil {
+		t.Fatalf("expected fail-closed on missing token, stdout=%s; stderr=%s", stdout, stderr)
 	}
-	assertAllowEnvelope(t, stdout)
-	if !strings.Contains(stderr, "allowing cursor tool") {
-		t.Errorf("stderr should announce allowing on the fail-open path, got: %q", stderr)
+	assertDenyEnvelope(t, stdout)
+	if !strings.Contains(stderr, "blocking cursor tool") {
+		t.Errorf("stderr should announce blocking on the fail-closed path, got: %q", stderr)
 	}
 }
 

@@ -332,9 +332,19 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 	// A plugin rendered before the listener proof existed would still send
 	// its credential to whoever holds the TCP port; it is repaired.
 	if managedPluginListenerProof(opts) {
+		proofCall := []byte("if (DC_LISTENER_PROOF) return defenseclawProvenTCPRequest(path, init, token);")
+		if pluginSecureClientProfile(opts) {
+			proofCall = []byte("if (DC_LISTENER_PROOF) await defenseclawProveListener(token, init.signal);")
+		}
 		markers = append(markers,
 			[]byte("const DC_LISTENER_PROOF = \"1\";\n"),
-			[]byte("if (DC_LISTENER_PROOF) await defenseclawProveListener(token, init.signal);"),
+			proofCall,
+		)
+	}
+	if !opts.ManagedEnterprise {
+		markers = append(markers,
+			[]byte(`const DC_PER_USER_NATIVE_POST = "1";`),
+			[]byte(`execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR]`),
 		)
 	}
 	for _, marker := range markers {
@@ -487,9 +497,9 @@ func (c *hookOnlyConnector) rendersExactHookEntries() bool {
 // functions Setup writes with, and no other entry that Setup's reconcile
 // claims as DefenseClaw's (an edited script path or name, a misplaced or
 // duplicate entry). Entries Setup does not claim, the user's own hooks, are
-// ignored, except in Copilot's defenseclaw.json, DefenseClaw's own file, where
-// an event Setup binds holds nothing else. Every entry that fails the check is
-// one Setup replaces, so a heal always converges.
+// ignored, except in Copilot's defenseclaw.json: a bound event must hold only
+// DefenseClaw's current handler. Setup refuses an independent handler in that
+// event and tells the operator to move it to another hook file.
 func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document map[string]interface{}) bool {
 	if document == nil {
 		return false

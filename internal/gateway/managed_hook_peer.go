@@ -266,15 +266,24 @@ func (z *managedHookAuthorizer) exempt(peer managedHookPeer) bool {
 		}, false)
 		return anyMatches(z.enrollment.ExemptUsers, func(entry string) bool { return userEntryMatches(&subject, entry) })
 	}
-	// Settled facts already cached for the account that holds the uid now
-	// bind its names: when they match no entry, the caller is not exempt,
-	// without waiting for the directory. Only a possible exemption (the
-	// cached facts match an entry, or none are settled) waits for verified
-	// facts, within the exemption's bound. A managed Mac waited for a fresh
-	// Open Directory answer on every hook of every caller a named entry did
-	// not match by uid or exact name, up to 2 s per hook (review of r104
-	// Q-identity, loop round 1).
-	if cached, ok := managedHookExemptFacts(peer.UID, true); ok && !matches(cached) {
+	// The facts the cache holds now for the account that holds the uid decide
+	// without waiting: names they give that match an entry exempt the caller,
+	// and settled facts that match none reject it. Only missing or unsettled
+	// facts (an answer without its UPN or domain yet) that match no entry wait
+	// for a current answer, within identityDirectoryBudget, as a cold read did
+	// before. Entries select by account names (userEntryMatches), never by
+	// group, so a cached match needs none of the fresh Open Directory answer a
+	// managed Mac waits for on group decisions; the cache's own bounds
+	// (lifetime, maxAge, the account holding the uid now, the guardian's
+	// record) still apply. Waiting for a fresh answer on every hook, up to 2 s
+	// and then 750 ms, either held every caller or denied a named exemption
+	// whenever a healthy directory answered after the wait (review of r104
+	// Q-identity, loop rounds 1 and 2).
+	cached, settled := managedHookExemptFacts(peer.UID, true)
+	if matches(cached) {
+		return true
+	}
+	if settled {
 		return false
 	}
 	facts, _ := managedHookExemptFacts(peer.UID, false)
@@ -292,10 +301,10 @@ func (z *managedHookAuthorizer) hostRunExempt(peer managedHookPeer) bool {
 
 // managedHookExemptFacts are the verified directory facts exempt matches a
 // caller's names with, from the cache the caller's hook requests use; tests
-// replace it. cached asks only for settled facts the cache already holds,
-// without waiting; otherwise the facts are read within the exemption's
-// bound (exemptIdentityDirectory), so the first hook after a restart can
-// use a UPN or DOMAIN\name exemption.
+// replace it. cached returns the facts the cache holds now, without waiting,
+// and whether they are settled (a nonmatch then rejects); otherwise the
+// facts are read as a blocking hook read gets them (exemptIdentityDirectory),
+// so the first hook after a restart can use a UPN or DOMAIN\name exemption.
 var managedHookExemptFacts = exemptIdentityDirectory
 
 // decide authorizes one hook call. surface is the caller's
@@ -530,6 +539,16 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			a.serveSandboxRoute(authorizer, peer, route, w, r, next)
 			return
 		}
+		if r.URL.Path == connector.UserScopedRotationProofPath {
+			// A root lifecycle can prove a large roster during key rotation.
+			// Hook-call budgets must not make that transaction fail mid-roster.
+			if peer.UID != 0 {
+				writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonGuardianOnly)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
 		r, release := a.admitHookCaller(w, r, strconv.Itoa(peer.UID), route)
 		if release == nil {
 			return
@@ -674,9 +693,10 @@ var loadStandaloneRuntimeDescriptor = func(goos string) (*managed.RuntimeDescrip
 // managedHookSocketMux registers only the agent-facing routes on the hook
 // socket: connector hook endpoints, the inspect endpoints, the Codex
 // notifier, the refused-write report of a standard user CLI, the root
-// guardian's repair report and the managed sandbox authority routes a user's
-// sandbox daemon calls. Management, status, configuration, policy and scan
-// routes are not reachable through it at all.
+// guardian's repair report, the root lifecycle's credential rotation proof,
+// and the managed sandbox authority routes a user's sandbox daemon calls.
+// Management, status, configuration, policy and scan routes are not reachable
+// through it at all.
 func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
@@ -692,6 +712,7 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
 	mux.HandleFunc(managedGuardianRepairAuditPath, a.handleManagedGuardianRepairAudit)
 	mux.HandleFunc(managed.LaunchCoverageReportPath, a.handleManagedLaunchCoverageAudit)
+	mux.HandleFunc(connector.UserScopedRotationProofPath, a.serveRotationListenerProof)
 	a.registerSandboxAuthorityRoutes(mux)
 	a.registerSandboxRelayRoutes(mux)
 	handler := bodyLimitMiddleware(mux, func(r *http.Request) int64 {

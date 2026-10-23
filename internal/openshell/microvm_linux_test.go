@@ -21,7 +21,9 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -205,6 +207,96 @@ func TestConfiguredVMDriverIgnoresDefaultCopy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An explicit driver_dir falls back to the running gateway's own sibling,
+// even when a different openshell-gateway on PATH has an older driver.
+func TestConfiguredVMDriverUsesRunningGatewaySibling(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.onLinuxMicroVMs()
+	f.atRelease(openshell.InstallerVersion)
+	configuredDir := filepath.Join(f.home, "configured")
+	f.writeTOML(strings.Replace(linuxVMTOML, "[openshell.drivers.vm]\n",
+		"[openshell.drivers.vm]\ndriver_dir = \""+configuredDir+"\"\n", 1), f.started.Add(-time.Minute))
+	runningDir := filepath.Join(f.home, "running", "bin")
+	runningGateway := filepath.Join(runningDir, openshell.GatewayBinary)
+	touchExecutable(t, runningGateway)
+	runningDriver := filepath.Join(runningDir, "openshell-driver-vm")
+	touchExecutable(t, runningDriver)
+	f.runner.On(runningDriver+" --version", "openshell-driver-vm "+openshell.InstallerVersion+"\n", nil)
+	pathDir := filepath.Join(f.home, "path", "bin")
+	pathGateway := filepath.Join(pathDir, openshell.GatewayBinary)
+	touchExecutable(t, pathGateway)
+	pathDriver := filepath.Join(pathDir, "openshell-driver-vm")
+	touchExecutable(t, pathDriver)
+	f.runner.On(pathDriver+" --version", "openshell-driver-vm 0.1.3\n", nil)
+	f.runner.On("ps -axww -o pid=,ppid=,uid=,args=", "  41 1 1000 "+runningGateway+"\n", nil)
+	lookPath := f.doctor.LookPath
+	f.doctor.LookPath = func(name string) (string, error) {
+		if name == openshell.GatewayBinary {
+			return pathGateway, nil
+		}
+		return lookPath(name)
+	}
+	r := f.run()
+	if r.MicroVM == nil || r.MicroVM.DriverBinary != runningDriver {
+		t.Fatalf("selected driver = %+v, want running gateway sibling %q", r.MicroVM, runningDriver)
+	}
+	expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusPass, runningDriver)
+}
+
+// Linux ps separates argv on spaces, including spaces in argv[0]. The
+// running executable's /proc link identifies its sibling even in that case.
+func TestConfiguredVMDriverUsesRunningGatewayWithSpaces(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.onLinuxMicroVMs()
+	f.atRelease(openshell.InstallerVersion)
+	configuredDir := filepath.Join(f.home, "configured")
+	f.writeTOML(strings.Replace(linuxVMTOML, "[openshell.drivers.vm]\n",
+		"[openshell.drivers.vm]\ndriver_dir = \""+configuredDir+"\"\n", 1), f.started.Add(-time.Minute))
+	runningDir := filepath.Join(f.home, "running gateway", "bin")
+	runningGateway := filepath.Join(runningDir, openshell.GatewayBinary)
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(sleep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(runningDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runningGateway, contents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(runningGateway, "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	runningDriver := filepath.Join(runningDir, "openshell-driver-vm")
+	touchExecutable(t, runningDriver)
+	f.runner.On(runningDriver+" --version", "openshell-driver-vm "+openshell.InstallerVersion+"\n", nil)
+	pathDir := filepath.Join(f.home, "path", "bin")
+	pathGateway := filepath.Join(pathDir, openshell.GatewayBinary)
+	touchExecutable(t, pathGateway)
+	pathDriver := filepath.Join(pathDir, "openshell-driver-vm")
+	touchExecutable(t, pathDriver)
+	f.runner.On(pathDriver+" --version", "openshell-driver-vm 0.1.3\n", nil)
+	f.runner.On("ps -axww -o pid=,ppid=,uid=,args=", "  "+strconv.Itoa(cmd.Process.Pid)+" 1 1000 "+runningGateway+" 30\n", nil)
+	lookPath := f.doctor.LookPath
+	f.doctor.LookPath = func(name string) (string, error) {
+		if name == openshell.GatewayBinary {
+			return pathGateway, nil
+		}
+		return lookPath(name)
+	}
+	r := f.run()
+	if r.MicroVM == nil || r.MicroVM.DriverBinary != runningDriver {
+		t.Fatalf("selected driver = %+v, want running gateway sibling %q", r.MicroVM, runningDriver)
+	}
+	expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusPass, runningDriver)
 }
 
 // Without driver_dir, a driver beside the gateway on PATH is searched after

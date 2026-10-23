@@ -18,6 +18,7 @@
 
 import json
 import os
+import subprocess
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -1883,13 +1884,31 @@ class TestSetupSplunkCommand(unittest.TestCase):
         kwargs = bridge_call.kwargs
         self.assertEqual(kwargs["capture_output"], True)
         self.assertEqual(kwargs["text"], True)
-        self.assertEqual(kwargs["timeout"], 300)
+        self.assertGreaterEqual(kwargs["timeout"], 7200)
         self.assertEqual(kwargs["env"]["S3_EXPORT_ENABLED"], "true")
         self.assertEqual(kwargs["env"]["S3_BUCKET"], "agentwatch-demo")
         self.assertEqual(kwargs["env"]["S3_PREFIX"], "agentwatch/defenseclaw")
         self.assertEqual(kwargs["env"]["AWS_REGION"], "us-west-2")
         self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", kwargs["env"])
         self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", kwargs["env"])
+
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
+    def test_bootstrap_bridge_streams_pull_progress_in_terminal(self, _mock_bridge_bin, mock_run):
+        from defenseclaw.commands.cmd_setup import _bootstrap_bridge
+
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr=None)
+        with patch(
+            "defenseclaw.commands.cmd_setup.click.get_text_stream",
+            return_value=SimpleNamespace(isatty=lambda: True),
+        ):
+            assert _bootstrap_bridge(self.tmp_dir, refresh_bundle=False) is None
+
+        kwargs = mock_run.call_args.kwargs
+        self.assertNotIn("capture_output", kwargs)
+        self.assertEqual(kwargs["stdout"], subprocess.PIPE)
+        self.assertIsNone(kwargs["stderr"])
+        self.assertGreaterEqual(kwargs["timeout"], 7200)
 
     @patch("defenseclaw.commands.cmd_setup._bootstrap_bridge", return_value=None)
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))

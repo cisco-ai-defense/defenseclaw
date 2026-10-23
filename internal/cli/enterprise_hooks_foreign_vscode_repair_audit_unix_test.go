@@ -23,6 +23,13 @@ import (
 )
 
 func TestStandaloneForeignCleanupReportsOnlyRestoredCopilotLocalHookFile(t *testing.T) {
+	previousFactory := guardianAuditClientFactory
+	guardianAuditClientFactory = func(_ time.Duration, socket string, _ int) (*http.Client, error) {
+		return &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		}}}, nil
+	}
+	t.Cleanup(func() { guardianAuditClientFactory = previousFactory })
 	previousCfg, previousManifest := cfg, enterpriseHookManifest
 	previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
 	previousLoadRecord, previousWriteRecord := enterpriseHookLoadCopilotVSCodeAccounts, enterpriseHookWriteCopilotVSCodeAccounts
@@ -103,6 +110,9 @@ func TestStandaloneForeignCleanupReportsOnlyRestoredCopilotLocalHookFile(t *test
 	t.Cleanup(func() { _ = server.Close() })
 	go func() { _ = server.Serve(listener) }()
 	socket := listener.Addr().String()
+	previousTransport := enterpriseHookStandaloneHookTransport
+	enterpriseHookStandaloneHookTransport = func() (string, int, error) { return socket, os.Geteuid(), nil }
+	t.Cleanup(func() { enterpriseHookStandaloneHookTransport = previousTransport })
 	now := time.Date(2026, 10, 13, 20, 0, 0, 0, time.UTC)
 	pass := func(at time.Time) {
 		t.Helper()

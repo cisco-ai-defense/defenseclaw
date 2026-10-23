@@ -18,6 +18,7 @@ own tests elsewhere.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import errno
 import hashlib
@@ -2173,7 +2174,7 @@ class OrphanCopilotPluginTests(unittest.TestCase):
             plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
             (plugin / "hooks").mkdir(parents=True)
             (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
-            command = "'/opt/dc/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse'"
+            command = "'/opt/dc/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse' --hook-surface vscode-local"
             hooks = {"hooks": {"PreToolUse": [{"type": "command", "command": command, "timeout": 30}]}}
             (plugin / "hooks" / "hooks.json").write_text(json.dumps(hooks))
             with (
@@ -2188,6 +2189,79 @@ class OrphanCopilotPluginTests(unittest.TestCase):
             ):
                 cmd_uninstall._remove_orphan_copilot_plugin()
             self.assertFalse(plugin.parent.exists())
+
+    def test_orphan_cleanup_preserves_independent_copilot_plugin_handler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+            (plugin / "hooks").mkdir(parents=True)
+            (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+            own = "'/opt/dc/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse' --hook-surface vscode-local"
+            independent = "'/opt/operator/copilot-audit' hook --enterprise-managed --event 'PreToolUse'"
+            hooks = {"hooks": {"PreToolUse": [
+                {"type": "command", "command": own, "timeout": 30},
+                {"type": "command", "command": independent, "timeout": 30},
+            ]}}
+            path = plugin / "hooks" / "hooks.json"
+            path.write_text(json.dumps(hooks))
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+            self.assertTrue(plugin.exists(), "cleanup must keep a plugin with an independent handler")
+            self.assertEqual(json.loads(path.read_text()), {"hooks": {"PreToolUse": [hooks["hooks"]["PreToolUse"][1]]}})
+            self.assertTrue((plugin / "plugin.json").exists())
+
+    def test_orphan_cleanup_keeps_independent_fields_in_a_shared_handler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+            (plugin / "hooks").mkdir(parents=True)
+            (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+            own = "'/opt/dc/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse' --hook-surface vscode-local"
+            hooks = {"hooks": {"PreToolUse": [{"type": "command", "command": own, "operator": {"command": "/opt/operator/audit"}}]}}
+            path = plugin / "hooks" / "hooks.json"
+            path.write_text(json.dumps(hooks))
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+            self.assertEqual(json.loads(path.read_text()), hooks)
+
+    def test_orphan_cleanup_recognizes_released_windows_plugin(self):
+        fixture = Path(__file__).resolve().parents[2] / "internal" / "enterprisepolicy" / "testdata" / "copilot-vscode-1.0.0" / "windows-hooks.json"
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+            (plugin / "hooks").mkdir(parents=True)
+            (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+            (plugin / "hooks" / "hooks.json").write_bytes(fixture.read_bytes())
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+            self.assertFalse(plugin.exists(), "the released Windows plugin was DefenseClaw's")
+
+    def test_orphan_cleanup_keeps_edited_windows_handler_with_operator_command(self):
+        fixture = Path(__file__).resolve().parents[2] / "internal" / "enterprisepolicy" / "testdata" / "copilot-vscode-1.0.0" / "windows-hooks.json"
+        hooks = json.loads(fixture.read_text())
+        command = hooks["hooks"]["SessionStart"][0]["command"]
+        prefix, encoded = command.split(" -EncodedCommand ", 1)
+        script = base64.b64decode(encoded).decode("utf-16le") + "; Write-Output operator"
+        hooks["hooks"]["SessionStart"][0]["command"] = prefix + " -EncodedCommand " + base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+            (plugin / "hooks").mkdir(parents=True)
+            (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+            path = plugin / "hooks" / "hooks.json"
+            path.write_text(json.dumps(hooks))
+            with (
+                patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+            ):
+                cmd_uninstall._remove_orphan_copilot_plugin()
+            self.assertTrue(plugin.exists(), "cleanup removed an independent PowerShell statement")
+            self.assertEqual(json.loads(path.read_text()), {"hooks": {"SessionStart": hooks["hooks"]["SessionStart"]}})
 
 
 class _BlockDefenseClawImports:

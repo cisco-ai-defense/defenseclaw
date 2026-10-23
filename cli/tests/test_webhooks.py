@@ -39,6 +39,7 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import yaml
@@ -61,6 +62,7 @@ from defenseclaw.webhooks import (
     synthetic_event,
     validate_webhook_url,
 )
+from defenseclaw.webhooks.writer import redact_webhook_url
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -355,6 +357,30 @@ class ApplyWebhookRoundTripTests(unittest.TestCase):
 
 
 class SSRFValidationTests(unittest.TestCase):
+    def test_invalid_port_is_refused_before_write_and_existing_bad_url_is_safe_to_display(self):
+        bad = "https://example.com:bad/private-path?token=private-value"
+        with tempfile.TemporaryDirectory() as td:
+            _write_cfg(td)
+            with open(os.path.join(td, "config.yaml"), "rb") as config_file:
+                before = config_file.read()
+            for dry_run in (True, False):
+                with self.subTest(dry_run=dry_run):
+                    # This is URL validation, not the config-lock ACL test.
+                    # A native Windows temp directory may have a foreign
+                    # owner SID under an elevated test token.
+                    with patch("defenseclaw.webhooks.writer.locked_config_yaml", return_value=nullcontext()):
+                        with self.assertRaisesRegex(ValueError, "port"):
+                            apply_webhook(
+                                data_dir=td, name="badport", type_="generic", url=bad,
+                                enabled=False, dry_run=dry_run,
+                            )
+                    with open(os.path.join(td, "config.yaml"), "rb") as config_file:
+                        self.assertEqual(config_file.read(), before)
+        shown = redact_webhook_url(bad)
+        self.assertNotIn("private-path", shown)
+        self.assertNotIn("private-value", shown)
+        self.assertNotIn("bad", shown)
+
     def test_accepts_public_https(self):
         validate_webhook_url("https://hooks.slack.com/services/X/Y/Z")
 

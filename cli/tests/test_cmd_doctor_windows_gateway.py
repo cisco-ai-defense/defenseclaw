@@ -421,6 +421,43 @@ class WindowsGatewayDoctorTests(unittest.TestCase):
         self.assertIn("refusing lifecycle mutation", detail)
         lifecycle.assert_not_called()
 
+    def test_unverified_listener_identity_never_triggers_lifecycle_repair(self):
+        with open(os.path.join(self.home, "config.yaml"), "w", encoding="utf-8") as handle:
+            handle.write("config_version: 8\n")
+        for code in (
+            "legacy_identity",
+            "foreign_listener",
+            "ambiguous_listener",
+            "unavailable",
+            "unbound_home",
+        ):
+            with self.subTest(code=code):
+                reason = f"{code} listener identity is unsafe"
+                with (
+                    patch.object(
+                        cmd_doctor,
+                        "_trusted_gateway_listener",
+                        return_value=cmd_doctor._GatewayTrust(code, reason, 4242),
+                    ),
+                    patch.object(
+                        cmd_doctor,
+                        "_managed_gateway_process_trust_for_lifecycle",
+                        return_value=cmd_doctor._GatewayTrust("missing", "no managed PID"),
+                    ),
+                    patch.object(
+                        cmd_doctor,
+                        "_managed_gateway_listener_evidence",
+                        return_value=ListenerEvidence("missing"),
+                    ),
+                    patch.object(cmd_doctor, "_foreign_gateway_port_holder", return_value=""),
+                    patch.object(cmd_doctor, "_repair_gateway_lifecycle", return_value=(True, "")) as lifecycle,
+                ):
+                    tag, detail = _fix_gateway_service(self.cfg, assume_yes=True)
+                self.assertEqual(tag, "fail")
+                self.assertIn(reason, detail)
+                self.assertIn("refusing lifecycle mutation", detail)
+                lifecycle.assert_not_called()
+
 
 class FakeWatchdogEvidence:
     def __init__(self, *, record=None, process=None, state=None, ownership=None):

@@ -6,7 +6,9 @@ package openshell
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -65,6 +67,36 @@ func LaunchAgentLabelsIn(listing []byte, base string) []string {
 		}
 	}
 	return labels
+}
+
+// LaunchDomain is the launchd domain of the account uid's job of base, whose
+// installed label is label, from what print (`launchctl print DOMAIN`) says
+// of each domain: the one that lists label, else one that lists an earlier
+// label of base, else the graphical session when there is one, else the
+// background session of an ssh login. launchd keeps one job per label for
+// an account, whichever of its sessions loaded it (a sign-in's Background
+// session, a root lifecycle's bootstrap): a bootstrap into the other
+// domain fails with "Bootstrap failed: 5: Input/output error", and a
+// kickstart, stop or kill there finds no job (GAP-0863). listing is what
+// print said of the domain picked.
+func LaunchDomain(uid int, base, label string, print func(domain string) (string, error)) (domain, listing string) {
+	gui, user := "gui/"+strconv.Itoa(uid), "user/"+strconv.Itoa(uid)
+	guiOut, guiErr := print(gui)
+	guiLabels := LaunchAgentLabelsIn([]byte(guiOut), base)
+	if guiErr == nil && slices.Contains(guiLabels, label) {
+		return gui, guiOut
+	}
+	userOut, userErr := print(user)
+	userLabels := LaunchAgentLabelsIn([]byte(userOut), base)
+	switch {
+	case guiErr != nil:
+		return user, userOut
+	case userErr == nil && slices.Contains(userLabels, label):
+		return user, userOut
+	case len(guiLabels) == 0 && userErr == nil && len(userLabels) > 0:
+		return user, userOut
+	}
+	return gui, guiOut
 }
 
 // FindLaunchAgent is the installed job of base in dir: its label and plist.

@@ -49,7 +49,8 @@ func TestDoctorAdviceForAnOldErrorStateMicroVM(t *testing.T) {
 		t.Fatal("no sandbox-hooks check")
 		return openshell.Check{}
 	}
-	after := ", then `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME` for hic, which keep the sandbox and its work"
+	afterDocker := ", then `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME` for hic, which keep the sandbox and its work"
+	afterVM := ", then `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME` for hic; the sandbox remains, but its MicroVM work is kept only through the last successful disk sync"
 	held := func(move string) string {
 		return move + " is refused while OpenShell does not report hic stopped, and this OpenShell neither stops nor starts a MicroVM in its error state: " +
 			"`defenseclaw sandbox delete NAME` deletes it with its work"
@@ -65,8 +66,8 @@ func TestDoctorAdviceForAnOldErrorStateMicroVM(t *testing.T) {
 		{"per user, timed out", "vm", "ProvisioningTimedOut: Provisioning repair window expired after 300 seconds", false, perUser + " (see Gateway; " + held("the upgrade") + ")"},
 		{"managed", "vm", "MainProcessFailed: Canonical main process exited with status 1", true, managed + " (" + held("the move") + ")"},
 		{"managed, not polled", "vm", "ProcessPollFailed: Bad file descriptor", true, managed + " (" + held("the move") + ")"},
-		{"managed, VM gone", "vm", "ProcessExited: VM process exited with status 1", true, managed + after},
-		{"docker", "docker", "ContainerExited: exited", false, perUser + " (see Gateway)" + after},
+		{"managed, VM gone", "vm", "ProcessExited: VM process exited with status 1", true, managed + afterVM},
+		{"docker", "docker", "ContainerExited: exited", false, perUser + " (see Gateway)" + afterDocker},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ta := newTestApp(t, "")
@@ -110,6 +111,12 @@ func TestDoctorAdviceForALingeringFailedMicroVM(t *testing.T) {
 			if c.Status != openshell.StatusWarn || c.Fix == nil {
 				t.Fatalf("hooks check = %+v", c)
 			}
+			if tc.driver == "vm" && !strings.Contains(c.Detail, "MicroVM") {
+				t.Errorf("failed VM reported as a Docker container: %s", c.Detail)
+			}
+			if tc.driver == "vm" && !tc.lingering && !strings.Contains(c.Fix.Summary, "last successful disk sync") {
+				t.Errorf("failed VM advice promises work without a confirmed sync: %s", c.Fix.Summary)
+			}
 			if tc.lingering {
 				for _, want := range []string{
 					"`defenseclaw sandbox start failed --end-vm`",
@@ -128,7 +135,22 @@ func TestDoctorAdviceForALingeringFailedMicroVM(t *testing.T) {
 				strings.Contains(c.Fix.Summary, "--end-vm") {
 				t.Errorf("ordinary error advice = %s", c.Fix.Summary)
 			}
+			if tc.driver == "vm" && strings.Contains(c.Fix.Summary, "which keep the sandbox and its work") {
+				t.Errorf("failed VM advice promises all work: %s", c.Fix.Summary)
+			}
 		})
+	}
+}
+
+func TestDoctorAdviceForAnotherHeldMicroVMError(t *testing.T) {
+	sb := sampleSandbox("failed")
+	sb.Phase, sb.Driver, sb.PhaseReason = "error", "vm", "ProcessPollFailed: Bad file descriptor"
+	ta := newTestApp(t, "", sb)
+	ta.daemon.status.Gateway.Version = openshell.SupportedMin
+	c := ta.hooksCheck(bg, "")
+	if c.Fix == nil || !strings.Contains(c.Fix.Summary, "`defenseclaw sandbox stop failed`") ||
+		!strings.Contains(c.Fix.Summary, "last successful disk sync") || strings.Contains(c.Fix.Summary, "`defenseclaw sandbox start NAME`") {
+		t.Fatalf("held failed VM advice promises stop/start recovery: %+v", c)
 	}
 }
 
@@ -149,7 +171,7 @@ func TestStopOfAnEndedMicroVMSaysHowToStopIt(t *testing.T) {
 				"its VM still runs what its workload left running, and its start ends that VM with no flush first, so what the VM has not written to its disk is lost: " +
 				"`defenseclaw sandbox start box --end-vm` ends the VM that way, then `defenseclaw sandbox stop box` once it is ready; or `defenseclaw sandbox delete box` (DefenseClaw sandbox) or `openshell sandbox delete box` (raw OpenShell sandbox), which deletes it and its work"},
 		{"failed", "error", "MainProcessFailed: Canonical main process exited with status 1", openshell.SupportedMin,
-			"⚠ box is in OpenShell's error state: OpenShell does not stop it, so its MicroVM may still run"},
+			"⚠ box is in OpenShell's error state (MainProcessFailed: Canonical main process exited with status 1): OpenShell does not stop it, so its MicroVM may still run"},
 		{"completed, old gateway", "completed", "", "0.1.3",
 			"until OpenShell reports it stopped: `defenseclaw sandbox delete box` (DefenseClaw sandbox) or `openshell sandbox delete box` (raw OpenShell sandbox), which deletes it and its work (this OpenShell neither stops nor starts a completed MicroVM)"},
 	} {

@@ -121,3 +121,47 @@ func TestManagedLaunchAgentCheckReadsTheTaggedLabel(t *testing.T) {
 		t.Fatalf("check = %+v", c)
 	}
 }
+
+// TestLaunchDomainIsWhereTheJobIsLoaded (GAP-0863): launchd keeps one job
+// per label for an account, in its graphical or its background domain, and
+// a bootstrap into the other fails with "5: Input/output error". The domain
+// of an agent is the one that lists its label, else one that lists an
+// earlier label of it, else the graphical session, else the background one.
+func TestLaunchDomainIsWhereTheJobIsLoaded(t *testing.T) {
+	const base, label, old = SandboxAgentBase, SandboxAgentBase + ".0123456789ab", SandboxAgentBase
+	listing := func(labels ...string) string {
+		out := "services = {\n"
+		for _, l := range labels {
+			out += "\t\t0\t-\t" + l + "\n"
+		}
+		return out + "}\n"
+	}
+	for _, tc := range []struct {
+		name      string
+		gui, user string
+		guiErr    bool
+		want      string
+	}{
+		{name: "loaded in the GUI session", gui: listing(label), user: listing(), want: "gui/501"},
+		{name: "loaded in the background session only", gui: listing(), user: listing(label), want: "user/501"},
+		{name: "current label in the background, old one in the GUI", gui: listing(old), user: listing(label), want: "user/501"},
+		{name: "only an earlier label, in the background", gui: listing(), user: listing(old), want: "user/501"},
+		{name: "loaded nowhere", gui: listing(), user: listing(), want: "gui/501"},
+		{name: "no GUI session", guiErr: true, user: listing(), want: "user/501"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := LaunchDomain(501, base, label, func(domain string) (string, error) {
+				if domain == "gui/501" {
+					if tc.guiErr {
+						return "Domain does not support specified action", errors.New("exit status 125")
+					}
+					return tc.gui, nil
+				}
+				return tc.user, nil
+			})
+			if got != tc.want {
+				t.Fatalf("domain = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}

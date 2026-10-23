@@ -89,13 +89,44 @@ def _ensure_policies_dir(app: AppContext) -> str:
 
 
 def _load_policy(path: str) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise click.ClickException(f"invalid YAML in policy file {path}{location}") from exc
+    except UnicodeError as exc:
+        raise click.ClickException(f"policy file {path} is not UTF-8 text") from exc
+    except OSError as exc:
+        raise click.ClickException(f"cannot read policy file {path}: {exc.strerror or exc}") from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise click.ClickException(f"policy YAML in {path} must be a mapping at the top level")
+    return data
 
 
 def _save_policy(path: str, data: dict) -> None:
-    with open(path, "w") as f:
-        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+    # A catalog entry may already be a symlink. Never open it for writing:
+    # write an exclusive temporary file in the catalog and atomically replace
+    # only the directory entry after refusing any link observed there.
+    def refuse_link() -> None:
+        if os.path.islink(path):
+            raise click.ClickException(f"policy catalog destination {path} is a symbolic link; remove it before saving")
+
+    refuse_link()
+    fd, staged = tempfile.mkstemp(prefix=".policy-", suffix=".yaml", dir=os.path.dirname(path) or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+        refuse_link()
+        os.replace(staged, path)
+    finally:
+        if os.path.lexists(staged):
+            os.unlink(staged)
 
 
 def _sanitize_policy_name(name: str) -> str:
@@ -515,10 +546,15 @@ def load(app: AppContext, path: str) -> None:
 
     # Standard policy: treat as activate. The file must contain a
     # ``name`` field so the catalog can register it.
-    name = data.get("name") or data.get("metadata", {}).get("name", "")
+    metadata = data.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        raise click.ClickException("policy YAML metadata must be a mapping")
+    name = data.get("name") or metadata.get("name", "")
     if not name:
         click.echo("error: policy YAML has no 'name' field; cannot activate.", err=True)
         raise SystemExit(1)
+    if not isinstance(name, str):
+        raise click.ClickException("policy YAML name must be a string")
 
     # Copy the file into the user policy directory so activate can find it.
     dest = os.path.join(_ensure_policies_dir(app), f"{_sanitize_policy_name(name)}.yaml")

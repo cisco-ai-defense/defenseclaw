@@ -34,7 +34,7 @@ func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 	}{
 		{installed: "closed", env: "open", deny: true},
 		{installed: "closed", env: "", deny: true},
-		{installed: "open", env: "closed", deny: false},
+		{installed: "open", env: "closed", deny: true},
 		{installed: "open", env: "", strict: "1", deny: true},
 	} {
 		t.Run("installed="+tc.installed+"/env="+tc.env+"/strict="+tc.strict, func(t *testing.T) {

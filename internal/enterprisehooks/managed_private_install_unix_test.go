@@ -196,14 +196,8 @@ func TestDiscoverUnixPrivateClaudeWithoutVersionIsUnprotected(t *testing.T) {
 
 func TestDiscoverUnixPrivateCodexAndCopilotBelowContract(t *testing.T) {
 	home := makeHome(t, trustedTestDir(t), "alice")
-	for _, pkg := range []string{"@openai/codex", "@github/copilot"} {
-		path := filepath.Join(home, "private", "node_modules", filepath.FromSlash(pkg), "package.json")
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(`{"name":"`+pkg+`","version":"0.0.1"}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	for pkg, entry := range map[string]string{"@openai/codex": "bin/codex.js", "@github/copilot": "npm-loader.js"} {
+		npmCopy(t, filepath.Join(home, "private", "node_modules", filepath.FromSlash(pkg)), pkg, "0.0.1", entry)
 	}
 	findings := DiscoverUnixPrivateAgentInstalls(home, []string{"codex", "copilot"})
 	if len(findings) != 2 || findings[0].Connector != "codex" || findings[1].Connector != "copilot" {
@@ -213,15 +207,9 @@ func TestDiscoverUnixPrivateCodexAndCopilotBelowContract(t *testing.T) {
 
 func TestDiscoverUnixVoltaCodexAndCopilotCopies(t *testing.T) {
 	home := makeHome(t, trustedTestDir(t), "alice")
-	for _, pkg := range []string{"@openai/codex", "@github/copilot"} {
-		path := filepath.Join(home, ".volta", "tools", "image", "packages", filepath.FromSlash(pkg),
-			"node_modules", filepath.FromSlash(pkg), "package.json")
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(`{"name":"`+pkg+`","version":"0.0.1"}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	for pkg, entry := range map[string]string{"@openai/codex": "bin/codex.js", "@github/copilot": "npm-loader.js"} {
+		npmCopy(t, filepath.Join(home, ".volta", "tools", "image", "packages", filepath.FromSlash(pkg),
+			"node_modules", filepath.FromSlash(pkg)), pkg, "0.0.1", entry)
 	}
 	findings := DiscoverUnixPrivateAgentInstalls(home, []string{"codex", "copilot"})
 	if len(findings) != 2 || findings[0].Connector != "codex" || findings[1].Connector != "copilot" {

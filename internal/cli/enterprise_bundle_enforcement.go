@@ -30,6 +30,9 @@ type bundleEnforcement struct {
 	// why).
 	CurrentConfig []byte
 	CurrentErr    error
+	// CurrentDigest is this build's digest of the verified current bundle,
+	// which can differ from the digest saved by an older product build.
+	CurrentDigest string
 	// InstalledConfig is the installed config.yaml; nil when it could not
 	// be read.
 	InstalledConfig []byte
@@ -93,7 +96,7 @@ func (e bundleEnforcement) Problem() string {
 	}
 	label := bundleLabel(e.Current)
 	switch {
-	case e.CurrentErr != nil || e.CurrentConfig == nil:
+	case e.CurrentErr != nil || e.CurrentConfig == nil || e.CurrentDigest == "":
 		detail := "it could not be rendered"
 		if e.CurrentErr != nil {
 			detail = boundedPolicyMessage(e.CurrentErr.Error())
@@ -109,9 +112,9 @@ func (e bundleEnforcement) Problem() string {
 		return fmt.Sprintf("the running gateway did not report its policy, so %s is not confirmed as enforced", label)
 	case e.Policy.LastReloadError != "":
 		return fmt.Sprintf("the gateway rejected its last reload (%s) and keeps enforcing an earlier policy, not %s", e.Policy.LastReloadError, label)
-	case !strings.EqualFold(e.Policy.GatewayReportedDigest, e.Current.EffectivePolicyDigest):
+	case !strings.EqualFold(e.Policy.GatewayReportedDigest, e.CurrentDigest):
 		return fmt.Sprintf("the gateway enforces effective policy %s, not %s of %s", enterprisestatus.ShortDigest(e.Policy.GatewayReportedDigest),
-			enterprisestatus.ShortDigest(e.Current.EffectivePolicyDigest), label)
+			enterprisestatus.ShortDigest(e.CurrentDigest), label)
 	}
 	return ""
 }

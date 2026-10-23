@@ -71,9 +71,8 @@ def test_managed_hook_docs_distinguish_outages_from_refusals() -> None:
 
 
 def test_managed_outage_open_docs_name_rate_limits_and_the_guard_session_check() -> None:
-    """r104 W4b2 review: a rate limit blocks also when the resends run out; the
-    administrator's open does not reach a connector whose foreign-hook guard
-    checks the session with the gateway; observe mode is not a fail mode."""
+    """Rate limits block after the resends; a guarded call needs a current
+    gateway answer even when the administrator selects open (decision 16)."""
     threat_model = (ROOT / "docs/ENTERPRISE-THREAT-MODEL.md").read_text(encoding="utf-8")
     r31 = next(line for line in threat_model.splitlines() if line.startswith("| R31 |"))
     assert "including for Claude Code, Codex and Devin" not in r31
@@ -99,6 +98,8 @@ def test_managed_outage_open_docs_name_rate_limits_and_the_guard_session_check()
     assert "in observe mode | Open" not in per_layer
     assert "Managed Claude Code and Codex hooks | Always closed" not in per_layer
     assert "observe and action mode alike" in per_layer and "outage only" in per_layer
+    # Decision 16: the administrator open never covers a guarded call.
+    assert "not for a connector whose foreign-hook guard checks the session" in per_layer
     assert "observe mode fails open" not in coverage
 
     troubleshooting = (DOCS / "troubleshooting/enterprise/index.mdx").read_text(encoding="utf-8")
@@ -548,7 +549,7 @@ FACTS = [
         (("enterprise/runtime/sandbox-reference.mdx",),
          "Without `--purge`, uninstall stops running sandboxes through the sandbox daemon"),
         (("enterprise/runtime/sandbox-reference.mdx",),
-         "Every sandbox stays with its records, disks and any copy-mode work not pulled yet."),
+         "Sandbox records and disks stay; unpulled copy-mode work remains only through the last successful disk sync"),
     ]),
     ("per_user_uninstall_stops_on_a_running_sandbox", [
         (("get-started/uninstall.mdx",),

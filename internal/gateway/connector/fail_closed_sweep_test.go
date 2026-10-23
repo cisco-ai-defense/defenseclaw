@@ -22,13 +22,13 @@ func TestOpenCodeClosedPluginRejectsUnusableAnswers(t *testing.T) {
 	}
 }
 
-func TestOpenCodeExplicitPerUserOpenAllowsUnusableAnswer(t *testing.T) {
+func TestOpenCodeExplicitPerUserOpenStillRejectsUnusableAnswer(t *testing.T) {
 	server := openCodeStubGateway(t, `{}`, `{"action":"unknown"}`)
 	data := openCodePluginTestData(t, server)
 	data.FailMode = "open"
 	lines := runOpenCodePluginHarness(t, data, 2)
-	if len(lines) < 2 || lines[0] != "allow" || lines[1] != "allow" {
-		t.Fatalf("explicit per-user open rejected unusable answers: %q", lines)
+	if len(lines) < 2 || lines[0] == "allow" || lines[1] == "allow" {
+		t.Fatalf("explicit per-user open allowed unusable answers: %q", lines)
 	}
 }
 
@@ -111,8 +111,9 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 			for _, name := range []string{"inspect-request.sh", "inspect-tool.sh", "inspect-response.sh", "inspect-tool-response.sh"} {
 				t.Run(parser.name+"/"+verdict.name+"/"+name, func(t *testing.T) {
 					hookHome := t.TempDir()
+					installNativeGatewayForHookTest(t, hookHome)
 					cmd := exec.Command("bash", filepath.Join(dir, name))
-					cmd.Env = append(os.Environ(), "PATH="+parser.path, "DEFENSECLAW_HOME="+hookHome, "DEFENSECLAW_FAIL_MODE=closed")
+					cmd.Env = append(os.Environ(), "PATH="+parser.path, "HOME="+hookHome, "DEFENSECLAW_HOME="+hookHome, "DEFENSECLAW_FAIL_MODE=closed")
 					cmd.Stdin = strings.NewReader(`{"tool":"Bash","input":"echo marker","content":"marker"}`)
 					output, err := cmd.CombinedOutput()
 					got := 0
@@ -147,12 +148,10 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 	}
 }
 
-// Without jq or python3 the shared inspect hooks cannot check a call. An
-// install with JSON state (hooks/.hookcfg, which setup always writes) cannot
-// have its mode read either, so it blocks even when installed open (1.0.4
-// review, loop round 2 of G-hooks-upg); only flat records alone, with no JSON
-// state, keep the explicit open answer and its notice.
-func TestInspectShellNoParserExplicitOpenNotice(t *testing.T) {
+// Without jq or python3 the shared inspect hooks cannot check a call. A
+// per-user render is closed whatever mode it was asked for, with or without
+// JSON state (hooks/.hookcfg), so it blocks and records closed.
+func TestInspectShellNoParserExplicitPerUserOpenStillBlocks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX hooks")
 	}
@@ -205,18 +204,12 @@ func TestInspectShellNoParserExplicitOpenNotice(t *testing.T) {
 			cmd.Env = append(os.Environ(), "PATH="+path, "DEFENSECLAW_HOME="+hookHome, "DEFENSECLAW_FAIL_MODE=open")
 			cmd.Stdin = strings.NewReader(`{"tool":"Bash","content":"marker"}`)
 			output, err := cmd.CombinedOutput()
-			wantMode := "open"
-			if tc.jsonState {
-				wantMode = "closed"
-				if err == nil || !strings.Contains(string(output), "DefenseClaw needs jq or python3 to check this call") || !strings.Contains(string(output), "blocking") {
-					t.Fatalf("closed notice missing: err=%v output=%q", err, output)
-				}
-			} else if err != nil || !strings.Contains(string(output), "DefenseClaw needs jq or python3 to check this call") || !strings.Contains(string(output), "allowing") {
-				t.Fatalf("open notice missing: err=%v output=%q", err, output)
+			if err == nil || !strings.Contains(string(output), "DefenseClaw needs jq or python3 to check this call") || !strings.Contains(string(output), "blocking") {
+				t.Fatalf("closed notice missing: err=%v output=%q", err, output)
 			}
 			failure, err := os.ReadFile(filepath.Join(hookHome, "logs", "hook-failures.jsonl"))
-			if err != nil || !strings.Contains(string(failure), `"fail_mode":"`+wantMode+`"`) {
-				t.Fatalf("missing %s failure record: %v %q", wantMode, err, failure)
+			if err != nil || !strings.Contains(string(failure), `"fail_mode":"closed"`) {
+				t.Fatalf("missing closed failure record: %v %q", err, failure)
 			}
 			if calls.Load() != 0 {
 				t.Fatalf("hook sent %d requests without a verdict parser", calls.Load())
@@ -284,4 +277,69 @@ func TestClosedShellHookRejectsMissingHome(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPerUserCopilotShellDeniesGatewayFailureDuringInstall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX hook")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	root := t.TempDir()
+	hookDir := filepath.Join(root, "hooks")
+	if err := os.Mkdir(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookScriptsCommonWithFailMode(hookDir, strings.TrimPrefix(server.URL, "http://"), "test-token", "open", []string{"copilot-hook.sh"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".install.lock"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ event, deny string }{
+		{"preToolUse", `"permissionDecision":"deny"`},
+		{"permissionRequest", `"behavior":"deny"`},
+	} {
+		t.Run(tc.event, func(t *testing.T) {
+			cmd := exec.Command("bash", filepath.Join(hookDir, "copilot-hook.sh"), "--event", tc.event)
+			cmd.Env = append(os.Environ(), "HOME="+root, "DEFENSECLAW_HOME="+root)
+			cmd.Stdin = strings.NewReader(`{"toolName":"bash","toolArgs":"{}"}`)
+			out, err := cmd.CombinedOutput()
+			if err != nil || !strings.Contains(string(out), tc.deny) {
+				t.Fatalf("install call allowed: err=%v output=%q", err, out)
+			}
+		})
+	}
+	t.Run("redirected hook home", func(t *testing.T) {
+		otherHome := t.TempDir()
+		cmd := exec.Command("bash", filepath.Join(hookDir, "copilot-hook.sh"), "--event", "preToolUse")
+		cmd.Env = append(os.Environ(), "HOME="+root, "DEFENSECLAW_HOME="+otherHome)
+		cmd.Stdin = strings.NewReader(`{"toolName":"bash","toolArgs":"{}"}`)
+		out, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), `"permissionDecision":"deny"`) {
+			t.Fatalf("redirected home hid the install lock: err=%v output=%q", err, out)
+		}
+	})
+	t.Run("unreadable install directory", func(t *testing.T) {
+		state := filepath.Join(root, "unreadable-state")
+		if err := os.Mkdir(state, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(state, ".install.lock"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(state, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(state, 0o700) })
+		cmd := exec.Command("bash", filepath.Join(hookDir, "copilot-hook.sh"), "--event", "preToolUse")
+		cmd.Env = append(os.Environ(), "HOME="+root, "DEFENSECLAW_HOME="+state)
+		cmd.Stdin = strings.NewReader(`{"toolName":"bash","toolArgs":"{}"}`)
+		out, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), `"permissionDecision":"deny"`) {
+			t.Fatalf("unreadable install lock allowed: err=%v output=%q", err, out)
+		}
+	})
 }

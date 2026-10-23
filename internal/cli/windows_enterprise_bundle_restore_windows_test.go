@@ -57,8 +57,13 @@ var windowsBundleEditedDigest = "sha256:" + strings.Repeat("e", 64)
 // gateway and the installed CLI's policy digest, which reports the bundle
 // digest while config.yaml is the bundle config and another one otherwise.
 func newWindowsBundleRestoreHost(t *testing.T) *windowsBundleRestoreHost {
+	return newWindowsBundleRestoreHostForVersion(t, "1.0.2")
+}
+
+func newWindowsBundleRestoreHostForVersion(t *testing.T, sourceVersion string) *windowsBundleRestoreHost {
 	t.Helper()
 	e := newBundleCLIEnv(t)
+	appVersion = sourceVersion
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
 	signed := filepath.Join(e.dir, "v5.dcbundle")
 	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
@@ -199,6 +204,62 @@ func windowsBundleRestoreOptions() *windowsEnterpriseLifecycleOptions {
 	opts := ensureTestOptions()
 	opts.configPath, opts.manifestPath, opts.installedBeforeRun = "", "", true
 	return opts
+}
+
+// A confirmed receipt keeps the digest of the build that applied it. After
+// an upgrade, all Windows health actions must check the running gateway
+// against this build's verified bundle and the exact installed config.
+func TestWindowsBundleHealthAfterProductUpgradeUsesCurrentDigest(t *testing.T) {
+	for _, sourceVersion := range []string{"1.0.2", "1.0.3"} {
+		t.Run(sourceVersion, func(t *testing.T) {
+			host := newWindowsBundleRestoreHostForVersion(t, sourceVersion)
+			driver := newWindowsBundleDriver(host.layout)
+			state, err := driver.Store.LoadState()
+			if err != nil || state.Current == nil {
+				t.Fatalf("confirmed state: %+v, %v", state, err)
+			}
+			const oldDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+			if host.digest == oldDigest {
+				t.Fatal("the upgraded build did not change the effective digest")
+			}
+			state.Current.EffectivePolicyDigest = oldDigest
+			raw, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(driver.Store.StatePath(), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			appVersion = "1.0.4"
+			for _, action := range []string{"status", "verify", "ensure", "repair", "upgrade"} {
+				result := newWindowsEnterpriseStandaloneResult(action, windowsBundleRestoreOptions())
+				result.Installed = true
+				result.Readiness.Gateway = true
+				result.Policy = &enterprisestatus.PolicyState{EffectiveDigest: host.digest, GatewayReportedDigest: host.digest, Applied: true}
+				addWindowsBundleEnforcementError(result, windowsBundleRestoreOptions(), false)
+				if windowsBundleHasCode(result.Errors, bundleNotAppliedCode) {
+					t.Fatalf("%s rejected the enforced upgraded bundle: %+v", action, result.Errors)
+				}
+				result.Policy.GatewayReportedDigest = oldDigest
+				addWindowsBundleEnforcementError(result, windowsBundleRestoreOptions(), false)
+				if !windowsBundleHasCode(result.Errors, bundleNotAppliedCode) {
+					t.Fatalf("%s accepted a gateway reporting the old policy", action)
+				}
+			}
+			changed := append(bytes.Clone(host.bundleConfig), []byte("# changed after confirmation\n")...)
+			if err := os.WriteFile(host.layout.ConfigPath, changed, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			result := newWindowsEnterpriseStandaloneResult("verify", windowsBundleRestoreOptions())
+			result.Installed = true
+			result.Readiness.Gateway = true
+			result.Policy = &enterprisestatus.PolicyState{EffectiveDigest: host.digest, GatewayReportedDigest: host.digest, Applied: true}
+			addWindowsBundleEnforcementError(result, windowsBundleRestoreOptions(), false)
+			if !windowsBundleHasCode(result.Errors, bundleNotAppliedCode) {
+				t.Fatal("verify accepted changed installed config despite the gateway digest")
+			}
+		})
+	}
 }
 
 // assertWindowsBundleRestored checks config.yaml is the bundle config again,

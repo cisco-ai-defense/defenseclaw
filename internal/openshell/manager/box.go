@@ -129,15 +129,8 @@ type box struct {
 	// hooks.on_silence: stop) scheduled this session's stop.
 	tamperStop  bool
 	silenceSent bool
-	// oldSupervisorStop is set while a stop of a session on an old
-	// supervisor is scheduled (scheduleOldSupervisorStop).
-	oldSupervisorStop bool
-	// oldSupervisorStopSaid is the session and the feed line of the last
-	// failed automatic stop of it (stopOldSupervisor), which a reconcile
-	// retry does not publish again until it changes.
-	oldSupervisorStopSaid string
-	// oldSupervisorNetworkErr is the last failure to withdraw the direct
-	// network rules of a completed or failed MicroVM on an old supervisor.
+	// oldSupervisorNetworkErr is the last failure to withdraw the network
+	// rules and providers of a live legacy guest (oldSupervisorLive).
 	oldSupervisorNetworkErr string
 	// oldSupervisorNetworkBusy prevents duplicate containment workers while
 	// a lifecycle operation holds op.
@@ -465,8 +458,6 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		// silent.
 		b.silentSince, b.silenceSent = time.Time{}, false
 		b.portLines, b.opens = nil, nil
-		// A new session hears again why its automatic stop failed.
-		b.oldSupervisorStopSaid = ""
 		// The new session's hooks name its session.
 		m.tel.forgetSandbox(b.rec.Name)
 		if previous != audit.SandboxPhaseReady {
@@ -556,22 +547,17 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "MEDIUM",
 			Reason: sandboxapi.ReasonUnflushedStop, Message: unflushedStopMessage(rec.Name)})
 	}
-	if phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(rec.SessionRelease) {
-		// Once a session, and again for a restarted daemon that finds it
-		// still running: isolate a legacy MicroVM before its flush and stop.
-		if oldSupervisorVMNeedsContainment(phase, rec) {
-			m.containOldSupervisorNetwork(ctx, b)
-		}
-		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
-			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorMessage(rec.Name, rec.SessionRelease, m.upgradeWayOn(release))})
-		m.scheduleOldSupervisorStop(b)
-	} else if oldSupervisorLingering(phase, rec) {
-		// OpenShell returns a completed or failed MicroVM's stop unchanged.
-		// Keep its compute and disk, but withdraw its two external network
-		// paths while the legacy supervisor is still alive.
+	if oldSupervisorLive(phase, rec) {
+		// Once a session, and again for a restarted daemon that finds it:
+		// DefenseClaw stops no legacy guest itself, since only its user can
+		// save its work first. It closes the egress proxy and withdraws the
+		// network rules it added, which does not contain that supervisor's
+		// broker (GAP-0831), says the guest is not protected, with the
+		// command that ends it, and runs no new sandbox while it lives
+		// (legacyRunRefusal).
 		m.containOldSupervisorNetwork(ctx, b)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
-			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorLingeringMessage(rec.Name, rec.SessionRelease)})
+			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorMessage(rec.Name, rec.SessionRelease, phase, rec.Driver, m.upgradeWayOn(release))})
 	}
 	m.syncGuard(b, phase)
 	m.syncObserve(b, phase)
@@ -622,9 +608,10 @@ func stopLosesWrites(driver string) bool {
 // its container stopped (a Docker restart stops every one), its workload
 // failed, or OpenShell gave up provisioning it. A gateway that runs
 // sandboxes (openshell.SupportedMin and later) stops a sandbox in that phase
-// and starts it again after (NVIDIA/OpenShell#4231), which keeps the
-// sandbox and its work, except after a provisioning timeout: OpenShell
-// refuses that stop while its own cleanup reclaims what the attempt started,
+// and starts it again after (NVIDIA/OpenShell#4231). A failed MicroVM
+// keeps only work that reached its last successful disk sync. After a
+// provisioning timeout OpenShell refuses that stop while its own cleanup
+// reclaims what the attempt started,
 // and a start after the cleanup provisions the sandbox again. An older
 // gateway can neither stop nor start it: upgrade (upgradeWayOn, "" on a
 // gateway that runs sandboxes) is how OpenShell is upgraded first, and the
@@ -645,19 +632,32 @@ func errorPhaseWayOn(name, reason, upgrade string, microVM bool) string {
 		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then wait a minute for OpenShell's cleanup of " +
 			"the provisioning that timed out and `defenseclaw sandbox start " + name + "` (no stop: OpenShell " + openshell.SupportedMin +
 			" refuses to stop a sandbox whose provisioning timed out), which provisions it again"
+	case upgrade != "" && microVM:
+		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then " + exitedMicroVMWayOn(name)
 	case upgrade != "":
 		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then `defenseclaw sandbox stop " + name +
 			"` and `defenseclaw sandbox start " + name + "`, which keep the sandbox and its work"
 	case microVM && openshell.LingeringVM(openshell.PhaseError, reason, false):
-		// Its stop is returned as it is, and its start ends the VM with
-		// no flush: neither keeps all of its work.
-		return openshell.StopWayOn(name, openshell.PhaseError, reason, true)
+		// OpenShell may still hold its VM. The main-process failure has an
+		// explicit lossy end path; other reasons get the phase's stop advice.
+		way := openshell.StopWayOn(name, openshell.PhaseError, reason, true)
+		if !openshell.MainProcessFailed(reason) {
+			way += "; its MicroVM work is kept only through the last successful disk sync"
+		}
+		return way
 	case openshell.ProvisioningTimedOut(reason):
 		return "OpenShell gave up provisioning it and refuses to stop it while its own cleanup reclaims what it started: wait a minute, then `defenseclaw sandbox start " +
 			name + "` (no stop), which provisions it again; a start that says the cleanup is still pending is tried again a little later"
+	case microVM:
+		return exitedMicroVMWayOn(name)
 	}
 	return "fix what stopped it (start Docker again, for one), then `defenseclaw sandbox stop " + name +
 		"` and `defenseclaw sandbox start " + name + "`, which keep the sandbox and its work"
+}
+
+func exitedMicroVMWayOn(name string) string {
+	return "fix why its MicroVM exited; then `defenseclaw sandbox stop " + name + "` and `defenseclaw sandbox start " + name +
+		"`; the sandbox remains, but its MicroVM work is kept only through the last successful disk sync"
 }
 
 // upgradeWayOn is how this host's OpenShell is upgraded when the gateway
@@ -758,17 +758,22 @@ func (m *Manager) sandboxReleaseRefusal(gw *Gateway) error {
 	return nil
 }
 
-// oldSupervisorWarning is the sandbox's warning while its session runs the
-// supervisor of an OpenShell release older than openshell.SupportedMin
-// (oldSupervisorMessage), which DefenseClaw stops (stopOldSupervisor): a
-// stop that has not happened yet, or failed.
-const oldSupervisorWarning = "this session may run the supervisor of an OpenShell older than " + openshell.SupportedMin +
-	", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494): " +
-	"DefenseClaw closes a legacy MicroVM's network and keeps the VM until you stop it, since that release's stop may lose unsynced writes, or stops it itself if its network cannot be closed. `defenseclaw sandbox exec` runs nothing in it, and `defenseclaw sandbox connect` may start it again after it stops " +
-	"on OpenShell " + openshell.SupportedMin + " or later"
+// legacyUnprotected opens every account of a live legacy guest
+// (oldSupervisorLive): the owner's words for the state.
+const legacyUnprotected = "legacy sandbox running, not protected by the 1.0.4 egress policy"
 
-const oldSupervisorLingeringWarning = "this MicroVM may still run background work on an OpenShell supervisor older than " + openshell.SupportedMin +
-	": DefenseClaw closes its proxy and attempts to withdraw its direct network rules while keeping the VM and disk; OpenShell cannot stop it without losing unsynced work"
+// legacyContainment is what DefenseClaw does, and does not, about a live
+// legacy guest. Closing its egress proxy and withdrawing the network rules
+// and providers it added does not contain that supervisor's broker, which
+// falls through to the native call when it cannot inspect a socket
+// (GAP-0831), so the guest is never reported contained.
+const legacyContainment = "DefenseClaw closed its egress proxy and withdraws the network rules it added, but that does not contain the old broker, " +
+	"which passes a connection it cannot inspect straight to the host; DefenseClaw does not stop the sandbox for you, and until it is gone " +
+	"it creates and starts no sandbox and runs nothing in it"
+
+// legacyRulesKept opens the warning about a withdrawal of a live legacy
+// guest's network rules that failed (the error follows).
+const legacyRulesKept = "DefenseClaw could not withdraw the network rules it added to this legacy sandbox either, or confirm them withdrawn, so they may still let it out: "
 
 // oldSupervisorLingering reports a VM with compute still held after the
 // main process ended, whose session may use a broker from before 0.1.5.
@@ -780,197 +785,115 @@ func oldSupervisorLingering(phase audit.SandboxPhase, rec record) bool {
 		holdsCompute(phase, rec.Driver, rec.PhaseReason)
 }
 
-// oldSupervisorVMNeedsContainment includes a ready legacy MicroVM, which
-// DefenseClaw keeps with its network closed until the user stops it
-// (stopOldSupervisor). The same rule on restart keeps its network closed.
-func oldSupervisorVMNeedsContainment(phase audit.SandboxPhase, rec record) bool {
-	return oldSupervisorLingering(phase, rec) ||
-		phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(rec.SessionRelease) && stopLosesWrites(rec.Driver)
+// oldSupervisorLive reports a legacy guest that may still run the
+// supervisor of an OpenShell release older than openshell.SupportedMin (or
+// one its record does not name, a record of DefenseClaw 1.0.3 or older): a
+// ready session on any driver, and a MicroVM whose workload ended but whose
+// VM may still run (oldSupervisorLingering). DefenseClaw keeps it as it is
+// until its user ends it, withdraws what it added to its network
+// (containOldSupervisorNetwork), reports it unprotected and runs no new
+// sandbox meanwhile (legacyRunRefusal).
+func oldSupervisorLive(phase audit.SandboxPhase, rec record) bool {
+	return phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(rec.SessionRelease) || oldSupervisorLingering(phase, rec)
 }
 
-func oldSupervisorLingeringMessage(name, release string) string {
-	which := "OpenShell " + release
-	if release == "" {
-		which = "an OpenShell release older than " + openshell.SupportedMin + " (the session's release was not recorded)"
+// legacyWayOn is how the user ends the live legacy guest name in phase on
+// compute driver driver ("" is docker): the stop of a ready one, which on
+// a MicroVM syncs its disk first because that release's stop does not, and
+// the delete of a MicroVM whose workload ended, which OpenShell does not
+// stop (or, on OpenShell SupportedMin or later, its start with --end-vm).
+func legacyWayOn(name string, phase audit.SandboxPhase, driver string) string {
+	if phase == audit.SandboxPhaseReady {
+		way := "save the work you need, then run `defenseclaw sandbox stop " + name + "`"
+		if stopLosesWrites(driver) {
+			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost)"
+		}
+		return way
 	}
-	return "⚠ " + name + " may still run background work on the supervisor of " + which +
-		", whose network broker can bypass sandbox policy (NVIDIA/OpenShell#4494): DefenseClaw closes its egress proxy and attempts to withdraw its direct network rules, " +
-		"while keeping the MicroVM and disk; OpenShell cannot stop this ended VM without losing unsynced work"
+	return "OpenShell does not stop this VM, whose workload ended: `defenseclaw sandbox delete " + name + "` deletes it and its work, or on OpenShell " +
+		openshell.SupportedMin + " or later `defenseclaw sandbox start " + name + " --end-vm` ends the VM, losing what it has not written to its disk"
 }
 
-// oldSupervisorMessage is the feed's warning about the sandbox name whose
-// session started on OpenShell release (a record from before DefenseClaw
-// kept it: ""), older than openshell.SupportedMin: it runs that release's
-// supervisor until it stops, whatever the gateway runs now, so DefenseClaw
-// stops it (stopOldSupervisor). upgrade is the way on of a gateway that
+// oldSupervisorWarning is the view's warning about the live legacy guest
+// name in phase on driver (oldSupervisorLive).
+func oldSupervisorWarning(name string, phase audit.SandboxPhase, driver string) string {
+	what := "its session runs"
+	if phase != audit.SandboxPhaseReady {
+		what = "its MicroVM may still run background work on"
+	}
+	return legacyUnprotected + ": " + what + " the supervisor of an OpenShell release older than " + openshell.SupportedMin +
+		", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494). " + legacyContainment + ": " +
+		legacyWayOn(name, phase, driver)
+}
+
+// oldSupervisorMessage is the feed's HIGH finding about the live legacy
+// guest name (oldSupervisorLive) in phase on driver, whose session started
+// on OpenShell release (a record from before DefenseClaw kept it: ""), older
+// than openshell.SupportedMin. upgrade is the way on of a gateway that
 // starts no sandbox (Manager.upgradeWayOn).
-func oldSupervisorMessage(name, release, upgrade string) string {
-	msg := "⚠ " + name + "'s session started on OpenShell " + release + ", whose network broker can let the sandbox's connections bypass its policy " +
-		"(NVIDIA/OpenShell#4494), and it keeps that supervisor while it runs: "
+func oldSupervisorMessage(name, release string, phase audit.SandboxPhase, driver, upgrade string) string {
+	which := "its session started on OpenShell " + release + ", whose network broker can let the sandbox's connections bypass its policy " +
+		"(NVIDIA/OpenShell#4494), and it keeps that supervisor while it runs"
 	if release == "" {
-		msg = "⚠ " + name + "'s session started before DefenseClaw kept the OpenShell release a session starts on, so it may run a supervisor older than " +
-			openshell.SupportedMin + ", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494): "
+		which = "its session started before DefenseClaw kept the OpenShell release a session starts on, so it may run a supervisor older than " +
+			openshell.SupportedMin + ", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494)"
 	}
-	msg += "DefenseClaw closes a legacy MicroVM's network and keeps the VM until an explicit `defenseclaw sandbox stop " + name + "`, which may lose unsynced writes (it stops the VM itself only if its network cannot be closed); "
-	if upgrade != "" {
-		return msg + upgrade + ", then `defenseclaw sandbox start " + name + "` starts it on that release's supervisor"
+	if phase != audit.SandboxPhaseReady {
+		which = "its MicroVM may still run background work; " + which
 	}
-	return msg + "`defenseclaw sandbox start " + name + "` (or `connect`) starts it again on this gateway's supervisor"
+	msg := "⚠ " + name + ": " + legacyUnprotected + ": " + which + ". " + legacyContainment + ": " + legacyWayOn(name, phase, driver)
+	switch {
+	case phase != audit.SandboxPhaseReady:
+		return msg
+	case upgrade != "":
+		return msg + "; then " + upgrade + ", and `defenseclaw sandbox start " + name + "` starts it on that release's supervisor"
+	}
+	return msg + "; then `defenseclaw sandbox start " + name + "` (or `connect`) starts it again on this gateway's supervisor"
 }
 
-// scheduleOldSupervisorStop stops in the background the sandbox of b, which
-// is ready on the supervisor of an OpenShell release older than
-// openshell.SupportedMin, or of one its record does not name (a record from
-// DefenseClaw 1.0.3 or older), unless that session is over by then. That
-// supervisor's network broker can let the sandbox's connections bypass its
-// policy (NVIDIA/OpenShell#4494) for as long as the session runs, whatever
-// the gateway runs now. A ready MicroVM is not stopped while its network is
-// proven closed (stopOldSupervisor); one whose network could not be closed
-// is (fail closed). The next start after a stop runs the
-// gateway's own supervisor, and a gateway older than
-// SupportedMin starts none (sandboxReleaseRefusal). Once a stop is
-// scheduled, another sight of the session waits for it.
-func (m *Manager) scheduleOldSupervisorStop(b *box) {
-	m.mu.Lock()
-	if b.oldSupervisorStop {
-		m.mu.Unlock()
-		return
-	}
-	b.oldSupervisorStop = true
-	name, bindingID := b.rec.Name, b.rec.BindingID
-	m.mu.Unlock()
-	m.tamperStops.Add(1)
-	go func() {
-		defer m.tamperStops.Done()
-		defer func() {
-			m.mu.Lock()
-			b.oldSupervisorStop = false
-			m.mu.Unlock()
-		}()
-		m.stopOldSupervisor(name, bindingID)
-	}()
-}
-
-// reconcileOldSupervisor retries the stop of a ready legacy session or
-// network containment of an ended legacy MicroVM. The reconcile interval
-// is the backoff after a failed stop or policy update.
+// reconcileOldSupervisor retries the withdrawal of what DefenseClaw added
+// to the network of a live legacy guest (oldSupervisorLive): the reconcile
+// interval is the backoff after a failed policy update.
 func (m *Manager) reconcileOldSupervisor(ctx context.Context, b *box) {
 	m.mu.Lock()
-	old := b.phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(b.rec.SessionRelease)
-	linger := oldSupervisorLingering(b.phase, b.rec)
-	rec := b.rec
+	live := oldSupervisorLive(b.phase, b.rec)
 	m.mu.Unlock()
-	if old {
-		if oldSupervisorVMNeedsContainment(audit.SandboxPhaseReady, rec) {
-			m.containOldSupervisorNetwork(ctx, b)
-		}
-		m.scheduleOldSupervisorStop(b)
-	} else if linger {
+	if live {
 		m.containOldSupervisorNetwork(ctx, b)
 	}
 }
 
-// errLegacyVMKept: DefenseClaw keeps a ready legacy MicroVM, whose network
-// it closed, until the user stops it (stopOldSupervisor).
-var errLegacyVMKept = errors.New("DefenseClaw keeps the legacy MicroVM, whose network is closed, until it is stopped explicitly")
-
-// stopOldSupervisor stops the sandbox name while the session bindingID
-// still runs an old supervisor (scheduleOldSupervisorStop). A stop that
-// fails leaves it running on it: the feed says so, and its view tells the
-// CLI (sandboxapi.Sandbox.OldSupervisor), whose exec refuses it and whose
-// connect stops it first.
-//
-// A ready MicroVM is not stopped while its network is proven closed: the
-// stop of a release before 0.1.5 does not flush the VM's disk, and nothing
-// DefenseClaw runs in the guest can hold back every write that follows its
-// sync (a process an exec OpenShell lets in starts after any look at the
-// guest, for one), so an automatic stop could lose them without the user's
-// say. The VM is kept, contained, until the user's own stop, which flushes
-// first and says what it may lose, or until its network can no longer be
-// proven closed: then it is stopped (stopWithFlush with uncontained), and the
-// feed says what that may have lost.
-func (m *Manager) stopOldSupervisor(name, bindingID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
-	defer cancel()
-	b, unlock, err := m.lockBox(name)
-	if err != nil {
-		m.logf("old supervisor: stop %s: %v", name, err)
-		return
-	}
-	defer unlock()
+// legacyRunRefusal refuses a create or a start while a live legacy guest
+// (oldSupervisorLive) other than except runs: its network cannot be
+// contained (GAP-0831), so DefenseClaw runs no new sandbox until its user
+// ends it. except is the sandbox a start ends that way (an ended legacy
+// MicroVM started with --end-vm). The refusal names each guest with the
+// command that ends it.
+func (m *Manager) legacyRunRefusal(except string) error {
 	m.mu.Lock()
-	release, driver := b.rec.SessionRelease, b.rec.Driver
-	current := b.rec.BindingID == bindingID && b.phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(release)
-	m.mu.Unlock()
-	if !current {
-		return
-	}
-	var uncontained error
-	if stopLosesWrites(driver) {
-		if uncontained = m.proveOldSupervisorNetworkClosed(ctx, b); uncontained == nil {
-			err = errLegacyVMKept
-		} else {
-			m.logf("old supervisor: stop %s: its network is not closed: %v", name, uncontained)
+	var live []string
+	ways := map[string]string{}
+	for name, b := range m.boxes {
+		if name == except || b.retained || b.missing || b.deleted || b.creating || !oldSupervisorLive(b.phase, b.rec) {
+			continue
 		}
+		live = append(live, name)
+		ways[name] = name + ": " + legacyWayOn(name, b.phase, b.rec.Driver)
 	}
-	if err == nil {
-		err = m.stopWithFlush(ctx, b, uncontained)
-	}
-	said := ""
-	if err != nil {
-		said = bindingID + "\x00" + oldSupervisorStopFailed(name, release, err)
-	}
-	m.mu.Lock()
-	repeat := said != "" && b.oldSupervisorStopSaid == said
-	b.oldSupervisorStopSaid = said
 	m.mu.Unlock()
-	switch {
-	case repeat:
-		// Each reconcile retries the stop, or proves the kept VM's network
-		// closed again: the feed and the log said this one already.
-	case errors.Is(err, errLegacyVMKept):
-		m.logf("old supervisor: kept %s with its network closed until it is stopped explicitly", name)
-		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
-			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorStopFailed(name, release, err)})
-	case err != nil:
-		m.logf("old supervisor: stop %s: %v", name, err)
-		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
-			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorStopFailed(name, release, err)})
-	default:
-		m.logf("old supervisor: stopped %s", name)
+	if len(live) == 0 {
+		return nil
 	}
-}
-
-// oldSupervisorRelease names the supervisor of OpenShell release ("" when
-// its record names none) in the feed's lines.
-func oldSupervisorRelease(release string) string {
-	if release == "" {
-		return "an OpenShell release older than " + openshell.SupportedMin + ", as far as DefenseClaw knows"
+	slices.Sort(live)
+	detail := make([]string, 0, len(live))
+	for _, name := range live {
+		detail = append(detail, ways[name])
 	}
-	return "OpenShell " + release
-}
-
-// oldSupervisorUnflushedStop is the feed's line for the legacy MicroVM name
-// that DefenseClaw stopped because its network could not be closed (why).
-func oldSupervisorUnflushedStop(name, release string, why error) string {
-	return "⚠ DefenseClaw stopped " + name + "'s legacy MicroVM because its network could not be closed (" + why.Error() +
-		"): that release stops a MicroVM without flushing its disk, so files the VM wrote after DefenseClaw's last flush may be missing or end in zero bytes; check them before you bring the work back. " +
-		"Its session ran the supervisor of " + oldSupervisorRelease(release) + " (NVIDIA/OpenShell#4494), which must not run with open egress"
-}
-
-// oldSupervisorStopFailed is the feed's line for the sandbox name whose
-// session runs the supervisor of OpenShell release ("" when its record
-// names none) and which DefenseClaw could not stop (err).
-func oldSupervisorStopFailed(name, release string, err error) string {
-	which := oldSupervisorRelease(release)
-	if errors.Is(err, errLegacyVMKept) {
-		return "⚠ DefenseClaw kept " + name + "'s legacy MicroVM running with its network closed (DefenseClaw's proxy and its direct OpenShell rules) and its compute and disk kept, and does not stop it itself: " +
-			"that release stops a MicroVM without flushing its disk, so a stop may lose unsynced writes. Save the work you need, then explicitly run `defenseclaw sandbox stop " + name + "`, which flushes first; its next start runs the gateway's own supervisor. " +
-			"Its session still runs the supervisor of " + which + " (NVIDIA/OpenShell#4494)"
-	}
-	return "⚠ DefenseClaw could not stop " + name + ", whose session still runs the supervisor of " + which +
-		" (NVIDIA/OpenShell#4494): " + err.Error() + "; stop it with `defenseclaw sandbox stop " + name +
-		"`: until it stops, `defenseclaw sandbox exec` runs nothing in it, and `defenseclaw sandbox connect` stops it first"
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+		Message: "DefenseClaw runs no new sandbox while " + strings.Join(live, ", ") + " runs (" + legacyUnprotected + "): its session runs the supervisor " +
+			"of an OpenShell release older than " + openshell.SupportedMin + ", whose network broker can let connections bypass sandbox policy " +
+			"(NVIDIA/OpenShell#4494), and DefenseClaw cannot contain it",
+		Detail: strings.Join(detail, "; ") + "; then run again"}
 }
 
 // unflushedStopMessage is the feed's warning about the MicroVM name that
@@ -978,7 +901,8 @@ func oldSupervisorStopFailed(name, release string, err error) string {
 func unflushedStopMessage(name string) string {
 	return "⚠ " + name + "'s MicroVM went down without DefenseClaw stopping it (the OpenShell gateway restarted, for one), so what it wrote " +
 		"in its last seconds may be missing or end in zero bytes: check those files before you bring the work back (its review flags the ones " +
-		"that end in zero bytes). `defenseclaw sandbox stop` flushes first, and so do DefenseClaw's own gateway restarts"
+		"that end in zero bytes). `defenseclaw sandbox stop` requests a disk sync before stopping a running MicroVM; changes after the last successful disk sync may be lost. " +
+		"DefenseClaw restarts its own gateway only after OpenShell reports every MicroVM stopped"
 }
 
 // errorPhaseReason is why a sandbox is in OpenShell's error phase, in
@@ -1339,16 +1263,10 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		v.StartedAt = started
 		v.UptimeSeconds = int64(m.now().Sub(started) / time.Second)
 	}
-	if b.phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(r.SessionRelease) {
-		v.Warnings = append(slices.Clone(v.Warnings), oldSupervisorWarning)
+	if oldSupervisorLive(b.phase, r) {
+		v.Warnings = append(slices.Clone(v.Warnings), oldSupervisorWarning(r.Name, b.phase, r.Driver))
 		if b.oldSupervisorNetworkErr != "" {
-			v.Warnings = append(v.Warnings, "DefenseClaw could not withdraw the legacy MicroVM's direct network rules: "+b.oldSupervisorNetworkErr)
-		}
-		v.OldSupervisor = true
-	} else if oldSupervisorLingering(b.phase, r) {
-		v.Warnings = append(slices.Clone(v.Warnings), oldSupervisorLingeringWarning)
-		if b.oldSupervisorNetworkErr != "" {
-			v.Warnings = append(v.Warnings, "DefenseClaw could not withdraw the legacy MicroVM's direct network rules: "+b.oldSupervisorNetworkErr)
+			v.Warnings = append(v.Warnings, legacyRulesKept+b.oldSupervisorNetworkErr)
 		}
 		v.OldSupervisor = true
 	}

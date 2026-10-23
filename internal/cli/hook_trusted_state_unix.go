@@ -6,10 +6,8 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -68,16 +66,14 @@ var standaloneHookInUserNamespace = func() bool {
 // user namespace the listener's owner cannot be checked (it reads as the
 // overflow uid), so the report carries only the connector and the reason;
 // it is best effort and bounded.
-var reportStandaloneHookRefusal = func(socket, connectorName, reason string) {
+var reportStandaloneHookRefusal = func(socket string, serviceUID int, connectorName, reason string) {
 	if strings.TrimSpace(socket) == "" {
 		return
 	}
-	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var dialer net.Dialer
-			return dialer.DialContext(ctx, "unix", socket)
-		},
-	}}
+	client, err := hookexec.NewManagedStandaloneHookSocketHTTPClient(2*time.Second, socket, serviceUID)
+	if err != nil {
+		return
+	}
 	request, err := http.NewRequest(http.MethodPost, "http://defenseclaw-hook/api/v1/inspect/tool", strings.NewReader("{}"))
 	if err != nil {
 		return
@@ -241,7 +237,11 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 		if prepared && failed && !secureClientHost {
 			opts.ManagedStandalone = true
 			if opts.ManagedRuntimeFailure == hookexec.ManagedUserNamespaceReason {
-				reportStandaloneHookRefusal(layout.HookSocketPath, connectorName, opts.ManagedRuntimeFailure)
+				serviceUID := -1
+				if descriptor != nil {
+					serviceUID = descriptor.ServiceUID
+				}
+				reportStandaloneHookRefusal(layout.HookSocketPath, serviceUID, connectorName, opts.ManagedRuntimeFailure)
 			}
 		}
 		return

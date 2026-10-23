@@ -282,6 +282,11 @@ func TestGatewayStatusShowsTheKernelSensor(t *testing.T) {
 // managed deployment's config first; this runs the real fetch against a
 // gateway that only the pinned config and token reach.
 func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
+	previousFactory := managedGatewayClientFactory
+	managedGatewayClientFactory = func(time.Duration, string, string) (*http.Client, error) {
+		return &http.Client{}, nil // This test's httptest server stands in for the protected service.
+	}
+	t.Cleanup(func() { managedGatewayClientFactory = previousFactory })
 	const token = "dc-test-discovery-token"
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/guardrail/profiles/resolve" {
@@ -373,6 +378,38 @@ func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
 	gateway.Close()
 	if _, err := enterpriseGatewayGet("/api/v1/slow", &answer); err == nil || !strings.Contains(err.Error(), "check the deployment") {
 		t.Fatalf("stopped gateway error = %v, want the deployment status hint", err)
+	}
+}
+
+func TestEnterpriseDiscoveryDoesNotSendItsTokenToAnUnverifiedListener(t *testing.T) {
+	seen := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		seen++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	previousCfg, previousPin, previousLoad, previousFactory := cfg, enterpriseDiscoveryPinManagedEnv,
+		enterpriseDiscoveryLoadConfig, managedGatewayClientFactory
+	t.Cleanup(func() {
+		cfg, enterpriseDiscoveryPinManagedEnv, enterpriseDiscoveryLoadConfig, managedGatewayClientFactory =
+			previousCfg, previousPin, previousLoad, previousFactory
+	})
+	enterpriseDiscoveryPinManagedEnv = func() error { return nil }
+	enterpriseDiscoveryLoadConfig = func(*cobra.Command) error {
+		cfg = &config.Config{DeploymentMode: "managed_enterprise", Gateway: config.GatewayConfig{
+			APIBind: "127.0.0.1", APIPort: port,
+		}}
+		return nil
+	}
+	managedGatewayClientFactory = func(time.Duration, string, string) (*http.Client, error) {
+		return nil, errors.New("connected gateway service peer is unverified")
+	}
+	var out json.RawMessage
+	_, err := enterpriseGatewayGet("/status", &out)
+	if err == nil || seen != 0 {
+		t.Fatalf("managed discovery sent a request to another account: requests=%d error=%v", seen, err)
 	}
 }
 

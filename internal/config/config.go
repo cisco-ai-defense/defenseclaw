@@ -1366,9 +1366,8 @@ func (c *WebhookConfig) ResolvedSecret() string {
 //     compatibility with installs that wrote it before
 //     hook_fail_mode existed.
 //
-// Operators who want to change the runtime behavior of the
-// generated hooks should edit guardrail.hook_fail_mode (or run
-// `defenseclaw guardrail fail-mode`), NOT this field.
+// A managed administrator can select an outage mode through
+// guardrail.hook_fail_mode. This field never changes hook availability.
 type AgentHookConfig struct {
 	Enabled                      bool     `mapstructure:"enabled"                         yaml:"enabled"`
 	Mode                         string   `mapstructure:"mode"                            yaml:"mode,omitempty"`
@@ -1756,14 +1755,12 @@ type GuardrailConfig struct {
 	//     the event with a stderr warning and an entry in
 	//     $DEFENSECLAW_HOME/logs/hook-failures.jsonl.
 	//
-	//   - "closed" (fresh-install default): the same failures BLOCK where
-	//     the connector/event exposes a blocking response. Migrated legacy
-	//     configs can retain an explicit "open".
+	//   - "closed" (per-user and managed-host default): the same failures
+	//     BLOCK where the connector/event exposes a blocking response.
 	//
-	// An explicit value always wins, on a managed computer too (there the
-	// administrator's config sets it). Secure Client is the one exception to
-	// the closed default: when this key is unset, Secure Client resolves it
-	// to "open" (#1163). See Config.EffectiveHookFailModeForConnector.
+	// Only an administrator-managed host can choose open for an outage.
+	// Per-user hosts resolve closed even if a migrated file contains open.
+	// Secure Client defaults open when unset (#1163).
 	//
 	// DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and
 	// missing-token failures closed. See

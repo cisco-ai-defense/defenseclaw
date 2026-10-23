@@ -162,10 +162,12 @@ func TestClosedPanicStopNativeAnswersSurviveHookRunner(t *testing.T) {
 			wantOutput: `{"continue":false,"stopReason":"DefenseClaw stopped this turn after an internal evaluator error."}`,
 		},
 		{
+			// Antigravity's continue veto re-enters the agent loop: the
+			// gateway allows termination after a recovered panic.
 			connector:  "antigravity",
 			event:      "Stop",
-			response:   `{"action":"block","hook_output":{"decision":"continue","reason":"DefenseClaw internal evaluator error"}}`,
-			wantOutput: `{"decision":"continue","reason":"DefenseClaw internal evaluator error"}`,
+			response:   `{"action":"allow","raw_action":"block","would_block":true,"hook_output":{"decision":"allow"}}`,
+			wantOutput: `{"decision":"allow"}`,
 		},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {
@@ -185,19 +187,24 @@ func TestClosedPanicStopNativeAnswersSurviveHookRunner(t *testing.T) {
 	}
 }
 
-func TestAntigravityClosedStopBlockCannotEmitNativeAllow(t *testing.T) {
+// The native runner never synthesizes Antigravity's Stop veto: "continue"
+// re-enters the agent loop and would repeat a failing Stop hook.
+func TestAntigravityStopRunnerNeverSynthesizesLoopingVeto(t *testing.T) {
 	for _, response := range []string{
 		`{"action":"block","reason":"internal evaluator error","hook_output":{"decision":"allow"}}`,
 		`{"action":"block","reason":"internal evaluator error"}`,
+		`{"action":"allow","raw_action":"block","would_block":true,"hook_output":{"decision":"allow"}}`,
 	} {
-		result := run(t, "antigravity", ok(response), func(opts *Options) {
-			opts.Event = "Stop"
-			opts.FailMode = "closed"
-			opts.Stdin = strings.NewReader(`{"conversationId":"panic-stop","terminationReason":"error","fullyIdle":true}`)
-		})
-		var output map[string]interface{}
-		if result.code != 0 || json.Unmarshal([]byte(result.stdout), &output) != nil || output["decision"] != "continue" {
-			t.Fatalf("gateway block %s yielded code=%d stdout=%q stderr=%q, want native Stop veto", response, result.code, result.stdout, result.stderr)
+		for _, managedStandalone := range []bool{false, true} {
+			result := run(t, "antigravity", ok(response), func(opts *Options) {
+				opts.Event = "Stop"
+				opts.FailMode = "closed"
+				opts.ManagedEnterprise, opts.ManagedStandalone = managedStandalone, managedStandalone
+				opts.Stdin = strings.NewReader(`{"conversationId":"panic-stop","terminationReason":"error","fullyIdle":true}`)
+			})
+			if result.code != 0 || strings.Contains(result.stdout, "continue") {
+				t.Fatalf("gateway answer %s (standalone=%v) yielded code=%d stdout=%q stderr=%q, want no Stop veto", response, managedStandalone, result.code, result.stdout, result.stderr)
+			}
 		}
 	}
 }
@@ -207,7 +214,6 @@ func TestClaudeClosedStopBlockCannotEmitNativeAllow(t *testing.T) {
 		`{"action":"block","reason":"internal evaluator error","claude_code_output":{"decision":"allow"}}`,
 		`{"action":"block","reason":"internal evaluator error","claude_code_output":{"continue":null,"stopReason":"claimed terminal"}}`,
 		`{"action":"block","reason":"internal evaluator error","claude_code_output":{"continue":true,"stopReason":"claimed terminal"}}`,
-		`{"action":"block","reason":"internal evaluator error"}`,
 	} {
 		result := run(t, "claudecode", ok(response), func(opts *Options) {
 			opts.Event = "Stop"
@@ -218,6 +224,45 @@ func TestClaudeClosedStopBlockCannotEmitNativeAllow(t *testing.T) {
 		if result.code != 0 || json.Unmarshal([]byte(result.stdout), &output) != nil || output["continue"] != false || output["stopReason"] == "" {
 			t.Fatalf("gateway block %s yielded code=%d stdout=%q stderr=%q, want terminal closed Stop", response, result.code, result.stdout, result.stderr)
 		}
+	}
+}
+
+// A Claude Code policy block on Stop, SubagentStop or TeammateIdle has no
+// terminal directive: the runner keeps the exit-2 feedback that asks Claude
+// Code to keep working, and never turns it into continue:false. Only the
+// gateway's recovered-panic answer ends the turn.
+func TestClaudeLifecyclePolicyBlockKeepsExitTwoFeedback(t *testing.T) {
+	body := `{"action":"block","reason":"policy: finish the open task first"}`
+	sp, found := specFor("claudecode")
+	if !found {
+		t.Fatal("missing claudecode spec")
+	}
+	for _, event := range []string{"Stop", "SubagentStop", "TeammateIdle"} {
+		result := run(t, "claudecode", ok(body), func(opts *Options) {
+			opts.Event = event
+			opts.FailMode = "closed"
+			opts.Stdin = strings.NewReader(`{"hook_event_name":"` + event + `","session_id":"policy-stop"}`)
+		})
+		if result.code != blockExit || strings.TrimSpace(result.stdout) != "" ||
+			!strings.Contains(result.stderr, "policy: finish the open task first") {
+			t.Fatalf("%s: code=%d stdout=%q stderr=%q, want exit-2 policy feedback", event, result.code, result.stdout, result.stderr)
+		}
+		// The standalone managed answer path decides the same response.
+		var stdout, stderr bytes.Buffer
+		code := sp.decide(Options{Connector: "claudecode", Event: event, ManagedEnterprise: true, ManagedStandalone: true,
+			FailMode: "closed", Stdout: &stdout, Stderr: &stderr}, []byte(body))
+		if code != blockExit || strings.TrimSpace(stdout.String()) != "" || !strings.Contains(stderr.String(), "policy: finish the open task first") {
+			t.Fatalf("%s standalone: code=%d stdout=%q stderr=%q, want exit-2 policy feedback", event, code, stdout.String(), stderr.String())
+		}
+	}
+	// A policy Stop decision passes through unchanged.
+	result := run(t, "claudecode", ok(`{"action":"block","reason":"policy","claude_code_output":{"decision":"block","reason":"policy"}}`), func(opts *Options) {
+		opts.Event = "Stop"
+		opts.FailMode = "closed"
+		opts.Stdin = strings.NewReader(`{"hook_event_name":"Stop","session_id":"policy-stop"}`)
+	})
+	if result.code != 0 || strings.TrimSpace(result.stdout) != `{"decision":"block","reason":"policy"}` {
+		t.Fatalf("policy Stop decision: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // The migration map of the upgrade to 1.0.4: which account incarnation held
@@ -56,9 +57,23 @@ const oldLegacyAgentOwnersFile = "legacy-agent-owners.json"
 var legacyAgentOwnersOpen = os.Open
 
 const (
-	legacyAgentOwnersVersion  = 1
-	maxLegacyAgentOwnersBytes = 4 << 20
-	maxLegacyAgentOwners      = 65536
+	legacyAgentOwnersVersion = 1
+	maxLegacyAgentOwners     = 65536
+	// maxLegacyAgentOwnerField bounds the bytes of an owner's user and of
+	// its token (validLegacyAgentOwner).
+	maxLegacyAgentOwnerField = 256
+	// maxLegacyAgentOwnersBytes is the largest map WriteLegacyAgentOwners
+	// can write, and the largest the reader takes. The map is written once,
+	// so a map the reader refused would leave every legacy agents entry
+	// unbound for good. It is the header with the longest time plus
+	// maxLegacyAgentOwners entries with the longest uid, user and token, a
+	// byte of which json.Marshal spells in at most six (\u003c for <, > and
+	// &; earlier 1.0.4 builds also wrote \ufffd for a byte that is not
+	// UTF-8). A map of real account names is far smaller (about 8 MiB for
+	// 65,536 qualified AD accounts).
+	maxLegacyAgentOwnersBytes    = int64(legacyAgentOwnersHeaderBytes + maxLegacyAgentOwners*legacyAgentOwnerEntryBytes)
+	legacyAgentOwnersHeaderBytes = len(`{"v":1,"written_at":"","owners":{}}`) + len("9999-12-31T23:59:59.999999999Z")
+	legacyAgentOwnerEntryBytes   = len(`"":{"user":"","token":""},`) + len("9223372036854775807") + 2*6*maxLegacyAgentOwnerField
 )
 
 // LegacyAgentOwner is the account that held a uid at the upgrade.
@@ -119,7 +134,8 @@ func LegacyAgentOwnersRecorded(dir string) bool {
 // WriteLegacyAgentOwners writes the migration map owners (by uid) to dir
 // once: an existing map is kept as it is, and an empty one is not written,
 // so the next pass tries again. setOwnership gives the file the guardian
-// authorization ownership before it is renamed into place.
+// authorization ownership before it is renamed into place. Every map it
+// writes is within maxLegacyAgentOwnersBytes, the reader's bound.
 func WriteLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, now time.Time, setOwnership func(string) error) (bool, error) {
 	if dir == "" {
 		return false, nil
@@ -190,7 +206,7 @@ func readLegacyAgentOwnersFile(path string, trust func(path, label string) error
 	if err != nil {
 		return nil, false, err
 	}
-	if len(data) > maxLegacyAgentOwnersBytes {
+	if int64(len(data)) > maxLegacyAgentOwnersBytes {
 		return nil, false, nil
 	}
 	var doc legacyAgentOwnersDoc
@@ -246,8 +262,14 @@ func moveLegacyAgentOwners(dir string) (invalid bool, err error) {
 	return false, os.Rename(oldPath, filepath.Join(dir, LegacyAgentOwnersFile))
 }
 
+// validLegacyAgentOwner reports whether owner is one the map can carry and
+// give back unchanged. A user or token that is not UTF-8 is refused: JSON
+// would carry another name (U+FFFD), which binds no account.
 func validLegacyAgentOwner(owner LegacyAgentOwner) bool {
-	if owner.User == "" || len(owner.User) > 256 || owner.Token == "" || len(owner.Token) > 256 {
+	if !utf8.ValidString(owner.User) || !utf8.ValidString(owner.Token) {
+		return false
+	}
+	if owner.User == "" || len(owner.User) > maxLegacyAgentOwnerField || owner.Token == "" || len(owner.Token) > maxLegacyAgentOwnerField {
 		return false
 	}
 	return !strings.ContainsFunc(owner.User+owner.Token, func(r rune) bool { return r < 0x20 || r == 0x7f })

@@ -7,13 +7,13 @@ keywords:
   - Codex notify bridge
 ---
 
-Reference for the [Codex connector](/docs/connectors/codex). Codex talks to `api.openai.com` or the ChatGPT backend directly. DefenseClaw observes through Codex's hooks, its [native OpenTelemetry exporter](https://learn.chatgpt.com/docs/config-file/config-advanced#observability-and-telemetry) and, under Secure Client or in an OpenShell sandbox, a notify bridge. Per-user and standalone enterprise installs on the host do not register the bridge. No proxy is involved.
+Reference for the [Codex connector](/docs/connectors/codex). Codex talks to `api.openai.com` or the ChatGPT backend directly. DefenseClaw observes host activity through Codex's hooks. Isolated OpenShell images also use Codex's [native OpenTelemetry exporter](https://learn.chatgpt.com/docs/config-file/config-advanced#observability-and-telemetry). Secure Client and the OpenShell sandbox use a notify bridge. Per-user and standalone installs on the host do not register a notify bridge or native exporter. No proxy is involved.
 
 ## Install surface
 
 <Flow
   direction="TB"
-  caption="Codex reaches the gateway through hooks and OpenTelemetry. Only the hooks can block. They run on up to eleven events, depending on the Codex version, and nine of them can block. The OpenTelemetry exporter only records."
+  caption="Codex reaches the gateway through hooks. Isolated OpenShell also uses native OpenTelemetry. Only the hooks can block."
 >
   <Node id="codex" kind="agent">Codex</Node>
   <Node id="hooks" kind="connector">{`DefenseClaw hooks\nup to eleven events`}</Node>
@@ -29,12 +29,12 @@ Reference for the [Codex connector](/docs/connectors/codex). Codex talks to `api
 
 | Platform | Status | Connector path |
 | --- | --- | --- |
-| macOS and Linux | **Supported** | Portable command hooks and native OTel. |
-| Native Windows x64 | **Supported** | A system PowerShell bridge starts the protected `defenseclaw-hook.exe` for each registered event, plus native OTel. |
+| macOS and Linux | **Supported** | Portable command hooks; native OTel only in isolated OpenShell. |
+| Native Windows x64 | **Supported** | A system PowerShell bridge starts the protected `defenseclaw-hook.exe` for each registered event; host native OTel is disabled. |
 
 ### Setup details
 
-Native logs, metrics and traces use the loopback `/v1/{logs,metrics,traces}` endpoints with `X-DefenseClaw-Source: codex` and a bearer in Codex's exporter configuration. The credential is separate from the gateway master token and the Codex hook credential, works only for Codex OTLP over loopback, and cannot call management or another connector. Do not print or copy the exporter header or its sidecar. Setup also pins Codex's `otel.environment` to DefenseClaw's configured environment (Codex defaults to `dev`), and doctor compares it with live runtime metadata.
+Host setup removes earlier DefenseClaw native exporter blocks and revokes their scoped tokens because Codex cannot verify the account behind the loopback listener. An existing Codex process can retain the old configuration; quit and reopen Codex after an upgrade. The isolated OpenShell exporter still uses the gateway's `/v1/{logs,metrics,traces}` endpoints. Do not print or copy old exporter headers.
 
 Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/reference/observability/redaction/). The alias options are in the [quick-alias reference](/docs/reference/commands/guardrail-setup#aliases).
 
@@ -44,7 +44,7 @@ On native Windows, DefenseClaw writes each event and contract into `%CODEX_HOME%
 
 | What | macOS and Linux | Windows |
 | --- | --- | --- |
-| Hooks and OTel | `~/.codex/config.toml` | `%CODEX_HOME%\config.toml` |
+| Hooks; removal of earlier native OTel | `~/.codex/config.toml` | `%CODEX_HOME%\config.toml` |
 | Hook program | `~/.defenseclaw/hooks/codex-hook.sh` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 | Credential sidecars | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
 
@@ -103,7 +103,7 @@ Codex activates project `.codex/` layers only for trusted projects. Inventory re
 | Hook script | `codex-hook.sh` |
 | Hook config paths | `~/.codex/config.toml`, `~/.codex/managed_config.toml` |
 | Response field | `codex_output` |
-| Native OTLP | yes |
+| Native OTLP | isolated OpenShell only; host upgrades remove old exporters |
 | W3C traceparent | yes |
 | Fail closed | yes |
 
@@ -154,4 +154,4 @@ When a hook fails closed because DefenseClaw cannot decide, `Stop`, `SubagentSto
 | Connections to OpenAI when the gateway starts (Windows) | Each gateway start or restart with the Codex connector enabled runs Codex's app-server once to read its effective requirements. It connects to OpenAI (for example chatgpt.com) and can reach your model provider. |
 | Hooks fail after a Codex update (Windows) | Setup records the Codex executable's path and SHA-256. An update changes it, so doctor fails the **Hook contract** and **Codex hooks** rows with `policy-blocked: selected Codex executable no longer matches protected Setup evidence`. Run `defenseclaw setup codex --yes`. |
 
-**Behind an HTTP proxy.** The hooks reach the gateway on 127.0.0.1 and ignore proxy variables. Codex's OTel exporter follows them and has no proxy option, so without a loopback entry in `NO_PROXY` its telemetry and credential would go to the proxy. On Linux and macOS setup adds a marked block to `$CODEX_HOME/.env` that appends `127.0.0.1,localhost,::1` and the instance-metadata addresses (`169.254.169.254,169.254.170.2,fd00:ec2::254`) to `NO_PROXY` and `no_proxy`. Everything else still goes through your proxy. Sessions started before setup keep the old environment. `defenseclaw guardrail disable --connector codex` and uninstall remove only that block (and the file, if setup created it). Codex applies `.env` lines in order, so write a later line as `NO_PROXY="${NO_PROXY},.corp.example.com"`. If a proxy variable is set and the loopback is not covered, or the block lacks the metadata addresses, `defenseclaw doctor` warns on the **Codex telemetry proxy** row. On Windows, run `setx NO_PROXY 127.0.0.1,localhost,::1` once and open a new terminal, or set `$env:NO_PROXY` in the PowerShell session.
+**Behind an HTTP proxy.** Hooks reach the gateway on 127.0.0.1 and ignore proxy variables. Managed Linux and macOS setup retains a marked `NO_PROXY` block for cloud instance metadata and container credentials. Host setup does not install a native exporter.

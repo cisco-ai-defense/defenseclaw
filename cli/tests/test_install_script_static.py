@@ -58,6 +58,26 @@ def _run(args: list[str], tmp_path: Path, **env: str) -> subprocess.CompletedPro
     return subprocess.run([BASH, *args], capture_output=True, text=True, env=environment, timeout=60, check=False)
 
 
+def _run_rollback_with_no_agents(args: list[str], tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
+    # The rollback fixtures model an account with closed agents. A shared CI
+    # account may have an unrelated OpenCode process running beside this test.
+    inventory = tmp_path / "process-inventory"
+    inventory.mkdir(exist_ok=True)
+    ps = inventory / "ps"
+    real_ps = shutil.which("ps")
+    assert real_ps is not None
+    ps.write_text(
+        '#!/bin/sh\n'
+        'if [ "$#" -eq 8 ] && [ "$1" = -u ] && [ "$3" = -o ] && [ "$4" = pid= ] && '
+        '[ "$5" = -o ] && [ "$6" = comm= ] && [ "$7" = -o ] && [ "$8" = args= ]; then exit 0; fi\n'
+        f'exec "{real_ps}" "$@"\n',
+        encoding="ascii",
+    )
+    ps.chmod(0o755)
+    path = f"{inventory}:{env.pop('PATH', os.environ.get('PATH', '/usr/bin:/bin'))}"
+    return _run(args, tmp_path, PATH=path, **env)
+
+
 def test_scripts_parse_under_bash() -> None:
     for script in (INSTALL_SH, HANDOFF_SH):
         subprocess.run([BASH, "-n", str(script)], check=True)
@@ -804,7 +824,7 @@ def test_a_rollback_whose_gateway_does_not_start_is_undone_and_exits_1(tmp_path:
     script = _stamped(tmp_path, "1.0.2")
     env = {"DEFENSECLAW_APP_PATH": "none"}
 
-    back = _run([str(script), "--rollback", "--yes"], tmp_path, **env)
+    back = _run_rollback_with_no_agents([str(script), "--rollback", "--yes"], tmp_path, **env)
 
     assert back.returncode == 1, back.stdout + back.stderr
     assert "Rolling back to DefenseClaw 1.0.1" in back.stdout
@@ -819,9 +839,9 @@ def test_a_rollback_whose_gateway_does_not_start_is_undone_and_exits_1(tmp_path:
     # second one rolls forward.
     older = dc_home / "previous" / "bin" / "defenseclaw-gateway"
     older.write_text(older.read_text(encoding="utf-8").replace("start) exit 1", "start) exit 0"), encoding="utf-8")
-    back = _run([str(script), "--rollback", "--yes"], tmp_path, **env)
+    back = _run_rollback_with_no_agents([str(script), "--rollback", "--yes"], tmp_path, **env)
     assert back.returncode == 0, back.stdout + back.stderr
-    forward = _run([str(script), "--rollback", "--yes"], tmp_path, **env)
+    forward = _run_rollback_with_no_agents([str(script), "--rollback", "--yes"], tmp_path, **env)
 
     assert forward.returncode == 0, forward.stdout + forward.stderr
     assert "Rolling forward to DefenseClaw 1.0.2" in forward.stdout
@@ -859,7 +879,7 @@ def test_a_rollback_to_0_x_removes_the_1_0_connector_registrations_first(tmp_pat
     (dc_home / "previous" / "VERSION").write_text("0.8.10\n", encoding="utf-8")
     script = _stamped(tmp_path, "1.0.1")
 
-    back = _run([str(script), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
+    back = _run_rollback_with_no_agents([str(script), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
 
     assert back.returncode == 0, back.stdout + back.stderr
     assert "Could not remove" not in back.stdout + back.stderr
@@ -873,7 +893,7 @@ def test_a_rollback_to_0_x_removes_the_1_0_connector_registrations_first(tmp_pat
     assert kept.read_text(encoding="utf-8") == "kept-token\n"
 
     calls.unlink()
-    forward = _run([str(script), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
+    forward = _run_rollback_with_no_agents([str(script), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
 
     assert forward.returncode == 0, forward.stdout + forward.stderr
     # Only the GAP-0009 check of which gateway can prune hook entries; neither fake can.
@@ -902,7 +922,7 @@ def test_a_rollback_to_0_x_names_only_the_installer_command_to_return(tmp_path: 
             (dc_home / "previous" / "GATEWAY_WAS_RUNNING").write_text("true\n", encoding="utf-8")
         script = _stamped(case, current)
 
-        back = _run([str(script), "--rollback", "--yes"], case, DEFENSECLAW_APP_PATH="none")
+        back = _run_rollback_with_no_agents([str(script), "--rollback", "--yes"], case, DEFENSECLAW_APP_PATH="none")
         out = back.stdout + back.stderr
 
         assert back.returncode == 0, out
@@ -965,7 +985,7 @@ def _rollback_to_0_8_with_a_damaged_store(tmp_path: Path, starts: bool) -> tuple
     (dc_home / "previous" / "GATEWAY_WAS_RUNNING").write_text("true\n", encoding="utf-8")
     _damaged_audit_db(dc_home / "previous" / "data" / "audit.db")
     try:
-        result = _run([str(_stamped(tmp_path, "1.0.1")), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
+        result = _run_rollback_with_no_agents([str(_stamped(tmp_path, "1.0.1")), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
     finally:
         subprocess.run(["pkill", "-f", str(tmp_path / "defenseclaw-sleep")], check=False)
     return result, dc_home
@@ -1041,7 +1061,7 @@ def test_a_rollback_refused_on_hook_drift_prints_only_the_fix_that_works(tmp_pat
     (dc_home / "previous" / "VERSION").write_text("0.8.10\n", encoding="utf-8")
     (dc_home / "previous" / "GATEWAY_WAS_RUNNING").write_text("true\n", encoding="utf-8")
 
-    back = _run([str(_stamped(tmp_path, "1.0.1")), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
+    back = _run_rollback_with_no_agents([str(_stamped(tmp_path, "1.0.1")), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
 
     assert back.returncode == 1, back.stdout + back.stderr
     out = back.stdout + back.stderr
@@ -1428,6 +1448,36 @@ def _install_sh_functions(*names: str) -> str:
         start = text.index(f"{name}() {{")
         bodies.append(text[start : text.index("\n}\n", start) + 3])
     return helpers + "".join(bodies)
+
+
+def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path: Path) -> None:
+    # A 1.0.3 plugin already loaded in an agent cannot see a new install lock.
+    # The installer must leave its gateway running until that agent exits.
+    source = INSTALL_SH.read_text(encoding="utf-8")
+    rollback = source[source.index('if [[ "${ROLLBACK}" == true ]]; then') : source.index('# ──', source.index('if [[ "${ROLLBACK}" == true ]]; then') + 1)]
+    assert rollback.index("assert_no_loaded_plugin_agents") < rollback.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway"')
+    probe = tmp_path / "ps"
+    probe.write_text('#!/bin/sh\nprintf "%s\\n" "$DC_TEST_PS_ROWS"\n', encoding="ascii")
+    probe.chmod(0o755)
+    body = _install_sh_functions("loaded_plugin_agents", "assert_no_loaded_plugin_agents")
+    for rows, expected in [
+        ("1 bash bash", True),
+        ("2 opencode opencode", False),
+        ("3 amp amp", False),
+        ("4 node node /opt/node_modules/@sourcegraph/amp/cli.js", False),
+        # macOS truncates `comm` to the start of the absolute launch path.
+        ("5 /Users/u/.openc /Users/u/.opencode/bin/opencode", False),
+        ("6 /Users/u/.amp/b /Users/u/.amp/bin/amp", False),
+    ]:
+        run = subprocess.run(
+            [BASH, "-c", 'die() { printf "%s\\n" "$*" >&2; return 1; }\n' + body + "assert_no_loaded_plugin_agents"],
+            env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "DC_TEST_PS_ROWS": rows},
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        assert (run.returncode == 0) is expected, (rows, run.stdout, run.stderr)
+
+    upgrade_guard = source.index("assert_no_loaded_plugin_agents\nWAS_RUNNING=false")
+    assert upgrade_guard < source.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway"', upgrade_guard)
 
 
 def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
@@ -2366,3 +2416,82 @@ def test_a_signature_that_does_not_verify_stops_the_install(tmp_path: Path) -> N
 
     assert result.returncode == 1 and "die: Could not sign defenseclaw-gateway for this Mac" in result.stdout
     assert not (staging / "binaries.sha256").exists()
+
+
+# ── 1.0.4 (T8 smoke review loop round 3) ────────────────────────────────────
+
+
+def test_an_upgrade_finishes_the_removed_connector_cleanup_or_fails(tmp_path: Path) -> None:
+    # A gateway start that brought the other connectors up only logged a
+    # removed connector (OpenHands, OmniGent) whose teardown it could not
+    # finish, and the upgrade exited 0. The installer now checks each: one not
+    # done is torn down again, and one still not done is named with its cause
+    # and the install exits 3.
+    home = tmp_path / "dc"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls"
+    gateway = bin_dir / "defenseclaw-gateway"
+
+    def run(dirty: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        # dirty: connector -> "once" (clean after a teardown) or "always".
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        for name, how in dirty.items():
+            (state / name).write_text(how, encoding="utf-8")
+        gateway.write_text(
+            "#!/bin/sh\n"
+            f'echo "$*" >> "{calls}"\n'
+            "name=$4; action=$2\n"
+            f'state="{state}/$name"\n'
+            '[ -f "$state" ] || exit 0\n'
+            'if [ "$action" = teardown ]; then\n'
+            '  [ "$(cat "$state")" = once ] && rm -f "$state"\n'
+            "  exit 1\n"
+            "fi\n"
+            'echo "  X $name: $name cleanup incomplete: /h/openhands-hook.sh is gone, but /w/.openhands/hooks.json still runs it. To finish: run defenseclaw-gateway connector teardown --connector $name" >&2\n'
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+        script = tmp_path / "finish.sh"
+        script.write_text(
+            'set -euo pipefail\nerr() { echo "err: $*" >&2; }\n'
+            + _install_sh_functions("finish_retired_connector_cleanup")
+            + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" LOG="{tmp_path / "log"}" VERSION=1.0.4\n'
+            + "finish_retired_connector_cleanup\n",
+            encoding="utf-8",
+        )
+        if calls.exists():
+            calls.unlink()
+        return _run([str(script)], tmp_path)
+
+    verify = f"connector verify --connector {{}} --data-dir {home}"
+    teardown = f"connector teardown --connector {{}} --data-dir {home}"
+
+    clean = run({})
+    assert clean.returncode == 0, clean.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [verify.format("openhands"), verify.format("omnigent")]
+
+    healed = run({"omnigent": "once"})
+    assert healed.returncode == 0, healed.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        verify.format("openhands"),
+        verify.format("omnigent"),
+        teardown.format("omnigent"),
+        verify.format("omnigent"),
+    ]
+
+    stuck = run({"openhands": "always"})
+    assert stuck.returncode == 1
+    assert "could not finish removing the openhands connector" in stuck.stderr
+    assert "/w/.openhands/hooks.json still runs it" in stuck.stderr
+    assert "To finish: run defenseclaw-gateway connector teardown --connector openhands" in stuck.stderr
+    assert "omnigent" not in stuck.stderr
+
+    # The upgrade runs it once the gateway it started is up, and exits 3.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    main = text[text.index("finish_swap\n# until 1.1") : text.index("exit ${START_RC}")]
+    assert main.index(
+        'if [[ -n "${PREV_VERSION}" && "${WAS_RUNNING}" == true ]] && ! finish_retired_connector_cleanup; then\n    START_RC=3\nfi'
+    ) < main.index("report_retired_connector_leftovers")

@@ -1851,6 +1851,10 @@ def fail_mode_cmd(
     (multi-connector installs only), writing a per-connector override
     while the global default and the other connectors are left untouched.
     """
+    managed_host = str(getattr(app.cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    if mode == "open" and not managed_host:
+        ux.err("Fail-open is reserved for administrator-managed hosts during an outage.", indent="  ")
+        raise SystemExit(1)
     if connector_flag:
         _set_connector_fail_mode(
             app, connector_flag, mode, restart=restart, yes=yes
@@ -1862,7 +1866,7 @@ def fail_mode_cmd(
     # (an OpenShell policy connector, a connector set up later), so a no-op
     # needs the saved global value to be exactly the requested one.
     saved_global = str(gc.hook_fail_mode or "").strip().lower()
-    current = saved_global if saved_global in ("open", "closed") else "open"
+    current = saved_global if managed_host and saved_global in ("open", "closed") else "closed"
 
     if mode is None:
         click.echo()
@@ -1946,7 +1950,8 @@ def fail_mode_cmd(
                 # GAP-1109: a connector override (or observe mode) keeps these
                 # open although the global default is closed.
                 _warn_still_fail_open(gc, _open_names)
-            click.echo(f"  {ux.dim('Switch to open:')}   defenseclaw guardrail fail-mode open")
+            if managed_host:
+                click.echo(f"  {ux.dim('Switch to open:')}   defenseclaw guardrail fail-mode open")
         click.echo()
         return
 
@@ -3731,6 +3736,11 @@ def _scope_key(connector_key: str | None, profile: str | None) -> str:
     return key
 
 
+def _rule_prune_scope(connector_key: str | None, profile: str | None) -> str:
+    """Keep the owning scope when its last rule override is removed."""
+    return _scope_key(None, profile) if profile else _scope_key(connector_key, None)
+
+
 def _scope_block(cfg, connector_key: str | None, profile: str | None):
     """The config block of a scope (None when it isn't written yet)."""
     block = cfg.guardrail
@@ -4709,7 +4719,12 @@ def _change_protection(
         wanted = (set(on_now) | {name}) if enable else (set(on_now) - {name})
         order = {p.name: index for index, p in enumerate(packs)}
         desired = sorted(wanted, key=lambda n: order.get(n, len(order)))
-        change = config_writer.Change(path, desired) if desired else config_writer.Change(path, unset=True)
+        change = (
+            config_writer.Change(path, desired)
+            if desired else config_writer.Change(
+                path, unset=True, prune_empty_to=_rule_prune_scope(connector_key, profile_name)
+            )
+        )
         _preflight_config_write(app)
         verb = "enable" if enable else "disable"
         result = _write_guardrail_config(app, [change], f"guardrail protection {verb} {name}", _fail)
@@ -4831,14 +4846,22 @@ def _stale_rule_changes(cfg, pack_dir: str, connector_key: str | None) -> tuple[
             if len(kept) != len(ids):
                 dropped.extend(f"{key}.rules.{field}: {i}" for i in ids if i not in known)
                 path = f"{key}.rules.{field}"
-                changes.append(config_writer.Change(path, kept) if kept else config_writer.Change(path, unset=True))
+                changes.append(
+                    config_writer.Change(path, kept)
+                    if kept else config_writer.Change(
+                        path, unset=True, prune_empty_to=_rule_prune_scope(scope_connector, scope_profile)
+                    )
+                )
         overrides = dict(getattr(rules, "severity_overrides", None) or {})
         kept_overrides = {i: v for i, v in overrides.items() if i in known}
         if len(kept_overrides) != len(overrides):
             dropped.extend(f"{key}.rules.severity_overrides: {i}" for i in overrides if i not in known)
             path = f"{key}.rules.severity_overrides"
             changes.append(
-                config_writer.Change(path, kept_overrides) if kept_overrides else config_writer.Change(path, unset=True)
+                config_writer.Change(path, kept_overrides)
+                if kept_overrides else config_writer.Change(
+                    path, unset=True, prune_empty_to=_rule_prune_scope(scope_connector, scope_profile)
+                )
             )
     return changes, dropped
 
@@ -4895,7 +4918,10 @@ def _change_rule_lists(
             changes.append(
                 config_writer.Change(f"{key}.rules.{remove_from}", rest)
                 if rest
-                else config_writer.Change(f"{key}.rules.{remove_from}", unset=True)
+                else config_writer.Change(
+                    f"{key}.rules.{remove_from}", unset=True,
+                    prune_empty_to=_rule_prune_scope(connector_key, profile_name),
+                )
             )
         if not changes:
             message = f"Rule {rule_id} is already turned {state} for {where}; nothing was changed."
@@ -4964,7 +4990,7 @@ def rule_severity_cmd(
     key = config_writer.format_path((*overrides, rule_id))
     level = severity.upper()
     scope_key = _scope_key(connector_key, profile_name)
-    prune_to = _scope_key(None, profile_name) if profile_name else scope_key
+    prune_to = _rule_prune_scope(connector_key, profile_name)
     change = (
         config_writer.Change(key, unset=True, prune_empty_to=prune_to)
         if level == "DEFAULT" else config_writer.Change(key, level)
@@ -5091,7 +5117,12 @@ def _change_suppression(
         else:
             updated = [s for s in current if s["id"] != sid]
         updated = [{k: v for k, v in s.items() if v} for s in updated]
-        change = config_writer.Change(path, updated) if updated else config_writer.Change(path, unset=True)
+        change = (
+            config_writer.Change(path, updated)
+            if updated else config_writer.Change(
+                path, unset=True, prune_empty_to=_rule_prune_scope(connector_key, profile_name)
+            )
+        )
         _preflight_config_write(app)
         verb = "add" if entry is not None else "remove"
         result = _write_guardrail_config(app, [change], f"guardrail suppress {verb} {sid}", _fail)
