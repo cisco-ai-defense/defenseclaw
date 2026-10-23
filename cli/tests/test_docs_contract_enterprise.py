@@ -70,9 +70,8 @@ def test_managed_hook_docs_distinguish_outages_from_refusals() -> None:
 
 
 def test_managed_outage_open_docs_name_rate_limits_and_the_guard_session_check() -> None:
-    """r104 W4b2 review: a rate limit blocks also when the resends run out; the
-    administrator's open does not reach a connector whose foreign-hook guard
-    checks the session with the gateway; observe mode is not a fail mode."""
+    """Rate limits block after the resends; guarded outage calls need trusted
+    process and session records even when the administrator selects open."""
     threat_model = (ROOT / "docs/ENTERPRISE-THREAT-MODEL.md").read_text(encoding="utf-8")
     r31 = next(line for line in threat_model.splitlines() if line.startswith("| R31 |"))
     assert "including for Claude Code, Codex and Devin" not in r31
@@ -98,6 +97,8 @@ def test_managed_outage_open_docs_name_rate_limits_and_the_guard_session_check()
     assert "in observe mode | Open" not in per_layer
     assert "Managed Claude Code and Codex hooks | Always closed" not in per_layer
     assert "observe and action mode alike" in per_layer and "outage only" in per_layer
+    assert re.search(r"foreign_hooks: remove.*agent process.*session.*15 minutes", per_layer)
+    assert "not for a connector whose foreign-hook guard checks the session" not in per_layer
     assert "observe mode fails open" not in coverage
 
     troubleshooting = (DOCS / "troubleshooting/enterprise/index.mdx").read_text(encoding="utf-8")

@@ -1083,6 +1083,35 @@ class TestLockContractFailureDetail:
         detail = cmd_setup._lock_contract_failure_detail("devin", newer, invariant)
         assert "predates" in detail and "defenseclaw-gateway restart" in detail
 
+    @pytest.mark.parametrize("removed", ["omni" + "gent", "open" + "hands"])
+    def test_removed_connector_names_cleanup_without_setup_or_disable_advice(
+        self, removed: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cmd_setup._is_removed_connector_name("open-hands")
+        assert cmd_setup._is_removed_connector_name("open_hands")
+        entry = {
+            "connector": removed,
+            "raw_agent_version": "0.10.0",
+            "normalized_agent_version": "0.10.0",
+            "compatibility_status": "unknown",
+            "hook_fail_mode": "closed",
+        }
+        invariant = connector_lock_contract_invariant(removed, entry)
+        assert invariant
+        detail = cmd_setup._lock_contract_failure_detail(removed, entry, invariant)
+        assert "removed in DefenseClaw 1.0.4" in detail
+        assert "manual cleanup" in detail
+        assert "guardrail disable" not in detail
+        lock = tmp_path / "hook_contract_lock.json"
+        lock.write_text(json.dumps({"version": 2, "connectors": {removed: entry}}))
+        keep, skipped = cmd_setup._partition_unconvergeable_peers(
+            str(lock), {"kiro", removed}, required={"kiro"}
+        )
+        output = capsys.readouterr().out
+        assert keep == {"kiro"} and skipped == frozenset({removed})
+        assert "Re-run setup for" not in output
+        assert "manual cleanup" in output
+
     def test_unversioned_agent_names_a_missing_install(self) -> None:
         # GAP-1285: OpenCode not installed for the account reports no version.
         entry = {"connector": "opencode", "compatibility_status": "unversioned", "hook_fail_mode": "open"}

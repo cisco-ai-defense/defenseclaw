@@ -160,7 +160,9 @@ function docsText(): string {
 }
 
 describe('1.0.4 managed outage and upgrade claims', () => {
-  it('keeps the managed guarded outage limit across operator and threat-model pages', () => {
+  it('pins guarded outage guidance to the protected process and session records', () => {
+    const guard = source('internal/cli/hook_foreign_guard.go');
+    assert.match(guard, /if err != nil && !update\.Decision\.Deny && errors\.As\(err, &outage\)[\s\S]*?protectedForeignHookSession\(update\.Key, update\.Decision, outage\.serviceUID\)/);
     const outagePages = [
       'appendix/coverage-by-layer.mdx',
       'reference/configuration/fail-modes.mdx',
@@ -175,18 +177,18 @@ describe('1.0.4 managed outage and upgrade claims', () => {
     for (const name of outagePages) {
       const guidance = page(name);
       assert.match(guidance, /foreign_hooks: remove/i, name);
-      assert.match(guidance, /(?:guarded|guard|session).*(?:outage.*block|block.*outage)/i, name);
+      assert.match(guidance, /(?:process|session|record).*(?:record|allow|block)/i, name);
+      assert.doesNotMatch(guidance, /guarded calls block during an outage even under `open`|guarded call blocks even under the administrator's `open`/i, name);
     }
-    assert.match(repoText('docs/ENTERPRISE-THREAT-MODEL.md'), /R31.*foreign_hooks: remove.*blocks outages/i);
+    assert.match(repoText('docs/ENTERPRISE-THREAT-MODEL.md'), /R31.*foreign_hooks: remove.*fresh, trusted process and session records/i);
     const changelog = repoText('CHANGELOG.md');
-    assert.match(changelog, /Known limits.*foreign_hooks: remove.*guarded connectors.*block tool calls during a gateway outage.*hook_fail_mode: open/i);
+    assert.match(changelog, /During an outage under `open`, a guarded call runs only when the records of its agent process and its session/i);
     assert.match(page('appendix/coverage-by-layer.mdx'), /On a per-user install or under Secure Client.*Connector limits and failure reporting vary.*Managed standalone behavior is in the next row/i);
+    const threatRow = source('docs-site/content/docs/enterprise/plan/threat-model.mdx')
+      .split('\n').find((line) => line.startsWith('| Set `DEFENSECLAW_FAIL_MODE=open`')) ?? '';
+    assert.match(threatRow, /foreign_hooks: remove.*(?:process|session).*records.*(?:allow|block)/i);
+    assert.doesNotMatch(threatRow, /except for connectors whose foreign-hook guard/i);
     const all = docsText();
-    assert.doesNotMatch(all, /(?:fresh|trusted|protected) (?:process and session |session |hook )?records?.{0,100}(?:allow|run).{0,70}(?:outage|gateway.*down)/i);
-    assert.doesNotMatch(all, /(?:outage|gateway.*down).{0,100}(?:fresh|trusted|protected) (?:process and session |session |hook )?records?.{0,100}(?:allow|run)/i);
-    assert.doesNotMatch(all, /(?:lifts?|lifted) the 1\.0\.3 (?:outage )?limit/i);
-    // An unconditional statement about every connector would hide the
-    // administrator's outage-only open for connectors without this guard.
     assert.doesNotMatch(all, /(?:gateway )?outages? always block (?:all|every) (?:managed )?(?:hook|connector|call)/i);
   });
 
@@ -194,7 +196,9 @@ describe('1.0.4 managed outage and upgrade claims', () => {
     const guard = page('enterprise/configure/foreign-hook-guard.mdx');
     assert.match(guard, /Windows Amp keeps its guard record locally.*managed plugin blocks gateway outages in every fail mode.*report.*allow/i);
     assert.match(page('enterprise/configure/reference.mdx'), /Amp \(`amp`\).*gateway-backed foreign-hook guard.*local foreign-hook session record.*plugin itself blocks gateway outages/i);
-    assert.match(repoText('CHANGELOG.md'), /Windows Amp keeps its guard record locally.*managed plugin blocks outages independently/i);
+    assert.match(repoText('CHANGELOG.md'), /Windows Amp keeps its guard record locally.*managed plugin blocks (?:gateway )?outages independently/i);
+    assert.match(page('enterprise/configure/reference.mdx'), /For gateway-backed guards.*gateway keeps.*Windows Amp keeps its guard snapshot locally/i);
+    assert.match(page('reference/configuration/fail-modes.mdx'), /For gateway-backed guards.*protected records.*On Windows Amp keeps its guard record/i);
     const risk = repoText('docs/ENTERPRISE-THREAT-MODEL.md').split('| R13 |')[1]?.split('| R14 |')[0] ?? '';
     assert.match(risk, /Windows Amp keeps its guard record locally.*managed plugin blocks gateway outages/i);
     assert.doesNotMatch(docsText(), /guard checks each covered connector's session with the gateway/i);
@@ -274,6 +278,18 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
   });
 });
 
+describe('Amp rejected command display', () => {
+  it('explains the collapsed summary without treating an attempted call as execution', () => {
+    const plugin = source('internal/gateway/connector/hooks/amp-plugin.ts');
+    const amp = page('connectors/amp.mdx');
+    assert.match(plugin, /case "block":[\s\S]*?action: "reject-and-continue",\s*message: verdict\.reason/);
+    assert.match(amp, /Ran 1 command/);
+    assert.match(amp, /Tool rejected by plugin/);
+    assert.match(amp, /command did not execute/i);
+    assert.match(amp, /audit.*block/i);
+  });
+});
+
 describe('1.0.4 operator routes and limits', () => {
   it('derives the MCP-description YARA signature count from the shipped rules', () => {
     const rules = readFileSync(join(repo, 'policies/yara/mcp-tools/description_injection.yara'), 'utf8');
@@ -309,6 +325,12 @@ describe('1.0.4 operator routes and limits', () => {
     const risk = repoText('docs/ENTERPRISE-THREAT-MODEL.md').split('| R25 |')[1]?.split('| R26 |')[0] ?? '';
     assert.match(risk, /engine version.*surface_unverified.*not enrolled/i);
     assert.doesNotMatch(risk, /enrollment finds an agent only through its CLI install/i);
+  });
+
+  it('does not advertise local files as MCP scan targets', () => {
+    const api = page('reference/apis/gateway-api.mdx');
+    assert.match(api, /`POST`\s*\|\s*`\/v1\/mcp\/scan`[^\n]*Path or JSON-file targets[^\n]*HTTP 400[^\n]*bare identifier without path or file syntax[^\n]*configured server name/i);
+    assert.doesNotMatch(api, /MCP scanner against a target URL or local path/i);
   });
 
   it('keeps managed readers off per-user HITL commands', () => {

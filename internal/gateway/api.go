@@ -3245,12 +3245,26 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /v1/mcp/scan — run MCP scanner on a URL or configured server name
+// POST /v1/mcp/scan — run MCP scanner on a URL or configured server name.
 // ---------------------------------------------------------------------------
 
 type mcpScanRequest struct {
 	Target string `json:"target"`
 	Name   string `json:"name"`
+}
+
+func mcpScanLocalPath(target string) bool {
+	lower := strings.ToLower(target)
+	windowsDrive := len(target) >= 2 && target[1] == ':' &&
+		(target[0] >= 'A' && target[0] <= 'Z' || target[0] >= 'a' && target[0] <= 'z')
+	if strings.HasPrefix(lower, "file:") || windowsDrive || filepath.IsAbs(target) {
+		return true
+	}
+	if strings.Contains(target, "://") {
+		return false
+	}
+	return target == "." || target == ".." || strings.ContainsAny(target, `/\`) ||
+		strings.HasPrefix(target, "~") || strings.HasSuffix(lower, ".json")
 }
 
 func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
@@ -3268,9 +3282,18 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if mcpScanLocalPathTarget(req.Target) {
+	if mcpScanLocalPath(req.Target) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "local path MCP scan targets are not supported; use a configured MCP server name or its URL",
+			"error": "local path targets are not supported by the MCP scan API; use a configured MCP server name or an MCP URL",
+		})
+		return
+	}
+	lowerTarget := strings.ToLower(req.Target)
+	if strings.Contains(req.Target, "://") && !strings.HasPrefix(lowerTarget, "http://") &&
+		!strings.HasPrefix(lowerTarget, "https://") && !strings.HasPrefix(lowerTarget, "ws://") &&
+		!strings.HasPrefix(lowerTarget, "wss://") && !strings.HasPrefix(lowerTarget, "sse://") {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "unsupported MCP scan URL scheme; use http, https, ws, wss or sse",
 		})
 		return
 	}
@@ -3311,26 +3334,6 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "mcp", scanAPIResponseEnvelope(result)))
-}
-
-func mcpScanLocalPathTarget(target string) bool {
-	lower := strings.ToLower(target)
-	if strings.HasPrefix(lower, "file:") {
-		return true
-	}
-	for _, scheme := range []string{"http://", "https://", "ws://", "wss://", "sse://"} {
-		if strings.HasPrefix(lower, scheme) {
-			return false
-		}
-	}
-	// A drive-relative path has no slash, and filepath cannot recognize it
-	// when a Linux gateway validates a Windows target.
-	if len(target) >= 2 && target[1] == ':' &&
-		(target[0] >= 'a' && target[0] <= 'z' || target[0] >= 'A' && target[0] <= 'Z') {
-		return true
-	}
-	return target == "." || target == ".." || filepath.IsAbs(target) || strings.ContainsAny(target, `/\`) ||
-		strings.HasSuffix(lower, ".json") || strings.HasPrefix(target, "~")
 }
 
 // ---------------------------------------------------------------------------

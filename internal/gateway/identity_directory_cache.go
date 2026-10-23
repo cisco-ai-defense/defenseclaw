@@ -120,6 +120,7 @@ type identityCache[T any] struct {
 type identityCacheEntry[T any] struct {
 	facts       T
 	ok          bool
+	usedByHook  bool
 	fetchedAt   time.Time
 	nextAttempt time.Time
 	inflight    chan struct{}
@@ -189,6 +190,7 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		entry = &identityCacheEntry[T]{}
 		c.entries[key] = entry
 	}
+	entry.usedByHook = true
 	c.dropAgedLocked(key, entry, now)
 	age := now.Sub(entry.fetchedAt)
 	invalidated := entry.ok && (entry.fetchedAt.Before(c.staleBefore) || entry.fetchedAt.Before(entry.staleBefore))
@@ -665,6 +667,12 @@ func (c *identityCache[T]) health() identityCacheHealth {
 	now := c.now()
 	for key, entry := range c.entries {
 		if entry.failedSince.IsZero() || now.Sub(entry.lastFailedAt) >= identityDirectoryTTL {
+			continue
+		}
+		if entry.gone && entry.fetchedAt.IsZero() && !entry.usedByHook {
+			// A deliberately queried nonexistent account has never supplied facts
+			// to hook calls. Keep its lookup refusal, but do not turn it into a
+			// directory outage warning for the managed deployment.
 			continue
 		}
 		if c.confirmGone && entry.gone && c.answeredAt.After(entry.lastFailedAt) {

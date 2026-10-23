@@ -79,8 +79,9 @@ const (
 	// ownership: "off" before it kept Claude Code off every route). It
 	// changes nothing unless the user's hook contract lock records such a
 	// registration.
-	enterpriseHookWorkerModeRemoveLeftover      = "remove_leftover"
-	enterpriseHookWorkerModeBlockPersonalClaude = "block_personal_claude"
+	enterpriseHookWorkerModeRemoveLeftover            = "remove_leftover"
+	enterpriseHookWorkerModeBlockPersonalClaude       = "block_personal_claude"
+	enterpriseHookWorkerModeRepairManagedCodexFeature = "repair_managed_codex_feature"
 	// enterpriseHookWorkerModePurge removes the user's DefenseClaw per-user
 	// state (standalone uninstall --purge). It runs after the request's
 	// removals and only when every one of them succeeded: the state holds
@@ -659,6 +660,13 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		case enterpriseHookWorkerModeBlockPersonalClaude:
 			err = blockPersonalClaudeHook(opts)
 			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
+		case enterpriseHookWorkerModeRepairManagedCodexFeature:
+			if !request.Standalone {
+				err = errors.New("managed Codex feature repair requires the standalone guardian")
+			} else {
+				err = repairManagedCodexUserFeature(opts)
+			}
+			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
 		case enterpriseHookWorkerModePurge:
 			if purgeBlocked != "" {
 				err = errors.New("kept the per-user state for its backups: " + purgeBlocked)
@@ -696,6 +704,62 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		results = append(results, outcome)
 	}
 	return enterpriseHookWorkerResponse{Targets: results}
+}
+
+// repairManagedCodexUserFeature runs with the target user's uid. The machine
+// requirements already pin hooks=true; this removes only the conflicting user
+// key that makes Codex refuse an unrelated project trust write.
+func repairManagedCodexUserFeature(opts enterprisehooks.InstallOptions) error {
+	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "codex") {
+		return errors.New("managed Codex feature repair requires the Codex connector")
+	}
+	path := filepath.Join(opts.UserHome, ".codex", "config.toml")
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect Codex user config %s: %w", path, err)
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("resolve Codex user config %s: %w", path, err)
+	}
+	resolvedHome, err := filepath.EvalSymlinks(opts.UserHome)
+	if err != nil {
+		return fmt.Errorf("resolve enrolled home %s for Codex user config: %w", opts.UserHome, err)
+	}
+	if !enterpriseHookWorkerPathWithin(resolvedHome, resolved) {
+		return fmt.Errorf("codex user config %s resolves outside the enrolled home; move it into the home before managed feature repair", path)
+	}
+	file, err := os.OpenFile(resolved, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return fmt.Errorf("open Codex user config %s: %w", path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat Codex user config %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > 4<<20 {
+		return fmt.Errorf("codex user config %s is not a regular file of at most 4 MiB", path)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, 4<<20+1))
+	if err != nil {
+		return fmt.Errorf("read bounded Codex user config %s: %w", path, err)
+	}
+	if len(raw) > 4<<20 {
+		return fmt.Errorf("codex user config %s exceeded the 4 MiB read limit", path)
+	}
+	repaired, err := connector.RemoveCodexManagedHookFeature(raw)
+	if err != nil {
+		return fmt.Errorf("repair Codex user config %s: %w", path, err)
+	}
+	if bytes.Equal(raw, repaired) {
+		return nil
+	}
+	if err := configwrite.WriteFileDurable(resolved, repaired, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("publish repaired Codex user config %s: %w", path, err)
+	}
+	return nil
 }
 
 // blockPersonalClaudeHook replaces only an existing DefenseClaw-owned

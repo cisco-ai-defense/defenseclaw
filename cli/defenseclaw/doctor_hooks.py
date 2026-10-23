@@ -3642,10 +3642,16 @@ def validate_windows_hook_registration(
                 f"on-disk Windows-native {runtime} registration is valid; "
                 f"hook_entries={matrix_entries}; allowlist_entries={allowlist_entries}; "
                 f"target={resolved}; {evidence}; running Hermes CLI/TUI/gateway/desktop/service hosts "
-                "are unverified and must be reloaded or restarted; live=false",
+                "are unverified: doctor cannot verify which hooks an already running host loaded, "
+                "even after a restart or successful hook traffic; live=false",
                 command,
                 resolved,
                 raw_target,
+                repair=(
+                    "close every Hermes CLI/TUI/gateway/desktop/service host, then run 'defenseclaw doctor'; "
+                    "start Hermes again after the on-disk checks pass. "
+                    "Running-host load verification is unavailable"
+                ),
             )
         return WindowsHookCheck(
             "healthy",

@@ -18,7 +18,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import io
 import json
 import os
@@ -459,7 +458,8 @@ def test_windows_hermes_idle_is_healthy_not_pending_reload() -> None:
     pending = WindowsHookCheck(
         "pending-reload",
         "on-disk Windows-native executable registration is valid; hook_entries=23; running Hermes "
-        "CLI/TUI/gateway/desktop/service hosts are unverified and must be reloaded or restarted; live=false",
+        "CLI/TUI/gateway/desktop/service hosts are unverified: doctor cannot verify which hooks "
+        "an already running host loaded; live=false",
     )
     with mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=False):
         idle = cmd_doctor._hermes_idle_native_check(pending, _DoctorResult())

@@ -76,7 +76,7 @@ func TestVerifyWindowsManagedRuntimeGenerationForInstallDoesNotImpersonate(t *te
 		HookExecutable:             `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`,
 		GatewayAddr:                "127.0.0.1:18970",
 		GatewayServiceName:         "DefenseClawGateway-Test",
-		FailMode:                   "open",
+		FailMode:                   "closed",
 		ScopedToken:                "scoped-test-token",
 		HookContractID:             "codex-hooks-v1",
 		HookContractLockUpdatedAt:  "2026-08-23T10:00:00Z",

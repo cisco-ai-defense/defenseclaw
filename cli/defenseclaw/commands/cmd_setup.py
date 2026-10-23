@@ -15005,10 +15005,11 @@ def _lock_contract_failure_detail(connector: str, entry: Any, invariant: str) ->
     appears while setting up an unrelated connector.
     """
 
-    if normalize_connector(connector) in REMOVED_CONNECTOR_NAMES:
+    if _is_removed_connector_name(connector):
         return (
             f"{connector} support was removed in DefenseClaw 1.0.4; "
-            "run defenseclaw doctor for the manual cleanup steps"
+            "there is no supported setup route. Run defenseclaw doctor for the "
+            "manual cleanup steps for retired connector state."
         )
 
     raw_version = ""
@@ -15251,17 +15252,23 @@ def _partition_unconvergeable_peers(
         click.echo()
         for name, detail in sorted(skipped.items()):
             ux.warn(f"skipping {name}: {detail}")
-        ux.subhead(_skipped_peer_followup(skipped))
+        followup = _skipped_peer_followup(skipped)
+        if followup:
+            ux.subhead(followup)
     return keep, frozenset(skipped) | frozenset(quiet)
+
+
+def _is_removed_connector_name(name: str) -> bool:
+    """Recognize retired connector names, including old OpenHands spellings."""
+    return normalize_connector(name).replace("-", "").replace("_", "") in REMOVED_CONNECTOR_NAMES
 
 
 def _skipped_peer_followup(skipped: set[str] | dict[str, str]) -> str:
     """Give setup advice only for peers whose connector still exists."""
-    active = sorted(set(skipped) - set(REMOVED_CONNECTOR_NAMES))
-    message = "Continuing with the rest of the roster."
-    if active:
-        message += f" Re-run setup for {', '.join(active)} after fixing the above."
-    return message
+    active = sorted(name for name in skipped if not _is_removed_connector_name(name))
+    if not active:
+        return ""
+    return f"Continuing with the rest of the roster. Re-run setup for {', '.join(active)} after fixing the above."
 
 def _opencode_awaiting_restart(readiness: _ConnectorRuntimeReadiness) -> bool:
     """OpenCode's plugin is current, but no OpenCode has loaded it since the restart.
@@ -15479,7 +15486,9 @@ def _wait_for_connector_runtime(
                         return
                 if not cancelled.is_set() and time.monotonic() < deadline:
                     if skipped_peers:
-                        ux.subhead(_skipped_peer_followup(skipped_peers))
+                        followup = _skipped_peer_followup(skipped_peers)
+                        if followup:
+                            ux.subhead(followup)
                     results.put_nowait(pending_reload or _ConnectorRuntimeReadiness(True))
             except Exception as exc:  # noqa: BLE001 - worker failures are bounded readiness evidence.
                 if not cancelled.is_set() and time.monotonic() < deadline:
