@@ -1137,9 +1137,9 @@ func simpleAssignedProgramName(word *syntax.Word, assigned map[string]string) (s
 		part = quoted.Parts[0]
 	}
 	param, ok := part.(*syntax.ParamExp)
-	if !ok || param.Param == nil || param.Excl || param.Length || param.Width ||
-		param.Index != nil || param.Slice != nil || param.Repl != nil ||
-		param.Names != 0 || param.Exp != nil {
+	if !ok || param.Param == nil || param.Excl || param.Length || param.Width || param.IsSet ||
+		param.Index != nil || param.Slice != nil || param.Repl != nil || param.Names != 0 ||
+		param.Exp != nil || param.NestedParam != nil || param.Flags != nil || len(param.Modifiers) != 0 {
 		return "", false
 	}
 	value, found := assigned[param.Param.Value]

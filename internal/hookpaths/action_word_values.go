@@ -139,7 +139,18 @@ func actionWordValue(word *syntax.Word, values actionValues, cwd, home string) (
 func actionBoundProgramWords(file *syntax.File, home string) map[*syntax.CallExpr]string {
 	bound := make(map[*syntax.CallExpr]string)
 	for i := 1; i < len(file.Stmts); i++ {
-		call, ok := file.Stmts[i].Cmd.(*syntax.CallExpr)
+		// The first command of a list (x=f; "$x" && echo done) runs right
+		// after the assignment too.
+		command := file.Stmts[i].Cmd
+		for {
+			list, ok := command.(*syntax.BinaryCmd)
+			if !ok || list.Op != syntax.AndStmt && list.Op != syntax.OrStmt || list.X == nil ||
+				list.X.Negated || list.X.Background || len(list.X.Redirs) != 0 {
+				break
+			}
+			command = list.X.Cmd
+		}
+		call, ok := command.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			continue
 		}
