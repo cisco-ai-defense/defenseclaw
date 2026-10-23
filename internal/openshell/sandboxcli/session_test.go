@@ -1427,6 +1427,24 @@ func TestAnOldSupervisorRunsNothing(t *testing.T) {
 	has(t, ta.output(), "m1-b still runs the supervisor of an OpenShell release older than "+openshell.SupportedMin)
 }
 
+// Connect is not an explicit choice to discard MicroVM writes. A legacy
+// session whose guest sync may be broken stays isolated until the automatic
+// stop confirms a flush or the user chooses a loss-aware stop.
+func TestConnectDoesNotStopALegacyMicroVMWithoutALossDecision(t *testing.T) {
+	ta := newTestApp(t, "")
+	sb := sampleSandbox("legacy-vm")
+	sb.Phase, sb.OldSupervisor, sb.Driver = "ready", true, "vm"
+	ta.daemon.add(sb)
+	err := ta.Connect(bg, ConnectOptions{Name: sb.Name})
+	if err == nil || !strings.Contains(err.Error(), "unsynced writes") ||
+		!strings.Contains(err.Error(), "explicitly run `defenseclaw sandbox stop legacy-vm`") {
+		t.Fatalf("legacy MicroVM connect did not explain the loss decision: %v", err)
+	}
+	if ta.calls("POST", "legacy-vm/stop") != 0 || ta.calls("POST", "legacy-vm/start") != 0 {
+		t.Fatalf("connect stopped an unflushed legacy MicroVM")
+	}
+}
+
 // A headless session in an existing sandbox runs without a terminal:
 // `connect NAME --prompt TEXT` or the harness's own print flag (manual
 // test M6).

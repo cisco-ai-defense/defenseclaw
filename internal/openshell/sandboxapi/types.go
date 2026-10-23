@@ -17,6 +17,7 @@
 package sandboxapi
 
 import (
+	"encoding/json"
 	"slices"
 	"strconv"
 	"strings"
@@ -157,6 +158,9 @@ type ManagedStatus struct {
 	// sandbox harness for this account. An unavailable policy answer leaves
 	// it false, so doctor cannot claim broad readiness without one.
 	Allowed bool `json:"allowed"`
+	// LegacyAllowedMissing is true only after decoding a status from an older
+	// daemon that did not send allowed. It is not an authorization verdict.
+	LegacyAllowedMissing bool `json:"-"`
 	// DeniedHarnesses names configured harnesses whose profile forbids a
 	// sandbox. Empty with Allowed false means the policy could not be read.
 	DeniedHarnesses []string `json:"denied_harnesses,omitempty"`
@@ -201,6 +205,28 @@ type ManagedStatus struct {
 	// Unavailable is why sandboxes can't run for the caller ("" = they
 	// can).
 	Unavailable string `json:"unavailable,omitempty"`
+}
+
+// UnmarshalJSON preserves the difference between an older daemon omitting
+// allowed and a current daemon explicitly denying it.
+func (m *ManagedStatus) UnmarshalJSON(data []byte) error {
+	type plain ManagedStatus
+	var decoded plain
+	var wire struct {
+		*plain
+		Allowed *bool `json:"allowed"`
+	}
+	wire.plain = &decoded
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*m = ManagedStatus(decoded)
+	if wire.Allowed == nil {
+		m.LegacyAllowedMissing = true
+	} else {
+		m.Allowed = *wire.Allowed
+	}
+	return nil
 }
 
 // Gateway is the OpenShell gateway the daemon is connected to.
@@ -414,13 +440,13 @@ type Sandbox struct {
 	// Orphaned marks an OpenShell sandbox with DefenseClaw labels but no
 	// DefenseClaw binding; its hooks cannot authenticate.
 	Orphaned bool `json:"orphaned,omitempty"`
-	// OldSupervisor marks a ready sandbox whose session runs the supervisor
-	// of an OpenShell release older than openshell.SupportedMin (or of one
-	// its record does not name), whose network broker can let the sandbox's
-	// connections bypass its policy (NVIDIA/OpenShell#4494). The daemon
-	// stops it; until it has, `sandbox exec` refuses it and `sandbox
-	// connect` stops it before it starts it again (GAP-0415). A daemon
-	// older than 1.0.4 never sets it.
+	// OldSupervisor marks a sandbox whose session runs the supervisor of an
+	// OpenShell release older than openshell.SupportedMin (or of one its
+	// record does not name), whose network broker can bypass sandbox policy
+	// (NVIDIA/OpenShell#4494). The daemon stops a ready session (GAP-0415);
+	// for a completed or failed MicroVM it withdraws network access while
+	// keeping its compute and disk until OpenShell reports the VM gone. A
+	// warning reports a failed withdrawal.
 	OldSupervisor bool `json:"old_supervisor,omitempty"`
 	// NestedRepos are the git repositories the nested-repository guard
 	// found in a mounted project during the current session.

@@ -81,6 +81,9 @@ type fakeDaemon struct {
 	// onStatus runs before the status is returned (the daemon notices a
 	// change).
 	onStatus func(st *sandboxapi.Status)
+	// statusWithoutAllowed models a managed daemon from before Status gained
+	// the aggregate managed.allowed field.
+	statusWithoutAllowed bool
 	// onExplain, when set, edits the explain answer to a request.
 	onExplain func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain)
 	// createMCP and createWarnings are what create reports.
@@ -244,7 +247,18 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		if d.onStatus != nil {
 			d.onStatus(&d.status)
 		}
-		reply(d.status)
+		if d.statusWithoutAllowed {
+			raw, _ := json.Marshal(d.status)
+			var status map[string]json.RawMessage
+			_ = json.Unmarshal(raw, &status)
+			var managed map[string]json.RawMessage
+			_ = json.Unmarshal(status["managed"], &managed)
+			delete(managed, "allowed")
+			status["managed"], _ = json.Marshal(managed)
+			reply(status)
+		} else {
+			reply(d.status)
+		}
 	case path == sandboxapi.PathPolicyExplain && d.explainErr != nil && d.explainErr(sandboxapi.ParseExplainQuery(r.URL.Query())) != nil:
 		e := d.explainErr(sandboxapi.ParseExplainQuery(r.URL.Query()))
 		w.Header().Set("Content-Type", "application/json")

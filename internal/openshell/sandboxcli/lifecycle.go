@@ -527,12 +527,16 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	}
 	if sb.Phase == "ready" && sb.OldSupervisor {
 		// Its session runs a supervisor whose network broker can let its
-		// connections bypass its policy: it stops, and the start below runs
-		// the gateway's own (GAP-0415).
+		// connections bypass its policy. A MicroVM must not be stopped by
+		// connect: only a confirmed automatic flush or a separate,
+		// loss-aware user stop may end it.
+		if d, ok := openshell.LookupDriver(sb.Driver); !ok || !d.StopFlushes {
+			return oldSupervisorRefusal(sb, nil)
+		}
 		a.note(sb.Name + " still runs the supervisor of an OpenShell release older than " + openshell.SupportedMin + "; stopping it to start it on the gateway's own…")
 		stopped, serr := api.Stop(ctx, sb.Name)
 		if serr != nil {
-			return oldSupervisorRefusal(sb.Name, apiError(serr))
+			return oldSupervisorRefusal(sb, apiError(serr))
 		}
 		sb = stopped
 	}
@@ -642,10 +646,17 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 // the supervisor of an OpenShell release older than openshell.SupportedMin
 // (sandboxapi.Sandbox.OldSupervisor), whose network broker can let its
 // connections bypass its policy (NVIDIA/OpenShell#4494): stopErr is why a
-// connect could not stop it, nil for an exec, which does not try.
-func oldSupervisorRefusal(name string, stopErr error) error {
+// connect could not stop it, nil for an exec, which does not try. Connect
+// refuses a legacy MicroVM until an automatic flush succeeds or the user
+// explicitly chooses a potentially lossy stop.
+func oldSupervisorRefusal(sb *sandboxapi.Sandbox, stopErr error) error {
+	name := sb.Name
 	msg := name + " runs the supervisor of an OpenShell release older than " + openshell.SupportedMin +
 		", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494), so DefenseClaw runs nothing in it"
+	if d, ok := openshell.LookupDriver(sb.Driver); !ok || !d.StopFlushes {
+		return fmt.Errorf("%s. Its MicroVM stays isolated while DefenseClaw retries a confirmed disk flush; if you accept possible loss of unsynced writes, explicitly run `%s stop %s`, then start or connect again",
+			msg, CommandName, name)
+	}
 	if stopErr != nil {
 		return fmt.Errorf("%s, and it could not stop it (%v): stop it with `%s stop %s`, then connect again", msg, stopErr, CommandName, name)
 	}
@@ -724,7 +735,7 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 		return apiError(err)
 	}
 	if sb.Phase == "ready" && sb.OldSupervisor {
-		return oldSupervisorRefusal(sb.Name, nil)
+		return oldSupervisorRefusal(sb, nil)
 	}
 	if sb.Phase != "ready" {
 		return fmt.Errorf("%s is %s; start it with `%s start %s`", sb.Name, sb.Phase, CommandName, sb.Name)

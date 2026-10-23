@@ -43,6 +43,56 @@ func managedStatusFixture() *sandboxapi.ManagedStatus {
 		RequestAccess: "it-security@example.com", InstallMode: "setup", Driver: "docker", OpenShellVersion: "0.1.3"}
 }
 
+// An older managed daemon omits managed.allowed while it keeps an account's
+// running sandbox during an upgrade. The doctor can ask its existing explain
+// endpoint for the configured harnesses; an explicit denial still fails.
+func TestManagedDoctorUsesLegacyDaemonPolicyExplanation(t *testing.T) {
+	withManagedHost(t)
+	for _, tc := range []struct {
+		name   string
+		denied string
+		want   openshell.CheckStatus
+	}{
+		{"permitted", "", openshell.StatusPass},
+		{"one harness denied", "codex", openshell.StatusFail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.Managed = managedStatusFixture()
+			ta.daemon.statusWithoutAllowed = true
+			ta.daemon.onExplain = func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
+				ex.Managed = &sandboxapi.ManagedExplain{Allowed: req.Harness != tc.denied}
+			}
+			rep := ta.runDoctor(bg)
+			row := rep.Get(CheckIDAdmin)
+			if row == nil || row.Status != tc.want {
+				t.Fatalf("organization policy for legacy daemon = %+v", row)
+			}
+			if tc.denied == "" && !rep.OK() {
+				t.Fatalf("permitted running account was reported unready: %+v", rep.Checks)
+			}
+			if tc.denied != "" && !strings.Contains(row.Detail, tc.denied) {
+				t.Fatalf("denial did not name %s: %+v", tc.denied, row)
+			}
+		})
+	}
+}
+
+func TestManagedDoctorLegacyPolicyExplanationFailureIsNotReady(t *testing.T) {
+	withManagedHost(t)
+	ta := newTestApp(t, "")
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.statusWithoutAllowed = true
+	ta.daemon.explainErr = func(sandboxapi.ExplainRequest) *sandboxapi.Error {
+		return sandboxapi.Errorf(sandboxapi.CodeUnavailable, "policy service unavailable")
+	}
+	rep := ta.runDoctor(bg)
+	if row := rep.Get(CheckIDAdmin); row == nil || row.Status != openshell.StatusFail ||
+		!strings.Contains(row.Detail, "older sandbox service did not report authorization") || rep.OK() {
+		t.Fatalf("unconfirmed legacy authorization = %+v", row)
+	}
+}
+
 // withManagedHost makes the CLI treat this computer as a managed one.
 func withManagedHost(t *testing.T) {
 	t.Helper()
@@ -607,7 +657,7 @@ func TestDoctorRowsOnAManagedComputer(t *testing.T) {
 	}
 	// GAP-0175: before the first sandbox no profile is known; the row
 	// names the policy, never "profile your organization's policy".
-	if c := ta.managedPolicyCheck(&sandboxapi.ManagedStatus{}); c.Status != openshell.StatusFail ||
+	if c := ta.managedPolicyCheck(bg, &sandboxapi.ManagedStatus{}); c.Status != openshell.StatusFail ||
 		!strings.HasPrefix(c.Detail, "your organization's policy: sandbox authorization could not be confirmed") {
 		t.Errorf("unnamed policy row = %+v", c)
 	}

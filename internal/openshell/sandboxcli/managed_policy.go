@@ -907,7 +907,7 @@ func firstCovering(globs []string, host string) string {
 // managedPolicyCheck is the doctor's "Organization policy" row on a managed
 // computer: the caller's own profile and policy id, never the local
 // configuration, and a warning while the directory could not be reached.
-func (a *App) managedPolicyCheck(m *sandboxapi.ManagedStatus) openshell.Check {
+func (a *App) managedPolicyCheck(ctx context.Context, m *sandboxapi.ManagedStatus) openshell.Check {
 	c := openshell.Check{ID: CheckIDAdmin, Title: "Organization policy", Status: openshell.StatusPass}
 	// Before the first sandbox the daemon knows no profile: the row then
 	// names the policy, not a "profile" without a name (GAP-0175).
@@ -921,10 +921,21 @@ func (a *App) managedPolicyCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 	if ago := agoText(m.UpdatedAt, a.Now()); ago != "" {
 		c.Detail += ", updated " + ago
 	}
-	if !m.Allowed {
+	allowed, denied := m.Allowed, m.DeniedHarnesses
+	if m.LegacyAllowedMissing {
+		var err error
+		allowed, denied, err = a.legacyManagedPermission(ctx)
+		if err != nil {
+			c.Status = openshell.StatusFail
+			c.Detail += ": this older sandbox service did not report authorization, and its policy explanation could not confirm it: " + sandboxapi.DisplayText(err.Error())
+			c.Fix = &openshell.Fix{Summary: sandboxapi.AccessContact(m.RequestAccess)}
+			return c
+		}
+	}
+	if !allowed {
 		c.Status = openshell.StatusFail
-		if len(m.DeniedHarnesses) > 0 {
-			c.Detail += ": your organization doesn't allow sandboxes for " + strings.Join(sandboxapi.DisplayTexts(m.DeniedHarnesses), ", ")
+		if len(denied) > 0 {
+			c.Detail += ": your organization doesn't allow sandboxes for " + strings.Join(sandboxapi.DisplayTexts(denied), ", ")
 		} else {
 			c.Detail += ": sandbox authorization could not be confirmed for your account"
 		}
@@ -936,6 +947,47 @@ func (a *App) managedPolicyCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 			sandboxapi.AccessContact(m.RequestAccess)}
 	}
 	return c
+}
+
+// legacyManagedPermission asks an older daemon's existing explain endpoint
+// for each harness this CLI can run. Its status did not carry the aggregate
+// authorization verdict, so absence must not mean a denial or an approval.
+func (a *App) legacyManagedPermission(ctx context.Context) (bool, []string, error) {
+	specs, err := a.harnesses(nil)
+	if err != nil {
+		return false, nil, err
+	}
+	api, err := a.api()
+	if err != nil {
+		return false, nil, err
+	}
+	var denied []string
+	for _, spec := range specs {
+		ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Harness: spec.Name})
+		if err != nil {
+			return false, nil, err
+		}
+		if ex == nil || ex.Managed == nil {
+			return false, nil, fmt.Errorf("no managed policy for %s", spec.Name)
+		}
+		if !ex.Managed.Allowed || !managedHarnessListed(ex.Managed.AllowedHarnesses, spec.Name) {
+			denied = append(denied, spec.Name)
+		}
+	}
+	return len(denied) == 0, denied, nil
+}
+
+func managedHarnessListed(allowed []string, name string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	name = config.NormalizeConnectorName(name)
+	for _, h := range allowed {
+		if config.NormalizeConnectorName(h) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // managedRuntimeCheck is the doctor's row for the daemon's OpenShell on a

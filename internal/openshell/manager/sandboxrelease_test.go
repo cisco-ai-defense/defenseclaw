@@ -20,6 +20,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -32,6 +33,68 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 )
+
+// A 0.1.3 MicroVM does not flush on stop. An automatic legacy-supervisor
+// stop must keep its disk when sync fails, even though the network broker
+// needs to be isolated immediately.
+func TestLegacyMicroVMAutoStopRequiresAConfirmedFlush(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer openshelltest.ExecResponse
+	}{
+		{"no sync confirmation", openshelltest.ExecResponse{Stdout: []byte("exited\n")}},
+		{"sync exec failed", openshelltest.ExecResponse{Err: errors.New("sync failed")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newVMEnv(t, nil)
+			e.create(sandboxapi.CreateRequest{Name: "kept", Copy: true})
+			e.addNetworkRule("kept", "direct", "background.example.org", 443)
+			b := e.boxOf("kept")
+			e.m.mu.Lock()
+			b.rec.SessionRelease = "0.1.3"
+			e.m.mu.Unlock()
+			e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+				if len(call.Command) > 0 && call.Command[0] == "/bin/sync" {
+					return openshelltest.ExecResponse{Err: errors.New("sync failed")}
+				}
+				return tc.answer
+			}))
+			stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+			e.m.lifecycle(t.Context(), b, audit.SandboxPhaseReady, audit.SandboxTriggerWatch, true, nil, nil)
+			e.m.tamperStops.Wait()
+			if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
+				t.Fatalf("stopped an unflushed MicroVM: %d stop calls", got-stops)
+			}
+			if got := e.get("kept"); got.Phase != "ready" || !got.OldSupervisor {
+				t.Fatalf("legacy MicroVM was not retained: %+v", got)
+			}
+			if e.hasRule("kept", "direct") || !b.rec.OldSupervisorNetworkClosed {
+				t.Fatalf("legacy MicroVM still has network access: %+v", b.rec)
+			}
+			if found := e.events("kept", sandboxapi.ActivityFinding, sandboxapi.ReasonOldSupervisor); len(found) < 2 ||
+				!strings.Contains(found[len(found)-1].Message, "explicitly run `defenseclaw sandbox stop kept`") ||
+				!strings.Contains(found[len(found)-1].Message, "loss of unsynced writes") {
+				t.Fatalf("no loss-aware stop decision: %+v", found)
+			}
+			if tc.name == "no sync confirmation" {
+				// A later confirmed flush lets the automatic stop finish. The
+				// next session restores only its create-time policy.
+				e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, _ openshelltest.ExecCall) openshelltest.ExecResponse {
+					return openshelltest.ExecResponse{Stdout: []byte("exited\nsynced\n")}
+				}))
+				must(t, e.m.Reconcile(t.Context()))
+				e.m.tamperStops.Wait()
+				if got := e.get("kept"); got.Phase != "stopped" || got.OldSupervisor {
+					t.Fatalf("confirmed flush did not stop the old session: %+v", got)
+				}
+				e.startBox("kept", sandboxapi.StartRequest{})
+				if !e.hasRule("kept", "defenseclaw_egress") || e.hasRule("kept", "direct") || b.rec.OldSupervisorNetworkClosed {
+					t.Fatalf("new session did not restore its create-time network: %+v", b.rec)
+				}
+			}
+		})
+	}
+}
 
 // TestAHostLeftOnAnOlderOpenShellUpgradesInPlace: DefenseClaw 1.0.0 to
 // 1.0.3 left hosts on OpenShell 0.1.1 to 0.1.3, whose network broker can let
@@ -82,7 +145,7 @@ func TestAHostLeftOnAnOlderOpenShellUpgradesInPlace(t *testing.T) {
 	e.m.tamperStops.Wait()
 	found := oldSupervisor()
 	if len(found) != 1 || found[0].Severity != "HIGH" || !strings.Contains(found[0].Message, "kept's session started on OpenShell 0.1.3") ||
-		!strings.Contains(found[0].Message, "DefenseClaw stops it now, as `defenseclaw sandbox stop kept` does; upgrade OpenShell 0.1.3 to "+openshell.InstallerVersion) ||
+		!strings.Contains(found[0].Message, "DefenseClaw closes a legacy MicroVM's network and stops it after a confirmed disk flush; if sync fails, it keeps the VM and an explicit `defenseclaw sandbox stop kept` may lose unsynced writes; upgrade OpenShell 0.1.3 to "+openshell.InstallerVersion) ||
 		!strings.HasSuffix(found[0].Message, "then `defenseclaw sandbox start kept` starts it on that release's supervisor") {
 		t.Fatalf("old-supervisor findings = %+v", found)
 	}
@@ -110,7 +173,7 @@ func TestAHostLeftOnAnOlderOpenShellUpgradesInPlace(t *testing.T) {
 func TestOldSupervisorWordsForARecordWithoutARelease(t *testing.T) {
 	msg := oldSupervisorMessage("box", "", "")
 	if !strings.Contains(msg, "box's session started before DefenseClaw kept the OpenShell release a session starts on, so it may run a supervisor older than "+openshell.SupportedMin) ||
-		!strings.HasSuffix(msg, "DefenseClaw stops it now, as `defenseclaw sandbox stop box` does; `defenseclaw sandbox start box` (or `connect`) starts it again on this gateway's supervisor") {
+		!strings.HasSuffix(msg, "DefenseClaw closes a legacy MicroVM's network and stops it after a confirmed disk flush; if sync fails, it keeps the VM and an explicit `defenseclaw sandbox stop box` may lose unsynced writes; `defenseclaw sandbox start box` (or `connect`) starts it again on this gateway's supervisor") {
 		t.Fatalf("message = %q", msg)
 	}
 	e := newEnv(t, nil)

@@ -183,7 +183,7 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		case st.managed != nil:
 			// A user on a managed computer reads the organization's policy
 			// from the daemon, never from a configuration they cannot read.
-			rep.Checks = append(rep.Checks, a.managedPolicyCheck(st.managed), managedRuntimeCheck(st.managed))
+			rep.Checks = append(rep.Checks, a.managedPolicyCheck(ctx, st.managed), managedRuntimeCheck(st.managed))
 			if c := a.withAdminVMDriver(managedDriverCheck(st.managed), st.managed); c != nil {
 				c = a.withRenderedVMDriver(c, st.managed, d.Rendered)
 				rep.Checks = append(rep.Checks, *c)

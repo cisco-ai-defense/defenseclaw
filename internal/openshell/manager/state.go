@@ -216,6 +216,15 @@ type record struct {
 	// until it stops (openshell.SupportedMin). Empty in records from before
 	// it was kept, whose sessions all began on an older release.
 	SessionRelease string `json:"session_release,omitempty"`
+	// OldSupervisorNetworkClosed records that DefenseClaw withdrew the
+	// network rules of a ready or ended MicroVM on a legacy supervisor. The next
+	// successful start restores only its create-time policy, after OpenShell
+	// has replaced that supervisor; it survives a daemon restart.
+	OldSupervisorNetworkClosed bool `json:"old_supervisor_network_closed,omitempty"`
+	// OldSupervisorProviders are the providers DefenseClaw detached while
+	// closing that legacy VM's direct network routes. They are restored only
+	// after a new supervisor is ready, and only if current policy allows them.
+	OldSupervisorProviders []string `json:"old_supervisor_providers,omitempty"`
 	// HookCounts are the hook counters as the daemon last kept them
 	// (keepHookCounts): a restarted daemon goes on from them. Copies of a
 	// record share them, so they are replaced, never changed in place.

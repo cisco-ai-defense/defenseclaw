@@ -149,25 +149,26 @@ func parseHarnessEnd(out []byte) harnessEnd {
 // detached run as it found it (State sandboxapi.RunNone: there is none, or the
 // sandbox did not answer), whose log the stop keeps next: from what the
 // script printed before an exec that failed (a slow flush cut short), or
-// else from a look at the run of its own (probeRun). Failures are logged:
-// the stop goes ahead either way.
-func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) harness.DetachedRun {
+// else from a look at the run of its own (probeRun). The second result is
+// whether a required disk flush was confirmed. A manual stop still reports
+// failures and goes ahead; an automatic legacy MicroVM stop requires it.
+func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) (harness.DetachedRun, bool) {
 	none := harness.DetachedRun{State: sandboxapi.RunNone}
 	m.mu.Lock()
-	name, harnessName := b.rec.Name, b.rec.Harness
+	name, harnessName, driver := b.rec.Name, b.rec.Harness, b.rec.Driver
 	ready := b.phase == audit.SandboxPhaseReady && !b.creating && !b.deleted && !b.retained
 	tamper := b.tamperStop
 	m.mu.Unlock()
 	if !ready {
-		return none
+		return none, false
 	}
-	flush := !gw.Driver.StopFlushes
+	flush := stopLosesWrites(driver)
 	spec, ok := harness.Get(harnessName)
 	if !ok {
 		if flush {
-			m.flushSandbox(ctx, gw, name)
+			return none, m.flushSandbox(ctx, gw, name)
 		}
-		return none
+		return none, true
 	}
 	script, budget, timeout := endHarnessScript, harnessExitBudget, harnessExitWait+3*time.Second
 	if flush {
@@ -198,12 +199,12 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) harness.D
 			// and its log kept.
 			run = m.probeRun(ctx, gw, name)
 		}
-		if flush && !end.Synced {
+		if flush {
 			// The flush matters more than the harness's goodbye: once more,
 			// on its own.
-			m.flushSandbox(ctx, gw, name)
+			return run, m.flushSandbox(ctx, gw, name)
 		}
-		return run
+		return run, true
 	}
 	end := parseHarnessEnd(res.Stdout)
 	if end.Harness == "running" {
@@ -212,7 +213,7 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) harness.D
 	if flush && !end.Synced {
 		m.flushFailed(name, fmt.Errorf("sync(1) did not finish (the sandbox answered %q)", strings.Join(strings.Fields(string(res.Stdout)), " ")))
 	}
-	return end.Run
+	return end.Run, !flush || end.Synced
 }
 
 // harnessEndOutput bounds what the exec of endHarnessScript keeps of its
@@ -250,7 +251,7 @@ func (b *headBuffer) Bytes() []byte { return b.buf.Bytes() }
 
 // flushSandbox runs sync(1) in a ready sandbox before a stop its driver
 // does not flush, and reports a failure.
-func (m *Manager) flushSandbox(ctx context.Context, gw *Gateway, name string) {
+func (m *Manager) flushSandbox(ctx context.Context, gw *Gateway, name string) bool {
 	ctx, cancel := context.WithTimeout(ctx, flushWait+5*time.Second)
 	defer cancel()
 	res, err := m.ownExec(ctx, gw, name, []string{"/bin/sync"}, openshell.ExecOptions{Timeout: flushWait, Attempts: 1, MaxOutputBytes: 256})
@@ -259,7 +260,9 @@ func (m *Manager) flushSandbox(ctx context.Context, gw *Gateway, name string) {
 	}
 	if err != nil {
 		m.flushFailed(name, err)
+		return false
 	}
+	return true
 }
 
 // flushFailed says a stop went ahead without the flush: what the workload

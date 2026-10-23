@@ -30,6 +30,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
+
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -211,8 +213,23 @@ func (m *Manager) RefreshPolicies() { m.refreshEgress() }
 // feed says so once. Without a decider the credential is revoked.
 func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 	m.mu.Lock()
-	cred, rec, d := b.cred, b.rec, b.decider
+	cred, rec, d, phase := b.cred, b.rec, b.decider, b.phase
+	if b.sb != nil {
+		// Adoption recovers credentials before lifecycle republishes the
+		// phase. Use OpenShell's live phase so an old Completed record never
+		// gets an open proxy window during a daemon restart.
+		phase = auditPhase(b.sb.Status.Phase)
+		if phase == audit.SandboxPhaseError {
+			if said := openshell.FailureReason(b.sb); said != "" {
+				rec.PhaseReason = said
+			}
+		}
+	}
 	m.mu.Unlock()
+	if rec.OldSupervisorNetworkClosed || oldSupervisorVMNeedsContainment(phase, rec) {
+		m.suspendOldSupervisorEgress(b)
+		return
+	}
 	if cred.Username == "" || rec.BindingID == "" || eff == nil {
 		return
 	}
@@ -231,6 +248,296 @@ func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 		m.noteEgressOff(b, "")
 	}
 	m.recheckEgress(rec.BindingID)
+}
+
+const oldSupervisorEgressOff = "the MicroVM may still run a supervisor from OpenShell before " + openshell.SupportedMin + "; DefenseClaw's egress proxy is closed while its compute and disk are kept"
+
+// suspendOldSupervisorEgress closes the DefenseClaw proxy route, including
+// tunnels already open. Called again on policy refresh so an older session
+// is never re-registered while its ended VM is kept.
+func (m *Manager) suspendOldSupervisorEgress(b *box) {
+	m.mu.Lock()
+	cred, rec := b.cred, b.rec
+	m.mu.Unlock()
+	if rec.BindingID == "" {
+		return
+	}
+	why := egress.Decision{Category: egress.CategoryEgressOff, Source: egress.SourceDefault, Reason: oldSupervisorEgressOff}
+	if cred.Username == "" || m.creds.Suspend(cred, m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, nil, nil), why) != nil {
+		m.creds.Revoke(rec.BindingID)
+	}
+	m.recheckEgress(rec.BindingID)
+	m.noteEgressOff(b, oldSupervisorEgressOff)
+}
+
+// containOldSupervisorNetwork withdraws every direct OpenShell rule from a
+// legacy MicroVM, including one whose ready session cannot be safely
+// stopped before sync. The proxy suspension runs first even if the gateway
+// cannot be reached. A rule update is conditional on the current resource
+// version, so a concurrent new session cannot have its rules stripped.
+// Reconcile retries failed or not-yet-loaded updates.
+func (m *Manager) containOldSupervisorNetwork(ctx context.Context, b *box) {
+	m.suspendOldSupervisorEgress(b)
+	if !b.op.TryLock() {
+		m.scheduleOldSupervisorNetwork(b)
+		return
+	}
+	defer b.op.Unlock()
+	m.containOldSupervisorNetworkLocked(ctx, b)
+}
+
+// scheduleOldSupervisorNetwork waits for a concurrent start, stop or delete
+// to finish before withdrawing rules. In particular, a start cannot read
+// the old record before containment and then launch under a stripped policy.
+func (m *Manager) scheduleOldSupervisorNetwork(b *box) {
+	m.mu.Lock()
+	if b.oldSupervisorNetworkBusy {
+		m.mu.Unlock()
+		return
+	}
+	b.oldSupervisorNetworkBusy = true
+	b.oldSupervisorNetworkErr = "network containment is pending behind a sandbox operation"
+	m.mu.Unlock()
+	m.tamperStops.Add(1)
+	go func() {
+		defer m.tamperStops.Done()
+		b.op.Lock()
+		defer b.op.Unlock()
+		defer func() {
+			m.mu.Lock()
+			b.oldSupervisorNetworkBusy = false
+			m.mu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
+		defer cancel()
+		m.containOldSupervisorNetworkLocked(ctx, b)
+	}()
+}
+
+// containOldSupervisorNetworkLocked runs with the sandbox operation lock,
+// so the start cannot race between closing its old rules and recording that
+// it must restore the create-time rules on the new supervisor.
+func (m *Manager) containOldSupervisorNetworkLocked(ctx context.Context, b *box) {
+	m.mu.Lock()
+	rec, phase := b.rec, b.phase
+	m.mu.Unlock()
+	if !oldSupervisorVMNeedsContainment(phase, rec) {
+		m.mu.Lock()
+		b.oldSupervisorNetworkErr = ""
+		m.mu.Unlock()
+		return
+	}
+	err := m.withdrawOldSupervisorRules(ctx, b)
+	m.mu.Lock()
+	newlyClosed := err == nil && !b.rec.OldSupervisorNetworkClosed
+	if newlyClosed {
+		b.rec.OldSupervisorNetworkClosed = true
+	}
+	m.mu.Unlock()
+	if newlyClosed {
+		if saveErr := m.saveRecord(b); saveErr != nil {
+			err = fmt.Errorf("save the closed-network state: %w", saveErr)
+			m.mu.Lock()
+			b.rec.OldSupervisorNetworkClosed = false
+			m.mu.Unlock()
+		}
+	}
+	m.mu.Lock()
+	previous := b.oldSupervisorNetworkErr
+	b.oldSupervisorNetworkErr = ""
+	if err != nil {
+		b.oldSupervisorNetworkErr = err.Error()
+	}
+	changed := previous != b.oldSupervisorNetworkErr
+	m.mu.Unlock()
+	if err != nil && changed {
+		m.logf("old supervisor: cannot close the network of %s: %v", rec.Name, err)
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
+			Reason: sandboxapi.ReasonOldSupervisor, Message: "⚠ " + rec.Name + " still has a legacy MicroVM: its proxy is closed, but DefenseClaw could not finish withdrawing its direct OpenShell network rules: " + err.Error()})
+	}
+}
+
+func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error {
+	m.mu.Lock()
+	rec := b.rec
+	m.mu.Unlock()
+	name := rec.Name
+	gw, err := m.gateway(ctx)
+	if err != nil {
+		return err
+	}
+	global, err := gw.Client.GlobalPolicy(ctx)
+	if err != nil {
+		return err
+	}
+	if global != nil {
+		return fmt.Errorf("a gateway-global policy prevents changing this sandbox's network rules")
+	}
+	sb, err := gw.Client.GetSandbox(ctx, name)
+	if err != nil {
+		return err
+	}
+	if sb == nil || (sb.Status.Phase != openshell.PhaseReady && sb.Status.Phase != openshell.PhaseCompleted && sb.Status.Phase != openshell.PhaseError) {
+		return fmt.Errorf("OpenShell no longer reports a live legacy MicroVM")
+	}
+	// OpenShell composes attached providers' direct endpoints into the
+	// effective policy. Removing their generated rule names from the base
+	// policy cannot close those routes: detach first, and remember exactly
+	// what this containment detached for the next safe supervisor.
+	active := slices.Clone(sb.Spec.Providers)
+	rec.OldSupervisorProviders = slices.Clone(rec.OldSupervisorProviders)
+	var added bool
+	for _, provider := range active {
+		if slices.Contains(rec.Providers, provider) && !slices.Contains(rec.DetachedProviders, provider) &&
+			!slices.Contains(rec.OldSupervisorProviders, provider) {
+			rec.OldSupervisorProviders = append(rec.OldSupervisorProviders, provider)
+			added = true
+		}
+	}
+	if added {
+		slices.Sort(rec.OldSupervisorProviders)
+		m.mu.Lock()
+		b.rec.OldSupervisorProviders = rec.OldSupervisorProviders
+		m.mu.Unlock()
+		if err := m.saveRecord(b); err != nil {
+			return fmt.Errorf("save the providers to restore: %w", err)
+		}
+	}
+	for _, provider := range active {
+		if _, err := gw.Client.DetachProvider(ctx, name, provider); err != nil && !openshell.IsNotFound(err) {
+			return fmt.Errorf("detach the direct network of provider %s: %w", provider, err)
+		}
+	}
+	cfg, err := gw.Client.SandboxConfig(ctx, name)
+	if err != nil {
+		return err
+	}
+	if cfg == nil || cfg.Policy == nil {
+		return fmt.Errorf("OpenShell returned no sandbox policy")
+	}
+	version := cfg.PolicyVersion
+	if len(cfg.Policy.NetworkPolicies) > 0 {
+		sb, err = gw.Client.GetSandbox(ctx, name)
+		if err != nil {
+			return err
+		}
+		if sb == nil || (sb.Status.Phase != openshell.PhaseReady && sb.Status.Phase != openshell.PhaseCompleted && sb.Status.Phase != openshell.PhaseError) {
+			return fmt.Errorf("OpenShell no longer reports a live legacy MicroVM")
+		}
+		names := make([]string, 0, len(cfg.Policy.NetworkPolicies))
+		for rule := range cfg.Policy.NetworkPolicies {
+			names = append(names, rule)
+		}
+		sort.Strings(names)
+		ops := make([]openshell.PolicyMergeOperation, 0, len(names))
+		for _, rule := range names {
+			ops = append(ops, openshell.PolicyMergeOperation{RemoveRule: &v1.RemoveNetworkRule{RuleName: rule}})
+		}
+		res, err := gw.Client.MergePolicy(ctx, name, ops, openshell.PolicyUpdateOptions{
+			ExpectedResourceVersion: sb.ResourceVersion,
+			Annotations:             map[string]string{"source": "defenseclaw", "reason": "old-supervisor-network"},
+		})
+		if err != nil {
+			return err
+		}
+		if res == nil {
+			return fmt.Errorf("OpenShell returned no policy revision")
+		}
+		version = res.Version
+	}
+	if err := waitNetworkPolicy(ctx, gw, name, version); err != nil {
+		return err
+	}
+	confirmed, err := gw.Client.SandboxConfig(ctx, name)
+	if err != nil {
+		return err
+	}
+	if confirmed == nil || confirmed.Policy == nil || len(confirmed.Policy.NetworkPolicies) != 0 {
+		return fmt.Errorf("OpenShell still reports network rules after the closed policy loaded")
+	}
+	return nil
+}
+
+// waitNetworkPolicy waits for the supervisor to load the revision: a
+// committed gateway revision alone does not close live egress.
+func waitNetworkPolicy(ctx context.Context, gw *Gateway, name string, version uint32) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		status, err := gw.Client.PolicyStatus(ctx, name, 0)
+		if err != nil {
+			return err
+		}
+		if status != nil && status.ActiveVersion == status.Revision.Version && status.ActiveVersion >= version {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("OpenShell did not load network policy revision %d: %w", version, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// restoreOldSupervisorNetwork restores only the create-time rules after a
+// new supervisor is ready. Old session approvals are not brought into it.
+func (m *Manager) restoreOldSupervisorNetwork(ctx context.Context, gw *Gateway, b *box, sb *openshell.Sandbox, eff *packs.Effective) error {
+	if sb == nil || sb.Spec.Policy == nil {
+		return fmt.Errorf("OpenShell returned no create-time policy")
+	}
+	m.mu.Lock()
+	rec := b.rec
+	m.mu.Unlock()
+	res, err := gw.Client.SetPolicy(ctx, sb.Name, sb.Spec.Policy, openshell.PolicyUpdateOptions{
+		Annotations: map[string]string{"source": "defenseclaw", "reason": "new-supervisor-network"},
+	})
+	if err != nil {
+		return err
+	}
+	if res == nil {
+		return fmt.Errorf("OpenShell returned no policy revision")
+	}
+	if err := waitNetworkPolicy(ctx, gw, sb.Name, res.Version); err != nil {
+		return err
+	}
+	attached := slices.Clone(sb.Spec.Providers)
+	for _, provider := range rec.OldSupervisorProviders {
+		if !slices.Contains(rec.Providers, provider) || slices.Contains(rec.DetachedProviders, provider) {
+			continue
+		}
+		if slices.Contains(attached, provider) {
+			continue
+		}
+		for _, ep := range rec.ProviderEndpoints {
+			if ep.Provider == provider {
+				if err := endpointRefusal(eff, ep); err != nil {
+					return fmt.Errorf("provider %s is no longer allowed: %w", provider, err)
+				}
+			}
+		}
+		if _, err := gw.Client.AttachProvider(ctx, sb.Name, provider); err != nil {
+			return fmt.Errorf("restore provider %s on the new supervisor: %w", provider, err)
+		}
+		attached = append(attached, provider)
+	}
+	if err := waitNetworkPolicy(ctx, gw, sb.Name, res.Version); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	b.rec.OldSupervisorNetworkClosed = false
+	b.rec.OldSupervisorProviders = nil
+	b.oldSupervisorNetworkErr = ""
+	m.mu.Unlock()
+	if err := m.saveRecord(b); err != nil {
+		m.mu.Lock()
+		b.rec.OldSupervisorNetworkClosed = true
+		b.rec.OldSupervisorProviders = rec.OldSupervisorProviders
+		m.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 // egressOffDecision is the refusal a sandbox's suspended egress proxy
