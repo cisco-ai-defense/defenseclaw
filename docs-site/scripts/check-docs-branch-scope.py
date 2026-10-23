@@ -5,7 +5,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -24,7 +23,8 @@ def main() -> int:
         print("usage: check-docs-branch-scope.py <base-commit>", file=sys.stderr)
         return 2
     forbidden = [
-        path for path in changed_paths(sys.argv[1])
+        path
+        for path in changed_paths(sys.argv[1])
         if path != "CHANGELOG.md" and not path.startswith(("docs/", "docs-site/"))
     ]
     claims = (ROOT / "docs-site/scripts/test-docs-claims.ts").read_text(encoding="utf-8")
