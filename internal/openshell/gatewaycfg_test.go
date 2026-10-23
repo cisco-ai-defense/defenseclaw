@@ -659,7 +659,7 @@ func TestGatewayConfigWritesForAGatewayRunAnotherWay(t *testing.T) {
 		want     string
 	}{
 		{openshell.DriverVM, openshell.DriverVM, "so it loads the change (DefenseClaw cannot restart it); restarting it stops every sandbox on it: " +
-			"first stop the MicroVM sandboxes running on it with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes, which flushes their disks, or what they wrote since their last sync is lost\n"},
+			"first stop the MicroVM sandboxes running on it with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes; DefenseClaw's stop requests a disk sync, but raw OpenShell's does not, so save a raw sandbox's work first; changes after the last successful disk sync may be lost\n"},
 		{openshell.DriverDocker, openshell.DriverVM, "on the vm compute driver (DefenseClaw cannot restart it), which stops every sandbox on it; " +
 			"sandboxes made on the docker driver cannot start again"},
 	} {

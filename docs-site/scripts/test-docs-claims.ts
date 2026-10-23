@@ -34,6 +34,36 @@ describe('recovery and repair advice', () => {
       assert.ok(section.includes(text), `error-state recovery must describe ${text}`);
     }
     assert.ok(!section.includes('which keep the sandbox and its work'), 'error-state recovery promises to keep unwritten VM work');
+    const exited = section.split('For a MicroVM whose process exited')[1]?.split('For a MicroVM whose main process failed')[0];
+    assert.ok(exited, 'exited-VM recovery needs its own advice');
+    assert.ok(exited.includes('last successful disk sync'), 'an exited VM may have unsynced work');
+    assert.ok(!exited.includes('keep the sandbox and its work'), 'an exited VM has no confirmed disk sync');
+    assert.ok(section.includes('ProcessPollFailed') && section.includes('a stop that OpenShell refuses does not release the VM'),
+      'another held VM error must not promise stop/start recovery');
+    const refusedStart = body.split('## A sandbox is not as DefenseClaw prepared it')[1]?.split('## ')[0];
+    assert.ok(refusedStart?.includes('last successful disk sync'), 'refused-start advice must qualify MicroVM work');
+    assert.ok(!refusedStart?.includes('(its work is kept)'), 'refused-start advice promises unsynced work');
+    const handoff = page('reference/sandboxes/cli.mdx').split('Handing the gateway over stops the sandboxes it runs')[1]?.split('</Callout>')[0];
+    assert.ok(handoff?.includes('last successful disk sync'), 'gateway handoff advice must qualify copy-mode MicroVM work');
+    assert.ok(!handoff?.includes('a copy keeps its work in the sandbox'), 'gateway handoff promises unsynced copy-mode work');
+    const managed = page('enterprise/runtime/sandboxes.mdx');
+    assert.ok(managed.includes('last successful disk sync'), 'managed upgrade advice must qualify failed-VM work');
+    assert.ok(!managed.includes('a completed or failed MicroVM on 0.1.5 is started'),
+      'managed upgrade advice must not send every failed VM through --end-vm');
+    assert.ok(!managed.includes('the user stops and starts a MicroVM that was in the error state'),
+      'managed upgrade advice promises a failed VM can always stop and start');
+    const upgrade = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
+    assert.ok(upgrade.includes('It does not stop that legacy guest for you'), 'legacy guest recovery must leave the stop to its user');
+    assert.ok(!upgrade.includes('DefenseClaw stops it as soon as it sees it'), 'legacy guest recovery promises an automatic stop');
+    assert.ok(upgrade.includes('`openshell sandbox stop` does not sync its guest disk'), 'raw OpenShell stops need their own disk warning');
+    for (const [name, claim] of [
+      ['troubleshooting/sandboxes/setup-and-gateway.mdx', 'last successful disk sync'],
+      ['troubleshooting/sandboxes/disk-and-telemetry.mdx', 'last successful disk sync'],
+      ['reference/sandboxes/cli.mdx', 'last successful one'],
+      ['enterprise/runtime/sandbox-reference.mdx', 'last successful disk sync'],
+    ]) {
+      assert.ok(page(name).includes(claim), `${name} must qualify what a failed sync preserves`);
+    }
   });
 
   it('keeps the saved guardrail mode', () => {

@@ -137,7 +137,7 @@ func TestOldGatewayTimeoutWayOnStartsWithoutAStop(t *testing.T) {
 		}
 	}
 	if got := errorPhaseWayOn("box", "ProcessExited: VM process exited with status 1", upgrade, true); got !=
-		"this OpenShell can neither stop nor start a sandbox in its error state: "+upgrade+", then `defenseclaw sandbox stop box` and `defenseclaw sandbox start box`, which keep the sandbox and its work" {
+		"this OpenShell can neither stop nor start a sandbox in its error state: "+upgrade+", then fix why its MicroVM exited; then `defenseclaw sandbox stop box` and `defenseclaw sandbox start box`; the sandbox remains, but its MicroVM work is kept only through the last successful disk sync" {
 		t.Errorf("a MicroVM whose VM is gone on an old gateway: %q", got)
 	}
 

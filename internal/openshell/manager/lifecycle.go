@@ -699,7 +699,7 @@ func (e *sessionRulesError) Unwrap() error { return e.err }
 // stopErr is that stop's failure: the sandbox then still runs with the
 // rules, and the refusal says so and how to end it instead. The gateway's
 // own words stay in the log.
-func sessionRulesLeft(name string, err, stopErr error) error {
+func sessionRulesLeft(name string, err, stopErr error, stopFlushes bool) error {
 	rules, these := "the network rules", "the rules"
 	what := "the network rules approved for its last session"
 	var left *sessionRulesError
@@ -724,7 +724,7 @@ func sessionRulesLeft(name string, err, stopErr error) error {
 	}
 	return &sandboxapi.Error{Code: code,
 		Message: "sandbox " + name + " did not start: " + what + " could not be removed from its policy, " +
-			"so DefenseClaw stopped it again (its work is kept)",
+			"so " + stoppedUnverifiedOutcome(stopFlushes),
 		Detail: "a new session does not keep what was approved for the last one; start it again " +
 			"(the removal is tried first), and if this repeats, `defenseclaw sandbox doctor` checks the OpenShell gateway"}
 }
@@ -948,7 +948,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 			// approved for the last one.
 			m.logf("sandbox %s: the rules approved for its last session are still in its policy: %v (before the start: %v); stopping it again",
 				rec.Name, err, rulesLeft)
-			return sessionRulesLeft(rec.Name, err, m.stopUnverified(ctx, gw, b))
+			return sessionRulesLeft(rec.Name, err, m.stopUnverified(ctx, gw, b), gw.Driver.StopFlushes)
 		}
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {

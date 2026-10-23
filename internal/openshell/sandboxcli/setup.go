@@ -1135,10 +1135,10 @@ func (a *App) manualRestartStops(ctx context.Context, microVM bool, gone []strin
 			"or what it wrote since its last sync is lost: " + strings.Join(held, "; ")
 	case known:
 		return "restarting it stops every sandbox on it (none runs now): stop a MicroVM sandbox you start before then first (" + stop +
-			", which flushes its disk), or what it wrote since its last sync is lost"
+			"; DefenseClaw's stop requests a disk sync, but raw OpenShell's does not); save a raw sandbox's work first; changes after the last successful disk sync may be lost"
 	}
 	return "restarting it stops every sandbox on it: first stop the MicroVM sandboxes running on it with " + stop +
-		", which flushes their disks, or what they wrote since their last sync is lost"
+		"; DefenseClaw's stop requests a disk sync, but raw OpenShell's does not, so save a raw sandbox's work first; changes after the last successful disk sync may be lost"
 }
 
 // shortList names at most five of names.

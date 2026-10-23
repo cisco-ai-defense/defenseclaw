@@ -399,7 +399,7 @@ func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, 
 // what the check expects (create.go); a record without it cannot be
 // checked, and is refused the same way.
 func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec record) error {
-	const outcome = "DefenseClaw stopped it again (its work is kept)"
+	outcome := stoppedUnverifiedOutcome(gw.Driver.StopFlushes)
 	if rec.Verify == nil {
 		m.logf("%s: sandbox %s has no workload check in its record; stopping it again", gatewaylog.ErrCodeOpenShellPolicyRejected, rec.Name)
 		refusal := &sandboxapi.Error{Code: sandboxapi.CodePolicyRejected,
@@ -434,10 +434,19 @@ func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec re
 	return nil
 }
 
+// stoppedUnverifiedOutcome keeps Docker's work claim while qualifying a
+// MicroVM stop: a failed guest sync cannot preserve its later writes.
+func stoppedUnverifiedOutcome(stopFlushes bool) string {
+	if !stopFlushes {
+		return "DefenseClaw stopped it again (only work through the last successful disk sync is kept)"
+	}
+	return "DefenseClaw stopped it again (its work is kept)"
+}
+
 // stopUnverified stops again a sandbox a start must not leave running (it
 // failed the workload check, or still has a rule of its last session),
-// flushing its disk first where the driver's stop does not (the last
-// session's work stays for pull), and records the phase OpenShell reports
+// requesting a disk sync first where the driver's stop does not flush (work
+// after the last successful sync may be lost), and records the phase OpenShell reports
 // then. It returns why the stop failed: the sandbox then still runs, and
 // the start's refusal must say so rather than that it was stopped
 // (GAP-0014).

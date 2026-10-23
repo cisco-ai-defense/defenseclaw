@@ -213,7 +213,7 @@ func TestSetupUsesAGatewayRunAnotherWay(t *testing.T) {
 				stops := "restarting it stops every sandbox on it\n"
 				if mac {
 					stops = "restarting it stops every sandbox on it (none runs now): stop a MicroVM sandbox you start before then first " +
-						"(`defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes, which flushes its disk), or what it wrote since its last sync is lost\n"
+						"(`defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes; DefenseClaw's stop requests a disk sync, but raw OpenShell's does not); save a raw sandbox's work first; changes after the last successful disk sync may be lost\n"
 				}
 				has(t, out, "✓ gateway configuration written; it takes effect when you restart the gateway\n",
 					"⚠ restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it); "+stops)
@@ -312,6 +312,9 @@ func TestSetupSaysTheRestartYouMakeStopsSandboxes(t *testing.T) {
 			runningOn(t, ta, 2)
 			ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
 			out := ta.output()
+			if mac && (!strings.Contains(out, "last successful disk sync") || strings.Contains(out, "which flushes their disks")) {
+				t.Fatalf("manual MicroVM restart advice promises a successful sync: %s", out)
+			}
 			const last = "⚠ restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it); "
 			if !mac {
 				has(t, out, "so it loads the change (DefenseClaw cannot restart it); restarting it stops every sandbox on it\n",
@@ -320,7 +323,7 @@ func TestSetupSaysTheRestartYouMakeStopsSandboxes(t *testing.T) {
 				return
 			}
 			has(t, out, "so it loads the change (DefenseClaw cannot restart it); restarting it stops every sandbox on it: first stop the MicroVM sandboxes "+
-				"running on it with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes, which flushes their disks, or what they wrote since their last sync is lost\n",
+				"running on it with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes; DefenseClaw's stop requests a disk sync, but raw OpenShell's does not, so save a raw sandbox's work first; changes after the last successful disk sync may be lost\n",
 				last+"restarting it stops every MicroVM on it with no flush, so first stop each sandbox that OpenShell does not report stopped, or what it wrote "+
 					"since its last sync is lost: dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a` (DefenseClaw sandbox), or `openshell sandbox stop dc-claude-theirs-a` (raw OpenShell sandbox); dc-claude-theirs-b (ready): `defenseclaw sandbox stop dc-claude-theirs-b` (DefenseClaw sandbox), or `openshell sandbox stop dc-claude-theirs-b` (raw OpenShell sandbox)\n")
 			if ta.gateway.restarts != 0 || ta.gateway.applied != 0 || len(ta.gateway.written) != 1 {
